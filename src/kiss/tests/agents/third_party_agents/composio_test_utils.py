@@ -121,10 +121,6 @@ class FakeComposioServer(RecordingServer):
         self.status_holds[api_key] = (held, release)
         return held, release
 
-    def paths(self, method: str) -> list[str]:
-        """Return the paths of every recorded request made with *method*."""
-        return [r["path"] for r in self.requests if r["method"] == method]
-
     def set_statuses(self, account: str, *statuses: str) -> None:
         """Answer *account*'s next status polls with *statuses* in turn; the last one sticks.
 

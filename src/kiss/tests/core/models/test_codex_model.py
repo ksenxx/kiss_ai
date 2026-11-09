@@ -210,6 +210,9 @@ class TestBuildCliArgs:
         assert 'web_search="disabled"' in args
         assert "skills.max_context_tokens=1" in args
         assert "project_doc_max_bytes=0" in args
+        # Codex emits ``reasoning`` items (shown as thinking) only when a
+        # reasoning summary is configured, and the user config is ignored.
+        assert args[args.index('model_reasoning_summary="detailed"') - 1] == "-c"
 
     def test_instructions_file_is_passed_as_a_toml_string(self) -> None:
         m = CodexModel("codex/default")
@@ -264,7 +267,14 @@ class TestParseStreamEvents:
         assert result["usage"]["input_tokens"] == 10
         assert result["usage"]["output_tokens"] == 3
 
-    def test_agent_reasoning_wraps_with_thinking_callback(self) -> None:
+    @pytest.mark.parametrize("item_type", ["reasoning", "agent_reasoning"])
+    def test_agent_reasoning_wraps_with_thinking_callback(self, item_type: str) -> None:
+        """A completed reasoning item is shown as thinking.
+
+        ``codex exec --json`` (codex-cli 0.163.0) names the item
+        ``reasoning``; ``agent_reasoning`` is the older name.  Neither
+        counts as a tool item (an extra request).
+        """
         thinking_states: list[bool] = []
         tokens: list[str] = []
         m = CodexModel(
@@ -273,15 +283,29 @@ class TestParseStreamEvents:
             thinking_callback=thinking_states.append,
         )
         lines = [
-            '{"type":"item.completed","item":{"type":"agent_reasoning",'
-            '"text":"thinking..."}}',
+            f'{{"type":"item.completed","item":{{"type":"{item_type}","text":"thinking..."}}}}',
             '{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}',
         ]
-        content, _, err = m._parse_stream_events(iter(lines))
+        content, result, err = m._parse_stream_events(iter(lines))
         assert content == "answer"
         assert thinking_states == [True, False]
         assert tokens == ["thinking...", "answer"]
         assert err is None
+        assert result["requests"] == 1
+
+    def test_reasoning_title_lines_lose_their_bold_markers(self) -> None:
+        """Codex summaries are bold titles; the Thinking panel shows plain text.
+
+        Only a line that is wholly one bold title is unwrapped; bold inside
+        a sentence, or two bold spans on one line, stays as written.
+        """
+        tokens: list[str] = []
+        m = CodexModel("codex/default", token_callback=tokens.append)
+        text = "**Checking descent**\\n**Verifying bounds.**\\nA **key** step\\n**a** and **b**"
+        m._parse_stream_events(
+            iter([f'{{"type":"item.completed","item":{{"type":"reasoning","text":"{text}"}}}}'])
+        )
+        assert tokens == ["Checking descent\nVerifying bounds.\nA **key** step\n**a** and **b**"]
 
     def test_turn_failed_returns_error_message(self) -> None:
         m = CodexModel("codex/default")
@@ -439,6 +463,37 @@ class TestGenerateIntegration:
         content, _response = m.generate()
         assert "pong" in content.lower()
         assert len(tokens) > 0
+
+    @pytest.mark.timeout(600)
+    def test_generate_streams_reasoning_as_thinking(self) -> None:
+        """A turn that needs reasoning shows its summary titles as thinking.
+
+        The backend sends Codex summaries as bold titles only; they must
+        reach the thinking callback, as plain text, before the answer.
+        The model skips the summary when it reasons briefly (about one
+        turn in eight on this prompt), so up to four turns are tried.
+        """
+        events: list[object] = []
+        for _ in range(4):
+            m = CodexModel(
+                "codex/default",
+                token_callback=events.append,
+                thinking_callback=events.append,
+                model_config={"timeout": 240},
+            )
+            m.initialize(
+                "Find all integer solutions (x, y) of x^2 - 7y^2 = 2 with |x| < 200. "
+                "Answer briefly."
+            )
+            content, _ = m.generate()
+            assert content
+            if True in events:
+                break
+        start = events.index(True)
+        thinking = events[start + 1]
+        assert events[start + 2] is False
+        assert isinstance(thinking, str) and thinking.strip()
+        assert "**" not in thinking
 
     @pytest.mark.timeout(240)
     def test_generate_has_no_native_file_tools(

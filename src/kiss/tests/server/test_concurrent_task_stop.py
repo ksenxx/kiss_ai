@@ -124,7 +124,7 @@ class TestRecordingIsolation(unittest.TestCase):
         printer._thread_local.task_id = "A"
         printer.start_recording()
         printer.broadcast({"type": "tool_call", "name": "Read"})
-        events = printer.peek_recording()
+        events = printer.peek_recording_for_task(printer.thread_binding())
         assert len(events) == 1
         assert events[0]["type"] == "tool_call"
         printer.broadcast({"type": "tool_result", "content": "ok"})

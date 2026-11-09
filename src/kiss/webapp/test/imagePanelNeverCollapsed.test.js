@@ -10,7 +10,10 @@
 //   * collapseOlderPanels  -- while a task streams, older panels fold as
 //     new ones arrive; an image panel must stay open.
 //   * collapseAllExceptResult -- a replayed transcript folds everything
-//     but the result; an image panel must stay open.
+//     but the result; an image panel must stay open.  A finished task's
+//     replay then folds all its panels into one collapsed Trajectory
+//     (foldTrajectory), image included: opening the Trajectory by its
+//     header must show the image at once, with no second click.
 //   * applyChevronState -- a finished task's plain tool panels are
 //     folded; an image panel must stay open.
 //
@@ -23,6 +26,8 @@ const {
   makePage,
   send,
   stubRaf,
+  loadMainCss,
+  click,
   startRunningTask,
   PNG_B64,
 } = require('./simplify2_harness');
@@ -30,9 +35,22 @@ const {
 const pages = [];
 
 function openPage() {
-  const page = makePage({beforeScripts: stubRaf});
+  const page = makePage({
+    beforeScripts: win => {
+      stubRaf(win);
+      loadMainCss(win);
+    },
+  });
   pages.push(page.win);
   return page;
+}
+
+/** The nearest ancestor (or `el` itself) the stylesheet hides, or null. */
+function hiddenBy(win, el) {
+  for (let e = el; e && e.nodeType === 1; e = e.parentElement) {
+    if (win.getComputedStyle(e).display === 'none') return e;
+  }
+  return null;
 }
 
 /** The task's tool panels: on the transcript while it runs, inside its
@@ -140,6 +158,10 @@ function testLiveStreamKeepsImagePanelOpen() {
 function testReplayKeepsImagePanelOpenAndVisible() {
   const wv = openPage();
   const win = wv.win;
+  // The daemon is connected: #app is on screen (it hides under the
+  // loading overlay until then), so what hides the image is the
+  // transcript's own folding.
+  send(win, {type: 'daemonStatus', connected: true});
   const events = [{type: 'prompt', text: 'replayed task'}];
   for (let i = 0; i < 3; i++) {
     events.push({type: 'tool_call', name: 'Read', path: '/tmp/r' + i});
@@ -166,10 +188,8 @@ function testReplayKeepsImagePanelOpenAndVisible() {
     'the replayed panels sit inside the Trajectory',
   );
   const imagePanel = panels[3];
-  assert.ok(
-    imagePanel.querySelector('img.tr-img'),
-    'the screenshot panel shows its image',
-  );
+  const img = imagePanel.querySelector('img.tr-img');
+  assert.ok(img, 'the screenshot panel shows its image');
   const plain = [panels[0], panels[1], panels[2], panels[4]];
   assert.ok(
     plain.every(p => p.classList.contains('collapsed')),
@@ -179,7 +199,28 @@ function testReplayKeepsImagePanelOpenAndVisible() {
     !imagePanel.classList.contains('collapsed'),
     'BUG: the replayed panel showing an image was auto-collapsed',
   );
-  console.log('ok: a replayed image panel stays open and on screen');
+  // The finished task reads as its text, one folded Trajectory and the
+  // result: the image waits inside the Trajectory, hidden by it alone.
+  assert.ok(traj.classList.contains('collapsed'), 'the Trajectory is folded');
+  const hider = hiddenBy(win, img);
+  assert.ok(
+    hider && hider.classList.contains('trajectory-sub') && traj.contains(hider),
+    'only the folded Trajectory hides the image',
+  );
+  // Opening the Trajectory by its header shows the image at once: no
+  // other ancestor of it is folded or hidden.
+  click(win, traj.querySelector(':scope > .trajectory-h'));
+  assert.ok(!traj.classList.contains('collapsed'), 'the header opens it');
+  assert.strictEqual(
+    hiddenBy(win, img),
+    null,
+    'BUG: the image is still hidden once the Trajectory is open',
+  );
+  assert.ok(
+    !imagePanel.classList.contains('collapsed'),
+    'the image panel needs no second click',
+  );
+  console.log('ok: a replayed image panel is one Trajectory click from view');
 }
 
 // A `summary` folds ordinary panels and leaves image panels expanded

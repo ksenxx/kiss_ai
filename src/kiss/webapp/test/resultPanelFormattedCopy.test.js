@@ -51,6 +51,7 @@ async function testHtmlSummaryCopiesFormattedText() {
       '<p>All <b>good</b>.</p>' +
       '<ul><li>alpha</li><li>beta</li></ul>' +
       '<ol start="3"><li>three</li><li>four</li></ol>' +
+      '<ul><li><p>loose one</p><p>more</p></li><li></li><li><p>loose two</p></li></ul>' +
       '<pre><code>x = 1\ny = 2</code></pre>' +
       '<table><tr><th>k</th><th>v</th></tr>' +
       '<tr><td>a</td><td>b</td></tr></table>',
@@ -71,6 +72,13 @@ async function testHtmlSummaryCopiesFormattedText() {
   assert.ok(text.includes('- beta'), 'every ul item gets a marker');
   assert.ok(text.includes('3. three'), 'ol honours its start number');
   assert.ok(text.includes('4. four'), 'ol numbering increments');
+  assert.ok(
+    /- loose one\n\nmore\n\n-\n- loose two/.test(text),
+    'a loose item (paragraph-wrapped) keeps its marker on its first ' +
+      'line, its later paragraphs stay paragraphs, an empty item keeps ' +
+      'its line; got: ' +
+      text,
+  );
   assert.ok(
     text.includes('x = 1\ny = 2'),
     'pre content keeps its own line breaks',
@@ -176,7 +184,10 @@ function testFormattedTextFromNodeBranches() {
     '<ul><li>top<ul><li>nested</li></ul></li></ul>' +
     '<script>bad()</script>' +
     '<div class="panel-copy-btn">chrome</div>' +
-    '<ol start="x"><li>fallback-one</li></ol>';
+    '<ol start="x"><li>fallback-one</li></ol>' +
+    '<ol reversed><li>second</li><li>first</li></ol>' +
+    '<ol start="5" reversed><li>five</li><li>four</li></ol>' +
+    '<ol><li value="4">four</li><li>five</li><li value="x">six</li></ol>';
   const text = fmt(el).replace(/^\n+|\n+$/g, '');
   assert.ok(text.includes('a\nb'), '<br> becomes a newline; got: ' + text);
   assert.ok(text.includes('---'), '<hr> becomes a rule line');
@@ -188,6 +199,58 @@ function testFormattedTextFromNodeBranches() {
     text.includes('1. fallback-one'),
     'a non-numeric ol start falls back to 1; got: ' + text,
   );
+  // The numbers the browser shows: a reversed list counts down from its
+  // item count (or its start), an li value restarts the count.
+  assert.ok(text.includes('2. second\n1. first'), 'reversed; got: ' + text);
+  assert.ok(text.includes('5. five\n4. four'), 'reversed start; got: ' + text);
+  assert.ok(
+    text.includes('4. four\n5. five\n6. six'),
+    'li value restarts the count; got: ' + text,
+  );
+  win.close();
+}
+
+function testNestedListAsAnItemsFirstChildStartsItsOwnLine() {
+  // A nested list that is the first thing in its item (nothing, or
+  // only whitespace, before it) must start on its own indented line:
+  // the parent's marker and the child's marker are never joined on one
+  // line as "-   - nested" / "1.   1. nested".  The item with text
+  // before its child list keeps its shape.
+  const {win} = makePage();
+  const fmt = win.PanelCopy.formattedTextFromNode;
+  const doc = win.document;
+  const cases = [
+    {
+      html: '<ul><li><ul><li>nested</li></ul></li><li>next</li></ul>',
+      expect: '-\n\n  - nested\n\n- next',
+    },
+    {
+      html: '<ol><li><ol><li>nested</li></ol></li></ol>',
+      expect: '1.\n\n  1. nested',
+    },
+    {
+      html: '<ul><li> <ul><li>nested</li></ul></li></ul>',
+      expect: '-\n\n  - nested',
+    },
+    {
+      html: '<ul><li><ul><li>nested</li></ul><p>after</p></li></ul>',
+      expect: '-\n\n  - nested\n\nafter',
+    },
+    {
+      html: '<ul><li>top<ul><li>nested</li></ul></li></ul>',
+      expect: '- top\n\n  - nested',
+    },
+  ];
+  for (const c of cases) {
+    const el = doc.createElement('div');
+    el.innerHTML = c.html;
+    const text = fmt(el).replace(/^\n+|\n+$/g, '');
+    assert.strictEqual(
+      text,
+      c.expect,
+      'BUG: nested list markers joined on one line for ' + c.html,
+    );
+  }
   win.close();
 }
 
@@ -202,6 +265,8 @@ async function main() {
   console.log('  ok - empty/image-only summaries never copy raw HTML');
   testFormattedTextFromNodeBranches();
   console.log('  ok - formattedTextFromNode branch behaviours');
+  testNestedListAsAnItemsFirstChildStartsItsOwnLine();
+  console.log('  ok - a nested list first in its item starts its own line');
   console.log('resultPanelFormattedCopy.test.js: all tests passed');
 }
 

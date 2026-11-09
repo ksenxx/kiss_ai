@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -36,7 +37,13 @@ from kiss.core.user_config import (
     save_api_key,
     save_config,
 )
-from kiss.tests.conftest import AMBIENT_AWS_ENV_VARS, HOT_READER_PAUSE, IS_WINDOWS, posix_only
+from kiss.tests.conftest import (
+    AMBIENT_AWS_ENV_VARS,
+    HOT_READER_PAUSE,
+    IS_WINDOWS,
+    is_root,
+    posix_only,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -292,7 +299,40 @@ class TestApiKeySave:
         assert "export ANTHROPIC_API_KEY=ant-key" in content
         rc = Path.home() / ".config" / "fish" / "config.fish"
         assert not rc.exists()
+        # No RC will be written, so no lock file (nor its directory) is made for it.
+        assert not (Path.home() / ".config").exists()
         assert os.environ["ANTHROPIC_API_KEY"] == "ant-key"
+
+    @posix_only("an unreadable RC needs chmod-based permission denial")
+    def test_a_failed_rc_scrub_leaves_the_store_and_the_process_agreeing(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A save whose RC scrub fails (the error reaches the caller) changes
+        nothing: the store, the process environment and the config singleton
+        all keep the old key.  Editing the store first left it holding the new
+        key while this daemon kept using, and showing, the old one until a
+        restart loaded the new."""
+        if is_root():
+            pytest.skip("root reads a mode-000 file")
+        from kiss.core import config as config_module
+
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        env_file = api_keys_env_path()
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text("export OPENAI_API_KEY=old\n")
+        load_api_keys()
+        assert os.environ["OPENAI_API_KEY"] == "old"
+        rc = Path.home() / ".zshrc"
+        rc.write_text("export OPENAI_API_KEY=old\n")
+        rc.chmod(0)
+        try:
+            with pytest.raises(PermissionError):
+                save_api_key("OPENAI_API_KEY", "new")
+        finally:
+            rc.chmod(0o600)
+        assert env_file.read_text() == "export OPENAI_API_KEY=old\n"
+        assert os.environ["OPENAI_API_KEY"] == "old"
+        assert config_module.DEFAULT_CONFIG.OPENAI_API_KEY == "old"
 
     def test_replace_existing_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A key already in the canonical store is replaced in place."""
@@ -506,6 +546,137 @@ class TestApiKeyDelete:
             f"export OPENAI_API_KEY={shlex.quote('new-val')}"
             in api_keys_env_path().read_text()
         )
+
+    def test_delete_keeps_the_other_commands_of_a_compound_rc_line(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only the assignment of the key goes; the commands after the ``;`` stay.
+
+        The scrub dropped the whole physical line, so deleting one key
+        also deleted an unrelated assignment sharing its line, and a
+        line assigning the key after another command was left behind.
+        A ``;`` inside quotes is a value character, not a separator.
+
+        Then it dropped everything up to the next ``;``: the ``&& export
+        GEMINI_API_KEY=…`` of an and-list, the other operands of one
+        ``export``, and the ``)`` of a command substitution holding a
+        ``;`` -- a deletion that lost unrelated credentials or left the
+        RC unparseable.  Only the key's own ``KEY=…`` word goes; an
+        export emptied inside an and/or-list or a compound command is
+        replaced by the ``true`` no-op so the structure stays valid, and
+        an export inside ``$(…)`` runs in a subshell that never reaches
+        the sourcing shell, so that line is left alone.
+
+        A redirection is not an operand: ``export KEY=old 2>/dev/null``
+        left ``export 2>/dev/null``, and a bare ``export`` prints every
+        exported variable -- the other keys -- to whatever sources the
+        RC.  The export goes whole when the key was its only operand;
+        the redirection stays with the operands it keeps.
+
+        The ``&`` of ``2>&1`` (``&>/dev/null``) is part of the
+        redirection, not a background separator: split there, the scrub
+        left ``true &1 GEMINI_API_KEY=keep``, which runs the command
+        ``1`` and loses the other key.  An escaped ``\\>`` is a value
+        character, though, and the ``&`` after it a background
+        separator again: taken for a redirection's, it joined the next
+        command into the export, whose operands that command became
+        once the key went (``export printf …``).  A here-document
+        (``<<``, ``<<-``) is a redirection too, and its lines follow:
+        the emptied export becomes ``true`` with the document rather
+        than leaving a bare ``export << EOF`` (every variable printed)
+        or the document's lines to run as commands.  The operator needs
+        no blank before it: the shell reads ``KEY=old<<EOF`` as the word
+        ``KEY=old`` and the operator ``<<``; read as one word, the
+        document went unseen and the introducer was deleted, leaving
+        its lines to run as commands.  A process substitution glued to
+        the value (``KEY=old<(:)``, ``KEY=old>(:)``) is part of that
+        word, though, not a redirection: taken for ``<``, the word
+        ended before it and the scrub left ``export<(:) …``, a command
+        the shell does not find (exit 127), losing the other key of
+        the line; ``< <(:)`` is still the redirection ``<`` and its
+        target.
+        """
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        rc = Path.home() / ".zshrc"
+        rc.write_text(
+            "export OPENAI_API_KEY=old; export ANTHROPIC_API_KEY=keep-me\n"
+            "export KEEP_FIRST=1; export OPENAI_API_KEY='a;b'; # note\n"
+            "export OPENAI_API_KEY='x;y'\n"
+            "export OPENAI_API_KEY=old && export GEMINI_API_KEY=keep-and\n"
+            "export GEMINI_API_KEY=keep-first OPENAI_API_KEY=old TOGETHER_API_KEY=keep-last\n"
+            'printf "%s\\n" $(printf token; export OPENAI_API_KEY=local)\n'
+            "true || export OPENAI_API_KEY=old\n"
+            "if true; then export OPENAI_API_KEY=old; fi\n"
+            "export OPENAI_API_KEY=old 2>/dev/null\n"
+            "export OPENAI_API_KEY=old GEMINI_API_KEY=keep-redirected 2> /dev/null\n"
+            "export OPENAI_API_KEY=old 2>&1\n"
+            "export OPENAI_API_KEY=old &>/dev/null\n"
+            "export OPENAI_API_KEY=old 2>&1 GEMINI_API_KEY=keep-duplicated\n"
+            "export OPENAI_API_KEY=old<(:) ANTHROPIC_API_KEY=keep-substituted-in\n"
+            "export OPENAI_API_KEY=old>(:) TOGETHER_API_KEY=keep-substituted-out\n"
+            "export OPENAI_API_KEY=old OPENROUTER_API_KEY=keep-redirected-in < <(:)\n"
+            "export OPENAI_API_KEY=old << EOF\n"
+            "printf leaked-document\n"
+            "EOF\n"
+            "export OPENAI_API_KEY=old <<- EOF\n"
+            "\tprintf leaked-document\n"
+            "\tEOF\n"
+            "export OPENAI_API_KEY=old<<EOF\n"
+            "printf leaked-document\n"
+            "EOF\n"
+            "export OPENAI_API_KEY=old\\>& printf 'retained-background\\n'\n"
+            "wait\n"
+            'printf "%s\\n" "$GEMINI_API_KEY" "$ANTHROPIC_API_KEY" "$TOGETHER_API_KEY" '
+            '"$OPENROUTER_API_KEY"\n'
+        )
+        save_api_key("OPENAI_API_KEY", "")
+        assert rc.read_text() == (
+            "export ANTHROPIC_API_KEY=keep-me\nexport KEEP_FIRST=1; # note\n"
+            "true && export GEMINI_API_KEY=keep-and\n"
+            "export GEMINI_API_KEY=keep-first TOGETHER_API_KEY=keep-last\n"
+            'printf "%s\\n" $(printf token; export OPENAI_API_KEY=local)\n'
+            "true || true\n"
+            "if true; then true; fi\n"
+            "export GEMINI_API_KEY=keep-redirected 2> /dev/null\n"
+            "export 2>&1 GEMINI_API_KEY=keep-duplicated\n"
+            "export ANTHROPIC_API_KEY=keep-substituted-in\n"
+            "export TOGETHER_API_KEY=keep-substituted-out\n"
+            "export OPENROUTER_API_KEY=keep-redirected-in < <(:)\n"
+            "true << EOF\n"
+            "printf leaked-document\n"
+            "EOF\n"
+            "true <<- EOF\n"
+            "\tprintf leaked-document\n"
+            "\tEOF\n"
+            "true<<EOF\n"
+            "printf leaked-document\n"
+            "EOF\n"
+            "true & printf 'retained-background\\n'\n"
+            "wait\n"
+            'printf "%s\\n" "$GEMINI_API_KEY" "$ANTHROPIC_API_KEY" "$TOGETHER_API_KEY" '
+            '"$OPENROUTER_API_KEY"\n'
+        )
+        bash = _resolve_shell_path("bash")
+        if bash is not None:
+            syntax = subprocess.run([bash, "-n", str(rc)], capture_output=True, text=True)
+            assert syntax.returncode == 0, syntax.stderr
+            # Sourced for real, the RC prints its one token, the output
+            # of the command backgrounded after the escaped ``\>`` and
+            # the keys kept beside the descriptor duplication, the two
+            # process substitutions and the redirection from one,
+            # nothing of the environment (no bare ``export`` was left
+            # behind) and no here-document line run as a command.
+            sourced = subprocess.run(
+                [bash, "--noprofile", "--norc", "-c", 'source "$1"', "probe", str(rc)],
+                capture_output=True,
+                text=True,
+                env={"HOME": str(Path.home()), "UNRELATED_SECRET": "dummy-secret"},
+            )
+            assert sourced.returncode == 0, sourced.stderr
+            assert sourced.stdout == (
+                "token\nretained-background\nkeep-duplicated\nkeep-substituted-in\n"
+                "keep-substituted-out\nkeep-redirected-in\n"
+            )
 
     def test_delete_preserves_prefixed_key_names(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -879,22 +1050,85 @@ class TestLoadApiKeys:
         load_api_keys()
         assert os.environ.get("GEMINI_API_KEY") is None
 
+    def test_the_users_shell_rc_wins_over_a_stale_key_in_another_shells_rc(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A bash user's current ``.bashrc`` key migrates, not the ``.zshrc`` leftover.
+
+        The migration scanned bash, zsh and fish in that fixed order and
+        let each later RC overwrite what the earlier ones found, so a
+        stale key in an abandoned shell's RC beat the current one of
+        ``$SHELL``.  The user's shell is read first and the other RCs
+        only fill what it does not set -- including a key whose
+        assignment the text cannot import: a value assembled from a
+        variable is resolved by sourcing that RC rather than replaced
+        by the leftover, and an explicit ``KEY=""`` leaves the key
+        unset instead of resurrecting the leftover into the store.
+        """
+        shell = _installed_posix_shell()
+        other = "zsh" if shell == "bash" else "bash"
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
+        for name in ("OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+        _shell_rc_path(shell).write_text(
+            "export OPENAI_API_KEY=current-key\n"
+            'V=current\nexport ANTHROPIC_API_KEY="$V-expanded"\n'
+            'export TOGETHER_API_KEY=""\n'
+        )
+        _shell_rc_path(other).write_text(
+            "export OPENAI_API_KEY=obsolete-key\nexport GEMINI_API_KEY=other-only\n"
+            "export ANTHROPIC_API_KEY=obsolete-key\nexport TOGETHER_API_KEY=obsolete-key\n"
+        )
+        load_api_keys()
+        assert os.environ.get("OPENAI_API_KEY") == "current-key"
+        assert os.environ.get("GEMINI_API_KEY") == "other-only"
+        assert os.environ.get("ANTHROPIC_API_KEY") == "current-expanded"
+        assert os.environ.get("TOGETHER_API_KEY") is None
+        assert "obsolete-key" not in api_keys_env_path().read_text()
+
+    def test_a_later_rc_assignment_wins_even_when_it_cannot_be_imported(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``export KEY=old`` followed by ``export KEY=""`` leaves the key unset in
+        a shell, so the migration must not resurrect ``old`` into the store; the
+        same holds for a later assignment that needs the shell to expand it."""
+        shell = _installed_posix_shell()
+        rc = _shell_rc_path(shell)
+        rc.write_text(
+            'export OPENAI_API_KEY=old\nexport OPENAI_API_KEY=""\n'
+            'export GEMINI_API_KEY=stale\nG=later\nexport GEMINI_API_KEY="$G-key"\n'
+        )
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        load_api_keys()
+        store = api_keys_env_path().read_text()
+        assert "old" not in store and os.environ.get("OPENAI_API_KEY") is None
+        assert "stale" not in store and os.environ.get("GEMINI_API_KEY") == "later-key"
+
     def test_load_parses_quoting_edge_cases(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Unbalanced quotes, empty values, and multi-word raws load honestly.
 
-        A line ``shlex`` cannot parse (unbalanced quote) keeps its raw
-        text; a multi-word remainder loads its first word (what a shell
-        assigns for ``KEY=two words``); a bare ``KEY=`` loads as empty.
-        None of these may crash the loader or corrupt the rest of the
-        file's imports.
+        A line with an unbalanced quote keeps its raw text; a multi-word
+        remainder loads its first word (what a shell assigns for
+        ``KEY=two words``); a bare ``KEY=`` loads as empty, and so does
+        ``KEY= # removed`` (the value ends at the blank, the rest is a
+        comment); ``\\$`` and ``\\``` inside double quotes lose their
+        backslash as in a shell, ``#`` inside a word is no comment, and
+        neither is one opening the value (``KEY=#literal`` continues the
+        assignment's word: the shell assigns ``#literal``).  None of
+        these may crash the loader or corrupt the rest of the file's
+        imports.
         """
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        for name in (
-            "KISS_TEST_UNBALANCED", "KISS_TEST_EMPTY",
-            "KISS_TEST_WORDS", "KISS_TEST_OK",
-        ):
+        names = (
+            "KISS_TEST_UNBALANCED", "KISS_TEST_EMPTY", "KISS_TEST_WORDS", "KISS_TEST_OK",
+            "KISS_TEST_BLANK", "KISS_TEST_ESCAPED", "KISS_TEST_HASH", "KISS_TEST_NOTE",
+            "KISS_TEST_LEADING_HASH", "KISS_TEST_SEMICOLON", "KISS_TEST_QUOTED_SEMICOLON",
+        )
+        for name in names:
             monkeypatch.delenv(name, raising=False)
         env_file = api_keys_env_path()
         env_file.parent.mkdir(parents=True, exist_ok=True)
@@ -902,18 +1136,37 @@ class TestLoadApiKeys:
             "export KISS_TEST_UNBALANCED=\"oops\n"
             "export KISS_TEST_EMPTY=\n"
             "export KISS_TEST_WORDS=two words\n"
-            "export KISS_TEST_OK='fine'\n",
+            "export KISS_TEST_OK='fine'\n"
+            "export KISS_TEST_BLANK= # removed\n"
+            'export KISS_TEST_ESCAPED="sk-\\$lit\\`eral\\n"\n'
+            "export KISS_TEST_HASH=abc#def\n"
+            "export KISS_TEST_NOTE=abc # note\n"
+            "export KISS_TEST_LEADING_HASH=#literal # note\n"
+            "export KISS_TEST_SEMICOLON='sk-audit'; export OTHER=x\n"
+            "export KISS_TEST_QUOTED_SEMICOLON='a;b'\n",
         )
         load_api_keys()
         assert os.environ.get("KISS_TEST_UNBALANCED") == '"oops'
         assert os.environ.get("KISS_TEST_EMPTY") == ""
         assert os.environ.get("KISS_TEST_WORDS") == "two"
         assert os.environ.get("KISS_TEST_OK") == "fine"
-        for name in (
-            "KISS_TEST_UNBALANCED", "KISS_TEST_EMPTY",
-            "KISS_TEST_WORDS", "KISS_TEST_OK",
-        ):
+        assert os.environ.get("KISS_TEST_BLANK") == ""
+        assert os.environ.get("KISS_TEST_ESCAPED") == "sk-$lit`eral\\n"
+        assert os.environ.get("KISS_TEST_HASH") == "abc#def"
+        assert os.environ.get("KISS_TEST_NOTE") == "abc"
+        assert os.environ.get("KISS_TEST_LEADING_HASH") == "#literal"
+        # An unquoted ``;`` ends the assignment (the rest is another command).
+        assert os.environ.get("KISS_TEST_SEMICOLON") == "sk-audit"
+        assert os.environ.get("KISS_TEST_QUOTED_SEMICOLON") == "a;b"
+        for name in names:
             del os.environ[name]
+        # In fish the value is a word of its own, so a ``#`` opening it is a
+        # comment: the RC assigns the key, but to nothing the store can hold.
+        assert user_config._scan_rc_text_for_keys(
+            "set -gx OPENAI_API_KEY #literal\nset -gx GEMINI_API_KEY g#1\n",
+            "fish",
+            {"OPENAI_API_KEY", "GEMINI_API_KEY"},
+        ) == {"OPENAI_API_KEY": None, "GEMINI_API_KEY": "g#1"}
 
     def test_save_collapses_duplicate_store_lines(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -1199,6 +1452,12 @@ class TestReviewRegressions:
         ``.bashrc``; a stock Debian/Ubuntu RC returns near the top for
         non-interactive shells, so sourcing alone never reaches the key.
         The textual scan must find it anyway.
+
+        The scan reads every command of a line, not only its first:
+        ``export A=old; export A=current; export B=…`` migrates
+        ``current`` and ``B`` -- a first-command-only scan stored the
+        obsolete ``old`` and lost ``B`` to the sourcing fallback, which
+        the guard turns back before it reaches the line.
         """
         rc = Path.home() / ".bashrc"
         rc.write_text(
@@ -1206,13 +1465,58 @@ class TestReviewRegressions:
             "    *i*) ;;\n"
             "      *) return;;\n"
             "esac\n"
-            "export GEMINI_API_KEY=legacy-after-guard\n",
+            "export GEMINI_API_KEY=legacy-after-guard\n"
+            "export OPENAI_API_KEY=old; export OPENAI_API_KEY=current;"
+            " export ANTHROPIC_API_KEY=same-line\n",
         )
         monkeypatch.setenv("SHELL", "/bin/bash")
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        for name in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
         load_api_keys()
         assert os.environ.get("GEMINI_API_KEY") == "legacy-after-guard"
-        assert "legacy-after-guard" in api_keys_env_path().read_text()
+        assert os.environ.get("OPENAI_API_KEY") == "current"
+        assert os.environ.get("ANTHROPIC_API_KEY") == "same-line"
+        store = api_keys_env_path().read_text()
+        assert "legacy-after-guard" in store
+        assert "OPENAI_API_KEY=old" not in store
+        # Everything was read from the text: the shell was never spawned.
+        assert user_config._RC_SOURCED_MARKER not in store
+
+    def test_migration_leaves_conditional_assignments_to_the_shell(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An assignment the shell may skip, or run in a subshell, migrates as the shell says.
+
+        The scan read every command of a line as an unconditional
+        assignment: ``export A=current || export A=obsolete`` imported
+        ``obsolete``, which the shell never assigns (the ``||`` branch
+        of a succeeding export), ``false && export B=never`` imported
+        ``never``, and an export piped into ``cat`` runs in a subshell
+        that never reaches the sourcing shell.  Only a command bounded
+        by ``;`` (an ``&`` before it, an ``&&`` or ``||`` after it) is
+        the text's to read; the others are left to the one-time
+        sourcing pass, which sees what the shell assigns.
+        """
+        shell = _installed_posix_shell()
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
+        for name in ("OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+        _shell_rc_path(shell).write_text(
+            "export OPENAI_API_KEY=current || export OPENAI_API_KEY=obsolete\n"
+            "false && export GEMINI_API_KEY=never-assigned\n"
+            "export ANTHROPIC_API_KEY=pipeline-only | cat\n"
+        )
+        load_api_keys()
+        assert os.environ.get("OPENAI_API_KEY") == "current"
+        assert os.environ.get("GEMINI_API_KEY") is None
+        assert os.environ.get("ANTHROPIC_API_KEY") is None
+        store = api_keys_env_path().read_text()
+        assert "OPENAI_API_KEY=current" in store
+        assert "obsolete" not in store
+        assert "never-assigned" not in store
+        assert "pipeline-only" not in store
+        # The text left them to the shell, which was sourced once.
+        assert user_config._RC_SOURCED_MARKER in store
 
     def test_delete_scrubs_every_shell_rc(
         self, monkeypatch: pytest.MonkeyPatch,

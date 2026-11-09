@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from kiss.server import agent_state
-from kiss.server.merge_flow import _pending_worktrees
+from kiss.server.merge_flow import _flatten_changed, _pending_worktrees
 
 
 def merge_conflict(server: Any, tab_id: str = "") -> bool:
@@ -23,3 +23,18 @@ def merge_conflict(server: Any, tab_id: str = "") -> bool:
     state = agent_state.find_by_tab(tab_id)
     wt_agent = state.agent if state is not None else None
     return any(server._conflict_of(wt) for wt in _pending_worktrees(wt_agent))
+
+
+def worktree_changed_files(server: Any, tab_id: str) -> list[str]:
+    """The files changed in the pending worktrees of *tab_id* against their original branches.
+
+    The list ``worktree_done`` carries as ``changedFiles``, asked
+    directly: files of the worktree the task's work dir is in are
+    relative to it, files of any other repository's worktree are
+    prefixed with that repository's root, and a worktree git cannot
+    list contributes nothing.  ``[]`` for a tab without an agent.
+    """
+    state = agent_state.find_by_tab(tab_id)
+    if state is None or state.agent is None:
+        return []
+    return _flatten_changed(server._list_pending(state.agent), state.agent._wt)

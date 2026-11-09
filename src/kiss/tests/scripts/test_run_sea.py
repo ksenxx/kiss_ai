@@ -15,9 +15,10 @@ that quotes the task and the ``pwd`` output, so each run is deterministic
 and the script's exit code, printed YAML and effective working directory
 can be asserted exactly.  Markers in the task text steer the second step:
 :data:`FAIL_MARKER` makes ``finish`` report ``success: false``,
-:data:`BAD_FINISH_MARKER` makes the model call ``finish`` with a wrong
-argument, which ends the run with the tool's error text instead of a YAML
-mapping (the script's ``except`` path).
+:data:`BAD_FINISH_MARKER` makes the model's first ``finish`` call use a
+wrong argument, which the run hands back to the model as a tool error (a
+failed ``finish`` is not the task's result); the model then calls
+``finish`` correctly.
 
 Nothing is patched: the model is the real OpenAI-compatible adapter, pointed
 at the test server through the SEA's ``model_config`` setting, which is
@@ -135,7 +136,8 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
 
     The second step reads the task text: with :data:`BAD_FINISH_MARKER`
     it calls ``finish(result=...)`` (not a parameter of the structured
-    ``finish``), otherwise ``finish(success=<not FAIL_MARKER>, ...)``
+    ``finish``) once, then on reading the tool error the correct
+    ``finish``; otherwise ``finish(success=<not FAIL_MARKER>, ...)``
     with a summary quoting the task and the ``pwd`` output.
     """
 
@@ -162,7 +164,7 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
         }
         if not tool_outputs:
             name, arguments = "Bash", {"command": "pwd", "description": "print the work dir"}
-        elif BAD_FINISH_MARKER in task:
+        elif BAD_FINISH_MARKER in task and len(tool_outputs) == 1:
             arguments = {"result": "done"}
         if body.get("stream"):
             self.send_response(200)
@@ -343,20 +345,27 @@ def test_sea_settings_pin_model_and_work_dir(
     _assert_run_seen("pinned run", "sea-model", pinned)
 
 
-def test_finish_with_wrong_arguments_exit_1(
+def test_finish_with_wrong_arguments_is_corrected_exit_0(
     fake_openai: str, kiss_home: Path, tmp_path: Path
 ) -> None:
-    """A ``finish`` call with a wrong argument ends the run with its error text: exit 1."""
+    """A ``finish`` call with a wrong argument is a tool error the model corrects, no result."""
     sea = _write_sea(tmp_path / "seas", "probe")
     proc = _run(
         [str(sea), f"{BAD_FINISH_MARKER} please", "-m", "fake-model"],
         _env(kiss_home, fake_openai),
         tmp_path,
     )
-    assert proc.returncode == 1, proc.stderr
-    assert "Failed to call finish" in proc.stdout, proc.stdout
+    assert proc.returncode == 0, proc.stderr
+    assert _result_yaml(proc.stdout)["success"] is True
     assert "Traceback" not in proc.stderr, proc.stderr
-    _assert_run_seen(f"{BAD_FINISH_MARKER} please", "fake-model", tmp_path)
+    # Three steps: ``pwd``, the bad ``finish``, then the corrected one,
+    # issued on reading the bad call's error as a tool result.
+    bad_step, good_step = FakeOpenAIHandler.requests[-2:]
+    assert _task_in(good_step["messages"]) == f"{BAD_FINISH_MARKER} please"
+    tool_outputs = [m for m in good_step["messages"] if m.get("role") == "tool"]
+    assert len(tool_outputs) == 2, good_step["messages"]
+    assert "Failed to call finish" in str(tool_outputs[-1]["content"]), tool_outputs
+    assert len([m for m in bad_step["messages"] if m.get("role") == "tool"]) == 1
 
 
 def test_sea_by_name_from_seas_md(fake_openai: str, kiss_home: Path, tmp_path: Path) -> None:

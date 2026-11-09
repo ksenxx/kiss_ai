@@ -39,7 +39,7 @@ const {
   stubRaf,
   fakeMatchMedia,
 } = require('./simplify2_harness');
-const {makeRunner} = require('./ui_antipattern_harness');
+const {makeRunner, key} = require('./ui_antipattern_harness');
 
 const {test, report} = makeRunner();
 
@@ -232,12 +232,6 @@ function pointer(win, target, type, fields) {
   const ev = new win.Event(type, {bubbles: true, cancelable: true});
   Object.assign(ev, {button: 0, clientY: 0, pointerId: 1}, fields);
   target.dispatchEvent(ev);
-}
-
-function key(win, target, k) {
-  target.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: k, bubbles: true, cancelable: true}),
-  );
 }
 
 async function main() {

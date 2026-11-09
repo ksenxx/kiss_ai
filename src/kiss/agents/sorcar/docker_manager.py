@@ -9,10 +9,13 @@ import base64
 import binascii
 import codecs
 import functools
+import glob
 import json
 import logging
 import os
+import posixpath
 import queue
+import re
 import shlex
 import shutil
 import socket
@@ -25,8 +28,8 @@ from typing import Any, NamedTuple
 
 import docker
 from docker.models.containers import Container  # type: ignore[assignment]
+from docker.utils import parse_repository_tag
 
-from kiss.agents.sorcar._concurrency import _race_delay, locked_call
 from kiss.agents.sorcar.edit_guards import (
     edit_call,
     heredoc_copy,
@@ -38,6 +41,7 @@ from kiss.agents.sorcar.edit_guards import (
 from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.useful_tools import (
     _MAX_BINARY_READ_BYTES,
+    _Capture,
     _output_budget,
     _stop_requested,
     _truncate_output,
@@ -50,6 +54,7 @@ from kiss.agents.sorcar.useful_tools import (
 from kiss.core import tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_error import KISSError
+from kiss.core.locked import _race_delay, locked_call
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +100,11 @@ _EXEC_TOKEN_VAR = "KISS_EXEC_TOKEN"
 #: indefinitely delayed start costs one inspect every few seconds.
 _REAP_POLL_INTERVAL_S = 0.2
 _REAP_POLL_MAX_INTERVAL_S = 5.0
+#: Consecutive ``exec_inspect`` failures (a dropped connection, a read
+#: timeout: not the exec being gone) after which the reaper stops watching a
+#: start that never came: a daemon failing for this long (minutes at the
+#: interval cap) is not about to start the exec.
+_REAP_MAX_INSPECT_FAILURES = 60
 
 #: How long a timed-out or stopped command waits for the reaper's first
 #: kill sweep before returning: long enough that the command is normally
@@ -103,6 +113,13 @@ _REAP_POLL_MAX_INTERVAL_S = 5.0
 #: short enough that a daemon withholding the sweep's stream cannot hold
 #: the task thread.  The sweep itself continues on the reaper thread.
 _KILL_WAIT_S = 2.0
+
+#: How long :meth:`DockerManager._remove_shared_volume_dir` retries a failed
+#: ``rmtree``: Docker Desktop on macOS releases the mount points it made
+#: in the shared directory for nested bind mounts a moment after the
+#: container's removal returns, and until then deleting them fails with
+#: ``EACCES``.
+_RMTREE_RETRY_S = 2.0
 
 #: ``docker_image`` spelling that attaches to an already running container
 #: (``container:<name-or-id>``) instead of starting one from an image.
@@ -196,15 +213,22 @@ def _drain_exec_stream(
 
 def _take_output(
     item: tuple[bool, str],
-    stdout_parts: list[str],
-    stderr_parts: list[str],
+    stdout: list[str] | _Capture,
+    stderr: list[str] | _Capture,
     on_text: Callable[[str], None] | None,
 ) -> None:
     """Keep one decoded ``(is_stderr, text)`` piece and hand it to *on_text* when given."""
     is_stderr, text = item
-    (stderr_parts if is_stderr else stdout_parts).append(text)
+    (stderr if is_stderr else stdout).append(text)
     if on_text is not None:
         on_text(text)
+
+
+def _kept(parts: list[str] | _Capture) -> tuple[str, int]:
+    """Return the text *parts* holds and the characters it dropped (a list drops none)."""
+    if isinstance(parts, _Capture):
+        return parts.text(), parts.dropped
+    return "".join(parts), 0
 
 
 def _collapse_progress(output: str) -> str:
@@ -304,6 +328,127 @@ def _timeout_message(timeout_seconds: float, output: str) -> str:
     return message
 
 
+#: Shortest interval between two runs of a ``Bash(until=...)`` command.
+MIN_POLL_SECONDS = 1.0
+
+
+def _run_until[RunResult: tuple[Any, ...]](
+    run: Callable[[float], RunResult],
+    until: str,
+    poll_seconds: float,
+    timeout_seconds: float,
+    cancel: threading.Event | None,
+) -> tuple[RunResult, str]:
+    """Re-run a command until its output matches *until* or *timeout_seconds* pass.
+
+    The ``until`` loop of the container ``Bash`` tools: a wait for a file,
+    a port or a log line is one tool call however long it takes, instead
+    of a ``sleep N; grep`` turn per poll.  Each run gets the time left of
+    the deadline and no run starts after it; a run killed at the deadline
+    ends the loop with its timeout result.  Without a match the call
+    lasts the whole *timeout_seconds*, whatever the interval.
+
+    Args:
+        run: Runs the command once, bounded by the seconds it is given, and
+            returns a tuple starting with ``(exit code, output)`` (``None``
+            for a kill at the deadline), as the exec helpers do; what
+            follows (the dropped-character count of the container exec)
+            is passed through with the last run's result.
+        until: The regular expression (Python ``re``, searched in the
+            output with ``^`` and ``$`` matching at line ends as in
+            ``grep``), valid (:func:`until_refusal` checked it).
+        poll_seconds: Seconds between two runs, at least :data:`MIN_POLL_SECONDS`.
+        timeout_seconds: The call's deadline.
+        cancel: The task's stop event (``None`` for none); a Stop ends the
+            loop after the current run.
+
+    Returns:
+        ``(result, verdict)``: the last run's result as *run* returned it,
+        and one line saying whether the pattern matched and after how many
+        runs and seconds.
+    """
+    pattern = re.compile(until, re.MULTILINE)
+    interval = max(MIN_POLL_SECONDS, float(poll_seconds))
+    started = time.monotonic()
+    end = started + timeout_seconds
+    runs = 0
+    while True:
+        runs += 1
+        result = run(timeout_seconds if runs == 1 else end - time.monotonic())
+        exit_code, output = result[0], result[1]
+        if pattern.search(output):
+            return result, (
+                f"[until {until!r}: matched on run {runs} after "
+                f"{time.monotonic() - started:.1f} s]")
+        remaining = end - time.monotonic()
+        if exit_code is None or remaining <= 0 or _stop_requested(cancel):
+            break
+        # Sleep one interval, or what is left of the deadline (then no further run).
+        stopped = tool_interrupt.wait_interruptible(cancel or threading.Event(),
+                                                    min(interval, remaining))
+        if stopped or remaining <= interval:
+            break
+    return result, (
+        f"[until {until!r}: not matched after {runs} runs and {time.monotonic() - started:.1f} s "
+        f"of the {timeout_seconds:g} s timeout_seconds]")
+
+
+def until_refusal(until: str, poll_seconds: float) -> str | None:
+    """The one-line refusal of a ``Bash(until=...)`` call, or ``None`` when it may run.
+
+    Args:
+        until: The ``until`` argument (``""`` for none).
+        poll_seconds: The ``poll_seconds`` argument.
+    """
+    try:
+        re.compile(until)
+    except re.error as error:
+        return f"Error: until is not a valid regular expression: {error}"
+    try:
+        float(poll_seconds)
+    except (TypeError, ValueError):
+        return f"Error: poll_seconds must be a number of seconds, got {poll_seconds!r}"
+    return None
+
+
+def _sweep_command(shared: str, mounts: list[str]) -> str:
+    """Return the shell command emptying the shared volume at *shared* but no mount below it.
+
+    ``find -delete`` descends into every bind mount nested under the
+    shared path, and a mount of the caller's (*mounts*, the container
+    paths of :attr:`DockerManager.volumes`) is the caller's directory,
+    not the manager's to empty; ``-xdev`` would not stop there, since a
+    bind mount of the same host file system has the same device.  Each
+    nested mount and everything below it is excluded by path (a glob
+    pattern, so its own glob characters are escaped, and so is a
+    backslash, which ``find -path`` reads as an escape and
+    :func:`glob.escape` leaves as it is).
+    """
+    inside = shared.rstrip("/") + "/"
+    spared = ""
+    for mount in mounts:
+        path = posixpath.normpath(mount)
+        if path.startswith(inside):
+            pattern = glob.escape(path).replace("\\", "\\\\")
+            spared += f" -not -path {shlex.quote(pattern)} -not -path {shlex.quote(pattern + '/*')}"
+    return f"find {shlex.quote(shared)} -mindepth 1{spared} -delete"
+
+
+def probe_command(path: str, test: str) -> str:
+    """Return the shell command whose status answers the guards' question *test* about *path*.
+
+    *test* is a ``test`` primary (``-e``, ``-d``, ``-L``) or ``"link"``:
+    whether a ``sed -i`` on the path would cut a link, as the host's
+    :func:`~kiss.agents.sorcar.useful_tools._sed_replaces_link` asks
+    (the path is a symlink, or a file with other hard links; POSIX
+    ``find -links``).
+    """
+    quoted = shlex.quote(path)
+    if test == "link":
+        return f'[ -L {quoted} ] || [ -n "$(find {quoted} -prune -links +1 2>/dev/null)" ]'
+    return f"test {test} {quoted}"
+
+
 def _refuse_or_lift(
     command: str,
     workdir: str | None,
@@ -314,6 +459,7 @@ def _refuse_or_lift(
     max_output_chars: int = MAX_OUTPUT_CHARS,
     isdir: Callable[[str], bool] | None = None,
     remember: Callable[[PendingAppend | None], None] | None = None,
+    islink: Callable[[str], bool] | None = None,
 ) -> tuple[str | None, float]:
     """Apply the guards of the container ``Bash`` tools to *command*.
 
@@ -330,10 +476,12 @@ def _refuse_or_lift(
     of a compound command then runs as a ``Bash`` call with the
     original call's *description*, *timeout_seconds* and
     *max_output_chars*, *isdir* tells whether its leading ``cd``
-    names a directory there, and *remember* keeps the
-    :class:`PendingAppend` of a redirected ``>>`` copy on the manager,
-    after dropping (``None``) the one an earlier call left there: its
-    Write was refused, and it belonged to that Write alone.
+    names a directory there, *islink* whether a ``sed -i`` on its
+    target would cut a link (then no Edit is exact), and *remember*
+    keeps the :class:`PendingAppend` of a redirected ``>>`` copy on
+    the manager, after dropping (``None``) the one an earlier call
+    left there: its Write was refused, and it belonged to that Write
+    alone.
 
     Returns:
         ``(refusal, timeout_seconds)``: the guard's message (``None``
@@ -345,9 +493,12 @@ def _refuse_or_lift(
     if remember is not None:
         remember(None)
     guard, timeout_seconds = refuse_or_lift(command, workdir, timeout_seconds)
-    if guard is None and read_bytes is not None and isdir is not None and remember is not None:
+    if (
+        guard is None and read_bytes is not None and isdir is not None
+        and remember is not None and islink is not None
+    ):
         guard = _rewrite_instead(
-            command, workdir, exists, isdir, read_bytes, description, timeout_seconds,
+            command, workdir, exists, isdir, islink, read_bytes, description, timeout_seconds,
             max_output_chars, remember,
         )
     refusal = guard or rewrite_guard(command) or heredoc_guard(command, workdir, exists)
@@ -359,6 +510,7 @@ def _rewrite_instead(
     workdir: str | None,
     exists: Callable[[str], bool],
     isdir: Callable[[str], bool],
+    islink: Callable[[str], bool],
     read_bytes: Callable[[str], bytes],
     description: str,
     timeout_seconds: float,
@@ -390,6 +542,10 @@ def _rewrite_instead(
         workdir: The directory it starts in (``None`` when unknown).
         exists: Whether a path exists in the container.
         isdir: Whether a path is a directory in the container.
+        islink: Whether a ``sed -i`` on a path would cut a link there
+            (a symlink, a file with other hard links): sed replaces the
+            name, an Edit writes through it, so none is exact and the
+            guards decide, as on the host.
         read_bytes: Fetches a file's bytes from the container.
         description: The ``Bash`` call's description, for the follow-up.
         timeout_seconds: The call's deadline, for the follow-up.
@@ -404,7 +560,10 @@ def _rewrite_instead(
     Raises:
         ToolRedirect: The call to make instead.
     """
-    copy = heredoc_copy(command, workdir)
+    # The container's (or the bridge environment's) home is not this
+    # process's: a ``~`` target stays unresolved and heredoc_guard
+    # refuses the copy, asking for the literal path.
+    copy = heredoc_copy(command, workdir, home=None)
     if copy is not None and copy.path is not None and not copy.path.startswith("/dev/"):
         refusal = cd_refusal(copy.cwd, isdir)
         if refusal is not None:
@@ -433,6 +592,8 @@ def _rewrite_instead(
         refusal = cd_refusal(edit.cwd, isdir)
         if refusal is not None:
             return refusal
+        if edit.what != "python heredoc" and islink(edit.path):
+            return None
         edits: list[tuple[str, str, bool]] | None = edit.edits
         if edit.text_dependent and exists(edit.path):
             try:
@@ -461,6 +622,8 @@ _FETCH_SCRIPT = (
     "size=$(wc -c < {path}) && echo \"$size\" && [ \"$size\" -le {max} ]"
     " && base64 < {path} | tr -d '\\n'"
 )
+#: A line of the fetch's output that is (part of) the base64 payload.
+_BASE64_LINE = re.compile(r"[A-Za-z0-9+/=]+")
 
 
 def fetched_bytes(path: str, max_bytes: int, exit_code: int | None, output: str) -> bytes:
@@ -492,7 +655,15 @@ def fetched_bytes(path: str, max_bytes: int, exit_code: int | None, output: str)
             "(ffmpeg, ImageMagick) to produce a smaller artifact first"
         )
     if exit_code != 0:
-        raise OSError(f"cannot read {path}: {encoded.strip() or 'the fetch did not finish'}")
+        # The base64 that arrived before the failure (megabytes of it,
+        # possibly) is no reason; what the pipeline printed besides it
+        # (its stderr, the stop notice, after the payload) is.
+        detail = " ".join(
+            line.strip() for line in encoded.splitlines()
+            if line.strip() and not _BASE64_LINE.fullmatch(line.strip())
+        )
+        what = "timed out" if exit_code is None else "did not finish"
+        raise OSError(f"cannot read {path}: {detail or f'the fetch {what}'}")
     try:
         data = base64.b64decode(encoded.strip(), validate=True)
     except binascii.Error as e:
@@ -573,6 +744,9 @@ class _ExecRun:
         self.cancelled = False
         self.start_committed = False
         self.start_refused = False
+        # Taken by the one reaper thread that sweeps; a repeat of
+        # ``cancel()`` may start a second thread, which finds it taken.
+        self.reaper_claim = threading.Lock()
 
     def run_worker(self) -> None:
         """Worker thread body: create, start and drain the exec, then fetch its exit code."""
@@ -633,7 +807,11 @@ class _ExecRun:
         cannot leak the lock under the worker.  Safe to repeat: a call
         cut short by an injection that landed after the mark but before
         the reaper's start (:meth:`DockerManager._exec` retries it once)
-        installs the reaper the first call did not.
+        installs the reaper the first call did not; one cut short later
+        starts a second thread, which exits at once because the first
+        holds :attr:`reaper_claim` (no bookkeeping on this thread can
+        tell the two apart: an injection can land between any two of
+        its statements, so the claim is taken by the reaper itself).
         """
         if not locked_call(self.lock, self._mark_cancelled):
             return
@@ -665,26 +843,42 @@ class _ExecRun:
         as its container lives (the inspect fails once the container
         is removed) — a fixed window would let a start delayed past it
         run forever, the exact bug this reaper exists to prevent — unless
-        the daemon refused the start.  The watch is on the exec's own
-        container, not on ``manager.container``: a ``close()`` of an
-        attached manager drops that handle while the container lives
-        on.  The poll interval backs off so an indefinitely delayed
-        start costs one inspect every few seconds.
+        the daemon refused the start.  Only the exec being gone
+        (``NotFound``) ends the watch; a failed inspect (a dropped
+        connection, a read timeout) is retried, since the start may
+        still come, up to :data:`_REAP_MAX_INSPECT_FAILURES` times in a
+        row.  The watch is on the exec's own container, not on
+        ``manager.container``: a ``close()`` of an attached manager
+        drops that handle while the container lives on.  The poll
+        interval backs off so an indefinitely delayed start costs one
+        inspect every few seconds.
 
         Args:
-            swept: Set once the first sweep has run.
+            swept: Set once the first sweep has run (at once when another
+                reaper of this run holds the claim and sweeps).
         """
+        if not self.reaper_claim.acquire(blocking=False):
+            swept.set()
+            return
         try:
             self.manager._kill_exec(self.token, self.container)
         finally:
             swept.set()
         interval = _REAP_POLL_INTERVAL_S
+        failures = 0
         while not self.start_refused:
             try:
                 info = self.manager.client.api.exec_inspect(self.exec_id)
-            except Exception:  # container/exec already gone
-                logger.debug("could not inspect timed-out exec", exc_info=True)
+                failures = 0
+            except docker.errors.NotFound:  # type: ignore[attr-defined]
+                logger.debug("timed-out exec is gone", exc_info=True)
                 return
+            except Exception:
+                logger.debug("could not inspect timed-out exec", exc_info=True)
+                failures += 1
+                if failures >= _REAP_MAX_INSPECT_FAILURES:
+                    return
+                info = {}
             if info.get("Pid"):
                 self.manager._kill_exec(self.token, self.container)
                 if not info.get("Running"):
@@ -702,7 +896,6 @@ class DockerManager:
         tag: str = "latest",
         workdir: str = "/",
         mount_shared_volume: bool = True,
-        ports: dict[int, int] | None = None,
         volumes: dict[str, str] | None = None,
     ) -> None:
         """Initialize the Docker client.
@@ -721,9 +914,6 @@ class DockerManager:
                 a later ``container:<id>`` attach runs commands there.
             mount_shared_volume: Whether to mount a shared volume. Set to False
                 for images that already have content in the workdir (e.g., SWE-bench).
-            ports: Port mapping from container port to host port.
-                Example: {8080: 8080} maps container port 8080 to host port 8080.
-                Example: {80: 8000, 443: 8443} maps multiple ports.
             volumes: Extra read-write bind mounts, host path to container
                 path.  Example: ``{"/home/me/repo": "/home/me/repo"}``
                 makes the host directory visible at the same path inside
@@ -756,7 +946,6 @@ class DockerManager:
 
         self.workdir = workdir
         self.mount_shared_volume = mount_shared_volume
-        self.ports = ports
         self.volumes = dict(volumes or {})
         self.client_shared_path = "/testbed"
         self.host_shared_path: str | None = None
@@ -772,11 +961,13 @@ class DockerManager:
         if image_name.startswith(ATTACH_PREFIX):
             self.attached_container = image_name[len(ATTACH_PREFIX):]
             self.image, self.tag = "", ""
-        elif ":" in image_name:
-            self.image, self.tag = image_name.rsplit(":", 1)
         else:
-            self.image = image_name
-            self.tag = tag
+            # docker's reference grammar, as docker-py's pull() reads it:
+            # the text after the last colon is a tag only when no "/"
+            # follows it (``localhost:5000/name`` is a registry port, no
+            # tag), and ``name@sha256:...`` is a digest.
+            self.image, parsed_tag = parse_repository_tag(image_name)
+            self.tag = parsed_tag or tag
 
     def open(self) -> None:
         """Pull and load a Docker image, then create and start a container.
@@ -785,9 +976,9 @@ class DockerManager:
             KISSError: If a container is already open on this manager
                 (starting a second one would orphan the first — ``close``
                 only knows the newest container — and leak its shared
-                volume directory), or if the previous container's shared
-                volume directory still cannot be removed (starting anyway
-                would replace the only reference to it).
+                volume directory), or if the previous container, or its
+                shared volume directory, still cannot be removed (starting
+                anyway would replace the only reference to it).
         """
         locked_call(self._lifecycle_lock, self._open_locked)
 
@@ -798,6 +989,16 @@ class DockerManager:
                 "A container is already open on this DockerManager; "
                 "call close() before open() again."
             )
+        if self.container_name is not None:
+            # A previous close() could not remove the container (see
+            # _discard_container); retry before a new one takes its
+            # name on the manager and the shared volume dir it mounts.
+            self._discard_container()
+            if self.container_name is not None:
+                raise KISSError(
+                    f"The previous container {self.container_name} could not be "
+                    "removed; remove it and call open() again."
+                )
         if self.host_shared_path is not None:
             # A previous close() could not delete the shared volume
             # dir (see _remove_shared_volume_dir); retry before a new
@@ -824,7 +1025,7 @@ class DockerManager:
             return
         image = self.image
         tag = self.tag
-        full_image_name = f"{image}:{tag}"
+        full_image_name = f"{image}@{tag}" if tag.startswith("sha256:") else f"{image}:{tag}"
         print(f"Pulling Docker image: {full_image_name}")
         try:
             self.client.images.get(full_image_name)
@@ -848,8 +1049,6 @@ class DockerManager:
             mounts[self.host_shared_path] = {"bind": self.client_shared_path, "mode": "rw"}
         if mounts:
             container_kwargs["volumes"] = mounts
-        if self.ports:
-            container_kwargs["ports"] = {f"{cp}/tcp": hp for cp, hp in self.ports.items()}
         # create() and start() are separate calls, under a name chosen
         # here, so the manager owns the container from the moment it
         # exists: docker-py's ``run()`` never removes a container whose
@@ -896,6 +1095,8 @@ class DockerManager:
         description: str,
         timeout_seconds: int = 30,
         max_output_chars: int = MAX_OUTPUT_CHARS,
+        until: str = "",
+        poll_seconds: float = 5.0,
     ) -> str:
         """
         Execute a bash command in the running Docker container.
@@ -906,6 +1107,15 @@ class DockerManager:
             timeout_seconds: Maximum time to wait before treating the command as hung.
             max_output_chars: Characters of output kept (head and tail),
                 up to the configured ceiling.
+            until: A regular expression: when given, the command (a cheap
+                read-only check such as ``grep DONE build.log; tail -3
+                build.log``) is re-run every ``poll_seconds`` until its
+                output matches or ``timeout_seconds`` elapse, in this one
+                call, so a wait for a file, a port or a log line costs one
+                turn however long it takes.  The result is the last run's
+                output plus one line saying whether it matched and after
+                how many runs and seconds.
+            poll_seconds: Seconds between two runs with ``until`` (at least 1).
 
         Returns:
             The output of the command, including stdout, stderr, and exit code
@@ -924,20 +1134,32 @@ class DockerManager:
             command, self.workdir, timeout_seconds, probe, self.read_bytes,
             description, max_output_chars, functools.partial(probe, test="-d"),
             functools.partial(setattr, self, "pending_append"),
+            functools.partial(probe, test="link"),
         )
         if guard is not None:
             return guard
-        exit_code, output = self._exec(
-            container, command, deadline, self.stop_event, self.stream_callback,
-        )
+        run = functools.partial(self._exec, container, command, cancel=self.stop_event,
+                                on_text=self.stream_callback)
+        verdict = ""
+        if until:
+            refusal = until_refusal(until, poll_seconds)
+            if refusal is not None:
+                return refusal
+            (exit_code, output, dropped), verdict = _run_until(
+                run, until, poll_seconds, deadline, self.stop_event)
+            verdict = "\n" + verdict
+        else:
+            exit_code, output, dropped = run(deadline)
         # A tool-panel Stop ended the wait cooperatively (the exec is
         # already killed): surface it as the interrupted result.
         tool_interrupt.raise_if_interrupted()
         if exit_code is None:
-            return _truncate_output(_timeout_message(deadline, output), max_output_chars)
+            return _truncate_output(
+                _timeout_message(deadline, output), max_output_chars, dropped=dropped,
+            ) + verdict
         return _truncate_output(
-            _with_exit_code(output, exit_code), max_output_chars,
-        )
+            _with_exit_code(output, exit_code), max_output_chars, dropped=dropped,
+        ) + verdict
 
     def run_commands_parallel(
         self,
@@ -980,9 +1202,13 @@ class DockerManager:
             KISSError: If no container is open.
         """
         del description
+        # The pending append of a redirected ``>>`` copy belongs to the
+        # Write made right after it: like any other call, this one drops it.
+        self.pending_append = None
         container = self._open_container()
         run_one = functools.partial(
             self._timed_exec, container, timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
         )
         return run_commands_pool(commands, run_one, max_workers, self.stop_event, max_output_chars)
 
@@ -992,6 +1218,7 @@ class DockerManager:
         command: str,
         cancel: threading.Event,
         timeout_seconds: float,
+        max_output_chars: int,
     ) -> tuple[int | None, str, float]:
         """Run one ``run_commands_parallel`` command; never raises.
 
@@ -1014,10 +1241,14 @@ class DockerManager:
             )
             if guard is not None:
                 return -1, guard, 0.0
-            exit_code, output = self._exec(container, command, timeout_seconds, cancel)
+            exit_code, output, dropped = self._exec(container, command, timeout_seconds, cancel)
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
-            exit_code, output = -1, f"Error: {e}"
+            return -1, f"Error: {e}", time.monotonic() - started
+        if dropped:
+            # Cut here, as the host runner does, so the marker counts the
+            # whole output and not just the head and tail that were kept.
+            output = _truncate_output(output, max_output_chars, dropped=dropped)
         return exit_code, output, time.monotonic() - started
 
     def _path_test(
@@ -1032,16 +1263,18 @@ class DockerManager:
 
         ``-e`` (the default) asks whether the path exists, the
         here-document guard's question; ``-d`` whether it is a
-        directory, the question about a ``cd``.  The probe is an exec
-        like any command (:meth:`_exec`), so the command's deadline and
-        a Stop bound it.  A probe that gave no answer (timed out or
-        stopped) fails closed either way: it counts as existing, so a
-        copy is refused rather than run on a target nobody checked, and
-        as no directory, so a ``cd`` nobody checked authorizes no
-        rewrite after it.
+        directory, the question about a ``cd``; ``link`` whether a
+        ``sed -i`` on it would cut a link (:func:`probe_command`).  The
+        probe is an exec like any command (:meth:`_exec`), so the
+        command's deadline and a Stop bound it.  A probe that gave no
+        answer (timed out or stopped) fails closed either way: it
+        counts as existing, so a copy is refused rather than run on a
+        target nobody checked, as no directory, so a ``cd`` nobody
+        checked authorizes no rewrite after it, and as a link, so no
+        Edit stands for a sed nobody checked.
         """
-        exit_code, _ = self._exec(
-            container, f"test {test} {shlex.quote(path)}", timeout_seconds, cancel,
+        exit_code, _, _ = self._exec(
+            container, probe_command(path, test), timeout_seconds, cancel,
         )
         return exit_code == 0 if test == "-d" else exit_code != 1
 
@@ -1076,9 +1309,38 @@ class DockerManager:
         """
         container = self._open_container()
         script = _FETCH_SCRIPT.format(path=shlex.quote(path), max=max_bytes)
-        exit_code, output = self._exec(container, script, timeout_seconds, self.stop_event)
+        exit_code, output, _ = self._exec(
+            container, script, timeout_seconds, self.stop_event, whole=True,
+        )
         tool_interrupt.raise_if_interrupted()
         return fetched_bytes(path, max_bytes, exit_code, output)
+
+    def run(self, command: str, timeout_seconds: float) -> tuple[int | None, str]:
+        """Run *command* in the container: its exit code and output, uncut.
+
+        The finish gate's primitive (the host side is
+        :func:`~kiss.agents.sorcar.coding_gate.run_on_host`): no guard,
+        no echo of a description and none of :meth:`Bash`'s output cap,
+        since the gate parses ``-z`` file lists and hashes whole diffs
+        from the output and bounds its own reads.
+
+        Args:
+            command: The bash command to execute.
+            timeout_seconds: Seconds it may run; past them the code is ``None``.
+
+        Returns:
+            ``(exit code, output)``; the code is ``None`` at the deadline
+            and ``-1`` when the task was stopped meanwhile.
+
+        Raises:
+            KISSError: If no container is open.
+        """
+        container = self._open_container()
+        exit_code, output, _ = self._exec(
+            container, command, timeout_seconds, self.stop_event, whole=True,
+        )
+        tool_interrupt.raise_if_interrupted()
+        return exit_code, output
 
     def _exec(
         self,
@@ -1087,7 +1349,8 @@ class DockerManager:
         timeout_seconds: float,
         cancel: threading.Event | None = None,
         on_text: Callable[[str], None] | None = None,
-    ) -> tuple[int | None, str]:
+        whole: bool = False,
+    ) -> tuple[int | None, str, int]:
         """Run *command* in *container*, bounded by *timeout_seconds*.
 
         The exec is created, started, drained and inspected for its
@@ -1116,20 +1379,28 @@ class DockerManager:
                 :func:`_stop_requested`) ends it the same way.
             on_text: Optional callback receiving each piece of output as
                 it arrives (the ``Bash`` stream callback).
+            whole: Keep every piece of output (``read_bytes``, whose
+                fetch is bounded by its own size limit).  Otherwise each
+                stream is kept as the host ``Bash`` keeps its output
+                (:class:`_Capture`): whole until it passes twice
+                ``_CAPTURE_CHARS``, its head and tail from then on, so a
+                flood of output never sits whole in this process.
 
         Returns:
-            ``(exit_code, output)`` — the exit code is ``None`` on
-            timeout and ``-1`` when *cancel* or the interrupt fired (the
-            output then ends with ``Killed: the task was stopped.``); the
-            output is stdout followed by stderr, untruncated.  The
-            verdict is taken from the stop event, the clock and the exit
-            code alone, not from how the wait ended: a Stop or a deadline
-            that lands while the worker's final item is being taken
-            still wins over a known exit code.
+            ``(exit_code, output, dropped)`` — the exit code is ``None``
+            on timeout and ``-1`` when *cancel* or the interrupt fired
+            (the output then ends with ``Killed: the task was stopped.``);
+            the output is stdout followed by stderr, untruncated except
+            for the *dropped* characters left out between the head and
+            the tail of a stream that was kept bounded.  The verdict is
+            taken from the stop event, the clock and the exit code alone,
+            not from how the wait ended: a Stop or a deadline that lands
+            while the worker's final item is being taken still wins over
+            a known exit code.
         """
         run = _ExecRun(self, container, command)
-        stdout_parts: list[str] = []
-        stderr_parts: list[str] = []
+        stdout: list[str] | _Capture = [] if whole else _Capture()
+        stderr: list[str] | _Capture = [] if whole else _Capture()
         deadline = time.monotonic() + timeout_seconds
         try:
             # Started inside the protected region: a Stop landing as
@@ -1149,7 +1420,7 @@ class DockerManager:
                     if run.error is not None:
                         raise run.error
                     break
-                _take_output(item, stdout_parts, stderr_parts, on_text)
+                _take_output(item, stdout, stderr, on_text)
             # Output the worker had decoded by the time the wait ended
             # still belongs to the command: a Stop or a deadline that
             # lands between two slices (after an empty slice, before the
@@ -1161,7 +1432,7 @@ class DockerManager:
                 item = run.out_queue.get_nowait()
                 if item is None:
                     break
-                _take_output(item, stdout_parts, stderr_parts, on_text)
+                _take_output(item, stdout, stderr, on_text)
             stopped = _stop_requested(cancel)
             exit_code = None if stopped or time.monotonic() >= deadline else run.exit_code
             if exit_code is None:
@@ -1182,12 +1453,11 @@ class DockerManager:
             except BaseException:
                 run.cancel()
             raise
-        output = "\n".join(
-            part for part in ("".join(stdout_parts), "".join(stderr_parts)) if part
-        )
+        (out, out_dropped), (err, err_dropped) = _kept(stdout), _kept(stderr)
+        output = "\n".join(part for part in (out, err) if part)
         if stopped:
-            return -1, "\n".join(filter(None, (output, STOPPED_MESSAGE)))
-        return exit_code, output
+            output = "\n".join(filter(None, (output, STOPPED_MESSAGE)))
+        return (-1 if stopped else exit_code), output, out_dropped + err_dropped
 
     def _tagged_exec_create(
         self, container_id: str | None, command: str, token: str,
@@ -1248,34 +1518,22 @@ class DockerManager:
         except Exception:  # pragma: no cover — container already gone
             logger.debug("could not kill timed-out exec", exc_info=True)
 
-    def get_host_port(self, container_port: int) -> int | None:
-        """Get the host port mapped to a container port.
-
-        Args:
-            container_port: The container port to look up.
-
-        Returns:
-            The host port mapped to the container port, or None if not mapped.
-        """
-        container = self._open_container()
-        _race_delay()  # test hook: widens the guard-to-use window
-
-        container.reload()
-        port_bindings = container.attrs.get("NetworkSettings", {}).get("Ports", {})
-        port_key = f"{container_port}/tcp"
-        if port_key in port_bindings and port_bindings[port_key]:
-            return int(port_bindings[port_key][0]["HostPort"])
-        return None
-
     def close(self) -> None:
-        """Stop and remove the Docker container.
+        """Remove the Docker container.
 
         Handles cleanup of both the container and any temporary directories
         created for shared volumes — including a directory an earlier
         ``close()`` failed to delete, which is retried here — and
         releases the Docker client's pooled connections to the daemon
         (a later ``open()`` or a reaper still polling an exec gets a
-        fresh connection on demand).
+        fresh connection on demand).  The container is force-removed
+        (one daemon call, no stop grace: its PID 1 is an interactive
+        bash, which ignores the graceful stop's SIGTERM, and nothing in
+        it is preserved), after it emptied the shared volume itself,
+        since what its commands made there is root-owned on the host.
+        A Stop injected into this thread while a daemon call is in
+        flight still removes the container and the directory before it
+        propagates.
         """
         try:
             locked_call(self._lifecycle_lock, self._close_locked)
@@ -1298,40 +1556,39 @@ class DockerManager:
 
         container_id = self.container.id[:12] if self.container.id else "unknown"
         try:
-            print(f"Stopping container {container_id}")
-            self.container.stop()
-        except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
-            print(f"Failed to stop container {container_id}: {e}")
-
-        try:
+            if self.host_shared_path is not None:
+                # Best effort: a container already gone leaves the
+                # directory to rmtree as it is.
+                try:
+                    self.container.exec_run([
+                        "/bin/sh", "-c",
+                        _sweep_command(self.client_shared_path, list(self.volumes.values())),
+                    ])
+                except Exception:
+                    logger.debug("could not empty the shared volume", exc_info=True)
             print(f"Removing container {container_id}")
-            self.container.remove()
-        except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
-            print(f"Failed to remove container {container_id}: {e}")
-            # A failed stop leaves the container running and the plain
-            # remove refused: force it, as the failure path of open()
-            # does.  A container still not removed keeps its name on the
-            # manager (the handle is dropped, as there) so a later close()
-            # retries by name instead of forgetting a running container
-            # and deleting the shared directory it still mounts.
+            # A container not removed keeps its name on the manager (the
+            # handle is dropped) so a later close() retries by name
+            # instead of forgetting a running container and deleting the
+            # shared directory it still mounts.
             self._discard_container()
-            if self.container_name is not None:
-                return
-
-        self.container = None
-        self.container_name = None
-        self._remove_shared_volume_dir()
-        print("Container closed successfully")
+            self._remove_shared_volume_dir()
+        except BaseException:
+            # An injected Stop landed inside a daemon call or the rmtree:
+            # both are idempotent and keep the name / path on failure.
+            self._discard_container()
+            self._remove_shared_volume_dir()
+            raise
+        if self.container_name is None and self.host_shared_path is None:
+            print("Container closed successfully")
 
     def _discard_container(self) -> None:
         """Force-remove the container :meth:`open` created, by handle or by its name.
 
-        The failure path of :meth:`open`, and the no-handle and
-        refused-remove paths of :meth:`close`: a container the daemon
-        made but whose handle never reached ``self.container`` (a Stop
-        inside ``containers.create()``) is found by ``container_name``.
+        The failure path of :meth:`open` and the removal of
+        :meth:`close`: a container the daemon made but whose handle
+        never reached ``self.container`` (a Stop inside
+        ``containers.create()``) is found by ``container_name``.
         A name the daemon never created (the create call itself failed)
         is a no-op; any other failure to remove is reported and leaves
         the name on the manager, so a later :meth:`close` retries.
@@ -1358,16 +1615,24 @@ class DockerManager:
         ``host_shared_path`` is cleared only once the directory is gone
         (deleted here, or already absent): a failed ``rmtree`` keeps the
         path on the manager so the leak stays traceable and the next
-        :meth:`close` or :meth:`open` retries the removal.  A repeated
-        call with nothing tracked is a no-op.
+        :meth:`close` or :meth:`open` retries the removal.  While
+        ``container_name`` is set the container is not known to be
+        removed (:meth:`_discard_container` failed) and may still mount
+        the directory, so it is kept for the retry that removes the
+        container.  A repeated call with nothing tracked is a no-op.
+        A failing ``rmtree`` is retried for :data:`_RMTREE_RETRY_S`.
         """
         path = self.host_shared_path
-        if path is None:
+        if path is None or self.container_name is not None:
             return
-        if os.path.exists(path):
+        deadline = time.monotonic() + _RMTREE_RETRY_S
+        while os.path.exists(path):
             try:
                 shutil.rmtree(path)
             except Exception as e:
+                if time.monotonic() < deadline:
+                    time.sleep(0.1)
+                    continue
                 logger.debug("Exception caught", exc_info=True)
                 print(f"Failed to clean up temp directory {path}: {e}")
                 return

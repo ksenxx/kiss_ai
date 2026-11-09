@@ -129,6 +129,80 @@ class TestBuildCliArgs:
         assert "--no-session-persistence" in args
 
 
+def _flag(args: list[str], flag: str) -> str | None:
+    """Return the value after ``flag`` in a CLI argument list, or None when absent."""
+    return args[args.index(flag) + 1] if flag in args else None
+
+
+class TestEffortFlag:
+    """``--effort`` follows the catalog ``thinking`` level; ``reasoning_effort`` outranks it."""
+
+    def test_entry_without_a_level_sends_no_flag_and_keeps_the_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``cc/opus`` names whichever Opus the CLI picks and carries no level:
+        the CLI's own default applies and a ``CLAUDE_CODE_EFFORT_LEVEL`` the
+        user set stays in force, whichever way the subscription switch is."""
+        from kiss.core.config import DEFAULT_CONFIG
+
+        assert MODEL_INFO["cc/opus"].thinking is None
+        monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "low")
+        m = ClaudeCodeModel("cc/opus")
+        m.initialize("test")
+        assert "--effort" not in m._build_cli_args()
+        monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", True)
+        env = m._cli_env()
+        assert env is not None and env["CLAUDE_CODE_EFFORT_LEVEL"] == "low"
+        monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+        assert m._cli_env() is None  # inherits the daemon's environment, variable included
+
+    def test_catalog_level_of_the_base_and_of_an_alias(self) -> None:
+        """A base entry runs at the level the catalog stores; a generated
+        ``-{level}`` alias runs at its own level on the base's ``--model``."""
+        assert MODEL_INFO["cc/claude-opus-5-5"].thinking == "high"
+        m = ClaudeCodeModel("cc/claude-opus-5-5")
+        m.initialize("test")
+        args = m._build_cli_args()
+        assert _flag(args, "--model") == "claude-opus-5-5"
+        assert _flag(args, "--effort") == "high"
+
+        for level in ("low", "medium", "high", "xhigh", "max"):
+            alias = model(f"cc/claude-opus-5-5-{level}")
+            assert isinstance(alias, ClaudeCodeModel)
+            assert MODEL_INFO[alias.model_name].alias_of == "cc/claude-opus-5-5"
+            alias.initialize("test")
+            args = alias._build_cli_args()
+            assert _flag(args, "--model") == "claude-opus-5-5"
+            assert _flag(args, "--effort") == level
+
+    def test_reasoning_effort_outranks_the_catalog_and_the_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``model_config["reasoning_effort"]`` (what ``KISSAgent._turn_effort``
+        sets for one turn) wins over the alias's level, is read at each
+        launch, and the flag is not outranked by ``CLAUDE_CODE_EFFORT_LEVEL``:
+        the variable is left out of the child environment, whichever way
+        the subscription switch is, without touching the daemon's own."""
+        from kiss.core.config import DEFAULT_CONFIG
+
+        monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "max")
+        m = ClaudeCodeModel("cc/claude-opus-5-5-xhigh", model_config={"reasoning_effort": "low"})
+        m.initialize("test")
+        assert _flag(m._build_cli_args(), "--effort") == "low"
+        del m.model_config["reasoning_effort"]
+        assert _flag(m._build_cli_args(), "--effort") == "xhigh"
+
+        monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", True)
+        env = m._cli_env()
+        assert env is not None and "CLAUDE_CODE_EFFORT_LEVEL" not in env
+        assert m._use_subscription is True
+        monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+        env = m._cli_env()
+        assert env is not None and "CLAUDE_CODE_EFFORT_LEVEL" not in env
+        assert m._use_subscription is False
+        assert os.environ["CLAUDE_CODE_EFFORT_LEVEL"] == "max"
+
+
 class TestModelInfoEntries:
     def test_cc_models_in_model_info(self) -> None:
         assert "cc/opus" in MODEL_INFO

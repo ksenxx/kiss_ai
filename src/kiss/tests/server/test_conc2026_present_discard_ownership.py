@@ -54,6 +54,7 @@ from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.conftest import init_repo, kiss_wt_branches
+from kiss.tests.server.pause import Pause
 
 
 class TestPresentDiscardOwnership(unittest.TestCase):
@@ -614,8 +615,17 @@ class TestPresentDiscardOwnership(unittest.TestCase):
         ``_emit_pending_worktree`` presentation on resume."""
         tab_id = "tab-mc1-idle"
         wt_dir, branch = self._make_pending_empty_worktree(tab_id)
+        probes: list[str] = []
 
-        self.server._emit_pending_worktree(tab_id)
+        def count_probe(local: dict[str, Any]) -> bool:
+            probes.append(local["self"].__class__.__name__)
+            return False
+
+        # The presentation already runs under the resume's claim, so
+        # its empty answer cannot go stale: the worktree is probed once.
+        with Pause(AgentServer._list_pending.__code__, count_probe):
+            self.server._emit_pending_worktree(tab_id)
+        self.assertEqual(len(probes), 1, probes)
 
         self.assertFalse(wt_dir.exists(), "empty branch was not discarded")
         self.assertNotIn(branch, kiss_wt_branches(self.repo))

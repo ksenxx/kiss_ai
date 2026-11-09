@@ -154,26 +154,115 @@ def test_destructive_guard_protects_root_and_work_dir(tmp_path: Path) -> None:
     assert destructive_command_guard(f"rm -rf {tmp_path}", None) is None
 
 
+@pytest.mark.parametrize("command, refused", [
+    # the wrappers a model reaches for when it means "stop my server"
+    ("exec kill -9 -1", True), ("nohup kill -9 -1", True), ("timeout 5 kill -9 -1", True),
+    ("nice kill -9 -1", True), ("nice -n 5 kill -1", True), ("time kill -1", True),
+    ("command kill -1", True), ("builtin kill -1", True), ("xargs kill -1", True),
+    ("echo x | xargs rm -rf /", True), ("nohup sudo kill -1", True),
+    # a shell's -c text, a backquoted substitution
+    ("bash -c 'kill -9 -1'", True), ('sh -c "rm -rf /"', True), ("bash -ec 'pkill -f .'", True),
+    ("echo `kill -1`", True), ("echo $(kill -1)", True),
+    # a wrapper's option value spelled like a command, a directory prefix after the
+    # wrapper's options, a command name among the operands of the command
+    ("timeout -s kill 5 rm -rf /", True), ("sudo -u kill rm -rf /", True),
+    ("exec -a kill rm -rf /", True), ("xargs -I rm rm -rf /", True),
+    ("sudo -n /bin/rm -rf /", True), ("sudo -u root /usr/bin/kill -9 -1", True),
+    ("rm -rf kill /", True), ("kill -9 rm -1", True), ("sudo rm -rf a kill -1", True),
+    ("bash -x -c 'kill -1'", True), ("bash --norc -c 'kill -1'", True),
+    # options after the ``-c`` cluster, ``-c`` first in its cluster
+    ("bash -c -- 'kill -9 -1'", True), ("bash -c -e 'kill -9 -1'", True),
+    ("bash -co posix 'kill -9 -1'", True), ("bash -cl 'kill -1'", True),
+    ('sh -c -o posix "rm -rf /"', True), ("bash -c -e 'kill -1 1234'", False),
+    ("bash -co posix 'rm -rf ./build'", False),
+    ("sudo echo rm -rf x rm ok", False), ("sudo echo /bin/rm /bin/rm ok", False),
+    ("rm -rf a kill -1", False), ("timeout -s kill 5 sleep 1", False),
+    # several option values spelled like guarded commands before the real one
+    ("env -u kill -u pkill rm -rf /tmp/w", True), ("env -u kill -u pkill rm -rf /", True),
+    ("sudo -u kill -g pkill kill -9 -1", True), ("env -u rm -u kill pkill -f .", True),
+    ("env -u kill -u pkill -u rm rm -rf /tmp/w", True),
+    ("bash -c -e -u kill -u pkill 'rm -rf /tmp/w'", True),
+    ("env -u kill -u pkill rm -rf /tmp/w/build", False), ("env -u kill -u pkill true", False),
+    # the work dir through its parent
+    ("rm -rf /tmp/w/..", True), ("rm -rf /tmp/w/../", True), ("rm -rf /tmp/w/../w", True),
+    ("rm -rf /tmp/w/../w/", True), ("rm -rf /tmp/w/../*", True), ("rm -rf /..", True),
+    # a signal, a pid, a sibling or a subdirectory, a quoted mention in an argument
+    ("kill -1 1234", False), ("nice kill -1 1234", False), ("rm -rf /tmp/w/../other", False),
+    ("rm -rf /tmp/w/w", False), ("rm -rf /tmp/w/build", False), ("grep -rn 'kill -1' src", False),
+    ("xargs grep 'kill -1'", False), ("command -v rm", False), ("timeout 5 sleep 1", False),
+])
+def test_destructive_guard_sees_through_command_wrappers(command: str, refused: bool) -> None:
+    """Audit 2026-11-07 A12_claude-2: the guard absorbed one ``sudo``/``env`` wrapper and so
+    missed ``nohup kill -9 -1``, ``timeout 5 kill -9 -1``, ``bash -c 'kill -9 -1'`` and a
+    backquoted substitution, and ``rm -rf <workdir>/..``; one wrapper of any of these kinds,
+    a shell's ``-c`` text and the work dir named through its parent are refused.  Audit
+    2026-11-08 S8: the shell's options may continue after the ``-c`` cluster (``bash -c --
+    '…'``, ``bash -c -e '…'``, ``bash -co posix '…'``) and ``-c`` may lead its cluster.
+    Review 2026-11-08 R7 S7/F2: a wrapper's options may hold any number of values spelled
+    like guarded commands (``env -u kill -u pkill rm -rf <workdir>``) before the real one."""
+    verdict = destructive_command_guard(command, "/tmp/w")
+    assert (verdict == DESTRUCTIVE_VERDICT) is refused, command
+    assert verdict is None or verdict == DESTRUCTIVE_VERDICT
+
+
 def test_guards_stay_linear_on_long_commands() -> None:
     """Repeated wrappers and assignments must not make the patterns backtrack exponentially.
 
     A 20 kB command of repeated ``sudo -n`` (or ``X=1``) words ran for over a
     second with nested wrapper repetitions; the single-wrapper prefix keeps it
-    in milliseconds.
+    in milliseconds.  A 40 kB command of separators (``:;:;...``; audit
+    2026-11-05 A09-4) ran for seconds, since from every separator the
+    directory prefix and an assignment's value scanned the rest of the text
+    for a ``/`` or a blank; they stop at the next separator.  A wrapper followed
+    by thousands of ``rm`` (``kill``, ``pkill``, ``apt``...) words (audit
+    2026-11-08 S7/F2) ran for seconds, quadratic in the command length: every
+    word after the wrapper was a candidate command and each candidate rescanned
+    the whole suffix for a protected operand; the wrapper's arguments now end at
+    the first occurrence of the command the pattern matches (review 2026-11-08 R7
+    S7/F2: whatever other guarded names its options hold, ``env -u kill -u pkill
+    …``), so each suffix is scanned once per guarded command.  The shell's options
+    after its ``-c`` cluster (audit 2026-11-08 S8) end at the first, possibly
+    quoted, command name the same way, and the cluster's ``c`` is its first
+    ``c``, so a 48 kB cluster is read once rather than once per split.
     """
     long_commands = [
+        "sudo echo " + "rm " * 8000 + "ok",
+        "sudo echo " + "kill " * 6000 + "ok",
+        "sudo echo " + "pkill " * 5000 + "ok",
+        "sudo echo " + "/bin/rm " * 4000 + "ok",
+        "sudo echo " + "rm " * 8000 + "ok; echo /",
+        "env " + "-u kill -u pkill -u rm " * 2000 + "ok",
+        "env " + "-u kill " * 4000 + "rm -rf ./x",
+        "bash " + "-c rm " * 5000 + "ok",
+        "bash -c " + "'rm " * 8000 + "ok",
+        "bash -c -e " + "x 'rm " * 4000 + "ok",
+        "bash " + "-co posix " * 4000 + "ok",
+        "bash -" + "c" * 48_000 + "1 x",
+        "bash -c -e " + "echo hello " * 4400,
+        "sudo echo " + "apt " * 6000 + "ok",
+        "sudo echo " + "npm " * 6000 + "ok",
         "sudo -n " * 2499 + "true #xx",
         "sudo -n " + "X=1 " * 4996 + " true #x",
         "kill " + "-9 " * 5000 + "1234",
         "pkill " + "-f " * 3000 + "myserver",
         "rm -rf " + "./a " * 4000 + "./b",
         "npm " + "--flag " * 3000 + "test",
+        ":;" * 20_000,
+        ";A=" * 13_333,
+        ";/" * 20_000,
+        "|" * 40_000,
+        "(" * 40_000,
+        "a;" * 20_000 + "rm -rf /",
     ]
     for command in long_commands:
         started = time.monotonic()
         destructive_command_guard(command, "/work")
         lift_install_timeout(command, 30)
         assert time.monotonic() - started < 1, command[:40]
+    assert destructive_command_guard(long_commands[-1], "/work") == DESTRUCTIVE_VERDICT
+    # A long argument list before the protected operand is still read through.
+    assert destructive_command_guard("sudo rm -rf " + "./a " * 8000 + "/", "/work")
+    assert lift_install_timeout("sudo pip " + "--flag " * 8000 + "install x", 30) == 900
 
 
 def test_install_timeout_lift() -> None:
@@ -211,6 +300,9 @@ def test_bash_refuses_destructive_commands_without_running_them(tmp_path: Path) 
     assert tools.Bash("kill -9 -1", "kill all") == DESTRUCTIVE_VERDICT
     assert tools.Bash(f"rm -rf {tmp_path}", "wipe in background", background=True) == (
         DESTRUCTIVE_VERDICT)
+    # Review 2026-11-08 R7 S7/F2: ``env -u kill -u pkill rm -rf <workdir>`` deletes the
+    # work dir through a wrapper whose option values are spelled like guarded commands.
+    assert tools.Bash(f"env -u kill -u pkill rm -rf {tmp_path}", "wipe") == DESTRUCTIVE_VERDICT
     assert keep.read_text() == "keep"
     # as_posix: bash would eat the backslashes of a Windows path.
     build = (tmp_path / "build").as_posix()

@@ -18,7 +18,11 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {queueRaf, installXtermStub} = require('./simplify2_harness');
+const {
+  queueRaf,
+  installXtermStub,
+  flushMicrotasks: settle,
+} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -65,14 +69,6 @@ async function openView(selection) {
   assert.strictEqual(terminals.length, 1, 'xterm created on first show');
   terminals[0].getSelection = () => selection;
   return {keyHandler: terminals[0].keyHandler, log};
-}
-
-/**
- * Let the clipboard rejection and the execCommand fallback settle:
- * `PanelCopy.copyText` is promise-only, so one macrotask turn drains it.
- */
-function settle() {
-  return new Promise(resolve => setImmediate(resolve));
 }
 
 async function main() {

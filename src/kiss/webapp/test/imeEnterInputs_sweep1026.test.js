@@ -22,21 +22,7 @@ const {
   typeInto,
 } = require('./simplify2_harness');
 const {sendHistory, makeRow} = require('./history_helpers');
-
-const IME_FORMS = [{isComposing: true}, {keyCode: 229}];
-
-/** Dispatch *key* as a keydown inside an IME composition (*form*). */
-function imeKey(win, el, key, form) {
-  el.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key, bubbles: true, ...form}),
-  );
-}
-
-function plainEnter(win, el) {
-  el.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
-  );
-}
+const {key, IME_FORMS} = require('./ui_antipattern_harness');
 
 function testTricksAddBox() {
   const {win, posted} = buildPage();
@@ -45,14 +31,14 @@ function testTricksAddBox() {
   const addInput = win.document.getElementById('tricks-add-input');
   typeInto(win, addInput, '日本語の促進');
   for (const form of IME_FORMS) {
-    imeKey(win, addInput, 'Enter', form);
+    key(win, addInput, 'Enter', form);
     assert.strictEqual(
       ofType(posted, 'addTrick').length,
       0,
       'IME Enter does not add: ' + JSON.stringify(form),
     );
   }
-  plainEnter(win, addInput);
+  key(win, addInput, 'Enter');
   assert.strictEqual(
     ofType(posted, 'addTrick').length,
     1,
@@ -78,7 +64,7 @@ function testHistoryRenameBox() {
   input.value = 'ログイン修正';
   for (const form of IME_FORMS) {
     const label = JSON.stringify(form);
-    imeKey(win, input, 'Enter', form);
+    key(win, input, 'Enter', form);
     assert.ok(
       titleEl.querySelector('input'),
       'IME Enter keeps the rename box open: ' + label,
@@ -89,13 +75,13 @@ function testHistoryRenameBox() {
       'nothing renamed yet: ' + label,
     );
     // Escape inside the composition belongs to the IME too.
-    imeKey(win, input, 'Escape', form);
+    key(win, input, 'Escape', form);
     assert.ok(
       titleEl.querySelector('input'),
       'IME Escape keeps the rename box open: ' + label,
     );
   }
-  plainEnter(win, input);
+  key(win, input, 'Enter');
   assert.deepStrictEqual(
     JSON.parse(JSON.stringify(ofType(posted, 'setChatSummary'))),
     [{type: 'setChatSummary', chatId: 'A', summary: 'ログイン修正'}],
@@ -127,14 +113,14 @@ function testModelSearchBox() {
   const picked = () => ofType(posted, 'selectModel').map(m => m.model);
   for (const form of IME_FORMS) {
     const label = JSON.stringify(form);
-    imeKey(win, search, 'Enter', form);
+    key(win, search, 'Enter', form);
     assert.deepStrictEqual(picked(), [], 'IME Enter picks no model: ' + label);
     assert.ok(
       win.document.getElementById('model-list').querySelector('.model-item'),
       'the picker is still open: ' + label,
     );
   }
-  plainEnter(win, search);
+  key(win, search, 'Enter');
   assert.deepStrictEqual(
     picked(),
     ['gpt-b'],

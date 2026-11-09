@@ -23,6 +23,8 @@ const harness = require('./simplify2_harness');
 const {send, snapshotEntry, click: clickEl} = harness;
 const {tabEl} = require('./subagent_tab_helpers');
 
+const {trackWindow, runTests} = require('./workdir_helpers');
+
 // Loads the real chat page (chat.html + panelCopy.js + api.js +
 // main.js) into JSDOM and records every scrollIntoView call made on a
 // tab strip (an element with class "chat-tab"), by tab id.  Calls on
@@ -38,6 +40,7 @@ function makePage() {
     };
   }
   const {win} = harness.makePage({beforeScripts: recordTabScrolls});
+  trackWindow(win);
   return {win, tabScrolls};
 }
 
@@ -340,22 +343,4 @@ const tests = [
   testSubagentRetagDoesNotScroll,
 ];
 
-let failures = 0;
-for (const t of tests) {
-  try {
-    t();
-    console.log('PASS', t.name);
-  } catch (err) {
-    failures += 1;
-    console.error('FAIL', t.name);
-    console.error(err && err.stack ? err.stack : err);
-  }
-}
-if (failures > 0) {
-  console.error(`${failures} test(s) failed`);
-  process.exit(1);
-}
-console.log(`All ${tests.length} tabBarNoAutoScroll tests passed`);
-// The page leaves reconnect timers behind in JSDOM; exit explicitly
-// like the other suites so the process never hangs.
-process.exit(0);
+runTests(tests.map(fn => [fn.name, fn]));

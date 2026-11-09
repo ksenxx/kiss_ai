@@ -20,12 +20,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read", "cache_write", "cost", "stop_reason")
-"""The keys of :attr:`LLMReply.usage`, always all present."""
-
 
 def zero_usage() -> dict[str, Any]:
-    """Return a usage dict of all :data:`USAGE_KEYS` at zero (``stop_reason`` ``None``).
+    """Return a usage dict of every :attr:`LLMReply.usage` key at zero (``stop_reason`` ``None``).
 
     The default of :attr:`LLMReply.usage`, so a reply built without
     one (the launcher's contract check) reads like a real reply.
@@ -47,7 +44,7 @@ class LLMReply:
             ``input_tokens``, ``output_tokens``, ``cache_read``,
             ``cache_write``, ``cost`` (USD) and ``stop_reason`` (the
             provider's, ``None`` when it gave none) — every key always
-            present (:data:`USAGE_KEYS`).
+            present (:func:`zero_usage` lists them).
         step: The agent's step count after this call (1 for the first).
         budget_used: USD spent by the agent so far, this call included.
         total_tokens_used: Tokens the agent has used so far, this call

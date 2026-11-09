@@ -395,9 +395,12 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             channel_id: Chat to monitor — a JID or a phone number
                 (normalized to ``<digits>@s.whatsapp.net``). Empty
                 monitors all chats.
-            oldest: Timestamp cursor — the raw ``messages.timestamp``
-                string of the newest message already seen. ``""``/``"0"``
-                fetches the most recent messages without an after-filter.
+            oldest: Cursor naming the newest message already seen:
+                ``"<timestamp>|<id>"`` (the raw ``messages.timestamp``
+                string and the message id, so messages sharing a
+                timestamp are told apart), or a legacy bare timestamp
+                meaning strictly newer than it. ``""``/``"0"`` fetches
+                the most recent messages without an after-filter.
             limit: Maximum messages to return.
 
         Returns:
@@ -411,8 +414,13 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             where.append("chat_jid = ?")
             params.append(_to_jid(channel_id))
         if has_cursor:
-            where.append("timestamp > ?")
-            params.append(oldest)
+            ts_cursor, sep, id_cursor = oldest.partition("|")
+            if sep:
+                where.append("(timestamp, id) > (?, ?)")
+                params += [ts_cursor, id_cursor]
+            else:
+                where.append("timestamp > ?")
+                params.append(oldest)
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         # With a cursor, take the OLDEST unseen rows so a burst larger
         # than *limit* is delivered across ticks instead of being skipped;
@@ -429,12 +437,11 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             return [], oldest
         if not has_cursor:
             rows = list(reversed(rows))
-        new_cursor = oldest
+        # Rows are in (timestamp, id) order, so the last one is the newest.
+        new_cursor = f"{rows[-1][4] or ''}|{rows[-1][0] or ''}" if rows else oldest
         messages: list[dict[str, Any]] = []
         for msg_id, chat_jid, sender, content, ts, is_from_me, media_type in rows:
             ts = str(ts or "")
-            if ts > new_cursor:
-                new_cursor = ts
             messages.append(
                 {
                     "ts": ts,

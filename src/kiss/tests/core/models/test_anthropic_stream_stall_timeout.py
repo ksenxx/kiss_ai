@@ -70,6 +70,7 @@ from typing import Any
 
 import pytest
 
+from kiss.core import stop_signal
 from kiss.core.models.anthropic_model import AnthropicModel
 
 _MODEL = "claude-stall-under-test"
@@ -232,6 +233,18 @@ class _StallHandler(BaseHTTPRequestHandler):
         if _STATE.mode == "no_headers":
             _STATE.stop.wait(timeout=120.0)
             return
+        if _STATE.mode == "header_drip":
+            # The status line, then one header byte at a time, forever:
+            # every read returns in time, so the byte-level clock never
+            # fires, and no response exists yet for the stream watchdog.
+            self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Pad: ")
+            self.wfile.flush()
+            while not _STATE.stop.wait(timeout=0.03):
+                try:
+                    self._write_chunks([b"a"])
+                except OSError:
+                    return
+            return
         self._send_sse_headers()
         if _STATE.mode == "silent":
             _STATE.stop.wait(timeout=120.0)
@@ -383,6 +396,38 @@ class TestAdapterAbortsStalledStream:
         )
         _assert_stall_timeout_error(outcome)
         assert _STATE.request_count == 2
+
+    def test_headers_that_never_complete_time_out(
+        self, monkeypatch: pytest.MonkeyPatch, stall_server: str
+    ) -> None:
+        """A peer trickling header bytes defeats the read timeout: a deadline must cut it.
+
+        Neither clock covers this phase on its own: every byte resets the
+        httpx read timeout, and the event-level watchdog only exists
+        once the response headers are complete.
+        """
+        _STATE.mode = "header_drip"
+        m = _make_model(monkeypatch, stall_server)
+        _assert_stall_timeout_error(_run_bounded(m.generate))
+
+    def test_a_stop_while_headers_trickle_in_ends_the_turn(
+        self, monkeypatch: pytest.MonkeyPatch, stall_server: str
+    ) -> None:
+        """A Stop pressed while the headers are still incomplete is honoured within seconds."""
+        _STATE.mode = "header_drip"
+        m = _make_model(monkeypatch, stall_server)
+        stop = threading.Event()
+
+        def generate_under_stop() -> Any:
+            stop_signal.set_thread_stop_event(stop)
+            try:
+                return m.generate()
+            finally:
+                stop_signal.set_thread_stop_event(None)
+
+        threading.Timer(0.5, stop.set).start()
+        outcome = _run_bounded(generate_under_stop, deadline=5.0)
+        assert isinstance(outcome, KeyboardInterrupt), f"expected the Stop, got {outcome!r}"
 
     def test_ping_only_stream_times_out_fast(
         self, monkeypatch: pytest.MonkeyPatch, stall_server: str

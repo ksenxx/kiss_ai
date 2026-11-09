@@ -75,10 +75,14 @@
     const n = Math.max(0, Math.round(Number(ms) || 0));
     if (n < 1000) return n + 'ms';
     const s = n / 1000;
-    if (s < 60) return s.toFixed(1) + 's';
-    const m = Math.floor(s / 60);
-    const sec = (s - m * 60).toFixed(1);
-    return m + 'm ' + sec + 's';
+    let m = Math.floor(s / 60);
+    let sec = (s - m * 60).toFixed(1);
+    // toFixed rounds 59.95..59.999 up to "60.0": carry into the minutes.
+    if (sec === '60.0') {
+      m += 1;
+      sec = '0.0';
+    }
+    return m ? m + 'm ' + sec + 's' : sec + 's';
   }
 
   // Reads a pixel-valued CSS custom property off <body> so layout
@@ -199,7 +203,7 @@
       _renderElapsedLabel(el, Math.max(0, end - startTs));
     } else if (startMs) {
       _renderPanelTime(el);
-    } else if (!startTs && !startMs) {
+    } else if (!startTs) {
       // Never stamped at all: nothing to seal.
       return;
     }
@@ -1072,6 +1076,10 @@
   // until the popup is dismissed (hideAC); its rising edge is when the
   // ranking is refreshed.
   let inSlashCommand = false;
+  // True from the user's dismissal of the mention picker (Escape, a
+  // blur) until the next keystroke: a file list still on its way for
+  // the mention typed before must not reopen what the user closed.
+  let acDismissed = false;
 
   let histCache = [];
   let histIdx = -1;
@@ -1086,12 +1094,22 @@
 
   let historyOffset = 0;
   let historyLoading = false;
+  // The daemon's page size (HISTORY_PAGE, machines.py): a shorter page
+  // is the last one.
+  const HISTORY_PAGE = 50;
   let historyHasMore = true;
   let historyGeneration = 0;
   // refreshHistory coalescing: when the page-one request in flight was
   // sent (0 once its reply has arrived) and whether a refresh was
   // folded into it (sent once that reply lands).
   let historyPageOneSentAt = 0;
+  // The plain view's page one as the last reply left it, kept across
+  // page loads so the next one paints rows before its first reply
+  // (paintCachedHistory); painted once per page, and never a source
+  // of a page-two fetch.
+  const HISTORY_CACHE_KEY = 'sorcar-history-page1';
+  let historyCachePainted = false;
+  let historyCachePainting = false;
   let historyRefreshWanted = false;
   // A page-one request older than this is no longer waited on: its
   // reply is lost (a daemon-side failure on a live socket).
@@ -1563,6 +1581,16 @@
     saveLockedSubpanelOffsets();
     tab.outputFragment = document.createDocumentFragment();
     while (O.firstChild) tab.outputFragment.appendChild(O.firstChild);
+    // The thread's pagination anchors and edges describe this
+    // transcript (the neighbours spliced into it), so they travel on
+    // the fragment and go with it when the transcript is replaced.
+    tab.outputFragment.adjacentState = {
+      taskId: currentTaskId,
+      oldest: oldestLoadedTaskId,
+      newest: newestLoadedTaskId,
+      noPrev: noPrevTask,
+      noNext: noNextTask,
+    };
     // visibletask-coverage:start
     tab.taskText = currentTaskName;
     tab.pendingTaskText = pendingTaskText;
@@ -1692,6 +1720,9 @@
     // longer applies.
     resetUserScrollLock();
     const restoredTranscript = !!tab.outputFragment;
+    const savedAdjacent = restoredTranscript
+      ? tab.outputFragment.adjacentState
+      : null;
     if (restoredTranscript) {
       O.appendChild(tab.outputFragment);
       tab.outputFragment = null;
@@ -1768,6 +1799,7 @@
     if (inputContainer) inputContainer.style.display = hideInput ? 'none' : '';
     updateInputDisabled();
     resetAdjacentState();
+    restoreAdjacentState(savedAdjacent);
     syncAskComposer();
     // landing-coverage:start
     // A running tab comes back at the end of its transcript — events
@@ -2114,6 +2146,12 @@
   let signinTab = null;
   let signinTabNavigated = false;
   let signinProvider = '';
+  // The token of that click, sent with `signinLogin` / `signinPaste` and
+  // echoed by the daemon on the click's own answers: a failure of an
+  // earlier click of the SAME provider, already on its way when the
+  // user clicked again, must not end the retry.
+  let signinAttempt = '';
+  let signinAttempts = 0;
 
   /**
    * Show the sign-in window for a `signin` event.  The daemon sends one
@@ -2157,6 +2195,7 @@
     if (!signinModal) return;
     signinModal.style.display = 'none';
     signinProvider = '';
+    signinAttempt = '';
     if (cancel) api.send({type: 'signinCancel'});
     dropSigninTab();
   }
@@ -2193,18 +2232,35 @@
       signinTab = null;
     }
     signinProvider = String(provider);
+    signinAttempt = 'signin-' + ++signinAttempts;
     setSigninNote('Starting the sign-in\u2026', false);
     signinPasteRow.style.display = 'none';
-    api.send({type: 'signinLogin', provider: signinProvider});
+    api.send({
+      type: 'signinLogin',
+      provider: signinProvider,
+      attempt: signinAttempt,
+    });
+  }
+
+  /**
+   * Whether a `signinUrl` / `signinError` answers the current click: by
+   * the attempt token the daemon echoes, else (a daemon echoing none, a
+   * paste's failure naming no provider) by the provider.
+   * @param {{provider?: string, attempt?: string}} ev
+   * @returns {boolean}
+   */
+  function signinAnswersCurrentClick(ev) {
+    if (typeof ev.attempt === 'string') return ev.attempt === signinAttempt;
+    return !ev.provider || ev.provider === signinProvider;
   }
 
   /**
    * The daemon named the sign-in page (`signinUrl`): load it in the tab
    * the click opened, and offer a link to it in case that tab is gone.
-   * @param {{provider: string, url: string}} ev
+   * @param {{provider: string, url: string, attempt?: string}} ev
    */
   function signinPageArrived(ev) {
-    if (!signinWindowOpen() || ev.provider !== signinProvider) return;
+    if (!signinWindowOpen() || !signinAnswersCurrentClick(ev)) return;
     const note = document.createDocumentFragment();
     if (signinTab && !signinTab.closed) {
       signinTab.location.href = ev.url;
@@ -2244,13 +2300,15 @@
    * The sign-in failed (`signinError`): say why, keep the buttons.  The
    * failure of a click since replaced by another provider's (the daemon
    * ended that attempt; this one's page is still to come) is ignored,
-   * like its `signinUrl`.  A paste's failure names no provider.
-   * @param {{error: string, provider?: string}} ev
+   * like its `signinUrl`, and so is a failure of an earlier click of
+   * the same provider (told apart by the attempt token).  A paste's
+   * failure names no provider.
+   * @param {{error: string, provider?: string, attempt?: string}} ev
    */
   function signinFailed(ev) {
-    if (!signinWindowOpen()) return;
-    if (ev.provider && ev.provider !== signinProvider) return;
+    if (!signinWindowOpen() || !signinAnswersCurrentClick(ev)) return;
     signinProvider = '';
+    signinAttempt = '';
     dropSigninTab();
     setSigninNote('Sign-in failed: ' + (ev.error || 'unknown error'), true);
   }
@@ -2260,7 +2318,7 @@
     const text = signinPasteInput.value.trim();
     if (!text) return;
     setSigninNote('Finishing the sign-in\u2026', false);
-    api.send({type: 'signinPaste', text});
+    api.send({type: 'signinPaste', text, attempt: signinAttempt});
   }
 
   if (signinModal) {
@@ -2374,6 +2432,40 @@
   // (see lastScrolledTabId for the same discipline on the strip).
   let lastScrolledContentTabId = null;
 
+  /**
+   * The strip entry of *list* holding the keyboard focus, read before
+   * the strip is rebuilt: the tab's id and whether its close control,
+   * rather than the tab itself, is focused.  Null when the focus is
+   * elsewhere.
+   */
+  function focusedStripEntry(list) {
+    const el = document.activeElement;
+    const tabEl = el && list.contains(el) ? el.closest('[role="tab"]') : null;
+    return tabEl ? {id: tabEl.dataset.tabId, close: el !== tabEl} : null;
+  }
+
+  /**
+   * Put the keyboard focus back on the rebuilt node of *entry* (see
+   * focusedStripEntry) in *list*: a routine repaint (a status update)
+   * must not drop a keyboard user to the document body.  A focused tab
+   * stays the row's roving Tab stop, as moveTabFocus leaves it.
+   */
+  function restoreStripFocus(list, entry) {
+    if (!entry) return;
+    const tabEl = Array.from(list.querySelectorAll('[role="tab"]')).find(
+      el => el.dataset.tabId === entry.id,
+    );
+    if (!tabEl) return;
+    const target = entry.close ? tabEl.querySelector('.chat-tab-close') : tabEl;
+    if (!target) return;
+    if (!entry.close) {
+      list
+        .querySelectorAll('[role="tab"]')
+        .forEach(el => el.setAttribute('tabindex', el === tabEl ? '0' : '-1'));
+    }
+    target.focus({preventScroll: true});
+  }
+
   function renderTabBar() {
     const tabList = document.getElementById('tab-list');
     const tabBar = document.getElementById('tab-bar');
@@ -2408,6 +2500,7 @@
     tabList.setAttribute('role', 'tablist');
     tabList.setAttribute('aria-label', 'Chat tabs');
 
+    const focused = focusedStripEntry(tabList);
     tabList.innerHTML = '';
     // Roving tabindex (WAI-ARIA tabs pattern, manual activation): only
     // the active tab is a Tab stop; the arrow keys move focus between
@@ -2434,6 +2527,7 @@
     if (activeEl && activeTabId !== lastScrolledTabId)
       activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
     lastScrolledTabId = activeTabId;
+    if (members.length > 1) restoreStripFocus(tabList, focused);
 
     renderContentTabBar(split);
   }
@@ -2448,6 +2542,7 @@
     if (!list) return;
     list.setAttribute('role', 'tablist');
     list.setAttribute('aria-label', 'Open files');
+    const focused = focusedStripEntry(list);
     list.innerHTML = '';
     const contentTabs = tabs.filter(t => t.isContentTab);
     const folded = split && contentTabs.length > 0 && contentPaneHidden;
@@ -2471,6 +2566,7 @@
     if (activeEl && activeContentTabId !== lastScrolledContentTabId)
       activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
     lastScrolledContentTabId = activeContentTabId;
+    restoreStripFocus(list, focused);
   }
 
   /**
@@ -2773,6 +2869,9 @@
     }
     const activeWasClosed = toClose.has(activeTabId);
     const closed = tabs[origIdx];
+    // The chat a content tab on screen belongs to (its run is what the
+    // surface under the file shows): resolved before the tabs go.
+    const shownChatId = chatTargetTabId();
     // A file a closing sub-agent opened stays with the chat: it moves up
     // to the nearest surviving ancestor, so it keeps its place in that
     // chat's group on the tab strip (a closed root's files turn into
@@ -2785,12 +2884,16 @@
       const i = tabs.findIndex(t => t.id === id);
       if (i >= 0) tabs.splice(i, 1);
       forgetClosedTabState(id);
-      if (!fromServer) {
-        armCloseShield(id);
-        api.closeTab({tabId: id});
-      }
+      if (!fromServer) api.closeTab({tabId: id, ack: armCloseShield(id)});
     }
     rpAfterTabsClosed(toClose);
+    const shown = getTab(activeTabId);
+    if (shown && shown.isContentTab && toClose.has(shownChatId)) {
+      // The file stays on screen; the closed chat's timer, spinner and
+      // Stop under it must not (reconcileTabs does the same for a close
+      // mirrored from another surface).
+      clearChatSurface();
+    }
     if (activeWasClosed) {
       const successor =
         tabs.length > 0
@@ -3138,8 +3241,11 @@
    * start-up.  Going split: a content tab on screen moves to the
    * content pane and its owning chat (or the first chat, or a fresh
    * one) takes the chat pane; otherwise the pane shows the content tab
-   * last viewed, if it is still open.  Going stacked: the content pane
-   * goes away and the chat stays on screen.
+   * last viewed, if it is still open, else any surviving content tab
+   * (one opened in the background while stacked, or the neighbour of
+   * a browser another surface closed while stacked, records no pane
+   * selection; its row must not sit over "No open files").  Going
+   * stacked: the content pane goes away and the chat stays on screen.
    */
   function applySplitLayout() {
     const active = getTab(activeTabId);
@@ -3150,7 +3256,9 @@
       const shown =
         active && active.isContentTab
           ? active
-          : getTab(activeContentTabId) || getTab(lastViewedContentTabId);
+          : getTab(activeContentTabId) ||
+            getTab(lastViewedContentTabId) ||
+            tabs.find(t => t.isContentTab);
       if (active && active.isContentTab) {
         const chat = getTab(chatTabIdForHost());
         if (chat) {
@@ -3755,6 +3863,12 @@
     }
     tabs.splice(idx, 1);
     disposeTabContentView(tab);
+    if (!tab.isBrowserTab && !tab.isTerminalTab) {
+      closedFileOpens.set(
+        tab.contentPath + '\n' + (tab.ownerBrowseMachine || ''),
+        fileOpenSeq,
+      );
+    }
     // The fold does not outlive the content tabs: the next tab opened,
     // even in the background, shows the pane.
     if (!tabs.some(t => t.isContentTab)) storeContentPaneFold(false);
@@ -4446,37 +4560,10 @@
     if (focusFirst && first) first.focus();
   }
 
-  /**
-   * The roving keyboard model of the page's menus: ArrowUp / ArrowDown
-   * wrap through `items`, Home / End jump to the ends, Enter / Space
-   * click the focused item (all four default-prevented), and Tab leaves
-   * the menu through `onLeave` with the browser's own focus move.
-   * @param {KeyboardEvent} e The keydown.
-   * @param {Array<Element>} items The focusable menu items, in order.
-   * @param {Function} onLeave Closes the menu when Tab is pressed.
-   * @returns {boolean} Whether the key belonged to the model.
-   */
-  function menuKeyNav(e, items, onLeave) {
-    if (!items.length) return false;
-    const at = items.indexOf(document.activeElement);
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      const step = e.key === 'ArrowDown' ? 1 : -1;
-      const next = at < 0 && step < 0 ? items.length - 1 : at + step;
-      items[(next + items.length) % items.length].focus();
-    } else if (e.key === 'Home' || e.key === 'End') {
-      items[e.key === 'Home' ? 0 : items.length - 1].focus();
-    } else if (e.key === 'Enter' || e.key === ' ') {
-      if (at >= 0) items[at].click();
-    } else if (e.key === 'Tab') {
-      onLeave();
-      return true;
-    } else {
-      return false;
-    }
-    e.preventDefault();
-    return true;
-  }
-
+  // The dropdown's keys run on the shared menu model of
+  // contentContextMenu.js (arrows / Home / End / Enter / Space, Tab
+  // leaves); Escape is the capture listener's below, before Monaco sees
+  // the key.
   function onContentMenuKey(e, bar, btn, el) {
     const rows = Array.from(
       el.querySelectorAll('.content-menu-item[tabindex]'),
@@ -4487,7 +4574,9 @@
       btn.focus();
       closeContentMenu();
     }
-    if (menuKeyNav(e, rows, leaveToButton)) return;
+    if (window.ContentContextMenu.menuKeyNav(e, rows, null, leaveToButton)) {
+      return;
+    }
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       const btns = Array.from(bar.children);
       const step = e.key === 'ArrowRight' ? 1 : -1;
@@ -4668,11 +4757,20 @@
   // daemon never pairs the path with stale text, and a file tab with
   // no buffer (a read-only preview, a binary) sends ``null``, so the
   // daemon drops any snapshot of the path and reads the file on disk.
-  function editorContext(withContent) {
+  // *machine* is where the context is read: the task's machine for a
+  // run (its system prompt names the path there), this machine ('')
+  // for a completion.  A file of another machine is no context there,
+  // except for a completion that sends the buffer, which the daemon
+  // completes against instead of its disk.
+  function editorContext(withContent, machine) {
     const tab = getTab(lastViewedContentTabId);
     const isFile =
       tab && tab.isContentTab && !tab.isBrowserTab && !tab.contentNotAFile;
-    const path = isFile ? tab.contentPath : '';
+    const readable =
+      isFile &&
+      (String(tab.ownerBrowseMachine || '') === machine ||
+        (withContent && tab.contentHasText));
+    const path = readable ? tab.contentPath : '';
     if (!path) return withContent ? {activeFile: ''} : {};
     const ctx = {activeFile: path};
     if (withContent) {
@@ -4798,6 +4896,11 @@
     tab.contentSaving = true;
     tab.contentSaveToken = tab.id + ':' + contentSaveSeq;
     tab.contentPendingVersionId = model.getAlternativeVersionId();
+    // The save supersedes a reload still awaiting its reply: that
+    // reply (the old text) would replace the editor and, with it, drop
+    // this save's token, leaving a clean buffer on text the disk no
+    // longer holds.  Retired, the reply finds no taker and is dropped.
+    tab.contentReloadRequested = false;
     setContentSaveStatus(tab, 'Saving\u2026', false);
     // A reply lost to a dropped connection must not leave the Save
     // button disabled forever; the token is retired with the wait so
@@ -4863,6 +4966,22 @@
   // again while it was on its way: those edits were never consented
   // away.
   let contentReloadSeq = 0;
+  // Every plain open carries an `open:` token numbering the request (the
+  // daemon echoes it), and closing a file's editor records the number
+  // of the last request sent before the close, by path and machine: a
+  // reply numbered at or below it (a double-clicked link's second
+  // reply) must not reopen the file the user just closed
+  // (handleFileContent); a later request is a new open.  The record
+  // outlives that reopen: the replies of the older requests are stale
+  // whenever they arrive (after the new open's too, since another
+  // chat's request does not queue behind this one's), and the next
+  // close of the file overwrites it.
+  let fileOpenSeq = 0;
+  const closedFileOpens = new Map();
+  function fileOpenToken() {
+    fileOpenSeq += 1;
+    return 'open:' + fileOpenSeq;
+  }
   function reloadContentTab(tab) {
     contentReloadSeq += 1;
     tab.contentReloadRequested = 'reload:' + contentReloadSeq;
@@ -5025,6 +5144,8 @@
     if (!api) return null;
     return api.installContentContextMenu(document, {
       shouldOpen: contentContextMenuAllowed,
+      // Select All selects the content pane, not the chat beside it.
+      scope: target => target.closest('#content-tab-area'),
     });
   }
 
@@ -5436,8 +5557,7 @@
     // and settles the tab still awaiting that very token.  The reply of
     // a reload whose tab closed meanwhile has no taker: it is dropped
     // rather than reopening the closed file in a new tab (or toasting
-    // its error).  Any other token (a picture nobody awaits any more,
-    // see handleInlineImageContent) is an ordinary open.
+    // its error).
     const reloadToken =
       String(ev.token || '').indexOf('reload:') === 0 ? ev.token : '';
     const reloadTab = reloadToken
@@ -5446,6 +5566,25 @@
         )
       : null;
     if (reloadToken && !reloadTab) return;
+    const path = ev.path || '';
+    // The machine the file is on: the daemon stamps every reply a
+    // registered machine answered, so an unstamped reply is a file of
+    // this machine -- never the drop-down's unsent pick, which only
+    // says where the tab's NEXT task goes.  A report (a synthetic
+    // event, no reply) is on the machine the task ran on.
+    const machine = ev.machine
+      ? String(ev.machine)
+      : ev.isReport
+        ? tabBoundMachine(owner)
+        : '';
+    // A plain open's reply for a file whose editor closed after the
+    // request was sent has no taker either (see closedFileOpens).
+    const openSeq =
+      String(ev.token || '').indexOf('open:') === 0
+        ? parseInt(ev.token.slice(5), 10)
+        : 0;
+    if (openSeq && openSeq <= (closedFileOpens.get(path + '\n' + machine) || 0))
+      return;
     if (ev.error) {
       // tableak-coverage:start
       // A background task's failed file open is that task's problem. Toasting
@@ -5467,17 +5606,6 @@
       if (reloadTab) reloadTab.contentReloadRequested = false;
       return;
     }
-    const path = ev.path || '';
-    // The machine the file is on: the daemon stamps every reply a
-    // registered machine answered, so an unstamped reply is a file of
-    // this machine -- never the drop-down's unsent pick, which only
-    // says where the tab's NEXT task goes.  A report (a synthetic
-    // event, no reply) is on the machine the task ran on.
-    const machine = ev.machine
-      ? String(ev.machine)
-      : ev.isReport
-        ? tabBoundMachine(owner)
-        : '';
     // One content tab per path, like one editor per file in VS Code --
     // per machine: the same path on two machines is two files.  A
     // browser tab (its "path" is a URL) or a terminal tab (none) is
@@ -5711,8 +5839,14 @@
    * the tab.
    */
   function onTabCtxMenuKey(e) {
-    // Tabbing out of the menu closes it (no focus trap).
-    menuKeyNav(e, tabCtxMenuItems(), closeTabContextMenu);
+    // Tabbing out of the menu closes it (no focus trap); Escape is the
+    // document listener's below.
+    window.ContentContextMenu.menuKeyNav(
+      e,
+      tabCtxMenuItems(),
+      null,
+      closeTabContextMenu,
+    );
   }
   tabCtxMenu.addEventListener('keydown', onTabCtxMenuKey);
 
@@ -5973,8 +6107,30 @@
           t.unackedPrompts.length > 0),
     );
     if (busy) return;
-    if (!draftMoved && (root.inputValue || '').trim()) return;
+    if (!draftMoved && hasDraft(root)) return;
     closeTab(root.id, false, false);
+  }
+
+  /** True when the saved composer of *tab* holds text or attachments. */
+  function hasDraft(tab) {
+    return (
+      !!(tab.inputValue || '').trim() || (tab.attachments || []).length > 0
+    );
+  }
+
+  /**
+   * Move the attachments of *left*, the chat just left, and their
+   * error notes into the composer of the chat on screen: "+" carries
+   * the whole draft over, and a pending slot's conversion lands in the
+   * array it was given, which is the one moved.
+   */
+  function takeAttachmentsFrom(left) {
+    attachments = left.attachments || [];
+    attachErrors = left.attachErrors || [];
+    left.attachments = [];
+    left.attachErrors = [];
+    updateInputDisabled();
+    renderFileChips();
   }
 
   /** True for a root chat tab no task has ever touched: it still shows
@@ -6017,23 +6173,27 @@
     const fresh = tabs.find(isFreshChat);
     if (!fresh) {
       createNewTab();
-      // The draft moved with the user (createNewTab carried it into the
-      // new chat): the chat left behind keeps no copy, whether it is
-      // retired now or stays open because it is busy.
+      // The draft moved with the user (createNewTab carried the text
+      // into the new chat; the attachments follow it here): the chat
+      // left behind keeps no copy, whether it is retired now or stays
+      // open because it is busy.
       if (left) {
         left.inputValue = '';
+        takeAttachmentsFrom(left);
         persistTabState();
       }
       retireIdleChat(left, true);
       return;
     }
     const draft = inp.value || '';
-    const draftMoved = !!draft.trim() && !(fresh.inputValue || '').trim();
+    const draftMoved =
+      (!!draft.trim() || attachments.length > 0) && !hasDraft(fresh);
     if (draftMoved) {
       inp.value = '';
       fresh.inputValue = draft;
     }
     switchToTab(fresh.id);
+    if (draftMoved && left) takeAttachmentsFrom(left);
     retireIdleChat(left, draftMoved);
     focusInputWithRetry();
   }
@@ -6148,43 +6308,78 @@
   }
 
   // Tab ids announced to the daemon in an `openTab` whose `tabs_state`
-  // echo has not arrived yet, mapped to how many snapshots have since
-  // arrived WITHOUT the id. A snapshot broadcast inside that window
-  // predates the registration and must not remove the brand-new tab —
-  // but an id no snapshot ever confirms (e.g. the daemon rejected or
-  // dropped the open) must not stay snapshot-immune forever, so it
-  // expires after PENDING_OPEN_MAX_MISSES missed snapshots.
+  // echo has not arrived yet, mapped to {ack, misses}: the token the
+  // `openTab` carried and how many snapshots have since arrived
+  // WITHOUT the id. A snapshot broadcast inside that window predates
+  // the registration and must not remove the brand-new tab. The daemon
+  // echoes the token in the `acks` of the first snapshot taken after
+  // it processed the command, so the shield lifts when a snapshot
+  // lists the id, when one acknowledges the token (an id it omits then
+  // was rejected, dropped or closed meanwhile) or when the daemon
+  // rejects the open (`openTabRejected`); snapshots other activity
+  // publishes meanwhile are no acknowledgment, however many (A18-1).
+  // Only a daemon that echoes no `acks` at all (older) retires the
+  // shield after PENDING_OPEN_MAX_MISSES snapshots without the id, so
+  // an open it dropped does not shield a ghost tab forever.  An open
+  // sent before an outage may never be answered (lost with the
+  // socket): the reconnect (`daemonStatus`) retires its shield and the
+  // daemon's next snapshot settles the tab -- unless the transport
+  // still owes the open's delivery (the reconnect's `daemonStatus`
+  // names such frames in `unconfirmed`: queued during the outage, or
+  // held behind a batch no `pong` has confirmed, through as many
+  // reconnects as that takes), in which case the daemon has yet to
+  // receive it, and the shield holds until its answer.
   const pendingOpenTabs = new Map();
   const PENDING_OPEN_MAX_MISSES = 3;
   // The mirror image for closes: tab ids this client just removed and
-  // told the daemon to close (`closeTab`), mapped to {hits, at}: how
-  // many snapshots have since arrived WITH the id, and when the close
-  // was issued. A snapshot broadcast before the daemon processed the
-  // close still lists the tab and must not resurrect it (empty
-  // transcript, one round trip of flicker). The shield lifts as soon as
-  // a snapshot omits the id, on the PENDING_CLOSE_MAX_HITS-th snapshot
-  // that still lists it (the daemon kept the tab, so it is shown
-  // again), or PENDING_CLOSE_TTL_MS after the close: a stale snapshot
-  // is a matter of milliseconds, and a shield that outlives that would
-  // hide a tab another surface legitimately re-opened with the same id
-  // when this client missed the close-confirming snapshot (outage).
-  // armCloseShield / reconnect (`daemonStatus`) own the entries.
+  // told the daemon to close (`closeTab`), mapped to {ack, hits, at}:
+  // the close's token, how many snapshots have since arrived WITH the
+  // id, and when the close was issued. A snapshot broadcast before the
+  // daemon processed the close still lists the tab and must not
+  // resurrect it (empty transcript, one round trip of flicker). The
+  // shield lifts as soon as a snapshot omits the id, or on the
+  // snapshot that acknowledges the token while still listing it (the
+  // daemon kept the tab, so it is shown again). A daemon echoing no
+  // `acks` lifts it instead on the PENDING_CLOSE_MAX_HITS-th snapshot
+  // that still lists it, or PENDING_CLOSE_TTL_MS after the close: a
+  // stale snapshot is a matter of milliseconds, and a shield that
+  // outlives that would hide a tab another surface legitimately
+  // re-opened with the same id when this client missed the
+  // close-confirming snapshot (outage). armCloseShield / reconnect
+  // (`daemonStatus`) own the entries.
   const pendingCloseTabs = new Map();
   const PENDING_CLOSE_MAX_HITS = PENDING_OPEN_MAX_MISSES;
   const PENDING_CLOSE_TTL_MS = 5000;
+  // The tokens are unique to this page (another surface's close of the
+  // same tab must not answer this one's).
+  const tabAckPrefix = genTabId();
+  let tabAckCount = 0;
 
+  function newTabAck() {
+    return tabAckPrefix + ':' + ++tabAckCount;
+  }
+
+  /**
+   * Shield *tabId*, just closed here, from the snapshots that predate
+   * the daemon's processing of the close.
+   * @returns {string} The token to send with the `closeTab`.
+   */
   function armCloseShield(tabId) {
-    pendingCloseTabs.set(tabId, {hits: 0, at: Date.now()});
+    const ack = newTabAck();
+    pendingCloseTabs.set(tabId, {ack, hits: 0, at: Date.now()});
+    return ack;
   }
 
   // Announce a locally created chat tab to the daemon's shared tab
   // registry so every other client opens the same tab.
   function registerTab(tab) {
-    pendingOpenTabs.set(tab.id, 0);
+    const ack = newTabAck();
+    pendingOpenTabs.set(tab.id, {ack, misses: 0});
     api.openTab({
       tabId: tab.id,
       title: tab.title || 'new chat',
       workDir: tab.workDir || '',
+      ack,
     });
   }
 
@@ -6224,7 +6419,11 @@
   // replays; they re-anchor after their parent) and content tabs
   // (file views are per-user surfaces on every client, so they are
   // not mirrored).
-  function reconcileTabs(list) {
+  function reconcileTabs(list, acks) {
+    // The tokens this snapshot answers; a daemon that echoes none
+    // (older) sends no list, and the shields then expire by count and
+    // age instead (see pendingOpenTabs / pendingCloseTabs).
+    const acked = Array.isArray(acks) ? new Set(acks) : null;
     const byId = new Map(tabs.map(t => [t.id, t]));
     const inSnapshot = new Set();
     const next = [];
@@ -6239,10 +6438,11 @@
       const shield = pendingCloseTabs.get(e.tabId);
       if (shield) {
         shield.hits += 1;
-        if (
-          shield.hits < PENDING_CLOSE_MAX_HITS &&
-          Date.now() - shield.at < PENDING_CLOSE_TTL_MS
-        ) {
+        const kept = acked
+          ? acked.has(shield.ack)
+          : shield.hits >= PENDING_CLOSE_MAX_HITS ||
+            Date.now() - shield.at >= PENDING_CLOSE_TTL_MS;
+        if (!kept) {
           listedClosed.add(e.tabId);
           return;
         }
@@ -6286,13 +6486,18 @@
       next.push(tab);
     });
 
-    // Expire pending opens the daemon never confirmed: after a few
-    // snapshots without the id, the open is considered lost/rejected
-    // and the id stops shielding its local tab from reconciliation.
-    pendingOpenTabs.forEach((misses, id) => {
+    // Retire the pending opens this snapshot answers without listing
+    // the id (the daemon processed the open and the tab is not there:
+    // dropped, or closed meanwhile), or, against a daemon that echoes
+    // no acknowledgments, the ones a few snapshots never confirmed:
+    // the id stops shielding its local tab from reconciliation.
+    pendingOpenTabs.forEach((pending, id) => {
       if (inSnapshot.has(id)) return;
-      if (misses + 1 >= PENDING_OPEN_MAX_MISSES) pendingOpenTabs.delete(id);
-      else pendingOpenTabs.set(id, misses + 1);
+      pending.misses += 1;
+      const settled = acked
+        ? acked.has(pending.ack)
+        : pending.misses >= PENDING_OPEN_MAX_MISSES;
+      if (settled) pendingOpenTabs.delete(id);
     });
     // A snapshot without the id confirms the close: the shield lifts.
     pendingCloseTabs.forEach((_shield, id) => {
@@ -6322,6 +6527,31 @@
       if (inSnapshot.has(t.id) || removedIds.has(t.id)) return;
       next.push(t);
     });
+    // The composer shows the newest state of the active tab's draft
+    // (the boot placeholder shows the previously selected tab's
+    // persisted draft, which the user may have edited since): when the
+    // snapshot removes that placeholder, an edit made here follows the
+    // screen to the tab taking it (below); restoreTab would otherwise
+    // show the older persisted copy or nothing.  Only the unregistered
+    // placeholder's draft moves: a registered chat closed elsewhere
+    // takes its draft with it, as a local close does, and must not
+    // overwrite the draft the chat taking the screen owns.
+    const dying = getTab(activeTabId);
+    const liveDraft =
+      dying &&
+      !dying.inRegistry &&
+      removedIds.has(dying.id) &&
+      inp.value !== (dying.inputValue || '')
+        ? inp.value
+        : null;
+    // A content tab on screen (stacked surface) keeps under it the run
+    // of the chat it belongs to: timer, spinner and the Stop button.
+    // That chat closing elsewhere must blank the surface, as a local
+    // close does (closeTab), or the run lives on under the file with a
+    // Stop that targets no task.
+    if (dying && dying.isContentTab && removedIds.has(chatTargetTabId())) {
+      clearChatSurface();
+    }
     // Only chat tabs and their sub-agent descendants are removed here
     // (content tabs are never in the registry and carry no
     // parentTabId), so there is no editor to dispose.
@@ -6377,6 +6607,11 @@
           : '';
       if (activeDraft && !saved && !target.inputValue) {
         target.inputValue = activeDraft;
+      }
+      // An edit of the draft on screen is newer than any persisted copy;
+      // a deletion only clears the draft of the tab the boot tab showed.
+      if (liveDraft !== null && (liveDraft || target === saved)) {
+        target.inputValue = liveDraft;
       }
       // A content tab taking the screen (stacked surface) restores no
       // chat: blank the chat surface, as a local close does (closeTab),
@@ -6577,6 +6812,9 @@
     'server-reset-confirm-cancel',
   );
   const memoryToggleBtn = document.getElementById('cfg-use-memory');
+  // The global Compaction switch (config key ``compaction``): every
+  // agent reads the persisted value, so no per-run submit flag.
+  const compactionToggleBtn = document.getElementById('cfg-compaction');
   const shareBtn = document.getElementById('share-btn');
   const inputDrawerBtn = document.getElementById('input-drawer-btn');
   const inputAreaEl = document.getElementById('input-area');
@@ -7210,7 +7448,7 @@
     // learns that the owner chat's task ended (its `status
     // running:false` is not the active tab's).
     const pollTab = getTab(metaInfoChatTabId());
-    if (pollTab ? !pollTab.isRunning : !isRunning) return;
+    if (!pollTab || !pollTab.isRunning) return;
     // Each poll may run the daemon's paid update agent: only a panel on
     // screen polls (not the closed phone drawer, nor the desktop panel
     // slid off behind a file).
@@ -8010,12 +8248,15 @@
   const pendingCronSaves = [];
   const pendingMachineSaves = [];
 
-  // The `generation` the last machine add was stamped with: an add
-  // without a name registers the address's host, so two unnamed adds
-  // name the same key ('') while the daemon adds them in parallel
-  // (one lock per host) and answers in either order.  This daemon
-  // echoes the stamp on the reply (a forwarded machine's reply does
-  // not: takePendingSave then falls back to the name).
+  // The `generation` the last machine add or Schedule save was stamped
+  // with: an add without a name registers the address's host, so two
+  // unnamed adds name the same key ('') while the daemon adds them in
+  // parallel (one lock per host) and answers in either order; two
+  // Schedule creates (no job id), or two updates of the same job (the
+  // first editor cancelled with its update in flight), likewise name
+  // the same key, and the daemon answers cron actions independently.
+  // A daemon echoing the stamp on the reply settles the save it
+  // answers; one echoing none leaves takePendingSave to the name.
   let machineSaveGeneration = 0;
 
   /**
@@ -8241,11 +8482,13 @@
       saved => {
         if (sidebarFormOffline(scheduleStatus)) return false;
         scheduleEdit = {id: job.id, values: saved, saving: true};
+        const generation = ++machineSaveGeneration;
         pendingCronSaves.push({
           machine: panelsMachine,
           action: 'update',
           key: String(job.id),
           state: scheduleEdit,
+          generation,
         });
         cronAction({
           action: 'update',
@@ -8253,6 +8496,7 @@
           name: saved.name,
           schedule: saved.schedule,
           what: saved.what,
+          generation,
         });
       },
       () => {
@@ -8310,11 +8554,13 @@
       saved => {
         if (sidebarFormOffline(scheduleStatus)) return false;
         scheduleAdd = {values: saved, saving: true};
+        const generation = ++machineSaveGeneration;
         pendingCronSaves.push({
           machine: panelsMachine,
           action: 'create',
           key: '',
           state: scheduleAdd,
+          generation,
         });
         cronAction({
           action: 'create',
@@ -8322,6 +8568,7 @@
           schedule: saved.schedule,
           what: saved.what,
           kind: saved.kind,
+          generation,
         });
       },
       () => {
@@ -8359,8 +8606,10 @@
    *
    * @param {{jobs: Array<Object>, action?: string, error?: string,
    *     jobId?: string}} ev The reply.
+   * @param {Object|null} saved The form state whose save the reply
+   *     answers (takePendingSave), or null.
    */
-  function renderCronJobs(ev) {
+  function renderCronJobs(ev, saved) {
     ensureSidebarPanelsPoll();
     const jobs = Array.isArray(ev.jobs) ? ev.jobs : [];
     const error = String(ev.error || '');
@@ -8376,12 +8625,6 @@
         ? ''
         : 'No scheduled jobs. Click + to schedule one, or ask Sorcar, e.g. "every morning at 9 summarize my email".');
     scheduleStatus.classList.toggle('is-error', Boolean(error));
-    const saved = takePendingSave(
-      pendingCronSaves,
-      ev.action,
-      ev.jobId,
-      replyMachine(ev),
-    );
     if (saved && saved === scheduleEdit) {
       if (error) scheduleEdit.saving = false;
       else scheduleEdit = null;
@@ -8583,10 +8826,11 @@
    *
    * @param {{machines: Array<Object>, action?: string, error?: string,
    *     name?: string, forwarded?: boolean}} ev The reply.
+   * @param {Object|null} [saved] The form state whose save the reply
+   *     answers (takePendingSave); none for a relabel repaint.
    */
-  function renderMachines(ev) {
+  function renderMachines(ev, saved) {
     ensureSidebarPanelsPoll();
-    setRefreshSpin(machinesRefreshBtn, false);
     const rows = Array.isArray(ev.machines) ? ev.machines : [];
     const error = String(ev.error || '');
     // A refused reply (a forwarded machine that is down, say) carries no
@@ -8608,13 +8852,6 @@
     machinesStatusLine.textContent =
       error || (rows.length ? '' : 'No machines.');
     machinesStatusLine.classList.toggle('is-error', Boolean(error));
-    const saved = takePendingSave(
-      pendingMachineSaves,
-      ev.action,
-      ev.name,
-      replyMachine(ev),
-      ev.generation,
-    );
     if (saved && saved === machineAdd)
       machineAdd = error ? {values: machineAdd.values, saving: false} : null;
     for (const m of rows) {
@@ -8914,7 +9151,18 @@
     }
     const relabelled = noteMachineLabels(labels);
     renderChatMachine();
-    if (relabelled && sidebar.classList.contains('open')) {
+    // The rows' machine chips carry the labels: refetch the page so
+    // they are rebuilt, unless page one is in flight already: its
+    // reply rebuilds the rows with the labels known by then (a label
+    // change takes renderHistory off its keep-the-DOM path), and a
+    // fresh generation here would throw that reply away (the first
+    // page of every page load, since the labels arrive with the
+    // `machines` reply of the `ready` fan-out).
+    if (
+      relabelled &&
+      sidebar.classList.contains('open') &&
+      !historyPageOneInFlight()
+    ) {
       requestHistoryFromStart();
     }
   }
@@ -9253,16 +9501,18 @@
   }
 
   /**
-   * Week columns that fit the graph's width, at least one.
+   * Week columns that fit the heatmap's viewport, at least one.
    *
+   * @param {HTMLElement} viewport The heatmap's viewport: the graph
+   *     around it is wider by its padding, which is no room for a
+   *     column.
    * @returns {number} The column count.
    */
-  function spendColumnsThatFit() {
+  function spendColumnsThatFit(viewport) {
     return Math.max(
       1,
       Math.floor(
-        (spendGraph.clientWidth + SPEND_GAP_PX) /
-          (SPEND_CELL_PX + SPEND_GAP_PX),
+        (viewport.clientWidth + SPEND_GAP_PX) / (SPEND_CELL_PX + SPEND_GAP_PX),
       ),
     );
   }
@@ -9343,7 +9593,7 @@
     const last = newest > today ? newest : today;
     const lastIdx = (last.getDay() + 6) % 7;
     const days = Math.max(
-      (spendColumnsThatFit() - 1) * 7 + lastIdx + 1,
+      (spendColumnsThatFit(viewport) - 1) * 7 + lastIdx + 1,
       SPEND_MIN_DAYS,
       Math.min(spendHistoryDays(reported, last), SPEND_MAX_DAYS),
     );
@@ -9521,7 +9771,9 @@
   function onSpendGraphResize() {
     const grid = spendGraph.querySelector('.spend-grid');
     if (!grid) return;
-    if (spendColumnsThatFit() > grid.childElementCount) drawSpendGraph();
+    const viewport = spendGraph.querySelector('.spend-viewport');
+    if (spendColumnsThatFit(viewport) > grid.childElementCount)
+      drawSpendGraph();
     else pinSpendScroll();
   }
 
@@ -9861,6 +10113,7 @@
       path: path,
       workDir: workDir || sidebarWorkDir(),
       tabId: owner || activeTabId,
+      token: fileOpenToken(),
     };
     if (background) msg.background = true;
     api.send(onMachine(msg, machine));
@@ -10516,7 +10769,10 @@
     if (open && !node.loaded && !node.loading) {
       if (explorerIsCycle(node)) {
         // A symlink back into its own ancestry would expand for ever.
-        node.loaded = true;
+        // The note is not a listing: the folder stays unloaded, so a
+        // refresh (which re-lists loaded folders) does not ask for the
+        // cycle either, and the next expansion judges the link afresh
+        // (a parent's re-listing may have retargeted it since).
         node.kids.textContent = '';
         explorerNote(node.kids, node.depth + 1, '(symbolic link cycle)');
         return;
@@ -10624,11 +10880,23 @@
       // symlinked folders pointing at one target must stay two
       // independent nodes.  The daemon resolves the path on request.
       const childPath = joinPath(parentPath, entry.name);
+      // A plain sub-folder of a resolved folder is at its parent's
+      // real path + name; a symlinked one is wherever it points.
+      const real =
+        typeof entry.real === 'string'
+          ? entry.real
+          : node.realPath
+            ? joinPath(node.realPath, entry.name)
+            : '';
       const old = keep.get(childPath);
       if (old) {
         keep.delete(childPath);
         const oldNode = explorerDirs.get(explorerKey(node.root, childPath));
         if (!!oldNode === !!entry.isDir) {
+          // The kept folder follows its link: a symlink pointed
+          // elsewhere since (away from the ancestor it cycled back
+          // to) is judged afresh on its next expansion.
+          if (oldNode && real) oldNode.realPath = real;
           fresh.appendChild(old);
           if (oldNode) fresh.appendChild(oldNode.kids);
           return;
@@ -10646,14 +10914,7 @@
           isDir: !!entry.isDir,
           root: node.root,
           parent: parentPath,
-          // A plain sub-folder of a resolved folder is at its parent's
-          // real path + name; a symlinked one is wherever it points.
-          real:
-            typeof entry.real === 'string'
-              ? entry.real
-              : node.realPath
-                ? joinPath(node.realPath, entry.name)
-                : '',
+          real: real,
         },
         depth,
       );
@@ -10841,9 +11102,24 @@
   // The workspace is a folder of a machine: this one (scmMachine '')
   // or the remote machine the browsed chat runs on, whose daemon
   // answers every request of the view (stamped with the machine).
+  // The status is also per chat (scmTab, see scmTabId): its
+  // `taskWorktree` names the worktree THAT chat's task runs in, which
+  // the badge counts, so another chat in the same workspace reloads
+  // the view and a late reply for the previous chat is dropped.
   let scmWorkDir = '';
   let scmMachine = '';
+  let scmTab = '';
   let scmGeneration = 0;
+  // Whether a gitStatus of the current generation is on its way: the
+  // daemon serves a connection's commands one after another, so the
+  // badge poll never queues a second one behind it (a slow git would
+  // otherwise pile up a backlog a Stop or a submit waits behind).
+  let scmStatusPending = false;
+  // Whether a gitLog of the current generation is on its way (a full
+  // reload asks for the status and the log together): its status,
+  // answered first, must not re-ask the log because the log still on
+  // hand (the previous generation's) walks from an older HEAD.
+  let scmLogPending = false;
   let scmStatus = null;
   let scmLog = null;
   let scmRefreshTimer = null;
@@ -10877,9 +11153,9 @@
     if (!scmChangesList || !scmGraphList) return;
     const wd = sidebarWorkDir();
     const machine = sidebarMachine();
-    if (wd !== scmWorkDir || machine !== scmMachine) {
-      // Another workspace: reload right away, and forget a refresh
-      // scheduled for the previous one.
+    if (wd !== scmWorkDir || machine !== scmMachine || scmTabId() !== scmTab) {
+      // Another workspace (or chat): reload right away, and forget a
+      // refresh scheduled for the previous one.
       cancelScmRefreshTimer();
       requestSourceControl(wd, machine);
       return;
@@ -10928,6 +11204,7 @@
     const changed = wd !== scmWorkDir || machine !== scmMachine;
     scmWorkDir = wd;
     scmMachine = machine;
+    scmTab = scmTabId();
     scmGeneration++;
     if (changed || !wd) {
       // Another workspace (or none): drop the old data and show the
@@ -10953,6 +11230,8 @@
    * `extra` fields on top.
    */
   function sendScmRequest(apiFn, wd, machine, extra) {
+    if (apiFn === api.gitStatus) scmStatusPending = true;
+    else scmLogPending = true;
     apiFn(
       onMachine(
         {
@@ -10994,6 +11273,7 @@
 
   function handleGitStatus(ev) {
     if (String(ev.token || '') !== String(scmGeneration)) return;
+    scmStatusPending = false;
     // The badge poll's usual answer repeats the status on screen (same
     // request, same tree): rebuilding the lists for it would drop the
     // keyboard focus and the open context menu every 5 s.
@@ -11003,12 +11283,42 @@
       scmStatusKey(scmStatus) === scmStatusKey(ev);
     scmStatus = ev;
     if (repeat) return;
+    // The poll asks for the status alone, so a commit, checkout or
+    // reset made outside a task (a terminal) moves a HEAD under the
+    // log on hand: the log is re-asked under the same token and the
+    // graph waits for it rather than redrawing the old history.  Not
+    // while this generation's log is still on its way: that one
+    // walks from the HEAD this status reports.
+    const behind = !scmLogPending && scmLogBehind(ev);
+    if (behind) sendScmRequest(api.gitLog, scmWorkDir, scmMachine, {limit: 50});
     renderScmChanges();
-    if (scmPairComplete()) renderScmGraph();
+    if (!behind && scmPairComplete()) renderScmGraph();
+  }
+
+  /** The worktree HEADs a gitStatus / gitLog reply names, as one key. */
+  function scmHeadsKey(reply) {
+    const list = Array.isArray(reply.worktrees) ? reply.worktrees : [];
+    return list
+      .map(wt => (wt && wt.head ? String(wt.head) : ''))
+      .filter(Boolean)
+      .sort()
+      .join(' ');
+  }
+
+  /**
+   * Whether the log on hand walks from other HEADs than *status* just
+   * reported (the current worktree's, or another worktree's).
+   */
+  function scmLogBehind(status) {
+    if (status.error || !scmLog || scmLog.error) return false;
+    const cur = scmWorktrees(status)[0];
+    if (cur.head && String(scmLog.head || '') !== String(cur.head)) return true;
+    return scmHeadsKey(status) !== scmHeadsKey(scmLog);
   }
 
   function handleGitLog(ev) {
     if (String(ev.token || '') !== String(scmGeneration)) return;
+    scmLogPending = false;
     scmLog = ev;
     if (scmPairComplete()) renderScmGraph();
   }
@@ -11035,10 +11345,11 @@
     const wd = sidebarWorkDir();
     const machine = sidebarMachine();
     if (!wd) return;
-    if (wd !== scmWorkDir || machine !== scmMachine) {
+    if (wd !== scmWorkDir || machine !== scmMachine || scmTabId() !== scmTab) {
       requestSourceControl(wd, machine);
       return;
     }
+    if (scmStatusPending) return;
     sendScmRequest(api.gitStatus, wd, machine, {});
   }
 
@@ -11589,14 +11900,17 @@
   /**
    * The worktrees (other than the current one) whose HEAD is *sha*, so
    * the commit row can carry a "worktree" badge like VS Code's graph
-   * decorates the checked-out ref.
+   * decorates the checked-out ref.  The status names them: the badge
+   * poll keeps it fresh, while the log is only re-asked when the set
+   * of HEADs changes (a worktree moved, or two swapping HEADs, keeps
+   * it).  The log's list stands in for a status without one.
    */
   function scmWorktreesAt(sha) {
     const list =
-      scmLog && Array.isArray(scmLog.worktrees)
-        ? scmLog.worktrees
-        : scmStatus && Array.isArray(scmStatus.worktrees)
-          ? scmStatus.worktrees
+      scmStatus && Array.isArray(scmStatus.worktrees)
+        ? scmStatus.worktrees
+        : scmLog && Array.isArray(scmLog.worktrees)
+          ? scmLog.worktrees
           : [];
     return list.filter(wt => wt && !wt.current && wt.head === sha);
   }
@@ -11762,25 +12076,15 @@
       toggleScmCommit(commit);
       return;
     }
+    // A file row opens as a diff, as in VS Code: a file of a graph
+    // commit against its parent, a file of the Changes list or of an
+    // "Uncommitted changes" row as the working tree against HEAD.
     const file = target.closest('.scm-row');
-    if (!file) return;
-    if (file.closest('#scm-graph')) {
-      // A file of the graph opens as a diff, as in VS Code: the commit
-      // against its parent, or the working tree against HEAD for the
-      // "Uncommitted changes" row.
-      openScmFileDiff(file);
-      return;
-    }
-    if (file.dataset.scmStatus === 'D') return;
-    openWorkspaceFile(
-      file.dataset.scmPath,
-      file.dataset.scmWorktree || scmWorkDir,
-      scmMachine,
-    );
+    if (file) openScmFileDiff(file);
   }
 
   /**
-   * Request the side-by-side diff of a graph file row (see handleGitShow).
+   * Request the side-by-side diff of a file row (see handleGitShow).
    *
    * @param {HTMLElement} row The file row.
    * @param {{workDir: string, tabId: string, machine: string}} [target]
@@ -11914,6 +12218,20 @@
     return prefix + ':' + sidebarRequestSeq;
   }
 
+  /**
+   * Take the pending sidebar request the reply *ev* answers (by its
+   * echoed `token`), forgetting it; null for an unknown token.
+   *
+   * @param {{token?: string}} ev The reply.
+   * @returns {?Object} The request, or null.
+   */
+  function takeSidebarRequest(ev) {
+    const token = String(ev.token || '');
+    const request = pendingSidebarRequests.get(token);
+    if (request) pendingSidebarRequests.delete(token);
+    return request || null;
+  }
+
   /** The platform's label for a shortcut (`win` on Windows/Linux). */
   function keyLabel(win, mac, linux) {
     if (IS_MAC) return mac;
@@ -12014,9 +12332,27 @@
         isVirtual: true,
         machine: machine || '',
       },
-      true,
+      resultOwnerShown(ownerTabId),
       ownerTabId,
     );
+  }
+
+  /**
+   * Whether a result asked for by tab *ownerTabId* (a search, a diff, a
+   * commit) may take the screen when its reply lands: only while the
+   * chat it belongs to is the one on screen (itself, or a file of it).
+   * A reply landing after a switch to another chat opens its tab in
+   * the background instead, as a background task's file does.
+   *
+   * @param {string|undefined} ownerTabId The request's tab ('' / absent
+   *   for the tab on screen).
+   * @returns {boolean} Whether the result may be shown now.
+   */
+  function resultOwnerShown(ownerTabId) {
+    if (ownerTabId === undefined || ownerTabId === null || ownerTabId === '')
+      return true;
+    const owner = rootChatTab(getTab(String(ownerTabId)));
+    return !!owner && owner.id === chatTargetTabId();
   }
 
   /**
@@ -12071,9 +12407,8 @@
 
   /** Handle an fsResult reply: refresh the tree, open results, report errors. */
   function handleFsResult(ev) {
-    const request = pendingSidebarRequests.get(String(ev.token || ''));
+    const request = takeSidebarRequest(ev);
     if (!request) return;
-    pendingSidebarRequests.delete(String(ev.token || ''));
     if (ev.error) {
       if (ev.exists && !request.overwrite) {
         // VS Code asks before replacing: "A file or folder with the
@@ -12256,6 +12591,27 @@
   }
 
   /**
+   * Wire the keys of an inline name box *input* to *finish(accept)*:
+   * Enter commits and Escape drops, neither reaching the list behind
+   * the box (its own arrow / Enter handling must not run).  The Enter
+   * or Escape of an IME composition picks or drops a candidate and
+   * does neither.
+   */
+  function bindInlineInputKeys(input, finish) {
+    input.addEventListener('keydown', e => {
+      e.stopPropagation();
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        finish(true);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        finish(false);
+      }
+    });
+  }
+
+  /**
    * Show an inline text box.  For `newFile` / `newFolder` it is a new
    * row at the top of *folderRow*'s children; for `rename` it replaces
    * the name of *row*.  `commit(value)` runs with the entered name.
@@ -12321,20 +12677,7 @@
       cancelExplorerInput();
       if (accept && value) commit(value);
     }
-    input.addEventListener('keydown', e => {
-      // The tree's own key handling (arrows, Enter) must not run.
-      e.stopPropagation();
-      // The Enter or Escape of an IME composition picks or drops a
-      // candidate; it neither commits nor drops the name.
-      if (e.isComposing || e.keyCode === 229) return;
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        finish(true);
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        finish(false);
-      }
-    });
+    bindInlineInputKeys(input, finish);
     input.addEventListener('blur', () => {
       // A folder listing landing mid-edit re-attaches and refocuses
       // the box (handleDirListing); only a blur that sticks commits.
@@ -12427,6 +12770,7 @@
    */
   function explorerDeleteItem(rows) {
     const machine = explorerMachine;
+    const tabId = activeTabId;
     const what =
       rows.length === 1
         ? "'" +
@@ -12451,6 +12795,7 @@
             rows.forEach(r => {
               sendFsAction({
                 machine: machine,
+                tabId: tabId,
                 action: 'delete',
                 path: r.dataset.explorerPath,
                 root: explorerRowRoot(r),
@@ -12471,6 +12816,7 @@
    */
   function explorerMultiMenuItems(rows) {
     const machine = explorerMachine;
+    const tabId = activeTabId;
     const files = rows.filter(r => !r.classList.contains('is-dir'));
     const items = [];
     if (files.length) {
@@ -12498,6 +12844,7 @@
         run: () => {
           sendFsAction({
             machine: machine,
+            tabId: tabId,
             action: 'compare',
             path: files[0].dataset.explorerPath,
             dest: files[1].dataset.explorerPath,
@@ -12530,7 +12877,11 @@
     const name = pathBaseName(path) || path;
     // The machine the entries are on, captured now: an action may send
     // its request after a confirmation, when the tree shows another.
+    // Likewise the chat the menu was opened in, which owns what the
+    // reply opens: the user may have switched chats by the time a
+    // prompt or an inline input is answered.
     const machine = explorerMachine;
+    const tabId = activeTabId;
     const items = [];
     if (isDir) {
       items.push({
@@ -12540,6 +12891,7 @@
           startExplorerInput('newFile', row, value => {
             sendFsAction({
               machine: machine,
+              tabId: tabId,
               action: 'newFile',
               path: path,
               name: value,
@@ -12555,6 +12907,7 @@
           startExplorerInput('newFolder', row, value => {
             sendFsAction({
               machine: machine,
+              tabId: tabId,
               action: 'newFolder',
               path: path,
               name: value,
@@ -12598,6 +12951,7 @@
             if (!selected) return;
             sendFsAction({
               machine: machine,
+              tabId: tabId,
               action: 'compare',
               path: selected.path,
               dest: path,
@@ -12625,6 +12979,7 @@
               if (!query) return false;
               sendFsAction({
                 machine: machine,
+                tabId: tabId,
                 action: 'findInFolder',
                 path: path,
                 query: query,
@@ -12655,6 +13010,7 @@
         explorerClipboard.paths.forEach(src => {
           sendFsAction({
             machine: machine,
+            tabId: tabId,
             action: explorerClipboard.cut ? 'move' : 'copy',
             path: src,
             dest: parent,
@@ -12699,6 +13055,7 @@
           if (value === name) return;
           sendFsAction({
             machine: machine,
+            tabId: tabId,
             action: 'rename',
             path: path,
             // A sibling name: `parent` is the folder itself on a
@@ -12844,9 +13201,8 @@
   }
 
   function handleGitActionResult(ev) {
-    const request = pendingSidebarRequests.get(String(ev.token || ''));
+    const request = takeSidebarRequest(ev);
     if (!request) return;
-    pendingSidebarRequests.delete(String(ev.token || ''));
     if (ev.error) {
       sidebarError(ev.error, describeSidebarFailure(request));
       // A failed action may still have changed the repository (a
@@ -12867,9 +13223,8 @@
   }
 
   function handleGitShow(ev) {
-    const request = pendingSidebarRequests.get(String(ev.token || ''));
+    const request = takeSidebarRequest(ev);
     if (!request) return;
-    pendingSidebarRequests.delete(String(ev.token || ''));
     if (ev.error) {
       sidebarError(ev.error, describeSidebarFailure(request));
       return;
@@ -12959,7 +13314,7 @@
         // diff, with its own tab.
         machine: ev.machine || '',
       },
-      true,
+      resultOwnerShown(ev.tabId),
       // The tab that asked for the diff owns it (the reply echoes the
       // request's tabId), so a reply landing after a tab switch opens
       // in that tab's workspace, not the current one's.
@@ -13108,10 +13463,15 @@
         },
       ];
     }
-    // A working-tree change (of any worktree); under the graph's
-    // "Uncommitted changes" row it also offers the diff a click opens.
+    // A working-tree change (of any worktree): the diff a click opens,
+    // then the file itself.
     const deleted = row.dataset.scmStatus === 'D';
-    const items = [
+    return [
+      {
+        id: 'open-changes',
+        label: 'Open Changes',
+        run: () => openScmFileDiff(row, target),
+      },
       {
         id: 'open-file',
         label: 'Open File',
@@ -13132,14 +13492,6 @@
         run: () => window.PanelCopy.copyText(relPath),
       },
     ];
-    if (row.closest('#scm-graph')) {
-      items.unshift({
-        id: 'open-changes',
-        label: 'Open Changes',
-        run: () => openScmFileDiff(row, target),
-      });
-    }
-    return items;
   }
 
   function onScmContextMenu(e) {
@@ -13453,8 +13805,10 @@
       // A "Select Folder" on a typed path: the daemon listed THAT
       // path, so it is a real folder -- pick it (its canonical
       // spelling) now; a refused root stays listed with the reason.
+      // A path typed over it meanwhile is the user's newer intent:
+      // the listing only fills the browser then.
       folderPickerSelectPending = 0;
-      if (applyPickedFolder(folderPickerDir)) return;
+      if (untouched && applyPickedFolder(folderPickerDir)) return;
     }
     const dirs = (Array.isArray(ev.entries) ? ev.entries : []).filter(en => {
       return en && en.isDir && typeof en.name === 'string';
@@ -13481,11 +13835,15 @@
    * header's drop-down, the folder picker and the Explorer's check
    * mark).  The daemon adopts, persists and broadcasts it (setWorkDir);
    * this client re-scopes right away rather than waiting for its own
-   * broadcast.  A listDir check still in flight for an earlier pick is
-   * superseded: its late reply must not undo this one.  A folder of a
-   * remote *machine* (the drop-down of a tab bound to it) is adopted
-   * by that machine's daemon instead, and the chat header follows the
-   * daemon's machineWorkDirs answer (handleMachineWorkDirs).
+   * broadcast, and asks for the daemon's answer (`reply`: the
+   * configData of the directory it ended on), which takes a refused
+   * pick back -- the listing proved the folder exists, not that
+   * config.json could record it.  A listDir check still in flight for
+   * an earlier pick is superseded: its late reply must not undo this
+   * one.  A folder of a remote *machine* (the drop-down of a tab bound
+   * to it) is adopted by that machine's daemon instead, and the chat
+   * header follows the daemon's machineWorkDirs answer
+   * (handleMachineWorkDirs).
    *
    * @param {string} dir The folder, in the daemon's canonical spelling.
    * @param {string} machine The registered machine the folder is on,
@@ -13499,7 +13857,7 @@
       api.setWorkDir({workDir: dir, machine: machine});
       return;
     }
-    api.setWorkDir({workDir: dir});
+    api.setWorkDir({workDir: dir, reply: true});
     adoptWorkDir(dir);
   }
 
@@ -13531,6 +13889,10 @@
     // The task-info panel's Workdir item falls back to the global
     // directory while the visible task has no settings of its own.
     updateMetaTaskDetails(metaShownSettings);
+    // An ``@`` mention being typed lists the new directory's files: its
+    // pending reply (the old directory's) is dropped by the files
+    // handler, so the picker asks again.
+    if (inp && getAtCtx()) checkAutocomplete();
   }
 
   // ---- The working directory drop-down of the chat header -------------
@@ -14712,15 +15074,31 @@
   // A phone screen is too small for the transcript and the input textbox
   // at once. While a task runs the transcript wins and the textbox folds
   // away (the button bar stays); the moment nothing is running the textbox
-  // comes back so the user can start the next task. Once the user works
-  // the handle themselves that choice is final.
+  // comes back so the user can start the next task. A new chat on screen
+  // keeps it too: the user is there to type its first task. Once the user
+  // works the handle themselves that choice holds until "+" is pressed.
   function syncMobileInputDrawer() {
     if (!isMobileRemote || inputDrawerUserSet) return;
-    const wantCollapsed = tabs.some(isLaunchRunning);
+    const wantCollapsed =
+      !isFreshChat(getTab(activeTabId)) && tabs.some(isLaunchRunning);
     if (inputDrawerCollapsed === wantCollapsed) return;
     inputDrawerCollapsed = wantCollapsed;
     applyDrawerState();
     persistTabState();
+  }
+
+  // "+" on a phone: the new chat opens with its textbox unfolded, whatever
+  // folded it (a task running elsewhere or the handle), and the textbox
+  // takes the focus.  The tap is the user gesture that lets the phone
+  // raise its keyboard, so the focus is given here rather than through
+  // focusInputWithRetry, which leaves a phone's focus alone.
+  function showMobileNewChatComposer() {
+    if (!isMobileRemote) return;
+    inputDrawerUserSet = false;
+    inputDrawerCollapsed = false;
+    applyDrawerState();
+    persistTabState();
+    inp.focus();
   }
   // drawer-coverage:end
 
@@ -14878,6 +15256,23 @@
     pinnedRegion = null;
   }
 
+  /**
+   * Put back the pagination anchors and edges *saved* with a restored
+   * transcript (saveCurrentTab) after resetAdjacentState rewound them:
+   * the neighbours spliced into it came back with it, so the next
+   * overscroll fetches the task beyond them, not one already on
+   * screen.  Nothing is put back when the tab's task changed meanwhile
+   * (the anchors described another thread).
+   * @param {?Object} saved The fragment's `adjacentState`, if any.
+   */
+  function restoreAdjacentState(saved) {
+    if (!saved || String(saved.taskId) !== String(currentTaskId)) return;
+    oldestLoadedTaskId = saved.oldest;
+    newestLoadedTaskId = saved.newest;
+    noPrevTask = saved.noPrev;
+    noNextTask = saved.noNext;
+  }
+
   function showAdjacentLoader(direction) {
     removeAdjacentLoader();
     const loader = mkEl('div', 'adjacent-loader');
@@ -15006,10 +15401,9 @@
 
     const taskLabel = task || '(untitled task)';
 
-    // The tab-switch reset rewinds the pagination anchors while spliced
-    // `.adjacent-task` containers survive in the restored transcript, so a
-    // later scroll can fetch a task that is already on screen. Splicing
-    // it again would stack duplicate regions; just repair the anchor.
+    // A reply for a task already on screen (a fetch repeated after its
+    // reply was lost to a tab switch) must not stack a duplicate
+    // region; just repair the anchor.
     if (hasTaskId) {
       const rendered = Array.from(O.querySelectorAll('.adjacent-task')).some(
         el => el.dataset.taskId === String(taskId),
@@ -15112,6 +15506,9 @@
     clearGhost();
     syncClearBtn();
     autosizeComposer();
+    // The draft changed as if typed: the history cycling ends (as it
+    // does on input), or the next ArrowDown would replace the draft.
+    histIdx = -1;
     return true;
   }
 
@@ -15219,7 +15616,7 @@
       api.complete(
         Object.assign(
           {query: inp.value, tabId: activeTabId || undefined},
-          editorContext(true),
+          editorContext(true, ''),
         ),
       );
     }, 300);
@@ -15288,14 +15685,23 @@
     tooltipAnchorWatch.disconnect();
     tooltipEl.classList.remove('visible');
   }
+  // The tooltip element the pointer comes from / goes to in a
+  // mouseover / mouseout (null: none).  Both bubble at every child
+  // boundary of the anchor (a button's svg icon, a row's spans): a
+  // crossing that stays inside it is not a new hover.
+  function tooltipRelated(e) {
+    const el = e.relatedTarget;
+    return el && el.closest ? el.closest('[data-tooltip]') : null;
+  }
   document.addEventListener('mouseover', e => {
     const target = e.target.closest('[data-tooltip]');
-    if (!target) return;
+    if (!target || tooltipRelated(e) === target) return;
     clearTimeout(tooltipTimer);
     tooltipTimer = setTimeout(() => showTooltipFor(target), 400);
   });
   document.addEventListener('mouseout', e => {
-    if (!e.target.closest('[data-tooltip]')) return;
+    const target = e.target.closest('[data-tooltip]');
+    if (!target || tooltipRelated(e) === target) return;
     hideTooltip();
   });
   document.addEventListener('focusin', e => {
@@ -15514,19 +15920,30 @@
    * images) resolve against, as sent with their checkPaths / openFile.
    *
    * For a tab bound to a registered machine the request is forwarded
-   * there unchanged, so the directory must be one of THAT machine: its
-   * working directory, or none before it is known, which its daemon
-   * takes as its own working directory.  A directory of this daemon
-   * (`/Users/me/kiss` on a laptop) names nothing there: every relative
-   * link of a bound tab stayed inert, or opened to "File not found".
+   * there unchanged, so the directory must be one of THAT machine: the
+   * directory the tab's task ran in there (recorded from the task's
+   * header while the tab was bound to it; the machine's working
+   * directory may have moved since, for later tasks), else the
+   * machine's working directory, or none before it is known, which
+   * its daemon takes as its own working directory.  A directory of
+   * this daemon (`/Users/me/kiss` on a laptop) names nothing there:
+   * every relative link of a bound tab stayed inert, or opened to
+   * "File not found".
    *
    * @param {string} machine The tab's bound machine, '' for this daemon.
    * @param {string|undefined} workDir The owning task's work dir on
    *   this daemon; undefined for the active tab's.
+   * @param {string} owner The tab that owns the transcript.
    * @returns {string} The directory to send ('' = the daemon's own).
    */
-  function transcriptFileWorkDir(machine, workDir) {
-    if (machine) return machineDirs(machine).workDir || '';
+  function transcriptFileWorkDir(machine, workDir, owner) {
+    if (machine) {
+      const tab = getTab(owner);
+      if (tab && tab.workDir && tab.workDirMachine === machine) {
+        return tab.workDir;
+      }
+      return machineDirs(machine).workDir || '';
+    }
     return typeof workDir === 'string'
       ? workDir
       : workDirForTab(activeTabId) || '';
@@ -15545,7 +15962,7 @@
     // is stamped on the span so a later re-check and the reply keep
     // the same identity whatever the drop-down says by then.
     const machine = tabBoundMachine(owner);
-    const wd = transcriptFileWorkDir(machine, workDir);
+    const wd = transcriptFileWorkDir(machine, workDir, owner);
     for (const span of spans) {
       span.setAttribute('data-path-wd', wd);
       // tableak-coverage:start
@@ -15556,16 +15973,6 @@
       _pendingFileLinkSpans.add(span);
     }
     queueFileLinkChecks(owner, spans, true);
-  }
-
-  /**
-   * Ask which of *paths* (relative to *wd*) exist for tab *owner* on
-   * *machine* ('' = this daemon).  For a registered machine the daemon
-   * forwards the `checkPaths` stamped `machine` there and stamps the
-   * `pathsExist` reply the same.
-   */
-  function sendCheckPaths(owner, wd, machine, paths) {
-    api.checkPaths(onMachine({paths, workDir: wd, tabId: owner}, machine));
   }
 
   function handlePathsExist(ev) {
@@ -15646,12 +16053,20 @@
    * reissueFileLinkChecks(), resolves them; forgetPendingFileLinks()
    * drops them with the transcript.
    *
+   * A check dropped with its transcript (dropPendingPathChecksOf) is
+   * no longer in flight but its reply is still counted as one to
+   * ignore; refused, it has no reply coming, so that count goes too,
+   * or the rebuilt transcript's fresh check of the path would have its
+   * only valid reply consumed as the old answer.
+   *
    * @param {string} owner The tab whose check was refused.
    * @param {string} machine The machine that refused it ('' = this daemon).
    */
   function releaseRefusedPathChecks(owner, machine) {
     const tab = String(owner);
-    for (const key of Array.from(_pendingPathChecks)) {
+    const keys = new Set(_pendingPathChecks);
+    for (const key of _supersededPathChecks.keys()) keys.add(key);
+    for (const key of keys) {
       const parts = key.split('\u0000');
       if (parts[0] === tab && parts[2] === machine) {
         _pendingPathChecks.delete(key);
@@ -15706,12 +16121,24 @@
    */
   function restorePendingFileLinks(released) {
     for (const span of released.spans) _pendingFileLinkSpans.add(span);
-    for (const key of released.checks) _pendingPathChecks.add(key);
+    for (const key of released.checks) {
+      _pendingPathChecks.add(key);
+      const newer = _supersededPathChecks.get(key) || 0;
+      if (newer > 1) _supersededPathChecks.set(key, newer - 1);
+      else _supersededPathChecks.delete(key);
+    }
     restoreReplayImages(released.images);
   }
 
   /**
    * Drop every in-flight path-check key of tab *owner*.
+   *
+   * The check itself is still on its way: its reply is counted as one
+   * more to ignore (_supersededPathChecks), so the rebuilt transcript
+   * asks about the path afresh and that newer check settles its span,
+   * not the answer to the discarded one (the replies come in the order
+   * asked).  A reply a lost connection swallowed clears with the rest
+   * (forgetInFlightPathChecks).
    *
    * @returns {Array<string>} The dropped keys.
    */
@@ -15721,7 +16148,10 @@
     for (const key of Array.from(_pendingPathChecks)) {
       if (key.indexOf(prefix) === 0) {
         _pendingPathChecks.delete(key);
-        _supersededPathChecks.delete(key);
+        _supersededPathChecks.set(
+          key,
+          (_supersededPathChecks.get(key) || 0) + 1,
+        );
         dropped.push(key);
       }
     }
@@ -15873,8 +16303,13 @@
       }
       if (group.paths.indexOf(p) < 0) group.paths.push(p);
     }
+    // One `checkPaths` per (work dir, machine): for a registered machine
+    // the daemon forwards it there and stamps the `pathsExist` reply
+    // with the same `machine`.
     for (const g of groups.values()) {
-      sendCheckPaths(owner, g.wd, g.machine, g.paths);
+      api.checkPaths(
+        onMachine({paths: g.paths, workDir: g.wd, tabId: owner}, g.machine),
+      );
     }
   }
 
@@ -16040,16 +16475,9 @@
 
   function collectText(node) {
     if (node.nodeType === 3) return node.textContent || '';
-    if (node.nodeType === 1 && node.classList) {
-      if (
-        node.classList.contains('panel-copy-btn') ||
-        node.classList.contains('panel-stop-btn') ||
-        node.classList.contains('collapse-preview') ||
-        node.classList.contains('panel-ts') ||
-        node.classList.contains('panel-time')
-      )
-        return '';
-    }
+    // The panel chrome (buttons, preview, timestamps) is panelCopy.js's
+    // one list.
+    if (node.nodeType === 1 && window.PanelCopy.shouldSkip(node)) return '';
     let out = '';
     for (let i = 0; i < node.childNodes.length; i++) {
       const child = node.childNodes[i];
@@ -16236,6 +16664,36 @@
         _finishedSubagentTasks.values().next().value,
       );
     }
+  }
+
+  /**
+   * Close the tab of a sub-agent the daemon reports finished: its
+   * `subagentDone`, or the closed-history announcement a replay makes
+   * for a child that finished while this surface was away.
+   *
+   * A finished sub-agent's tab closes on every surface, with or
+   * without a fan-out panel to book the close against
+   * (rpAfterTabsClosed): the finished-history announcement of a replay
+   * that follows (isDone, not `reopened`) keeps it closed here too,
+   * instead of re-creating it on the surface whose parent transcript
+   * was never fetched.
+   *
+   * @param {object} doneTab The sub-agent's open tab.
+   */
+  function closeFinishedSubagentTab(doneTab) {
+    if (doneTab.currentTaskId)
+      rememberFinishedSubagent(String(doneTab.currentTaskId));
+    // A sub-agent finishing is not the task finishing: the parent
+    // task keeps running, so its report opens in the background.
+    openReadyReportTabs(doneTab.id, false);
+    doneTab.isDone = true;
+    setTabRunning(doneTab, false);
+    if (doneTab.id === activeTabId) {
+      setRunningState(false);
+      if (inputContainer) inputContainer.style.display = 'none';
+    }
+    _rpClosedSubagentTabs.add(doneTab.id);
+    closeTab(doneTab.id, true);
   }
   let _rpSyncing = false;
   // Sub-agent tabs a collapse wants closed while a transcript is being
@@ -16543,11 +17001,15 @@
     // by tab id too; left on the old id, a later worktree_result,
     // reconnect or close would find none of them and the pending frame
     // would skip its collapse work.
-    retagFileLinks(
-      oldId,
-      newTabId,
-      activeTabId === oldId ? O : tab.outputFragment,
-    );
+    const root = activeTabId === oldId ? O : tab.outputFragment;
+    retagFileLinks(oldId, newTabId, root);
+    // So are the fan-outs this sub-agent ran itself (their panels'
+    // _rpParentTabId): left on the old id, a nested child reopened from
+    // one would be resumed under a parent that no longer exists.
+    if (root && root.querySelectorAll) {
+      for (const p of root.querySelectorAll('.tc-run-parallel'))
+        if (p._rpParentTabId === oldId) p._rpParentTabId = newTabId;
+    }
     if (_tailSweepTabId === oldId) _tailSweepTabId = newTabId;
     if (activeTabId === oldId) activeTabId = newTabId;
     // A retag is an identity rename of the tab already on screen, not
@@ -16557,8 +17019,7 @@
     // The represented CHAT tab is tracked even while a content tab is
     // active, so it must follow the rename on its own.
     if (reportedChatTabId === oldId) reportChatTab(newTabId);
-    armCloseShield(oldId);
-    api.closeTab({tabId: oldId});
+    api.closeTab({tabId: oldId, ack: armCloseShield(oldId)});
   }
 
   function rpOwnerTabIdForContainer(container, fallbackTabId) {
@@ -17434,6 +17895,7 @@
     pendingReplayImages.clear();
     waiting.forEach(img => {
       if (replayImageObserver) replayImageObserver.observe(img);
+      else requestReplayImage(img);
     });
   }
 
@@ -17581,7 +18043,14 @@
    * pieces are still due, and a reply sent whole as it is.
    */
   function joinFileContentChunks(ev) {
-    const key = [ev.tabId || '', ev.token || '', ev.path || ''].join('\n');
+    // The same path on two machines is two files (a registered
+    // machine's daemon stamps its pieces): each joins with its own.
+    const key = [
+      ev.machine || '',
+      ev.tabId || '',
+      ev.token || '',
+      ev.path || '',
+    ].join('\n');
     const head = fileContentChunks.get(key);
     if (head) head.content += String(ev.content || '');
     if (ev.more === true) {
@@ -17602,11 +18071,14 @@
   /**
    * Whether a fileContent reply answers a picture request (see
    * requestInlineImage); if so it is settled here and never opens a
-   * tab.
+   * tab.  A picture nobody awaits any more (its request was forgotten
+   * when the connection dropped, or answered already) is dropped: no
+   * one asked for a file tab.
    */
   function handleInlineImageContent(ev) {
-    const onDone = ev.token ? pendingInlineImages.get(ev.token) : undefined;
-    if (!onDone) return false;
+    if (!/^img-\d+$/.test(String(ev.token || ''))) return false;
+    const onDone = pendingInlineImages.get(ev.token);
+    if (!onDone) return true;
     pendingInlineImages.delete(ev.token);
     onDone(inlineImageDataUri(ev));
     return true;
@@ -17639,7 +18111,7 @@
     if (!root || !root.querySelectorAll) return;
     const owner = String(ownerTabId === undefined ? activeTabId : ownerTabId);
     const machine = tabBoundMachine(owner);
-    const wd = transcriptFileWorkDir(machine, workDir);
+    const wd = transcriptFileWorkDir(machine, workDir, owner);
     const imgs = root.querySelectorAll('img[src]');
     // One request per distinct src; the images that share it.
     const bySrc = new Map();
@@ -17948,6 +18420,10 @@
         last = last.previousSibling;
       }
       if (_isPathSpan(last)) {
+        // The span leaves the registry with the DOM: the merged path
+        // registers its own (a reconnect must not re-ask about the
+        // fragment, nor a refused check retain it).
+        _pendingFileLinkSpans.delete(last);
         el.replaceChild(document.createTextNode(last.textContent), last);
       }
     }
@@ -18343,8 +18819,15 @@
         if (typeof ev.callId === 'number') c.dataset.callId = String(ev.callId);
         // finish is never interruptible: its result IS the task's.
         if (ev.name !== 'finish') {
+          // The owning tab's id is read at click time: a sub-agent tab
+          // may be renamed meanwhile (retagSubagentTab), and the daemon
+          // resolves the interrupt by the tab it addresses now.
+          const ownerTab = getTab(evOwnerTab);
           addStopButton(c, () => {
-            const req = {tabId: evOwnerTab, toolName: ev.name || ''};
+            const req = {
+              tabId: ownerTab ? ownerTab.id : evOwnerTab,
+              toolName: ev.name || '',
+            };
             if (typeof ev.callId === 'number') req.callId = ev.callId;
             api.interruptTool(req);
           });
@@ -18486,7 +18969,22 @@
               ev.ts,
             ),
           );
+          // The tool returned: the question is answered.  A tab still
+          // answering it (the answer was given on another surface while
+          // this one was away, so its askUserDone was missed and the
+          // reconnect's replay brings the result) leaves answer mode,
+          // keeping the draft and the parked prompt; a question still
+          // open is re-announced by the daemon after the replay.  A
+          // replay decides that once its whole transcript is in
+          // (reconcileReplayedQuestion): the call answered here may be
+          // an earlier one asking the same words as the open question.
+          const answered = resultTarget.classList.contains(
+            'tc-question-pending',
+          );
           setQuestionPanelPending(resultTarget, false);
+          resultTarget.classList.add('tc-question-answered');
+          const qTab = answered && !_replaying ? getTab(evOwnerTab) : null;
+          if (qTab && qTab.askPendingQuestion !== null) clearAskForTab(qTab);
         } else {
           const op = mkEl('div', 'bash-panel');
           const opContent = mkEl('div', 'bash-panel-content');
@@ -18502,7 +19000,6 @@
       }
       case 'system_output': {
         if (tState.bashPanel) {
-          if (!tState.bashBuf) tState.bashBuf = '';
           tState.bashBuf += ev.text || '';
           if (!tState.bashRaf) {
             tState.bashRaf = requestAnimationFrame(() => {
@@ -19906,6 +20403,87 @@
   }
 
   /**
+   * Whether the CHATS view is narrowed by the search box or a filter
+   * drop-down.  The page-one cache holds the plain view only.
+   * @returns {boolean}
+   */
+  function historyViewFiltered() {
+    return !!(
+      (historySearch && historySearch.value) ||
+      historyFilter('hf-tag') ||
+      historyFilter('hf-machine') ||
+      historyFilter('hf-workdir')
+    );
+  }
+
+  /**
+   * Paint the page-one rows the previous visit left in storage, once
+   * per page and before its first request goes out.  Over a slow link
+   * the first reply takes seconds (it queues behind the transcript of
+   * the tab on screen), and the panel need not sit on its placeholder
+   * meanwhile: the reply replaces the rows when it lands (one that
+   * equals them keeps the DOM, see renderHistory).  Nothing is painted
+   * over rows already on screen or into a filtered view, and no later
+   * page is asked for from cached rows (loadMoreHistory): the caller's
+   * resetHistoryPagination marks page one in flight right after.
+   */
+  function paintCachedHistory() {
+    if (historyCachePainted) return;
+    historyCachePainted = true;
+    if (allHistSessions.length > 0 || historyViewFiltered()) return;
+    let cached = null;
+    try {
+      cached = JSON.parse(
+        window.localStorage.getItem(HISTORY_CACHE_KEY) || 'null',
+      );
+    } catch (_e) {
+      return;
+    }
+    if (!cached || !Array.isArray(cached.sessions) || !cached.sessions.length)
+      return;
+    adoptMachineLabels(cached.machineLabels || {});
+    historyCachePainting = true;
+    try {
+      renderHistory(cached.sessions, 0, historyGeneration);
+    } finally {
+      historyCachePainting = false;
+    }
+  }
+
+  /**
+   * Keep the plain view's page one for the next page load
+   * (paintCachedHistory).  An empty page is kept too, so a list the
+   * user emptied is not painted back from an older visit.
+   * @param {Array<Object>} sessions The rows of the reply.
+   * @param {Object} machineLabels The reply's machine labels.
+   */
+  function rememberHistoryPage(sessions, machineLabels) {
+    if (historyViewFiltered()) return;
+    try {
+      window.localStorage.setItem(
+        HISTORY_CACHE_KEY,
+        JSON.stringify({sessions, machineLabels}),
+      );
+    } catch (_e) {
+      /* private browsing or a full store: the next load paints nothing early */
+    }
+  }
+
+  /**
+   * Note machine labels from a `history` reply (or the cached page):
+   * the rows' machine chips are built with them, and the chat header's
+   * drop-down, the Machines subpanel and the Task Info panel's Machine
+   * row follow a change.
+   * @param {Object} labels Machine name to label.
+   */
+  function adoptMachineLabels(labels) {
+    if (!noteMachineLabels(labels)) return;
+    renderChatMachine();
+    if (lastMachinesEvent) renderMachines(lastMachinesEvent);
+    updateMetaTaskDetails(metaShownSettings);
+  }
+
+  /**
    * Fetch the next history page, with a "Loading..." row at the end of
    * the list, unless one is in flight or the last page was short.
    * Taken by the list's scroll handler near its bottom, and by
@@ -19914,7 +20492,7 @@
    * scroll event would ever ask for the page then.
    */
   function loadMoreHistory() {
-    if (historyLoading || !historyHasMore) return;
+    if (historyLoading || !historyHasMore || historyCachePainting) return;
     historyLoading = true;
     const loader = mkEl('div', 'sidebar-loading');
     loader.id = 'history-loader';
@@ -20152,13 +20730,21 @@
   // it is the one the user makes when they come back -- so the jingle
   // sounds then, once per finish missed, one after the other.
   let victoryDeferred = [];
+  // The list a player waits in: victoryDeferred, or the `next` of the
+  // player sounding ahead of it.  A player that fails while it waits is
+  // replaced there, so the turn still comes to the ones after it.
+  const victoryWaitingIn = new WeakMap();
+  // The players that already are the second fetch of a clip.
+  const victoryRetried = new WeakSet();
 
   /**
    * Play the victory jingle once, unless the page has none or the user
    * muted it.  A `play()` the autoplay policy refuses is kept for the
-   * next gesture (victoryDeferred); any other failure (an undecodable
-   * clip, an engine without promises) is dropped: the finished tab
-   * shows the result either way.
+   * next gesture (victoryDeferred); a clip whose download or decoding
+   * fails is fetched once more on a fresh player (see
+   * victoryPlayerFailed); any other failure (an engine without
+   * promises, a second failure) is dropped: the finished tab shows
+   * the result either way.
    */
   function playVictorySound() {
     const url = window.__VOICE__ && window.__VOICE__.victoryAudioUrl;
@@ -20171,23 +20757,111 @@
    * Start *player*, then the deferred players *next* in turn (each
    * when the one before ends or fails).  A refusal by the autoplay
    * policy puts *player* and *next* back in the deferred queue, in
-   * order, for the next gesture.
+   * order, for the next gesture; any other failure of *player* goes
+   * to victoryPlayerFailed.
    *
    * @param {HTMLAudioElement} player The jingle to sound now.
    * @param {Array<HTMLAudioElement>} next The ones to sound after it.
    */
   function startVictoryPlayer(player, next) {
-    player.onended = () => soundVictoryInTurn(next);
-    player.onerror = () => soundVictoryInTurn(next);
+    victoryWaitingIn.delete(player);
+    // Muted since this one was queued (the Settings box here, or on
+    // another page of the profile): its turn sounds nothing, and the
+    // ones after it are dropped with it.
+    if (!victorySoundEnabled()) {
+      next.forEach(waiting => victoryWaitingIn.delete(waiting));
+      next.length = 0;
+      return;
+    }
+    next.forEach(waiting => victoryWaitingIn.set(waiting, next));
+    // One outcome per start.  The clip ended, or was interrupted: the
+    // user agent paused it (tab backgrounded, audio focus lost) and
+    // `ended` never follows, as for playTalkAudio -- so `pause` passes
+    // the turn too, else the ones after it would wait for ever.  The
+    // player is retired first (handlers off, source dropped): a resume
+    // cannot play it over the next clip, and a natural end, which
+    // fires `pause` just before `ended`, passes the turn once.  A
+    // play() whose clip has not loaded yet is still pending then, and
+    // the pause rejects it (AbortError): that is the same outcome
+    // reported again, not a failure of the retired player, which would
+    // fetch its emptied source and pass the turn a second time.  A
+    // load that fails reports twice too (the `error` event and the
+    // rejected play()).  A refusal by the autoplay policy is no
+    // outcome: the player waits for the next gesture, which starts it
+    // afresh, and a load that fails meanwhile is still heard (it is
+    // replaced where it waits).
+    let settled = false;
+    const over = () => {
+      if (settled) return;
+      settled = true;
+      retireTalkPlayer(player);
+      soundVictoryInTurn(next);
+    };
+    const failed = err => {
+      if (settled) return;
+      if (err && err.name === 'NotAllowedError') {
+        deferVictory(player, next);
+        return;
+      }
+      settled = true;
+      victoryPlayerFailed(player, next);
+    };
+    player.onended = over;
+    player.onpause = over;
+    player.onabort = over;
+    player.onerror = () => failed(null);
     try {
       const played = player.play();
-      if (played && typeof played.catch === 'function') {
-        played.catch(err => {
-          if (err && err.name === 'NotAllowedError')
-            victoryDeferred.push(player, ...next);
-        });
-      }
+      if (played && typeof played.catch === 'function') played.catch(failed);
     } catch (_e) {}
+  }
+
+  function deferVictory(player, next) {
+    victoryDeferred.push(player, ...next);
+    victoryWaitingIn.set(player, victoryDeferred);
+    next.forEach(waiting => victoryWaitingIn.set(waiting, victoryDeferred));
+  }
+
+  /**
+   * *player*'s clip did not load or play (Chromium drops every request
+   * in flight when an interface of the host appears or goes away, as
+   * when a container starts beside the daemon): the clip is fetched
+   * once more on a fresh player, which takes *player*'s place -- in
+   * the list *player* waits in (the deferred queue, or the `next` of
+   * the player sounding ahead of it) when its turn is still to come,
+   * else sounding now, ahead of *next*.  A player that is that second
+   * fetch is dropped instead, and the turn goes on without it.
+   *
+   * @param {HTMLAudioElement} player The player that failed.
+   * @param {Array<HTMLAudioElement>} next The ones to sound after it.
+   */
+  function victoryPlayerFailed(player, next) {
+    // Dealt with: nothing more is heard from it (a waiting player's
+    // `onerror` included).
+    clearTalkPlayer(player);
+    let fresh = null;
+    if (!victoryRetried.has(player)) {
+      fresh = new window.Audio(player.src);
+      victoryRetried.add(fresh);
+    }
+    const waitingIn = victoryWaitingIn.get(player);
+    const at = waitingIn ? waitingIn.indexOf(player) : -1;
+    if (at >= 0) {
+      if (fresh) {
+        waitingIn[at] = fresh;
+        victoryWaitingIn.set(fresh, waitingIn);
+        // A failure while it waits, which nothing else would hear,
+        // takes it out of the list (its turn re-sets the handler).
+        fresh.onerror = () => victoryPlayerFailed(fresh, []);
+      } else {
+        waitingIn.splice(at, 1);
+      }
+      victoryWaitingIn.delete(player);
+    } else if (fresh) {
+      startVictoryPlayer(fresh, next);
+    } else {
+      soundVictoryInTurn(next);
+    }
   }
 
   function soundVictoryInTurn(players) {
@@ -20338,38 +21012,26 @@
   // single conversation is on screen, because then there is no other tab it
   // could belong to and nothing to leak into; dropping it there would merely
   // throw away the output of an ordinary one-tab session.
+  //
+  // "I have not adopted a task" is NOT proof of ownership: a tab that owns
+  // nothing fails closed for every task-keyed message, the header
+  // aggregates included (the daemon addresses every copy of those to the
+  // tab it is for, so the tab's own ones pass isForActiveTab by tabId).
   function isForActiveTaskId(ev) {
     const evTaskId = ev ? ev.taskId : undefined;
     if (evTaskId === undefined || evTaskId === null || evTaskId === '') {
       return isOnlyActiveConversation();
     }
     const owned = tabTaskId(getTab(activeTabId));
-    if (owned === '') return mayPrecedeAdoption(ev);
-    return owned === String(evTaskId);
+    return owned !== '' && owned === String(evTaskId);
   }
 
-  // The only message types that legitimately reach a tab BEFORE it knows
-  // which task it is running. The daemon reports these two aggregates as soon
-  // as it starts working, which can be before the reply carrying the task id
-  // has been processed, and neither is adopted (see the adoption guard in the
-  // streaming branch) -- so a tab that owns nothing yet would never be able
-  // to show its own header counters if they were held to the same rule as a
-  // transcript.
+  // The message types that reach a tab BEFORE it knows which task it is
+  // running. The daemon reports these two aggregates as soon as it starts
+  // working, which can be before the reply carrying the task id has been
+  // processed, so neither drives adoption (see the adoption guard in the
+  // streaming branch).
   const PRE_ADOPTION_TYPES = new Set(['result', 'usage_info']);
-
-  /**
-   * True when `ev` may be shown in a visible tab that owns no task yet.
-   *
-   * "I have not adopted a task" is NOT proof of ownership, so a tab in that
-   * state fails closed for everything that carries a task's words: those are
-   * only ever produced for the tab that asked for them, and that tab proves
-   * itself with a tabId or with the pendingTaskId it claimed when it
-   * submitted. Only the header aggregates are exempt, and only because they
-   * are the ones that legitimately race ahead of adoption.
-   */
-  function mayPrecedeAdoption(ev) {
-    return !!ev && PRE_ADOPTION_TYPES.has(ev.type);
-  }
 
   /**
    * True when the visible tab may take `ev`'s taskId as its own.
@@ -20463,10 +21125,6 @@
     // utterance to the chat tab whose work produced it.
     const id = chatTargetTabId();
     return {tabId: id, taskId: tabTaskId(getTab(id))};
-  };
-  // The visible tab's id (the tests read it).
-  window.kissActiveTabId = function () {
-    return activeTabId;
   };
   // tableak-coverage:end
 
@@ -20642,6 +21300,10 @@
           daemonConnected = false;
           daemonWasDown = daemonEverConnected;
           chatStayedOnScreen = ev.reconnecting === true;
+          // The status and log asked of the dropped connection are not
+          // coming.
+          scmStatusPending = false;
+          scmLogPending = false;
         }
         if (ev.connected) {
           // A password-protected transport announces `connected` twice
@@ -20675,8 +21337,31 @@
             // issued before the outage was either processed (the id is
             // gone) or lost with the socket (the tab is back), and a
             // shield left armed would hide a tab another surface
-            // re-opened under that id while this one was away.
-            pendingCloseTabs.clear();
+            // re-opened under that id while this one was away.  An
+            // open issued before the outage likewise: processed (the
+            // id is listed) or lost (the tab goes, as its shield would
+            // never be acknowledged).  It is not announced again: a
+            // lost acknowledgment is no lost open, and a second
+            // `openTab` of an id another surface closed meanwhile is a
+            // new open to the daemon, bringing the closed tab back on
+            // every surface.  A close or open the transport still owes
+            // (`unconfirmed`: queued during the outage, re-sent on this
+            // connection, or held behind a batch awaiting its `pong`)
+            // is on its way ahead of this `ready` and keeps its shield
+            // until the daemon answers it -- the daemon decides an
+            // open once per token, so a re-sent one brings nothing
+            // back (OpenTabOutcome.REPLAYED).
+            const owed = new Set(
+              (Array.isArray(ev.unconfirmed) ? ev.unconfirmed : []).map(
+                f => f && f.ack,
+              ),
+            );
+            pendingCloseTabs.forEach((shield, id) => {
+              if (!owed.has(shield.ack)) pendingCloseTabs.delete(id);
+            });
+            pendingOpenTabs.forEach((pending, id) => {
+              if (!owed.has(pending.ack)) pendingOpenTabs.delete(id);
+            });
             sendReady();
           }
           // modelpick-coverage:start
@@ -20803,9 +21488,7 @@
           break;
         }
         const stTab = getTab(activeTabId);
-        const shownChatId = String(
-          (stTab && stTab.backendChatId) || activeTabId || '',
-        );
+        const shownChatId = shareChatIdOf(stTab);
         // The tab may have moved on to another chat meanwhile (a run
         // from another surface rebinds it, to another machine too):
         // the reply, echoing the chat asked for, would splice the new
@@ -20813,6 +21496,21 @@
         // works again for the chat on screen.
         if (ev.chatId && String(ev.chatId) !== shownChatId) {
           setShareInFlight(false);
+          break;
+        }
+        // The history must be the bound machine's (a forwarded reply
+        // is stamped with its origin; this daemon's own carries none):
+        // one from anywhere else -- the daemon answered a machine's
+        // chat from its own history, or the binding changed meanwhile
+        // -- would export the wrong, or an empty, page.  Refused,
+        // visibly, and the button works again.
+        const origin = String(ev.machine || '');
+        const bound = tabBoundMachine(activeTabId);
+        if (origin !== bound) {
+          notifyShareFailed(
+            'no history of this chat came from ' + (bound || 'this daemon'),
+          );
+          flashShareBtn(false);
           break;
         }
         sendShareExport(
@@ -20977,11 +21675,12 @@
         // trajectory-coverage:end
         renderTabBar();
         refreshHistory();
-        syncMobileInputDrawer();
         // Only news of a task that IS running may move the user. A task
         // finishing must not: the launch already brought them to it, and the
         // result they were brought to see is the last thing to pull them off.
         if (ev.running) switchToLatestRunningTab();
+        // After the switch: the phone's composer follows the chat on screen.
+        syncMobileInputDrawer();
         // runstart-coverage:start
         if (justStarted && evTab.id === activeTabId) showChatForRun();
         // runstart-coverage:end
@@ -21152,19 +21851,19 @@
         // it replaces the list frozen into the page at load time so the
         // panel repaints right away. The first `userCount` entries are
         // the user's own (editable, deletable) rows. An in-place editor
-        // still open on a row is closed when its index may point at
-        // another promptlet now; a row that still holds the promptlet
-        // it edits keeps the editor, with its draft (renderTricks
-        // re-attaches it).
+        // still open follows the promptlet it edits to its row in the
+        // new list (another window deleting a promptlet above it shifts
+        // the indices), keeping its draft (renderTricks re-attaches
+        // it); it is closed when that promptlet is no longer one of
+        // the user's own.
         const shown = window.__TRICKS__ || [];
         window.__TRICKS__ = Array.isArray(ev.tricks) ? ev.tricks : [];
         window.__MY_TRICKS_COUNT__ =
           typeof ev.userCount === 'number' ? ev.userCount : 0;
-        if (
-          editingTrickIndex >= window.__MY_TRICKS_COUNT__ ||
-          window.__TRICKS__[editingTrickIndex] !== shown[editingTrickIndex]
-        ) {
-          closeTrickEditor();
+        if (editingTrickIndex >= 0) {
+          const at = window.__TRICKS__.indexOf(shown[editingTrickIndex]);
+          if (at < 0 || at >= window.__MY_TRICKS_COUNT__) closeTrickEditor();
+          else editingTrickIndex = at;
         }
         confirmTrickAdd(window.__TRICKS__);
         renderTricks(window.__TRICKS__);
@@ -21183,17 +21882,20 @@
       // that sent it is gone with its machine): that save must not
       // be left for a later reply of the same action and name to
       // answer once the subpanels are back on its machine.
-      case 'cronJobs':
-        if (panelReplyShown(ev)) renderCronJobs(ev);
-        else
-          takePendingSave(
-            pendingCronSaves,
-            ev.action,
-            ev.jobId,
-            replyMachine(ev),
-          );
+      case 'cronJobs': {
+        // The reply answers its save whether or not the subpanel shows
+        // the machine it is from.
+        const saved = takePendingSave(
+          pendingCronSaves,
+          ev.action,
+          ev.jobId,
+          replyMachine(ev),
+          ev.generation,
+        );
+        if (panelReplyShown(ev)) renderCronJobs(ev, saved);
         break;
-      case 'machines':
+      }
+      case 'machines': {
         // This daemon's registry is the drop-down's list whichever
         // machine the Machines subpanel shows; the subpanel paints the
         // registry of the machine it shows.
@@ -21202,22 +21904,25 @@
           // The reply may relabel the machine the Machine row names.
           updateMetaTaskDetails(metaShownSettings);
         }
-        if (!panelReplyShown(ev)) {
-          takePendingSave(
-            pendingMachineSaves,
-            ev.action,
-            ev.name,
-            replyMachine(ev),
-          );
-          break;
-        }
+        const saved = takePendingSave(
+          pendingMachineSaves,
+          ev.action,
+          ev.name,
+          replyMachine(ev),
+          ev.generation,
+        );
+        if (!panelReplyShown(ev)) break;
         lastMachinesEvent = {
           machines: ev.machines,
           error: ev.error,
           forwarded: ev.forwarded,
         };
-        renderMachines(ev);
+        // Only a reply ends the refresh button's spin: the relabel
+        // repaint from a `history` reply (below) is not one.
+        setRefreshSpin(machinesRefreshBtn, false);
+        renderMachines(ev, saved);
         break;
+      }
       case 'machineWorkDirs':
         handleMachineWorkDirs(ev);
         break;
@@ -21254,16 +21959,12 @@
         if (panelReplyShown(ev)) renderRecommendations(ev);
         break;
       case 'history':
-        // The labels first: the rows' machine chips are built with
-        // them (and the chat header's drop-down and the Machines
-        // subpanel follow).
-        if (noteMachineLabels(ev.machineLabels || {})) {
-          renderChatMachine();
-          if (lastMachinesEvent) renderMachines(lastMachinesEvent);
-          // The Task Info panel's Machine row carries the label too.
-          updateMetaTaskDetails(metaShownSettings);
-        }
+        // The labels first: the rows' machine chips are built with them.
+        adoptMachineLabels(ev.machineLabels || {});
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
+        if ((ev.generation || 0) === historyGeneration && !(ev.offset || 0)) {
+          rememberHistoryPage(ev.sessions || [], ev.machineLabels || {});
+        }
         // A stale reply (an older generation, dropped by renderHistory)
         // must not rebuild the filters either: its date range is the
         // previous query's, and its machine or directory list may lack
@@ -21290,6 +21991,15 @@
         // A list from another machine than the tab's (asked before its
         // machine pick changed) does not answer the mention typed now.
         if ((ev.machine || '') !== tabMachine(activeTabId)) break;
+        // Nor does a list for a directory the tab no longer browses
+        // (the workspace moved while the old one's index was building:
+        // the reply echoes the workDir it was asked for, and
+        // adoptWorkDir asked again for the new one).
+        if (
+          ev.workDir !== undefined &&
+          ev.workDir !== tabBrowseWorkDir(activeTabId)
+        )
+          break;
         const filesCtx = getAtCtx();
         if (!filesCtx) {
           // A stale ``files`` reply from a prior ``@`` query must not
@@ -21302,6 +22012,7 @@
         if (ev.prefix !== undefined && ev.prefix !== filesCtx.query) {
           break;
         }
+        if (acDismissed) break;
         if (ev.loading && ev.machine) {
           // The machine was still indexing its folder when the daemon
           // stopped waiting for its list (a minute): ask again.  This
@@ -21336,10 +22047,11 @@
         const askTab = getTab(askTabId);
         if (!askTab) break;
         const askQuestion = ev.question || '';
+        const askQuestionId =
+          typeof ev.questionId === 'string' ? ev.questionId : '';
         // Before the duplicate check: a new ask of the same text must
         // still take its own id (a replay re-sends the same one).
-        askTab.askQuestionId =
-          typeof ev.questionId === 'string' ? ev.questionId : '';
+        askTab.askQuestionId = askQuestionId;
         // Duplicate delivery of the SAME pending question (the server
         // re-emits it on every session replay so clients that connect
         // mid-question also show the modal). Re-initializing would
@@ -21347,6 +22059,14 @@
         // another client reloaded; a genuinely new question always
         // follows an askUserDone, which resets the state to null.
         if (askTab.askPendingQuestion === askQuestion) break;
+        // Another question is open here (its close was missed while
+        // this surface was away): its answer draft and the prompt
+        // parked before it come back first, losslessly, rather than
+        // the draft being parked as the prompt over that prompt.
+        if (askTab.askPendingQuestion !== null) {
+          retireAskForTab(askTab);
+          askTab.askQuestionId = askQuestionId;
+        }
         enterAnswerMode(askTab, askQuestion);
         const draft = savedAskDrafts && savedAskDrafts[askTab.id];
         // The question this client was already answering when it
@@ -21420,13 +22140,22 @@
         // An unaddressed error answers a window-level request: an
         // update started from the settings sheet or a promptlet add
         // from the promptlets sheet.  Both sheets cover the transcript,
-        // so the sheet that asked shows the answer too.
+        // so the sheet that asked shows the answer too.  A refused
+        // ~/.kiss mutation names the command it answers (`command`,
+        // commands.py _send_error_to_sender) and reaches that one
+        // pending operation; an error naming none (an update's) is
+        // offered to every operation awaiting an answer, as before.
         if (!isAddressed(ev)) {
-          relayUpdateStatus(ev.text, true);
-          relayTrickAddError(ev.text);
-          relayTrickEditError(ev.text);
+          const command = ev.command || '';
+          if (!command) relayUpdateStatus(ev.text, true);
+          if (!command || command === 'addTrick') relayTrickAddError(ev.text);
+          if (!command || command === 'editTrick') {
+            relayTrickEditError(ev.text);
+          }
           // Likewise a custom-model save this daemon refused.
-          restoreRefusedCustomModelSave('');
+          if (!command || command === 'saveMyModel') {
+            restoreRefusedCustomModelSave('');
+          }
         }
         break;
       case 'notice':
@@ -21716,8 +22445,10 @@
           if (ev.extra) {
             try {
               const bgExtra = JSON.parse(ev.extra);
-              if (bgExtra.work_dir && !isRootDir(bgExtra.work_dir))
+              if (bgExtra.work_dir && !isRootDir(bgExtra.work_dir)) {
                 teTab.workDir = bgExtra.work_dir;
+                teTab.workDirMachine = tabBoundMachine(teTab.id);
+              }
               if (typeof bgExtra.startTs === 'number' && bgExtra.startTs > 0)
                 teTab.t0 = bgExtra.startTs;
               // The replayed task's own end: 0 while it runs, never the
@@ -21855,7 +22586,13 @@
                 : 0;
             if (extra.work_dir && !isRootDir(extra.work_dir)) {
               const wdTab = getTab(activeTabId);
-              if (wdTab) wdTab.workDir = extra.work_dir;
+              if (wdTab) {
+                wdTab.workDir = extra.work_dir;
+                // The task ran on the machine the tab is bound to (the
+                // daemon announces a binding before the task's frames):
+                // its directory is one of that machine.
+                wdTab.workDirMachine = tabBoundMachine(wdTab.id);
+              }
             }
           } catch (_e) {}
         }
@@ -21921,7 +22658,7 @@
       case 'tabs_state':
         // A snapshot without a well-formed tab list is junk, not an
         // empty registry: ignore it rather than close every tab.
-        if (Array.isArray(ev.tabs)) reconcileTabs(ev.tabs);
+        if (Array.isArray(ev.tabs)) reconcileTabs(ev.tabs, ev.acks);
         break;
 
       case 'focusInput':
@@ -21951,6 +22688,10 @@
         if (ev.query !== undefined && ev.query !== inp.value) {
           break;
         }
+        // Asked before the user left the composer (or pressed Escape):
+        // the picker they closed stays closed until the next keystroke,
+        // as for a file list (the `files` reply).
+        if (acDismissed) break;
         renderCompletions(ev.completions || []);
         break;
       }
@@ -22191,10 +22932,14 @@
         }
         // A finished sub-agent's tab closed when it finished on the
         // live surface, so a page's own replay keeps it closed too: the
-        // child joins its fan-out panel, which can still reopen it.
-        if (subDone && !subTab && ev.closedHistory) {
+        // child joins its fan-out panel, which can still reopen it.  A
+        // tab still open here missed its subagentDone while this
+        // surface was away: the replay's terminal state closes it now,
+        // as the subagentDone would have.
+        if (subDone && ev.closedHistory) {
           if (rpPanel) rpRegisterSubagent(rpPanel, parentId, subTaskId, '');
-          _rpClosedSubagentTabs.add(ev.tab_id);
+          if (subTab) closeFinishedSubagentTab(subTab);
+          else _rpClosedSubagentTabs.add(ev.tab_id);
           break;
         }
         // The daemon's terminal state wins over a tab that missed its
@@ -22294,20 +23039,7 @@
       }
       case 'subagentDone': {
         const doneTab = getTab(ev.tab_id);
-        if (doneTab) {
-          if (doneTab.currentTaskId)
-            rememberFinishedSubagent(String(doneTab.currentTaskId));
-          // A sub-agent finishing is not the task finishing: the parent
-          // task keeps running, so its report opens in the background.
-          openReadyReportTabs(doneTab.id, false);
-          doneTab.isDone = true;
-          setTabRunning(doneTab, false);
-          if (doneTab.id === activeTabId) {
-            setRunningState(false);
-            if (inputContainer) inputContainer.style.display = 'none';
-          }
-          closeTab(doneTab.id, true);
-        }
+        if (doneTab) closeFinishedSubagentTab(doneTab);
         break;
       }
       default:
@@ -23077,8 +23809,31 @@
       sections[i].appendChild(ph);
     }
     if (!out.firstChild) return '';
-    highlightPending(out);
+    // The highlight pass re-linkifies every code block: still under
+    // the guard, as the replay above, so the paths of this already
+    // serialized page are neither registered nor asked about.
+    _shareExportReplay = true;
+    try {
+      highlightPending(out);
+    } finally {
+      _shareExportReplay = false;
+    }
     return out.outerHTML;
+  }
+
+  /**
+   * The chat id *tab*'s export is asked for and saved under: a
+   * sub-agent tab's own id (its page must never land over the parent
+   * chat's, whose persistent id its replay names as `backendChatId`),
+   * else the chat's persistent id, or the tab id of a chat without
+   * one yet.  The `share_tasks` reply echoes it, and is matched by it.
+   *
+   * @param {?Object} tab The tab on screen.
+   * @returns {string} The chat id.
+   */
+  function shareChatIdOf(tab) {
+    if (tab && tab.isSubagentTab) return String(tab.id);
+    return String((tab && tab.backendChatId) || activeTabId || '');
   }
 
   /**
@@ -23533,6 +24288,8 @@
     // switch that follows repaints the shared status row — a caller
     // that wants the numbers this replay painted must read them now.
     if (opts && opts.onEventsRendered) opts.onEventsRendered();
+    if (replayOwnerTab && !isAdjacentReplay && !_shareExportReplay)
+      reconcileReplayedQuestion(container, replayOwnerTab);
     collapseAllExceptResult(container, ownerTabId);
     // trajectory-coverage:start
     // A task that has ended reads as its text, one Trajectory panel
@@ -23873,7 +24630,11 @@
   function isSilentDiscardMessage(ev) {
     if (!ev || !ev.success) return false;
     const msg = ev.message || '';
-    return /^Discarded branch '[^']+'\.$/.test(msg);
+    // One paragraph per discarded worktree (a task may have made one
+    // in each of several repositories), every one plain.
+    return msg
+      .split('\n\n')
+      .every(line => /^Discarded branch '[^']+'\.$/.test(line));
   }
 
   function handleWorktreeResult(ev) {
@@ -24098,6 +24859,7 @@
         }
         if (e.key === 'Escape') {
           hideAC();
+          acDismissed = true;
           return;
         }
       }
@@ -24143,6 +24905,7 @@
     });
     inp.addEventListener('input', () => {
       autosizeComposer();
+      acDismissed = false;
       checkAutocomplete();
       requestGhost();
       histIdx = -1;
@@ -24151,6 +24914,7 @@
     inp.addEventListener('blur', () => {
       clearGhost();
       hideAC();
+      acDismissed = true;
     });
     inp.addEventListener('touchstart', handleInputTouchStart, {passive: true});
     inp.addEventListener('touchend', handleInputTouchEnd);
@@ -24200,13 +24964,18 @@
               ? ''
               : String(tab.currentTaskId);
           if (subTaskId) {
-            api.shareChatTasks({
-              tabId: activeTabId,
-              chatId: String(tab.id),
-              taskId: subTaskId,
-            });
+            api.shareChatTasks(
+              onMachine(
+                {
+                  tabId: activeTabId,
+                  chatId: shareChatIdOf(tab),
+                  taskId: subTaskId,
+                },
+                tabBoundMachine(activeTabId),
+              ),
+            );
           } else {
-            sendShareExport(String(tab.id), [], false);
+            sendShareExport(shareChatIdOf(tab), [], false);
           }
           return;
         }
@@ -24214,9 +24983,16 @@
         // reload the DOM holds only the one task the session replay
         // repainted — so the daemon is asked for every persisted
         // transcript of the chat first; the export is assembled in
-        // the `share_tasks` reply handler.
-        const chatId = String((tab && tab.backendChatId) || activeTabId || '');
-        api.shareChatTasks({tabId: activeTabId, chatId: chatId});
+        // the `share_tasks` reply handler.  A chat bound to a machine
+        // ran there: its history is that machine's, so the request is
+        // stamped with the binding (not with a pick for the next task,
+        // which has run nothing yet) and the daemon forwards it.
+        api.shareChatTasks(
+          onMachine(
+            {tabId: activeTabId, chatId: shareChatIdOf(tab)},
+            tabBoundMachine(activeTabId),
+          ),
+        );
       });
     }
     uploadBtn.addEventListener('click', () => {
@@ -24395,6 +25171,7 @@
       if (!document.body.classList.contains('remote-desktop')) {
         sidebarOverlay.classList.add('open');
       }
+      paintCachedHistory();
       requestHistoryFromStart();
       // The drawer may have missed task news while closed.
       refreshSidebarDataViews(false);
@@ -24410,6 +25187,7 @@
     if (newChatBtn) {
       newChatBtn.addEventListener('click', () => {
         openNewChat();
+        showMobileNewChatComposer();
       });
     }
     // The "..." overflow menu: working directory, mic, share, attach,
@@ -24762,6 +25540,7 @@
           setMetaDrawerOpen(false);
           if (!sidebar.classList.contains('open')) {
             sidebar.classList.add('open');
+            paintCachedHistory();
             requestHistoryFromStart();
           }
           sidebarOverlay.classList.remove('open');
@@ -25057,12 +25836,10 @@
         // Typed into a Custom Models box while an Add or Save awaits
         // its answer: a refusal must leave this newer typing alone
         // (restoreRefusedCustomModelSave).
-        if (
-          pendingCustomModelSave &&
-          e.target &&
-          CUSTOM_MODEL_BOX_IDS.includes(e.target.id)
-        ) {
-          pendingCustomModelSave.typed = true;
+        if (e.target && CUSTOM_MODEL_BOX_IDS.includes(e.target.id)) {
+          pendingCustomModelSaves.forEach(p => {
+            p.typed = true;
+          });
         }
       };
       settingsPanel.addEventListener('input', noteSettingsEdit);
@@ -25089,7 +25866,10 @@
       customModelSaveBtn.addEventListener('click', submitCustomModel);
     }
     if (customModelCancelBtn) {
-      customModelCancelBtn.addEventListener('click', cancelCustomModelEdit);
+      customModelCancelBtn.addEventListener('click', () => {
+        cancelCustomModelEdit();
+        placeRefusedCustomModelSaves();
+      });
     }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
@@ -25256,6 +26036,7 @@
           path: raw,
           workDir: wd === null ? workDirForTab(activeTabId) : wd,
           tabId: activeTabId,
+          token: fileOpenToken(),
         };
         const machine = el.getAttribute('data-path-machine') || '';
         if (machine) msg.machine = machine;
@@ -25895,7 +26676,7 @@
     // No workDir: the daemon runs every task in its one global working
     // directory (the chat header drop-down's pick on any surface).
     // The run's system prompt names the file open in the editor.
-    Object.assign(msg, editorContext(false));
+    Object.assign(msg, editorContext(false, msg.machine));
     api.send(msg);
     t0 = Date.now();
     endTs = 0;
@@ -25931,6 +26712,24 @@
     if (!root || !root.querySelectorAll) return null;
     const panels = root.querySelectorAll('.tc-question');
     return panels.length ? panels[panels.length - 1] : null;
+  }
+
+  /**
+   * A replay of *tab*'s own transcript into *container* is complete:
+   * the question the tab is answering is that transcript's LAST one
+   * (one call blocks the agent until it is answered), whatever earlier
+   * calls asked the same words.  A tab still answering a question whose
+   * answer the replay brought (given on another surface while this one
+   * was away, so its askUserDone was missed) leaves answer mode here,
+   * keeping the draft and the parked prompt; a question still open
+   * keeps its mode and is re-announced by the daemon after the replay.
+   */
+  function reconcileReplayedQuestion(container, tab) {
+    if (tab.askPendingQuestion === null) return;
+    const panels = container.querySelectorAll('.tc-question');
+    const last = panels.length ? panels[panels.length - 1] : null;
+    if (last && last.classList.contains('tc-question-answered'))
+      clearAskForTab(tab);
   }
 
   function setQuestionPanelPending(panel, pending) {
@@ -26045,11 +26844,21 @@
     }
   }
 
+  // Whether *candidate* mirrors *sourceTab*'s question: the tab itself,
+  // or another tab of the same backend chat asking the SAME question
+  // (by the daemon's question id, else by its words).  Sub-agents of
+  // one task share its chat id but each asks its own question and
+  // waits on its own answer: the answer to one leaves the others
+  // asking.
   function isAskSameChatTab(sourceTab, candidate) {
     if (!sourceTab || !candidate) return false;
     if (candidate.id === sourceTab.id) return true;
     const chatId = String(sourceTab.backendChatId || '');
-    return !!chatId && String(candidate.backendChatId || '') === chatId;
+    if (!chatId || String(candidate.backendChatId || '') !== chatId)
+      return false;
+    if (sourceTab.askQuestionId && candidate.askQuestionId)
+      return candidate.askQuestionId === sourceTab.askQuestionId;
+    return candidate.askPendingQuestion === sourceTab.askPendingQuestion;
   }
 
   // A tab's own task ended, so only its question dies. Sibling tabs sharing
@@ -26061,10 +26870,10 @@
   }
 
   function clearAskForMatchingChatTabs(sourceTab) {
-    for (let i = 0; i < tabs.length; i++) {
-      const tab = tabs[i];
-      if (isAskSameChatTab(sourceTab, tab)) retireAskForTab(tab);
-    }
+    // Matched before any is retired: retiring *sourceTab* forgets the
+    // question its mirrors are told by.
+    const mirrors = tabs.filter(tab => isAskSameChatTab(sourceTab, tab));
+    mirrors.forEach(retireAskForTab);
     syncAskComposer();
     renderTabBar();
   }
@@ -27266,7 +28075,7 @@
         : Number(group.dataset.statusTs);
     // The newest task of the chat that ran on THIS daemon, which the
     // header opens even when a remote copy of the chat is newer.
-    if (!(typeof session.machine === 'string' && session.machine.trim())) {
+    if (!sessionMachine(session)) {
       const knownLocal = Number(group.dataset.localStatusTs);
       if (!isFinite(knownLocal) || ms > knownLocal) {
         group.dataset.localStatusTs = String(isFinite(ms) ? ms : 0);
@@ -27294,9 +28103,9 @@
    * Show the machine chip on the header of a chat that lives only on a
    * remote machine (its rows are folded away by default, so the header
    * is what says where the chat is); a chat with a task on this daemon
-   * carries no chip, as the header opens it here.  The remote-only chat
-   * also loses its rename pencil (see startHistoryGroupRename), as its
-   * rows lose their favourite star.
+   * carries no chip, as the header opens it here.  The remote-only
+   * chat's rename pencil and delete button act on that machine's
+   * history.db (historyGroupMachine).
    */
   function syncHistoryGroupMachine(group) {
     const actions = group.querySelector(
@@ -27304,19 +28113,6 @@
     );
     const chip = actions.querySelector(':scope > .history-chat-machine');
     const remote = group._kissLastLocalSession ? null : group._kissLastSession;
-    const pencil = actions.querySelector(':scope > .history-chat-rename');
-    if (pencil) pencil.style.display = remote ? 'none' : '';
-    // The delete button too: the chat's rows live in the remote
-    // machine's history.db, which a deleteChat here cannot reach.
-    // A local chat's trash icon stays hidden while its Delete / Cancel
-    // question is open (a later history page re-syncs the header).
-    const del = actions.querySelector(':scope > .sidebar-item-delete');
-    if (del) {
-      const confirm = actions.querySelector(':scope > .sidebar-item-confirm');
-      if (remote && confirm) confirm.style.display = 'none';
-      const asking = !!confirm && confirm.style.display !== 'none';
-      del.style.display = remote || asking ? 'none' : '';
-    }
     if (
       chip &&
       (!remote || chip.textContent !== machineLabel(sessionMachine(remote)))
@@ -27330,6 +28126,15 @@
         actions.appendChild(label);
       }
     }
+  }
+
+  /**
+   * The machine whose history.db holds *group*'s chat: '' for a chat
+   * with a task on this daemon, else the machine of its latest row.
+   */
+  function historyGroupMachine(group) {
+    if (group._kissLastLocalSession || !group._kissLastSession) return '';
+    return sessionMachine(group._kissLastSession);
   }
 
   /**
@@ -27415,21 +28220,14 @@
    * from then on instead of the computed summary (an empty text brings
    * the computed one back); Escape cancels.  The box swallows the
    * header's own clicks and keys so typing never opens the chat.
-   * A chat with no task on this daemon is not renamed: the summary is
-   * stored here, where its rows (all from another machine) never read it.
+   * A chat with no task on this daemon is renamed on its machine,
+   * whose history.db holds its rows.
    */
   function startHistoryGroupRename(group, chatId) {
     const header = group.querySelector(':scope > .history-chat-header');
     const titleEl =
       header && header.querySelector(':scope > .history-chat-title');
-    if (
-      !titleEl ||
-      !chatId ||
-      !group._kissLastLocalSession ||
-      titleEl.querySelector('input')
-    ) {
-      return;
-    }
+    if (!titleEl || !chatId || titleEl.querySelector('input')) return;
     const original = titleEl.textContent;
     const input = document.createElement('input');
     input.type = 'text';
@@ -27448,14 +28246,25 @@
       group.classList.remove('renaming');
       if (save && text !== original) {
         // Shown at once; the next history refresh carries the daemon's
-        // copy (updateHistoryGroupHeader keeps this text until then).
-        // An emptied box asks for the computed summary back, which
-        // that refresh brings.
-        if (text) historyEditedSummaries.set(chatId, {text, ts: Date.now()});
-        else historyEditedSummaries.delete(chatId);
+        // copy (updateHistoryGroupHeader keeps this text until then),
+        // and a write the daemon could not make (no broadcast follows)
+        // is undone by the expiry's own refresh.  An emptied box asks
+        // for the computed summary back, which that refresh brings.
+        if (text) {
+          const edited = {text, ts: Date.now()};
+          historyEditedSummaries.set(chatId, edited);
+          scheduleHistoryTitleExpiry(edited);
+        } else {
+          historyEditedSummaries.delete(chatId);
+        }
         titleEl.textContent = text || original;
         header.setAttribute('aria-label', titleEl.textContent);
-        api.setChatSummary({chatId: chatId, summary: text});
+        api.setChatSummary(
+          historyWrite(
+            {chatId: chatId, summary: text},
+            historyGroupMachine(group),
+          ),
+        );
       } else {
         titleEl.textContent = original;
       }
@@ -27464,18 +28273,7 @@
     }
     input.addEventListener('click', e => e.stopPropagation());
     input.addEventListener('dblclick', e => e.stopPropagation());
-    input.addEventListener('keydown', e => {
-      e.stopPropagation();
-      // Enter / Escape inside an IME composition belong to the IME.
-      if (e.isComposing || e.keyCode === 229) return;
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        finish(true);
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        finish(false);
-      }
-    });
+    bindInlineInputKeys(input, finish);
     input.addEventListener('blur', () => finish(true));
     input.focus();
     input.select();
@@ -27532,7 +28330,13 @@
       // with a notice (one of its tasks runs) leaves it on screen.
       const del = makeSidebarDeleteConfirm({
         ariaLabel: 'Delete chat',
-        onConfirm: () => api.deleteChat({chatId: chatId, tabId: activeTabId}),
+        onConfirm: () =>
+          api.deleteChat(
+            historyWrite(
+              {chatId: chatId, tabId: activeTabId},
+              historyGroupMachine(group),
+            ),
+          ),
       });
       actions.appendChild(del.delBtn);
       actions.appendChild(del.confirmWrap);
@@ -27601,11 +28405,6 @@
     historyList.appendChild(group);
     if (chatId) historyChatGroups.set(chatId, group);
     return group;
-  }
-
-  /** Where a chat panel's task rows live: its body container. */
-  function historyGroupBody(group) {
-    return group.querySelector(':scope > .history-chat-body');
   }
 
   function historyDaySeparator(ts) {
@@ -27972,16 +28771,22 @@
    */
   function scheduleHistoryFavExpiry(deadline, now) {
     if (historyFavExpiryTimer && deadline >= historyFavExpiryDeadline) return;
-    if (historyFavExpiryTimer) clearTimeout(historyFavExpiryTimer);
+    clearHistoryFavExpiry();
     historyFavExpiryDeadline = deadline;
     historyFavExpiryTimer = setTimeout(
       () => {
-        historyFavExpiryTimer = null;
-        historyFavExpiryDeadline = Infinity;
+        clearHistoryFavExpiry();
         refreshHistory();
       },
       Math.max(0, deadline - now),
     );
+  }
+
+  /** Disarm the favourite-expiry refetch (scheduleHistoryFavExpiry). */
+  function clearHistoryFavExpiry() {
+    if (historyFavExpiryTimer) clearTimeout(historyFavExpiryTimer);
+    historyFavExpiryTimer = null;
+    historyFavExpiryDeadline = Infinity;
   }
 
   /**
@@ -27993,7 +28798,10 @@
     const now = Date.now();
     sessions.forEach(s => {
       if (s.task_id === undefined || s.task_id === null) return;
-      const key = String(s.task_id);
+      // A favourite is a write to the row's own machine's database: a
+      // row of another machine with the same task id does not
+      // acknowledge it.
+      const key = historyFavoriteKey(s);
       const pending = historyPendingFavorites.get(key);
       if (!pending) return;
       // A parked page is merged AGAIN when it finally lands: judge
@@ -28017,17 +28825,31 @@
         delete s._kissFavDaemon;
         // The last overlay retired: its reconciliation refetch has
         // nothing left to show.
-        if (historyPendingFavorites.size === 0 && historyFavExpiryTimer) {
-          clearTimeout(historyFavExpiryTimer);
-          historyFavExpiryTimer = null;
-          historyFavExpiryDeadline = Infinity;
-        }
+        if (historyPendingFavorites.size === 0) clearHistoryFavExpiry();
         return;
       }
       s._kissFavDaemon = daemonValue;
       s.is_favorite = pending.value;
       scheduleHistoryFavExpiry(pending.ts + 10000 + 100, now);
     });
+  }
+
+  /**
+   * The key of history row *s* in historyPendingFavorites: its task id,
+   * prefixed with its machine for a row of a remote machine.
+   */
+  function historyFavoriteKey(s) {
+    const machine = sessionMachine(s);
+    return machine ? machine + '\n' + s.task_id : String(s.task_id);
+  }
+
+  /**
+   * The CHATS-panel command *fields* for a row of *machine*: stamped
+   * `machine` when the row lives on a remote machine, whose daemon
+   * then applies it to its own history.db.
+   */
+  function historyWrite(fields, machine) {
+    return machine ? Object.assign({}, fields, {machine: machine}) : fields;
   }
 
   function renderHistory(sessions, offset, generation) {
@@ -28102,7 +28924,7 @@
         historyPendingRender = null;
         clearHistoryParkSafety();
         historyOffset = sessions.length;
-        historyHasMore = sessions.length >= 50;
+        historyHasMore = sessions.length >= HISTORY_PAGE;
         applyHistoryFilterVisibility();
         // The rows did not change, but the collapse DEFAULT may have:
         // a search whose results equal the loaded page (and the later
@@ -28226,8 +29048,7 @@
       div.dataset.sea = typeof s.sea === 'string' ? s.sea.trim() : '';
       div.dataset.tags = typeof s.tags === 'string' ? s.tags : '';
       // '' for the local daemon's rows, else the remote machine's name.
-      div.dataset.machine =
-        typeof s.machine === 'string' ? s.machine.trim() : '';
+      div.dataset.machine = sessionMachine(s);
       const itemText = historyRowText(s) || 'Untitled';
       div.dataset.tooltip = itemText;
 
@@ -28242,8 +29063,9 @@
       const actions = document.createElement('div');
       actions.className = 'sidebar-item-actions';
 
-      // A remote task's favourite flag lives on its own machine.
-      if (s.task_id && !div.dataset.machine) {
+      // A remote task's favourite flag lives on its own machine: the
+      // toggle is sent there.
+      if (s.task_id) {
         const favBtn = document.createElement('button');
         favBtn.type = 'button';
         favBtn.className = 'sidebar-item-favorite';
@@ -28273,12 +29095,17 @@
           // else refreshes the panel, the daemon's value must still
           // reappear at the bound.
           const ts = Date.now();
-          historyPendingFavorites.set(String(s.task_id), {value: next, ts});
+          historyPendingFavorites.set(historyFavoriteKey(s), {value: next, ts});
           scheduleHistoryFavExpiry(ts + 10000 + 100, ts);
           applyFavState();
           div.dataset.favorite = next ? '1' : '0';
           applyHistoryFilterVisibility();
-          api.setFavorite({taskId: s.task_id, isFavorite: next});
+          api.setFavorite(
+            historyWrite(
+              {taskId: s.task_id, isFavorite: next},
+              div.dataset.machine,
+            ),
+          );
         });
         actions.appendChild(favBtn);
       }
@@ -28288,16 +29115,19 @@
         );
       }
       // Delete the task from history.db (its sub-tasks go with it).
-      // A running task keeps its row (the daemon refuses anyway), and
-      // a remote task's row lives on its own machine.  The row is not
+      // A running task keeps its row (the daemon refuses anyway); a
+      // remote task is deleted by its own machine.  The row is not
       // removed here: the daemon's `tasks_updated` after the delete
       // refetches the history, and a refused delete (a sub-task still
       // running) leaves the row where it is.
-      if (s.task_id && !s.is_running && !div.dataset.machine) {
+      if (s.task_id && !s.is_running) {
+        const rowMachine = div.dataset.machine;
         const del = makeSidebarDeleteConfirm({
           ariaLabel: 'Delete task',
           onConfirm: () =>
-            api.deleteTask({taskId: s.task_id, tabId: activeTabId}),
+            api.deleteTask(
+              historyWrite({taskId: s.task_id, tabId: activeTabId}, rowMachine),
+            ),
         });
         actions.appendChild(del.delBtn);
         actions.appendChild(del.confirmWrap);
@@ -28416,7 +29246,8 @@
         historyList.appendChild(div);
       } else {
         const group = historyGroupFor(s);
-        const body = historyGroupBody(group);
+        // The chat panel's body, where its task rows live.
+        const body = group.querySelector(':scope > .history-chat-body');
         const before = Array.from(body.children).find(
           row => historyNewestFirst(div, row) < 0,
         );
@@ -28430,7 +29261,7 @@
     });
 
     historyOffset += sessions.length;
-    if (sessions.length < 50) {
+    if (sessions.length < HISTORY_PAGE) {
       historyHasMore = false;
     }
     refreshHistorySeaOptions();
@@ -29480,13 +30311,14 @@
   function switchSettingsMachine(machine) {
     settingsMachine = machine;
     // The other machine's answer to a save is not for these boxes.
-    pendingCustomModelSave = null;
+    pendingCustomModelSaves = [];
     clearConfigForm();
     myModels = [];
     renderCustomModels();
     if (machine) return;
     if (webToolsToggleBtn) webToolsToggleBtn.checked = localUseWebBrowser;
     if (memoryToggleBtn) memoryToggleBtn.checked = localUseMemory;
+    if (compactionToggleBtn) compactionToggleBtn.checked = localCompaction;
   }
 
   function openTricksPanel() {
@@ -29659,7 +30491,7 @@
       if (index >= 0 && index < (window.__MY_TRICKS_COUNT__ || 0)) {
         if (editingTrickIndex >= 0) continue;
         editingTrickIndex = index;
-        editingTrickRow = makeTrickEditor(index, newText, error);
+        editingTrickRow = makeTrickEditor(newText, error);
         renderTricks(tricks);
         focusTrickEditor(editingTrickRow);
       } else if (
@@ -29687,9 +30519,12 @@
     const tricks = window.__TRICKS__ || [];
     api.deleteTrick({text: tricks[index]});
     tricks.splice(index, 1);
-    // The indices shift: an editor open on another row would now edit
-    // the wrong promptlet, so it is closed.
-    closeTrickEditor();
+    // The rows below the deleted one move up: an editor open on one of
+    // them follows its promptlet, draft kept, as it does when another
+    // window deletes (the `tricksData` handler).  The editor row has
+    // Save / Cancel instead of a Delete button, so the edited promptlet
+    // is never the one deleted here.
+    if (index < editingTrickIndex) editingTrickIndex -= 1;
     window.__MY_TRICKS_COUNT__ = Math.max(
       0,
       (window.__MY_TRICKS_COUNT__ || 0) - 1,
@@ -29759,8 +30594,8 @@
     '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
 
   /**
-   * Build the promptlet row that is the in-place editor for the
-   * promptlet at *index*: a textarea holding *text* plus Save and
+   * Build the promptlet row that is the in-place editor (the one at
+   * `editingTrickIndex`): a textarea holding *text* plus Save and
    * Cancel buttons.  Enter (Ctrl/Cmd+Enter too) saves, Shift+Enter
    * inserts a newline, Escape cancels (keys typed into an IME
    * composition are left alone); clicks inside the editor never reach
@@ -29768,7 +30603,7 @@
    * attaches the row and then calls `focusTrickEditor`.  *error*, when
    * given, is the daemon's rejection of the draft, shown under it.
    */
-  function makeTrickEditor(index, text, error) {
+  function makeTrickEditor(text, error) {
     const div = document.createElement('div');
     div.className = 'sidebar-item tricks-item editing';
     const textarea = document.createElement('textarea');
@@ -29797,8 +30632,11 @@
       div.appendChild(note);
     }
     div.appendChild(actions);
+    // The row is the open editor, whose promptlet is the one at
+    // `editingTrickIndex` when the save happens: the row may have moved
+    // since it was built (a list change from another window).
     saveBtn.addEventListener('click', () =>
-      saveTrickEdit(index, textarea.value),
+      saveTrickEdit(editingTrickIndex, textarea.value),
     );
     cancelBtn.addEventListener('click', cancelTrickEdit);
     textarea.addEventListener('input', () => growTrickEditor(textarea));
@@ -29809,7 +30647,7 @@
         cancelTrickEdit();
       } else if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        saveTrickEdit(index, textarea.value);
+        saveTrickEdit(editingTrickIndex, textarea.value);
       }
     });
     div.addEventListener('click', e => e.stopPropagation());
@@ -29828,6 +30666,23 @@
     try {
       textarea.setSelectionRange(end, end);
     } catch (_e) {}
+  }
+
+  /**
+   * Give *el* (the editor's textarea, or one of its buttons) the focus
+   * back after a repaint detached it, with the caret where it was.
+   *
+   * @param {HTMLElement} el The element that had the focus.
+   */
+  function refocusTrickEditor(el) {
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    el.focus();
+    if (typeof start === 'number' && typeof end === 'number') {
+      try {
+        el.setSelectionRange(start, end, el.selectionDirection);
+      } catch (_e) {}
+    }
   }
 
   /** Size the promptlet editor's textarea to its content. */
@@ -29855,16 +30710,24 @@
     }
     const query = tricksSearch ? tricksSearch.value.trim().toLowerCase() : '';
     const userCount = window.__MY_TRICKS_COUNT__ || 0;
+    // Emptying the list blurs a focused editor textarea: its focus and
+    // caret are put back once it is re-attached (a list change from
+    // another window must not interrupt typing).
+    const focused =
+      editingTrickRow && editingTrickRow.contains(document.activeElement)
+        ? document.activeElement
+        : null;
     tricksList.innerHTML = '';
     tricks.forEach((text, index) => {
       if (query && !text.toLowerCase().includes(query)) return;
       if (index === editingTrickIndex && index < userCount) {
-        // The open editor is re-attached as is (draft and focus kept);
-        // a fresh one is attached first, then sized and focused.
+        // The open editor is re-attached as is (draft kept); a fresh
+        // one is attached first, then sized and focused.
         const fresh = !editingTrickRow;
-        if (fresh) editingTrickRow = makeTrickEditor(index, text);
+        if (fresh) editingTrickRow = makeTrickEditor(text);
         tricksList.appendChild(editingTrickRow);
         if (fresh) focusTrickEditor(editingTrickRow);
+        else if (focused) refocusTrickEditor(focused);
         return;
       }
       const div = document.createElement('div');
@@ -30119,6 +30982,12 @@
   // "user-edited" nor keep a fresher configData from repainting boxes
   // the user never touched.
   let customModelPreEditDirty = null;
+  // The pending saves whose `typed` stood when the edit began: the
+  // typing in the editor's boxes is the edit's own draft, discarded
+  // with it on Cancel, so the records get their pre-edit state back
+  // (restoring the boxes restores what stands in them) and the refused
+  // drafts a cancelled editor's typing held back can be placed.
+  let customModelPreEditTyped = null;
   // The values `startCustomModelEdit` loaded into the boxes: the edit
   // has unsaved changes while the boxes differ from them (see
   // `customModelEditIsDirty`).
@@ -30129,18 +30998,23 @@
   // snapshot (the boxes may have been populated before this panel
   // open's configData reply arrived).
   let lastCustomCfgValues = null;
-  // The saveMyModel sent and not answered yet ({machine, originalName
-  // -- null for an Add -- values, typed}).  Add and Save clear or put
-  // back the boxes at once (the daemon's myModelsData repaints the
-  // list), but the daemon may still refuse the save: the client-side
-  // validation knows only the last list, and another surface may have
-  // taken the name since, or the file could not be written.  The
-  // refusal -- an unaddressed `error` from this daemon, a forwarded
-  // myModelsData carrying `error` from a remote machine -- brings the
-  // draft back (restoreRefusedCustomModelSave) instead of losing it,
-  // unless the user typed into the boxes meanwhile (`typed`, set by
-  // the settings sheet's input listener): that newer typing stands.
-  let pendingCustomModelSave = null;
+  // The saveMyModels sent to the machine the sheet shows and not
+  // answered yet, oldest first ({originalName -- null for an Add --
+  // values, typed}); a switch of the sheet's machine empties it.
+  // Add and Save clear or put back the boxes at once (the daemon's
+  // myModelsData repaints the list), but the daemon may still refuse
+  // the save: the client-side validation knows only the last list,
+  // and another surface may have taken the name since, or the file
+  // could not be written.  The refusal -- an unaddressed `error` from
+  // this daemon, a forwarded myModelsData carrying `error` from a
+  // remote machine -- answers the oldest save still awaiting one (the
+  // daemon answers in order) and brings its draft back
+  // (restoreRefusedCustomModelSave) instead of losing it; a refused
+  // save (`refused`) stays here until its draft can be placed: while
+  // an edit is open, or the user typed into the boxes since (`typed`,
+  // set by the settings sheet's input listener, cleared by the next
+  // save), that newer draft stands and the refused one waits.
+  let pendingCustomModelSaves = [];
   // The Custom Models boxes: the name, and the three shared with the
   // config form's custom-endpoint fields.
   const CUSTOM_MODEL_BOX_IDS = [
@@ -30207,6 +31081,9 @@
           'cfg-custom-headers',
         ].filter(id => settingsEditedFields.has(id)),
       );
+      customModelPreEditTyped = new Set(
+        pendingCustomModelSaves.filter(p => p.typed),
+      );
     }
     customModelEditName = model.name;
     writeCustomModelBoxes({
@@ -30262,8 +31139,13 @@
         }
       });
       writeCustomModelBoxes(restored);
+      const typedBefore = customModelPreEditTyped || new Set();
+      pendingCustomModelSaves.forEach(p => {
+        p.typed = typedBefore.has(p);
+      });
       customModelBoxSnapshot = null;
       customModelPreEditDirty = null;
+      customModelPreEditTyped = null;
     }
     setCustomModelEditMode(false);
     renderCustomModels();
@@ -30326,16 +31208,22 @@
       apiKey: values.apiKey,
       headers: values.headers,
     };
-    pendingCustomModelSave = {
-      machine: settingsMachine,
+    // The typing since the earlier saves is sent now: no newer draft
+    // stands in the boxes any more.
+    pendingCustomModelSaves.forEach(p => {
+      p.typed = false;
+    });
+    pendingCustomModelSaves.push({
       originalName: customModelEditName,
       values: values,
       typed: false,
-    };
+      refused: false,
+    });
     if (customModelEditName !== null) {
       msg.originalName = customModelEditName;
       api.saveMyModel(settingsCommand(msg));
       cancelCustomModelEdit();
+      placeRefusedCustomModelSaves();
       return;
     }
     api.saveMyModel(settingsCommand(msg));
@@ -30344,6 +31232,7 @@
     // keep what the user typed — they are also the config form's
     // custom-endpoint fields.
     if (nameInp) nameInp.value = '';
+    placeRefusedCustomModelSaves();
   }
 
   /**
@@ -30357,55 +31246,67 @@
    * draft to bring back.
    */
   function confirmCustomModelSave() {
-    const pending = pendingCustomModelSave;
-    if (!pending || pending.machine !== settingsMachine) return;
-    const v = pending.values;
-    const saved = myModels.some(
-      m =>
-        m &&
-        m.name === v.name &&
-        (m.endpoint || '') === v.endpoint &&
-        (m.api_key || '') === v.apiKey &&
-        (m.headers || '') === v.headers,
-    );
-    const renamed =
-      pending.originalName !== null && pending.originalName !== v.name;
-    if (
-      saved &&
-      (!renamed || !myModels.some(m => m && m.name === pending.originalName))
-    )
-      pendingCustomModelSave = null;
+    pendingCustomModelSaves = pendingCustomModelSaves.filter(pending => {
+      const v = pending.values;
+      const saved = myModels.some(
+        m =>
+          m &&
+          m.name === v.name &&
+          (m.endpoint || '') === v.endpoint &&
+          (m.api_key || '') === v.apiKey &&
+          (m.headers || '') === v.headers,
+      );
+      const renamed =
+        pending.originalName !== null && pending.originalName !== v.name;
+      return !(
+        saved &&
+        (!renamed || !myModels.some(m => m && m.name === pending.originalName))
+      );
+    });
   }
 
   /**
-   * The daemon of *machine* ('' for this one) refused the save it was
-   * sent: bring the draft back for a fix.  An edit reopens on the model
-   * it edited (gone meanwhile: nothing to edit), an Add gets its
-   * cleared name back -- while the sheet still shows that machine, and
-   * unless a newer edit is open or the user typed into the boxes since
-   * (a newer Add draft, say): those stand.
+   * The daemon of *machine* ('' for this one) refused a save it was
+   * sent: the oldest not yet refused (it answers in order).  Its draft
+   * comes back for a fix (`placeRefusedCustomModelSaves`) -- while the
+   * sheet still shows that machine.
    *
    * @param {string} machine The machine whose refusal arrived.
    */
   function restoreRefusedCustomModelSave(machine) {
-    const pending = pendingCustomModelSave;
-    if (!pending || pending.machine !== machine) return;
-    pendingCustomModelSave = null;
-    if (
-      settingsMachine !== machine ||
-      customModelEditName !== null ||
-      pending.typed
-    )
-      return;
-    if (pending.originalName === null) {
-      const nameInp = document.getElementById('cfg-custom-model-name');
-      if (nameInp && !nameInp.value) nameInp.value = pending.values.name;
-      return;
+    if (machine !== settingsMachine) return;
+    const pending = pendingCustomModelSaves.find(p => !p.refused);
+    if (!pending) return;
+    pending.refused = true;
+    placeRefusedCustomModelSaves();
+  }
+
+  /**
+   * Give the refused saves their drafts back, oldest first: an edit
+   * reopens on the model it edited with the refused values (gone
+   * meanwhile: nothing to edit), an Add gets its cleared name back.
+   * A draft that cannot be placed yet waits, never lost: an edit is
+   * open (a draft of its own, never overwritten) or the user typed
+   * into the boxes since (a newer Add draft, say) -- the editor's
+   * Save or Cancel, or the next Add, places it.
+   */
+  function placeRefusedCustomModelSaves() {
+    for (const pending of pendingCustomModelSaves.filter(p => p.refused)) {
+      if (customModelEditName !== null || pending.typed) return;
+      pendingCustomModelSaves.splice(
+        pendingCustomModelSaves.indexOf(pending),
+        1,
+      );
+      if (pending.originalName === null) {
+        const nameInp = document.getElementById('cfg-custom-model-name');
+        if (nameInp && !nameInp.value) nameInp.value = pending.values.name;
+        continue;
+      }
+      const model = myModels.find(m => m && m.name === pending.originalName);
+      if (!model) continue;
+      startCustomModelEdit(model);
+      writeCustomModelBoxes(pending.values);
     }
-    const model = myModels.find(m => m && m.name === pending.originalName);
-    if (!model) return;
-    startCustomModelEdit(model);
-    writeCustomModelBoxes(pending.values);
   }
 
   /** Repaint the #custom-models-list rows from myModels. */
@@ -30539,6 +31440,11 @@
     if (prevConfigWorkDir !== configWorkDir) {
       refreshSidebarDataViews(false);
       renderChatWorkDir();
+      // An ``@`` mention typed before the directory was known (or
+      // while another surface moved it) asked for the old one: its
+      // reply is dropped by the files handler, so the picker asks
+      // again (as adoptWorkDir does for a pick made here).
+      if (inp && getAtCtx()) checkAutocomplete();
     }
     // The machine drop-down's global pick is the daemon's too (where
     // a new chat's tasks run; a pick on any surface updates it).
@@ -30552,12 +31458,15 @@
     // settings sheet (which showed that machine's) closes.
     localUseWebBrowser = cfg.use_web_browser !== false;
     localUseMemory = cfg.use_memory !== false;
+    localCompaction = cfg.compaction !== false;
   }
 
-  // This daemon's "Use web tools" / "Use persistent memory" settings
-  // (the same defaults as user_config.DEFAULTS until its config arrives).
+  // This daemon's "Use web tools" / "Use persistent memory" /
+  // "Compaction" settings (the same defaults as user_config.DEFAULTS
+  // until its config arrives).
   let localUseWebBrowser = true;
   let localUseMemory = true;
+  let localCompaction = true;
 
   /**
    * Fill the settings form from a configData reply (this daemon's, or
@@ -30592,6 +31501,9 @@
     // ``useWebTools`` override.
     webToolsStateKnown = true;
     setChecked(memoryToggleBtn, cfg.use_memory !== false);
+    // On unless the user turned it off (user_config.DEFAULTS.compaction
+    // is true).
+    setChecked(compactionToggleBtn, cfg.compaction !== false);
     // Opt-in (user_config.DEFAULTS.chrome_bridge is false).
     setChecked(
       document.getElementById('cfg-chrome-bridge'),
@@ -30692,6 +31604,9 @@
     if (want('cfg-use-memory')) {
       cfg.use_memory = !!(memoryToggleBtn && memoryToggleBtn.checked);
     }
+    if (want('cfg-compaction')) {
+      cfg.compaction = !!(compactionToggleBtn && compactionToggleBtn.checked);
+    }
     if (want('cfg-chrome-bridge')) {
       cfg.chrome_bridge = el('cfg-chrome-bridge').checked;
     }
@@ -30733,12 +31648,17 @@
     return {config: cfg, apiKeys};
   }
 
+  // Both contexts carry the token's `end`: the caret may sit inside
+  // an edited word ("@re|port.md", "/wr|ite"), and a completion
+  // replaces the whole word, not only its part before the caret.
   function getAtCtx() {
     const val = inp.value,
       pos = inp.selectionStart || 0;
     const before = val.substring(0, pos);
     const m = before.match(/@([^\s]*)$/);
-    return m ? {start: before.length - m[0].length, query: m[1]} : null;
+    if (!m) return null;
+    const end = pos + val.substring(pos).match(/^[^\s]*/)[0].length;
+    return {start: before.length - m[0].length, end, query: m[1]};
   }
 
   function getSlashCtx() {
@@ -30753,15 +31673,15 @@
     const before = val.substring(0, pos);
     const m = before.match(/(^|\s)\/([A-Za-z0-9_-]*)$/);
     if (!m) return null;
-    return {start: before.length - m[0].length + m[1].length, query: m[2]};
+    const end = pos + val.substring(pos).match(/^[A-Za-z0-9_-]*/)[0].length;
+    return {start: before.length - m[0].length + m[1].length, end, query: m[2]};
   }
 
   function acceptSlashCommand(name) {
     const slashCtx = getSlashCtx();
     if (!slashCtx) return;
-    const cursor = inp.selectionStart || inp.value.length;
-    const sep = /^\s/.test(inp.value.substring(cursor)) ? '' : ' ';
-    replaceComposerSpan(slashCtx.start, cursor, '/' + name + sep);
+    const sep = /^\s/.test(inp.value.substring(slashCtx.end)) ? '' : ' ';
+    replaceComposerSpan(slashCtx.start, slashCtx.end, '/' + name + sep);
   }
 
   /**
@@ -30969,6 +31889,9 @@
     inp.setSelectionRange(start + text.length, start + text.length);
     hideAC();
     inp.focus();
+    // The draft changed as if typed: the history cycling ends (see
+    // acceptGhost).
+    histIdx = -1;
   }
 
   function insertAtMention(file) {
@@ -30978,10 +31901,9 @@
       inp.focus();
       return;
     }
-    const cursor = inp.selectionStart || inp.value.length;
-    const sep = /^\s/.test(inp.value.substring(cursor)) ? '' : ' ';
+    const sep = /^\s/.test(inp.value.substring(atCtx.end)) ? '' : ' ';
     // The daemon already prefixed the mention ("./" or "~/").
-    replaceComposerSpan(atCtx.start, cursor, file + sep);
+    replaceComposerSpan(atCtx.start, atCtx.end, file + sep);
     api.recordFileUsage(
       onMachine(
         {path: file, workDir: tabBrowseWorkDir(activeTabId)},

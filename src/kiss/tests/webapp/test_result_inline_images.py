@@ -147,8 +147,11 @@ class TestResultInlineImages:
                 " && document.title === 'loaded'; }",
                 timeout=30000,
             )
+            # The link's own open carries an ``open:<n>`` token (a late
+            # reply of a closed tab is dropped by it); the picture fetch
+            # inside the preview is the one ``img-`` tokened open.
             opens = [f for f in sent if f.get("type") == "openFile"]
-            assert [f["path"] for f in opens if "token" in f] == [
+            assert [f["path"] for f in opens if f.get("token", "").startswith("img-")] == [
                 str(harness.work_dir / "reports" / "fig.png"),
             ]
         finally:

@@ -33,6 +33,7 @@ const {
   micBtn,
   settle,
   startPipeline,
+  fireTimer,
   VOICE_CFG,
 } = require('./voice_page_helpers');
 const {test, report} = makeRunner();
@@ -219,6 +220,74 @@ async function main() {
       `the re-enabled pipeline must end live: ${micBtn(win).className}`,
     );
     assert.strictEqual(log.filter(e => e === 'ctx-open').length, 1);
+  });
+
+  await test('W10/F2: a microphone request nobody answers times out into the error state; the retry asks again and a late grant to the expired request is released', async () => {
+    const page = makePage();
+    const {win, mic, log} = page;
+    micBtn(win).click(); // on: getUserMedia 1 pending after the load
+    await settle();
+    assert.strictEqual(mic.calls.length, 1);
+    fireTimer(page, 30000); // the permission prompt is never answered
+    await settle();
+    const btn = micBtn(win);
+    assert.ok(
+      btn.classList.contains('voice-error'),
+      `the stalled request must settle into the error state: ${btn.className}`,
+    );
+    assert.match(
+      btn.getAttribute('data-tooltip') || '',
+      /microphone request timed out/,
+    );
+    assert.strictEqual(win.localStorage.getItem('kissVoiceEnabled'), '0');
+    micBtn(win).click(); // the user tries again: busy was cleared
+    await settle();
+    assert.strictEqual(mic.calls.length, 2, 'the retry must ask for the mic');
+    mic.calls[1].grant();
+    await settle();
+    assert.ok(
+      micBtn(win).classList.contains('voice-listening'),
+      `the retry must end live: ${micBtn(win).className}`,
+    );
+    assert.strictEqual(log.filter(e => e === 'track-stopped').length, 0);
+    mic.calls[0].grant(); // the browser answers the expired request late
+    await settle();
+    assert.strictEqual(
+      log.filter(e => e === 'track-stopped').length,
+      1,
+      `the late stream must be released: ${JSON.stringify(log)}`,
+    );
+    assert.ok(
+      micBtn(win).classList.contains('voice-listening'),
+      `the live pipeline must be untouched: ${micBtn(win).className}`,
+    );
+    assert.strictEqual(log.filter(e => e === 'ctx-open').length, 1);
+    assert.strictEqual(log.filter(e => e === 'ctx-closed').length, 0);
+  });
+
+  await test('W10/F2: OFF then ON around a microphone request nobody answers restarts the pipeline once the request times out', async () => {
+    const page = makePage();
+    const {win, mic} = page;
+    micBtn(win).click(); // on: getUserMedia 1 pending after the load
+    await settle();
+    micBtn(win).click(); // off: the start stays busy behind the request
+    micBtn(win).click(); // on again: deferred behind it
+    await settle();
+    assert.strictEqual(mic.calls.length, 1, 'the toggle waits for the start');
+    assert.ok(micBtn(win).classList.contains('voice-loading'));
+    fireTimer(page, 30000); // the stale request is given up
+    await settle();
+    assert.strictEqual(mic.calls.length, 2, 'the newer toggle must run now');
+    assert.ok(
+      !micBtn(win).classList.contains('voice-error'),
+      `a superseded timeout must not paint an error: ${micBtn(win).className}`,
+    );
+    mic.calls[1].grant();
+    await settle();
+    assert.ok(
+      micBtn(win).classList.contains('voice-listening'),
+      `the re-enabled pipeline must end live: ${micBtn(win).className}`,
+    );
   });
 
   await test('OFF then ON during an in-flight start restarts the pipeline exactly once', async () => {

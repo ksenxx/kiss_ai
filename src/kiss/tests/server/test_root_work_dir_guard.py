@@ -51,12 +51,13 @@ class TestIsRootDir(unittest.TestCase):
 
     def test_roots(self) -> None:
         """POSIX, Windows-drive and bare-backslash roots are roots,
-        including root-equivalent spellings (``/./``, ``C:\\.\\``)."""
+        including root-equivalent spellings (``/./``, ``C:\\.\\``, and
+        ``C:\\..``: ``..`` clamps at a drive root as it does at ``/``)."""
         for path in (
             "/", "//", "///", "\\", "\\\\", " / ",
             "/.", "/./", "/..", "/../", "/./..", "/a/..",
             "C:\\", "C:/", "c:\\", "c:/", "C:", "c:", "Z:\\",
-            "C:\\.\\", "C:/./",
+            "C:\\.\\", "C:/./", "C:\\..", "C:/../", "C:\\proj\\..\\..", "c:/a/../..",
         ):
             self.assertTrue(is_root_dir(path), path)
 
@@ -71,7 +72,7 @@ class TestIsRootDir(unittest.TestCase):
         for path in (
             "", "   ",
             "/Users/ksen/work/kiss", "/a", "/a/", "/a/../b",
-            "C:\\proj", "C:/proj", "c:x",
+            "C:\\proj", "C:/proj", "c:x", "C:..", "C:\\a\\..\\b",
             "ab", "9:", ":c", "src", "é:", "é:\\",
             "\\\\server\\share", "//server/share",
         ):

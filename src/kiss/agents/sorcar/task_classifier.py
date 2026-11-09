@@ -94,14 +94,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.decide_tool import (
     DEFAULT_DECISIONS_MODEL,
     decisions_tool_available,
     make_decide_tool,
 )
 from kiss.core.config import kiss_home
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.kiss_agent import KISSAgent
+from kiss.core.locked import locked_call
 from kiss.core.models.decisions_model import choice
 
 logger = logging.getLogger(__name__)
@@ -213,6 +214,10 @@ CLASSIFIER_CACHE_MAX_ENTRIES = 2000
 # unlucky first reading from sticking forever while still sparing
 # every near-term repeat (retries, templates, follow-ups) the call.
 CLASSIFIER_CACHE_TTL_SECONDS = 7 * 24 * 3600.0
+# The most seconds a memo waits for the cache file's cross-process lock
+# (a read-merge-write of the file takes milliseconds): a holder that
+# wedged costs the memo this much, then the memo stays in-process only.
+CLASSIFIER_CACHE_LOCK_TIMEOUT_SECONDS = 5.0
 
 # In-process mirror of the cache file, keyed by :func:`_cache_key`, in
 # insertion order.  ``None`` until first use.  Guarded by
@@ -324,12 +329,18 @@ class ClassifierRun:
             structured-output attempt needed the plain fallback; 0 for
             a decisions verdict, which is not an LLM step, and for a
             memo hit).
+        charges: The spend split by the model that made it, as
+            ``(model, usd, tokens)`` triples adding up to
+            ``budget_used`` / ``tokens_used``; empty when nothing was
+            spent.  The classifier emits no ``llm_call``, so the run
+            files these under their models in its Spend split.
     """
 
     classification: TaskClassification | None
     budget_used: float
     tokens_used: int
     steps: int
+    charges: tuple[tuple[str, float, int], ...] = ()
 
 
 def classification_enabled(override: bool | None = None) -> bool:
@@ -635,9 +646,9 @@ def remember_classification(
     """Memoise *classification* for *task* on *model_name* and persist it.
 
     Memos another process wrote to the file since this process last
-    read it are merged in first (newer write wins per key), so
-    concurrent daemon and CLI processes only ever lose a memo to a
-    same-instant race, never to a stale mirror.  The cache is bounded
+    read it are merged in first (newer write wins per key) under a
+    cross-process file lock, so concurrent daemon and CLI processes
+    never lose a memo to each other.  The cache is bounded
     at :data:`CLASSIFIER_CACHE_MAX_ENTRIES` (oldest first) and written
     atomically; a write failure only loses the memo, never the verdict.
 
@@ -658,8 +669,33 @@ def _cache_entry_locked(key: str) -> dict[str, Any] | None:
 
 
 def _remember_locked(key: str, is_simple: bool) -> None:
-    """Store the verdict under *key* and persist the cache (``_cache_lock`` held)."""
+    """Store the verdict under *key* and persist the cache (``_cache_lock`` held).
+
+    The read-merge-write of the file is one transaction under a
+    cross-process lock (``<cache>.lock``), so two processes memoising
+    at once cannot replace each other's write with a stale copy.  When
+    the lock file cannot be made (an unwritable home) or its holder
+    does not let go within :data:`CLASSIFIER_CACHE_LOCK_TIMEOUT_SECONDS`
+    (``TimeoutError`` is an ``OSError``), the memo still enters the
+    in-process mirror.
+    """
     path = _cache_path()
+    cache: dict[str, dict[str, Any]] | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with exclusive_file_lock(
+            path.with_name(path.name + ".lock"), timeout=CLASSIFIER_CACHE_LOCK_TIMEOUT_SECONDS,
+        ):
+            cache = _memoise_locked(path, key, is_simple)
+            _write_cache_file(path, cache)
+    except OSError:
+        logger.debug("Could not persist classifier cache", exc_info=True)
+        if cache is None:
+            _memoise_locked(path, key, is_simple)
+
+
+def _memoise_locked(path: Path, key: str, is_simple: bool) -> dict[str, dict[str, Any]]:
+    """Merge the file at *path* into the mirror, add *key* and return the bounded mirror."""
     # A mirror loaded earlier may lag behind the file (another process
     # wrote since): merge the file in.  One that _load_cache_locked
     # reads just now is the file, so merging it would be a second read.
@@ -672,19 +708,26 @@ def _remember_locked(key: str, is_simple: bool) -> None:
                 cache[other_key] = other
     cache.pop(key, None)
     cache[key] = {"is_simple": is_simple, "ts": time.time()}
+    # Oldest first by write time: a memo the merge above refreshed in
+    # place keeps its old position, so the insertion order is no
+    # guide to age.
     while len(cache) > CLASSIFIER_CACHE_MAX_ENTRIES:
-        del cache[next(iter(cache))]
+        del cache[min(cache, key=lambda other_key: cache[other_key]["ts"])]
+    return cache
+
+
+def _write_cache_file(path: Path, cache: dict[str, dict[str, Any]]) -> None:
+    """Replace the file at *path* atomically with *cache*; raises ``OSError`` on failure."""
     tmp_path = path.with_name(path.name + f".{os.getpid()}.tmp")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path.write_text(json.dumps(cache), encoding="utf-8")
         os.replace(tmp_path, path)
     except OSError:
-        logger.debug("Could not persist classifier cache", exc_info=True)
         try:
             tmp_path.unlink()
         except OSError:
             pass
+        raise
 
 
 def clear_classification_cache() -> None:
@@ -897,6 +940,7 @@ def classify_task(
         budget_used=llm.budget_used + decided.budget_used,
         tokens_used=llm.tokens_used + decided.tokens_used,
         steps=llm.steps,
+        charges=decided.charges + llm.charges,
     )
 
 
@@ -924,6 +968,7 @@ def _classify_with_decisions(task: str) -> ClassifierRun:
         )
     return ClassifierRun(
         classification=classification, budget_used=budget, tokens_used=tokens, steps=0,
+        charges=_charges(DEFAULT_DECISIONS_MODEL, budget, tokens),
     )
 
 
@@ -976,4 +1021,10 @@ def _classify_with_llm(
         budget_used=budget_used,
         tokens_used=tokens_used,
         steps=steps,
+        charges=_charges(model_name, budget_used, tokens_used),
     )
+
+
+def _charges(model: str, budget: float, tokens: int) -> tuple[tuple[str, float, int], ...]:
+    """Return :attr:`ClassifierRun.charges` for spend made on one *model* (empty if none)."""
+    return ((model, budget, tokens),) if budget > 0 or tokens > 0 else ()

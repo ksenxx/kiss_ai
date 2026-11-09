@@ -23,7 +23,6 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
 const {
   makePage: makeChatPage,
   stubRaf,
@@ -32,19 +31,12 @@ const {
   MEDIA,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {micBtn, makeVoskWindow} = require('./voice_page_helpers');
+const {micBtn, makeVoskWindow, VOICE_CFG} = require('./voice_page_helpers');
 
 const {test, report} = makeRunner();
 
 const MODEL_URL = 'https://models.example.com/model.tar.gz';
 const LOAD_ERROR = 'HTTP error! status: 404';
-
-const FALLBACK_CFG = {
-  voskSrc: '/media/vosk.js',
-  modelUrl: MODEL_URL,
-  ackAudioUrl: '/media/working-on-it.mp3',
-  nonce: 'test-nonce',
-};
 
 /**
  * A Worker stand-in for jsdom (which has none) that plays the real
@@ -143,7 +135,7 @@ function installVoiceStubs(win, cfg, workers) {
   if (typeof win.URL.createObjectURL !== 'function') {
     win.URL.createObjectURL = () => 'blob:fake-vosk-worker';
   }
-  win.__VOICE__ = Object.assign({}, FALLBACK_CFG, cfg || {});
+  win.__VOICE__ = Object.assign({}, VOICE_CFG, cfg || {});
   win.localStorage.setItem('kissVoiceEnabled', '0');
 }
 

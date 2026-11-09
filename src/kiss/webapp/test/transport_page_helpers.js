@@ -267,7 +267,13 @@ function openNextSocket(sockets, timers, n) {
   return sockets[n + 1];
 }
 
+/** How many `submit` frames went out over every socket. */
+function submitCount(sockets) {
+  return sockets.flatMap(frames).filter(f => f.type === 'submit').length;
+}
+
 module.exports = {
+  submitCount,
   newDom,
   newAuthDom,
   ok,

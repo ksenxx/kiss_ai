@@ -9,7 +9,7 @@
 
 'use strict';
 
-/* global require, console, process, setImmediate */
+/* global require, console, process */
 
 const assert = require('assert');
 const {
@@ -17,14 +17,11 @@ const {
   send,
   stubRaf,
   readyTabId,
+  flushMicrotasks: flush,
 } = require('./simplify2_harness');
 
 function makePage() {
   return makeChatPage({beforeScripts: stubRaf});
-}
-
-function flush() {
-  return new Promise(resolve => setImmediate(resolve));
 }
 
 async function testThoughtsPanelCostLive() {

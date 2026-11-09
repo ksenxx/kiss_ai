@@ -170,3 +170,22 @@ class TestNestedInlineStyles:
         text = html_to_rich("<p><b>outer <b>inner</b></b></p>")
         for span in text.spans:
             assert str(span.style).split().count("bold") <= 1
+
+    def test_a_stray_end_tag_closes_nothing_else(self) -> None:
+        """A mismatched end tag (``</i>`` inside ``<b>``) does not pop the
+        enclosing style, and an end tag with no open element is ignored."""
+        text = html_to_rich("<p><b>bold</i> still bold</b> after</em> plain</p>")
+        assert text.plain == "bold still bold after plain"
+        assert [(s.start, s.end, str(s.style)) for s in text.spans] == [
+            (0, 4, "bold"),
+            (4, 15, "bold"),
+        ]
+
+    def test_an_end_tag_closes_through_unclosed_inner_styles(self) -> None:
+        """``</b>`` ending ``<b>…<i>…</b>`` drops the unclosed ``<i>`` too."""
+        text = html_to_rich("<p><b>x <i>y</b> z</p>")
+        assert text.plain == "x y z"
+        assert [(s.start, s.end, str(s.style)) for s in text.spans] == [
+            (0, 2, "bold"),
+            (2, 3, "bold italic"),
+        ]

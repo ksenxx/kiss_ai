@@ -360,22 +360,32 @@ function answerCheckPaths(win, results) {
 
 /**
  * A `beforeScripts` hook: record every `setTimeout` the page arms as
- * `{cb, ms, id, cleared}` while still arming it for real, so a suite can
- * see which delays main.js chose, or fire one early with
- * fireCapturedTimers.  `clearTimeout` marks the entry `cleared`.
+ * `{cb, ms, id, cleared, fired}` while still arming it for real, so a
+ * suite can see which delays main.js chose, or fire one early with
+ * fireCapturedTimers.  `clearTimeout` marks the entry `cleared`; a timer
+ * that reaches its due time is marked `fired`, so a later drain does not
+ * run it a second time.
  *
  * @param {Array} [timers=[]] The ledger to append to, for a caller that
  *   hands its own array out before the page boots.
- * @returns {Array<{cb: Function, ms: number, id: *, cleared: boolean}>}
- *   The timers, in order.
+ * @returns {Array<{cb: Function, ms: number, id: *, cleared: boolean,
+ *   fired: boolean}>} The timers, in order.
  */
 function captureTimers(win, timers = []) {
   const realSetTimeout = win.setTimeout;
   const realClearTimeout = win.clearTimeout;
   win.setTimeout = function (cb, ms, ...args) {
-    const id = realSetTimeout.call(win, cb, ms, ...args);
-    timers.push({cb, ms, id, cleared: false});
-    return id;
+    const timer = {cb, ms, id: null, cleared: false, fired: false, args};
+    timer.id = realSetTimeout.call(
+      win,
+      () => {
+        timer.fired = true;
+        cb(...args);
+      },
+      ms,
+    );
+    timers.push(timer);
+    return timer.id;
   };
   win.clearTimeout = function (id) {
     for (const t of timers) if (t.id === id) t.cleared = true;
@@ -387,13 +397,20 @@ function captureTimers(win, timers = []) {
 /**
  * Cancel and run now every captureTimers timer armed since index *from*
  * (removing them from *timers*), instead of waiting for its due time.
- * A timer the page already cancelled stays quiet, as in a browser.
+ * A timer the page already cancelled, or that already fired, stays
+ * quiet, as in a browser; so does one an earlier callback of the same
+ * drain cancels, which is why each record leaves the ledger only when
+ * its turn comes (the page's clearTimeout marks records it finds there).
+ * A timer armed by a callback is not part of the batch.
  */
 function fireCapturedTimers(win, timers, from = 0) {
-  for (const t of timers.splice(from)) {
-    if (t.cleared) continue;
+  for (const t of timers.slice(from)) {
+    const i = timers.indexOf(t);
+    if (i >= 0) timers.splice(i, 1);
+    if (t.cleared || t.fired) continue;
     win.clearTimeout(t.id);
-    t.cb();
+    t.fired = true;
+    t.cb(...t.args);
   }
 }
 
@@ -440,18 +457,25 @@ function stubRaf(win) {
  */
 function queueRaf(win) {
   const frames = [];
+  // The batch run() is dispatching: a frame of it cancelled by an
+  // earlier frame of the same batch must not run, as in a browser.
+  let running = [];
   let nextId = 0;
   win.requestAnimationFrame = function (cb) {
     const id = ++nextId;
-    frames.push({id, cb});
+    frames.push({id, cb, cancelled: false});
     return id;
   };
   win.cancelAnimationFrame = function (id) {
     const i = frames.findIndex(f => f.id === id);
     if (i >= 0) frames.splice(i, 1);
+    const f = running.find(r => r.id === id);
+    if (f) f.cancelled = true;
   };
   function run() {
-    for (const f of frames.splice(0)) f.cb();
+    running = frames.splice(0);
+    for (const f of running) if (!f.cancelled) f.cb();
+    running = [];
   }
   return {frames, run};
 }
@@ -774,7 +798,8 @@ function showTips(win, tips) {
  * test fires the surviving ones with fireTimers, so no wall-clock sleep
  * decides whether a stale timer lands before or after a later click.
  *
- * @returns {Array<{fn: Function, cleared: boolean}>} The timers, in order.
+ * @returns {Array<{fn: Function, cleared: boolean, fired: boolean}>} The
+ *   timers, in order; a fired one is marked `fired` and never runs again.
  */
 function recordTimers(win, ms) {
   const timers = [];
@@ -782,7 +807,7 @@ function recordTimers(win, ms) {
   const realClearTimeout = win.clearTimeout;
   win.setTimeout = function (fn, delay, ...args) {
     if (delay !== ms) return realSetTimeout.call(win, fn, delay, ...args);
-    const timer = {fn, cleared: false};
+    const timer = {fn, cleared: false, fired: false, args};
     timers.push(timer);
     return timer;
   };
@@ -793,9 +818,16 @@ function recordTimers(win, ms) {
   return timers;
 }
 
-/** Run every timer of recordTimers in *timers* that was not cleared. */
+/**
+ * Run every timer of recordTimers in *timers* that was neither cleared
+ * nor fired yet, once: draining the same ledger again runs nothing.
+ */
 function fireTimers(timers) {
-  for (const timer of timers) if (!timer.cleared) timer.fn();
+  for (const timer of timers) {
+    if (timer.cleared || timer.fired) continue;
+    timer.fired = true;
+    timer.fn(...timer.args);
+  }
 }
 
 /**
@@ -1122,7 +1154,37 @@ const PNG_B64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg' +
   'YGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==';
 
+/** Every open tab ID in tab order, copied into Node's Array realm. */
+function tabIds(win) {
+  return Array.from(win._testApi.openTabs(), t => t.id);
+}
+
+/** The untrimmed text of the element with `id`. */
+function rowText(win, id) {
+  return win.document.getElementById(id).textContent;
+}
+
+/** Wait for Node's check phase, preserving setImmediate scheduling. */
+function flushMicrotasks() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+/** Normalize JSON values from another JavaScript realm for strict comparison. */
+function plain(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+/** The promptlet panel's rows in display order. */
+function promptletRows(doc) {
+  return Array.from(doc.getElementById('tricks-list').children);
+}
+
 module.exports = {
+  plain,
+  promptletRows,
+  tabIds,
+  rowText,
+  flushMicrotasks,
   queueRaf,
   showTips,
   MEDIA,

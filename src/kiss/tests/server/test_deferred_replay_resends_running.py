@@ -160,9 +160,12 @@ class TestDeferredReplayResendsRunning(IsolatedAsyncioTestCase):
             self.assertEqual(resp["type"], "auth_ok")
             await ws.send(json.dumps(ready_cmd))
             events: list[dict[str, Any]] = []
-            for _ in range(30):
+            # The replays come last, behind several worker-thread hops of
+            # the ready sequence: a 2 s quiet gap ended the drain before
+            # them on a loaded box (2026-11-08), so allow 5 s.
+            for _ in range(200):
                 try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                    raw = await asyncio.wait_for(ws.recv(), timeout=5)
                     events.append(json.loads(raw))
                 except TimeoutError:
                     break

@@ -24,6 +24,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -37,6 +39,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _ClassifierSpend
 from kiss.agents.sorcar.task_classifier import (
     _VERDICT_JSON_SCHEMA,
     CLASSIFIER_CACHE_FILENAME,
+    CLASSIFIER_CACHE_LOCK_TIMEOUT_SECONDS,
     CLASSIFIER_CACHE_MAX_ENTRIES,
     CLASSIFIER_MAX_TOKENS,
     CLASSIFIER_STALL_TIMEOUT_SECONDS,
@@ -53,6 +56,7 @@ from kiss.agents.sorcar.task_classifier import (
 )
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.server.json_printer import JsonPrinter
+from kiss.tests.conftest import posix_only
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     IsolatedKissHome,
@@ -571,6 +575,89 @@ def test_memos_from_another_process_are_merged_on_write(
     )
 
 
+def test_a_refreshed_memo_merged_from_disk_is_not_evicted_before_older_ones(
+    env: IsolatedKissHome,
+) -> None:
+    """Eviction goes by write time, also for a memo another process refreshed.
+
+    This process loaded a full mirror (``key-00000`` its oldest entry
+    and the head of its insertion order); another process then
+    refreshed ``key-00000``, the newest memo on disk.  The next memo
+    here merges that refresh and evicts one entry: the oldest,
+    ``key-00001``, not the refreshed key (audit 2026-11-07,
+    A13_astra-9).
+    """
+    cache_file = env.kiss_home / CLASSIFIER_CACHE_FILENAME
+    now = time.time()
+    full = {
+        f"key-{i:05d}": {"is_simple": True, "ts": now - CLASSIFIER_CACHE_MAX_ENTRIES + i}
+        for i in range(CLASSIFIER_CACHE_MAX_ENTRIES)
+    }
+    cache_file.write_text(json.dumps(full), encoding="utf-8")
+    assert cached_classification("warm", "m") is None  # loads the mirror
+    refreshed = {**full}
+    del refreshed["key-00000"]
+    refreshed["key-00000"] = {"is_simple": False, "ts": now + 1}
+    cache_file.write_text(json.dumps(refreshed), encoding="utf-8")
+    remember_classification("new", "m", None, TaskClassification(is_simple=True))
+    stored = json.loads(cache_file.read_text(encoding="utf-8"))
+    assert len(stored) == CLASSIFIER_CACHE_MAX_ENTRIES
+    assert "key-00001" not in stored
+    assert _verdict_of(stored["key-00000"]) is False
+    assert list(stored)[-1] == _cache_key("new", "m", None)
+    assert cached_classification("new", "m") == TaskClassification(is_simple=True)
+
+
+_WRITER_PROCESS = """
+import sys
+from kiss.agents.sorcar.task_classifier import (
+    TaskClassification, cached_classification, remember_classification,
+)
+who = sys.argv[1]
+cached_classification("warm", "m")  # load the mirror before the race starts
+print("loaded", flush=True)
+sys.stdin.readline()  # the parent's "go"
+for k in range(50):
+    remember_classification(f"{who}-{k}", "m", None, TaskClassification(is_simple=True))
+print("done", flush=True)
+"""
+
+
+def test_concurrent_processes_keep_every_memo(env: IsolatedKissHome) -> None:
+    """Two processes memoising at once lose none of their verdicts.
+
+    Each writer loads the mirror, then (on the parent's signal, so both
+    race) memoises 50 verdicts; every read-merge-write of the file is
+    a cross-process transaction, so the file ends with all 100.
+    """
+    writers = [
+        subprocess.Popen(
+            [sys.executable, "-c", _WRITER_PROCESS, who],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        for who in ("a", "b")
+    ]
+    try:
+        for writer in writers:
+            assert writer.stdout is not None and writer.stdout.readline().strip() == "loaded"
+        for writer in writers:
+            assert writer.stdin is not None
+            writer.stdin.write("go\n")
+            writer.stdin.flush()
+        for writer in writers:
+            out, _ = writer.communicate(timeout=120)
+            assert writer.returncode == 0 and out.strip() == "done"
+    finally:
+        for writer in writers:
+            writer.kill()
+    stored = json.loads((env.kiss_home / CLASSIFIER_CACHE_FILENAME).read_text(encoding="utf-8"))
+    missing = [
+        f"{who}-{k}" for who in ("a", "b") for k in range(50)
+        if _cache_key(f"{who}-{k}", "m", None) not in stored
+    ]
+    assert missing == []
+
+
 def test_clear_cache_removes_file_and_memory(env: IsolatedKissHome) -> None:
     """``clear_classification_cache`` forgets everything, twice is fine."""
     remember_classification(
@@ -610,6 +697,68 @@ def test_unwritable_cache_dir_keeps_verdict(env: IsolatedKissHome) -> None:
     finally:
         os.environ["KISS_HOME"] = saved
         clear_classification_cache()
+
+
+_HOLD_LOCK = r"""
+import fcntl, sys
+fd = open(sys.argv[1], "w")
+fcntl.flock(fd, fcntl.LOCK_EX)
+print("held", flush=True)
+sys.stdin.readline()
+"""
+
+
+@posix_only("the wedged holder takes the lock with fcntl.flock")
+def test_wedged_lock_holder_costs_a_bounded_wait(env: IsolatedKissHome) -> None:
+    """A process that took the cache's file lock and wedged stalls nothing for good.
+
+    A real child process holds ``<cache>.lock`` and never releases it.
+    ``remember_classification`` waits for the lock at most
+    :data:`CLASSIFIER_CACHE_LOCK_TIMEOUT_SECONDS`, then keeps the memo
+    in the in-process mirror as an unwritable home would; a lookup of
+    another task from another thread, queued behind it on the
+    process-wide ``_cache_lock``, is answered right after.  Before the
+    fix both waited in the kernel for as long as the holder lived
+    (audit 2026-11-07, A13_claude-1).
+    """
+    from kiss.agents.sorcar import task_classifier as tc_module
+
+    cache_path = tc_module._cache_path()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_LOCK, str(cache_path.with_name(cache_path.name + ".lock"))],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    bound = CLASSIFIER_CACHE_LOCK_TIMEOUT_SECONDS + 20
+    memo = threading.Thread(
+        target=remember_classification, args=("t", "m", None, TaskClassification(True)),
+    )
+    lookups: list[TaskClassification | None] = []
+    lookup = threading.Thread(target=lambda: lookups.append(cached_classification("u", "m")))
+    try:
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+        started = time.monotonic()
+        memo.start()
+        # The memo thread is inside the file wait once it holds _cache_lock.
+        while tc_module._cache_lock.acquire(blocking=False):
+            tc_module._cache_lock.release()
+            assert time.monotonic() - started < bound, "the memo never took _cache_lock"
+            time.sleep(0.01)
+        lookup.start()
+        memo.join(bound)
+        assert not memo.is_alive(), "remember_classification is still waiting for the lock"
+        assert time.monotonic() - started >= CLASSIFIER_CACHE_LOCK_TIMEOUT_SECONDS
+        lookup.join(bound)
+        assert not lookup.is_alive(), "cached_classification is still waiting"
+        assert lookups == [None]
+        # The memo went to the mirror only: the file was never written.
+        assert cached_classification("t", "m") == TaskClassification(True)
+        assert not cache_path.exists()
+    finally:
+        holder.kill()
+        holder.wait(30)
+        memo.join(bound)
+        lookup.join(bound)
 
 
 # ---------------------------------------------------------------------------

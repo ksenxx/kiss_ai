@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from kiss.agents.sorcar import task_digest
+from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.tests.agents.sorcar.test_task_digest_progress_log_wave3 import (
     _edit_call,
     _log_of,
@@ -89,6 +90,31 @@ def test_the_tasks_own_edits_are_replayed_on_the_text_it_wrote(tmp_path: Path) -
     task_id = _task(tmp_path, events, time.time() - 600)
 
     assert _log_of(task_id) == "# log\n+ a\n+ b\n- d\n- e"
+
+
+def test_edits_of_a_crlf_log_are_replayed_as_the_tool_applied_them(tmp_path: Path) -> None:
+    # A14-5 (astra): Edit matches LF-only old text against a CRLF file by
+    # converting the edit to CRLF; the replay must do the same, else the
+    # digest keeps the old status and appends the new one.
+    log = tmp_path / "tmp" / "PROGRESS.md"
+    tools = UsefulTools(work_dir=str(tmp_path))
+    tools.Write(str(log), "# log\r\n- old status\r\n")
+    single = tools.Edit(str(log), old_string="- old status\n", new_string="- new status\n")
+    multi = json.dumps([
+        {"old_string": "- new status\n", "new_string": "- new status\n- step 2\n"},
+        {"old_string": "- ", "new_string": "* ", "replace_all": True},
+    ])
+    batch = tools.Edit(str(log), edits=multi)
+    assert not single.startswith("Error") and not batch.startswith("Error")
+    assert log.read_bytes() == b"# log\r\n* new status\r\n* step 2\r\n"
+    events = [
+        *_write_call(log, "# log\r\n- old status\r\n"),
+        *_edit_call(log, {"old_string": "- old status\n", "new_string": "- new status\n"}, single),
+        *_edit_call(log, {"extras": {"edits": multi}}, batch),
+    ]
+    task_id = _task(tmp_path, events, time.time() - 600)
+
+    assert _log_of(task_id) == "# log\r\n* new status\r\n* step 2"
 
 
 def test_a_task_that_only_appended_to_an_older_log_shows_its_own_edits(tmp_path: Path) -> None:

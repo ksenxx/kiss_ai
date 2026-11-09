@@ -56,6 +56,13 @@ LISTING: list[dict[str, Any]] = [
         "context_length": 65536,
         "pricing": {"input": 2.0, "output": 6.0, "cached_input": 0.25},
     },
+    {
+        # Catalogued embedding whose rates moved: priced like every other model.
+        "id": "BAAI/bge-large-en-v1.5",
+        "type": "embedding",
+        "context_length": 512,
+        "pricing": {"input": 0.03, "output": 0.0},
+    },
 ]
 
 
@@ -142,6 +149,15 @@ def test_compute_and_apply_write_together_cache_prices(
             "emb": False,
             "gen": True,
         },
+        # Embedding priced from an old listing: both rates follow the provider.
+        "BAAI/bge-large-en-v1.5": {
+            "context_length": 512,
+            "input_price_per_1M": 0.01,
+            "output_price_per_1M": 0.5,
+            "fc": False,
+            "emb": True,
+            "gen": False,
+        },
     }
     catalog.write_text(json.dumps(current))
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", catalog)
@@ -152,6 +168,7 @@ def test_compute_and_apply_write_together_cache_prices(
     assert by_name == {
         "moonshotai/Kimi-K3": {"cache_read_price_per_1M": 0.3},
         "deepseek-ai/DeepSeek-V4-Pro-0813": {"cache_read_price_per_1M": 0.13},
+        "BAAI/bge-large-en-v1.5": {"input_price_per_1M": 0.03, "output_price_per_1M": 0.0},
     }
     [qwen] = new_models
     assert qwen["name"] == "Qwen/Qwen3.9-Preview"
@@ -163,6 +180,9 @@ def test_compute_and_apply_write_together_cache_prices(
     assert written["deepseek-ai/DeepSeek-V4-Pro-0813"]["cache_read_price_per_1M"] == 0.13
     assert "cache_read_price_per_1M" not in written["meta-llama/Llama-3.3-70B-Instruct-Turbo"]
     assert written["Qwen/Qwen3.9-Preview"]["cache_read_price_per_1M"] == 0.25
+    embedding = written["BAAI/bge-large-en-v1.5"]
+    assert (embedding["input_price_per_1M"], embedding["output_price_per_1M"]) == (0.03, 0.0)
+    assert (embedding["emb"], embedding["gen"], embedding["fc"]) == (True, False, False)
 
     # Loaded the way the runtime loads it, a Kimi-K3 cache hit costs $0.30/M.
     monkeypatch.setenv("KISS_MODEL_INFO_PATH", str(catalog))

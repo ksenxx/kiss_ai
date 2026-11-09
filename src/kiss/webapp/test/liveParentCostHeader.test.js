@@ -6,11 +6,13 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, stubRaf, clickTab} = require('./simplify2_harness');
-
-function headerText(win, id) {
-  return win.document.getElementById(id).textContent;
-}
+const {
+  makePage,
+  send,
+  stubRaf,
+  clickTab,
+  rowText: headerText,
+} = require('./simplify2_harness');
 
 function testParentHeaderTracksLiveAggregateUsage() {
   const {win} = makePage({beforeScripts: stubRaf});
@@ -18,6 +20,9 @@ function testParentHeaderTracksLiveAggregateUsage() {
   assert.ok(api, '_testApi must be exposed by main.js');
   const parentTab = api.getActiveTabId();
 
+  // Every copy of a task's counters the daemon sends names the tab it
+  // is for; a tab that owns no task takes none addressed by task id
+  // alone (A32-1).
   send(win, {
     type: 'usage_info',
     text: 'Steps: 2/100, Tokens: 1,000/400,000, Budget: $0.1000/$10.00, ',
@@ -25,6 +30,7 @@ function testParentHeaderTracksLiveAggregateUsage() {
     cost: '$0.1000',
     total_steps: 2,
     taskId: 'parent-task',
+    tabId: parentTab,
   });
   assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 1.00K');
   assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.10');
@@ -57,6 +63,7 @@ function testParentHeaderTracksLiveAggregateUsage() {
     cost: '$0.4000',
     total_steps: 7,
     taskId: 'parent-task',
+    tabId: parentTab,
   });
   assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 31.0K');
   assert.strictEqual(
@@ -113,14 +120,21 @@ function testMisroutedParentUsageForOtherTaskDropped() {
 // pins what a frame WITHOUT a field leaves on the header.
 function testMissingFieldsKeepThePreviousNumbers() {
   const {win} = makePage({beforeScripts: stubRaf});
+  const tabId = win._testApi.getActiveTabId();
   send(win, {
     type: 'usage_info',
     text: 'Steps: 3/100, Tokens: 1,234/400,000, Budget: $0.5000/$10.00, ',
     taskId: 'parent-task',
+    tabId,
   });
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 3');
 
-  send(win, {type: 'usage_info', text: 'no metrics here', taskId: 'parent-task'});
+  send(win, {
+    type: 'usage_info',
+    text: 'no metrics here',
+    taskId: 'parent-task',
+    tabId,
+  });
   assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 1.23K');
   assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.50');
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 3');
@@ -131,6 +145,7 @@ function testMissingFieldsKeepThePreviousNumbers() {
     total_tokens: 2500,
     cost: '$0.6000',
     taskId: 'parent-task',
+    tabId,
   });
   assert.strictEqual(headerText(win, 'status-steps'), 'Steps: 3');
   assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.60');
@@ -145,6 +160,7 @@ function testMissingFieldsKeepThePreviousNumbers() {
     cost: 'N/A',
     step_count: 0,
     taskId: 'parent-task',
+    tabId,
   });
   assert.strictEqual(headerText(win, 'status-tokens'), 'Tokens: 2.50K');
   assert.strictEqual(headerText(win, 'status-budget'), 'Cost: $0.60');

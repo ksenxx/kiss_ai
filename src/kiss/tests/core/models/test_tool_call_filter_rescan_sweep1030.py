@@ -15,7 +15,10 @@ parser, which tries every brace, still ran the call.
 
 from __future__ import annotations
 
+import sys
 import time
+from types import FrameType
+from typing import Any
 
 import pytest
 
@@ -130,3 +133,32 @@ def test_rescans_stay_linear(text: str) -> None:
     shown = _stream(text, 0)
     assert time.monotonic() - started < 10.0
     assert shown == text
+
+
+def test_a_stop_as_the_filter_is_entered_leaves_no_tool_bearing_state() -> None:
+    """A Stop landing as ``__enter__`` returns must still restore the adapter.
+
+    The ``with`` statement never calls ``__exit__`` for an exception
+    raised before its block starts, so the tools-prompt turn itself must
+    put the callbacks and the tool-bearing mark back: otherwise the next
+    ordinary turn of the reused adapter streams through the dead filter
+    and stops early at a tool-call example in its answer.
+    """
+    shown: list[str] = []
+    model = ClaudeCodeModel("cc/opus", token_callback=shown.append)
+    original = (model.token_callback, model.thinking_callback, model.model_config)
+
+    def stop_as_enter_returns(frame: FrameType, event: str, arg: Any) -> Any:
+        if event == "return" and frame.f_code is _ToolCallFilteredStream.__enter__.__code__:
+            sys.settrace(None)
+            raise KeyboardInterrupt("Stop as the filter is entered")
+        return stop_as_enter_returns
+
+    sys.settrace(stop_as_enter_returns)
+    try:
+        with pytest.raises(KeyboardInterrupt), model._tools_prompt_installed({"Bash": print}):
+            pass
+    finally:
+        sys.settrace(None)
+    assert (model.token_callback, model.thinking_callback, model.model_config) == original
+    assert model._tool_bearing_turn is False

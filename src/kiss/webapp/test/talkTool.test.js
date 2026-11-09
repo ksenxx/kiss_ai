@@ -26,6 +26,7 @@ function testTalkForOtherWindowsTabStaysSilent() {
 
   assert.strictEqual(created.length, 0, "another window's copy is silent");
   assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
+  win.close();
   console.log("PASS: talk copy for another window's tab stays silent");
 }
 
@@ -44,6 +45,7 @@ function testTalkWithoutLanguagePlaysClip() {
   assert.strictEqual(created.length, 1, 'clip plays without a language');
   assert.strictEqual(created[0].src, 'data:audio/mpeg;base64,' + B64);
   assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
+  win.close();
   console.log('PASS: talk without language still plays the clip');
 }
 
@@ -58,13 +60,14 @@ function testTalkEmptyTextIsIgnored() {
 
   assert.strictEqual(created.length, 0, 'empty text must not play');
   assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
+  win.close();
   console.log('PASS: talk with empty/missing text is ignored');
 }
 
+// Each test closes its page: a page left with a clip "playing" keeps
+// its stall sampler (main.js TALK_STALL_CHECK_MS interval) and node
+// alive, so a leak shows as a hang instead of hiding behind an exit.
 testTalkForOtherWindowsTabStaysSilent();
 testTalkWithoutLanguagePlaysClip();
 testTalkEmptyTextIsIgnored();
 console.log('All talkTool tests passed.');
-// The pages are left with a clip "playing": its stall sampler
-// (main.js TALK_STALL_CHECK_MS interval) would keep node alive.
-process.exit(0);

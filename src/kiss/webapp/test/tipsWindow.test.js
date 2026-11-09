@@ -14,6 +14,7 @@ const projectRoot = path.resolve(__dirname, '..');
 const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {stubClipboard} = require('./simplify2_harness');
+const {panelParts, THREE_TIPS} = require('./tips_helpers');
 const {test, report} = makeRunner();
 
 // A page with tips.js (and its PanelCopy dependency) loaded over
@@ -48,28 +49,6 @@ function loadTipsDom(
   run('tips.js');
   return dom.window;
 }
-
-function panelParts(win) {
-  const host = win.document.querySelector('kiss-tips-panel');
-  assert.ok(host, 'kiss-tips-panel must be mounted on document.body');
-  const root = host.shadowRoot;
-  assert.ok(root, 'kiss-tips-panel must use shadow DOM');
-  return {
-    host,
-    root,
-    body: root.querySelector('.tips-body'),
-    counter: root.querySelector('.tips-counter'),
-    prev: root.querySelector('.tips-prev'),
-    next: root.querySelector('.tips-next'),
-    close: root.querySelector('.tips-close'),
-  };
-}
-
-const THREE_TIPS = [
-  '## First tip\n\n- alpha\n- beta',
-  'Second tip with **bold** text.',
-  '### Third tip\n\n`code` here.',
-];
 
 test('tips panel auto-mounts centered and renders markdown as HTML', () => {
   const win = loadTipsDom({tips: THREE_TIPS, show: true});

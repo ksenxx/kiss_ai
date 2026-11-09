@@ -37,7 +37,7 @@ without test doubles:
 
 The browser chat page speaks the same JSON frames over WSS that a
 client speaks over the local endpoint used here; both go through
-``RemoteAccessServer._dispatch_client_command`` verbatim.
+``RemoteAccessServer._ws_handler``'s ``ServerApi.dispatch`` call verbatim.
 """
 
 from __future__ import annotations

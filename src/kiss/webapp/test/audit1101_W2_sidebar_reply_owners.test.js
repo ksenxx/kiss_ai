@@ -840,6 +840,107 @@ async function main() {
     );
   });
 
+  await test('F5: a deferred Explorer action belongs to the chat its menu was opened in', () => {
+    // Find in Folder (a prompt), New File (an inline input) and Delete
+    // (a confirmation) send their request after the user answers; a
+    // chat switch in between must not re-own the request.
+    const {win, posted} = makePage();
+    openExplorer(win, posted, [
+      {name: 'src', path: WD + '/src', isDir: true},
+      {name: 'foo.py', path: WD + '/foo.py', isDir: false},
+    ]);
+    const owner = win._testApi.getActiveTabId();
+    runMenuItem(win, explorerRow(win, WD + '/src'), 'Find in Folder...');
+    const find = toastInput(toast(win, 'find-in-folder'));
+    runMenuItem(win, explorerRow(win, WD), 'New File...');
+    const newFile = win.document.querySelector('input.explorer-input');
+    runMenuItem(win, explorerRow(win, WD + '/foo.py'), 'Delete');
+    const del = toastButton(toast(win, 'fs-delete'), 'Delete');
+    win._testApi.createNewTab();
+    const current = win._testApi.getActiveTabId();
+    assert.notStrictEqual(current, owner);
+    find.value = 'TODO';
+    key(win, find, 'Enter');
+    newFile.value = 'later.txt';
+    key(win, newFile, 'Enter');
+    click(win, del);
+    const sent = ofType(posted, 'fsAction');
+    assert.deepStrictEqual(
+      sent.map(m => m.action),
+      ['findInFolder', 'newFile', 'delete'],
+    );
+    for (const req of sent) {
+      assert.strictEqual(
+        req.tabId,
+        owner,
+        'BUG: ' + req.action + ' was sent as the chat active at submit time',
+      );
+    }
+    // The search result opens for the owner (in the background).
+    send(win, {
+      type: 'fsResult',
+      token: sent[0].token,
+      tabId: sent[0].tabId,
+      action: 'findInFolder',
+      text: 'foo.py:1: TODO',
+      count: 1,
+    });
+    const result = win._testApi.openTabs().find(t => t.isContentTab);
+    assert.ok(result, 'the search result tab opened');
+    assert.strictEqual(result.rootId, owner, 'in the owning chat');
+    assert.strictEqual(win._testApi.getActiveTabId(), current);
+  });
+
+  await test('F6: a result landing after a chat switch opens in the background', () => {
+    // Stacked layout: a search asked in chat A whose reply lands once
+    // chat B is on screen opens its tab in A's group without taking the
+    // screen from B (as a file of a background task does); the same
+    // reply with A still on screen shows it.
+    const page = makeHarnessPage({narrow: true});
+    pages.push(page.win);
+    const {win, posted} = page;
+    // The stacked remote lists the Explorer only while its drawer is open.
+    click(win, byId(win, 'meta-drawer-btn'));
+    openExplorer(win, posted, [{name: 'src', path: WD + '/src', isDir: true}]);
+    const owner = win._testApi.getActiveTabId();
+    const search = () => {
+      runMenuItem(win, explorerRow(win, WD + '/src'), 'Find in Folder...');
+      const input = toastInput(toast(win, 'find-in-folder'));
+      input.value = 'TODO';
+      key(win, input, 'Enter');
+      return ofType(posted, 'fsAction').pop();
+    };
+    const reply = req =>
+      send(win, {
+        type: 'fsResult',
+        token: req.token,
+        tabId: req.tabId,
+        action: 'findInFolder',
+        text: 'src/a.py:1: TODO',
+        count: 1,
+      });
+    const late = search();
+    win._testApi.createNewTab();
+    const current = win._testApi.getActiveTabId();
+    reply(late);
+    const result = win._testApi.openTabs().find(t => t.isContentTab);
+    assert.ok(result, 'the result tab opened');
+    assert.strictEqual(result.rootId, owner, "in A's group");
+    assert.strictEqual(
+      win._testApi.getActiveTabId(),
+      current,
+      "BUG: chat A's late result took the screen from chat B",
+    );
+    win._testApi.switchToTab(owner);
+    click(win, byId(win, 'meta-drawer-btn'));
+    reply(search());
+    assert.strictEqual(
+      win._testApi.getActiveTabId(),
+      result.id,
+      'a result for the chat on screen shows',
+    );
+  });
+
   report('audit1101_W2_sidebar_reply_owners');
   await new Promise(r => setTimeout(r, 0));
   for (const win of pages) win.close();

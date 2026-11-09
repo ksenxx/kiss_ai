@@ -168,7 +168,7 @@ def test_python_and_sed_rewrites_are_made_as_edits_through_the_agent(tmp_path: P
     assert notes.read_text() == "old\nmore text\n"
     assert h.hook_calls[-1] == ("Edit", {
         "file_path": str(notes), "old_string": "old", "new_string": "old\nmore",
-        "replace_all": False,
+        "replace_all": False, "exact": True,
     })
     notes.write_text("old text\n")
     out = h.call("Bash", command=PYTHON_TWO_REPLACES, description="rewrite")
@@ -336,8 +336,15 @@ def test_the_rest_of_a_compound_command_runs_after_the_applied_write(tmp_path: P
     assert out.startswith("Applied as Edit(") and "Successfully replaced 1 occurrence(s)" in out
     assert h.hook_calls[-2:] == [("Edit", {
         "file_path": str(hello), "old_string": "world", "new_string": "there",
-        "replace_all": True,
+        "replace_all": True, "exact": True,
     }), ("Bash", rest)]
+
+
+# What a failed Edit's not-found error adds for a one-line file (edit_matching.nearest_region).
+NEAREST = (
+    " The closest region is lines 1-1:\n    1 | {text}\n"
+    "Re-issue the Edit with the exact text of those lines as old_string."
+)
 
 
 def test_the_rest_is_not_run_when_the_rewrite_did_not_go_through(tmp_path: Path) -> None:
@@ -364,7 +371,8 @@ def test_the_rest_is_not_run_when_the_rewrite_did_not_go_through(tmp_path: Path)
     rest = _rest("touch after-edit", "edit, touch")
     call = edit_call(str(notes), [("absent", "present\n", False)])
     assert out == (
-        f"Applied as {call}, whose result follows:\nError: String not found in file\n"
+        f"Applied as {call}, whose result follows:\nError: String not found in file."
+        f"{NEAREST.format(text='old text')}\n"
         f"{call_text('Bash', rest)} was not made: the Edit did not go through."
     ), out
     assert not (tmp_path / "after-edit").exists()
@@ -481,6 +489,7 @@ def test_a_per_line_sed_applies_the_edit_exact_for_the_file(tmp_path: Path) -> N
     ) in out, out
     assert h.hook_calls[-2] == ("Edit", {
         "file_path": str(notes), "old_string": "old", "new_string": "new", "replace_all": True,
+        "exact": True,
     })
     notes.write_text("old old\n")
     multiline = "sed -i 's/old/new\\n/' notes.md && cat notes.md"
@@ -514,7 +523,8 @@ def test_without_an_agent_the_tool_runs_the_rest_itself(tmp_path: Path) -> None:
     call = edit_call(str(notes), [("absent", "present\n", False)])
     assert out == (
         f"Not applied: the command stands for {call}, which failed: Error: String not found "
-        f"in file\n{call_text('Bash', touch)} was not made: the Edit did not go through."
+        f"in file.{NEAREST.format(text='new text')}\n"
+        f"{call_text('Bash', touch)} was not made: the Edit did not go through."
     ), out
     assert not (app / "after").exists()
     # Under an agent the redirect carries the rest as its follow-up call.

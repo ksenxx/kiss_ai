@@ -16,9 +16,7 @@
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
 
-function submits(posted) {
-  return posted.filter(m => m.type === 'submit');
-}
+const {submits} = require('./attachment_helpers');
 
 function enter(win, inp, init) {
   const ev = new win.KeyboardEvent('keydown', {

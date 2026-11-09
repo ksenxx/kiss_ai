@@ -32,15 +32,12 @@
 
 const assert = require('assert');
 const {makeResizePage: makePage, panelW, pointer, drag} = require('./panel_resize_helpers');
+const {key} = require('./ui_antipattern_harness');
 
 const MIN_W = 10;
 const WINDOW_W = 1024;
 const DEFAULT_W = Math.round(WINDOW_W * 0.2);
 const CHAT_MIN = 360;
-
-function key(win, el, name) {
-  el.dispatchEvent(new win.KeyboardEvent('keydown', {key: name, bubbles: true}));
-}
 
 function resizerOf(win, panel) {
   return win.document.getElementById(panel.resizerId);

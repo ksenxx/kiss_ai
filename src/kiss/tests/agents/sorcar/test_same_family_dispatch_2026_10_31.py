@@ -13,11 +13,12 @@ sub-agents, another family is pinned, or the child is a review -- which then run
 ``other_family_model(parent)`` and says so on its ``ran:`` line.
 
 The refusal, the fan-out over distinct files, the shared-file refusal, the parent
-task that asks for sub-agents and the review that has to stay on its family run
-END TO END: a real local daemon runs a parent whose scripted stand-in model calls
-``run_agent`` / ``run_parallel``; the children are real daemon sub-tasks on the
-same stand-in.  The re-route itself, an explicitly pinned other-family model and a
-pinned same-family reviewer are asserted on the plan ``plan_run_agent`` returns:
+task that asks for sub-agents, the named budget capped at the caller's remainder
+and the review that has to stay on its family run END TO END: a real local daemon
+runs a parent whose scripted stand-in model calls ``run_agent`` / ``run_parallel``;
+the children are real daemon sub-tasks on the same stand-in.  The re-route itself,
+an explicitly pinned other-family model and a pinned same-family reviewer are
+asserted on the plan ``plan_run_agent`` returns:
 running such a child would send it to the real vendor of the other family (the
 caller's ``model_config`` is never inherited by another model), which no test may do.
 """
@@ -114,6 +115,7 @@ class _ScriptedParent:
         self.call = call
         self.child_markers = child_markers
         self.parent_requests: list[dict[str, Any]] = []
+        self.child_requests: list[dict[str, Any]] = []
         self.children: list[str] = []
 
     def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -122,6 +124,7 @@ class _ScriptedParent:
         if PARENT_MARK not in current_task:
             marker = next((m for m in self.child_markers if m in current_task), "KID-?")
             self.children.append(marker)
+            self.child_requests.append(request)
             return finish_response(f"done-{marker}")
         self.parent_requests.append(request)
         if len(self.parent_requests) == 1:
@@ -233,6 +236,32 @@ def test_parent_task_asking_for_sub_agents_may_use_its_own_family(
     assert result.success is True, result
     assert sorted(script.children) == ["KID-1", "KID-2"]
     assert script.tool_result().count(f"ran: sorcar model={STANDIN_MODEL} tools=") == 2
+
+
+def test_named_budget_above_the_callers_remainder_is_capped_at_it(
+    env: IsolatedKissHome, daemon: str,
+) -> None:
+    """An inheriting child whose call names $16 of a caller with $8 left runs with $8.
+
+    The cap (``agent_dispatch.budget_cap_of``, applied by the daemon's
+    ``sea_apply.cap_budget``) is the caller's remainder: the child's own
+    Task Settings say $8.00, where the uncapped call would say $16.00 and
+    the default share of one child $4.00.
+    """
+    script = _ScriptedParent(
+        tool_call_response(
+            "run_agent", {"task": "KID-1 say done", "max_budget": "16", "timeout": "120"},
+        ),
+        ("KID-1",),
+    )
+    result = _run_parent(env, daemon, f"{PARENT_MARK} use a sub-agent for this", script)
+    assert result.success is True, result
+    assert script.children == ["KID-1"]
+    (child,) = script.child_requests
+    text = request_text(child)
+    assert text.count("Max budget (USD): $") == 1, text[:2000]
+    assert "Max budget (USD): $8.00" in text, text[:2000]
+    assert "done-KID-1" in script.tool_result()
 
 
 def test_review_with_no_other_family_stays_on_the_callers_model_and_says_so(
@@ -378,6 +407,57 @@ def test_daemon_that_pins_its_model_keeps_the_review_on_it(
         )
     finally:
         offline.__exit__(None, None, None)
+
+
+def test_daemon_that_pins_its_model_refuses_a_sea_that_names_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Under the pin a SEA whose settings name a model or a model configuration is refused.
+
+    The call names neither, so the pin's check of the call's arguments passes;
+    the daemon would then apply the SEA's ``model`` and the sub-task would run
+    on it, off the pinned model.  The same SEA is admitted without the pin.
+    """
+    other = tmp_path / "other_model_sea.py"
+    other.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\n"
+        "class Sea(BaseSea):\n"
+        "    def settings(self, settings):\n"
+        "        return settings | {'model': 'gpt-4o'}\n",
+        encoding="utf-8",
+    )
+    configured = tmp_path / "configured_sea.py"
+    configured.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\n"
+        "class Sea(BaseSea):\n"
+        "    def settings(self, settings):\n"
+        "        return settings | {'model_config': {'temperature': 0}}\n",
+        encoding="utf-8",
+    )
+    same = tmp_path / "same_model_sea.py"
+    same.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\n"
+        "class Sea(BaseSea):\n"
+        "    def settings(self, settings):\n"
+        f"        return settings | {{'model': {STANDIN_MODEL!r}}}\n",
+        encoding="utf-8",
+    )
+    caller = _Caller("PARENT do the work with sub-agents")  # the family rule lets these pass
+    monkeypatch.setenv(PIN_TASK_MODEL_ENV, "1")
+    refused = plan_run_agent(str(tmp_path), "do the thing", str(other), parent_agent=caller)
+    assert isinstance(refused, str) and "pins every task to its model" in refused, refused
+    assert "'gpt-4o'" in refused, refused
+    refused = plan_run_agent(str(tmp_path), "do the thing", str(configured), parent_agent=caller)
+    assert isinstance(refused, str) and "model_config" in refused, refused
+    # A SEA that names the pinned model itself moves nothing and is admitted.
+    plan = plan_run_agent(str(tmp_path), "do the thing", str(same), parent_agent=caller)
+    assert isinstance(plan, dict), plan
+    # A standalone call (no calling task) is never pinned.
+    plan = plan_run_agent(str(tmp_path), "do the thing", str(other))
+    assert isinstance(plan, dict), plan
+    monkeypatch.setenv(PIN_TASK_MODEL_ENV, "")
+    plan = plan_run_agent(str(tmp_path), "do the thing", str(other), parent_agent=caller)
+    assert isinstance(plan, dict), plan
 
 
 def test_explicit_other_family_model_is_allowed_without_pieces() -> None:

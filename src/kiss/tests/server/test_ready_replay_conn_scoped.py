@@ -36,7 +36,10 @@ These tests drive a real :class:`RemoteAccessServer` over real
   transcripts nor re-opens them in windows that already show them;
 * the one exception: a ``ready`` whose legacy ``restoredTabs`` seed an
   EMPTY registry announces tabs that are new to every client, and
-  their replays are broadcast so no window is left with empty tabs.
+  their replays reach every connection so no window is left with
+  empty tabs — as refreshes of what the registry binds when each
+  replay runs: a tab another surface closed or rebound meanwhile
+  stays closed, or keeps the chat it was rebound to (V8-F1).
 """
 
 from __future__ import annotations
@@ -52,10 +55,20 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
+from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import init_repo
+from kiss.tests.server.pause import Pause
 from kiss.tests.server.test_web_server_tab_mirroring import (
     TabMirroringBase,
 )
+
+
+def _bound_to(tab_id: str, chat_id: str) -> Any:
+    """A ``tabs_state`` predicate: the snapshot binds *tab_id* to *chat_id*."""
+    return lambda ev: any(
+        row.get("tabId") == tab_id and row.get("chatId") == chat_id
+        for row in ev.get("tabs", [])
+    )
 
 
 def _seed_subagent_row(parent_task_id: str, chat_id: str, text: str) -> str:
@@ -434,3 +447,98 @@ class TestReadyReplayConnScoped(TabMirroringBase):
         assert replay_a is not None
         texts = [e.get("text") for e in replay_a.get("events", [])]
         self.assertIn("legacy prompt", texts)
+
+    def _hold_seeded_replay(self, tab_id: str, chat_id: str) -> Pause:
+        """Hold the executor at the replay a seeding ``ready`` queued for *tab_id*.
+
+        The ready chose what to replay from a snapshot of the registry;
+        the hold widens the window before the replay runs, in which
+        another surface can close or rebind the tab.
+        """
+        return Pause(AgentServer._handle_command.__code__, lambda local: (
+            local["cmd"].get("type") == "resumeSession"
+            and local["cmd"].get("tabId") == tab_id
+            and local["cmd"].get("chatId") == chat_id
+        ))
+
+    async def test_a_seeding_ready_does_not_reopen_a_tab_closed_meanwhile(
+        self,
+    ) -> None:
+        """V8-F1 (audit 2026-11-08): a tab closed after the ready chose to replay it
+        stays closed on every surface; the replay publishes nothing."""
+        _task_id, chat_id = self._seed_chat("adopted chat", [
+            {"type": "prompt", "text": "adopted transcript"},
+        ])
+        ws_a = await self._connect_ok()
+        ws_b = await self._connect_ok()
+        assert self.server is not None
+        registry = self.server._agent_server.tab_registry
+        tab = "tab-adopted"
+        with self._hold_seeded_replay(tab, chat_id) as pause:
+            await self._ready(ws_a, restored=[
+                {"tabId": tab, "chatId": chat_id, "title": "adopted chat"},
+            ], tab_id=tab)
+            self.assertTrue(await asyncio.to_thread(pause.paused.wait, 15))
+            self.assertTrue(registry.has_tab(tab))
+            await self._send(ws_b, {"type": "closeTab", "tabId": tab})
+            self.assertIsNotNone(
+                await self._wait_for_snapshot_with(ws_b, absent={tab}),
+            )
+            self.assertFalse(registry.has_tab(tab))
+            pause.release()
+            reopened = await self._wait_for_snapshot_with(
+                ws_b, present={tab}, timeout=2.0,
+            )
+            self.assertIsNone(
+                reopened, f"the seeded replay reopened the closed tab: {reopened}",
+            )
+            self.assertFalse(registry.has_tab(tab))
+
+    async def test_a_seeding_ready_does_not_rebind_a_tab_navigated_meanwhile(
+        self,
+    ) -> None:
+        """V8-F1 (audit 2026-11-08): a tab rebound after the ready chose to replay
+        it keeps the newer chat everywhere, and the ready's client gets THAT
+        chat's transcript, not the stale one."""
+        _old_task, old_chat = self._seed_chat("old adopted chat", [
+            {"type": "prompt", "text": "old transcript"},
+        ])
+        _new_task, new_chat = self._seed_chat("new user-selected chat", [
+            {"type": "prompt", "text": "new transcript"},
+        ])
+        ws_a = await self._connect_ok()
+        ws_b = await self._connect_ok()
+        assert self.server is not None
+        registry = self.server._agent_server.tab_registry
+        tab = "tab-navigated"
+        with self._hold_seeded_replay(tab, old_chat) as pause:
+            await self._ready(ws_a, restored=[
+                {"tabId": tab, "chatId": old_chat, "title": "old adopted chat"},
+            ], tab_id=tab)
+            self.assertTrue(await asyncio.to_thread(pause.paused.wait, 15))
+            await self._send(ws_b, {
+                "type": "resumeSession", "tabId": tab, "chatId": new_chat,
+            })
+            self.assertIsNotNone(await self._wait_for_event(
+                ws_b, "tabs_state", pred=_bound_to(tab, new_chat),
+            ))
+            pause.release()
+            stale = await self._wait_for_event(
+                ws_b, "tabs_state", pred=_bound_to(tab, old_chat), timeout=2.0,
+            )
+            self.assertIsNone(
+                stale, f"the seeded replay rebound the tab to its old chat: {stale}",
+            )
+            self.assertEqual(
+                [chat for t, chat, _task in registry.bound_tabs() if t == tab],
+                [new_chat],
+            )
+            # The ready's client resumed from the stale snapshot: what it
+            # gets is the chat the tab shows now, never the old one.
+            old_replay_a = await self._wait_for_event(
+                ws_a, "task_events", timeout=2.0,
+                pred=lambda ev: ev.get("tabId") == tab and ev.get("chat_id") == old_chat,
+            )
+            self.assertIsNone(
+                old_replay_a, "the ready's client received the stale chat's transcript",
+            )

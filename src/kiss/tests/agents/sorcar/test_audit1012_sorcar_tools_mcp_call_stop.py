@@ -19,12 +19,15 @@ the real :mod:`kiss.core.tool_interrupt` machinery; no mocks.
 
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import sys
 import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import FrameType
+from typing import Any
 
 import pytest
 
@@ -32,6 +35,7 @@ from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig, _connect
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
     end_tool_call,
+    inject_async_exception,
     interrupt_tool_call,
     new_tool_call,
     register_tool_call,
@@ -140,6 +144,110 @@ def test_call_tool_stops_promptly(tmp_path: Path) -> None:
         assert conn.in_flight == 0
         assert manager.call_tool(key, "slow", {"seconds": 0}) == "done"
     finally:
+        manager.shutdown()
+
+
+class _PauseInFutureCancel:
+    """Profile hook parking the thread as it enters ``Future.cancel``, until resumed."""
+
+    def __init__(self) -> None:
+        self.future: concurrent.futures.Future[Any] | None = None
+        self.reached = threading.Event()
+        self.resume = threading.Event()
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> None:
+        if event == "call" and frame.f_code is concurrent.futures.Future.cancel.__code__:
+            sys.setprofile(None)
+            self.future = frame.f_locals["self"]
+            self.reached.set()
+            self.resume.wait(60)
+
+
+def _call_under_hook(
+    hook: Any, manager: MCPManager, key: str, outcome: list[BaseException | str],
+) -> None:
+    """Thread body: a 1 s ``slow`` tool call under the profile *hook*; record its outcome."""
+    token = new_tool_call("slow")
+    register_tool_call(token)
+    sys.setprofile(hook)
+    try:
+        outcome.append(manager.call_tool(key, "slow", {"seconds": 1}))
+        end_tool_call(token)
+    except BaseException as exc:  # noqa: BLE001 — the thread records any outcome
+        outcome.append(exc)
+    finally:
+        sys.setprofile(None)
+        unregister_tool_call(token)
+
+
+def _blocked_in(thread: threading.Thread, code: Any, timeout: float) -> bool:
+    """Whether *thread* reaches (and stays in) a frame running *code* within *timeout*."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        assert thread.ident is not None
+        frame = sys._current_frames().get(thread.ident)
+        if frame is not None and frame.f_code is code:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+@pytest.mark.usefixtures("real_stdin")
+def test_stop_inside_the_calls_cancel_does_not_wedge_the_manager_loop(tmp_path: Path) -> None:
+    """A Stop landing in ``call_tool``'s cancellation must not leave the loop blocked for good.
+
+    The cleanup cancelled the call's future on the task thread.
+    ``Future.cancel`` takes the future's condition with a plain
+    ``with``, and a Stop delivered right after its ``__enter__``
+    (CPython gh-74174, here made certain by a contended acquisition)
+    leaves that condition held by a thread that then dies.  When the
+    call later completed, the loop's ``_settle`` blocked on it for
+    ever: every MCP connection of the daemon shares that loop.  The
+    cancellation now runs on the loop thread, which receives no
+    injections.
+    """
+    manager = MCPManager()
+    config = _config(tmp_path, 0.0)
+    pause = _PauseInFutureCancel()
+    outcome: list[BaseException | str] = []
+    try:
+        conn = manager.connect(config)
+        assert conn.error == "", conn.error
+        key = _connection_key(config)
+        caller = threading.Thread(target=_call_under_hook, args=(pause, manager, key, outcome))
+        caller.start()
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and conn.in_flight == 0:
+            time.sleep(0.01)
+        assert conn.in_flight == 1, "the call never leased the connection"
+        assert caller.ident is not None
+        # The panel Stop: the call's wait raises and the cleanup runs
+        # while the tool is still executing on the server.
+        assert interrupt_tool_call(caller.ident, "slow")
+        while not pause.reached.is_set() and caller.is_alive():
+            pause.reached.wait(0.05)
+        if pause.reached.is_set():
+            # The cleanup cancels on the task thread: hold the future's
+            # condition so that thread blocks in ``__enter__``, deliver
+            # the Stop there, then let it acquire.
+            future = pause.future
+            assert future is not None
+            with future._condition:  # type: ignore[attr-defined]
+                pause.resume.set()
+                assert _blocked_in(caller, threading.Condition.__enter__.__code__, 10)
+                inject_async_exception(caller.ident, KeyboardInterrupt)
+        caller.join(30)
+        assert not caller.is_alive(), "call_tool() did not return"
+        assert len(outcome) == 1 and not isinstance(outcome[0], str), outcome
+        # The server finishes the 1 s tool: the loop settles the call.
+        time.sleep(1.5)
+        heartbeat = threading.Event()
+        manager._loop.call_soon_threadsafe(heartbeat.set)
+        assert heartbeat.wait(30), "the manager loop is wedged on the call's future"
+        assert conn.in_flight == 0, "the Stop left the call's lease on the connection"
+        assert manager.call_tool(key, "slow", {"seconds": 0}) == "done"
+    finally:
+        pause.resume.set()
         manager.shutdown()
 
 

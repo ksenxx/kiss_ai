@@ -20,17 +20,8 @@
 // the reply lands, so every reply sent is shown.
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-const {finishedSession} = require('./history_helpers');
-
-/** A finished row, of the registered `machine` when one is given. */
-function session(id, title, machine) {
-  return finishedSession(
-    id,
-    title,
-    machine ? {machine, machine_url: 'https://' + machine + ':8787'} : {},
-  );
-}
+const {makePage, send, ofType} = require('./simplify2_harness');
+const {machineSession: session, rowTitles} = require('./history_helpers');
 
 const SESSIONS = [
   session(1, 'local one', ''),
@@ -38,12 +29,8 @@ const SESSIONS = [
   session(3, 'lab task', 'lab'),
 ];
 
-function historyRequests(posted) {
-  return posted.filter(m => m && m.type === 'getHistory');
-}
-
 function lastRequest(posted) {
-  const reqs = historyRequests(posted);
+  const reqs = ofType(posted, 'getHistory');
   return reqs[reqs.length - 1];
 }
 
@@ -56,12 +43,6 @@ function reply(generation, sessions, offset = 0) {
     machines: ['box', 'lab'],
     localMachine: 'myhost',
   };
-}
-
-function rowTitles(win) {
-  return Array.from(
-    win.document.querySelectorAll('#history-list .sidebar-item-text'),
-  ).map(el => el.textContent);
 }
 
 // The machines named by the rows' chips (a chat's header and its task
@@ -87,13 +68,13 @@ function testBurstFoldsIntoTheFlightAndEveryReplyShows() {
   const {win, posted, first} = openPage();
   posted.length = 0;
   // The load burst: task news while page one is still in flight.
-  const tabId = win.kissActiveTabId();
+  const tabId = win._testApi.getActiveTabId();
   send(win, {type: 'tasks_updated'});
   send(win, {type: 'status', running: true, attached: true, tabId, startTs: Date.now()});
   send(win, {type: 'status', running: false, tabId});
   send(win, {type: 'tasks_updated'});
   assert.strictEqual(
-    historyRequests(posted).length,
+    ofType(posted, 'getHistory').length,
     0,
     'a refresh during the flight folds into it',
   );
@@ -103,7 +84,7 @@ function testBurstFoldsIntoTheFlightAndEveryReplyShows() {
   assert.deepStrictEqual(rowTitles(win), ['lab task', 'box task', 'local one']);
   assert.deepStrictEqual(chips(win), ['lab', 'box']);
   // ... and the folded refresh goes out exactly once, as a new page one.
-  const after = historyRequests(posted);
+  const after = ofType(posted, 'getHistory');
   assert.strictEqual(after.length, 1, 'one trailing refetch');
   assert.strictEqual(after[0].offset, 0);
   assert.strictEqual(after[0].generation, first.generation + 1);
@@ -111,10 +92,10 @@ function testBurstFoldsIntoTheFlightAndEveryReplyShows() {
   posted.length = 0;
   send(win, reply(after[0].generation, SESSIONS.slice(0, 2)));
   assert.deepStrictEqual(rowTitles(win), ['box task', 'local one']);
-  assert.strictEqual(historyRequests(posted).length, 0, 'no refetch without a folded refresh');
+  assert.strictEqual(ofType(posted, 'getHistory').length, 0, 'no refetch without a folded refresh');
   // A refresh once nothing is in flight goes out at once.
   send(win, {type: 'tasks_updated'});
-  assert.strictEqual(historyRequests(posted).length, 1, 'an idle refresh is sent now');
+  assert.strictEqual(ofType(posted, 'getHistory').length, 1, 'an idle refresh is sent now');
   win.close();
   console.log('  ok - a burst folds into the flight and every reply shows');
 }
@@ -136,11 +117,11 @@ function testAViewChangeStartsAFreshGenerationAtOnce() {
   posted.length = 0;
   send(win, reply(first.generation, SESSIONS));
   assert.deepStrictEqual(rowTitles(win), [], 'stale reply not rendered');
-  assert.strictEqual(historyRequests(posted).length, 0, 'stale reply triggers nothing');
+  assert.strictEqual(ofType(posted, 'getHistory').length, 0, 'stale reply triggers nothing');
   // The search's reply renders and nothing was folded into it.
   send(win, reply(searchReq.generation, SESSIONS.slice(1, 2)));
   assert.deepStrictEqual(rowTitles(win), ['box task']);
-  assert.strictEqual(historyRequests(posted).length, 0);
+  assert.strictEqual(ofType(posted, 'getHistory').length, 0);
   win.close();
   console.log('  ok - a search while in flight refetches at once');
 }
@@ -155,9 +136,9 @@ function testALaterPageDoesNotFlushTheFoldedRefresh() {
   posted.length = 0;
   // A later page's reply (not page one) flushes nothing.
   send(win, reply(gen, SESSIONS, 1));
-  assert.strictEqual(historyRequests(posted).length, 0, 'a page-two reply flushes nothing');
+  assert.strictEqual(ofType(posted, 'getHistory').length, 0, 'a page-two reply flushes nothing');
   send(win, reply(gen, SESSIONS));
-  assert.strictEqual(historyRequests(posted).length, 1, 'page one flushes the folded refresh');
+  assert.strictEqual(ofType(posted, 'getHistory').length, 1, 'page one flushes the folded refresh');
   win.close();
   console.log('  ok - only page one flushes the folded refresh');
 }
@@ -167,7 +148,7 @@ function testAReconnectDoesNotWaitOnALostReply() {
   posted.length = 0;
   send(win, {type: 'daemonStatus', connected: false});
   send(win, {type: 'daemonStatus', connected: true});
-  const reqs = historyRequests(posted);
+  const reqs = ofType(posted, 'getHistory');
   assert.strictEqual(reqs.length, 1, 'the reconnect refetches page one');
   assert.strictEqual(reqs[0].offset, 0);
   win.close();
@@ -182,7 +163,7 @@ function testAStalledFlightIsGivenUpOn() {
   try {
     send(win, {type: 'tasks_updated'});
     assert.strictEqual(
-      historyRequests(posted).length,
+      ofType(posted, 'getHistory').length,
       1,
       'a page-one request 30 s without a reply is not waited on',
     );
@@ -198,7 +179,7 @@ function testAClosedPanelFoldsNothing() {
   posted.length = 0;
   win.document.getElementById('sidebar').classList.remove('open');
   send(win, {type: 'tasks_updated'});
-  assert.strictEqual(historyRequests(posted).length, 0, 'a closed panel asks nothing');
+  assert.strictEqual(ofType(posted, 'getHistory').length, 0, 'a closed panel asks nothing');
   win.close();
   console.log('  ok - a closed panel asks nothing');
 }

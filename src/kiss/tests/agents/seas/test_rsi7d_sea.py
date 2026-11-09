@@ -278,7 +278,7 @@ def test_indexed_seas_reports_editable_paths_and_prompt_shapes(checkout: Path) -
     assert rows["fdemo"]["prompt_getter"] == "system_prompt"  # appends: ``prompt + CONSTANT``
     assert rows["fdemo"]["prompt_constant"] == "SYSTEM_PROMPT"
     assert rows["fdemo"]["prompt_chars"] == len(
-        _FSTRING_SEA.split("SYSTEM_PROMPT = ", 1)[1].split("\n\n\nclass")[0]
+        _FSTRING_SEA.split("SYSTEM_PROMPT = ", 1)[1].split("\n\n\nclass", 1)[0]
     )
     assert (rows["noprompt"]["prompt_getter"], rows["noprompt"]["prompt_constant"]) == ("", "")
     assert rows["rsi7d"]["registered_path"] == str(_SEA_PATH)

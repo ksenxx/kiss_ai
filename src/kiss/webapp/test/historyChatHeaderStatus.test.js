@@ -23,6 +23,7 @@ const {
   makeRow: helperMakeRow,
   sendHistory,
   chatHeader: header,
+  chatTabs,
 } = require('./history_helpers');
 
 function makePage() {
@@ -353,14 +354,6 @@ function testLegacyFlatViewHasNoHeaders() {
   console.log('  ok - the flat view is unchanged');
 }
 
-// The open chat tabs (chat tabs have no row of their own: the Chats
-// panel picks the one on screen; the rest stay open, hidden).
-function chatTabs(win) {
-  return win._testApi
-    .openTabs()
-    .filter(t => !t.isSubagentTab && !t.isContentTab);
-}
-
 function hasTab(win, tabId) {
   return win._testApi.openTabs().some(t => t.id === tabId);
 }
@@ -411,7 +404,7 @@ function testChevronFoldsAndHeaderOpensLastTask() {
     'a settled chat starts collapsed',
   );
   const tabsBefore = chatTabs(win).length;
-  const idleTab = win.kissActiveTabId();
+  const idleTab = win._testApi.getActiveTabId();
   posted.length = 0;
 
   // The chevron only shows / hides the chat's task panels; it reads
@@ -436,7 +429,7 @@ function testChevronFoldsAndHeaderOpensLastTask() {
   assert.strictEqual(chev.getAttribute('aria-expanded'), 'true');
   assert.ok(sidebar.classList.contains('open'), 'the tasks stay in view');
   assert.strictEqual(
-    win.kissActiveTabId(),
+    win._testApi.getActiveTabId(),
     idleTab,
     'the chevron opens no tab',
   );
@@ -466,7 +459,7 @@ function testChevronFoldsAndHeaderOpensLastTask() {
     !sidebar.classList.contains('open'),
     'the sidebar closes as for a row click',
   );
-  assert.notStrictEqual(win.kissActiveTabId(), idleTab, 'a new tab is active');
+  assert.notStrictEqual(win._testApi.getActiveTabId(), idleTab, 'a new tab is active');
   assert.ok(!hasTab(win, idleTab), 'the idle chat left behind is retired');
   assert.strictEqual(chatTabs(win).length, tabsBefore, 'one tab for the chat');
   const resumes = ofType(posted, 'resumeSession');
@@ -475,13 +468,13 @@ function testChevronFoldsAndHeaderOpensLastTask() {
   assert.strictEqual(resumes[0].taskId, 2, 'at its last task');
   assert.strictEqual(
     resumes[0].tabId,
-    win.kissActiveTabId(),
+    win._testApi.getActiveTabId(),
     'in the fresh, now active, tab',
   );
 
   // The daemon binds the new tab to chat A; a second header click
   // finds that tab showing the chat and switches to it.
-  const chatATab = win.kissActiveTabId();
+  const chatATab = win._testApi.getActiveTabId();
   send(win, {
     type: 'task_events',
     tabId: chatATab,
@@ -513,14 +506,14 @@ function testChevronFoldsAndHeaderOpensLastTask() {
     startTs: 1_700_000_950_000,
   });
   win.document.getElementById('new-chat-btn').click();
-  const freshTab = win.kissActiveTabId();
+  const freshTab = win._testApi.getActiveTabId();
   assert.notStrictEqual(freshTab, chatATab, 'a fresh chat is active');
   assert.ok(hasTab(win, chatATab), 'the running chat A stays open');
   openSidebar(win);
   posted.length = 0;
   header(win, 'A').click();
   assert.strictEqual(
-    win.kissActiveTabId(),
+    win._testApi.getActiveTabId(),
     chatATab,
     'the header switches to chat A',
   );
@@ -559,11 +552,11 @@ function testEventlessLastTaskResumesByChatId() {
     }),
   ]);
   const tabsBefore = chatTabs(win).length;
-  const idleTab = win.kissActiveTabId();
+  const idleTab = win._testApi.getActiveTabId();
   posted.length = 0;
   header(win, 'E').click();
   // The idle chat left behind is retired, so the count does not grow.
-  assert.notStrictEqual(win.kissActiveTabId(), idleTab, 'a new tab is active');
+  assert.notStrictEqual(win._testApi.getActiveTabId(), idleTab, 'a new tab is active');
   assert.ok(!hasTab(win, idleTab), 'the idle chat left behind is retired');
   assert.strictEqual(chatTabs(win).length, tabsBefore, 'one tab for chat E');
   const resumes = ofType(posted, 'resumeSession');
@@ -604,7 +597,7 @@ function testEventlessLastTaskResumesByChatId() {
   // A row click on the same task still shows it read-only in a fresh
   // tab when no tab is bound to the chat; the settled chat E left
   // behind is retired.
-  const chatETab = win.kissActiveTabId();
+  const chatETab = win._testApi.getActiveTabId();
   send(win, {type: 'tasks_updated'});
   sendHistory(win, posted, [
     makeRow({
@@ -618,7 +611,7 @@ function testEventlessLastTaskResumesByChatId() {
   posted.length = 0;
   rowByTask(win, 6).click();
   assert.notStrictEqual(
-    win.kissActiveTabId(),
+    win._testApi.getActiveTabId(),
     chatETab,
     'a fresh read-only tab',
   );

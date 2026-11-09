@@ -91,7 +91,7 @@ class TestDockerRunCommandsParallel(unittest.TestCase):
         assert container is not None
         other.close()
         exit_code, output, _seconds = other._timed_exec(
-            container, "echo x", threading.Event(), 5,
+            container, "echo x", threading.Event(), 5, 5000,
         )
         self.assertEqual(exit_code, -1)
         self.assertTrue(output.startswith("Error: "), output)

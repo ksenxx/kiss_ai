@@ -15,11 +15,12 @@
 
 const assert = require('assert');
 const {makePage, loadRemoteCss} = require('./simplify2_harness.js');
-const {makeSession, loadHistory, sendHistory} = require('./history_helpers');
-
-function historyRow(win) {
-  return win.document.querySelector('#history-list .sidebar-item');
-}
+const {
+  makeSession,
+  loadHistory,
+  sendHistory,
+  historyRow,
+} = require('./history_helpers');
 
 function testCollapsedByDefaultAndToggles() {
   const {win, posted} = makePage();

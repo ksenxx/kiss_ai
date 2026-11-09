@@ -133,3 +133,50 @@ def test_concurrent_refreshes_notify_subscribers_in_publish_order(
     assert delivered == sorted(delivered, key=len), (
         f"snapshots delivered out of publish order: {delivered!r}"
     )
+
+
+def test_a_rescan_with_nothing_to_deliver_does_not_wait_for_a_slow_subscriber(
+    tmp_path: Path,
+) -> None:
+    """A task thread resolving an unregistered name rescans (``get_command`` on a miss).
+
+    Its snapshot is the one already broadcast, so it has nothing to
+    deliver and must return at once, even while the watcher thread's
+    delivery of that snapshot is still running: the daemon's subscriber
+    builds the ``seaCommands`` event from history.db, which a
+    write-locked database stalls for SQLite's 30 s busy timeout, and the
+    publish-and-notify lock held across that delivery parked every
+    rescan behind it.
+    """
+    folder = tmp_path / "seas"
+    _touch_sea(folder, "alpha")
+    _write_seas_md([str(folder)])
+    delivery_started = threading.Event()
+    release = threading.Event()
+    delivered: list[list[str]] = []
+
+    def subscriber(commands: list[str]) -> None:
+        delivery_started.set()
+        assert release.wait(timeout=10.0), "the delivery was never released"
+        delivered.append(commands)
+
+    sea_commands.subscribe(subscriber)
+    watcher = threading.Thread(target=sea_commands.refresh_registry, name="watcher-rescan")
+    watcher.start()
+    assert delivery_started.wait(timeout=10.0), "the first snapshot was never delivered"
+    misses: list[Path | None] = []
+
+    def resolve_miss() -> None:
+        misses.append(sea_commands.get_command("nosuchcommand"))
+
+    task = threading.Thread(target=resolve_miss, name="task-miss")
+    task.start()
+    task.join(timeout=5.0)
+    try:
+        assert not task.is_alive(), "the unchanged rescan waited for the subscriber"
+    finally:
+        release.set()
+        watcher.join(timeout=10.0)
+        task.join(timeout=10.0)
+    assert misses == [None]
+    assert delivered == [sea_commands.list_commands()]

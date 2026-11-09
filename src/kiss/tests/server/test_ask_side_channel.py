@@ -33,13 +33,16 @@ The tests exercise:
   worktree tools).
 * ``_broadcast_ask_answer`` — once ``daemon_client.run`` returns
   (or raises) the worker broadcasts ONE ``ask_answer`` event carrying
-  the question, the answer text, the success flag, the asking tab id
-  and the owner task id, so the running task's transcript shows the
-  answer after the answering sub-agent's tab is gone.
+  the question, the answer text, the success flag and the owner task
+  id, so the running task's transcript shows the answer after the
+  answering sub-agent's tab is gone.  The event is routed by the
+  OWNER task (the tabs showing it now), not by the tab the question
+  was typed into: that tab may have been closed meanwhile.
 """
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -47,13 +50,20 @@ from typing import Any
 
 import pytest
 
+import kiss.agents.sorcar.persistence as th
 from kiss.agents.seas.ask import ask_sea
 from kiss.agents.sorcar import daemon_client, sea_commands
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
-from kiss.tests.server.conftest import clear_agent_states
+from kiss.server.web_server import Payload, WebPrinter
+from kiss.tests.server.conftest import (
+    clear_agent_states,
+    redirect_persistence,
+    restore_persistence,
+)
+from kiss.tests.server.pause import Pause
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -214,12 +224,14 @@ def test_ask_message_bypasses_pending_queue_and_dispatches() -> None:
         "attachments": None,
     }]
     # The user's typed line is echoed into the tab so it shows up in
-    # the transcript above where the answer will land.
+    # the transcript above where the answer will land.  The echo is
+    # routed by the owning task (the printer records it and stamps one
+    # copy per tab subscribed to that task), not by the typing tab: a
+    # tab rebound to another chat meanwhile must not receive it.
     prompt_echoes = [e for e in events if e.get("type") == "prompt"]
     assert prompt_echoes == [{
         "type": "prompt",
         "text": "/ask why did the last step fail?",
-        "tabId": "tab-1",
         "steer": True,
         "taskId": "task-abc",
     }]
@@ -248,15 +260,13 @@ def test_ask_help_answers_with_the_description_without_dispatch() -> None:
     assert st.pending_user_messages == []
     assert calls == []
     assert [e for e in events if e.get("type") == "prompt"] == [{
-        "type": "prompt", "text": "/ask HELP", "tabId": "tab-1", "steer": True,
-        "taskId": "task-abc",
+        "type": "prompt", "text": "/ask HELP", "steer": True, "taskId": "task-abc",
     }]
     assert [e for e in events if e.get("type") == "ask_answer"] == [{
         "type": "ask_answer",
         "question": "HELP",
         "text": ask_sea.AskSea().description(),
         "success": True,
-        "tabId": "tab-1",
         "taskId": "task-abc",
     }]
 
@@ -287,6 +297,100 @@ def test_ask_check_answers_with_the_dry_run_report_without_dispatch() -> None:
     assert answer["text"] == sea_commands.sea_check("ask", Path(ask_sea.__file__))
     assert answer["text"].startswith("/ask: " + ask_sea.AskSea().description())
     assert "tools added: task_context" in answer["text"]
+
+
+def test_ask_through_a_run_on_a_busy_tab_is_the_side_channel_too() -> None:
+    """A ``run`` that lands on a tab whose task is live routes ``/ask`` like ``appendUserMessage``.
+
+    The page switches to ``appendUserMessage`` once it knows the tab
+    is busy; a ``run`` sent before that (the startup window) or by an
+    API client is the same user action, so its ``/ask …`` line is the
+    side channel (here ``/ask help``, answered locally with the ask
+    SEA's description), not steering text handed to the running
+    agent.  A plain line still steers.
+    """
+    server, events = _make_server()
+    st = _register_running_task("task-abc", "tab-1", chat_id="chat-1")
+    st.task_thread = threading.Thread(target=lambda: None, daemon=True)
+    sea_commands.refresh_registry()
+
+    server._cmd_run({"tabId": "tab-1", "prompt": "/ask help", "_notice": "sent 1 file"})
+
+    assert st.pending_user_messages == []
+    assert [e["type"] for e in events] == ["setTaskText", "prompt", "ask_answer", "notice"], events
+    assert events[1] == {
+        "type": "prompt", "text": "/ask help", "steer": True, "taskId": "task-abc",
+    }
+    assert events[2]["text"] == ask_sea.AskSea().description()
+    assert events[3] == {"type": "notice", "text": "sent 1 file", "tabId": "tab-1"}
+
+    server._cmd_run({"tabId": "tab-1", "prompt": "plain follow-up"})
+    assert st.pending_user_messages == ["plain follow-up"]
+    assert [e["type"] for e in events[4:]] == ["setTaskText", "prompt"]
+
+
+@pytest.mark.parametrize("successor_chat", ["", "chat-other"])
+def test_run_on_a_busy_tab_admits_the_message_in_the_lock_hold_that_found_the_task(
+    successor_chat: str,
+) -> None:
+    """A ``run`` into a busy tab queues its text on the task it found, in the same lock hold.
+
+    ``_cmd_run`` picks the tab's running task under ``STATE_LOCK``; the
+    message must land on that task's queue in the same lock hold, so a
+    task that ends right after the pick re-runs the text (the real
+    ``_release_run_state`` drains the queue into the tab's next run)
+    and a successor task of another chat that re-arms the tab meanwhile
+    never receives it.  It used to be handed to
+    ``_cmd_append_user_message`` after the lock was released, whose own
+    lookup saw the tab idle (the text was refused, back in the
+    composer) or bound to the successor (the text steered an unrelated
+    chat, ``chatId`` notwithstanding).  A run that reaches that handler
+    is held at its entry while the task ends, which lands the race for
+    sure; one that queues the text under its own lock never gets there.
+    """
+    server, events = _make_server()
+    original = _register_running_task("task-orig", "tab-busy", chat_id="chat-orig")
+    original.task_thread = threading.Thread(target=lambda: None, daemon=True)
+    failures: list[BaseException] = []
+
+    def submit() -> None:
+        try:
+            server._cmd_run({
+                "tabId": "tab-busy", "chatId": "chat-orig", "prompt": "follow-up for chat-orig",
+            })
+        except BaseException as exc:  # noqa: BLE001 — reported by the test thread
+            failures.append(exc)
+
+    successor: AgentState | None = None
+    held = Pause(
+        AgentServer._cmd_append_user_message.__code__,
+        lambda local: local.get("self") is server,
+    )
+    with held:
+        worker = threading.Thread(target=submit, daemon=True)
+        worker.start()
+        while worker.is_alive() and not held.paused.is_set():
+            worker.join(0.01)
+        with server._state_lock:
+            reruns, redispatch, _ = server._release_run_state(original, {}, "tab-busy", "")
+            if successor_chat:
+                agent_state.unregister(original.task_id, original)
+                successor = _register_running_task("task-succ", "tab-busy", chat_id=successor_chat)
+                successor.task_thread = threading.Thread(target=lambda: None, daemon=True)
+        held.release()
+        worker.join(10)
+    assert not worker.is_alive() and not failures, failures
+
+    refused = [e["text"] for e in events if e.get("code") == "prompt_refused"]
+    assert refused == [], refused
+    if successor is not None:
+        assert successor.pending_user_messages == [], (
+            f"chat {successor_chat} received the text: {successor.pending_user_messages}"
+        )
+    assert [text for text, _files in reruns] == ["follow-up for chat-orig"], (
+        f"the ended task does not re-run the text; reruns={reruns}"
+    )
+    assert redispatch is True
 
 
 def test_non_ask_message_still_queues_and_does_not_dispatch() -> None:
@@ -592,7 +696,7 @@ def test_side_channel_survives_daemon_run_exception(
     assert answers[0]["success"] is False
     assert "simulated daemon failure" in answers[0]["text"]
     assert answers[0]["question"] == "q"
-    assert answers[0]["tabId"] == "tab-1"
+    assert "tabId" not in answers[0]
     assert answers[0]["taskId"] == "task-1"
 
 
@@ -610,9 +714,9 @@ def test_side_channel_broadcasts_answer_into_owner_task(
     the moment it ends, so this event is the ONLY way the user sees
     the reply.  It carries the question (so the panel is
     self-contained on replay), the answer text and success flag from
-    the :class:`TaskResult`, the asking tab id and the OWNER task id
-    (the stamp that makes the printer record + persist it under the
-    running task).
+    the :class:`TaskResult` and the OWNER task id (the stamp that
+    makes the printer record + persist it under the running task and
+    route it to that task's viewer tabs) -- not the asking tab id.
     """
     server, events = _make_server()
     _install_daemon_run_capture(monkeypatch)
@@ -633,9 +737,73 @@ def test_side_channel_broadcasts_answer_into_owner_task(
         "question": "why did step 3 fail?",
         "text": "<p>Step 3 failed because the file was missing.</p>",
         "success": True,
-        "tabId": "tab-1",
         "taskId": "task-abc",
     }
+
+
+class _WireCapturingWebPrinter(WebPrinter):
+    """A real :class:`WebPrinter` whose wire is a list of ``(tab stamp, payload)``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wire: list[tuple[str, dict[str, Any]]] = []
+        self._wire_lock = threading.Lock()
+
+    def _send_to_ws_clients(self, data: Payload, tab_id: str = "") -> None:
+        assert isinstance(data, str)
+        with self._wire_lock:
+            self.wire.append((tab_id, json.loads(data)))
+
+
+def test_ask_answer_reaches_the_tabs_showing_the_owner_now(tmp_path: Path) -> None:
+    """The answer goes to the tabs showing the OWNER now, once, and is persisted once.
+
+    The answer lands minutes after the question.  By then the asking
+    tab may be closed and the owner task reopened in another tab
+    (session replay subscribes it); stamping the answer with the
+    asking tab's historical id would deliver it to nobody.  Routed by
+    the owner task instead, it reaches the current viewer, is recorded
+    once under the owner (a viewer attaching later replays it) and --
+    the owner finished and its agent state retired -- is still
+    persisted once under the owner's own row.
+    """
+    saved = redirect_persistence(tmp_path)
+    printer = _WireCapturingWebPrinter()
+    server = AgentServer(printer=printer)
+    try:
+        owner_id, _ = th._add_task("owner of the /ask", "")
+        owner = str(owner_id)
+        assert agent_state.get(owner) is None, "the owner's agent state is retired"
+        printer.ensure_recording_for_task(owner)
+        printer.subscribe_tab(owner, "old-tab")
+        printer.cleanup_tab("old-tab")
+        printer.subscribe_tab(owner, "new-tab")
+        assert printer.viewer_tab_ids(owner) == ["new-tab"]
+
+        server._broadcast_ask_answer(
+            tab_id="old-tab", owner_task_id=owner,
+            question="why?", text="the answer", success=True,
+        )
+
+        sent = [(tab, ev) for tab, ev in printer.wire if ev["type"] == "ask_answer"]
+        assert [tab for tab, _ in sent] == ["new-tab"], f"answer routed to {sent!r}"
+        assert sent[0][1]["tabId"] == "new-tab" and sent[0][1]["taskId"] == owner
+        with printer._lock:
+            recorded = [
+                e for e in printer._recordings.get(owner, [])
+                if e.get("type") == "ask_answer"
+            ]
+        assert len(recorded) == 1, f"recorded {len(recorded)} times"
+        assert "tabId" not in recorded[0]
+        th._flush_chat_events()
+        row = th._load_chat_events_by_task_id(owner)
+        assert row is not None and isinstance(row["events"], list)
+        persisted = [e for e in row["events"] if e.get("type") == "ask_answer"]
+        assert len(persisted) == 1, f"persisted {len(persisted)} times"
+        assert persisted[0]["text"] == "the answer" and "tabId" not in persisted[0]
+    finally:
+        server._file_index.stop()
+        restore_persistence(saved)
 
 
 def test_broadcast_ask_answer_without_owner_task_omits_task_id() -> None:

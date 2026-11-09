@@ -35,11 +35,13 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from kiss.agents.sorcar.chat_summary import end_ms, launch_ms
-from kiss.agents.sorcar.useful_tools import _edit_pairs
+from kiss.agents.sorcar.edit_matching import reindent, tolerant_matches
+from kiss.agents.sorcar.useful_tools import _crlf_edit, _edit_pairs
 
 # Per-kind clip limits (characters) applied when an entry is rendered.
 _CLIP: dict[str, int] = {
@@ -63,6 +65,10 @@ _OVERVIEW_SUMMARIES_HEAD = 2
 _OVERVIEW_SUMMARIES_TAIL = 10
 _OVERVIEW_ASK_ANSWERS = 3
 _OVERVIEW_TAIL_ENTRIES = 30
+# A fan-out of hundreds of sub-agents would otherwise fill the whole
+# context (:data:`MAX_CONTEXT_CHARS`) with child lines alone.
+_CHILDREN_HEAD = 2
+_CHILDREN_TAIL = 20
 MAX_PAGE = 400
 # Character budget of :func:`context` (~15-20k tokens): the whole
 # context fits a single cheap model call next to the question.
@@ -194,7 +200,8 @@ def digest_events(events: list[dict[str, Any]]) -> tuple[list[Entry], str]:
 
     Returns:
         ``(entries, spend)`` where *spend* is the text of the last
-        ``usage_info`` event (``""`` when none was recorded).
+        ``usage_info`` event (``""`` when none was recorded); a textless
+        one (a late charge's totals) is formatted from its fields.
     """
     entries: list[Entry] = []
     stream = _StreamBuffer()
@@ -207,7 +214,7 @@ def digest_events(events: list[dict[str, Any]]) -> tuple[list[Entry], str]:
             continue
         stream.flush(entries)
         if kind == "usage_info":
-            spend = str(ev.get("text") or spend)
+            spend = str(ev.get("text") or "") or _totals_spend(ev) or spend
         elif kind == "prompt":
             text = str(ev.get("text") or "").strip()
             if seen_prompt and not text.startswith("/ask"):
@@ -233,6 +240,23 @@ def digest_events(events: list[dict[str, Any]]) -> tuple[list[Entry], str]:
                 entries.append(Entry(kind.upper(), str(text)))
     stream.flush(entries)
     return entries, spend
+
+
+def _totals_spend(ev: dict[str, Any]) -> str:
+    """Return the spend line of a textless ``usage_info`` from its totals, or ``""``.
+
+    A late charge (persisted after the run by
+    :func:`~kiss.agents.sorcar.sorcar_agent._append_late_usage_events`)
+    carries an empty ``text`` and the authoritative ``cost_usd``,
+    ``total_tokens`` and ``total_steps``.
+    """
+    if ev.get("cost_usd") is None:
+        return ""
+    return (
+        f"Steps: {int(ev.get('total_steps') or 0)}, "
+        f"Total tokens: {int(ev.get('total_tokens') or 0):,}, "
+        f"Budget: ${float(ev['cost_usd']):.4f}"
+    )
 
 
 def _event_ms(ev: dict[str, Any]) -> int:
@@ -445,26 +469,28 @@ def _child_line(child: dict[str, Any]) -> str:
     )
 
 
-def _summary_line(index: int, entry: Entry) -> str:
-    """Return one overview line of a progress summary entry."""
+def _summary_line(indexed: tuple[int, Entry]) -> str:
+    """Return one overview line of a progress summary entry, given with its transcript index."""
+    index, entry = indexed
     return f"[{index}] {entry.render(_OVERVIEW_SUMMARY_CHARS)}"
 
 
-def _summary_section(indexed: list[tuple[int, Entry]]) -> list[str]:
-    """Return the overview lines for the task's own progress summaries.
+def _head_and_tail[T](
+    items: list[T], head: int, tail: int, omitted: str, line: Callable[[T], str],
+) -> list[str]:
+    """Return *items* rendered by *line*: all, or the first *head* and last *tail* around a count.
 
-    The first :data:`_OVERVIEW_SUMMARIES_HEAD` and the last
-    :data:`_OVERVIEW_SUMMARIES_TAIL`, with a line counting the omitted
-    ones between them when there are more.
+    The count line reads ``... <n> <omitted> ...``.  Only the items
+    shown are rendered: a fan-out of hundreds of children formats the
+    few it lists.
     """
-    head, tail = _OVERVIEW_SUMMARIES_HEAD, _OVERVIEW_SUMMARIES_TAIL
-    omitted = len(indexed) - head - tail
-    if omitted <= 0:
-        return [_summary_line(i, e) for i, e in indexed]
+    gone = len(items) - head - tail
+    if gone <= 0:
+        return [line(item) for item in items]
     return [
-        *(_summary_line(i, e) for i, e in indexed[:head]),
-        f"... {omitted} earlier summaries omitted (see run_transcript) ...",
-        *(_summary_line(i, e) for i, e in indexed[-tail:]),
+        *(line(item) for item in items[:head]),
+        f"... {gone} {omitted} ...",
+        *(line(item) for item in items[-tail:]),
     ]
 
 
@@ -483,7 +509,10 @@ def _children_section(task: dict[str, Any], with_side_channel_count: bool) -> li
             f"; plus {len(children) - len(workers)} side-channel /ask or task-update "
             "runs not listed"
         )
-    return ["", title + ") ==", *([_child_line(c) for c in workers] or ["(none)"])]
+    lines = _head_and_tail(
+        workers, _CHILDREN_HEAD, _CHILDREN_TAIL, "earlier sub-agent tasks omitted", _child_line,
+    )
+    return ["", title + ") ==", *(lines or ["(none)"])]
 
 
 def overview(task_id: str) -> str:
@@ -518,7 +547,10 @@ def overview(task_id: str) -> str:
     lines += [f"[{i}] {e.render()}" for i, e in shown_asks] or ["(none)"]
     summaries = [(i, e) for i, e in indexed if e.kind == "SUMMARY"]
     lines += ["", f"== Progress summaries written by the task ({len(summaries)}) =="]
-    lines += _summary_section(summaries) or ["(none)"]
+    lines += _head_and_tail(
+        summaries, _OVERVIEW_SUMMARIES_HEAD, _OVERVIEW_SUMMARIES_TAIL,
+        "earlier summaries omitted (see run_transcript)", _summary_line,
+    ) or ["(none)"]
     tail = indexed[-_OVERVIEW_TAIL_ENTRIES:]
     lines += ["", f"== Last {len(tail)} of {len(entries)} transcript entries =="]
     lines += [f"[{i}] {e.render()}" for i, e in tail] or ["(no transcript entries yet)"]
@@ -552,8 +584,11 @@ def _replay(text: str, ev: dict[str, Any]) -> str:
     """Return the log *text* after the task's successful ``Write`` / ``Edit`` call *ev*.
 
     A ``Write`` puts its content.  An edit replaces its old text (each
-    occurrence with ``replace_all``) as the tool did; when the old text
-    is not in *text*, the file held text the task did not write there,
+    occurrence with ``replace_all``) as the tool did, including its CRLF
+    fallback (:func:`_crlf_edit`) and, for a single replacement, its
+    unique whitespace-tolerant match (:func:`tolerant_matches`, the new
+    text re-indented by :func:`reindent`); when the old text is not in
+    *text* either way, the file held text the task did not write there,
     so only the edit's new text is added, at the end.  A malformed
     ``edits`` list changes nothing.
     """
@@ -566,9 +601,17 @@ def _replay(text: str, ev: dict[str, Any]) -> str:
     )]
     if isinstance(pairs, str):
         return text
+    crlf = "\r\n" in text
     for old, new, every in pairs:
+        if old and old not in text:
+            old, new = _crlf_edit(old, new, crlf)
         if old and old in text:
             text = text.replace(old, new, -1 if every else 1)
+            continue
+        matches = tolerant_matches(text, old) if old and not every else []
+        if len(matches) == 1:
+            match = matches[0]
+            text = text[:match.start] + reindent(new, match.indent) + text[match.end:]
         elif new:
             text += new if not text or text.endswith("\n") else "\n" + new
     return text

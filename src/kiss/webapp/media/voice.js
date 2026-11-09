@@ -209,10 +209,11 @@
 
   let model = null;
   let recognizer = null;
-  // The extra grammar-free recognizer run alongside `recognizer` when
-  // kissVoiceDebug=1, so stopBrowserPipeline can free it: each one holds a
-  // worker-side Kaldi recognizer and a model.recognizers entry for the
-  // model's page-long lifetime.
+  // The grammar-free recognizer run alongside `recognizer`: a wake needs
+  // both to hear the word (see heardWake).  Kept here so
+  // stopBrowserPipeline can free it: each one holds a worker-side Kaldi
+  // recognizer and a model.recognizers entry for the model's page-long
+  // lifetime.
   let freeRecognizer = null;
   let audioContext = null;
   let mediaStream = null;
@@ -408,6 +409,50 @@
     }, timeoutMs);
   }
 
+  // How far apart (ms) the two recognizers' final results may land and
+  // still count as one wake.  The grammar-free final usually comes one
+  // 4096-sample block (~0.26 s) after the grammar's, and up to ~1.5 s
+  // later when a command follows the word without a pause.
+  const WAKE_AGREE_MS = 2500;
+  // When each recognizer last heard the wake word (0: not since the
+  // last wake or pipeline start); see heardWake.
+  let grammarHeardAt = 0;
+  let freeHeardAt = 0;
+
+  /** Whether the grammar-free transcript *text* contains the wake word. */
+  function freeTextHasWake(text) {
+    const words = normalize(text).split(' ');
+    return WAKE_ALIASES.some(alias => words.indexOf(alias) !== -1);
+  }
+
+  /**
+   * Record that one recognizer heard the wake word, and wake when the
+   * other one heard it too within WAKE_AGREE_MS.
+   *
+   * The grammar recognizer alone is not enough: its grammar has only
+   * "abracadabra" and [unk], so Kaldi can force-fit any loud enough
+   * stretch of speech onto the word (Russian "which can remember" and
+   * Bengali "government" both did, 2026-11-08).  The grammar-free
+   * recognizer has the full vocabulary and only writes "abracadabra"
+   * when the word was really said.
+   *
+   * @param {boolean} fromGrammar true for the grammar recognizer's
+   *   final, false for the grammar-free one's.
+   * @returns {boolean} true when the wake fired.
+   */
+  function heardWake(fromGrammar) {
+    const now = Date.now();
+    const otherAt = fromGrammar ? freeHeardAt : grammarHeardAt;
+    if (otherAt && now - otherAt <= WAKE_AGREE_MS) {
+      grammarHeardAt = 0;
+      freeHeardAt = 0;
+      return triggerWake();
+    }
+    if (fromGrammar) grammarHeardAt = now;
+    else freeHeardAt = now;
+    return false;
+  }
+
   function triggerWake() {
     const now = Date.now();
     if (now - lastWakeAt < COOLDOWN_MS) return false;
@@ -531,6 +576,18 @@
   let preambleChunks = [];
   let preambleMs = 0;
 
+  /**
+   * How much longer than WAKE_PREAMBLE_MS the ring must reach back: the
+   * time since the grammar recognizer heard the wake word, while that
+   * wake still awaits the grammar-free confirmation (heardWake), so the
+   * confirmed wake still ships the word's own audio.
+   */
+  function preambleHoldMs() {
+    if (!grammarHeardAt) return 0;
+    const waited = Date.now() - grammarHeardAt;
+    return waited <= WAKE_AGREE_MS ? waited : 0;
+  }
+
   function rememberPreamble(samples, sourceRate, blockMs) {
     preambleChunks.push({
       chunk: downsampleTo16k(samples, sourceRate),
@@ -539,9 +596,10 @@
     preambleMs += blockMs;
     // Keep at least one chunk, and never evict below the cap: the wake
     // word must not be trimmed away by a block boundary.
+    const capMs = WAKE_PREAMBLE_MS + preambleHoldMs();
     while (
       preambleChunks.length > 1 &&
-      preambleMs - preambleChunks[0].ms >= WAKE_PREAMBLE_MS
+      preambleMs - preambleChunks[0].ms >= capMs
     ) {
       preambleMs -= preambleChunks[0].ms;
       preambleChunks.shift();
@@ -634,6 +692,10 @@
       audio: pcmBase64(done.preamble.concat(done.chunks)),
       wakePrefixed: true,
       wakeSamples: wakeSamples,
+      // Every capture starts from heardWake, i.e. both recognizers heard
+      // the word; the server needs this to accept a non-English
+      // transcript that lost the word in translation.
+      wakeAgreed: true,
       // The daemon echoes the tag on the transcript (see retireRound).
       round: done.round.id,
     });
@@ -662,12 +724,14 @@
     }
   }
 
-  // How long the speech engine (vosk.js) or a speech-model load may take
-  // before it is declared failed.  The engine's script tag settles on
-  // `load` or `error`, and the vendored createModel when its worker posts
-  // 'load' or fires a Worker 'error' event; a load that does neither (a
-  // stalled response, a service worker that never answers, the model
-  // fetch hanging on a dead tunnel, WASM init stalling) stays pending for
+  // How long the speech engine (vosk.js), a speech-model load or the
+  // microphone request may take before it is declared failed.  The
+  // engine's script tag settles on `load` or `error`, the vendored
+  // createModel when its worker posts 'load' or fires a Worker 'error'
+  // event, and getUserMedia when the browser answers; one that does
+  // none of these (a stalled response, a service worker that never
+  // answers, the model fetch hanging on a dead tunnel, WASM init
+  // stalling, a permission prompt nobody answers) stays pending for
   // ever, so without a bound `busy` stays true for the page lifetime and
   // the mic is wedged on 'loading' with every re-enable deferring to
   // `busy`.  The server never sets `cfg.modelLoadTimeoutMs`; it is a test
@@ -709,6 +773,12 @@
   // starting a second one next to it.  A failed load is forgotten so
   // the next attempt downloads afresh.
   let modelPromise = null;
+  // The attempts that timed out waiting on the load in flight: the first
+  // keeps sharing it (a slow download finishes for the next attempt),
+  // the second gives it up as stalled (a worker that never reports) and
+  // cancels it, so the attempt after that downloads afresh instead of
+  // waiting on it for ever.
+  let modelTimeouts = 0;
 
   /**
    * Load (or reuse) the speech model, never hanging: this attempt is
@@ -717,16 +787,29 @@
    * cleared, re-enable retries).  The download itself goes on: a
    * re-enable waits for it instead of starting another, and a model
    * that arrives after its attempt timed out is kept for the next one.
+   * A load two attempts in a row timed out on is given up: the engine
+   * cancels it (its worker is terminated, see vosk.js createModel) and
+   * the next attempt starts a fresh one.
    */
   function loadModel() {
     if (!modelPromise) {
-      modelPromise = window.Vosk.createModel(cfg.modelUrl).then(
+      modelTimeouts = 0;
+      const engineLoad = window.Vosk.createModel(cfg.modelUrl);
+      const load = engineLoad.then(
         m => {
           model = m;
+          // The engine's own worker 'error' listener is one-shot (boot
+          // failures): a worker that dies after its load is this page's
+          // to notice, for the model's whole life.
+          if (m.worker && typeof m.worker.addEventListener === 'function') {
+            m.worker.addEventListener('error', err =>
+              onModelWorkerError(m, err),
+            );
+          }
           return m;
         },
         err => {
-          modelPromise = null;
+          if (modelPromise === load) modelPromise = null;
           // Realm-agnostic error check (`instanceof Error` fails across
           // window boundaries): anything carrying a message is reported
           // as-is; a rejection without one gets a message of its own.
@@ -735,13 +818,18 @@
             : new Error('failed to load speech model');
         },
       );
+      load.cancel = engineLoad.cancel;
+      modelPromise = load;
     }
     const load = modelPromise;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error('speech model load timed out')),
-        MODEL_LOAD_TIMEOUT_MS,
-      );
+      const timer = setTimeout(() => {
+        if (++modelTimeouts > 1 && modelPromise === load) {
+          modelPromise = null;
+          load.cancel();
+        }
+        reject(new Error('speech model load timed out'));
+      }, MODEL_LOAD_TIMEOUT_MS);
       load.then(
         m => {
           clearTimeout(timer);
@@ -770,16 +858,102 @@
    * transcripts still stand.
    */
   function onMicEnded(gen) {
+    failLivePipeline(
+      gen,
+      'the microphone was disconnected or taken by another application',
+    );
+  }
+
+  /**
+   * The speech worker reported an error for the wake-word recognizer of
+   * generation *gen* (it could not build it, or could not decode a
+   * chunk): nothing can wake through this pipeline any more, so it comes
+   * down like a lost microphone, with the worker's reason on the button.
+   * The loaded model is kept: the next click retries on it.
+   */
+  function onRecognizerError(gen, message) {
+    failLivePipeline(
+      gen,
+      (message && message.error) || 'the speech recognizer failed',
+    );
+  }
+
+  /**
+   * The speech worker of the loaded model *m* died (an uncaught error
+   * in the worker, a WASM abort): it decodes nothing any more, so a live
+   * pipeline on it would stay "listening" to a microphone nothing hears.
+   * The worker is reclaimed and the model forgotten, so the next enable
+   * loads a fresh one; a pipeline that is live or starting on it comes
+   * down like a lost microphone, with the worker's reason on the button.
+   * A model forgotten already (its worker erred before) is only reclaimed.
+   */
+  function onModelWorkerError(m, err) {
+    m.worker.terminate();
+    if (model !== m) return;
+    model = null;
+    modelPromise = null;
+    if (enabled) {
+      failLivePipeline(
+        voiceGen,
+        (err && err.message) || 'the speech worker failed',
+      );
+    }
+  }
+
+  function failLivePipeline(gen, reason) {
     if (gen !== voiceGen) return;
     ++voiceGen;
     stopBrowserPipeline();
     flashPendingRounds();
     enabled = false;
     persist();
-    setUi(
-      'error',
-      'the microphone was disconnected or taken by another application',
-    );
+    setUi('error', reason);
+  }
+
+  function stopTracks(stream) {
+    const tracks = stream.getTracks();
+    for (let i = 0; i < tracks.length; i++) tracks[i].stop();
+  }
+
+  /**
+   * Ask for the microphone, never hanging: the request is raced against
+   * MODEL_LOAD_TIMEOUT_MS (a permission prompt nobody answers keeps
+   * getUserMedia pending for ever, and the browser offers no way to
+   * abort it), so a stalled request settles its attempt into the
+   * ordinary failure path instead of wedging `busy`, and with it every
+   * re-enable, for the page lifetime.  The request itself goes on: a
+   * stream granted after the deadline belongs to an attempt that is
+   * over and is released at once.
+   */
+  function requestMicrophone() {
+    const request = navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        channelCount: 1,
+      },
+    });
+    return new Promise((resolve, reject) => {
+      let expired = false;
+      const timer = setTimeout(() => {
+        expired = true;
+        reject(new Error('microphone request timed out'));
+      }, MODEL_LOAD_TIMEOUT_MS);
+      request.then(
+        stream => {
+          if (expired) {
+            stopTracks(stream);
+            return;
+          }
+          clearTimeout(timer);
+          resolve(stream);
+        },
+        err => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
   }
 
   function stopBrowserPipeline() {
@@ -805,8 +979,7 @@
       sourceNode = null;
     }
     if (mediaStream) {
-      const tracks = mediaStream.getTracks();
-      for (let i = 0; i < tracks.length; i++) tracks[i].stop();
+      stopTracks(mediaStream);
       mediaStream = null;
     }
     if (audioContext) {
@@ -849,21 +1022,14 @@
           // the microphone. The settle handler below fixes up the UI.
           return null;
         }
-        return navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            channelCount: 1,
-          },
-        });
+        return requestMicrophone();
       })
       .then(stream => {
         if (!stream) return;
         if (gen !== voiceGen || !enabled) {
           // Superseded while getUserMedia was pending: release the just
           // granted microphone immediately.
-          const tracks = stream.getTracks();
-          for (let i = 0; i < tracks.length; i++) tracks[i].stop();
+          stopTracks(stream);
           return;
         }
         mediaStream = stream;
@@ -915,7 +1081,11 @@
         // plain "[unk]".  Waking on such a partial after a 100 ms
         // pause, as this page once did, made the wake fire at random
         // during conversation.  The final result lands about a second
-        // after the word ends, with a confidence per word.
+        // after the word ends, with a confidence per word.  Even a
+        // final only counts once the grammar-free recognizer below
+        // agrees (heardWake).
+        grammarHeardAt = 0;
+        freeHeardAt = 0;
         recognizer.on('result', message => {
           if (message && message.result) {
             debugLog('result', message.result.text);
@@ -923,9 +1093,10 @@
             if (
               (matchesWake(message.result.text) ||
                 wakeWithLeadingNoise(message.result.result)) &&
-              wordsConfident(message.result.result)
+              wordsConfident(message.result.result) &&
+              heardWake(true)
             ) {
-              if (triggerWake()) beginCapture();
+              beginCapture();
             }
           }
         });
@@ -934,19 +1105,23 @@
             debugLog('partial', message.result.partial);
           }
         });
-        if (debugEnabled()) {
-          freeRecognizer = new model.KaldiRecognizer(audioContext.sampleRate);
-          freeRecognizer.on('result', message => {
-            if (message && message.result) {
-              debugLog('free-result', message.result.text);
+        recognizer.on('error', message => onRecognizerError(gen, message));
+        freeRecognizer = new model.KaldiRecognizer(audioContext.sampleRate);
+        freeRecognizer.on('result', message => {
+          if (message && message.result) {
+            debugLog('free-result', message.result.text);
+            if (capture) return;
+            if (freeTextHasWake(message.result.text) && heardWake(false)) {
+              beginCapture();
             }
-          });
-          freeRecognizer.on('partialresult', message => {
-            if (message && message.result && message.result.partial) {
-              debugLog('free-partial', message.result.partial);
-            }
-          });
-        }
+          }
+        });
+        freeRecognizer.on('partialresult', message => {
+          if (message && message.result && message.result.partial) {
+            debugLog('free-partial', message.result.partial);
+          }
+        });
+        freeRecognizer.on('error', message => onRecognizerError(gen, message));
         sourceNode = audioContext.createMediaStreamSource(mediaStream);
         processorNode = audioContext.createScriptProcessor(4096, 1, 1);
         let lastRmsAt = 0;
@@ -974,8 +1149,7 @@
           rememberPreamble(samples, event.inputBuffer.sampleRate, blockMs);
           try {
             recognizer.acceptWaveform(event.inputBuffer);
-            if (freeRecognizer)
-              freeRecognizer.acceptWaveform(event.inputBuffer);
+            freeRecognizer.acceptWaveform(event.inputBuffer);
           } catch (_e) {}
         };
         sourceNode.connect(processorNode);

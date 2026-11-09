@@ -419,6 +419,25 @@ async function main() {
     win.close();
   });
 
+  // The guard's throw from inside a click listener never reaches the test
+  // (jsdom reports it and the dispatch returns), so the runner must fail
+  // the test from the harness's call ledger instead.
+  await test('a native dialog called from a DOM listener fails the test', () => {
+    const {win} = h.makePage();
+    const btn = win.document.getElementById('send-btn');
+    const asksNatively = () => win.confirm('really?');
+    btn.addEventListener('click', asksNatively);
+    const inner = h.makeRunner();
+    inner.test('(expected to fail) a listener calls window.confirm', () => {
+      h.click(win, btn);
+    });
+    assert.strictEqual(inner.failed(), 1, 'the forbidden call failed the test');
+    btn.removeEventListener('click', asksNatively);
+    inner.test('(expected to pass) a plain click', () => h.click(win, btn));
+    assert.strictEqual(inner.failed(), 1, 'the ledger was cleared per test');
+    win.close();
+  });
+
   report('ui_antipattern_dialogs');
 }
 

@@ -10,13 +10,13 @@
 // submits to that machine; a tab back on this machine commits and
 // submits here.
 
-/* global require, console, process */
+/* global require */
 
 'use strict';
 
 const assert = require('assert');
 const {
-  closeWindows,
+  runTests,
   send,
   byId,
   msgs,
@@ -127,18 +127,4 @@ const tests = [
   ],
 ];
 
-let failed = 0;
-for (const [name, fn] of tests) {
-  try {
-    fn();
-    console.log('ok - ' + name);
-  } catch (e) {
-    failed += 1;
-    console.log('not ok - ' + name);
-    console.log(e && e.stack ? e.stack : String(e));
-  } finally {
-    closeWindows();
-  }
-}
-console.log(`\n${tests.length - failed} passed, ${failed} failed`);
-process.exit(failed ? 1 : 0);
+runTests(tests);

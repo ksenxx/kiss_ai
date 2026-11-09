@@ -302,3 +302,26 @@ class TestIgnoredFileRescueReclaim:
         assert (self.repo / _IGNORED_REL).is_file(), (
             "ignored output of the orphan worktree was destroyed by reclaim"
         )
+
+    def test_reclaim_preserves_worktree_holding_an_ignored_nested_repo(self) -> None:
+        """git lists an ignored nested repository as ONE directory entry
+        (``data/clone/``) and never descends into it; the rescue cannot
+        land a directory, so it must fail closed and the reclaim must
+        preserve the worktree instead of deleting the only copy (A09)."""
+        branch = "kiss/wt-reclaim-nested"
+        wt_dir = self.repo / ".kiss-worktrees" / "kiss_wt-reclaim-nested"
+        GitWorktreeOps.ensure_excluded(self.repo)
+        assert GitWorktreeOps.create(self.repo, branch, wt_dir)
+        assert GitWorktreeOps.save_original_branch(
+            self.repo, branch, GitWorktreeOps.current_branch(self.repo) or "",
+        )
+        nested = wt_dir / "data" / "clone"
+        nested.mkdir(parents=True)
+        _git(nested, "init", "-q").check_returncode()
+        (nested / "payload.txt").write_text("only copy\n")
+        assert GitWorktreeOps.list_ignored_files(wt_dir) == ["data/clone/"]
+        assert GitWorktreeOps.rescue_ignored_files(wt_dir, self.repo) == (0, False)
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+        assert (nested / "payload.txt").read_text() == "only copy\n", (
+            "the nested repository was destroyed with its worktree"
+        )

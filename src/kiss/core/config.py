@@ -157,10 +157,27 @@ def adopt_legacy_file(
     one, so a process of the previous version that is still running
     (the web app before its restart, say) keeps writing to the same
     file -- SQLite resolves the link, so both versions share one WAL --
-    instead of recreating an empty file under the old name.  Not on
-    Windows: SQLite there names the WAL after the path it was given, so
-    a link would have the two versions write two WALs over one database
-    file; the old version is restarted anyway, so nothing is left behind.
+    instead of recreating an empty file under the old name.  Such a
+    process opens the old name at any moment (a connection per
+    operation), so the old name must stay usable throughout: the files
+    are hard-linked to the new name, the old name is swapped for the
+    symlink in one rename, and only then are the old sidecar names
+    dropped; a plain rename would part the main file from its WAL for
+    a moment (``disk I/O error``), then leave no file at all (which a
+    writer recreates empty, and the symlink then cannot be made).  A
+    database's WAL and SHM are kept in place meanwhile by a connection
+    of this process (:func:`_wal_held_open`): that process also closes
+    a connection at any moment, and the last close of a WAL database
+    checkpoints it and deletes the sidecars, so a close between two of
+    the links would have the next connection start a fresh WAL under
+    the old name -- the new name then ended up with the old WAL beside
+    the fresh SHM (``database disk image is malformed``), and the rows
+    of the fresh WAL were dropped with the old sidecar names.  A
+    database that connection cannot read is not renamed at all (see
+    below).  Not on Windows: SQLite there names the WAL after the path
+    it was given, so a link would have the two versions write two WALs
+    over one database file; the old version is restarted anyway, so
+    nothing is left behind and the files are simply renamed.
     Concurrent adopters serialise on a lock file next to *path*, and the
     one that arrives second finds nothing left to do.  The lock is
     skipped only once the adoption is visibly done -- the legacy name is
@@ -189,6 +206,11 @@ def adopt_legacy_file(
             than :data:`ADOPTION_LOCK_TIMEOUT` seconds; the holder only
             renames files, so such a wait means it is wedged, and
             waiting on would hang the caller for good.
+        sqlite3.Error: When the legacy file is an SQLite database that
+            the connection keeping its WAL in place cannot read (another
+            process holds it locked, say).  Nothing has been touched: the
+            files keep their names, so the next call retries, and the
+            caller must not create a file under *path* meanwhile.
     """
     legacy = path.with_name(legacy_name)
     if not legacy.exists():
@@ -210,31 +232,104 @@ def adopt_legacy_file(
     ):
         if not _adoption_pending(path, legacy, stale):
             return
-        if path.exists():
-            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-            set_aside = path.with_name(f"{path.name}.stale-{stamp}")
+        held = _wal_held_open(legacy) if "-wal" in suffixes and os.name != "nt" else None
+        try:
+            if path.exists() and not _hard_linked(path, legacy):
+                stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+                set_aside = path.with_name(f"{path.name}.stale-{stamp}")
+                for suffix in suffixes:
+                    source = path.with_name(path.name + suffix)
+                    if source.exists():
+                        os.replace(source, set_aside.with_name(set_aside.name + suffix))
             for suffix in suffixes:
-                source = path.with_name(path.name + suffix)
-                if source.exists():
-                    os.replace(source, set_aside.with_name(set_aside.name + suffix))
-        for suffix in suffixes:
-            source = legacy.with_name(legacy.name + suffix)
-            if source.exists():
-                os.replace(source, path.with_name(path.name + suffix))
-        if os.name != "nt":
-            os.symlink(path.name, legacy)
+                source = legacy.with_name(legacy.name + suffix)
+                target = path.with_name(path.name + suffix)
+                if os.name == "nt":
+                    if source.exists():
+                        os.replace(source, target)
+                elif source.exists() and not _hard_linked(source, target):
+                    _link_over(source, target)
+            if os.name == "nt":
+                return
+            link = legacy.with_name(legacy.name + ".link")
+            link.unlink(missing_ok=True)
+            os.symlink(path.name, link)
+            os.replace(link, legacy)
+            for suffix in suffixes:
+                if suffix:
+                    legacy.with_name(legacy.name + suffix).unlink(missing_ok=True)
+        finally:
+            if held is not None:
+                held.close()
+
+
+def _wal_held_open(database: Path) -> sqlite3.Connection | None:
+    """Open a connection to *database* with its WAL (and SHM) open, to keep them in place.
+
+    SQLite checkpoints a WAL database and deletes its sidecars when the
+    last connection closes, and recreates them when the next one opens;
+    while this connection is open no other close is the last, and every
+    connection opened meanwhile, under either of the database's names,
+    joins the one WAL.  The WAL is opened by a read (a connection alone
+    opens nothing).  The connection is read-only, so it writes nothing
+    and deletes nothing itself, and only a file with SQLite's header is
+    opened at all: a file that is no database (or an empty one) has no
+    WAL to keep, and SQLite deletes a ``-wal`` found beside a file with
+    no pages.
+
+    Returns:
+        The connection, to be closed once the names are in place, or
+        ``None`` when *database* is no SQLite database.
+
+    Raises:
+        sqlite3.Error: When *database* has SQLite's header but cannot be
+            read: a writer in ``locking_mode=EXCLUSIVE`` keeps it locked
+            beyond the busy timeout, say.  Such a database may well have
+            a WAL to keep, so it is not one to rename unkept.
+    """
+    try:
+        with database.open("rb") as file:
+            if file.read(16) != b"SQLite format 3\x00":
+                return None
+    except OSError:
+        return None
+    connection = sqlite3.connect(database.absolute().as_uri() + "?mode=ro", uri=True)
+    try:
+        connection.execute("PRAGMA schema_version").fetchone()
+    except sqlite3.Error:
+        connection.close()
+        raise
+    return connection
+
+
+def _hard_linked(path: Path, other: Path) -> bool:
+    """Tell whether *path* and *other* are two names of one file, neither a symlink."""
+    try:
+        return not path.is_symlink() and not other.is_symlink() and path.samefile(other)
+    except OSError:
+        return False
+
+
+def _link_over(source: Path, target: Path) -> None:
+    """Make *target* a hard link of *source*, replacing whatever *target* was."""
+    staged = target.with_name(target.name + ".link")
+    staged.unlink(missing_ok=True)
+    os.link(source, staged)
+    os.replace(staged, target)
 
 
 def _adoption_pending(path: Path, legacy: Path, stale: Callable[[Path], bool] | None) -> bool:
     """Tell whether :func:`adopt_legacy_file` has a rename left to do.
 
-    True when only the legacy file exists, or when both exist as
-    distinct files (neither a link to the other) and *stale* judges the
-    one at *path* to be the leftover of an older version.
+    True when only the legacy file exists, when both names are hard
+    links of one file (an adoption that stopped before it left the
+    symlink behind), or when both exist as distinct files (neither a
+    link to the other) and *stale* judges the one at *path* to be the
+    leftover of an older version.
     """
     if not legacy.exists():
         return False
-    if not path.exists():
+    if not path.exists() or _hard_linked(path, legacy):
         return True
     if stale is None:
         return False
@@ -461,7 +556,11 @@ class Config(BaseModel):
         description=(
             "Replace old, large tool outputs in the model conversation with "
             "short stubs once the context grows past compaction_start_tokens "
-            "(KISS_TOOL_OUTPUT_COMPACTION=0 disables)."
+            "(KISS_TOOL_OUTPUT_COMPACTION=0 disables).  The global Compaction "
+            "setting of the daemon (config.json key ``compaction``, the settings "
+            "panel's checkbox) is mirrored here by user_config.apply_config_to_env; "
+            "off, no agent of the process compacts, whatever its own "
+            "``compaction`` run option says."
         ),
     )
     compaction_start_tokens: int = Field(
@@ -489,6 +588,56 @@ class Config(BaseModel):
             "compaction of old tool outputs and arguments, so the context stays near "
             "that size instead of growing to the hand-off limit (0 disables the "
             "target; KISS_COMPACTION_TARGET_FRACTION)."
+        ),
+    )
+    reasoning_keep_turns: int = Field(
+        default_factory=lambda: _env_int("KISS_REASONING_KEEP_TURNS", 0),
+        description=(
+            "How many of the most recent reasoning turns a provider that retains the "
+            "model's reasoning across tool calls keeps in the context (Anthropic: the "
+            "clear_thinking context-editing strategy; OpenAI GPT-5.6+: reasoning.context "
+            "current_turn); 0, the default, keeps every turn's reasoning, as the providers "
+            "do by default. Off by default because each clearing rewrites the cached "
+            "prefix: in the 2026-11-07 Terminal-Bench A/B (2 turns kept, a turn every 5 "
+            "steps) 92% of the calls after a turn note missed the prompt cache and the "
+            "spend per attempt nearly doubled (KISS_REASONING_KEEP_TURNS)."
+        ),
+    )
+    reasoning_turn_steps: int = Field(
+        default_factory=lambda: _env_int("KISS_REASONING_TURN_STEPS", 5),
+        description=(
+            "Steps per reasoning turn: every this many steps the agent appends a short "
+            "harness note as a user message, which the providers count as a new turn, so "
+            "reasoning_keep_turns measures steps (a tool-result-only message continues the "
+            "turn in progress); 0 never starts a new turn (KISS_REASONING_TURN_STEPS)."
+        ),
+    )
+    context_edit_trigger_tokens: int = Field(
+        default_factory=lambda: _env_int("KISS_CONTEXT_EDIT_TRIGGER_TOKENS", 200_000),
+        description=(
+            "Input tokens past which Anthropic's server-side tool-result clearing "
+            "(clear_tool_uses) clears the inputs and results of the tool calls before "
+            "the last context_edit_keep_tool_uses ones; 0 sends no tool-result clearing. "
+            "A clearing rewrites the cached prefix (one call at full input price), so it "
+            "must be rare and bulk: at 200k with context_edit_clear_at_least 100k it "
+            "happens once per few dozen calls and pays back within about twenty "
+            "(KISS_CONTEXT_EDIT_TRIGGER_TOKENS)."
+        ),
+    )
+    context_edit_keep_tool_uses: int = Field(
+        default_factory=lambda: _env_int("KISS_CONTEXT_EDIT_KEEP_TOOL_USES", 20),
+        description=(
+            "Tool calls (inputs and results) the server-side clearing keeps "
+            "(KISS_CONTEXT_EDIT_KEEP_TOOL_USES)."
+        ),
+    )
+    context_edit_clear_at_least: int = Field(
+        default_factory=lambda: _env_int("KISS_CONTEXT_EDIT_CLEAR_AT_LEAST", 100_000),
+        description=(
+            "Input tokens a server-side clearing must remove to be applied, so each "
+            "one pays for the prompt-cache write it causes: a cache miss costs about "
+            "twelve cache reads of the whole context, a cleared token saves a tenth of a "
+            "token on every later call (KISS_CONTEXT_EDIT_CLEAR_AT_LEAST)."
         ),
     )
     routine_turn_effort: str = Field(

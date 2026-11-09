@@ -80,8 +80,8 @@ class Services:
                     name=f"service-{path.name}",
                     daemon=True,
                 )
+                thread.start()  # one the OS refuses is not kept: ``stop`` joins started ones
                 self.threads.append(thread)
-                thread.start()
         for thread in self.threads:
             logger.info("Started service %s", thread.name.removeprefix("service-"))
 

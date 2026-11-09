@@ -460,11 +460,16 @@
     /**
      * Escape closes the dialog; Left/Right arrows page through the
      * tips; Tab and Shift+Tab cycle inside it so focus never lands on
-     * the page behind the modal overlay.
+     * the page behind the modal overlay.  Runs in the capture phase on
+     * ``window``, ahead of the page's own ``document`` capture handlers
+     * (main.js closes the topmost Settings sheet on Escape there): the
+     * Escape that closes the dialog goes no further, so the sheet the
+     * dialog was opened from stays until the next one.
      */
     _handleKeyDown(event) {
       if (event.key === 'Escape') {
         event.preventDefault();
+        event.stopPropagation();
         this.remove();
         return;
       }
@@ -505,12 +510,12 @@
       // Remember who opened the dialog so closing can hand focus back,
       // then move focus into the dialog (the close button).
       this._opener = document.activeElement;
-      document.addEventListener('keydown', this._onKeyDown, true);
+      window.addEventListener('keydown', this._onKeyDown, true);
       this._close.focus();
     }
 
     disconnectedCallback() {
-      document.removeEventListener('keydown', this._onKeyDown, true);
+      window.removeEventListener('keydown', this._onKeyDown, true);
       const opener = this._opener;
       this._opener = null;
       if (

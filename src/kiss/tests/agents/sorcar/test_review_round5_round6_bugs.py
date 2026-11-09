@@ -43,6 +43,14 @@ def test_save_task_extra_raises_on_is_favorite_payload(temp_db: Path) -> None:  
         persistence._save_task_extra(
             {"is_favorite": True, "tokens": 5}, task_id=tid,
         )
+    # Refused before any write (nothing of the payload landed) and
+    # whatever the id: the check is on the payload, not on the row.
+    row = persistence._get_db().execute(
+        "SELECT tokens FROM task_history WHERE id = ?", (tid,),
+    ).fetchone()
+    assert row["tokens"] == 0
+    with pytest.raises(ValueError, match="_set_task_favorite"):
+        persistence._save_task_extra({"is_favorite": True}, task_id="no-such-row")
 
 
 def test_bx_handles_falsy_string_literals_during_migration(

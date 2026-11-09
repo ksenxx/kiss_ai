@@ -11,7 +11,7 @@
 'use strict';
 
 const assert = require('assert');
-const {loadMainCss, makePage, send} = require('./simplify2_harness');
+const {loadMainCss, makePage, send, ofType} = require('./simplify2_harness');
 const {visibleTitles, makeRow, selectFilter} = require('./history_helpers');
 
 const ALL_TAGS = [
@@ -62,10 +62,6 @@ function selectTag(win, value) {
   selectFilter(win, 'hf-tag', value);
 }
 
-function getHistoryPosts(posted) {
-  return posted.filter(m => m && m.type === 'getHistory');
-}
-
 function testDropdownMarkup() {
   const {win} = makePage();
   const doc = win.document;
@@ -112,7 +108,7 @@ function testTagFiltersLoadedRowsAndRefetches() {
   const pill = win.document.getElementById('hf-tag').parentElement;
   assert.ok(!pill.classList.contains('active'), 'pill inactive with no tag');
 
-  const before = getHistoryPosts(posted).length;
+  const before = ofType(posted, 'getHistory').length;
   selectTag(win, 'work');
   assert.deepStrictEqual(
     visibleTitles(win).sort(),
@@ -120,7 +116,7 @@ function testTagFiltersLoadedRowsAndRefetches() {
     'rows without the tag hide before the daemon answers',
   );
   assert.ok(pill.classList.contains('active'), 'pill marks the active tag');
-  const posts = getHistoryPosts(posted);
+  const posts = ofType(posted, 'getHistory');
   assert.strictEqual(posts.length, before + 1, 'one refetch per change');
   const req = posts[posts.length - 1];
   assert.strictEqual(req.tag, 'work', 'the request carries the tag');
@@ -145,7 +141,7 @@ function testTagFiltersLoadedRowsAndRefetches() {
   assert.strictEqual(visibleTitles(win).length, 3, '"All tags" restores rows');
   assert.ok(!pill.classList.contains('active'), 'pill inactive again');
   assert.strictEqual(
-    getHistoryPosts(posted)[getHistoryPosts(posted).length - 1].tag,
+    ofType(posted, 'getHistory')[ofType(posted, 'getHistory').length - 1].tag,
     '',
     'clearing the tag refetches without one',
   );
@@ -159,7 +155,7 @@ function testTagRidesOnSearchAndScrollRequests() {
   const search = win.document.getElementById('history-search');
   search.value = 'parser';
   search.dispatchEvent(new win.Event('input', {bubbles: true}));
-  let req = getHistoryPosts(posted).pop();
+  let req = ofType(posted, 'getHistory').pop();
   assert.strictEqual(req.query, 'parser', 'search text is sent');
   assert.strictEqual(req.tag, 'coding', 'the tag rides on a search request');
 
@@ -176,7 +172,7 @@ function testTagRidesOnSearchAndScrollRequests() {
   Object.defineProperty(list, 'clientHeight', {value: 500, configurable: true});
   list.scrollTop = 600;
   list.dispatchEvent(new win.Event('scroll'));
-  req = getHistoryPosts(posted).pop();
+  req = ofType(posted, 'getHistory').pop();
   assert.strictEqual(req.offset, 50, 'the scroll asks for page two');
   assert.strictEqual(req.tag, 'coding', 'the tag rides on the page-two request');
   assert.strictEqual(req.query, 'parser', 'and so does the search text');
@@ -203,7 +199,7 @@ function testTagExpandsChatGroups() {
     type: 'history',
     sessions: [twoTasks[1]],
     offset: 0,
-    generation: getHistoryPosts(posted).pop().generation,
+    generation: ofType(posted, 'getHistory').pop().generation,
   });
   const filtered = win.document.querySelector('#history-list .history-chat-group');
   assert.ok(

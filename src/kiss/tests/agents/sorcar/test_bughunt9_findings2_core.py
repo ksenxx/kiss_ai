@@ -14,7 +14,8 @@ Covers, end-to-end with real files/processes/DBs (no mocks/patches):
   status`` as dirty (never report clean on error).
 * S2-05 — ``copy_dirty_state`` must raise on a failing ``git status``
   instead of silently omitting the user's dirty state.
-* S2-30 — ``copy_dirty_state`` must mirror dirty submodule content.
+* S2-30 / S4-F4 — ``copy_dirty_state`` must refuse a dirty submodule
+  instead of flattening it into the worktree (where git cannot see it).
 * S2-07 — one invalid-UTF-8 SKILL.md file must not abort discovery.
 * S2-22 — ``--max_budget`` rejects nan/inf/zero/negative values.
 """
@@ -130,7 +131,7 @@ class TestGitStatusFailureIsNeverClean:
 
 
 class TestCopyDirtySubmodule:
-    """S2-30: dirty submodule content must be mirrored into the worktree."""
+    """S2-30 / S4-F4: a dirty submodule is refused, never flattened."""
 
     def setup_method(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -138,7 +139,14 @@ class TestCopyDirtySubmodule:
     def teardown_method(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_dirty_submodule_file_is_copied(self) -> None:
+    def test_dirty_submodule_is_refused_not_flattened(self) -> None:
+        """Mirroring the submodule's files (minus ``.git``) into the
+        worktree's uninitialized gitlink directory hid them from git:
+        edits there were invisible to status, auto-commit and the
+        ignored-file rescue, and the finalizer removed the worktree with
+        their only copy (audit S4/F4).  The snapshot is refused with
+        ``OSError`` instead, which the caller turns into a fallback to
+        the user's own checkout, left intact."""
         sub = _make_repo(self.tmp)  # creates self.tmp / "repo"
         sub = sub.rename(self.tmp / "sub")
         repo = _make_repo(self.tmp)
@@ -152,11 +160,13 @@ class TestCopyDirtySubmodule:
 
         wt = self.tmp / "wt"
         (wt / "mod").mkdir(parents=True)
-        copied = GitWorktreeOps.copy_dirty_state(repo, wt)
+        with pytest.raises(OSError, match="submodule"):
+            GitWorktreeOps.copy_dirty_state(repo, wt)
 
-        assert copied is True
-        assert (wt / "mod" / "a.txt").read_text() == "submodule dirty content\n"
-        assert not (wt / "mod" / ".git").exists()
+        assert (repo / "mod" / "a.txt").read_text() == "submodule dirty content\n"
+        assert not (wt / "mod" / "a.txt").exists(), (
+            "the submodule was flattened into the worktree"
+        )
 
     def test_untracked_embedded_repo_is_not_mirrored(self) -> None:
         """``?? dir/`` entries (foreign repos/worktrees under the repo)

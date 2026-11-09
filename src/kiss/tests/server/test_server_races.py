@@ -33,6 +33,7 @@ import unittest
 from pathlib import Path
 
 from kiss.server.file_index import FileIndexRegistry
+from kiss.tests.server.conftest import local_view
 
 
 class TestOverlappingIndexRequests(unittest.TestCase):
@@ -74,7 +75,7 @@ class TestOverlappingIndexRequests(unittest.TestCase):
 
         reg.ensure(root, hold_worker)
         self.assertTrue(first_built.wait(10), "first build never finished")
-        first = reg.view_for(root)
+        first = local_view(reg, root)
         self.assertIsNotNone(first)
         assert first is not None
         self.assertEqual(first.paths, ["a.py", "sub/", "sub/b.py"])
@@ -100,7 +101,7 @@ class TestOverlappingIndexRequests(unittest.TestCase):
         self.assertTrue(drained.wait(10))
 
         self.assertEqual(list(reg._indexes), [root], "exactly one index per root")
-        view = reg.view_for(root)
+        view = local_view(reg, root)
         assert view is not None
         self.assertEqual(view.paths, ["a.py", "c.py", "sub/"])
         on_disk = sorted(

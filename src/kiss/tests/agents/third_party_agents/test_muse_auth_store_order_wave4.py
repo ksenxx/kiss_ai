@@ -4,9 +4,9 @@
 # add your name here
 """A vault store that fails leaves the connector's ``config.json`` untouched.
 
-Mattermost, BlueBubbles, LINE, Zalo, Twitch and Nextcloud Talk probe a
-candidate credential directly, then used to write its non-secret metadata
-(server origin, webhook secret, OA id, client id) BEFORE ``store_credentials``.
+Mattermost, BlueBubbles, LINE, Zalo, Twitch, Nextcloud Talk and Firecrawl
+used to write a candidate credential's non-secret metadata (server origin,
+webhook secret, OA id, client id, base URL) BEFORE ``store_credentials``.
 When the vault then refused the store, the previous credential stayed enrolled
 but ``config.json`` already described the candidate, so the next backend (each
 cron tick builds one) paired the old credential with the new server, secret or
@@ -37,6 +37,11 @@ from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import _config a
 from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import (
     _muse_authenticate as bb_authenticate,
 )
+from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import (
+    FirecrawlAgent,
+    FirecrawlChannelBackend,
+)
+from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import _config as firecrawl_config
 from kiss.agents.third_party_agents.line.line_sea import LineAgent
 from kiss.agents.third_party_agents.line.line_sea import _config as line_config
 from kiss.agents.third_party_agents.mattermost.mattermost_sea import (
@@ -52,7 +57,15 @@ from kiss.agents.third_party_agents.twitch.twitch_sea import _config as twitch_c
 from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloAgent
 from kiss.agents.third_party_agents.zalo.zalo_sea import _config as zalo_config
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools, loopback_policy
-from kiss.tests.agents.third_party_agents.recording_http import serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    recording_server,
+    serve_recording,
+)
+from kiss.tests.agents.third_party_agents.test_muse_auth_channels import (
+    _REAL_FIRECRAWL_KEY,
+    _ApiHandler,
+    _ApiServer,
+)
 from kiss.tests.agents.third_party_agents.test_muse_auth_messaging import (
     _REAL_BB_PASSWORD,
     _REAL_LINE_TOKEN,
@@ -82,6 +95,14 @@ def api_server() -> Iterator[_MessagingApiServer]:
 def other_server() -> Iterator[_MessagingApiServer]:
     """The server a failed rotation points at."""
     yield from serve_recording(_MessagingApiHandler, _MessagingApiServer)
+
+
+@pytest.fixture()
+def fc_servers() -> Iterator[tuple[_ApiServer, _ApiServer]]:
+    """Two Firecrawl emulators: the enrolled one and a failed rotation's target."""
+    with recording_server(_ApiHandler, _ApiServer) as enrolled:
+        with recording_server(_ApiHandler, _ApiServer) as other:
+            yield enrolled, other
 
 
 def test_mattermost_failed_store_keeps_the_server(
@@ -209,3 +230,24 @@ def test_nextcloud_failed_store_keeps_the_server(
     assert json.loads(auth_tools(NextcloudTalkAgent())["check_nextcloud_auth"]())["ok"] is True
     basic = base64.b64encode(f"bot:{_REAL_NC_PASSWORD}".encode()).decode()
     assert api_server.header("Authorization") == f"Basic {basic}"
+
+
+def test_firecrawl_failed_store_keeps_the_server(
+    muse_env: Path, fc_servers: tuple[_ApiServer, _ApiServer]
+) -> None:
+    """The enrolled key keeps its ``base_url``; a fresh backend still reaches that server."""
+    api_server, other_server = fc_servers
+    tools = auth_tools(FirecrawlAgent())
+    first = tools["authenticate_firecrawl"](_REAL_FIRECRAWL_KEY, api_server.base_url)
+    assert json.loads(first)["ok"] is True
+    enrolled = firecrawl_config.path.read_text()
+    result = json.loads(tools["authenticate_firecrawl"]("fc  spaced", other_server.base_url))
+    assert result["ok"] is False
+    assert _VAULT_REFUSED in result["error"]
+    assert firecrawl_config.path.read_text() == enrolled
+    fresh = FirecrawlChannelBackend()
+    assert fresh.connect() is True, fresh._connection_info
+    assert json.loads(fresh.firecrawl_scrape("https://example.com"))["ok"] is True
+    assert api_server.requests[-1]["path"] == "/v2/scrape"
+    assert api_server.header("Authorization") == f"Bearer {_REAL_FIRECRAWL_KEY}"
+    assert other_server.requests == []

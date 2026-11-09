@@ -234,6 +234,98 @@ def test_parallel_and_background_commands_are_guarded(work: Path) -> None:
     assert (work / "notes.md").read_text() == "old\n"
 
 
+def test_an_exec_sink_is_the_file_its_shell_opened_where_it_opened_it(work: Path) -> None:
+    """Audit 2026-11-08 S8/F1-F2: ``exec > file`` opens the file in the directory of the
+    ``exec``, in the shell that runs it: a later ``cd`` does not move it, an ``exec`` in a
+    pipeline stage or in the background is a subshell's, and one that may not run (after
+    ``&&``, in an ``if``, in a function body) leaves the earlier file possible."""
+    tools = UsefulTools(work_dir=str(work))
+    notes = work / "notes.md"
+    for command, verdict in (
+        # the file opened in the work dir, whatever directory the copy runs in
+        ("exec > notes.md; cd sub; cat <<'EOF'\nnew\nEOF", _refusal(notes)),
+        ("cd sub; exec > ../notes.md; cd ..; cat <<'EOF'\nnew\nEOF", _refusal(notes)),
+        # a sink opened in a directory only the shell knows stays unknown after a known cd
+        (f'cd "$D"; exec > notes.md; cd {work}/sub; cat <<\'EOF\'\nnew\nEOF',
+         _unresolved("notes.md")),
+        # an exec in a pipeline stage or in the background is a subshell's
+        ("exec > notes.md; exec > sub/log2 | cat; cat <<'EOF'\nnew\nEOF", _refusal(notes)),
+        ("exec > notes.md; exec > sub/log2 & cat <<'EOF'\nnew\nEOF", _refusal(notes)),
+        # an exec that may not run leaves the earlier file possible
+        ("exec > notes.md; false && exec > sub/log2; cat <<'EOF'\nnew\nEOF", _refusal(notes)),
+        ("exec > notes.md; if false; then exec > sub/log2; fi; cat <<'EOF'\nnew\nEOF",
+         _refusal(notes)),
+        ("exec > notes.md; f() { exec > sub/log2; }; cat <<'EOF'\nnew\nEOF", _refusal(notes)),
+    ):
+        assert tools.Bash(command, "exec") == verdict, command
+    assert notes.read_text() == "old\n"
+    assert not (work / "sub" / "log2").exists()
+    # A new file is created where the exec opened it; an exec that may not run
+    # into a new file refuses nothing.
+    out = tools.Bash("exec > made.log; cd sub; cat <<'EOF'\nnew\nEOF", "create")
+    assert "REFUSED" not in out and (work / "made.log").read_text() == "new\n"
+    out = tools.Bash("[ -n \"$NOPE\" ] && exec > sub/log2; cat <<'EOF'\nshown\nEOF", "maybe")
+    assert "REFUSED" not in out and "shown" in out and not (work / "sub" / "log2").exists()
+
+
+def test_a_child_shell_is_read_with_its_own_variables_and_options(work: Path) -> None:
+    """Audit 2026-11-08 S8/F3-F4: a child shell's ``-c`` text sees the parent's environment
+    (its exported variables, as the assignments before the command set them, none after
+    ``env -i``), not its unexported variables, and the shell reads its options to their end
+    (``--``, a later ``-e``, ``-co posix``, a valued ``-o`` / ``--rcfile``) before the text.
+    Review 2026-11-08 R7 S8/F3: an ``export`` that may not run (after ``&&`` once its list
+    ends, after ``||``, in an ``if``) leaves the child's value unknown, as does an ``export
+    -n`` that may not run, and ``unset`` drops the export attribute with the value."""
+    tools = UsefulTools(work_dir=str(work))
+    notes = work / "notes.md"
+    for command, verdict in (
+        ("T=sub/; bash -c 'cat > \"${T}notes.md\" <<EOF\nnew\nEOF'", _unresolved("${T}notes.md")),
+        ("export T=sub/; T= bash -c 'cat > \"${T}notes.md\" <<EOF\nnew\nEOF'", _refusal(notes)),
+        ("export T=sub/; env -i bash -c 'cat > \"${T}notes.md\" <<EOF\nnew\nEOF'",
+         _unresolved("${T}notes.md")),
+        ("export T=sub/; export -n T; bash -c 'cat > \"${T}notes.md\" <<EOF\nnew\nEOF'",
+         _unresolved("${T}notes.md")),
+        ("T=sub/; false && export T; bash -c 'cat > \"${T}notes.md\" <<EOF\nnew\nEOF'",
+         _unresolved("${T}notes.md")),
+        ("T=sub/; if false; then export T; fi; bash -c 'cat > \"${T}notes.md\" <<EOF\nnew\nEOF'",
+         _unresolved("${T}notes.md")),
+        ("T=sub/; true || export T; bash -c 'cat > \"${T}notes.md\" <<EOF\nnew\nEOF'",
+         _unresolved("${T}notes.md")),
+        ("export T=sub/; unset T; T=sub/; bash -c 'cat > \"${T}notes.md\" <<EOF\nnew\nEOF'",
+         _unresolved("${T}notes.md")),
+        ("export T=sub/; false && export -n T; bash -c 'cat > \"${T}notes.md\" <<EOF\nnew\nEOF'",
+         _unresolved("${T}notes.md")),
+        ("T=sub/; (export T); bash -c 'cat > \"${T}notes.md\" <<EOF\nnew\nEOF'",
+         _unresolved("${T}notes.md")),
+        ("bash -c -- 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
+        ("bash -c -e 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
+        ("bash -co posix 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
+        ("bash -o pipefail -c 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
+        ("bash --rcfile /dev/null -c 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
+        ("bash -rcfile /dev/null -c 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
+        ("sh -c -- 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
+        ("eval 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
+    ):
+        assert tools.Bash(command, "child") == verdict, command
+    assert notes.read_text() == "old\n"
+    # The words after the text are the child's arguments; an exported variable is the
+    # child's too; eval runs in this shell, which knows its own variables.
+    out = tools.Bash("bash -ec 'cat > made.txt <<EOF\nnew\nEOF' -x", "arguments")
+    assert "REFUSED" not in out and (work / "made.txt").read_text() == "new\n"
+    out = tools.Bash("T=sub/; export T; bash -c 'cat > \"${T}made.txt\" <<EOF\nnew\nEOF'", "export")
+    assert "REFUSED" not in out and (work / "sub" / "made.txt").read_text() == "new\n"
+    # An export after ``&&`` holds for the rest of its list, as an assignment does; an
+    # export that may not run adds nothing to a variable exported before it.
+    out = tools.Bash("T=sub/ && export T && bash -c 'cat > \"${T}made3.txt\" <<EOF\nnew\nEOF'",
+                     "and-list export")
+    assert "REFUSED" not in out and (work / "sub" / "made3.txt").read_text() == "new\n"
+    out = tools.Bash("export T=sub/; false && export T; bash -c 'cat > \"${T}made4.txt\" <<EOF\n"
+                     "new\nEOF'", "exported twice")
+    assert "REFUSED" not in out and (work / "sub" / "made4.txt").read_text() == "new\n"
+    out = tools.Bash("T=sub/; eval 'cat > \"${T}made2.txt\" <<EOF\nnew\nEOF'", "eval")
+    assert "REFUSED" not in out and (work / "sub" / "made2.txt").read_text() == "new\n"
+
+
 def test_guard_reads_commands_as_bash_does(tmp_path: Path) -> None:
     """Commands that must not run go to the guard itself; odd syntax is read as bash reads it."""
     cwd, notes = str(tmp_path), tmp_path / "notes.md"

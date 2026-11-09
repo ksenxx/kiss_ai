@@ -96,7 +96,6 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
 from kiss.agents.sorcar import chrome_bridge, cron_agent, local_endpoint, machines
-from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.persistence import (
     _load_all_chat_events_by_chat_id,
     _load_chat_events_by_task_id,
@@ -109,6 +108,7 @@ from kiss.core.browser_handoff import in_docker, set_browser_tab_opener
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.locked import locked_call
 from kiss.core.processes import find_bash, suppress_error_dialogs
 from kiss.core.processes import pid_alive as _is_pid_alive
 from kiss.core.processes import process_identity as _process_identity
@@ -146,7 +146,9 @@ from kiss.server.speech import (
     SpeakerIdentifier,
     default_models_dir,
     download_once,
+    save_voice_recording,
     transcribe_pcm,
+    update_voice_recording_info,
 )
 from kiss.server.stall_watchdog import start_stall_watchdog
 from kiss.server.task_update import TaskUpdateRunner
@@ -502,6 +504,50 @@ async def _await_while_draining[T](
     return result
 
 
+_PART_ROOM_BYTES = local_endpoint.PART_CHARS
+"""Unsent bytes a peer may have before the next part of a big frame is written to it.
+
+``ServerConnection.send`` returns as soon as the transport took a part,
+long before the peer did: the loop's write buffer, the kernel's send
+queue (which macOS and Linux grow to megabytes for a peer that reads
+slowly) and the peer's receive window hold many parts, so a sender
+that wrote part after part ran that far ahead of the wire, and an
+urgent reply let through between two parts
+(:meth:`WebPrinter._locked_send`) still landed behind all of it: a
+``history`` page took half a minute on a 1 Mbit/s link.  A later part
+is therefore held until the peer's unsent bytes
+(:func:`_unsent_bytes`) are down to about one part
+(:func:`_send_when_room`), which keeps what an urgent reply waits
+behind at about two parts whatever the link; a peer on a fast link has
+taken the previous part before the first look and pays nothing.
+"""
+
+_PART_ROOM_TICK = 0.005
+"""Seconds between two looks at a peer's unsent bytes (:func:`_send_when_room`)."""
+
+
+async def _send_when_room(
+    transport: asyncio.WriteTransport, endpoint: ServerConnection, text: str,
+) -> None:
+    """Send *text*, a later part of a big frame, once the peer took the earlier ones.
+
+    Waits until the peer's unsent bytes are down to
+    :data:`_PART_ROOM_BYTES`, then sends.  Awaited under a
+    :class:`_DrainWatch` (:meth:`WebPrinter._send_while_draining`),
+    which aborts the transport of a peer whose unsent bytes stop
+    shrinking, so the wait ends for a peer that reads nothing too (the
+    send then fails with the connection's closing error).
+
+    Args:
+        transport: The peer's connection transport.
+        endpoint: The peer's connection.
+        text: The part to send.
+    """
+    while not transport.is_closing() and _unsent_bytes(transport) > _PART_ROOM_BYTES:
+        await asyncio.sleep(_PART_ROOM_TICK)
+    await endpoint.send(text)
+
+
 _SEND_TIMEOUT = 30.0
 """Seconds a client may leave its socket unread before it is dropped.
 
@@ -665,7 +711,8 @@ def _share_subagent_entries(
                     "events": with_synthesized_events(events, row),
                     "metrics": task_metrics_from_session(row),
                 }
-                used += len(json.dumps(entry).encode("utf-8"))
+                # ``json.dumps`` escapes to ASCII: its length is the byte size.
+                used += len(json.dumps(entry))
                 if used > max_bytes:
                     return out, used, True
                 out.append(entry)
@@ -845,7 +892,7 @@ def _forwarded_client_ip(websocket: ServerConnection) -> str:
     if cf_ip:
         return cf_ip
     xff = str(headers.get("X-Forwarded-For") or "")
-    return xff.split(",")[0].strip()
+    return xff.split(",", maxsplit=1)[0].strip()
 
 
 def _basic_auth_password(request: Request) -> str:
@@ -1463,6 +1510,23 @@ def _cloudflared_pidfile() -> Path:
     return kiss_home() / "cloudflared.pid"
 
 
+_CLOUDFLARED_PIDFILE_LOCK_TIMEOUT_S = 5.0
+
+
+def _cloudflared_pidfile_lock() -> Path:
+    """The lock file serialising the pidfile's publication and retirement across daemons.
+
+    Held through :func:`kiss.core.file_lock.exclusive_file_lock` by
+    :func:`_save_cloudflared_pidfile` and :func:`_unlink_cloudflared_pidfile`:
+    the retirement's read, comparison and unlink are one step, so a
+    successor daemon's record published meanwhile is never the one
+    deleted.  Readers keep relying on the atomic replacement (the lock
+    is not reentrant, and the retirement reads under it).
+    """
+    pidfile = _cloudflared_pidfile()
+    return pidfile.with_name(f".{pidfile.name}.lock")
+
+
 _SYSTEMD_RUN_SCOPE_PREFIX = (
     "systemd-run", "--user", "--scope", "--collect", "--quiet", "--",
 )
@@ -1544,7 +1608,10 @@ def _save_cloudflared_pidfile(
     if url:
         data["url"] = url
     try:
-        _atomic_write_text(_cloudflared_pidfile(), json.dumps(data) + "\n")
+        with exclusive_file_lock(
+            _cloudflared_pidfile_lock(), timeout=_CLOUDFLARED_PIDFILE_LOCK_TIMEOUT_S,
+        ):
+            _atomic_write_text(_cloudflared_pidfile(), json.dumps(data) + "\n")
     except OSError as exc:
         logger.debug("Failed to write cloudflared pidfile: %s", exc)
 
@@ -1568,16 +1635,30 @@ def _load_cloudflared_pidfile() -> dict[str, Any] | None:
     return data
 
 
-def _unlink_cloudflared_pidfile() -> None:
+def _unlink_cloudflared_pidfile(pid: int | None = None) -> None:
     """Best-effort removal of the cloudflared pidfile.
 
     Used once the recorded cloudflared process is known to be dead so
-    a later kiss-web does not try to adopt a stale pid.  Failures are
-    ignored — the worst case is a stale pidfile that the next adoption
-    attempt rejects via its pid-liveness check.
+    a later kiss-web does not try to adopt a stale pid.  With *pid*,
+    only a record still naming that process goes: a successor daemon
+    sharing the home may have published its own tunnel while the
+    retired one was waited for, and that record is kept (A21-3).
+    Failures are ignored — the worst case is a stale pidfile that the
+    next adoption attempt rejects via its pid-liveness check.
+
+    Args:
+        pid: The retired process whose record is to be removed, or
+            ``None`` to remove whatever record there is.
     """
     try:
-        _cloudflared_pidfile().unlink(missing_ok=True)
+        with exclusive_file_lock(
+            _cloudflared_pidfile_lock(), timeout=_CLOUDFLARED_PIDFILE_LOCK_TIMEOUT_S,
+        ):
+            if pid is not None:
+                data = _load_cloudflared_pidfile()
+                if data is not None and data["pid"] != pid:
+                    return
+            _cloudflared_pidfile().unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -1641,7 +1722,7 @@ def _terminate_declined_cloudflared(pid: int, grace_s: float = 2.0) -> None:
     (:meth:`RemoteAccessServer._terminate_tunnel_proc`).
     """
     _terminate_cloudflared_pid(pid, grace_s)
-    _unlink_cloudflared_pidfile()
+    _unlink_cloudflared_pidfile(pid)
 
 
 def _terminate_cloudflared_pid(pid: int, grace_s: float = 2.0) -> None:
@@ -1745,6 +1826,47 @@ def _find_cloudflared_forwarding_to(local_port: int) -> list[tuple[int, int]]:
     return found
 
 
+def _cloudflared_origin_port(pid: int) -> int | None:
+    """Return the loopback port the quick tunnel *pid* forwards to.
+
+    Reads the process's argv (``ps``) and parses its ``--url`` like
+    :func:`_quick_tunnel_argv_ports`.  ``None`` when the origin cannot
+    be told — a named tunnel (``run`` in the argv: its origin is
+    configured in the dashboard), no loopback ``--url``, an argv that
+    does not parse, or no ``ps`` (Windows) — so the caller adopts the
+    process as before.
+
+    Args:
+        pid: The process recorded in the pidfile.
+
+    Returns:
+        The ``--url`` port, or ``None`` when unknown.
+    """
+    if sys.platform == "win32":  # pragma: no cover — Windows only
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "args="],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=5,
+        )
+    except Exception:
+        return None
+    args = result.stdout.split()[1:]
+    if not args or args[0] != "tunnel" or "run" in args:
+        return None
+    for i, arg in enumerate(args[:-1]):
+        if arg == "--url":
+            try:
+                target = urlsplit(args[i + 1])
+                return target.port if target.hostname in _LOOPBACK_HOSTS else None
+            except ValueError:
+                return None
+    return None
+
+
 def _quick_tunnel_argv_ports(args: list[str], local_port: int) -> int | None:
     """Return the ``--metrics`` port of a quick-tunnel argv aimed at *local_port*.
 
@@ -1822,7 +1944,7 @@ def _terminate_orphan_cloudflared(local_port: int | None = None) -> None:
             # identity itself (and logs a recycled pid) before signalling.
             _terminate_declined_cloudflared(pid)
         else:
-            _unlink_cloudflared_pidfile()
+            _unlink_cloudflared_pidfile(pid)
     if local_port is not None:
         _terminate_stray_cloudflared(local_port, None)
 
@@ -1836,7 +1958,10 @@ def _try_adopt_existing_cloudflared(
     the metrics ``/ready`` endpoint reports ``readyConnections > 0``,
     and re-discovers the public URL via the ``/quicktunnel`` endpoint
     (falling back to the URL recorded in the pidfile when the metrics
-    endpoint doesn't expose one — e.g. named tunnels).
+    endpoint doesn't expose one — e.g. named tunnels).  A recorded
+    quick tunnel whose ``--url`` port is not *local_port* (the daemon's
+    port changed) is declined and terminated instead
+    (:func:`_cloudflared_origin_port`): its public URL reaches nothing.
 
     When the pidfile yields nothing (missing, malformed, dead pid, or a
     live process that had to be declined) and *local_port* is given,
@@ -1878,17 +2003,31 @@ def _try_adopt_existing_cloudflared(
         metrics_port = data.get("metrics_port")
         if isinstance(metrics_port, int):
             recorded_pid = pid
-            if _is_pid_alive(pid):
+            if not _is_pid_alive(pid):
+                logger.info(
+                    "cloudflared pidfile points to dead pid %d; ignoring",
+                    pid,
+                )
+            elif (
+                local_port is not None
+                and (origin := _cloudflared_origin_port(pid)) not in (None, local_port)
+            ):
+                # The daemon's port changed since the tunnel was
+                # spawned: adopted, its public URL would reach a port
+                # nobody listens on, and the watchdog (which checks
+                # readiness, not the origin) would keep it forever.
+                logger.info(
+                    "cloudflared pid %d forwards to local port %s, not %d; "
+                    "not adopting",
+                    pid, origin, local_port,
+                )
+                _terminate_declined_cloudflared(pid)
+            else:
                 adopted = _adopt_cloudflared_candidate(
                     pid, metrics_port, data.get("url"),
                 )
                 if adopted is not None:
                     return adopted
-            else:
-                logger.info(
-                    "cloudflared pidfile points to dead pid %d; ignoring",
-                    pid,
-                )
     if local_port is None:
         return None
     for pid, metrics_port in _find_cloudflared_forwarding_to(local_port):
@@ -1920,6 +2059,15 @@ def _adopt_cloudflared_candidate(
         ``(pid, metrics_port, url)`` on adoption; ``None`` after the
         process was declined and terminated.
     """
+    if not _looks_like_cloudflared(pid):
+        # A stale record whose pid the OS recycled for an unrelated
+        # process: whatever answers on the recorded metrics port is
+        # some other tunnel's, not this process's, so a healthy reading
+        # must not adopt it (A21-4).  Nothing is signalled (the helper
+        # re-checks the identity); the stale record is unlinked.
+        logger.info("pid %d is not a cloudflared process (pid recycled); not adopting", pid)
+        _terminate_declined_cloudflared(pid)
+        return None
     ready = _probe_tunnel_ready(metrics_port)
     if ready is not True:
         # Re-probe before declining: ``None`` (endpoint unreachable —
@@ -2022,9 +2170,10 @@ def _probe_tunnel_ready(metrics_port: int) -> bool | None:
         cannot be parsed still counts as ``False`` because a 503
         from ``/ready`` is by definition "not ready".
         ``None`` if the endpoint is unreachable, replies with a
-        non-503 HTTP error, the response is not valid JSON, or the
-        value is non-numeric — callers should treat this as "no
-        information" and *not* count it toward an unhealthy streak.
+        non-503 HTTP error, the response is not valid JSON, is not an
+        object carrying ``readyConnections``, or the value is
+        non-numeric — callers should treat this as "no information"
+        and *not* count it toward an unhealthy streak.
     """
     not_ready_status = 503
     try:
@@ -2048,8 +2197,10 @@ def _probe_tunnel_ready(metrics_port: int) -> bool | None:
     except Exception:
         return None
     try:
-        return int(data.get("readyConnections", 0)) > 0
-    except (TypeError, ValueError):
+        # A 200 body without the field (or not an object) is no
+        # confirmed zero: it must not count toward an unhealthy streak.
+        return int(data["readyConnections"]) > 0
+    except (KeyError, TypeError, ValueError):
         return None
 
 
@@ -2634,13 +2785,14 @@ def _snapshot_active_tabs() -> list[str]:
 
     Snapshots the agent-state registry under its lock before iterating
     so a concurrent worker thread mutating it cannot race the iterator.
-    The lock is a :class:`threading.RLock`, so re-entry from the same
-    thread is safe even when called from a signal handler that
-    interrupted a lock holder.  Falls back to a best-effort unlocked
-    snapshot if the lock itself is unusable (e.g. during interpreter
-    shutdown), and skips malformed entries rather than propagating, so
-    callers — the shutdown-signal logger and the ``activeTasksQuery``
-    handler — always get a usable (possibly partial) report.
+    Never call it from a signal handler: the handler's thread may hold
+    a lock the registry-lock holder is waiting for (see
+    :meth:`RemoteAccessServer._handle_shutdown_signal`).  Falls back to
+    a best-effort unlocked snapshot if the lock itself is unusable
+    (e.g. during interpreter shutdown), and skips malformed entries
+    rather than propagating, so callers — the update barrier and the
+    ``activeTasksQuery`` handler — always get a usable (possibly
+    partial) report.
 
     Liveness is :meth:`AgentState.busy`, not ``is_task_active`` alone:
     a worker that ``_cmd_run`` has started but that has not yet raised
@@ -2988,6 +3140,23 @@ def _webclip_profile(url: str) -> bytes:
     return webclip.brand_profile(url, _tls_dir())
 
 
+URGENT_REPLY_TYPES = frozenset({
+    "history", "machines", "cronJobs", "appsStatus", "spendReport", "recommendations",
+})
+"""Replies that go ahead of the frames queued for their connection.
+
+The sidebar panels' lists (the CHATS rows a page opens on, the
+Machines, Schedule, Apps, Spend and Recommendations panels): a few
+kilobytes each, asked for by the user and waited for on screen, with
+no ordering relation to a task's stream.  Sent in queue order they
+waited behind whatever was queued first -- the transcripts a ``ready``
+replays, megabytes that take a slow link half a minute -- so
+:meth:`WebPrinter.broadcast` sends them ahead of the queue
+(:meth:`FifoSendLock.acquire` with ``ahead``), and a big frame under
+way lets them through between its parts (:meth:`WebPrinter._locked_send`).
+"""
+
+
 class FifoSendLock:
     """Per-endpoint FIFO lock whose waiters cost O(1) each.
 
@@ -3000,19 +3169,52 @@ class FifoSendLock:
     60 daemon tasks: clients dropped by the drain timeout, results
     never delivered).  This lock hands ownership to the leftmost live
     waiter on :meth:`release` and never scans the queue.
+
+    A waiter may ask to go *ahead* of the queue (an urgent reply, see
+    :data:`URGENT_REPLY_TYPES`): the ahead waiters are served before
+    the others, in the order they asked, and counted in
+    :attr:`ahead_waiting` until they own the lock, so the owner can
+    see that one is waiting and let it through (:meth:`let_ahead`).
     """
 
     def __init__(self) -> None:
         self._locked = False
         self._waiters: collections.deque[asyncio.Future[None]] = collections.deque()
+        self._ahead: collections.deque[asyncio.Future[None]] = collections.deque()
 
-    async def acquire(self) -> None:
-        """Wait in FIFO order until the lock is owned by the caller."""
+    @property
+    def ahead_waiting(self) -> int:
+        """How many waiters asked to go ahead and do not own the lock yet."""
+        return sum(not fut.done() for fut in self._ahead)
+
+    async def acquire(self, ahead: bool = False) -> None:
+        """Wait until the lock is owned by the caller.
+
+        Args:
+            ahead: Wait in the ahead lane, served before the waiters
+                in turn.
+        """
         if not self._locked:
             self._locked = True
             return
         fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._waiters.append(fut)
+        (self._ahead if ahead else self._waiters).append(fut)
+        await self._wait(fut)
+
+    async def let_ahead(self) -> None:
+        """Let the ahead waiters through, then own the lock again.
+
+        For the owner: the lock goes to the ahead waiters in turn,
+        including any that ask meanwhile, and comes back to the caller
+        before the waiters in turn get it.
+        """
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._waiters.appendleft(fut)
+        self.release()
+        await self._wait(fut)
+
+    async def _wait(self, fut: asyncio.Future[None]) -> None:
+        """Wait for *fut*, the hand-over of the lock; pass it on if cancelled meanwhile."""
         try:
             await fut
         except asyncio.CancelledError:
@@ -3022,12 +3224,13 @@ class FifoSendLock:
             raise
 
     def release(self) -> None:
-        """Hand the lock to the next live waiter, or unlock."""
-        while self._waiters:
-            fut = self._waiters.popleft()
-            if not fut.done():
-                fut.set_result(None)  # ownership transfers; stays locked
-                return
+        """Hand the lock to the next live waiter (an ahead one first), or unlock."""
+        for lane in (self._ahead, self._waiters):
+            while lane:
+                fut = lane.popleft()
+                if not fut.done():
+                    fut.set_result(None)  # ownership transfers; stays locked
+                    return
         self._locked = False
 
     async def __aenter__(self) -> None:
@@ -3243,7 +3446,7 @@ class WebPrinter(JsonPrinter):
           targeted "system" events: sent verbatim to all connected
           clients (which filter by ``tabId``), but **not** recorded
           or persisted — except the ``TAB_STAMPED_TASK_EVENT_TYPES``
-          (``prompt`` echoes, ``ask_answer`` replies, ``result``) that
+          (``prompt`` echoes and ``result`` events) that
           ALSO carry a ``taskId``, whose tabId-stripped copy is
           recorded and persisted under that task (see the tabId branch
           below).
@@ -3296,7 +3499,9 @@ class WebPrinter(JsonPrinter):
             if slot is not None:
                 slot.set_result(data)
             else:
-                self._send_to_conn(conn_id, data)
+                self._send_to_conn(
+                    conn_id, data, ahead=event.get("type") in URGENT_REPLY_TYPES,
+                )
             return
 
         if "tabId" in event:
@@ -3403,15 +3608,10 @@ class WebPrinter(JsonPrinter):
             ``True`` when the machine has an audio player and the event
             carries a clip, so playback was enqueued; ``False`` otherwise.
         """
-        if not event.get("audioB64"):
-            return False
         try:
             from kiss.server import talk_player
 
-            if talk_player.player_command() is None:
-                return False
-            talk_player.shared_player().play(dict(event))
-            return True
+            return talk_player.shared_player().play(event)
         except Exception:
             logger.exception("daemon-side talk clip playback failed")
             return False
@@ -3518,6 +3718,29 @@ class WebPrinter(JsonPrinter):
                 if endpoint is not None:
                     skip.add(endpoint)
         return [w for w in self._local_clients if w not in skip]
+
+    def replay_conn_ids(self, tab_id: str) -> list[str]:
+        """Return the ids of the connections a broadcast replay of *tab_id* reaches.
+
+        Every remote browser, plus the local peers a task-event copy
+        stamped *tab_id* goes to (:meth:`_local_clients_for_tab`); a
+        daemon-link peer is never one.  A ``ready`` that seeded the
+        empty registry replays the seeded tabs to each of them
+        separately, connection-scoped, so every replay refreshes the
+        tab against the registry as it is when the replay runs
+        instead of publishing the ready's stale snapshot (V8-F1).
+
+        Args:
+            tab_id: The frontend tab the replay is stamped with.
+        """
+        with self._ws_lock:
+            recipients = self._remote_clients | set(
+                self._local_clients_for_tab_locked(tab_id),
+            )
+            return [
+                conn_id for conn_id, endpoint in self._conn_endpoints.items()
+                if endpoint in recipients
+            ]
 
     def register_local_tab(self, conn_id: str, tab_id: str) -> None:
         """Record the local connection *conn_id*'s interest in *tab_id*.
@@ -3640,7 +3863,7 @@ class WebPrinter(JsonPrinter):
         else:
             self._send_to_ws_clients(slot)
 
-    def _send_to_conn(self, conn_id: str, data: Payload) -> None:
+    def _send_to_conn(self, conn_id: str, data: Payload, ahead: bool = False) -> None:
         """Send a pre-serialised JSON payload to ONE connection.
 
         Used by :meth:`broadcast` for request/reply events stamped
@@ -3652,11 +3875,13 @@ class WebPrinter(JsonPrinter):
             conn_id: The connection id registered via :meth:`bind_conn`.
             data: The JSON payload (already encoded with ``json.dumps``)
                 or a reserved replay slot that resolves to it.
+            ahead: Send it ahead of the payloads queued for the
+                connection (:data:`URGENT_REPLY_TYPES`).
         """
         endpoint = locked_call(self._ws_lock, self._conn_endpoints.get, conn_id)
         if endpoint is None:
             return
-        self._schedule_send(endpoint, data)
+        self._schedule_send(endpoint, data, ahead)
 
     def send_lock(self, endpoint: Any) -> FifoSendLock:
         """Return the per-endpoint lock serialising outbound sends.
@@ -3685,16 +3910,43 @@ class WebPrinter(JsonPrinter):
         return lock
 
     async def _locked_send(
-        self, endpoint: ServerConnection, data: Payload,
+        self, endpoint: ServerConnection, data: Payload, ahead: bool = False,
     ) -> None:
         """Send one payload to one endpoint under its FIFO send lock.
+
+        A frame bigger than
+        :data:`~kiss.agents.sorcar.local_endpoint.PART_CHARS` (a
+        replayed transcript) goes out as separate ``part`` frames
+        (:func:`~kiss.agents.sorcar.local_endpoint.frame_parts`) to a
+        peer that joins them (``parts`` in :meth:`add_client`): a
+        browser on a slow network sees each part land (its stale
+        check would take a single big frame's minutes of silence for
+        a dead socket).  Any other peer gets the frame whole, as
+        before.  Between two parts an urgent reply that is waiting
+        for the lock (:data:`URGENT_REPLY_TYPES`, queued *ahead*) is
+        let through (:meth:`FifoSendLock.let_ahead`).  An urgent reply
+        bigger than a part (a ``history`` page of fifty long rows runs
+        past one) takes the ordinary lane instead, in parts: the parts
+        of two frames must never interleave (the joiners drop what
+        they had gathered of one frame at another's part), and sent
+        whole it was one frame of silence to the slow peer's stale
+        check for the minutes it took (A21-2).
 
         Args:
             endpoint: The client connection to write to.
             data: The JSON payload (already encoded with ``json.dumps``)
                 or a reserved replay slot that resolves to it.
+            ahead: Take the lock ahead of the waiters queued for it.
         """
-        async with self.send_lock(endpoint):
+        if (
+            ahead and isinstance(data, str) and len(data) > local_endpoint.PART_CHARS
+            and endpoint in self._parts_clients
+        ):
+            ahead = False
+        lock = self.send_lock(endpoint)
+        await lock.acquire(ahead)
+        owned = True
+        try:
             if isinstance(data, ConcurrentFuture):
                 # A reserved replay slot (``replay_snapshot``): hold this
                 # endpoint's FIFO place until the payload is set (or the
@@ -3704,9 +3956,34 @@ class WebPrinter(JsonPrinter):
                 text = await asyncio.shield(asyncio.wrap_future(data))
             else:
                 text = data
-            await self._timed_send(endpoint, text)
+            parts = (
+                local_endpoint.frame_parts(text)
+                if endpoint in self._parts_clients and not ahead else [text]
+            )
+            # A later part waits for the peer to take the earlier ones
+            # (``_PART_ROOM_BYTES``): an urgent reply then lands behind
+            # about two parts, not behind megabytes the transport and
+            # the kernel buffered.  A loopback peer (a ``daemon_client``
+            # run, uncompressed) has no slow link and is not held: the
+            # looks cost it fifty times the transfer.
+            paced = endpoint not in self._local_clients
+            for index, part in enumerate(parts):
+                if index and lock.ahead_waiting:
+                    owned = False
+                    # A cancel while waiting (the peer went away) leaves
+                    # the lock to its owner: ``let_ahead`` passes a lock
+                    # handed back meanwhile on, and ``owned`` stays False.
+                    await lock.let_ahead()
+                    owned = True
+                if not await self._timed_send(endpoint, part, when_room=paced and index > 0):
+                    return
+        finally:
+            if owned:
+                lock.release()
 
-    def _schedule_send(self, endpoint: ServerConnection, data: Payload) -> None:
+    def _schedule_send(
+        self, endpoint: ServerConnection, data: Payload, ahead: bool = False,
+    ) -> None:
         """Schedule one payload send to one endpoint on the event loop.
 
         Shared by :meth:`_send_to_ws_clients` (fan-out) and
@@ -3719,15 +3996,20 @@ class WebPrinter(JsonPrinter):
             endpoint: The client connection to write to.
             data: The JSON payload (already encoded with ``json.dumps``)
                 or a reserved replay slot that resolves to it.
+            ahead: Send it ahead of the payloads queued for the
+                endpoint (:meth:`_locked_send`).
         """
         loop = self._loop
         if loop is None or not loop.is_running():
             return
+        coro = self._locked_send(endpoint, data, ahead)
         try:
-            fut = asyncio.run_coroutine_threadsafe(
-                self._locked_send(endpoint, data), loop,
-            )
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
         except Exception:
+            # The loop closed under the hand-off: the send is dropped
+            # and the never-scheduled coroutine closed (the collector
+            # would otherwise warn that it was never awaited).
+            coro.close()
             logger.debug("Failed to send to client", exc_info=True)
             return
         if not locked_call(self._ws_lock, self._track_pending_send, endpoint, fut):
@@ -3737,7 +4019,9 @@ class WebPrinter(JsonPrinter):
             partial(self._discard_pending_send, endpoint),
         )
 
-    async def _timed_send(self, endpoint: ServerConnection, data: str) -> None:
+    async def _timed_send(
+        self, endpoint: ServerConnection, data: str, when_room: bool = False,
+    ) -> bool:
         """Send *data* to *endpoint*, dropping a peer that stops reading.
 
         ``ServerConnection.send`` waits for the transport's write
@@ -3748,32 +4032,32 @@ class WebPrinter(JsonPrinter):
         reading).  A peer whose socket takes nothing for
         :attr:`_send_timeout` seconds (:meth:`_send_while_draining`)
         is removed from both client sets and its transport aborted,
-        which also ends its handler.  A frame bigger than
-        :data:`~kiss.agents.sorcar.local_endpoint.PART_CHARS` (a
-        replayed transcript) goes out as separate ``part`` frames
-        (:func:`~kiss.agents.sorcar.local_endpoint.frame_parts`) to a
-        peer that joins them (``parts`` in :meth:`add_client`): a
-        browser on a slow network sees each part land (its stale
-        check would take a single big frame's minutes of silence for
-        a dead socket).  Any other peer gets the frame whole, as
-        before.
+        which also ends its handler.
 
         Args:
             endpoint: The client connection to write to.
-            data: The JSON payload (already encoded with ``json.dumps``).
+            data: One frame (already encoded with ``json.dumps``), or
+                one part of a big one (:meth:`_locked_send`).
+            when_room: Send it once the peer took the earlier parts
+                (:func:`_send_when_room`): a later part of a big frame.
+
+        Returns:
+            True when the peer took it; False when it was dropped.
         """
-        parts = local_endpoint.frame_parts(data) if endpoint in self._parts_clients else [data]
         try:
-            for part in parts:
-                await self._send_while_draining(endpoint, part)
+            await self._send_while_draining(endpoint, data, when_room)
         except Exception:
             logger.debug("Failed to write to client", exc_info=True)
             self.remove_client(endpoint)
             transport = getattr(endpoint, "transport", None)
             if transport is not None:
                 transport.abort()
+            return False
+        return True
 
-    async def _send_while_draining(self, endpoint: ServerConnection, text: str) -> None:
+    async def _send_while_draining(
+        self, endpoint: ServerConnection, text: str, when_room: bool = False,
+    ) -> None:
         """Send *text* to *endpoint*; give up once its socket took nothing for a whole deadline.
 
         ``ServerConnection.send`` hands the frame to the transport at
@@ -3795,6 +4079,8 @@ class WebPrinter(JsonPrinter):
         Args:
             endpoint: The client connection to write to.
             text: One frame, or one part of a big one.
+            when_room: Send *text* once the peer's unsent bytes are
+                down to about one part (:func:`_send_when_room`).
 
         Raises:
             TimeoutError: When the peer's write buffer did not shrink
@@ -3804,7 +4090,8 @@ class WebPrinter(JsonPrinter):
         if transport is None:
             await endpoint.send(text)
             return
-        await _await_while_draining(transport, endpoint.send(text), self._send_timeout)
+        send = _send_when_room(transport, endpoint, text) if when_room else endpoint.send(text)
+        await _await_while_draining(transport, send, self._send_timeout)
 
     def add_client(
         self, ws: ServerConnection, local: bool = False, link: bool = False,
@@ -4470,7 +4757,7 @@ def _build_html() -> str:
     """
     version = _read_version()
     tricks_data = read_tricks_data()
-    subs = _page_subs(version)
+    subs = _page_subs(version, _read_commit())
     subs["TRICKS_JSON"] = json.dumps(tricks_data["tricks"]).replace("</", "<\\/")
     subs["MY_TRICKS_COUNT"] = str(tricks_data["userCount"])
     subs["TIPS_JSON"] = json.dumps(tips_data(version)).replace("</", "<\\/")
@@ -4478,7 +4765,7 @@ def _build_html() -> str:
     return re.sub(r"( ?)\{\{([A-Z_]+)\}\}", partial(_fill_placeholder, subs), tpl)
 
 
-def _page_subs(version: str) -> dict[str, str]:
+def _page_subs(version: str, commit: str) -> dict[str, str]:
     """Return the static ``{{PLACEHOLDER}}`` substitutions of the chat page.
 
     Everything :func:`_build_html` fills except the per-request tricks
@@ -4487,7 +4774,10 @@ def _page_subs(version: str) -> dict[str, str]:
 
     Args:
         version: The installed version string (:func:`_read_version`).
+        commit: The short commit hash of the running code
+            (:func:`_read_commit`); shown after the version.
     """
+    commit_suffix = f" ({commit})" if commit else ""
     head_style = (
         f'<link href="{_media_url("remote-codex.css")}" rel="stylesheet">\n'
         "  <style>\n"
@@ -4563,7 +4853,7 @@ def _page_subs(version: str) -> dict[str, str]:
         "INPUT_PLACEHOLDER": "Ask anything... (@ for files)",
         "ENTERKEYHINT": ' enterkeyhint="send"',
         "MODEL_NAME": "loading...",
-        "VERSION_SUFFIX": f" {version}" if version else "",
+        "VERSION_SUFFIX": f" {version}{commit_suffix}" if version else "",
         "AUTH_MODAL": auth_modal,
         "HLJS_SRC": _media_url("highlight.min.js"),
         "MARKED_SRC": _media_url("marked.min.js"),
@@ -4670,7 +4960,11 @@ def _app_shell_urls(brand_assets: list[str]) -> list[str]:
             ``?v=``) and those files are precached under exactly that
             URL.
     """
-    rendered = " ".join(_page_subs(_read_version()).values())
+    # Without the version label: it holds no media URL, and the commit
+    # hash behind it costs a ``git rev-parse`` spawn per render in a
+    # daemon run from a checkout (the browser re-fetches ``/sw.js``
+    # on every navigation).
+    rendered = " ".join(_page_subs("", "").values())
     urls = sorted(set(_MEDIA_URL_RE.findall(rendered)))
     return ["/", *urls, *(f"/media/{name}" for name in brand_assets)]
 
@@ -4751,6 +5045,32 @@ def _read_version() -> str:
     return m.group(1) if m else ""
 
 
+def _read_commit() -> str:
+    """Return the short git commit hash of the running code, or ``""``.
+
+    An installed copy has no ``.git``: ``install.sh`` writes the
+    checkout's hash to ``core/_commit.txt``.  A daemon run straight
+    from a checkout asks git instead.
+    """
+    kiss_dir = Path(__file__).parent.parent
+    try:
+        return (kiss_dir / "core" / "_commit.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=kiss_dir,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def _version_tuple(v: str) -> tuple[int, ...] | None:
     """Return ``v`` parsed as an int-tuple, or ``None`` on failure.
 
@@ -4788,11 +5108,7 @@ def _compare_versions(a: str, b: str) -> int:
     n = max(len(ta), len(tb))
     ta = ta + (0,) * (n - len(ta))
     tb = tb + (0,) * (n - len(tb))
-    if ta > tb:
-        return 1
-    if ta < tb:
-        return -1
-    return 0
+    return (ta > tb) - (ta < tb)
 
 
 def _fetch_latest_version() -> str | None:
@@ -4996,19 +5312,25 @@ async def _logged(
 async def _cancel_task(task: asyncio.Task[None] | None) -> None:
     """Cancel *task* (if any) and wait for it to unwind.
 
+    Only a cancellation of the awaiting task that arrives during the
+    wait propagates (``asyncio.wait`` raises it); the cancelled
+    *task*'s own ``CancelledError`` stays in it, so a caller that is
+    itself already unwinding from a cancellation (``stop_async`` in a
+    cancelled serving task's ``finally``) is not mistaken for newly
+    cancelled.  A task that already died with an exception is logged
+    rather than re-raised into the caller's shutdown sequence.
+
     Args:
         task: The asyncio task to cancel, or ``None`` for a no-op.
     """
     if task is None:
         return
     task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        # The awaiting task's own cancellation must keep unwinding.
-        current = asyncio.current_task()
-        if current is not None and current.cancelling():
-            raise
+    await asyncio.wait({task})
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning(
+            "background task %r ended with an error", task, exc_info=task.exception(),
+        )
 
 
 def _read_log_from(path: Path, offset: int) -> bytes:
@@ -5171,6 +5493,9 @@ class RemoteAccessServer:
         # process" and the start could publish a live one afterwards.
         self._tunnel_lock = threading.Lock()
         self._tunnel_stopped = False
+        # ``_detach_tunnel`` ran: a spawn that publishes afterwards hands
+        # its cloudflared to the next daemon instead (see there).
+        self._tunnel_detached = False
         self._ntfy_base_url = ntfy_base_url
         self._last_posted_url: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -5542,7 +5867,11 @@ class RemoteAccessServer:
         nobody is served while no password is set (403).  A wrong
         non-empty password counts toward the per-IP lockout shared
         with the handshake (429 while it holds); a credential-less
-        request, every page's first fetch, does not.
+        request, every page's first fetch, does not.  The private
+        daemon (:attr:`local_only`) serves nobody: it admits only
+        token-authenticated local clients, and an HTTP request carries
+        no token, so the loopback admission would hand the owner's
+        trajectories to every user of the machine.
 
         Args:
             connection: The connection the request arrived on.
@@ -5551,6 +5880,11 @@ class RemoteAccessServer:
         Returns:
             The refusal response, or ``None`` for an admitted requester.
         """
+        if self._local_only:
+            return _http_response(
+                403, "application/json; charset=utf-8",
+                b'{"error": "This private server serves no trajectory data"}',
+            )
         ip = self._client_ip(connection)
         if _connection_peer_is_loopback(connection) and sorcar_api.is_loopback_ip(ip):
             return None
@@ -5714,6 +6048,14 @@ class RemoteAccessServer:
         # ``link``: a daemon-link peer, told only global events and the
         # replies to its own requests (see ``WebPrinter.add_client``).
         conn_state: dict[str, Any] = {"conn_id": uuid.uuid4().hex, "link": auth.link}
+        # Every command of the connection, from a remote browser or a
+        # local client alike, goes to the code API's ``dispatch`` with
+        # this one context: the API layer validates it against the
+        # catalog and stamps it (``connId``, tab registration); nothing
+        # is routed here.
+        ctx = sorcar_api.ApiContext(
+            endpoint=websocket, conn_state=conn_state, is_local=is_local,
+        )
         self._printer.bind_conn(conn_state["conn_id"], websocket)
         # The standalone app's popup window (kiss-app on macOS) marks
         # its connection; the daemon quits a browser whose popup closed.
@@ -5754,9 +6096,7 @@ class RemoteAccessServer:
                     await websocket.close()
                     break
                 try:
-                    await self._dispatch_client_command(
-                        cmd, websocket, conn_state, is_local,
-                    )
+                    await self._server_api.dispatch(cmd, ctx)
                 except websockets.exceptions.ConnectionClosed:
                     raise
                 except Exception:
@@ -5880,45 +6220,6 @@ class RemoteAccessServer:
             conn_state.pop("rotated_from", None)
             return False
         return password_accepted(client_pw, rotated_from)
-
-    async def _dispatch_client_command(
-        self,
-        cmd: dict[str, Any],
-        endpoint: ServerConnection,
-        conn_state: dict[str, Any],
-        is_local: bool,
-    ) -> None:
-        """Hand one parsed client command to the server's code API.
-
-        The single per-message entry point of :meth:`_ws_handler` for
-        remote browsers and local clients alike, so the two kinds of
-        peer cannot drift in behaviour.  This method owns NO routing: it wraps the connection's
-        transport state into a :class:`kiss.server.sorcar.ApiContext`
-        and calls :meth:`kiss.server.sorcar.ServerApi.dispatch`, which
-        validates the command against the API catalog, applies the
-        per-connection stamping (``connId``, tab registration — see
-        the invariant documentation on :class:`ServerApi`), and
-        invokes the API method the command's catalog entry names, with
-        this server as the backend.
-
-        Args:
-            cmd: The parsed JSON command dictionary.
-            endpoint: The client's :class:`ServerConnection`, used
-                for direct replies.
-            conn_state: Per-connection mutable state holding the
-                connection's unique ``conn_id``.  Each browser tab
-                owns exactly one connection, and the API layer's
-                stamping of ``connId`` is what guarantees the
-                per-tab autocomplete isolation invariant.
-            is_local: Whether the connection authenticated with the
-                local token (see :meth:`kiss.server.sorcar.ServerApi.authenticate`).
-        """
-        ctx = sorcar_api.ApiContext(
-            endpoint=endpoint,
-            conn_state=conn_state,
-            is_local=is_local,
-        )
-        await self._server_api.dispatch(cmd, ctx)
 
     def _bootstrap_events(self) -> list[dict[str, Any]]:
         """The events a ``ready`` answers with: ``tricksData``,
@@ -6241,7 +6542,10 @@ class RemoteAccessServer:
         :meth:`_watch_update_exit` lowers it; a failed spawn (``None``,
         already reported as an ``error`` event, or a raise the awaiting
         spawner re-raises) owns nothing, so the barrier goes down and a
-        later Update click starts over.
+        later Update click starts over.  A spawn that lands after
+        :meth:`stop_async` cancelled the watcher that existed keeps its
+        detached installer but starts no watcher on the stopped
+        server's loop (as :meth:`_handle_update_models` does).
 
         Args:
             conn_id: Requesting connection id (``""`` to broadcast).
@@ -6253,7 +6557,7 @@ class RemoteAccessServer:
         if spawned is not None:
             self._update_proc = spawned[0]
         self._update_starting = False
-        if spawned is None:
+        if spawned is None or self._shutdown_initiated:
             self._set_update_barrier(False)
             return
         self._update_watch_task = asyncio.create_task(
@@ -6277,50 +6581,58 @@ class RemoteAccessServer:
         with agent_state.STATE_LOCK:
             self._agent_server._update_installing = up
 
-    def _arm_update_barrier_if_idle(self, gen: int) -> bool:
+    def _arm_update_barrier_if_idle(self, gen: int = 0) -> bool:
         """Raise the run-admission barrier when no task is in flight.
 
-        The idle verdict (:func:`_snapshot_active_tabs`) and the arming
+        The idle verdict (:func:`_snapshot_active_tabs`) and the raise
         happen in ONE :data:`agent_state.STATE_LOCK` critical section
         — the lock ``_cmd_run`` holds while it admits a run — so a
-        ``run`` submitted between the poller's "no active tasks"
+        ``run`` submitted between the caller's "no active tasks"
         observation and the installer spawn is either counted as
         active (and defers the update) or refused by the barrier.
-        Nothing is armed once the shutdown sweep has begun
+        Nothing is raised once the shutdown sweep has begun
         (``_shutdown_stopping``, set under the same lock): it stops
         every task, and the idle daemon it leaves behind must not run
-        an installer that would restart it.  The armed generation must
-        still be *gen* (a Cancel, or a Cancel and a re-arm, cleared or
-        replaced it) and is CONSUMED here: from here on the launch
-        belongs to the poller, and a Cancel arriving later finds
-        nothing armed and stands down (conc1018 I2-F1).
+        an installer that would restart it.
 
-        Runs on the event loop, in the step in which the poller enters
-        :meth:`_handle_run_update` and takes the single-flight guard
-        (``_update_starting``).  An installer's exit watcher, a loop
-        callback too, lowers the barrier whenever no installer is in
-        progress; were this check on a worker thread, a watcher could
-        run between the raise and the poller's resume and drop the
-        barrier under the poller.  Task threads hold the lock for
-        milliseconds, which the loop waits out as in
-        :meth:`_set_update_barrier`.
+        For the idle-update poller (*gen* is its generation) the armed
+        generation must still be *gen* (a Cancel, or a Cancel and a
+        re-arm, cleared or replaced it) and is CONSUMED here: from here
+        on the launch belongs to the poller, and a Cancel arriving later
+        finds nothing armed and stands down (conc1018 I2-F1).  For the
+        deferred-restart loop (no *gen*) a barrier that is up already
+        belongs to an installer about to start (an Update click, the
+        idle poller) and is left alone.
+
+        Runs on the event loop, in the step in which the caller enters
+        :meth:`_handle_run_update` (or spawns the deferred restart) and
+        takes the single-flight guard (``_update_starting``).  An
+        installer's exit watcher, a loop callback too, lowers the
+        barrier whenever no installer is in progress; were this check
+        on a worker thread, a watcher could run between the raise and
+        the caller's resume and drop the barrier under it.  Task
+        threads hold the lock for milliseconds, which the loop waits
+        out as in :meth:`_set_update_barrier`.
 
         Args:
-            gen: The calling poller's generation.
+            gen: The calling poller's generation, or ``0`` for the
+                deferred-restart loop.
 
         Returns:
             ``True`` when the barrier was raised (idle), ``False`` when
-            a task is still live and the poller must wait, the daemon
-            is shutting down, or the idle update was cancelled.
+            a task is still live and the caller must wait, the daemon
+            is shutting down, the idle update was cancelled, or (no
+            *gen*) the barrier is up already.
         """
         with agent_state.STATE_LOCK:
-            if (
-                self._update_when_idle_armed != gen
-                or self._agent_server._shutdown_stopping
-                or _snapshot_active_tabs()
-            ):
+            claimed = (
+                self._agent_server._update_installing if gen == 0
+                else self._update_when_idle_armed != gen
+            )
+            if claimed or self._agent_server._shutdown_stopping or _snapshot_active_tabs():
                 return False
-            self._update_when_idle_armed = 0
+            if gen:
+                self._update_when_idle_armed = 0
             self._agent_server._update_installing = True
             return True
 
@@ -6588,7 +6900,10 @@ class RemoteAccessServer:
         spawned = await loop.run_in_executor(
             None, self._spawn_update_models, conn_id,
         )
-        if spawned is not None:
+        # ``stop_async`` cancels only the watcher that exists when it
+        # runs; a spawn still in flight then must not install one on
+        # the stopped server's loop (the updater is detached by design).
+        if spawned is not None and not self._shutdown_initiated:
             self._update_models_watch_task = asyncio.create_task(
                 self._watch_update_models_exit(spawned, conn_id),
             )
@@ -6720,9 +7035,12 @@ class RemoteAccessServer:
         with an empty ``text``.  Such a client also sends
         ``wakeSamples`` — the sample count of the prepended audio —
         so speaker identification runs on the capture alone (the
-        pre-wake ring may carry another voice).  Messages without the
-        flag (older clients, plain dictation) keep the lenient
-        behavior.
+        pre-wake ring may carry another voice).  ``wakeAgreed: true``
+        says both of the page's recognizers (grammar and grammar-free)
+        heard the wake word; only then may a non-English transcript
+        that lost the word in translation still be accepted.  Messages
+        without ``wakePrefixed`` (older clients, plain dictation) keep
+        the lenient behavior.
 
         Args:
             cmd: The parsed ``voiceTranscribe`` command.
@@ -6741,6 +7059,24 @@ class RemoteAccessServer:
         if pcm:
             assert self._loop is not None
             expect_wake_prefix = bool(cmd.get("wakePrefixed"))
+            wake_agreed = cmd.get("wakeAgreed") is True
+            wake_samples = cmd.get("wakeSamples")
+            if (
+                not isinstance(wake_samples, int)
+                or isinstance(wake_samples, bool)
+                or not 0 < wake_samples < len(pcm) // 2
+            ):
+                wake_samples = None
+            # Keep the audio as received (wake word + speech) so a
+            # false trigger can be replayed later.
+            info: dict[str, Any] = {
+                "wakePrefixed": expect_wake_prefix,
+                "wakeSamples": wake_samples,
+                "wakeAgreed": wake_agreed,
+            }
+            recording = await self._loop.run_in_executor(
+                None, save_voice_recording, pcm, info,
+            )
             try:
                 result = await self._loop.run_in_executor(
                     None,
@@ -6748,6 +7084,7 @@ class RemoteAccessServer:
                     pcm,
                     DEFAULT_AUDIO_MODEL,
                     expect_wake_prefix,
+                    wake_agreed,
                 )
                 text = result["text"]
                 language = result["language"]
@@ -6760,17 +7097,17 @@ class RemoteAccessServer:
                 )
                 text = ""
                 language = None
+            if recording is not None:
+                info.update(text=text, language=language, accepted=bool(text))
+                await self._loop.run_in_executor(
+                    None, update_voice_recording_info, recording, info,
+                )
             if text:
                 # Speaker identification uses the capture alone: the
                 # client's wakeSamples marks where the prepended
                 # pre-wake ring (which may carry another voice) ends.
-                wake_samples = cmd.get("wakeSamples")
                 speaker_pcm = pcm
-                if (
-                    isinstance(wake_samples, int)
-                    and not isinstance(wake_samples, bool)
-                    and 0 < wake_samples < len(pcm) // 2
-                ):
+                if wake_samples is not None:
                     speaker_pcm = pcm[2 * wake_samples:]
                 speaker = await self._loop.run_in_executor(
                     None, self._identify_voice_speaker, speaker_pcm,
@@ -7193,7 +7530,14 @@ class RemoteAccessServer:
                 reply["error"] = "Nothing to share: the chat is empty"
                 return reply
             try:
-                page = _build_share_page(title, body_html)
+                # JSON may legally carry a lone surrogate (a title the
+                # page clipped mid-emoji by UTF-16 units), which has no
+                # UTF-8 form: replaced ("?") rather than raised past
+                # the reply, which left the share button waiting.
+                page = (
+                    _build_share_page(title, body_html)
+                    .encode("utf-8", "replace").decode("utf-8")
+                )
                 out_path = (
                     Path(work_dir).expanduser()
                     / "reports"
@@ -7324,7 +7668,7 @@ class RemoteAccessServer:
                     # the saved page's task info (taskPanelInfoHTML).
                     "metrics": task_metrics_from_session(row),
                 }
-                budget -= len(json.dumps(entry).encode("utf-8"))
+                budget -= len(json.dumps(entry))  # ASCII: length == byte size
                 if budget < 0:
                     truncated = True
                     break
@@ -7456,11 +7800,15 @@ class RemoteAccessServer:
         connection alone, and a client that vanished mid-request must
         not surface an error.  A ``fileContent`` reply with more text
         than one frame carries goes out as several frames
-        (:func:`_reply_frames`).
+        (:func:`_reply_frames`).  A sidebar panel's reply
+        (:data:`URGENT_REPLY_TYPES`, the ``machines`` rows for one)
+        goes ahead of the frames queued for the connection, as it does
+        from :meth:`WebPrinter.broadcast`.
         """
+        ahead = reply.get("type") in URGENT_REPLY_TYPES
         try:
             for frame in _reply_frames(reply):
-                await self._printer._locked_send(endpoint, json.dumps(frame))
+                await self._printer._locked_send(endpoint, json.dumps(frame), ahead)
         except Exception:
             logger.debug("%s: failed to write reply", what, exc_info=True)
 
@@ -8294,20 +8642,15 @@ class RemoteAccessServer:
             idle and is launching the installer is left alone: the
             update is under way and the single-flight guard in
             :meth:`_handle_run_update` covers any concurrent request.
-            The armed generation is cleared under
-            :data:`agent_state.STATE_LOCK`, the lock the idle check
-            (:meth:`_arm_update_barrier_if_idle`) reads it under.  Both
-            run on the event loop, so a Cancel lands either while the
-            poller sleeps (cancelled there, it never checks again) or
-            after its verdict (the generation is consumed and this call
-            stands down).  Task threads hold that lock for the few
-            milliseconds of a run admission or a refusal broadcast; the
-            loop waits those out here as :meth:`_set_update_barrier`
-            does.
+            The armed generation is touched on the event loop only
+            (here, the arming handler and the idle check
+            :meth:`_arm_update_barrier_if_idle`), so a Cancel lands
+            either while the poller sleeps (cancelled there, it never
+            checks again) or after its verdict (the generation is
+            consumed and this call stands down); no lock is needed.
         """
-        with agent_state.STATE_LOCK:
-            was_armed = self._update_when_idle_armed != 0
-            self._update_when_idle_armed = 0
+        was_armed = self._update_when_idle_armed != 0
+        self._update_when_idle_armed = 0
         if not was_armed:
             return False
         task = self._update_when_idle_task
@@ -8393,34 +8736,6 @@ class RemoteAccessServer:
         """
         return self._url_file.parent / deferred_restart.RESTART_PENDING_FILE
 
-    def _raise_update_barrier_if_idle(self) -> bool:
-        """Raise the run-admission barrier if it is down and no task is in flight.
-
-        The idle check (:func:`_snapshot_active_tabs`) and the raise are
-        one :data:`agent_state.STATE_LOCK` section, the lock ``_cmd_run``
-        admits a run under, so a run is either counted here or refused
-        by the barrier.  A barrier that is up already belongs to an
-        installer about to start (an Update click, the idle poller).
-        Once the shutdown sweep has begun (``_shutdown_stopping``, set
-        under the same lock) nothing is raised: the sweep stops every
-        task, and the idle daemon it leaves behind must not run an
-        installer that would restart it.  Task threads hold the lock
-        for milliseconds, which the event loop waits out as in
-        :meth:`_set_update_barrier`.
-
-        Returns:
-            Whether this call raised the barrier.
-        """
-        with agent_state.STATE_LOCK:
-            if (
-                self._agent_server._update_installing
-                or self._agent_server._shutdown_stopping
-                or _snapshot_active_tabs()
-            ):
-                return False
-            self._agent_server._update_installing = True
-            return True
-
     async def _deferred_restart_loop(self) -> None:
         """Finish the restart an installer deferred, once no task is in flight.
 
@@ -8450,7 +8765,7 @@ class RemoteAccessServer:
             try:
                 if not await asyncio.to_thread(path.exists):
                     continue
-                if self._update_in_progress() or not self._raise_update_barrier_if_idle():
+                if self._update_in_progress() or not self._arm_update_barrier_if_idle():
                     continue
                 self._update_starting = True
                 spawn = loop.run_in_executor(None, self._spawn_deferred_restart, path)
@@ -8641,8 +8956,10 @@ class RemoteAccessServer:
         offer and fetches the transcript when the user opens the tab.
         A ``ready`` whose legacy ``restoredTabs`` seed an EMPTY
         registry is the exception: those tabs are new to every client,
-        so all of them are replayed to everyone.  Tab state is
-        server-canonical — clients never keep a tab set of their own.
+        so all of them are replayed to everyone (one connection-scoped
+        replay per client, each a refresh of the registry as it is when
+        it runs).  Tab state is server-canonical — clients never keep
+        a tab set of their own.
 
         Args:
             cmd: The ``ready`` message from the client (already
@@ -8689,11 +9006,17 @@ class RemoteAccessServer:
         except Exception:
             logger.exception("ready tab-registry sync failed")
             bound, adopted = [], False
-        # Tabs this ready just seeded the empty registry with (legacy
-        # migration) are new to every other client too: those clients
-        # adopt them from the ``tabs_state`` snapshot without asking for
-        # their transcripts, so the replays must reach everyone.
-        replay_conn_id = "" if adopted else conn_id
+        # The CHATS page the client asked for before this ready goes
+        # out before the transcript queued below: over a slow link the
+        # rows are on screen while the transcript streams in.
+        await self._server_api.await_history_reply(conn_id)
+        if bound:
+            # The bindings as they are NOW, not the snapshot from before
+            # that wait (up to 3 s): a tab another surface closed or
+            # rebound meanwhile was resumed from the stale snapshot, and
+            # the replay's publication reopened or rebound it on every
+            # surface (A22-1).
+            bound = await asyncio.to_thread(self._agent_server.tab_registry.bound_tabs)
         # Only the tab the client is looking at (``tabId``) gets its
         # transcript now.  The other bound tabs are DEFERRED: the
         # client receives their
@@ -8704,18 +9027,37 @@ class RemoteAccessServer:
         # stalled the daemon while it loaded and serialized them,
         # which in turn made the client reconnect again.
         for rt_id, rt_chat, rt_task in bound:
-            resume: dict[str, Any] = {
-                "type": "resumeSession", "chatId": rt_chat,
-                "tabId": rt_id, "replayConnId": replay_conn_id,
-            }
-            if not adopted and rt_id != tab_id:
-                resume["deferred"] = True
-            # A tab pinned to a specific historical task replays THAT
-            # task; without the taskId the replay would silently
-            # switch every client's tab to the chat's latest task.
-            if rt_task:
-                resume["taskId"] = rt_task
-            await self._run_cmd(resume)
+            # Tabs this ready just seeded the empty registry with
+            # (legacy migration) are new to every other client too:
+            # those clients adopt them from the ``tabs_state`` snapshot
+            # without asking for their transcripts, so every connection
+            # a broadcast would reach gets a replay of its own.  Each is
+            # connection-scoped, i.e. a refresh of what the registry
+            # binds when it runs (``_replay_session``): a tab another
+            # surface closed or rebound between the snapshot above and
+            # the replay stays closed, or keeps its newer chat, where a
+            # broadcast replay republished the stale binding (V8-F1).
+            # This connection first: it is the one painting its screen.
+            targets = [conn_id]
+            if adopted:
+                targets = [
+                    c for c in dict.fromkeys(
+                        [conn_id, *self._printer.replay_conn_ids(rt_id)],
+                    ) if c
+                ]
+            for target in targets:
+                resume: dict[str, Any] = {
+                    "type": "resumeSession", "chatId": rt_chat,
+                    "tabId": rt_id, "replayConnId": target,
+                }
+                if not adopted and rt_id != tab_id:
+                    resume["deferred"] = True
+                # A tab pinned to a specific historical task replays THAT
+                # task; without the taskId the replay would silently
+                # switch every client's tab to the chat's latest task.
+                if rt_task:
+                    resume["taskId"] = rt_task
+                await self._run_cmd(resume)
         self._server_api._spawn_reply(self._send_signin(conn_id))
 
     async def _open_path_only_prompt(
@@ -8883,6 +9225,10 @@ class RemoteAccessServer:
             # means "no per-run override" and the agent resolves the
             # persisted ``use_memory`` setting itself.
             "useMemory": cmd.get("useMemory"),
+            # Same contract for context compaction: only an explicit
+            # ``false`` turns it off for the run; the global Compaction
+            # setting is read by the agent itself.
+            "compaction": cmd.get("compaction"),
             "_notice": notice,
         }
         await self._run_cmd(run_cmd)
@@ -8941,11 +9287,11 @@ class RemoteAccessServer:
         attempt = 0
         max_attempts = max(1, retries)
         while attempt < max_attempts:
-            self._tunnel_metrics_port = _pick_free_local_port()
+            metrics_port = self._tunnel_metrics_port = _pick_free_local_port()
             base_argv = [
                 "cloudflared", "tunnel",
                 "--metrics",
-                f"127.0.0.1:{self._tunnel_metrics_port}",
+                f"127.0.0.1:{metrics_port}",
                 *args,
             ]
             try:
@@ -8994,6 +9340,19 @@ class RemoteAccessServer:
                         raise RuntimeError(
                             "tunnel stopped while cloudflared was starting",
                         )
+                    if self._tunnel_detached:
+                        # ``_detach_tunnel`` already ran (graceful
+                        # shutdown while this spawn was in flight) and
+                        # reset the bookkeeping: the dying daemon must
+                        # not own the child — its stderr pipe would die
+                        # with the process — so hand it to the next
+                        # daemon the way ``_detach_tunnel`` does:
+                        # pidfile (the port of the argv) + drain shim.
+                        _save_cloudflared_pidfile(proc.pid, metrics_port, None)
+                        self._spawn_stderr_drain_shim(proc)
+                        raise RuntimeError(
+                            "tunnel detached while cloudflared was starting",
+                        )
                     self._tunnel_proc = proc
                     self._tunnel_started_at = time.monotonic()
                     self._tunnel_adopted_pid = None
@@ -9036,7 +9395,7 @@ class RemoteAccessServer:
         # thread must not overwrite it with a stale (dead) ``Popen``
         # whose stderr pipe would then outlive ``stop_async``.
         with self._tunnel_lock:
-            if self._tunnel_stopped and last_proc is not None:
+            if (self._tunnel_stopped or self._tunnel_detached) and last_proc is not None:
                 _reap_proc(last_proc)
                 raise RuntimeError(
                     "tunnel stopped while cloudflared was starting",
@@ -9374,13 +9733,16 @@ class RemoteAccessServer:
             None, self._start_tunnel,
         )
         if self._shutdown_initiated:
-            # SIGTERM landed while the tunnel start was in flight (the
-            # entry guard above ran before the flag was set).  The
-            # sigterm thread's early detach has already run, so detach
-            # this fresh cloudflared as well — its pid/URL were saved
-            # to the pidfile by the start path, so the NEXT daemon
-            # adopts it — and publish nothing from a dying process.
-            self._detach_tunnel()
+            # Shutdown began while the tunnel start was in flight (the
+            # entry guard above ran before the flag was set): publish
+            # nothing from a dying process.  The fresh cloudflared
+            # stays in ``_tunnel_proc`` for the shutdown path that owns
+            # the decision: the sigterm thread / ``start()``'s
+            # ``finally`` detach it (a spawn landing after their detach
+            # hands itself over under ``_tunnel_lock``), ``stop_async``
+            # and ``start_async``'s rollback kill it.  Detaching here
+            # hid it from ``stop_async``'s ``_stop_tunnel`` and leaked
+            # it past the stopped server.
             return
         if tunnel_url:
             logger.info("Tunnel restarted: %s", tunnel_url)
@@ -9449,7 +9811,7 @@ class RemoteAccessServer:
                         name=f"kiss-cloudflared-reaper-{proc.pid}",
                         daemon=True,
                     ).start()
-            _unlink_cloudflared_pidfile()
+            _unlink_cloudflared_pidfile(proc.pid)
         elif kill_adopted and self._tunnel_adopted_pid is not None:
             # An adopted pid came from the pidfile of a PREVIOUS
             # process, so unlike the self-spawned ``proc`` above it
@@ -9675,6 +10037,8 @@ class RemoteAccessServer:
                 await self._watchdog_ping_clients()
             except Exception:
                 logger.debug("Watchdog WS ping error", exc_info=True)
+            if sys.platform != "darwin":
+                continue
             try:
                 if await asyncio.to_thread(
                     standalone_app.sweep_windowless_app, standalone_app.macos_bundle_path(),
@@ -9976,11 +10340,20 @@ class RemoteAccessServer:
         ``$KISS_HOME/remote-url.json``: a sibling kiss-web that has
         already taken over may have overwritten it, and removing it
         would briefly leave ``kiss-web --url`` with no URL.
+
+        Sets :attr:`_tunnel_detached` under :attr:`_tunnel_lock` (the
+        counterpart of :meth:`_stop_tunnel`'s ``_tunnel_stopped``): a
+        :meth:`_spawn_cloudflared` still in flight on an executor
+        thread then hands its child to the pidfile and a drain shim
+        itself instead of publishing it into this dying daemon, where
+        no later detach would find it.
         """
-        proc = self._tunnel_proc
-        if proc is not None and proc.poll() is None:
-            self._spawn_stderr_drain_shim(proc)
-        self._reset_tunnel_proc_state()
+        with self._tunnel_lock:
+            self._tunnel_detached = True
+            proc = self._tunnel_proc
+            if proc is not None and proc.poll() is None:
+                self._spawn_stderr_drain_shim(proc)
+            self._reset_tunnel_proc_state()
         self._reset_tunnel_backoff_state()
 
     @staticmethod
@@ -10100,20 +10473,32 @@ class RemoteAccessServer:
             # cancellation must not leave a half-bound WSS listener
             # live in an embedder that catches the exception.
             self._close_partial_setup()
-            # Then the services.d helpers _bind_listeners started, off
-            # the loop: stopping one that ignores SIGTERM waits
-            # STOP_GRACE_SECONDS before the SIGKILL.
+            # Then the services.d helpers and the SEA-registry watcher
+            # _bind_listeners started, off the loop: stopping a helper
+            # that ignores SIGTERM waits STOP_GRACE_SECONDS before the
+            # SIGKILL, and the watcher stop joins its poller.
             await asyncio.to_thread(self._services.stop)
+            await asyncio.to_thread(self._stop_sea_command_watcher)
             raise
 
     def _close_partial_setup(self) -> None:
-        """Tear down listeners bound by a failed/cancelled ``_setup_server``."""
+        """Tear down listeners and loops armed by a failed/cancelled ``_setup_server``."""
         # No surfaces will ever attach to this server: sign-in pages
         # must not be sent to its Browser tab.
         set_browser_tab_opener(None)
-        if self._trusted_clients_task is not None:
-            self._trusted_clients_task.cancel()
-            self._trusted_clients_task = None
+        # Every loop _bind_listeners armed before it failed (a failure
+        # after the four watchdog-era loops are created — the SEA
+        # watcher's thread start, the reset flag's claim — used to
+        # leave them running in an embedder that caught the error).
+        for task in (
+            self._trusted_clients_task, self._watchdog_task, self._version_check_task,
+            self._machines_watch_task, self._deferred_restart_task,
+        ):
+            if task is not None:
+                task.cancel()
+        self._trusted_clients_task = self._watchdog_task = None
+        self._version_check_task = self._machines_watch_task = None
+        self._deferred_restart_task = None
         self._close_ws_listeners()
         self._ws_server = None
         self._ws_loopback_server = None
@@ -10277,8 +10662,8 @@ class RemoteAccessServer:
                 "server again",
                 self.port, self.port,
             )
-            # Local clients may have been pointed at a non-loopback
-            # address meanwhile: publish the loopback one.  Off the
+            # No endpoint was published while the alias was missing
+            # (``_write_local_endpoint_file``): publish it now.  Off the
             # loop: the endpoint lock may be waited for (bounded, 5 s).
             await asyncio.to_thread(self._write_local_endpoint_file)
 
@@ -10292,13 +10677,28 @@ class RemoteAccessServer:
         exists (the layout :func:`_generate_self_signed_cert` produces),
         else the certificate itself (a self-signed certificate is its
         own trust anchor).
+
+        Publishes nothing while no listener is reachable over loopback
+        (a LAN-only listener whose ``127.0.0.1`` alias another process
+        holds): a same-machine client is a non-loopback peer on the LAN
+        address, where plaintext is refused and the token never
+        honoured, so that endpoint could only fail.
+        :meth:`_watchdog_reclaim_loopback` publishes once the alias is
+        bound.
         """
+        host, port = _bound_loopback(self._ws_loopback_server, self._ws_server)
+        if not sorcar_api.is_loopback_ip(host.strip("[]")):
+            logger.warning(
+                "No loopback listener: local clients cannot reach this daemon "
+                "until 127.0.0.1:%d is reclaimed; the endpoint file is not written",
+                port,
+            )
+            return
         if self._ssl_certfile and self._ssl_keyfile:
             sibling_ca = Path(self._ssl_certfile).parent / tls_certs.CA_CERT_FILE
             ca_path = str(sibling_ca) if sibling_ca.is_file() else self._ssl_certfile
         else:
             ca_path = str(_tls_dir() / tls_certs.CA_CERT_FILE)
-        host, port = _bound_loopback(self._ws_loopback_server, self._ws_server)
         local_endpoint.write_endpoint(
             self._local_endpoint_file,
             local_endpoint.LocalEndpoint(
@@ -10535,18 +10935,22 @@ class RemoteAccessServer:
     def _broadcast_current_sea_commands(self) -> None:
         """Broadcast the registry's current SEA slash-command list (worker thread).
 
-        The event is rebuilt while the registry changed during its slow
-        usage read: a rescan published meanwhile has broadcast the newer
-        list inline, and this one, sent last, must not take it back.
+        The registry is re-read after every send and the event rebuilt
+        and re-sent while it changed: a rescan published during the slow
+        usage read, or between the last check and the send, has
+        broadcast the newer list inline, and the older one sent after
+        it must not be the last word.  The check comes after the send
+        so no publish can slip in between them.
         """
         from kiss.agents.sorcar import sea_commands
 
         names = sea_commands.list_commands()
-        event = sea_commands_event(names)
-        while (current := sea_commands.list_commands()) != names:
+        while True:
+            self._printer.broadcast(sea_commands_event(names))
+            current = sea_commands.list_commands()
+            if current == names:
+                return
             names = current
-            event = sea_commands_event(names)
-        self._printer.broadcast(event)
 
     def _stop_sea_command_watcher(self) -> None:
         """Unsubscribe from the SEA registry and stop its poller.
@@ -10639,9 +11043,15 @@ class RemoteAccessServer:
     ) -> None:
         """React to a catchable termination signal (SIGTERM / SIGHUP).
 
-        Logs the signal alongside a snapshot of in-flight agent tasks
-        (via :func:`_snapshot_active_tabs`, which is signal-safe) and
-        current memory.  For ``SIGTERM`` the *first* invocation starts
+        Logs the signal and current memory.  The in-flight tasks are
+        NOT listed here: the handler runs on the event-loop thread,
+        which may be inside a ``WebPrinter._ws_lock`` section, while a
+        worker holding ``agent_state.STATE_LOCK`` (a status broadcast
+        under the server's state lock) waits for that same lock — a
+        registry snapshot taken here would wait for the worker, the
+        worker for this thread, and the daemon would never shut down.
+        :meth:`_stop_active_agent_tasks` logs the swept tasks instead,
+        off this thread.  For ``SIGTERM`` the *first* invocation starts
         the :meth:`_shutdown_on_sigterm` thread, which stops the
         in-flight agent worker threads and then unwinds the event loop
         deterministically (via :meth:`_request_loop_shutdown`) so
@@ -10671,12 +11081,10 @@ class RemoteAccessServer:
                 directly).
         """
         sig_name = signal.Signals(signum).name
-        active_tabs = _snapshot_active_tabs()
         logger.warning(
-            "Signal %s received: pid=%d active_tasks=[%s] rss=%.1fMB",
+            "Signal %s received: pid=%d rss=%.1fMB",
             sig_name,
             os.getpid(),
-            ", ".join(active_tabs) if active_tabs else "none",
             _rss_mb(),
         )
         if signum in _SHUTDOWN_SIGNALS:
@@ -10970,6 +11378,15 @@ class RemoteAccessServer:
         if not active:
             return
 
+        # Signal first: the pre-emptive persistence below waits for the
+        # history write lock and, behind another writer, for SQLite's
+        # busy timeout; the workers must already be stopping meanwhile.
+        # Its rewrite touches only rows still at the creation sentinel,
+        # so a worker that finishes its cleanup first is never clobbered.
+        for _tab_id, _state, stop_event, _thread in active:
+            if stop_event is not None:
+                stop_event.set()
+
         try:
             from kiss.agents.sorcar.persistence import (
                 _shutdown_persist_in_flight_results,
@@ -10989,10 +11406,6 @@ class RemoteAccessServer:
             len(active),
             ", ".join(tab_id for tab_id, _, _, _ in active),
         )
-
-        for _tab_id, _state, stop_event, _thread in active:
-            if stop_event is not None:
-                stop_event.set()
 
         deadline = time.monotonic() + timeout
         for tab_id, state, _stop_event, thread in active:
@@ -11110,7 +11523,6 @@ class RemoteAccessServer:
             # thread already detached.
             self._detach_tunnel()
             self._shutdown_children()
-            file_index.stop()
             chrome_bridge.ChromeBridge.shutdown()
             if stall_watchdog is not None:
                 stall_watchdog.stop()
@@ -11134,9 +11546,12 @@ class RemoteAccessServer:
         up, killed when they ignore it), the streams of tabs running on
         remote machines, the brand's sign-in hook (SIGTERM, killed when
         it ignores it: its kill thread would not survive the interpreter's
-        exit), the brand's ``services.d`` helpers (the same), and the
-        SEA-registry watcher.  Every step is idempotent: the SIGTERM
-        thread runs the first three early.
+        exit), the brand's ``services.d`` helpers (the same), the
+        SEA-registry watcher, the ``@``-picker's file-index worker
+        (joined after its queue is closed: ``stop_async`` used to leave
+        it blocked on the queue, retaining the server, L2-2) and the
+        ghost-text autocomplete worker (the same, L2-1).  Every step is
+        idempotent: the SIGTERM thread runs the first three early.
         """
         self._stop_active_agent_tasks()
         self._await_active_merges()
@@ -11150,6 +11565,8 @@ class RemoteAccessServer:
         self._server_api.signin.shutdown()
         self._services.stop()
         self._stop_sea_command_watcher()
+        self._agent_server._file_index.stop()
+        self._agent_server._stop_complete_worker()
 
     async def start_async(self) -> None:
         """Start the server asynchronously (for use in existing event loops).

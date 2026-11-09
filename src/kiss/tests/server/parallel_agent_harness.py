@@ -33,6 +33,7 @@ from kiss.core.utils import rmtree_force
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import wait_for as wait_for  # re-exported for the server tests
 from kiss.tests.server.conftest import init_repo
 
 # The stand-in server speaks the OpenAI chat-completions wire format,
@@ -270,6 +271,27 @@ def request_text(request: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def tool_names(request: dict[str, Any]) -> list[str]:
+    """Return the function names of the ``tools`` array of a chat-completions *request*."""
+    return [
+        tool["function"]["name"]
+        for tool in request.get("tools", [])
+        if isinstance(tool, dict) and "function" in tool
+    ]
+
+
+def system_text(request: dict[str, Any]) -> str:
+    """Return the system message of a chat-completions *request* (the run's system prompt).
+
+    ``""`` when the request carries no system message.
+    """
+    for message in request.get("messages", []):
+        if message.get("role") == "system":
+            content = message.get("content")
+            return content if isinstance(content, str) else str(content)
+    return ""
+
+
 class CapturePrinter(JsonPrinter):
     """Real :class:`JsonPrinter` that also records broadcast events."""
 
@@ -482,23 +504,26 @@ def history_rows() -> list[dict[str, Any]]:
     ]
 
 
-def wait_for(predicate: Callable[[], bool], timeout: float = 30.0) -> bool:
-    """Poll *predicate* until it is true or *timeout* seconds elapse."""
-    deadline = threading.Event()
-    step = 0.02
-    waited = 0.0
-    while waited < timeout:
-        if predicate():
-            return True
-        deadline.wait(step)
-        waited += step
-    return predicate()
-
-
 def override_attribute(test: unittest.TestCase, owner: Any, name: str, value: Any) -> None:
     """Set ``owner.name`` to *value* for the rest of *test*; the cleanup restores it."""
     test.addCleanup(setattr, owner, name, getattr(owner, name))
     setattr(owner, name, value)
+
+
+def restore_env(name: str, value: str | None) -> None:
+    """Put environment variable *name* back to *value* (``None`` = unset).
+
+    A cleanup for tests that change the environment:
+    ``test.addCleanup(restore_env, name, os.environ.get(name))``.
+
+    Args:
+        name: The variable's name.
+        value: Its value before the test, or ``None`` when it was unset.
+    """
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
 
 
 class LocalDaemonTestCase(unittest.TestCase):

@@ -38,7 +38,7 @@ import pytest
 
 from kiss.agents.sorcar.docker_manager import STOPPED_MESSAGE, DockerManager
 from kiss.agents.sorcar.docker_tools import DockerTools
-from kiss.core.tool_verdict import ALLOW, ToolRedirect, refuse
+from kiss.core.tool_verdict import ALLOW, ToolRedirect, Verdict, refuse
 from kiss.tests.agents.sorcar.docker_test_containers import IMAGE, is_docker_available
 from kiss.tests.agents.sorcar.test_docker_parity_2026_10_31 import _Harness
 
@@ -59,20 +59,40 @@ _HEREDOC_REWRITE = (
 # A cat here-document over the existing file after a ``cd`` (``/`` is the
 # default workdir): the guard asks the container whether ``/`` is a directory.
 _CAT_HEREDOC_REWRITE = "cd / && cat > tmp/some_file.txt <<'EOF'\nb\nEOF"
-# The exact call each rewrite of the seeded ``a\n`` stands for.
+# The exact call each rewrite of the seeded ``a\n`` stands for (an Edit matching
+# verbatim only, as sed and ``str.replace`` do: ``exact``).
 _REWRITE_CALLS = {
     _SED_REWRITE: (
         "Edit",
         {"file_path": "/tmp/some_file.txt", "old_string": "a", "new_string": "b\nc",
-         "replace_all": False},
+         "replace_all": False, "exact": True},
     ),
     _HEREDOC_REWRITE: (
         "Edit",
         {"file_path": "/tmp/some_file.txt", "old_string": "a", "new_string": "b",
-         "replace_all": True},
+         "replace_all": True, "exact": True},
     ),
     _CAT_HEREDOC_REWRITE: ("Write", {"file_path": "/tmp/some_file.txt", "content": "b\n"}),
 }
+# Python's executables moved aside inside the container (and back): the
+# Edit then runs its Perl fallback, as in an image without Python.
+_PYTHON_OFF = (
+    "for p in /usr/local/bin/python /usr/local/bin/python3; do mv \"$p\" \"$p.off\"; done"
+    " && ! command -v python3 && ! command -v python"
+)
+_PYTHON_ON = "for p in /usr/local/bin/python /usr/local/bin/python3; do mv \"$p.off\" \"$p\"; done"
+_CRLF = b"a\r\nb\r\nc\r\nd\r\n"
+_SEED_CRLF = "printf 'a\\r\\nb\\r\\nc\\r\\nd\\r\\n' > /tmp/race.txt"
+
+
+def _raw(env: DockerManager, command: str) -> str:
+    """Run *command* in the container as is (no guard, no redirect); it must exit 0."""
+    assert env.container is not None
+    result = env.container.exec_run(["/bin/bash", "-c", command])
+    output = result.output
+    assert isinstance(output, bytes)  # not streamed: ``exec_run`` returns the whole output
+    assert result.exit_code == 0, output
+    return output.decode()
 
 
 @pytest.fixture(scope="module")
@@ -151,11 +171,13 @@ def test_docker_bash_makes_shell_rewrites_as_the_edit_or_write(
     [
         (
             _SED_REWRITE, "Edit",
-            {"old_string": "a", "new_string": "b\nc", "replace_all": False}, b"b\nc\n",
+            {"old_string": "a", "new_string": "b\nc", "replace_all": False, "exact": True},
+            b"b\nc\n",
         ),
         (
             _HEREDOC_REWRITE, "Edit",
-            {"old_string": "a", "new_string": "b", "replace_all": True}, b"b\n",
+            {"old_string": "a", "new_string": "b", "replace_all": True, "exact": True},
+            b"b\n",
         ),
         (_CAT_HEREDOC_REWRITE, "Write", {"content": "b\n"}, b"b\n"),
     ],
@@ -181,6 +203,100 @@ def test_docker_bash_makes_shell_rewrites_as_edit_or_write(
     assert result.startswith(f"Applied as {name}(") and "Successfully" in result, result
     assert h.hook_calls[-1] == expected and h.tool_calls() == ["Bash", name, "Bash", name]
     assert env.read_bytes("/tmp/some_file.txt") == content
+
+
+def test_docker_redirected_edit_is_applied_verbatim_only(env: DockerManager) -> None:
+    """The Edit a ``sed -i`` is redirected to matches verbatim, whatever the file holds by then.
+
+    The pair is settled from the file's text when the command is
+    converted and the agent makes the Edit afterwards, its hook first:
+    a writer landing in between (here the hook itself, writing through
+    the container) turned a sed matching nothing into an Edit landing
+    through the whitespace-tolerant retry, and a python ``.replace`` over
+    a file turned CRLF into a batch landing through the CRLF retry of the
+    container's Python script and of its Perl fallback (audit 2026-11-08,
+    S3/F4; round 2).  The model's own Edit of the same strings keeps both
+    retries; a batch carries ``exact`` to each of its edits.
+    """
+    h = _Harness(env)
+    env.Bash("printf 'a b\\n' > /tmp/race.txt && printf 'a   b\\n' > /tmp/race_oracle.txt", "seed")
+
+    def hook_writing_first(name: str, args: dict[str, Any]) -> Verdict:
+        if name == "Edit":
+            env.Bash("printf 'a   b\\n' > /tmp/race.txt", "another writer")
+        return h.hook(name, args)
+
+    h.agent.tool_call_hook = hook_writing_first
+    out = h.call("Bash", command="sed -i 's/a b/X/' /tmp/race.txt", description="sed")
+    assert out.startswith(
+        'Applied as Edit(file_path="/tmp/race.txt", old_string="a b", new_string="X"), '
+        "whose result follows:\nError: String not found in file"
+    ), out
+    assert h.hook_calls[-1] == ("Edit", {
+        "file_path": "/tmp/race.txt", "old_string": "a b", "new_string": "X",
+        "replace_all": False, "exact": True,
+    })
+    assert env.read_bytes("/tmp/race.txt") == b"a   b\n"
+    # sed itself over that text changes nothing either.
+    oracle = env.Bash("sed -i 's/a b/X/' /tmp/race_oracle.txt && cat /tmp/race_oracle.txt", "sed")
+    assert oracle.startswith("a   b\n"), oracle
+    # The model's own Edit keeps the retry; its exact batch does not.
+    h.agent.tool_call_hook = h.hook
+    edits = json.dumps([{"old_string": "a b", "new_string": "X"}])
+    out = h.call("Edit", file_path="/tmp/race.txt", edits=edits, exact=True)
+    assert out.startswith("Error: edit 1: String not found in file"), out
+    assert env.read_bytes("/tmp/race.txt") == b"a   b\n"
+    out = h.call("Edit", file_path="/tmp/race.txt", edits=edits)
+    assert out.startswith("edit 1: Successfully replaced 1 occurrence(s)"), out
+    assert env.read_bytes("/tmp/race.txt") == b"X\n"
+    # Two ``.replace`` calls over a file that turns CRLF before the call is made.
+    program = (
+        "s = open('/tmp/race.txt', newline='').read()\n"
+        "s = s.replace('a\\nb', 'A\\nB').replace('c\\nd', 'C\\nD')\n"
+        "open('/tmp/race.txt', 'w', newline='').write(s)\n"
+    )
+    command = f"python3 - <<'EOF'\n{program}EOF"
+    edits = json.dumps([
+        {"old_string": "a\nb", "new_string": "A\nB", "replace_all": True},
+        {"old_string": "c\nd", "new_string": "C\nD", "replace_all": True},
+    ])
+
+    def hook_turning_crlf_first(name: str, args: dict[str, Any]) -> Verdict:
+        if name == "Edit":
+            env.Bash(_SEED_CRLF, "another writer")
+        return h.hook(name, args)
+
+    env.Bash("printf 'a\\nb\\nc\\nd\\n' > /tmp/race.txt", "seed")
+    h.agent.tool_call_hook = hook_turning_crlf_first
+    out = h.call("Bash", command=command, description="two literal replacements")
+    assert h.hook_calls[-1] == (
+        "Edit", {"file_path": "/tmp/race.txt", "edits": edits, "exact": True},
+    )
+    assert "whose result follows:\nError: edit 1: String not found in file" in out, out
+    assert env.read_bytes("/tmp/race.txt") == _CRLF
+    # The program itself over that text changes nothing either.
+    _raw(env, _SEED_CRLF.replace("race.txt", "race_oracle.txt"))
+    _raw(env, command.replace("race.txt", "race_oracle.txt"))
+    assert env.read_bytes("/tmp/race_oracle.txt") == _CRLF
+    # Direct exact calls, one pair and a batch, in the container's Python and
+    # in its Perl fallback; the model's own batch keeps the CRLF retry in both.
+    h.agent.tool_call_hook = h.hook
+    single = {"old_string": "a\nb", "new_string": "A\nB", "replace_all": True}
+    for backend in ("python", "perl"):
+        if backend == "perl":
+            _raw(env, _PYTHON_OFF)
+        try:
+            for call in (single, {"edits": edits}):
+                env.Bash(_SEED_CRLF, "seed")
+                out = h.call("Edit", file_path="/tmp/race.txt", exact=True, **call)
+                assert "String not found in file" in out, (backend, out)
+                assert env.read_bytes("/tmp/race.txt") == _CRLF, backend
+            out = h.call("Edit", file_path="/tmp/race.txt", edits=edits)
+            assert out.startswith("edit 1: Successfully replaced 1 occurrence(s)"), (backend, out)
+            assert env.read_bytes("/tmp/race.txt") == b"A\r\nB\r\nC\r\nD\r\n", backend
+        finally:
+            if backend == "perl":
+                _raw(env, _PYTHON_ON)
 
 
 def test_docker_run_commands_parallel_refuses_shell_rewrites(env: DockerManager) -> None:

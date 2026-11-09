@@ -152,3 +152,67 @@ def test_model_keeps_a_registered_custom_name(tmp_path: Path) -> None:
     assert result["merged"] == ["openai/gpt-5-custom", 1.5]
     assert result["hot_added"] == ["anthropic/claude-custom-late", 0.0]
     assert result["harbor_alias"] == [True]
+
+
+# One bundled model per capability a settings-panel save must keep: the
+# Responses transport (its thinking aliases mirror the base's flag), a
+# decisions-only model, an embedding model, and a model with a fallback
+# and the Anthropic thinking overrides.
+_FLAGGED = (
+    "gpt-6-astra",
+    "openrouter/~typesafe/jev-latest",
+    "text-embedding-3-small",
+    "claude-fable-5",
+)
+_FLAGS = (
+    "is_function_calling_supported",
+    "is_embedding_supported",
+    "is_generation_supported",
+    "is_decisions_supported",
+    "use_responses_api",
+    "fallback",
+    "extended_thinking",
+    "adaptive_thinking",
+)
+
+_FLAG_SNAPSHOT = """
+import json
+from kiss.core.models import model_info as mi
+
+names, flags, save = %r, %r, %r
+related = [n for n in sorted(mi.MODEL_INFO) if n in names or mi.MODEL_INFO[n].alias_of in names]
+result = {n: {f: getattr(mi.MODEL_INFO[n], f) for f in flags} for n in related}
+if save:
+    for n in names:
+        assert mi.save_custom_model(n, endpoint=%r, api_key="k") is None
+else:
+    name = "openrouter/~typesafe/jev-latest"
+    built = mi.model(name, model_config=mi.custom_model_config(name))
+    result["decisions_class"] = type(built).__name__
+print(json.dumps(result))
+"""
+
+
+def test_a_saved_credential_keeps_the_catalog_capability_flags(tmp_path: Path) -> None:
+    """A settings-panel save of a bundled model keeps that model's flags.
+
+    The seeded entry copied the context length, thinking level and
+    prices only, and the loader replaces the bundled entry with it on
+    the next start: a decisions-only model came back as a generative
+    tool-calling one (built by the chat adapter instead of the decisions
+    one), an embedding model entered the generation picker, and the
+    Responses transport flag, the fallback model and the Anthropic
+    thinking overrides were gone — the transport flag from every
+    thinking alias of the base as well, since the aliases mirror it.
+    """
+    home = _home_with_registry(tmp_path, {})
+    before = _run(_FLAG_SNAPSHOT % (_FLAGGED, _FLAGS, True, _ENDPOINT), home)
+    assert before["gpt-6-astra"]["use_responses_api"] is True
+    assert before["gpt-6-astra-high"]["use_responses_api"] is True
+    assert before["openrouter/~typesafe/jev-latest"]["is_decisions_supported"] is True
+    assert before["text-embedding-3-small"]["is_embedding_supported"] is True
+    assert before["claude-fable-5"]["fallback"]
+    assert before["claude-fable-5"]["adaptive_thinking"] is True
+    after = _run(_FLAG_SNAPSHOT % (_FLAGGED, _FLAGS, False, _ENDPOINT), home)
+    assert after.pop("decisions_class") == "DecisionsModel"
+    assert after == before

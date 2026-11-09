@@ -121,6 +121,11 @@ function testPollPausesWhenHiddenOrDisconnected() {
   send(win, {type: 'configData', config: {work_dir: WD}});
   clock.tick(5000);
   const n = ofType(posted, 'gitStatus').length;
+  assert.ok(n > 0, 'the first tick asks for the git status');
+  // Answer the outstanding request: an unanswered one would suppress
+  // every later tick on its own (one request at a time) and hide a
+  // missing hidden-page guard.
+  send(win, statusReply(lastToken(posted), 0));
 
   setHidden(win, true);
   clock.tick(15000);
@@ -271,6 +276,8 @@ function testNoPollWhileThePanelIsOffScreen() {
     send(win, {type: 'daemonStatus', connected: true});
     send(win, {type: 'configData', config: {work_dir: WD}});
     clock.tick(5000);
+    // The daemon answers (an unanswered status is not asked again).
+    send(win, statusReply(lastToken(posted), 0));
     send(win, {
       type: 'fileContent',
       path: WD + '/a.txt',
@@ -302,12 +309,296 @@ function testNoPollWhileThePanelIsOffScreen() {
   console.log('  ok - no poll while the task-info panel is off screen');
 }
 
+// A26_fable-1: the tick must not queue a new gitStatus behind one the
+// daemon has not answered yet.  The daemon serves a connection's
+// commands one after another, so with a slow git (a large repository,
+// a slow disk) every unanswered tick would add a status request to
+// the backlog a later Stop or submit waits behind.
+function testOneOutstandingStatusRequest() {
+  const {win, posted, clock} = makePage();
+  send(win, {type: 'daemonStatus', connected: true});
+  send(win, {type: 'configData', config: {work_dir: WD}});
+  clock.tick(5000);
+  const sent = ofType(posted, 'gitStatus');
+  assert.ok(sent.length > 0, 'the workspace is asked for its status');
+  const n = sent.length;
+
+  // Twenty ticks with no reply: the request on its way is the one
+  // outstanding, nothing is queued behind it.
+  clock.tick(20 * 5000);
+  assert.strictEqual(
+    ofType(posted, 'gitStatus').length,
+    n,
+    'BUG - the ticks queued gitStatus requests behind the unanswered one',
+  );
+
+  // The reply lands: the next tick asks again.
+  send(win, statusReply(lastToken(posted), 2));
+  assert.strictEqual(byId(win, 'scm-hdr-count').textContent, '2');
+  clock.tick(5000);
+  assert.strictEqual(
+    ofType(posted, 'gitStatus').length,
+    n + 1,
+    'the tick after the reply polls again',
+  );
+
+  // A reply of a stale token (the request of a workspace left behind)
+  // is not the answer to the outstanding one: still one in flight.
+  send(win, statusReply('0', 9));
+  clock.tick(5000);
+  assert.strictEqual(
+    ofType(posted, 'gitStatus').length,
+    n + 1,
+    'a stale reply does not release the poll',
+  );
+
+  // The daemon drops: its answer is not coming; the reconnected poll
+  // asks afresh.
+  send(win, {type: 'daemonStatus', connected: false});
+  send(win, {type: 'daemonStatus', connected: true});
+  clock.tick(5000);
+  assert.ok(
+    ofType(posted, 'gitStatus').length > n + 1,
+    'the poll resumes after a reconnect',
+  );
+  win.close();
+  console.log('  ok - one status request outstanding at a time');
+}
+
+// A26_claude-2: the badge poll asks for the status alone (the log moves
+// on a commit), but a commit, checkout or reset made outside a task (a
+// terminal) moves HEAD under the log on hand: a status reply whose
+// heads differ from the log's re-asks the log under the same token, and
+// the graph is rebuilt from the fresh pair, not from the old log.
+function testAMovedHeadReloadsTheLog() {
+  const {win, posted, clock} = makePage();
+  const doc = win.document;
+  const subjects = () =>
+    Array.from(doc.querySelectorAll('#scm-graph .scm-commit-subject')).map(
+      el => el.textContent,
+    );
+  const worktree = (reply, head) =>
+    Object.assign(reply, {
+      worktrees: [
+        {
+          path: WD,
+          name: 'repo',
+          head,
+          branch: 'main',
+          detached: false,
+          current: true,
+          changes: reply.changes || [],
+        },
+      ],
+    });
+  send(win, {type: 'daemonStatus', connected: true});
+  send(win, {type: 'configData', config: {work_dir: WD}});
+  const tok = lastToken(posted);
+  send(win, worktree(statusReply(tok, 1), 'a1b2c3d'));
+  send(win, worktree(logReply(tok), 'a1b2c3d'));
+  assert.deepStrictEqual(subjects(), ['Uncommitted changes', 'first']);
+  const logs = ofType(posted, 'gitLog').length;
+
+  // The tree alone changed: the log stands, nothing is re-asked.
+  clock.tick(5000);
+  send(win, worktree(statusReply(lastToken(posted), 2), 'a1b2c3d'));
+  assert.strictEqual(ofType(posted, 'gitLog').length, logs, 'same head: no log');
+
+  // `git commit` in a terminal: the poll sees the new HEAD and a clean
+  // tree.
+  clock.tick(5000);
+  send(win, worktree(statusReply(lastToken(posted), 0), 'e5f6a7b'));
+  assert.strictEqual(
+    ofType(posted, 'gitLog').length,
+    logs + 1,
+    'BUG - the moved HEAD did not re-ask the log',
+  );
+  const req = lastMsg(posted, 'gitLog');
+  assert.strictEqual(req.token, lastToken(posted), 'same generation');
+  assert.strictEqual(req.workDir, WD);
+  assert.deepStrictEqual(
+    subjects(),
+    ['Uncommitted changes', 'first'],
+    'the graph waits for the fresh log instead of showing the old one',
+  );
+  const fresh = worktree(logReply(req.token), 'e5f6a7b');
+  fresh.head = 'e5f6a7b';
+  fresh.commits.unshift({
+    sha: 'e5f6a7b',
+    shortSha: 'e5f6a7b',
+    parents: ['a1b2c3d'],
+    author: 'a',
+    date: '2026-10-16T00:01:00Z',
+    refs: ['HEAD -> main'],
+    subject: 'second',
+    files: [],
+  });
+  send(win, fresh);
+  assert.deepStrictEqual(subjects(), ['second', 'first'], 'the new commit shows');
+
+  // The next poll agrees with the fresh log: nothing more is asked.
+  clock.tick(5000);
+  send(win, worktree(statusReply(lastToken(posted), 1), 'e5f6a7b'));
+  assert.strictEqual(ofType(posted, 'gitLog').length, logs + 1);
+  assert.deepStrictEqual(subjects(), ['Uncommitted changes', 'second', 'first']);
+  win.close();
+  console.log('  ok - a HEAD moved outside a task reloads the log');
+}
+
+function worktreeEntry(path, name, head, current) {
+  return {
+    path,
+    name,
+    head,
+    branch: name,
+    detached: false,
+    current: !!current,
+    changes: [],
+  };
+}
+
+function commitEntry(sha, parents, subject) {
+  return {
+    sha,
+    shortSha: sha.slice(0, 7),
+    parents,
+    author: 'a',
+    date: '2026-10-16T00:00:00Z',
+    refs: [],
+    subject,
+    files: [],
+  };
+}
+
+// Audit 2026-11-08 (W5 F2): the graph's "worktree" badges follow the
+// status replies, which the badge poll keeps fresh, not the worktree
+// list of the log on hand: a worktree moved (`git worktree move`) or
+// two worktrees' HEADs swapped keep the same set of HEADs, so the log
+// is rightly not re-asked -- and the badges must still move.
+function testStatusOnlyWorktreeChangesRepaintTheBadges() {
+  const {win, posted, clock} = makePage();
+  const doc = win.document;
+  const A = 'a'.repeat(40);
+  const B = 'b'.repeat(40);
+  const C = 'c'.repeat(40);
+  const badge = sha => {
+    const ref = doc.querySelector(
+      '.scm-commit[data-scm-sha="' + sha + '"] .scm-ref.is-worktree',
+    );
+    return ref ? ref.textContent + ' ' + ref.title : null;
+  };
+  const withTrees = (reply, trees) => Object.assign(reply, {worktrees: trees});
+  send(win, {type: 'daemonStatus', connected: true});
+  send(win, {type: 'configData', config: {work_dir: WD}});
+  const tok = lastToken(posted);
+  const trees = [
+    worktreeEntry(WD, 'repo', A, true),
+    worktreeEntry(WD + '-left', 'left', B),
+    worktreeEntry(WD + '-right', 'right', C),
+  ];
+  send(win, withTrees(statusReply(tok, 0), trees));
+  const log = withTrees(logReply(tok), trees);
+  log.head = A;
+  log.commits = [
+    commitEntry(A, [B], 'A'),
+    commitEntry(B, [C], 'B'),
+    commitEntry(C, [], 'C'),
+  ];
+  send(win, log);
+  assert.strictEqual(badge(B), 'left Worktree ' + WD + '-left');
+  assert.strictEqual(badge(C), 'right Worktree ' + WD + '-right');
+  const logs = ofType(posted, 'gitLog').length;
+
+  // The two worktrees swapped HEADs (a checkout in each).
+  clock.tick(5000);
+  send(
+    win,
+    withTrees(statusReply(lastToken(posted), 0), [
+      trees[0],
+      worktreeEntry(WD + '-left', 'left', C),
+      worktreeEntry(WD + '-right', 'right', B),
+    ]),
+  );
+  assert.strictEqual(ofType(posted, 'gitLog').length, logs, 'same HEADs: no log');
+  assert.strictEqual(
+    badge(B),
+    'right Worktree ' + WD + '-right',
+    'BUG - the badge stayed on the worktree list of the old log',
+  );
+  assert.strictEqual(badge(C), 'left Worktree ' + WD + '-left');
+
+  // `git worktree move repo-left repo-moved`: same HEAD, new folder.
+  clock.tick(5000);
+  send(
+    win,
+    withTrees(statusReply(lastToken(posted), 0), [
+      trees[0],
+      worktreeEntry(WD + '-moved', 'moved', C),
+      worktreeEntry(WD + '-right', 'right', B),
+    ]),
+  );
+  assert.strictEqual(ofType(posted, 'gitLog').length, logs, 'same HEADs: no log');
+  assert.strictEqual(badge(C), 'moved Worktree ' + WD + '-moved');
+  assert.strictEqual(badge(B), 'right Worktree ' + WD + '-right');
+  win.close();
+  console.log('  ok - a status-only worktree move or HEAD swap moves the badges');
+}
+
+// Audit 2026-11-08 (W5 F3): a full refresh asks for the status and the
+// log together; its status, answered first, must not ask for the log
+// a second time because the log still on hand (the previous
+// generation's) walks from the old HEAD.  The moved-HEAD re-ask stays
+// for the status-only poll (testAMovedHeadReloadsTheLog).
+function testAFullRefreshAsksTheLogOnce() {
+  const {win, posted} = makePage();
+  const doc = win.document;
+  const subjects = () =>
+    Array.from(doc.querySelectorAll('#scm-graph .scm-commit-subject')).map(
+      el => el.textContent,
+    );
+  const withTree = (reply, head) => {
+    const tree = worktreeEntry(WD, 'repo', head, true);
+    tree.changes = reply.changes || [];
+    return Object.assign(reply, {worktrees: [tree]});
+  };
+  send(win, {type: 'daemonStatus', connected: true});
+  send(win, {type: 'configData', config: {work_dir: WD}});
+  const tok = lastToken(posted);
+  send(win, withTree(statusReply(tok, 1), 'a1b2c3d'));
+  send(win, withTree(logReply(tok), 'a1b2c3d'));
+  assert.deepStrictEqual(subjects(), ['Uncommitted changes', 'first']);
+
+  // The user committed and pressed Refresh: one status + one log.
+  byId(win, 'scm-refresh').click();
+  const tok2 = lastToken(posted);
+  assert.notStrictEqual(tok2, tok, 'a refresh is a new generation');
+  const logsOf = t => ofType(posted, 'gitLog').filter(m => m.token === t);
+  assert.strictEqual(logsOf(tok2).length, 1);
+  send(win, withTree(statusReply(tok2, 0), 'e5f6a7b'));
+  assert.strictEqual(
+    logsOf(tok2).length,
+    1,
+    'BUG - the refresh status re-asked the log its refresh already asked',
+  );
+  const fresh = withTree(logReply(tok2), 'e5f6a7b');
+  fresh.head = 'e5f6a7b';
+  fresh.commits.unshift(commitEntry('e5f6a7b', ['a1b2c3d'], 'second'));
+  send(win, fresh);
+  assert.deepStrictEqual(subjects(), ['second', 'first']);
+  win.close();
+  console.log('  ok - a full refresh asks the log once');
+}
+
 function main() {
   testBadgeFollowsTheWorkingTree();
   testPollPausesWhenHiddenOrDisconnected();
   testNoWorkspaceNoPoll();
   testUnchangedPollReplyKeepsFocus();
   testNoPollWhileThePanelIsOffScreen();
+  testOneOutstandingStatusRequest();
+  testAMovedHeadReloadsTheLog();
+  testStatusOnlyWorktreeChangesRepaintTheBadges();
+  testAFullRefreshAsksTheLogOnce();
   console.log('scmBadgePoll.test.js: all tests passed');
   process.exit(0);
 }

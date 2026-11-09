@@ -170,6 +170,34 @@ def test_wait_until_with_a_catastrophic_pattern_still_ends_at_the_deadline(
 
 
 @pytest.mark.timeout(60)
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="counts open fds through /proc")
+def test_a_failed_matcher_launch_ends_the_wait_with_an_error(tmp_path: Path) -> None:
+    """A matcher that cannot be started (no file descriptor left) fails the wait at once.
+
+    The launch ran before the matcher thread's ``try``: an ``OSError``
+    there (the daemon at its fd or process limit) ended the thread
+    silently, so the wait ran to its full deadline without ever
+    searching the log and returned a normal report (A14-3 claude).
+    The limit is lowered for real: ``RLIMIT_NOFILE`` set to the open
+    count plus one makes the matcher's pipes fail with ``EMFILE``.
+    """
+    import resource  # POSIX only, like the /proc this test needs
+
+    tools = UsefulTools(work_dir=str(tmp_path))
+    job = _job_id(tools.Bash("sleep 30", "job", background=True))
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (len(os.listdir("/proc/self/fd")) + 1, hard))
+    before = time.monotonic()
+    try:
+        report = tools.bash_job(job, action="wait", until="NEVER", timeout_seconds=20)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+    assert time.monotonic() - before < 5, "the wait ran on without a matcher"
+    assert report.startswith("Error: could not start the log matcher for until='NEVER':"), report
+    tools.bash_job(job, action="kill")
+
+
+@pytest.mark.timeout(60)
 def test_stop_at_the_matcher_launch_leaves_no_matcher_behind(tmp_path: Path) -> None:
     """A Stop landing as the matcher comes into existence (2026-11-04 review R1) still ends it.
 

@@ -21,13 +21,9 @@ const assert = require('assert');
 const H = require('./ui_antipattern_harness');
 
 const harness = require('./simplify2_harness');
+const {MACHINES} = require('./settings_helpers');
 
 const {makePage, send, sleep, click} = H;
-
-const MACHINES = [
-  {name: 'laptop', local: true, status: 'reachable', address: 'https://a'},
-  {name: 'gpu-box', status: 'reachable', address: 'ssh me@gpu'},
-];
 
 function setUp(ctx) {
   const {win} = ctx;

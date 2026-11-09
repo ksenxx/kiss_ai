@@ -253,16 +253,23 @@ def make_decide_tool(
     if not isinstance(decisions_model, DecisionsModel):
         raise KISSError(f"{model_name} is not a decisions model (catalog flag 'dec' is not set)")
 
-    def attribute(cost: float, tokens: int) -> None:
-        """Fold one call's spend into *agent*'s task accounting (no step)."""
+    def attribute(cost: float, tokens: int, binding: tuple[Any, str] | None) -> None:
+        """Fold one call's spend into the accounting of the task it was made for (no step)."""
         if on_usage is not None:
             on_usage(cost, tokens)
-        if agent is not None and (cost > 0 or tokens > 0):
-            from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
+        if agent is not None:
+            from kiss.agents.sorcar.sorcar_agent import _attribute_side_call_usage
 
-            _attribute_sub_usage(agent, cost, tokens, 0)
+            _attribute_side_call_usage(agent, model_name, cost, tokens, binding)
 
     def decide(state: str, questions: str) -> str:
+        binding = None
+        if agent is not None:
+            from kiss.agents.sorcar.sorcar_agent import side_call_binding
+
+            # Bound now: a reply that comes back after the task ended
+            # (a handler a Stop abandoned) still charges this task.
+            binding = side_call_binding(agent)
         try:
             parsed = parse_questions(questions)
             response = decisions_model.decide(state, parsed)
@@ -271,10 +278,10 @@ def make_decide_tool(
             charged = decisions_model.take_partial_usage_response()
             if isinstance(charged, dict):
                 cost, input_tokens, output_tokens = decision_usage(decisions_model, charged)
-                attribute(cost, input_tokens + output_tokens)
+                attribute(cost, input_tokens + output_tokens, binding)
             return f"Error: {e.args[0]}"
         text, cost, tokens = format_decision(decisions_model, response)
-        attribute(cost, tokens)
+        attribute(cost, tokens, binding)
         return text
 
     decide.__doc__ = (

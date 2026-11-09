@@ -34,7 +34,7 @@ from unittest import TestCase
 
 from kiss.agents.sorcar import persistence
 from kiss.server import agent_state
-from kiss.server.server import AgentServer
+from kiss.server.server import AgentServer, _extra_dict
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     ScriptedHandler,
@@ -135,8 +135,12 @@ class TestResumeNamingAPreRowRun(TestCase):
         self.assertEqual(state.client_run_token, CHILD_TOKEN)
         return state.task_id
 
-    def _resume(self, task_id: str) -> dict[str, Any]:
-        """Resume ``CHILD_TAB`` naming *task_id*; return the transcript frame it got."""
+    def _resume(self, task_id: str, replay_id: str = "replay-child") -> dict[str, Any]:
+        """Resume ``CHILD_TAB`` naming *task_id*; return the transcript frame it got.
+
+        An empty *replay_id* is a page's own ``ready`` (nothing forwarded
+        the resume), the other scoped resume a daemon answers.
+        """
         first = len(self.printer.emitted)
         self.server._cmd_resume_session({
             "type": "resumeSession",
@@ -145,14 +149,14 @@ class TestResumeNamingAPreRowRun(TestCase):
             "taskId": task_id,
             "scoped": True,
             "connId": "conn-child",
-            "replayId": "replay-child",
+            **({"replayId": replay_id} if replay_id else {}),
         })
         frames = [
             ev for ev in list(self.printer.emitted)[first:]
             if ev.get("type") == "task_events" and ev.get("tabId") == CHILD_TAB
         ]
         self.assertEqual(len(frames), 1, frames)
-        self.assertEqual(frames[0].get("replayId"), "replay-child")
+        self.assertEqual(frames[0].get("replayId"), replay_id or None)
         return frames[0]
 
     def _assert_replays_the_child(self, frame: dict[str, Any], key: str) -> None:
@@ -179,6 +183,19 @@ class TestResumeNamingAPreRowRun(TestCase):
             and any(t.get("tabId") == CHILD_TAB for t in ev.get("tabs", []))
         ]
         self.assertEqual(published, [], "a sub-agent's tab must not reach the shared registry")
+
+    def test_a_pages_ready_naming_the_child_replays_the_child(self) -> None:
+        """A page's own scoped resume of a sub-agent tab is not a chat refresh.
+
+        A connection-scoped resume of a CHAT tab refreshes the view the
+        tab shows; a sub-agent's tab shows no chat view, so its resume
+        replays the run it names (not the chat's latest row, the
+        parent's) and installs no chat view on the tab.
+        """
+        key = self._park_child(parentTaskId=self.parent_id)
+        self._assert_replays_the_child(self._resume(CHILD_TOKEN, replay_id=""), key)
+        with self.server._state_lock:
+            self.assertNotIn(CHILD_TAB, self.server._tab_chat_views)
 
     def test_an_unknown_task_still_loads_the_chats_latest_row(self) -> None:
         """A pinned task whose row is gone keeps resolving to the chat (the ready path)."""
@@ -207,11 +224,6 @@ class TestResumeNamingAPreRowRun(TestCase):
             key = self._park_child(parentTaskId=self.parent_id)
             state = agent_state.find_by_tab(CHILD_TAB)
             assert state is not None
-            attach = Pause(
-                AgentServer._attach_viewer_to_running_chat.__code__,
-                lambda loc: loc.get("new_tab_id") == CHILD_TAB,
-            )
-            model = Pause(ScriptedHandler.do_POST.__code__, lambda loc: True)
             first = len(self.printer.emitted)
             resume = threading.Thread(
                 target=self.server._cmd_resume_session,
@@ -225,9 +237,14 @@ class TestResumeNamingAPreRowRun(TestCase):
                     "replayId": "replay-rekey",
                 },),
             )
+            # Held once the resume resolved the named run, before the
+            # ``_state_lock`` section that pins and attaches the tab:
+            # the worker re-keys the state under that lock.
+            attach = Pause(_extra_dict.__code__, lambda loc: threading.current_thread() is resume)
+            model = Pause(ScriptedHandler.do_POST.__code__, lambda loc: True)
             with Pauses(attach, model):
                 resume.start()
-                self.assertTrue(attach.paused.wait(15), "the resume never reached the attach")
+                self.assertTrue(attach.paused.wait(15), "the resume never resolved the run")
                 (self.tmp / "release").write_text("1", encoding="utf-8")
                 self.assertTrue(model.paused.wait(30), "the run never reached the model")
                 # The row is allocated and the state keyed by it; the run goes on.

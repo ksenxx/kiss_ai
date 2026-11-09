@@ -84,7 +84,7 @@ class _SnoozeTestBase(_UpdateCheckTestBase):
         self,
         reader: LocalReader,
         want: bool,
-        timeout: float = 5.0,
+        timeout: float = 15.0,  # 5 s ran out once under a full 80-core suite
     ) -> dict[str, object]:
         """Read ``update_available`` events until ``snoozed == want``.
 

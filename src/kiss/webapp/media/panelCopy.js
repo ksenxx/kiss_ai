@@ -36,6 +36,14 @@
     'panel-time',
   ];
 
+  /**
+   * Whether *el* is panel chrome every text walker leaves out: the copy
+   * and stop buttons, the collapsed preview, the timestamp and elapsed
+   * labels (SKIP_CLASSES).  Shared with main.js's collapsed-preview text.
+   *
+   * @param {?Node} el A node; anything without a classList is content.
+   * @returns {boolean} True for chrome.
+   */
   function shouldSkip(el) {
     if (!el || !el.classList) return false;
     for (let i = 0; i < SKIP_CLASSES.length; i++) {
@@ -129,10 +137,14 @@
    *     normalise it).
    */
   function formattedTextFromNode(root) {
-    const st = {out: ''};
+    // markerEnd: the length of `out` right after a list marker, while
+    // its item has written nothing else yet.
+    const st = {out: '', markerEnd: -1};
 
     function breakLine(want) {
-      if (!st.out) return;
+      // An item's first block (a paragraph-wrapped "loose" item) goes
+      // on the marker's line, as the browser shows it.
+      if (!st.out || st.out.length === st.markerEnd) return;
       st.out = st.out.replace(/[ \t]+$/, '');
       let have = 0;
       for (
@@ -184,6 +196,11 @@
       }
       const para = PARA_TAGS[tag] === 1;
       const line = LINE_TAGS[tag] === 1;
+      // A nested list first in its item is not that item's first block
+      // on the marker's line: the browser shows the child items below
+      // the (otherwise empty) parent marker, so their markers never
+      // join it on one line.
+      if (tag === 'UL' || tag === 'OL') st.markerEnd = -1;
       if (para) breakLine(2);
       else if (line) breakLine(1);
       let childCtx = ctx;
@@ -192,11 +209,20 @@
       } else if (tag === 'UL') {
         childCtx = {pre: ctx.pre, lists: ctx.lists.concat([{ordered: false}])};
       } else if (tag === 'OL') {
-        let start = parseInt(node.getAttribute('start') || '1', 10);
-        if (!isFinite(start)) start = 1;
+        // The numbers the browser shows: a reversed list counts down,
+        // from its item count unless a start is given.
+        const reversed = node.hasAttribute('reversed');
+        let start = parseInt(node.getAttribute('start') || '', 10);
+        if (!isFinite(start)) {
+          start = reversed
+            ? Array.from(node.children).filter(c => c.tagName === 'LI').length
+            : 1;
+        }
         childCtx = {
           pre: ctx.pre,
-          lists: ctx.lists.concat([{ordered: true, n: start}]),
+          lists: ctx.lists.concat([
+            {ordered: true, n: start, step: reversed ? -1 : 1},
+          ]),
         };
       } else if (tag === 'LI') {
         const depth = ctx.lists.length;
@@ -205,10 +231,13 @@
         const top = depth > 0 ? ctx.lists[depth - 1] : null;
         let marker = '- ';
         if (top && top.ordered) {
+          const value = parseInt(node.getAttribute('value') || '', 10);
+          if (isFinite(value)) top.n = value;
           marker = top.n + '. ';
-          top.n++;
+          top.n += top.step;
         }
         st.out += indent + marker;
+        st.markerEnd = st.out.length;
       } else if (
         (tag === 'TD' || tag === 'TH') &&
         node.previousElementSibling
@@ -219,6 +248,7 @@
       for (let i = 0; i < node.childNodes.length; i++) {
         walk(node.childNodes[i], childCtx);
       }
+      if (tag === 'LI') st.markerEnd = -1;
       if (para) breakLine(2);
       else if (line) breakLine(1);
     }
@@ -598,6 +628,7 @@
   // two SVG strings are exported for the tests only; the app reaches
   // them through the other entries.
   const api = {
+    shouldSkip: shouldSkip,
     getRawText: getRawText,
     formattedTextFromNode: formattedTextFromNode,
     wireCopyButton: wireCopyButton,

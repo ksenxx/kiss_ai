@@ -104,7 +104,6 @@ async function connect() {
         });
         return;
       }
-      if (msg.type === 'ping') return;
       if (typeof msg.id !== 'number' || !msg.cmd) return;
       if (authed) handleCommand(sock, msg);
       else if (proofPending) preAuth.push(msg);
@@ -147,7 +146,10 @@ function tabInfo(t) {
 // deadline must not run the injection once it recovers, nor the CSP
 // fallback's debugger attach).
 function pastDeadline(limit) {
-  return Date.now() >= limit.at;
+  // `expired` is set by the timer that answered "exceeded": a timer may
+  // fire a fraction of a millisecond before Date.now() reaches `at`, and
+  // the answered command must never pass this check again.
+  return limit.expired === true || Date.now() >= limit.at;
 }
 
 function deadlineError(limit) {
@@ -332,10 +334,19 @@ function evaluate(args, limit) {
 // -------------------------------------------------- interaction layer
 // The agent-facing commands (snapshot/click/type_text) run this page code
 // through evaluate(), so they inherit its MAIN-world + CSP-debugger cascade
-// and its per-tab serialization. Uids are reassigned by every snapshot and
-// stored in data-kiss-uid attributes; click/type resolve them there. The
-// embedded sources use only plain string concatenation (no backticks, no
-// ${) so they can live inside this file's template literals safely.
+// and its per-tab serialization. Uids are stored in data-kiss-uid
+// attributes, which click/type resolve, and owned through a kissUid
+// property of the element object, which they check: cloneNode (and an
+// innerHTML round trip) copies attributes, not properties, so a copy of
+// an element, or a replacement that took its place, never answers to its
+// uid. A uid is stable across snapshots and never reused for another
+// element of the document (fresh ones come from a counter kept on the
+// root element): every task shares the one Chrome, so a handle from an
+// earlier snapshot, another agent's or one taken before the page changed,
+// still names its element or fails as stale, never a control that took
+// its place. The embedded sources use
+// only plain string concatenation (no backticks, no ${) so they can live
+// inside this file's template literals safely.
 const KISS_SNAPSHOT_JS = `(function () {
   var MAX = 200;
   var ROLES = { button: 1, link: 1, menuitem: 1, menuitemcheckbox: 1, menuitemradio: 1, tab: 1, option: 1, checkbox: 1, switch: 1, radio: 1, combobox: 1, listbox: 1, textbox: 1, searchbox: 1, slider: 1, spinbutton: 1, treeitem: 1 };
@@ -347,17 +358,18 @@ const KISS_SNAPSHOT_JS = `(function () {
       if (nodes[i].shadowRoot) walk(nodes[i].shadowRoot, visit);
     }
   }
-  walk(document, function (el) { el.removeAttribute('data-kiss-uid'); });
   // Candidates: semantic interactives (SEL) plus anything styled
   // cursor:pointer — React apps routinely make bare divs clickable with no
   // role/tabindex at all (cursor inherits, so a clickable container makes
   // every descendant a candidate too; the innermost-wins pass below
   // collapses those).
   var cands = [];
-  var styles = new Map();
   walk(document, function (el) {
     var cs = getComputedStyle(el);
-    styles.set(el, cs);
+    // Hidden elements are no candidates at all: a hidden text-bearing
+    // descendant (a collapsed label inheriting the cursor) would
+    // otherwise suppress its visible clickable ancestor below.
+    if (cs.visibility === 'hidden' || cs.display === 'none' || !el.getClientRects().length) return;
     if (el.matches(SEL)) {
       var role = el.getAttribute('role');
       if (role && !ROLES[role]) return;
@@ -399,7 +411,7 @@ const KISS_SNAPSHOT_JS = `(function () {
   });
   var candSet = new Set(cands);
   var ICON_TAGS = { path: 1, svg: 1, i: 1, img: 1, span: 1 };
-  var innermost = cands.filter(function (el) {
+  var els = cands.filter(function (el) {
     if (suppressed.has(el)) return false;
     // A textless icon-ish leaf under a surviving clickable is noise: the
     // ancestor is the same click target with a better (or equal) label.
@@ -410,16 +422,26 @@ const KISS_SNAPSHOT_JS = `(function () {
     }
     return true;
   });
-  var els = innermost.filter(function (el) {
-    if (!el.getClientRects().length) return false;
-    var cs = styles.get(el);
-    return cs.visibility !== 'hidden' && cs.display !== 'none';
-  });
   var lines = [];
   var shown = Math.min(els.length, MAX);
+  // Only the listed elements keep a uid: a handle to an element that is
+  // gone from the snapshot fails instead of resolving to its successor.
+  var listed = new Set(els.slice(0, shown));
+  walk(document, function (el) { if (!listed.has(el)) el.removeAttribute('data-kiss-uid'); });
+  var root = document.documentElement;
+  var next = parseInt(root.getAttribute('data-kiss-uid-next'), 10) || 1;
+  var used = {};
   for (var i = 0; i < shown; i++) {
     var el = els[i];
-    var uid = i + 1;
+    // The uid the element owns is its kissUid property, not the attribute:
+    // a cloned node carries the attribute along (the copy may well come
+    // first, or have replaced the original), never the property.
+    var uid = el.kissUid;
+    // New element, a uid not of this document, or one owned twice: a
+    // fresh uid.
+    if (!(uid > 0 && uid < next) || used[uid]) uid = next++;
+    used[uid] = 1;
+    el.kissUid = uid;
     el.setAttribute('data-kiss-uid', String(uid));
     var tag = el.tagName.toLowerCase();
     var role = el.getAttribute('role');
@@ -433,26 +455,35 @@ const KISS_SNAPSHOT_JS = `(function () {
     if (el.getAttribute('aria-selected') === 'true') line += ' [selected]';
     lines.push(line);
   }
+  root.setAttribute('data-kiss-uid-next', String(next));
   var head = document.title + ' — ' + location.href + ' — ' + els.length + ' interactive elements';
   if (els.length > shown) head += ' (showing first ' + shown + ')';
   return head + '\\n' + lines.join('\\n');
 })()`;
 
 // click/type resolve uids with a deep find: uids may live inside open
-// shadow roots, where document.querySelector cannot reach. The helper is
-// inlined into each source so every constant stays self-contained for
-// injection (and for the tests that extract these constants verbatim).
+// shadow roots, where document.querySelector cannot reach. Of the
+// elements carrying the attribute only the one owning the uid (its
+// kissUid property, which cloneNode does not copy) is the element the
+// snapshot listed. The helper is inlined into each source so every
+// constant stays self-contained for injection (and for the tests that
+// extract these constants verbatim).
 const KISS_CLICK_JS = `(function (uid) {
   function kissFind(u) {
     var sel = '[data-kiss-uid="' + u + '"]';
-    var direct = document.querySelector(sel);
+    function owner(scope) {
+      var hits = scope.querySelectorAll(sel);
+      for (var i = 0; i < hits.length; i++) if (hits[i].kissUid === u) return hits[i];
+      return null;
+    }
+    var direct = owner(document);
     if (direct) return direct;
     var queue = [document];
     while (queue.length) {
       var nodes = queue.shift().querySelectorAll('*');
       for (var i = 0; i < nodes.length; i++) {
         if (nodes[i].shadowRoot) {
-          var hit = nodes[i].shadowRoot.querySelector(sel);
+          var hit = owner(nodes[i].shadowRoot);
           if (hit) return hit;
           queue.push(nodes[i].shadowRoot);
         }
@@ -474,7 +505,10 @@ const KISS_CLICK_JS = `(function (uid) {
   el.dispatchEvent(new MouseEvent('mousedown', opts));
   el.dispatchEvent(new PointerEvent('pointerup', opts));
   el.dispatchEvent(new MouseEvent('mouseup', opts));
-  el.click();
+  // SVG elements (an <svg role=button>) have no click(): a dispatched
+  // click reaches their handlers all the same.
+  if (typeof el.click === 'function') el.click();
+  else el.dispatchEvent(new MouseEvent('click', opts));
   var desc = (el.innerText || el.getAttribute('aria-label') || el.value || el.tagName).replace(/\\s+/g, ' ').trim().slice(0, 60);
   return 'clicked [' + uid + '] <' + el.tagName.toLowerCase() + '> "' + desc + '"';
 })`;
@@ -482,14 +516,19 @@ const KISS_CLICK_JS = `(function (uid) {
 const KISS_TYPE_JS = `(function (uid, text) {
   function kissFind(u) {
     var sel = '[data-kiss-uid="' + u + '"]';
-    var direct = document.querySelector(sel);
+    function owner(scope) {
+      var hits = scope.querySelectorAll(sel);
+      for (var i = 0; i < hits.length; i++) if (hits[i].kissUid === u) return hits[i];
+      return null;
+    }
+    var direct = owner(document);
     if (direct) return direct;
     var queue = [document];
     while (queue.length) {
       var nodes = queue.shift().querySelectorAll('*');
       for (var i = 0; i < nodes.length; i++) {
         if (nodes[i].shadowRoot) {
-          var hit = nodes[i].shadowRoot.querySelector(sel);
+          var hit = owner(nodes[i].shadowRoot);
           if (hit) return hit;
           queue.push(nodes[i].shadowRoot);
         }
@@ -568,8 +607,12 @@ const COMMANDS = {
     return tabInfo(await chrome.tabs.get(args.tabId));
   },
 
-  async activate_tab(args) {
+  // The deadline is rechecked before every focus mutation that follows an
+  // await: a command answered "exceeded" has released the focus queue, and
+  // resuming into the next command's tab would steal its focus.
+  async activate_tab(args, limit) {
     const tab = await chrome.tabs.update(args.tabId, { active: true });
+    if (pastDeadline(limit)) throw deadlineError(limit);
     await chrome.windows.update(tab.windowId, { focused: true });
     return tabInfo(tab);
   },
@@ -590,15 +633,22 @@ const COMMANDS = {
   },
 
   type_text(args, limit) {
-    if (typeof args.text !== 'string' || !args.text) throw new Error("type_text needs a non-empty 'text'");
+    // An empty text is a value: it clears the field.
+    if (typeof args.text !== 'string') throw new Error("type_text needs a 'text' string");
     return runInteraction(args, KISS_TYPE_JS, `, ${JSON.stringify(args.text)}`, limit);
   },
 
-  async screenshot(args) {
+  async screenshot(args, limit) {
     const tab = await chrome.tabs.get(args.tabId);
+    if (pastDeadline(limit)) throw deadlineError(limit);
     await chrome.windows.update(tab.windowId, { focused: true });
+    if (pastDeadline(limit)) throw deadlineError(limit);
     await chrome.tabs.update(args.tabId, { active: true });
+    if (pastDeadline(limit)) throw deadlineError(limit);
     await new Promise((r) => setTimeout(r, 250)); // let the tab paint
+    // Answered "exceeded" meanwhile: the window's active tab may be the
+    // next command's by now, and a capture spends Chrome's capture quota.
+    if (pastDeadline(limit)) throw deadlineError(limit);
     return chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' }); // data URL
   },
 };
@@ -619,6 +669,7 @@ function withDeadline(promise, onTimeout, limit) {
     promise.finally(() => clearTimeout(timer)),
     new Promise((_, reject) => {
       timer = setTimeout(() => {
+        limit.expired = true;
         if (onTimeout) onTimeout();
         reject(new Error(`command exceeded its ${limit.ms / 1000}s deadline`));
       }, Math.max(limit.at - Date.now(), 0));
@@ -658,12 +709,15 @@ async function handleCommand(sock, msg) {
     // A command whose socket closed while it waited in a queue (KISS timed
     // it out and dropped the connection), or whose deadline passed there,
     // must not run: its effect (a navigation, a click) would land after the
-    // caller gave up on it, and nobody is listening for its reply.
+    // caller gave up on it, and nobody is listening for its reply. The
+    // deadline check is pastDeadline's: a command the outer deadline below
+    // already answered "exceeded" (its timer may fire a tick before
+    // Date.now() reaches the deadline) must not run once its slot frees.
     const run = () => {
       if (sock.readyState !== WebSocket.OPEN) {
         throw new Error('connection closed before the command ran');
       }
-      if (Date.now() >= limit.at) {
+      if (pastDeadline(limit)) {
         throw new Error(`command waited out its ${budget / 1000}s deadline in the queue`);
       }
       return fn(args, limit); // the evaluate family rechecks the deadline at each stage

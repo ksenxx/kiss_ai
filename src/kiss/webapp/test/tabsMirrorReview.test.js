@@ -15,20 +15,58 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {send} = harness;
+const {trackWindow, runTests} = require('./workdir_helpers');
+const {clickClose} = require('./subagent_tab_helpers');
+const {
+  installFakeWebSocket,
+  bootShim,
+  frames,
+} = require('./transport_page_helpers');
+const {send, tabIds: openTabIds} = harness;
 
-// Every window a test opened; the runner closes them after the test so
-// no page timer can keep the process alive.
-const openWindows = [];
-
+/** A chat page, closed by the runner once its test ends. */
 function makePage() {
   const page = harness.makePage();
-  openWindows.push(page.win);
+  trackWindow(page.win);
   return page;
 }
 
-function closeOpenWindows() {
-  while (openWindows.length) openWindows.pop().close();
+/**
+ * A chat page on the REAL transport (media/transport.js) over a fake
+ * WebSocket born CONNECTING, so what the daemon would receive, and
+ * when, is exactly what the shim sends: the commands it queues during
+ * an outage, re-sends while a reconnect's batch is unconfirmed, or
+ * holds back behind one.  `connect()` completes the handshake of the
+ * socket the shim opened last; `reconnect()` makes the shim open the
+ * next one at once (it reconnects without backoff on `online`) and
+ * completes that handshake, which flushes the queued batch and
+ * announces `daemonStatus` to main.js.
+ */
+function makeTransportPage() {
+  const win = harness.newDom({runScripts: 'outside-only'});
+  trackWindow(win);
+  const sockets = [];
+  installFakeWebSocket(win, sockets, {connecting: true});
+  bootShim(win);
+  harness.loadPageScripts(win);
+  function connect() {
+    const sock = sockets[sockets.length - 1];
+    sock.fireOpen();
+    sock.fireMessage({type: 'auth_ok'});
+    return sock;
+  }
+  function reconnect() {
+    const before = sockets.length;
+    win.dispatchEvent(new win.Event('online'));
+    assert.strictEqual(sockets.length, before + 1, 'the shim reconnected');
+    return connect();
+  }
+  return {win, sockets, connect, reconnect};
+}
+
+/** Every `openTab` frame sent on any socket of a transport page. */
+function openTabFrames(sockets) {
+  return sockets.flatMap(frames).filter(f => f.type === 'openTab');
 }
 
 /** The tab ids on the strip (#tab-list), in order. */
@@ -167,9 +205,11 @@ function testOpenTabRejectedForLastTabKeepsLocalPlaceholder() {
 }
 
 function testUnconfirmedPendingOpenExpiresAfterSnapshots() {
-  // A pending openTab the daemon never confirms must stop shielding
-  // the local tab after a few snapshots, so the client converges back
-  // to the canonical tab set instead of keeping a ghost tab forever.
+  // Against a daemon that echoes no acknowledgments (its snapshots
+  // carry no `acks`), a pending openTab the daemon never confirms must
+  // stop shielding the local tab after a few snapshots, so the client
+  // converges back to the canonical tab set instead of keeping a ghost
+  // tab forever.  A daemon that echoes them is pinned below (A18-1).
   const {win, posted} = makePage();
   send(win, {type: 'tabs_state', tabs: [snapshotEntry('t1', 'one')]});
   win._testApi.createNewTab();
@@ -195,6 +235,362 @@ function testUnconfirmedPendingOpenExpiresAfterSnapshots() {
 // applies to ids that never get confirmed) is pinned by
 // tabsMirror.test.js::testInFlightOpenSurvivesStaleSnapshot.
 
+// 2026-11-05 A18-1: the daemon echoes the `ack` token of an `openTab` in
+// the `acks` of the first snapshot taken after it processed the command.
+// Snapshots other activity publishes meanwhile (every one carrying an
+// `acks` list that names no token of ours) are no acknowledgment,
+// however many: the pending open keeps shielding the tab and its draft.
+// The acknowledging snapshot settles it: the tab is listed (opened) or
+// not (the open was rejected, dropped or the tab closed meanwhile).
+function testPendingOpenWaitsForItsAcknowledgment() {
+  const {win, posted} = makePage();
+  const stale = () => ({
+    type: 'tabs_state',
+    tabs: [snapshotEntry('t1', 'one')],
+    acks: ['someone-else'],
+  });
+  send(win, stale());
+  win._testApi.createNewTab();
+  const open = msgsOf(posted, 'openTab')[0];
+  assert.ok(open.ack, 'openTab carries an ack token for the daemon to echo');
+  const newId = open.tabId;
+  win.document.getElementById('task-input').value = 'typed while opening';
+
+  for (let i = 0; i < 5; i++) send(win, stale());
+  assert.ok(
+    openTabIds(win).includes(newId),
+    'REGRESSION: unrelated snapshots retired the pending open and ' +
+      'dropped the brand-new tab',
+  );
+  assert.strictEqual(
+    win.document.getElementById('task-input').value,
+    'typed while opening',
+    'the draft typed into the new tab survives the stale snapshots',
+  );
+
+  // The acknowledging snapshot lists the tab: registered for good; a
+  // later snapshot without it is another client's close, as usual.
+  send(win, {
+    type: 'tabs_state',
+    tabs: [snapshotEntry('t1', 'one'), snapshotEntry(newId, 'new chat')],
+    acks: [open.ack],
+  });
+  assert.deepStrictEqual(openTabIds(win), ['t1', newId]);
+  send(win, {type: 'tabs_state', tabs: [snapshotEntry('t1', 'one')], acks: []});
+  assert.deepStrictEqual(openTabIds(win), ['t1']);
+
+  // A second open whose acknowledging snapshot OMITS the tab: the
+  // daemon processed the open and the tab is not there (dropped, or
+  // closed meanwhile), so the shield lifts and the tab goes.
+  win._testApi.createNewTab();
+  const open2 = msgsOf(posted, 'openTab')[1];
+  assert.notStrictEqual(open2.ack, open.ack, 'tokens are unique per command');
+  send(win, stale());
+  assert.ok(openTabIds(win).includes(open2.tabId), 'still shielded');
+  send(win, {
+    type: 'tabs_state',
+    tabs: [snapshotEntry('t1', 'one')],
+    acks: [open2.ack],
+  });
+  assert.deepStrictEqual(
+    openTabIds(win),
+    ['t1'],
+    'the acknowledging snapshot that omits the tab retires the open',
+  );
+}
+
+// A18-1: an open the daemon had not acknowledged when the connection
+// dropped is not announced again on reconnect.  A lost acknowledgment
+// is no lost open: the daemon may have processed it, and the user may
+// have closed the tab on another surface meanwhile -- a second
+// `openTab` of that id is a new open to the daemon (TabRegistry.open_tab
+// registers any absent id), which would bring the closed tab back on
+// every surface.  The reconnect's `ready` snapshot is authoritative
+// for opens as for closes: a tab it lists is kept, draft and all; one
+// it omits is gone, as a lost open is in any case.  An open the
+// transport still owes is different (round 3): the `daemonStatus` of
+// the reconnect names the frames the transport has not had delivered
+// yet (`unconfirmed`: the batch it just flushed, re-sent on the next
+// connection if this one dies before its `pong`, and the frames held
+// back behind it), and the shield of an open among them holds until
+// the daemon answers it, through the snapshots other surfaces publish
+// meanwhile and through every reconnect it is still owed at.  Here the
+// recording transport plays the shim: the `daemonStatus` it sends
+// carries what the real one would.
+function testUnacknowledgedOpenIsNotReannouncedAfterReconnect() {
+  const a = makePage();
+  const b = makePage();
+  const root = snapshotEntry('t1', 'one');
+  for (const p of [a, b]) {
+    send(p.win, {type: 'tabs_state', tabs: [root], acks: []});
+    send(p.win, {type: 'daemonStatus', connected: true});
+  }
+  a.win._testApi.createNewTab();
+  const open = msgsOf(a.posted, 'openTab')[0];
+  const fresh = snapshotEntry(open.tabId, open.title);
+  // The daemon processed the open: its acknowledging snapshot reaches
+  // B, but A's connection drops first.  The user then closes the
+  // shared tab on B.
+  send(b.win, {type: 'tabs_state', tabs: [root, fresh], acks: [open.ack]});
+  assert.deepStrictEqual(openTabIds(b.win), ['t1', open.tabId]);
+  send(a.win, {type: 'daemonStatus', connected: false});
+  b.win._testApi.switchToTab(open.tabId);
+  clickClose(b.win, open.tabId);
+  const close = msgsOf(b.posted, 'closeTab').pop();
+  send(b.win, {type: 'tabs_state', tabs: [root], acks: [close.ack]});
+  assert.deepStrictEqual(openTabIds(b.win), ['t1']);
+  // A reconnects: `ready` goes out, the open does not.
+  a.posted.length = 0;
+  send(a.win, {type: 'daemonStatus', connected: true});
+  assert.strictEqual(
+    msgsOf(a.posted, 'ready').length,
+    1,
+    'reconnect re-readies',
+  );
+  assert.deepStrictEqual(
+    msgsOf(a.posted, 'openTab'),
+    [],
+    'REGRESSION: the reconnect announced the open again, which brings ' +
+      'back on every surface the tab the user closed on another one',
+  );
+  // The `ready` reply omits the tab: it is gone here too.
+  send(a.win, {type: 'tabs_state', tabs: [root], acks: []});
+  assert.deepStrictEqual(openTabIds(a.win), ['t1'], 'the ready snapshot rules');
+
+  // An open the daemon processed and nobody closed: the `ready` reply
+  // lists the tab, which is kept with its draft, and no `openTab` is
+  // sent for it either.
+  a.win._testApi.createNewTab();
+  const open2 = msgsOf(a.posted, 'openTab')[0];
+  a.win.document.getElementById('task-input').value = 'draft';
+  a.posted.length = 0;
+  send(a.win, {type: 'daemonStatus', connected: false});
+  send(a.win, {type: 'daemonStatus', connected: true});
+  assert.deepStrictEqual(msgsOf(a.posted, 'openTab'), []);
+  send(a.win, {
+    type: 'tabs_state',
+    tabs: [root, snapshotEntry(open2.tabId, open2.title)],
+    acks: [],
+  });
+  assert.deepStrictEqual(openTabIds(a.win), ['t1', open2.tabId]);
+  assert.strictEqual(
+    a.win.document.getElementById('task-input').value,
+    'draft',
+  );
+
+  // A tab opened while the daemon was down: its `openTab` is on its
+  // way once the connection is back, so the snapshots that arrive
+  // before the daemon answers it (other surfaces re-readying after
+  // the same outage) must not drop the tab and what was typed into it.
+  send(a.win, {type: 'daemonStatus', connected: false});
+  a.win._testApi.createNewTab();
+  const open3 = msgsOf(a.posted, 'openTab').pop();
+  a.win.document.getElementById('task-input').value = 'typed offline';
+  a.posted.length = 0;
+  send(a.win, {type: 'daemonStatus', connected: true, unconfirmed: [open3]});
+  assert.deepStrictEqual(
+    msgsOf(a.posted, 'openTab'),
+    [],
+    'not announced twice',
+  );
+  const listed = [root, snapshotEntry(open2.tabId, open2.title)];
+  send(a.win, {type: 'tabs_state', tabs: listed, acks: ['someone-else']});
+  send(a.win, {type: 'tabs_state', tabs: listed, acks: []});
+  assert.deepStrictEqual(
+    openTabIds(a.win),
+    ['t1', open2.tabId, open3.tabId],
+    'REGRESSION: the reconnect dropped the tab opened during the outage ' +
+      'before the daemon could answer its open',
+  );
+  assert.strictEqual(
+    a.win.document.getElementById('task-input').value,
+    'typed offline',
+  );
+  send(a.win, {
+    type: 'tabs_state',
+    tabs: listed.concat(snapshotEntry(open3.tabId, open3.title)),
+    acks: [open3.ack],
+  });
+  assert.deepStrictEqual(openTabIds(a.win), ['t1', open2.tabId, open3.tabId]);
+
+  // Opened during an outage, still owed when the next connection is
+  // lost too (the transport re-sends its batch on the one after): the
+  // shield holds across that reconnect as well, until the daemon's
+  // answer -- which, the tab having been closed on another surface
+  // meanwhile, acknowledges the open without listing it.
+  const listed3 = listed.concat(snapshotEntry(open3.tabId, open3.title));
+  send(a.win, {type: 'daemonStatus', connected: false});
+  a.win._testApi.createNewTab();
+  const open4 = msgsOf(a.posted, 'openTab').pop();
+  a.win.document.getElementById('task-input').value = 'typed offline too';
+  send(a.win, {type: 'daemonStatus', connected: true, unconfirmed: [open4]});
+  send(a.win, {type: 'tabs_state', tabs: listed3, acks: []});
+  assert.ok(openTabIds(a.win).includes(open4.tabId), 'shielded once');
+  a.posted.length = 0;
+  send(a.win, {type: 'daemonStatus', connected: false});
+  send(a.win, {type: 'daemonStatus', connected: true, unconfirmed: [open4]});
+  assert.deepStrictEqual(msgsOf(a.posted, 'openTab'), [], 'never re-sent');
+  send(a.win, {type: 'tabs_state', tabs: listed3, acks: ['someone-else']});
+  assert.deepStrictEqual(
+    openTabIds(a.win),
+    ['t1', open2.tabId, open3.tabId, open4.tabId],
+    'REGRESSION: the second reconnect dropped a tab whose open the ' +
+      'transport still owes, and what was typed into it',
+  );
+  assert.strictEqual(
+    a.win.document.getElementById('task-input').value,
+    'typed offline too',
+  );
+  send(a.win, {type: 'tabs_state', tabs: listed3, acks: [open4.ack]});
+  assert.deepStrictEqual(
+    openTabIds(a.win),
+    ['t1', open2.tabId, open3.tabId],
+    'the acknowledging snapshot rules: the tab closed elsewhere is gone',
+  );
+
+  // Opened during an outage and delivered on the reconnect (the batch
+  // was confirmed; only the answer was lost with the connection): the
+  // next reconnect owes nothing for it, so the `ready` reply settles
+  // it like any other open, and no ghost tab is shielded for ever.
+  send(a.win, {type: 'daemonStatus', connected: false});
+  a.win._testApi.createNewTab();
+  const open5 = msgsOf(a.posted, 'openTab').pop();
+  send(a.win, {type: 'daemonStatus', connected: true, unconfirmed: [open5]});
+  send(a.win, {type: 'tabs_state', tabs: listed3, acks: []});
+  assert.ok(openTabIds(a.win).includes(open5.tabId), 'shielded while owed');
+  send(a.win, {type: 'daemonStatus', connected: false});
+  send(a.win, {type: 'daemonStatus', connected: true, unconfirmed: []});
+  send(a.win, {type: 'tabs_state', tabs: listed3, acks: []});
+  assert.deepStrictEqual(
+    openTabIds(a.win),
+    ['t1', open2.tabId, open3.tabId],
+    'REGRESSION: an open the transport delivered and the daemon never ' +
+      'listed keeps shielding a tab no other surface has',
+  );
+}
+
+// Round 3 (a): the shield follows the transport's real delivery state.
+// A frame posted while a reconnect's batch awaits its `pong` is held
+// back behind the batch, connected or not, and sent only after the
+// `pong` -- through as many reconnects as it takes.  Until then the
+// open was never sent: a snapshot omitting the tab is no verdict on
+// it, and retiring the shield at a reconnect lost the tab and its
+// draft to the next unrelated snapshot, after which the open, sent at
+// last, recreated the tab empty.  The real shim over a fake socket:
+// the open's delivery is whatever the shim does with it.
+function heldOpenSurvivesReconnects(openOffline) {
+  const {win, sockets, connect, reconnect} = makeTransportPage();
+  const root = snapshotEntry('t1', 'one');
+  const first = connect();
+  first.fireMessage({type: 'pong'});
+  first.fireMessage({type: 'tabs_state', tabs: [root], acks: []});
+  first.fireClose();
+  // A command queued during the outage makes the reconnect's batch,
+  // which awaits its `pong`; the open is posted behind it.
+  win.acquireTransport().postMessage({type: 'getSettings'});
+  const second = reconnect();
+  if (openOffline) second.fireClose();
+  win._testApi.createNewTab();
+  const newId = openTabIds(win).find(id => id !== 't1');
+  const input = win.document.getElementById('task-input');
+  input.value = 'unsent draft';
+  input.dispatchEvent(new win.Event('input', {bubbles: true}));
+  assert.deepStrictEqual(openTabFrames(sockets), [], 'the open is held back');
+  if (!openOffline) second.fireClose();
+  const unrelated = {type: 'tabs_state', tabs: [root], acks: ['other-surface']};
+  let sock = reconnect();
+  sock.fireMessage(unrelated);
+  assert.deepStrictEqual(
+    openTabIds(win),
+    ['t1', newId],
+    'REGRESSION: an unrelated snapshot dropped a tab whose open the ' +
+      'transport has not sent yet',
+  );
+  if (openOffline) {
+    sock.fireClose();
+    sock = reconnect();
+    sock.fireMessage(unrelated);
+    assert.deepStrictEqual(
+      openTabIds(win),
+      ['t1', newId],
+      'REGRESSION: the second reconnect dropped the still-unsent open',
+    );
+  }
+  assert.deepStrictEqual(openTabFrames(sockets), [], 'still not sent');
+  sock.fireMessage({type: 'pong'});
+  const sent = openTabFrames(sockets);
+  assert.strictEqual(sent.length, 1, 'the open goes out once, after the pong');
+  assert.strictEqual(sent[0].tabId, newId);
+  sock.fireMessage({
+    type: 'tabs_state',
+    tabs: [root, snapshotEntry(newId, sent[0].title)],
+    acks: [sent[0].ack],
+  });
+  assert.deepStrictEqual(openTabIds(win), ['t1', newId]);
+  win._testApi.switchToTab(newId);
+  assert.strictEqual(input.value, 'unsent draft', 'the draft survived');
+}
+
+function testHeldOpenMadeOnlineSurvivesReconnects() {
+  heldOpenSurvivesReconnects(false);
+}
+
+function testHeldOpenMadeOfflineSurvivesReconnects() {
+  heldOpenSurvivesReconnects(true);
+}
+
+// Round 3 (b), the page's side: an open made during an outage goes out
+// in the reconnect's batch; when that connection dies before the
+// daemon's `pong`, the shim re-sends the batch on the next one, token
+// and all (at-least-once), and main.js announces nothing on top.  The
+// daemon decides a token once (OpenTabOutcome.REPLAYED, see
+// test_web_server_tab_mirroring.py): its answer echoes the token and
+// lists the tab, or omits it when another surface closed it in
+// between.  The shield, kept while the open is owed, settles on that
+// answer either way -- never on an unrelated snapshot before it.
+function testReplayedOpenIsSettledByTheDaemonsAnswer() {
+  const {win, sockets, connect, reconnect} = makeTransportPage();
+  const root = snapshotEntry('t1', 'one');
+  const first = connect();
+  first.fireMessage({type: 'pong'});
+  first.fireMessage({type: 'tabs_state', tabs: [root], acks: []});
+  first.fireClose();
+  win._testApi.createNewTab();
+  const newId = openTabIds(win).find(id => id !== 't1');
+  const second = reconnect();
+  const [open] = openTabFrames(sockets);
+  assert.ok(open && open.tabId === newId, 'the queued open went out');
+  // The daemon processed it, but this connection died before its
+  // answer and the batch's pong arrived; the user closed the tab on
+  // another surface meanwhile.
+  second.fireClose();
+  const third = reconnect();
+  assert.deepStrictEqual(
+    openTabFrames(sockets),
+    [open, open],
+    'the shim re-sends the open with its token; main.js adds no open',
+  );
+  third.fireMessage({
+    type: 'tabs_state',
+    tabs: [root],
+    acks: ['other-surface'],
+  });
+  assert.deepStrictEqual(
+    openTabIds(win),
+    ['t1', newId],
+    'REGRESSION: an unrelated snapshot dropped the tab whose open the ' +
+      'transport is still delivering',
+  );
+  third.fireMessage({type: 'tabs_state', tabs: [root], acks: [open.ack]});
+  assert.deepStrictEqual(
+    openTabIds(win),
+    ['t1'],
+    'the acknowledging answer rules: the tab closed elsewhere is gone',
+  );
+  third.fireMessage({type: 'pong'});
+  assert.strictEqual(openTabFrames(sockets).length, 2, 'nothing more is sent');
+}
+
 const tests = [
   testCloseSubagentTabBroadcastRemovesTabWithoutEcho,
   testCloseSubagentTabForUnknownIdIsIgnored,
@@ -202,22 +598,11 @@ const tests = [
   testOpenTabRejectedDropsLocalPendingTab,
   testOpenTabRejectedForLastTabKeepsLocalPlaceholder,
   testUnconfirmedPendingOpenExpiresAfterSnapshots,
+  testPendingOpenWaitsForItsAcknowledgment,
+  testUnacknowledgedOpenIsNotReannouncedAfterReconnect,
+  testHeldOpenMadeOnlineSurvivesReconnects,
+  testHeldOpenMadeOfflineSurvivesReconnects,
+  testReplayedOpenIsSettledByTheDaemonsAnswer,
 ];
 
-let failures = 0;
-for (const t of tests) {
-  try {
-    t();
-    console.log('PASS', t.name);
-  } catch (err) {
-    failures += 1;
-    console.error('FAIL', t.name);
-    console.error(err && err.stack ? err.stack : err);
-  }
-  closeOpenWindows();
-}
-if (failures > 0) {
-  console.error(`${failures} test(s) failed`);
-  process.exit(1);
-}
-console.log(`All ${tests.length} tabsMirrorReview tests passed`);
+runTests(tests.map(fn => [fn.name, fn]));

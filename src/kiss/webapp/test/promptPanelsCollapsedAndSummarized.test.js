@@ -21,6 +21,7 @@ const {
   readyTabId,
   output,
 } = require('./simplify2_harness');
+const {sendStep} = require('./prompt_step_helpers');
 
 function makePage() {
   // Markdown rendering, so a prompt can show a picture.
@@ -42,24 +43,6 @@ function startTask(win, posted, task) {
     chat_id: 'chat-' + task.replace(/\W+/g, '-'),
   });
   send(win, {type: 'status', running: true});
-}
-
-function sendStep(win, i) {
-  send(win, {type: 'thinking_start'});
-  send(win, {type: 'thinking_delta', text: 'thought ' + i});
-  send(win, {type: 'thinking_end'});
-  send(win, {
-    type: 'tool_call',
-    name: 'Bash',
-    command: 'echo ' + i,
-    description: 'step ' + i,
-  });
-  send(win, {
-    type: 'tool_result',
-    name: 'Bash',
-    output: String(i),
-    success: true,
-  });
 }
 
 function topLevel(win) {

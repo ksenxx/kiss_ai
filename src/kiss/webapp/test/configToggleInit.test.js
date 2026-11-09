@@ -3,12 +3,12 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end (JSDOM) tests for the "Use web tools" and "Use persistent
-// memory" settings toggles: they must be INITIALIZED from the server's
-// ``configData`` (keys ``use_web_browser`` / ``use_memory``) instead of
-// the hardcoded ``checked`` state shipped in chat.html, and their state
-// must be PERSISTED back through ``saveConfig`` when the settings panel
-// closes.  The "Classify tasks before running" and "Use Jev" boxes were
+// End-to-end (JSDOM) tests for the "Use web tools", "Use persistent
+// memory" and "Compaction" settings toggles: they must be INITIALIZED
+// from the server's ``configData`` (keys ``use_web_browser`` /
+// ``use_memory`` / ``compaction``) instead of the hardcoded ``checked``
+// state shipped in chat.html, and their state must be PERSISTED back
+// through ``saveConfig`` when the settings panel closes.  The "Classify tasks before running" and "Use Jev" boxes were
 // removed from the Settings UI: the form must neither show nor save
 // ``classify_tasks`` / ``classify_with_decisions`` (the daemon keeps
 // its stored values).  The memory directory (config key ``memory_dir``)
@@ -34,12 +34,13 @@ function testTogglesInitializedFalseFromConfigData() {
   const {win, posted} = makePage();
   send(win, {
     type: 'configData',
-    config: {use_web_browser: false, use_memory: false},
+    config: {use_web_browser: false, use_memory: false, compaction: false},
     apiKeys: {},
   });
 
   const web = win.document.getElementById('cfg-use-web-tools');
   const mem = win.document.getElementById('cfg-use-memory');
+  const compaction = win.document.getElementById('cfg-compaction');
   assert.strictEqual(
     web.checked,
     false,
@@ -50,6 +51,11 @@ function testTogglesInitializedFalseFromConfigData() {
     mem.checked,
     false,
     'configData {use_memory:false} must uncheck #cfg-use-memory',
+  );
+  assert.strictEqual(
+    compaction.checked,
+    false,
+    'configData {compaction:false} must uncheck #cfg-compaction',
   );
 
   // The initialized state must flow into the actual submit command.
@@ -65,6 +71,9 @@ function testTogglesInitializedFalseFromConfigData() {
     false,
     'submit must carry useWebTools:false after configData turned the toggle off',
   );
+  // The global Compaction setting is the daemon's: every agent reads
+  // the persisted value, so a submit carries no per-run flag for it.
+  assert.ok(!('compaction' in run), 'submit must not carry compaction');
   win.close();
   console.log(
     '  ok - configData false values initialize toggles and submit flags',
@@ -76,10 +85,11 @@ function testTogglesInitializedTrueFromConfigData() {
   // Start from the opposite state so a no-op would be caught.
   win.document.getElementById('cfg-use-web-tools').checked = false;
   win.document.getElementById('cfg-use-memory').checked = false;
+  win.document.getElementById('cfg-compaction').checked = false;
 
   send(win, {
     type: 'configData',
-    config: {use_web_browser: true, use_memory: true},
+    config: {use_web_browser: true, use_memory: true, compaction: true},
     apiKeys: {},
   });
 
@@ -93,6 +103,11 @@ function testTogglesInitializedTrueFromConfigData() {
     true,
     'configData {use_memory:true} must check #cfg-use-memory',
   );
+  assert.strictEqual(
+    win.document.getElementById('cfg-compaction').checked,
+    true,
+    'configData {compaction:true} must check #cfg-compaction',
+  );
   win.close();
   console.log('  ok - configData true values re-check the toggles');
 }
@@ -101,6 +116,7 @@ function testMissingKeysDefaultToChecked() {
   const {win} = makePage();
   win.document.getElementById('cfg-use-web-tools').checked = false;
   win.document.getElementById('cfg-use-memory').checked = false;
+  win.document.getElementById('cfg-compaction').checked = false;
 
   // Older servers / partial configs omit the keys: default is true,
   // matching user_config.DEFAULTS.
@@ -115,6 +131,11 @@ function testMissingKeysDefaultToChecked() {
     win.document.getElementById('cfg-use-memory').checked,
     true,
     'missing use_memory must default #cfg-use-memory to checked',
+  );
+  assert.strictEqual(
+    win.document.getElementById('cfg-compaction').checked,
+    true,
+    'missing compaction must default #cfg-compaction to checked',
   );
   win.close();
   console.log('  ok - missing config keys default the toggles');
@@ -163,6 +184,7 @@ function testToggleStatePersistedOnSettingsClose() {
     config: {
       use_web_browser: true,
       use_memory: true,
+      compaction: true,
       memory_dir: '~/notes/memories',
       classify_tasks: true,
       classify_with_decisions: true,
@@ -173,10 +195,13 @@ function testToggleStatePersistedOnSettingsClose() {
   // The user turns the toggles off, then closes the settings panel.
   const web = win.document.getElementById('cfg-use-web-tools');
   const mem = win.document.getElementById('cfg-use-memory');
+  const compaction = win.document.getElementById('cfg-compaction');
   web.checked = false;
   web.dispatchEvent(new win.Event('change', {bubbles: true}));
   mem.checked = false;
   mem.dispatchEvent(new win.Event('change', {bubbles: true}));
+  compaction.checked = false;
+  compaction.dispatchEvent(new win.Event('change', {bubbles: true}));
 
   closeSettings(win);
 
@@ -186,8 +211,8 @@ function testToggleStatePersistedOnSettingsClose() {
   // Object.prototype deepStrictEqual would reject)
   assert.deepStrictEqual(
     {...save.config},
-    {use_web_browser: false, use_memory: false},
-    'saveConfig carries exactly the two edited toggles: the daemon merges ' +
+    {use_web_browser: false, use_memory: false, compaction: false},
+    'saveConfig carries exactly the three edited toggles: the daemon merges ' +
       'the payload, so the stored memory_dir / classify_* values (no ' +
       'Settings field) and the retired auto_commit_mode / is_worktree stay ' +
       'out of it',
@@ -197,13 +222,20 @@ function testToggleStatePersistedOnSettingsClose() {
   // populate must land on the persisted (unchecked) state.
   web.checked = true;
   mem.checked = true;
+  compaction.checked = true;
   send(win, {
     type: 'configData',
-    config: {use_web_browser: false, use_memory: false, memory_dir: '~/notes/memories'},
+    config: {
+      use_web_browser: false,
+      use_memory: false,
+      compaction: false,
+      memory_dir: '~/notes/memories',
+    },
     apiKeys: {},
   });
   assert.strictEqual(web.checked, false, 'echoed configData must re-apply');
   assert.strictEqual(mem.checked, false, 'echoed configData must re-apply');
+  assert.strictEqual(compaction.checked, false, 'echoed configData must re-apply');
   win.close();
   console.log('  ok - settings close persists toggle state via saveConfig');
 }

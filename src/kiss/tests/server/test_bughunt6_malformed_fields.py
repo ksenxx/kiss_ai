@@ -160,8 +160,14 @@ class TestMalformedFields(unittest.TestCase):
             f"work_dir corrupted to {self.server.work_dir!r}"
         )
         self.server._handle_command(
-            {"type": "getFiles", "prefix": "x", "workDir": [1]},
+            {"type": "getFiles", "prefix": "x", "workDir": [1], "connId": "win-A"},
         )
+        # ``_handle_command`` blanks the list ``workDir`` (the daemon's
+        # directory stands in), so the picker still gets its reply — at
+        # least the ``loading`` placeholder — instead of the command
+        # dying in ``picker_for``.
+        files_events = [e for e in self.events if e.get("type") == "files"]
+        assert files_events and files_events[0].get("connId") == "win-A", self.events
 
     def test_record_file_usage_nonstring_path_does_not_raise(self) -> None:
         self.server._handle_command(

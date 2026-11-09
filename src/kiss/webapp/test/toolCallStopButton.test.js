@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {announceRetaggedSubagent} = require('./subagent_tab_helpers');
 const {
   makePage: makeSharedPage,
   send,
@@ -28,7 +29,16 @@ const {
   fireTimers,
 } = require('./simplify2_harness');
 
-const {test, report} = makeRunner();
+const runner = makeRunner();
+const report = runner.report;
+const openWindows = [];
+
+/** Close windows opened by this test, not the page shared by its siblings. */
+async function test(name, fn) {
+  const firstWindow = openWindows.length;
+  await runner.test(name, fn);
+  while (openWindows.length > firstWindow) openWindows.pop().close();
+}
 
 /**
  * Boot the chat page with the real stylesheet, so the running/finished
@@ -36,7 +46,9 @@ const {test, report} = makeRunner();
  * class names.
  */
 function makePage() {
-  return makeSharedPage({beforeScripts: loadMainCss});
+  const wv = makeSharedPage({beforeScripts: loadMainCss});
+  openWindows.push(wv.win);
+  return wv;
 }
 
 function display(win, el) {
@@ -376,11 +388,53 @@ async function run() {
     'panelCopy.addStopButton: button, click state, reset and guards',
     panelStopBody,
   );
-  await pageTests();
+  try {
+    await pageTests();
+  } finally {
+    while (openWindows.length) openWindows.pop().close();
+  }
+  await test('Stop follows the rename of its sub-agent tab', retagBody);
   report('toolCallStopButton');
-  // The pages keep their panel tickers and stop-button reset timers
-  // alive; the suite is done, so end the process explicitly.
-  process.exit(0);
+}
+
+/**
+ * A sub-agent's tool runs on its own task; the daemon may re-announce
+ * that sub-agent under a new tab id (retagSubagentTab renames the tab
+ * and releases the old id).  The panel's Stop, clicked after the
+ * rename, must name the surviving tab: an interruptTool for the
+ * retired id reaches no running task.
+ */
+function retagBody() {
+  const wv = makePage();
+  const win = wv.win;
+  const parentId = wv.posted.find(m => m.type === 'ready').tabId;
+  win._testApi.hideWelcome();
+  send(win, {type: 'status', running: true, tabId: parentId, startTs: 1});
+  announceRetaggedSubagent(win, parentId, 'sa-1');
+  send(win, {type: 'status', running: true, tabId: 'sa-1', startTs: 1});
+  win._testApi.switchToTab('sa-1');
+  send(win, {
+    type: 'tool_call',
+    tabId: 'sa-1',
+    name: 'Bash',
+    command: 'sleep 60',
+    callId: 7,
+  });
+  announceRetaggedSubagent(win, parentId, 'sa-2');
+  assert.ok(
+    wv.posted.some(m => m.type === 'closeTab' && m.tabId === 'sa-1'),
+    'setup: the retag releases the old id',
+  );
+  assert.strictEqual(win._testApi.getActiveTabId(), 'sa-2');
+  const tc = win.document.querySelector('#output .ev.tc');
+  const stop = tc.querySelector(':scope > .panel-stop-btn');
+  const before = wv.posted.length;
+  click(win, stop);
+  const msg = wv.posted.slice(before).find(m => m.type === 'interruptTool');
+  assert.ok(msg, 'interruptTool is posted');
+  assert.strictEqual(msg.tabId, 'sa-2', 'Stop names the renamed tab');
+  assert.strictEqual(msg.toolName, 'Bash');
+  assert.strictEqual(msg.callId, 7);
 }
 
 async function panelStopBody() {
@@ -389,6 +443,7 @@ async function panelStopBody() {
     pretendToBeVisual: true,
   });
   const win = dom.window;
+  openWindows.push(win);
   const doc = win.document;
   // The 30 ms reset timer is recorded and fired by hand below.
   const resetTimers = recordTimers(win, 30);
@@ -464,7 +519,6 @@ async function panelStopBody() {
     'the default reset clears the stopping state',
   );
   assert.strictEqual(btn2.disabled, false);
-  win.close();
 }
 
 run().catch(e => {

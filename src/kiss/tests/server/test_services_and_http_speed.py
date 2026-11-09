@@ -26,6 +26,7 @@ import json
 import re
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -35,6 +36,7 @@ import pytest
 
 from kiss.server.helpers import MEDIA_DIR
 from kiss.server.http_speed import IMMUTABLE
+from kiss.server.services import Services
 from kiss.tests.conftest import posix_only
 from kiss.tests.remote_daemon import RemoteDaemon, start_remote_daemon
 
@@ -104,6 +106,35 @@ def stop(daemon: RemoteDaemon) -> None:
 def home(tmp_path: Path) -> Path:
     """The daemon's ``KISS_HOME``."""
     return tmp_path / "home"
+
+
+@posix_only("sh scripts and process groups")
+def test_a_service_thread_that_cannot_start_leaves_the_supervisor_usable(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A supervising thread the OS refuses is not kept: ``stop`` and a retried ``start`` work."""
+    services = home / "services.d"
+    services.mkdir(parents=True)
+    executable(
+        services / "recorder", "#!/bin/sh\ntouch \"$KISS_HOME/recorder-ran\"\nexec sleep 600\n"
+    )
+    monkeypatch.setenv("KISS_HOME", str(home))
+    supervisor = Services()
+    previous = threading.stack_size()
+    threading.stack_size(2**48)  # a stack no mmap grants: ``Thread.start`` raises
+    try:
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            supervisor.start()
+    finally:
+        threading.stack_size(previous)
+    assert supervisor.threads == []  # the thread that never started is not joined later
+    supervisor.start()  # the failure did not count as "already started"
+    try:
+        assert len(supervisor.threads) == 1
+        wait_until(lambda: (home / "recorder-ran").exists())
+    finally:
+        supervisor.stop()  # must not raise for a thread that never started
+    assert not any(thread.is_alive() for thread in supervisor.threads)
 
 
 @posix_only("sh scripts, process groups and ps")
@@ -181,6 +212,12 @@ def test_text_answers_are_compressed_and_hashed_media_kept(daemon: RemoteDaemon)
         assert (status, body, headers["cache-control"]) == (200, original, IMMUTABLE)
         assert "content-encoding" not in headers and headers["vary"] == "Accept-Encoding"
     assert get(daemon.port, main_js.group(1), "gzip;q=junk")[1]["content-encoding"] == "gzip"
+    # ``*`` admits every coding not listed (RFC 9110 12.5.3) -- gzip
+    # included -- unless a ``gzip`` member of its own refuses it.
+    for accept in ("*", "br, *;q=0.5", "*, gzip;q=junk"):
+        assert get(daemon.port, main_js.group(1), accept)[1]["content-encoding"] == "gzip", accept
+    for accept in ("*;q=0", "gzip;q=0, *", "*, gzip;q=0"):
+        assert "content-encoding" not in get(daemon.port, main_js.group(1), accept)[1], accept
     # The coding list may come as several header lines.
     conn = http.client.HTTPConnection("127.0.0.1", daemon.port, timeout=30)
     conn.putrequest("GET", main_js.group(1), skip_accept_encoding=True)

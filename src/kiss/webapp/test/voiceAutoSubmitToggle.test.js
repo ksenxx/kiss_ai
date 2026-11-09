@@ -17,6 +17,7 @@ const {
   stubRaf,
   recordTimers,
   fireTimers,
+  byId,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
@@ -48,9 +49,7 @@ function makePage(options) {
   return {win, posted, played};
 }
 
-function input(win) {
-  return win.document.getElementById('task-input');
-}
+const input = win => byId(win, 'task-input');
 
 function toggle(win) {
   return win.document.getElementById('cfg-voice-auto-submit');

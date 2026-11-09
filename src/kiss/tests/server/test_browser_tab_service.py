@@ -18,15 +18,18 @@ a Linux CI host; they are exercised only through their shared helpers.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import concurrent.futures
 import http.server
 import os
 import shutil
+import signal
 import stat
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +38,9 @@ import pytest
 from kiss.agents.sorcar import web_stealth
 from kiss.core import default_browser as db
 from kiss.server.browser_tab import (
+    _ATTACH_TIMEOUT,
+    _CLOSE_TIMEOUT,
+    _INTERRUPT_PROBE_TIMEOUT,
     BrowserTabService,
     _key_params,
     _mouse_params,
@@ -44,6 +50,7 @@ from kiss.server.browser_tab import (
 )
 from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
+from kiss.tests.server.pause import Pause, Pauses
 
 _PLAYWRIGHT_CACHE = Path.home() / ".cache" / "ms-playwright"
 
@@ -91,7 +98,11 @@ def test_normalize_url_and_home(monkeypatch: pytest.MonkeyPatch) -> None:
     assert normalize_url("about:blank") == "about:blank"
     assert normalize_url("example.com") == "https://example.com"
     assert normalize_url("docs.python.org/3/") == "https://docs.python.org/3/"
-    assert normalize_url("localhost:8080/app") == "https://localhost:8080/app"
+    # A local server has no certificate, like a LAN address.
+    assert normalize_url("localhost:8080/app") == "http://localhost:8080/app"
+    assert normalize_url("localhost") == "http://localhost"
+    assert normalize_url("192.168.1.10:3000") == "http://192.168.1.10:3000"
+    assert normalize_url("localhost.example.com") == "https://localhost.example.com"
     assert normalize_url("kiss sorcar agent") == (
         "https://www.google.com/search?q=kiss%20sorcar%20agent"
     )
@@ -286,8 +297,12 @@ def test_family_name_and_mac_bundle_helper(tmp_path: Path) -> None:
         b"<key>CFBundleExecutable</key><string>Fake</string></dict></plist>"
     )
     assert db._mac_app_executable(str(app)) is None  # binary missing
-    exe = _fake_binary(app / "Contents" / "MacOS", "Fake")
-    assert db._mac_app_executable(str(app)) == str(exe)
+    # The binary is found as Popen would run it: on Windows that is never an
+    # extensionless file (``shutil.which`` with ``PATHEXT``), so the stand-in is a ``.cmd``.
+    binary = "Fake.cmd" if sys.platform == "win32" else "Fake"
+    exe = _fake_binary(app / "Contents" / "MacOS", binary)
+    found = db._mac_app_executable(str(app))
+    assert found is not None and Path(found).resolve() == exe.resolve()
     (app / "Contents" / "Info.plist").write_bytes(b"not a plist")
     assert db._mac_app_executable(str(app)) is None
     assert db._mac_app_executable(str(tmp_path / "Missing.app")) is None
@@ -670,3 +685,361 @@ def test_open_for_user_focuses_every_surface_and_reports_failures(
     # After shutdown nothing can be opened, and the failure is reported, not raised.
     service.shutdown()
     assert service.open_for_user(page_server) is False
+
+
+def _task_on(loop: asyncio.AbstractEventLoop, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+    """Start *coro* as a task on the service's loop (what ``wait_for`` cancels on a timeout)."""
+    started: concurrent.futures.Future[asyncio.Task[Any]] = concurrent.futures.Future()
+    loop.call_soon_threadsafe(lambda: started.set_result(loop.create_task(coro)))
+    return started.result(5)
+
+
+async def _cancelled(task: asyncio.Task[Any]) -> bool:
+    await asyncio.wait({task})
+    return task.cancelled()
+
+
+def _attaching_new_page(local: dict[str, Any]) -> bool:
+    """The first resumption of a new page's ``_register``: its CDP session just came back."""
+    return local.get("is_new") is True and "cdp" not in local
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+def test_an_open_cancelled_while_its_page_attaches_leaves_no_page_behind(
+    daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An open cancelled during the page's attach closes that page instead of losing it.
+
+    ``asyncio.wait_for(_open, _OPEN_TIMEOUT)`` cancels the open's task;
+    landing inside ``_register`` (a browser slow to answer CDP) it used
+    to leave the page behind: attached by the context's own ``page``
+    registration, it was announced as a blank tab nobody asked for,
+    or, when the open's registration was the one cancelled, it stayed
+    open in the browser with no record, so no surface showed it and
+    nothing could close it.  The open's task is cancelled at exactly
+    that point: the loop is held when the new page's ``_register``
+    resumes with its CDP session, and the cancel is queued before it
+    goes on.  Afterwards the browser holds the first tab alone.
+    """
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    assert service.open_for_user(page_server) is True
+    first = _events(printer, "openBrowserTab")[0]["tab_id"]
+    loop = service._loop
+    context = service._context
+    assert loop is not None and context is not None
+    # The first tab, plus the blank page a persistent context starts with.
+    pages_before = set(context.pages)
+
+    attaching = Pause(BrowserTabService._register.__code__, _attaching_new_page)
+    with attaching:
+        task = _task_on(loop, service._open(page_server, ""))
+        assert attaching.paused.wait(30), "the new page never reached its attach"
+        loop.call_soon_threadsafe(task.cancel)
+        attaching.release()
+    assert asyncio.run_coroutine_threadsafe(_cancelled(task), loop).result(30) is True
+
+    _wait(lambda: set(context.pages) == pages_before or None, "the unwanted page to close")
+    assert set(service._pages) == {first}
+    with service._lock:
+        assert set(service._by_page) == {id(service._pages[first].page)}
+    # A blank tab the page event's registration announced meanwhile
+    # was closed again on every surface.
+    stray = {e["tab_id"] for e in _events(printer, "openBrowserTab")} - {first}
+    assert stray <= {e["tab_id"] for e in _events(printer, "closeBrowserTab")}
+    assert not _events(printer, "closeBrowserTab", tab_id=first)
+    # The browser is intact: the next open lands in it.
+    assert service.open_for_user(page_server) is True
+    assert service._context is context and len(context.pages) == len(pages_before) + 1
+
+
+def _browser_pid(profile_dir: Path) -> int:
+    """The browser process of *profile_dir*: the profile on its command line, no ``--type``.
+
+    Chromium rewrites its own process title, after which ``cmdline`` holds the
+    arguments joined by spaces instead of NULs, so both separators split it
+    (the pytest profile path has no spaces).
+    """
+    own = f"--user-data-dir={profile_dir}".encode()
+    pids = []
+    for proc in Path("/proc").iterdir():
+        try:
+            raw = (proc / "cmdline").read_bytes() if proc.name.isdigit() else b""
+            args = raw.replace(b"\0", b" ").split()
+        except OSError:
+            continue
+        if own in args and not any(arg.startswith(b"--type=") for arg in args):
+            pids.append(int(proc.name))
+    assert len(pids) == 1, pids
+    return pids[0]
+
+
+def _coroutine_name(task: asyncio.Task[Any] | None) -> str:
+    """The qualified name of the coroutine *task* runs (``""`` for no task)."""
+    return getattr(task.get_coro() if task is not None else None, "__qualname__", "")
+
+
+def _entered_by_page_event(local: dict[str, Any]) -> bool:
+    """``_register`` entered by the context's own ``page`` registration (a task of its own)."""
+    return _coroutine_name(asyncio.current_task()).endswith("._register")
+
+
+def _entered_by_open(local: dict[str, Any]) -> bool:
+    """``_register`` entered by the open's ``_new_tab`` (inside the open's task)."""
+    return _coroutine_name(asyncio.current_task()).endswith("._open")
+
+
+async def _tasks_running(name: str) -> int:
+    return len([task for task in asyncio.all_tasks() if _coroutine_name(task).endswith(name)])
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(sys.platform != "linux", reason="SIGSTOP and /proc")
+def test_a_cancelled_open_whose_browser_stops_answering_settles_within_the_bound(
+    daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cleanup of a cancelled open does not wait for an attachment that never comes.
+
+    The context's ``page`` event registers a new page first (its task
+    is queued before the ``new_page`` reply wakes the open), so the
+    open's own registration is the second one, waiting on
+    ``attached``; the open's cancel hits that wait and leaves the
+    page event's attach running.  A browser that stops answering
+    (here: SIGSTOP, sent while the loop is held at the page event's
+    ``_register`` entry) never completes that attach: the attach is
+    bounded (``_ATTACH_TIMEOUT``), so the registration forgets the
+    page and the cleanup takes the bounded close path instead of
+    waiting on ``attached`` for good with the record and the page
+    behind it.  Once the browser answers again the queued close takes
+    the page down, and the next open lands in the same browser.
+    """
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    assert service.open_for_user(page_server) is True
+    first = _events(printer, "openBrowserTab")[0]["tab_id"]
+    loop = service._loop
+    context = service._context
+    assert loop is not None and context is not None
+    pages_before = set(context.pages)
+    pid = _browser_pid(service._profile_dir)
+
+    page_event = Pause(BrowserTabService._register.__code__, _entered_by_page_event)
+    open_side = Pause(BrowserTabService._register.__code__, _entered_by_open)
+    stopped = False
+    try:
+        with Pauses(page_event, open_side):
+            task = _task_on(loop, service._open(page_server, ""))
+            assert page_event.paused.wait(30), "the page event never registered the new page"
+            os.kill(pid, signal.SIGSTOP)
+            stopped = True
+            page_event.release()
+            assert open_side.paused.wait(30), "the open never reached its own registration"
+            # Queued behind the held step: the cancel lands once the
+            # open waits on ``attached``.
+            loop.call_soon_threadsafe(task.cancel)
+            open_side.release()
+        assert asyncio.run_coroutine_threadsafe(_cancelled(task), loop).result(30) is True
+
+        def settled() -> bool:
+            with service._lock:
+                forgotten = set(service._pages) == {first}
+            cleanups = asyncio.run_coroutine_threadsafe(
+                _tasks_running("._close_unwanted"), loop,
+            ).result(10)
+            return forgotten and cleanups == 0
+
+        _wait(
+            settled,
+            "the cancelled open's page to be forgotten and its cleanup to end",
+            timeout=_ATTACH_TIMEOUT + _CLOSE_TIMEOUT + 10,
+        )
+        # Never attached, never announced.
+        assert {e["tab_id"] for e in _events(printer, "openBrowserTab")} == {first}
+    finally:
+        if stopped:
+            os.kill(pid, signal.SIGCONT)
+    # The close sent to the stopped browser takes the page down once it answers again.
+    _wait(lambda: set(context.pages) == pages_before or None, "the unwanted page to close")
+    with service._lock:
+        assert set(service._by_page) == {id(service._pages[first].page)}
+    assert not _events(printer, "closeBrowserTab", tab_id=first)
+    assert service.open_for_user(page_server) is True
+    assert service._context is context and len(context.pages) == len(pages_before) + 1
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(sys.platform != "linux", reason="SIGSTOP and /proc")
+def test_an_open_whose_browser_stops_answering_fails_and_closes_its_page(
+    daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An open whose attach reaches its bound fails, and its page is closed, not left behind.
+
+    Nobody cancels this open: an agent thread's ``open_for_user`` just
+    waits it out.  The browser stops answering (SIGSTOP, sent while the
+    loop is held at the page event's ``_register`` entry) once the page
+    exists, so the attach reaches ``_ATTACH_TIMEOUT``, both
+    registrations forget the page and the open fails within that bound.
+    The page used to be the failed open's only loose end: alive in the
+    browser once it answered again, with no record, so no surface showed
+    it and nothing could close it.  The failed open closes it like a
+    cancelled one does, and the next open lands in the same browser.
+    """
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    assert service.open_for_user(page_server) is True
+    first = _events(printer, "openBrowserTab")[0]["tab_id"]
+    context = service._context
+    assert context is not None
+    pages_before = set(context.pages)
+    pid = _browser_pid(service._profile_dir)
+
+    page_event = Pause(BrowserTabService._register.__code__, _entered_by_page_event)
+    agent_thread = concurrent.futures.ThreadPoolExecutor(1)
+    stopped = False
+    try:
+        with page_event:
+            opening = agent_thread.submit(service.open_for_user, page_server)
+            assert page_event.paused.wait(30), "the page event never registered the new page"
+            os.kill(pid, signal.SIGSTOP)
+            stopped = True
+            page_event.release()
+        # Settled by the attach bound, not by the open's own (longer) one.
+        assert opening.result(_ATTACH_TIMEOUT + 10) is False
+        # Never attached, never announced.
+        with service._lock:
+            assert set(service._pages) == {first}
+            assert set(service._by_page) == {id(service._pages[first].page)}
+        assert {e["tab_id"] for e in _events(printer, "openBrowserTab")} == {first}
+    finally:
+        if stopped:
+            os.kill(pid, signal.SIGCONT)
+        agent_thread.shutdown()
+    # The close sent to the stopped browser takes the page down once it answers again.
+    _wait(lambda: set(context.pages) == pages_before or None, "the failed open's page to close")
+    assert not _events(printer, "closeBrowserTab", tab_id=first)
+    assert service.open_for_user(page_server) is True
+    assert service._context is context and len(context.pages) == len(pages_before) + 1
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(sys.platform != "linux", reason="SIGSTOP and /proc")
+def test_an_interrupt_the_browser_does_not_answer_settles_and_closes_the_tab(
+    daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The input watchdog's recovery gives up within its bound on a browser that stops answering.
+
+    ``interrupt`` first asks the page's CDP session to terminate the
+    running script, then probes the page, and closes the tab when it
+    still does not answer.  A browser that has stopped answering
+    (SIGSTOP) answers neither request: the terminate request used to
+    be unbounded, so the recovery never reached its probe nor the
+    close fallback, and the wedged tab (and the agent's blocked input
+    call behind the watchdog) stayed that way.  Both requests are
+    bounded by ``_INTERRUPT_PROBE_TIMEOUT`` now, so the recovery falls
+    through to the bounded close, which takes the page down once the
+    browser answers again.
+    """
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    assert service.open_for_user(page_server) is True
+    tab_id = _events(printer, "openBrowserTab")[0]["tab_id"]
+    loop = service._loop
+    assert loop is not None
+    pid = _browser_pid(service._profile_dir)
+    os.kill(pid, signal.SIGSTOP)
+    try:
+        recovery = asyncio.run_coroutine_threadsafe(service._interrupt(tab_id), loop)
+        # Settled by the probe and close bounds, not by the test's patience.
+        recovery.result(_INTERRUPT_PROBE_TIMEOUT + 3 * _CLOSE_TIMEOUT + 10)
+        assert service._pages[tab_id].closing is True
+    finally:
+        os.kill(pid, signal.SIGCONT)
+    # The close sent to the stopped browser takes the tab down once it answers again.
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=tab_id), "the wedged tab to close")
+
+
+def test_shutdown_settles_an_outstanding_submission(daemon: Any) -> None:
+    """Closing the private loop cancels outstanding futures and runs their finalizers."""
+    server, _printer = daemon
+    service = server.browser_tabs
+    entered = threading.Event()
+    finalized = threading.Event()
+
+    async def pending_operation() -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finalized.set()
+
+    future = service._run_threadsafe(pending_operation())
+    assert entered.wait(10)
+    service.shutdown()
+    assert future.done(), "shutdown abandoned the submitted future"
+    assert future.cancelled()
+    assert finalized.is_set(), "the pending operation's finalizer never ran"
+
+
+def _registering_popup(local: dict[str, Any]) -> bool:
+    """``_register`` entered for a page the browser opened itself."""
+    return local.get("popup") is True
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(sys.platform != "linux", reason="SIGSTOP and /proc")
+def test_a_popup_whose_attach_fails_is_closed_not_left_behind(
+    daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A popup the service cannot attach is closed like a failed open's page.
+
+    A ``window.open`` page is registered by the context's ``page``
+    event alone: no open waits for it, so when its attach reaches
+    ``_ATTACH_TIMEOUT`` (the browser stops answering, SIGSTOP, once
+    the popup exists) nothing used to close it.  The page lived on
+    with no record: no surface showed it, nothing could close it, and
+    it kept the browser alive.  The registration now closes a popup
+    it gave up on, and the close lands once the browser answers.
+    """
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    assert service.open_for_user(page_server) is True
+    first = _events(printer, "openBrowserTab")[0]["tab_id"]
+    loop = service._loop
+    context = service._context
+    assert loop is not None and context is not None
+    pages_before = set(context.pages)
+    pid = _browser_pid(service._profile_dir)
+
+    popup_event = Pause(BrowserTabService._register.__code__, _registering_popup)
+    stopped = False
+    try:
+        with popup_event:
+            opening = asyncio.run_coroutine_threadsafe(
+                service._pages[first].page.evaluate("void window.open('about:blank')"), loop,
+            )
+            assert popup_event.paused.wait(30), "the page event never registered the popup"
+            os.kill(pid, signal.SIGSTOP)
+            stopped = True
+            popup_event.release()
+        assert len(context.pages) == len(pages_before) + 1
+        _wait(lambda: len(service._pages) == 2 or None, "the popup to be reserved")
+        # Never attached, never announced: the registration forgets the popup within the bound.
+        _wait(
+            lambda: set(service._pages) == {first} or None,
+            "the popup to be forgotten",
+            timeout=_ATTACH_TIMEOUT + 10,
+        )
+    finally:
+        if stopped:
+            os.kill(pid, signal.SIGCONT)
+    # The browser answers the ``window.open`` only now, and the close sent
+    # to it meanwhile takes the popup down.
+    opening.result(30)
+    _wait(lambda: set(context.pages) == pages_before or None, "the popup to close")
+    assert {e["tab_id"] for e in _events(printer, "openBrowserTab")} == {first}
+    assert not _events(printer, "closeBrowserTab")

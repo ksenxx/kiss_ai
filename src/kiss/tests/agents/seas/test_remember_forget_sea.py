@@ -18,6 +18,9 @@ finish text is fixed, so what the model writes is not under test.)
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -196,6 +199,33 @@ def test_edits_keep_every_other_line_byte_for_byte(_fresh_agents_md: Path) -> No
     assert path.read_bytes() == b"Unrelated prose without trailing newline\n- Rule\n"
 
 
+def _in_a_child(scenario: str, timeout: float) -> tuple[subprocess.Popen[str], str]:
+    """Run this module's function *scenario* in a child interpreter; return (reaped child, output).
+
+    The concurrency scenarios' executor threads are joined when their
+    interpreter exits, and ``shutdown(wait=False, cancel_futures=True)``
+    only skips queued work: a worker wedged by a locking regression would
+    hang the pytest process itself once the Future timeout fired.  So the
+    deadline is the parent's: a child still running after *timeout*
+    seconds is killed and reaped, and comes back with a non-zero
+    ``returncode`` (0 means every assertion of the scenario held).  The
+    child inherits ``KISS_HOME`` and so works on the session's AGENTS.md.
+    """
+    code = f"from {__name__} import {scenario}; {scenario}()"
+    child = subprocess.Popen(
+        [sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    )
+    try:
+        output = child.communicate(timeout=timeout)[0]
+    except subprocess.TimeoutExpired:
+        child.kill()
+        output = child.communicate()[0]
+    return child, output
+
+
+_STANDING = "- Always preserve this standing instruction"
+
+
 def test_readers_never_see_a_partial_file_during_updates(_fresh_agents_md: Path) -> None:
     """A task reading AGENTS.md while it is rewritten gets the old or the new text.
 
@@ -209,11 +239,19 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_agents_md: Path)
     show empty snapshots).  On Windows this also exercises the
     sharing-violation handling on both sides: the writer's replace must
     wait out the reader's open handle and the reader's open must wait
-    out the in-flight rename.
+    out the in-flight rename.  The rounds run in a child interpreter
+    (see :func:`_in_a_child`) on the file this process prepared.
     """
-    path = _fresh_agents_md
-    standing = "- Always preserve this standing instruction"
-    remember_sea.remember_instruction(standing)
+    remember_sea.remember_instruction(_STANDING)
+    child, output = _in_a_child("_readers_scenario", timeout=240)
+    assert child.returncode == 0, output
+    assert _fresh_agents_md.read_text() == f"# User instructions\n\n{_STANDING}\n"
+
+
+def _readers_scenario() -> None:
+    """The reader/writer rounds of :func:`test_readers_never_see_a_partial_file_during_updates`."""
+    path = agents_md.agents_md_path()
+    standing = _STANDING
     rounds = 200
     ready = [Event() for _ in range(rounds)]  # ``ready[i]``: the reader reached round i
     written = [Event() for _ in range(rounds)]  # ``written[i]``: round i's writes are done
@@ -241,23 +279,31 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_agents_md: Path)
         return snapshots
 
     pool = ThreadPoolExecutor(max_workers=2)
-    try:  # a stuck worker fails the test in bounded time instead of hanging ``with``'s shutdown
+    try:  # a stuck worker is reported here; the parent's deadline then ends this interpreter
         writer = pool.submit(write)
         snapshots = pool.submit(read).result(timeout=120)
         writer.result(timeout=120)
     finally:
-        for event in ready + written:  # a stuck worker must not block its peer past exit
+        for event in ready + written:  # a stuck worker must not block its peer
             event.set()
         pool.shutdown(wait=False, cancel_futures=True)
     assert len(snapshots) >= rounds, len(snapshots)
     bad = [s for s in snapshots if standing not in s]
     assert bad == [], f"{len(bad)} partial snapshots, e.g. {bad[0]!r}"
-    assert path.read_text() == f"# User instructions\n\n{standing}\n"
 
 
 def test_concurrent_remembers_all_land(_fresh_agents_md: Path) -> None:
     """Sixteen simultaneous adds each keep their line: the update is serialized."""
-    path = _fresh_agents_md
+    child, output = _in_a_child("_concurrent_remembers_scenario", timeout=120)
+    assert child.returncode == 0, output
+    assert sorted(agents_md.read_instructions()) == sorted(
+        f"Concurrent rule {i}" for i in range(16)
+    )
+    assert _fresh_agents_md.read_text().startswith("# User instructions\n\n- Concurrent rule ")
+
+
+def _concurrent_remembers_scenario() -> None:
+    """The sixteen simultaneous adds of :func:`test_concurrent_remembers_all_land`."""
     start = Barrier(16, timeout=30)
 
     def add(i: int) -> str:
@@ -270,10 +316,31 @@ def test_concurrent_remembers_all_land(_fresh_agents_md: Path) -> None:
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
     assert all(r.startswith("Remembered in ") for r in replies), replies
-    assert sorted(agents_md.read_instructions()) == sorted(
-        f"Concurrent rule {i}" for i in range(16)
-    )
-    assert path.read_text().startswith("# User instructions\n\n- Concurrent rule ")
+
+
+def test_a_wedged_worker_fails_at_the_deadline_and_is_reaped() -> None:
+    """A worker that never returns cannot hang pytest: the child is killed at the deadline, reaped.
+
+    The child gets through its own Future timeout and ``shutdown(wait=False)``
+    but never exits (the interpreter joins the wedged thread), which is the
+    hang the parent's deadline is for.
+    """
+    deadline = 10.0  # the child's import of this module must fit too, on a loaded machine
+    started = time.monotonic()
+    child, output = _in_a_child("_wedged_scenario", timeout=deadline)
+    assert time.monotonic() - started >= deadline  # ended by the parent, not by the child
+    assert child.returncode not in (None, 0)  # killed, then reaped
+    assert "TimeoutError" in output and "the interpreter now joins the wedged worker" in output
+
+
+def _wedged_scenario() -> None:
+    """A worker that never returns, in the scenarios' executor pattern."""
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        pool.submit(Event().wait).result(timeout=0.1)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+        print("the scenario gave up; the interpreter now joins the wedged worker", flush=True)
 
 
 def test_remember_appends_to_a_hand_written_file(_fresh_agents_md: Path) -> None:

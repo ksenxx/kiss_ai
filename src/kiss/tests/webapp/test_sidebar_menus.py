@@ -158,11 +158,14 @@ def _show_section(page, section_id: str) -> None:
 
 def _hide_panel(page) -> None:
     """Desktop: the task-info panel lies over the content pane's right
-    edge, where the PDF toolbar sits; press in the pane to slide the
-    panel away (a phone stacks the surfaces, nothing to hide)."""
+    edge, where the PDF toolbar sits; press in the viewer to slide the
+    panel away (a phone stacks the surfaces, nothing to hide).  The
+    press lands inside the viewer, as the user's would: a press outside
+    it (the chat transcript) hands the scrolling keys to the browser
+    until the viewer is pointed at again."""
     if not page.evaluate("document.body.classList.contains('remote-desktop')"):
         return
-    page.dispatch_event("#content-tab-area", "pointerdown")
+    page.dispatch_event(_PDF_VIEWER + " .pdf-scroller", "pointerdown")
     page.wait_for_selector("body.meta-hidden", state="attached", timeout=5000)
 
 
@@ -656,11 +659,35 @@ def test_source_control_lists_every_worktree(browser, harness, worktree):
             "els => els.map(e => e.textContent)",
         )
         assert subjects == ["Uncommitted changes", "Uncommitted changes (wt-task)"]
-        # Clicking the worktree's changed README opens the worktree copy.
+        # Clicking a file of the Changes list opens its diff (HEAD vs the
+        # working tree of ITS worktree), as a file of the Graph does.
         tabs_before = page.locator(".chat-tab").count()
-        wt_rows.filter(has_text="wt-untracked.txt").first.click()
+        _panel_click(wt_rows.filter(has_text="wt-untracked.txt").first)
         _wait_tab_count(page, tabs_before + 1)
-        _wait_content(page, "worktree-untracked-sentinel-5e2d")
+        diff = _wait_diff_tab(page, "worktree-untracked-sentinel-5e2d")
+        assert diff["original"] == ""
+        assert diff["readOnly"] is True
+        last = _sent(frames, "gitShow")[-1]
+        assert last["mode"] == "diff" and last["sha"] == ""
+        assert last["path"] == "wt-untracked.txt"
+        assert last["workDir"] == str(worktree)
+        assert not _sent(frames, "openFile")
+        main_readme = page.locator(
+            f"#scm-changes .scm-row[data-scm-worktree='{_css(str(harness.work_dir))}']",
+            has_text="README.md",
+        ).first
+        _panel_click(main_readme)
+        _wait_tab_count(page, tabs_before + 2)
+        diff = _wait_diff_tab(page, "# readme changed")
+        assert diff["original"] == "# readme\n"
+        titles = page.eval_on_selector_all(
+            ".chat-tab", "els => els.map(e => e.textContent)",
+        )
+        assert any("README.md (Working Tree)" in t for t in titles)
+        # Its context menu offers Open Changes ahead of Open File.
+        _panel_click(main_readme, button="right")
+        assert _menu_labels(page)[:2] == ["Open Changes", "Open File"]
+        page.keyboard.press("Escape")
     finally:
         context.close()
 

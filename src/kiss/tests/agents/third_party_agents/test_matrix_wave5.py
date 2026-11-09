@@ -25,7 +25,6 @@ holds ``_start_on_loop`` at the racy instant until the Stop has returned.
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import inspect
 import json
 import linecache
@@ -42,6 +41,7 @@ from kiss.tests.agents.third_party_agents.recording_http import serve_recording
 from kiss.tests.agents.third_party_agents.test_matrix_send_retry_wave2 import (
     _Sleeper,
     _started_backend,
+    _StopAtFutureResult,
 )
 from kiss.tests.agents.third_party_agents.test_matrix_wave4 import (
     _ROOM,
@@ -167,26 +167,6 @@ class _HoldStartOnLoop:
         return self.local
 
 
-class _StopWhileHeld:
-    """Caller-thread tracer: as ``_run`` waits on its future, raise Stop once the loop is held."""
-
-    def __init__(self, hold: _HoldStartOnLoop) -> None:
-        self.hold = hold
-        self.fired = False
-
-    def __call__(self, frame: Any, event: str, arg: Any) -> Any:
-        """Raise ``KeyboardInterrupt`` on the first call of ``Future.result``."""
-        if (
-            event == "call"
-            and not self.fired
-            and frame.f_code is concurrent.futures.Future.result.__code__
-        ):
-            self.fired = True
-            assert self.hold.held.wait(5)
-            raise KeyboardInterrupt("injected stop")
-        return None
-
-
 def _swap_tracer(tracer: Any) -> Any:
     """Install *tracer* on the calling thread; return the one it replaces (e.g. coverage's)."""
     previous = sys.gettrace()
@@ -221,7 +201,7 @@ def _run_stopped_while_held(backend: Any, coro: Any, line: str | None) -> None:
     assert loop is not None
     hold = _HoldStartOnLoop(line)
     loop_tracer = _on_loop_thread(loop, _swap_tracer, hold)
-    caller_tracer = _swap_tracer(_StopWhileHeld(hold))
+    caller_tracer = _swap_tracer(_StopAtFutureResult(hold.held))
     try:
         with pytest.raises(KeyboardInterrupt):
             backend._run(coro)

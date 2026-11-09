@@ -32,6 +32,7 @@ const {
   openNextSocket,
   settle,
   frames,
+  submitCount,
 } = require('./transport_page_helpers');
 
 const {test, report} = makeRunner();
@@ -56,11 +57,6 @@ function sentTypes(sock) {
   return frames(sock)
     .filter(f => f.type !== 'auth')
     .map(f => f.type);
-}
-
-/** How many `submit` frames went out over every socket. */
-function submitCount(sockets) {
-  return sockets.flatMap(frames).filter(f => f.type === 'submit').length;
 }
 
 /** Open the next socket of *page* (socket *n + 1*) and authenticate it. */
@@ -186,6 +182,45 @@ async function main() {
       ]);
       assert.deepStrictEqual(sentTypes(sockets[0]), ['saveConfig', 'ping']);
       assert.strictEqual(submitCount(sockets), 1);
+      window.close();
+    },
+  );
+
+  // A Send click between the socket's death (readyState CLOSED) and
+  // the queued `onclose` that tells main.js about it (A36-1): the
+  // submit is the first frame posted, so it would have been the whole
+  // re-sent batch.  It is held instead, with the frames after it, and
+  // goes out once after the pong of the connection that gets one.
+  await test(
+    'a submit posted on a closed socket before its onclose runs once ' +
+      'across two reconnects that lose the first pong',
+    async () => {
+      const page = newPage('https://example.test/');
+      const transport = boot(page);
+      const {sockets, window} = page;
+      sockets[0].fireOpen();
+      sockets[0].fireMessage({type: 'auth_ok'});
+      sockets[0].readyState = window.WebSocket.CLOSED; // onclose still queued
+      transport.postMessage({type: 'submit', tabId: 't', prompt: 'once'});
+      transport.postMessage({type: 'saveConfig', config: {value: 'B'}});
+      assert.deepStrictEqual(sentTypes(sockets[0]), []);
+      sockets[0].fireClose();
+      const second = reconnect(page, 0);
+      assert.deepStrictEqual(
+        sentTypes(second),
+        ['ping'],
+        'the submit is in no batch: the ping alone asks for the pong',
+      );
+      second.fireClose(); // died before the pong
+      const third = reconnect(page, 1);
+      assert.deepStrictEqual(sentTypes(third), ['ping']);
+      third.fireMessage({type: 'pong'});
+      assert.deepStrictEqual(sentTypes(third), [
+        'ping',
+        'submit',
+        'saveConfig',
+      ]);
+      assert.strictEqual(submitCount(sockets), 1, 'the prompt runs once');
       window.close();
     },
   );

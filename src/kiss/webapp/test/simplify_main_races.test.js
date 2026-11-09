@@ -291,11 +291,14 @@ async function openDirtyTab(ctx) {
       text: 'src/a.py:1: needle',
       count: 1,
     });
-    assert.strictEqual(
-      h.all(win, '.chat-tab.content-tab').length,
-      1,
-      'the result tab opened',
-    );
+    // The result opens in the background (the user is reading b1 now)
+    // in the group of the chat that asked.
+    const result = win._testApi.openTabs().find(t => t.isContentTab);
+    assert.ok(result, 'the result tab opened');
+    assert.strictEqual(result.rootId, 'a1', "in a1's group");
+    assert.strictEqual(win._testApi.getActiveTabId(), 'b1', 'b1 stays');
+    win._testApi.switchToTab(result.id);
+    assert.strictEqual(h.all(win, '.chat-tab.content-tab').length, 1);
     // The result tab is on screen; the `ready` sent after an outage
     // names the chat it belongs to.
     h.send(win, {type: 'daemonStatus', connected: false, reconnecting: true});

@@ -118,6 +118,7 @@ def _parent_after_a_run(repo: Path) -> ChatSorcarAgent:
     parent._prompt_suffix = PARENT_PROMPT_SUFFIX
     parent._use_web_tools = False
     parent._use_memory_override = True
+    parent.compaction = False
     parent.work_dir = str(repo)
     return parent
 
@@ -278,7 +279,7 @@ class TestDispatchResultInheritance:
         env: IsolatedKissHome,
         daemon: RecordingDaemon,
     ) -> None:
-        """Model, same-model config, budget share, chat, web, memory."""
+        """Model, same-model config, budget share, chat, web, memory, compaction."""
         parent = _parent_after_a_run(env.repo)
         _dispatch(parent)
         (call,) = daemon.run_commands
@@ -292,6 +293,8 @@ class TestDispatchResultInheritance:
         assert call["appendToPrompt"] == PARENT_PROMPT_SUFFIX
         assert call["useWebTools"] is False
         assert call["useMemory"] is True
+        assert call["compaction"] is False
+        assert call["provenance"]["compaction"] == "inherited"
         assert call["dockerImage"] == ""
         # The caller's ``tools()`` tools are resolved on the
         # daemon (callables cannot travel the wire): the flag asks for them.
@@ -372,6 +375,7 @@ class Sea(BaseSea):
             add_to_prompt="explicit prompt suffix",
             use_web_tools=True,
             use_memory=False,
+            compaction=True,
         )
         _dispatch(parent, model_name=PARENT_MODEL, budget=0.5, options=options)
         (call,) = daemon.run_commands
@@ -384,6 +388,8 @@ class Sea(BaseSea):
         assert call["appendToPrompt"] == "explicit prompt suffix"
         assert call["useWebTools"] is True
         assert call["useMemory"] is False
+        assert call["compaction"] is True
+        assert call["provenance"]["compaction"] == "explicit"
 
     def test_a_different_model_drops_the_parent_model_config(
         self,
@@ -717,11 +723,11 @@ class TestFullRunInheritance:
         env: IsolatedKissHome,
         daemon: RecordingDaemon,
     ) -> None:
-        """Model, config, budget share, chat, web/memory, the run's work dir."""
+        """Model, config, budget share, chat, web/memory/compaction, the run's work dir."""
         env.write_config(classify_tasks=False)
         server = StandInModelServer(_DelegatingModel())
         try:
-            parent = _run_parent(env, server)
+            parent = _run_parent(env, server, compaction=False)
         finally:
             server.stop()
         (call,) = daemon.run_commands
@@ -736,6 +742,8 @@ class TestFullRunInheritance:
         assert call["appendToSystemPrompt"] == ""
         assert call["useWebTools"] is False
         assert call["useMemory"] is True
+        # The run's ``compaction`` keyword is the live state the child inherits.
+        assert call["compaction"] is False
         assert call["dockerImage"] == ""
         # ``run`` normalises its work_dir with ``Path.resolve()`` (macOS tmp
         # dirs are ``/var`` -> ``/private/var`` symlinks).

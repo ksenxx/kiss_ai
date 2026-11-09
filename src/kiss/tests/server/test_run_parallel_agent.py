@@ -32,7 +32,9 @@ from kiss.tests.server.parallel_agent_harness import (
     StandInModelServer,
     finish_response,
     request_text,
+    system_text,
     tool_call_response,
+    tool_names,
 )
 
 CHILD_SEA = textwrap.dedent('''
@@ -58,22 +60,6 @@ CHILD_SEA = textwrap.dedent('''
         def tools(self, tools):
             return tools + [child_probe]
 ''')
-
-
-def _tool_names(request: dict[str, Any]) -> list[str]:
-    return [
-        tool["function"]["name"]
-        for tool in request.get("tools", [])
-        if isinstance(tool, dict) and "function" in tool
-    ]
-
-
-def _system_text(request: dict[str, Any]) -> str:
-    for message in request.get("messages", []):
-        if message.get("role") == "system":
-            content = message.get("content")
-            return content if isinstance(content, str) else str(content)
-    return ""
 
 
 @pytest.fixture
@@ -119,9 +105,9 @@ def test_run_parallel_children_run_as_the_named_agent_script(
         for marker in ("KID-1", "KID-2"):
             if f"[child-sea] {marker} say done" in text:
                 children[marker] = {
-                    "system": _system_text(request),
+                    "system": system_text(request),
                     "text": text,
-                    "tools": _tool_names(request),
+                    "tools": tool_names(request),
                     "model": request.get("model"),
                 }
                 return finish_response(f"done-{marker}")
@@ -215,7 +201,7 @@ def test_run_parallel_children_inherit_the_parent_and_a_broken_child_fails_alone
 
     def child_responder(request: dict[str, Any]) -> dict[str, Any]:
         text = request_text(request)
-        children["KID-A"] = {"text": text, "tools": _tool_names(request)}
+        children["KID-A"] = {"text": text, "tools": tool_names(request)}
         return finish_response("done-KID-A")
 
     def parent_responder(request: dict[str, Any]) -> dict[str, Any]:

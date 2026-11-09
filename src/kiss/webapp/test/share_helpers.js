@@ -25,12 +25,15 @@ function click(el) {
 /**
  * Click the share button, answer the page's shareChatTasks request with
  * `tasks` (plus the fields of `replyExtra`), and return the resulting
- * shareChat command (or undefined when none was sent).
+ * shareChat command (or undefined when none was sent).  Only the
+ * messages this click produced count: on a page that already shared
+ * once, an earlier export is never returned for a share that sent none.
  */
 function shareWithTasks(wv, tasks, replyExtra) {
   const win = wv.win;
+  const from = wv.posted.length;
   click(win.document.getElementById('share-btn'));
-  const req = lastMsg(wv.posted, 'shareChatTasks');
+  const req = lastMsg(wv.posted.slice(from), 'shareChatTasks');
   assert.ok(req, 'clicking share must ask the daemon for the chat tasks');
   send(win, {
     type: 'share_tasks',
@@ -40,7 +43,7 @@ function shareWithTasks(wv, tasks, replyExtra) {
     truncated: false,
     ...(replyExtra || {}),
   });
-  return lastMsg(wv.posted, 'shareChat') || undefined;
+  return lastMsg(wv.posted.slice(from), 'shareChat') || undefined;
 }
 
 /**
@@ -60,4 +63,4 @@ function makeSharePage(bodyHtml) {
   return win;
 }
 
-module.exports = {click, shareWithTasks, makeSharePage};
+module.exports = {click, shareWithTasks, makeSharePage, SHARE_JS};

@@ -90,7 +90,7 @@ def test_two_registry_instances_never_publish_a_torn_file(tmp_path: Path) -> Non
         f"BUG: torn tabs.json observed ({len(torn[0])} bytes): {torn[0][:80]!r}"
     )
     final = json.loads(path.read_text(encoding="utf-8"))
-    assert final == {"tabs": []}
+    assert final == {"tabs": [], "acks": []}  # the decided open tokens live with the tabs
     assert sorted(p.name for p in tmp_path.iterdir()) == ["tabs.json"], (
         "temp residue left next to tabs.json"
     )

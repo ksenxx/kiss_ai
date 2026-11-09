@@ -16,6 +16,7 @@ import pytest
 
 from kiss.agents.sorcar.checkpoints import CheckpointError, Snapshot, plan_restore, snapshot
 from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.utils import rmtree_force
 from kiss.tests.conftest import is_root, posix_only
 
 
@@ -257,6 +258,17 @@ def test_a_directory_in_place_of_a_file_and_an_embedded_repository(tmp_path: Pat
     out = tools.rollback("v1")
     assert "rewrote 0 files; deleted 0 files" in out, out
     assert (clean / "vendored" / "a.py").read_text() == "print('v1')\n"
+    # The converse: the checkpoint holds the embedded repository as a
+    # gitlink; its files were since vendored plainly (``.git`` removed) and
+    # one added.  No snapshot holds them, so the rollback leaves them alone
+    # instead of deleting what the gitlink stood for.
+    tools.checkpoint("v2")
+    rmtree_force(clean / "vendored" / ".git")  # git's object files are read-only (Windows)
+    (clean / "vendored" / "new-work.txt").write_text("new\n")
+    out = tools.rollback("v2")
+    assert "rewrote 0 files; deleted 0 files" in out, out
+    assert (clean / "vendored" / "a.py").read_text() == "print('v1')\n"
+    assert (clean / "vendored" / "new-work.txt").read_text() == "new\n"
 
 
 def test_listing_cuts_long_path_lists(tmp_path: Path) -> None:

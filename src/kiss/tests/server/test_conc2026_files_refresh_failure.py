@@ -56,6 +56,7 @@ from kiss.tests.conftest import (
     thread_start_can_be_starved,
 )
 from kiss.tests.server._memory_printer import MemoryPrinter
+from kiss.tests.server.conftest import local_view
 
 _REPLY_FAILED = "indexed file-picker reply failed"
 
@@ -288,7 +289,7 @@ class TestFilesRefreshFailure(unittest.TestCase):
         # the built index in place, so this is the warm synchronous
         # path exercising a fresh _load_file_usage.
         self._heal_database()
-        self.assertIsNotNone(self.registry.view_for(self.work_dir))
+        self.assertIsNotNone(local_view(self.registry, self.work_dir))
         self.server._handle_command({
             "type": "getFiles",
             "prefix": "hel",
@@ -330,7 +331,7 @@ class TestFilesRefreshFailure(unittest.TestCase):
             f"index worker died with {hook.records!r}",
         )
         # The corrupt ignore file is tolerated: the tree is still indexed.
-        view = self.registry.view_for(self.work_dir)
+        view = local_view(self.registry, self.work_dir)
         self.assertIsNotNone(view)
         assert view is not None
         self.assertIn("hello.py", view.paths)
@@ -357,10 +358,10 @@ class TestFilesRefreshFailure(unittest.TestCase):
         self.assertTrue(
             self._wait(
                 lambda: self._index_of(self.work_dir) is not index_mid
-                and "fresh_file.py" in (self.registry.view_for(self.work_dir) or view).paths,
+                and "fresh_file.py" in (local_view(self.registry, self.work_dir) or view).paths,
             ),
             f"post-task refresh never published the rescan: "
-            f"{(self.registry.view_for(self.work_dir) or view).paths!r}",
+            f"{(local_view(self.registry, self.work_dir) or view).paths!r}",
         )
 
     def test_cold_request_with_corrupt_gitignore_and_broken_database(
@@ -408,7 +409,7 @@ class TestFilesRefreshFailure(unittest.TestCase):
             })
             self._wait_token_released(conn_id)
         self.assertEqual(hook.records, [])
-        self.assertIsNotNone(self.registry.view_for(third))
+        self.assertIsNotNone(local_view(self.registry, third))
 
     def test_superseded_failing_refresh_leaves_the_newer_token_alone(
         self,
@@ -490,7 +491,7 @@ class TestFilesRefreshFailure(unittest.TestCase):
         when the request fails."""
         conn_id = "conn-ac1e"
         self._build_index(self.work_dir)
-        self.assertIsNotNone(self.registry.view_for(self.work_dir))
+        self.assertIsNotNone(local_view(self.registry, self.work_dir))
 
         self._break_database()
         with self.assertRaises(Exception):

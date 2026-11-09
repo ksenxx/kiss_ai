@@ -15,7 +15,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {sleep, click} = require('./simplify2_harness');
+const {sleep, click, recordTimers} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
 
@@ -43,19 +43,7 @@ function makePage(writeTextImpl) {
     configurable: true,
     value: {writeText: writeTextImpl},
   });
-  const timers = [];
-  const realSetTimeout = win.setTimeout;
-  const realClearTimeout = win.clearTimeout;
-  win.setTimeout = function (fn, ms, ...args) {
-    if (ms !== 1500) return realSetTimeout(fn, ms, ...args);
-    const timer = {fn, cleared: false};
-    timers.push(timer);
-    return timer;
-  };
-  win.clearTimeout = function (handle) {
-    if (handle && typeof handle === 'object') handle.cleared = true;
-    else realClearTimeout(handle);
-  };
+  const timers = recordTimers(win, 1500);
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   const panel = win.document.getElementById('panel');
   panel.textContent = 'panel body text';

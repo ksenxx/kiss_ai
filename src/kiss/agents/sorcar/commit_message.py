@@ -143,12 +143,16 @@ def _commit_message_from_llm(diff_text: str, user_prompt: str | None, bill_to: A
         f"multiple changes. {no_quote}Return ONLY the commit message text, "
         "no quotes or markdown fences.\n\n{context}"
     )
+    from kiss.agents.sorcar.sorcar_agent import _attribute_side_call_usage, side_call_binding
     from kiss.core.kiss_agent import KISSAgent
 
     generator = KISSAgent("Commit Message Generator")
+    model_name = ""
+    binding = side_call_binding(bill_to) if bill_to is not None else None
     try:
+        model_name = get_fast_model()
         raw = generator.run(
-            model_name=get_fast_model(),
+            model_name=model_name,
             prompt_template=template,
             arguments={"context": context},
             is_agentic=False,
@@ -159,11 +163,10 @@ def _commit_message_from_llm(diff_text: str, user_prompt: str | None, bill_to: A
         logger.debug("Commit message generation failed", exc_info=True)
         return FALLBACK_SUBJECT
     finally:
-        if bill_to is not None and (generator.budget_used > 0 or generator.total_tokens_used > 0):
-            from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
-
+        if bill_to is not None:
             # Steps stay the task's own: the call is not one of its steps.
-            _attribute_sub_usage(
-                bill_to, generator.budget_used, generator.total_tokens_used, 0,
+            _attribute_side_call_usage(
+                bill_to, model_name, generator.budget_used, generator.total_tokens_used,
+                binding,
             )
 

@@ -276,11 +276,15 @@ class SynologyChatChannelBackend(ToolMethodBackend):
             return True
         handle = mint_surrogate("synology")
         if handle is None:
-            # No embedded token and no vault enrollment: the webhook URL
-            # itself is the whole configuration; keep the legacy direct
-            # path.
-            self._wire_direct(webhook_url)
-            return True
+            # The marker says the webhook token was moved to the vault;
+            # with the vault entry gone there is no credential, so no
+            # request may leave on the direct path.
+            self._connection_info = (
+                "Synology webhook token missing from the Muse vault; "
+                "reauthentication required (authenticate_synology with the "
+                "webhook URL including its token)."
+            )
+            return False
         _scrub_config_webhook_token()
         self._surrogate = handle.token
         self._http = MuseBoundarySession("synology")

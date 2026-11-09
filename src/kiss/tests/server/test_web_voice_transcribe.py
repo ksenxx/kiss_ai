@@ -47,6 +47,12 @@ from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
 import kiss.core.user_config as vc
+from kiss.server.speech import (
+    VOICE_DEBUG_KEEP,
+    save_voice_recording,
+    update_voice_recording_info,
+    voice_debug_dir,
+)
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
@@ -189,6 +195,63 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
         self.assertEqual(msg["text"], "")
         self.assertIsNone(msg["speaker"])
         self.assertIsNone(msg["language"])
+
+    async def test_received_audio_is_saved_for_debugging(self) -> None:
+        """Every received clip is kept as WAV + JSON before transcription.
+
+        The clip is silence, so no gpt-audio call is made (offline):
+        the saved WAV must hold the exact received samples (wake
+        prefix included) and the note the wake flags and the outcome.
+        Older recordings beyond ``VOICE_DEBUG_KEEP`` are pruned, and an
+        unwritable folder does not stop the reply.
+        """
+        saved_home = os.environ.get("KISS_HOME")
+        os.environ["KISS_HOME"] = str(Path(self.tmpdir) / "home")
+        try:
+            folder = voice_debug_dir()
+            folder.mkdir(parents=True)
+            for i in range(VOICE_DEBUG_KEEP):
+                (folder / f"00000000-{i:03d}.wav").write_bytes(b"")
+                (folder / f"00000000-{i:03d}.json").write_text("{}")
+            ws = await self._connect_ok()
+            pcm = b"\x01\x00" * 16000
+            msg = await self._voice_speech_reply(
+                ws, base64.b64encode(pcm).decode("ascii"), timeout=15,
+                extra={
+                    "wakePrefixed": True, "wakeSamples": 8000,
+                    "wakeAgreed": True,
+                },
+            )
+            self.assertEqual(msg["text"], "")
+            wavs = sorted(folder.glob("*.wav"))
+            self.assertEqual(len(wavs), VOICE_DEBUG_KEEP)
+            self.assertFalse((folder / "00000000-000.wav").exists())
+            self.assertFalse((folder / "00000000-000.json").exists())
+            with wave.open(str(wavs[-1]), "rb") as wf:
+                self.assertEqual(wf.getframerate(), 16000)
+                self.assertEqual(wf.readframes(wf.getnframes()), pcm)
+            note = json.loads(wavs[-1].with_suffix(".json").read_text())
+            self.assertEqual(note, {
+                "wakePrefixed": True, "wakeSamples": 8000, "wakeAgreed": True,
+                "text": "", "language": None, "accepted": False,
+            })
+
+            shutil.rmtree(folder)
+            folder.write_text("not a folder")
+            msg = await self._voice_speech_reply(
+                ws, base64.b64encode(pcm).decode("ascii"), timeout=15,
+            )
+            self.assertEqual(msg["text"], "")
+            self.assertIsNone(save_voice_recording(pcm, {}))
+            note_dir = Path(self.tmpdir) / "clip.json"
+            note_dir.mkdir()
+            update_voice_recording_info(note_dir.with_suffix(".wav"), {})
+            self.assertTrue(note_dir.is_dir())
+        finally:
+            if saved_home is None:
+                os.environ.pop("KISS_HOME", None)
+            else:
+                os.environ["KISS_HOME"] = saved_home
 
     async def test_undecodable_audio_replies_empty_voice_speech(self) -> None:
         """Malformed base64 must degrade to an empty transcription."""

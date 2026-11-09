@@ -112,7 +112,7 @@ function pressEnter(win, input) {
   );
 }
 
-function openForm(win, list) {
+function openForm(list) {
   return list.querySelector('form.sidebar-inline-form');
 }
 
@@ -124,7 +124,7 @@ function saveButton(form) {
 function typedScheduleForm(win) {
   send(win, {type: 'cronJobs', jobs: []});
   click(win, byId(win, 'meta-schedule-add'));
-  const form = openForm(win, byId(win, 'meta-schedule-list'));
+  const form = openForm(byId(win, 'meta-schedule-list'));
   form.elements.name.value = 'Digest';
   form.elements.schedule.value = 'every 30m';
   form.elements.what.value = 'summarize my email';
@@ -135,7 +135,7 @@ function typedScheduleForm(win) {
 function typedMachineForm(win) {
   send(win, {type: 'machines', machines: [], checkedAt: 1});
   click(win, byId(win, 'meta-machines-add'));
-  const form = openForm(win, byId(win, 'meta-machines-list'));
+  const form = openForm(byId(win, 'meta-machines-list'));
   form.elements.name.value = 'gpu';
   form.elements.address.value = 'me@gpu';
   return form;
@@ -161,7 +161,7 @@ async function main() {
     // The periodic poll re-renders the list: the form comes back with
     // its draft and still refuses a second submit.
     send(win, {type: 'cronJobs', jobs: []});
-    const again = openForm(win, list);
+    const again = openForm(list);
     assert.ok(again && again !== form, 'the poll rebuilt the form');
     assert.strictEqual(again.elements.name.value, 'Digest');
     assert.ok(saveButton(again).disabled, 'still in flight after a re-render');
@@ -179,7 +179,7 @@ async function main() {
       action: 'create',
       error: 'bad schedule',
     });
-    const reopened = openForm(win, list);
+    const reopened = openForm(list);
     assert.ok(reopened, 'a refused create keeps the form open');
     assert.strictEqual(reopened.elements.schedule.value, 'every 30m');
     assert.ok(!saveButton(reopened).disabled, 'a refusal re-enables Save');
@@ -204,7 +204,7 @@ async function main() {
       ],
     });
     assert.strictEqual(
-      openForm(win, list),
+      openForm(list),
       null,
       'an accepted create closes the form',
     );
@@ -225,7 +225,7 @@ async function main() {
     assert.ok(saveButton(form).disabled);
     // A plain machines reply (the poll) rebuilds the form, still armed.
     send(win, {type: 'machines', machines: [], checkedAt: 2});
-    const again = openForm(win, list);
+    const again = openForm(list);
     assert.ok(again && again !== form);
     assert.strictEqual(again.elements.address.value, 'me@gpu');
     assert.ok(saveButton(again).disabled, 'still in flight after a re-render');
@@ -242,7 +242,7 @@ async function main() {
       action: 'add',
       error: 'unreachable',
     });
-    const reopened = openForm(win, list);
+    const reopened = openForm(list);
     assert.ok(reopened, 'a refused add keeps the form open');
     assert.ok(!saveButton(reopened).disabled, 'a refusal re-enables Save');
     assert.strictEqual(
@@ -257,11 +257,7 @@ async function main() {
       checkedAt: 4,
       action: 'add',
     });
-    assert.strictEqual(
-      openForm(win, list),
-      null,
-      'an accepted add closes the form',
-    );
+    assert.strictEqual(openForm(list), null, 'an accepted add closes the form');
     win.close();
   });
 
@@ -300,8 +296,8 @@ async function main() {
     send(win, {type: 'daemonStatus', connected: true});
     send(win, {type: 'cronJobs', jobs: []});
     send(win, {type: 'machines', machines: [], checkedAt: 5});
-    const sched2 = openForm(win, scheduleList);
-    const mach2 = openForm(win, machinesList);
+    const sched2 = openForm(scheduleList);
+    const mach2 = openForm(machinesList);
     assert.strictEqual(sched2.elements.name.value, 'Digest');
     assert.strictEqual(mach2.elements.name.value, 'gpu');
     assert.ok(!saveButton(sched2).disabled && !saveButton(mach2).disabled);
@@ -579,9 +575,9 @@ async function main() {
       action: 'add',
       error: 'unreachable',
     });
-    pressEnter(win, openForm(win, list).elements.address);
+    pressEnter(win, openForm(list).elements.address);
     assert.strictEqual(ofType(posted, 'machineAction').length, 2);
-    assert.ok(saveButton(openForm(win, list)).disabled);
+    assert.ok(saveButton(openForm(list)).disabled);
     // A history reply relabels a machine: the Machines list repaints
     // from the cached reply, which must not count as a second answer.
     send(win, {
@@ -591,7 +587,7 @@ async function main() {
       generation: 1,
       machineLabels: {gpu: 'gpu.local'},
     });
-    const again = openForm(win, list);
+    const again = openForm(list);
     assert.ok(again, 'the form survives the repaint');
     assert.strictEqual(again.elements.address.value, 'me@gpu');
     assert.ok(saveButton(again).disabled, 'the retry is still in flight');
@@ -607,7 +603,7 @@ async function main() {
       checkedAt: 3,
       action: 'add',
     });
-    assert.strictEqual(openForm(win, list), null, 'the retry ack closes it');
+    assert.strictEqual(openForm(list), null, 'the retry ack closes it');
     win.close();
   });
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import random
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -348,6 +349,66 @@ class TestAgentToolInterrupt:
         assert _first_line(outcome["result"]) == USER_INTERRUPTED_MESSAGE
 
 
+class _ReturningTool(threading.Thread):
+    """A tool call that returns when released, then runs "the agent loop" (a wait)."""
+
+    def __init__(self) -> None:
+        super().__init__(daemon=True)
+        self.token: tool_interrupt.ToolCallToken | None = None
+        self.registered = threading.Event()
+        self.release = threading.Event()
+        self.ended = threading.Event()
+        self.after = threading.Event()
+        self.outcome = "never ran"
+
+    def run(self) -> None:
+        token = new_tool_call("paused injector")
+        register_tool_call(token)
+        self.token = token
+        self.registered.set()
+        self.release.wait(30)
+        try:
+            end_tool_call(token)
+            self.ended.set()
+            self.after.wait(30)
+            self.outcome = "clean"
+        except ToolCallInterrupted:
+            self.outcome = "late" if self.ended.is_set() else "in end_tool_call"
+        finally:
+            unregister_tool_call(token)
+
+
+class _PauseBeforeInjecting:
+    """A profile hook for the injector's thread: pause on the call of
+    ``inject_async_exception``, i.e. after the ``closing`` check, before the injection."""
+
+    def __init__(self) -> None:
+        self.paused = threading.Event()
+        self.resume = threading.Event()
+
+    def __call__(self, frame: Any, event: str, arg: object) -> None:
+        if event == "call" and frame.f_code is tool_interrupt.inject_async_exception.__code__:
+            self.paused.set()
+            assert self.resume.wait(30), "the test never resumed the injector"
+
+
+class _Injector(threading.Thread):
+    """Force the injection on a thread of its own, under the pausing hook."""
+
+    def __init__(self, token: tool_interrupt.ToolCallToken, hook: _PauseBeforeInjecting) -> None:
+        super().__init__(daemon=True)
+        self.token = token
+        self.hook = hook
+        self.injected: bool | None = None
+
+    def run(self) -> None:
+        sys.setprofile(self.hook)
+        try:
+            self.injected = tool_interrupt._inject_unless_closing(self.token)
+        finally:
+            sys.setprofile(None)
+
+
 class TestRegistry:
     """The running-tool registry and its guards."""
 
@@ -472,6 +533,35 @@ class TestRegistry:
         assert token.injected is True
         assert token.event.is_set()
         assert running_tool_name(main_ident) is None
+
+    def test_a_return_waits_out_an_injector_paused_inside_its_verdict(self) -> None:
+        """The injector has passed its ``closing`` check and is about to inject when
+        it is descheduled for longer than the drain deadline.  The tool's return
+        must wait for the verdict, however long: the interrupt lands inside
+        ``end_tool_call``, never in whatever the thread runs next."""
+        tool = _ReturningTool()
+        tool.start()
+        assert tool.registered.wait(5)
+        token = tool.token
+        assert token is not None
+        assert interrupt_tool_call(token.thread_ident, token.name) is True
+        hook = _PauseBeforeInjecting()
+        injector = _Injector(token, hook)
+        injector.start()
+        try:
+            assert hook.paused.wait(5), "the injector never reached the injection"
+            tool.release.set()  # the tool returns while the injector is paused
+            assert not tool.ended.wait(tool_interrupt._DRAIN_SECONDS + 0.5), (
+                "the tool returned with an injection pending"
+            )
+        finally:
+            hook.resume.set()
+            injector.join(5)
+            tool.after.set()
+            tool.join(5)
+        assert injector.injected is True and token.injected is True
+        assert tool.outcome == "in end_tool_call"
+        assert running_tool_name(token.thread_ident) is None
 
     def test_cooperative_signal_alone_leaves_a_returned_result_alone(self) -> None:
         """A tool that returned on its own before the grace period keeps its result."""

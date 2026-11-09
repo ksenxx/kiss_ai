@@ -661,6 +661,58 @@ def test_key_store_round_trip(tmp_path, monkeypatch) -> None:
     assert model_info.bedrock_credentials_configured() is False
 
 
+def test_blank_token_cleanup_cannot_delete_a_token_saved_meanwhile(tmp_path, monkeypatch) -> None:
+    """The constructor's unset of an empty ``AWS_BEARER_TOKEN_BEDROCK`` is atomic with the store.
+
+    The constructor reads the empty exported value, and before it deletes
+    the variable the settings panel saves a real token into the
+    environment: the deletion must not take the new token with it, so
+    the check and the deletion run under the key store's lock.
+    """
+    import httpx2
+
+    from kiss.core.models.anthropic_model import _bedrock_client
+    from kiss.core.user_config import save_api_key
+    from kiss.tests.server.pause import Pause
+
+    for field in _AWS_FIELDS:
+        _pin_env(monkeypatch, field)
+        monkeypatch.setattr(
+            config_module.DEFAULT_CONFIG, field, getattr(config_module.DEFAULT_CONFIG, field)
+        )
+        monkeypatch.delenv(field, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KISS_HOME", str(tmp_path / ".kiss"))
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "")
+    errors: list[BaseException] = []
+
+    def construct() -> None:
+        try:
+            _bedrock_client("", httpx2.Timeout(5.0))
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    def deleting_the_token(frame_locals: dict[str, Any]) -> bool:
+        return frame_locals.get("key") == "AWS_BEARER_TOKEN_BEDROCK"
+
+    with Pause(os._Environ.__delitem__.__code__, deleting_the_token) as held:
+        constructor = threading.Thread(target=construct, daemon=True)
+        constructor.start()
+        assert held.paused.wait(10), "the constructor never reached the deletion"
+        saver = threading.Thread(
+            target=save_api_key, args=("AWS_BEARER_TOKEN_BEDROCK", "fresh-token"), daemon=True
+        )
+        saver.start()
+        saver.join(0.5)  # blocked on the lock the constructor holds, or (pre-fix) done
+        held.release()
+        constructor.join(10)
+        saver.join(10)
+    assert not constructor.is_alive() and not saver.is_alive()
+    assert errors == []
+    assert os.environ.get("AWS_BEARER_TOKEN_BEDROCK") == "fresh-token"
+    assert config_module.DEFAULT_CONFIG.AWS_BEARER_TOKEN_BEDROCK == "fresh-token"
+
+
 # --------------------------------------------------------------------------
 # Live Bedrock (only with real credentials in the environment)
 # --------------------------------------------------------------------------
@@ -1066,41 +1118,19 @@ def test_concurrent_initialize_tolerates_empty_exported_bearer_token(monkeypatch
 
     ``_bedrock_client`` unsets an empty ``AWS_BEARER_TOKEN_BEDROCK`` so the
     SDK does not take ``""`` for a token.  Two task threads (two chats, or
-    ``run_parallel`` sub-agents) can both read the empty value before
-    either removes it; the loser of that race used to die with
-    ``KeyError``.  The interleaving is pinned twice, by wrappers around
-    the real stdlib functions: ``os.environ.get`` holds each thread on a
-    barrier once, right after its first read of that variable, so both
-    have read it before either removes it; and ``os.unsetenv`` (the first
-    thing ``os.environ.__delitem__`` does, before it drops the key from
-    its dict) holds each thread once more, so both are inside the
-    deletion before either finishes it.  The second barrier is the one
-    ``os.environ.pop(key, None)`` lost: it reads again and then deletes
-    outside its ``KeyError`` handler.
+    ``run_parallel`` sub-agents) could both read the empty value before
+    either removed it; the loser of that race used to die with
+    ``KeyError``.  The check and the deletion now run under the key
+    store's lock: the first thread is held inside the deletion (the real
+    ``os.environ.__delitem__``) while the second constructs, and the
+    second must neither raise nor get past its own check before the
+    first is done.
     """
+    from kiss.tests.server.pause import Pause
+
     monkeypatch.delenv("ANTHROPIC_BEDROCK_BASE_URL", raising=False)
     _set_aws(monkeypatch, AWS_ACCESS_KEY_ID="AKIA", AWS_SECRET_ACCESS_KEY="secret")
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "")
-    real_get = os.environ.get
-    real_unsetenv = os.unsetenv
-    both_have_read = threading.Barrier(2, timeout=10)
-    both_are_deleting = threading.Barrier(2, timeout=10)
-    synced = threading.local()
-
-    def get_then_wait_for_the_other_reader(key: str, default: Any = None) -> Any:
-        value = real_get(key, default)
-        if key == "AWS_BEARER_TOKEN_BEDROCK" and not getattr(synced, "read", False):
-            synced.read = True
-            both_have_read.wait()
-        return value
-
-    def wait_for_the_other_deleter_then_unsetenv(key: bytes) -> None:
-        if key == b"AWS_BEARER_TOKEN_BEDROCK" and not getattr(synced, "deleting", False):
-            synced.deleting = True
-            both_are_deleting.wait()
-        real_unsetenv(key)
-
-    monkeypatch.setattr(os, "unsetenv", wait_for_the_other_deleter_then_unsetenv)
     errors: list[BaseException] = []
 
     def build_client() -> None:
@@ -1109,15 +1139,19 @@ def test_concurrent_initialize_tolerates_empty_exported_bearer_token(monkeypatch
         except BaseException as exc:
             errors.append(exc)
 
-    os.environ.get = get_then_wait_for_the_other_reader  # type: ignore[method-assign]
-    try:
+    def deleting_the_token(frame_locals: dict[str, Any]) -> bool:
+        return frame_locals.get("key") == "AWS_BEARER_TOKEN_BEDROCK"
+
+    with Pause(os._Environ.__delitem__.__code__, deleting_the_token) as held:
         threads = [threading.Thread(target=build_client) for _ in range(2)]
-        for thread in threads:
-            thread.start()
+        threads[0].start()
+        assert held.paused.wait(10), "the first constructor never reached the deletion"
+        threads[1].start()
+        threads[1].join(timeout=0.5)
+        assert threads[1].is_alive(), "the second constructor ran its check during the deletion"
+        held.release()
         for thread in threads:
             thread.join(timeout=30)
-    finally:
-        del os.environ.get  # type: ignore[method-assign]
     assert not any(thread.is_alive() for thread in threads)
     assert errors == []
     assert "AWS_BEARER_TOKEN_BEDROCK" not in os.environ
@@ -1125,7 +1159,7 @@ def test_concurrent_initialize_tolerates_empty_exported_bearer_token(monkeypatch
 
 def test_direct_anthropic_route_unchanged(monkeypatch) -> None:
     """The direct route still sends top-level cache_control and service_tier."""
-    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "ANTHROPIC_WORKSPACE_ID", "")
     with ScriptedAnthropicServer() as server:
         monkeypatch.setenv("ANTHROPIC_BASE_URL", server.base_url)
         adapter = AnthropicModel(
@@ -1174,7 +1208,7 @@ def test_set_model_keeps_each_provider_on_its_own_credential(monkeypatch) -> Non
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
     monkeypatch.delenv("ANTHROPIC_BEDROCK_BASE_URL", raising=False)
-    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "ANTHROPIC_WORKSPACE_ID", "")
     monkeypatch.setattr(config_module.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "anthropic-token")
     _set_aws(monkeypatch, AWS_BEARER_TOKEN_BEDROCK="bedrock-token")
     agent: Any = SorcarAgent("test-bedrock-switch")
@@ -1441,7 +1475,7 @@ def test_explicit_anthropic_only_fields_never_reach_bedrock(monkeypatch) -> None
 
 def test_direct_route_keeps_an_explicit_cache_control(monkeypatch) -> None:
     """On the Anthropic API a caller's own top-level ``cache_control`` is sent as given."""
-    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "ANTHROPIC_WORKSPACE_ID", "")
     with ScriptedAnthropicServer() as server:
         monkeypatch.setenv("ANTHROPIC_BASE_URL", server.base_url)
         adapter = AnthropicModel(

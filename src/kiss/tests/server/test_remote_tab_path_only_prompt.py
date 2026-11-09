@@ -25,6 +25,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from kiss.tests.server.remote_tabs_probe import machine_of
 from kiss.tests.server.test_remote_tabs import RemoteTabsHarness
 
 
@@ -37,7 +38,7 @@ class TestRemoteTabPathOnlyPrompt(RemoteTabsHarness):
         # prompt that follows is forwarded along the same stream.
         await self._submit(tab, "Say hello", "box")
         await self._run_until_idle(tab)
-        self.assertEqual(self.server._server_api.remote_tabs.machine_of(tab), "box")
+        self.assertEqual(machine_of(self.server._server_api.remote_tabs, tab), "box")
 
         target = Path(self.remote.home) / "notes.md"
         # ``newline=""``: the daemon serves the file's bytes as they are,
@@ -60,7 +61,7 @@ class TestRemoteTabPathOnlyPrompt(RemoteTabsHarness):
         # and the tab every surface shows keeps its chat's title
         # rather than the path (the binding published the prompt as
         # the title before the machine could tell it was a file).
-        self.assertEqual(self.server._server_api.remote_tabs.machine_of(tab), "box")
+        self.assertEqual(machine_of(self.server._server_api.remote_tabs, tab), "box")
         tabs = await self._ask({"type": "ready", "tabId": tab}, "tabs_state")
         entry = next(t for t in tabs["tabs"] if t["tabId"] == tab)
         self.assertEqual(entry["title"], "Say hello")

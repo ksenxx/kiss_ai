@@ -52,6 +52,7 @@ from kiss.agents.sorcar.useful_tools import (
     UV_REWRITTEN_NOTE,
     UsefulTools,
     _is_read_only,
+    sleep_alternative,
     sleep_guard,
     uv_in_worktree,
 )
@@ -495,8 +496,15 @@ def test_long_sleep_without_a_running_job_runs_as_written(tools: UsefulTools) ->
     before = time.monotonic()
     out = tools.Bash("timeout 1 sleep 60; echo ran", "poll", timeout_seconds=100)
     assert 0.9 < time.monotonic() - before < 10
-    assert out == "ran\n"
-    # a sleep the text search cannot take out runs as written, job or not
+    # ...and the note names the one-call wait and the adopted job to wait on instead
+    assert out == "ran\n" + sleep_alternative(60)
+    assert out.startswith("ran\n\n[note: the sleep of 60 s ran as written: no background job")
+    assert 'Bash(command, until="<regex>", poll_seconds=N, timeout_seconds=M)' in out
+    assert 'bash_job(<id>, "wait")' in out
+    # a loop's sleep with no job: as written, with the same note
+    command = "for i in 1; do timeout 1 sleep 31; done; echo ran"
+    assert tools.Bash(command, "poll", timeout_seconds=100) == "ran\n" + sleep_alternative(31)
+    # a sleep the text search cannot take out runs as written, job or not, without the note
     job = _job_id(tools.Bash("sleep 5", "slow", background=True))
     out = tools.Bash("timeout 1 sleep 6'0'; echo ran", "poll", timeout_seconds=100)
     assert out == "ran\n"

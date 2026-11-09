@@ -35,6 +35,7 @@ import base64
 import os
 import shlex
 import stat
+import sys
 import time
 import unittest
 import uuid
@@ -52,6 +53,16 @@ def _write_script(path: Path, body: str) -> None:
     """Write an executable ``/bin/sh`` script at *path*."""
     path.write_text("#!/bin/sh\n" + body)
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def _python_player(path: Path, body: str) -> str:
+    """Write the Python player *body* at *path*; return its ``KISS_SORCAR_PLAY_CMD``.
+
+    Run by this interpreter, so it plays on Windows too, where a
+    ``/bin/sh`` script cannot be executed directly.
+    """
+    path.write_text("import os, time\n" + body)
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(path))}"
 
 
 def _pid_alive(pid: int) -> bool:
@@ -195,6 +206,72 @@ class TalkPlayerGroupKillTest(_EnvMixin):
             "SIGTERM-ignoring wrapper survived: SIGKILL escalation "
             "never reached its process group",
         )
+
+
+class PlayerResolvedOncePerEventTest(_EnvMixin):
+    """``play`` resolves the machine's player once, when the event is queued."""
+
+    def test_player_resolved_at_enqueue_is_the_one_used_at_playback(self) -> None:
+        """The argv found at enqueue travels with the entry to the worker.
+
+        The player used to be looked up twice per talk: by the daemon
+        before queueing and again by the worker at playback (an
+        environment read and up to six ``PATH`` scans each).  Now the
+        lookup happens once, at enqueue: a player override changed
+        while the clip waits in the queue does not apply to it.
+        """
+        tmp = Path(self.enterContext(_tempdir()))
+        runs = tmp / "invocations.log"
+        gate = tmp / "release"
+        first = _python_player(
+            tmp / "first_player.py",
+            f"open({str(runs)!r}, 'a').write('first\\n')\n"
+            f"while not os.path.exists({str(gate)!r}):\n    time.sleep(0.05)\n",
+        )
+        second = _python_player(
+            tmp / "second_player.py", f"open({str(runs)!r}, 'a').write('second\\n')\n"
+        )
+        os.environ["KISS_SORCAR_PLAY_CMD"] = first
+
+        player = TalkPlayer()
+        queued_first = player.play(
+            {"talkId": uuid.uuid4().hex, "text": "", "audioB64": MP3_B64}
+        )
+        self.assertTrue(_wait_for(runs.exists, 10.0), "first player never started")
+        # The worker is busy with the first clip: the second waits in
+        # the queue, its player already chosen.
+        queued_second = player.play(
+            {"talkId": uuid.uuid4().hex, "text": "", "audioB64": MP3_B64}
+        )
+        os.environ["KISS_SORCAR_PLAY_CMD"] = second
+        gate.write_text("go")
+        self.assertTrue(
+            _wait_for(lambda: len(runs.read_text().splitlines()) >= 2, 20.0),
+            "the second clip never played",
+        )
+        self.assertEqual(runs.read_text().split(), ["first", "first"])
+        self.assertEqual((queued_first, queued_second), (True, True))
+
+    def test_no_player_means_nothing_queued_and_nothing_remembered(self) -> None:
+        """Without a player ``play`` answers ``False`` and the talk may be re-sent later."""
+        tmp = Path(self.enterContext(_tempdir()))
+        runs = tmp / "invocations.log"
+        script = _python_player(tmp / "player.py", f"open({str(runs)!r}, 'a').write('run\\n')\n")
+        os.environ["KISS_SORCAR_PLAY_CMD"] = "'unterminated"  # malformed: no player
+        player = TalkPlayer()
+        event = {"talkId": uuid.uuid4().hex, "text": "", "audioB64": MP3_B64}
+        self.assertFalse(player.play(event))
+        self.assertFalse(player.play({"talkId": uuid.uuid4().hex, "text": ""}))
+        self.assertIsNone(player._worker)
+        # The same talk re-sent once a player exists plays: it was not
+        # remembered as spoken.
+        os.environ["KISS_SORCAR_PLAY_CMD"] = script
+        self.assertTrue(player.play(event))
+        self.assertTrue(_wait_for(runs.exists, 10.0), "the re-sent talk never played")
+        # Spoken once (the browser client's ``spokenTalkIds`` behaviour):
+        # the repeat is accepted but nothing is queued for it.
+        self.assertTrue(player.play(event))
+        self.assertTrue(player._queue.empty())
 
 
 class PlaybackTimeoutEnvTest(_EnvMixin):

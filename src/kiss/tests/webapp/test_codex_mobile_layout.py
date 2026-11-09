@@ -119,7 +119,6 @@ CONTROL_IDS = [
     "settings-panel",
     "settings-panel-close",
     "remote-url",
-    "config-form",
     "cfg-remote-password",
     "secret-toggle-template",
     "cfg-max-budget",

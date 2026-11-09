@@ -46,7 +46,15 @@ const {freezeClock} = require('./history_helpers');
 // keys of the spend grid do not depend on when the suite runs.
 const NOW = Date.UTC(2026, 0, 15, 20, 0, 0);
 
-const {test, report} = makeRunner();
+const runner = makeRunner();
+const report = runner.report;
+const openWindows = [];
+
+/** Run one test through the shared runner, then close its windows. */
+async function test(name, fn) {
+  await runner.test(name, fn);
+  while (openWindows.length) openWindows.pop().close();
+}
 
 /**
  * Boot a chat page with the given body attributes, its clock frozen at
@@ -81,6 +89,7 @@ function makePage(opts) {
       fakeMatchMedia(win, desktop);
     },
   });
+  openWindows.push(win);
   return {win, posted, intervals, observers};
 }
 
@@ -649,7 +658,8 @@ async function main() {
       schedule: 'every 2h',
       what: 'summarize my email',
     };
-    eq(posted, [update]);
+    // Each save is stamped with a fresh generation the daemon echoes.
+    eq(posted, [{...update, generation: 1}]);
     // The update is in flight: Save is disabled and a repeated Enter
     // or click sends nothing more until the reply re-renders the form.
     assert.ok(form.querySelector('.sidebar-inline-form-save').disabled);
@@ -678,12 +688,12 @@ async function main() {
     form.elements.schedule.dispatchEvent(
       new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
     );
-    eq(posted, [update]);
+    eq(posted, [{...update, generation: 2}]);
     send(win, {type: 'cronJobs', jobs, action: 'update', error: 'still no'});
     form = list.children[0].querySelector('form');
     posted.length = 0;
     form.querySelector('.sidebar-inline-form-save').click();
-    eq(posted, [update]);
+    eq(posted, [{...update, generation: 3}]);
     send(win, {
       type: 'cronJobs',
       jobs,
@@ -710,7 +720,7 @@ async function main() {
     // (the rebuilt form is still waiting for the same reply).
     posted.length = 0;
     form.querySelector('.sidebar-inline-form-save').click();
-    eq(posted, [Object.assign({}, update, {schedule: 'every 3h'})]);
+    eq(posted, [{...update, schedule: 'every 3h', generation: 4}]);
     send(win, {type: 'cronJobs', jobs});
     form = list.children[0].querySelector('form');
     assert.ok(
@@ -740,7 +750,7 @@ async function main() {
     send(win, {type: 'daemonStatus', connected: true});
     posted.length = 0; // the reconnect re-requests the panels
     form.querySelector('.sidebar-inline-form-save').click();
-    eq(posted, [Object.assign({}, update, {schedule: 'every 3h'})]);
+    eq(posted, [{...update, schedule: 'every 3h', generation: 5}]);
     send(win, {type: 'cronJobs', jobs, action: 'update', error: ''});
     assert.strictEqual(list.querySelectorAll('form').length, 0);
     // A poll with no editor open changes nothing.
@@ -887,7 +897,8 @@ async function main() {
       what: 'echo night',
       kind: 'command',
     };
-    eq(posted, [create]);
+    // Each save is stamped with a fresh generation the daemon echoes.
+    eq(posted, [{...create, generation: 1}]);
     // The create is in flight: a second click sends nothing more (the
     // daemon would refuse the duplicate and paint that over the first
     // create's success).
@@ -912,7 +923,11 @@ async function main() {
       'a refusal re-enables Save',
     );
     form.querySelector('.sidebar-inline-form-save').click();
-    eq(posted, [create], 'the Save button sends the create too');
+    eq(
+      posted,
+      [{...create, generation: 2}],
+      'the Save button sends the create too',
+    );
     send(win, {
       type: 'cronJobs',
       jobs,
@@ -1050,6 +1065,111 @@ async function main() {
       action: 'update',
       jobId: 'b',
       error: '',
+    });
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+  });
+
+  await test('Schedule: reordered replies answer the save whose generation they echo', () => {
+    // Two creates (same action, no job id) and two updates of the same
+    // job cannot be told apart by what they name: each save is stamped
+    // with a generation the daemon echoes, and the reply answers that
+    // save, however the replies are ordered.  A daemon echoing none
+    // still answers the oldest (the test above).
+    const {win, posted} = makePage();
+    send(win, {type: 'daemonStatus', connected: true});
+    const list = el(win, 'meta-schedule-list');
+    const jobs = [job({id: 'a', name: 'A'})];
+    send(win, {type: 'cronJobs', jobs});
+    const topForm = () => list.firstElementChild.querySelector('form');
+    const save = form => form.querySelector('.sidebar-inline-form-save');
+    const sent = () => posted.filter(m => m.type === 'cronAction');
+    // The "old" add form is saved and cancelled; the "new" one is saved
+    // in its place.
+    for (const name of ['old', 'new']) {
+      el(win, 'meta-schedule-add').click();
+      const form = topForm();
+      form.elements.name.value = name;
+      form.elements.schedule.value = 'every 5m';
+      form.elements.what.value = 'task ' + name;
+      save(form).click();
+      if (name === 'old') form.querySelector('.sidebar-confirm-no').click();
+    }
+    const [oldAdd, newAdd] = sent();
+    assert.ok(
+      oldAdd.generation && newAdd.generation !== oldAdd.generation,
+      'each create carries its own generation',
+    );
+    // The new create's refusal lands first: it re-arms the new form.
+    send(win, {
+      type: 'cronJobs',
+      jobs,
+      action: 'create',
+      jobId: '',
+      error: 'new refused',
+      generation: newAdd.generation,
+    });
+    assert.ok(!save(topForm()).disabled, "the new form's own refusal re-arms it");
+    assert.strictEqual(topForm().elements.name.value, 'new');
+    // The old create's success then answers the cancelled form: the new
+    // form and its draft stay.
+    const created = jobs.concat([job({id: 'o', name: 'old'})]);
+    send(win, {
+      type: 'cronJobs',
+      jobs: created,
+      action: 'create',
+      jobId: '',
+      error: '',
+      generation: oldAdd.generation,
+    });
+    assert.ok(topForm(), "the old create's success leaves the new form open");
+    assert.strictEqual(topForm().elements.name.value, 'new');
+    topForm().querySelector('.sidebar-confirm-no').click();
+    // Two updates of job a: the first editor is cancelled with its
+    // update in flight, the second saved; its refusal arrives before
+    // the first's success.
+    const rowA = () => list.children[0];
+    const editor = () => rowA().querySelector('form');
+    for (const what of ['a-first', 'a-second']) {
+      rowA().querySelector('.sidebar-item-edit').click();
+      editor().elements.what.value = what;
+      save(editor()).click();
+      if (what === 'a-first') editor().querySelector('.sidebar-confirm-no').click();
+    }
+    const [firstUpdate, secondUpdate] = sent().slice(2);
+    assert.strictEqual(firstUpdate.jobId, 'a');
+    assert.ok(
+      secondUpdate.generation && secondUpdate.generation !== firstUpdate.generation,
+      'each update carries its own generation',
+    );
+    send(win, {
+      type: 'cronJobs',
+      jobs: created,
+      action: 'update',
+      jobId: 'a',
+      error: 'second refused',
+      generation: secondUpdate.generation,
+    });
+    assert.ok(!save(editor()).disabled, "the second editor's own refusal re-arms it");
+    assert.strictEqual(editor().elements.what.value, 'a-second');
+    send(win, {
+      type: 'cronJobs',
+      jobs: created,
+      action: 'update',
+      jobId: 'a',
+      error: '',
+      generation: firstUpdate.generation,
+    });
+    assert.ok(editor(), "the first update's success leaves the second editor open");
+    assert.strictEqual(editor().elements.what.value, 'a-second');
+    // Its own success closes it.
+    save(editor()).click();
+    send(win, {
+      type: 'cronJobs',
+      jobs: created,
+      action: 'update',
+      jobId: 'a',
+      error: '',
+      generation: sent()[4].generation,
     });
     assert.strictEqual(list.querySelectorAll('form').length, 0);
   });
@@ -1794,6 +1914,25 @@ async function main() {
     assert.ok(
       !machinesBtn.disabled && !machinesBtn.classList.contains('spinning'),
     );
+    // A history reply that relabels a machine repaints the Machines
+    // list from the cached reply; a repaint is not a reply, so the
+    // probe in flight keeps its spin.
+    machinesBtn.click();
+    send(win, {
+      type: 'history',
+      sessions: [],
+      offset: 0,
+      generation: 1,
+      machineLabels: {gpu: 'gpu.local'},
+    });
+    assert.ok(
+      machinesBtn.disabled && machinesBtn.classList.contains('spinning'),
+      'a relabel repaint does not stop the machines spin',
+    );
+    send(win, {type: 'machines', machines: [], checkedAt: 2});
+    assert.ok(
+      !machinesBtn.disabled && !machinesBtn.classList.contains('spinning'),
+    );
     // A dropped connection never answers: the buttons recover.
     btn.click();
     machinesBtn.click();
@@ -1802,6 +1941,37 @@ async function main() {
     assert.ok(
       !machinesBtn.disabled && !machinesBtn.classList.contains('spinning'),
     );
+  });
+
+  await test('Machines: a relabel refetches the CHATS rows once page one has landed, not while it is in flight', () => {
+    const {win, posted} = makePage();
+    const requests = () => posted.filter(m => m.type === 'getHistory');
+    // The page's own page-one request is in flight: the `machines`
+    // reply of the `ready` fan-out relabels without a new request
+    // (one would throw the reply in flight away); the reply renders
+    // the rows with the labels known by then.
+    const first = requests();
+    assert.strictEqual(first.length, 1, 'page one requested at boot');
+    posted.length = 0;
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
+    eq(requests(), [], 'no refetch while page one is in flight');
+    send(win, {
+      type: 'history',
+      sessions: [],
+      offset: 0,
+      generation: first[0].generation,
+      machineLabels: {},
+    });
+    // Page one landed: a label the page did not know refetches the
+    // rows, whose machine chips carry the labels.
+    posted.length = 0;
+    send(win, {
+      type: 'machines',
+      machines: [Object.assign({}, MACHINES[2], {label: 'office-mac'})],
+      checkedAt: 2,
+    });
+    assert.strictEqual(requests().length, 1, 'one refetch');
+    assert.strictEqual(requests()[0].offset, 0);
   });
 
   await test('the subpanels are requested once per connection: a repeated connected status asks nothing more', () => {
@@ -2060,20 +2230,35 @@ async function main() {
     const before = columns();
     resize.fn();
     assert.strictEqual(columns(), before, 'zero width: same grid');
+    // jsdom lays nothing out: the heatmap's viewport (a redraw makes a
+    // new one) reports the width set here.  The columns follow THAT
+    // width, not the graph's, which is wider by its padding (review
+    // 2026-11-08, W2): a graph 4px wider than its viewport fits no
+    // more columns than the viewport does.
+    let viewportWidth = 0;
+    Object.defineProperty(win.HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get() {
+        if (this.classList.contains('spend-viewport')) return viewportWidth;
+        return this === graph ? viewportWidth + 4 : 0;
+      },
+    });
     // 1000px fits 71 columns of 11px cells with 3px gaps: the grid
     // grows to fill them (the oldest day is only 29 weeks back).
-    Object.defineProperty(graph, 'clientWidth', {
-      value: 1000,
-      configurable: true,
-    });
+    viewportWidth = 1000;
     resize.fn();
     assert.strictEqual(columns(), 71);
     const dated = cells(win).filter(c => c.dataset.spendDate);
     assert.strictEqual(dated[dated.length - 1].dataset.spendDate, dayKey(0));
     assert.ok(dated.length >= 71 * 7 - 6 && dated.length <= 71 * 7);
-    Object.defineProperty(graph, 'clientWidth', {value: 0, configurable: true});
+    viewportWidth = 0;
     resize.fn();
     assert.strictEqual(columns(), 71, 'narrower: no redraw');
+    // A 1003px viewport fits 71 columns (72 need 1005px); the graph
+    // around it, 1007px, would fit 72.
+    viewportWidth = 1003;
+    resize.fn();
+    assert.strictEqual(columns(), 71, 'BUG - a column the viewport cannot fit was drawn');
   });
 
   await test('Spend: a daemon day ahead of the viewer (another time zone) ends the grid', () => {
@@ -3370,7 +3555,6 @@ async function main() {
   });
 
   report('sidebarPanels');
-  process.exit(0);
 }
 
 main();

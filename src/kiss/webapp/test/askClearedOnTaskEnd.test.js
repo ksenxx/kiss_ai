@@ -30,10 +30,23 @@ function askModalVisible(win) {
 
 // The '?' attention mark a chat shows while it waits for an answer
 // off-screen (a tab on screen never shows it: its question is the composer).
+// Read from the tab's record: the chats below are root tabs of their own
+// groups, and the strip renders only the group on screen, so their mark is
+// never in the DOM.  testSubagentStripBadgeClearedOnEachTerminalEvent reads
+// the rendered `.chat-tab-attention` of a sub-agent that shares the strip.
 function attentionGlyph(win, tabId) {
   const rec = tabRecord(win, tabId);
   assert.ok(rec, `tab ${tabId} must be open`);
   return rec.askPending && tabId !== win._testApi.getActiveTabId() ? '?' : '';
+}
+
+// The rendered attention mark of a tab on the strip (null without one).
+function stripBadge(win, tabId) {
+  const el = win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id="${tabId}"]`,
+  );
+  assert.ok(el, `tab ${tabId} must be on the strip`);
+  return el.querySelector('.chat-tab-attention');
 }
 
 // The Question panel in the transcript is the whole notice: neither a
@@ -133,6 +146,51 @@ function testBackgroundAskClearedOnEachTerminalEvent() {
     win.close();
   }
   console.log('  ok - an ending task clears its background question badge');
+}
+
+// A sub-agent shares its parent's strip, so its badge is a real element
+// there: the terminal event must take that element away, not only the
+// record's flag.
+function testSubagentStripBadgeClearedOnEachTerminalEvent() {
+  for (const type of TERMINAL_EVENTS) {
+    const win = makePage();
+    const api = win._testApi;
+    const parentTab = api.getActiveTabId();
+    const subTab = 'sub-' + type;
+    send(win, {
+      type: 'openSubagentTab',
+      tab_id: subTab,
+      parent_tab_id: parentTab,
+      description: 'child',
+      task_id: 'task-' + subTab,
+      taskIndex: 0,
+      isSubagentTab: true,
+    });
+
+    send(win, {type: 'askUser', question: 'Continue?', tabId: subTab});
+    assert.strictEqual(api.getActiveTabId(), subTab);
+    clickTab(win, parentTab);
+    const badge = stripBadge(win, subTab);
+    assert.ok(badge, `${type}: the waiting sub-agent must be flagged first`);
+    assert.strictEqual(badge.textContent, '?');
+
+    send(win, {type: type, tabId: subTab, success: true});
+
+    assert.strictEqual(
+      stripBadge(win, subTab),
+      null,
+      `${type} must take the badge off the sub-agent's strip entry`,
+    );
+    assert.strictEqual(
+      attentionGlyph(win, subTab),
+      '',
+      `${type} must clear the sub-agent's record too`,
+    );
+    assert.strictEqual(askModalVisible(win), false);
+
+    win.close();
+  }
+  console.log("  ok - an ending task clears its sub-agent's strip badge");
 }
 
 // Ending one task must not silence a question that another chat is still
@@ -279,6 +337,7 @@ function testTerminalEventWithoutQuestionIsHarmless() {
 const TESTS = [
   testActiveTabAskClearedOnEachTerminalEvent,
   testBackgroundAskClearedOnEachTerminalEvent,
+  testSubagentStripBadgeClearedOnEachTerminalEvent,
   testUnrelatedTabKeepsItsQuestion,
   testSameChatIdSiblingKeepsItsQuestion,
   testTerminalEventWithoutQuestionIsHarmless,

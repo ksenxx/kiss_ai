@@ -12,9 +12,13 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const h = require('./ui_antipattern_harness');
 
 const {test, report} = h.makeRunner();
+
+const TIPS_JS = path.join(__dirname, '..', 'media', 'tips.js');
 
 function isOpen(win, id) {
   return h.byId(win, id).classList.contains('open');
@@ -88,6 +92,30 @@ async function main() {
     assert.ok(!isOpen(win, modal), 'Escape closed the confirm');
     assert.ok(isOpen(win, 'settings-panel'), 'the sheet under it stays open');
     assert.strictEqual(h.ofType(posted, 'serverReset').length, 0);
+    win.close();
+  });
+
+  await test('the Tips dialog consumes Escape; settings under it stays open', () => {
+    const {win} = h.makePage();
+    win.__TIPS__ = {tips: ['One', 'Two'], show: false};
+    win.eval(fs.readFileSync(TIPS_JS, 'utf8'));
+    h.click(win, h.byId(win, 'settings-btn'));
+    assert.ok(isOpen(win, 'settings-panel'), 'precondition: sheet open');
+    h.click(win, h.byId(win, 'tips-btn'));
+    const host = win.document.querySelector('kiss-tips-panel');
+    assert.ok(host, 'precondition: tips open');
+    // Escape pressed with focus inside the dialog, as a keyboard event
+    // crosses the shadow boundary.
+    const close = host.shadowRoot.querySelector('.tips-close');
+    close.focus();
+    h.key(win, close, 'Escape', {composed: true});
+    assert.ok(!win.document.querySelector('kiss-tips-panel'), 'tips closed');
+    assert.ok(isOpen(win, 'settings-panel'), 'the sheet under it stays open');
+    escape(win);
+    assert.ok(
+      !isOpen(win, 'settings-panel'),
+      'a second Escape closes the sheet',
+    );
     win.close();
   });
 

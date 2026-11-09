@@ -15,11 +15,13 @@ call would prove the relay ran when it must not.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any, cast
 
 from kiss.agents.seas.sh import sh_sea
-from kiss.agents.sorcar import persistence, sea_commands
+from kiss.agents.sorcar import local_endpoint, persistence, sea_commands
 from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import sorcar
@@ -168,3 +170,83 @@ class Sea(BaseSea):
         assert row is not None
         types = [e.get("type") for e in cast(list[dict[str, Any]], row["events"])]
         assert types[-1] == "task_error", types
+
+    def test_a_viewer_attached_during_help_receives_the_answer(self) -> None:
+        """A tab that resumes the chat while ``description()`` runs gets the help result too."""
+        sea = self._register_user_sea(
+            "slowhelp", """
+import pathlib
+import time
+
+from kiss.agents.seas.base.base_sea import BaseSea
+
+_DIR = pathlib.Path(__file__).resolve().parent
+
+
+class Sea(BaseSea):
+    def description(self):
+        (_DIR / "entered").write_text("1", encoding="utf-8")
+        deadline = time.time() + 60
+        while time.time() < deadline and not (_DIR / "release").exists():
+            time.sleep(0.02)
+        return "slowhelp: the help text"
+""",
+        )
+        calls: list[dict[str, Any]] = []
+        self._install_counting_stub(calls)
+        seed = sorcar.run(
+            "/sh help", work_dir=self.repo, endpoint_file=self.endpoint_file, timeout=60,
+        )
+        assert seed.success is True and seed.chat_id, seed
+        out: dict[str, Any] = {}
+
+        def run_help() -> None:
+            out["result"] = sorcar.run(
+                "/slowhelp help",
+                work_dir=self.repo,
+                chat_id=seed.chat_id,
+                endpoint_file=self.endpoint_file,
+                timeout=60,
+            )
+
+        launcher = threading.Thread(target=run_help, daemon=True)
+        launcher.start()
+        viewer_events: list[dict[str, Any]] = []
+        viewer = local_endpoint.connect(Path(self.endpoint_file), open_timeout=60)
+        try:
+            deadline = time.monotonic() + 30
+            while not (sea.parent / "entered").exists():
+                assert time.monotonic() < deadline, "description() never ran"
+                time.sleep(0.02)
+            # A second surface opens the chat while the help runs: it
+            # attaches to the run and is told it is running.
+            viewer.send(json.dumps({
+                "type": "resumeSession", "chatId": seed.chat_id, "tabId": "viewer-tab",
+            }))
+            while True:
+                event = json.loads(viewer.recv(timeout=60))
+                if event.get("tabId") != "viewer-tab":
+                    continue
+                viewer_events.append(event)
+                if event.get("type") == "status" and event.get("running"):
+                    break
+            (sea.parent / "release").write_text("1", encoding="utf-8")
+            # The run's end reaches the viewer; the answer must have
+            # reached it first.
+            while True:
+                event = json.loads(viewer.recv(timeout=60))
+                if event.get("tabId") != "viewer-tab":
+                    continue
+                viewer_events.append(event)
+                if event.get("type") == "status" and not event.get("running"):
+                    break
+        finally:
+            (sea.parent / "release").write_text("1", encoding="utf-8")
+            viewer.close()
+            launcher.join(timeout=60)
+        assert out["result"].success is True and out["result"].text == "slowhelp: the help text"
+        results = [e for e in viewer_events if e.get("type") == "result"]
+        assert [e["text"] for e in results] == ["slowhelp: the help text"], [
+            (e.get("type"), e.get("text")) for e in viewer_events
+        ]
+        assert calls == []

@@ -23,6 +23,7 @@ const {
   stubRaf,
   fakeMatchMedia,
   fakeIntervals,
+  pickMachine,
 } = require('./simplify2_harness');
 
 const MACHINES = [
@@ -75,13 +76,6 @@ function makePage(desktop) {
   send(win, {type: 'configData', config: {}, machine: 'laptop'});
   send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
   return {win, posted};
-}
-
-/** Pick *machine* in the chat header's drop-down. */
-function pickMachine(win, machine) {
-  const select = win.document.getElementById('chat-machine');
-  select.value = machine;
-  select.dispatchEvent(new win.Event('change', {bubbles: true}));
 }
 
 /** gpu-box's forwarded `machines` reply. */

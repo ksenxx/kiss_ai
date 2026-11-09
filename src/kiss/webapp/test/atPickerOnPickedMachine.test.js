@@ -119,6 +119,30 @@ function testATabOnThisMachineAsksThisDaemon() {
   ]);
 }
 
+function testAMentionPickedWithTheCaretInsideTheWordReplacesIt() {
+  const {win, posted} = bootOnGpuBox();
+  pickMachine(win, '');
+  posted.length = 0;
+  const inp = byId(win, 'task-input');
+  // An edit of a typed mention: the caret sits at "@re|port.md".
+  inp.value = '@report.md summarize';
+  inp.setSelectionRange(3, 3);
+  inp.dispatchEvent(new win.Event('input', {bubbles: true}));
+  assertJsonEqual(
+    msgs(posted, 'getFiles').map(m => m.prefix),
+    ['re'],
+  );
+  answerFiles(win, 're', [{type: 'file', text: './report.md'}], '');
+  byId(win, 'autocomplete').querySelector('.ac-item').click();
+  assert.strictEqual(
+    inp.value,
+    './report.md summarize',
+    "BUG - the old mention's tail after the caret survived the completion",
+  );
+  // The space after the word is kept, not doubled.
+  assert.strictEqual(inp.selectionStart, './report.md'.length);
+}
+
 function testALateListOfThePreviousMachineIsDropped() {
   const {win} = bootOnGpuBox();
   typeInto(win, byId(win, 'task-input'), '@ma');
@@ -130,6 +154,35 @@ function testALateListOfThePreviousMachineIsDropped() {
   // gpu-box's list arrives late: it does not answer this mention.
   answerFiles(win, 'ma', [{type: 'file', text: './main_remote.py'}], 'gpu-box');
   assertJsonEqual(pickerItems(win), ['./make_local.py']);
+}
+
+function testALateListDoesNotReopenADismissedPicker() {
+  // Escape (or a blur) dismisses the picker: the list still on its way
+  // for the mention typed before does not reopen it; the next keystroke
+  // asks again and that answer shows.
+  const {win} = bootOnGpuBox();
+  const inp = byId(win, 'task-input');
+  typeInto(win, inp, '@a');
+  answerFiles(win, 'a', [{type: 'file', text: './alpha.js'}], 'gpu-box');
+  assertJsonEqual(pickerItems(win), ['./alpha.js']);
+  typeInto(win, inp, '@ab');
+  inp.dispatchEvent(
+    new win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}),
+  );
+  assertJsonEqual(pickerItems(win), [], 'Escape closes the picker');
+  answerFiles(win, 'ab', [{type: 'file', text: './abc.js'}], 'gpu-box');
+  assertJsonEqual(
+    pickerItems(win),
+    [],
+    'BUG: the late list reopened the picker the user dismissed',
+  );
+  typeInto(win, inp, '@abc');
+  answerFiles(win, 'abc', [{type: 'file', text: './abc.js'}], 'gpu-box');
+  assertJsonEqual(pickerItems(win), ['./abc.js'], 'typing on asks again');
+  inp.dispatchEvent(new win.FocusEvent('blur'));
+  assertJsonEqual(pickerItems(win), [], 'a blur closes the picker');
+  answerFiles(win, 'abc', [{type: 'file', text: './abcd.js'}], 'gpu-box');
+  assertJsonEqual(pickerItems(win), [], 'and keeps it closed');
 }
 
 function testAMachineStillIndexingIsAskedAgain() {
@@ -166,8 +219,16 @@ const tests = [
     testAMachineStillIndexingIsAskedAgain,
   ],
   [
-    "a late list of the previous machine is dropped",
+    'a late list of the previous machine is dropped',
     testALateListOfThePreviousMachineIsDropped,
+  ],
+  [
+    'a late list does not reopen a dismissed picker',
+    testALateListDoesNotReopenADismissedPicker,
+  ],
+  [
+    'a mention picked with the caret inside the word replaces it',
+    testAMentionPickedWithTheCaretInsideTheWordReplacesIt,
   ],
   [
     "an unknown folder means the machine's own",

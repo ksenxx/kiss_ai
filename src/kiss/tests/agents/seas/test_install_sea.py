@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import stat
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -29,7 +28,7 @@ from kiss.agents.seas.install.install_sea import (
 )
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.machines import Machine, save_machines
-from kiss.tests.agents.seas.conftest import run_sea
+from kiss.tests.agents.seas.conftest import git, run_sea
 from kiss.tests.agents.seas.sea_contract import (
     assert_worker_contract,
     system_message,
@@ -76,8 +75,8 @@ def make_checkout(home: Path, name: str, origin: str) -> Path:
     """Create ``home/name``, a git checkout with *origin* and the stand-in ``install.sh``."""
     checkout = home / name
     checkout.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
-    subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin", origin], check=True)
+    git(checkout, "init", "-q")
+    git(checkout, "remote", "add", "origin", origin)
     script = checkout / "install.sh"
     script.write_text(INSTALL_SH)
     script.chmod(script.stat().st_mode | stat.S_IXUSR)

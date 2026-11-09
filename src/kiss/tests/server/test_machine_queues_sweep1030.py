@@ -20,6 +20,10 @@ waiting out ``REQUEST_TIMEOUT``).
   after another, before the one for the mention on screen.  Of the
   requests that waited together behind one on its way, only the last is
   forwarded now; the page drops every list but the current one anyway.
+* Regression (audit A13): the per-machine locks are keyed by the name
+  the client sent and were never dropped, so every unknown or retired
+  name ever asked about kept a lock for the daemon's life.  A lock now
+  lives only while a request for its name is in flight.
 
 A ``ping`` answered with ``pong`` marks the point where the daemon has
 dispatched every frame sent before it (it reads a connection's frames
@@ -126,6 +130,10 @@ class TestMachineQueues(IsolatedAsyncioTestCase):
         shutil.copyfile(self.certfile, machine.cert_file())
         mach.save_machines([*mach.load_machines(), machine])
 
+    async def _replies_done(self) -> None:
+        """Wait for every background reply the daemon has in flight."""
+        await asyncio.gather(*list(self.server._server_api._background_replies))
+
     async def test_a_stalled_machine_holds_up_no_other_machines_work_dirs(self) -> None:
         self._register_silent_machine("mute")
         started = time.monotonic()
@@ -157,6 +165,29 @@ class TestMachineQueues(IsolatedAsyncioTestCase):
         self.assertEqual(added["action"], "add")
         self.assertNotEqual(added["error"], "")
         self.assertEqual([m["name"] for m in added["machines"]][1:], [])
+        # Neither name is asked about any more: no lock is kept for them.
+        await self._replies_done()
+        self.assertEqual(self.server._server_api._machine_locks, {})
+
+    async def test_a_machines_lock_lives_only_while_its_requests_are_in_flight(self) -> None:
+        api = self.server._server_api
+        await self._send({"type": "getMachineWorkDirs", "machine": "nope"})
+        self.assertEqual((await self._read("machineWorkDirs"))["machine"], "nope")
+        await self._replies_done()
+        # BUG: ``nope`` (a name nobody will ask about again) kept a lock.
+        self.assertEqual(api._machine_locks, {})
+        self._register_silent_machine("mute")
+        await self._send({"type": "getMachineWorkDirs", "machine": "mute"})
+        await self._send({"type": "getMachineWorkDirs", "machine": "mute"})
+        await self._ping()  # the first stalls in its handshake, the second waits for the lock
+        self.assertEqual(list(api._machine_locks), ["mute"])
+        self.silent.close()  # mute's handshakes fail now
+        for _ in range(2):
+            self.assertEqual((await self._read("machineWorkDirs"))["machine"], "mute")
+        await self._replies_done()
+        # The lock went with its last user, and the second request did
+        # not create a lock of its own meanwhile.
+        self.assertEqual(api._machine_locks, {})
 
     async def test_an_add_without_a_name_queues_under_the_hosts_name(self) -> None:
         # The machine an add without a name registers is named after the

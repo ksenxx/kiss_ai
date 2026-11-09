@@ -82,6 +82,44 @@ _REFUSED = {"error": "KISSError: the KISS tool bridge is closed"}
 # The reply to a request without the bridge's secret.
 _UNAUTHENTICATED = {"error": "KISSError: unauthenticated KISS tool bridge request"}
 
+#: Longest request line a handler reads (a tool call's arguments, as one
+#: JSON line); a longer one is dropped.
+_MAX_REQUEST_BYTES = 64 * 1024 * 1024
+
+
+def _read_request_line(sock: socket.socket, deadline: float) -> bytes:
+    """Read one line from *sock* by ``time.monotonic()`` *deadline*; ``b""`` without one.
+
+    A plain ``readline`` is bounded per read, which a client sending a
+    byte within the socket's timeout every time resets for good; this
+    read is bounded as a whole and in size (:data:`_MAX_REQUEST_BYTES`).
+
+    Args:
+        sock: The accepted connection.
+        deadline: When to give up.
+
+    Returns:
+        The line with its newline, or ``b""`` when the client hung up,
+        went past the deadline or the size cap first.
+    """
+    timeout = sock.gettimeout()
+    line = bytearray()
+    try:
+        while not line.endswith(b"\n"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or len(line) >= _MAX_REQUEST_BYTES:
+                return b""
+            sock.settimeout(remaining)
+            # Never past the cap: a line crossing it inside a receive
+            # would otherwise be accepted whole.
+            chunk = sock.recv(min(65536, _MAX_REQUEST_BYTES - len(line)))
+            if not chunk:
+                return b""
+            line += chunk
+    finally:
+        sock.settimeout(timeout)  # the reply's write keeps its own bound
+    return bytes(line)
+
 
 class ServedCall(NamedTuple):
     """One tool call the bridge answered: what Codex asked and what it got back."""
@@ -224,7 +262,7 @@ class _BridgeServer(socketserver.ThreadingTCPServer):
 
         The usual cause is a proxy that went away (Codex exited) before
         the reply was written, or a connection that never sent its
-        request line within :attr:`_BridgeHandler.timeout`.
+        request line within :data:`REQUEST_TIMEOUT_SECONDS`.
 
         Args:
             request: The connection the handler was serving.
@@ -233,23 +271,26 @@ class _BridgeServer(socketserver.ThreadingTCPServer):
         logger.debug("KISS MCP bridge request failed", exc_info=True)
 
 
+# Bound on the whole read of a request line and on each write
+# (``StreamRequestHandler`` sets ``timeout`` on the accepted socket).  The
+# proxy sends its request line the moment it connects and reads the reply
+# at once, so a connection that has not finished its line this long is a
+# client that never will (silent, or sending a byte now and then): the
+# handler fails and its socket is closed instead of waiting for good, since
+# ``ToolBridge._close`` joins only the handlers executing a call.  The
+# tool's execution itself is no socket I/O and is not bounded by this.
+REQUEST_TIMEOUT_SECONDS = 5.0
+
+
 class _BridgeHandler(socketserver.StreamRequestHandler):
     """Handle one request: read a JSON line, answer with a JSON line."""
 
-    # Bound on each socket read and write (``StreamRequestHandler`` sets
-    # it on the accepted socket).  The proxy sends its request line the
-    # moment it connects and reads the reply at once, so a connection
-    # silent this long is a client that will never finish its line: the
-    # handler fails and its socket is closed instead of waiting for good,
-    # since ``ToolBridge._close`` joins only the handlers executing a
-    # call.  The tool's execution itself is no socket I/O and is not
-    # bounded by this.
-    timeout = 5.0
+    timeout = REQUEST_TIMEOUT_SECONDS
 
     def handle(self) -> None:
         """Dispatch the request to the tool list or the tool executor."""
         server = cast(_BridgeServer, self.server)
-        line = self.rfile.readline()
+        line = _read_request_line(self.connection, time.monotonic() + REQUEST_TIMEOUT_SECONDS)
         if not line:  # the client connected and hung up without asking
             return
         request = json.loads(line.decode("utf-8"))

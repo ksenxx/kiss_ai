@@ -37,6 +37,7 @@ from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.tests.conftest import seed_worktree
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 
 @pytest.fixture(autouse=True)
@@ -162,7 +163,7 @@ def test_index_only_work_is_listed_and_kept(tmp_path: Path) -> None:
     agent = agent_state.find_by_tab("staged-tab").agent  # type: ignore[union-attr]
     assert agent is not None
 
-    assert server._get_worktree_changed_files("staged-tab") == ["tracked.txt"]
+    assert worktree_changed_files(server, "staged-tab") == ["tracked.txt"]
     # Post-task path (the runner discards when nothing was presented),
     # then the session-resume path (which discards itself).
     assert server._present_pending_worktree("staged-tab", discard_if_empty=False) is True

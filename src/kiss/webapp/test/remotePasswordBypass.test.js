@@ -12,6 +12,7 @@ const {JSDOM, VirtualConsole} = require('jsdom');
 const {fakeIntervals, sleep} = require('./simplify2_harness');
 const {
   installFakeWebSocket,
+  installFakeTimers,
   readShimJs,
   bootShim,
   ok,
@@ -539,7 +540,8 @@ async function run() {
       // The page keeps its state: no reload.  main.js hears
       // `connected: true` and re-sends `ready` itself, which is what
       // resyncs it with the server.  The flushed batch is followed by
-      // a `ping` whose `pong` confirms the server took it.
+      // a `ping` whose `pong` confirms the server took it; until then
+      // the status names the batch as unconfirmed.
       assert.strictEqual(reloads.length, 0, 'a re-auth never reloads the page');
       const types = s2.sent.map(d => JSON.parse(d).type);
       assert.deepStrictEqual(
@@ -550,8 +552,17 @@ async function run() {
       );
       assert.deepStrictEqual(
         plain(statusFrames),
-        [{type: 'daemonStatus', connected: true}],
-        'the app is told the socket is back, after the flush',
+        [
+          {
+            type: 'daemonStatus',
+            connected: true,
+            unconfirmed: [
+              {type: 'saveConfig', config: {edited: 'during the outage'}},
+            ],
+          },
+        ],
+        'the app is told the socket is back, after the flush, and which ' +
+          'commands the server has not confirmed yet',
       );
       s2.fireMessage({type: 'pong'});
       assert.ok(
@@ -595,6 +606,7 @@ async function run() {
       assert.deepStrictEqual(plain(statusFrames[statusFrames.length - 1]), {
         type: 'daemonStatus',
         connected: true,
+        unconfirmed: [],
       });
       ok('re-auth after a lost session resyncs in place, never reloads');
     } catch (err) {
@@ -817,11 +829,7 @@ async function run() {
     // Record the shim's timers instead of sleeping across the 1 s
     // lockout: the reconnect it arms is fired by hand below, so the
     // check does not depend on the wall clock under a loaded runner.
-    const timers = [];
-    window.setTimeout = function (fn, ms) {
-      timers.push({fn, ms});
-      return timers.length;
-    };
+    const timers = installFakeTimers(window);
     bootShim(window);
     const sock = sockets[0];
     sock.fireOpen();
@@ -903,11 +911,7 @@ async function run() {
 
   {
     const {window, sockets} = page({noModal: true});
-    const timers = [];
-    window.setTimeout = function (fn, ms) {
-      timers.push({fn, ms});
-      return timers.length;
-    };
+    const timers = installFakeTimers(window);
     bootShim(window);
     const sock = sockets[0];
     sock.fireOpen();
@@ -1121,6 +1125,9 @@ async function run() {
     // browsing session: when the page fetch keeps timing out while the
     // WebSocket works, the second cached load must not loop.
     const reloads = [];
+    // What the first page leaves in sessionStorage for the next cached
+    // load of the same tab (jsdom gives every window a storage of its own).
+    let persisted = null;
     const {
       window,
       sockets,
@@ -1171,6 +1178,7 @@ async function run() {
         '1',
         'the reload is recorded for the next page instance',
       );
+      persisted = window.sessionStorage.getItem('sorcar-offline-reloaded');
       assert.deepStrictEqual(
         s0.sent.map(d => JSON.parse(d).type),
         ['auth'],
@@ -1187,7 +1195,10 @@ async function run() {
     }
     window.close();
 
-    // Storage that fails at reload time (quota) cannot stop the reload.
+    // Storage that cannot take the guard (quota): no reload.  The next
+    // cached load would find no guard and reload again, and so on for as
+    // long as the page fetch fails; the page runs its cached code instead,
+    // as a second cached load does, and authenticates.
     const {window: wq, sockets: socketsQ} = page({offlineShell: true, reloads});
     bootShim(wq);
     socketsQ[0].fireOpen();
@@ -1201,28 +1212,37 @@ async function run() {
     try {
       assert.strictEqual(
         reloads.length,
-        2,
-        'the reload happens even when the guard cannot be written',
+        1,
+        'a page that cannot record its reload does not reload',
       );
-      ok('an unwritable guard does not stop the offline-shell reload');
+      assert.strictEqual(
+        wq.sessionStorage.getItem('sorcar-offline-reloaded'),
+        null,
+        'nothing is left for the next load to go on',
+      );
+      assert.ok(
+        isVisible(wq.document.getElementById('app')),
+        'the page authenticates and is revealed',
+      );
+      ok('an unwritable guard means no offline-shell reload');
     } catch (err) {
       fail('offline shell reload with failing storage broken', err);
     }
     wq.close();
 
-    // Second cached load in the same session: the guard holds, and the
-    // page is a normal live page from here on (a later drop resyncs it
-    // in place like any other).
+    // Second cached load in the same session, with what the first page
+    // persisted: the guard holds, and the page is a normal live page from
+    // here on (a later drop resyncs it in place like any other).
     const pg2 = page({offlineShell: true, reloads});
     const {window: w2, sockets: sockets2} = pg2;
-    w2.sessionStorage.setItem('sorcar-offline-reloaded', '1');
+    w2.sessionStorage.setItem('sorcar-offline-reloaded', persisted);
     bootShim(w2);
     sockets2[0].fireOpen();
     sockets2[0].fireMessage({type: 'auth_ok'});
     try {
       assert.strictEqual(
         reloads.length,
-        2,
+        1,
         'no second reload: the cached page is kept',
       );
       assert.ok(
@@ -1239,7 +1259,7 @@ async function run() {
       sockets2[1].fireMessage({type: 'auth_ok'});
       assert.strictEqual(
         reloads.length,
-        2,
+        1,
         'a kept cached page reconnects without reloading',
       );
       ok('a repeated offline-cached load does not reload again');
@@ -1270,12 +1290,7 @@ async function run() {
     // (every 15 s; the server sends a heartbeat frame every 15 s) must
     // drop a socket that has been silent for 45 s and reconnect.
     const {window, sockets, statuses, appFrames} = page({noOverlay: true});
-    const timers = [];
-    window.setTimeout = function (fn, ms) {
-      timers.push({fn, ms});
-      return timers.length;
-    };
-    window.clearTimeout = function () {};
+    const timers = installFakeTimers(window);
     let now = 1000000;
     window.Date.now = () => now;
     bootShim(window);
@@ -2471,12 +2486,7 @@ async function run() {
       const sockets = [];
       installFakeWebSocket(window, sockets, {connecting: true});
       window.name = name;
-      const timers = [];
-      window.setTimeout = function (fn, ms) {
-        timers.push({fn, ms});
-        return timers.length;
-      };
-      window.clearTimeout = function () {};
+      const timers = installFakeTimers(window);
       bootShim(window);
       const delays = [];
       for (let i = 0; i < 10; i++) {

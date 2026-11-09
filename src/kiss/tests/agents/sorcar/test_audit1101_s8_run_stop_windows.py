@@ -27,6 +27,7 @@ on them.  Real history database and printer; nothing is mocked.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
@@ -109,10 +110,12 @@ def _task_rows(home: IsolatedKissHome) -> list[tuple[str, str, int]]:
         return db.execute("SELECT id, result, end_ts FROM task_history").fetchall()
 
 
-def _stop_in_the_publication(home: IsolatedKissHome, **run_kwargs: Any) -> _Worker:
+def _stop_in_the_publication(
+    home: IsolatedKissHome, printer: JsonPrinter | None = None, **run_kwargs: Any,
+) -> _Worker:
     """Run the agent and Stop it while ``run`` waits to publish the allocated task id."""
     agent = ChatSorcarAgent("audit1101-stop-at-publication")
-    worker = _Worker(agent, CapturePrinter(), home.repo, **run_kwargs)
+    worker = _Worker(agent, printer or CapturePrinter(), home.repo, **run_kwargs)
     publication = Pause(
         locked_call.__code__,
         lambda frame_locals: frame_locals.get("lock") is agent._task_id_lock
@@ -133,14 +136,30 @@ def _stop_in_the_publication(home: IsolatedKissHome, **run_kwargs: Any) -> _Work
 
 
 def test_stop_while_publishing_the_task_id_finalises_the_row(home: IsolatedKissHome) -> None:
-    worker = _stop_in_the_publication(home)
+    # Audit 2026-11-08 S1/F4: the calling task is live and recording under
+    # the binding the stopped run never replaced; the run's cleanup must
+    # stop its own recording only, not the caller's.
+    printer = CapturePrinter()
+    caller = ChatSorcarAgent("audit1101-caller")
+    printer._thread_local.task_id = CALLER_BINDING
+    printer.agent_task_allocated(caller, CALLER_BINDING, "caller-chat")
+    printer.start_recording()
+    printer.broadcast({"type": "text_delta", "text": "caller-before", "task_id": CALLER_BINDING})
+    try:
+        worker = _stop_in_the_publication(home, printer)
 
-    rows = _task_rows(home)
-    assert len(rows) == 1, rows
-    _task_id, result, end_ts = rows[0]
-    assert result == "Task interrupted"
-    assert end_ts > 0
-    assert worker.binding_after == [CALLER_BINDING]
+        rows = _task_rows(home)
+        assert len(rows) == 1, rows
+        _task_id, result, end_ts = rows[0]
+        assert result == "Task interrupted"
+        assert end_ts > 0
+        assert worker.binding_after == [CALLER_BINDING]
+        assert agent_state.agent_states[CALLER_BINDING].is_task_active
+        # The caller's recording is still live: its own stop returns it.
+        texts = [event.get("text") for event in printer.stop_recording()]
+        assert texts == ["caller-before"], texts
+    finally:
+        printer.agent_task_finished(caller, CALLER_BINDING)
 
 
 def test_stop_while_publishing_persists_a_runner_owned_row_too(home: IsolatedKissHome) -> None:
@@ -185,6 +204,35 @@ def test_second_stop_in_the_finish_hook_completes_the_cleanup(home: IsolatedKiss
             if state.task_id == task_id and state.is_task_active
         ]
     assert active == []
+    assert worker.binding_after == [CALLER_BINDING]
+    rows = {row[0]: row[1:] for row in _task_rows(home)}
+    assert rows[task_id][0] == "Task interrupted"
+    assert rows[task_id][1] > 0
+
+
+class _RecordingStaysLive(CapturePrinter):
+    """A printer whose recording cannot be retired: the failure is logged, never hidden."""
+
+    def stop_recording(self) -> list[dict[str, Any]]:
+        raise RuntimeError("the recording could not be retired")
+
+
+def test_a_failing_stop_recording_is_logged_and_the_cleanup_completes(
+    home: IsolatedKissHome, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``stop_recording`` raising leaves the recording live for good: silent before, logged now."""
+    agent = ChatSorcarAgent("audit1101-stop-recording-fails")
+    worker = _Worker(agent, _RecordingStaysLive(), home.repo,
+                     _on_task_id_allocated=_stop_in_own_thread)
+    with caplog.at_level(logging.WARNING, logger="kiss.agents.sorcar.chat_sorcar_agent"):
+        worker.thread.start()
+        worker.join()
+    assert [type(exc) for exc in worker.errors] == [KeyboardInterrupt]
+    task_id = agent.last_task_id
+    logged = [r for r in caplog.records if r.getMessage() == f"stop_recording({task_id!r}) raised"]
+    assert len(logged) == 1 and logged[0].exc_info is not None
+    assert logged[0].exc_info[0] is RuntimeError
+    # The remaining cleanup steps still ran.
     assert worker.binding_after == [CALLER_BINDING]
     rows = {row[0]: row[1:] for row in _task_rows(home)}
     assert rows[task_id][0] == "Task interrupted"

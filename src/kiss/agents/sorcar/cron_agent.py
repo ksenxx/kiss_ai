@@ -97,12 +97,12 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from kiss.agents.seas.base.base_sea import ChannelSea
-from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.history_columns import CRON_TASK_MARKER
 from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
-from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
+from kiss.core.locked import locked_call
+from kiss.core.processes import SIGKILL, kill_process_group, pid_alive, popen_process_group
 from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
 
 logger = logging.getLogger(__name__)
@@ -115,11 +115,13 @@ _running: dict[str, threading.Thread] = {}
 """Job id -> thread of every job run in progress in this process.
 
 Ticks register the thread they launch, ``run_now`` the calling thread.
-Process-local (the JSON store holds no lease): a tick treats a job whose
-thread is still alive as not due and ``run_now`` refuses it, so a run
-that outlasts the job's interval is never overlapped in the same
-process.  ``kiss-cron --tick`` in another process cannot see these runs
-and may still overlap them.
+Process-local: a tick treats a job whose thread is still alive as not
+due and ``run_now`` refuses it, so a run that outlasts the job's
+interval is never overlapped in the same process.  Another process
+(``kiss-cron --tick`` beside the daemon's scheduler) cannot see these
+threads: it finds the run on the stored job instead, whose
+``running_pid`` every launch records and the run's outcome removes
+(:func:`_running_elsewhere`).
 """
 
 _daemon_endpoint_file: str | None = None
@@ -273,13 +275,17 @@ def load_jobs(strict: bool = False, path: Path | None = None) -> list[dict[str, 
 
     Raises:
         ValueError: ``strict`` and the store exists but is unreadable or
-            not a JSON list.
+            not a JSON list (the message says which).
     """
     try:
         data = json.loads(read_bytes_waiting_for_writer(path or _jobs_path()).decode("utf-8"))
     except FileNotFoundError:
         return []
-    except (OSError, ValueError):
+    except OSError as exc:
+        if strict:
+            raise ValueError(f"the cron job store cannot be read: {exc}") from exc
+        return []
+    except ValueError:
         data = None
     if not isinstance(data, list):
         if strict:
@@ -589,8 +595,15 @@ def failure_backoff_seconds(streak: int) -> float:
 
 
 def _same_failure(job: dict[str, Any], text: str | None) -> bool:
-    """Return whether *text* repeats the job's previous failed result (same first line)."""
+    """Return whether *text* repeats the job's previous failed result (same first line).
+
+    A previous failure a target did not get (its delivery note is an
+    error) is no repeat: the user has not read it, so it is delivered
+    again.
+    """
     if job.get("last_status") in (None, "ok", "silent") or not text:
+        return False
+    if any(str(note).startswith("error") for note in job.get("last_delivery") or []):
         return False
     previous = str(job.get("last_summary") or "")
     return _first_line(previous) == _first_line(text) != ""
@@ -890,12 +903,16 @@ def _run_outcome(summary: str, success: bool) -> tuple[str, str | None]:
         success: Whether the run succeeded.
 
     Returns:
-        ``("silent", None)`` for an empty or ``[SILENT]`` summary,
-        otherwise ``("ok" | "error", summary)``.
+        ``("silent", None)`` for a successful run with an empty or
+        ``[SILENT]`` summary, ``("ok", summary)`` for any other success,
+        ``("error", summary)`` for a failed run (``"Task failed"`` when
+        its summary is empty or silent: a failure covers no window,
+        however quiet it is).
     """
-    if not summary or _is_silent(summary):
-        return "silent", None
-    return ("ok" if success else "error"), summary
+    silent = not summary or _is_silent(summary)
+    if success:
+        return ("silent", None) if silent else ("ok", summary)
+    return "error", ("Task failed" if silent else summary)
 
 
 def _job_timeout(job: dict[str, Any], default: float) -> float:
@@ -917,6 +934,25 @@ def _job_budget(job: dict[str, Any]) -> float | None:
     """Return the per-run USD budget of *job* (``max_budget``); ``None`` is the daemon default."""
     raw_budget = job.get("max_budget")
     return float(raw_budget) if raw_budget else None
+
+
+class UnresolvedRunError(TimeoutError):
+    """A prompt job's run ended while its daemon task may still be running.
+
+    Raised by :func:`_run_prompt_job` for a timeout whose stop the
+    daemon never confirmed or a daemon connection lost while the task
+    ran; the message is the complete error to record.
+
+    Attributes:
+        task_id: The daemon's ``task_history`` row id of the task, which
+            claims the job until the row is finished (see
+            :func:`_claimed_task_id`); ``""`` when the run ended before
+            the daemon named one, so nothing is known to be running.
+    """
+
+    def __init__(self, message: str, task_id: str = "") -> None:
+        super().__init__(message)
+        self.task_id = task_id
 
 
 def _run_in_chat_job(
@@ -945,7 +981,7 @@ def _run_in_chat_job(
         output file by the caller.
 
     Raises:
-        TimeoutError: When the run timed out but the daemon never
+        UnresolvedRunError: When the run timed out but the daemon never
             confirmed the stop (see :func:`_run_prompt_job`).
     """
     from kiss.agents.sorcar import daemon_client
@@ -971,14 +1007,25 @@ def _run_in_chat_job(
             cron_job=True,
         )
     except daemon_client.StopUnconfirmedTimeoutError as exc:
-        raise TimeoutError(
+        raise UnresolvedRunError(
             f"in-chat job timed out after {timeout:g}s; the stop was not confirmed, "
-            f"so the task MAY STILL BE RUNNING (and spending) on the daemon: {exc}"
+            f"so the task MAY STILL BE RUNNING (and spending) on the daemon: {exc}",
+            exc.result.task_id,
         ) from exc
     except daemon_client.StoppedOnTimeoutError:
         # The daemon confirmed the stop: a plain failed run, like a
         # prompt job's confirmed stop (nothing is left running).
         return "error", f"in-chat job timed out after {timeout:g}s and was stopped"
+    except daemon_client.ConnectionLostError as exc:
+        # The task may still be running in the chat's directory: the
+        # TimeoutError _execute_job records for a prompt job's lost
+        # connection, so the user is told rather than shown a plain error.
+        lost = getattr(exc, "task_result", None)
+        raise UnresolvedRunError(
+            f"in-chat job lost its connection to the daemon, so the task MAY STILL BE "
+            f"RUNNING (and spending) in {run_dir}: {exc}",
+            "" if lost is None else lost.task_id,
+        ) from exc
     except (OSError, ValueError) as exc:
         return "error", f"Error: {exc}"
     return _run_outcome(result_summary(result), result.success)
@@ -989,8 +1036,10 @@ def _run_prompt_job(
 ) -> tuple[str, str | None]:
     """Run an LLM cron job in a fresh daemon session.
 
-    Launches :data:`PROMPT_SEA_PATH` with the ``run_agent`` tool
-    (:func:`kiss.agents.sorcar.agent_dispatch.make_run_agent_tool`)
+    Launches :data:`PROMPT_SEA_PATH` as a ``run_agent`` job
+    (:func:`kiss.agents.sorcar.agent_dispatch.plan_run_agent`, driven
+    here rather than through the tool's text, so that the task id the
+    daemon named stays readable when the run ends with an error)
     exactly as a chat task launches any SEA: the task text is
     the Hermes-style preamble followed by the job's prompt, and the
     job's ``model`` and ``max_budget`` (``""`` / ``None`` mean "daemon
@@ -1032,22 +1081,24 @@ def _run_prompt_job(
         nobody to collect it later, so this function kills it.
 
     Raises:
-        TimeoutError: When the task may still be running: the run timed
-            out and the daemon never confirmed the stop, or the
+        UnresolvedRunError: When the task may still be running: the run
+            timed out and the daemon never confirmed the stop, or the
             connection to the daemon failed while the task ran.  The
             caller must keep *scratch_dir*; the message is the complete
-            error to record.
+            error to record and the error names the task when the
+            daemon did.
     """
     # Lazy import: agent_dispatch imports this module lazily as well
     # (``_daemon_endpoint_file``), and importing it at module load would
     # pull the whole dispatch layer into ``kiss-cron --list``.
     from kiss.agents.sorcar.agent_dispatch import (
-        agent_jobs_of,
         forget_agent_job,
+        join_agent_job,
         kill_agent_job,
-        make_run_agent_tool,
+        launch_agent_job,
         may_still_run,
-        notice_job_id,
+        new_agent_job,
+        plan_run_agent,
     )
     from kiss.agents.sorcar.sea_commands import slash_command_task
     from kiss.agents.sorcar.sea_settings import script_name
@@ -1069,41 +1120,51 @@ def _run_prompt_job(
         options["work_dir"] = str(run_dir)
     if command is not None:
         options["auto_classify"] = False
-    run_agent = make_run_agent_tool(str(scratch_dir))
     budget = _job_budget(job)
-    reply = run_agent(
-        agent=str(sea_path),
-        task=task,
-        model=str(job.get("model_name") or ""),
-        max_budget="" if budget is None else str(budget),
-        timeout=str(timeout),
+    plan = plan_run_agent(
+        str(scratch_dir), task, agent=str(sea_path), model=str(job.get("model_name") or ""),
+        max_budget="" if budget is None else str(budget), timeout=str(timeout),
         options=json.dumps(options),
     )
-    # ``run_agent``'s timeout bounds the call only; an unattended run
-    # has nobody to collect the detached sub-task, so it is stopped.
-    detached = agent_jobs_of(None).get(notice_job_id(reply))
-    if detached is not None:
-        try:
-            reply = kill_agent_job(detached)
-        finally:
-            # Also when the kill itself is interrupted: nothing else
-            # ever collects an ownerless job from the registry.
-            forget_agent_job(detached)
-        bound = f"the scheduled task did not finish within {timeout:g}s"
-        if not detached.finished or may_still_run(detached.outcome, name):
-            raise TimeoutError(
-                f"prompt job timed out after {timeout:g}s; the stop was not "
-                f"confirmed, so the task may still be running in {run_dir} (its "
-                f"scratch directory {scratch_dir} is kept): Error: {bound}; a stop "
-                f"was requested but the daemon never confirmed it, so the task MAY "
-                f"STILL BE RUNNING (and spending) on the daemon."
-            )
-        if isinstance(detached.outcome, str):  # stopped (a finished one falls through)
-            return "error", f"Error: {bound}; {reply.removeprefix('Error: ')}"
+    if isinstance(plan, str):
+        return "error", plan
+    # The job itself, not the ``run_agent`` tool's text: a run that ends
+    # with an error (a lost connection) keeps the task id the daemon
+    # named on the job, where the text never carries it.
+    run = new_agent_job(plan["name"], plan, None)
+    try:
+        launch_agent_job(run)
+        if join_agent_job(run, run.timeout):
+            reply = run.result
+        else:
+            # The timeout bounds the wait only; an unattended run has
+            # nobody to collect the still-running sub-task, so it is stopped.
+            reply = kill_agent_job(run)
+            bound = f"the scheduled task did not finish within {timeout:g}s"
+            if not run.finished or may_still_run(run.outcome, name):
+                raise UnresolvedRunError(
+                    f"prompt job timed out after {timeout:g}s; the stop was not "
+                    f"confirmed, so the task may still be running in {run_dir} (its "
+                    f"scratch directory {scratch_dir} is kept): Error: {bound}; a stop "
+                    f"was requested but the daemon never confirmed it, so the task MAY "
+                    f"STILL BE RUNNING (and spending) on the daemon.",
+                    run.task_id,
+                )
+            if isinstance(run.outcome, str):  # stopped (a finished one falls through)
+                return "error", f"Error: {bound}; {reply.removeprefix('Error: ')}"
+    except BaseException:
+        # The wait or the kill was interrupted: the sub-task is cancelled,
+        # as ``run_agent`` cancels its own.
+        run.cancel.set()
+        raise
+    finally:
+        # Nothing else ever collects an ownerless job from the registry.
+        forget_agent_job(run)
     if may_still_run(reply, name):
-        raise TimeoutError(
+        raise UnresolvedRunError(
             f"prompt job lost its connection to the daemon, so the task may still be "
-            f"running in {run_dir} (its scratch directory {scratch_dir} is kept): {reply}"
+            f"running in {run_dir} (its scratch directory {scratch_dir} is kept): {reply}",
+            run.task_id,
         )
     if reply.startswith("Error:"):
         return "error", reply
@@ -1320,6 +1381,13 @@ def _run_command_job(
     return "ok", output
 
 
+#: The fields of a job that say what a run does and when.  An edit of one
+#: of them (:func:`_update`) while a run is in flight makes that run the
+#: old job's: its outcome is not recorded on the edited job (the claim of
+#: a task it left running is: :func:`_claimed_task_id`).
+TASK_KEYS = ("prompt", "command", "schedule")
+
+
 def _execute_job(job: dict[str, Any]) -> None:
     """Execute one job, deliver its result, and record the outcome.
 
@@ -1333,7 +1401,9 @@ def _execute_job(job: dict[str, Any]) -> None:
     exception is a prompt job whose task may still be running (a
     timeout whose stop the daemon never confirmed, a daemon connection
     lost while the task ran): the task may still use the directory, so
-    it is kept and its path reported.
+    it is kept and its path reported, and the task's row id is kept on
+    the job as ``running_task_id`` so that the job is not launched again
+    while that task runs (:func:`_claimed_task_id`).
 
     Never raises: failures are recorded in the job's ``last_status`` /
     ``last_summary`` fields (a damaged store is logged and left as it
@@ -1355,6 +1425,7 @@ def _execute_job(job: dict[str, Any]) -> None:
     started = time.time()
     work_dir: Path | None = None
     keep_work_dir = False
+    running_task_id = ""
     text: str | None
     try:
         # Inside the try: a scratch directory that cannot be created (a
@@ -1384,6 +1455,7 @@ def _execute_job(job: dict[str, Any]) -> None:
         # running (a confirmed-stop timeout is reported as an ordinary
         # error): the scratch directory is kept, as the error says.
         keep_work_dir = True
+        running_task_id = getattr(e, "task_id", "")
         status, text = "error", str(e)
     except Exception as e:
         logger.error("Cron job %s failed: %s", job["id"], e, exc_info=True)
@@ -1423,6 +1495,24 @@ def _execute_job(job: dict[str, Any]) -> None:
             return
         for stored in jobs:
             if stored["id"] == job["id"]:
+                # The run is over, whatever its outcome: the job is no
+                # longer this process's (:func:`_running_elsewhere`).
+                stored.pop("running_pid", None)
+                # Edited or not, the job is the task's that may still be
+                # running in its directory (:func:`_claimed_task_id`).
+                if running_task_id:
+                    stored["running_task_id"] = running_task_id
+                else:
+                    stored.pop("running_task_id", None)
+                if any(stored.get(key) != job.get(key) for key in TASK_KEYS):
+                    # The job was edited while it ran: the outcome is the
+                    # old task's (its output is in the job's log), not
+                    # the new one's, which has yet to run.
+                    logger.warning(
+                        "cron job %s was edited while it ran: the run's outcome is not "
+                        "recorded on the edited job", job["id"],
+                    )
+                    break
                 stored["last_status"] = status
                 stored["last_summary"] = (text or "")[:MAX_STORED_SUMMARY_CHARS]
                 stored["last_delivery"] = notes
@@ -1444,6 +1534,51 @@ def _execute_job(job: dict[str, Any]) -> None:
                     stored["enabled"] = False
                     stored["next_run_at"] = None
         save_jobs(jobs)
+
+
+def _claimed_task_id(job: dict[str, Any]) -> str:
+    """Return the id of *job*'s daemon task that may still be running, else ``""``.
+
+    A prompt run that ended without its task's terminal status (a stop
+    the daemon never confirmed, a daemon connection lost) left the
+    task's row id on the job as ``running_task_id`` (:func:`_execute_job`);
+    the job is not launched again, by a tick or a "run now", while that
+    ``task_history`` row is unfinished, so it never overlaps its own
+    task.  The claim ends when the row is finished (the task's final
+    save, or the daemon's orphan recovery after a restart) or gone.
+
+    Args:
+        job: The stored job record.
+    """
+    task_id = str(job.get("running_task_id") or "")
+    if not task_id:
+        return ""
+    # Lazy: the history database is not opened for ``kiss-cron --list``.
+    from kiss.agents.sorcar.persistence import task_end_ms, task_start_ms
+
+    return task_id if task_start_ms(task_id) and not task_end_ms(task_id) else ""
+
+
+def _running_elsewhere(job: dict[str, Any]) -> bool:
+    """Return whether another live process is running *job*.
+
+    Every launch — a tick's, :func:`start_job`'s, a ``run_now``'s —
+    stores its process id on the job as ``running_pid`` and the run's
+    outcome removes it (:func:`_execute_job`), so a scheduler in
+    another process over the same store leaves the job alone while
+    that process lives.  This process's own record does not count: its
+    registry (:data:`_running`) says whether the run is still on, so a
+    record left behind by an outcome that could not be written never
+    blocks the job.  A dead process's record is stale.
+
+    Args:
+        job: The stored job record.
+    """
+    try:
+        pid = int(job.get("running_pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    return pid != os.getpid() and pid_alive(pid)
 
 
 def running_job_ids() -> set[str]:
@@ -1502,10 +1637,14 @@ def tick(now: float | None = None, wait: bool = True) -> int:
     :data:`_running`) is not due: the tick leaves it untouched (its
     ``next_run_at`` stays in the past) and starts only the other due
     jobs, so it runs again on the first tick after it finishes — within
-    the grace window — instead of overlapping itself.  The registry is
-    process-local, so ``kiss-cron --tick`` in another process may still
-    overlap a run; a one-shot claimed by a process that crashes
-    mid-run is not retried.
+    the grace window — instead of overlapping itself.  A job another
+    live process is running, by the ``running_pid`` its launch stored
+    (:func:`_running_elsewhere`), is left untouched the same way; the
+    record of a process that died mid-run is dropped and the job runs
+    (a one-shot it had claimed is not retried: its occurrence was
+    consumed).  So is a job whose last run's daemon task may still be
+    running (:func:`_claimed_task_id`), until that task's row is
+    finished, when the claim is dropped from the store.
 
     Args:
         now: Current time in epoch seconds; ``None`` uses the clock.
@@ -1528,8 +1667,16 @@ def tick(now: float | None = None, wait: bool = True) -> int:
         due = []
         changed = False
         for job in jobs:
-            if not job.get("enabled") or job["id"] in running:
+            if not job.get("enabled") or job["id"] in running or _claimed_task_id(job):
                 continue
+            if job.pop("running_task_id", None):
+                changed = True
+            if _running_elsewhere(job):
+                continue
+            if job.pop("running_pid", None):
+                # Left by a process that died mid-run, or by this one
+                # when the run's outcome could not be recorded.
+                changed = True
             try:
                 overdue = now - float(job["next_run_at"])
                 if overdue < 0:
@@ -1559,13 +1706,15 @@ def tick(now: float | None = None, wait: bool = True) -> int:
             job["previous_run_at"] = job.get("last_run_at")
             job["last_run_at"] = now
             job["next_run_at"] = next_run
+            job["running_pid"] = os.getpid()
             if job.get("one_shot"):
                 job["enabled"] = False
             due.append(job)
             changed = True
-        # The claim (advanced ``next_run_at``, disabled one-shot) is
-        # persisted BEFORE anything runs: a store that cannot be written
-        # launches nothing, so a job never runs twice for one occurrence.
+        # The claim (advanced ``next_run_at``, disabled one-shot, this
+        # process as the runner) is persisted BEFORE anything runs: a
+        # store that cannot be written launches nothing, so a job never
+        # runs twice for one occurrence.
         if changed:
             save_jobs(jobs)
         # Launched while holding the store lock: a job that finishes
@@ -2036,6 +2185,7 @@ def _launch_or_record(job: dict[str, Any]) -> threading.Thread | None:
         return _launch(job)
     except Exception as e:
         logger.error("Cron job %s could not start: %s", job["id"], e, exc_info=True)
+        job.pop("running_pid", None)
         job["last_status"] = "error"
         job["last_summary"] = f"could not start: {type(e).__name__}: {e}"
         return None
@@ -2044,20 +2194,38 @@ def _launch_or_record(job: dict[str, Any]) -> threading.Thread | None:
 def start_job(job: dict[str, Any]) -> str:
     """Run *job* now in its own thread (as a tick does), without waiting.
 
-    The thread is registered in :data:`_running` so a tick skips the
-    job while it runs and a second start is refused.
+    The thread is registered in :data:`_running` and this process on
+    *job* as its ``running_pid``, which the caller — holding the store
+    lock — saves: a tick in this or another process skips the job while
+    it runs and a second start is refused, as is a start while the job's
+    last run's task may still be running (:func:`_claimed_task_id`).
 
     Args:
         job: The stored job record to execute.
 
     Returns:
         ``""`` when the thread started, else the error text (the job is
-        already running in this process).
+        already running in this or another process, or claimed by its
+        task).
     """
+    task_id = _claimed_task_id(job)
+    if task_id:
+        return _claimed_error(job["id"], task_id)
+    if _running_elsewhere(job):
+        return f"job {job['id']!r} is already running"
     with _running_lock:
+        job["running_pid"] = os.getpid()
         if _launch(job) is None:
             return f"job {job['id']!r} is already running"
     return ""
+
+
+def _claimed_error(job_id: str, task_id: str) -> str:
+    """The text refusing a run of *job_id* while its last run's *task_id* may still be running."""
+    return (
+        f"job {job_id!r} is not run again while its last run's task {task_id} may still be "
+        f"running on the daemon; it runs again once that task ends"
+    )
 
 
 def apply_job_action(
@@ -2112,8 +2280,10 @@ def apply_job_action(
             return f"no job with id {job_id!r}"
         job = match[0]
         if action == "run_now":
-            return start_job(job)
-        if action == "remove":
+            error = start_job(job)
+            if error:
+                return error
+        elif action == "remove":
             jobs = [other for other in jobs if other["id"] != job_id]
         elif action == "pause":
             job["enabled"] = False
@@ -2492,12 +2662,21 @@ def cron_job(
         # would leak a plain ``with`` (CPython gh-74174).
         try:
             with _jobs_lock(blocking=True):
-                match = [job for job in load_jobs() if job["id"] == job_id]
-                claimed = bool(match) and locked_call(
-                    canonical._running_lock, _claim_run, canonical._running, job_id, me,
+                jobs = load_jobs()
+                match = [job for job in jobs if job["id"] == job_id]
+                task_id = _claimed_task_id(match[0]) if match else ""
+                claimed = bool(match) and not task_id and not _running_elsewhere(match[0]) and (
+                    locked_call(
+                        canonical._running_lock, _claim_run, canonical._running, job_id, me,
+                    )
                 )
+                if claimed:
+                    match[0]["running_pid"] = os.getpid()
+                    save_jobs(jobs)
             if not match:
                 return _dump({"error": f"no job with id {job_id!r}"})
+            if task_id:
+                return _dump({"error": _claimed_error(job_id, task_id)})
             if not claimed:
                 return _dump({"error": f"job {job_id!r} is already running"})
             _execute_job(match[0])

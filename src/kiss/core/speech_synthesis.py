@@ -112,7 +112,8 @@ def synthesize_talk_audio(
         model: GPT audio-chat model name from MODEL_INFO.json.
         voice: OpenAI built-in voice name.
         usage_out: Optional dict that receives the synthesis agent's
-            spend (``budget_used`` USD and ``total_tokens_used``) so the
+            spend (``budget_used`` USD and ``total_tokens_used``, with
+            the ``model`` it ran on) so the
             CALLER can attribute it to its own task accounting.  The
             synthesis agent is a throwaway; without this, its spend
             (audio output bills $64/M tokens on gpt-audio-1.5) would
@@ -151,6 +152,7 @@ def synthesize_talk_audio(
             )
         finally:
             if usage_out is not None:
+                usage_out["model"] = model
                 usage_out["budget_used"] = float(agent.budget_used or 0.0)
                 usage_out["total_tokens_used"] = int(agent.total_tokens_used or 0)
         data = getattr(agent.model, "last_audio_data", None)

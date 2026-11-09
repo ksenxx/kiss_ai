@@ -104,6 +104,8 @@ class NostrChannelBackend(ToolMethodBackend):
 
     def _publish_signed_event(self, event: Any) -> None:
         """Publish an already-signed event to all configured relays (pynostr flow)."""
+        if not self._relays:
+            raise RuntimeError("no relays configured")
         from pynostr.relay_manager import RelayManager
 
         manager = RelayManager(timeout=6)
@@ -349,6 +351,8 @@ class NostrAgent(BaseChannelAgent):
             """
             if not private_key.strip():  # pragma: no branch
                 return "private_key cannot be empty."
+            if not [r for r in relays.split(",") if r.strip()]:
+                return "relays cannot be empty."
             try:
                 from pynostr.key import PrivateKey
 

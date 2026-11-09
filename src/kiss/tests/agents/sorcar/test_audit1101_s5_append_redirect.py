@@ -195,16 +195,23 @@ def test_a_refused_redirect_leaves_no_append_for_a_later_write(env: DockerManage
     )
     assert env.read_bytes(path) == b"base\nrequested\n"
     # Every other call after the refusal drops it too: a Bash command, a Read, an Edit, a
-    # Write of another file.
+    # Write of another file, a run_commands_parallel (A08 claude-7: it kept it).
     env.Bash(f"printf 'base\\n' > {path}", "seed", 30, 500)
     for name, args in (
         ("Bash", {"command": "true", "description": "nothing"}),
+        ("run_commands_parallel", {"commands": '["true"]'}),
         ("Read", {"file_path": path}),
         ("Edit", {"file_path": path, "old_string": "base", "new_string": "base"}),
         ("Write", {"file_path": "/tmp/other.txt", "content": "base\nrequested\n"}),
     ):
         _refused_append(h, env, path)
-        h.call(name, **args)
+        if name == "run_commands_parallel":
+            # The agent keeps the prompt cache warm around a fan-out with
+            # the model the harness's agent never had: the tool is called
+            # as dispatched (the hook has no say over a fan-out).
+            h.tools[name](**args)
+        else:
+            h.call(name, **args)
         assert env.pending_append is None, name
         assert h.call("Write", file_path=path, content="base\nrequested\n").startswith(
             "Successfully wrote 15 characters"
@@ -251,8 +258,13 @@ def test_the_bridge_settles_its_pending_append_the_same_way(tmp_path: Path) -> N
     server = ExecBridgeServer(LocalEnvironment(str(tmp_path)), loop.loop)
     try:
         with ExecBridge(f"exec:{server.url}") as bridge, ExecBridge(f"exec:{server.url}") as other:
-            _check_append_race(
-                _Harness(cast(Any, bridge)), bridge, other.Bash, str(tmp_path / "append.txt"),
-            )
+            h = _Harness(cast(Any, bridge))
+            path = str(tmp_path / "append.txt")
+            _check_append_race(h, bridge, other.Bash, path)
+            # Its run_commands_parallel drops a refused redirect's append too (A08 claude-7).
+            bridge.Bash(f"printf 'base\\n' > {path}", "seed", 30, 500)
+            _refused_append(h, cast(Any, bridge), path)
+            bridge.run_commands_parallel('["true"]')
+            assert bridge.pending_append is None
     finally:
         _close(server, loop)

@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from kiss.core import config as config_module
 from kiss.core import user_config
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.user_config import load_api_keys, save_api_key, save_config
@@ -44,6 +45,10 @@ def _own_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("USERPROFILE", str(home))  # what Path.home() reads on Windows
     monkeypatch.setenv("SHELL", "/bin/bash")
     monkeypatch.delenv(KEY, raising=False)
+    # load_api_keys / save_api_key copy the key into DEFAULT_CONFIG; restore it so a
+    # later live Gemini test in this process does not send the fake "legacy" key.
+    config = config_module.DEFAULT_CONFIG
+    monkeypatch.setattr(config, KEY, getattr(config, KEY))
     monkeypatch.setitem(vars(user_config), "CONFIG_DIR", tmp_path / "kiss")
     monkeypatch.setitem(vars(user_config), "CONFIG_PATH", tmp_path / "kiss" / "config.json")
     monkeypatch.setattr(user_config, "_LOCK_TIMEOUT_S", 1.0)

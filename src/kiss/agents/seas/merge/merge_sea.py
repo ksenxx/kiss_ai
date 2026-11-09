@@ -76,7 +76,15 @@ Tool rules:
   occurrence takes the same resolution.
 - When the `Steps:` footer of a tool result ends in 9, make your next call
   `summary`; otherwise the 10th, 20th, ... call is refused.
-"""
+
+## Lessons from recent runs (rsi7d)
+- The budget is small (5 USD): a merge of 8 files with 29 blocks was
+  fully resolved and staged but exceeded it at step 65, so the run counted as failed.
+  Resolve the small files first (one `Edit` per file), `git add` each file in the same
+  Bash call that greps its markers and parses it (`python3 -c "import ast; ..."`), and
+  call `finish` as soon as `git diff --name-only --diff-filter=U` prints nothing.
+- When both sides edit only a docstring, comment or message string, take the incoming
+  version at once; do not grep the code for which wording it uses."""
 
 
 class MergeSea(WorkerSea):

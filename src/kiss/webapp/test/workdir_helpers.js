@@ -123,7 +123,61 @@ function runTests(tests) {
   process.exit(failed ? 1 : 0);
 }
 
+/** The Explorer's top-level folder rows, in DOM order. */
+function rootRows(win) {
+  return Array.from(
+    win.document.querySelectorAll('#explorer-tree > .explorer-row.is-root'),
+  );
+}
+
+/** Answer a pending workdir check, asserting it is scoped to the requested folder. */
+function answerWorkDirCheck(win, posted, dir, error) {
+  const checks = msgs(posted, 'listDir').filter(
+    m => String(m.token).startsWith('workdir:') && m.path === dir,
+  );
+  const req = checks[checks.length - 1];
+  assert.ok(req, 'a workdir: listDir check for ' + dir + ' was sent');
+  assert.strictEqual(req.workDir, dir, 'the check is scoped to the folder');
+  if (error) {
+    send(win, {type: 'dirListing', token: req.token, path: dir, error});
+    return req;
+  }
+  send(win, {
+    type: 'dirListing',
+    token: req.token,
+    path: dir,
+    root: dir,
+    entries: [],
+  });
+  return req;
+}
+
+/** Answer the last listDir for *p* (stamped *machine*, '' for none). */
+function answerListing(win, posted, p, machine, entries) {
+  const reqs = msgs(posted, 'listDir').filter(
+    m => m.path === p && (m.machine || '') === machine,
+  );
+  const req = reqs[reqs.length - 1];
+  assert.ok(
+    req,
+    `a listDir for ${p} on '${machine || 'this machine'}' was sent`,
+  );
+  const reply = {
+    type: 'dirListing',
+    token: req.token,
+    path: p,
+    root: req.workDir,
+    entries,
+  };
+  if (machine) reply.machine = machine;
+  send(win, reply);
+  return req;
+}
+
 module.exports = {
+  answerListing,
+  rootRows,
+  answerWorkDirCheck,
   makePage,
   closeWindows,
   send,

@@ -54,7 +54,10 @@ from kiss.core.models.stream_abort import (
 from kiss.core.processes import (
     _REAP_GRACE_SECONDS,
     SIGKILL,
+    exit_status_unreaped,
+    exited_unreaped,
     kill_process_group,
+    pid_handed_on,
     popen_process_group,
 )
 from kiss.core.tool_schema import declared_schema
@@ -428,7 +431,7 @@ def parse_tool_arguments(arguments: Any) -> dict[str, Any]:
         return {}
     try:
         parsed = json.loads(arguments)
-    except json.JSONDecodeError:
+    except ValueError:  # JSONDecodeError, or the decoder's integer digit limit
         logger.debug("Exception caught", exc_info=True)
         return {}
     return parsed if isinstance(parsed, dict) else {}
@@ -711,7 +714,7 @@ def _iter_jsonl(lines: Iterable[str]) -> Iterator[Any]:
             continue
         try:
             yield json.loads(line)
-        except json.JSONDecodeError:
+        except ValueError:  # JSONDecodeError, or the decoder's integer digit limit
             continue
 
 
@@ -1177,6 +1180,10 @@ def environ_without(names: Collection[str]) -> dict[str, str]:
     return env
 
 
+REASONING_PASSBACK_FAMILIES = frozenset({"deepseek"})
+"""Model families whose API requires every earlier turn's reasoning back when tools are present."""
+
+
 class Model(ABC):
     """Abstract base class for LLM provider implementations."""
 
@@ -1231,6 +1238,9 @@ class Model(ABC):
         self.thinking_callback = thinking_callback
         self.usage_info_for_messages: str = ""
         self.conversation: list[Any] = []
+        # The server-side context edits the last response reports (Anthropic's
+        # ``context_management.applied_edits``); empty for the other providers.
+        self.last_context_edits: list[dict[str, Any]] = []
         self.client: Any = None
         # The inputs ``client`` was built from; see _reuse_client.
         self._client_inputs: tuple[Any, ...] | None = None
@@ -1247,6 +1257,9 @@ class Model(ABC):
             0,
             frozenset(),
         )
+        # Every credited helper call as (key, model, USD, tokens), for the
+        # agent's split of its spend by model; see helper_calls.
+        self._helper_calls: tuple[tuple[str, str, float, int], ...] = ()
         # Called before a helper makes a paid call on the agent's behalf:
         # KISSAgent installs its limit check here (and hand_off_conversation
         # carries it to a replacement model) so a batch of descriptions
@@ -1605,6 +1618,45 @@ class Model(ABC):
                 break
         return list(reversed(native))
 
+    def keeps_reasoning_turns(self) -> bool:
+        """Return whether the provider keeps only the last reasoning turns under the keep-K policy.
+
+        True when the requests ask the provider to retain the model's
+        reasoning for the ``Config.reasoning_keep_turns`` most recent turns
+        only (Anthropic's ``clear_thinking`` context edit, OpenAI's
+        ``reasoning.context: current_turn``).  The agent then starts a new
+        turn every ``Config.reasoning_turn_steps`` steps with a short user
+        note, since a message holding only tool results continues the turn
+        in progress.  The base adapter sends no such request.
+        """
+        return False
+
+    def compacts_whole_turns(self) -> bool:
+        """Return whether a compaction must remove whole old turns rather than stub texts.
+
+        True for the model families that require every earlier turn's
+        reasoning to be passed back when tools are present
+        (:data:`REASONING_PASSBACK_FAMILIES`: DeepSeek answers 400
+        otherwise, whatever route serves it), so that the only compaction
+        allowed takes a turn out entire, reasoning, calls and results
+        together (:func:`~kiss.core.context_compaction.plan_turn_removal`).
+        The other families get old outputs and arguments stubbed in place.
+        """
+        from kiss.core.models.model_families import family_of
+
+        return family_of(self.model_name) in REASONING_PASSBACK_FAMILIES
+
+    def server_side_context_editing(self) -> bool:
+        """Return whether the provider clears old tool inputs and results itself.
+
+        True when the requests carry a server-side clearing of old tool
+        calls (Anthropic's ``clear_tool_uses`` context edit): the agent then
+        does no client-side compaction of the conversation, which on the
+        Claude models that check the prefix of their thinking blocks would
+        invalidate every later block.  The base adapter sends none.
+        """
+        return False
+
     def supports_images(self) -> bool:
         """Return whether this model can see the images and PDFs a tool returns.
 
@@ -1885,7 +1937,7 @@ class Model(ABC):
         self._rejected_response = None
         return response
 
-    def _credit_helper_usage(self, cost: float, tokens: int, key: str) -> None:
+    def _credit_helper_usage(self, cost: float, tokens: int, key: str, model: str = "") -> None:
         """Add helper call *key*'s spend to :meth:`helper_usage`, once per key.
 
         The vision bridge reports each description call here as soon as
@@ -1893,16 +1945,33 @@ class Model(ABC):
         spend reaches the agent even when the batch of descriptions never
         returns.  ONE store, and a repeated *key* adds nothing, so a
         caller may retry a credit a stop interrupted without billing it
-        twice.
+        twice.  The call is then listed under its *model* in
+        :meth:`helper_calls` (one store, once per key, after the spend's:
+        a stop between the two loses the listing, never adds an unbilled
+        one; a retried credit lists it).
 
         Args:
             cost: USD the call was billed.
             tokens: Tokens the call used.
             key: A key unique to the call.
+            model: The model the call ran on; ``""`` lists nothing.
         """
         epoch, spent, used, keys = self._helper_spent
         if key not in keys:
             self._helper_spent = (epoch, spent + cost, used + tokens, keys | {key})
+        calls = self._helper_calls
+        if model and all(call[0] != key for call in calls):
+            self._helper_calls = (*calls, (key, model, cost, tokens))
+
+    def helper_calls(self) -> tuple[tuple[str, str, float, int], ...]:
+        """Return every helper call credited to this model, as ``(key, model, USD, tokens)``.
+
+        The agent files each under its model in the task's split of spend
+        by model (``KISSAgent.helper_charge_hook``): the calls emit no
+        ``llm_call`` of the agent's.  Kept across conversation resets
+        (the keys are unique), so an unfiled call is never lost.
+        """
+        return self._helper_calls
 
     def helper_usage(self) -> tuple[object, float, int]:
         """Return what this model's helpers spent in this conversation.
@@ -2099,6 +2168,7 @@ def hand_off_conversation(old: Model, new: Model, boundary: int = 0) -> int:
         landed = len(responses_items_to_chat_messages(old.conversation[:boundary]))
     new.usage_info_for_messages = old.usage_info_for_messages
     new._helper_spent = old._helper_spent
+    new._helper_calls = old._helper_calls
     new.limit_check = old.limit_check
     return landed
 
@@ -2149,6 +2219,22 @@ def _parse_docstring_params(docstring: str) -> dict[str, str]:
     return param_descriptions
 
 
+def _accepts_string(schema: dict[str, Any]) -> bool:
+    """Return whether a value valid under JSON *schema* may be a string.
+
+    An untyped schema accepts anything; a union accepts a string when
+    one of its options does.
+
+    Args:
+        schema: A parameter's JSON schema.
+    """
+    options = schema.get("anyOf", []) + schema.get("oneOf", [])
+    types = schema.get("type")
+    if types is None:
+        return not options or any(_accepts_string(option) for option in options)
+    return types == "string" or (isinstance(types, list) and "string" in types)
+
+
 def _python_type_to_json_schema(python_type: Any) -> dict[str, Any]:
     """Converts a Python type annotation to a JSON schema type.
 
@@ -2170,12 +2256,14 @@ def _python_type_to_json_schema(python_type: Any) -> dict[str, Any]:
             return _python_type_to_json_schema(non_none_args[0])
         return {"anyOf": [_python_type_to_json_schema(a) for a in non_none_args]}
 
-    if origin is list:
+    # The bare ``list``/``dict`` have no origin: they are the unparameterised
+    # collections, not the string fallback below.
+    if origin is list or python_type is list:
         if args:
             return {"type": "array", "items": _python_type_to_json_schema(args[0])}
         return {"type": "array"}
 
-    if origin is dict:
+    if origin is dict or python_type is dict:
         return {"type": "object"}
 
     type_mapping: dict[type, dict[str, str]] = {
@@ -2311,11 +2399,16 @@ class CLITextModel(Model):
         config = dict(original_config)
         original_system = config.get("system_instruction", "")
         config["system_instruction"] = (original_system + "\n\n" + tools_prompt).strip()
+        # Built before anything is installed: a Stop landing as the
+        # filter's ``__enter__`` returns never reaches its ``__exit__``,
+        # so the restoration is owed by this ``finally`` as well.
+        filtered = _ToolCallFilteredStream(self)
         self.model_config = config
         try:
-            with _ToolCallFilteredStream(self):
+            with filtered:
                 yield
         finally:
+            filtered.restore()
             self.model_config = original_config
 
     def generate_and_process_with_tools(
@@ -2333,7 +2426,7 @@ class CLITextModel(Model):
         text stream to the callbacks as they arrive, minus the raw
         ``tool_calls`` JSON, so the block is never rendered in the chat
         panel.  Adapters shape the turn through :meth:`_text_tools` and
-        :meth:`_tool_call_text`.
+        :meth:`_parse_tool_calls`.
 
         Args:
             function_map: Dictionary mapping function names to callable functions.
@@ -2349,10 +2442,45 @@ class CLITextModel(Model):
             # then billed through take_partial_usage_response().
             self._rejected_response = response
         self._rejected_response = None
-        function_calls = _parse_text_based_tool_calls(self._tool_call_text(content))
+        function_calls = self._parse_tool_calls(content)
         if function_calls:
+            self._decode_text_arguments(function_calls, function_map)
             self._replace_last_assistant_with_tool_calls(content, function_calls)
         return function_calls, content, response
+
+    def _decode_text_arguments(
+        self,
+        function_calls: list[dict[str, Any]],
+        function_map: dict[str, Callable[..., Any]],
+    ) -> None:
+        """Decode, in place, the string arguments of parameters that are not strings.
+
+        An ``<invoke>`` call (see :func:`_parse_xml_tool_call`) carries
+        every argument as text, so an integer, boolean, list or object
+        parameter receives the JSON text of its value.  Each string
+        argument whose parameter the tool's schema does not let be a
+        string is replaced by its JSON value when it parses as JSON;
+        parameters that accept a string keep their text verbatim
+        (``"123"`` typed into a page stays a string).
+
+        Args:
+            function_calls: The parsed calls, updated in place.
+            function_map: The turn's tools, by name.
+        """
+        for call in function_calls:
+            func = function_map.get(call["name"])
+            arguments = call["arguments"]
+            if func is None or not isinstance(arguments, dict):
+                continue
+            schema = self._function_to_openai_tool(func)["function"]["parameters"]
+            properties = schema.get("properties", {})
+            for name, value in arguments.items():
+                if not isinstance(value, str) or _accepts_string(properties.get(name, {})):
+                    continue
+                try:
+                    arguments[name] = json.loads(value)
+                except ValueError:
+                    continue
 
     def _text_tools(
         self, function_map: dict[str, Callable[..., Any]]
@@ -2364,13 +2492,13 @@ class CLITextModel(Model):
         """
         return function_map
 
-    def _tool_call_text(self, content: str) -> str:
-        """Return the text of a finished turn that is parsed for ``tool_calls``.
+    def _parse_tool_calls(self, content: str) -> list[dict[str, Any]]:
+        """Return the ``tool_calls`` a finished turn made, parsed from its text.
 
         Args:
             content: The turn's assistant text.
         """
-        return content
+        return _parse_text_based_tool_calls(content)
 
     def _emit_as_thinking(self, text: str) -> None:
         """Forward *text* to the token callback wrapped in a thinking block.
@@ -2410,21 +2538,31 @@ class CLITextModel(Model):
         """
         timeout = self.model_config.get("timeout", 300)
         work_dir = self.model_config.get("work_dir") or None
-        with _CLIProcess(
-            args,
-            label,
-            timeout,
-            cwd=work_dir,
-            env=self._cli_env(),
-            waiting_on_caller=self._tool_call_in_flight,
-            caller_error=self._tool_call_error,
-        ) as proc:
-            try:
-                yield proc
-            except _StreamReadTimeoutError:
-                raise _cli_stall_error(label, timeout) from None
-            finally:
-                self._close_thinking_if_open()
+        # A Stop landing as the constructor or ``__enter__`` returns never
+        # reaches the ``with`` block's exit: the supervisor registers
+        # itself in ``started`` before its child exists, and is closed
+        # from here in that case (a second close is a no-op).
+        started: list[_CLIProcess] = []
+        try:
+            with _CLIProcess(
+                args,
+                label,
+                timeout,
+                cwd=work_dir,
+                env=self._cli_env(),
+                waiting_on_caller=self._tool_call_in_flight,
+                caller_error=self._tool_call_error,
+                started=started,
+            ) as proc:
+                try:
+                    yield proc
+                except _StreamReadTimeoutError:
+                    raise _cli_stall_error(label, timeout) from None
+                finally:
+                    self._close_thinking_if_open()
+        finally:
+            for cli in started:
+                cli.close()
 
     def _tool_call_in_flight(self) -> bool:
         """Return whether the CLI is silent because it waits on a KISS tool.
@@ -2466,6 +2604,9 @@ class CLITextModel(Model):
 # Longest wait for a child that already closed stdout to exit on its own.
 # Bounded by the run's own deadline, so a short timeout stays short.
 _EXIT_GRACE_SECONDS = 10.0
+# How often an exit wait that must not reap the child (see
+# :meth:`_CLIProcess.wait_for_exit`) looks again.
+_EXIT_POLL_SECONDS = 0.01
 # How often a blocked reader re-checks the thread's stop signal.
 _STOP_POLL_SECONDS = 0.1
 
@@ -2593,6 +2734,7 @@ class _CLIProcess:
         env: dict[str, str] | None = None,
         waiting_on_caller: Callable[[], bool] | None = None,
         caller_error: Callable[[], Exception | None] | None = None,
+        started: "list[_CLIProcess] | None" = None,
     ) -> None:
         """Start *args* and begin draining both of its output pipes.
 
@@ -2616,10 +2758,17 @@ class _CLIProcess:
                 call the child made to the caller hit a fatal limit), or
                 ``None``; polled with the stop signal by :meth:`lines`.
                 ``None`` never errs.
+            started: Appended with this supervisor before the child is
+                spawned, so a caller whose Stop lands as the constructor
+                or ``__enter__`` returns (the ``with`` block, and so
+                :meth:`close`, never starts) can still close it.
 
         Raises:
             KISSError: If the executable could not be started.
         """
+        if started is not None:
+            started.append(self)
+        self._closed = False
         self._label = label
         self._timeout = timeout
         self._deadline = time.monotonic() + timeout
@@ -2638,12 +2787,75 @@ class _CLIProcess:
         self._writer: threading.Thread | None = None
         self._writer_cancel = threading.Event()
         self._stdin_lock = threading.RLock()
-        # Everything else exists before the child does.  From the spawn
-        # to the end of __init__ every statement is inside the try that
-        # kills it: a Stop injected (PyThreadState_SetAsyncExc) at any
-        # check point there must not escape a constructor whose ``with``
-        # block, and so close(), never starts.
+        # Everything else exists before the child does.  The child is
+        # spawned on a helper thread: a Stop injected into this thread
+        # (PyThreadState_SetAsyncExc) at the spawn helper's own return
+        # would lose the Popen it returns, a child nobody can kill.  From
+        # the spawn to the end of __init__ every statement is inside the
+        # try that kills it: a Stop at any check point there must not
+        # escape a constructor whose ``with`` block, and so close(),
+        # never starts.
         readers: list[threading.Thread] = []
+        spawned: list[subprocess.Popen[str]] = []
+        spawn_error: list[OSError] = []
+        spawn_done = threading.Event()
+        handoff = threading.RLock()  # reentrant: locked_call needs its owner check
+        spawner = threading.Thread(
+            target=self._spawn,
+            args=(args, cwd, env, spawned, spawn_error, spawn_done, handoff),
+            daemon=True,
+            name="cli-spawn",
+        )
+        try:
+            spawner.start()
+            spawn_done.wait()
+            if spawn_error:
+                raise KISSError(f"Failed to start {label}: {spawn_error[0]}") from spawn_error[0]
+            self._proc = spawned[0]
+            self._start_reader(readers, self._drain_stdout, "stdout")
+            self._start_reader(readers, self._drain_stderr, "stderr")
+            self._readers = (readers[0], readers[1])
+        except BaseException:
+            # The Stop may have landed while the helper was still
+            # spawning.  The start is given up under the handoff lock: a
+            # child the helper returns from now on is the helper's own to
+            # end (see _spawn), one it returned before is aborted here,
+            # and the bounded wait keeps either ahead of the Stop.
+            locked_call(handoff, self._give_up_start)
+            spawn_done.wait(_REAP_GRACE_SECONDS)
+            if spawned:
+                self._proc = spawned[0]
+                self._abort_start(readers)
+            raise
+
+    def _give_up_start(self) -> None:
+        """Mark the start given up; runs under the handoff lock of :meth:`_spawn`.
+
+        From here on no part of the child's lifetime is :meth:`close`'s
+        to end: a child the helper published before is aborted by the
+        constructor, one it returns later the helper ends itself.
+        """
+        self._closed = True
+
+    def _spawn(
+        self,
+        args: list[str],
+        cwd: str | None,
+        env: dict[str, str] | None,
+        spawned: list[subprocess.Popen[str]],
+        spawn_error: list[OSError],
+        spawn_done: threading.Event,
+        handoff: threading.RLock,
+    ) -> None:
+        """Spawn the child into *spawned* (or its ``OSError`` into *spawn_error*), then signal.
+
+        The child is published under *handoff*, and only while the
+        constructor still waits for it: one returned after the
+        constructor gave the start up (a Stop landed during the spawn,
+        see :meth:`__init__`) would run with no supervisor at all, so it
+        is killed, reaped and its pipes closed here instead, before
+        *spawn_done* lets the constructor go on.
+        """
         try:
             # errors="replace": a hook, plugin or shell command the CLI
             # runs can print bytes in any encoding.  With the strict
@@ -2655,7 +2867,7 @@ class _CLIProcess:
             # Its own process group (job object on Windows), so that
             # _signal_tree can take down the tool commands the CLI runs
             # as grandchildren together with it.
-            self._proc = popen_process_group(
+            proc = popen_process_group(
                 _unwrap_npm_cmd_shim(args),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -2667,14 +2879,17 @@ class _CLIProcess:
                 env=env,
             )
         except OSError as e:
-            raise KISSError(f"Failed to start {label}: {e}") from e
-        try:
-            self._start_reader(readers, self._drain_stdout, "stdout")
-            self._start_reader(readers, self._drain_stderr, "stderr")
-            self._readers = (readers[0], readers[1])
-        except BaseException:
-            self._abort_start(readers)
-            raise
+            spawn_error.append(e)
+        else:
+            with handoff:
+                published = not self._closed
+                if published:
+                    spawned.append(proc)
+            if not published:
+                self._proc = proc
+                self._abort_start([])
+        finally:
+            spawn_done.set()
 
     def __enter__(self) -> "_CLIProcess":
         """Return the running process supervisor."""
@@ -2690,7 +2905,9 @@ class _CLIProcess:
         ``Thread.start()`` failing (thread exhaustion) or a Stop landing
         anywhere in ``__init__`` after the spawn means the ``with`` block
         is never entered and ``close()`` never runs, so the child would
-        stay alive behind three open pipes.  Once
+        stay alive behind three open pipes; a child the spawn helper
+        returned after the constructor gave the start up (see
+        :meth:`_spawn`) has no readers and is ended the same way.  Once
         the child is dead a reader that did start drains its pipe to EOF
         and exits; as in :meth:`close`, an output pipe is closed only
         after its reader is gone, stdin unconditionally.  A reader is
@@ -2796,7 +3013,7 @@ class _CLIProcess:
                 self._writer_cancel.set()
                 raise
             writer.join(timeout=min(remaining, _STOP_POLL_SECONDS))
-            if not writer.is_alive() or self._proc.poll() is not None:
+            if not writer.is_alive() or exited_unreaped(self._proc):
                 return
 
     def _raise_for_caller(self) -> None:
@@ -2877,7 +3094,7 @@ class _CLIProcess:
                 while view:
                     if (
                         self._writer_cancel.is_set()
-                        or self._proc.poll() is not None
+                        or exited_unreaped(self._proc)
                         or time.monotonic() >= self._deadline
                     ):
                         break
@@ -2989,6 +3206,13 @@ class _CLIProcess:
         down nor a tool call of the child that hit a fatal limit
         meanwhile must be answered with a successful turn.
 
+        The status is read without reaping the child (see
+        :func:`exit_status_unreaped`): the child's pid is also its
+        group's id, which :meth:`close` is yet to signal, and the kernel
+        keeps that id reserved for the group only while the child is a
+        zombie or a member of the group lives.  Reaped here, the id could
+        be handed to another session leader before the SIGKILL.
+
         Returns:
             The exit status, or ``None`` when the child outlived the wait.
 
@@ -3000,10 +3224,11 @@ class _CLIProcess:
         wait_until = time.monotonic() + min(remaining, _EXIT_GRACE_SECONDS)
         while True:
             self._raise_for_caller()
-            slice_ = min(wait_until - time.monotonic(), _STOP_POLL_SECONDS)
-            status = self._reap(max(slice_, 0.0))
-            if status is not None or slice_ <= 0:
+            status = exit_status_unreaped(self._proc)
+            left = wait_until - time.monotonic()
+            if status is not None or left <= 0:
                 return status
+            time.sleep(min(left, _EXIT_POLL_SECONDS))
 
     def stderr_text(self) -> str:
         """Return everything the child wrote to stderr.
@@ -3065,32 +3290,55 @@ class _CLIProcess:
         SIGTERM, and it may ignore SIGTERM, so the grace period is always
         followed by a SIGKILL of the group (a group that is already gone
         only raises ``ProcessLookupError``, which :meth:`_signal_tree`
-        swallows).
+        swallows).  The child is reaped only after that last signal:
+        until then it is at worst a zombie, which keeps its pid reserved
+        as the group's id (see :func:`kill_process_group`), so neither
+        signal can reach a stranger's group that recycled it.
+
+        A Stop can land at any check point in here (the daemon forces a
+        ``KeyboardInterrupt`` into the task thread), so the teardown is
+        written to be finished by the retry ``_cli_turn`` makes: the hard
+        kill, the reap and the release run in a ``finally`` however the
+        grace wait ends; nothing is signalled once the child has been
+        reaped, since from then on its pid, and so its group's id, may
+        belong to a stranger (POSIX only: see :func:`pid_handed_on`,
+        the Windows job is terminated whatever the leader's status);
+        and ``_closed`` is set only by a teardown
+        that ran to its end, the one state in which a call has nothing
+        left to do (a start that never completed sets it too: its abort
+        path is that child's whole teardown).
         """
+        if self._closed:
+            return
         proc = self._proc
-        self._signal_tree(signal.SIGTERM)
-        if proc.poll() is None:
-            self._reap(_REAP_GRACE_SECONDS)
-        self._signal_tree(SIGKILL)
-        if proc.poll() is None:
-            self._reap(_REAP_GRACE_SECONDS)
-        self._writer_cancel.set()
-        if self._writer is not None and self._writer.is_alive():
-            self._writer.join()
-        locked_call(self._stdin_lock, self._close_stdin)
-        attached = (
-            (proc.stdout, self._readers[0]),
-            (proc.stderr, self._readers[1]),
-        )
-        for _pipe, thread in attached:
-            thread.join(timeout=_REAP_GRACE_SECONDS)
-        for pipe, thread in attached:
-            if thread.is_alive():
-                logger.warning("%s left %s attached to its pipe", self._label, thread.name)
-                continue
-            assert pipe is not None
-            with contextlib.suppress(OSError):
-                pipe.close()
+        try:
+            if not pid_handed_on(proc):
+                self._signal_tree(signal.SIGTERM)
+                grace_over = time.monotonic() + _REAP_GRACE_SECONDS
+                while not exited_unreaped(proc) and time.monotonic() < grace_over:
+                    time.sleep(_EXIT_POLL_SECONDS)
+        finally:
+            if not pid_handed_on(proc):
+                self._signal_tree(SIGKILL)
+                self._reap(_REAP_GRACE_SECONDS)
+            self._writer_cancel.set()
+            if self._writer is not None and self._writer.is_alive():
+                self._writer.join()
+            locked_call(self._stdin_lock, self._close_stdin)
+            attached = (
+                (proc.stdout, self._readers[0]),
+                (proc.stderr, self._readers[1]),
+            )
+            for _pipe, thread in attached:
+                thread.join(timeout=_REAP_GRACE_SECONDS)
+            for pipe, thread in attached:
+                if thread.is_alive():
+                    logger.warning("%s left %s attached to its pipe", self._label, thread.name)
+                    continue
+                assert pipe is not None
+                with contextlib.suppress(OSError):
+                    pipe.close()
+            self._closed = True
 
 
 # A complete markdown fence opener (``` plus an optional language tag,
@@ -3253,6 +3501,11 @@ class _ToolCallFilteredStream:
     A fence around anything that is *not* a validated tool call streams
     untouched.
 
+    An ``<invoke>`` block of Claude's native call syntax that opens a line
+    is held from its ``<invoke name="`` to its ``</invoke>`` the same way;
+    when it parses as a call it is dropped with all the text after it,
+    which is the model imagining the call's result.
+
     Thinking tokens are never filtered: they are already displayed apart
     from the answer, and a tool call quoted inside reasoning is content.
     """
@@ -3273,6 +3526,10 @@ class _ToolCallFilteredStream:
         self._fence_open = ""
         self._eat_close = False
         self._close_buf = ""
+        self._invoke: str | None = None
+        self._invoke_tail = ""
+        self._line_blank = True
+        self._invoke_done = False
 
     def __enter__(self) -> "_ToolCallFilteredStream":
         """Mark the turn as tool-bearing and install the filtering callbacks.
@@ -3301,9 +3558,13 @@ class _ToolCallFilteredStream:
         try:
             self._flush()
         finally:
-            self._model.token_callback = self._token_callback
-            self._model.thinking_callback = self._thinking_callback
-            self._model._tool_bearing_turn = False
+            self.restore()
+
+    def restore(self) -> None:
+        """Put the captured callbacks back on the adapter and clear the tool-bearing mark."""
+        self._model.token_callback = self._token_callback
+        self._model.thinking_callback = self._thinking_callback
+        self._model._tool_bearing_turn = False
 
     def _emit(self, text: str) -> None:
         """Send *text* onward, if there is any and anyone is listening."""
@@ -3321,7 +3582,59 @@ class _ToolCallFilteredStream:
         if self._in_thinking:
             self._emit(token)
         else:
-            self._feed(token)
+            self._feed_invokes(token)
+
+    def _feed_invokes(self, text: str) -> None:
+        """Hold ``<invoke>`` blocks out of *text* and pass the rest to :meth:`_feed`.
+
+        A trailing run that may still become ``<invoke name="`` waits in
+        ``_invoke_tail`` for the next token.  An opener counts only at
+        the start of a line, as in :func:`_parse_xml_tool_call`; a held
+        block that does not parse as a call is fed on as text.
+        """
+        while text and not self._invoke_done:
+            if self._invoke is not None:
+                self._invoke += text
+                end = self._invoke.find("</invoke>")
+                if end < 0:
+                    return
+                end += len("</invoke>")
+                block, text = self._invoke[:end], self._invoke[end:]
+                self._invoke = None
+                self._invoke_done = bool(_parse_xml_tool_call(block))
+                if not self._invoke_done:
+                    self._feed_text(block)
+                continue
+            text, self._invoke_tail = self._invoke_tail + text, ""
+            start = text.find(_XML_INVOKE_OPEN)
+            if start < 0:
+                keep = next(
+                    (
+                        n
+                        for n in range(len(_XML_INVOKE_OPEN) - 1, 0, -1)
+                        if text.endswith(_XML_INVOKE_OPEN[:n])
+                    ),
+                    0,
+                )
+                self._feed_text(text[: len(text) - keep])
+                self._invoke_tail = text[len(text) - keep :]
+                return
+            self._feed_text(text[:start])
+            if self._line_blank:
+                self._invoke = ""
+                text = text[start:]
+            else:
+                self._feed_text(text[start])
+                text = text[start + 1 :]
+
+    def _feed_text(self, text: str) -> None:
+        """Feed *text* to :meth:`_feed`, tracking whether its last line is blank so far."""
+        line = text.rpartition("\n")
+        if line[1]:
+            self._line_blank = not line[2].strip()
+        elif line[2].strip():
+            self._line_blank = False
+        self._feed(text)
 
     def _feed(self, text: str) -> None:
         """Emit the plain text of *text*, buffering any JSON object in it.
@@ -3502,6 +3815,10 @@ class _ToolCallFilteredStream:
         belongs to the already-suppressed wrapper and is discarded with
         it.
         """
+        invoke, self._invoke = self._invoke, None
+        tail, self._invoke_tail = self._invoke_tail, ""
+        if invoke is not None or tail:
+            self._feed(invoke or tail)
         held, self._held_prefix = self._held_prefix, ""
         self._emit(held)
         self._release()
@@ -3684,6 +4001,10 @@ def _iter_balanced_json_objects(
         except json.JSONDecodeError as exc:
             failed_at[quoted] = start + exc.pos
             continue
+        except ValueError:
+            # The decoder's integer digit limit: not JSON it can decode,
+            # and no error position to shortcut the candidates inside.
+            continue
         except RecursionError:
             # Nested deeper than the parser can follow (tens of thousands
             # of levels).  The candidates inside are nearly as deep and
@@ -3696,8 +4017,8 @@ def _iter_balanced_json_objects(
     return results
 
 
-def _iter_tool_calls_lists(obj: Any) -> "list[list[Any]]":
-    """Collect every ``tool_calls`` list inside *obj*.
+def _iter_tool_calls_lists(obj: Any) -> "list[list[dict[str, Any]]]":
+    """Collect the calls of every ``tool_calls`` list inside *obj*.
 
     Walks dicts and lists looking for any ``"tool_calls"`` key whose value
     is a list.  This supports both top-level ``{"tool_calls": [...]}``
@@ -3708,21 +4029,34 @@ def _iter_tool_calls_lists(obj: Any) -> "list[list[Any]]":
     extra call.  The walk keeps its own stack: ``json.loads`` accepts
     nesting far deeper than the interpreter's recursion limit.
 
+    An entry whose ``name`` is not a string is not a call, and a list
+    with no call in it is not collected: this walk is the one judgement
+    of whether a JSON object carries a call, shared by the parser
+    (:func:`_parse_text_based_tool_calls`), the JSON precedence over a
+    native ``<invoke>`` block (:func:`_has_json_call`) and the Claude
+    Code early stop, so an empty or invalid envelope neither silences
+    the invoke after it nor ends the turn as a call.
+
     Args:
         obj: A parsed JSON value (dict, list, scalar).
 
     Returns:
-        Lists of tool-call entries in encounter order (depth first, a
-        dict's own list before the ones nested in its other values).
+        The calls of each ``tool_calls`` list that holds one, in
+        encounter order (depth first, a dict's own list before the ones
+        nested in its other values).
     """
-    out: list[list[Any]] = []
+    out: list[list[dict[str, Any]]] = []
     stack = [obj]
     while stack:
         node = stack.pop()
         if isinstance(node, dict):
             tcs = node.get("tool_calls")
             if isinstance(tcs, list):
-                out.append(tcs)
+                calls = [
+                    tc for tc in tcs if isinstance(tc, dict) and isinstance(tc.get("name"), str)
+                ]
+                if calls:
+                    out.append(calls)
                 stack.extend(reversed([v for k, v in node.items() if k != "tool_calls"]))
             else:
                 stack.extend(reversed(node.values()))
@@ -3748,6 +4082,13 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
       ``[]``/``{}`` characters (e.g. markdown links inside a finish summary),
     - emit several distinct ``tool_calls`` blocks in one response.
 
+    When no JSON call comes before it, the first ``<invoke name="...">``
+    block of Claude's native tool-call syntax that opens a line is the
+    only call (see :func:`_parse_xml_tool_call`): Claude models driven
+    through ``claude --tools ""`` fall back to it despite the JSON
+    instructions, and then write invoke after invoke with no results in
+    between, so only the first one is a call the model made knowingly.
+
     Args:
         content: The text content to parse for tool calls.
 
@@ -3756,14 +4097,14 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
         ``name``, and ``arguments`` keys.  Returns an empty list if no
         valid tool calls are found.
     """
-    function_calls: list[dict[str, Any]] = []
+    function_calls = _parse_xml_tool_call(content)
+    if function_calls:
+        return function_calls
     seen: set[tuple[str, str]] = set()
 
     for _start, _end, parsed in _iter_balanced_json_objects(content):
         for tcs in _iter_tool_calls_lists(parsed):
             for tc in tcs:
-                if not (isinstance(tc, dict) and isinstance(tc.get("name"), str)):
-                    continue
                 arguments = tc.get("arguments", {})
                 try:
                     key = (tc["name"], json.dumps(arguments, sort_keys=True))
@@ -3783,6 +4124,93 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
                 )
 
     return function_calls
+
+
+# Claude's native tool-call syntax, which a Claude model may emit as
+# plain text when the CLI exposes no tools: one ``<invoke>`` block that
+# opens a line, holding one ``<parameter>`` element per argument.
+_XML_INVOKE_OPEN = '<invoke name="'
+_XML_INVOKE_OPENER_RE = re.compile(r'^[ \t]*<invoke name="', re.MULTILINE)
+_XML_INVOKE_RE = re.compile(
+    r'^[ \t]*<invoke name="([^"]+)">(.*?)</invoke>', re.MULTILINE | re.DOTALL
+)
+_XML_PARAMETER_RE = re.compile(r'<parameter name="([^"]+)">(.*?)</parameter>', re.DOTALL)
+
+
+def _parse_xml_tool_call(content: str) -> list[dict[str, Any]]:
+    """Parse the first ``<invoke>`` block of *content* as a tool call.
+
+    The arguments are the raw parameter texts;
+    :meth:`CLITextModel._decode_text_arguments` turns the ones the tool
+    does not declare as strings into JSON values.
+
+    Args:
+        content: The text content to parse.
+
+    Returns:
+        A one-element list with the call (``id``, ``name``, ``arguments``),
+        or an empty list when *content* has no complete ``<invoke>`` block.
+    """
+    match = _first_invoke(content)
+    if match is None:
+        return []
+    return [
+        {
+            "id": f"call_{uuid.uuid4().hex[:8]}",
+            "name": match.group(1),
+            "arguments": dict(_XML_PARAMETER_RE.findall(match.group(2))),
+        }
+    ]
+
+
+def _first_invoke(content: str) -> re.Match[str] | None:
+    """Return the first complete ``<invoke>`` block of *content* that is a call.
+
+    It is not one when a JSON ``tool_calls`` block comes before it: the
+    JSON call is the model's, and the invoke is text after it.
+
+    Args:
+        content: The text content to search.
+    """
+    match = _XML_INVOKE_RE.search(content)
+    if match is None or _has_json_call(content[: match.start()]):
+        return None
+    return match
+
+
+def _has_json_call(content: str) -> bool:
+    """Return whether *content* holds a JSON ``tool_calls`` block with a call in it."""
+    return any(
+        _iter_tool_calls_lists(parsed)
+        for _start, _end, parsed in _iter_balanced_json_objects(content)
+    )
+
+
+def _inside_invoke(content: str) -> bool:
+    """Return whether *content* ends inside an ``<invoke>`` block that may become the call.
+
+    A JSON call streamed inside the block is one of its arguments, so
+    the stream must not stop there.
+
+    Args:
+        content: The streamed text so far.
+    """
+    opener = _XML_INVOKE_OPENER_RE.search(content)
+    return (
+        opener is not None
+        and "</invoke>" not in content[opener.end() :]
+        and not _has_json_call(content[: opener.start()])
+    )
+
+
+def _xml_tool_call_end(content: str) -> int:
+    """Return the end of the first ``<invoke>`` call of *content*, or ``-1``.
+
+    Args:
+        content: The streamed text so far.
+    """
+    match = _first_invoke(content)
+    return match.end() if match else -1
 
 
 def render_tool_call(name: str, arguments: dict[str, Any]) -> str:

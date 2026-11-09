@@ -15,7 +15,9 @@ executables a running window may still use, is refused then.
 
 from __future__ import annotations
 
+import json
 import os
+import signal
 import stat
 import time
 from collections.abc import Callable
@@ -25,6 +27,7 @@ from typing import Any
 import pytest
 
 from kiss.core.brand import BRAND
+from kiss.core.processes import pid_alive
 from kiss.server import standalone_app
 from kiss.tests.conftest import posix_only
 
@@ -39,12 +42,13 @@ def _hanging_commands(bin_dir: Path, *names: str) -> None:
 
     The stub ``exec``s its sleep, so the sleep is the process the probe
     kills at its timeout (a sleep forked by the stub would outlive it);
-    ``<stub>.started`` records that the stub did run.
+    ``<stub>.started`` records that the stub did run, ``<stub>.pid`` its
+    (and so the sleep's) pid.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
     for name in names:
         stub = bin_dir / name
-        stub.write_text(f'#!/bin/sh\n: > "{stub}.started"\nexec sleep 60\n')
+        stub.write_text(f'#!/bin/sh\necho $$ > "{stub}.pid"\n: > "{stub}.started"\nexec sleep 60\n')
         stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
 
 
@@ -121,3 +125,55 @@ def test_unanswering_ps_is_not_nothing_running(
     assert standalone_app.write_macos_launcher(apps, BRAND, icon, exe, state, None) is None
     assert not exe_copy.exists() and not (bundle / "Contents" / "Frameworks").exists()
     assert (bundle / "Contents" / "MacOS" / "launcher").exists()
+
+
+def test_silent_playwright_driver_cannot_hang_the_browser_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``playwright_chromium`` is None at its timeout when the driver stays silent; the driver dies.
+
+    Playwright's executable-path lookup starts its node driver and waits
+    for the driver's handshake with no deadline of its own, and
+    ``kiss-app`` asks it before opening any window (``find_browser``,
+    ``sandboxed``), so a driver that starts and never answers would park
+    the app for good. The real Node driver is stopped by a preload
+    module before its handshake; the product timeout is unchanged. An
+    invalid Node option then exercises an immediate driver failure.
+    The lookup is cached per process:
+    cleared before each question here and at the end, so the tests that
+    follow ask the real driver again.
+    """
+    pid_file = tmp_path / "node.pid"
+    preload = tmp_path / "stop-node.cjs"
+    preload.write_text(
+        f"require('node:fs').writeFileSync({json.dumps(str(pid_file))}, String(process.pid));\n"
+        "process.kill(process.pid, 'SIGSTOP');\n", encoding="utf-8",
+    )
+    monkeypatch.delenv("PLAYWRIGHT_NODEJS_PATH", raising=False)
+    monkeypatch.setenv("NODE_OPTIONS", f"--require={json.dumps(str(preload))}")
+    timeout = standalone_app.PLAYWRIGHT_TIMEOUT_SECS
+    lookup = standalone_app.playwright_chromium
+    lookup.cache_clear()
+    try:
+        started = time.monotonic()
+        assert lookup() is None
+        elapsed = time.monotonic() - started
+        assert pid_file.exists(), "the real Node driver never ran"
+        assert timeout <= elapsed < timeout + 15.0, f"waited {elapsed:.2f}s for {timeout}s"
+        # The stuck driver went with the lookup that gave up on it.
+        pid = int(pid_file.read_text())
+        deadline = time.monotonic() + 5.0
+        while pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not pid_alive(pid), "the stuck driver outlived the lookup"
+
+        monkeypatch.setenv("NODE_OPTIONS", "--invalid-kiss-test-option")
+        lookup.cache_clear()
+        started = time.monotonic()
+        assert lookup() is None
+        elapsed = time.monotonic() - started
+        assert elapsed < timeout, f"a dead driver took {elapsed:.2f}s to give up on"
+    finally:
+        lookup.cache_clear()
+        if pid_file.exists() and pid_alive(int(pid_file.read_text())):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)

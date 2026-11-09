@@ -388,6 +388,60 @@ async function main() {
     );
   });
 
+  await test('CAND-6: a chat switch in the same repository re-asks the status for the new chat', async () => {
+    // The status is per chat (its `taskWorktree` is the worktree that
+    // chat's task runs in, which the badge counts): the chat on screen
+    // is part of the view's identity, so switching chats asks again
+    // and a late reply for the previous chat is dropped.
+    const {win, posted} = makePage();
+    send(win, {
+      type: 'tabs_state',
+      tabs: [
+        {tabId: 'a', chatId: 'chat-a', workDir: WD, title: 'A'},
+        {tabId: 'b', chatId: 'chat-b', workDir: WD, title: 'B'},
+      ],
+    });
+    win._testApi.switchToTab('a');
+    openScm(win, posted);
+    const taskWt = WD + '/.kiss-worktrees/a';
+    const change = n => ({path: 'f' + n + '.py', status: 'M'});
+    const worktrees = [
+      {path: WD, name: 'repo', head: SHA_A, branch: 'main', current: true,
+        changes: [change(1), change(2)]},
+      {path: taskWt, name: 'a', head: SHA_A, branch: 'kiss/a', current: false,
+        changes: [1, 2, 3, 4, 5, 6, 7].map(change)},
+    ];
+    const status = (token, taskWorktree) => ({
+      type: 'gitStatus',
+      token,
+      workDir: WD,
+      repo: WD,
+      branch: 'main',
+      changes: [],
+      worktrees,
+      taskWorktree,
+    });
+    const forA = ofType(posted, 'gitStatus').pop();
+    assert.strictEqual(forA.tabId, 'a');
+    send(win, status(forA.token, taskWt));
+    const badge = byId(win, 'scm-hdr-count');
+    assert.strictEqual(badge.textContent, '7', "chat A's task worktree");
+    win._testApi.switchToTab('b');
+    const forB = ofType(posted, 'gitStatus').pop();
+    assert.strictEqual(
+      forB.tabId,
+      'b',
+      'BUG: the switch to B re-asked no status for B',
+    );
+    assert.notStrictEqual(forB.token, forA.token);
+    send(win, status(forB.token, ''));
+    assert.strictEqual(badge.textContent, '2', "B's main worktree");
+    // A's reply, late (the daemon answered A's request after B's): it
+    // carries A's token and is not B's status.
+    send(win, status(forA.token, taskWt));
+    assert.strictEqual(badge.textContent, '2', "BUG: A's count shown for B");
+  });
+
   report('conc2026_sidebar_scm_races');
   for (const win of pages) win.close();
 }

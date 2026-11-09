@@ -10,7 +10,8 @@ lock), but the command paths read the attribute MORE THAN ONCE without
 that lock: ``Bash`` checked ``self.container is None`` and then read
 ``self.container.id`` again; ``_bash_streaming`` and ``_kill_exec``
 asserted on one read and dereferenced another; ``get_host_port``
-checked and then called ``self.container.reload()``.  A ``close()``
+(since removed as unused) checked and then called
+``self.container.reload()``.  A ``close()``
 that lands between the two reads turned an orderly "no container is
 open" refusal into an ``AttributeError`` — or, on the timed-out-exec
 reaper path, an ``AssertionError`` that killed the reaper daemon
@@ -104,9 +105,9 @@ def test_kill_exec_after_concurrent_close_is_a_noop(cleanup: None) -> None:
 
 
 def test_bash_racing_close_never_tears(cleanup: None) -> None:
-    """Concurrent Bash/get_host_port vs close(): orderly outcomes only.
+    """Concurrent Bash vs close(): orderly outcomes only.
 
-    Every worker enters its method, passes the container check, and —
+    Every worker enters ``Bash``, passes the container check, and —
     thanks to ``KISS_RACE_DELAY`` — parks inside the historical
     check-to-use window while the main thread runs ``close()`` to
     completion.  Acceptable outcomes are a successful result, the
@@ -116,7 +117,7 @@ def test_bash_racing_close_never_tears(cleanup: None) -> None:
     """
     mgr = DockerManager(IMAGE)
     mgr.open()
-    barrier = threading.Barrier(5)
+    barrier = threading.Barrier(4)
     outcomes: list[BaseException | str] = []
     outcomes_lock = threading.Lock()
 
@@ -131,15 +132,7 @@ def test_bash_racing_close_never_tears(cleanup: None) -> None:
         except BaseException as exc:  # noqa: BLE001 — recorded for assertions
             record(exc)
 
-    def run_port() -> None:
-        barrier.wait(30)
-        try:
-            record(str(mgr.get_host_port(80)))
-        except BaseException as exc:  # noqa: BLE001 — recorded for assertions
-            record(exc)
-
     threads = [threading.Thread(target=run_bash, daemon=True) for _ in range(3)]
-    threads.append(threading.Thread(target=run_port, daemon=True))
     os.environ["KISS_RACE_DELAY"] = "0.1"
     try:
         for t in threads:
@@ -157,13 +150,11 @@ def test_bash_racing_close_never_tears(cleanup: None) -> None:
         if isinstance(o, (AttributeError, AssertionError))
     ]
     assert not torn, f"torn container read under concurrent close(): {torn!r}"
-    assert len(outcomes) == 4
+    assert len(outcomes) == 3
     assert mgr.container is None
 
 
-def test_bash_and_get_host_port_after_close_raise_kiss_error(
-    cleanup: None,
-) -> None:
+def test_bash_after_close_raises_kiss_error(cleanup: None) -> None:
     """The closed-manager branch stays an orderly KISSError refusal."""
     mgr = DockerManager(IMAGE)
     mgr.open()
@@ -173,18 +164,15 @@ def test_bash_and_get_host_port_after_close_raise_kiss_error(
         mgr.close()
     with pytest.raises(KISSError):
         mgr.Bash("echo hi", "say hi", timeout_seconds=30)
-    with pytest.raises(KISSError):
-        mgr.get_host_port(80)
 
 
-def test_streaming_and_ports_snapshot_paths_still_work(cleanup: None) -> None:
-    """Streaming Bash and a real port mapping work through the snapshots.
+def test_streaming_snapshot_path_still_works(cleanup: None) -> None:
+    """Streaming Bash works through the snapshot.
 
-    Covers the non-torn branches of the modified methods end to end:
-    the streaming path (shared token-tagged exec creation), a mapped
-    port, and an unmapped port.
+    Covers the non-torn branch of the streaming path (shared
+    token-tagged exec creation) end to end.
     """
-    mgr = DockerManager(IMAGE, ports={80: 0})
+    mgr = DockerManager(IMAGE)
     chunks: list[str] = []
     mgr.stream_callback = chunks.append
     mgr.open()
@@ -192,8 +180,5 @@ def test_streaming_and_ports_snapshot_paths_still_work(cleanup: None) -> None:
         out = mgr.Bash("echo streamed", "stream a line", timeout_seconds=30)
         assert "streamed" in out
         assert "streamed" in "".join(chunks)
-        port = mgr.get_host_port(80)
-        assert isinstance(port, int) and port > 0
-        assert mgr.get_host_port(4321) is None
     finally:
         mgr.close()

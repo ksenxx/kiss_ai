@@ -34,6 +34,7 @@ from typing import Any
 
 import pytest
 
+from kiss.tests.server.conftest import ensure_loop
 from kiss.tests.server.test_audit1005_browser_tab_lifecycle import _driver_processes
 from kiss.tests.server.test_browser_tab_service import (
     _PLAYWRIGHT_CACHE,
@@ -67,7 +68,7 @@ def _launch_cancelled_in_mask(service: Any) -> bool:
         Exception: Whatever a launch that failed on its own raised; a
             broken browser install must fail the test, not skip it.
     """
-    loop = service._ensure_loop()
+    loop = ensure_loop(service)
     future = asyncio.run_coroutine_threadsafe(service._launch(), loop)
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:

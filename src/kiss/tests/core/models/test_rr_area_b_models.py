@@ -628,12 +628,18 @@ def _null_responder(request: Request) -> Reply:
     return Reply(json_body={})
 
 
+_HEADER_BUDGET = 30.0
+
+
 def _issue(client: httpx.Client, url: str) -> httpx.Response:
-    """Send one real POST through *client*, returning the response."""
+    """Send one real POST through *client*, returning the still-open response.
+
+    The body is left unread: a response the SDK finished with is no
+    stream's (A03-2f), so only an in-flight one can stand for "this
+    stream's request".  ``client.close()`` releases it.
+    """
     request = client.build_request("POST", url, json={})
-    response = client.send(request)
-    response.read()
-    return response
+    return client.send(request, stream=True)
 
 
 class TestAbortableStreamSnapshot:
@@ -646,7 +652,7 @@ class TestAbortableStreamSnapshot:
             url = server.base_url + "/anything"
             previous = _issue(client, url)
             assert client.last_response is previous
-            stream = _AbortableStream(iter([]), client)
+            stream = _AbortableStream(iter([]), client, _HEADER_BUDGET)
             assert client.last_response is None
             assert stream.response is None
             client.close()
@@ -664,7 +670,7 @@ class TestAbortableStreamSnapshot:
                 yield "chunk-1"
                 yield "chunk-2"
 
-            stream = _AbortableStream(lazy_request_chunks(), client)
+            stream = _AbortableStream(lazy_request_chunks(), client, _HEADER_BUDGET)
             iterator = iter(stream)
             assert next(iterator) == "chunk-1"
             own_response = stream.response
@@ -681,7 +687,7 @@ class TestAbortableStreamSnapshot:
         with ScriptedOpenAIServer(_null_responder) as server:
             client = _ResponseTrackingHttpxClient(stall_timeout=30.0)
             url = server.base_url + "/anything"
-            stream = _AbortableStream(iter(["only"]), client)
+            stream = _AbortableStream(iter(["only"]), client, _HEADER_BUDGET)
             own_response = _issue(client, url)  # "this stream's" request
             assert stream.response is own_response
             later = _issue(client, url)
@@ -698,7 +704,7 @@ class TestAbortableStreamSnapshot:
                 return
                 yield  # pragma: no cover — makes this a generator
 
-            stream = _AbortableStream(no_chunks(), client)
+            stream = _AbortableStream(no_chunks(), client, _HEADER_BUDGET)
             stream.close()
             _issue(client, url)  # a retry after the dead stream was closed
             assert stream.response is None

@@ -10,8 +10,9 @@
 // jsdom suite in test/victorySound.test.js.  That suite covers a visible,
 // a background, a sub-agent, an unknown and an unnamed tab, the muted
 // and the storage-less page, a missing Audio constructor or clip URL,
-// and a play() that rejects, returns nothing or throws, so full line
-// coverage of the fenced regions is full branch coverage.
+// a play() that rejects, returns nothing or throws, and a player whose
+// clip fails to load once and twice, so full line coverage of the
+// fenced regions is full branch coverage.
 
 'use strict';
 

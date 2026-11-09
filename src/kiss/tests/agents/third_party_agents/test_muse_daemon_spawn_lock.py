@@ -12,7 +12,10 @@ check-and-spawn step on ``spawn.lock``, so waiters find the winner's
 daemon instead of spawning.
 
 The test releases several caller processes at once and records every
-daemon process that carries this test's ``KISS_HOME`` while they run.
+daemon process that carries this test's ``KISS_HOME`` while they run:
+losslessly, by a ``sitecustomize`` every daemon interpreter runs at
+start (a ``/proc`` poll alone could miss a loser that started and
+exited between two scans), and by that poll, which also bounds the wait.
 """
 
 from __future__ import annotations
@@ -48,6 +51,39 @@ MUSE_POLICY = {"defaults": {"read": "allow", "write": "ask"}}
 # Upper bound on the whole race: a hung caller fails the test instead of
 # hanging the suite (pytest timeouts are disabled repo-wide).
 _DEADLINE_S = 60.0
+
+_START_RECORDER = """
+import os, sys
+if "kiss.agents.third_party_agents.muse_auth.daemon" in sys.orig_argv:
+    with open(os.environ["MUSE_DAEMON_STARTS"], "a") as record:
+        record.write(f"{os.getpid()}\\n")
+"""
+
+
+def _record_daemon_starts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Make every interpreter started as the daemon append its pid to the returned file.
+
+    A ``sitecustomize`` first on ``PYTHONPATH`` (inherited by the callers
+    and by the daemons they spawn) runs at interpreter start, before the
+    daemon can probe the socket and exit, so the record is lossless.
+
+    Args:
+        monkeypatch: Sets ``PYTHONPATH`` and the record's path for the test.
+        tmp_path: Holds the ``sitecustomize`` module and the record.
+
+    Returns:
+        The record file: one line per daemon start.
+    """
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "sitecustomize.py").write_text(_START_RECORDER)
+    starts = tmp_path / "daemon_starts"
+    starts.touch()
+    monkeypatch.setenv("MUSE_DAEMON_STARTS", str(starts))
+    inherited = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(site), *inherited]))
+    return starts
+
 
 _CALLER_SCRIPT = """
 import os, sys, time
@@ -135,6 +171,7 @@ def test_concurrent_callers_spawn_one_daemon(
     """Callers released together spawn a single daemon and all get served."""
     setup_muse_env(monkeypatch, MUSE_POLICY)
     kiss_home = os.environ["KISS_HOME"]
+    starts = _record_daemon_starts(monkeypatch, tmp_path)
     barrier = tmp_path / "go"
     # Spawning happens inside the try so a failure while spawning still kills
     # the callers already started, which would otherwise wait on the barrier.
@@ -172,12 +209,13 @@ def test_concurrent_callers_spawn_one_daemon(
     assert all(out.strip() == "ok" for out in outputs), outputs
     assert running
     assert len(seen) == 1, f"expected one daemon, saw pids {sorted(seen)}"
+    assert starts.read_text().split() == [str(pid) for pid in seen]
     assert (muse_auth_dir() / "spawn.lock").exists()
 
 
 @pytest.mark.skipif(not Path("/proc/self/environ").exists(), reason="needs Linux /proc")
 def test_concurrent_threads_spawn_one_daemon(
-    isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch
+    isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Threads of one process also serialize on ``spawn.lock``.
 
@@ -187,6 +225,7 @@ def test_concurrent_threads_spawn_one_daemon(
     """
     setup_muse_env(monkeypatch, MUSE_POLICY)
     kiss_home = os.environ["KISS_HOME"]
+    starts = _record_daemon_starts(monkeypatch, tmp_path)
     start = threading.Barrier(_CALLERS)
     errors: list[BaseException] = []
     threads = [
@@ -209,6 +248,7 @@ def test_concurrent_threads_spawn_one_daemon(
     assert errors == []
     assert running
     assert len(seen) == 1, f"expected one daemon, saw pids {sorted(seen)}"
+    assert starts.read_text().split() == [str(pid) for pid in seen]
 
 
 def _call_after_barrier(start: threading.Barrier, errors: list[BaseException]) -> None:

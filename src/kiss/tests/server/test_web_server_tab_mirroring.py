@@ -900,6 +900,158 @@ class Sea(BaseSea):
             "keeps a permanently local tab",
         )
 
+    async def test_open_and_close_acks_ride_the_snapshot_that_reflects_them(
+        self,
+    ) -> None:
+        """A18-1: the ``ack`` of an ``openTab`` / ``closeTab`` is echoed
+        in the ``acks`` of the first ``tabs_state`` taken after the
+        daemon processed that command.
+
+        Snapshots other activity publishes meanwhile carry no such
+        token, so a client keeps its optimistic open / close until the
+        snapshot that answers it (a count of unrelated snapshots, or
+        elapsed time, is no acknowledgment).  Every snapshot carries
+        the ``acks`` list (empty when it answers nobody): a page tells
+        a daemon that echoes acknowledgments from one that does not.
+        """
+        ws_a = await self._connect_ok()
+        ws_b = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._ready(ws_b)
+        baseline = await self._wait_for_event(ws_b, "tabs_state")
+        self.assertIsNotNone(baseline)
+        assert baseline is not None
+        self.assertEqual(
+            baseline.get("acks"), [],
+            "every tabs_state carries an acks list, empty when it answers no command",
+        )
+
+        def _acking(token: str) -> Any:
+            return lambda ev: token in ev.get("acks", [])
+
+        # B's open (sent without a token, as an older page would)
+        # publishes a snapshot that acknowledges nobody; the snapshot
+        # that acknowledges A's open was taken after it and lists the
+        # tab.  (The sender may ship the tab before the token when
+        # the two opens overlap; the listing alone also lifts the
+        # page's shield, so the order is free.)
+        await self._send(ws_b, {
+            "type": "openTab", "tabId": "tab-b1", "title": "theirs",
+        })
+        await self._send(ws_a, {
+            "type": "openTab", "tabId": "tab-a1", "title": "mine",
+            "ack": "a-open-1",
+        })
+        opened = await self._wait_for_event(
+            ws_a, "tabs_state", pred=_acking("a-open-1"),
+        )
+        self.assertIsNotNone(opened, "no snapshot acknowledged A's openTab")
+        assert opened is not None
+        self.assertIn(
+            "tab-a1", _tab_ids(opened),
+            "the acknowledging snapshot must reflect the open it answers",
+        )
+
+        # The close's token rides a snapshot that omits the tab.
+        await self._send(ws_a, {
+            "type": "closeTab", "tabId": "tab-a1", "ack": "a-close-1",
+        })
+        closed = await self._wait_for_event(
+            ws_a, "tabs_state", pred=_acking("a-close-1"),
+        )
+        self.assertIsNotNone(closed, "no snapshot acknowledged A's closeTab")
+        assert closed is not None
+        self.assertNotIn("tab-a1", _tab_ids(closed))
+        # A token answers once: the snapshot B's close publishes
+        # carries neither of A's.
+        await self._send(ws_b, {"type": "closeTab", "tabId": "tab-b1"})
+        later = await self._wait_for_snapshot_with(ws_a, absent={"tab-b1"})
+        assert later is not None
+        self.assertEqual(later.get("acks"), [])
+
+    async def test_replayed_open_does_not_reopen_a_tab_closed_meanwhile(
+        self,
+    ) -> None:
+        """A page's transport re-sends the batch it flushed on a
+        connection that died before the daemon's ``pong`` confirmed it
+        (media/transport.js, at-least-once), so an ``openTab`` the
+        daemon already processed can arrive a second time, with the
+        same ``ack`` token, after another surface closed the tab.  The
+        replay must not reopen it: the daemon answers with a snapshot
+        that echoes the token and omits the tab, which is what the
+        replaying page needs to drop its shielded copy.  A fresh token
+        for the same id is a new open, as before.
+        """
+        ws_a = await self._connect_ok()
+        ws_b = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._ready(ws_b)
+        self.assertIsNotNone(await self._wait_for_event(ws_b, "tabs_state"))
+
+        def _acking(token: str) -> Any:
+            return lambda ev: token in ev.get("acks", [])
+
+        open_cmd = {
+            "type": "openTab", "tabId": "tab-a1", "title": "mine",
+            "ack": "a-open-1",
+        }
+        await self._send(ws_a, open_cmd)
+        opened = await self._wait_for_event(
+            ws_a, "tabs_state", pred=_acking("a-open-1"),
+        )
+        assert opened is not None
+        self.assertIn("tab-a1", _tab_ids(opened))
+        self.assertIsNotNone(
+            await self._wait_for_snapshot_with(ws_b, present={"tab-a1"}),
+        )
+        # A's connection dies before the pong; the user closes the tab
+        # on B meanwhile.
+        await ws_a.close()
+        await self._send(ws_b, {
+            "type": "closeTab", "tabId": "tab-a1", "ack": "b-close-1",
+        })
+        closed = await self._wait_for_event(
+            ws_b, "tabs_state", pred=_acking("b-close-1"),
+        )
+        assert closed is not None
+        self.assertNotIn("tab-a1", _tab_ids(closed))
+
+        # A's next connection replays the open, token and all.
+        ws_a2 = await self._connect_ok()
+        await self._send(ws_a2, open_cmd)
+        answer = await self._wait_for_event(
+            ws_a2, "tabs_state", pred=_acking("a-open-1"),
+        )
+        self.assertIsNotNone(
+            answer,
+            "the replayed open was not answered: the page keeps shielding "
+            "a tab the registry does not have",
+        )
+        assert answer is not None
+        self.assertNotIn(
+            "tab-a1", _tab_ids(answer),
+            "REGRESSION: a replayed open (same ack token) reopened the tab "
+            "another surface closed meanwhile",
+        )
+        self.assertIsNone(
+            await self._wait_for_snapshot_with(
+                ws_b, present={"tab-a1"}, timeout=1.0,
+            ),
+            "the closed tab came back on the other surface",
+        )
+        on_disk = json.loads(
+            (Path(self.tmpdir) / ".kiss" / "tabs.json").read_text(encoding="utf-8"),
+        )
+        self.assertNotIn("tab-a1", [t["tabId"] for t in on_disk["tabs"]])
+
+        # A genuine new open of the same id (a fresh token) is opened.
+        await self._send(ws_a2, dict(open_cmd, ack="a-open-2"))
+        reopened = await self._wait_for_event(
+            ws_a2, "tabs_state", pred=_acking("a-open-2"),
+        )
+        assert reopened is not None
+        self.assertIn("tab-a1", _tab_ids(reopened))
+
 
 @unittest.skipIf(is_root(), "root bypasses directory permissions")
 class TestTabRegistryPersistenceFailure(unittest.TestCase):

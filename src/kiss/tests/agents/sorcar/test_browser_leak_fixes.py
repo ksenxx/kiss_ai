@@ -18,7 +18,11 @@ These tests use a REAL headless Chromium (no mocks) and assert on the
 actual OS process state via ``os.kill(pid, 0)``.
 """
 
+import json
+import logging
 import os
+import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -26,8 +30,15 @@ import time
 
 import pytest
 
-from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.agents.sorcar import web_stealth
+from kiss.agents.sorcar.web_use_tool import (
+    WebUseTool,
+    _stop_playwright,
+    _terminate_pid_escalating,
+)
+from kiss.core.processes import process_identity
 from kiss.tests.conftest import posix_only
+from kiss.tests.server.pause import Pause
 
 _posix_only = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX process/signal semantics required"
@@ -93,12 +104,19 @@ class TestBrowserProcessKilledOnClose:
         leaking the Chromium process (this is exactly what happened on
         the atexit path for browsers created in ThreadPoolExecutor
         workers).  The PID-kill fallback must still terminate it.
+
+        ``playwright.stop()`` fails the same way, and its request never
+        reaches the Node driver (closing the driver's stdin is left to
+        the event loop, which no longer turns): the driver process must
+        be killed and reaped as well, or one ``node run-driver`` stays
+        for every closed tool until the daemon exits.
         """
         box: dict = {}
 
         def _worker() -> None:
             tool = WebUseTool(user_data_dir=str(tmp_path / "prof"), headless=True)
             box["pid"] = _launch(tool)
+            box["driver_pid"] = tool._playwright._impl_obj._connection._transport._proc.pid
             box["tool"] = tool
 
         t = threading.Thread(target=_worker)
@@ -106,9 +124,14 @@ class TestBrowserProcessKilledOnClose:
         t.join(timeout=120)
         assert not t.is_alive(), "worker thread hung"
         assert "pid" in box, "browser failed to launch in worker thread"
+        assert _pid_alive(box["driver_pid"]), "the Playwright driver is not a live process"
         box["tool"].close()
         assert _wait_dead(box["pid"]), (
             f"Chromium (pid {box['pid']}) leaked after cross-thread close()"
+        )
+        # A zombie still answers ``kill(pid, 0)``: the driver must be reaped too.
+        assert _wait_dead(box["driver_pid"]), (
+            f"Playwright driver (pid {box['driver_pid']}) leaked after cross-thread close()"
         )
 
     def test_ensure_browser_relaunch_kills_previous_process(self, tmp_path):
@@ -144,6 +167,129 @@ class TestBrowserProcessKilledOnClose:
             victim.terminate()
             victim.wait()
             tool.close()
+
+    def test_signal_never_reaches_a_stranger_that_took_the_browsers_pid(self):
+        """PID-reuse guard, the window inside one escalation step.
+
+        The identity check and the signal are two steps: a browser that
+        exits (reaped at once by the driver, its parent) and whose pid
+        the kernel hands to a stranger between them had the stranger
+        signalled.  Run in a child pid namespace, where the next pid
+        can be chosen (``ns_last_pid``), so the reuse is forced for sure
+        instead of waiting for the pid counter to wrap.
+        """
+        if shutil.which("unshare") is None:
+            pytest.skip("unshare is not installed")
+        namespace = ["unshare", "-Urpf", "--mount-proc"]
+        if subprocess.run([*namespace, "true"], capture_output=True).returncode != 0:
+            pytest.skip("unprivileged user namespaces are unavailable")
+        probe = f"import {__name__} as t; t._signal_after_pid_reuse()"
+        result = subprocess.run(
+            [*namespace, sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stderr
+        report = json.loads(result.stdout.strip().splitlines()[-1])
+        assert report["stranger"] == report["target"], report
+        assert report["stranger_exit"] is None, f"the stranger was signalled: {report}"
+
+    @posix_only("the driver is frozen with SIGSTOP")
+    def test_stop_of_a_stalled_driver_is_bounded(self):
+        """A driver that stops draining its pipe (frozen here) must not hold
+        ``_stop_playwright`` for good: it is killed and reaped instead."""
+        playwright = web_stealth.playwright_api().sync_playwright().start()
+        driver_pid = playwright._impl_obj._connection._transport._proc.pid
+        os.kill(driver_pid, signal.SIGSTOP)
+        resume = threading.Timer(60, os.kill, args=(driver_pid, signal.SIGCONT))
+        resume.daemon = True
+        resume.start()
+        started = time.monotonic()
+        try:
+            _stop_playwright(playwright)
+        finally:
+            resume.cancel()
+            try:
+                os.kill(driver_pid, signal.SIGCONT)
+            except OSError:
+                pass
+        elapsed = time.monotonic() - started
+        assert elapsed < 30, f"the stop waited {elapsed:.0f}s for the frozen driver"
+        assert _wait_dead(driver_pid), f"Playwright driver (pid {driver_pid}) leaked"
+
+    @posix_only("the driver is frozen with SIGSTOP")
+    def test_close_with_a_stalled_driver_is_bounded(self, tmp_path):
+        """A driver that stops answering (frozen here) must not hold the
+        public ``close()`` for good.  The graceful close went to the driver
+        with no deadline of its own, and the close watchdog's kill of
+        Chromium unwedges nothing when the driver observes no exit: the
+        close is cut off on the Python side instead, the driver discarded
+        like a dead one (Chromium killed by pid, the driver killed and
+        reaped by the bounded stop)."""
+        tool = WebUseTool(user_data_dir=str(tmp_path / "prof"), headless=True)
+        pid = _launch(tool)
+        driver_pid = tool._playwright._impl_obj._connection._transport._proc.pid
+        os.kill(driver_pid, signal.SIGSTOP)
+        resume = threading.Timer(90, os.kill, args=(driver_pid, signal.SIGCONT))
+        resume.daemon = True
+        resume.start()
+        started = time.monotonic()
+        try:
+            assert tool.close() == "Browser closed."
+        finally:
+            resume.cancel()
+            try:
+                os.kill(driver_pid, signal.SIGCONT)
+            except OSError:
+                pass
+        elapsed = time.monotonic() - started
+        assert elapsed < 60, f"close() waited {elapsed:.0f}s for the frozen driver"
+        assert tool._playwright is None and tool._context is None
+        assert _wait_dead(pid), f"Chromium (pid {pid}) leaked after close()"
+        assert _wait_dead(driver_pid), f"Playwright driver (pid {driver_pid}) leaked"
+
+
+def _signal_after_pid_reuse() -> None:
+    """Terminate a process whose pid a stranger took over mid-call; report what happened.
+
+    Runs in a child pid namespace (see the test): holds
+    ``_terminate_pid_escalating`` between its identity check and its
+    signal (at the ``logger.warning`` that announces the kill), lets the
+    target exit and be reaped, gives its pid to a stranger through
+    ``ns_last_pid``, releases the call and prints a JSON line with the
+    stranger's exit status (``None`` while it lives).
+    """
+    target = subprocess.Popen(["sleep", "60"])
+    identity = process_identity(target.pid)
+    announcing = Pause(
+        logging.Logger.warning.__code__, lambda frame: "Killing leaked" in str(frame.get("msg"))
+    )
+    with announcing:
+        worker = threading.Thread(
+            target=_terminate_pid_escalating, args=(target.pid, identity), daemon=True
+        )
+        worker.start()
+        assert announcing.paused.wait(30), "the kill was never announced"
+        target.kill()
+        target.wait()
+        stranger = None
+        for _ in range(5):  # another fork can slip in between; retry
+            with open("/proc/sys/kernel/ns_last_pid", "w") as counter:
+                counter.write(str(target.pid - 1))
+            stranger = subprocess.Popen(["sleep", "60"])
+            if stranger.pid == target.pid:
+                break
+            stranger.kill()
+            stranger.wait()
+        assert stranger is not None
+        announcing.release()
+        worker.join(30)
+    time.sleep(0.5)
+    report = {"target": target.pid, "stranger": stranger.pid, "stranger_exit": stranger.poll()}
+    stranger.kill()
+    stranger.wait()
+    print(json.dumps(report), flush=True)
 
 
 @_posix_only

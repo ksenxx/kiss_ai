@@ -57,7 +57,7 @@ def _finish_body() -> bytes:
                     "function": {
                         "name": "finish",
                         "arguments": json.dumps(
-                            {"success": "true", "summary": "parent-done"},
+                            {"success": "true", "summary_in_html": "parent-done"},
                         ),
                     },
                 }],

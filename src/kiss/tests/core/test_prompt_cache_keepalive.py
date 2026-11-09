@@ -26,6 +26,7 @@ from kiss.core.kiss_error import BudgetExceededError
 from kiss.core.models.anthropic_model import KEEP_ALIVE_MAX_TOKENS, KEEP_ALIVE_TEXT
 from kiss.core.models.model_info import calculate_cost
 from kiss.core.prompt_cache_keepalive import is_long_running_call
+from kiss.core.utils import finish
 from kiss.tests.agents.sorcar import local_model_server as openai_server
 from kiss.tests.core import local_anthropic_server as anthropic_server
 
@@ -47,6 +48,9 @@ def test_is_long_running_call() -> None:
     assert not is_long_running_call("bash_job", {"job_id": "j1"})
     assert not is_long_running_call("Bash", {"command": "ls", "timeout_seconds": 120})
     assert not is_long_running_call("Bash", {"command": "ls", "timeout_seconds": "soon"})
+    # A JSON integer too large for a float (``float()`` raises OverflowError,
+    # not ValueError) is the tool's to reject, not the classifier's to raise on.
+    assert not is_long_running_call("Bash", {"command": "ls", "timeout_seconds": 10**400})
     assert not is_long_running_call("Bash", {"command": "ls"})
     assert not is_long_running_call("Read", {"file_path": "/x", "timeout": None})
 
@@ -275,7 +279,7 @@ def test_openai_compatible_model_sends_no_ping(monkeypatch: pytest.MonkeyPatch) 
         agent.run(
             model_name=openai_server.MODEL,
             prompt_template="Call slow_tool once, then finish.",
-            tools=[slow_tool],
+            tools=[slow_tool, finish],  # the structured finish ``finish_body`` scripts
             max_steps=4,
             max_budget=5.0,
             verbose=False,

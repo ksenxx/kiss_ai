@@ -88,32 +88,44 @@ def _is_append_piece(frame_locals: dict[str, Any]) -> bool:
     return "base64 -d >>" in frame_locals["command"]
 
 
+def _write_through(results: list[str], tools: DockerTools, path: str, content: str) -> None:
+    """Thread body: ``Write`` *content* to *path* and keep the result."""
+    results.append(tools.Write(path, content))
+
+
 def test_concurrent_writes_never_mix_and_readers_never_see_a_partial_file(
     env: DockerManager,
 ) -> None:
-    """Two writers of one path leave the file one of the two contents, never a mixture."""
+    """Two writers of one path leave the file one of the two contents, never a mixture.
+
+    The second writer's publication waits for the one in flight (the
+    tools' ``_FILE_WRITE_LOCK``, as on the host: A08 astra-2 / fable-1),
+    so it lands last.
+    """
     tools = DockerTools(env.Bash)
     path = "/tmp/race/target.txt"
     assert "Successfully wrote" in tools.Write(path, "previous\n")
     big = "A" * 80_000
     results: list[str] = []
-
-    def write_big() -> None:
-        results.append(tools.Write(path, big))
-
-    writer = threading.Thread(target=write_big)
+    writer = threading.Thread(target=_write_through, args=(results, tools, path, big))
+    second = threading.Thread(target=_write_through, args=(results, tools, path, "B" * 10))
     with Pause(DockerManager.Bash.__code__, _is_append_piece) as pause:
         writer.start()
         assert pause.paused.wait(60), "the big write never reached its second piece"
         # The first piece has landed somewhere, but a reader still sees
         # the previous file whole.
         assert env.Bash(f"cat {path}", "cat").split("\n")[0] == "previous"
-        results.append(tools.Write(path, "B" * 10))
+        # A second writer waits for the publication in flight.
+        second.start()
+        second.join(2)
+        assert second.is_alive(), "the second write did not wait for the first's publication"
+        assert env.Bash(f"cat {path}", "cat").split("\n")[0] == "previous"
         pause.release()
     writer.join(60)
-    assert not writer.is_alive()
+    second.join(60)
+    assert not writer.is_alive() and not second.is_alive()
     assert all("Successfully wrote" in result for result in results), results
-    assert _sha256_in(env, path) == hashlib.sha256(big.encode()).hexdigest()
+    assert _sha256_in(env, path) == hashlib.sha256(b"B" * 10).hexdigest()
     assert _listing(env, "/tmp/race") == ["target.txt"]
 
 
@@ -145,6 +157,32 @@ def test_write_keeps_the_mode_of_the_replaced_file(env: DockerManager) -> None:
     assert "Successfully wrote" in tools.Write("/tmp/mode/run.sh", "#!/bin/sh\necho two\n")
     assert env.Bash("stat -c %a /tmp/mode/run.sh", "stat").split("\n")[0] == "755"
     assert env.Bash("/tmp/mode/run.sh", "run").split("\n")[0] == "two"
+
+
+def test_write_through_a_symlink_updates_its_target_and_keeps_the_link(env: DockerManager) -> None:
+    """A Write to a symlink lands in the file it points to, as the ``cat > link`` it stands for.
+
+    The link stays a link (its mode is never the target's) and a dangling
+    link makes its missing target, as the shell redirection would.
+    """
+    tools = DockerTools(env.Bash)
+    tools.Write("/tmp/links/target.txt", "old\n")
+    env.Bash(
+        "cd /tmp/links && chmod 640 target.txt && ln -s target.txt link.txt"
+        " && ln -s /tmp/links/missing.txt dangling.txt",
+        "ln",
+    )
+    assert "Successfully wrote" in tools.Write("/tmp/links/link.txt", "new\n")
+    checked = env.Bash(
+        "cd /tmp/links && readlink link.txt && stat -c %a target.txt && cat target.txt && ls",
+        "check",
+    )
+    assert checked.split("\n")[:6] == [
+        "target.txt", "640", "new", "dangling.txt", "link.txt", "target.txt",
+    ], checked
+    assert "Successfully wrote" in tools.Write("/tmp/links/dangling.txt", "made\n")
+    checked = env.Bash("cd /tmp/links && readlink dangling.txt && cat missing.txt", "check")
+    assert checked.split("\n")[:2] == ["/tmp/links/missing.txt", "made"], checked
 
 
 def test_manager_closed_between_pieces_raises_and_publishes_nothing(

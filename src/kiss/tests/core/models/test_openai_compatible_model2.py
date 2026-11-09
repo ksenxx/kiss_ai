@@ -3001,6 +3001,114 @@ class TestReviewBugReproductions9:
             for item in input_items
         )
 
+    def test_terminal_only_tool_call_does_not_overwrite_a_streamed_one(
+        self, capture_server: str
+    ) -> None:
+        """A sparse terminal output is not indexed like the stream (A04-6a).
+
+        Call A arrives at output_index 0 in the stream; the terminal
+        ``response.completed.output`` omits A and holds only call B, at
+        position 0 of that shorter list.  B must get a slot of its own,
+        not A's.
+        """
+        m = OpenAICompatibleModel2(
+            "gpt-4o",
+            base_url=capture_server,
+            api_key="k",
+            token_callback=lambda t: None,
+        )
+        m.initialize("hi")
+
+        frames = [
+            _stream_sse_event(
+                "response.output_item.added",
+                {
+                    "type": "response.output_item.added",
+                    "sequence_number": 1,
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_a",
+                        "call_id": "call_a",
+                        "name": "echo",
+                        "arguments": "",
+                    },
+                },
+            ),
+            _stream_sse_event(
+                "response.function_call_arguments.delta",
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "sequence_number": 2,
+                    "item_id": "fc_a",
+                    "output_index": 0,
+                    "delta": '{"text":"a"}',
+                },
+            ),
+            _stream_sse_event(
+                "response.completed",
+                {
+                    "type": "response.completed",
+                    "sequence_number": 3,
+                    "response": {
+                        "id": "r",
+                        "object": "response",
+                        "created_at": 0,
+                        "model": "gpt-4o",
+                        "parallel_tool_calls": True,
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "output": [
+                            {
+                                "type": "function_call",
+                                "id": "fc_b",
+                                "call_id": "call_b",
+                                "name": "echo",
+                                "arguments": '{"text":"b"}',
+                                "status": "completed",
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 1,
+                            "input_tokens_details": {"cached_tokens": 0},
+                            "output_tokens": 1,
+                            "output_tokens_details": {"reasoning_tokens": 0},
+                            "total_tokens": 2,
+                        },
+                    },
+                },
+            ),
+        ]
+        _CapturingHandler.next_response_body = b"".join(frames)
+
+        fcs, _content, _resp = m.generate_and_process_with_tools(
+            function_map={"echo": _echo},
+            tools_schema=_ECHO_TOOL_CHAT_SCHEMA,
+        )
+        assert fcs == [
+            {"id": "call_a", "name": "echo", "arguments": {"text": "a"}},
+            {"id": "call_b", "name": "echo", "arguments": {"text": "b"}},
+        ]
+
+        m.add_function_results_to_conversation_and_return(
+            [("echo", {"result": "A"}), ("echo", {"result": "B"})]
+        )
+        m.token_callback = None
+        _CapturingHandler.next_response_body = _text_response_json("done").encode()
+        m.generate()
+
+        replayed = [
+            (item["type"], item["call_id"])
+            for item in _last_body()["input"]
+            if isinstance(item, dict) and item.get("type", "").startswith("function_call")
+        ]
+        assert replayed == [
+            ("function_call", "call_a"),
+            ("function_call", "call_b"),
+            ("function_call_output", "call_a"),
+            ("function_call_output", "call_b"),
+        ]
+
 
 class TestReviewBugReproductions10:
     """Reproduce + verify fix for review #10 bugs."""
@@ -5145,6 +5253,34 @@ class TestReviewBugReproductions23:
 
         assert text == "hello from item.done"
         assert tokens == ["hello from item.done"]
+
+        # A delta that streamed a prefix of the final text: the suffix the
+        # deltas never carried reaches the token callback too (audit C5/F4:
+        # the empty terminal output used to leave the UI with "hel" while
+        # the returned content was the whole text).
+        tokens.clear()
+        m = OpenAICompatibleModel2(
+            "gpt-4o", base_url=capture_server, api_key="k", token_callback=tokens.append
+        )
+        m.initialize("hi")
+        delta = _stream_sse_event(
+            "response.output_text.delta",
+            {
+                "type": "response.output_text.delta",
+                "sequence_number": 0,
+                "item_id": "msg_1",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "hel",
+                "logprobs": [],
+            },
+        )
+        _CapturingHandler.next_response_body = b"".join([delta, *frames])
+
+        text, _resp = m.generate()
+
+        assert text == "hello from item.done"
+        assert "".join(tokens) == "hello from item.done"
 
     def test_streaming_added_full_arguments_override_valid_earlier_delta(
         self, capture_server: str

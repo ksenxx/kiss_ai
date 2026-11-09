@@ -38,6 +38,7 @@ from typing import Any
 from kiss.server.remote_tabs import RemoteTabs
 from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.pause import Pause
+from kiss.tests.server.remote_tabs_probe import machine_of
 from kiss.tests.server.test_remote_tabs import RemoteTabsHarness, _FinishingModel
 
 
@@ -63,14 +64,14 @@ class TestUnbindEndsSubAgentTabs(RemoteTabsHarness):
         await self._send({"type": "resumeSession", "taskId": new_tab["task_id"], "tabId": sub_tab})
         await self._until("task_events", sub_tab)
         remote_tabs = self.server._server_api.remote_tabs
-        self.assertEqual(remote_tabs.machine_of(sub_tab), "box")
+        self.assertEqual(machine_of(remote_tabs, sub_tab), "box")
 
         await self._send({"type": "newChat", "tabId": tab})
         seen = await self._collect_until_unbound(tab)
         types = [(m["type"], m.get("tabId") or m.get("tab_id")) for m in seen]
         self.assertEqual(types.count(("subagentDone", sub_tab)), 1, types)
-        self.assertEqual(remote_tabs.machine_of(tab), "")
-        self.assertEqual(remote_tabs.machine_of(sub_tab), "")
+        self.assertEqual(machine_of(remote_tabs, tab), "")
+        self.assertEqual(machine_of(remote_tabs, sub_tab), "")
         self.assertEqual(remote_tabs._unbinds, {}, "no bind in flight: nothing counted")
 
     async def test_rebinding_to_another_machine_ends_the_sub_agent_tabs(self) -> None:
@@ -96,7 +97,7 @@ class TestUnbindEndsSubAgentTabs(RemoteTabsHarness):
             raise AssertionError("the tab was never re-bound")
         types = [(m["type"], m.get("tabId") or m.get("tab_id")) for m in seen]
         self.assertEqual(types.count(("subagentDone", announced)), 1, types)
-        self.assertEqual(self.server._server_api.remote_tabs.machine_of(tab), "box2")
+        self.assertEqual(machine_of(self.server._server_api.remote_tabs, tab), "box2")
         _FinishingModel.released.set()
         await self._run_until_idle(tab)
 
@@ -128,7 +129,7 @@ class TestUnbindEndsSubAgentTabs(RemoteTabsHarness):
         self.assertIs(remote_tabs._tabs[first], stream_b, "the tab joined the other stream")
         self.assertTrue(stream_a.retired, "the first stream was retired")
         self.assertEqual(remote_tabs._views._bound.get(first), None)
-        self.assertEqual(remote_tabs.machine_of(first), "box")
+        self.assertEqual(machine_of(remote_tabs, first), "box")
         types = [(m["type"], m.get("tabId") or m.get("tab_id")) for m in seen]
         self.assertNotIn(("subagentDone", announced), types, "the other stream is untouched")
         bindings = [m["machine"] for m in seen if m["type"] == "tabMachine" and m["tabId"] == first]
@@ -142,7 +143,7 @@ class TestUnbindEndsSubAgentTabs(RemoteTabsHarness):
                 break
         else:
             raise AssertionError("the sub-agent's end never reached the joined tab")
-        self.assertEqual(remote_tabs.machine_of(other), "box")
+        self.assertEqual(machine_of(remote_tabs, other), "box")
 
     async def test_stand_down_counter_is_kept_only_while_a_bind_connects(self) -> None:
         """Closing tabs that were never bound leaves no bookkeeping behind."""
@@ -157,7 +158,7 @@ class TestUnbindEndsSubAgentTabs(RemoteTabsHarness):
         self.assertEqual(remote_tabs._connecting, {})
         await self._send({"type": "closeTab", "tabId": tab})
         await self._until("tabs_state")
-        self.assertEqual(remote_tabs.machine_of(tab), "")
+        self.assertEqual(machine_of(remote_tabs, tab), "")
         self.assertEqual(remote_tabs._unbinds, {})
 
     async def test_retiring_the_root_spares_a_sub_agent_tab_that_rebound_meanwhile(self) -> None:
@@ -205,6 +206,6 @@ class TestUnbindEndsSubAgentTabs(RemoteTabsHarness):
         ended = [m["tab_id"] for m in seen if m.get("type") == "subagentDone"]
         self.assertEqual(ended, [], "the rebound child was ended by its old stream")
         self.assertIs(remote_tabs._tabs[child], rebound)
-        self.assertEqual(remote_tabs.machine_of(child), "box")
+        self.assertEqual(machine_of(remote_tabs, child), "box")
         _FinishingModel.released.set()
 

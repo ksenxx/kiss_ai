@@ -442,6 +442,19 @@ def find_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def wait_for(predicate: Callable[[], bool], timeout: float = 30.0) -> bool:
+    """Poll *predicate* every 20 ms until it holds (True) or *timeout* seconds pass (False).
+
+    A monotonic deadline, so the poll's own sleeps do not stretch the wait.
+    """
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
 AMBIENT_AWS_ENV_VARS = (
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",

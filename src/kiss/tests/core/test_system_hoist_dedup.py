@@ -5,7 +5,7 @@
 """Regression tests for the shared system-message hoisting helper.
 
 ``AnthropicModel._build_create_kwargs`` and
-``GeminiModel._resolve_system_instruction`` used to carry two verbatim
+``GeminiModel._build_config`` used to carry two verbatim
 copies of the same ~14-line loop that merges the configured
 ``system_instruction`` with OpenAI-style ``role="system"`` conversation
 messages (which enter a conversation on model hand-off, e.g. via the
@@ -55,7 +55,9 @@ def _gemini_system(
     config = {"system_instruction": system_instruction} if system_instruction else {}
     m = GeminiModel("gemini-2.5-pro", api_key="test-key", model_config=config)
     m.conversation = list(conversation)
-    return m._resolve_system_instruction(m._chat_messages())
+    instruction = m._build_config(m._chat_messages()).system_instruction
+    assert instruction is None or isinstance(instruction, str)
+    return instruction
 
 
 _USER = {"role": "user", "content": "hello"}

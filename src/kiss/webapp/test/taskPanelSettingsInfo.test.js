@@ -39,13 +39,24 @@ const {
   loadMainCss,
   readyTabId,
 } = require('./simplify2_harness');
-const {test, report} = makeRunner();
+const runner = makeRunner();
+const report = runner.report;
+const openWindows = [];
+
+/** Run one test through the shared runner, then close its windows. */
+async function test(name, fn) {
+  const result = runner.test(name, fn);
+  if (result) await result;
+  while (openWindows.length) openWindows.pop().close();
+}
 
 function makePage() {
-  return makeHarnessPage({
+  const wv = makeHarnessPage({
     sourceUrl: 'taskinfo-main.js',
     beforeScripts: stubRaf,
   });
+  openWindows.push(wv.win);
+  return wv;
 }
 
 const DASH = '\u2014';
@@ -393,7 +404,7 @@ test('a background tab keeps its settings and shows them on switch', () => {
     tabId: TAB,
     taskId: 'task-1',
   });
-  const SECOND = win._testApi.createNewTab();
+  win._testApi.createNewTab();
   assert.notStrictEqual(win._testApi.getActiveTabId(), TAB);
   assert.strictEqual(infoText(win), '', 'a fresh tab has no settings');
   // A live event for the now-background first tab — a NEW task the
@@ -474,6 +485,7 @@ test('share export gives every task panel its own settings info', () => {
   const msg = wv.posted.filter(m => m.type === 'shareChat').pop();
   assert.ok(msg, 'the share_tasks reply must produce a shareChat command');
   const dom = new JSDOM('<div id="app">' + msg.html + '</div>');
+  openWindows.push(dom.window);
   const infos = Array.from(
     dom.window.document.querySelectorAll('.task-panel-info'),
   ).map(el => el.textContent);
@@ -627,6 +639,7 @@ test('a saved page lists every Task Info row for every task', () => {
   });
   const msg = wv.posted.filter(m => m.type === 'shareChat').pop();
   const dom = new JSDOM('<div id="app">' + msg.html + '</div>');
+  openWindows.push(dom.window);
   const infos = Array.from(
     dom.window.document.querySelectorAll('.task-panel-info'),
   );
@@ -743,6 +756,7 @@ test('share markup: the info block follows the task text', () => {
   });
   const msg = wv.posted.filter(m => m.type === 'shareChat').pop();
   const dom = new JSDOM('<div id="app">' + msg.html + '</div>');
+  openWindows.push(dom.window);
   const doc = dom.window.document;
   const info = doc.querySelector('.task-panel .task-panel-info');
   assert.ok(info, 'the exported panel carries an info block');
@@ -773,6 +787,3 @@ test('share markup: the info block follows the task text', () => {
 });
 
 report('taskPanelSettingsInfo');
-// The pages leave live timers behind (the running-task clock, the
-// button flash), so exit explicitly instead of draining them.
-process.exit(0);

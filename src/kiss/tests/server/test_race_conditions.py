@@ -42,6 +42,7 @@ class TestAutocompleteWorkerDoubleSpawn:
         instance._state_lock = threading.RLock()  # type: ignore[attr-defined]
         instance._complete_queue = None  # type: ignore[attr-defined]
         instance._complete_worker = None  # type: ignore[attr-defined]
+        instance._complete_stopped = False  # type: ignore[attr-defined]
 
         def fake_loop(self_ref: object) -> None:
             q = getattr(self_ref, "_complete_queue", None)

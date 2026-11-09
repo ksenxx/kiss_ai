@@ -105,7 +105,9 @@ def _usage_events(task_id: str) -> list[dict[str, Any]]:
     return [e for e in events if e.get("type") in ("usage_info", "result")]
 
 
-def _run(env: IsolatedKissHome, printer: CapturePrinter, model_url: str) -> ChatSorcarAgent:
+def _run(
+    env: IsolatedKissHome, printer: CapturePrinter | None, model_url: str
+) -> ChatSorcarAgent:
     """Run one persisted ``ChatSorcarAgent`` session against the scripted model."""
     agent = ChatSorcarAgent("late-dispatch-parent")
     agent.run(
@@ -134,15 +136,18 @@ def _wait_for_row_cost(task_id: str, at_least: float, timeout: float = 10.0) -> 
         time.sleep(0.05)
 
 
+@pytest.mark.parametrize("server_printer", [True, False], ids=["server-printer", "no-printer"])
 def test_job_settling_after_the_row_was_saved_is_added_to_the_row(
-    env: IsolatedKissHome, monkeypatch: pytest.MonkeyPatch,
+    env: IsolatedKissHome, monkeypatch: pytest.MonkeyPatch, server_printer: bool,
 ) -> None:
     """The stop confirms after the grace: the saved row gains the spend, with an event.
 
     The end-of-run grace is cut to 0.2 s and the stand-in holds the
     stop's confirmation until the test has seen the saved row, so
     ``kill_jobs_of`` returns, the row is saved without the child's
-    spend, and only then does the job thread settle.
+    spend, and only then does the job thread settle.  A caller without
+    a server printer (a CLI run) has a row all the same: its late spend
+    used to go to the in-memory ledger only, which nothing reads again.
     """
     monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
     monkeypatch.setenv("KISS_DISABLE_TASK_CLASSIFIER", "1")
@@ -159,7 +164,7 @@ def test_job_settling_after_the_row_was_saved_is_added_to_the_row(
     _RunAgentThenFinishHandler.requests = 0
     _RunAgentThenFinishHandler.script = str(script)
     srv, url = _start_server(_RunAgentThenFinishHandler)
-    printer = CapturePrinter()
+    printer = CapturePrinter() if server_printer else None
     try:
         agent = _run(env, printer, url)
         task_id = agent.last_task_id

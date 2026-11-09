@@ -371,7 +371,9 @@ def test_browser_override_wins_and_must_exist(tmp_path: Path) -> None:
     assert _LOOPBACK in proc.stderr
 
 
-def test_without_override_a_real_browser_is_found() -> None:
+def test_without_override_a_real_browser_is_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A system Chromium-family browser, else the Playwright Chromium, is used."""
     bundled = standalone_app.playwright_chromium()
     found = standalone_app.find_browser()
@@ -379,6 +381,13 @@ def test_without_override_a_real_browser_is_found() -> None:
     # An unknown platform has no system candidates: only the bundled browser remains.
     assert standalone_app.find_browser(system="Plan9") == bundled
     assert bundled is None or (bundled.is_file() and os.access(bundled, os.X_OK))
+    # A browsers directory Playwright has not downloaded into holds no bundled browser.
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "empty"))
+    standalone_app.playwright_chromium.cache_clear()
+    try:
+        assert standalone_app.playwright_chromium() is None
+    finally:
+        standalone_app.playwright_chromium.cache_clear()
 
 
 def test_the_bundled_chromium_runs_unsandboxed_on_linux(tmp_path: Path) -> None:
@@ -1164,9 +1173,21 @@ def test_linux_launcher_carries_the_brand(tmp_path: Path, monkeypatch: pytest.Mo
     assert standalone_app.uninstall_launcher(BRAND, home=tmp_path, system="Linux") == moved
     assert not moved.exists() and entry.exists()
     assert standalone_app.uninstall_launcher(BRAND, home=tmp_path, system="Linux") is None
-    # A relative XDG_DATA_HOME is ignored, as the XDG spec says.
+    # A relative XDG_DATA_HOME is ignored, as the XDG spec says.  The
+    # reinstall (for another state directory) replaces the entry: a
+    # desktop reading it meanwhile, held open here, keeps the complete
+    # old entry, never a cut-short one, and no staging file is left.
     monkeypatch.setenv("XDG_DATA_HOME", "relative/data")
-    assert standalone_app.install_launcher(BRAND, icon, exe, home=tmp_path, system="Linux") == entry
+    old = entry.read_bytes()
+    with entry.open("rb") as held:
+        assert (
+            standalone_app.install_launcher(BRAND, icon, exe, home=tmp_path, system="Linux")
+            == entry
+        )
+        assert held.read() == old
+    assert entry.read_bytes() != old and _desktop_fields(entry)["Name"] == BRAND["product_name"]
+    assert os.access(entry, os.X_OK)
+    assert set(entry.parent.iterdir()) == {entry, branded}
     assert standalone_app.uninstall_launcher(BRAND, home=tmp_path, system="Linux") == entry
 
 
@@ -1508,10 +1529,11 @@ def test_branded_launcher_names_and_icon(branded_src: Path, tmp_path: Path) -> N
 #
 # The same paths the subprocess tests take, run in this interpreter so
 # coverage sees them.  Not reachable here without test doubles, hence
-# untested: a broken Playwright package (``playwright_chromium`` returning
-# None from its except branch), the ``.icns`` conversion (needs macOS'
-# ``sips`` and ``iconutil``) and the ``--foreground`` exec, which would
-# replace this interpreter (the subprocess test above covers it).
+# untested: an interpreter that cannot be started for the Playwright
+# lookup (``playwright_chromium`` returning None from its OSError branch),
+# the ``.icns`` conversion (needs macOS' ``sips`` and ``iconutil``) and the
+# ``--foreground`` exec, which would replace this interpreter (the
+# subprocess test above covers it).
 
 
 @pytest.mark.skipif(platform.system() != "Linux", reason="checks the Linux .desktop launcher")
@@ -1752,11 +1774,21 @@ def test_macos_bundle_is_a_clone_of_the_browser(tmp_path: Path) -> None:
     marker.write_text("kept")
     launcher = bundle / "Contents" / "MacOS" / "launcher"
     launcher.write_text("stale")
-    assert standalone_app.install_launcher(
-        SEAMLESS_LOOP, icon, exe, home=tmp_path, system="Darwin", state_dir=state, browser=browser
-    )
+    plist = bundle / "Contents" / "Info.plist"
+    with launcher.open("rb") as held_launcher, plist.open("rb") as held_plist:
+        assert standalone_app.install_launcher(
+            SEAMLESS_LOOP, icon, exe, home=tmp_path, system="Darwin", state_dir=state,
+            browser=browser,
+        )
+        # Both are replaced, not rewritten in place: a shell running the
+        # launcher or Launch Services reading the plist meanwhile keeps
+        # the complete old file, never a cut-short one.
+        assert held_launcher.read() == b"stale"
+        assert os.fstat(held_plist.fileno()).st_ino != plist.stat().st_ino
     assert marker.read_text() == "kept"
-    assert "--foreground" in launcher.read_text()
+    assert "--foreground" in launcher.read_text() and os.access(launcher, os.X_OK)
+    assert set((bundle / "Contents" / "MacOS").iterdir()) == {exe_copy, launcher}
+    assert _bundle_plist(bundle) == info
     assert standalone_app.install_launcher(
         SEAMLESS_LOOP, icon, exe, home=tmp_path, system="Darwin", state_dir=state, browser=newer
     )

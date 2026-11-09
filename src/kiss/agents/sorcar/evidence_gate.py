@@ -34,7 +34,15 @@ import posixpath
 import re
 from typing import Any
 
-from kiss.agents.sorcar.shell_scan import UV_VALUED_OPTIONS, SimpleCommand, Word, simple_commands
+from kiss.agents.sorcar.shell_scan import (
+    SHELLS,
+    UV_VALUED_OPTIONS,
+    SimpleCommand,
+    Word,
+    command_text,
+    shell_script_index,
+    simple_commands,
+)
 
 #: Programs that change the files their operands name, with the operands
 #: they change: ``last`` (the destination of a copy), ``all`` (every path
@@ -53,6 +61,10 @@ WRITING_PROGRAMS: dict[str, str] = {
 #: or in the next word, ``t`` possibly last in a cluster of short options.
 _TARGET_PROGRAMS = frozenset({"cp", "mv", "install"})
 _TARGET_OPTION = re.compile(r"(?:-[a-su-zA-Z]*t|--target-directory=?)(?P<value>.*)")
+#: ``chmod``'s (``chown``'s, ``chgrp``'s) option naming the file whose mode or
+#: owner to copy, attached (``--reference=RFILE``) or in the next word: the
+#: mode is then no operand, and every operand is a file.
+_REFERENCE_OPTION = re.compile(r"--reference=?(?P<value>.*)")
 #: A python interpreter in command position, whose ``-m MODULE`` runs a tool.
 _PYTHON = re.compile(r"python[0-9.]*$")
 #: ``sed``'s in-place option, among its options in any position.  An
@@ -65,9 +77,6 @@ BUILD_TOOLS = frozenset({"make", "cmake", "ninja"})
 _CHECK_TARGET = re.compile(r"(?:test|check)\b")
 #: The option that fixes files in place (``ruff check --fix``, ``check --full --fix``).
 _FIX_OPTION = re.compile(r"--fix\b")
-#: The shells whose ``-c`` (``-lc``, ``-ec``, ``-ce``) argument is shell text.
-SHELLS = frozenset({"bash", "sh", "dash", "zsh", "ksh"})
-_COMMAND_OPTION = re.compile(r"-[a-zA-Z]*c[a-zA-Z]*")
 #: ``find``'s actions that run a command on each file found.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 #: A path under a ``tmp`` directory: the scratch directory of the run (``tmp/x``,
@@ -171,24 +180,6 @@ def _outputs(command: SimpleCommand) -> list[Word]:
     return outputs
 
 
-def _shell_script(words: list[str]) -> str | None:
-    """The command string a shell's arguments *words* run (``bash -c "..."``), or ``None``.
-
-    An option may take the next word as its value (``-o pipefail``); a
-    word that is no option is a script file, not shell text.
-    """
-    index = 0
-    while index < len(words):
-        if _COMMAND_OPTION.fullmatch(words[index]):
-            return words[index + 1] if index + 1 < len(words) else None
-        if not words[index].startswith("-"):
-            return None
-        index += 1
-        if index < len(words) and not words[index].startswith("-"):
-            index += 1
-    return None
-
-
 def runs_subcommand(words: list[str], tools: dict[str, re.Pattern[str]]) -> bool:
     """Whether the command *words* run a subcommand of one of *tools*.
 
@@ -251,23 +242,30 @@ def _named_operands(program: str, words: list[str]) -> list[str]:
 
     See :data:`WRITING_PROGRAMS`.  A copy's ``-t DIR`` /
     ``--target-directory DIR`` names its destination (``cp -t src a.py``
-    changes ``src``, not ``a.py``).
+    changes ``src``, not ``a.py``); a ``chmod --reference=RFILE a.py``
+    takes its mode from ``RFILE`` (read, not changed) and changes
+    ``a.py``, its first operand.
     """
     if program == "dd":
         return [word[3:] for word in words if word.startswith("of=")]
     operands: list[str] = []
     target: str | None = None
-    value_next = False
+    value_next = skip_next = False
+    rule = WRITING_PROGRAMS[program]
     for word in words:
-        if value_next:
+        if skip_next:
+            skip_next = False
+        elif value_next:
             target, value_next = word, False
         elif program in _TARGET_PROGRAMS and (match := _TARGET_OPTION.match(word)):
             # ``-t DIR``, ``-tDIR``, ``-rt DIR``, ``--target-directory[=| ]DIR``
             target = match["value"] or None
             value_next = target is None
+        elif rule == "rest" and (match := _REFERENCE_OPTION.match(word)):
+            # ``--reference[=| ]RFILE`` supplies the mode or owner: every operand is a file
+            rule, skip_next = "all", not match["value"]
         elif not word.startswith("-"):
             operands.append(word)
-    rule = WRITING_PROGRAMS[program]
     if rule == "last":
         return operands[-1:] if target is None else [target]
     if rule == "rest":
@@ -333,22 +331,36 @@ def _program_changes(argv: list[str], cwd: str | None) -> list[str]:
         # ``-execdir`` runs in their directories.
         starts = list(itertools.takewhile(lambda w: not w.startswith(("-", "(", "!")), argv[1:]))
         starts = starts or ["."]
-        if "-delete" in argv:
-            return [] if all(_in_scratch(cwd, s) for s in starts) else [program, *starts]
-        for index, word in enumerate(argv):
-            if word in _FIND_EXEC:
-                rest = [w for w in argv[index + 1:] if w not in (";", "+")]
-                files = [s for w in rest for s in (starts if w == "{}" else [w])]
-                if word in ("-execdir", "-okdir"):
-                    cwd = (posixpath.join(cwd, starts[0]) if cwd is not None
-                           and all(_in_scratch(cwd, s) for s in starts) else None)
-                return _program_changes(files, cwd)
-        return []
+        changes: list[str] = []
+        if "-delete" in argv and not all(_in_scratch(cwd, s) for s in starts):
+            changes = [program, *starts]
+        # A match's directory is the start's own parent at the least (the
+        # start itself is a match), so an ``-execdir`` command whose
+        # operands stay below it (no ``..``) names scratch files when every
+        # such parent is scratch; else they are judged as written.
+        execdir_cwd = (posixpath.join(cwd, starts[0]) if cwd is not None and all(
+            is_scratch_path(posixpath.dirname(posixpath.normpath(posixpath.join(cwd, s))))
+            for s in starts) else None)
+        index = 0
+        while index < len(argv):
+            word = argv[index]
+            index += 1
+            if word not in _FIND_EXEC:
+                continue
+            # The clause's command runs up to its ``;`` or ``+``; every clause counts.
+            end = next((i for i in range(index, len(argv)) if argv[i] in (";", "+")), len(argv))
+            files = [s for w in argv[index:end] for s in (starts if w == "{}" else [w])]
+            clause_cwd = cwd
+            if word in ("-execdir", "-okdir"):
+                clause_cwd = None if any(".." in w for w in argv[index:end]) else execdir_cwd
+            changes.extend(_program_changes(files, clause_cwd))
+            index = end + 1
+        return changes
     if program in SHELLS:
-        script = _shell_script(argv[1:])
+        script = shell_script_index(argv[1:])
         if script is None:
             return []
-        return [change for command in simple_commands(script, cwd, optimistic=True)
+        return [change for command in simple_commands(argv[script + 1], cwd, optimistic=True)
                 for change in _changes(command)]
     operands = [word for word in argv[1:] if not word.startswith("-")]
     if program in WRITING_PROGRAMS:
@@ -370,6 +382,17 @@ def _program_changes(argv: list[str], cwd: str | None) -> list[str]:
         return [] if only_checks else [program, *operands]
     if any(_FIX_OPTION.match(w) for w in argv[1:]) or runs_subcommand(argv, WRITING_SUBCOMMANDS):
         return [program, *operands]
+    if program == "uv":
+        # ``uv [options] run [options] command...`` runs that command, whose
+        # changes are its own (``uv run sed -i s/a/b/ f`` edits ``f``).
+        index = 1
+        while index < len(argv) and argv[index].startswith("-"):
+            index += 2 if argv[index] in UV_VALUED_OPTIONS else 1
+        if index < len(argv) and argv[index] == "run":
+            index += 1
+            while index < len(argv) and argv[index].startswith("-"):
+                index += 2 if argv[index] in UV_VALUED_OPTIONS else 1
+            return _program_changes(argv[index:], cwd)
     return []
 
 
@@ -380,9 +403,17 @@ def _changes(command: SimpleCommand) -> list[str]:
     the directory the command runs in: ``cd /w/tmp/x && cat > f``) is a
     check's output, not a change.
     """
+    argv = command.argv()
+    text = command_text(argv)
+    if text is not None and simple_commands(text, command.cwd, optimistic=True):
+        # ``eval 'text'``, ``bash -c 'text'``: the scanner read the text as
+        # commands of its own, which carry this command's redirections too.
+        # A text that runs no command (a comment, blanks) carries nothing:
+        # the redirections are this command's, which still truncate.
+        return []
     changed = [word.text for word in _outputs(command)
                if not word.text.startswith("/dev/") and not _in_scratch(command.cwd, word.text)]
-    changed.extend(_program_changes([word.text for word in command.argv()], command.cwd))
+    changed.extend(_program_changes([word.text for word in argv], command.cwd))
     return changed
 
 

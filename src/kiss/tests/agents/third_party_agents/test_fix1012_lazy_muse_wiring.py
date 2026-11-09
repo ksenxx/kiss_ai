@@ -38,7 +38,6 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     store_credentials,
     vault_has_credentials,
 )
-from kiss.core.file_lock import exclusive_file_lock
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
     loopback_policy,
@@ -49,12 +48,11 @@ from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingServer,
     serve_recording,
 )
+from kiss.tests.server.pause import Pause
 
 _REAL = "real-secret-credential"
 _MS_ACCESS = "graph-access-token"
 _THREADS = 16
-_SETTLE_SECONDS = 0.5
-"""Best-effort pause for the threads to reach the wiring guard (see ``_fire_first_requests``)."""
 _SERVICES = (
     "homeassistant",
     "brave_search",
@@ -156,43 +154,51 @@ def _after_barrier(
         results.put(e)
 
 
-def _fire_first_requests(request: Any, agent: Any) -> list[Any]:
+def _fire_first_requests(request: Any, agent: Any, at_guard: int = _THREADS) -> list[Any]:
     """Fire *request* from ``_THREADS`` threads at once as the backend's very first request.
 
-    ``spawn.lock`` is held while the threads start, so the first wiring
-    (which spawns the daemon under that lock) cannot finish before the
-    lock is released; with unguarded wiring each thread then enrols and
-    mints on its own.
-
-    The ``_SETTLE_SECONDS`` pause is best effort, not a guarantee: nothing
-    in the backend signals "I have reached the wiring guard", so the pause
-    is what gives the other threads time to get there while the lock is
-    held.  On a loaded machine a late thread simply arrives after the
-    wiring is done and takes the "reuses the wiring" path, so the test
-    then checks less (a sequential wiring) but never fails spuriously.
+    The backend's own ``_wire_lock`` is held while the threads start and
+    until *at_guard* of them have entered ``_wire_deferred`` (counted at
+    the real entry by a :class:`Pause` hook that never pauses), so the
+    requests are queued at the wiring guard before the first wiring can
+    begin; with unguarded wiring each thread then enrols and mints on
+    its own.  A thread that never reaches the guard fails the test: a
+    sequential wiring cannot pass as a concurrent one.
 
     Args:
         request: ``request(agent)`` issues one read through the backend.
         agent: A freshly built, still unwired channel agent.
+        at_guard: How many threads can reach the guard before the first
+            wiring: all of them, unless the backend serialises requests
+            ahead of it (Synology's ``_send_lock``), where only one can.
 
     Returns:
         Every thread's result (or the exception it raised).
 
     Raises:
-        AssertionError: A thread did not finish within the deadline.  The
-            workers are daemon threads, so a request stuck in the backend
-            fails the test instead of hanging it, and cannot keep the
-            interpreter alive at exit either (an executor's worker threads
-            are joined at shutdown; daemon threads are not).
+        AssertionError: A thread did not reach the wiring guard or did
+            not finish within the deadline.  The workers are daemon
+            threads, so a request stuck in the backend fails the test
+            instead of hanging it, and cannot keep the interpreter alive
+            at exit either (an executor's worker threads are joined at
+            shutdown; daemon threads are not).
     """
+    backend = agent._backend
+    arrived = threading.Semaphore(0)
+
+    def count_arrival(frame_locals: dict[str, Any]) -> bool:
+        arrived.release()
+        return False
+
     barrier = threading.Barrier(_THREADS, timeout=30)
     results: queue.Queue[Any] = queue.Queue()
-    with exclusive_file_lock(muse_auth_dir() / "spawn.lock"):
+    with Pause(type(backend)._wire_deferred.__code__, count_arrival), backend._wire_lock:
         for _ in range(_THREADS):
             threading.Thread(
                 target=_after_barrier, args=(barrier, request, agent, results), daemon=True
             ).start()
-        time.sleep(_SETTLE_SECONDS)
+        for _ in range(at_guard):
+            assert arrived.acquire(timeout=30), "a first request never reached the wiring guard"
     deadline = time.monotonic() + 120
     outcomes: list[Any] = []
     while len(outcomes) < _THREADS:
@@ -499,7 +505,10 @@ def test_concurrent_first_requests_share_one_wiring(
     assert muse_auth_dir().joinpath("audit.jsonl").exists() is False
     assert server.requests == []
 
-    results = _fire_first_requests(issue, agent)
+    # Synology sends under ``_send_lock``, ahead of the wiring guard: one
+    # thread wires while the others queue at the send; the rest contend
+    # at the guard itself.
+    results = _fire_first_requests(issue, agent, at_guard=1 if service == "synology" else _THREADS)
 
     failures = [r for r in results if isinstance(r, Exception)]
     assert failures == [], failures

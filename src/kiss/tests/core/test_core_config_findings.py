@@ -106,6 +106,38 @@ def test_refreshing_config_still_picks_up_new_keys(config_file: Path) -> None:
     assert config_module.DEFAULT_CONFIG.OPENAI_API_KEY == "sk-f2-openai-rotated"
 
 
+def test_compaction_setting_round_trips_into_the_live_config(config_file: Path) -> None:
+    """The global ``compaction`` setting is persisted and mirrored into ``DEFAULT_CONFIG``.
+
+    The settings panel's "Compaction" checkbox saves the key; the
+    daemon then applies the stored config, and every agent's
+    ``_maybe_compact_conversation`` reads
+    ``DEFAULT_CONFIG.tool_output_compaction``.  Absent (an older
+    ``config.json``) it is on; a junk value is coerced like every
+    boolean setting.
+    """
+    assert DEFAULTS["compaction"] is True
+    assert "compaction" in load_config()
+    assert load_config()["compaction"] is True
+
+    save_config({"compaction": False})
+    assert json.loads(config_file.read_text(encoding="utf-8"))["compaction"] is False
+    apply_config_to_env(load_config())
+    assert config_module.DEFAULT_CONFIG.tool_output_compaction is False
+
+    save_config({"compaction": True})
+    apply_config_to_env(load_config())
+    assert config_module.DEFAULT_CONFIG.tool_output_compaction is True
+
+    config_file.write_text(json.dumps({"compaction": 0}), encoding="utf-8")
+    apply_config_to_env(load_config())
+    assert config_module.DEFAULT_CONFIG.tool_output_compaction is False
+
+    config_file.write_text(json.dumps({"max_budget": 7}), encoding="utf-8")
+    apply_config_to_env(load_config())
+    assert config_module.DEFAULT_CONFIG.tool_output_compaction is True
+
+
 def test_retired_is_parallel_key_is_forgotten(config_file: Path) -> None:
     """F3: a legacy ``is_parallel`` entry is neither read back nor re-persisted.
 

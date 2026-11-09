@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pytest
 
+from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.models.anthropic_model import AnthropicModel
 
 
@@ -25,11 +26,16 @@ def _make() -> AnthropicModel:
     return AnthropicModel("claude-under-test", api_key="key-1")
 
 
+def _set_workspace_id(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """Configure the workspace id (the adapter reads the config field) for one test."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "ANTHROPIC_WORKSPACE_ID", value, raising=False)
+
+
 def test_initialize_twice_keeps_the_same_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two runs with unchanged inputs share one client (and its pool)."""
-    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    _set_workspace_id(monkeypatch, "")
     model = _make()
     model.initialize("first run")
     first = model.client
@@ -46,13 +52,13 @@ def test_changed_workspace_id_rebuilds_the_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The workspace header is read per run; a change must reach the client."""
-    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    _set_workspace_id(monkeypatch, "")
     model = _make()
     model.initialize("run without workspace")
     first = model.client
     assert "anthropic-workspace-id" not in first.default_headers
 
-    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_changed")
+    _set_workspace_id(monkeypatch, "wrkspc_changed")
     model.initialize("run with workspace")
 
     assert model.client is not first
@@ -63,7 +69,7 @@ def test_changed_api_key_rebuilds_the_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A rotated key must not keep authenticating with the old one."""
-    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    _set_workspace_id(monkeypatch, "")
     model = _make()
     model.initialize("run one")
     first = model.client

@@ -35,7 +35,7 @@ from kiss.tests.agents.sorcar.test_worktree_audit5 import (  # noqa: F401
     _restore_db,
 )
 from kiss.tests.conftest import seed_worktree
-from kiss.tests.server.worktree_helpers import merge_conflict
+from kiss.tests.server.worktree_helpers import merge_conflict, worktree_changed_files
 
 
 class TestBug22ConflictMissesStaged:
@@ -127,7 +127,7 @@ class TestBug24SilentDiscardOnGitFailure:
             ))
 
             try:
-                changed_after = server._get_worktree_changed_files("t24")
+                changed_after = worktree_changed_files(server, "t24")
             finally:
                 agent_state.unregister(state.task_id, state)
             assert "important.txt" in changed_after

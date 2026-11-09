@@ -25,6 +25,10 @@ thread could still block past its deadline or leak a reaper:
    was treated as an in-flight start: the cancel path installed a reaper
    that polled an exec that never started until the container closed.
    A refusal is recorded and no reaper is kept for it.
+5. (audit 2026-11-07, A08 astra-1 / fable-2) A reaper whose ``exec_inspect``
+   failed transiently (a dropped daemon connection) while the start was
+   still delayed gave up, and the start that then landed ran unwatched.
+   Only a ``NotFound`` (the exec or container gone) ends the watch.
 
 Each test runs a real exec in a real container; the latency shims
 replace a method on the real docker-py client or container object,
@@ -40,6 +44,7 @@ from types import FrameType
 from typing import Any, cast
 
 import docker.errors
+import requests
 
 from kiss.agents.sorcar.docker_manager import (
     _EXEC_TOKEN_VAR,
@@ -148,6 +153,9 @@ class TestExecCancelBounded(unittest.TestCase):
         self.api = cast(Any, self.env.client.api)
         self.container = cast(Any, self.env.container)
         self.first_call = threading.Event()
+        self.real_exec_create = self.api.exec_create
+        self.watched_exec_id = ""
+        self.watched_token = ""
 
     def tearDown(self) -> None:
         self.env.stop_event = None
@@ -169,17 +177,48 @@ class TestExecCancelBounded(unittest.TestCase):
             time.sleep(0.5)
         self.fail(f"command still running in the container ({count} processes)")
 
+    def _watch_next_exec(self) -> None:
+        """Record the id and token of the token-tagged exec the next ``Bash`` creates.
+
+        The shims below act on that exec only.  The reaper of an earlier
+        command outlives its ``Bash`` call: it keeps polling
+        ``exec_inspect`` and sweeping through ``exec_run`` on the same
+        ``api``/``container`` objects, and the previous test's last
+        reaper is still at it when this test's shims go in (deterministic
+        for the sweep that follows a timed-out ``sleep 1.1``; wider on a
+        loaded machine, where the polls back off up to 5 s).  A shim that
+        acted on its first call, whoever made it, was spent by that
+        reaper: the delay meant for this test's kill sweep or exit-code
+        fetch never happened, or the Stop fired before the output was
+        queued.
+        """
+        self.watched_exec_id = ""
+        self.watched_token = ""
+
+        def recording_exec_create(*args: Any, **kwargs: Any) -> Any:
+            resp = self.real_exec_create(*args, **kwargs)
+            token = (kwargs.get("environment") or {}).get(_EXEC_TOKEN_VAR)
+            if token and not self.watched_exec_id:
+                self.watched_exec_id = resp["Id"]
+                self.watched_token = token
+            return resp
+
+        self.api.exec_create = recording_exec_create
+
     def _slow_exec_run(self, seconds: float) -> None:
-        """Make the first kill sweep (``container.exec_run``) take *seconds*."""
+        """Make the watched exec's first kill sweep (``container.exec_run``) take *seconds*."""
         real_exec_run = self.container.exec_run
         first_call = self.first_call
 
-        def delayed_exec_run(*args: Any, **kwargs: Any) -> Any:
-            if not first_call.is_set():
+        def delayed_exec_run(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+            # The sweep script names the token of the tree it kills.
+            token = self.watched_token
+            if token and token in str(cmd) and not first_call.is_set():
                 first_call.set()
                 time.sleep(seconds)
-            return real_exec_run(*args, **kwargs)
+            return real_exec_run(cmd, *args, **kwargs)
 
+        self._watch_next_exec()
         self.container.exec_run = delayed_exec_run
 
     def _slow_exec_start(self, seconds: float, pause_container: bool = False) -> None:
@@ -217,33 +256,42 @@ class TestExecCancelBounded(unittest.TestCase):
     def _slow_exec_inspect(self, seconds: float, stop: threading.Event | None = None) -> None:
         """Delay the first ``exec_inspect`` of the next ``Bash`` exec by *seconds*.
 
-        *stop* is set first when given.  Only the token-tagged exec created
-        after this call (the next ``Bash`` command) is delayed: the reaper of an earlier command
-        keeps polling ``exec_inspect`` and running untagged kill sweeps in
-        the background, and on a loaded machine that poll would otherwise
-        take the delay meant for this test's exit-code fetch.
+        *stop* is set first when given.
         """
-        real_exec_create = self.api.exec_create
         real_exec_inspect = self.api.exec_inspect
         first_call = threading.Event()
-        watched: list[str] = []
-
-        def recording_exec_create(*args: Any, **kwargs: Any) -> Any:
-            resp = real_exec_create(*args, **kwargs)
-            if not watched and _EXEC_TOKEN_VAR in (kwargs.get("environment") or {}):
-                watched.append(resp["Id"])
-            return resp
 
         def delayed_exec_inspect(exec_id: str, *args: Any, **kwargs: Any) -> Any:
-            if watched and exec_id == watched[0] and not first_call.is_set():
+            if exec_id == self.watched_exec_id and not first_call.is_set():
                 first_call.set()
                 if stop is not None:
                     stop.set()
                 time.sleep(seconds)
             return real_exec_inspect(exec_id, *args, **kwargs)
 
-        self.api.exec_create = recording_exec_create
+        self._watch_next_exec()
         self.api.exec_inspect = delayed_exec_inspect
+
+    def _dropped_reaper_inspect(self) -> None:
+        """Make the reaper's first ``exec_inspect`` of the watched exec a dropped connection.
+
+        ``self.reaper_inspect_failed`` is set once it did.
+        """
+        real_exec_inspect = self.api.exec_inspect
+        failed = threading.Event()
+        self.reaper_inspect_failed = failed
+
+        def dropped_exec_inspect(exec_id: str, *args: Any, **kwargs: Any) -> Any:
+            if (
+                exec_id == self.watched_exec_id and not failed.is_set()
+                and threading.current_thread().name.startswith("docker-exec-reaper-")
+            ):
+                failed.set()
+                raise requests.exceptions.ConnectionError("connection reset by the daemon")
+            return real_exec_inspect(exec_id, *args, **kwargs)
+
+        self._watch_next_exec()
+        self.api.exec_inspect = dropped_exec_inspect
 
     def _wait_until_exec_finished(self, exec_id: str) -> None:
         """Poll ``exec_inspect`` until *exec_id* has had a pid and is no longer running."""
@@ -283,11 +331,32 @@ class TestExecCancelBounded(unittest.TestCase):
         thread.join(30)
         self.assertFalse(thread.is_alive())
         self.assertIsInstance(outcome.get("error"), ToolCallInterrupted)
+        # The interrupt's retried cancellation may start a second reaper
+        # thread, which exits at once (the first holds the claim and
+        # sweeps): within a moment the run has at most one.
+        name = f"docker-exec-reaper-{self.watched_token[:8]}"
+        deadline = time.monotonic() + 2
+        reapers = [t.name for t in threading.enumerate() if t.name == name]
+        while len(reapers) > 1 and time.monotonic() < deadline:
+            time.sleep(0.05)
+            reapers = [t.name for t in threading.enumerate() if t.name == name]
+        self.assertLessEqual(len(reapers), 1, reapers)
         # ``Bash`` returned at ~2 s while the start is still delayed until
         # 3 s; a process count taken now would be 0 without proving
         # anything.  Wait for the late start to have happened, then for
         # the daemon to report that exec as started and finished (it
         # would run 47 s unless the reaper killed it), then for its tree.
+        self.assertTrue(self.started.wait(10), "the delayed exec_start never returned")
+        self._wait_until_exec_finished(self.started_exec_id)
+        self._wait_until_no_process("sle", "ep 47")
+
+    def test_a_dropped_inspect_does_not_end_the_reaper_of_a_delayed_start(self) -> None:
+        """(5) The reaper outlives a transient inspect failure and kills the start landing later."""
+        self._slow_exec_start(3)
+        self._dropped_reaper_inspect()
+        result = self.env.Bash("sleep 47", "hang", timeout_seconds=1)
+        self.assertIn("timed out", result)
+        self.assertTrue(self.reaper_inspect_failed.wait(10), "the reaper never inspected the exec")
         self.assertTrue(self.started.wait(10), "the delayed exec_start never returned")
         self._wait_until_exec_finished(self.started_exec_id)
         self._wait_until_no_process("sle", "ep 47")
@@ -364,15 +433,18 @@ class TestExecCancelBounded(unittest.TestCase):
         real_exec_start = self.api.exec_start
         real_exec_inspect = self.api.exec_inspect
 
-        def held_exec_start(*args: Any, **kwargs: Any) -> Any:
-            stop.armed.set()
-            time.sleep(0.3)
-            return real_exec_start(*args, **kwargs)
+        def held_exec_start(exec_id: str, *args: Any, **kwargs: Any) -> Any:
+            if exec_id == self.watched_exec_id:
+                stop.armed.set()
+                time.sleep(0.3)
+            return real_exec_start(exec_id, *args, **kwargs)
 
-        def exec_inspect_after_output(*args: Any, **kwargs: Any) -> Any:
-            stop.output_queued.set()
-            return real_exec_inspect(*args, **kwargs)
+        def exec_inspect_after_output(exec_id: str, *args: Any, **kwargs: Any) -> Any:
+            if exec_id == self.watched_exec_id:
+                stop.output_queued.set()
+            return real_exec_inspect(exec_id, *args, **kwargs)
 
+        self._watch_next_exec()
         self.api.exec_start = held_exec_start
         self.api.exec_inspect = exec_inspect_after_output
         result = self.env.Bash("echo done", "stopped between slices", timeout_seconds=30)

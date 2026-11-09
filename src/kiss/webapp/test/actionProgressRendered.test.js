@@ -15,25 +15,22 @@
 // sibling (``worktree_result``) must clear the live line again; so must
 // the manual Git Commit button's ``autocommit_done``.
 //
-// The second half covers the LAST exit of the line.  ``worktree_result``
-// is not guaranteed to arrive: the merge flow runs inside a swallow-all
-// handler on the daemon, and the progress events are broadcast from
-// INSIDE the call it wraps, so anything raised after the first "Staging
-// changes…" / "Generating commit message…" -- a git binary that dies, a
-// stopped task unwinding through the merge, an LLM call that throws
-// while writing the commit message -- eats the terminal event and the
-// transcript keeps a live progress line that nothing will ever take
-// away.  It is not a stale label: it reads as if the merge were still
-// running, forever.
+// The second half covers the LAST exit of the line.  The daemon's
+// ``worktreeAction`` handler (commands.py ``_cmd_worktree_action``)
+// answers every request with a ``worktree_result``, a failed merge
+// included (an exception becomes ``{success: false, message}``), so the
+// terminal event is lost only when the daemon itself dies or the
+// connection drops mid-merge: the page then keeps a live progress line
+// that nothing will ever take away.  It is not a stale label: it reads
+// as if the merge were still running, forever.
 //
-// What the daemon does still guarantee is the task-end event: control
-// falls out of that handler and broadcasts task_done / task_error /
-// task_stopped / task_interrupted immediately afterwards.  A task that
-// has ended has no operation left in flight, so that is where the line
-// has to go.  In the happy path the terminal event has already removed
-// the line by then, so this is a safety net that never fires -- which is
-// why the tests also pin that it does not fire too eagerly (another
-// tab's task ending, and the real result line, must both survive).
+// A task-end event (task_done / task_error / task_stopped /
+// task_interrupted) means the tab has no operation left in flight, so
+// that is where the line has to go.  In the happy path the terminal
+// event has already removed the line by then, so this is a safety net
+// that never fires -- which is why the tests also pin that it does not
+// fire too eagerly (another tab's task ending, and the real result
+// line, must both survive).
 
 'use strict';
 

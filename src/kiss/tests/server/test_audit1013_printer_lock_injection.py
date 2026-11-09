@@ -11,7 +11,7 @@ check point of the bytecode, including the one right after a
 on a task thread leaks the lock, and the daemon has ONE ``WebPrinter``
 for every task, so a leaked printer lock wedges printing for the
 daemon's life.  Every printer lock a task thread can take therefore
-goes through :func:`~kiss.agents.sorcar._concurrency.locked_call`.
+goes through :func:`~kiss.core.locked.locked_call`.
 
 Each test here hammers a real printer path from a worker thread with
 hundreds of injections and then asserts that every lock the path takes
@@ -36,8 +36,8 @@ from collections.abc import Callable
 
 import pytest
 
-from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.persistence import TASK_USAGE_LOCK
+from kiss.core.locked import locked_call
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.task_runner import _TaskRunnerMixin
@@ -133,7 +133,7 @@ class _Lifecycle:
         self.printer._thread_local.task_id = "audit1013-life"
         self.printer.start_recording()
         self.printer.ensure_recording_for_task("audit1013-life")
-        self.printer.peek_recording()
+        self.printer.peek_recording_for_task(self.printer.thread_binding())
         self.printer.stop_recording()
         self.printer.cleanup_task("audit1013-life", subscriber_linger_seconds=0)
 
@@ -155,7 +155,7 @@ class _SubtaskPersister:
     def __call__(self) -> None:
         self.runner._persist_subtask_row(
             self.state, task_id="audit1013-row", result_summary="r",
-            model="m", work_dir="/tmp", sub_start_ms=0,
+            model="m", work_dir="/tmp", sub_start_ms=0, end_event={"type": "task_done"},
         )
 
 

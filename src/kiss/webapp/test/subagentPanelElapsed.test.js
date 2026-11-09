@@ -35,16 +35,15 @@ const {
   makePage: makeChatPage,
   send,
   clickTab: activateTab,
+  parsePanelTimeMs,
 } = require('./simplify2_harness');
 const {bootParallelRun} = require('./subagent_tab_helpers');
-
-// The window the running test opened; the runner closes it afterwards.
-const openWindows = [];
+const {trackWindow, runTests} = require('./workdir_helpers');
 
 /** A chat page, closed by the runner once its test ends. */
 function makePage() {
   const page = makeChatPage();
-  openWindows.push(page.win);
+  trackWindow(page.win);
   return page;
 }
 
@@ -56,23 +55,6 @@ function makePage() {
  */
 function elapsedLabel(panel) {
   return panel.querySelector(':scope > .panel-time > .panel-elapsed');
-}
-
-/**
- * Parse a `.panel-elapsed` label ("450ms", "3.5s", "1m 2.0s") to ms.
- *
- * @param {string} text The label text.
- * @returns {number} Milliseconds.
- */
-function parseElapsedMs(text) {
-  let m = /^(\d+)ms$/.exec(text);
-  if (m) return Number(m[1]);
-  m = /^(\d+(?:\.\d+)?)s$/.exec(text);
-  if (m) return Number(m[1]) * 1000;
-  m = /^(\d+)m (\d+(?:\.\d+)?)s$/.exec(text);
-  if (m) return Number(m[1]) * 60000 + Number(m[2]) * 1000;
-  assert.fail('unparsable elapsed label: ' + JSON.stringify(text));
-  return 0;
 }
 
 /**
@@ -149,7 +131,7 @@ function testReplayedSubagentPanelsShowDurations() {
   const openTc = tcs[1];
   const openLabel = elapsedLabel(openTc);
   assert.ok(openLabel, 'the open tool_call shows a live elapsed');
-  const openMs = parseElapsedMs(openLabel.textContent);
+  const openMs = parsePanelTimeMs(openLabel.textContent);
   assert.ok(
     openMs >= 50000 && openMs < 70000,
     'the open tool_call counts from its event start (~51s), got ' +
@@ -219,7 +201,7 @@ function testLiveSubagentPanelsShowElapsed() {
   const tcLabel = elapsedLabel(tc);
   assert.ok(tcLabel, 'live sub-agent tool_call shows elapsed');
   assert.ok(
-    parseElapsedMs(tcLabel.textContent) < 60000,
+    parsePanelTimeMs(tcLabel.textContent) < 60000,
     'live elapsed is wall-clock small, got ' + tcLabel.textContent,
   );
   assert.strictEqual(tc.dataset.timeDone, '1', 'frozen on result');
@@ -415,21 +397,4 @@ const tests = [
   testTerminalEventSealsOpenPanels,
 ];
 
-let failures = 0;
-for (const t of tests) {
-  try {
-    t();
-    console.log('ok - ' + t.name);
-  } catch (e) {
-    failures += 1;
-    console.error('FAIL - ' + t.name);
-    console.error(e && e.stack ? e.stack : String(e));
-  } finally {
-    while (openWindows.length) openWindows.pop().close();
-  }
-}
-if (failures > 0) {
-  console.error(failures + ' failure(s)');
-  process.exit(1);
-}
-console.log('all subagentPanelElapsed tests passed');
+runTests(tests.map(fn => [fn.name, fn]));

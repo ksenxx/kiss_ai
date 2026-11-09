@@ -180,7 +180,10 @@ def test_create_worktree_keeps_the_unretired_claim(
 ) -> None:
     """A new task's ``create_worktree`` must not overwrite a claim the
     retire could not release; it reports the pending worktree as the
-    active one instead."""
+    active one instead, says that its directory is gone rather than
+    sending the task to edit there, and recovers (parks the claim for
+    real, hands out a fresh worktree) by itself once the marker can be
+    written (audit 2026-11-07, A13_astra-3)."""
     agent = ChatSorcarAgent("audit0902-fix-marker-setup")
     agent.work_dir = str(env.repo)
     assert agent._try_setup_worktree(env.repo, str(env.repo)) is not None
@@ -197,6 +200,10 @@ def test_create_worktree_keeps_the_unretired_claim(
         lock.unlink()
 
     assert "already active" in second, second
+    assert not wt.wt_dir.exists()
+    assert f"its directory {wt.wt_dir} is gone" in second, second
+    assert "Edit that repository's files there" not in second, second
+    assert "call create_worktree again" in second, second
     assert agent._wt is wt
     assert agent._wt_pending
     assert not GitWorktreeOps._preserve_marker_on_disk(env.repo, wt.branch)
@@ -206,16 +213,15 @@ def test_create_worktree_keeps_the_unretired_claim(
     registered = [b for _, b in GitWorktreeOps.registered_worktrees(env.repo)]
     assert [b for b in registered if b.startswith("kiss/wt-")] == []
 
-    # With git config writable again the next retire parks it for real
-    # and create_worktree hands out a fresh worktree.
-    agent._retire_previous_worktree()
-    assert agent._wt is None
+    # With git config writable again create_worktree itself parks the
+    # claim for real and hands out a fresh worktree.
     third = agent.create_worktree()
     assert third.startswith("Created worktree"), third
     assert agent._wt is not None and agent._wt is not wt
-    assert GitWorktreeOps.load_preserve_marker(env.repo, wt.branch)
+    assert GitWorktreeOps._preserve_marker_on_disk(env.repo, wt.branch)
     assert _branch_has_agent_file(env.repo, wt.branch)
     assert agent.discard().startswith("Discarded")
+    assert GitWorktreeOps.branch_exists(env.repo, wt.branch)
 
 
 def test_same_process_reclaim_honours_the_volatile_claim(env: IsolatedKissHome) -> None:

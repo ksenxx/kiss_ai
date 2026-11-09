@@ -219,11 +219,13 @@ def _split_words(command_line: str, *, posix: bool = True) -> list[str]:
 
 
 def _which(command: str) -> str | None:
-    """Return the absolute path of *command* when it exists and is executable."""
-    path = Path(command).expanduser()
-    if path.is_file() and os.access(path, os.X_OK):
-        return str(path)
-    return shutil.which(command)
+    """Return the path of *command* when it exists and is executable, else ``None``.
+
+    A path (``~`` expanded) is checked as given; a bare name is looked
+    up the way ``Popen`` will run it (``shutil.which``), never as a
+    file of the working directory, which ``Popen`` would not run.
+    """
+    return shutil.which(os.path.expanduser(command))
 
 
 def _run(argv: list[str]) -> str:
@@ -295,7 +297,7 @@ def _mac_app_executable(app_path: str) -> str | None:
     try:
         with info.open("rb") as fh:
             executable = plistlib.load(fh).get("CFBundleExecutable")
-    except (OSError, plistlib.InvalidFileException, ValueError):
+    except (OSError, ValueError):  # plistlib.InvalidFileException is a ValueError
         return None
     if not isinstance(executable, str):
         return None

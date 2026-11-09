@@ -59,6 +59,8 @@ from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cer
 from kiss.tests.conftest import find_free_port
 from kiss.tests.local_ws import open_local_connection
 from kiss.tests.remote_daemon import start_remote_daemon
+from kiss.tests.server.parallel_agent_harness import restore_env
+from kiss.tests.server.remote_tabs_probe import machine_of
 
 CHILD_SUMMARY = "<p>Hello from the box sub-agent</p>"
 PARENT_SUMMARY = "<p>The box answered</p>"
@@ -72,9 +74,13 @@ def _finish(summary: str, pause: float = 0.0) -> dict[str, Any]:
     ]}
 
 
-def _run_agent(**arguments: Any) -> dict[str, Any]:
-    """A scripted answer: one ``run_agent(**arguments)`` call."""
-    return {"pause": 0.0, "calls": [("run_agent", arguments)]}
+def _call(name: str, **arguments: Any) -> dict[str, Any]:
+    """A scripted answer: one ``name(**arguments)`` tool call."""
+    return {"pause": 0.0, "calls": [(name, arguments)]}
+
+
+_run_agent = functools.partial(_call, "run_agent")
+"""A scripted answer: one ``run_agent(**arguments)`` call."""
 
 
 def _default_script(machine: str) -> list[dict[str, Any]]:
@@ -154,14 +160,6 @@ def _restore_config(saved: str | None) -> None:
         vc._config_path().write_text(saved)
 
 
-def _restore_env(key: str, saved: str | None) -> None:
-    """Put the environment variable *key* back as it was before the test."""
-    if saved is None:
-        os.environ.pop(key, None)
-    else:
-        os.environ[key] = saved
-
-
 def _remote_rows(home: Path) -> list[tuple[str, str]]:
     """The ``(task, parent_task_id)`` rows of the remote daemon's history."""
     with sqlite3.connect(home / "history.db") as db:
@@ -212,7 +210,7 @@ class TwoDaemonsCase(IsolatedAsyncioTestCase):
         # The dispatcher inside the daemon reaches the daemon through its
         # endpoint file (``$KISS_SORCAR_LOCAL``), as a run_agent call does.
         endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
-        self.addCleanup(_restore_env, LOCAL_ENDPOINT_ENV, os.environ.get(LOCAL_ENDPOINT_ENV))
+        self.addCleanup(restore_env, LOCAL_ENDPOINT_ENV, os.environ.get(LOCAL_ENDPOINT_ENV))
         os.environ[LOCAL_ENDPOINT_ENV] = str(endpoint_file)
         self.server = RemoteAccessServer(
             host="127.0.0.1", port=find_free_port(), certfile=str(certfile),
@@ -489,7 +487,7 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
                 break
             await asyncio.sleep(0.1)
         self.assertTrue(api_tab, "the run's tab was published")
-        self.assertEqual(self.server._server_api.remote_tabs.machine_of(api_tab), "box")
+        self.assertEqual(machine_of(self.server._server_api.remote_tabs, api_tab), "box")
         result = await running
         self.assertTrue(result.success)
         self.assertIn(CHILD_SUMMARY, result.text)
@@ -502,7 +500,7 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
                 break
             await asyncio.sleep(0.1)
         self.assertNotIn(api_tab, published)
-        self.assertEqual(self.server._server_api.remote_tabs.machine_of(api_tab), "")
+        self.assertEqual(machine_of(self.server._server_api.remote_tabs, api_tab), "")
 
     async def test_two_sub_agents_on_the_machine_keep_their_own_tabs(self) -> None:
         """Siblings on one machine: each stream relays its own run's new_tab, not the other's."""

@@ -35,7 +35,7 @@ from kiss.server import agent_state
 from kiss.server.merge_flow import _capture_untracked
 from kiss.server.server import AgentServer
 from kiss.tests.conftest import posix_only
-from kiss.tests.server.worktree_helpers import merge_conflict
+from kiss.tests.server.worktree_helpers import merge_conflict, worktree_changed_files
 
 # With ``core.quotepath=false`` (which the project sets) git C-quotes only
 # names containing ``"``, ``\\`` or control characters; none of those is a
@@ -129,7 +129,7 @@ class TestWorktreeQuotedPaths(unittest.TestCase):
         wt_file.write_text(
             wt_file.read_text().replace("line5\n", "line5-agent\n"),
         )
-        changed = self.server._get_worktree_changed_files(self.tab_id)
+        changed = worktree_changed_files(self.server, self.tab_id)
         self.assertIn(QUOTED_NAME, changed, f"got: {changed}")
 
     def test_conflict_check_sees_quoted_overlap(self) -> None:

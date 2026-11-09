@@ -98,6 +98,7 @@ from kiss.tests.agents.third_party_agents.slack_oauth_test_utils import (
     SlackOAuthState,
     sign_in,
 )
+from kiss.tests.conftest import posix_only
 from kiss.tests.server.pause import Pause
 
 _REAL_SLACK_TOKEN = "xoxb-real-secret-slack"
@@ -602,6 +603,7 @@ def _start_fake_daemon(
                 except OSError:
                     break
                 with conn:
+                    conn.settimeout(5.0)  # a peer that never completes its frame
                     try:
                         request = recv_frame(conn)
                     except Exception:
@@ -647,6 +649,7 @@ def _stopping_listener(thread: threading.Thread, stopped: threading.Event) -> It
         if thread.is_alive():
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wake:
+                    wake.settimeout(5.0)  # a full backlog would block a plain connect
                     wake.connect(str(socket_path()))
             except OSError:
                 pass
@@ -711,6 +714,49 @@ def test_teardown_muse_env_fails_on_a_daemon_that_does_not_exit(isolated_kiss_ho
     teardown_muse_env()
 
 
+@posix_only("the fake daemon listens on an AF_UNIX socket, which CPython on Windows has not")
+def test_stopping_listener_ends_despite_a_stalled_peer_and_a_full_backlog(
+    isolated_kiss_home: Path,
+) -> None:
+    """Fake-daemon cleanup is bounded when a peer never completes its frame.
+
+    The serving thread used to read an accepted connection with no
+    timeout and the cleanup's wake-up ``connect()`` had none either: one
+    peer that sent half a frame plus the listen backlog queued behind it
+    held both threads until the peers hung up.
+    """
+    listener, stopped = _start_fake_daemon({"ok": True}, honors_stop=False)
+    peers: list[socket.socket] = []
+    done = threading.Event()
+
+    def clean_up() -> None:
+        with _stopping_listener(listener, stopped):
+            pass
+        done.set()
+
+    try:
+        stalled = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        peers.append(stalled)
+        stalled.connect(str(socket_path()))
+        stalled.sendall(b'{"op": "status"')  # no newline: the frame never completes
+        for _ in range(16):  # fill the backlog: a timed connect fails once it is full
+            queued = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            peers.append(queued)
+            queued.settimeout(1.0)
+            try:
+                queued.connect(str(socket_path()))
+            except (TimeoutError, BlockingIOError, ConnectionRefusedError):
+                break  # Linux queues the connect until it times out; macOS refuses it
+        cleaner = threading.Thread(target=clean_up, daemon=True)
+        cleaner.start()
+        assert done.wait(20.0), "fake daemon cleanup blocked behind the stalled peer"
+    finally:
+        for peer in peers:
+            peer.close()
+        stopped.set()
+        listener.join(timeout=10.0)
+
+
 def test_stale_pre_upgrade_daemon_is_replaced(muse_env: Path) -> None:
     """ensure_daemon stops a protocol-1 relic and spawns the current daemon."""
     from kiss.agents.third_party_agents.muse_auth import client as muse_client
@@ -738,7 +784,7 @@ def test_daemon_protocol_of_garbage_listeners(muse_env: Path) -> None:
 
 
 def test_slack_workspace_list_and_delete_are_vault_aware(
-    muse_env: Path, capsys: pytest.CaptureFixture
+    muse_env: Path, api_server: _ApiServer, capsys: pytest.CaptureFixture
 ) -> None:
     """Vault-only workspaces are listed and deletion clears the vault."""
     from kiss.agents.third_party_agents.slack.slack_sea import (
@@ -750,9 +796,13 @@ def test_slack_workspace_list_and_delete_are_vault_aware(
     assert "No workspaces found" in capsys.readouterr().out
 
     _save_token(_REAL_SLACK_TOKEN, "team2")
-    backend = SlackChannelBackend(workspace="team2")
-    backend.connect()  # enrolls into the vault, deleting the plaintext
     service = _muse_service("team2")
+    set_policy(service, extra_hosts=["127.0.0.1"])  # the emulator, for this workspace too
+    backend = SlackChannelBackend(workspace="team2")
+    backend._api_base_url = f"{api_server.base_url}/api/"
+    # connect() enrolls into the vault, deleting the plaintext, and runs auth.test.
+    assert backend.connect(), backend._connection_info
+    assert [r["path"] for r in api_server.requests] == ["/api/auth.test"]
     assert vault_has_credentials(service)
     assert not _token_path("team2").exists()
 

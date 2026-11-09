@@ -48,6 +48,7 @@ from kiss.tests.agents.sorcar.test_audit1012_sorcar_core_machine_link_send impor
 )
 from kiss.tests.conftest import find_free_port
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.remote_tabs_probe import machine_of
 
 _TAB = "tab-deaf"
 
@@ -140,9 +141,9 @@ class TestRemoteTabDeafDaemon(IsolatedAsyncioTestCase):
         self.assertLess(time.monotonic() - started, 40.0)
         # The stream is gone and the tab is home again.
         deadline = time.monotonic() + 10.0
-        while self.server._server_api.remote_tabs.machine_of(_TAB) and time.monotonic() < deadline:
+        while machine_of(self.server._server_api.remote_tabs, _TAB) and time.monotonic() < deadline:
             time.sleep(0.05)
-        self.assertEqual(self.server._server_api.remote_tabs.machine_of(_TAB), "")
+        self.assertEqual(machine_of(self.server._server_api.remote_tabs, _TAB), "")
         # The client's command loop is free: the next command is answered at once.
         started = time.monotonic()
         await self._send({"type": "ping"})

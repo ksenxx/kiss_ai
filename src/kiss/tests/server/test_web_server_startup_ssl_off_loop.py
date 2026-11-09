@@ -59,8 +59,9 @@ _SSL_DELAY_SECS = 3.0
 _CTOR_BUDGET_SECS = 1.5
 
 # A loop blocked by the SSL build would stall its ticker for the whole
-# _SSL_DELAY_SECS; a loop that is free ticks every few milliseconds.
-_MAX_LOOP_STALL_SECS = 1.0
+# _SSL_DELAY_SECS; a loop that is free ticks every few milliseconds, but a
+# loaded machine stalled it 1.15 s once, so the bound sits between the two.
+_MAX_LOOP_STALL_SECS = 2.0
 
 
 class SslBuildOffLoopTest(IsolatedAsyncioTestCase):
