@@ -16,6 +16,7 @@ from __future__ import annotations
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 from kiss.core.processes import (
@@ -36,6 +37,14 @@ def _wait_gone(pid: int, timeout: float = 5.0) -> bool:
             return True
         time.sleep(0.05)
     return not pid_alive(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    """Whether the process table lists *pid* as exited but not yet reaped (``ps`` state ``Z``)."""
+    state = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=10,
+    ).stdout.strip()
+    return state.startswith("Z")
 
 
 def test_child_honouring_sigterm_is_reaped() -> None:
@@ -86,6 +95,53 @@ def test_descendant_ignoring_sigterm_is_killed_after_leader_exits() -> None:
         # On failure the grandchild still sleeps in the (still valid) group.
         kill_process_tree(proc)
         proc.wait(timeout=5)
+        proc.stdout.close()
+
+
+def test_exited_leader_stays_unreaped_while_its_group_runs_out_its_grace() -> None:
+    """A leader that honoured SIGTERM is kept a zombie until its group's last signal.
+
+    The grace wait reaped the leader first (``proc.wait``) and then
+    probed the group with ``killpg(pgid, 0)``: reaped, the leader's pid
+    (the group's id) is the kernel's to hand to a stranger the moment
+    the group's last member is gone, so the probe, or the ``SIGKILL``
+    escalation it decides, could reach a stranger's group.  A zombie
+    leader keeps the id reserved: it is reaped only after that signal.
+    """
+    code = (
+        "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "print(os.getpid(), flush=True); time.sleep(60)"
+    )
+    proc = popen_process_group(
+        ["bash", "-c", '"$1" -c "$2" & wait', "mixed", sys.executable, code],
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert proc.stdout is not None
+    try:
+        grandchild = int(proc.stdout.readline().strip())  # printed after SIG_IGN is set
+        terminator = threading.Thread(
+            target=terminate_process_group, args=(proc, 2.0), daemon=True,
+        )
+        terminator.start()
+        # The shell dies of SIGTERM at once; its grandchild ignores it and
+        # holds the group open for the whole grace period.
+        deadline = time.monotonic() + 1.0
+        while not _is_zombie(proc.pid):
+            assert time.monotonic() < deadline, "the leader was reaped on exit, before its group"
+            time.sleep(0.02)
+        until = time.monotonic() + 0.5
+        while time.monotonic() < until:
+            assert proc.returncode is None and _is_zombie(proc.pid), "the leader was reaped early"
+            assert pid_alive(grandchild)
+            time.sleep(0.05)
+        terminator.join(10)
+        assert not terminator.is_alive()
+        assert proc.returncode == -signal.SIGTERM
+        assert _wait_gone(grandchild)
+    finally:
+        if proc.returncode is None:
+            kill_process_tree(proc)
+            proc.wait(timeout=5)
         proc.stdout.close()
 
 

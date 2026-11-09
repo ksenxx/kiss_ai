@@ -22,6 +22,8 @@ failure report for a client that hangs up early is pinned last.
 from __future__ import annotations
 
 import socket
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from typing import Any
@@ -118,3 +120,38 @@ def test_irc_read_lines_names_a_client_that_hung_up() -> None:
             pytest.raises(AssertionError, match=r"closed before 'USER '; got \['NICK bot'\]"),
         ):
             read_lines(conn, "USER ")
+
+
+def _chatter(client: socket.socket, stop: threading.Event, give_up_at: float) -> None:
+    """Send unrelated IRC lines every 10 ms until *stop* or *give_up_at*, then hang up."""
+    while not stop.is_set() and time.monotonic() < give_up_at:
+        client.sendall(b"PING :keepalive\r\n")
+        time.sleep(0.01)
+    client.close()
+
+
+def test_irc_read_lines_gives_up_at_its_deadline_while_the_client_keeps_talking() -> None:
+    """``read_lines`` fails at *timeout* when the client sends only other lines.
+
+    The bound used to apply to each ``recv``: a live client that sent
+    unrelated lines more often than that kept the helper reading until
+    the client hung up (here after 3 s; a chatty peer never does).
+    """
+    stop = threading.Event()
+    with closing(IRCServer()) as server:
+        client = socket.create_connection(("127.0.0.1", server.port), timeout=5)
+        thread = threading.Thread(
+            target=_chatter, args=(client, stop, time.monotonic() + 3), daemon=True
+        )
+        thread.start()
+        try:
+            with server.accept() as conn:
+                started = time.monotonic()
+                with pytest.raises(
+                    AssertionError, match=r"no line starting with 'USER ' within 0.3 s"
+                ):
+                    read_lines(conn, "USER ", timeout=0.3)
+                assert time.monotonic() - started < 2
+        finally:
+            stop.set()
+            thread.join(timeout=5)

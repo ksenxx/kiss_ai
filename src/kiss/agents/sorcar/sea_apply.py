@@ -311,4 +311,23 @@ def apply_run(cmd: dict[str, Any], seas: list[BaseSea], run: SeaRun) -> set[str]
         "defaulted": defaulted_keys(cmd, staged, SETTING_FIELDS),
     }
     cmd.update(staged)
+    cap_budget(cmd)
     return overridden
+
+
+def cap_budget(cmd: dict[str, Any]) -> None:
+    """Lower a ``run`` command's ``maxBudget`` to its ``budgetCap``, in place.
+
+    The cap is the bound a ``run_agent`` dispatch sends, the caller's
+    unreserved remainder and no more than the job's reservation
+    (``agent_dispatch.budget_cap_of``); it bounds the budget whatever
+    named it, the call, the SEA's ``max_budget`` setting or the
+    inherited share, after the precedence and the lock check above,
+    so the SEA's settings, the provenance marks and the record are
+    untouched.  A command without a cap, or whose budget is within it,
+    is left alone.
+    """
+    cap = cmd.get("budgetCap")
+    budget = cmd.get("maxBudget")
+    if isinstance(cap, int | float) and isinstance(budget, int | float) and budget > cap:
+        cmd["maxBudget"] = cap

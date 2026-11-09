@@ -1730,6 +1730,10 @@ copy_app_files() {
         return 1
     }
     rm -f "$list"
+    # The checkout's commit, shown next to the version in the Settings
+    # panel (web_server._read_commit); a tarball has none.
+    git -C "$PROJECT_DIR" rev-parse --short HEAD > "$APP_DIR/src/kiss/core/_commit.txt" \
+        2>/dev/null || rm -f "$APP_DIR/src/kiss/core/_commit.txt"
     echo "   Copied $count files to $APP_DIR"
 }
 
@@ -2062,7 +2066,9 @@ fi
     else
         echo "=== App install complete ==="
         echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-        echo "App directory: $APP_DIR"
+        # The app the daemon now runs from: a brand home's when one was
+        # restarted above, though this run installed $APP_DIR too.
+        echo "App directory: ${restart_app:-$APP_DIR}"
         echo "CLI: $BIN_DIR/sorcar"
         echo ""
         echo "API keys are set in the webapp's settings; the remote-access password is printed below."

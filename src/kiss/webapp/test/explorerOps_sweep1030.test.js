@@ -151,7 +151,6 @@ async function main() {
     openExplorer(win, posted, [{name: 'src', path: WD + '/src', isDir: true}]);
     const row = explorerRow(win, WD + '/src');
     runMenuItem(win, row, 'Rename...');
-    await sleep(5);
     const input = row.querySelector('input.explorer-input');
     input.value = 'lib';
     key(win, input, 'Enter');

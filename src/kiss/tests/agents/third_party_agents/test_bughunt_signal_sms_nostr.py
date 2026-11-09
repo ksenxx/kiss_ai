@@ -21,16 +21,25 @@ Covers:
   keys on the bot's number. Runtime Twilio API behavior is skipif-guarded because
   the twilio package is optional.
 - nostr_sea.py: ``is_from_bot`` must key on the message contract key ``user``
-  (with a ``pubkey`` fallback); the pynostr publish flow is skipif-guarded.
+  (with a ``pubkey`` fallback); the pynostr publish flow (skipif-guarded) is
+  driven against a loopback WebSocket relay, and publishing with no relay
+  configured is refused instead of reported as delivered.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import sys
+import threading
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 from importlib.util import find_spec
+from typing import Any
 
 import pytest
+from websockets.sync.server import ServerConnection, serve
 
 from kiss.tests.agents.third_party_agents.conftest import install_cli_on_path
 from kiss.tests.agents.third_party_agents.recording_http import (
@@ -258,6 +267,35 @@ class TestSMSBackend(unittest.TestCase):
             self.assertIn("/Messages.json", server.requests[0]["path"])
 
 
+@contextmanager
+def _loopback_relay(received: list[list]) -> Iterator[str]:
+    """Serve a one-shot Nostr relay on a free port; yield its ws URL.
+
+    The relay appends each client frame to ``received``, acknowledges an
+    ``EVENT`` with the NIP-20 ``OK`` reply and closes the connection.
+    """
+
+    def handler(connection: ServerConnection) -> None:
+        frame = json.loads(connection.recv())
+        received.append(frame)
+        if frame[0] == "EVENT":
+            connection.send(json.dumps(["OK", frame[1]["id"], True, ""]))
+        connection.close()
+
+    server = serve(handler, "127.0.0.1", 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"ws://127.0.0.1:{server.socket.getsockname()[1]}"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5.0)
+        if sys.platform != "win32":
+            # websockets 15 ``Server.shutdown`` never closes its shutdown pipe.
+            os.close(server.shutdown_watcher)
+            os.close(server.shutdown_notifier)
+
+
 class TestNostrBackend(unittest.TestCase):
     """Tests for NostrChannelBackend bot detection and publish flow."""
 
@@ -288,9 +326,9 @@ class TestNostrBackend(unittest.TestCase):
         self.assertFalse(backend.is_from_bot({"user": ""}))
         self.assertFalse(backend.is_from_bot({}))
 
-    @unittest.skipIf(find_spec("pynostr") is None, "pynostr not installed")
-    def test_publish_note_uses_pynostr_relay_manager_flow(self) -> None:
-        """publish_note must use the pynostr RelayManager API (no open_connections)."""
+    @staticmethod
+    def _signed_backend() -> Any:
+        """A backend holding a fresh pynostr key pair and no relays yet."""
         import importlib
 
         from kiss.agents.third_party_agents.nostr.nostr_sea import NostrChannelBackend
@@ -299,10 +337,33 @@ class TestNostrBackend(unittest.TestCase):
         backend = NostrChannelBackend()
         backend._private_key = pynostr_key.PrivateKey()
         backend._public_key = backend._private_key.public_key.hex()
+        return backend
+
+    @unittest.skipIf(find_spec("pynostr") is None, "pynostr not installed")
+    def test_publish_note_uses_pynostr_relay_manager_flow(self) -> None:
+        """publish_note signs a kind-1 event and the RelayManager delivers it to the relay."""
+        backend = self._signed_backend()
+        received: list[list] = []
+        with _loopback_relay(received) as relay_url:
+            backend._relays = [relay_url]
+            result = json.loads(backend.publish_note("bughunt test note"))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(len(received), 1, received)
+        kind, event = received[0]
+        self.assertEqual(kind, "EVENT")
+        self.assertEqual(event["id"], result["event_id"])
+        self.assertEqual(event["kind"], 1)
+        self.assertEqual(event["content"], "bughunt test note")
+        self.assertEqual(event["pubkey"], backend._public_key)
+
+    @unittest.skipIf(find_spec("pynostr") is None, "pynostr not installed")
+    def test_publish_note_without_relays_is_refused(self) -> None:
+        """With no relay configured nothing can be published, so the note is not 'ok'."""
+        backend = self._signed_backend()
         backend._relays = []
         result = json.loads(backend.publish_note("bughunt test note"))
-        self.assertTrue(result["ok"], result)
-        self.assertTrue(result["event_id"])
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error"], "no relays configured")
 
 
 if __name__ == "__main__":

@@ -164,6 +164,25 @@ class TestRunningTaskNotMarkedFailed(_TempDbTestCase):
         self.assertTrue(by_task["crashed task"]["failed"])
         self.assertFalse(by_task["crashed task"]["is_running"])
 
+    def test_in_process_error_result_is_marked_failed(self) -> None:
+        """A row whose result is a persisted in-process error (``KISS Error: ...``) is a
+        failure in the history payload, as it is for the recall evaluation: the history
+        classifier is the one of ``kiss.core.memoryfield.evaluate``."""
+        task_id, _ = th._add_task("codex task")
+        th._save_task_result("KISS Error: Codex CLI failed: usage limit reached", task_id)
+
+        self.server._handle_command({"type": "getHistory"})
+
+        sessions: list[dict[str, Any]] = []
+        with self._lock:
+            for e in reversed(self.events):
+                if e["type"] == "history":
+                    sessions = list(e["sessions"])
+                    break
+        by_task = {s["title"]: s for s in sessions}
+        self.assertTrue(by_task["codex task"]["failed"], "an in-process error reads as a success")
+        self.assertFalse(by_task["codex task"]["is_running"])
+
 
 class TestSubtaskFailureStepCount(_TempDbTestCase):
     """C4: the failure broadcast must report the agent's total_steps."""

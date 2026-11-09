@@ -32,6 +32,8 @@
   'use strict';
 
   const BUTTON_NAMES = ['left', 'middle', 'right', 'back', 'forward'];
+  // The `buttons` bit of each button above.
+  const BUTTON_BITS = [1, 4, 2, 8, 16];
   const RESIZE_DEBOUNCE_MS = 150;
   // Presses closer than this in time and space count up (double,
   // triple click) - pointer events carry no click count of their own.
@@ -150,6 +152,9 @@
       urlInput.value = view.url;
     });
     urlInput.addEventListener('keydown', e => {
+      // An IME's Enter / Escape commits or cancels the composition, not
+      // the address (Chromium reports keyCode 229 for keys an IME takes).
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'Enter') {
         e.preventDefault();
         navigate('go', urlInput.value.trim());
@@ -192,7 +197,10 @@
       send({type: 'browserInput', tab_id: tabId, event});
     }
 
+    // The pointer event forwarded last: where the remote pointer is.
+    let lastPointer = null;
     function mouse(action, e, extra) {
+      lastPointer = e;
       const p = pagePoint(e);
       const event = Object.assign(
         {
@@ -249,6 +257,30 @@
       };
       return lastPress.count;
     }
+    // The buttons down on the remote page, a `buttons` bitmask.
+    let held = 0;
+    /**
+     * Forward the button transitions from *held* to *e*'s `buttons`: a
+     * press or a release per changed button, in button order.  Pointer
+     * Events fire pointerdown for the first button pressed and
+     * pointerup for the last released; a button pressed or released
+     * while another stays down (a chord) comes as a pointermove whose
+     * `buttons` changed, which forwarded as a move would leave the
+     * remote page with that press or release missing.
+     */
+    function syncButtons(e) {
+      const buttons = e.buttons || 0;
+      for (let i = 0; i < BUTTON_BITS.length; i++) {
+        const bit = BUTTON_BITS[i];
+        if ((held & bit) === (buttons & bit)) continue;
+        const down = (buttons & bit) !== 0;
+        mouse(down ? 'mousePressed' : 'mouseReleased', e, {
+          button: BUTTON_NAMES[i],
+          clickCount: down ? clickCountFor(e) : lastPress.count || 1,
+        });
+      }
+      held = buttons;
+    }
     screen.addEventListener('pointerdown', e => {
       if (e.pointerType === 'touch') return;
       screen.focus();
@@ -258,17 +290,35 @@
         } catch (_e) {}
       }
       flushMove();
-      mouse('mousePressed', e, {clickCount: clickCountFor(e)});
+      syncButtons(e);
       e.preventDefault();
     });
     screen.addEventListener('pointerup', e => {
       if (e.pointerType === 'touch') return;
       flushMove();
-      mouse('mouseReleased', e, {clickCount: lastPress.count || 1});
+      syncButtons(e);
       e.preventDefault();
+    });
+    // A pointer the browser cancels after a press (the OS took the
+    // device, a native drag began) gets no pointerup.  A release sent
+    // instead would click the control under the press (Chromium fires
+    // click on a release at the press point whatever its click count),
+    // and a cancelled gesture must activate nothing: a move with no
+    // buttons down ends the press on the remote page (its pressed
+    // state, :active) without mouseup or click, as the cancel ended it
+    // here.
+    screen.addEventListener('pointercancel', e => {
+      if (e.pointerType === 'touch' || !held) return;
+      flushMove();
+      held = 0;
+      mouse('mouseMoved', lastPointer, {buttons: 0});
     });
     screen.addEventListener('pointermove', e => {
       if (e.pointerType === 'touch') return;
+      if ((e.buttons || 0) !== held) {
+        flushMove();
+        syncButtons(e);
+      }
       // Coalesce to one move per animation frame.
       pendingMove = e;
       if (moveFrame === null) moveFrame = requestAnimationFrame(flushMove);
@@ -353,18 +403,32 @@
         ),
       );
     }
+    // The keys forwarded down and not up yet, by code.  A keyup goes to
+    // wherever the focus is then: one that leaves the screen (the
+    // address field, another tab, another application) never reaches
+    // it, and the remote page would keep the key pressed.  They are
+    // released when the screen loses focus, when the view is hidden
+    // and on dispose.
+    const heldKeys = new Map();
+    function releaseKeys() {
+      heldKeys.forEach(e => key('up', e));
+      heldKeys.clear();
+    }
     screen.addEventListener('keydown', e => {
       // Paste comes through the paste event with the LOCAL clipboard's
       // text; the remote page never sees this Ctrl/Cmd+V.
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') return;
+      heldKeys.set(e.code || e.key, e);
       key('down', e);
       e.preventDefault();
     });
     screen.addEventListener('keyup', e => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') return;
+      heldKeys.delete(e.code || e.key);
       key('up', e);
       e.preventDefault();
     });
+    screen.addEventListener('blur', releaseKeys);
     screen.addEventListener('paste', e => {
       const text =
         e.clipboardData && e.clipboardData.getData
@@ -422,6 +486,7 @@
         // Layout has to settle before the size is meaningful.
         resizeTimer = setTimeout(reportViewport, 0);
       } else {
+        releaseKeys();
         reportViewport();
       }
     };
@@ -464,6 +529,7 @@
 
     view.dispose = function () {
       if (view.disposed) return;
+      releaseKeys();
       view.disposed = true;
       clearTimeout(resizeTimer);
       if (moveFrame !== null) cancelAnimationFrame(moveFrame);

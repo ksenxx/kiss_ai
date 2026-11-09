@@ -79,8 +79,8 @@ def _executor_response() -> dict:
 
 
 def _summarizer_finish_response() -> dict:
-    """``finish(success=True, summary="...")`` so the summarizer returns immediately."""
-    args = json.dumps({"success": True, "summary": "summary-from-test"})
+    """``finish(result="...")`` (the summarizer's one tool) so it returns immediately."""
+    args = json.dumps({"result": "summary-from-test"})
     return {
         "id": "chatcmpl-sum",
         "object": "chat.completion",
@@ -292,7 +292,7 @@ def _streamed_tool_call(name: str, arguments: str) -> Reply:
 def _streaming_responder(request: Request) -> Reply:
     """Summarizer prompts get ``finish``; executor prompts loop on ``noop``."""
     if "Summarizer" in json.dumps(request.body):
-        args = json.dumps({"success": True, "summary": "summary-from-test"})
+        args = json.dumps({"result": "summary-from-test"})
         return _streamed_tool_call("finish", args)
     return _streamed_tool_call("noop", "{}")
 

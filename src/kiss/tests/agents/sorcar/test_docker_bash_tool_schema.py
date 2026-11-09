@@ -107,7 +107,7 @@ class TestDockerBashToolExposesBothLimits(unittest.TestCase):
         self.assertEqual(
             list(parameters),
             ["command", "description", "timeout_seconds", "max_output_chars", "background",
-             "on_timeout"],
+             "on_timeout", "until", "poll_seconds"],
         )
 
     def test_default_output_cap_is_the_configured_budget(self) -> None:
@@ -135,6 +135,25 @@ class TestDockerBashToolExposesBothLimits(unittest.TestCase):
         agent = SorcarAgent("K2 docker shim, no manager")
         with self.assertRaises(KISSError):
             agent._docker_bash("echo hi", "no manager attached")
+
+    def test_gate_shell_is_not_cut_at_the_tool_output_cap(self) -> None:
+        """The finish gate's ``git ls-files`` / ``git diff`` reads must come back whole.
+
+        The gate parses ``-z`` lists and hashes diffs from what
+        ``_gate_shell`` returns, so the Bash tool's 8,000-char cut (and
+        its ``[truncated`` marker) must never apply to it; the exit code
+        and the deadline keep the host primitive's contract.
+        """
+        from kiss.core.config import DEFAULT_CONFIG
+
+        width = 3 * DEFAULT_CONFIG.tool_output_default_chars
+        code, output = self.agent._gate_shell(f"python -c \"print('x' * {width})\"", 30)
+        self.assertEqual(code, 0)
+        self.assertNotIn("truncated", output)
+        self.assertEqual(output.strip(), "x" * width)
+        # The output as the command wrote it, as ``run_on_host`` returns it.
+        self.assertEqual(self.agent._gate_shell("echo failing; exit 3", 30), (3, "failing\n"))
+        self.assertIsNone(self.agent._gate_shell("tail -f /dev/null", 1)[0])
 
 
 if __name__ == "__main__":  # pragma: no cover — manual runs

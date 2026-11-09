@@ -64,17 +64,13 @@ class TestCatalogFlagRouting:
     def test_chat_completions_only_models_stay_on_v1(self) -> None:
         """Models OpenAI serves only on Chat Completions must stay v1.
 
-        ``gpt-4o-search-preview`` and ``gpt-audio`` are rejected by
-        ``/v1/responses`` ("not supported with the Responses API"), and
-        embeddings have no generation endpoint at all.
+        ``gpt-audio`` is rejected by ``/v1/responses`` ("not supported
+        with the Responses API"), and embeddings have no generation
+        endpoint at all.  The search-preview models, the other example,
+        left the catalog in the 2026-11-05 refresh (OpenAI no longer
+        lists them).
         """
-        for name in (
-            "gpt-4o-search-preview",
-            "gpt-4o-mini-search-preview",
-            "gpt-audio",
-            "gpt-audio-mini",
-            "text-embedding-3-small",
-        ):
+        for name in ("gpt-audio", "gpt-audio-mini", "text-embedding-3-small"):
             info = MODEL_INFO[name]
             assert info.use_responses_api is not True, name
             assert isinstance(model(name), OpenAICompatibleModel), name
@@ -183,6 +179,72 @@ class TestConfigOverrides:
         assert isinstance(m, OpenAICompatibleModel)
         assert not isinstance(m, OpenAICompatibleModel2)
 
+    @pytest.mark.parametrize("flag", [True, False, None])
+    def test_registry_endpoint_entry_routes_on_its_own_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: bool | None,
+    ) -> None:
+        """A MY_MODELS entry's ``use_responses_api`` decides for its own endpoint.
+
+        The registry's README documents the field, the seeder writes it
+        into every saved entry and the task runner runs such an entry
+        through ``custom_model_config`` (endpoint, key, headers only), so
+        the entry's flag must be honoured by the factory's ``base_url``
+        branch; without the flag a custom gateway stays on v1.
+        """
+        from kiss.core.models import model_info
+
+        entry: dict = {
+            "endpoint": "http://127.0.0.1:9/v1",
+            "api_key": "k",
+            "context_length": 8192,
+            "input_price_per_1M": 1.0,
+            "output_price_per_1M": 2.0,
+            "fc": True,
+            "emb": False,
+            "gen": True,
+            "thinking": "high",
+        }
+        if flag is not None:
+            entry["use_responses_api"] = flag
+        my_models = tmp_path / "MY_MODELS.json"
+        my_models.write_text(json.dumps({"my-gw/custom": entry}))
+        monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", my_models)
+        expected = OpenAICompatibleModel2 if flag else OpenAICompatibleModel
+        m = model("my-gw/custom", model_info.custom_model_config("my-gw/custom"))
+        assert type(m) is expected, flag
+        assert m.base_url == "http://127.0.0.1:9/v1"
+
+    def test_a_panel_saved_vendor_model_stays_on_v1_at_a_custom_gateway(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bundled name registered at a gateway keeps Chat Completions there.
+
+        The settings panel seeds the entry with the catalog's
+        ``use_responses_api`` (verified at the vendor's own endpoint), so
+        that copy must not switch an unverified gateway to
+        ``/v1/responses``; the same entry at the vendor's default URL
+        keeps the Responses transport.
+        """
+        from kiss.core.models import model_info
+
+        monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
+        flagged = next(
+            name
+            for name, info in MODEL_INFO.items()
+            if info.use_responses_api and name.startswith("gpt-") and info.alias_of is None
+        )
+        assert model_info.save_custom_model(flagged, "http://127.0.0.1:9/v1", "k") is None
+        saved = json.loads((tmp_path / "MY_MODELS.json").read_text())[flagged]
+        assert saved["use_responses_api"] is True
+        m = model(flagged, model_info.custom_model_config(flagged))
+        assert type(m) is OpenAICompatibleModel
+        assert m.base_url == "http://127.0.0.1:9/v1"
+        vendor = _match_openai_compatible_provider(flagged)
+        assert vendor is not None
+        assert type(model(flagged, {"base_url": vendor.base_url, "api_key": "k"})) is (
+            OpenAICompatibleModel2
+        )
+
 
 class TestMyModelsAliasSync:
     """A base-only MY_MODELS override must re-mirror onto generated aliases."""
@@ -264,6 +326,11 @@ class TestMyModelsAliasSync:
         override["output_price_per_1M"] = 456.0
         for field in ("cache_read_price_per_1M", "cache_write_price_per_1M"):
             override.pop(field, None)
+        # The context window and the capabilities are the provider
+        # model's too: a base routed to a smaller endpoint takes its
+        # aliases along (the agent budgets compaction on the alias's).
+        override["context_length"] = 12345
+        override["fc"] = not bundled[base].get("fc", True)
         my_models = tmp_path / "MY_MODELS.json"
         my_models.write_text(json.dumps({base: override}))
         monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", my_models)
@@ -274,6 +341,9 @@ class TestMyModelsAliasSync:
             table[alias].cache_read_price_per_1M
             == table[base].cache_read_price_per_1M
         )
+        assert table[alias].context_length == 12345
+        assert table[alias].is_function_calling_supported is override["fc"]
+        assert table[alias].thinking == bundled[alias].get("thinking"), "keeps its own level"
 
     def test_untouched_bases_leave_aliases_alone(self) -> None:
         """Without a user override the bundled alias copies are untouched."""

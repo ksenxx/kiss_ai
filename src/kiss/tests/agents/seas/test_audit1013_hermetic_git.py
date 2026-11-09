@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from kiss.core.processes import popen_process_group
+from kiss.core.processes import start_process_group
 from kiss.tests.agents.seas.conftest import git, seed_repo
 from kiss.tests.conftest import posix_only
 
@@ -32,8 +32,12 @@ def test_seed_repo_ignores_global_hooks_and_signing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The seeded repository is built with the helper's hermetic git, so a global
-    ``core.hooksPath`` whose pre-commit hook waits for ever, a ``commit.gpgsign`` and an
-    ``init.defaultBranch`` never reach it; each call keeps the helper's 60 s cap."""
+    ``core.hooksPath`` whose pre-commit hook waits for ever, a ``commit.gpgsign``, an
+    ``init.defaultBranch`` and an identity exported by the launching shell never reach
+    it; each call keeps the helper's 60 s cap."""
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Inherited Author")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "inherited@example.test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "inherited@example.test")
     hooks = tmp_path / "hooks"
     hooks.mkdir()
     hook = hooks / "pre-commit"
@@ -101,7 +105,7 @@ class _EditorUp:
     """Profile hook of the test's thread: the helper's timeout starts once the editor runs.
 
     ``run_process_group`` starts git and then waits for it with the
-    timeout.  Between the two, at the return of ``popen_process_group``,
+    timeout.  Between the two, at the return of ``start_process_group``,
     the hook waits (at most 30 s) until the editor has written its pid,
     so git's own start-up on a loaded machine cannot use up the short
     timeout before it has spawned the editor the test watches.
@@ -113,7 +117,7 @@ class _EditorUp:
 
     def __call__(self, frame: Any, event: str, arg: Any) -> None:
         """Wait for the editor's pid when git has just been started."""
-        if event != "return" or frame.f_code is not popen_process_group.__code__:
+        if event != "return" or frame.f_code is not start_process_group.__code__:
             return
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:

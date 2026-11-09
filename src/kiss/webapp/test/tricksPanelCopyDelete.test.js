@@ -19,11 +19,8 @@ const {
   typeInto: input,
   stubClipboard,
   settle: flush,
+  promptletRows: rows,
 } = require('./simplify2_harness');
-
-function rows(doc) {
-  return Array.from(doc.getElementById('tricks-list').children);
-}
 
 function texts(doc) {
   return rows(doc).map(

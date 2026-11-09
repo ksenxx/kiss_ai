@@ -30,6 +30,7 @@ import sqlite3
 from collections.abc import Iterable
 from itertools import chain
 from pathlib import Path
+from typing import Any
 
 from kiss.agents.sorcar.chat_summary import (
     NOT_SUBAGENT,
@@ -85,7 +86,9 @@ _SECRET_FORMATS: tuple[re.Pattern[bytes], ...] = tuple(
         rb"(AKIA[0-9A-Z]{16})(?![0-9A-Za-z])",
         rb"(xox[abprs]-\d{10,}+-[A-Za-z0-9-]{10,}+)",
         rb"(AIza[0-9A-Za-z_-]{35})",
-        rb"(eyJ[A-Za-z0-9_-]{10,}+\.eyJ[A-Za-z0-9_-]{10,}+\.[A-Za-z0-9_-]{10,}+)",
+        # Only at the head of a base64url run: an attempt that may start
+        # inside one rescans the rest of the run from every position.
+        rb"(?<![A-Za-z0-9_-])(eyJ[A-Za-z0-9_-]{10,}+\.eyJ[A-Za-z0-9_-]{10,}+\.[A-Za-z0-9_-]{10,}+)",
     )
 )
 #: Free-form credentials, matched on the lower-cased bytes: ``Bearer``
@@ -385,8 +388,12 @@ def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str
     parent repository's absolute paths to the worktree's before
     dispatch.  Every child takes part in the matching, so a prompt
     dispatched twice to different SEAs pairs up in order, but only
-    children whose ``sea`` is still empty are returned.  Children
-    reached by ``run_parallel`` have no such call and are not returned.
+    children whose ``sea`` is still empty are returned.  A call answered
+    by an error created a child only if one was launched between the
+    call and its result (:func:`_failed_dispatch_end`): a dispatch
+    refused before launching (a missing SEA file) must not claim the
+    child of its retry.  Children reached by ``run_parallel`` have no
+    such call and are not returned.
 
     Args:
         db: Open connection to ``history.db``.
@@ -396,14 +403,15 @@ def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str
         Mapping of child task id (``sea`` still empty) to SEA name.
     """
     calls = db.execute(
-        "SELECT event_json FROM events WHERE task_id = ? "
+        "SELECT event_json, timestamp FROM events WHERE task_id = ? "
         "AND event_json LIKE '%\"run_agent\"%' ORDER BY seq",
         (parent_task_id,),
     ).fetchall()
     if not calls:
         return {}
     children = db.execute(
-        "SELECT id, task, sea FROM task_history WHERE parent_task_id = ? ORDER BY timestamp, rowid",
+        "SELECT id, task, sea, timestamp FROM task_history WHERE parent_task_id = ? "
+        "ORDER BY timestamp, rowid",
         (parent_task_id,),
     ).fetchall()
     if not children:
@@ -412,14 +420,21 @@ def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str
 
     # ``_safe_str``: a BLOB task text (a hand-edited or third-party
     # database) is decoded, not split as ``bytes``.
-    child_keys = [(row[0], _dispatch_key(_safe_str(row[1])), row[2] or "") for row in children]
-    matched: set[str] = set()
-    inferred: dict[str, str] = {}
-    for (event_json,) in calls:
+    child_keys = [
+        (row[0], _dispatch_key(_safe_str(row[1])), row[2] or "", float(row[3] or 0))
+        for row in children
+    ]
+    events: list[tuple[dict[str, Any], float]] = []
+    for event_json, timestamp in calls:
         try:
             event = json.loads(event_json)
         except ValueError:
             continue
+        if isinstance(event, dict):
+            events.append((event, float(timestamp or 0)))
+    matched: set[str] = set()
+    inferred: dict[str, str] = {}
+    for index, (event, called) in enumerate(events):
         if event.get("type") != "tool_call" or event.get("name") != "run_agent":
             continue
         extras = event.get("extras") or {}
@@ -427,13 +442,35 @@ def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str
         sea = sea_name_of_agent(str(extras.get("agent") or ""))
         if not key or not sea:
             continue
-        for child_id, child_key, child_sea in child_keys:
-            if child_id not in matched and key in child_key:
-                matched.add(child_id)
-                if not child_sea:
-                    inferred[child_id] = sea
-                break
+        answered = _failed_dispatch_end(events, index)
+        for child_id, child_key, child_sea, launched in child_keys:
+            if child_id in matched or key not in child_key:
+                continue
+            if answered is not None and not called <= launched <= answered:
+                continue
+            matched.add(child_id)
+            if not child_sea:
+                inferred[child_id] = sea
+            break
     return inferred
+
+
+def _failed_dispatch_end(events: list[tuple[dict[str, Any], float]], index: int) -> float | None:
+    """Return when the ``run_agent`` call at *index* of *events* was answered by an error.
+
+    *events* are the parent's ``run_agent`` events with their
+    timestamps, in order; the call's result is the event after it when
+    that is a ``run_agent`` result.  ``None``: the call succeeded, or
+    has no result (still running, or a legacy row that persisted none).
+    """
+    if index + 1 >= len(events):
+        return None
+    event, answered = events[index + 1]
+    if event.get("type") != "tool_result" or event.get("tool_name") != "run_agent":
+        return None
+    if event.get("is_error") or str(event.get("content") or "").startswith("Error"):
+        return answered
+    return None
 
 
 def _dispatch_key(text: str) -> str:
@@ -501,14 +538,15 @@ def _task_tags(row: sqlite3.Row, has_secret: bool) -> str:
             ``parent_task_id`` columns.
         has_secret: The :func:`trajectory_has_secret` verdict for the row.
     """
-    from kiss.agents.sorcar.persistence import _is_failed_result, _safe_str
+    from kiss.agents.sorcar.persistence import _safe_str
+    from kiss.core.memoryfield.evaluate import is_failed_result
 
     # ``_safe_str``: a BLOB in a TEXT column (a hand-edited or
     # third-party database) is decoded, not rendered as ``b'...'``.
     return ",".join(classify_task_tags(
         _safe_str(row["task"]),
         is_subagent=bool(row["parent_task_id"]),
-        failed=_is_failed_result(_safe_str(row["result"]), row["success"]),
+        failed=is_failed_result(_safe_str(row["result"]), row["success"]),
         has_secret=has_secret,
     ))
 
@@ -600,6 +638,7 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
         # the second read come back empty.
         with _immediate_txn(db):
             for (chat_id,) in chats[start : start + _BACKFILL_BATCH]:
+                changes = db.total_changes
                 upsert_chat_summary(db, chat_id)
-    counts["chats"] = len(chats)
+                counts["chats"] += db.total_changes - changes
     return counts

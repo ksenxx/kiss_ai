@@ -25,6 +25,8 @@ const {
   makeWorkDirPage,
   pendingCounts,
   checkPathCommands,
+  findLinks,
+  findMissing,
 } = require('./file_link_helpers');
 
 const {send, clickTab} = harness;
@@ -215,11 +217,66 @@ function testShowWelcomeReleasesPendingSpans() {
 // An ordinary answered round trip emptying both sets is the tail of
 // fileLinkReissueOnReconnect.testReconnectReissuesTheLostCheck.
 
+// Audit 2026-11-08 (W6 F1): a transcript replaced (task_events) while a
+// path check of it is still unanswered.  The replacement asks about
+// the same path afresh, and the daemon answers both in order: the old
+// reply must not settle the new transcript's span (the newer check
+// read the disk later), whichever way the two answers go.
+function testAReplacedTranscriptIgnoresTheOldCheckReply(oldExists) {
+  const {win, posted} = makeWorkDirPage(WORK_DIR);
+  const tabId = win._testApi.getActiveTabId();
+  const file = WORK_DIR + '/report.txt';
+  send(win, {type: 'prompt', text: file, tabId});
+  const asks = () => checkPathCommands(posted).filter(c => c.paths.includes(file));
+  assert.strictEqual(asks().length, 1);
+  send(win, {
+    type: 'task_events',
+    tabId,
+    task_id: 'task-w6',
+    task: 'Task',
+    events: [{type: 'prompt', text: file}],
+  });
+  assert.strictEqual(asks().length, 2, 'the replacement asks afresh');
+  assert.deepStrictEqual(pendingCounts(win), {spans: 1, checks: 1});
+  const reply = (cmd, exists) =>
+    send(win, {
+      type: 'pathsExist',
+      tabId: cmd.tabId,
+      workDir: cmd.workDir,
+      results: {[file]: exists},
+    });
+  reply(asks()[0], oldExists);
+  assert.deepStrictEqual(
+    pendingCounts(win),
+    {spans: 1, checks: 1},
+    'BUG - the old check\'s reply settled the replacement\'s span',
+  );
+  reply(asks()[1], !oldExists);
+  assert.deepStrictEqual(pendingCounts(win), {spans: 0, checks: 0});
+  assert.strictEqual(findLinks(win, file).length, oldExists ? 0 : 1);
+  assert.strictEqual(findMissing(win, file).length, oldExists ? 1 : 0);
+  // The replacement's own reply was the last word: a later check of
+  // the path (another panel) is answered normally.
+  sendToolResult(win, tabId, 'again ' + file);
+  assert.strictEqual(asks().length, 3);
+  reply(asks()[2], true);
+  assert.deepStrictEqual(pendingCounts(win), {spans: 0, checks: 0});
+  assert.strictEqual(findLinks(win, file).length, oldExists ? 1 : 2);
+  win.close();
+  console.log(
+    '  ok - a replaced transcript ignores the old check\'s reply (old ' +
+      (oldExists ? 'positive' : 'negative') +
+      ')',
+  );
+}
+
 function main() {
   testLostReplyDoesNotWedgeThePathForEver();
   testClosingATabReleasesItsPendingSpans();
   testClearingATranscriptReleasesItsPendingSpans();
   testShowWelcomeReleasesPendingSpans();
+  testAReplacedTranscriptIgnoresTheOldCheckReply(true);
+  testAReplacedTranscriptIgnoresTheOldCheckReply(false);
   console.log('fileLinkPendingCleanup.test.js: all tests passed');
 }
 

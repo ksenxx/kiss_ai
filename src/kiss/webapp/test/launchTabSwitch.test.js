@@ -25,6 +25,7 @@ const {
   send,
   snapshotEntry,
   stubRaf,
+  tabIds,
 } = require('./simplify2_harness');
 
 // A launched window whose backend is live. `daemonStatus connected` is how
@@ -46,15 +47,6 @@ function makePage(opts) {
 
 function activeTabId(win) {
   return win._testApi.getActiveTabId();
-}
-
-function tabIds(win) {
-  // Every tab the window holds, in tab order.  Chat tabs have no row of
-  // their own any more (the Chats panel picks them), so the rendered
-  // strip alone would miss the chats that are not on screen.  Array.from
-  // re-creates the list in this realm: deepStrictEqual compares
-  // prototypes, and the window's Array is not ours.
-  return Array.from(win._testApi.openTabs(), t => t.id);
 }
 
 // A real pick by the user: a chat is picked in the Chats panel (the

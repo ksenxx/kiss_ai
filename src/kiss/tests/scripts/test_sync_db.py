@@ -586,6 +586,7 @@ def upgrade(conn: sqlite3.Connection) -> None:
     """Give a task table the columns a later release added (as the daemon does)."""
     conn.execute("ALTER TABLE task_history ADD COLUMN success INTEGER")
     conn.execute("ALTER TABLE task_history ADD COLUMN is_cron INTEGER DEFAULT 0")
+    conn.execute("ALTER TABLE task_history ADD COLUMN machine TEXT DEFAULT ''")
 
 
 def test_a_target_from_an_older_release_gains_the_source_columns(tmp_path: Path) -> None:
@@ -611,7 +612,7 @@ def test_a_target_from_an_older_release_gains_the_source_columns(tmp_path: Path)
     done = sync(str(source), str(target))
 
     assert done.returncode == 0, done.stderr
-    assert "column(s) success, is_cron added to task_history" in done.stdout
+    assert "column(s) success, is_cron, machine added to task_history" in done.stdout
     assert "is_cron worked out for the rows written without" in done.stdout
     info = column_info(target, "task_history")
     assert info["success"] == ("INTEGER", 0, None)
@@ -696,6 +697,34 @@ def test_each_side_may_have_a_column_the_other_lacks(tmp_path: Path) -> None:
     ) == [("a", "s", "t"), ("b", "s", "t")]
 
 
+def test_a_synced_row_keeps_the_machine_it_ran_on(tmp_path: Path) -> None:
+    """A row that ran on a third machine keeps its name; this machine's own rows read ''.
+
+    The extract stamps the source's own rows with the source's host
+    name and the merge clears the stamp of rows that ran on the
+    target's host; source and target share a host here, so the stamp
+    is cleared -- ``test_remote_round_trip`` sees it survive.
+    """
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    src.execute("ALTER TABLE task_history ADD COLUMN machine TEXT DEFAULT ''")
+    add_task(src, "here")
+    add_task(src, "lab-task")
+    src.execute("UPDATE task_history SET machine = 'lab' WHERE id = 'lab-task'")
+    src.close()
+    make_db(target).close()
+
+    done = sync(str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert rows(target, "SELECT id, machine FROM task_history ORDER BY id") == [
+        ("here", ""), ("lab-task", "lab"),
+    ]
+    assert rows(source, "SELECT id, machine FROM task_history ORDER BY id") == [
+        ("here", ""), ("lab-task", "lab"),
+    ]
+
+
 def test_the_event_table_gains_the_source_columns_too(tmp_path: Path) -> None:
     """A column added to ``events`` travels the same way, rowid alias aside."""
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
@@ -732,7 +761,7 @@ def test_a_dry_run_rolls_the_added_columns_back(tmp_path: Path) -> None:
     done = sync(str(source), str(target), "--dry-run")
 
     assert done.returncode == 0, done.stderr
-    assert "column(s) success, is_cron would be added to task_history" in done.stdout
+    assert "column(s) success, is_cron, machine would be added to task_history" in done.stdout
     assert "is_cron would be worked out" in done.stdout
     assert column_info(target, "task_history") == before
     assert task_ids(target) == ["old-cron"]
@@ -1079,12 +1108,27 @@ def test_remote_round_trip(tmp_path: Path) -> None:
         assert again.returncode == 0, again.stderr
         assert "0 task row(s) added, 0 event row(s) added" in again.stdout
 
+        # The remote copy names this machine as the one the tasks ran on.
+        stamped = remote_run(
+            "import socket,sqlite3,sys\n"
+            "c=sqlite3.connect(sys.argv[1])\n"
+            "print(sorted({r[0] for r in c.execute('SELECT machine FROM task_history')}))\n"
+            "c.execute(\"INSERT INTO task_history (id, timestamp, task) VALUES ('r3', 1, 'r3')\")\n"
+            "c.commit()\n"
+            "print(socket.gethostname().split('.')[0])\n",
+            remote_db,
+        ).split()
+
         pull = sync(f"{REMOTE_HOST}:{remote_db}", str(back))
         assert pull.returncode == 0, pull.stderr
     finally:
         remote_run("import os,sys\nos.remove(sys.argv[1])\n", remote_db)
 
-    assert task_ids(back) == ["r1", "r2"]
+    assert stamped[0] == repr([sync_db.host_name()])
+    # Back home r1 and r2 are this machine's own rows again; r3 ran there.
+    assert rows(back, "SELECT id, machine FROM task_history ORDER BY id") == [
+        ("r1", ""), ("r2", ""), ("r3", stamped[1]),
+    ]
     assert event_keys(back) == [("r1", 1), ("r1", 2), ("r1", 3), ("r2", 1)]
 
 
@@ -1477,6 +1521,42 @@ def test_a_deletion_spares_a_task_still_running_on_the_target(tmp_path: Path) ->
     assert sync(str(source), str(target)).returncode == 0
     assert task_ids(target) == ["reused"]
 
+    # Deleted again on the source after its new life began: the newer
+    # tombstone travels, although the target knows the id, and the reused
+    # task goes with it.
+    src = sqlite3.connect(source, isolation_level=None)
+    _tombstone(src, "deleted_tasks", "reused", 9000.0)
+    src.close()
+    assert sync(str(source), str(target)).returncode == 0
+    assert task_ids(target) == []
+    assert rows(target, "SELECT deleted_ts FROM deleted_tasks WHERE id = 'reused'") == [(9000.0,)]
+
+
+def test_a_task_recreated_after_its_deletion_travels(tmp_path: Path) -> None:
+    """A tombstone older than the task is another task's: the row and its events travel.
+
+    The extract must leave the recreated task in, as the merge would
+    keep it, so that a plain sync and a ``--full`` one agree; a task the
+    tombstone does date stays out of both.
+    """
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    add_task(src, "reused", timestamp=6000.0, events=2)
+    add_task(src, "older", timestamp=4000.0, events=1)
+    src.close()
+    dst = make_db(target)
+    _tombstone(dst, "deleted_tasks", "reused", 5000.0)
+    _tombstone(dst, "deleted_tasks", "older", 5000.0)
+    dst.close()
+    full = tmp_path / "dst-full.db"
+    shutil.copy(target, full)
+
+    for flags, path in (((), target), (("--full",), full)):
+        done = sync(str(source), str(path), *flags)
+        assert done.returncode == 0, done.stderr
+        assert task_ids(path) == ["reused"], flags
+        assert event_keys(path) == [("reused", 1), ("reused", 2)], flags
+
 
 def test_a_deleted_chat_loses_its_summary_row_but_a_deleted_task_does_not(
     tmp_path: Path,
@@ -1531,3 +1611,28 @@ def test_a_chat_started_again_after_its_deletion_keeps_its_row(tmp_path: Path) -
     assert rows(target, "SELECT chat_id, user_summary FROM chat_summaries") == [
         ("again", "New life")
     ]
+
+    # Deleted again on the source, after its new life began: the newer
+    # deletion reaches the target, with or without --full, and the chat goes.
+    src = sqlite3.connect(source, isolation_level=None)
+    _tombstone(src, "deleted_chats", "again", 9000.0)
+    src.close()
+    full = tmp_path / "dst-full.db"
+    shutil.copy(target, full)
+    for flags, path in (((), target), (("--full",), full)):
+        done = sync(str(source), str(path), *flags)
+        assert done.returncode == 0, done.stderr
+        assert rows(path, "SELECT deleted_ts FROM deleted_chats WHERE chat_id = 'again'") == [
+            (9000.0,)
+        ], flags
+        assert rows(path, "SELECT chat_id FROM chat_summaries") == [], flags
+    # Synced the other way, the older deletion cannot lower the newer one.
+    stale = tmp_path / "stale.db"
+    old = make_db(stale)
+    _tombstone(old, "deleted_chats", "again", 1000.0)
+    old.close()
+    for flags, path in (((), target), (("--full",), full)):
+        assert sync(str(stale), str(path), *flags).returncode == 0
+        assert rows(path, "SELECT deleted_ts FROM deleted_chats WHERE chat_id = 'again'") == [
+            (9000.0,)
+        ], flags

@@ -335,7 +335,35 @@ function spawnSubagent(page, parentId, taskId, desc, idx, opts) {
   return resume.tabId;
 }
 
+/** Announce the running child t1 under a new tab id in a retag scenario. */
+function announceRetaggedSubagent(win, parentId, tabId) {
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: tabId,
+    parent_tab_id: parentId,
+    description: 'sub 1',
+    task_id: 't1',
+    isSubagentTab: true,
+    isDone: false,
+  });
+}
+
+/** Defer registered chats B and C until a close-action test brings them on screen. */
+function deferChatTranscripts(win) {
+  for (const id of ['tab-b', 'tab-c']) {
+    send(win, {type: 'status', running: false, tabId: id});
+    send(win, {
+      type: 'replay_deferred',
+      tabId: id,
+      chatId: id === 'tab-b' ? 'c-b' : 'c-c',
+      taskId: '',
+    });
+  }
+}
+
 module.exports = {
+  announceRetaggedSubagent,
+  deferChatTranscripts,
   announceFinished,
   openSubTabIds,
   subagentTabEls,

@@ -39,7 +39,7 @@ from kiss.server.file_index import (
 )
 from kiss.server.server import AgentServer
 from kiss.tests.conftest import IS_WINDOWS, is_root, posix_only
-from kiss.tests.server.conftest import touch
+from kiss.tests.server.conftest import local_view, touch
 
 
 def _wait(pred: Callable[[], bool], timeout: float = 10.0) -> None:
@@ -65,7 +65,7 @@ def _build(reg: FileIndexRegistry, work_dir: str) -> FileView:
     done = threading.Event()
     reg.ensure(work_dir, done.set)
     assert done.wait(10.0)
-    view = reg.view_for(work_dir)
+    view = local_view(reg, work_dir)
     assert view is not None
     return view
 
@@ -132,14 +132,17 @@ class TestScan:
         assert reg.root_for(str(tmp_path / "src")) == (str(tmp_path), "src/")
 
     def test_nested_gitignores_apply_to_dirs_and_files_below_them(self, tmp_path: Path) -> None:
-        (tmp_path / ".gitignore").write_text("build/\n/top-only\nsecret.txt\n!keep\n*.log\n")
+        (tmp_path / ".gitignore").write_text(
+            "build/\n/top-only\nsecret.txt\n!keep\n*.log\n/data/\n/cache/\n"
+        )
         touch(
             tmp_path, "build/a.o", "top-only/x", "nested/top-only/y", "secret.txt",
             "nested/secret.txt", "keep", "run.log", "repo/.gitignore", "repo/tmp/junk",
             "repo/src/tmp/also-junk", "repo/generated/out.py", "repo/deeper/generated/in.py",
-            "other/tmp/kept.py", "nested/build",
+            "other/tmp/kept.py", "nested/build", "data", "cache/c.o", "nested/cache/k",
+            "repo/gen", "repo/sub/gen/g.py",
         )
-        (tmp_path / "repo" / ".gitignore").write_text("tmp\n/generated\n")
+        (tmp_path / "repo" / ".gitignore").write_text("tmp\n/generated\n/gen/\n/sub/gen/\n")
         paths = set(FileIndex.scan(str(tmp_path)).paths)
         assert "build/" not in paths and "build/a.o" not in paths
         assert "nested/build" in paths, "a `dir/` rule does not hide a file of that name"
@@ -152,6 +155,14 @@ class TestScan:
         assert "repo/generated/" not in paths
         assert "repo/deeper/generated/" in paths
         assert "repo/.gitignore" in paths
+        # An anchored ``/dir/`` rule skips that directory only: not a
+        # file of the same name (``git check-ignore data`` says so), nor
+        # a directory of that name elsewhere.
+        assert "cache/" not in paths and "cache/c.o" not in paths
+        assert "nested/cache/" in paths
+        assert "data" in paths, "an anchored `dir/` rule does not hide a file of that name"
+        assert "repo/gen" in paths
+        assert "repo/sub/gen/" not in paths and "repo/sub/gen/g.py" not in paths
 
     def test_rescan_reuses_unchanged_listings_and_sees_changes(self, tmp_path: Path) -> None:
         touch(tmp_path, "a/one.py", "b/two.py")
@@ -468,15 +479,15 @@ class TestRegistry:
         home = tmp_path / "home"
         touch(home, "proj/a.py")
         reg = _registry(tmp_path, home)
-        assert reg.view_for(str(home / "proj")) is None
+        assert local_view(reg, str(home / "proj")) is None
         view = _build(reg, str(home / "proj"))
         assert view.paths == ["a.py"]
         reg.refresh(str(tmp_path / "unknown"))
-        assert reg.view_for(str(tmp_path / "unknown")) is None, "refresh never indexes new roots"
+        assert local_view(reg, str(tmp_path / "unknown")) is None, "refresh never indexes new roots"
         time.sleep(0.02)
         touch(home, "proj/b.py")
         reg.refresh(str(home / "proj"))
-        _wait(lambda: (reg.view_for(str(home / "proj")) or view).paths == ["a.py", "b.py"])
+        _wait(lambda: (local_view(reg, str(home / "proj")) or view).paths == ["a.py", "b.py"])
         reg.stop()
 
     def test_stale_view_schedules_a_refresh(self, tmp_path: Path) -> None:
@@ -486,10 +497,10 @@ class TestRegistry:
         _build(reg, str(root))
         time.sleep(0.02)
         touch(root, "b.py")
-        assert reg.view_for(str(root)).paths == ["a.py"]  # type: ignore[union-attr]
+        assert local_view(reg, str(root)).paths == ["a.py"]  # type: ignore[union-attr]
         reg._indexes[str(root)].built_at -= file_index.STALE_AFTER + 1
-        assert reg.view_for(str(root)).paths == ["a.py"], "the stale view is served at once"  # type: ignore[union-attr]
-        _wait(lambda: reg.view_for(str(root)).paths == ["a.py", "b.py"])  # type: ignore[union-attr]
+        assert local_view(reg, str(root)).paths == ["a.py"], "the stale view is served at once"  # type: ignore[union-attr]
+        _wait(lambda: local_view(reg, str(root)).paths == ["a.py", "b.py"])  # type: ignore[union-attr]
         reg.stop()
 
     def test_listings_persist_across_registries(self, tmp_path: Path) -> None:
@@ -617,7 +628,7 @@ class TestRegistry:
         reg._worker.join(5.0)  # type: ignore[union-attr]
         assert not ran.is_set(), "a job queued before stop() must not run after it"
         assert reg.ensure(str(tmp_path), lambda: pytest.fail("must not run")) is False
-        assert reg.view_for(str(tmp_path)) is None
+        assert local_view(reg, str(tmp_path)) is None
         reg.stop()
 
     def test_refresh_queued_during_a_scan_is_not_skipped(self, tmp_path: Path) -> None:
@@ -984,13 +995,13 @@ class TestServerWiring:
         s = _Server(tmp_path, tmp_path / "home", str(root))
         s.server._refresh_files_after_task(str(root))
         time.sleep(0.1)
-        assert s.server._file_index.view_for(str(root)) is None, "never-indexed roots stay alone"
+        assert local_view(s.server._file_index, str(root)) is None, "never-indexed roots stay alone"
         _build(s.server._file_index, str(root))
         time.sleep(0.02)
         touch(root, "new_test.py")
         s.server._refresh_files_after_task(str(root))
         reg = s.server._file_index
-        _wait(lambda: "new_test.py" in (reg.view_for(str(root)) or FileView([])).paths)
+        _wait(lambda: "new_test.py" in (local_view(reg, str(root)) or FileView([])).paths)
         assert s.files_events() == [], "no unsolicited files event"
         s.get_files("new", str(root))
         assert _texts(s.files_events()[0]["files"]) == ["./new_test.py"]
@@ -1003,7 +1014,7 @@ class TestServerWiring:
         s = _Server(tmp_path, tmp_path / "home", str(old))
         s.server._handle_command({"type": "setWorkDir", "workDir": str(new)})
         assert s.server.work_dir == str(new)
-        _wait(lambda: s.server._file_index.view_for(str(new)) is not None)
+        _wait(lambda: local_view(s.server._file_index, str(new)) is not None)
         s.get_files("", "")
         assert _texts(s.files_events()[0]["files"]) == ["./n.py"]
         s.stop()

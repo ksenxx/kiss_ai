@@ -24,7 +24,7 @@ import queue
 import threading
 from typing import TYPE_CHECKING
 
-from kiss.agents.sorcar._concurrency import locked_call
+from kiss.core.locked import locked_call
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent

@@ -33,6 +33,10 @@ class _ScriptedModel:
 
     serves_tools_natively = False  # no native tool set is built for it
     native_tools_exposed = Model.native_tools_exposed  # the base no-op
+    # The context policies of the base model: none applies.
+    server_side_context_editing = Model.server_side_context_editing
+    keeps_reasoning_turns = Model.keeps_reasoning_turns
+    compacts_whole_turns = Model.compacts_whole_turns
 
     def __init__(
         self, usage: tuple[int, ...], raise_partial: bool = False, raise_unbilled: bool = False

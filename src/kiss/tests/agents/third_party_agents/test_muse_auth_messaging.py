@@ -1210,9 +1210,16 @@ def test_legacy_mode_unchanged(isolated_kiss_home: Path, api_server: _MessagingA
     )
     backend_sy.send_message("", "legacy hello")
     assert api_server.query().get("token") == [_REAL_SYNO_TOKEN]
-    # LINE: the SDK is not installed here, so the legacy constructor
-    # fails and the authenticate tool reports the error (no config write).
+
+
+def test_line_legacy_mode_unchanged(isolated_kiss_home: Path) -> None:
+    """With Muse off and no LINE SDK, the legacy constructor's error reaches the tool.
+
+    Its own test so the skip (the SDK installed) does not relabel the
+    other connectors' legacy checks as skipped.
+    """
     _require_linebot_absent()
+    assert os.environ.get("KISS_MUSE_AUTH") == "0"  # pinned by tests/conftest.py
     line_config.clear()
     agent = LineAgent()
     tools = auth_tools(agent)
@@ -1679,15 +1686,27 @@ def test_cli_import_mattermost_default_scheme_port(muse_env: Path) -> None:
     clear_credentials("mattermost")
 
 
-def test_synology_marker_with_empty_vault_falls_back_direct(
+def test_synology_marker_with_empty_vault_fails_closed(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
-    """A scrubbed config whose vault entry is gone degrades to direct mode."""
+    """A scrubbed config whose vault entry is gone needs re-authentication.
+
+    The ``muse`` marker means the webhook token was moved to the vault, so
+    its absence is a lost credential, not a tokenless choice: the direct
+    path would post the message body past Sentinel's write approval.
+    """
     syno_config.save({"webhook_url": api_server.base_url + "/webapi/entry.cgi?api=X", "muse": "1"})
     backend = SynologyChatChannelBackend()
-    assert backend._wire_muse() is True
+    assert backend.connect() is False
+    assert "reauthentication required" in backend._connection_info
     assert backend._muse is False
-    assert backend._http is requests
+    assert backend._webhook_url == ""
+    assert backend._webhook_server is None
+    # The lazily wired agent backend refuses the send the same way.
+    agent = SynologyChatAgent()
+    with pytest.raises(MuseAuthError, match="reauthentication required"):
+        agent._backend.send_message("", "hello")
+    assert api_server.requests == []
 
 
 # ------------------------------------------------ review round-2 regressions

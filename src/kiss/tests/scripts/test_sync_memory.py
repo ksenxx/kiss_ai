@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.memoryfield.index import VectorIndex, hashed_embedding
 from kiss.core.memoryfield.pages import MemoryDir
 from kiss.tests.conftest import posix_only
@@ -653,7 +654,9 @@ def test_merge_recurses_one_level_into_domain_memories_only(tmp_path: Path) -> N
     result = merge(src, dst)
     assert result.returncode == 0, result.stderr
     assert result.stdout == "added 1 updated 1 kept 0 conflicts 0 removed 0\n"
-    assert sorted(p.name for p in dst.iterdir()) == ["kiss", "other"]
+    # The ``<domain>.lock`` files are the domain memories' mutation locks,
+    # the ones MemoryDir leaves beside a domain memory it wrote to.
+    assert sorted(p.name for p in dst.iterdir()) == ["kiss", "kiss.lock", "other", "other.lock"]
     assert (dst / "kiss" / "repo-fact.md").read_bytes() == (
         (src / "kiss" / "repo-fact.md").read_bytes()
     )
@@ -743,6 +746,53 @@ def test_merge_of_a_missing_source_creates_nothing(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert result.stdout == "added 0 updated 0 kept 0 conflicts 0 removed 0\n"
     assert not (tmp_path / "dst").exists()
+
+
+def merge_in_background(source: Path, dest: Path) -> subprocess.Popen[str]:
+    """Start the merge script the way the sync runs it, without waiting for it."""
+    return subprocess.Popen(
+        [sys.executable, str(MERGE), str(source), str(dest)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def test_merge_waits_for_an_agent_writing_the_memory(tmp_path: Path) -> None:
+    """The script holds the locks ``MemoryDir`` takes around a write, as the SEA's merge does.
+
+    An agent in the middle of a write holds ``<memory>.lock`` (a domain
+    memory: ``<memory>/<domain>.lock``).  The script waits for it, so it
+    compares against the page the agent leaves rather than the one it
+    found, and the agent's newer page is kept instead of being replaced
+    by the older incoming copy.
+    """
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    write(src, "note", "incoming", "2026-01-02T00:00:00Z")
+    write(dst, "note", "old", "2026-01-01T00:00:00Z")
+    with exclusive_file_lock(Path(f"{dst}.lock"), timeout=5.0):
+        script = merge_in_background(src, dst)
+        # Still running after half a second: waiting for the lock, not merging.
+        with pytest.raises(subprocess.TimeoutExpired):
+            script.wait(0.5)
+        write(dst, "note", "agent's", "2030-01-01T00:00:00Z")
+    stdout, stderr = script.communicate(timeout=30)
+    assert script.returncode == 0, stderr
+    assert stdout == "added 0 updated 0 kept 1 conflicts 0 removed 0\n"
+    assert MemoryDir(dst).read("note").body.strip() == "agent's"
+
+    # A domain memory's lock, which the script takes after the memory's own.
+    write(src / "dom", "deep", "deep", "2026-01-02T00:00:00Z")
+    with exclusive_file_lock(dst / "dom.lock", timeout=5.0):
+        script = merge_in_background(src, dst)
+        with pytest.raises(subprocess.TimeoutExpired):
+            script.wait(0.5)
+        assert not (dst / "dom" / "deep.md").exists()
+    stdout, stderr = script.communicate(timeout=30)
+    assert script.returncode == 0, stderr
+    assert stdout == "added 1 updated 0 kept 1 conflicts 0 removed 0\n"
+    assert MemoryDir(dst / "dom").read("deep").body.strip() == "deep"
+    assert sorted(p.name for p in dst.iterdir()) == ["dom", "dom.lock", "note.md"]
 
 
 def test_merge_usage_error(tmp_path: Path) -> None:

@@ -23,6 +23,13 @@
 // voice_page_helpers and check that a wake-looking partial, with or
 // without a quiet microphone, never starts a capture, while the final
 // result still does.
+//
+// 2026-11-08: two wakes fired on Russian and Bengali background talk.
+// Replayed through Vosk, the grammar recognizer FINALS on "abracadabra"
+// for both (conf 0.53-1.0), while a grammar-free recognizer fed the same
+// audio heard "which can remember" and "government".  A wake now needs
+// both recognizers' finals to contain the word within 2.5 s of each
+// other; the tests at the end pin that agreement rule.
 
 const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
@@ -33,6 +40,7 @@ const {
   feed,
   lastProcessor,
   lastRecognizer,
+  lastFreeRecognizer,
   fireWake,
   wake,
   speak,
@@ -120,6 +128,68 @@ async function main() {
     fireWake(page);
     rec.handlers.result({result: {text: ''}});
     assert.ok(triggered(page), 'the capture in progress is kept');
+  });
+
+  await test('a grammar final alone does not wake; the free one confirms it', async () => {
+    const page = makeVoicePage();
+    await startPipeline(page);
+    page.clock.now += 3000;
+    lastRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    assert.ok(!triggered(page), 'the grammar recognizer alone must not wake');
+    page.clock.now += 260; // one 4096-sample block later
+    lastFreeRecognizer(page).handlers.result({
+      result: {text: 'which can remember'},
+    });
+    assert.ok(!triggered(page), 'a free final without the word must not wake');
+    lastFreeRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    assert.ok(triggered(page), 'both recognizers agree: the page wakes');
+    // A free result during the capture is ignored.
+    lastFreeRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    speak(page);
+  });
+
+  await test('the free final may come first; stale agreement does not wake', async () => {
+    const page = makeVoicePage();
+    await startPipeline(page);
+    page.clock.now += 3000;
+    lastFreeRecognizer(page).handlers.result({
+      result: {text: 'the abracadabra'},
+    });
+    assert.ok(!triggered(page), 'the free recognizer alone must not wake');
+    page.clock.now += 2600; // past the 2.5 s agreement window
+    lastRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    assert.ok(!triggered(page), 'finals 2.6 s apart are not one wake');
+    page.clock.now += 1000;
+    lastFreeRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    assert.ok(triggered(page), 'a free final 1 s after the grammar one wakes');
+  });
+
+  await test('a late confirmation still ships the wake word audio', async () => {
+    const page = makeVoicePage();
+    await startPipeline(page);
+    const proc = lastProcessor(page);
+    page.clock.now += 3000;
+    feed(proc, true, 4); // ~1 s of "abracadabra"
+    feed(proc, false, 4); // the endpointing silence
+    lastRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    for (let i = 0; i < 6; i++) {
+      page.clock.now += 256; // 1.5 s more before the free final
+      feed(proc, false, 1);
+    }
+    lastFreeRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    assert.ok(triggered(page), 'the free final within 2.5 s wakes');
+    speak(page);
+    const sent = page.posted.find(m => m.type === 'voiceTranscribe');
+    assert.strictEqual(sent.wakeAgreed, true, 'the server learns both recognizers agreed');
+    const buf = Buffer.from(sent.audio, 'base64');
+    const pcm = new Int16Array(buf.buffer, buf.byteOffset, buf.length / 2);
+    let wordSamples = 0;
+    for (let i = 0; i < sent.wakeSamples; i++) if (pcm[i] > 10000) wordSamples++;
+    assert.strictEqual(
+      wordSamples,
+      4 * 4096,
+      'the 2 s ring held on while the wake awaited its confirmation',
+    );
   });
 
   windows.forEach(win => win.close());

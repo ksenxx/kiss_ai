@@ -38,6 +38,8 @@ const {send, readyTabId} = require('./simplify2_harness');
 const {subagentTabEls} = require('./subagent_tab_helpers');
 const {makeWebappClient} = require('./transport_page_helpers');
 
+const openWindows = [];
+
 /** Boot a client, start the parent task, and return the parent tab id. */
 function bootParent(client) {
   const parentId = readyTabId(client.drain());
@@ -62,6 +64,7 @@ function bootParent(client) {
 
 function testDeterministicId() {
   const client = makeWebappClient();
+  openWindows.push(client.win);
   const parentId = bootParent(client);
   const taskId = 'sub-task-det-1';
 
@@ -72,7 +75,8 @@ function testDeterministicId() {
     taskId: '',
   });
 
-  const resume = client.drain()
+  const resume = client
+    .drain()
     .filter(m => m.type === 'resumeSession' && m.taskId === taskId)
     .pop();
   assert.ok(resume, 'new_tab must make the client resume the sub-agent');
@@ -98,6 +102,7 @@ function testDeterministicId() {
 
 function testParentlessDeterministicId() {
   const client = makeWebappClient();
+  openWindows.push(client.win);
   const taskId = 'sub-task-det-3';
   send(client.win, {
     type: 'new_tab',
@@ -105,7 +110,8 @@ function testParentlessDeterministicId() {
     parent_tab_id: '',
     taskId: '',
   });
-  const resume = client.drain()
+  const resume = client
+    .drain()
     .filter(m => m.type === 'resumeSession' && m.taskId === taskId)
     .pop();
   assert.ok(resume, 'a parent-less new_tab must still resume the sub-agent');
@@ -117,10 +123,11 @@ function testParentlessDeterministicId() {
   console.log('PASS parent-less deterministic id');
 }
 
-testDeterministicId();
-testParentlessDeterministicId();
+for (const test of [testDeterministicId, testParentlessDeterministicId]) {
+  try {
+    test();
+  } finally {
+    while (openWindows.length) openWindows.pop().close();
+  }
+}
 console.log('subagentTabDeterministicId.test.js: all tests passed');
-// JSDOM windows keep timers alive (running-task UI timer, shim
-// reconnect); an assertion failure above throws and exits non-zero, so
-// reaching this line means success.
-process.exit(0);

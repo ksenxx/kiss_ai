@@ -137,3 +137,34 @@ def test_env_wrapper_is_skipped_for_the_executable(
     _set_browser(monkeypatch, "env MOZ_X=1 firefox %s")
     assert browser_handoff._launch_commands(URL) == [["env", "MOZ_X=1", "firefox", URL]]
     assert _resolved(default_browser.default_browser_executable()) == stand_ins["firefox"]
+
+
+def test_a_bare_browser_name_is_the_one_popen_runs_not_a_file_of_the_cwd(
+    stand_ins: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``BROWSER=firefox`` names the ``firefox`` that ``Popen`` runs; a path is taken as given.
+
+    An executable file of that name in the daemon's working directory
+    passed the file check and was returned as the bare name, which
+    ``Popen`` then resolved through ``$PATH`` anyway: the file checked
+    and the file run were different ones.
+    """
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    install_cli_script(cwd / "firefox", _RECORDING_BROWSER)
+    monkeypatch.chdir(cwd)
+    _set_browser(monkeypatch, "firefox")
+    found = default_browser._which("firefox")
+    assert found == shutil.which("firefox"), "the file checked is not the file Popen runs"
+    if sys.platform != "win32":  # Windows searches the working directory first
+        assert _resolved(found) == stand_ins["firefox"]
+    assert _resolved(default_browser.default_browser_executable()) == _resolved(found)
+    # A path is checked as a path, ``~`` expanded; a missing one is nothing.  The file
+    # found is the one Popen runs: on Windows the ``ff.cmd`` shim beside the script.
+    home = tmp_path / "home"
+    home.mkdir()
+    ff = install_cli_script(home / "ff", _RECORDING_BROWSER)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    assert _resolved(default_browser._which("~/ff")) == _resolved(str(ff))
+    assert default_browser._which(str(home / "missing")) is None

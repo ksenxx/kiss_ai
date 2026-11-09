@@ -105,7 +105,7 @@ def test_a_logout_in_one_partition_is_carried_over_and_the_rest_is_kept(
     # Switch back: only A dies in the destination.
     _use(tool, source)
     session = tool._capture_session()
-    assert [c["value"] for c in session.cookies] == ["B"]
+    assert [c["value"] for c in session.cookies or []] == ["B"]
     _use(tool, destination)
     tool._restore_session(session)
     assert _values(destination) == {
@@ -160,10 +160,34 @@ def test_a_logout_in_one_ancestor_variant_of_a_partition_is_carried_over(
     source.add_cookies([_cookie("cross-site", site, True)])
     _use(tool, source)
     session = tool._capture_session()
-    assert [c["value"] for c in session.cookies] == ["cross-site"]
+    assert [c["value"] for c in session.cookies or []] == ["cross-site"]
     _use(tool, destination)
     tool._restore_session(session)
     assert _ancestor_values(destination) == {("cross-site", True)}
+
+
+def test_a_jar_that_could_not_be_read_deletes_nothing(browser: Any, tool: WebUseTool) -> None:
+    """A source whose cookies cannot be read (it closed under the switch here)
+    carries no jar at all, which is not an empty one: what the previous
+    switch carried into the destination stays there."""
+    source, destination = browser.new_context(), browser.new_context()
+    source.new_page()
+    destination.new_page()
+    source.add_cookies([_cookie("A", "https://site-a.example")])
+    _use(tool, source)
+    session = tool._capture_session()
+    _use(tool, destination)
+    tool._restore_session(session)
+    assert _values(destination) == {("A", "https://site-a.example")}
+    # Switch back, the source gone by the time its cookies are read.
+    _use(tool, source)
+    source.close()
+    session = tool._capture_session()
+    assert session.cookies is None
+    _use(tool, destination)
+    tool._restore_session(session)
+    assert _values(destination) == {("A", "https://site-a.example")}
+    assert tool._carried_cookies == []
 
 
 if __name__ == "__main__":

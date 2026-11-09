@@ -136,7 +136,6 @@
     const nested = root.querySelectorAll('.tc-run-parallel');
     for (let i = 0; i < nested.length; i++) {
       const p = nested[i];
-      if (p.closest('.adjacent-task')) continue;
       if (!p.classList.contains('collapsed')) {
         p.classList.add('collapsed');
         p.classList.remove('user-pinned');
@@ -217,18 +216,6 @@
   }
 
   /**
-   * Show or hide *sectionEl* (also syncing the [hidden] attribute the
-   * page CSS keys on).
-   *
-   * @param {Element} sectionEl A .share-task section.
-   * @param {boolean} show Whether it may be visible.
-   */
-  function setSectionShown(sectionEl, show) {
-    if (show) sectionEl.removeAttribute('hidden');
-    else sectionEl.setAttribute('hidden', '');
-  }
-
-  /**
    * Select the root chat tab (*taskId* null) or a sub-agent's tab:
    * swap which sections are on screen, repaint the strip, and put the
    * reader back at the top — the shared page's switchToTab.
@@ -240,10 +227,11 @@
     const sections = document.querySelectorAll('.share-task');
     for (let i = 0; i < sections.length; i++) {
       const s = sections[i];
+      // The [hidden] attribute is what the page CSS keys on.
       if (s.classList.contains('share-subagent')) {
-        setSectionShown(s, s.getAttribute('data-task-id') === taskId);
+        s.toggleAttribute('hidden', s.getAttribute('data-task-id') !== taskId);
       } else {
-        setSectionShown(s, taskId === null);
+        s.toggleAttribute('hidden', taskId !== null);
       }
     }
     renderShareTabBar();
@@ -381,41 +369,36 @@
   }
 
   /**
-   * Close the tab of sub-agent *taskId* along with every open
-   * descendant's tab (closing a sub-agent also closes the tabs of the
-   * fan-outs that sub-agent ran itself — the chat page's rule). A close
-   * the USER asked for is remembered on the owning panel, so the
-   * sub-agent stays closed until the panel is collapsed and expanded
-   * again; a close done by a collapsing panel is not.
+   * Close the tab of sub-agent *taskId*, as the user asked by its close
+   * button, along with every open descendant's tab (closing a sub-agent
+   * also closes the tabs of the fan-outs that sub-agent ran itself — the
+   * chat page's rule).  The close is remembered on the owning panel, so
+   * the sub-agent stays closed until the panel is collapsed and expanded
+   * again (a collapsing panel closes its tabs through `dropSubagentTabs`
+   * itself, see `syncSubagentTabs`).
    *
    * @param {string} taskId The sub-agent tab to close.
-   * @param {boolean} byUser Whether the user clicked the close button.
    */
-  function closeSubagentTab(taskId, byUser) {
-    // Which tab takes over when the SELECTED tab is closed: a close
-    // the user asked for falls back to plain index adjacency (the
-    // chat page's rule — whatever now sits where the tab was), while a
-    // close done by a collapsing panel returns to the root chat.
+  function closeSubagentTab(taskId) {
+    // Which tab takes over when the SELECTED tab is closed: plain index
+    // adjacency (the chat page's rule — whatever now sits where the tab
+    // was).
     const before = [null].concat(openSubTabs);
     const activeAt = before.indexOf(activeSubTab);
     const activeClosed = dropSubagentTabs(taskId);
-    if (byUser) {
-      const panels = document.querySelectorAll(
-        '.tc-run-parallel[data-rp-subagents]',
-      );
-      for (let i = 0; i < panels.length; i++) {
-        if (panelSubagentIds(panels[i]).indexOf(taskId) === -1) continue;
-        if (!panels[i]._shareClosedSubs) panels[i]._shareClosedSubs = {};
-        panels[i]._shareClosedSubs[taskId] = true;
-      }
+    const panels = document.querySelectorAll(
+      '.tc-run-parallel[data-rp-subagents]',
+    );
+    for (let i = 0; i < panels.length; i++) {
+      if (panelSubagentIds(panels[i]).indexOf(taskId) === -1) continue;
+      if (!panels[i]._shareClosedSubs) panels[i]._shareClosedSubs = {};
+      panels[i]._shareClosedSubs[taskId] = true;
     }
-    if (activeClosed && byUser) {
+    if (activeClosed) {
       const now = before.filter(
         id => id === null || openSubTabs.indexOf(id) !== -1,
       );
       selectSubTab(now[Math.min(activeAt, now.length - 1)]);
-    } else if (activeClosed) {
-      selectSubTab(null);
     } else {
       renderShareTabBar();
     }
@@ -438,7 +421,7 @@
       if (activeSubTab === open) activeClosed = true;
       const section = subagentSection(open);
       if (!section) continue;
-      setSectionShown(section, false);
+      section.toggleAttribute('hidden', true);
       // A sub-agent tab the chat page reopens replays its transcript
       // with the fan-outs collapsed; fold this section's the same
       // way, so reopening the tab never resurrects grandchild tabs
@@ -533,7 +516,7 @@
   function closeTabOfButton(closeEl) {
     const tabEl = closeEl.closest('.chat-tab');
     const id = tabEl && tabEl.getAttribute('data-sub-tab-id');
-    if (id) closeSubagentTab(id, true);
+    if (id) closeSubagentTab(id);
   }
 
   document.addEventListener('keydown', e => {

@@ -70,7 +70,7 @@ def test_module_is_stdlib_only() -> None:
             imported.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             imported.add((node.module or "").split(".")[0])
-    assert imported <= {"__future__", "logging", "sqlite3", "collections"}, imported
+    assert imported <= {"__future__", "logging", "socket", "sqlite3", "collections"}, imported
 
 
 @pytest.mark.parametrize(
@@ -164,3 +164,53 @@ def test_complete_rows_runs_the_backfills_it_is_asked_for() -> None:
     assert flags(conn) == {"cron": 0}
     assert history_columns.complete_rows(conn, {"is_cron", "is_cron", "owner"}) == ["is_cron"]
     assert flags(conn) == {"cron": 1}
+
+
+def test_synced_rows_learn_the_machine_they_ran_on_from_their_first_events(
+    tmp_path: Path,
+) -> None:
+    """The one-time repair stamps the rows whose first events name another host, once."""
+    from kiss.tests.server.conftest import redirect_persistence, restore_persistence
+
+    saved = redirect_persistence(tmp_path)
+    try:
+        here = history_columns.host_name()
+        ids = {
+            name: persistence._add_task(name, chat_id="c-" + name)[0]
+            for name in ("settings", "prompt", "own", "silent", "stamped")
+        }
+        db = persistence._get_db()
+        events = [
+            ("settings", 0, '{"type": "task_settings", "settings": {"host": "gpu-box.lan"}}'),
+            ("prompt", 0, '{"type": "system_prompt", "text": "- Machine info: lab (x86_64)\\n"}'),
+            ("own", 0, '{"type": "task_settings", "settings": {"host": "' + here + '"}}'),
+            ("own", 1, '{"type": "system_prompt", "text": "Machine info: ' + here + ' (arm64)"}'),
+            ("stamped", 0, '{"type": "system_prompt", "text": "Machine info: lab (x86_64)"}'),
+        ]
+        db.executemany(
+            "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, 1.0)",
+            [(ids[name], seq, text) for name, seq, text in events],
+        )
+        db.execute("UPDATE task_history SET machine = 'box' WHERE id = ?", (ids["stamped"],))
+        db.commit()
+
+        assert sorted(history_columns.task_origins(db)) == sorted(
+            [("gpu-box", ids["settings"]), ("lab", ids["prompt"])]
+        )
+        assert persistence._backfill_task_machines() == 2
+        machines = dict(db.execute("SELECT id, machine FROM task_history").fetchall())
+        assert {name: machines[task_id] for name, task_id in ids.items()} == {
+            "settings": "gpu-box", "prompt": "lab", "own": "", "silent": "", "stamped": "box",
+        }
+        # Once per database: the marker makes a second start a no-op.
+        db.execute("UPDATE task_history SET machine = '' WHERE id = ?", (ids["prompt"],))
+        db.commit()
+        assert persistence._backfill_task_machines() == 0
+        # A database it cannot read logs and is tried again on the next start.
+        (persistence._KISS_DIR / persistence._MACHINES_BACKFILLED).unlink()
+        db.execute("ALTER TABLE task_history RENAME COLUMN machine TO gone")
+        db.commit()
+        assert persistence._backfill_task_machines() == 0
+        assert not (persistence._KISS_DIR / persistence._MACHINES_BACKFILLED).exists()
+    finally:
+        restore_persistence(saved)

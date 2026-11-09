@@ -258,13 +258,20 @@ def plan_restore(
     out = _git(target.root, "diff-tree", "-r", "-z", "--no-renames", "--raw",
                target.tree, current.tree, stop_event=stop_event)
     fields = out.split("\0")
+    # Each change is ":<old mode> <new mode> <old sha> <new sha> <status>" then its path.
+    changes = [(meta.lstrip(":").split(), path)
+               for meta, path in zip(fields[0::2], fields[1::2], strict=False)]
+    # An embedded repository on either side: neither its gitlink nor the
+    # files at its path (the repository's own, held by no snapshot: ones
+    # vendored plainly since, or a repository embedded over plain files)
+    # are touched.
+    gitlinks = tuple(f"{path}/" for (old_mode, new_mode, *_), path in changes
+                     if _GITLINK in (old_mode, new_mode))
     rewrite: list[str] = []
     missing: list[str] = []
     delete: list[str] = []
-    # Each change is ":<old mode> <new mode> <old sha> <new sha> <status>" then its path.
-    for meta, path in zip(fields[0::2], fields[1::2], strict=False):
-        old_mode, new_mode, *_, status = meta.lstrip(":").split()
-        if _GITLINK in (old_mode, new_mode):
+    for (old_mode, new_mode, *_, status), path in changes:
+        if _GITLINK in (old_mode, new_mode) or path.startswith(gitlinks):
             continue
         (delete if status == "A" else rewrite).append(path)
         if status == "D":

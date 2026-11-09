@@ -39,7 +39,7 @@ def test_profile_permission_denied_lock_is_conservatively_in_use(
         raise PermissionError("foreign-owned lock")
 
     monkeypatch.setattr(web_use_tool.os, "readlink", denied)
-    assert web_use_tool._is_profile_in_use(str(profile)) is True
+    assert web_use_tool._profile_lock_state(str(profile))[1] is True
 
 
 @posix_only("shebang git shim on PATH cannot shadow git.exe on Windows")

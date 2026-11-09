@@ -28,28 +28,62 @@ import re
 from pathlib import Path
 
 #: ``_END`` closes a shell word: whitespace, end of command, a separator, a
-#: redirection or a comment.  ``_WORD`` is one argument of a simple command:
-#: it stops at a separator, a redirection or a newline and cannot start a
+#: redirection, a comment or a closing backquote.  ``_WORD`` is one argument
+#: of a simple command: it stops at a separator, a redirection or a newline and cannot start a
 #: comment, so ``_ARGS`` (zero or more arguments) never crosses into the next
 #: command or a trailing ``# comment``.  ``_CMD`` is where a command name may
-#: start: the beginning or a separator, then optional environment assignments,
-#: one ``sudo`` or ``env`` wrapper with its own arguments (``sudo -n``, ``sudo
-#: -u root``, ``env DEBUG=1``) and an optional directory prefix.  Each group
-#: tokenises the text in exactly one way (words are delimited by blanks and
-#: assignments contain ``=``), so matching stays linear in the command length;
-#: a repeated wrapper (``sudo -n sudo -n …``) is absorbed by the single
-#: wrapper's argument list instead of a nested repetition, which backtracked
-#: exponentially.  The blanks after a separator stop at a newline, which is
-#: a separator of its own: letting them run across newlines made every
-#: newline of a blank-line command swallow the rest of the text and
-#: backtrack through it, quadratic in the command length.
-_END = r"(?=\s|$|[;&|)\"'>#])"
+#: start: the beginning or a separator (a backquote too), then optional
+#: environment assignments, one wrapper (``sudo``, ``env``, ``nohup``,
+#: ``timeout 5``...) with its own arguments (``sudo -n``, ``sudo -u root``,
+#: ``env DEBUG=1``), or one shell's ``-c`` with the quote opening its text
+#: (``bash -c 'kill -1'``; the shell's options may go on after the ``-c``
+#: cluster, ``bash -c -e 'kill -1'``, ``bash -co posix 'kill -1'``, ``bash -c
+#: -- 'kill -1'``), and an optional directory prefix.  ``_CMD`` is
+#: a template: ``{commands}`` is the alternation of the command names the
+#: pattern after it matches.  Each group tokenises the text in exactly one
+#: way (words are delimited by blanks and assignments contain ``=``), so
+#: matching stays linear in the command length; a repeated wrapper (``sudo
+#: -n sudo -n …``) is absorbed by the single wrapper's argument list instead
+#: of a nested repetition, which backtracked exponentially.  The wrapper's
+#: arguments (``_WRAPPER_ARGS``) end at the first of those command names
+#: (under a directory prefix too), the shell's at its first ``-c`` cluster
+#: (``_SHELL_C``: the ``c`` is the cluster's first ``c``, so ``-ccc…c`` is
+#: read once rather than once per ``c``) and the options after the cluster
+#: (``_SHELL_ARGS``) at the first command name, quoted or not: as an
+#: arbitrary word list every later word was a candidate command, and each
+#: ``rm`` candidate of ``sudo echo rm rm rm …`` rescanned the whole suffix
+#: for a protected operand, quadratic in the command length.  The pattern
+#: after the prefix reads every word of the simple command, so its first
+#: occurrence stands for every later one (``xargs -I rm rm -rf /``): one
+#: scan of the suffix per command name.  That holds only when ``{commands}``
+#: names the one command the pattern after it matches: a wrapper's option
+#: values may be spelled like any number of other guarded commands
+#: (``timeout -s kill 5 rm -rf /``, ``env -u kill -u pkill rm -rf /``), and
+#: stopping at one of them hid the real command, so each guarded command
+#: gets its own prefix.  The blanks after a separator stop at a newline,
+#: which is a separator of its own: letting them run across newlines made
+#: every newline of a blank-line command swallow the rest of the text and
+#: backtrack through it, quadratic in the command length.  An assignment's
+#: value and the directory prefix stop at a separator too
+#: (``_UNSEPARATED``), where the next command may start: as ``\S*`` they
+#: ran from every separator of ``:;:;:;...`` to the end of the text and
+#: backtracked through it, quadratic again.
+_END = r"(?=\s|$|[;&|)\"'>#`])"
 _WORD = r"[^\s;&|<>()#][^\s;&|<>()]*"
 _ARGS = r"(?:" + _WORD + r"[ \t]+)*"
 _ARGS_LAZY = r"(?:" + _WORD + r"[ \t]+)*?"
+_UNSEPARATED = r"[^\s;&|()]*"
+_WRAPPER = r"sudo|env|exec|nohup|nice|time|command|builtin|xargs|timeout"
+_COMMAND_NAME = r"(?:" + _UNSEPARATED + r"/)?(?:{commands})"
+_WRAPPER_ARGS = r"(?:[ \t]+(?!" + _COMMAND_NAME + _END + r")" + _WORD + r")*[ \t]+"
+_SHELL_C = r"-[abd-zA-Z]*c[a-zA-Z]*"
+_SHELL_ARGS = r"(?:[ \t]+(?!['\"]?" + _COMMAND_NAME + _END + r")" + _WORD + r")*[ \t]+['\"]?"
 _CMD = (
-    r"(?:^|[;&|(\n])[^\S\n]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env)(?:[ \t]+" + _WORD + r")*?[ \t]+)?"
-    r"(?:\S*/)?"
+    r"(?:^|[;&|(`\n])[^\S\n]*(?:\w+=" + _UNSEPARATED + r"[ \t]+)*"
+    r"(?:(?:" + _WRAPPER + r")" + _WRAPPER_ARGS
+    + r"|(?:bash|sh|zsh|dash|ksh)(?:[ \t]+(?!" + _SHELL_C + r"[ \t])" + _WORD + r")*"
+    r"[ \t]+" + _SHELL_C + _SHELL_ARGS + r")?"
+    r"(?:" + _UNSEPARATED + r"/)?"
 )
 #: A path operand: quoted on both sides or not at all, so ``"/work backup"`` is
 #: not read as ``/work``; the ``{path}`` placeholder takes the path pattern.
@@ -67,19 +101,31 @@ _QUOTED_OR_BARE = r"(?:'{path}'|\"{path}\"|{path})"
 #:   be combined with other short flags (``pkill -ef .``).
 #: * The ``rm`` operand may follow options and other operands of the same
 #:   command (``rm -rf a b /``), with an optional trailing ``/``, ``*`` or
-#:   ``/*``.
+#:   ``/*``; the working directory counts through its parent too
+#:   (``{workdir}/..``, which holds it, and ``{workdir}/../{name}``), as does
+#:   the root as ``/..``.
 #:
 #: The patterns are plain regexes on the command text: a quoted mention such as
 #: ``echo 'a; rm -rf /'`` is refused too, and the model rephrases it.
 _PKILL_FULL = r"(?:-[a-zA-Z0-9]*f[a-zA-Z0-9]*|--full)"
-DESTRUCTIVE_COMMANDS = (
-    _CMD + r"(?:kill[ \t]+(?:-1" + _END + r"(?![ \t]+['\"]?[\d$%`])|" + _WORD + r"[ \t]+"
-    + _ARGS + r"-1" + _END + r")"
-    # The words before the first ``-f`` are matched greedily with a lookahead
-    # that stops at it, so the split is unique and the match stays linear.
-    + r"|pkill[ \t]+(?:(?!" + _PKILL_FULL + r"[ \t])" + _WORD + r"[ \t]+)*" + _PKILL_FULL
+_KILL_ALL = (
+    r"kill[ \t]+(?:-1" + _END + r"(?![ \t]+['\"]?[\d$%`])|" + _WORD + r"[ \t]+" + _ARGS + r"-1"
+    + _END + r")"
+)
+# The words before the first ``-f`` are matched greedily with a lookahead
+# that stops at it, so the split is unique and the match stays linear.
+_PKILL_ALL = (
+    r"pkill[ \t]+(?:(?!" + _PKILL_FULL + r"[ \t])" + _WORD + r"[ \t]+)*" + _PKILL_FULL
     + r"[ \t]+" + _ARGS_LAZY + _QUOTED_OR_BARE.format(path=r"\.(?:\*)?") + _END
-    + r"|rm[ \t]+" + _ARGS + _QUOTED_OR_BARE.format(path=r"(?:/|{workdir})/?\*?") + _END + r")"
+)
+_RM_PROTECTED = (
+    r"rm[ \t]+" + _ARGS
+    + _QUOTED_OR_BARE.format(path=r"(?:/(?:\.\.)?|{workdir}(?:/\.\.(?:/{name})?)?)/?\*?")
+    + _END
+)
+DESTRUCTIVE_COMMANDS = r"|".join(
+    _CMD.format(commands=name) + body
+    for name, body in (("kill", _KILL_ALL), ("pkill", _PKILL_ALL), ("rm", _RM_PROTECTED))
 )
 
 #: Text the model sees instead of running a destructive command.
@@ -92,12 +138,17 @@ DESTRUCTIVE_VERDICT = (
 
 #: Commands whose runtime is dominated by package managers or compilers.  Any
 #: arguments may separate the tool from its subcommand (``pip --cache-dir
-#: /tmp/pip install``, ``uv pip install``, ``npm run build``).
+#: /tmp/pip install``, ``uv pip install``, ``npm run build``).  An installer's
+#: subcommand may follow any installer name, so the installers share one
+#: prefix; ``python -m pip`` holds the installer name ``pip`` and needs none of
+#: its own.  The builders, matched by name alone, get their own prefix.
+_INSTALLERS = r"apt-get|apt|dpkg|pip3?|uv|conda|mamba|npm|yarn|pnpm|cargo|gem|go"
+_BUILDERS = r"make|cmake|ninja"
 INSTALL_COMMANDS = re.compile(
-    _CMD + r"(?:(?:apt-get|apt|dpkg|pip3?|python3?[ \t]+-m[ \t]+pip|uv|conda|mamba|npm|yarn|"
-    r"pnpm|cargo|gem|go)[ \t]+" + _ARGS_LAZY
-    + r"(?:install|ci|sync|add|update|upgrade|build|configure)"
-    + _END + r"|(?:make|cmake|ninja)" + _END + r")"
+    _CMD.format(commands=_INSTALLERS)
+    + r"(?:" + _INSTALLERS + r"|python3?[ \t]+-m[ \t]+pip)[ \t]+" + _ARGS_LAZY
+    + r"(?:install|ci|sync|add|update|upgrade|build|configure)" + _END
+    + r"|" + _CMD.format(commands=_BUILDERS) + r"(?:" + _BUILDERS + r")" + _END
 )
 
 #: Minimum timeout, in seconds, of an install or build command.
@@ -113,7 +164,8 @@ def destructive_pattern(workdir: str) -> re.Pattern[str]:
             (``""`` or ``"/"`` protect the root only).
     """
     escaped = re.escape(workdir.rstrip("/") or "/")
-    return re.compile(DESTRUCTIVE_COMMANDS.format(workdir=escaped))
+    name = re.escape(Path(workdir).name)
+    return re.compile(DESTRUCTIVE_COMMANDS.format(workdir=escaped, name=name))
 
 
 def destructive_command_guard(command: str, work_dir: str | None) -> str | None:

@@ -38,6 +38,7 @@ import pytest
 
 from kiss.server.file_index import FileIndex, FileIndexRegistry
 from kiss.server.server import AgentServer
+from kiss.tests.server.conftest import local_view
 
 
 def _wait_for(predicate: Callable[[], bool], timeout: float = 10.0) -> None:
@@ -175,7 +176,7 @@ def test_set_work_dir_updates_field_and_prewarms_the_index(
     with server._state_lock:
         server._last_active_file[""] = os.path.join(a, "alpha.txt")
         server._last_active_content[""] = "alpha"
-    assert server._file_index.view_for(b) is None
+    assert local_view(server._file_index, b) is None
 
     server._handle_command({"type": "setWorkDir", "workDir": b})
 
@@ -184,8 +185,8 @@ def test_set_work_dir_updates_field_and_prewarms_the_index(
     )
     assert server._last_active_file.get("", "") == ""
     assert server._last_active_content.get("", "") == ""
-    _wait_for(lambda: server._file_index.view_for(b) is not None)
-    view = server._file_index.view_for(b)
+    _wait_for(lambda: local_view(server._file_index, b) is not None)
+    view = local_view(server._file_index, b)
     assert view is not None and "beta.txt" in view.paths, (
         "setWorkDir must pre-warm the new folder's file index"
     )

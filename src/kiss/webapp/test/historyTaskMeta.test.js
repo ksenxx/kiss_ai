@@ -13,7 +13,7 @@ const {
   sendEmptyWorkDir,
   rowsByTitle,
 } = require('./simplify2_harness');
-const {makeRow} = require('./history_helpers');
+const {makeRow, workspaceSpan, metricsSpan} = require('./history_helpers');
 
 const WS_A = '/Users/koushik/work/repo-A';
 const WS_B = 'C:\\Users\\koushik\\repo-B';
@@ -71,14 +71,6 @@ const SESSIONS_FIXTURE = [
   ),
   ROW_H,
 ];
-
-function workspaceSpan(row) {
-  return row.querySelector('.running-item-workspace');
-}
-
-function metricsSpan(row) {
-  return row.querySelector('.running-item-metrics');
-}
 
 function testWorkspaceLineMergesMetadata(win) {
   const rows = rowsByTitle(win);

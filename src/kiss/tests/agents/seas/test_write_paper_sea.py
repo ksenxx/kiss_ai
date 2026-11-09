@@ -138,6 +138,15 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert "`check_paper`" in prompt and "`build_paper`" in prompt
     assert "Em dashes: zero in prose" in prompt
     assert "Never add .aux" in prompt
+    # The ICLR 2027 alignment: a contribution statement before the outline, a controlled
+    # comparison for the central claim, no README facts or caveat lists up front, and a
+    # reviewer round that scores the venue's form.
+    assert "## The contribution" in prompt and "the controlled comparison" in prompt
+    assert "Never write the paper around an untested claim" in prompt
+    assert "A difference within noise is not a result" in prompt
+    assert "Engineering trivia is not evidence" in prompt
+    assert "Conventional headings" in prompt and "25. Padding" in prompt
+    assert "(f) whether the central claim and the" in prompt and "(j) the appendix" in prompt
     assert [t.__name__ for t in sea.tools([print])] == ["print", "check_paper", "build_paper"]
     # Browse, skip the classifier; a ``run_agent`` dispatch waits six hours.
     # ``run_parallel`` is always offered, so nothing turns fan-out on.
@@ -356,6 +365,116 @@ def test_check_paper_flags_the_researched_slop_tells(tmp_path: Path) -> None:
         "fabricated-reference signatures",
     ):
         assert gate(report, name).startswith(f"{name}: 0 "), gate(report, name)
+
+
+_README_TEX = (
+    "\\documentclass{article}\\newcommand{\\LocFive}{4,449}\\begin{document}\n"
+    "\\begin{abstract}" + " ".join(["lorem"] * 150) + " The agent is five Python modules and "
+    "\\LocFive{} significant lines under a 3,851-word prompt. Each case study is one run "
+    "without a baseline agent. The gap is within sampling error, at a cost we cannot tell "
+    "apart.\\end{abstract}\n"
+    "\\section{Introduction}\n"
+    "It logs ideas to \\texttt{./tmp/ideas.md} and the first task cost \\$81 over 17 "
+    "wall-clock hours with two steering messages. We do not claim causality.\n"
+    "\\section{Result, and what it does not show}\\label{sec:result}\n"
+    "\\subsection[Why]{Why does \\emph{the schedule} not drift?}\n"
+    "\\paragraph{One task, two vendors.} The store spans 4,449 lines in tmp/notes.md and "
+    "cost \\$12; the run is a single run with no ablation of the procedure.\n"
+    "\\section{Threats to validity}\n"
+    "\\end{document}\n"
+)
+
+
+def test_check_paper_flags_the_iclr_2027_reviewer_tells(tmp_path: Path) -> None:
+    """The gates added from the ICLR 2027 reviews fire where those reviewers pointed.
+
+    The fixture is the KS Gov abstract and introduction in miniature: module and
+    line counts and a prompt word count up front, a file path and a dollar cost
+    in the introduction, a caveat list in the abstract, hedged headings, and
+    concessions in the body.  The same README facts in a later section are not
+    front matter and pass; a body concession is listed, not failed.
+    """
+    path = _write(tmp_path, _README_TEX, None)
+    report = write_paper_sea.check_paper(str(path))
+    abstract_line = _line(_README_TEX, "begin{abstract}")
+    # Two sentences concede (the second holds two phrases and counts once).
+    concessions = gate(report, "concessions in the abstract")
+    assert concessions == (
+        "concessions in the abstract: 2 (limit 1) FAIL; one scope sentence at most; a "
+        "comparison within noise is not a result"
+    )
+    assert f"    L{abstract_line}: Each case study is one run without a baseline agent." in report
+    assert "The gap is within sampling error, at a cost we cannot tell apart." in report
+    # Three facts in the abstract (the macro line count included), four in the
+    # introduction; the 4,449 lines, the path and the \$12 of the later section are
+    # not counted.
+    trivia = gate(report, "engineering trivia in the abstract and introduction")
+    assert trivia.startswith(
+        "engineering trivia in the abstract and introduction: 7 (limit 0) FAIL"
+    )
+    block = report.split("engineering trivia", 1)[1].split("hedged or question", 1)[0]
+    for needle in ("five Python modules", "LocFive{} significant lines", "3,851-word",
+                   "./tmp/ideas.md", "$81", "wall-clock", "steering messages"):
+        assert needle in block, needle
+    assert "tmp/notes.md" not in block and "$12" not in block
+    headings = gate(report, "hedged or question headings")
+    assert headings.startswith("hedged or question headings: 3 (limit 0) FAIL")
+    result_line = _line(_README_TEX, "what it does not show")
+    assert f"    L{result_line}: Result, and what it does not show\n" in report
+    assert "Why does \\emph{the schedule} not drift?" in report
+    assert "One task, two vendors." in report and "Threats to validity" not in report
+    # The abstract's own concessions are not repeated under the body; the body's two
+    # sentences are listed for review (CHECK), with "We do not claim" among them.
+    body = gate(report, "concessions in the body")
+    assert body.startswith("concessions in the body: 2 (list only) CHECK")
+    assert "We do not claim causality" in report and "single run with no ablation" in report
+    assert "abstract: not found" not in report
+
+    # A paper that states the same facts where they belong passes all four gates: the
+    # counts in an appendix section, one scope sentence in the abstract (two phrases,
+    # one sentence), plain headings.  Ordinary prose that shares the words is not
+    # flagged: a 256-word document, 3 lines per image, a README inside a URL, math
+    # with \not, an enumeration heading with a comma; a concession split across lines,
+    # even right after an inline command, is still one sentence.
+    plain = (
+        "\\documentclass{article}\\begin{document}\n"
+        "\\begin{abstract}" + " ".join(["lorem"] * 150) + " We do not claim causality "
+        "from \\emph{this experiment}\non a single run.\\end{abstract}\n"
+        "\\section{Introduction}\nThe agent sustains 5.50 Mops/s against 4.1 for the baseline "
+        "rerun on the same machine (3 runs, spread 0.1). Each input is a 256-word document; "
+        "we reconstruct 3 lines per image. Code: "
+        "\\url{https://github.com/org/project/blob/main/README.md}.\n"
+        "\\section{Datasets, metrics and baselines}\nTable 2 lists the 40 problems and the "
+        "12 we lost.\n\\subsection{Learning when $x \\not= y$}\nThe gap is within\nsampling "
+        "error for the 12.\n"
+        "\\section{Artifact}\nThe agent is five Python modules and 4,449 lines of code; the "
+        "run cost \\$81.\n\\end{document}\n"
+    )
+    path.write_text(plain, encoding="utf-8")
+    report = write_paper_sea.check_paper(str(path))
+    assert gate(report, "concessions in the abstract").startswith(
+        "concessions in the abstract: 1 (limit 1) PASS"
+    )
+    for name in (
+        "engineering trivia in the abstract and introduction",
+        "hedged or question headings",
+    ):
+        assert gate(report, name).startswith(f"{name}: 0 "), gate(report, name)
+    assert gate(report, "concessions in the body").startswith(
+        "concessions in the body: 1 (list only) CHECK"
+    )
+    assert "    L9: The gap is within sampling error for the 12.\n" in report
+    # Without any \section the whole paper is front matter; an absolute path is a path.
+    path.write_text(
+        "\\begin{document}Five modules, 4,449 lines of code, \\texttt{/home/user/train.py}."
+        "\\end{document}",
+        encoding="utf-8",
+    )
+    report = write_paper_sea.check_paper(str(path))
+    assert gate(report, "engineering trivia in the abstract and introduction").startswith(
+        "engineering trivia in the abstract and introduction: 3 (limit 0) FAIL"
+    )
+    assert "/home/user/train.py" in report
 
 
 def test_section_truncates_long_hit_lists() -> None:

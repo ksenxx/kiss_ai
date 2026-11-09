@@ -376,3 +376,59 @@ class TestOrphanTaskRecovery(TestCase):
             "regression: the chat summary was refreshed before the "
             "recovered end_ts was written, so last_finished stayed stale"
         )
+
+    def test_a_dead_owner_row_with_a_result_but_no_end_ts_is_finalized(self) -> None:
+        """A11-3 (fable): the sweep selected sentinel rows only.
+
+        The shutdown safety net replaces the sentinel without an
+        ``end_ts``, and a normal completion commits its result before
+        its final metadata: a process dying in between left a row with
+        a terminal result that no sweep finalized (unfinished to
+        ``task_end_ms``, so late spend was routed as to a live task; no
+        tags; a chat summary that never saw it end).
+        """
+        chat_id = "recovery-test-chat-10-terminal"
+        # The session database is shared: an unfinished row an earlier test
+        # left behind turns dead-owned once a test redirects ``_KISS_DIR``
+        # and back (the owner token is re-minted).  Sweep those first so the
+        # counts below are this test's rows only.
+        _persistence._recover_orphaned_tasks(set())
+        shutdown_id = _insert_sentinel_row("interrupted by shutdown", chat_id=chat_id)
+        assert _persistence._shutdown_persist_in_flight_results({shutdown_id}) == 1
+        done_id = _insert_sentinel_row("finished before its metadata", chat_id=chat_id)
+        _persistence._save_task_result("Task failed: boom", task_id=done_id, success=False)
+        _persistence._write_event_batch([(
+            done_id,
+            json.dumps({"type": "text", "text": "last activity"}),
+            3000.0,
+            str(_persistence._DB_PATH),
+        )])
+        for task_id in (shutdown_id, done_id):
+            _disown(task_id)
+            assert _persistence.task_end_ms(task_id) == 0
+
+        assert _persistence._recover_orphaned_tasks(set()) == 2
+
+        # The results stand; the rows are finished, tagged, and the chat
+        # summary dates its newest task's end.
+        assert _row_result(shutdown_id) == "Task interrupted by server restart/shutdown"
+        assert _row_result(done_id) == "Task failed: boom"
+        db = _persistence._get_db()
+        rows = {
+            task_id: db.execute(
+                "SELECT end_ts, tags FROM task_history WHERE id = ?", (task_id,),
+            ).fetchone()
+            for task_id in (shutdown_id, done_id)
+        }
+        assert rows[done_id]["end_ts"] == 3_000_000, "end_ts was not backfilled from the events"
+        assert "failed" in str(rows[done_id]["tags"]).split(",")
+        # No event survived: the completion instant stays unknown (0), the
+        # tags written mark the row finalized.
+        assert rows[shutdown_id]["end_ts"] == 0
+        assert "failed" in str(rows[shutdown_id]["tags"]).split(",")
+        last_finished = db.execute(
+            "SELECT last_finished FROM chat_summaries WHERE chat_id = ?", (chat_id,),
+        ).fetchone()["last_finished"]
+        assert last_finished == 3_000_000
+        # Finished rows are left alone by the next sweep.
+        assert _persistence._recover_orphaned_tasks(set()) == 0

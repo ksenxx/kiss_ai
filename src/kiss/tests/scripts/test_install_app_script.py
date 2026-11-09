@@ -102,6 +102,12 @@ def test_project_files_and_frontend_installed(installed_app: Path) -> None:
     # Data files the runtime reads next to its modules travel too.
     assert (installed_app / "src/kiss/SYSTEM.md").is_file()
     assert (installed_app / "src/kiss/core/models/MODEL_INFO.json").is_file()
+    # The checkout's commit hash, shown next to the version in Settings.
+    head = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"], cwd=REPO, capture_output=True, text=True
+    ).stdout.strip()
+    assert head
+    assert (installed_app / "src/kiss/core/_commit.txt").read_text().strip() == head
 
 
 def test_tests_and_webapp_tooling_excluded(installed_app: Path) -> None:
@@ -186,6 +192,19 @@ for source_path in (peer_sync.MEMORY_DELTA_PATH, peer_sync.MERGE_PAGES_PATH):
     assert source_path.suffix == ".py", source_path
     compile(source_path.read_bytes(), str(source_path), "exec")
 assert memory_delta.merge_module().TOMBSTONES_DIR == ".tombstones"
+# The Settings header shows the version and, in parentheses, the installed commit.
+commit = (Path(w.__file__).parent.parent / "core" / "_commit.txt").read_text().strip()
+assert w._read_commit() == commit != ""
+assert f"Configuration {w._read_version()} ({commit})<" in w._build_html()
+# Without the file (a tarball install, outside any git work tree) only the version shows.
+# (git missing or hanging, the except branch of _read_commit, is not reproducible here.)
+commit_file = Path(w.__file__).parent.parent / "core" / "_commit.txt"
+commit_file.rename(commit_file.with_suffix(".bak"))
+try:
+    assert w._read_commit() == ""
+    assert f"Configuration {w._read_version()}<" in w._build_html()
+finally:
+    commit_file.with_suffix(".bak").rename(commit_file)
 print("ok", len(commands), w._read_version())
 """
     env = dict(os.environ, PYTHONPATH=str(installed_app / "src"))

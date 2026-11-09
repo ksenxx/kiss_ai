@@ -19,6 +19,7 @@ const {
   makePage: makeChatPage,
   send,
   readyTabId,
+  clickTab,
 } = require('./simplify2_harness');
 // Content tabs on the group strip (#tab-list).  The strip lists them on
 // the file screen only: a report opened in the background (sub-agent
@@ -555,14 +556,40 @@ function testReplayDoesNotSuppressLiveReports() {
 
 function testRegenerationReusesSameTab() {
   const {win} = makePage({withMarked: true});
-  writeReport(win, 'reports/summary.md', '# v1');
-  writeReport(win, 'reports/summary.md', '# v2');
-  finishTask(win);
-  const tabsFound = contentTabs(win);
+  const chatTab = win._testApi.getActiveTabId();
+  // Two writes of one report within a task open it once, with the last
+  // content (the pending reports are deduplicated by path).
+  writeReport(win, 'reports/summary.md', '# v1', {tabId: chatTab});
+  writeReport(win, 'reports/summary.md', '# v1 again', {tabId: chatTab});
+  finishTask(win, {tabId: chatTab});
+  let tabsFound = contentTabs(win);
+  assert.strictEqual(
+    tabsFound.length,
+    1,
+    'writing the same report twice must open it once',
+  );
+  const reportTabId = tabsFound[0].dataset.tabId;
+  assert.ok(tabsFound[0].classList.contains('active'), 'the report tab opened');
+  assert.ok(
+    /<h1[^>]*>v1 again<\/h1>/.test(activeSrcdoc(win)),
+    'the tab shows the last content written',
+  );
+
+  // A later task regenerates the report while its tab is still open: the
+  // existing tab is brought forward with the new content, not doubled.
+  clickTab(win, chatTab);
+  writeReport(win, 'reports/summary.md', '# v2', {tabId: chatTab});
+  finishTask(win, {tabId: chatTab});
+  tabsFound = contentTabs(win);
   assert.strictEqual(
     tabsFound.length,
     1,
     'regenerating the same report must reuse its tab, not open a second',
+  );
+  assert.strictEqual(
+    tabsFound[0].dataset.tabId,
+    reportTabId,
+    'the same tab, not a new one',
   );
   assert.ok(
     tabsFound[0].classList.contains('active'),

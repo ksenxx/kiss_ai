@@ -109,7 +109,7 @@ def is_long_running_call(name: str, args: dict[str, Any]) -> bool:
         try:
             if float(args.get(key)) >= LONG_TOOL_TIMEOUT_SECONDS:  # type: ignore[arg-type]
                 return True
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # OverflowError: an int past float range
             continue
     return False
 

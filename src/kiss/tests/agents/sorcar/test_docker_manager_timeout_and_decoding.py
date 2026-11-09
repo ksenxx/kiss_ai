@@ -15,11 +15,17 @@ F4 every decode was strict UTF-8, so binary output raised
 ``UnicodeDecodeError`` *out of the tool*, and even valid UTF-8 split across
 two docker stream frames raised nondeterministically.
 
+Audit 2026-11-07 (A08 claude-2): the docker ``Bash`` keeps a command's
+output bounded in memory while it streams, as the host ``Bash`` does
+(head and tail once it passes twice ``_CAPTURE_CHARS``), and the
+truncation marker still counts the whole output.
+
 Every test here drives a real container through the real docker daemon; no
 mocks, patches or doubles.
 """
 
 import time
+import tracemalloc
 import unittest
 
 from kiss.agents.sorcar.docker_manager import DockerManager
@@ -115,6 +121,21 @@ class TestDockerManagerTimeoutAndTruncation(unittest.TestCase):
         """Output under the cap is returned verbatim (no marker)."""
         result = self.env.Bash("echo hello", "small")
         self.assertEqual(result.strip(), "hello")
+
+    def test_a_flood_of_output_is_kept_bounded_in_memory(self) -> None:
+        """50 MB of output never sits whole in the daemon; the marker counts it all (claude-2)."""
+        tracemalloc.start()
+        try:
+            result = self.env.Bash(
+                "head -c 50000000 /dev/zero | tr '\\0' a", "flood",
+                timeout_seconds=120, max_output_chars=4000,
+            )
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLessEqual(len(result), 4000)
+        self.assertRegex(result, r"truncated 4999\d{4} chars")
+        self.assertLess(peak, 24_000_000, f"the output was kept whole: peak {peak} bytes")
 
     def test_timeout_does_not_leave_the_command_running(self) -> None:
         """A timed-out streaming command is killed inside the container."""

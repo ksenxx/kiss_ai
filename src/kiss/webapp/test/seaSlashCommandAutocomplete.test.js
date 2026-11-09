@@ -169,6 +169,31 @@ function main() {
     assert.strictEqual(inp.selectionStart, 'plain text\n/slack'.length);
   });
 
+  test('a command chosen with the caret inside the word replaces the whole word', () => {
+    const {win} = makePage();
+    send(win, {type: 'seaCommands', commands: ['write']});
+    const inp = win.document.getElementById('task-input');
+    // An edit of a typed command: the caret sits at "/wr|ite".
+    inp.value = '/write summarize';
+    inp.setSelectionRange(3, 3);
+    fireInput(inp);
+    assert.ok(isPickerOpen(win), 'the caret inside the word opens the popup');
+    seaCommandItems(win)[0].click();
+    assert.strictEqual(
+      inp.value,
+      '/write summarize',
+      "BUG - the old word's tail after the caret survived the completion",
+    );
+    // The space after the word is kept, not doubled.
+    assert.strictEqual(inp.selectionStart, '/write'.length);
+    // A word with nothing after it gets the separator.
+    inp.value = 'do /wri';
+    inp.setSelectionRange(5, 5);
+    fireInput(inp);
+    seaCommandItems(win)[0].click();
+    assert.strictEqual(inp.value, 'do /write ');
+  });
+
   test('a slash inside a path or an @-mention is not a command', () => {
     const {win} = makePage();
     send(win, {type: 'seaCommands', commands: ['slack', 'src']});

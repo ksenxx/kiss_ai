@@ -110,7 +110,7 @@ function typeAndEnter(win, text) {
  * @returns {Array<object>} The `submit` messages, in order.
  */
 function submits(posted) {
-  return posted.filter(m => m.type === 'submit');
+  return harness.ofType(posted, 'submit');
 }
 
 /**
@@ -166,11 +166,33 @@ function removeChip(win, name) {
 }
 
 /**
+ * Whether the composer chip of the attachment named `name` is still the
+ * pending placeholder (the file is being read or converted).
+ *
+ * @param {object} win The page window.
+ * @param {string} name Text of the chip's label.
+ * @returns {boolean} True while the chip carries the `pending` class.
+ * @throws {Error} When no chip carries `name`.
+ */
+function chipPending(win, name) {
+  const chips = win.document.querySelectorAll('#file-chips .file-chip');
+  for (const chip of chips) {
+    if (chip.textContent.indexOf(name) >= 0) {
+      return chip.classList.contains('pending');
+    }
+  }
+  throw new Error('no chip found for ' + name);
+}
+
+/**
  * Park a send on a late attachment: PNG `shot.png` is still reading when
  * `prompt` is entered, so the send waits; a camera HEIC
  * `IMG_0002.HEIC` is pasted meanwhile and its decode parks in the page's
- * decoder (`decodes[0]`).  Asserts the send is still waiting, with the
- * HEIC's chip on screen, once the PNG has finished.
+ * decoder (`decodes[0]`).  Returns once the PNG has finished reading
+ * (its chip is no longer pending) and the send's wait has moved on to
+ * the HEIC alone: the FileReader's timing must not decide which slot the
+ * wait is parked on.  Asserts the send is still waiting then, with the
+ * HEIC's chip on screen.
  *
  * @param {{win: object, posted: Array<object>, decodes: Array}} page A
  *   makePage page.
@@ -191,8 +213,15 @@ async function parkSendOnLateHeic(page, prompt) {
     type: 'image/heic',
   });
   paste(win, heic);
-  await settle(() => decodes.length >= 1);
+  await settle(
+    () => decodes.length >= 1 && !chipPending(win, 'shot.png'),
+  );
   assert.strictEqual(decodes.length, 1, 'the HEIC reached the decoder');
+  assert.strictEqual(
+    chipPending(win, 'IMG_0002.HEIC'),
+    true,
+    'the HEIC is still converting once the PNG has been read',
+  );
   assert.strictEqual(
     submits(posted).length,
     0,
@@ -207,7 +236,13 @@ async function parkSendOnLateHeic(page, prompt) {
   return tabId;
 }
 
+/** The composer attachment chips' text, including pending and error labels. */
+function chipText(win) {
+  return win.document.getElementById('file-chips').textContent;
+}
+
 module.exports = {
+  chipText,
   makePage,
   makeHeldDeadlinePage,
   paste,
@@ -216,5 +251,6 @@ module.exports = {
   settle,
   failDecode,
   removeChip,
+  chipPending,
   parkSendOnLateHeic,
 };

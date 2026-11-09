@@ -23,9 +23,15 @@ from __future__ import annotations
 
 import inspect
 import io
+import sys
+import threading
+import time
+from types import FrameType
 from typing import Any
 
+import pytest
 import yaml
+from markdown_it.ruler import Ruler
 
 from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.utils import ensure_html, finish
@@ -140,6 +146,54 @@ class TestFinishAlwaysEmitsHtml:
         assert set(parsed) == {"success", "is_continue", "summary"}
 
 
+class _ParkAfterRuleCachePublish:
+    """Trace function for a thread rendering Markdown: parks the thread
+    (``parked`` is set; it resumes once ``released`` is) right after
+    markdown-it publishes the still-empty rule cache of the ruler owning
+    *rule*, the window in which another thread sharing that parser reads
+    no rules at all."""
+
+    def __init__(self, rule: str) -> None:
+        self.rule = rule
+        self.parked = threading.Event()
+        self.released = threading.Event()
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> Any:
+        if frame.f_code is not Ruler.__compile__.__code__:
+            return None
+        ruler = frame.f_locals["self"]
+        if event == "line" and ruler.__cache__ == {} and self.rule in ruler.get_all_rules():
+            self.parked.set()
+            self.released.wait(30)
+        return self
+
+
+class _Deadline:
+    """Trace function that aborts the traced thread's work with a
+    ``TimeoutError`` once *seconds* have elapsed: the bound on a render that
+    would otherwise spin forever on an empty rule list."""
+
+    def __init__(self, seconds: float) -> None:
+        self.until = time.monotonic() + seconds
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> Any:
+        if time.monotonic() > self.until:
+            raise TimeoutError("render still running")
+        return self
+
+
+def _render_in_thread(text: str, tracer: Any, results: dict[str, str]) -> None:
+    """Thread target: ``ensure_html(text)`` under *tracer*, its result (or
+    the repr of what it raised) stored in ``results[text]``."""
+    sys.settrace(tracer)
+    try:
+        results[text] = ensure_html(text)
+    except BaseException as exc:  # noqa: BLE001 - recorded for the assertion
+        results[text] = repr(exc)
+    finally:
+        sys.settrace(None)
+
+
 class TestEnsureHtml:
     """Unit coverage for the ``ensure_html`` conversion helper."""
 
@@ -148,6 +202,8 @@ class TestEnsureHtml:
 
     def test_html_fragment_untouched(self) -> None:
         assert ensure_html("<ul><li>a</li></ul>") == "<ul><li>a</li></ul>"
+        # An inline tag inside prose (no block-level tag anywhere) is markup too.
+        assert ensure_html("Done. <b>All</b> good") == "Done. <b>All</b> good"
 
     def test_empty_string_untouched(self) -> None:
         assert ensure_html("") == ""
@@ -160,6 +216,65 @@ class TestEnsureHtml:
     def test_doctype_document_passed_through(self) -> None:
         doc = "<!DOCTYPE html><html><body>hi</body></html>"
         assert ensure_html(doc) == doc
+
+    def test_markdown_with_html_inside_code_is_rendered_as_markdown(self) -> None:
+        """A tag inside a fenced block or a code span is an example, not
+        markup: the Markdown is rendered and the tag reaches the page escaped."""
+        fenced = ensure_html("# Example\n\n```html\n<div>Hello</div>\n```")
+        assert fenced.startswith("<h1>Example</h1>")
+        assert "<pre><code" in fenced and "&lt;div&gt;Hello&lt;/div&gt;" in fenced
+        assert "<div>" not in fenced
+        span = ensure_html("Wrap it in `<b>` tags")
+        assert span == "<p>Wrap it in <code>&lt;b&gt;</code> tags</p>"
+        indented = ensure_html("# Example\n\n    <div>Hello</div>\n")
+        assert indented == (
+            "<h1>Example</h1>\n<pre><code>&lt;div&gt;Hello&lt;/div&gt;\n</code></pre>"
+        )
+        # The indentation that makes the example a code block may open the
+        # whole text (four spaces or a tab, even after a blank line): the
+        # text is still Markdown, whatever follows the example included.
+        for leading in ("    ", "\t", "\n    "):
+            assert ensure_html(leading + "<div>Hello</div>\n\n# Example\n") == (
+                "<pre><code>&lt;div&gt;Hello&lt;/div&gt;\n</code></pre>\n<h1>Example</h1>"
+            ), repr(leading)
+        nested = ensure_html("# Example\n\n````markdown\n```html\n<div>Hello</div>\n```\n````\n")
+        assert nested == (
+            '<h1>Example</h1>\n<pre><code class="language-markdown">```html\n'
+            "&lt;div&gt;Hello&lt;/div&gt;\n```\n</code></pre>"
+        )
+        double = ensure_html("Wrap it in ``a`<b>`b`` tags")
+        assert double == "<p>Wrap it in <code>a`&lt;b&gt;`b</code> tags</p>"
+
+    @pytest.mark.parametrize("rule", ["normalize", "paragraph"])
+    def test_concurrent_first_renders_are_isolated(self, rule: str) -> None:
+        """Reproduces the race of a process-wide shared parser: markdown-it
+        fills a ruler's rule cache lazily on the first render and publishes
+        it empty before filling it, so a second thread rendering at that
+        moment got no rules: an empty summary (core ruler, ``normalize``)
+        or an endless loop in the block parser (block ruler,
+        ``paragraph``).  Thread A is parked in that window; thread B must
+        still render correctly, in bounded time, while A is parked."""
+        park = _ParkAfterRuleCachePublish(rule)
+        results: dict[str, str] = {}
+        first = threading.Thread(target=_render_in_thread, args=("# First", park, results))
+        second = threading.Thread(
+            target=_render_in_thread, args=("# Second", _Deadline(30), results), daemon=True
+        )
+        first.start()
+        try:
+            assert park.parked.wait(30), "the first render never compiled its rules"
+            second.start()
+            second.join(60)
+            assert results.get("# Second") == "<h1>Second</h1>"
+        finally:
+            park.released.set()
+            first.join(30)
+        assert results["# First"] == "<h1>First</h1>"
+
+    def test_html_with_backticks_in_its_text_is_still_html(self) -> None:
+        """Backticks in an HTML summary's prose do not make it Markdown."""
+        html = "<p>Run `make` and ```make test``` then `make install`</p>"
+        assert ensure_html(html) == html
 
     def test_non_string_input_is_coerced(self) -> None:
         """Some LLMs pass numbers/lists for summary_in_html — must not crash."""
@@ -243,9 +358,7 @@ class TestConsoleResultPanelRendersHtml:
         return buf.getvalue()
 
     def test_html_tags_are_rendered_not_shown(self) -> None:
-        out = self._render(
-            "<h1>Report</h1><ul><li>item one</li><li>item two</li></ul>"
-        )
+        out = self._render("<h1>Report</h1><ul><li>item one</li><li>item two</li></ul>")
         assert "<h1>" not in out
         assert "<li>" not in out
         assert "Report" in out

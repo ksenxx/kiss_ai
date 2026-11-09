@@ -67,6 +67,32 @@ class TestGitTimeout:
             f"_git took {elapsed:.1f}s — the 1s timeout did not fire"
         )
 
+    @posix_only("a sleeping clean filter needs a POSIX shell")
+    def test_timed_out_git_removes_its_index_lock(self, tmp_path: Path) -> None:
+        """A git killed on the deadline must get the chance to remove
+        ``index.lock`` (SIGTERM first, as the interrupt path already
+        does); a SIGKILL left the lock behind and every later index
+        write failed with "index.lock: File exists" (audit A09)."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        assert _git("init", cwd=repo).returncode == 0
+        assert _git("config", "filter.slow.clean", "sleep 300", cwd=repo).returncode == 0
+        (repo / ".gitattributes").write_text("*.txt filter=slow\n")
+        (repo / "data.txt").write_text("payload\n")
+        saved_timeout = git_worktree._GIT_TIMEOUT_SECONDS
+        git_worktree._GIT_TIMEOUT_SECONDS = 1.0
+        try:
+            result = _git("add", "-A", cwd=repo)
+        finally:
+            git_worktree._GIT_TIMEOUT_SECONDS = saved_timeout
+        assert result.returncode == 124
+        assert not (repo / ".git" / "index.lock").exists(), (
+            "the timed-out git left a stale index.lock behind"
+        )
+        assert _git("config", "--unset", "filter.slow.clean", cwd=repo).returncode == 0
+        retry = _git("add", "-A", cwd=repo)
+        assert retry.returncode == 0, retry.stderr
+
     def test_real_git_still_works_within_timeout(self, tmp_path: Path) -> None:
         """The normal (non-hanging) path is unchanged by the timeout."""
         repo = tmp_path / "repo"

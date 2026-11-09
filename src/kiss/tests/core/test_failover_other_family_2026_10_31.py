@@ -719,6 +719,8 @@ _TEXT_BLOCK: dict[str, Any] = {"type": "text", "text": ""}
 _ANTHROPIC_SCRIPTS: dict[str, list[list[bytes]]] = {}
 """Per model name, the streams to serve in order (the last one repeats)."""
 _ANTHROPIC_SEEN: list[str] = []
+_ANTHROPIC_BODIES: list[dict[str, Any]] = []
+"""The request bodies served, in order."""
 _ANTHROPIC_LOCK = threading.Lock()
 
 
@@ -731,6 +733,7 @@ class _AnthropicHandler(BaseHTTPRequestHandler):
         model = str(body.get("model", ""))
         with _ANTHROPIC_LOCK:
             _ANTHROPIC_SEEN.append(model)
+            _ANTHROPIC_BODIES.append(body)
             scripts = _ANTHROPIC_SCRIPTS[model]
             chunks = scripts.pop(0) if len(scripts) > 1 else scripts[0]
         self.send_response(200)
@@ -756,6 +759,7 @@ def anthropic_server() -> Generator[str]:
 def anthropic_scripts() -> Iterator[dict[str, list[list[bytes]]]]:
     _ANTHROPIC_SCRIPTS.clear()
     _ANTHROPIC_SEEN.clear()
+    _ANTHROPIC_BODIES.clear()
     yield _ANTHROPIC_SCRIPTS
     _ANTHROPIC_SCRIPTS.clear()
 
@@ -899,3 +903,99 @@ def test_anthropic_refusal_fails_over_to_an_openai_family_model(
         'refusal (stop_reason="refusal")'
     ]
     assert printer.llm_calls()[0]["stop_reason"] == "refusal"
+
+
+_CUT_OFF_FINISH = (_tool_block("toolu_1", "finish"), '{"result": "do')
+
+
+def _run_anthropic(
+    agent: KISSAgent, printer: CapturePrinter, model_config: dict[str, Any]
+) -> str:
+    return agent.run(
+        model_name=_ANTHROPIC_PRIMARY,
+        prompt_template="Do the task.",
+        max_steps=5,
+        max_budget=1.0,
+        verbose=False,
+        printer=printer,
+        model_config=model_config,
+    )
+
+
+def test_anthropic_native_effort_is_lowered_for_the_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    anthropic_server: str,
+    anthropic_scripts: dict[str, list[list[bytes]]],
+) -> None:
+    """A caller's native ``output_config.effort`` is what the first request
+    runs at; the retry of a request the cap cut short runs at ``low`` all the
+    same, as its notice says, and the rest of ``output_config`` stays."""
+    _register(
+        monkeypatch, _ANTHROPIC_PRIMARY, _OPENAI_OTHER, thinking="high", extended_thinking=False
+    )
+    _register(monkeypatch, _OPENAI_OTHER, None)
+    _ensure_key(monkeypatch, "ANTHROPIC_API_KEY")
+    anthropic_scripts[_ANTHROPIC_PRIMARY] = [
+        _anthropic_stream(_ANTHROPIC_PRIMARY, "max_tokens", [_CUT_OFF_FINISH]),
+        _anthropic_stream(
+            _ANTHROPIC_PRIMARY,
+            "tool_use",
+            [(_tool_block("toolu_2", "finish"), '{"result": "done"}')],
+        ),
+    ]
+    printer = CapturePrinter()
+    agent = KISSAgent("native-effort-retry")
+    agent.pre_step_hook = _point_at(anthropic_server, "http://127.0.0.1:9/unused")
+    result = _run_anthropic(
+        agent, printer, {"output_config": {"effort": "max", "format": {"type": "json"}}}
+    )
+
+    assert result == "done"
+    assert _ANTHROPIC_SEEN == [_ANTHROPIC_PRIMARY] * 2
+    assert [b["output_config"] for b in _ANTHROPIC_BODIES] == [
+        {"effort": "max", "format": {"type": "json"}},
+        {"effort": "low", "format": {"type": "json"}},
+    ]
+    assert printer.notices() == [
+        "Retrying the request at reasoning effort low after max_tokens"
+    ]
+    # The override lasted one turn: the caller's configuration is intact.
+    assert agent.model.model_config["output_config"]["effort"] == "max"
+    assert "reasoning_effort" not in agent.model.model_config
+
+
+def test_anthropic_native_low_effort_switches_without_a_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    anthropic_server: str,
+    anthropic_scripts: dict[str, list[list[bytes]]],
+) -> None:
+    """A native ``output_config.effort`` already at ``low`` leaves no lower
+    effort to retry at, whatever the catalog level: the run switches at once."""
+    _register(
+        monkeypatch, _ANTHROPIC_PRIMARY, _OPENAI_OTHER, thinking="high", extended_thinking=False
+    )
+    _register(monkeypatch, _OPENAI_OTHER, None)
+    _ensure_key(monkeypatch, "ANTHROPIC_API_KEY")
+    _ensure_key(monkeypatch, "OPENAI_API_KEY")
+    anthropic_scripts[_ANTHROPIC_PRIMARY] = [
+        _anthropic_stream(_ANTHROPIC_PRIMARY, "max_tokens", [_CUT_OFF_FINISH])
+    ]
+
+    def respond(request: Request) -> Reply:
+        return _chat_finish(str(request.body.get("model")))
+
+    printer = CapturePrinter()
+    with ScriptedOpenAIServer(respond) as server:
+        agent = KISSAgent("native-low-effort")
+        agent.pre_step_hook = _point_at(anthropic_server, server.base_url)
+        result = _run_anthropic(agent, printer, {"output_config": {"effort": "low"}})
+        openai_seen = _models_seen(server)
+
+    assert result == "done"
+    assert _ANTHROPIC_SEEN == [_ANTHROPIC_PRIMARY]
+    assert [b["output_config"]["effort"] for b in _ANTHROPIC_BODIES] == ["low"]
+    assert openai_seen == [_OPENAI_OTHER]
+    assert printer.notices() == [
+        f"Switched model from {_ANTHROPIC_PRIMARY} to {_OPENAI_OTHER} after an output "
+        'cap cut-off (stop_reason="max_tokens")'
+    ]

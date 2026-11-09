@@ -135,23 +135,11 @@ async function run() {
     window.close();
   }
 
-  {
-    // A page the service worker served from its cache (the server was
-    // unreachable) is a reconnect from the user's point of view: the
-    // worker only has the copy because the server was up before.
-    const {window} = boot(window => {
-      const meta = window.document.createElement('meta');
-      meta.setAttribute('name', 'kiss-offline-shell');
-      window.document.head.appendChild(meta);
-    });
-    assert.strictEqual(
-      overlayText(window),
-      RECONNECTING,
-      'the overlay says "Reconnecting ..." on a page served from the worker cache',
-    );
-    ok('offline-cached page shows "Reconnecting ..." immediately');
-    window.close();
-  }
+  // A page the service worker served from its cache (<meta
+  // name="kiss-offline-shell">) labels its overlay "Reconnecting ...":
+  // pinned, before and after a failed attempt, by
+  // remotePasswordBypass.test.js ("an offline-cached page labels its
+  // overlay as a reconnect").
 
   console.log('\nAll webapp server-loading-overlay tests passed.');
 }

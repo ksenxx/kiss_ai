@@ -19,9 +19,6 @@ pre code.hljs { display: block; overflow-x: auto; }
 .hljs-literal,
 .hljs-meta { color: #569cd6; }
 
-/* keyword.control */
-.hljs-keyword.control_ { color: #c586c0; }
-
 /* entity.name.function, support.function */
 .hljs-title,
 .hljs-title.function_,
@@ -47,9 +44,6 @@ pre code.hljs { display: block; overflow-x: auto; }
 /* string */
 .hljs-string,
 .hljs-meta .hljs-string { color: #ce9178; }
-
-/* constant.character.escape */
-.hljs-char.escape_ { color: #d7ba7d; }
 
 /* string.regexp */
 .hljs-regexp { color: #d16969; }

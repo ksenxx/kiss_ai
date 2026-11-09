@@ -272,6 +272,47 @@ function testCloseFlushRejoinsPunctuationSplit() {
   console.log('  ok - the close flush rejoins a path cut after . or :');
 }
 
+// A27_fable-3 / A27_claude-2: a chunk that extends the path at the end
+// of the previous one unwraps that path's candidate span (so the merged
+// path is matched whole).  The unwrapped span must leave the file-link
+// registry with the DOM: left there, every reply walks it, a refused
+// check keeps it for the life of the tab, and a reconnect re-asks the
+// daemon about a fragment nobody sees any more.
+function testExtendedPathUnregistersTheUnwrappedSpan() {
+  const {win, posted, tabId} = startBash();
+  const counts = () => win._testApi.pendingFileLinkCounts();
+  send(win, {type: 'system_output', text: 'see src/kiss/co', tabId});
+  win.flushRaf();
+  const first = checks(posted);
+  assert.deepStrictEqual(Array.from(first[first.length - 1].paths), [
+    'src/kiss/co',
+  ]);
+  assert.strictEqual(counts().spans, 1, 'the fragment waits for its reply');
+  send(win, {type: 'system_output', text: 're/agent.py now\n', tabId});
+  win.flushRaf();
+  const spans = win.document.querySelectorAll('#output [data-path-candidate]');
+  assert.strictEqual(spans.length, 1, 'one candidate, the whole path');
+  assert.strictEqual(spans[0].dataset.pathCandidate, 'src/kiss/core/agent.py');
+  assert.strictEqual(
+    counts().spans,
+    1,
+    'BUG - the unwrapped fragment span is still registered',
+  );
+  // A reconnect re-asks about the paths on screen alone.
+  send(win, {type: 'daemonStatus', connected: false});
+  const before = checks(posted).length;
+  send(win, {type: 'daemonStatus', connected: true});
+  const reasked = checks(posted).slice(before);
+  assert.deepStrictEqual(
+    [].concat(...reasked.map(c => Array.from(c.paths))),
+    ['src/kiss/core/agent.py'],
+    'the reconnect asks about the whole path only',
+  );
+  win.close();
+  console.log('  ok - an extended path unregisters the unwrapped span');
+}
+
 testFlushKeepsLinksAndAsksEachPathOnce();
 testCloseFlushRejoinsPunctuationSplit();
+testExtendedPathUnregistersTheUnwrappedSpan();
 console.log('audit1016b_bash_relink.test.js: all tests passed');

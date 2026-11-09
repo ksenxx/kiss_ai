@@ -321,7 +321,6 @@ body.remote-chat #more-btn {
   transition: background var(--dur-base);
 }
 
-body.remote-chat #tricks-btn.active,
 body.remote-chat #voice-btn.active {
   background: var(--hover-strong);
   color: var(--fg-strong);

@@ -347,7 +347,10 @@ class ClosedTabKeepsApiClient(ReconnectHarness):
             surface.send({"type": "resumeSession", "chatId": state.chat_id, "tabId": tab})
             self.assertTrue(wait_for(lambda: registry.has_tab(tab), timeout=10))
             self.assertTrue(wait_for(lambda: printer.viewer_tab_ids(task_id) == [tab], timeout=10))
-            self.assertFalse(state.frontend_closed)
+            # The replay publishes the tab and subscribes the viewer before it
+            # clears the headless mark (``_commit_replay_publication``), and
+            # the reads above are not under the daemon's state lock.
+            self.assertTrue(wait_for(lambda: not state.frontend_closed, timeout=10))
             mark = len(surface.remote_payloads)
             self.release.set()
             result = self._collect(worker, out)

@@ -58,12 +58,12 @@ function makeView() {
   return {win, view, sent, screen, frames, runFrames};
 }
 
-function pointer(win, screen, type, x, y, buttons) {
+function pointer(win, screen, type, x, y, buttons, button) {
   screen.dispatchEvent(
     new win.PointerEvent(type, {
       clientX: x,
       clientY: y,
-      button: 0,
+      button: button || 0,
       buttons,
       pointerType: 'mouse',
       bubbles: true,
@@ -159,6 +159,94 @@ async function main() {
         ['mouseMoved@3:0'],
         'a move queued when the view was disposed is dropped',
       );
+    },
+  );
+
+  // A pointer the browser cancels after the press (the OS took the
+  // device, a native drag began) gets no pointerup: the remote page
+  // would be left with the button down until the next click.  A
+  // release sent instead clicked the control under the press (Chromium
+  // fires click on a release at the press point whatever its click
+  // count): a cancelled gesture must activate nothing, so what goes
+  // out on pointercancel, after the move that preceded it and once, is
+  // a move with no buttons down, which ends the press on the remote
+  // page (its pressed state, :active) without mouseup or click, as the
+  // cancel ended it here; a lost capture after it, or a cancel with
+  // nothing pressed, sends nothing more.
+  await test(
+    'a cancelled pointer ends the remote press without a release, once',
+    async () => {
+      const {win, sent, screen, runFrames} = makeView();
+      pointer(win, screen, 'pointerdown', 10, 10, 1);
+      pointer(win, screen, 'pointermove', 30, 10, 1);
+      screen.dispatchEvent(
+        new win.PointerEvent('pointercancel', {
+          button: -1,
+          buttons: 0,
+          pointerType: 'mouse',
+          bubbles: true,
+        }),
+      );
+      screen.dispatchEvent(
+        new win.PointerEvent('lostpointercapture', {
+          pointerType: 'mouse',
+          bubbles: true,
+        }),
+      );
+      runFrames();
+      assert.deepStrictEqual(mouseTrace(sent), [
+        'mousePressed@10:1',
+        'mouseMoved@30:1',
+        'mouseMoved@30:0',
+      ]);
+      assert.ok(
+        !sent.some(m => m.event && m.event.action === 'mouseReleased'),
+        'no release, which would click the control under the press',
+      );
+      // A cancel with nothing pressed (a touch, or after a pointerup)
+      // releases nothing.
+      pointer(win, screen, 'pointerdown', 20, 20, 1);
+      pointer(win, screen, 'pointerup', 20, 20, 0);
+      screen.dispatchEvent(
+        new win.PointerEvent('pointercancel', {
+          button: -1,
+          pointerType: 'mouse',
+          bubbles: true,
+        }),
+      );
+      assert.deepStrictEqual(mouseTrace(sent).slice(3), [
+        'mousePressed@20:1',
+        'mouseReleased@20:0',
+      ]);
+    },
+  );
+
+  // Pointer Events fire pointerdown for the first button pressed and
+  // pointerup for the last released; a button pressed or released while
+  // another stays down (a chord) comes as a pointermove whose `buttons`
+  // changed.  Forwarded as moves, the remote page got a left press and a
+  // right release: each changed button is now its own press / release,
+  // in order, before the move.
+  await test(
+    'a chorded button press / release is forwarded as its own',
+    async () => {
+      const {win, sent, screen, runFrames} = makeView();
+      pointer(win, screen, 'pointerdown', 10, 10, 1);
+      pointer(win, screen, 'pointermove', 10, 10, 3, 2); // right pressed too
+      pointer(win, screen, 'pointermove', 12, 10, 2, 0); // left released
+      pointer(win, screen, 'pointerup', 12, 10, 0, 2); // right released
+      runFrames();
+      const buttons = sent
+        .filter(m => m.type === 'browserInput' && m.event.kind === 'mouse')
+        .map(m => [m.event.action, m.event.button, m.event.buttons].join(':'));
+      assert.deepStrictEqual(buttons, [
+        'mousePressed:left:1',
+        'mousePressed:right:3',
+        'mouseMoved:none:3',
+        'mouseReleased:left:2',
+        'mouseMoved:none:2',
+        'mouseReleased:right:0',
+      ]);
     },
   );
 

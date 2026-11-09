@@ -228,10 +228,11 @@ class _AutocompleteMixin:
         work_dir: str
         _state_lock: threading.RLock
         _complete_queue: (
-            queue.Queue[tuple[str, int, str, str | None, str, str, str]]
+            queue.Queue[tuple[str, int, str, str | None, str, str, str] | None]
             | None
         )
         _complete_worker: threading.Thread | None
+        _complete_stopped: bool
         _complete_seq_latest: dict[str, int]
         _file_index: FileIndexRegistry
         _files_latest_request: dict[str, object]
@@ -291,15 +292,19 @@ class _AutocompleteMixin:
         connections (browser tabs) are interleaved on this one
         queue, and discarding everything but the newest would let one
         tab's keystroke swallow another tab's still-fresh
-        request.
+        request.  A ``None`` item is :meth:`_stop_complete_worker`'s
+        sentinel: the loop returns on it.
         """
         assert self._complete_queue is not None
         q = self._complete_queue
         while True:
+            item = q.get()
+            if item is None:
+                return
             (
                 query, seq, snapshot_file, snapshot_content, chat_id,
                 conn_id, tab_id,
-            ) = q.get()
+            ) = item
             try:
                 self._complete(
                     query, seq, snapshot_file, snapshot_content, chat_id,
@@ -366,9 +371,14 @@ class _AutocompleteMixin:
             # a check-then-emit outside the lock would leave a window
             # in which an already-checked stale result still escapes.
             # Nothing in the broadcast path acquires ``_state_lock``
-            # (an RLock in any case), so this cannot deadlock.
+            # (an RLock in any case), so this cannot deadlock.  A
+            # completion that finishes after the worker was stopped
+            # (daemon shutdown) is dropped the same way.
             with self._state_lock:
-                if seq != self._complete_seq_latest.get(conn_id, -1):
+                if (
+                    self._complete_stopped
+                    or seq != self._complete_seq_latest.get(conn_id, -1)
+                ):
                     return
                 self._emit_ghost(fast, query, conn_id, tab_id)
                 self._emit_completions(completions, query, conn_id, tab_id)
@@ -521,9 +531,12 @@ class _AutocompleteMixin:
         thread exhaustion) used to leave a dead thread object in
         :attr:`_complete_worker`, so every later call returned early
         and requests queued forever with no consumer.
+
+        Nothing is started once :meth:`_stop_complete_worker` ran;
+        :meth:`_cmd_complete` checks the same flag before enqueueing.
         """
         with self._state_lock:
-            if self._complete_worker is not None:
+            if self._complete_worker is not None or self._complete_stopped:
                 return
             self._complete_queue = queue.Queue()
             worker = threading.Thread(
@@ -532,16 +545,31 @@ class _AutocompleteMixin:
             worker.start()
             self._complete_worker = worker
 
-    def _resolve_work_dir(self, work_dir: str) -> str:
-        """Return *work_dir* when non-empty, else the daemon-wide work_dir.
+    def _stop_complete_worker(self) -> None:
+        """Stop the autocomplete worker thread; later requests are dropped.
 
-        Used by the ``@``-mention file picker so each chat tab can scan
-        its own working directory: the frontend stamps the active tab's
-        ``workDir`` on ``getFiles``/``recordFileUsage`` commands, and an
-        empty value falls back to the daemon-wide ``self.work_dir``
-        captured from ``KISS_WORKDIR`` or the most-recent ``setWorkDir``.
+        Run by the daemon's shutdown (``_shutdown_children``), idempotent
+        and bounded.  Under ``_state_lock`` the worker is marked stopped
+        (:meth:`_cmd_complete` enqueues nothing from then on, a
+        completion still computing publishes nothing and no worker is
+        started again), the requests still queued are dropped and the
+        ``None`` sentinel :meth:`_complete_worker_loop` returns on is
+        queued.  The join runs outside the lock, which the worker takes
+        to publish, and gives up after five seconds: the thread is a
+        daemon one, so a wedged completion cannot hold the shutdown.
         """
-        return work_dir or self.work_dir
+        with self._state_lock:
+            self._complete_stopped = True
+            worker, q = self._complete_worker, self._complete_queue
+            if q is not None:
+                while True:
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        break
+                q.put(None)
+        if worker is not None:
+            worker.join(timeout=5.0)
 
     def _refresh_files_after_task(self, work_dir: str = "") -> None:
         """Rescan the ``@``-mention index covering *work_dir* after a task.
@@ -561,9 +589,10 @@ class _AutocompleteMixin:
         files from this task's workspace (fixer-5 F5-03/R5-03).
 
         A work_dir whose covering root was never indexed is left
-        alone: the first ``getFiles`` there scans it from scratch.
+        alone: the first ``getFiles`` there scans it from scratch.  An
+        empty *work_dir* is the daemon-wide one, as for :meth:`_get_files`.
         """
-        self._file_index.refresh(self._resolve_work_dir(work_dir))
+        self._file_index.refresh(work_dir or self.work_dir)
 
     def _emit_files(
         self,
@@ -572,6 +601,7 @@ class _AutocompleteMixin:
         loading: bool = False,
         prefix: str = "",
         tab_id: str = "",
+        work_dir: str = "",
     ) -> None:
         """Emit one ``files`` event for the ``@``-mention picker.
 
@@ -586,7 +616,13 @@ class _AutocompleteMixin:
         frontend needs the prefix to drop late replies for an
         ``@``-mention the user has since edited or abandoned (a
         prefix-less reply used to re-open the picker over the input
-        and swallow the next Enter keystroke).
+        and swallow the next Enter keystroke).  The directory the
+        request resolved to is stamped the same way (the daemon-wide
+        one for a request that named none, spelled as ``configData``
+        reports it): the page drops a reply for a directory its tab no
+        longer browses, so a workspace pick on another surface that
+        lands while a cold index builds cannot leave the old
+        workspace's files in the picker (A16-3).
 
         Args:
             ranked: Ranked file suggestion dicts to send.
@@ -598,9 +634,10 @@ class _AutocompleteMixin:
                 page can show several chat tabs over one connection,
                 and they share a single picker element, so the tab is
                 what actually identifies the owner of the reply.
+            work_dir: The directory the ``getFiles`` command resolved to.
         """
         event: dict[str, Any] = {
-            "type": "files", "files": ranked, "prefix": prefix,
+            "type": "files", "files": ranked, "prefix": prefix, "workDir": work_dir,
         }
         if loading:
             event["loading"] = True
@@ -645,7 +682,7 @@ class _AutocompleteMixin:
         or abandoned, so the map only ever holds connections with a
         build in flight.
         """
-        wd = self._resolve_work_dir(work_dir)
+        wd = work_dir or self.work_dir
         token: object = object()
         with self._state_lock:
             self._files_latest_request[conn_id] = token
@@ -658,7 +695,7 @@ class _AutocompleteMixin:
             # quick build's populated reply be overwritten by the empty
             # placeholder that follows it (R09-3).
             self._emit_files(
-                [], conn_id, loading=True, prefix=prefix, tab_id=tab_id,
+                [], conn_id, loading=True, prefix=prefix, tab_id=tab_id, work_dir=wd,
             )
             queued = self._file_index.ensure(
                 wd,
@@ -673,7 +710,7 @@ class _AutocompleteMixin:
             return
         try:
             ranked = picker.search(prefix, _load_file_usage())
-            self._emit_files(ranked, conn_id, prefix=prefix, tab_id=tab_id)
+            self._emit_files(ranked, conn_id, prefix=prefix, tab_id=tab_id, work_dir=wd)
         finally:
             # This request is answered (or has failed for good — e.g.
             # ``_load_file_usage`` hit an unopenable database, which
@@ -693,8 +730,9 @@ class _AutocompleteMixin:
     ) -> None:
         """Deliver the populated reply of a ``getFiles`` that hit a cold index.
 
-        Runs on the :class:`FileIndexRegistry` worker thread once the
-        root it built is ready.  The picker is resolved again: a work_dir
+        *work_dir* is the resolved root, stamped on the reply.  Runs on
+        the :class:`FileIndexRegistry` worker thread once the root it
+        built is ready.  The picker is resolved again: a work_dir
         below the home directory is served by the home index unless the
         home scan turned out to skip it (gitignored, collapsed bulk
         data), in which case the work_dir becomes a root of its own and
@@ -713,8 +751,7 @@ class _AutocompleteMixin:
                 if not superseded and not self._file_index.ensure(
                     work_dir,
                     functools.partial(
-                        self._emit_indexed_files,
-                        prefix, work_dir, conn_id, tab_id, token,
+                        self._emit_indexed_files, prefix, work_dir, conn_id, tab_id, token,
                     ),
                 ):
                     self._release_files_token(conn_id, token)
@@ -724,7 +761,9 @@ class _AutocompleteMixin:
                 reqs = self._files_latest_request
                 if reqs.get(conn_id) is not token:
                     return
-                self._emit_files(ranked, conn_id, prefix=prefix, tab_id=tab_id)
+                self._emit_files(
+                    ranked, conn_id, prefix=prefix, tab_id=tab_id, work_dir=work_dir,
+                )
                 reqs.pop(conn_id, None)
         except Exception:
             # ``_load_file_usage`` hitting a corrupt ``history.db`` must

@@ -17,10 +17,12 @@ a bare backend (the constructor touches none of it).
 from __future__ import annotations
 
 import asyncio
+import gc
 import inspect
 import unittest
+import warnings
 
-from kiss.server.sorcar import ServerApi
+from kiss.server.sorcar import ApiContext, ServerApi
 
 
 class _Backend:
@@ -87,6 +89,40 @@ class TestAfterCancel(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*self.api._background_replies)
         self.assertEqual(ran, ["first", "second"])
         self.assertEqual(self.api._pending_history, {})
+
+    async def test_cancelled_remote_history_write_leaves_nothing_unawaited(self) -> None:
+        """A machine's history write cancelled before it ran is closed whole.
+
+        ``dispatch`` queues a ``MACHINE_HISTORY_WRITES`` command stamped
+        with a machine as a reply that forwards it and then nudges every
+        page to refetch.  Cancelled before its first step, or while queued
+        behind a predecessor, the reply is closed unrun; it must not have
+        wrapped a second coroutine, created in advance, that the close
+        cannot reach (the GC then warned ``_forwarded_reply ... was never
+        awaited``).  No machine is contacted: nothing here runs.
+        """
+        cmd = {"type": "setFavorite", "taskId": "task-1", "isFavorite": True, "machine": "box"}
+        blocked = asyncio.get_running_loop().create_future()
+
+        async def predecessor() -> None:
+            await blocked
+
+        def context(conn_id: str) -> ApiContext:
+            return ApiContext(endpoint=None, conn_state={"conn_id": conn_id}, is_local=True)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            self.api._spawn_after(self.api._pending_actions, ("queued", "box"), predecessor())
+            await self.api.dispatch(dict(cmd), context("queued"))
+            await asyncio.sleep(0)  # the write now waits on its predecessor
+            await self.api.dispatch(dict(cmd), context("fresh"))  # never takes a step
+            await self.api.cancel_background_replies()
+            await asyncio.sleep(0)
+            gc.collect()
+        self.assertEqual(
+            [str(w.message) for w in caught if "never awaited" in str(w.message)], [],
+        )
+        self.assertEqual(self.api._pending_actions, {})
 
 
 if __name__ == "__main__":

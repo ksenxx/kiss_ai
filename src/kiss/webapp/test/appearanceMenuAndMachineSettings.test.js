@@ -53,16 +53,16 @@ function pageWithMachines(opts) {
 function testBedrockSubpanel() {
   const {win} = makePage();
   const subpanels = Array.from(
-    win.document.querySelectorAll('#config-form .config-subpanel'),
-  ).map(el => el.id);
+    win.document.querySelectorAll('#settings-panel .config-subpanel'),
+  ).map(el => el.querySelector('.config-subpanel-toggle').id);
   assert.deepStrictEqual(
     subpanels,
     [
-      'api-keys-subpanel',
-      'custom-models-subpanel',
-      'bedrock-subpanel',
-      'claude-code-subpanel',
-      'codex-subpanel',
+      'api-keys-toggle',
+      'custom-models-toggle',
+      'bedrock-toggle',
+      'claude-code-toggle',
+      'codex-toggle',
     ],
     'Bedrock is the subpanel after Custom Models, Claude Code after it, Codex last',
   );

@@ -20,6 +20,13 @@ const WD = '/ws/repo';
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
 
+// Every native dialog a page of makePage called, as `window.prompt` /
+// `window.confirm`.  The guards throw, but a throw inside a DOM listener
+// never reaches the test (jsdom reports it on its console and the
+// dispatch returns normally), so makeRunner fails the test from this
+// ledger as well.
+const nativeDialogCalls = [];
+
 /**
  * Build a page.  `win.prompt` / `win.confirm` throw: nothing may call
  * them.  The page is the desktop one (wide viewport: split chat/content
@@ -48,9 +55,11 @@ function makePage(opts) {
       // The page ships its own dialogs; a native prompt/confirm would block
       // the whole page.  Any call is a defect.
       w.prompt = function () {
+        nativeDialogCalls.push('window.prompt');
         throw new Error('window.prompt must not be called');
       };
       w.confirm = function () {
+        nativeDialogCalls.push('window.confirm');
         throw new Error('window.confirm must not be called');
       };
       created = harness.stubMonaco(w);
@@ -90,6 +99,11 @@ function key(win, el, name, extra) {
     ),
   );
 }
+
+// The two forms a keydown inside an IME composition takes (`extra` for
+// `key`): the standard flag, and the legacy keyCode 229 some browsers
+// send instead.  Neither is a submit.
+const IME_FORMS = [{isComposing: true}, {keyCode: 229}];
 
 /**
  * Bring a workspace section of the task-info panel (meta-explorer /
@@ -270,10 +284,18 @@ function makeRunner() {
   let passed = 0;
   const failures = [];
   function pass(name) {
+    // A forbidden native dialog called from a listener while the test
+    // ran is the test's failure, whatever its own assertions said.
+    if (nativeDialogCalls.length) {
+      const calls = nativeDialogCalls.splice(0).join(', ');
+      fail(name, new Error(`${calls} must not be called (native dialog)`));
+      return;
+    }
     passed++;
     console.log(`  \u2713 ${name}`);
   }
   function fail(name, e) {
+    nativeDialogCalls.length = 0;
     failures.push({name, error: e});
     console.log(`  \u2717 ${name}`);
     console.log(`      ${e.stack || e.message}`);
@@ -299,7 +321,11 @@ function makeRunner() {
     console.log(`\n${title}: ${passed} passed, ${failures.length} failed`);
     if (failures.length) process.exit(1);
   }
-  return {test, report};
+  /** How many tests failed so far (a probe for a runner under test). */
+  function failed() {
+    return failures.length;
+  }
+  return {test, report, failed};
 }
 
 module.exports = {
@@ -314,6 +340,7 @@ module.exports = {
   keyboardClick,
   rightClick,
   key,
+  IME_FORMS,
   byId,
   showSection,
   ofType,

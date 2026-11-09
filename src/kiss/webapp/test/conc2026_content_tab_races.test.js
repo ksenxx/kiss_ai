@@ -36,6 +36,7 @@ const {
   makePage: makeSharedPage,
   send,
   waitFor,
+  sleep,
   click,
   stubMonaco,
 } = require('./simplify2_harness');
@@ -274,11 +275,62 @@ async function testClosingTabRemovesConflictToast() {
   win.close();
 }
 
+// A Save clicked while a Reload from disk awaits its reply is the
+// later intent: it supersedes the reload.  The daemon answers both in
+// order (the read, then the write); the read's reply must not replace
+// the editor with the old text and, with it, drop the save's token --
+// the buffer would then read clean on the old text while the disk
+// holds the saved one, and the next save would carry the old version.
+async function testSaveSupersedesPendingReload() {
+  const ctx = makePage();
+  const {win, posted, created} = ctx;
+  await openDirtyContentTab(ctx);
+  const refreshBtn = win.document.querySelector('.content-refresh-btn');
+  assert.ok(refreshBtn, 'the save bar has a Reload from disk button');
+  click(win, refreshBtn);
+  const reload = posted.filter(m => m && m.type === 'openFile').pop();
+  assert.ok(reload && /^reload:/.test(reload.token), 'setup: reload sent');
+  click(win, win.document.querySelector('.content-save-btn'));
+  const save = posted.filter(m => m && m.type === 'saveFile').pop();
+  assert.ok(save, 'setup: the save is sent while the reload is pending');
+  assert.strictEqual(save.version, 'ver-1');
+  send(win, {
+    type: 'fileContent',
+    tabId: 'a1',
+    token: reload.token,
+    path: FILE_PATH,
+    name: 'notes.txt',
+    content: 'v1 on disk',
+    version: 'ver-1',
+  });
+  send(win, {type: 'fileSaved', token: save.token, ok: true, version: 'ver-2'});
+  await sleep(0);
+  assert.strictEqual(
+    created.length,
+    1,
+    'BUG: the superseded reload replaced the editor',
+  );
+  assert.strictEqual(created[0].editor.getModel().getValue(), 'v1 edited');
+  const status = win.document.querySelector('.content-save-status');
+  assert.strictEqual(status.textContent, 'Saved', 'the save was acknowledged');
+  // The next save carries the version the acknowledged save produced.
+  created[0].editor._type('v1 edited again');
+  click(win, win.document.querySelector('.content-save-btn'));
+  const next = posted.filter(m => m && m.type === 'saveFile').pop();
+  assert.notStrictEqual(next.token, save.token, 'a second save is sent');
+  assert.strictEqual(next.version, 'ver-2', 'with the saved version');
+  win.close();
+}
+
 (async () => {
   const {test, report} = makeRunner();
   await test(
     'a foreign-scope error does not swallow the reload',
     testForeignScopeErrorMustNotSwallowReload,
+  );
+  await test(
+    'a save sent while a reload is pending supersedes the reload',
+    testSaveSupersedesPendingReload,
   );
   await test(
     'a same-scope error still clears the reload flag',

@@ -729,6 +729,39 @@ def test_liveness_probe_of_a_browser_that_does_not_answer_is_bounded(tool, servi
 
 
 @posix_only("the browser is frozen with SIGSTOP")
+def test_leaving_a_browser_that_does_not_answer_is_bounded(tool, service, server):
+    """``show_browser(False)`` on a tab whose browser stopped answering comes
+    back on its own: the cookie read, the tab close and the disconnect are
+    bounded like the liveness probe, and a jar that could not be read is
+    not an empty one, so the cookie carried in earlier is still there
+    headless."""
+    tool.go_to_url(f"{server}/persist-login")
+    tool.show_browser()
+    tool.go_to_url(f"{server}/inert")
+    assert [c["name"] for c in tool._carried_cookies] == [PERSISTENT_COOKIE.split("=")[0]]
+    pid = _daemon_browser_pid(tool)
+    os.kill(pid, signal.SIGSTOP)
+    resume = threading.Timer(120, os.kill, args=(pid, signal.SIGCONT))
+    resume.daemon = True
+    resume.start()
+    try:
+        started = time.monotonic()
+        tree = tool.show_browser(visible=False)
+        elapsed = time.monotonic() - started
+    finally:
+        resume.cancel()
+        try:
+            os.kill(pid, signal.SIGCONT)
+        except ProcessLookupError:  # exited once resumed (its last tab was closed)
+            pass
+    assert tree.startswith("Page:") and not tool._live, tree
+    assert elapsed < 90, f"the switch waited {elapsed:.0f}s for the browser"
+    assert tool._carried_cookies == []
+    tool.go_to_url(f"{server}/cookies")
+    assert PERSISTENT_COOKIE in tool.get_page_content(text_only=True)
+
+
+@posix_only("the browser is frozen with SIGSTOP")
 def test_browser_exiting_during_the_liveness_probe_is_noticed(tool, service, server):
     """A browser that dies while ``_is_alive`` waits on it is reported dead at
     once, and the next call reconnects to the browser the daemon relaunches."""

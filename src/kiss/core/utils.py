@@ -9,6 +9,7 @@ import contextlib
 import functools
 import html as html_module
 import logging
+import ntpath
 import os
 import posixpath
 import re
@@ -171,10 +172,8 @@ def atomic_write_text(
     target.parent.mkdir(parents=True, exist_ok=True)
     preserved: int | None = mode
     if preserved is None:
-        try:
+        with contextlib.suppress(OSError):  # new file: created with create_mode below
             preserved = stat.S_IMODE(target.stat().st_mode)
-        except OSError:
-            preserved = None  # new file: created with create_mode below
     # A new file is staged with create_mode so the kernel applies the
     # process umask at creation, exactly like Path.write_text — without
     # the process-global (and thread-racy) os.umask() probe.  An existing
@@ -374,7 +373,9 @@ def _make_writable_and_retry(
     Windows refuses to unlink a read-only file (the bit is on the file);
     POSIX refuses to unlink or rmdir inside a directory without the write
     bit (the bit is on the parent), so both get ``u+rwx`` -- the parent
-    only below *root*, so nothing outside the tree changes.  An unlink or
+    only below *root*, and a symlink not at all (``chmod`` would follow
+    it to its target; its own bits never block its unlink), so nothing
+    outside the tree changes.  An unlink or
     rmdir is then retried; a directory that could not be opened or listed
     is removed as a tree of its own.  Each path gets one retry
     (*attempted*); a file that is already gone is fine (another remover
@@ -388,7 +389,8 @@ def _make_writable_and_retry(
     try:
         if path != root:
             os.chmod(os.path.dirname(path), stat.S_IRWXU)
-        os.chmod(path, stat.S_IRWXU)
+        if not os.path.islink(path):
+            os.chmod(path, stat.S_IRWXU)
         if func in (os.unlink, os.rmdir):
             func(path)
         else:
@@ -486,9 +488,11 @@ def is_root_dir(path: str) -> bool:
     whole disk, so callers treat a root exactly like "no work dir" and
     fall back to a properly configured folder.
 
-    Root-equivalent spellings (``/./``, ``/..``, ``C:\\.\\``) are
-    normalized before the check so they cannot slip past a literal
-    comparison.  Windows UNC roots (``\\\\server\\share``) are NOT
+    Root-equivalent spellings (``/./``, ``/..``, ``C:\\.\\``, ``C:\\..``)
+    are normalized before the check so they cannot slip past a literal
+    comparison: a drive path with Windows semantics (``..`` clamps at
+    the drive root), any other with POSIX ones.  Windows UNC roots
+    (``\\\\server\\share``) are NOT
     detected: on POSIX a double-slash prefix is a legal path, so
     classifying it as a root would blank legitimate directories.
 
@@ -499,13 +503,13 @@ def is_root_dir(path: str) -> bool:
         ``True`` when *path* is a filesystem root; ``False`` for every
         other string, including empty or whitespace-only ones.
     """
-    p = posixpath.normpath(path.strip().replace("\\", "/"))
-    if p in ("/", "//"):
-        return True
-    # A bare or slash-terminated drive ('C:', 'C:\', 'C:/') from a
-    # Windows-side client.  ASCII letters only, as Windows itself
-    # recognizes no other drive letters.
-    return len(p) == 2 and p[1] == ":" and p[0] in string.ascii_letters
+    p = path.strip()
+    # A drive path ('C:', 'C:\', 'C:/', 'C:\..') from a Windows-side
+    # client.  ASCII letters only, as Windows itself recognizes no other
+    # drive letters.
+    if len(p) >= 2 and p[1] == ":" and p[0] in string.ascii_letters:
+        return ntpath.splitdrive(ntpath.normpath(p))[1] in ("", "\\")
+    return posixpath.normpath(p.replace("\\", "/")) in ("/", "//")
 
 
 def substitute_prompt_args(template: str, arguments: dict[str, str] | None) -> str:
@@ -600,13 +604,33 @@ def _looks_like_html(text: str, tag_at_start: bool) -> bool:
 
     A DOCTYPE at the start (modulo whitespace) always counts.  With
     *tag_at_start* the tag must open the text; otherwise it may appear
-    anywhere.
+    anywhere outside Markdown code (a fenced or indented block, a code
+    span), where a tag is an example rather than markup.  The Markdown is
+    read unstripped: leading indentation is what makes an opening example
+    an indented code block.
     """
     stripped = text.lstrip()
     if stripped[:9].lower() == "<!doctype":
         return True
-    found = _HTML_TAG_RE.match(stripped) if tag_at_start else _HTML_TAG_RE.search(stripped)
-    return found is not None
+    if tag_at_start:
+        return _HTML_TAG_RE.match(stripped) is not None
+    return any(_HTML_TAG_RE.search(markup) for markup in _html_markup(text))
+
+
+def _html_markup(text: str) -> list[str]:
+    """The raw HTML of *text* read as Markdown: its HTML blocks and inline
+    tags, which excludes code (a fenced or indented block, a code span).
+    Without ``markdown_it`` the whole text counts as markup."""
+    try:
+        tokens = _markdown().parse(text)
+    except ImportError:
+        return [text]
+    markup = [token.content for token in tokens if token.type == "html_block"]
+    for token in tokens:
+        for child in token.children or ():
+            if child.type == "html_inline":
+                markup.append(child.content)
+    return markup
 
 
 def _unescape_escaped_html(text: str) -> str | None:
@@ -666,7 +690,7 @@ def ensure_html(text: str) -> str:
     if unescaped is not None:
         return unescaped
     try:
-        from markdown_it import MarkdownIt
+        parser = _markdown()
     except ImportError:
         # markdown_it can be momentarily unimportable (e.g. the installer
         # is rebuilding the venv with `uv sync`).  finish() runs on error
@@ -674,9 +698,20 @@ def ensure_html(text: str) -> str:
         # HTML-escaped text instead of masking the original error.
         escaped = html_module.escape(text).replace("\n", "<br/>")
         return f"<p>{escaped}</p>"
-
-    rendered: str = MarkdownIt("commonmark", {"breaks": False}).enable("table").render(text)
+    rendered: str = parser.render(text)
     return rendered.strip()
+
+
+def _markdown() -> Any:
+    """A new Markdown parser for :func:`ensure_html`, built when
+    ``markdown_it`` imports.  One per call, never shared: markdown-it fills
+    a parser's rule caches lazily on its first use and publishes each
+    cache empty before filling it, so a parser shared across threads hands
+    a concurrent first render no rules (an empty result, or an endless
+    loop in the block parser)."""
+    from markdown_it import MarkdownIt
+
+    return MarkdownIt("commonmark", {"breaks": False}).enable("table")
 
 
 def finish(

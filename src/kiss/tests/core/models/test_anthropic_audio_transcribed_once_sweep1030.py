@@ -30,6 +30,7 @@ from typing import Any
 
 import pytest
 
+from kiss.core.models import anthropic_model
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.model import Attachment
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
@@ -142,3 +143,25 @@ def test_audio_handed_over_from_an_openai_model_is_transcribed_once(
 
     assert whisper == ["/v1/audio/transcriptions"], f"{len(whisper)} Whisper calls for one clip"
     assert [_transcripts(request) for request in requests] == [[_FIRST_TRANSCRIPT]] * 2
+
+
+def test_the_transcript_cache_forgets_the_clip_used_longest_ago(whisper: list[str]) -> None:
+    """The process-wide cache is bounded: the daemon lives for days, its clips do not.
+
+    Once ``_TRANSCRIPT_CACHE_SIZE`` other clips were transcribed, the
+    clip used longest ago is transcribed again; one used since is not.
+    """
+    size = anthropic_model._TRANSCRIPT_CACHE_SIZE
+    first, *rest = [Attachment(_clip(), "audio/wav") for _ in range(size + 1)]
+    anthropic_model._transcript(first)
+    for clip in rest[:-1]:
+        anthropic_model._transcript(clip)
+    anthropic_model._transcript(first)  # used again: the newest now
+    anthropic_model._transcript(rest[-1])  # one more clip than the cache holds
+    calls = len(whisper)
+    assert calls == len(rest) + 1
+
+    anthropic_model._transcript(first)
+    assert len(whisper) == calls, "a clip used since the others was transcribed again"
+    anthropic_model._transcript(rest[0])
+    assert len(whisper) == calls + 1, "the clip used longest ago is still remembered"

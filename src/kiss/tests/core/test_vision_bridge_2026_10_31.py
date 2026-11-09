@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -23,10 +24,12 @@ from PIL import Image, ImageDraw, ImageFont
 
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core import config as config_module
+from kiss.core import stop_signal
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.claude_code_model import ClaudeCodeModel
+from kiss.core.models.codex_model import CodexModel
 from kiss.core.models.model import Attachment, hand_off_conversation
 from kiss.core.models.model_families import model_supports_images
 from kiss.core.models.model_info import (
@@ -35,10 +38,11 @@ from kiss.core.models.model_info import (
     calculate_cost,
 )
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-from kiss.core.models.vision_bridge import Described, describe_attachments, vision_model
+from kiss.core.models.vision_bridge import describe_attachments, vision_model
 from kiss.tests.agents.sorcar.local_model_server import serve, tool_call_body
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 from kiss.tests.core.models.anthropic_sse_harness import ScriptedAnthropicServer, sse
+from kiss.tests.core.test_audit1018_codex_bridge_stop import _call, _reply
 
 TEXT_ONLY_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
 """A catalog name of a model that cannot see; the local server answers for it."""
@@ -246,6 +250,87 @@ def test_a_cli_transport_gets_the_description(tmp_path: Path) -> None:
     assert "42" in text
 
 
+def test_a_codex_native_tool_result_gets_the_description(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A tool Codex calls natively over the MCP bridge goes through the bridge too.
+
+    The native executor stripped the attachments itself and recorded the
+    stripped text, so neither Codex (in the MCP reply) nor the next turn
+    or a model switch (in the replayed conversation) ever got the vision
+    description: a screenshot was ``[1 attachment(s) ... could not be
+    shown]`` for good.  Now the reply carries the description and the
+    usage line like any tool result, and the replay records that text
+    as it was served (the usage line once).
+    """
+    png_path = tmp_path / "shot.png"
+    _write_png(png_path)
+    usage_line = "Steps: 3/10 (the footer the framework shows the model)"
+
+    def read_the_png(call: dict[str, Any]) -> tuple[str, str]:
+        return call["name"], UsefulTools().Read(str(png_path))
+
+    schema = [{"type": "function", "function": {"name": "Read", "parameters": {"type": "object"}}}]
+    with ScriptedAnthropicServer(_vision_turn("A white 480x240 PNG reading KISS 42.")) as vision:
+        _route_the_bridge_to(monkeypatch, vision)
+        adapter = CodexModel("codex/default")
+        adapter.usage_info_for_messages = usage_line
+        with adapter.native_tools_exposed(schema, read_the_png):
+            bridge = adapter._tool_bridge
+            assert bridge is not None
+            reply = _reply(_call(bridge, "Read"))
+        vision_requests = vision.requests
+    assert len(vision_requests) == 1
+    served = reply["text"]
+    assert "could not be shown" not in served
+    assert f"[Description of image/png attachment 1 by {LOCAL_VISION_MODEL}; " in served
+    assert "the model you run on (codex/default) cannot see images]" in served
+    assert "KISS 42" in served
+    assert served.count(usage_line) == 1
+    tool_message = adapter.conversation[-1]
+    assert tool_message["role"] == "tool"
+    assert tool_message["content"] == served
+    assert tool_message["tool_call_id"] == adapter.conversation[-2]["tool_calls"][0]["id"]
+
+
+def test_a_stop_during_the_description_of_a_codex_native_result_is_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A Stop landing on the bridge's thread while the picture is described is a reply.
+
+    The agent's executor binds the task's stop event to the bridge's
+    thread and turns the ``KeyboardInterrupt`` a Stop raises into an
+    error Codex is told about; the description runs after the executor
+    returned, on the same thread, under the same binding.  Left to
+    escape, the interrupt killed the handler thread: Codex got no reply
+    and the call was never recorded.
+    """
+    png_path = tmp_path / "shot.png"
+    _write_png(png_path)
+    stop = threading.Event()
+    stop.set()
+
+    def read_the_png_under_a_stop(call: dict[str, Any]) -> tuple[str, str]:
+        stop_signal.set_thread_stop_event(stop)
+        return call["name"], UsefulTools().Read(str(png_path))
+
+    schema = [{"type": "function", "function": {"name": "Read", "parameters": {"type": "object"}}}]
+    with ScriptedAnthropicServer(_vision_turn("never read")) as vision:
+        _route_the_bridge_to(monkeypatch, vision)
+        adapter = CodexModel("codex/default")
+        with adapter.native_tools_exposed(schema, read_the_png_under_a_stop):
+            bridge = adapter._tool_bridge
+            assert bridge is not None
+            reply = _reply(_call(bridge, "Read"))
+    stopped = "KISSError: KISS Error: Tool Read stopped: Agent stop requested"
+    assert reply == {"error": stopped}
+    assert adapter.conversation[-1] == {
+        "role": "tool",
+        "tool_call_id": adapter.conversation[-2]["tool_calls"][0]["id"],
+        "content": stopped,
+    }
+
+
 def test_no_vision_model_configured_says_so(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -307,19 +392,6 @@ def test_a_failed_vision_call_becomes_a_failure_line(
     )
     # The call was made (and counted); a rejected request is billed nothing.
     assert (described.cost, described.tokens, described.calls) == (0.0, 0, 1)
-
-
-def test_audio_is_not_described() -> None:
-    """A clip no vision model reads gets the failure line, with no call made."""
-    described = describe_attachments([Attachment(b"RIFF", "audio/wav")], TEXT_ONLY_MODEL)
-    assert described == Described(
-        "[audio/wav attachment 1 could not be described: only images and PDFs are "
-        f"described; the model you run on ({TEXT_ONLY_MODEL}) cannot see images, "
-        "use a vision model or an OCR tool]",
-        0.0,
-        0,
-        0,
-    )
 
 
 def test_a_text_only_adapter_routes_attachments_through_the_bridge(
@@ -572,7 +644,7 @@ def test_a_stop_during_a_description_keeps_every_billed_call(
     """
     credited: dict[str, tuple[float, int]] = {}  # by key: a retried credit counts once
 
-    def credit(cost: float, tokens: int, key: str) -> None:
+    def credit(cost: float, tokens: int, key: str, model: str) -> None:
         credited.setdefault(key, (cost, tokens))
 
     png = Attachment(_write_png(tmp_path / "shot.png"), "image/png")
@@ -671,11 +743,11 @@ def test_a_stop_inside_the_credit_is_retried_and_counted_once(
     )
     calls: list[str] = []
 
-    def credit(cost: float, tokens: int, key: str) -> None:
+    def credit(cost: float, tokens: int, key: str, helper: str) -> None:
         calls.append(key)
         if len(calls) == 1 and not stop_after_store:
             raise KeyboardInterrupt("stop before the store")
-        model._credit_helper_usage(cost, tokens, key)
+        model._credit_helper_usage(cost, tokens, key, helper)
         if len(calls) == 1:
             raise KeyboardInterrupt("stop after the store")
 
@@ -688,6 +760,10 @@ def test_a_stop_inside_the_credit_is_retried_and_counted_once(
         pytest.approx(VISION_COST),
         VISION_INPUT_TOKENS + VISION_OUTPUT_TOKENS,
     )
+    # Listed once under the vision model, for the task's split by model.
+    assert [(key, helper) for key, helper, _, _ in model.helper_calls()] == [
+        (calls[0], vision_model())
+    ]
 
 
 def test_the_session_bank_folds_helper_spend_a_stop_left_unfolded(

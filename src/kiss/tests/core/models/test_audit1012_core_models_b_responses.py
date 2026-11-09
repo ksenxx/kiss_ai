@@ -344,6 +344,46 @@ def test_explicit_tool_use_id_wins_but_still_consumes_the_pending_call() -> None
         assert _calls_and_outputs(_sent_input(server))[-4:] == second_turn
 
 
+def test_an_unknown_explicit_tool_use_id_is_rejected_and_rolled_back() -> None:
+    """An explicit id no pending call carries answers nothing (A04-7a).
+
+    Matching it by name instead consumed another pending call and
+    recorded a second output under the explicit id: the queue ran empty
+    while the other call stayed unanswered in the conversation.
+    """
+    script = _Script([[("c1", "f"), ("c2", "f")], [("c3", "f"), ("c4", "f")]])
+    with ScriptedOpenAIServer(script) as server:
+        model = _v2(server.base_url)
+        _tool_turn(model)
+        model.add_function_results_to_conversation_and_return(
+            [("f", {"result": "first", "tool_use_id": "c1"})]
+        )
+        before = list(model.conversation)
+        with pytest.raises(KISSError, match="No pending function_call named 'f' with call_id 'c1'"):
+            model.add_function_results_to_conversation_and_return(
+                [("f", {"result": "again", "tool_use_id": "c1"})]
+            )
+        assert model.conversation == before
+        assert model._pending_function_calls == [{"name": "f", "call_id": "c2"}]
+        model.add_function_results_to_conversation_and_return([("f", {"result": "second"})])
+        _tool_turn(model)
+        assert _calls_and_outputs(_sent_input(server)) == [
+            ("call", "c1", "f"),
+            ("call", "c2", "f"),
+            ("output", "c1", "first"),
+            ("output", "c2", "second"),
+        ]
+        # The same through a restored history, whose unanswered calls are
+        # matched without a pending queue.
+        restored = _restored(server, model)
+        before = list(restored.conversation)
+        with pytest.raises(KISSError, match="No unanswered function_call named 'f' with call_id"):
+            restored.add_function_results_to_conversation_and_return(
+                [("f", {"result": "lost", "tool_use_id": "c9"})]
+            )
+        assert restored.conversation == before
+
+
 def test_function_call_without_call_id_is_rejected_at_the_transport() -> None:
     """A pending entry with an empty ``call_id`` cannot exist.
 

@@ -338,6 +338,44 @@ class TestContentTabEditing:
         assert path.read_text() == "rewritten_by_agent = True\n"
         assert "changed on disk" in page.locator(_STATUS).inner_text()
         assert page.locator(_DIRTY_TAB).count() == 1
+        # The message is long: at a phone width the bar wraps it rather
+        # than pushing Save and Reload out of the clipped pane (A24).
+        viewport = page.viewport_size
+        page.set_viewport_size({"width": 360, "height": 800})
+        # A phone stacks the surfaces (the layout switch hides the pane
+        # once the media query fires): the file's link then brings its
+        # tab back (dispatched: the conflict toast the caller needs
+        # covers the link).
+        page.wait_for_function(
+            "() => !document.body.classList.contains('remote-desktop')",
+            timeout=10000,
+        )
+        page.dispatch_event("#" + link_id, "click")
+        page.wait_for_function(
+            "() => document.querySelector('#content-tab-area')"
+            ".getBoundingClientRect().width > 0",
+            timeout=10000,
+        )
+        pushed_out = page.evaluate(
+            """sel => {
+                 const pane = document.querySelector('#content-tab-area')
+                   .getBoundingClientRect().right;
+                 const bar = document.querySelector(sel + '.content-save-bar');
+                 return [...bar.children]
+                   .filter(el => el.getBoundingClientRect().right > pane + 0.5)
+                   .map(el => el.className);
+               }""",
+            _EDITOR,
+        )
+        assert pushed_out == []
+        assert page.locator(_SAVE_BTN).is_visible()
+        assert page.locator(_EDITOR + ".content-refresh-btn").is_visible()
+        assert viewport is not None
+        page.set_viewport_size(viewport)
+        page.wait_for_function(
+            "() => document.body.classList.contains('remote-desktop')",
+            timeout=10000,
+        )
         return path
 
     def test_conflict_overwrite_writes_the_edits(self, browser, harness) -> None:

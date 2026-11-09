@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import sys
 import threading
 from collections.abc import Iterator
@@ -27,9 +28,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 import kiss.scripts.update_models as mod
+from kiss.core.kiss_error import KISSError
+from kiss.core.models.decisions_model import DecisionsModel, noul
 from kiss.scripts.update_models import (
     _assume_untested_capabilities,
     _build_entry,
@@ -85,13 +89,14 @@ class _ModelsListingHandler(BaseHTTPRequestHandler):
     """Serve ``/api/v1/models`` and its ``?output_modalities=decisions`` variant."""
 
     text_listing: dict[str, Any] = TEXT_LISTING
+    decisions_listing: dict[str, Any] = DECISIONS_LISTING
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, D102
         return
 
     def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
         if "output_modalities=decisions" in self.path:
-            listing = DECISIONS_LISTING
+            listing = _ModelsListingHandler.decisions_listing
         else:
             listing = _ModelsListingHandler.text_listing
         payload = json.dumps(listing).encode()
@@ -103,8 +108,12 @@ class _ModelsListingHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def _listing_server(text_listing: dict[str, Any] = TEXT_LISTING) -> Iterator[str]:
+def _listing_server(
+    text_listing: dict[str, Any] = TEXT_LISTING,
+    decisions_listing: dict[str, Any] = DECISIONS_LISTING,
+) -> Iterator[str]:
     _ModelsListingHandler.text_listing = text_listing
+    _ModelsListingHandler.decisions_listing = decisions_listing
     server = HTTPServer(("127.0.0.1", 0), _ModelsListingHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -294,20 +303,34 @@ def test_apply_and_readme_sync_record_decisions_models(
 
 
 def test_skip_test_assumes_flags_from_listing() -> None:
-    """--skip-test derives gen/emb/fc/dec from the listing markers without probing."""
+    """--skip-test derives gen/emb/fc/dec from the listing markers without probing.
+
+    Only a candidate assumed to generate text is assumed to call tools:
+    embedding-only (Together or Gemini) and decisions-only candidates get
+    ``fc=False``, and a Gemini candidate advertising neither
+    ``generateContent`` nor ``embedContent`` is dropped like a candidate
+    that fails every live probe.
+    """
     candidates: list[dict[str, Any]] = [
         {"name": JEV, "is_decisions": True},
         {"name": "BAAI/bge-large-en-v1.5", "is_embedding": True},
         {"name": "openrouter/openai/gpt-4o"},
+        {"name": "gemini-embedding-001", "is_embedding": True, "is_generation": False},
+        {"name": "gemini-9-flash", "is_embedding": False, "is_generation": True},
+        {"name": "gemini-9-flash-live", "is_embedding": False, "is_generation": False},
     ]
-    _assume_untested_capabilities(candidates)
+    kept = _assume_untested_capabilities(candidates)
     flags = [(c["gen"], c["emb"], c["fc"], c["dec"]) for c in candidates]
     assert flags == [
         (False, False, False, True),
-        (False, True, True, False),
+        (False, True, False, False),
         (True, False, True, False),
+        (False, True, False, False),
+        (True, False, True, False),
+        (False, False, False, False),
     ]
     assert all(c["thinking"] is None and c["use_responses_api"] is False for c in candidates)
+    assert [c["name"] for c in kept] == [c["name"] for c in candidates[:-1]]
 
 
 def test_current_model_info_exposes_dec_flag() -> None:
@@ -335,10 +358,33 @@ def test_live_decisions_probe_drives_capabilities(capsys: pytest.CaptureFixture[
 
 
 @pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set")
-def test_live_decisions_probe_fails_closed_on_bad_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An endpoint error (here HTTP 401) is a failed probe, not an exception."""
+def test_live_decisions_probe_tells_a_verdict_from_endpoint_trouble(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown model (HTTP 400) is a failed probe; a rejected key (HTTP 401) is no verdict."""
+    assert probe_decisions("openrouter/typesafe/does-not-exist-0.0") is False
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-invalid")
-    assert probe_decisions(JEV) is False
+    assert probe_decisions(JEV) is None
+
+
+def test_a_refused_connection_is_no_verdict_on_a_decisions_model() -> None:
+    """The adapter wraps httpx's connection error in a ``KISSError``; the probe looks through it.
+
+    The endpoint is a free loopback port, so the real transport is
+    refused at once: no HTTP status, no vendor reply, nothing about the
+    model -- ``dec`` must keep its stored value.  (A port bound but not
+    listening is refused on Linux only; macOS drops the SYN and the
+    connect times out.)
+    """
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    down = DecisionsModel(JEV, base_url=f"http://127.0.0.1:{port}", api_key="k")
+    with pytest.raises(KISSError) as caught:
+        down.decide("The parcel arrived crushed.", {"damaged": noul("Was it damaged?")})
+    assert isinstance(caught.value.__cause__, httpx.ConnectError)
+    assert mod._is_inconclusive_probe_error(caught.value) is True
 
 
 @pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set")
@@ -358,27 +404,32 @@ def test_live_probe_new_models_keeps_decisions_and_drops_dead_candidates() -> No
     assert candidates[2]["_skip"] is True
 
 
-@pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set")
-def test_main_test_existing_drops_dec_when_probe_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """``--test-existing`` re-probes catalogued decisions models; a failed probe clears ``dec``.
+_JEV_ENTRY = {
+    "context_length": 32000,
+    "input_price_per_1M": 0.042,
+    "output_price_per_1M": 0.0,
+    "fc": False,
+    "emb": False,
+    "gen": False,
+    "dec": True,
+}
 
-    The probe really goes to OpenRouter, with a deliberately invalid key so
-    it fails (HTTP 401).  Only the two Jev entries are in the catalog, so
-    no text model is probed; the listing comes from the local server.
+
+def _retest_decisions_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, names: tuple[str, ...]
+) -> Path:
+    """Run ``--test-existing --verbose`` on a catalog of decisions entries; return its path.
+
+    Only decisions entries are in the catalog, so no text model is probed;
+    the local listing server lists exactly those entries (so none is new
+    or retired), the probe itself goes wherever ``OPENROUTER_API_KEY``
+    lets it.
     """
-    jev_entry = {
-        "context_length": 32000,
-        "input_price_per_1M": 0.042,
-        "output_price_per_1M": 0.0,
-        "fc": False,
-        "emb": False,
-        "gen": False,
-        "dec": True,
-    }
     target = tmp_path / "MODEL_INFO.json"
-    target.write_text(json.dumps({JEV: jev_entry, JEV_PINNED: jev_entry}))
+    target.write_text(json.dumps(dict.fromkeys(names, _JEV_ENTRY)))
+    listing = {
+        "data": [_or_model(name.removeprefix("openrouter/"), "0.000000042", "0") for name in names]
+    }
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", target)
     monkeypatch.setattr(mod, "README_PATH", tmp_path / "README.md")
     for fetcher in (
@@ -390,20 +441,58 @@ def test_main_test_existing_drops_dec_when_probe_fails(
     ):
         monkeypatch.setattr(mod, fetcher, lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_codex_supported_slugs", lambda verbose=False: set())
-    snapshot = {**jev_entry, "thinking": None, "alias_of": None, "use_responses_api": None}
+    snapshot = {**_JEV_ENTRY, "thinking": None, "alias_of": None, "use_responses_api": None}
     monkeypatch.setattr(
-        mod, "get_current_model_info", lambda: {JEV: dict(snapshot), JEV_PINNED: dict(snapshot)}
+        mod, "get_current_model_info", lambda: {name: dict(snapshot) for name in names}
     )
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-invalid")
     monkeypatch.setattr(sys, "argv", ["update_models.py", "--test-existing", "--verbose"])
-    with _listing_server(text_listing={"data": []}) as url:
+    with _listing_server(text_listing={"data": []}, decisions_listing=listing) as url:
         _point_fetch_at(monkeypatch, url)
         mod.main()
+    return target
+
+
+@pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set")
+def test_main_test_existing_drops_dec_when_probe_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--test-existing`` clears ``dec`` from an entry OpenRouter rejects for good (HTTP 400)."""
+    gone = "openrouter/typesafe/does-not-exist-0.0"
+    target = _retest_decisions_catalog(tmp_path, monkeypatch, (gone,))
     out = capsys.readouterr().out
-    assert f"{JEV}: dec changed True -> False" in out
-    assert f"{JEV_PINNED}: dec changed True -> False" in out
+    assert f"{gone}: dec changed True -> False" in out
     assert "dec=N" in out
     written = json.loads(target.read_text())
-    assert set(written) == {JEV, JEV_PINNED}
-    assert "dec" not in written[JEV] and "dec" not in written[JEV_PINNED]
-    assert written[JEV]["gen"] is False
+    assert set(written) == {gone}
+    assert "dec" not in written[gone]
+    assert written[gone]["gen"] is False
+
+
+@pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set")
+def test_main_test_existing_keeps_dec_when_the_key_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A rejected key (HTTP 401) says nothing about the models: ``dec`` survives the retest."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-invalid")
+    target = _retest_decisions_catalog(tmp_path, monkeypatch, (JEV, JEV_PINNED))
+    out = capsys.readouterr().out
+    assert f"{JEV}: probe inconclusive, stored capabilities kept" in out
+    assert "dec=?" in out
+    assert "changed" not in out
+    written = json.loads(target.read_text())
+    assert written[JEV]["dec"] is True and written[JEV_PINNED]["dec"] is True
+
+
+def test_main_test_existing_keeps_dec_without_a_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With no OpenRouter key configured the decisions probe never runs and ``dec`` is kept."""
+    from kiss.core import config as config_module
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "")
+    target = _retest_decisions_catalog(tmp_path, monkeypatch, (JEV,))
+    out = capsys.readouterr().out
+    assert f"{JEV}: probe inconclusive, stored capabilities kept" in out
+    assert "changed" not in out
+    assert json.loads(target.read_text())[JEV]["dec"] is True

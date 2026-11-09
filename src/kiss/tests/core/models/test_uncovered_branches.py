@@ -27,9 +27,7 @@ class TestDeepSeekReasoningNoMatch(TestCase):
             _extract_deepseek_reasoning,
         )
 
-        reasoning, answer = _extract_deepseek_reasoning("Just a plain answer")
-        assert reasoning == ""
-        assert answer == "Just a plain answer"
+        assert _extract_deepseek_reasoning("Just a plain answer") == "Just a plain answer"
 
 
 class TestCacheControlOpenRouter(TestCase):

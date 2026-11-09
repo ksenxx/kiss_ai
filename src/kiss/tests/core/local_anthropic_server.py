@@ -32,7 +32,11 @@ PING_USAGE = {
 
 
 def tool_use_message(
-    name: str, arguments: dict[str, Any], prompt_tokens: int, call_id: str
+    name: str,
+    arguments: dict[str, Any],
+    prompt_tokens: int,
+    call_id: str,
+    applied_edits: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Describe one scripted assistant turn that calls *name* with *arguments*.
 
@@ -41,8 +45,13 @@ def tool_use_message(
         arguments: Its input.
         prompt_tokens: Reported (uncached) input size.
         call_id: The ``tool_use`` id.
+        applied_edits: The server-side context edits the turn reports in
+            its final ``message_delta`` (``context_management.applied_edits``).
     """
-    return {"name": name, "arguments": arguments, "prompt_tokens": prompt_tokens, "id": call_id}
+    turn = {"name": name, "arguments": arguments, "prompt_tokens": prompt_tokens, "id": call_id}
+    if applied_edits is not None:
+        turn["applied_edits"] = applied_edits
+    return turn
 
 
 def _sse(event: str, data: dict[str, Any]) -> bytes:
@@ -67,6 +76,13 @@ def _stream_body(turn: dict[str, Any]) -> bytes:
         "usage": usage,
     }
     block = {"type": "tool_use", "id": turn["id"], "name": turn["name"], "input": {}}
+    delta: dict[str, Any] = {
+        "type": "message_delta",
+        "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+        "usage": {"output_tokens": 30},
+    }
+    if "applied_edits" in turn:
+        delta["context_management"] = {"applied_edits": turn["applied_edits"]}
     return b"".join(
         [
             _sse("message_start", {"type": "message_start", "message": message}),
@@ -86,14 +102,7 @@ def _stream_body(turn: dict[str, Any]) -> bytes:
                 },
             ),
             _sse("content_block_stop", {"type": "content_block_stop", "index": 0}),
-            _sse(
-                "message_delta",
-                {
-                    "type": "message_delta",
-                    "delta": {"stop_reason": "tool_use", "stop_sequence": None},
-                    "usage": {"output_tokens": 30},
-                },
-            ),
+            _sse("message_delta", delta),
             _sse("message_stop", {"type": "message_stop"}),
         ]
     )
@@ -125,6 +134,8 @@ class ScriptedHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length) or b"{}")
+        # The beta header of the request, recorded next to its body.
+        body["_beta"] = self.headers.get("anthropic-beta", "")
         with self.lock:
             self.requests.append(body)
             streaming = bool(body.get("stream"))

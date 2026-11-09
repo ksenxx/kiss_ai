@@ -68,6 +68,7 @@ async def list_tools() -> list[types.Tool]:
                         "description": "Result cap",
                     },
                     "from": {"type": "string", "description": "Sender"},
+                    "since": {"type": ["string", "null"], "description": "Cutoff"},
                 },
                 "required": ["from"],
             },
@@ -126,7 +127,10 @@ def test_non_identifier_and_keyword_properties_live_call(
     ``make_mcp_tools`` must not crash on them (that would break agent
     startup for the whole server), and the wrapper must map the
     sanitized Python parameter names back to the original JSON property
-    names when calling the server.
+    names when calling the server.  An explicit ``None`` reaches the
+    server as ``null`` when the property admits it (``since``) and is
+    dropped when it does not (``max-results``: models send ``null`` for
+    optionals they leave unused, which the server would reject).
     """
     script = tmp_path / "weirdsrv.py"
     script.write_text(_WEIRD_SERVER_SCRIPT, encoding="utf-8")
@@ -155,12 +159,14 @@ def test_non_identifier_and_keyword_properties_live_call(
                 if p.default is inspect.Parameter.empty]
     optional = [n for n, p in params.items()
                 if p.default is not inspect.Parameter.empty]
-    assert len(required) == 1 and len(optional) == 1
+    assert len(required) == 1 and optional == ["max_results", "since"]
 
     received = json.loads(fetch(**{required[0]: "alice", optional[0]: 3}))
     assert received == {"from": "alice", "max-results": 3}
     received = json.loads(fetch(**{required[0]: "bob"}))
     assert received == {"from": "bob"}
+    received = json.loads(fetch(**{required[0]: "eve", "max_results": None, "since": None}))
+    assert received == {"from": "eve", "since": None}
 
 
 def test_no_truncation_note_at_exact_resource_cap(tmp_path: Path) -> None:

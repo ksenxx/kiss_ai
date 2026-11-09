@@ -33,7 +33,7 @@ LLM/coding-assistant indexing") and verified live:
   `openrouter/anthropic/claude-fable-5.1-max`, as `bestrouter_sea.py` and
   `orbestrouter_sea.py` do, "through a non-blocking run_agent" (the `/sync`
   row, rewritten in the same window, is identical in both),
-  the `/discover`, `/devtools` and
+  the `/discover`, `/devtools`, `/install` and
   `/sync_history_and_memory` rows are missing (the `/write_patent` and
   `/review_patent` rows are there), the `/rsi7d` row still says the SEA
   "applies and evaluates improvements to each SEA" where the page now
@@ -41,7 +41,9 @@ LLM/coding-assistant indexing") and verified live:
   `/revise_and_review_paper` row says "AI discovery" where the page says
   "/discover runs", the two `model_config` rows (the settings table and
   the `run_agent` options table) still read "(temperature, base URL,
-  ...)" where the page describes `base_url` and `plain_io: true`, and the channel table's "scratch
+  ...)" where the page describes `base_url` and `plain_io: true`, those
+  two tables lack the `compaction` row the page now has (the per-run
+  switch of context compaction, `sea_settings.SETTING_DOCS`), and the channel table's "scratch
   directory" and "no inheritance" rows lack the page's cron-job sentence and
   its "or exec bridge" clause; in `cli.md` the `settings(self, settings)`
   paragraph still has `/write` declaring `{"timeout": 3600}` where the page
@@ -64,8 +66,8 @@ LLM/coding-assistant indexing") and verified live:
   `assets/` holds only a PNG render of the first, `tb2-success-by-model.png`,
   which the root `README.md` embeds); `sea-commands.md`
   documents `src/kiss/agents/sorcar/sea_commands.py` and describes the
-  26 bundled commands `/ask`, `/autorouter`, `/bestrouter`, `/devtools`, `/discover`,
-  `/forget`, `/git_extract_knowledge`, `/good_morning`, `/machine`, `/merge`,
+  27 bundled commands `/ask`, `/autorouter`, `/bestrouter`, `/devtools`, `/discover`,
+  `/forget`, `/git_extract_knowledge`, `/good_morning`, `/install`, `/machine`, `/merge`,
   `/orautorouter`, `/orbestrouter`, `/recommendations`, `/remember`,
   `/review_paper`, `/review_patent`, `/revise_and_review_paper`, `/rsi7d`, `/sh`,
   `/skillopt`, `/sync`, `/sync_history_and_memory`, `/task_update`, `/write`,

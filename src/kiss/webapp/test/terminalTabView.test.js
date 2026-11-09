@@ -24,6 +24,7 @@ const {
   installXtermStub,
   newDom,
   loadPageScripts,
+  plain,
 } = require('./simplify2_harness');
 const {
   readShimJs,
@@ -64,9 +65,9 @@ function runTimers(page) {
   due.forEach(t => t.fn());
 }
 
-/** Wait until the page's `n`th terminal exists (xterm has loaded). */
-function xtermLoaded(page, n = 1) {
-  return waitFor(() => page.terminals.length >= n, 'xterm did not load');
+/** Wait until the page's first terminal exists (xterm has loaded). */
+function xtermLoaded(page) {
+  return waitFor(() => page.terminals.length >= 1, 'xterm did not load');
 }
 
 /** Create a view, show it and let xterm load. */
@@ -80,11 +81,6 @@ async function openView(page) {
   view.setVisible(true);
   await xtermLoaded(page);
   return {view, sent};
-}
-
-/** Objects from the page realm have another Object prototype. */
-function plain(value) {
-  return JSON.parse(JSON.stringify(value));
 }
 
 async function testOpenFitAndResize() {
@@ -136,13 +132,16 @@ async function testOpenFitAndResize() {
   });
   assert.strictEqual(sent.length, 2);
 
-  // Keystrokes go to the shell while it runs.
-  term.dataCb('ls\r');
-  assert.deepStrictEqual(plain(sent[2]), {
-    type: 'terminalInput',
-    tab_id: 'tab-1',
-    data: 'ls\r',
-  });
+  // Keystrokes go to the shell once the daemon confirmed it runs; typed
+  // before that they wait (the connection does not own the shell yet).
+  term.dataCb('l');
+  assert.strictEqual(sent.length, 2, 'input waits for the terminalOpened');
+  view.opened({attached: false});
+  term.dataCb('s\r');
+  assert.deepStrictEqual(plain(sent.slice(2)), [
+    {type: 'terminalInput', tab_id: 'tab-1', data: 'l'},
+    {type: 'terminalInput', tab_id: 'tab-1', data: 's\r'},
+  ]);
   // Output arriving before xterm existed is replayed, later output
   // written directly.
   view.data('$ ');
@@ -204,6 +203,101 @@ async function testExitRestartAndReconnectNote() {
 
   view.retheme();
   assert.ok(term.options.theme);
+}
+
+// The daemon could not start the FIRST shell of the tab (a pty fork
+// failure, a remote machine that refused): the tab is not dead.  Enter
+// asks for a new shell exactly as it does after an exit, and the note
+// says so.
+async function testErrorOnFirstOpenCanBeRetried() {
+  const page = makePage();
+  const {view, sent} = await openView(page);
+  const term = page.terminals[0];
+  view.error('The shell could not be started: boom');
+  assert.ok(view.exited);
+  assert.ok(term.written.includes('could not be started: boom'));
+  assert.ok(
+    term.written.includes('Press Enter to try again'),
+    'the note tells the user how to retry: ' + term.written,
+  );
+  term.dataCb('x');
+  assert.strictEqual(sent.length, 1, 'no input to a shell that never ran');
+  assert.strictEqual(term.keyHandler({type: 'keydown', key: 'Enter'}), false);
+  assert.strictEqual(sent.length, 2, 'Enter asks for a shell again');
+  assert.strictEqual(sent[1].type, 'terminalOpen');
+  assert.strictEqual(view.exited, false);
+  const before = term.written;
+  view.opened({attached: false});
+  assert.strictEqual(term.written, before, 'the retry is not a lost shell');
+  term.dataCb('ls\r');
+  assert.deepStrictEqual(plain(sent[2]), {
+    type: 'terminalInput',
+    tab_id: 'tab-1',
+    data: 'ls\r',
+  });
+}
+
+// An ended shell went through an outage: `disconnected` left the view
+// detached and `reconnect` leaves an exited shell alone.  Enter then
+// asks for a new shell, and a command typed before the daemon's
+// terminalOpened belongs to that new shell: it used to be dropped as
+// input for the old one, because the fresh shell "replaced" the ended
+// one.  What was typed for the old shell while the socket was down is
+// still not run in the shell the user explicitly asked for.
+async function testExplicitRestartAfterAnOutageKeepsTheTypedCommand() {
+  const page = makePage();
+  const {view, sent} = await openView(page);
+  const term = page.terminals[0];
+  view.opened({attached: false});
+  view.exit(0);
+  view.disconnected();
+  view.reconnect();
+  assert.strictEqual(sent.length, 1, 'a reconnect leaves an ended shell alone');
+  assert.strictEqual(term.keyHandler({type: 'keydown', key: 'Enter'}), false);
+  assert.strictEqual(sent[1].type, 'terminalOpen');
+  term.dataCb('echo typed-for-new-shell\r'); // before the open reply
+  assert.strictEqual(sent.length, 2, 'input waits for the terminalOpened');
+  view.opened({attached: false});
+  assert.deepStrictEqual(
+    plain(sent.slice(2)),
+    [
+      {
+        type: 'terminalInput',
+        tab_id: 'tab-1',
+        data: 'echo typed-for-new-shell\r',
+      },
+    ],
+    'the command typed for the new shell runs in it, once',
+  );
+  assert.ok(!term.written.includes('while this page was disconnected'));
+
+  // Typed for the running shell while the socket was down, then the
+  // daemon could not re-attach it: Enter asks for a new shell, and the
+  // old shell's input does not run in it.
+  view.disconnected();
+  term.dataCb('echo stale\r');
+  view.reconnect();
+  assert.strictEqual(sent.length, 4);
+  assert.strictEqual(sent[3].type, 'terminalOpen');
+  view.error('The shell could not be started: the machine is unreachable.');
+  assert.ok(view.exited);
+  assert.strictEqual(term.keyHandler({type: 'keydown', key: 'Enter'}), false);
+  term.dataCb('echo fresh\r');
+  view.opened({attached: false});
+  assert.deepStrictEqual(
+    plain(sent.slice(4)),
+    [
+      {
+        type: 'terminalOpen',
+        tab_id: 'tab-1',
+        cols: 80,
+        rows: 24,
+        workDir: '/work',
+      },
+      {type: 'terminalInput', tab_id: 'tab-1', data: 'echo fresh\r'},
+    ],
+    'only what was typed after the explicit restart reaches the new shell',
+  );
 }
 
 async function testDispose() {
@@ -323,12 +417,67 @@ async function testInputTypedWhileDisconnectedWaitsForTheReattach() {
   win.close();
 }
 
+// A terminal opened while the socket is down: its terminalOpen waits in
+// the transport's offline batch, which the reconnect sends and, when
+// that connection dies before the daemon's pong confirms it, sends
+// AGAIN on the next one (at-least-once).  Keystrokes typed before the
+// daemon confirmed the shell must not join that batch: a shell command
+// run twice is not a settings save applied twice.  They wait in the
+// view until terminalOpened, then go out once.
+async function testTerminalOpenedDuringAnOutageHoldsInputUntilTheReattach() {
+  const win = newDom();
+  const sockets = [];
+  installFakeWebSocket(win, sockets);
+  const {terminals} = installXtermStub(win);
+  win.eval(readShimJs());
+  loadPageScripts(win);
+  win.eval(fs.readFileSync(path.join(MEDIA, 'terminalTab.js'), 'utf8'));
+  handshake(sockets[0]);
+  sockets[0].fireClose();
+  win.document.getElementById('terminal-btn').click();
+  await xtermLoaded({terminals});
+  const term = terminals[0];
+  term.dataCb('echo example\r');
+  await waitForSocket(sockets, 2);
+  const sock = sockets[1];
+  sock.onopen();
+  sock.fireMessage({type: 'auth_ok'});
+  await settle();
+  const open = frames(sock).find(f => f.type === 'terminalOpen');
+  assert.ok(open, 'the reconnect batch carries the terminalOpen');
+  assert.deepStrictEqual(
+    inputs(sock),
+    [],
+    'nothing typed before the daemon confirmed the shell joins the batch',
+  );
+  sock.fireMessage({
+    type: 'terminalOpened',
+    tab_id: open.tab_id,
+    attached: false,
+  });
+  // The connection dies before the pong: the next one re-sends the
+  // batch; the input, posted after terminalOpened, goes out once.
+  sock.fireClose();
+  await waitForSocket(sockets, 3);
+  handshake(sockets[2]);
+  await settle();
+  assert.deepStrictEqual(
+    sockets.flatMap(inputs),
+    ['echo example\r'],
+    'the command typed during the outage runs exactly once',
+  );
+  win.close();
+}
+
 (async () => {
   await testOpenFitAndResize();
   await testExitRestartAndReconnectNote();
+  await testErrorOnFirstOpenCanBeRetried();
+  await testExplicitRestartAfterAnOutageKeepsTheTypedCommand();
   await testDispose();
   await testOutputBeforeXterm();
   await testInputTypedWhileDisconnectedWaitsForTheReattach();
+  await testTerminalOpenedDuringAnOutageHoldsInputUntilTheReattach();
   console.log('terminalTabView.test.js passed');
 })().catch(err => {
   console.error(err);

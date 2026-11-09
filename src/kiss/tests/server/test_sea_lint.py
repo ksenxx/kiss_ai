@@ -14,6 +14,7 @@ bundled tree is clean: that is the gate ``uv run check`` runs.
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -21,6 +22,7 @@ import pytest
 
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_cli import main
+from kiss.agents.sorcar.sea_commands import load_sea
 from kiss.agents.sorcar.sea_commands import sea_settings as sea_settings_of
 from kiss.agents.sorcar.sea_lint import (
     Finding,
@@ -31,7 +33,8 @@ from kiss.agents.sorcar.sea_lint import (
     lint_sea,
     registered_commands,
 )
-from kiss.agents.sorcar.sea_settings import declares_channel, declares_hidden
+from kiss.agents.sorcar.sea_settings import SeaError, declares_channel, declares_hidden
+from kiss.core.utils import replace_waiting_for_readers
 
 DESCRIPTION = """
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -119,7 +122,15 @@ def test_renamed_and_removed_keys_are_fixable_and_fix_rewrites_them(tmp_path: Pa
 def test_fix_skips_a_script_it_cannot_parse_and_fixes_the_rest(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """``lint_all(fix=True)`` reports an unparsable or unreadable script as broken and goes on."""
+    """``lint_all(fix=True)`` reports an unparsable or unreadable script as broken and goes on.
+
+    A script whose *rewrite* no longer parses is the codemod's own
+    failure, not the script's: it is kept as it is and the run says so
+    (``not fixed <path>: ...``) instead of skipping it silently and
+    listing its findings as ``[fixable]`` again.  Here the hook's
+    literal sits at the parser's nesting limit, so wrapping it in
+    ``refuse(...)`` is one parenthesis too many.
+    """
     unparsable = write_sea(tmp_path, DESCRIPTION + "\n    def settings(self, settings:\n", "bad")
     missing = tmp_path / "gone" / "gone_sea.py"
     fixable = write_sea(
@@ -128,12 +139,29 @@ def test_fix_skips_a_script_it_cannot_parse_and_fixes_the_rest(
         + "\n    def settings(self, settings):\n        return {'classify_tasks': False}\n",
         "good",
     )
-    findings = lint_all([unparsable, missing, fixable], fix=True)
-    assert [(f.path, f.code) for f in findings] == [(unparsable, "broken"), (missing, "broken")]
+    deep_body = DESCRIPTION + (
+        "\n    def tool_call_hook(self, name, args):\n        return "
+        + "(" * 200 + '"no"' + ")" * 200 + "\n"
+    )
+    deep = write_sea(tmp_path, deep_body, "deep")
+    findings = lint_all([unparsable, missing, fixable, deep], fix=True)
+    assert [(f.path, f.code) for f in findings] == [
+        (unparsable, "broken"), (missing, "broken"), (deep, "verdict"), (deep, "broken"),
+    ]
     assert findings[0].message.startswith("cannot parse: ")
     assert findings[1].message.startswith("cannot parse: ")
-    assert capsys.readouterr().out == f"fixed {fixable}:9: 'classify_tasks' -> 'auto_classify'\n"
+    assert findings[2].fixable and "must return a Verdict" in findings[3].message
+    out = capsys.readouterr().out
+    assert out.startswith(f"fixed {fixable}:9: 'classify_tasks' -> 'auto_classify'\n")
+    assert out.count("\n") == 2 and out.splitlines()[1].startswith(
+        f"not fixed {deep}: the rewrite no longer parses and was not saved: "
+        "too many nested parentheses"
+    )
     assert "'auto_classify': False" in fixable.read_text(encoding="utf-8")
+    assert deep.read_text(encoding="utf-8") == deep_body
+    with pytest.raises(SeaError, match="no longer parses"):
+        fix_sea(deep)
+    assert deep.read_text(encoding="utf-8") == deep_body
 
 
 def test_fix_keeps_prefixes_quotes_and_locks_and_skips_nested_dicts(tmp_path: Path) -> None:
@@ -163,6 +191,143 @@ def test_fix_keeps_prefixes_quotes_and_locks_and_skips_nested_dicts(tmp_path: Pa
     assert settings["locked"] == ["auto_classify", "model"] and settings["model_config"] == {
         "preset": "balanced"
     }
+
+
+def test_settings_dicts_are_those_that_reach_the_return(tmp_path: Path) -> None:
+    """Only a dict literal whose entries end up in the returned settings is a settings dict.
+
+    A local dict the method merely reads a value from is data: renaming
+    its ``model_name`` key would leave the ``info["model_name"]`` lookup
+    behind and break a valid script at load time.  A dict assigned to a
+    name the method returns (through ``|`` merges, ``**`` unpacks and
+    re-assignments of the same name) is a settings dict: it is linted,
+    fixed, and its literal ``hidden`` hides the command.
+    """
+    read_only = write_sea(
+        tmp_path,
+        DESCRIPTION
+        + """
+    def settings(self, settings):
+        info = {"model_name": "gpt-4o-mini", "model": "unused"}
+        return settings | {"model": info["model_name"]}
+""",
+        "readonly",
+    )
+    body = read_only.read_text(encoding="utf-8")
+    assert fix_sea(read_only) == []
+    assert read_only.read_text(encoding="utf-8") == body
+    assert lint_all([read_only]) == []
+    assert sea_settings_of(read_only)["model"] == "gpt-4o-mini"
+
+    aliased = write_sea(
+        tmp_path,
+        DESCRIPTION
+        + """
+    def settings(self, settings):
+        mine = {"hidden": True, "classify_tasks": False}
+        mine = mine | {"model_config": {"model_name": "data"}}
+        mine.update({"model_name": "gpt-6-astra"})
+        extra = {**mine, "locked": ["classify_tasks"]}
+        return settings | extra if settings else extra
+""",
+        "aliased",
+    )
+    assert declares_hidden(aliased)
+    assert codes(lint_all([aliased])) == ["renamed-key", "renamed-key", "renamed-key"]
+    assert [line.split(": ", 1)[1] for line in fix_sea(aliased)] == [
+        "'classify_tasks' -> 'auto_classify'", "'model_name' -> 'model'",
+        "'classify_tasks' -> 'auto_classify'",
+    ]
+    text = aliased.read_text(encoding="utf-8")
+    assert 'mine = {"hidden": True, "auto_classify": False}' in text
+    assert '{"model_config": {"model_name": "data"}}' in text  # a nested dict is data
+    assert 'mine.update({"model": "gpt-6-astra"})' in text  # updated into the result
+    assert '"locked": ["auto_classify"]' in text
+    assert lint_all([aliased]) == [] and declares_hidden(aliased)
+    assert sea_settings_of(aliased) == {
+        "hidden": True,
+        "auto_classify": False,
+        "model_config": {"model_name": "data"},
+        "model": "gpt-6-astra",
+        "locked": ["auto_classify"],
+    }
+
+    # A name re-assigned at the method's top level drops what it held:
+    # the first ``config`` is data the method reads a value from, and
+    # renaming its key would break the ``config["model_name"]`` lookup.
+    # An assignment under an ``if`` may or may not run: its dict reaches
+    # the return too, as does one merged from the name itself.
+    reassigned = write_sea(
+        tmp_path,
+        DESCRIPTION
+        + """
+    def settings(self, settings):
+        config = {"model_name": "gpt-5"}
+        model = config["model_name"]
+        config = {"model": model}
+        if settings.get("hidden"):
+            config = config | {"classify_tasks": False}
+        return {**settings, **config}
+""",
+        "reassigned",
+    )
+    assert sea_settings_of(reassigned)["model"] == "gpt-5"
+    assert codes(lint_all([reassigned])) == ["renamed-key"]
+    assert [line.split(": ", 1)[1] for line in fix_sea(reassigned)] == [
+        "'classify_tasks' -> 'auto_classify'",
+    ]
+    text = reassigned.read_text(encoding="utf-8")
+    assert 'config = {"model_name": "gpt-5"}' in text  # data, not settings
+    assert 'config = config | {"auto_classify": False}' in text
+    assert lint_all([reassigned]) == []
+    assert sea_settings_of(reassigned)["model"] == "gpt-5"
+
+
+def test_fix_publishes_the_rewrite_atomically_under_a_concurrent_loader(tmp_path: Path) -> None:
+    """A daemon loading the script while ``fix_sea`` saves it never sees a torn file.
+
+    The rewrite is published by replacing the file, so a concurrent
+    reader gets the old or the new script, never an empty or partial
+    one (which ``Path.write_text``'s truncate-then-write would show).  A
+    loader thread runs the real ``load_sea`` and reads the file's size
+    in a loop while the main thread re-stales the script (atomically,
+    so only ``fix_sea``'s own publish is under test) and fixes it again.
+    """
+    stale_body = DESCRIPTION + (
+        "\n    def settings(self, settings):\n        return settings | {'classify_tasks': False}\n"
+    )
+    path = write_sea(tmp_path, stale_body)
+    fixed_size = len(stale_body.encode("utf-8")) - 1  # 'auto_classify' is one byte shorter
+    stop = threading.Event()
+    failures: list[str] = []
+    sizes: list[int] = []
+
+    def load_until_stopped() -> None:
+        while not stop.is_set():
+            sizes.append(path.stat().st_size)
+            try:
+                load_sea(path)
+            except SeaError as exc:
+                failures.append(str(exc))
+
+    reader = threading.Thread(target=load_until_stopped)
+    reader.start()
+    try:
+        stale = path.with_name("stale.txt")
+        for _ in range(300):
+            stale.write_text(stale_body, encoding="utf-8")
+            # The loader may hold *path* open: Windows refuses a bare replace then.
+            replace_waiting_for_readers(stale, path)
+            assert fix_sea(path) == [f"{path}:9: 'classify_tasks' -> 'auto_classify'"]
+            if failures or min(sizes, default=fixed_size) < fixed_size:
+                break
+    finally:
+        stop.set()
+        reader.join()
+    assert failures == []
+    assert sizes and min(sizes) >= fixed_size
+    assert path.read_text(encoding="utf-8") == stale_body.replace("classify_tasks", "auto_classify")
+    assert sorted(p.name for p in path.parent.iterdir()) == [path.name]  # no staging file left
 
 
 def test_literal_verdicts_are_fixable_and_fix_rewrites_them_to_verdicts(tmp_path: Path) -> None:
@@ -576,6 +741,102 @@ class Child(sea_class({str(literal)!r})):
     assert sea_settings_of(child)["tool_profile"] == "bash"
     assert sea_settings_of(child)["hidden"] is True
     assert lint_all([child]) == []
+    # The literals are read in the order Python evaluates them: a ``**``
+    # unpack lays its entries where it stands, so the entry written
+    # after it wins, as at run time.
+    unpacked = write_sea(
+        folder, DESCRIPTION + """
+    def settings(self, settings):
+        base = {'hidden': False, 'model': 'x'}
+        return settings | {**base, 'hidden': True, **{'model': 'y'}, 'model': 'z'}
+""", "unpacked"
+    )
+    overridden = write_sea(
+        folder, DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'hidden': True, **{'hidden': False}}
+""", "overridden"
+    )
+    sea_commands.refresh_registry()
+    assert sea_settings_of(unpacked)["hidden"] is True and declares_hidden(unpacked)
+    assert sea_settings_of(unpacked)["model"] == "z"
+    assert sea_settings_of(overridden)["hidden"] is False and not declares_hidden(overridden)
+    commands = sea_commands.list_commands()
+    assert "unpacked" not in commands and "overridden" in commands
+    # A later computed value overwrites an earlier literal too: the
+    # script no longer declares the literal, whatever the computed
+    # value turns out to be, so the command stays listed (and the
+    # linter reports the computed ``True``), and only a literal written
+    # after the computed value hides it.
+    recomputed = write_sea(
+        folder,
+        "HIDE = False\n" + DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'hidden': True} | {'hidden': HIDE}
+""", "recomputed"
+    )
+    rehidden = write_sea(
+        folder,
+        "HIDE = True\n" + DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'hidden': True} | {'hidden': HIDE}
+""", "rehidden"
+    )
+    relisted = write_sea(
+        folder,
+        "HIDE = False\n" + DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'hidden': HIDE} | {'hidden': True}
+""", "relisted"
+    )
+    sea_commands.refresh_registry()
+    assert sea_settings_of(recomputed)["hidden"] is False and not declares_hidden(recomputed)
+    assert sea_settings_of(rehidden)["hidden"] is True and not declares_hidden(rehidden)
+    assert sea_settings_of(relisted)["hidden"] is True and declares_hidden(relisted)
+    commands = sea_commands.list_commands()
+    assert "recomputed" in commands and "rehidden" in commands and "relisted" not in commands
+    assert lint_all([recomputed]) == [] and lint_all([relisted]) == []
+    assert codes(lint_all([rehidden])) == ["hidden-not-literal"]
+
+
+@pytest.mark.parametrize(
+    ("prefix", "header", "encoding"),
+    [
+        (b"\xef\xbb\xbf", "# a byte-order mark ahead, as Windows editors write it\n", "utf-8"),
+        (b"", "# coding: latin-1\n# caf\xe9\n", "latin-1"),
+    ],
+    ids=["utf-8-bom", "latin-1-cookie"],
+)
+def test_a_script_is_read_in_the_source_encoding_import_reads(
+    isolated_home: Path, tmp_path: Path, prefix: bytes, header: str, encoding: str
+) -> None:
+    """A UTF-8 byte-order mark or a ``coding`` cookie: the loader compiles the bytes as
+    ``import`` does (PEP 263), so the script runs, but the registry's parse and the linter
+    decoded plain UTF-8 — the mark became ``U+FEFF``, a syntax error, and latin-1 bytes did
+    not decode — so a literal ``hidden`` was dropped, the command shown, and the script
+    reported broken.  Read alike, the script is hidden, linted and fixed in its encoding."""
+    folder = tmp_path / "seas"
+    path = write_sea(folder, "", "encoded")
+    body = header + DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'hidden': True, 'classify_tasks': False}
+"""
+    path.write_bytes(prefix + body.encode(encoding))
+    (isolated_home / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
+    sea_commands.refresh_registry()
+    assert "encoded" not in sea_commands.list_commands(), "the literal hidden was not read"
+    assert declares_hidden(path)
+    assert codes(lint_all([path])) == ["renamed-key"]
+    assert [line.split(": ", 1)[1] for line in fix_sea(path)] == [
+        "'classify_tasks' -> 'auto_classify'",
+    ]
+    data = path.read_bytes()
+    assert data.startswith(prefix + header.encode(encoding)), "the encoding was not kept"
+    assert data.decode("utf-8-sig" if prefix else encoding).endswith(
+        "return settings | {'hidden': True, 'auto_classify': False}\n"
+    )
+    assert lint_all([path]) == [] and declares_hidden(path)
+    assert sea_settings_of(path) == {"hidden": True, "auto_classify": False}
 
 
 def test_stale_docstring_and_home_literal(tmp_path: Path) -> None:

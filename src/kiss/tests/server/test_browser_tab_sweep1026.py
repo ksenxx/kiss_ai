@@ -39,6 +39,7 @@ from typing import Any
 import pytest
 
 from kiss.server.browser_tab import _TEARDOWN_TIMEOUT
+from kiss.tests.server.conftest import ensure_loop
 from kiss.tests.server.test_audit1012_server_rest_browser_launch_cancel import _suspended_in
 from kiss.tests.server.test_browser_tab_service import (
     _PLAYWRIGHT_CACHE,
@@ -112,7 +113,7 @@ def _freeze_browser_in_mask(
         launch *succeeded* before the mask was observed (the caller tears
         the browser down and tries again).
     """
-    loop = service._ensure_loop()
+    loop = ensure_loop(service)
     future = asyncio.run_coroutine_threadsafe(service._new_tab(), loop)
     # The driver and its browser process exist well before the mask (the
     # browser's start-up sits in between); finding them here keeps the

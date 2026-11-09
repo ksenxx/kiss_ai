@@ -4,7 +4,7 @@ The finish gate's reviewer runs on another model family with no printer,
 so it emits no ``llm_call`` event; its spend is charged to the task.
 Each charged attempt now leaves a ``gate_stage`` record with ``stage``
 ``charge`` (``model``, ``cost_usd``, ``tokens``) under the task's row
-(``SorcarAgent._charge_gate_usage`` -> ``persistence._record_gate_charge``),
+(``SorcarAgent._charge_gate_usage`` -> ``persistence._record_model_charge``),
 which ``_own_model_costs`` counts, so the Spend-by-model split credits
 the reviewer's model, also for a review a Stop ended and for one charged
 after the row's final save.
@@ -24,6 +24,7 @@ import pytest
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.coding_gate import CodingGate, run_on_host
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.file_lock import lock_exclusive
 from kiss.tests.agents.sorcar.test_coding_gate import MODEL, serve, text_body
 from kiss.tests.agents.sorcar.test_cost_audit_20261023 import (
     _by_model,
@@ -86,13 +87,45 @@ class TestGateChargeRecords:
     def test_a_charge_after_the_final_save_refreshes_the_split(self) -> None:
         task = _task(4.5, 4_600, [_llm_call(FABLE, 4.0, 4_000)])
         assert json.loads(_model_costs(task)) == {FABLE: [4.0, 4_000]}
-        th._record_gate_charge(task, ASTRA, 0.5, 600, "late-key")
+        th._record_model_charge(task, ASTRA, 0.5, 600, "late-key")
         assert json.loads(_model_costs(task)) == {FABLE: [4.0, 4_000], ASTRA: [0.5, 600]}
         assert _by_model() == {FABLE: (4.0, 4_000), ASTRA: (0.5, 600)}
 
+    def test_a_retry_while_the_journalled_charge_awaits_replay_charges_once(self) -> None:
+        # A11-1 (astra): a charge the database refused is journalled; a
+        # retry of the same key while a peer holds the journal lock (the
+        # replay is deferred) found nothing in ``events`` and queued the
+        # charge again, and the replay then inserted the second copy.
+        task = _task(4.5, 4_600, [_llm_call(FABLE, 4.0, 4_000)])
+        charge = {**_charge_record(ASTRA, 0.5, 600), "key": "retry-key", "taskId": task}
+        th._journal_failed_events(
+            [(task, json.dumps(charge), time.time(), str(th._DB_PATH))], 4)
+        peer = open(th._failed_events_path(str(th._DB_PATH)) + ".lock", "a+")  # noqa: SIM115
+        assert lock_exclusive(peer, blocking=False)
+
+        def peer_lets_go_once_the_retry_looked(statement: str) -> None:
+            if "json_extract(event_json, '$.key')" in statement:
+                peer.close()
+
+        db = th._get_db()
+        db.set_trace_callback(peer_lets_go_once_the_retry_looked)
+        try:
+            th._record_model_charge(task, ASTRA, 0.5, 600, "retry-key")
+        finally:
+            db.set_trace_callback(None)
+            peer.close()
+        for _attempt in range(5):
+            th._replay_failed_events()
+        copies = th._get_db().execute(
+            "SELECT COUNT(*) FROM events WHERE task_id = ? "
+            "AND json_extract(event_json, '$.key') = 'retry-key'", (task,),
+        ).fetchone()[0]
+        assert copies == 1
+        assert json.loads(_model_costs(task)) == {FABLE: [4.0, 4_000], ASTRA: [0.5, 600]}
+
     def test_a_charge_before_the_final_save_is_in_its_split(self) -> None:
         task_id, _ = th._add_task("running", "", {"model": FABLE})
-        th._record_gate_charge(task_id, ASTRA, 0.5, 600, "early-key")
+        th._record_model_charge(task_id, ASTRA, 0.5, 600, "early-key")
         assert _model_costs(task_id) == ""  # not finished: the final save computes it
         th._queue_chat_event(_llm_call(FABLE, 4.0, 4_000), task_id)
         th._flush_chat_events()
@@ -181,11 +214,66 @@ def test_a_persisted_run_without_a_server_printer_files_the_review_too(
     assert any(e.get("type") != "gate_stage" for e in session["events"])  # type: ignore[attr-defined]
 
 
+def _run_ok(agent: Any, work_dir: Path) -> str:
+    """One run of *agent* against a one-answer local model; its persisted row id."""
+    from kiss.agents.sorcar.sorcar_agent import _persisted_task_id
+    from kiss.tests.agents.sorcar.local_model_server import finish_body
+
+    with serve([finish_body("<p>ok</p>")]) as (url, _requests):
+        agent.run(prompt_template="Say ok.", model_name=MODEL, max_steps=2, max_budget=1.0,
+                  model_config={"base_url": url, "api_key": "local"}, use_memory=False,
+                  web_tools=False, verbose=False, work_dir=str(work_dir))
+    return str(_persisted_task_id(agent))
+
+
+def _row_cost(task_id: str) -> float:
+    """The cost the row *task_id* holds now, late charges included."""
+    return float(th._task_usage([task_id])[task_id]["cost"])  # type: ignore[arg-type]
+
+
+@pytest.mark.usefixtures("history_db")
+def test_gate_charge_keys_do_not_pile_up_over_a_reused_agent(tmp_path: Path) -> None:
+    """A run start keeps the previous run's charge keys and drops the older ones.
+
+    A key counts once because a stop charges an attempt twice, inside
+    the run that made it (or right after it, for a review the stop
+    left charging), so a reused chat agent needs the keys of the last
+    two runs only; before the fix it kept every key it ever charged
+    (audit 2026-11-07, A13_claude-8).
+    """
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+
+    agent = ChatSorcarAgent("audit1104-charge-keys")
+    row1 = _run_ok(agent, tmp_path)
+    assert row1
+    cost = _row_cost(row1)
+    agent._charge_gate_usage(0.5, 10, 1, "finish-review:one", task_id=row1)
+    agent._charge_gate_usage(0.5, 10, 1, "finish-review:one", task_id=row1)  # the stop's retry
+    assert _row_cost(row1) == pytest.approx(cost + 0.5)
+    row2 = _run_ok(agent, tmp_path)
+    assert row2 and row2 != row1
+    # One run later the key is still held: a review the stop left charging.
+    agent._charge_gate_usage(0.5, 10, 1, "finish-review:one", task_id=row1)
+    assert _row_cost(row1) == pytest.approx(cost + 0.5)
+    _run_ok(agent, tmp_path)
+    # Two runs later it is forgotten: the charge goes through.
+    agent._charge_gate_usage(0.5, 10, 1, "finish-review:one", task_id=row1)
+    assert _row_cost(row1) == pytest.approx(cost + 1.0)
+
+
 @pytest.mark.usefixtures("history_db")
 def test_charge_records_are_not_transcript() -> None:
     task_id, _ = th._add_task("metadata only", "", {"model": FABLE})
-    th._record_gate_charge(task_id, ASTRA, 0.5, 600, "k1")
-    th._record_gate_charge(task_id, ASTRA, 0.5, 600, "k2")
+    th._record_model_charge(task_id, ASTRA, 0.5, 600, "k1")
+    th._record_model_charge(task_id, ASTRA, 0.5, 600, "k2")
+    assert th._task_has_transcript_events(task_id) is False
+    # A11-3 (astra): the settings record and the charges of an API run's
+    # decide/talk calls stay metadata however many there are (a window
+    # of 20 metadata rows used to count as a transcript, so the run got
+    # no synthesized prompt/result and replayed blank).
+    th._queue_chat_event({"type": "task_settings", "settings": {}}, task_id)
+    for i in range(3, 25):
+        th._record_model_charge(task_id, ASTRA, 0.01, 1, f"k{i}")
     assert th._task_has_transcript_events(task_id) is False
     th._queue_chat_event({"type": "text", "text": "hello"}, task_id)
     assert th._task_has_transcript_events(task_id) is True

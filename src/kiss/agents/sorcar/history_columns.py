@@ -32,6 +32,7 @@ columns land together with their backfill, or not at all.
 
 from __future__ import annotations
 
+import socket
 import sqlite3
 from collections.abc import Callable, Iterable
 
@@ -47,6 +48,7 @@ ADDED_TASK_COLUMNS: tuple[tuple[str, str], ...] = (
     ("success", "INTEGER"),
     ("is_cron", "INTEGER DEFAULT 0"),
     ("model_costs", "TEXT DEFAULT ''"),
+    ("machine", "TEXT DEFAULT ''"),
 )
 """Columns of ``task_history`` added after the first release, oldest first.
 
@@ -81,6 +83,12 @@ by.
 
 CRON_RUN_DIR_PATTERN = "%/cron/runs/%"
 """``LIKE`` pattern of the run directory a job without a ``work_dir`` of its own ran in."""
+
+SETTINGS_HOST_MARKER = '"host": "'
+"""What precedes the host name in a ``task_settings`` event's JSON."""
+
+MACHINE_INFO_MARKER = "Machine info: "
+"""What precedes the host name in the Task Settings of a system prompt."""
 
 
 def missing_columns(
@@ -168,6 +176,51 @@ COLUMN_BACKFILLS: dict[str, Callable[[sqlite3.Connection], int]] = {
     "is_cron": backfill_is_cron,
 }
 """The columns whose value for older rows can be worked out, and how."""
+
+
+def host_name() -> str:
+    """Return this machine's short host name, what ``task_history.machine`` calls a machine."""
+    return socket.gethostname().strip().split(".")[0] or "localhost"
+
+
+def task_origins(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """Return ``(host, task id)`` for the unstamped rows whose first events name another host.
+
+    A row a history sync copied in before ``machine`` existed reads ''
+    like one of this machine's own, but the first events of every task
+    since mid-2026 say where it ran: the system prompt's Task Settings
+    line ``Machine info: <host> (<arch>)`` and, later, the
+    ``task_settings`` event's ``host``.  Both are read straight from the
+    ``(task_id, seq)`` index (``seq`` 0 and 1), but the system prompts
+    are large, so on a history of several GB this takes about a minute:
+    it is not a :data:`COLUMN_BACKFILLS` entry, which runs inside the
+    migration's write transaction, and the caller runs it on a thread of
+    its own.  A row whose events name no host, or this host, is left out.
+
+    Args:
+        conn: Connection to the database; only read.
+
+    Returns:
+        ``(short host name, task id)`` pairs, one per task.
+    """
+    here = host_name().lower()
+    origins: dict[str, str] = {}
+    for task_id, settings_host, info_host in conn.execute(
+        f"SELECT t.id, substr(e.event_json, nullif(instr(e.event_json, ?), 0) + ?, 120),"
+        " substr(e.event_json, nullif(instr(e.event_json, ?), 0) + ?, 120)"
+        f" FROM {TASK_TABLE} t JOIN events e ON e.task_id = t.id AND e.seq <= 1"
+        " WHERE COALESCE(t.machine, '') = ''",
+        (SETTINGS_HOST_MARKER, len(SETTINGS_HOST_MARKER),
+         MACHINE_INFO_MARKER, len(MACHINE_INFO_MARKER)),
+    ):
+        if settings_host:
+            text = settings_host.split('"', 1)[0]
+        else:
+            text = (info_host or "").split(" ", 1)[0]
+        host = text.split(".")[0]
+        if host and host.lower() not in {here, "unknown"}:
+            origins.setdefault(str(task_id), host)
+    return [(host, task_id) for task_id, host in origins.items()]
 
 
 def complete_rows(conn: sqlite3.Connection, columns: Iterable[str]) -> list[str]:

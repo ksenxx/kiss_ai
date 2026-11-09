@@ -145,7 +145,8 @@ from kiss.tests.agents.third_party_agents.recording_http import (
 from kiss.tests.server.pause import Pause
 
 _REAL_TG_TOKEN = "7000000001:AAtelegram-real-secret_x"
-_REAL_MS_SECRET = "msteams-real-client-secret"
+# Reserved characters, so the percent-encoded form differs from the raw secret.
+_REAL_MS_SECRET = "msteams-real-client-secret+/="
 _MS_TENANT = "11111111-2222-3333-4444-555555555555"
 _MS_CLIENT_ID = "app-client-id-1"
 
@@ -900,10 +901,22 @@ def test_msteams_graph_http_errors_surface_in_tools(
     assert json.loads(backend.post_chat_message("chat1", "hi")) == {"ok": True, "id": "M1"}
     bad = json.loads(backend.post_chat_message("chatbad", "hi"))
     assert bad["ok"] is False and "BadRequest" in bad["error"]
-    # GET-side 4xx envelopes get the same ok=False marking.
-    listed = json.loads(backend.list_channel_messages("badT", "C1"))
-    assert listed == {"ok": True, "messages": []}  # tolerant reader
+    # GET-side 4xx envelopes surface the same way from the listing tools:
+    # a failed or denied read is not an empty channel.
     assert backend._get("/teams/badT")["ok"] is False
+    for listed in (
+        backend.list_channel_messages("badT", "C1"),
+        backend.list_channels("badT"),
+        backend.list_team_members("badT"),
+    ):
+        bad = json.loads(listed)
+        assert bad["ok"] is False and "BadRequest" in bad["error"], listed
+    assert json.loads(backend.list_channel_messages("T1", "C1"))["ok"] is True
+    # Graph refusing the token: the user-scoped listings fail the same way.
+    api_server.graph_always_401 = True
+    for listed in (backend.list_teams(), backend.list_chats()):
+        bad = json.loads(listed)
+        assert bad["ok"] is False and "InvalidAuthenticationToken" in bad["error"], listed
 
 
 def test_msteams_flag_off_refuses_to_connect(
@@ -1225,7 +1238,9 @@ def test_token_exchange_error_never_relays_endpoint_text(
     message = backend._connection_info
     assert "HTTP 400" in message
     assert _REAL_MS_SECRET not in message
-    assert quote(_REAL_MS_SECRET, safe="") not in message
+    encoded = quote(_REAL_MS_SECRET, safe="")
+    assert encoded != _REAL_MS_SECRET  # the encoded form is a distinct leak to catch
+    assert encoded not in message
 
 
 def test_token_exchange_rejects_nonfinite_expiry(

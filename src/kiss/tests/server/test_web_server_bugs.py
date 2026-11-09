@@ -97,7 +97,7 @@ class TestReadyMalformedRestoredTabs(_ServerTestBase):
     async def test_non_dict_restored_tab_does_not_raise(self) -> None:
         """A string element in ``restoredTabs`` must be skipped, not
         raise ``AttributeError`` (which would propagate out of
-        ``_dispatch_client_command`` and tear down the connection)."""
+        ``ServerApi.dispatch`` and tear down the connection)."""
         endpoint = _RecordingEndpoint()
         cmd = {
             "type": "ready",

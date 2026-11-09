@@ -24,6 +24,8 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from types import FrameType
+from typing import Any
 
 import pytest
 
@@ -154,5 +156,53 @@ def test_batch_larger_than_the_pool_cap_keeps_every_member_until_its_tools_are_r
         assert first.error == "", first.error
         srv0_ping = next(tool for tool in tools if tool.__name__ == "srv0_ping")
         assert "srv0" in str(srv0_ping())
+    finally:
+        manager.shutdown()
+
+
+class _EvictAsTheBatchReturns:
+    """Profile hook: as ``connect_all`` returns its batch, another startup evicts it."""
+
+    def __init__(self, manager: MCPManager, other: MCPServerConfig) -> None:
+        self.manager = manager
+        self.other = other
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> None:
+        if event == "return" and frame.f_code is MCPManager.connect_all.__code__:
+            sys.setprofile(None)
+            assert self.manager.connect(self.other).session is not None
+            for conn in arg:
+                assert conn.finished.wait(20), "the batch was not evicted"
+
+
+def test_a_server_evicted_before_its_tools_are_registered_still_yields_them(
+    isolated_homes: Path,
+) -> None:
+    """A ready server another task's startup evicts right after the batch still gets its wrappers.
+
+    ``make_mcp_tools`` skipped a server whose ``session`` was gone by
+    the time it read the batch, although its tools had been discovered:
+    a concurrent startup enforcing the pool cap evicted the idle, ready
+    connection in that window, and the task ran without the server for
+    good (no wrapper, so nothing to reconnect on call).  The wrappers
+    are now built from the discovered tools; a call reconnects.
+    """
+    project = isolated_homes / "project"
+    script = project / "srv.py"
+    script.write_text(_FASTMCP_SCRIPT, encoding="utf-8")
+    save_mcp_server(_fastmcp_config(script, "srva"), "user", str(project))
+    stale = MCPManager._instance
+    if stale is not None:
+        stale.shutdown()
+    manager = MCPManager(max_connections=1)
+    MCPManager._instance = manager
+    try:
+        sys.setprofile(_EvictAsTheBatchReturns(manager, _fastmcp_config(script, "srvb")))
+        try:
+            tools = make_mcp_tools(str(project))
+        finally:
+            sys.setprofile(None)
+        assert [tool.__name__ for tool in tools] == ["srva_ping"]
+        assert "srva" in str(tools[0]())
     finally:
         manager.shutdown()

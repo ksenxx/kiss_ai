@@ -90,6 +90,31 @@ class TestBashUniformErrorContract:
         assert "out-line" in out_a and "err-line" in out_a
         assert any("out-line" in chunk for chunk in streamed)
 
+    def test_launch_failure_is_the_same_error_result_with_a_stream_callback(
+        self, tmp_path: Path,
+    ) -> None:
+        """A shell that cannot be launched (its directory cannot be entered)
+        is the same ``Error:`` result with a stream callback as without
+        it: only an exception of the callback itself propagates (A10-2)."""
+        if IS_WINDOWS or os.geteuid() == 0:
+            import pytest
+
+            pytest.skip("needs a directory the test user may not enter")
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0)
+        try:
+            streamed: list[str] = []
+            with_cb = UsefulTools(work_dir=str(locked), stream_callback=streamed.append)
+            without_cb = UsefulTools(work_dir=str(locked))
+            out_b = without_cb.Bash("echo hi", "probe", timeout_seconds=10)
+            out_a = with_cb.Bash("echo hi", "probe", timeout_seconds=10)
+        finally:
+            locked.chmod(0o700)
+        assert out_b.startswith("Error:") and "Permission denied" in out_b, out_b
+        assert out_a == out_b
+        assert streamed == []
+
 
 class TestFileLockNonBlocking:
     """F-R4: ``exclusive_file_lock``'s non-blocking mode and lock-file mode."""

@@ -13,7 +13,6 @@
 //  - `tabs_state` reconciliation adopts every registry tab, and a
 //    snapshot without a tab drops it (closed elsewhere) while the chat
 //    on screen stays;
-//  - the "+" button on a used chat opens a new chat in place;
 //  - sub-agent tabs: an own chat's sub-agent gets an internal tab, a
 //    foreign chat's sub-agent is ignored, a parentless spawn (a
 //    run_agent sub-task) is adopted.
@@ -97,26 +96,6 @@ function testReconcileAdoptsEveryRegistryTab() {
   win.close();
 }
 
-function testNewChatOpensAChatInPlace() {
-  const {win, posted} = makePage();
-  const boot = win._testApi.getActiveTabId();
-  send(win, {type: 'setTaskText', text: 'first task'});
-  win.document
-    .getElementById('new-chat-btn')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.notStrictEqual(
-    win._testApi.getActiveTabId(),
-    boot,
-    '"+" on a used chat opens a new chat in this page',
-  );
-  assert.ok(ofType(posted, 'newChat').length >= 1, 'the daemon is told');
-  const active = win._testApi
-    .openTabs()
-    .find(t => t.id === win._testApi.getActiveTabId());
-  assert.strictEqual(active.title, 'new chat');
-  win.close();
-}
-
 function testSubagentTabs() {
   const {win, posted} = makePage();
   const boot = win._testApi.getActiveTabId();
@@ -155,7 +134,6 @@ function main() {
   const tests = [
     testBootAnnouncesOneNewChat,
     testReconcileAdoptsEveryRegistryTab,
-    testNewChatOpensAChatInPlace,
     testSubagentTabs,
   ];
   for (const t of tests) {

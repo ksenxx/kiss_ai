@@ -29,12 +29,17 @@ from pathlib import Path
 
 #: Driver run in two concurrent processes.  Both wait on a barrier file so
 #: they enter the profile-resolution window together, then each reports the
-#: profile directory it actually opened.
+#: profile directory its Chromium actually holds: the ``--user-data-dir`` of
+#: the browser's own command line, read over CDP (``SystemInfo.getInfo``).
+#: Chromium's ``SingletonLock`` would name it on POSIX only (Windows Chromium
+#: holds a ``lockfile`` instead), and a second Chromium opening the same
+#: profile replaces the first one's lock, so a doubly opened profile would
+#: show as held by one process only.
 _BROWSER_DRIVER = """
-import os, sys, time
+import re, sys, time
 from pathlib import Path
 
-from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.agents.sorcar.web_use_tool import WebUseTool, _cdp_call
 
 profile, barrier, tag = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
 Path(str(barrier) + "." + tag).write_text("ready")
@@ -44,7 +49,12 @@ while not barrier.exists():
 tool = WebUseTool(user_data_dir=profile, headless=True)
 try:
     tree = tool.go_to_url("data:text/html,<h1>profile lock</h1>")
-    print("PROFILE=" + str(tool.effective_user_data_dir))
+    browser = tool._context.browser
+    cdp = _cdp_call(browser, browser._impl_obj.new_browser_cdp_session())
+    command_line = _cdp_call(browser, cdp.send("SystemInfo.getInfo"))["commandLine"]
+    # Windows quotes an argument with spaces in it; the test's paths have none.
+    held = re.search(r'--user-data-dir="?([^" ]+)', command_line)
+    print("PROFILE=" + (held.group(1) if held else ""))
     print("OK=" + str("profile lock" in tree))
     time.sleep(3)
 finally:

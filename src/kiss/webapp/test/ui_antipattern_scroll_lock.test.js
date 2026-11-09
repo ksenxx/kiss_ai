@@ -17,7 +17,7 @@ const h = require('./ui_antipattern_harness');
 const {test, report} = h.makeRunner();
 
 /** Give #output a 1000 px tall content in a 200 px viewport. */
-function giveScrollGeometry(win, out) {
+function giveScrollGeometry(out) {
   Object.defineProperty(out, 'scrollHeight', {value: 1000, configurable: true});
   Object.defineProperty(out, 'clientHeight', {value: 200, configurable: true});
   let top = 0;
@@ -44,7 +44,7 @@ async function main() {
     const {win} = h.makePage();
     const tabId = win._testApi.getActiveTabId();
     const out = h.byId(win, 'output');
-    giveScrollGeometry(win, out);
+    giveScrollGeometry(out);
     const btn = out.nextElementSibling;
     assert.ok(
       btn && btn.classList.contains('new-output-btn'),

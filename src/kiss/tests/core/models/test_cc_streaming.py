@@ -33,6 +33,9 @@ class TestAlwaysStreaming:
         assert args[idx + 1] == "stream-json"
         assert "--verbose" in args
         assert "--include-partial-messages" in args
+        # Without it the CLI streams thinking blocks with empty text.
+        idx = args.index("--thinking-display")
+        assert args[idx + 1] == "summarized"
 
     def test_generate_without_callback_uses_streaming(self) -> None:
         """generate() should use streaming even when token_callback is None."""

@@ -176,6 +176,254 @@ const run = (async () => {
       assert.strictEqual(txt.selectionEnd, 2);
     },
   );
+
+  // The clipboard read is asynchronous (the browser may first ask the
+  // user for permission): a field the page made read-only, disabled or
+  // removed meanwhile is left alone, as the native paste would leave it.
+  await runner.test(
+    'a Paste whose clipboard read lands after the field became read-only ' +
+      'does not write into it',
+    async () => {
+      const win = makeDom('');
+      let deliver = null;
+      Object.defineProperty(win.navigator, 'clipboard', {
+        value: {
+          readText: () =>
+            new Promise(resolve => {
+              deliver = resolve;
+            }),
+        },
+        configurable: true,
+      });
+      const txt = win.document.getElementById('txt');
+      txt.setSelectionRange(1, 1);
+      const inputs = [];
+      txt.addEventListener('input', () => inputs.push(txt.value));
+      activate(win, txt, 'paste');
+      assert.ok(deliver, 'the clipboard was asked');
+      txt.readOnly = true;
+      deliver('X');
+      await settle();
+      assert.strictEqual(txt.value, 'ab', 'a read-only field is not written');
+      assert.deepStrictEqual(inputs, [], 'and gets no input event');
+      assert.deepStrictEqual(unhandled, []);
+      assert.deepStrictEqual(listenerErrors, []);
+    },
+  );
+
+  // The paste was asked for at the selection of that moment.  A
+  // selection the user made while the read was pending (the caret
+  // moved, other text selected) is not where it was asked for, and the
+  // old offsets are nowhere over text the field has changed meanwhile:
+  // the clipboard text is dropped then, in a text field and in a
+  // contenteditable alike, and lands when nothing moved.
+  await runner.test(
+    'a Paste whose clipboard read lands after the selection moved pastes nowhere',
+    async () => {
+      const win = makeDom('');
+      const doc = win.document;
+      let deliver = null;
+      Object.defineProperty(win.navigator, 'clipboard', {
+        value: {
+          readText: () =>
+            new Promise(resolve => {
+              deliver = resolve;
+            }),
+        },
+        configurable: true,
+      });
+      const txt = doc.getElementById('txt');
+      txt.value = 'abcdef';
+      const inputs = [];
+      txt.addEventListener('input', () => inputs.push(txt.value));
+      txt.setSelectionRange(1, 2);
+      activate(win, txt, 'paste');
+      txt.setSelectionRange(4, 5);
+      deliver('X');
+      await settle();
+      assert.strictEqual(txt.value, 'abcdef', 'the new selection is kept');
+      assert.deepStrictEqual(inputs, []);
+      activate(win, txt, 'paste');
+      txt.value = 'abcdefgh';
+      txt.setSelectionRange(1, 2);
+      deliver('X');
+      await settle();
+      assert.strictEqual(txt.value, 'abcdefgh', 'and the changed text');
+      assert.deepStrictEqual(inputs, []);
+      activate(win, txt, 'paste');
+      deliver('X');
+      await settle();
+      assert.strictEqual(txt.value, 'aXcdefgh', 'an untouched one is pasted');
+      assert.strictEqual(txt.selectionStart, 2);
+      assert.deepStrictEqual(inputs, ['aXcdefgh']);
+
+      doc.body.insertAdjacentHTML(
+        'beforeend',
+        '<div id="ce" contenteditable="true">abcdef</div>',
+      );
+      Object.defineProperty(win.HTMLElement.prototype, 'isContentEditable', {
+        configurable: true,
+        get() {
+          return this.getAttribute('contenteditable') === 'true';
+        },
+      });
+      const ce = doc.getElementById('ce');
+      const sel = win.getSelection();
+      function select(start, end) {
+        const range = doc.createRange();
+        range.setStart(ce.firstChild, start);
+        range.setEnd(ce.firstChild, end);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      // (jsdom drops the selection when the menu focuses its first
+      // item, which Chromium does not: it is installed once the menu
+      // is up, before the item is clicked.)
+      function pasteAt(start, end) {
+        ce.dispatchEvent(
+          new win.MouseEvent('contextmenu', {bubbles: true, cancelable: true}),
+        );
+        select(start, end);
+        doc
+          .querySelector('#sorcar-content-context-menu [data-action="paste"]')
+          .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+      }
+      pasteAt(1, 2);
+      select(4, 5);
+      deliver('X');
+      await settle();
+      assert.strictEqual(ce.textContent, 'abcdef', 'contenteditable: kept');
+      pasteAt(1, 2);
+      deliver('X');
+      await settle();
+      assert.strictEqual(ce.textContent, 'aXcdef', 'contenteditable: pasted');
+      assert.deepStrictEqual(unhandled, []);
+      assert.deepStrictEqual(listenerErrors, []);
+    },
+  );
+
+  // A paste asked for in one content tab must not land in another (W1
+  // F1).  While the clipboard read is pending the user may switch tabs:
+  // the field's view is hidden (display:none, still mounted) and a chat
+  // composer focused.  In Chromium focus() on the hidden field fails
+  // silently and the insertText command then wrote into the composer
+  // (pinned by test_content_context_menu_paste_sweep1026.py); jsdom
+  // focuses hidden elements, so here the fallback wrote into the hidden
+  // field.  The paste is dropped instead when the field is no longer
+  // rendered or the focus has moved to another control, and the focus
+  // is never taken back from that control.
+  await runner.test(
+    'a Paste whose clipboard read lands after the field was hidden or ' +
+      'another control focused writes nowhere',
+    async () => {
+      const win = makeDom('');
+      const doc = win.document;
+      let deliver = null;
+      Object.defineProperty(win.navigator, 'clipboard', {
+        value: {
+          readText: () =>
+            new Promise(resolve => {
+              deliver = resolve;
+            }),
+        },
+        configurable: true,
+      });
+      doc.body.insertAdjacentHTML(
+        'beforeend',
+        '<div id="view"></div><textarea id="composer">DRAFT</textarea>',
+      );
+      const view = doc.getElementById('view');
+      const txt = doc.getElementById('txt');
+      view.appendChild(txt);
+      const composer = doc.getElementById('composer');
+      const inputs = [];
+      doc.addEventListener('input', e => {
+        inputs.push(e.target.id + '=' + e.target.value);
+      });
+      txt.focus();
+      txt.setSelectionRange(2, 2);
+      activate(win, txt, 'paste');
+      // The tab switch: the view hidden, the composer focused at its end.
+      view.style.display = 'none';
+      composer.focus();
+      composer.setSelectionRange(5, 5);
+      deliver('CLIP');
+      await settle();
+      assert.strictEqual(txt.value, 'ab', 'the hidden field is left alone');
+      assert.strictEqual(composer.value, 'DRAFT', 'and so is the composer');
+      assert.strictEqual(doc.activeElement, composer, 'the focus stays');
+      // The field still shown but the focus moved: dropped, focus kept.
+      view.style.display = '';
+      txt.focus();
+      activate(win, txt, 'paste');
+      composer.focus();
+      deliver('CLIP');
+      await settle();
+      assert.strictEqual(txt.value, 'ab', 'a field the focus left');
+      assert.strictEqual(doc.activeElement, composer, 'the focus stays');
+      // The field hidden, the focus nowhere in particular: dropped.
+      txt.focus();
+      activate(win, txt, 'paste');
+      view.style.display = 'none';
+      txt.blur();
+      deliver('CLIP');
+      await settle();
+      assert.strictEqual(txt.value, 'ab', 'a hidden field');
+      assert.deepStrictEqual(inputs, [], 'no input event for a dropped paste');
+      // Nothing moved: pasted at the caret.
+      view.style.display = '';
+      txt.focus();
+      activate(win, txt, 'paste');
+      deliver('CLIP');
+      await settle();
+      assert.strictEqual(txt.value, 'abCLIP');
+      assert.deepStrictEqual(inputs, ['txt=abCLIP']);
+      assert.deepStrictEqual(unhandled, []);
+      assert.deepStrictEqual(listenerErrors, []);
+    },
+  );
+
+  // The sandboxed preview iframe (an opaque origin, no clipboard-read
+  // delegation) cannot read the clipboard: its Paste is offered disabled
+  // instead of doing nothing; the keyboard shortcut shown still works.
+  // jsdom does not load a srcdoc iframe, so the preview document is
+  // built from the bootstrap markup main.js appends to the srcdoc, at
+  // the opaque origin the sandbox gives it.
+  await runner.test(
+    'in the sandboxed preview document Paste is offered disabled',
+    async () => {
+      const win = makeDom('');
+      const preview = new JSDOM(
+        '<!DOCTYPE html><body><textarea id="ta">ab</textarea>' +
+          win.ContentContextMenu.contentContextMenuBootstrapHtml() +
+          '</body>',
+        {runScripts: 'dangerously', pretendToBeVisual: true, url: 'about:srcdoc'},
+      );
+      const fwin = preview.window;
+      windows.push(fwin);
+      const fdoc = fwin.document;
+      assert.strictEqual(String(fdoc.location.origin), 'null', 'opaque origin');
+      const ta = fdoc.getElementById('ta');
+      ta.dispatchEvent(
+        new fwin.MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: 10,
+          clientY: 10,
+        }),
+      );
+      const paste = fdoc.querySelector(
+        '#sorcar-content-context-menu .sorcar-ctx-item[data-action="paste"]',
+      );
+      assert.ok(paste, 'Paste is listed');
+      assert.strictEqual(
+        paste.getAttribute('aria-disabled'),
+        'true',
+        'Paste is disabled where the clipboard cannot be read',
+      );
+      assert.strictEqual(paste.textContent.includes('V'), true, 'shortcut shown');
+    },
+  );
 })();
 
 run.then(() => {

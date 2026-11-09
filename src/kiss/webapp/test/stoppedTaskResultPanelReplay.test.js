@@ -60,8 +60,12 @@ function testHistoryReplayShowsStoppedResultPanel() {
 
 function testLiveStopShowsResultPanel() {
   const {win} = makePage();
+  // Live, the daemon stamps every copy of a task's events with the tab
+  // it is for; a tab that owns no task takes nothing addressed by task
+  // id alone (A32-1).
+  const tabId = win._testApi.getActiveTabId();
   for (const ev of stoppedTaskEvents()) {
-    send(win, Object.assign({}, ev));
+    send(win, Object.assign({tabId}, ev));
   }
   const panels = resultPanels(win);
   assert.strictEqual(panels.length, 1, 'live stop must render 1 Result panel');

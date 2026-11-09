@@ -563,6 +563,91 @@ class RemoteViewsTest(TwoClientHarness):
                 client, "browserState", timeout=60, tab_id=focused[0]["tab_id"], url=base + page,
             )
 
+    def test_a_losing_candidate_stream_dropped_before_its_close_keeps_the_winners_pages(
+        self,
+    ) -> None:
+        self._with_headless_remote(self._check_losing_candidate)
+
+    def _check_losing_candidate(self, base: str) -> None:
+        """A losing candidate neither resurrects a closed page nor closes the winner's pages.
+
+        Hold its socket close and one queued open until the winner has
+        closed that page.  Even before the matching queued close is
+        relayed, no surface may see the stale open.  Losing the candidate's
+        socket must also leave the winner's other page intact.
+        """
+        a, b, views = self.a, self.b, self._views()
+        losers: list[RemoteViewStream] = []
+
+        def not_the_winner(local: dict[str, Any]) -> bool:
+            if local["self"] is views._streams.get("box"):
+                return False
+            losers.append(local["self"])
+            return True
+
+        connecting = Pause(RemoteViewStream.__init__.__code__, lambda local: True)
+        closing = Pause(RemoteViewStream.close.__code__, not_the_winner)
+        stale_open = Pause(
+            RemoteViewStream._relay_browser.__code__,
+            lambda local: local["self"] in losers and local["kind"] == "openBrowserTab",
+        )
+        stale_close = Pause(
+            RemoteViewStream._relay_browser.__code__,
+            lambda local: local["self"] in losers and local["kind"] == "closeBrowserTab",
+        )
+        with Pauses(connecting, closing, stale_open, stale_close):
+            a.send({"type": "browserOpen", "url": base + "/", "machine": "box"})
+            self.assertTrue(connecting.paused.wait(30), "a's open never connected a stream")
+            # b's open connects and registers the winner while a's is held.
+            b.send({"type": "browserOpen", "url": base + "/second", "machine": "box"})
+            second = str(self.wait_event(b, "openBrowserTab", timeout=120, focus=True)["tab_id"])
+            winner = views._streams["box"]
+            connecting.release()
+            self.assertTrue(closing.paused.wait(30), "the loser never reached its close")
+            loser = losers[0]
+            # A page opened through the winner now is relayed by both
+            # streams (a's own commands queue behind its held open).
+            b.send({"type": "browserOpen", "url": base + "/third", "machine": "box"})
+            third = str(
+                self.wait_for(
+                    lambda: [
+                        e for e in b.of_type("openBrowserTab", focus=True)
+                        if e["tab_id"] != second
+                    ],
+                    timeout=120, what="the reply to b's second open",
+                )[0]["tab_id"]
+            )
+            self.assertTrue(stale_open.paused.wait(30), "the loser received the page's open")
+            b.send({"type": "browserClose", "tab_id": third})
+            for client in (a, b):
+                self.wait_event(client, "closeBrowserTab", timeout=60, tab_id=third)
+            stale_open.release()
+            self.assertTrue(stale_close.paused.wait(30), "the loser passed the stale open")
+            # ready is a delivery barrier; inspect lifecycle events, not its
+            # repairing snapshot, while the loser's matching close is held.
+            b.ready()
+            self.wait_event(b, "browserTabs", remote=True)
+            lifecycle = [
+                e["type"] for e in b.events
+                if e.get("tab_id") == third
+                and e["type"] in ("openBrowserTab", "closeBrowserTab")
+            ]
+            self.assertEqual(lifecycle[-1], "closeBrowserTab", lifecycle)
+            # The loser's connection drops before its normal close.
+            loser._ws.close()
+            stale_close.release()
+            loser._thread.join(30)
+            self.assertFalse(loser._thread.is_alive())
+            closing.release()
+        self.wait_event(a, "openBrowserTab", timeout=120, focus=True)
+        self.assertIs(views._streams.get("box"), winner)
+        self.assertIn(split_tab_id(second)[0], winner.browser_tabs)
+        self.assertNotIn(split_tab_id(third)[0], winner.browser_tabs)
+        for client in (a, b):
+            self.assertIn(second, self._live_remote_tabs(client))
+            self.assertNotIn(third, self._live_remote_tabs(client))
+            self.assertEqual(client.of_type("closeBrowserTab", tab_id=second), [])
+
     def test_a_reconnecting_page_is_told_the_remote_tabs_as_they_are(self) -> None:
         self._with_headless_remote(self._check_replay)
 

@@ -129,3 +129,86 @@ def test_workspace_lock_survives_injection() -> None:
         capture_output=True, text=True, timeout=120, check=False,
     )
     assert proc.returncode == 0, proc.stderr[-3000:]
+
+
+def _exit_stopped_at(nth: int) -> tuple[int, dict[str, object]]:
+    """On a task thread: enter ``account-a``, exit it with a Stop at its *nth* check, clean up.
+
+    An injected ``KeyboardInterrupt`` lands where the thread next checks
+    for it: right after a C call returned, or on entering a Python
+    callee.  A profile hook raises at the *nth* such point inside
+    ``_exit_workspace_locked``'s own body (none when *nth* is past them),
+    then the task runner's final cleanup runs: release whatever the
+    thread still records as held.
+
+    Returns:
+        The number of check points the exit body has, and the outcome.
+    """
+    top = channel_workspace._exit_workspace_locked.__code__
+    seen = 0
+    outcome: dict[str, object] = {}
+
+    def stop_at(frame: object, event: str, arg: object) -> None:
+        nonlocal seen
+        code = frame.f_code  # type: ignore[attr-defined]
+        back = frame.f_back  # type: ignore[attr-defined]
+        if (event == "c_return" and code is top) or (
+            event == "call" and back is not None and back.f_code is top
+        ):
+            seen += 1
+            if seen == nth:
+                raise KeyboardInterrupt
+
+    def task() -> None:
+        assert enter_workspace("account-a") is True
+        sys.setprofile(stop_at)
+        try:
+            exit_workspace("account-a")
+        except KeyboardInterrupt:
+            outcome["stopped"] = True
+        finally:
+            sys.setprofile(None)
+        held = held_workspace()
+        outcome["held_after_stop"] = held
+        if held:  # task_runner's cleanup: release exactly what this thread holds
+            exit_workspace(held)
+
+    thread = threading.Thread(target=task, name="stopped-channel-task")
+    thread.start()
+    thread.join(10)
+    assert not thread.is_alive()
+    return seen, outcome
+
+
+def test_a_stop_inside_the_exit_leaks_no_hold_and_releases_none_twice() -> None:
+    """Wherever a Stop lands in ``exit_workspace``, the runner's cleanup releases the hold once.
+
+    The exit cleared the thread's record first and decremented the count
+    after: a Stop in between left a count nobody could release, and every
+    later launch of another account waited out its whole 900 s timeout.
+    A second run of the same account holds the workspace too, so a
+    release counted twice shows as well as one never made.
+    """
+    assert enter_workspace("account-a") is True  # the other run of the same account
+    try:
+        nth = 1
+        while True:
+            points, outcome = _exit_stopped_at(nth)
+            assert channel_workspace._ACTIVE_WORKSPACES == {"account-a": 1}, (nth, outcome)
+            assert os.environ.get(WORKSPACE_ENV_VAR) == "account-a"
+            if nth > points:  # no Stop raised any more: the plain exit
+                assert not outcome.get("stopped")
+                break
+            assert outcome.get("stopped") is True, (nth, outcome)
+            nth += 1
+        assert nth > 2  # the exit has check points: the Stop was really exercised
+    finally:
+        exit_workspace("account-a")
+    assert channel_workspace._ACTIVE_WORKSPACES == {}
+    assert WORKSPACE_ENV_VAR not in os.environ
+    # The last hold of the account: its exit also withdraws the env var.
+    assert enter_workspace("account-a") is True
+    exit_workspace("account-a")
+    assert WORKSPACE_ENV_VAR not in os.environ
+    assert enter_workspace("account-b", timeout=1.0) is True  # nothing left to wait for
+    exit_workspace("account-b")

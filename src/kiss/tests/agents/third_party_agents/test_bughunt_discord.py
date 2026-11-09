@@ -102,9 +102,6 @@ class TestDiscordBackendBugs:
         self.backend = DiscordChannelBackend(api_base=discord_server.base_url)
         self.backend._token = "test-token"
 
-    def _paths(self) -> list[str]:
-        return [r["path"] for r in self.server.requests]
-
     def test_connect_stores_bot_id_for_is_from_bot(self) -> None:
         """connect() must remember the bot's own user id so is_from_bot works."""
         assert self.backend.connect() is True
@@ -114,8 +111,8 @@ class TestDiscordBackendBugs:
     def test_find_channel_uses_channels_path(self) -> None:
         """find_channel must query /guilds/{id}/channels, not /third_party_agents."""
         assert self.backend.find_channel("general") == "111"
-        assert "/guilds/G1/channels" in self._paths()
-        assert not any("third_party_agents" in p for p in self._paths())
+        assert "/guilds/G1/channels" in self.server.paths()
+        assert not any("third_party_agents" in p for p in self.server.paths())
 
     def test_poll_messages_zero_cursor(self) -> None:
         """poll_messages GETs /channels/{id}/messages; oldest='0' is not
@@ -123,7 +120,7 @@ class TestDiscordBackendBugs:
         snowflake id (usable as reply target); the cursor is the numerically
         largest id ('10000' > '9999')."""
         msgs, cursor = self.backend.poll_messages("111", "0", limit=50)
-        assert self._paths() == ["/channels/111/messages"]
+        assert self.server.paths() == ["/channels/111/messages"]
         assert self.server.requests[0]["query"].get("after") != ["0"]
         assert [m["id"] for m in msgs] == ["9999", "10000"]
         assert [m["ts"] for m in msgs] == ["9999", "10000"]

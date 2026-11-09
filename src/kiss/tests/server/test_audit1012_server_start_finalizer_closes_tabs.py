@@ -27,7 +27,7 @@ from kiss.core.user_config import save_config
 from kiss.server.remote_tabs import RemoteTab
 from kiss.tests.remote_daemon import start_remote_daemon
 from kiss.tests.server._blocking_start import close_leaked_listeners
-from kiss.tests.server.conftest import find_free_port
+from kiss.tests.server.conftest import ensure_loop, find_free_port
 from kiss.tests.server.test_blocking_start_releases_port import (
     _make_server,
     _start_on_thread,
@@ -44,7 +44,7 @@ def test_stopped_start_shuts_browser_and_remote_tabs(tmp_path: Path) -> None:
         server = _make_server(tmp_path, "finalized", find_free_port())
         thread = _start_on_thread(server)
         browser_tabs = server._agent_server.browser_tabs
-        browser_tabs._ensure_loop()
+        ensure_loop(browser_tabs)
         browser_thread = browser_tabs._thread
         assert browser_thread is not None and browser_thread.is_alive()
         remote_tabs = server._server_api.remote_tabs

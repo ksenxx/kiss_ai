@@ -24,7 +24,6 @@ import stat
 import tarfile
 import threading
 import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +44,8 @@ from kiss.agents.seas.sync_history_and_memory.sync_history_and_memory_sea import
     format_reports,
     sync_history_and_memory,
 )
-from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar import history_columns, sea_commands
+from kiss.agents.sorcar import machines as machine_registry
 from kiss.agents.sorcar.machines import Machine, save_machines
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.memoryfield.pages import MemoryDir
@@ -57,7 +57,7 @@ from kiss.tests.agents.seas.sea_contract import (
     tool_results,
 )
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import posix_only, wait_for
 
 pytestmark = posix_only("drives the engine through a bash ssh stand-in")
 
@@ -212,14 +212,16 @@ def finish_task(path: Path, task_id: str) -> None:
     conn.close()
 
 
-def wait_for(condition: Callable[[], bool], timeout: float = 30.0) -> bool:
-    """Poll *condition* every 20 ms until it holds (True) or *timeout* seconds pass (False)."""
-    deadline = time.monotonic() + timeout
-    while not condition():
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.02)
-    return True
+def seqs_of(path: Path, task_id: str) -> list[int]:
+    """Return the ``seq`` of every event of *task_id* in a database, in order."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT seq FROM events WHERE task_id = ? ORDER BY seq", (task_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [int(row[0]) for row in rows]
 
 
 def page_text(memory: MemoryDir, name: str) -> str:
@@ -290,6 +292,11 @@ def test_every_machine_ends_up_with_the_union(
 
     alpha, beta = reports
     assert alpha.error == "" and beta.error == ""
+    # Each machine's host name is saved, so the CHATS panel can name the
+    # rows pulled from it before its daemon ever answers (the fake ssh
+    # runs the peers here, on this host).
+    saved = machine_registry._saved_hosts()
+    assert saved["alpha"] == saved["beta"] == history_columns.host_name()
     assert alpha.pulled["tasks_inserted"] == 1 and alpha.pulled["events_inserted"] == 7
     assert beta.pulled["tasks_inserted"] == 2
     # Pushed after both pulls: each machine receives what the other brought.
@@ -701,9 +708,10 @@ def test_a_machine_that_cannot_be_reached_does_not_stop_the_others(
     """Dead, flaky and url-only machines are reported; the reachable one is synced all the same."""
     box = Sandbox(tmp_path, monkeypatch, "alpha", "dead", "flaky1", "flaky2")
     # flaky1: the master connection gets through, the home probe dies.  flaky2:
-    # both probes get through too, the history extract dies.
+    # the three probes (home, host name, memory) get through too, the
+    # history extract dies.
     monkeypatch.setenv("FLAKY_AFTER_flaky1", "1")
-    monkeypatch.setenv("FLAKY_AFTER_flaky2", "3")
+    monkeypatch.setenv("FLAKY_AFTER_flaky2", "4")
     make_db(box.db(), {"L1": {}})
     make_db(box.db("alpha"), {"A1": {}})
     make_db(box.db("flaky1"), {"F1": {}})
@@ -843,16 +851,20 @@ def test_machines_busy_writing_during_the_sync_lose_nothing(
         assert {k: v for k, v in have.items() if not k.endswith("-live")} == union, host
         # The live task stayed on its own machine, with every event it wrote.
         assert [k for k in have if k.endswith("-live")] == [f"{host or 'local'}-live"]
+        assert seqs_of(box.db(host), f"{host or 'local'}-live") == list(range(writes[host]))
         assert not list(box.memory(host).root.glob("*.incoming"))
     for report in reports:
         assert report.held_back_there == [f"{report.name}-live"] and report.held_back_here == [
             "local-live"
         ]
-    # Every page everywhere is a whole page: some "rewrite N" or "first", never a torn one.
+    # Every page everywhere is a whole page: "first" or some "rewrite N" its writer
+    # completed, never a torn one.
     for host in ("", "alpha", "beta"):
         for page in box.memory(host).root.glob("*.md"):
             body = page_text(box.memory(host), page.stem)
-            assert body == "first\n" or body.startswith("rewrite "), (host, page, body)
+            writer = page.stem.removesuffix("-page").replace("local", "")
+            whole = {"first\n", *(f"rewrite {i}\n" for i in range(writes[writer]))}
+            assert body in whole, (host, page, body)
 
 
 def test_a_hostile_stream_cannot_write_outside_the_memory(tmp_path: Path) -> None:

@@ -214,9 +214,19 @@ function testResultPanel() {
   );
   console.log('  ok - a picture the daemon cannot serve is marked, no tab');
 
-  // The same reply a second time is nobody's picture any more: it
-  // opens a tab like any other fileContent (4), as does an unknown
-  // token.
+  // The same reply a second time, or one with a picture token nobody
+  // awaits, is a picture still: nobody asked for a file tab, so it is
+  // dropped (A33-1).  A reply with no token is an ordinary open (4).
+  const activeBefore = win._testApi.getActiveTabId();
+  send(win, {
+    type: 'fileContent',
+    path: '/ws/proj/notes.txt',
+    name: 'notes.txt',
+    tabId: tab,
+    token: textFile.token,
+    content: 'plain text',
+    version: '1:1',
+  });
   send(win, {
     type: 'fileContent',
     path: '/ws/proj/notes.txt',
@@ -226,8 +236,24 @@ function testResultPanel() {
     content: 'plain text',
     version: '1:1',
   });
-  assert.strictEqual(contentTabs(win).length, 1, 'unknown token opens a tab');
-  console.log('  ok - a fileContent without a pending token opens a tab');
+  assert.strictEqual(
+    contentTabs(win).length,
+    0,
+    'BUG: a picture reply nobody awaits opened a file tab',
+  );
+  assert.strictEqual(win._testApi.getActiveTabId(), activeBefore);
+  send(win, {
+    type: 'fileContent',
+    path: '/ws/proj/notes.txt',
+    name: 'notes.txt',
+    tabId: tab,
+    content: 'plain text',
+    version: '1:1',
+  });
+  assert.strictEqual(contentTabs(win).length, 1, 'no token opens a tab');
+  console.log(
+    '  ok - a fileContent without a pending picture token opens no tab',
+  );
   win.close();
 }
 
@@ -489,10 +515,19 @@ function testEdgeCases() {
   assert.ok(late.classList.contains('inline-img-missing'));
   assert.ok(waiting.srcdoc.includes('src="never.png"'), 'preview rendered');
   const before = imageRequests(posted).length;
+  const tabsBefore = contentTabs(win).length;
+  const activeBefore = win._testApi.getActiveTabId();
   send(win, pngReply(imageRequests(posted).pop()));
   assert.ok(late.classList.contains('inline-img-missing'), 'reply forgotten');
   assert.strictEqual(imageRequests(posted).length, before);
-  assert.strictEqual(contentTabs(win).length, 3, 'the stale reply opens a tab');
+  // The stale reply is a picture nobody awaits any more: it opens no
+  // tab and leaves the user where they are (A33-1).
+  assert.strictEqual(
+    contentTabs(win).length,
+    tabsBefore,
+    'BUG: the stale picture reply opened a file tab',
+  );
+  assert.strictEqual(win._testApi.getActiveTabId(), activeBefore);
   console.log('  ok - a dropped connection settles pending pictures');
 
   // 10. The task-update info panel loads its pictures as the polled

@@ -19,9 +19,13 @@ non-root uid).  No mocks or patches.
 
 from __future__ import annotations
 
+import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from types import FrameType
+from typing import Any
 
 import pytest
 
@@ -54,8 +58,43 @@ class TestRunSpawnFailureEndsRun(unittest.TestCase):
             "type": "run", "tabId": tab_id, "prompt": "hello",
             "workDir": tmp.name, "taskId": "client-run-token-1",
         }
-        with nproc_limit_lowered_to_one(), self.assertRaises(RuntimeError):
-            server._cmd_run(cmd)
+        reporting = threading.Event()
+        disposing = threading.Event()
+        probed = threading.Event()
+        disposal_probed = threading.Event()
+        admission_open: list[bool] = []
+
+        def try_admission() -> None:
+            for entering, checked in ((reporting, probed), (disposing, disposal_probed)):
+                if entering.wait(10):
+                    acquired = server._state_lock.acquire(blocking=False)
+                    admission_open.append(acquired)
+                    if acquired:
+                        server._state_lock.release()
+                    checked.set()
+
+        def at_failure_report(frame: FrameType, event: str, arg: Any) -> None:
+            if event == "call" and frame.f_code is server._report_run_start_failure.__code__:
+                reporting.set()
+                assert probed.wait(10)
+            elif event == "call" and frame.f_code is server._dispose_if_closed.__code__:
+                disposing.set()
+                assert disposal_probed.wait(10)
+
+        probe = threading.Thread(target=try_admission)
+        probe.start()
+        sys.setprofile(at_failure_report)
+        try:
+            with nproc_limit_lowered_to_one(), self.assertRaises(RuntimeError):
+                server._cmd_run(cmd)
+        finally:
+            sys.setprofile(None)
+            reporting.set()
+            disposing.set()
+            probe.join(10)
+        # Publish before admitting a successor, but release STATE_LOCK
+        # before disposal can acquire the worktree's repo_lock.
+        assert admission_open == [False, True], admission_open
 
         results = [
             e for e in printer.emitted

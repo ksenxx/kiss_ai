@@ -45,6 +45,7 @@ from typing import Any
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.anthropic_model import (
     PRICE_MODIFIER_FIELDS,
+    _effort_level_for,
     cache_creation_tokens,
     price_modifier_factor,
 )
@@ -52,10 +53,12 @@ from kiss.core.models.model import (
     CLITextModel,
     ThinkingCallback,
     TokenCallback,
+    _inside_invoke,
     _iter_balanced_json_objects,
     _iter_jsonl,
     _iter_tool_calls_lists,
     _parse_text_based_tool_calls,
+    _xml_tool_call_end,
     environ_without,
 )
 from kiss.core.processes import run_process_group
@@ -85,6 +88,12 @@ def _find_claude_cli() -> str:
 # either in its environment a ``claude -p`` turn bills API tokens even when
 # the user is logged in to a Claude plan (code.claude.com/docs/en/authentication).
 _API_KEY_ENV_VARS: tuple[str, ...] = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+# The one setting that outranks ``--effort`` in the CLI's resolution order
+# (code.claude.com/docs/en/model-config, "Adjust effort level"): left out
+# of the child environment when KISS sends the flag, so the chosen level is
+# the one that runs.
+_EFFORT_ENV_VAR = "CLAUDE_CODE_EFFORT_LEVEL"
 
 SUBSCRIPTION_HINT = (
     "Claude Code is set to bill your Claude subscription (Settings > Claude "
@@ -224,6 +233,18 @@ def _find_consecutive_tool_calls_end(content: str) -> int:
     return last_tc_end
 
 
+# What may follow an object that closed inside a candidate ``{``: after
+# a value, after a ``,`` (a key or a value starts), after a ``-`` and
+# inside a number; a literal is spelled out letter by letter.  ``NaN``
+# and ``Infinity`` are the decoder's (``json.loads(..., strict=False)``
+# reads them), so a candidate holding them stays valid.
+_AFTER_VALUE = ",}]"
+_JSON_ITEM_START = '"{[-0123456789tfnNI'
+_AFTER_MINUS = "0123456789I"
+_IN_NUMBER = "0123456789.eE+-,}]"
+_JSON_LITERALS = {"t": "rue", "f": "alse", "n": "ull", "N": "aN", "I": "nfinity"}
+
+
 class _ObjectSpans:
     """Balanced ``{...}`` spans of streamed text, fed one delta at a time.
 
@@ -239,21 +260,88 @@ class _ObjectSpans:
     ``"`` nor ``}`` cannot be a JSON object and is dropped from its stack
     at once (the braces of a valid object all pass that rule, so its own
     pairing is unchanged), which spares a decode per ``{...}`` of a
-    brace-heavy file streamed inside a ``Write`` argument.
+    brace-heavy file streamed inside a ``Write`` argument.  Likewise the
+    candidates still open when an object closes inside them are dropped
+    when the text after it is not JSON: after a value only ``,``, ``]``
+    or ``}`` may come, after a ``,`` only a key or a value may start, and
+    a ``]`` leaves the text after a value again.  So the prose that
+    follows a block (``An example {"example": {...}`` or
+    ``{"example": [{...}],`` and then the imagined output) ends them as
+    candidates (:meth:`is_open`), whichever separators JSON allows come
+    first.  Not knowing whether a ``,`` sits in an array or an object,
+    the check accepts any value start there: a string, object or array
+    ends the check, a literal or number is read to its end (``, no
+    output`` breaks at the ``o``, ``, false output`` at the ``o`` after
+    the literal) and leaves the text after a value again.
 
     The streaming parser checks only the spans :meth:`feed` reports and
     rescans the whole text only when one of them is a ``tool_calls``
     object: rescanning per delta made a large streamed tool call (a
     ``Write`` of a brace-heavy file) cost minutes of CPU after the CLI
-    had finished.
+    had finished.  A span that closed while candidates of its stack
+    were still open (``enclosed`` maps its start to them, outermost
+    first) is their data for as long as one of them may still parse
+    (:func:`_may_still_parse`), exactly as the whole-text scanner
+    swallows it once the candidate does: judging it on its own would
+    promote an envelope-shaped argument into a call.  A candidate that
+    can no longer parse (``Pass {"cmd" and then run:`` before the
+    block) hides nothing, as the whole-text scanner skips it.
     """
 
     def __init__(self) -> None:
         self.pos = 0
         self.stacks: tuple[list[int], list[int]] = ([], [])
         self.fresh: list[int] | None = None
+        self.closed_under: list[int] | None = None
+        self.allowed = ""
+        self.literal = ""
         self.in_string = False
         self.escaped = False
+        self.enclosed: dict[int, tuple[int, ...]] = {}
+
+    def is_open(self, start: int) -> bool:
+        """Return whether the candidate ``{`` at offset *start* is still open on its stack.
+
+        Args:
+            start: The offset of the ``{`` in the whole text.
+        """
+        return any(start in stack for stack in self.stacks)
+
+    def _continues_candidates(self, ch: str) -> bool:
+        """Advance the expectation past *ch*; return whether ``closed_under`` may still parse.
+
+        Called for every character after an object closed inside open
+        candidates, until a string, object or array starts (which ends
+        the check) or the text stops being JSON (which ends them).
+
+        Args:
+            ch: The next character of the streamed text.
+        """
+        if self.literal:
+            if ch != self.literal[0]:
+                return False
+            self.literal = self.literal[1:]
+            if not self.literal:
+                self.allowed = _AFTER_VALUE
+        elif ch.isspace():
+            if self.allowed == _AFTER_MINUS:
+                return False
+            if self.allowed == _IN_NUMBER:
+                self.allowed = _AFTER_VALUE
+        elif ch not in self.allowed:
+            return False
+        elif ch == ",":
+            self.allowed = _JSON_ITEM_START
+        elif ch == "]":
+            self.allowed = _AFTER_VALUE
+        elif ch in '"{[}':
+            self.closed_under = None
+        elif self.allowed != _IN_NUMBER:
+            if ch in _JSON_LITERALS:
+                self.literal = _JSON_LITERALS[ch]
+            else:
+                self.allowed = _AFTER_MINUS if ch == "-" else _IN_NUMBER
+        return True
 
     def feed(self, text: str) -> list[tuple[int, int]]:
         """Consume *text*.
@@ -271,6 +359,9 @@ class _ObjectSpans:
                 if ch not in '"}':
                     self.fresh.pop()
                 self.fresh = None
+            if self.closed_under is not None and not self._continues_candidates(ch):
+                self.closed_under.clear()
+                self.closed_under = None
             if ch == "\\" and not self.escaped:
                 self.escaped = True
             else:
@@ -282,10 +373,40 @@ class _ObjectSpans:
                     stack.append(self.pos)
                     self.fresh = stack
                 elif ch == "}" and stack:
-                    closed.append((stack.pop(), self.pos + 1))
+                    start = stack.pop()
+                    if stack:
+                        self.enclosed[start] = tuple(stack)
+                        self.closed_under = stack
+                        self.allowed = _AFTER_VALUE
+                        self.literal = ""
+                    closed.append((start, self.pos + 1))
                 self.escaped = False
             self.pos += 1
         return closed
+
+
+_CALL_CLOSERS = ("```", "</function_calls>")
+"""What may close a tool call: a Markdown fence, Claude's native call wrapper."""
+
+
+def _is_call_epilogue(tail: str) -> bool:
+    """Return whether *tail*, the text streamed after a complete tool call, may still end the turn.
+
+    White space and the closers of the call (:data:`_CALL_CLOSERS`: the
+    Markdown fence around it, the ``<function_calls>`` wrapper Claude
+    puts around its native calls), the last one possibly still
+    streaming.  Anything else is the model writing on past the call.
+
+    Args:
+        tail: The text after the call's end.
+    """
+    rest = tail.strip()
+    while rest:
+        closer = next((c for c in _CALL_CLOSERS if rest.startswith(c)), None)
+        if closer is None:
+            return any(c.startswith(rest) for c in _CALL_CLOSERS)
+        rest = rest[len(closer):].strip()
+    return True
 
 
 def _is_tool_calls_object(text: str) -> bool:
@@ -299,6 +420,35 @@ def _is_tool_calls_object(text: str) -> bool:
     except json.JSONDecodeError:
         return False
     return bool(_iter_tool_calls_lists(parsed))
+
+
+def _may_still_parse(content: str, candidates: tuple[int, ...], end: int) -> bool:
+    """Return whether one of *candidates* is still a valid JSON prefix at *end*.
+
+    The whole-text scanner (:func:`~kiss.core.models.model._iter_balanced_json_objects`)
+    lets a candidate swallow the objects inside it only when it parses,
+    and a candidate that fails to decode before an inner object never
+    will: the decoder reads the same prefix however the text goes on.
+    So the innermost candidate is tried first and the text is cut at
+    *end* (just past an inner object's ``}``, outside any string on the
+    candidates' parity): a decode that fails at the cut wants more text
+    and may still parse, one that fails earlier is broken for good.
+
+    Args:
+        content: The streamed text so far.
+        candidates: Offsets of the ``{`` still open on the inner
+            object's stack when it closed, outermost first.
+        end: The offset just past the inner object.
+    """
+    for start in reversed(candidates):
+        try:
+            json.loads(content[start:end], strict=False)
+        except json.JSONDecodeError as exc:
+            if exc.pos >= end - start:
+                return True
+            continue
+        return True
+    return False
 
 
 def _merge_usage(target: dict[str, Any], usage: dict[str, Any], add: bool) -> None:
@@ -362,7 +512,9 @@ class ClaudeCodeModel(CLITextModel):
 
     Model names use the ``cc/`` prefix.  The part after the prefix is passed
     as the ``--model`` flag to the ``claude`` CLI (e.g. ``cc/opus`` →
-    ``--model opus``).
+    ``--model opus``); a generated ``-{level}`` alias is stripped first and
+    selects the effort instead (``cc/claude-opus-5-5-xhigh`` → ``--model
+    claude-opus-5-5 --effort xhigh``, see :meth:`_effort_level`).
 
     The CLI runs as a bare model (no native tools, KISS's system prompt
     in place of its own; see :meth:`_build_cli_args`), mirroring
@@ -393,6 +545,9 @@ class ClaudeCodeModel(CLITextModel):
                   ``--system-prompt-file``, replacing Claude Code's own system
                   prompt (see :meth:`_build_cli_args`).
                 - ``timeout`` (int): Subprocess timeout in seconds (default 300).
+                - ``reasoning_effort`` (str): The effort level to run at,
+                  passed as ``--effort``; outranks the catalog's level
+                  (see :meth:`_effort_level`).
             token_callback: Optional callback invoked with each streamed text token.
             thinking_callback: Optional callback invoked with ``True`` when a
                 thinking block starts and ``False`` when it ends.
@@ -403,7 +558,9 @@ class ClaudeCodeModel(CLITextModel):
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-        self._cli_model = model_name[3:] if model_name.startswith("cc/") else model_name
+        from kiss.core.models.model_info import _strip_thinking_alias
+
+        self._cli_model = _strip_thinking_alias(model_name).removeprefix("cc/")
         self._last_thinking_content: str = ""
         self._stopped_for_tool_calls: bool = False
         # Usage of the finished assistant messages of the current
@@ -442,7 +599,11 @@ class ClaudeCodeModel(CLITextModel):
         the user turn as a prompt injection and refuses the plain-text
         ``tool_calls`` protocol.  A file, because the prompt does not fit
         on a command line: Sorcar's alone exceeds the 32,767 characters
-        Windows allows.
+        Windows allows.  ``--thinking-display summarized`` keeps the
+        thinking text: in ``--print`` stream-json mode the CLI otherwise
+        asks the API to omit it, so thinking blocks stream empty.
+        ``--effort`` is added when :meth:`_effort_level` selects a level;
+        otherwise the CLI runs the model at its own default effort.
 
         Args:
             system_prompt_file: The file holding the system instruction
@@ -467,10 +628,34 @@ class ClaudeCodeModel(CLITextModel):
             "stream-json",
             "--verbose",
             "--include-partial-messages",
+            "--thinking-display",
+            "summarized",
         ]
+        effort = self._effort_level()
+        if effort is not None:
+            args += ["--effort", effort]
         if system_prompt_file is not None:
             args += ["--system-prompt-file", system_prompt_file]
         return args
+
+    def _effort_level(self) -> str | None:
+        """Return the effort level this turn runs at, or ``None`` for the CLI default.
+
+        Resolved by :func:`~kiss.core.models.anthropic_model._effort_level_for`
+        exactly as the direct Anthropic adapter resolves
+        ``output_config.effort``: an explicit ``reasoning_effort`` in
+        ``model_config`` (the key ``KISSAgent._turn_effort`` sets for one
+        turn) wins, else the catalog entry's ``thinking`` level (a
+        generated ``cc/claude-opus-5-5-xhigh`` alias carries ``xhigh``, a
+        base ``cc/claude-opus-5-5`` the level the catalog runs it at).  The
+        CLI accepts ``low`` … ``max`` and runs a level the model lacks at
+        the highest one below it.  Read at each launch so a per-turn
+        override is honoured.
+
+        Returns:
+            The level for ``--effort``, or ``None`` when nothing selects one.
+        """
+        return _effort_level_for(self.model_name, self.model_config)
 
     def generate(self) -> tuple[str, Any]:
         """Generate a response using the Claude Code CLI.
@@ -539,10 +724,16 @@ class ClaudeCodeModel(CLITextModel):
         key variable makes the turn API spend, whatever the switch says
         afterwards.  The same reading of the switch decides whether a
         failure of this turn carries :data:`SUBSCRIPTION_HINT`.
+
+        A turn launched with ``--effort`` runs without
+        :data:`_EFFORT_ENV_VAR`, which would otherwise outrank the flag.
         """
         env = claude_subscription_env()
         self._use_subscription = env is not None
         self._api_billed = env is None and any(os.environ.get(v) for v in _API_KEY_ENV_VARS)
+        if self._effort_level() is not None:
+            env = environ_without((_EFFORT_ENV_VAR,)) if env is None else env
+            env.pop(_EFFORT_ENV_VAR, None)
         return env
 
     def _with_auth_hint(self, error: KISSError, result_json: dict[str, Any]) -> KISSError:
@@ -626,10 +817,14 @@ class ClaudeCodeModel(CLITextModel):
         A ``result`` event is used as the authoritative final content.
 
         When *stop_on_tool_calls* is ``True``, the parser watches for
-        complete ``{"tool_calls": [...]}`` JSON blocks in the accumulated
-        text content.  As soon as one is found the content is truncated to
-        the end of that first block and parsing stops, preventing reasoning
-        models from hallucinating tool results in an unbounded stream.
+        complete ``{"tool_calls": [...]}`` JSON blocks (or a native
+        ``<invoke>`` block) in the accumulated text content.  Once the call
+        is complete the content is truncated to its end and the rest of the
+        stream is read only for the message's final usage
+        (``message_delta``, ``result``): the first new content after the
+        call (the model imagining its result) stops the parse, preventing
+        reasoning models from hallucinating tool results in an unbounded
+        stream.
 
         Args:
             lines: An iterable of JSON strings (one event per line).
@@ -649,6 +844,23 @@ class ClaudeCodeModel(CLITextModel):
         found_tool_calls = False
         last_tc_end = -1
         object_spans = _ObjectSpans()
+        # A ``tool_calls`` object closed inside a still-open candidate
+        # that may yet parse, to be judged with the whole text once a
+        # span closes outside any candidate (the enclosing one, or a
+        # later one when the enclosing one did not parse), and the open
+        # candidates it closed under: a sibling closing under the same
+        # ones is that candidate's data too and is not re-judged, so an
+        # argument holding thousands of envelope-shaped records costs
+        # one decode of the candidate, not one per record.
+        pending_enclosed = False
+        pending_under: tuple[int, ...] = ()
+        # Set once the content is cut at a complete tool call: the CLI
+        # sends the message's final usage (``message_delta``, ``result``)
+        # after the call's text, so the stream is read on for it and
+        # ends at the first new content (``drain_tail`` holds the text
+        # streamed after the cut).
+        draining = False
+        drain_tail = ""
         # Usage is kept on the instance (``_partial_usage`` for finished
         # messages, ``_open_message_usage`` for the one streaming) so a
         # stream that raises mid-parse still leaves its observed usage
@@ -659,6 +871,12 @@ class ClaudeCodeModel(CLITextModel):
         for event in events:
             event_type = event.get("type")
             self._note_api_model(event)
+            if draining and (
+                event_type in ("content_block_start", "message_start")
+                or (event_type == "assistant" and not saw_content_block)
+            ):
+                # New content after the call: the model imagining its result.
+                break
 
             if event_type == "assistant":
                 msg = event.get("message", {})
@@ -677,22 +895,34 @@ class ClaudeCodeModel(CLITextModel):
                             content += text
                             object_spans.feed(text)
                             self._invoke_token_callback(text)
-                if stop_on_tool_calls and content:
+                if stop_on_tool_calls and content and not draining:
                     # The deltas already located the blocks when they streamed.
-                    tc_end = (
-                        last_tc_end
-                        if found_tool_calls
-                        else _find_consecutive_tool_calls_end(content)
-                    )
+                    tc_end = _xml_tool_call_end(content)
+                    if tc_end <= 0:
+                        tc_end = (
+                            last_tc_end
+                            if found_tool_calls
+                            else _find_consecutive_tool_calls_end(content)
+                        )
                     if tc_end > 0:
+                        # The text block is complete (the CLI sends this
+                        # message before the block's stop): read on for
+                        # the final usage.
                         content = content[:tc_end]
                         self._stopped_for_tool_calls = True
-                        break
+                        draining = True
             elif event_type == "content_block_start":
                 saw_content_block = True
             elif event_type == "content_block_delta":
                 delta = event.get("delta", {})
                 delta_type = delta.get("type", "")
+                if draining:
+                    # Past the call: only white space (or the closing
+                    # tag of Claude's call wrapper) may follow it.
+                    drain_tail += delta.get("text", "") if delta_type == "text_delta" else "\0"
+                    if not _is_call_epilogue(drain_tail):
+                        break
+                    continue
                 if delta_type == "thinking_delta":
                     thinking_text = delta.get("thinking", "")
                     if thinking_text:
@@ -712,21 +942,75 @@ class ClaudeCodeModel(CLITextModel):
                                 window = content[-(len(text) + len("tool_calls")) :]
                                 seen_tool_calls_hint = "tool_calls" in window
                             # Outermost span first: inside valid JSON only
-                            # the outer object carries ``tool_calls``.
-                            if seen_tool_calls_hint and any(
-                                _is_tool_calls_object(content[start:end])
-                                for start, end in reversed(closed_spans)
+                            # the outer object carries ``tool_calls``.  A
+                            # span still inside an open candidate that may
+                            # yet parse is not judged on its own (see
+                            # ``_ObjectSpans``): the rescan of an incomplete
+                            # outer object would take an envelope-shaped
+                            # argument for the call and cut the content
+                            # there.  One inside candidates that can no
+                            # longer parse (a prose brace) is judged now.
+                            rescan = False
+                            spans = reversed(closed_spans) if seen_tool_calls_hint else ()
+                            for start, end in spans:
+                                enclosing = object_spans.enclosed.get(start)
+                                if enclosing is None:
+                                    rescan = pending_enclosed or _is_tool_calls_object(
+                                        content[start:end]
+                                    )
+                                elif enclosing != pending_under and _is_tool_calls_object(
+                                    content[start:end]
+                                ):
+                                    pending_enclosed = _may_still_parse(content, enclosing, end)
+                                    pending_under = enclosing
+                                    rescan = not pending_enclosed
+                                if rescan:
+                                    break
+                            # Prose after the pending object ended its
+                            # candidates, the outermost included (see
+                            # _ObjectSpans; a candidate that closed instead
+                            # was judged above): it is the call.
+                            if (
+                                pending_enclosed
+                                and pending_under
+                                and not object_spans.is_open(pending_under[0])
                             ):
+                                rescan = True
+                            if rescan:
+                                pending_enclosed = False
+                                pending_under = ()
                                 tc_end = _find_consecutive_tool_calls_end(content)
                                 if tc_end > 0:
                                     last_tc_end = tc_end
                                     found_tool_calls = True
-                            if found_tool_calls:
+                            # Claude's native call syntax (see
+                            # _parse_text_based_tool_calls): the first
+                            # complete block is the call unless a JSON call
+                            # came before it; what follows it is the model
+                            # imagining the result.
+                            if "</invoke>" in content[-(len(text) + len("</invoke>")) :]:
+                                xml_end = _xml_tool_call_end(content)
+                                if xml_end > 0:
+                                    drain_tail = content[xml_end:]
+                                    content = content[:xml_end]
+                                    self._stopped_for_tool_calls = True
+                                    if not _is_call_epilogue(drain_tail):
+                                        break
+                                    # The call is complete: read on for
+                                    # the message's final usage.
+                                    draining = True
+                                    continue
+                            if found_tool_calls and not _inside_invoke(content):
                                 trailing = content[last_tc_end:].strip()
                                 if trailing and not trailing.startswith("{"):
+                                    drain_tail = content[last_tc_end:]
                                     content = content[:last_tc_end]
                                     self._stopped_for_tool_calls = True
-                                    break
+                                    if not _is_call_epilogue(drain_tail):
+                                        break
+                                    # The call's closing fence: read on
+                                    # for the message's final usage only.
+                                    draining = True
             elif event_type == "content_block_stop":
                 # A no-op unless a thinking_delta opened the bracket, which
                 # only happens inside the thinking block that stops here.
@@ -952,8 +1236,8 @@ class ClaudeCodeModel(CLITextModel):
             default=None,
         )
 
-    def _tool_call_text(self, content: str) -> str:
-        """Return the turn's text, or its thinking when the text calls no tool.
+    def _parse_tool_calls(self, content: str) -> list[dict[str, Any]]:
+        """Return the turn's text calls, or its thinking's when the text calls no tool.
 
         A reasoning model sometimes emits the ``tool_calls`` block inside
         its thinking and then stops, so the thinking of the turn just
@@ -964,9 +1248,9 @@ class ClaudeCodeModel(CLITextModel):
         Args:
             content: The turn's assistant text.
         """
-        if _parse_text_based_tool_calls(content):
-            return content
-        return self._last_thinking_content
+        return _parse_text_based_tool_calls(content) or _parse_text_based_tool_calls(
+            self._last_thinking_content
+        )
 
     def extract_input_output_token_counts_from_response(
         self, response: Any

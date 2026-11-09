@@ -65,16 +65,19 @@ on top (see :func:`sea_layers` and :mod:`kiss.agents.sorcar.sea_apply`).
 
 Locking: two module locks, always acquired in the order
 ``_notify_lock`` -> ``_lock``.  ``_lock`` guards the registry and the
-subscriber list; ``_notify_lock`` wraps the publish-and-notify section
-of :func:`refresh_registry` so subscribers see snapshots in the order
-they were published.  Nothing calls :func:`refresh_registry` while
-holding ``_lock``.  The folders are read under no lock; a rescan that
-started before the last published one is dropped instead of published.
+subscriber list; ``_notify_lock`` wraps the delivery of a changed
+snapshot to the subscribers (:func:`_publish`) so they see snapshots
+in the order they were published.  Nothing calls
+:func:`refresh_registry` while holding ``_lock``.  The folders are
+read under no lock; a rescan that started before the last published
+one is dropped instead of published.
 """
 
 from __future__ import annotations
 
 import functools
+import importlib.abc
+import importlib.machinery
 import importlib.util
 import inspect
 import itertools
@@ -92,20 +95,22 @@ from pathlib import Path
 from typing import Any, cast
 
 from kiss.agents.seas.base.base_sea import BaseSea, ChannelSea
-from kiss.agents.sorcar._concurrency import locked, locked_call
 from kiss.agents.sorcar.sea_settings import (
     SEA_BASES,
     SeaError,
     declares_hidden,
     execute_python_file,
+    imported_revision,
     is_stop,
     parsed_sea,
+    refresh_imported_module,
     resolve_settings,
     safe_message,
     script_name,
 )
 from kiss.core.config import kiss_home
 from kiss.core.llm_reply import LLMReply
+from kiss.core.locked import locked, locked_call
 from kiss.core.tool_verdict import ALLOW, Verdict
 
 logger = logging.getLogger("kiss.sea_commands")
@@ -143,18 +148,23 @@ _registry: dict[str, Path] = {}
 # callback that itself calls :func:`list_commands` cannot deadlock).
 _lock = threading.RLock()
 
-# Serialises the publish-and-notify section of :func:`refresh_registry`
-# so subscribers receive snapshots in the order they were published:
-# without it two concurrent rescans could deliver snapshot B before A
-# and leave every subscriber on the stale list A for good (the
-# ``_last_broadcast`` dedupe then suppresses the correcting rescan).
+# Serialises the delivery of a changed snapshot to the subscribers
+# (:func:`_notify`) so they receive snapshots in the order they were
+# published: without it two concurrent rescans could deliver snapshot
+# B before A and leave every subscriber on the stale list A for good
+# (the ``_last_broadcast`` dedupe then suppresses the correcting
+# rescan).  Taken only by a rescan with something to deliver: one whose
+# snapshot is the last broadcast (a task thread's ``get_command`` miss,
+# mostly) returns at once instead of waiting out a slow subscriber (the
+# daemon's reads history.db, which a write-locked database stalls for
+# SQLite's 30 s busy timeout).
 #
-# LOCK ORDER: ``_notify_lock`` -> ``_lock``.  ``_notify_lock`` is taken
-# first and held through the callback loop; ``_lock`` is only ever
-# taken inside it or on its own.  No function may call
-# :func:`refresh_registry` while holding ``_lock``.  RLock so a
-# subscriber that re-enters :func:`refresh_registry` (e.g. through
-# :func:`get_command` on a miss) does not self-deadlock.
+# LOCK ORDER: ``_notify_lock`` -> ``_lock``.  ``_notify_lock`` is held
+# through the callback loop; ``_lock`` is only ever taken inside it or
+# on its own.  No function may call :func:`refresh_registry` while
+# holding ``_lock``.  RLock so a subscriber that re-enters
+# :func:`refresh_registry` (e.g. through :func:`get_command` on a miss)
+# does not self-deadlock.
 _notify_lock = threading.RLock()
 
 # Callbacks invoked (under ``_notify_lock`` but outside ``_lock``)
@@ -194,8 +204,47 @@ _model_sea_cache: dict[Path, tuple[dict[Path | str, _Reading], bool]] = {}
 # load): the stamp of the file it was asked for, loaded or not, and
 # the script its command name resolved to.  A load that fails in a
 # base is stamped with that base too, so its repair (the child
-# untouched) is re-read.
+# untouched) is re-read.  ``imported``: likewise the file of every
+# module the load imports the ordinary way (:class:`_PickerImports`),
+# stamped before it runs; read when the load fails, so a parent that
+# breaks the child's first ``from parent import Parent`` is re-read
+# once repaired (a load that succeeds is stamped from its class's
+# bases instead, :func:`_base_stamps`).
 _picker_load = threading.local()
+
+
+class _PickerImports(importlib.abc.MetaPathFinder):
+    """Records, on ``sys.meta_path``, the files a model-picker load imports the ordinary way.
+
+    Asked for every module not yet in ``sys.modules``; finds nothing
+    itself (the regular finders follow), but notes the file the path
+    finder resolves the name to, with its revision as it is before the
+    module runs, in the ``imported`` map of the picker load running on
+    this thread (``_picker_load``), if any.
+    """
+
+    def find_spec(
+        self, fullname: str, path: Any, target: Any = None
+    ) -> importlib.machinery.ModuleSpec | None:
+        """Note the ``.py`` file *fullname* resolves to on *path*; find nothing."""
+        imported = getattr(_picker_load, "imported", None)
+        if imported is not None:
+            spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+            if spec is not None and spec.origin is not None and spec.origin.endswith(".py"):
+                # The revision alone (a ``stat``), not :func:`parsed_sea`:
+                # a load's first ``import`` of a library would otherwise
+                # parse and memoise every module of it.
+                file = Path(spec.origin)
+                try:
+                    stat = file.stat()
+                except OSError:
+                    imported[file] = None
+                else:
+                    imported[file] = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+        return None
+
+
+sys.meta_path.insert(0, _PickerImports())
 
 # Watcher-thread coordination.
 _watcher_thread: threading.Thread | None = None
@@ -428,39 +477,58 @@ def refresh_registry() -> list[str]:
     return _publish(scan, _scan_sources(_read_seas_md_folders()))
 
 
-@locked(_notify_lock)
 def _publish(scan: int, merged: dict[str, Path]) -> list[str]:
     """Install rescan number *scan*'s *merged* as the registry; notify the subscribers of a change.
 
     Compare-and-swap under ``_lock`` (:func:`_swap_registry`) so two
     concurrent rescans can never both observe the old
     ``_last_broadcast`` and fire the same notification twice, and a
-    rescan older than the one last published is dropped.  The whole
-    publish-and-notify section runs under ``_notify_lock`` (order:
-    ``_notify_lock`` -> ``_lock``) so snapshots reach subscribers in
-    publish order; ``_lock`` itself is released before the callbacks
-    run so a subscriber that calls back into the module — e.g.
+    rescan older than the one last published is dropped.  A changed
+    snapshot is delivered under ``_notify_lock`` (order:
+    ``_notify_lock`` -> ``_lock``), one delivery at a time, each
+    skipped when a later snapshot was published meanwhile
+    (:func:`_notify`), so snapshots reach subscribers in publish
+    order; a rescan with nothing to deliver never waits for a
+    delivery.  ``_lock`` itself is released before the callbacks run
+    so a subscriber that calls back into the module — e.g.
     :func:`list_commands` — cannot deadlock.  Both locks are taken
-    through :func:`locked` because a task thread rescans too
+    through :func:`locked_call` because a task thread rescans too
     (:func:`get_command` on a miss) and the runner's Stop injection
     must not leak them.  That Stop can also land after
     ``_last_broadcast`` was advanced for a snapshot nobody delivered:
-    inside a callback, or still in the swap, between the advance and
-    its return.  The broadcast is then forgotten
-    (:func:`_forget_broadcast`) before the Stop propagates, so the
-    next rescan repeats it instead of deduplicating it away for good.
+    inside a callback, waiting for ``_notify_lock``, or still in the
+    swap, between the advance and its return.  The broadcast is then
+    forgotten (:func:`_forget_broadcast`) before the Stop propagates,
+    so the next rescan repeats it instead of deduplicating it away for
+    good.
     """
     try:
         snapshot, callbacks = locked_call(_lock, _swap_registry, scan, merged)
-        for cb in callbacks:
-            try:
-                cb(list(snapshot))
-            except Exception:  # pragma: no cover - subscribers own errors
-                logger.debug("SEA registry subscriber failed", exc_info=True)
+        if callbacks:
+            locked_call(_notify_lock, _notify, snapshot, callbacks)
     except BaseException:
         locked_call(_lock, _forget_broadcast)
         raise
     return snapshot
+
+
+def _notify(snapshot: list[str], callbacks: list[Callable[[list[str]], None]]) -> None:
+    """Deliver *snapshot* to *callbacks* unless a later one was published since; the caller
+    holds ``_notify_lock``.  The later one's rescan delivers its own snapshot after this
+    lock is released; this one, delivered after it, would leave every subscriber on the
+    older list."""
+    if not locked_call(_lock, _is_last_broadcast, snapshot):
+        return
+    for cb in callbacks:
+        try:
+            cb(list(snapshot))
+        except Exception:  # pragma: no cover - subscribers own errors
+            logger.debug("SEA registry subscriber failed", exc_info=True)
+
+
+def _is_last_broadcast(snapshot: list[str]) -> bool:
+    """Whether *snapshot* is the last one published for delivery; the caller holds ``_lock``."""
+    return _last_broadcast == tuple(snapshot)
 
 
 def _forget_broadcast() -> None:
@@ -858,12 +926,26 @@ def declared_settings(seas: list[BaseSea]) -> dict[str, Any]:
     ``work_dir`` is kept as written: the launcher anchors a relative one
     at the calling task's directory
     (:func:`kiss.agents.sorcar.sea_settings.anchored_work_dir`), as it
-    does a call's ``work_dir`` option.
+    does a call's ``work_dir`` option.  The record each layer returns is
+    checked as :func:`~kiss.agents.sorcar.sea_settings.resolve_settings`
+    checks the final one (known keys, every value of its key's type), so
+    an ill-typed write is refused whatever a later layer writes over it:
+    the verdict on a chain does not depend on the order of its layers.
 
     Raises:
-        SeaError: When a ``settings`` method raises or returns no dict.
+        SeaError: When a ``settings`` method raises, returns no dict, or
+            returns a record with an unknown key or an ill-typed value
+            (the error names the SEA and the method that wrote it).
     """
-    return _fold_methods(_chain(seas, "settings"), {}, _check_dict)
+    record: dict[str, Any] = {}
+    for method in _chain(seas, "settings"):
+        record = _check_dict(_label(method), _call(method, record))
+        try:
+            resolve_settings(record)
+        except SeaError as exc:
+            path = method.__self__.path  # type: ignore[attr-defined]
+            raise SeaError(f"SEA {str(path)!r}: {exc} (in {method.__qualname__})") from exc
+    return record
 
 
 def own_settings(sea: BaseSea) -> dict[str, Any]:
@@ -902,18 +984,16 @@ def base_settings(seas: list[BaseSea]) -> dict[str, Any]:
     """Return the effective settings of *seas*: the declared ones resolved.
 
     :func:`declared_settings` through
-    :func:`kiss.agents.sorcar.sea_settings.resolve_settings` (type
-    checks, channel locks for a :func:`is_channel` run).
+    :func:`kiss.agents.sorcar.sea_settings.resolve_settings` (the
+    channel locks for a :func:`is_channel` run; the type checks passed
+    on every layer in :func:`declared_settings` already).
 
     Raises:
         SeaError: When a ``settings`` method raises or returns no
-            dict, or the settings are malformed.
+            dict, or the settings are malformed (naming the SEA and
+            the method that wrote them).
     """
-    declared = declared_settings(seas)
-    try:
-        return resolve_settings(declared, is_channel(seas))
-    except SeaError as exc:
-        raise SeaError(f"SEA {str(seas[-1].path)!r}: {exc}") from exc
+    return resolve_settings(declared_settings(seas), is_channel(seas))
 
 
 def sea_settings(sea_path: Path) -> dict[str, Any]:
@@ -1277,8 +1357,12 @@ def _registers_as_model(sea_path: Path) -> bool:
     inherited from a custom base (``class X(sea_class(...))``) and an
     edit of that base alone changes the verdict; a base is stamped as
     it was before it ran, so one edited while the load was in flight
-    is re-read too, and a base named by command is also keyed on the
-    script the name resolves to (:func:`_reading`).  Only a script
+    is re-read too, a base named by command is also keyed on the
+    script the name resolves to (:func:`_reading`), and a base the
+    script imports the ordinary way is re-executed once it changed
+    (:func:`~kiss.agents.sorcar.sea_settings.refresh_imported_module`),
+    with every class deriving from it (:func:`_refresh_bases`), so the
+    stamp describes the class the script derives from.  Only a script
     whose source mentions ``register_as_model`` or derives its class
     from something other than the plain bases (so it may inherit the
     registration) is imported: importing every registered SEA (channel
@@ -1299,23 +1383,37 @@ def _registers_as_model(sea_path: Path) -> bool:
     verdict = False
     stamps: dict[Path | str, _Reading] = {sea_path: parsed.stamp}
     if parsed.mentions_register_as_model or parsed.bases.difference(SEA_BASES):
-        outer = getattr(_picker_load, "bases", None)
+        outer = getattr(_picker_load, "bases", None), getattr(_picker_load, "imported", None)
         asked: dict[Path | str, _Reading] = {}
-        _picker_load.bases = asked
+        imported: dict[Path | str, _Reading] = {}
+        _picker_load.bases, _picker_load.imported = asked, imported
         try:
+            # A base imported the ordinary way (``from parent import
+            # Parent``) is re-executed before the child runs, else the
+            # child would derive from its old class under its new stamp.
+            for base in cached[0] if cached is not None else ():
+                if isinstance(base, Path):
+                    refresh_imported_module(base)
             sea = load_sea(sea_path)
+            _refresh_bases(sea)
+            if _superseded(type(sea)):
+                # A base re-executed after the load (first met now, its
+                # module's revision unknown before the load, or deriving
+                # from a changed one): the class derives from the old module.
+                sea = load_sea(sea_path)
             stamps.update(_base_stamps(sea))
             verdict = _call(_method(sea, "register_as_model")) is True
         except SeaError:
             logger.warning("SEA %s: register_as_model() failed", sea_path, exc_info=True)
             # A base may be what broke (a parent mid-edit, or not yet
             # written): keep watching every base this load asked for
-            # and every one the last verdict depended on, so its repair
-            # is re-read.
+            # or imported and every one the last verdict depended on,
+            # so its repair is re-read.
             for base in cached[0] if cached is not None else ():
                 stamps.setdefault(base, _reading(base))
+            stamps.update(imported)
         finally:
-            _picker_load.bases = outer
+            _picker_load.bases, _picker_load.imported = outer
         # Each base as it was read, not as it is now: one edited while
         # the load ran would otherwise lend its new revision to the
         # verdict of its old class.
@@ -1325,9 +1423,51 @@ def _registers_as_model(sea_path: Path) -> bool:
 
 
 def _base_stamps(sea: BaseSea) -> dict[Path | str, _Reading]:
-    """Return the revision stamp of every SEA file the class of *sea* derives from."""
-    files = {_file_of(cls) for cls in type(sea).__mro__[1:] if issubclass(cls, BaseSea)}
-    return {file: parsed_sea(file).stamp for file in files if file is not None}
+    """Return the revision of every SEA file the class of *sea* derives from, as its class ran.
+
+    The revision the base's module was re-executed from
+    (:func:`~kiss.agents.sorcar.sea_settings.imported_revision`), not
+    the file's revision now: the file may have been edited since the
+    class ran, and the verdict is the old class's.  ``None`` (no
+    revision matches it, so the next query re-reads) for a base whose
+    module was re-executed again since the class derived from it; the
+    file's revision now for one never re-executed (the bundled bases).
+    """
+    stamps: dict[Path | str, _Reading] = {}
+    for cls in type(sea).__mro__[1:]:
+        file = _file_of(cls)
+        if file is None or not issubclass(cls, BaseSea):
+            continue
+        if getattr(sys.modules.get(cls.__module__), cls.__name__, None) is not cls:
+            stamps[file] = None
+        else:
+            stamps.setdefault(file, imported_revision(file) or parsed_sea(file).stamp)
+    return stamps
+
+
+def _refresh_bases(sea: BaseSea) -> None:
+    """Re-execute the changed imported bases of the class of *sea*, root first.
+
+    Each base after every base of its own: one that derives from a
+    class its module no longer holds (:func:`_superseded`, the base's
+    own base re-executed before this walk or by it) is re-executed
+    whatever its revision, so its class derives from the new one.
+    Afterwards every base is current, and the script's own class is
+    superseded exactly when the script must run again.
+    """
+    for cls in reversed(type(sea).__mro__[1:]):
+        file = _file_of(cls)
+        if file is not None and issubclass(cls, BaseSea):
+            refresh_imported_module(file, _superseded(cls))
+
+
+def _superseded(cls: type) -> bool:
+    """Whether a base of *cls* is no longer the class its module holds under its name: the
+    module was re-executed since *cls* derived from it, and *cls* must be re-executed too."""
+    return any(
+        getattr(sys.modules.get(base.__module__), base.__name__, None) is not base
+        for base in cls.__bases__
+    )
 
 
 def model_seas() -> dict[str, Path]:

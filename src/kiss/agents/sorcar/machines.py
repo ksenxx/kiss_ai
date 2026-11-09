@@ -74,10 +74,11 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterable, Iterator
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict, dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -86,7 +87,7 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidSta
 from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as _ws_connect
 
-from kiss.agents.sorcar._concurrency import _race_delay, locked_call
+from kiss.agents.sorcar.history_columns import host_name
 from kiss.agents.sorcar.local_endpoint import (
     LOCAL_ENDPOINT_FILE,
     FrameJoiner,
@@ -97,8 +98,13 @@ from kiss.core import tls_certs
 from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
-from kiss.core.locked import LockTimeoutError
-from kiss.core.processes import IS_WINDOWS, kill_process_tree, popen_process_group
+from kiss.core.locked import LockTimeoutError, _race_delay, locked_call
+from kiss.core.processes import (
+    IS_WINDOWS,
+    kill_process_tree,
+    popen_process_group,
+    waitid_exited,
+)
 from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -112,7 +118,7 @@ LOCAL_MACHINE = "__local__"
 """``getHistory``'s ``machine`` value asking for the daemon's own rows only."""
 REQUEST_TIMEOUT = 8.0
 """Seconds one remote request may take before the machine counts as down."""
-CORRELATED_REPLIES = frozenset({"models", "history", "myModelsData", "machines"})
+CORRELATED_REPLIES = frozenset({"models", "history", "myModelsData", "machines", "historyDeleted"})
 """The reply types the daemon answers with the request's ``generation`` echoed.
 
 A frame of one of these types that echoes none is not the answer
@@ -180,6 +186,8 @@ ENROLL_COMMAND = (
     f'for d in "$KISS_HOME" "$HOME/{HOME_DIR}" "$HOME"/.*; do '
     'case "$d" in ""|*/.|*/..) continue;; esac; '
     f'if [ -f "$d/{LOCAL_ENDPOINT_FILE}" ]; then '
+    f'p=$(sed -n "s/^ *\\"pid\\": *\\([0-9]*\\),*$/\\1/p" "$d/{LOCAL_ENDPOINT_FILE}"); '
+    '[ -n "$p" ] && kill -0 "$p" 2>/dev/null || continue; '
     f'[ -d "$d/{_TRUSTED}" ] || {{ '
     'echo "its daemon predates certificate enrollment: upgrade it" >&2; exit 3; }; '
     f'cat > "$d/{_TRUSTED}/.NAME.$$.tmp" && mv -f "$d/{_TRUSTED}/.NAME.$$.tmp" '
@@ -193,13 +201,17 @@ ENROLL_COMMAND = (
 """Remote command enrolling the CA on stdin as ``trusted-clients/NAME.pem``.
 
 ``NAME`` is replaced by :func:`enroll_over_ssh`.  The daemon's home is
-the first directory holding an endpoint file among ``$KISS_HOME``, the
-local brand's home (``~/.kiss``) and every other ``~/.*``: the remote
-daemon's brand (hence its state directory) may differ from the local
-one and may change when it is re-installed, and a stopped daemon
-removes its endpoint file, so the home found is the running daemon's.
-A daemon without a ``trusted-clients`` directory predates enrollment
-(exit 3).  The CA is staged under the shell's pid and renamed so the
+the first directory holding the endpoint file of a running daemon
+among ``$KISS_HOME``, the local brand's home (``~/.kiss``) and every
+other ``~/.*``: the remote daemon's brand (hence its state directory)
+may differ from the local one and may change when it is re-installed.
+A stopped daemon removes its endpoint file, but one that crashed or
+was killed leaves it behind, and so does the brand home of an earlier
+install (``~/.kiss`` beside a live ``~/.s10s``): an endpoint file
+whose ``pid`` is not alive (or missing: no daemon wrote it) is passed
+over, so the home found is the running daemon's and a stale home is
+never enrolled into.  A daemon without a ``trusted-clients`` directory
+predates enrollment (exit 3).  The CA is staged under the shell's pid and renamed so the
 daemon never reads a half-written file and two enrollments at once do
 not share a staging file.  Then the endpoint file (the daemon port)
 and the certificate to pin are printed, separated by a newline: the
@@ -267,7 +279,7 @@ def machines_file() -> Path:
 
 def local_machine_name() -> str:
     """Return this host's short name, the label of the local daemon's rows."""
-    return socket.gethostname().strip().split(".")[0] or "localhost"
+    return host_name()
 
 
 def load_machines() -> list[Machine]:
@@ -989,7 +1001,7 @@ def _exited(process: subprocess.Popen[bytes]) -> bool:
     if IS_WINDOWS or process.returncode is not None:
         return process.poll() is not None
     try:
-        return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        return waitid_exited(process.pid) is not None
     except ChildProcessError:  # reaped meanwhile by a ``wait`` on another thread
         return True
 
@@ -1016,14 +1028,25 @@ _tunnels: dict[str, SshTunnel] = {}
 _tunnels_lock = threading.RLock()
 
 
-def _cached_tunnel(ssh: str, remote_port: int) -> tuple[SshTunnel, SshTunnel | None]:
+def _cached_tunnel(ssh: str, remote_port: int) -> tuple[SshTunnel, SshTunnel | None] | None:
     """Return *ssh*'s cached tunnel and the one it replaced (under the lock).
 
     A fresh tunnel replaces the cached one when its remote port changed;
     the replaced tunnel is returned for the caller to close outside the
     lock, as :func:`_evict_tunnels` leaves closing to :func:`close_tunnels`:
-    its ``close`` waits for a forward that may be mid-login.
+    its ``close`` waits for a forward that may be mid-login.  ``None``
+    when the registry does not hold *ssh* at *remote_port*: read under
+    the lock, before anything is replaced, so a dial of a registration
+    the registry has moved past (a stream handshake still in flight on
+    the link a re-registration retired, asking for the old daemon port)
+    neither closes the live forward the new registration opened nor
+    opens a stale one.
     """
+    if not any(
+        m.ssh == ssh and (urlsplit(m.url).port or DEFAULT_PORT) == remote_port
+        for m in load_machines()
+    ):
+        return None
     tunnel = _tunnels.get(ssh)
     if tunnel is not None and tunnel.remote_port == remote_port:
         return tunnel, None
@@ -1058,23 +1081,27 @@ def tunnel_port(ssh: str, remote_port: int) -> int:
     one to close it, so it is closed here and the caller is told to
     try again, as a retired :class:`MachineLink` tells it.
 
-    A login the registry no longer holds is refused before anything is
-    opened: a :class:`Machine` read before a ``/machine remove`` (a
-    status check, a stream's dial) would otherwise cache and open its
-    forward after the removal's :func:`close_tunnels` swept, and
-    nothing would close it.  The registry is read after the tunnel is
-    cached and the sweep runs after the registry is written, so a
-    removal either shows in that read or sweeps the tunnel.
+    A forward the registry does not hold (*ssh* at *remote_port*) is
+    refused before anything is cached or opened: a :class:`Machine`
+    read before a ``/machine remove`` (a status check, a stream's dial)
+    would otherwise cache and open its forward after the removal's
+    :func:`close_tunnels` swept, and nothing would close it; one read
+    before a re-registration would replace the forward the new
+    registration opened.  The registry is read under the cache's lock
+    and the sweep runs after the registry is written, so a removal
+    either shows in that read or sweeps the tunnel.
 
     Raises:
         MachineError: When the forward cannot be opened (see
-            :meth:`SshTunnel.open`), the registry no longer holds *ssh*,
-            or the registry changed while it was opening.
+            :meth:`SshTunnel.open`), the registry does not hold *ssh*
+            at *remote_port*, or the registry changed while it was
+            opening.
     """
-    tunnel, stale = locked_call(_tunnels_lock, _cached_tunnel, ssh, remote_port)
-    if stale is not None:
-        stale.close()
-    if any(machine.ssh == ssh for machine in load_machines()):
+    cached = locked_call(_tunnels_lock, _cached_tunnel, ssh, remote_port)
+    if cached is not None:
+        tunnel, stale = cached
+        if stale is not None:
+            stale.close()
         # Test hook (no-op in production): widens the window between the
         # lookup and the open so the close_tunnels race is deterministic
         # under KISS_RACE_DELAY.
@@ -1082,8 +1109,8 @@ def tunnel_port(ssh: str, remote_port: int) -> int:
         port = tunnel.open()
         if locked_call(_tunnels_lock, _tunnels.get, ssh) is tunnel:
             return port
-    locked_call(_tunnels_lock, _drop_tunnel, ssh, tunnel)
-    tunnel.close()
+        locked_call(_tunnels_lock, _drop_tunnel, ssh, tunnel)
+        tunnel.close()
     raise MachineError(f"ssh {ssh}: the machine registry changed, try again")
 
 
@@ -1149,20 +1176,26 @@ class MachineLink:
         self._echoes = False  # the daemon's ``echoesGeneration`` (see CORRELATED_REPLIES)
         self._health = health if health is not None else LinkHealth()
         self._retired = False
+        self._abandoned: ClientConnection | None = None  # the socket :meth:`abandon` shut down
         # Stream handshakes in flight (:meth:`open_connection`), which
-        # run outside the lock; :meth:`retire` waits for them.
+        # run outside the lock; :meth:`retire` waits for them.  Counted
+        # under a lock of their own: the request lock is held for a
+        # whole exchange, which a stream must not wait behind.
         self._dialing = 0
-        self._idle = threading.Condition(self._lock)
+        self._idle = threading.Condition(threading.RLock())
 
     def _check_available(self) -> None:
         """Raise the error a retired or backed-off link answers with, if any.
 
         Drops the socket first when the host has slept since the last
         check (:func:`forget_after_sleep`): the socket is dead and so is
-        the back-off a failed poll during the sleep may have left.
+        the back-off a failed poll during the sleep may have left.  The
+        drop takes the lock (re-entered by a caller holding it); the
+        checks themselves read without it, like the machine's other
+        lanes read :class:`LinkHealth`.
         """
         if forget_after_sleep():
-            self._drop()
+            locked_call(self._lock, self._drop)
         if self._retired:
             raise self._retired_error()
         if time.monotonic() < self._health.retry_at:
@@ -1202,22 +1235,34 @@ class MachineLink:
         daemon at the far end closed the socket while its pings went
         unanswered, so a close handshake would only wait out
         ``close_timeout`` on a dead connection.  The shutdown wakes a
-        request in flight on the socket with ``ConnectionClosed`` and
-        makes the next one find it closed; either reconnects
-        (:meth:`request`).  The socket is forgotten by whoever holds
-        the lock next.
+        request in flight on the socket with ``ConnectionClosed``: it
+        fails as a sleep of the host, not as a failure of the machine
+        (:meth:`_exchange` knows the socket), so the back-off cleared
+        here is not armed again; the next request finds the socket
+        closed and reconnects (:meth:`request`).  The socket is
+        forgotten by whoever holds the lock next.
         """
         ws = self._ws
         if ws is not None:
+            self._abandoned = ws
             with suppress(OSError):
                 ws.socket.shutdown(socket.SHUT_RDWR)
         self._health.failures = 0
         self._health.retry_at = 0.0
 
     def _connect(self, timeout: float) -> ClientConnection:
-        """Open and authenticate the shared request socket (under the lock); see :meth:`_dial`."""
+        """Open and authenticate the shared request socket (under the lock); see :meth:`_dial`.
+
+        A :meth:`retire` that ran during the handshake could not close
+        a socket not yet published: the socket is closed here instead,
+        and the request fails without going out.
+        """
         self._check_available()
-        return self._dial(timeout, stream=False)
+        ws = self._dial(timeout, stream=False)
+        if self._retired:
+            ws.close()
+            raise self._retired_error()
+        return ws
 
     def _dial(self, timeout: float, stream: bool) -> ClientConnection:
         """Open and authenticate a socket; the handshake has *timeout* seconds.
@@ -1336,7 +1381,11 @@ class MachineLink:
             reply = recv_auth_reply(ws, timeout=_remaining(deadline))
             if isinstance(reply, dict) and reply.get("type") == "auth_ok":
                 self._echoes = reply.get("echoesGeneration") is True
+                # The machine answered: the ladder starts over, and the
+                # back-off a handshake beside this one (a stream's)
+                # may have left goes with it.
                 self._health.failures = 0
+                self._health.retry_at = 0.0
                 return ws
         except (ConnectionClosed, OSError, ValueError) as exc:
             ws.close()
@@ -1514,7 +1563,9 @@ class MachineLink:
                 out: the machine may have run it, so it must not be sent
                 again (the link then backs off); or the link was
                 retired (:meth:`retire` closed the socket): the
-                registry-changed error, with no back-off.
+                registry-changed error, with no back-off; or the host
+                slept (:meth:`abandon` shut the socket down): no
+                back-off either.
         """
         assert self._ws is not None
         self._generation += 1
@@ -1537,7 +1588,7 @@ class MachineLink:
             # say) are stale: drained first, they can neither pass for
             # this request's answer nor delay it.
             self._drain_buffered(deadline)
-            send(self._ws, json.dumps(frame), timeout=_remaining(deadline))
+            send(self._ws, json.dumps(frame), timeout=_send_budget(deadline))
             sent = True
             if not reply_type:
                 return {}
@@ -1606,7 +1657,16 @@ class MachineLink:
             # could run it twice.
             if isinstance(exc, ConnectionClosed) and not sent:
                 raise
+            abandoned = self._ws is self._abandoned
             self._drop()
+            if abandoned:
+                # abandon() shut the socket down under the request: the
+                # host slept, which is no failure of the machine and
+                # starts no back-off.
+                raise MachineError(
+                    f"{self.machine.name} ({self.machine.address()}): the host slept "
+                    f"while waiting for {reply_type}; try again"
+                ) from exc
             raise self._fail(
                 f"{self.machine.name} ({self.machine.address()}) did not answer: {exc}"
             ) from exc
@@ -1646,30 +1706,40 @@ class MachineLink:
         (it needs the tab's task events).  The caller owns the returned
         socket and closes it.
 
-        The handshake runs outside the link's lock (only the
-        availability check takes it, as it may drop the shared socket
-        after a sleep): a stream connects beside a request in flight
-        on the shared socket, and two streams to the machine (a chat
-        tab's and the machine's view stream, opened together by a
-        bind) connect at the same time instead of one after the other.
+        The handshake runs outside the link's lock (the availability
+        check takes it only to drop the shared socket after a sleep,
+        and the handshake is counted under the dial lock, where
+        :meth:`retire` is checked for again): a stream
+        connects beside a request in flight on the shared socket, and
+        two streams to the machine (a chat tab's and the machine's view
+        stream, opened together by a bind) connect at the same time
+        instead of one after the other.
 
         Raises:
             MachineError: When the daemon is unreachable or rejects the
                 password (the link backs off as after a failed request).
         """
-        locked_call(self._lock, self._start_dial)
+        self._check_available()
+        locked_call(self._idle, self._start_dial)
         try:
             return self._dial(timeout, stream=True)
         finally:
-            locked_call(self._lock, self._end_dial)
+            locked_call(self._idle, self._end_dial)
 
     def _start_dial(self) -> None:
-        """Count a stream handshake in, once the link is available (under the lock)."""
-        self._check_available()
+        """Count a stream handshake in, unless the link is retired (under the dial lock).
+
+        The check is under the lock :meth:`retire` waits under, after
+        the one :meth:`_check_available` made without it: a handshake
+        counted in is one the retirement waits for, and one the
+        retirement has stopped waiting for never starts.
+        """
+        if self._retired:
+            raise self._retired_error()
         self._dialing += 1
 
     def _end_dial(self) -> None:
-        """Count a stream handshake out and wake a waiting :meth:`retire` (under the lock)."""
+        """Count a stream handshake out and wake a waiting :meth:`retire` (under the dial lock)."""
         self._dialing -= 1
         self._idle.notify_all()
 
@@ -1688,8 +1758,9 @@ class MachineLink:
         with the registry-changed error, sent or not, and never
         re-connects), and only then the lock is taken to forget the
         socket.  A request still in its handshake, which the close
-        cannot reach, is waited for (:data:`REQUEST_TIMEOUT`
-        at most, plus its exchange), and so is a stream handshake
+        cannot reach, is waited for (:data:`REQUEST_TIMEOUT` at most:
+        it fails at the end of the handshake, :meth:`_connect`, and
+        never sends its command), and so is a stream handshake
         (:meth:`open_connection`, outside the lock; the ssh login's
         :data:`SSH_TIMEOUT` more): the tunnel it opens must exist
         before :func:`close_links` sweeps the tunnels, or a removed
@@ -1706,13 +1777,36 @@ class MachineLink:
         )
 
     def _dials_done(self) -> bool:
-        """Whether no stream handshake is in flight (under the lock)."""
+        """Whether no stream handshake is in flight (under the dial lock)."""
         return self._dialing == 0
 
 
 def _remaining(deadline: float) -> float:
     """Seconds left before the monotonic *deadline* (a small positive floor)."""
     return max(0.001, deadline - time.monotonic())
+
+
+#: The least a request's command write waits, whatever is left of the
+#: request's budget.  The write itself takes microseconds (a frame into
+#: the kernel's buffer), but the helper thread that performs it
+#: (``local_endpoint.send``) may wait longer than a spent budget's
+#: floor for a core on a loaded box; a write that lost that race is no
+#: daemon that stopped reading, and reporting it as one closed a sound
+#: socket and hid the reply's ``no <reply> within <N>s`` (full-suite
+#: run of 2026-11-05, a zero *timeout*).  The request's deadline still
+#: bounds the reply (:meth:`MachineLink._exchange` checks it before
+#: every read); the handshake's ``auth`` frame keeps the handshake's
+#: own budget, which :meth:`MachineLink._dial` promises.
+_SEND_FLOOR = 1.0
+
+
+def _send_budget(deadline: float) -> float:
+    """Seconds a command's write gets: the time to *deadline*, :data:`_SEND_FLOOR` at least.
+
+    Args:
+        deadline: The request's monotonic deadline.
+    """
+    return max(_SEND_FLOOR, deadline - time.monotonic())
 
 
 _links: dict[tuple[str, str, str, str, str], MachineLink] = {}
@@ -1858,17 +1952,108 @@ def forget_after_sleep() -> float:
 # The short host name each registered machine's daemon last gave of
 # itself (registered name -> host), from the ``machine`` of its
 # ``pong`` and the ``localMachine`` of its ``history`` replies; kept
-# while the machine is down.
-_hosts: dict[str, str] = {}
+# while the machine is down, and across restarts in HOSTS_FILE, so the
+# CHATS rows synced in from a machine that is down still name it.
+HOSTS_FILE = "machine_hosts.json"
+HOSTS_LOCK_TIMEOUT = 10.0
+"""Seconds :func:`note_host` waits for another writer of :data:`HOSTS_FILE`.
+
+A holder reads and rewrites the small file and nothing else, so a
+wait this long means a wedged holder: the name is kept in memory only
+and saved by a later observation.
+"""
+
+
+def _saved_hosts() -> dict[str, str]:
+    """Return the host names :func:`note_host` saved ({} when none or unreadable)."""
+    try:
+        raw = json.loads((kiss_home() / HOSTS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v for k, v in raw.items() if isinstance(v, str)}
+
+
+_hosts: dict[str, str] = _saved_hosts()
+# Machines whose host name is known in memory only (its save failed): the
+# next observation of the same name saves it again.
+_unsaved_hosts: set[str] = set()
 
 
 def note_host(machine: Machine, host: Any) -> None:
     """Record the host name *host* that *machine*'s daemon gave of itself.
 
-    Ignored unless a non-empty string.
+    Ignored unless a non-empty string; a new name is saved to
+    :data:`HOSTS_FILE` (best-effort).  The file is rewritten under a
+    file lock from the names it holds plus this one, never from this
+    process's whole mapping: the fan-out workers, the sidebar's machine
+    rows and a ``/sync_history_and_memory`` process note names at the
+    same time, and a writer putting its older mapping over a newer
+    file lost the other's name for good (a later identical observation
+    found it in memory and wrote nothing).  The names read back are
+    taken into memory with it.
     """
-    if isinstance(host, str) and host:
+    if not (isinstance(host, str) and host):
+        return
+    if _hosts.get(machine.name) == host and machine.name not in _unsaved_hosts:
+        return
+    path = kiss_home() / HOSTS_FILE
+    try:
+        with exclusive_file_lock(path.with_suffix(".lock"), timeout=HOSTS_LOCK_TIMEOUT):
+            hosts = {**_saved_hosts(), machine.name: host}
+            atomic_write_text(path, json.dumps(hosts, indent=2))
+            _hosts.update(hosts)
+        _unsaved_hosts.discard(machine.name)
+    except OSError:
+        # Known in memory, but the next identical observation retries the save.
         _hosts[machine.name] = host
+        _unsaved_hosts.add(machine.name)
+
+
+def machine_on_host(host: str, machines: list[Machine]) -> Machine | None:
+    """Return the machine of *machines* whose daemon runs on *host*, a short host name.
+
+    The host name its daemon gave of itself (:func:`note_host`) wins;
+    otherwise the machine's name, or a host of its address
+    (:func:`machine_hosts`) that is *host* or starts with ``host.``.
+    Case-insensitive; ``None`` when no machine matches.
+    """
+    wanted = host.strip().lower()
+    if not wanted:
+        return None
+    for machine in machines:
+        if _hosts.get(machine.name, "").lower() == wanted:
+            return machine
+    for machine in machines:
+        names = {machine.name.lower(), *(h.lower() for h in machine_hosts(machine))}
+        if any(n == wanted or n.startswith(wanted + ".") for n in names):
+            return machine
+    return None
+
+
+def label_synced_rows(sessions: list[dict[str, Any]], machines: list[Machine]) -> None:
+    """Attribute the history rows a history sync copied in to the machines they ran on.
+
+    A row of this daemon's history carries ``origin``: the host name of
+    the machine its task ran on ('' for this one), which
+    ``kiss.scripts.sync_db`` stamps on the rows it copies between
+    databases.  The field is removed from every row; a row whose
+    origin is a registered machine gets that machine's ``machine`` and
+    ``machine_url``, as :func:`fetch_history` stamps the rows it brings,
+    so the CHATS panel shows it as that machine's and resumes it there.
+    A row whose machine is not registered stays this daemon's.  The
+    host names saved by another process (a ``/sync_history_and_memory``
+    run, which asks each machine its host name over ssh) are taken in
+    first, so a machine whose daemon has never answered maps too.
+    """
+    for name, host in _saved_hosts().items():
+        _hosts.setdefault(name, host)
+    for session in sessions:
+        machine = machine_on_host(str(session.pop("origin", "") or ""), machines)
+        if machine is not None:
+            session["machine"] = machine.name
+            session["machine_url"] = machine.url
 
 
 def machine_label(machine: Machine) -> str:
@@ -1928,10 +2113,63 @@ def _float_or_none(value: Any) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
-# The unfiltered history page each machine last answered with
-# (registered name -> the machine as then registered, its page),
-# shown while the machine does not answer.
-_last_pages: dict[str, tuple[Machine, HistoryPage]] = {}
+_Registration = tuple[str, str, str, str]
+"""A machine as registered (name, URL, password, ssh login): what a fetch
+and a remembered page are keyed by, like a link (:func:`_cached_link`),
+so a name registered again for another daemon or with other credentials
+shares neither with the previous registration."""
+
+
+def _registration(machine: Machine) -> _Registration:
+    """Return *machine*'s :data:`_Registration`."""
+    return (machine.name, machine.url, machine.password, machine.ssh)
+
+
+# The history page each registration of a machine last answered a view
+# with ((registration, query, tag) -> the page), shown while the
+# machine does not answer; of a registration's filtered views only the
+# latest answered is kept (see _fetch_quietly).  Read and written under
+# _last_pages_lock: the fan-out workers store their pages at once, and
+# one pruning the dict while another inserts into it would raise
+# RuntimeError (dictionary changed size during iteration).
+_last_pages: dict[tuple[str, str, str, str, str, str], HistoryPage] = {}
+_last_pages_lock = threading.Lock()
+
+HISTORY_FANOUT_WAIT = 2.0
+"""Seconds a history reply waits for the registered machines' pages.
+
+A machine that has not answered by then (its link is being dialled
+again after a failure, an SSH port-forward is opening, the network to
+it is slow) contributes the page it last answered with, as a machine
+that does not answer does (:func:`_fetch_quietly`), and the reply
+goes out: the CHATS rows of this daemon and of the machines that did
+answer are not held back for it.  Its fetch runs on, and when the
+page it brings differs from the one served in its place, the reply's
+``late`` callback asks the pages to refresh (:func:`merged_history`).
+"""
+
+# The fetches under way, by (registration, query, tag, limit): a reply
+# that comes while a machine's page is still being fetched for the same
+# view waits for that fetch instead of starting another.
+_FetchKey = tuple[str, str, str, str, str, str, int]
+_fetches: dict[_FetchKey, Future[HistoryPage]] = {}
+_fetches_lock = threading.Lock()
+_fetch_pool = ThreadPoolExecutor(thread_name_prefix="chats-fan-out")
+
+
+def _last_page(machine: Machine, query: str, tag: str, limit: int) -> HistoryPage:
+    """Return the page *machine* last answered *query* and *tag* with, trimmed to *limit*.
+
+    An empty page for a view the machine, as registered, has not
+    answered (or not since another filtered view: see
+    :func:`_fetch_quietly`), and so for a name registered again for
+    another daemon (another address or login: another daemon's chats).
+    """
+    with _last_pages_lock:
+        last = _last_pages.get((*_registration(machine), query, tag))
+    if last is None:
+        return HistoryPage()
+    return HistoryPage(last.rows[:limit], last.date_min, last.date_max)
 
 
 def _fetch_quietly(machine: Machine, query: str, tag: str, limit: int) -> HistoryPage:
@@ -1940,30 +2178,70 @@ def _fetch_quietly(machine: Machine, query: str, tag: str, limit: int) -> Histor
     A machine that cannot be queried (the host is down or asleep, the
     SSH tunnel timed out, the link is backing off after a failure)
     must not make its chats vanish from the CHATS panel for that
-    reply: the unfiltered view (no *query*, no *tag*; the one the panel
-    shows by default) is remembered per machine and served again,
-    trimmed to *limit*, while the machine does not answer (a warning is
-    logged).  A filtered view, or a machine that has never answered,
-    contributes nothing then; nor does a page answered under the same
-    name by a machine registered differently (another address or
-    login: another daemon's chats).
+    reply: the page is remembered per registration and view and served
+    again, trimmed to *limit*, while the machine does not answer (a
+    warning is logged; :func:`_last_page`).  A filtered view (a *query*
+    or a *tag*) is remembered too, else one whose fetch outlasts
+    :data:`HISTORY_FANOUT_WAIT` never shows: the refresh its late
+    callback asks for (:func:`merged_history`) would serve the empty
+    fallback and fetch afresh, without end.  Only the latest filtered
+    view answered is kept per registration (a page per query typed
+    would grow without bound), beside the unfiltered one.
     """
-    unfiltered = not query and not tag
     try:
         page = fetch_history(machine, query, tag, limit)
     except MachineError as exc:
         logger.warning("CHATS: %s", exc)
-        last = _last_pages.get(machine.name) if unfiltered else None
-        if last is None or last[0] != machine:
-            return HistoryPage()
-        return HistoryPage(last[1].rows[:limit], last[1].date_min, last[1].date_max)
-    if unfiltered:
-        _last_pages[machine.name] = (machine, page)
+        return _last_page(machine, query, tag, limit)
+    key = (*_registration(machine), query, tag)
+    with _last_pages_lock:
+        if query or tag:
+            kept = (("", ""), key[4:])
+            for other in [k for k in _last_pages if k[:4] == key[:4] and k[4:] not in kept]:
+                _last_pages.pop(other, None)
+        _last_pages[key] = page
     return page
+
+
+def _shared_fetch(machine: Machine, query: str, tag: str, limit: int) -> Future[HistoryPage]:
+    """Return the fetch of *machine*'s page for this view under way, starting one if none is.
+
+    The fetch is shared by registration (:func:`_registration`) as
+    well as view: a name registered again for another daemon, or with
+    other credentials, does not join the fetch of the previous one.
+    """
+    key = (*_registration(machine), query, tag, limit)
+    with _fetches_lock:
+        future = _fetches.get(key)
+        started = future is None
+        if future is None:
+            future = _fetch_pool.submit(_fetch_quietly, machine, query, tag, limit)
+            _fetches[key] = future
+    if started:
+        # Outside the lock: a fetch already done (a failure cached in
+        # back-off) runs the callback here and now, which takes it.
+        future.add_done_callback(partial(_forget_fetch, key))
+    return future
+
+
+def _forget_fetch(key: _FetchKey, future: Future[HistoryPage]) -> None:
+    """Drop the finished *future* from the fetches under way."""
+    with _fetches_lock:
+        if _fetches.get(key) is future:
+            del _fetches[key]
+
+
+def _landed_late(
+    served: HistoryPage, late: Callable[[], None], future: Future[HistoryPage],
+) -> None:
+    """A page fetched after its reply went out: call *late* when it adds to what was served."""
+    if future.result().rows != served.rows:
+        late()
 
 
 def merged_history(
     local: HistoryPage, machines: list[Machine], query: str, tag: str, offset: int, limit: int,
+    late: Callable[[], None] | None = None,
 ) -> HistoryPage:
     """Return page *offset*..*offset+limit* of the union of all machines' history.
 
@@ -1977,13 +2255,25 @@ def merged_history(
     a copy never depends on what else is loaded, the page is the same
     whichever pages were loaded before it: a task never shows twice or
     goes missing across pages.  A machine that does not answer
-    contributes the unfiltered page it last answered with, if any
-    (:func:`_fetch_quietly`; a warning is logged).
+    contributes the page it last answered the view with, if any
+    (:func:`_fetch_quietly`; a warning is logged), and so does one that
+    has not answered within :data:`HISTORY_FANOUT_WAIT` seconds: its
+    fetch runs on and *late*, when given, is called once the page it
+    brings differs from the one served in its place, so the caller can
+    have the CHATS panels refresh.
     """
     need = offset + limit
-    with ThreadPoolExecutor(max_workers=max(1, len(machines))) as pool:
-        futures = [pool.submit(_fetch_quietly, m, query, tag, need) for m in machines]
-        pages = [local, *(future.result() for future in futures)]
+    futures = [_shared_fetch(m, query, tag, need) for m in machines]
+    wait(futures, timeout=HISTORY_FANOUT_WAIT)
+    pages = [local]
+    for machine, future in zip(machines, futures, strict=True):
+        if future.done():
+            pages.append(future.result())
+            continue
+        served = _last_page(machine, query, tag, need)
+        pages.append(served)
+        if late is not None:
+            future.add_done_callback(partial(_landed_late, served, late))
     best: dict[str, tuple[tuple[bool, float, int, int], dict[str, Any]]] = {}
     for source, page in enumerate(pages):
         for rank, session in enumerate(page.rows):

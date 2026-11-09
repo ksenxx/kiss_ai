@@ -71,9 +71,7 @@ const {
 
 const {test, report} = makeRunner();
 
-function submits(posted) {
-  return posted.filter(m => m.type === 'submit');
-}
+const {submits} = require('./attachment_helpers');
 
 async function main() {
   await test(

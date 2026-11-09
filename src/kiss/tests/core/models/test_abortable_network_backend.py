@@ -20,10 +20,13 @@ backend's retry sleep go through real servers.
 
 from __future__ import annotations
 
+import contextlib
 import http.server
 import shutil
+import socket
 import socketserver
 import ssl
+import sys
 import tempfile
 import threading
 import time
@@ -33,10 +36,11 @@ from typing import Any
 
 import httpx
 import pytest
-from httpcore._backends.sync import SyncBackend, SyncStream
+from httpcore._backends.sync import SyncBackend
 
 from kiss.core.models.stream_abort import (
     AbortableNetworkBackend,
+    _AbortableStream,
     make_pool_abortable,
     shutdown_pool_sockets,
 )
@@ -108,11 +112,10 @@ def _on_the_requester(_frame_locals: dict[str, Any]) -> bool:
     ("hold_at", "reaches_a_socket"),
     [
         # Connected, not yet upgraded: the plain socket the backend kept is shut down.
-        pytest.param(SyncStream.start_tls.__code__, True, id="before-the-handshake"),
-        # Mid-handshake the plain socket is detached and the pool has no
-        # stream for the connection: the abort reaches nothing, and the
-        # upgraded stream is shut down as the backend gets it.
-        pytest.param(ssl.SSLSocket.do_handshake.__code__, False, id="mid-handshake"),
+        pytest.param(_AbortableStream.start_tls.__code__, True, id="before-the-handshake"),
+        # Mid-handshake the plain socket is detached; the upgraded socket,
+        # kept before its handshake, is the one shut down.
+        pytest.param(ssl.SSLSocket.do_handshake.__code__, True, id="mid-handshake"),
     ],
 )
 def test_a_request_stopped_while_its_tls_connection_is_set_up_is_never_sent(
@@ -155,6 +158,59 @@ def test_a_request_stopped_while_its_tls_connection_is_set_up_is_never_sent(
         client.close()
         server.shutdown()
         server.server_close()
+
+
+def _in_a_handshake(requester: threading.Thread) -> bool:
+    """Whether *requester* is inside ``SSLSocket.do_handshake`` right now."""
+    frame = sys._current_frames().get(requester.ident or -1)
+    return frame is not None and frame.f_code is ssl.SSLSocket.do_handshake.__code__
+
+
+def test_a_request_stopped_in_a_handshake_the_peer_never_answers_fails_at_once() -> None:
+    """An abort during the TLS handshake shuts down the socket doing the handshake.
+
+    ``wrap_socket`` detaches the plain socket the backend kept and the
+    upgraded one was kept only once the handshake was done, so an abort
+    meanwhile found a dead descriptor: a Stop during a handshake a peer
+    never answers (it accepted the connection and went silent) waited
+    out the connect timeout, 5 s on the OpenAI and Anthropic clients.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    accepted: list[socket.socket] = []
+
+    def accept_and_say_nothing() -> None:
+        with contextlib.suppress(OSError):
+            while True:
+                accepted.append(listener.accept()[0])
+
+    threading.Thread(target=accept_and_say_nothing, daemon=True).start()
+    client = httpx.Client(verify=False, timeout=httpx.Timeout(10.0, connect=10.0))
+    outcome: list[BaseException] = []
+    requester = threading.Thread(
+        target=_get_into,
+        args=(client, f"https://127.0.0.1:{listener.getsockname()[1]}/", outcome),
+        name=_REQUESTER,
+        daemon=True,
+    )
+    try:
+        make_pool_abortable(client)
+        requester.start()
+        deadline = time.monotonic() + 10
+        while not _in_a_handshake(requester):
+            assert time.monotonic() < deadline, "the request never reached its handshake"
+            time.sleep(0.01)
+        assert shutdown_pool_sockets(client), "the abort found no socket to shut down"
+        requester.join(5)
+        assert not requester.is_alive(), "the stopped request waited for the connect timeout"
+        assert outcome and isinstance(outcome[0], httpx.ConnectError), outcome
+    finally:
+        listener.close()
+        for conn in accepted:
+            conn.close()
+        requester.join(15)
+        client.close()
 
 
 def test_a_read_whose_client_is_closed_under_it_ends_within_a_slice() -> None:

@@ -26,6 +26,7 @@ from typing import Any
 
 from kiss.agents.sorcar import task_digest
 from kiss.agents.sorcar.persistence import _add_task, _append_chat_event, _flush_chat_events
+from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.tool_interrupt import USER_INTERRUPTED_MESSAGE
 
 _LOG_HEADER = "== Progress log written by the task (newest entries) ==\n"
@@ -35,8 +36,11 @@ def _write_call(path: Path | str, content: str) -> list[dict[str, Any]]:
     """Events of a successful ``Write`` of *content* to *path*."""
     return [
         {"type": "tool_call", "name": "Write", "path": str(path), "content": content},
-        {"type": "tool_result", "content": f"Successfully wrote {len(content)} characters",
-         "tool_name": "Write"},
+        {
+            "type": "tool_result",
+            "content": f"Successfully wrote {len(content)} characters",
+            "tool_name": "Write",
+        },
     ]
 
 
@@ -49,11 +53,16 @@ def _edit_call(path: Path, extras: dict[str, Any], result: str) -> list[dict[str
 
 
 def _task(
-    work_dir: Path, events: list[dict[str, Any]], start: float, end: float | None = None,
+    work_dir: Path,
+    events: list[dict[str, Any]],
+    start: float,
+    end: float | None = None,
 ) -> str:
     """Persist a task row run in *work_dir* from *start* (to *end*) with *events*."""
     extra: dict[str, object] = {
-        "model": "test-model", "work_dir": str(work_dir), "startTs": int(start * 1000),
+        "model": "test-model",
+        "work_dir": str(work_dir),
+        "startTs": int(start * 1000),
     }
     if end is not None:
         extra["endTs"] = int(end * 1000)
@@ -129,12 +138,15 @@ def test_the_newest_successful_write_names_the_text_the_log_must_hold(tmp_path: 
     events = [
         *_write_call(log, "# log\n- step 1\n"),
         *_edit_call(
-            log, {"old_string": "- step 1\n", "new_string": "- step 1\n- step 2\n"}, "edited",
+            log,
+            {"old_string": "- step 1\n", "new_string": "- step 1\n- step 2\n"},
+            "edited",
         ),
         # Calls that wrote nothing: a failed Edit (its error is the returned
         # text), a Write that raised, and a call that only read the log.
         *_edit_call(
-            log, {"old_string": "- step 9", "new_string": "- step 3"},
+            log,
+            {"old_string": "- step 9", "new_string": "- step 3"},
             "Error: String not found in file",
         ),
         {"type": "tool_call", "name": "Write", "path": str(log), "content": "# lost\n"},
@@ -142,12 +154,27 @@ def test_the_newest_successful_write_names_the_text_the_log_must_hold(tmp_path: 
         # A Write and an Edit the user stopped, as the executor records them
         # (no error, ``interrupted``): neither says what the file holds.
         {"type": "tool_call", "name": "Write", "path": str(log), "content": "# stopped\n"},
-        {"type": "tool_result", "content": USER_INTERRUPTED_MESSAGE, "is_error": False,
-         "interrupted": True, "tool_name": "Write"},
-        {"type": "tool_call", "name": "Edit", "path": str(log), "old_string": "- step 2\n",
-         "new_string": "- step 2\n- stopped\n"},
-        {"type": "tool_result", "content": USER_INTERRUPTED_MESSAGE, "is_error": False,
-         "interrupted": True, "tool_name": "Edit"},
+        {
+            "type": "tool_result",
+            "content": USER_INTERRUPTED_MESSAGE,
+            "is_error": False,
+            "interrupted": True,
+            "tool_name": "Write",
+        },
+        {
+            "type": "tool_call",
+            "name": "Edit",
+            "path": str(log),
+            "old_string": "- step 2\n",
+            "new_string": "- step 2\n- stopped\n",
+        },
+        {
+            "type": "tool_result",
+            "content": USER_INTERRUPTED_MESSAGE,
+            "is_error": False,
+            "interrupted": True,
+            "tool_name": "Edit",
+        },
         {"type": "tool_call", "name": "Read", "path": str(log)},
         {"type": "tool_result", "content": body},
     ]
@@ -156,22 +183,84 @@ def test_the_newest_successful_write_names_the_text_the_log_must_hold(tmp_path: 
 
     # A multi-edit call: its edits apply in order to the task's own text,
     # whatever the file holds.
-    edits = json.dumps([
-        {"old_string": "# log", "new_string": "# progress log"},
-        {"old_string": "- step 2\n", "new_string": "- step 2\n- step 3\n"},
-    ])
-    multi = _task(tmp_path, [*events, *_edit_call(log, {"extras": {"edits": edits}}, "ok")],
-                  now - 60)
+    edits = json.dumps(
+        [
+            {"old_string": "# log", "new_string": "# progress log"},
+            {"old_string": "- step 2\n", "new_string": "- step 2\n- step 3\n"},
+        ]
+    )
+    multi = _task(
+        tmp_path, [*events, *_edit_call(log, {"extras": {"edits": edits}}, "ok")], now - 60
+    )
     assert _log_of(multi) == "# progress log\n- step 1\n- step 2\n- step 3"
     _write(log, "# progress log\n- step 1\n- step 2\n- step 3\n")
     assert _log_of(multi) == "# progress log\n- step 1\n- step 2\n- step 3"
 
     # A call that cannot be replayed (a malformed edits list) or deletes
     # text the task never wrote leaves the task's text as it was.
-    for extras in ({"extras": {"edits": "not json"}}, {"old_string": "- step 3\n",
-                                                        "new_string": ""}):
+    for extras in (
+        {"extras": {"edits": "not json"}},
+        {"old_string": "- step 3\n", "new_string": ""},
+    ):
         unproven = _task(tmp_path, [*events, *_edit_call(log, extras, "ok")], now - 60)
         assert _log_of(unproven) == body.rstrip()
+
+
+def test_whitespace_tolerant_edits_are_replayed_as_the_tool_applied_them(tmp_path: Path) -> None:
+    # S9/F3: Edit accepts an old_string that matches the file whitespace
+    # aside (indentation, trailing blanks, a tab for spaces) and re-indents
+    # the new text to the file's lines; the replay did only exact and CRLF
+    # matching, so such an edit was replayed as an append and the digest
+    # kept the entry the edit replaced next to its replacement.
+    log = tmp_path / "tmp" / "PROGRESS.md"
+    tools = UsefulTools(work_dir=str(tmp_path))
+    original = "# log\n  - still pending\n  - a\n  - b\n\tc\n"
+    events = _write_call(log, original)
+    assert tools.Write(str(log), original).startswith("Successfully")
+    multi = json.dumps(
+        [
+            # Lines the file indents deeper: the new text is re-indented as
+            # the file's lines are.  A tab for the blank, trailing blanks.
+            {"old_string": " - a\n - b\n", "new_string": " - a\n - b done\n"},
+            {"old_string": " c  ", "new_string": "\tc done"},
+        ]
+    )
+    cases: tuple[dict[str, Any], ...] = (
+        # Deeper indentation than the file's line: applied as written.
+        {"old_string": "    - still pending\n", "new_string": "    - done\n"},
+        {"extras": {"edits": multi}},
+        # Trailing blanks the file line does not have.
+        {"old_string": "# log   \n", "new_string": "# progress\n"},
+    )
+    for extras in cases:
+        edits = extras.get("extras", {}).get("edits")
+        result = (
+            tools.Edit(str(log), edits=edits)
+            if edits
+            else tools.Edit(str(log), str(extras["old_string"]), str(extras["new_string"]))
+        )
+        assert result.startswith("Successfully"), result
+        events += _edit_call(log, extras, result)
+    expected = "# progress\n    - done\n  - a\n  - b done\n\tc done\n"
+    assert log.read_text(encoding="utf-8") == expected
+    task_id = _task(tmp_path, events, time.time() - 60)
+
+    assert _log_of(task_id) == expected.rstrip()
+
+    # The first edit on a CRLF log: the CRLF fallback and the tolerant
+    # match combine as they do in the tool.
+    crlf = original.replace("\n", "\r\n")
+    shutil.rmtree(tmp_path / "tmp")
+    events = _write_call(log, crlf)
+    assert tools.Write(str(log), crlf).startswith("Successfully")
+    result = tools.Edit(str(log), "    - still pending\n", "    - done\n")
+    assert result.startswith("Successfully"), result
+    events += _edit_call(
+        log, {"old_string": "    - still pending\n", "new_string": "    - done\n"}, result
+    )
+    expected = "# log\r\n    - done\r\n  - a\r\n  - b\r\n\tc\r\n"
+    assert log.read_bytes() == expected.encode()
+    assert _log_of(_task(tmp_path, events, time.time() - 60)) == expected.rstrip()
 
 
 def test_a_worktree_tasks_log_is_read_in_its_worktree_then_where_the_merge_left_it(

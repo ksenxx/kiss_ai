@@ -11,6 +11,15 @@
   cancelling a watchdog), the same ``except`` used to swallow that
   outer cancellation too, and the caller ran on past the await
   instead of unwinding.
+* The converse (audit 2026-11-07, A21-1): the owner that is ALREADY
+  cancelled — an embedder's serving task calling ``stop_async`` from
+  its ``finally`` — keeps a nonzero ``cancelling()`` count while it
+  unwinds, so testing that count mistook the cancelled child's
+  ``CancelledError`` for a new cancellation of the owner and
+  ``stop_async`` bailed out at its first watchdog, leaving the
+  listeners open.  Only a cancellation that arrives DURING the wait
+  propagates now; and a task that already died with an exception is
+  logged, not re-raised into the shutdown sequence.
 * On a loop without reader callbacks (Windows' proactor loop) the
   first-byte sniff runs in a worker thread on a blocking duplicate of
   the socket that the thread closes itself, so a cancelled caller
@@ -22,10 +31,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 import socket
+import tempfile
 from unittest import IsolatedAsyncioTestCase, TestCase
 
 from kiss.server import web_server
+from kiss.tests.server.conftest import find_free_port
 
 
 class TestCancelTaskPropagatesOwnCancellation(IsolatedAsyncioTestCase):
@@ -66,6 +79,71 @@ class TestCancelTaskPropagatesOwnCancellation(IsolatedAsyncioTestCase):
         await web_server._cancel_task(inner)
         self.assertTrue(inner.cancelled())
         await web_server._cancel_task(None)
+
+    async def test_already_cancelled_owner_keeps_unwinding(self) -> None:
+        """An owner cancelled BEFORE the helper runs (in its ``finally``) finishes its cleanup."""
+        cleanup_done = False
+
+        async def _owner() -> None:
+            nonlocal cleanup_done
+            try:
+                await asyncio.sleep(30)
+            finally:
+                await web_server._cancel_task(inner)
+                cleanup_done = True
+
+        inner = asyncio.create_task(asyncio.sleep(30))
+        owner = asyncio.create_task(_owner())
+        await asyncio.sleep(0)
+        owner.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await owner
+        self.assertTrue(inner.cancelled())
+        self.assertTrue(cleanup_done, "the child's CancelledError aborted the owner's finally")
+
+    async def test_finished_task_exception_is_logged_not_raised(self) -> None:
+        """A task that already died with an exception does not abort the caller."""
+
+        async def _die() -> None:
+            raise OSError("install log vanished")
+
+        dead = asyncio.create_task(_die())
+        await asyncio.sleep(0)
+        self.assertTrue(dead.done())
+        with self.assertLogs(web_server.logger, level="WARNING") as logs:
+            await web_server._cancel_task(dead)
+        self.assertIn("install log vanished", "\n".join(logs.output))
+
+    async def test_stop_async_completes_in_a_cancelled_owners_finally(self) -> None:
+        """``stop_async`` run from a cancelled serving task's ``finally`` closes the listener."""
+        tmp = tempfile.mkdtemp(prefix="kiss-f9-stop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        port = find_free_port()
+        server = web_server.RemoteAccessServer(
+            host="127.0.0.1", port=port, work_dir=tmp,
+            url_file=os.path.join(tmp, "remote-url.json"),
+            local_endpoint_file=os.path.join(tmp, "sorcar-local.json"),
+        )
+        # The full start: it installs the watchdog, the loops stop_async
+        # cancels first, which is where the bailout happened.
+        await server.start_async()
+        self.assertIsNotNone(server._watchdog_task)
+
+        async def _serve() -> None:
+            try:
+                await asyncio.sleep(30)
+            finally:
+                await server.stop_async()
+
+        owner = asyncio.create_task(_serve())
+        await asyncio.sleep(0)
+        owner.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await owner
+        self.assertIsNone(server._ws_server, "stop_async bailed out before closing the listener")
+        with self.assertRaises(OSError):
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.close()
 
 
 class TestPeekFirstByteBlocking(TestCase):

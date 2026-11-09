@@ -25,6 +25,7 @@ from kiss.server.server import AgentServer
 from kiss.tests.conftest import posix_only
 from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.conftest import init_repo, run_git, run_git_checked
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 pytestmark = posix_only("carriage returns and newlines in file names")
 
@@ -120,7 +121,7 @@ def test_changed_files_fallback_lists_names_with_carriage_returns(tmp_path: Path
     # and the listing falls back to ``git status --porcelain -z``.
     run_git_checked(repo, "branch", "-m", "main", "renamed")
     try:
-        changed = server._get_worktree_changed_files("wt-cr")
+        changed = worktree_changed_files(server, "wt-cr")
     finally:
         run_git_checked(repo, "branch", "-m", "renamed", "main")
         wt_agent.discard()

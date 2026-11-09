@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import errno
 import fnmatch
 import logging
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -32,13 +34,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
-from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.html_to_markdown import html_to_markdown
 from kiss.core.kiss_error import KISSError
-from kiss.core.locked import locked_call
+from kiss.core.locked import _race_delay, locked_call
 from kiss.core.processes import (
-    kill_process_tree,
     pid_alive,
     popen_process_group,
     process_identity,
@@ -510,7 +510,8 @@ def _git(
     Always passes a timeout so a hung git process (e.g. waiting on a
     credential-helper prompt or a network remote) cannot block the
     agent thread forever — the one hardened runner every server-side
-    git call goes through.  On expiry a synthesized
+    git call goes through.  On expiry git is stopped like an
+    interrupted one (``SIGTERM`` first, below) and a synthesized
     non-zero ``CompletedProcess`` (returncode 124, the timeout
     convention) is returned so callers keep working.  A command that
     cannot start at all (``OSError``, e.g. an argument over the
@@ -564,7 +565,7 @@ def _git(
         )
     except subprocess.TimeoutExpired:
         logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
-        kill_process_tree(proc)
+        terminate_process_group(proc)  # SIGTERM first: git removes its .lock files
         try:
             out, err = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:  # pragma: no cover - defensive
@@ -783,7 +784,7 @@ def _same_path(left: Path, right: Path) -> bool:
         return left == right
 
 
-def _same_bytes(left: Path, right: Path) -> bool:
+def _same_bytes(left: Path, right: int) -> bool:
     """Return True when the two regular files hold identical bytes.
 
     Read now, chunk by chunk, with no cache: ``filecmp.cmp`` (even with
@@ -794,14 +795,17 @@ def _same_bytes(left: Path, right: Path) -> bool:
 
     Args:
         left: First file.
-        right: Second file.
+        right: Second file, as an open descriptor (the rescue reaches
+            its destination relative to a pinned directory descriptor,
+            never by pathname); read from its current offset and left
+            open.
 
     Raises:
         OSError: When either file cannot be read.
     """
-    if left.stat().st_size != right.stat().st_size:
+    if os.stat(left).st_size != os.fstat(right).st_size:
         return False
-    with open(left, "rb") as a, open(right, "rb") as b:
+    with open(left, "rb") as a, open(right, "rb", closefd=False) as b:
         while True:
             chunk_a = a.read(1 << 20)
             chunk_b = b.read(1 << 20)
@@ -809,6 +813,108 @@ def _same_bytes(left: Path, right: Path) -> bool:
                 return False
             if not chunk_a:
                 return True
+
+
+def _copy_to_fd(src: Path, fd: int, name: str, dir_fd: int | None) -> os.stat_result:
+    """Write *src*'s bytes, permission bits and timestamps to *fd* and close it.
+
+    The rescue's replacement for ``shutil.copystat`` on the destination
+    it holds as a descriptor.  The timestamps go through the descriptor
+    where ``os.utime`` takes one; where it does not (native Windows)
+    they go through *name* once the write handle is closed, because
+    NTFS stamps a written file again when that handle closes.
+
+    Args:
+        src: The regular file to copy.
+        fd: A writable descriptor of the empty destination; closed on
+            return, also when the copy fails.
+        name: The destination as the landing names it (see
+            :func:`_rescue_name`).
+        dir_fd: The descriptor of the destination's directory, or None
+            when *name* is the whole path.
+
+    Returns:
+        The ``stat`` of the destination taken from *fd* before it is
+        closed; its identity (``st_dev``, ``st_ino``) tells the file
+        apart from any other found at the same name later.
+
+    Raises:
+        OSError: When reading *src* or writing *fd* fails.
+    """
+    with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+        shutil.copyfileobj(inp, out)
+        out.flush()
+        st = os.fstat(inp.fileno())
+        os.fchmod(fd, stat.S_IMODE(st.st_mode))
+        if os.utime in os.supports_fd:
+            os.utime(fd, ns=(st.st_atime_ns, st.st_mtime_ns))
+        created = os.fstat(fd)
+    if os.utime not in os.supports_fd:
+        os.utime(name, ns=(st.st_atime_ns, st.st_mtime_ns), dir_fd=dir_fd)
+    return created
+
+
+#: Whether the rescue can pin a destination directory with a descriptor:
+#: ``O_DIRECTORY`` and ``O_NOFOLLOW`` exist and every operation of the
+#: landing takes ``dir_fd`` (Linux, macOS, the BSDs).  Where they do not
+#: (native Windows) the landing is by pathname, with the containment
+#: checked again after it (see :meth:`GitWorktreeOps._land_by_pathname`).
+_RESCUE_DIR_FD = (
+    hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and {os.open, os.mkdir, os.lstat, os.readlink, os.symlink, os.link, os.unlink}
+    <= os.supports_dir_fd
+)
+
+#: ``O_NOFOLLOW`` where the platform has it; the pathname landing of
+#: native Windows has no such flag and relies on the ``lstat`` before.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _rescue_name(path: Path, dir_fd: int | None) -> str:
+    """Return how the landing names *path* in its file operations.
+
+    Args:
+        path: A destination in the directory the landing writes to.
+        dir_fd: That directory's descriptor, or None for the pathname
+            landing.
+
+    Returns:
+        The last component of *path*, relative to *dir_fd*, or the
+        whole path when there is no descriptor.
+    """
+    return path.name if dir_fd is not None else os.fspath(path)
+
+
+def _make_rescue_dir_by_pathname(repo: Path, parent: Path) -> None:
+    """Create *parent* under *repo* one component at a time, refusing any link.
+
+    The pathname landing's counterpart of
+    :meth:`GitWorktreeOps._open_rescue_dir`: every component below
+    *repo* must be a real directory, not a symlink, a junction or another
+    reparse point, so the landing can neither leave the repository nor
+    land through an alias of the worktree being rescued from (whose
+    "identical" file would then be the source itself).
+
+    Args:
+        repo: The main repository root.
+        parent: The destination directory, *repo* itself or below it.
+
+    Raises:
+        OSError: ``ELOOP`` for a link component, ``ENOTDIR`` for a
+            component that is not a directory, or what ``mkdir`` raised.
+    """
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    path = repo
+    for part in parent.relative_to(repo).parts:
+        path = path / part
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(path)
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & reparse:
+            raise OSError(errno.ELOOP, "a rescue destination ancestor is a link", str(path))
+        if not stat.S_ISDIR(st.st_mode):
+            raise OSError(errno.ENOTDIR, "a rescue destination ancestor is no directory", str(path))
 
 
 def strip_worktree_suffix(path: str) -> str:
@@ -895,6 +1001,23 @@ def _porcelain_entries(output: str) -> list[tuple[str, str | None, str]]:
         old_name = next(fields, None) if "R" in code or "C" in code else None
         entries.append((code, old_name, field[3:]))
     return entries
+
+
+def _under_symlink(root: Path, rel: str) -> bool:
+    """True when an ancestor directory of *rel* inside *root* is a symlink.
+
+    Git never lists a path beyond a symlink, so a porcelain entry whose
+    ancestor is one (``D  dir/x`` next to ``A  dir`` after the tracked
+    ``dir/`` was replaced by a symlink) is a stale child: ``root / rel``
+    resolves *through* the link to a file outside the tree, which must
+    be neither copied nor removed.
+    """
+    path = root
+    for part in Path(rel).parts[:-1]:
+        path = path / part
+        if path.is_symlink():
+            return True
+    return False
 
 
 class GitWorktreeOps:
@@ -1137,12 +1260,7 @@ class GitWorktreeOps:
         Args:
             repo: Git repo root path.
         """
-        locked_call(repo_lock(repo), GitWorktreeOps._prune_locked, repo)
-
-    @staticmethod
-    def _prune_locked(repo: Path) -> None:
-        """:meth:`prune`'s body, run under ``repo_lock``."""
-        _git("worktree", "prune", cwd=repo)
+        locked_call(repo_lock(repo), _git, "worktree", "prune", cwd=repo)
 
     @staticmethod
     def stage_all(wt_dir: Path) -> None:
@@ -2231,7 +2349,10 @@ class GitWorktreeOps:
         :func:`process_identity` (prefixed with the pid it describes),
         the current holder of the pid must match it; a stamp without a
         matching identity (legacy, ``ps`` unavailable, or the pid
-        re-stamped by hand) falls back to the pid probe alone.
+        re-stamped by hand) falls back to the pid probe alone, and so
+        does a stamp whose current holder cannot be fingerprinted right
+        now (``ps`` failing): only a different identity proves that the
+        pid was recycled.
 
         Args:
             repo: Git repo root path.
@@ -2248,7 +2369,8 @@ class GitWorktreeOps:
         prefix = f"{owner_pid}:"
         if stamped is None or not stamped.startswith(prefix):
             return owner_pid
-        return owner_pid if process_identity(owner_pid) == stamped[len(prefix):] else None
+        current = process_identity(owner_pid)
+        return owner_pid if current is None or current == stamped[len(prefix):] else None
 
     @staticmethod
     def load_spare_marker(repo: Path, branch: str) -> bool:
@@ -2446,18 +2568,29 @@ class GitWorktreeOps:
           (preserving the only copy outranks ignore hygiene) and each
           landed sibling is verified with ``git check-ignore``,
           warning about any that are no longer ignored.
-        * Landing is atomic: the source is hard-linked into place
+        * Landing is atomic: a private copy is hard-linked into place
           (``os.link`` fails on an existing path and never follows a
           symlink), so a racing main-tree writer can neither be
           truncated nor redirected through a just-created leaf
           symlink, and a crash can never leave a partial destination
           that a later rescue would mistake for the user's file.  On
           filesystems refusing the link, an ``O_CREAT | O_EXCL`` copy
-          is used instead.
+          is used instead.  The landed file never shares the worktree
+          file's inode: a failed rescue preserves the worktree, and an
+          alias would carry every later edit of one tree into the other.
         * The nearest EXISTING ancestor of every destination must
           resolve inside *repo* — a main-tree directory symlink
           pointing elsewhere must not let the rescue write outside
-          the repository.
+          the repository.  The landing itself happens relative to a
+          descriptor of the destination directory reached from *repo*
+          without following any symlink, so an ancestor swapped for a
+          symlink during the rescue fails the landing instead of
+          redirecting it, and nothing is ever unlinked by a pathname
+          whose ancestors may have changed.  A platform without such
+          descriptors (native Windows, :data:`_RESCUE_DIR_FD`) lands
+          by pathname and checks the containment again afterwards,
+          removing a copy an ancestor swapped meanwhile carried
+          outside, and only a copy proven to be its own.
         * Paths with a component in :data:`_RESCUE_SKIP_COMPONENTS`
           (``__pycache__``, ``.venv``, ``node_modules``, ...) or a
           basename matching :data:`_RESCUE_SKIP_PATTERNS` (``.coverage``,
@@ -2466,10 +2599,12 @@ class GitWorktreeOps:
           are skipped: they are
           regenerable build/cache artifacts, and a copied virtualenv
           would carry broken absolute paths anyway.
-        * The rescue FAILS CLOSED: enumeration failure or any file
-          that could not be landed makes the returned flag ``False``,
-          and callers must then PRESERVE the worktree instead of
-          removing it — proceeding would destroy the only copy.
+        * The rescue FAILS CLOSED: enumeration failure, any file
+          that could not be landed, or an ignored NESTED REPOSITORY
+          (git lists it as one directory entry it never descends
+          into) makes the returned flag ``False``, and callers must
+          then PRESERVE the worktree instead of removing it —
+          proceeding would destroy the only copy.
 
         Args:
             wt_dir: The worktree directory about to be removed.
@@ -2502,6 +2637,16 @@ class GitWorktreeOps:
         for rel in candidates:
             src = wt_dir / rel
             dst = repo / rel
+            if src.is_dir() and not src.is_symlink():
+                # git lists an ignored NESTED REPOSITORY as one directory
+                # entry (``data/clone/``) and never descends into it;
+                # nothing here lands a directory, so declaring it safe
+                # would delete the only copy with the worktree.
+                logger.warning(
+                    "Cannot rescue nested repository %s; preserving worktree", src,
+                )
+                ok = False
+                continue
             try:
                 if not GitWorktreeOps._rescue_dst_contained(dst, repo_resolved):
                     logger.warning(
@@ -2511,15 +2656,15 @@ class GitWorktreeOps:
                     )
                     ok = False
                     continue
-                landed = GitWorktreeOps._land_rescued_file(src, dst)
+                landed = GitWorktreeOps._land_rescued_file(src, dst, repo)
                 if landed is not None:
                     rescued += 1
                     if not exclude_ok and _RESCUE_SIBLING_MARKER in landed.name:
                         GitWorktreeOps._warn_unignored_sibling(repo, landed)
-            except OSError:
+            except OSError as exc:
                 logger.warning(
-                    "Failed to rescue ignored file %s into %s",
-                    src, repo, exc_info=True,
+                    "Failed to rescue ignored file %s into %s: %s",
+                    src, repo, exc, exc_info=True,
                 )
                 ok = False
         if rescued:
@@ -2626,21 +2771,72 @@ class GitWorktreeOps:
             return False
 
     @staticmethod
-    def _land_rescued_file(src: Path, dst: Path) -> Path | None:
-        """Place *src* at *dst* without overwriting or following links.
+    def _open_rescue_dir(repo: Path, parent: Path) -> int:
+        """Open *parent*, the directory of a rescue destination under *repo*.
 
-        Symlink sources are recreated with ``os.symlink`` (atomic,
-        fails on an existing path).  Regular files are hard-linked
-        (atomic, same filesystem — the worktree lives under the repo);
-        when the filesystem refuses the link, an ``O_CREAT | O_EXCL``
-        exclusive-create copy is used.  An existing destination with
-        identical bytes counts as already safe; one with different
-        bytes gets the worktree's version landed under a
-        ``<stem>.kiss-rescued-<ns><ext>`` sibling so neither copy is lost.
+        Descends from *repo* one path component at a time, creating a
+        missing component and opening each with ``O_NOFOLLOW`` relative
+        to the previous descriptor, so the returned descriptor names a
+        directory reached from the repository root without following
+        any symlink.  A landing relative to it cannot leave the
+        repository through a symlinked ancestor, whether present before
+        the rescue or swapped in during it, and an ancestor renamed
+        afterwards moves the directory (the landed file with it) rather
+        than changing what the descriptor names.  Only for platforms
+        with these operations (:data:`_RESCUE_DIR_FD`).
+
+        Args:
+            repo: The main repository root.
+            parent: The destination directory, *repo* itself or below it.
+
+        Returns:
+            A read-only directory descriptor the caller closes.
+
+        Raises:
+            OSError: When a component is a symlink (``ELOOP``) or not a
+                directory, or cannot be created or opened.
+        """
+        fd = os.open(repo, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for part in parent.relative_to(repo).parts:
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child = os.open(
+                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd,
+                )
+                os.close(fd)
+                fd = child
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    @staticmethod
+    def _land_rescued_file(src: Path, dst: Path, repo: Path) -> Path | None:
+        """Place *src* at *dst*, under *repo*, without overwriting or following links.
+
+        Every check and write is relative to a descriptor of *dst*'s
+        directory that :meth:`_open_rescue_dir` reached from *repo*
+        without following a symlink, so a symlinked or swapped ancestor
+        can neither carry the landing outside the repository nor make
+        the cleanup of a failed landing unlink another directory's
+        file; a platform without such descriptors lands through
+        :meth:`_land_by_pathname`.  Symlink sources are recreated with ``os.symlink``
+        (atomic, fails on an existing name).  Regular files are copied
+        to a temporary file in that directory and the copy is
+        hard-linked into place (atomic); when the filesystem refuses
+        the link, an ``O_CREAT | O_EXCL`` exclusive-create copy is used.
+        An existing destination with identical bytes counts as already
+        safe; one with different bytes gets the worktree's version
+        landed under a ``<stem>.kiss-rescued-<ns><ext>`` sibling so
+        neither copy is lost.
 
         Args:
             src: The worktree file to preserve.
-            dst: The main-repo destination path.
+            dst: The main-repo destination path, under *repo*.
+            repo: The main repository root.
 
         Returns:
             The path the file was landed at (*dst* itself or a
@@ -2648,53 +2844,161 @@ class GitWorktreeOps:
             (identical or non-file source) and nothing was landed.
 
         Raises:
-            OSError: When the file could not be landed at all (the
-                caller marks the rescue failed and the worktree is
-                preserved).
+            OSError: When the file could not be landed at all — an
+                ancestor of *dst* is a symlink, the landing left the
+                repository, or the write failed (the caller marks the
+                rescue failed and the worktree is preserved).
         """
-        if src.is_symlink():
-            if dst.is_symlink() or dst.exists():
-                if (
-                    dst.is_symlink()
-                    and os.readlink(dst) == os.readlink(src)
+        if not src.is_symlink() and not src.is_file():
+            return None
+        if not _RESCUE_DIR_FD:
+            return GitWorktreeOps._land_by_pathname(src, dst, repo)
+        dir_fd = GitWorktreeOps._open_rescue_dir(repo, dst.parent)
+        try:
+            landed = GitWorktreeOps._land_in_dir(src, dst, dir_fd)
+        finally:
+            os.close(dir_fd)
+        return None if landed is None else landed[0]
+
+    @staticmethod
+    def _land_by_pathname(src: Path, dst: Path, repo: Path) -> Path | None:
+        """Place *src* at *dst* by pathname: the landing without directory descriptors.
+
+        Native Windows has no ``O_DIRECTORY``, ``O_NOFOLLOW`` or
+        ``dir_fd``, so the destination directory cannot be pinned and
+        every operation resolves the ancestors of *dst* afresh.  This
+        creates the missing ancestors one at a time and refuses any
+        that is a link (:func:`_make_rescue_dir_by_pathname`), lands
+        the file with :meth:`_land_in_dir`, and then checks that the
+        landed path still names the file just created (its ``lstat``
+        identity is the write descriptor's) and still lies inside
+        *repo*.  When an ancestor was swapped between these pathname
+        operations the landing fails and nothing is unlinked by
+        pathname (that name may resolve to an unrelated file by then):
+        a stray copy is the lesser harm, and the worktree keeps the
+        only sure copy.
+        Swapping a directory for a symlink takes a privilege ordinary
+        Windows processes lack, which bounds what the windows between
+        these pathname operations expose.
+
+        Args:
+            src: The worktree symlink or regular file to preserve.
+            dst: The main-repo destination path, under *repo*.
+            repo: The main repository root.
+
+        Returns:
+            The path the file was landed at (*dst* itself or a
+            collision sibling), or None when an identical copy was
+            already there.
+
+        Raises:
+            OSError: When the write failed, or an ancestor was swapped
+                during the landing.
+        """
+        _make_rescue_dir_by_pathname(repo, dst.parent)
+        landed = GitWorktreeOps._land_in_dir(src, dst, None)
+        if landed is None:
+            return None
+        path, created = landed
+        try:
+            ours = os.path.samestat(os.lstat(path), created)
+        except FileNotFoundError:
+            ours = False
+        if ours and GitWorktreeOps._rescue_dst_contained(path, repo.resolve()):
+            return path
+        raise OSError(
+            f"the destination {path} no longer names the copy the rescue "
+            "landed inside the repository: an ancestor was swapped during "
+            "the rescue"
+        )
+
+    @staticmethod
+    def _land_in_dir(
+        src: Path, dst: Path, dir_fd: int | None,
+    ) -> tuple[Path, os.stat_result] | None:
+        """Land *src*, a symlink or regular file, at *dst* in the directory *dir_fd* pins.
+
+        The landing of :meth:`_land_rescued_file`, every operation of it
+        relative to *dir_fd*: *dst* and its collision sibling are named
+        by their last component only.  With *dir_fd* None (the pathname
+        landing of :meth:`_land_by_pathname`) they are named by their
+        whole path instead.
+
+        Args:
+            src: The worktree symlink or regular file to preserve.
+            dst: The destination path, in the directory *dir_fd* pins.
+            dir_fd: The descriptor of *dst*'s directory, or None.
+
+        Returns:
+            The path the file was landed at (*dst* itself or a
+            collision sibling) with the ``stat`` of the landed file
+            (from its own descriptor; ``lstat`` for a symlink), or None
+            when an identical copy was already there.
+
+        Raises:
+            OSError: When the write failed.
+        """
+        link_target = os.readlink(src) if src.is_symlink() else None
+        name = _rescue_name(dst, dir_fd)
+        try:
+            existing = os.lstat(name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if link_target is not None:
+                if stat.S_ISLNK(existing.st_mode) and (
+                    os.readlink(name, dir_fd=dir_fd) == link_target
                 ):
                     return None
-                dst = GitWorktreeOps._rescued_sibling(dst)
-            else:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-            os.symlink(os.readlink(src), dst)
-            return dst
-        if not src.is_file():
-            return None
-        if dst.is_symlink() or dst.exists():
-            if dst.is_file() and not dst.is_symlink() and _same_bytes(src, dst):
-                return None
+            elif stat.S_ISREG(existing.st_mode):
+                fd = os.open(name, os.O_RDONLY | _O_NOFOLLOW, dir_fd=dir_fd)
+                try:
+                    if _same_bytes(src, fd):
+                        return None
+                finally:
+                    os.close(fd)
             dst = GitWorktreeOps._rescued_sibling(dst)
-        else:
-            dst.parent.mkdir(parents=True, exist_ok=True)
+            name = _rescue_name(dst, dir_fd)
+        if link_target is not None:
+            os.symlink(link_target, name, dir_fd=dir_fd)
+            return dst, os.lstat(name, dir_fd=dir_fd)
+        # The linked inode is a private copy, never *src* itself: a
+        # failed rescue preserves the worktree, and a main-tree file
+        # sharing the worktree file's inode would show every later
+        # edit of either side on the other.
+        tmp = _rescue_name(dst.parent / f"{_RESCUE_SIBLING_MARKER}{uuid.uuid4().hex}", dir_fd)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
         try:
-            os.link(src, dst)
-            return dst
-        except FileExistsError:
-            # A racing writer created dst between the check and the
-            # link; its file wins, ours lands beside it.
-            sibling = GitWorktreeOps._rescued_sibling(dst)
-            os.link(src, sibling)
-            return sibling
-        except OSError:
-            # Filesystem without hard-link support: exclusive-create
-            # copy (never follows a symlink, never overwrites).
-            fd = os.open(
-                dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644,
-            )
+            created = _copy_to_fd(src, fd, tmp, dir_fd)
             try:
-                with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
-                    shutil.copyfileobj(inp, out)
-            except BaseException:
-                dst.unlink(missing_ok=True)
+                os.link(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                return dst, created
+            except FileExistsError:
+                # A racing writer created dst between the check and the
+                # link; its file wins, ours lands beside it.
+                sibling = GitWorktreeOps._rescued_sibling(dst)
+                os.link(
+                    tmp, _rescue_name(sibling, dir_fd),
+                    src_dir_fd=dir_fd, dst_dir_fd=dir_fd,
+                )
+                return sibling, created
+            except FileNotFoundError:
+                # The temporary copy is gone from its directory: an
+                # ancestor changed under a pathname landing.
                 raise
-            shutil.copystat(str(src), str(dst))
-            return dst
+            except OSError:
+                # Filesystem without hard-link support: exclusive-create
+                # copy (never overwrites; on POSIX never follows a symlink).
+                fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644, dir_fd=dir_fd)
+                try:
+                    created = _copy_to_fd(src, fd, name, dir_fd)
+                except BaseException:
+                    os.unlink(name, dir_fd=dir_fd)
+                    raise
+                return dst, created
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp, dir_fd=dir_fd)
 
     @staticmethod
     def _rescued_sibling(dst: Path) -> Path:
@@ -2756,9 +3060,11 @@ class GitWorktreeOps:
 
         Raises:
             OSError: If ``git status`` itself fails (timeout, corrupt
-                index, ...), so the caller falls back to direct
-                execution instead of silently running without the
-                user's dirty state.
+                index, ...), or a dirty tracked submodule is in the way
+                (its content cannot be snapshotted into the worktree's
+                gitlink), so the caller falls back to direct execution
+                instead of silently running without the user's dirty
+                state.
         """
         status = _git("status", "--porcelain", "-z", "-uall", cwd=repo)
         if status.returncode != 0:
@@ -2771,14 +3077,22 @@ class GitWorktreeOps:
 
         copied = False
         for code, old_name, fname in _porcelain_entries(status.stdout):
-            src = repo / fname
-            dst = wt_dir / fname
-
-            if old_name is not None:
+            # Only a rename (``R``) vacates ``old_name``: a copy (``C``)
+            # leaves its source in place, and that source's own entry
+            # may already have mirrored it.
+            if old_name is not None and "R" in code and not _under_symlink(wt_dir, old_name):
                 old_dst = wt_dir / old_name
                 if old_dst.is_symlink() or old_dst.exists():
                     GitWorktreeOps._remove_path(old_dst)
                     copied = True
+
+            if _under_symlink(repo, fname) or _under_symlink(wt_dir, fname):
+                # The entry's ancestor is (or became) a symlink: the
+                # ancestor's own entry installs the link in *wt_dir* and
+                # takes the stale real directory with it.
+                continue
+            src = repo / fname
+            dst = wt_dir / fname
 
             if src.is_symlink():
                 GitWorktreeOps._remove_path(dst)
@@ -2793,8 +3107,23 @@ class GitWorktreeOps:
             elif src.is_dir() and not code.startswith("?"):
                 # A dirty TRACKED submodule shows up in porcelain output
                 # as the submodule directory itself (worktree code M/m).
-                # Mirror its working tree (minus .git) so the agent sees
-                # the user's dirty submodule content in the new worktree.
+                # Mirroring its working tree (minus .git) into the new
+                # worktree's uninitialized gitlink directory would flatten
+                # it into files git never sees there: edits to them reach
+                # neither status, nor auto-commit, nor the ignored-file
+                # rescue, and the finalizer would remove the worktree with
+                # their only copy.  Refuse the snapshot instead; the
+                # caller falls back to running in the user's checkout.
+                index_entry = _git("ls-files", "--stage", "-z", "--", fname, cwd=repo)
+                if index_entry.stdout.startswith("160000 "):
+                    raise OSError(
+                        f"cannot snapshot the dirty submodule {fname!r} of "
+                        f"{repo} into a worktree"
+                    )
+                # Any other tracked directory entry is a tracked file the
+                # user replaced by a directory (`` D foo`` next to
+                # ``?? foo/x``): mirror it so the worktree's stale file
+                # makes way for the untracked files under it.
                 # Untracked directory entries (``?? dir/``) are embedded
                 # foreign repos/worktrees — git refuses to recurse into
                 # them and they must not be mirrored (copying e.g. an
@@ -3973,10 +4302,15 @@ def _repo_key(wt: GitWorktree) -> Path:
 def _manual_merge_cmd(wt: GitWorktree) -> str:
     """Return the correct manual merge command for a worktree.
 
-    When a baseline commit exists, the auto-merge uses
-    ``cherry-pick --no-commit baseline..branch`` to replay only agent
-    commits.  ``git merge --squash`` would incorrectly include the
-    baseline's dirty-state snapshot.
+    When a baseline commit exists, the command applies the agent's net
+    change (``baseline..branch``) exactly as the auto-merge does: ONE
+    ``cherry-pick --no-commit`` of a synthetic commit holding the
+    branch's tree with the baseline as parent (see
+    :meth:`GitWorktreeOps._squashed_commit`), created inline by
+    ``git commit-tree``.  Replaying the range commit by commit would
+    refuse a merge commit on the branch (``no -m option``), and
+    ``git merge --squash`` would incorrectly include the baseline's
+    dirty-state snapshot.
 
     Args:
         wt: The worktree state.
@@ -3985,8 +4319,12 @@ def _manual_merge_cmd(wt: GitWorktree) -> str:
         A shell command string for manual merge.
     """
     if wt.baseline_commit:
-        rev_range = shlex.quote(f"{wt.baseline_commit}..{wt.branch}")
-        return f"git cherry-pick --no-commit {rev_range}"
+        squashed = (
+            f"git commit-tree {shlex.quote(wt.branch + '^{tree}')}"
+            f" -p {shlex.quote(wt.baseline_commit)}"
+            f" -m {shlex.quote(f'kiss: squashed {wt.branch}')}"
+        )
+        return f'git cherry-pick --no-commit "$({squashed})"'
     return f"git merge --squash {shlex.quote(wt.branch)}"
 
 

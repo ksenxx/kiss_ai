@@ -37,11 +37,16 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar import useful_tools
 from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core import tool_interrupt
+from kiss.core.processes import popen_process_group
 
 _WAIT_LINE = [
     first + i
@@ -68,8 +73,9 @@ def _run_bash_with_injection(
         tools: The tools instance under test.
         command: The shell command to run.
         helper_target_name: ``__name__`` of the helper thread's target
-            (``_drain_stdout`` for the reader, ``_stop_monitor`` for
-            the stop monitor) whose ``Thread.start`` is interrupted.
+            (``_drain_stdout`` for the reader, ``_own_child`` for the
+            owner thread that spawns the shell and runs its stop
+            monitor) whose ``Thread.start`` is interrupted.
 
     Returns:
         ``{"injected": bool, "exc": BaseException | None, "result": str | None}``.
@@ -101,7 +107,7 @@ def _run_bash_with_injection(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
-@pytest.mark.parametrize("helper", ["_drain_stdout", "_stop_monitor"])
+@pytest.mark.parametrize("helper", ["_drain_stdout", "_own_child"])
 def test_interrupted_helper_start_kills_the_spawned_shell(helper: str) -> None:
     """A stop landing inside a helper ``Thread.start`` leaves no shell behind."""
     assert len(_WAIT_LINE) == 1, "threading.Thread.start changed shape"
@@ -132,6 +138,145 @@ def test_interrupted_helper_start_kills_the_spawned_shell(helper: str) -> None:
                 break
             time.sleep(0.05)
         assert leftover == [], f"helper threads leaked: {leftover}"
+    finally:
+        stop_event.set()
+        subprocess.run(["pkill", "-f", tag], check=False)
+
+
+def _run_with_injection_after_spawn(
+    run: Callable[[], str],
+    nth_line: int,
+    make_exc: Callable[[], BaseException],
+    stop_event: threading.Event | None,
+) -> dict[str, Any]:
+    """Run *run* raising ``make_exc()`` at the *nth_line*-th line start after the shell exists.
+
+    The tracer watches every thread (``threading.settrace``) for the
+    return of :func:`popen_process_group`, the moment the child
+    process exists, then raises in the calling thread at its
+    *nth_line*-th following line event of the tool's own code
+    (``useful_tools``, ``tool_interrupt``): the check-point delivery of
+    the server's injected Stop, made deterministic (a trace event comes
+    BEFORE its line runs, so the stdlib's lock-restoring ``finally``
+    bodies, which a real injection lands after, are left alone).
+    *stop_event* is set first when given, as ``_stop_task`` sets the
+    task's event before it injects.
+
+    Returns:
+        ``{"injected": bool, "exc": BaseException | None, "result": str | None}``.
+    """
+    spawn_code = popen_process_group.__code__
+    tool_files = {useful_tools.__file__, tool_interrupt.__file__}
+    task_tid = threading.get_ident()
+    outcome: dict[str, Any] = {"injected": False, "exc": None, "result": None}
+    state = {"spawned": False, "lines": 0}
+
+    def tracer(frame: Any, event: str, arg: Any) -> Any:
+        if event == "return" and frame.f_code is spawn_code:
+            state["spawned"] = True
+        elif (
+            event == "line"
+            and state["spawned"]
+            and not outcome["injected"]
+            and threading.get_ident() == task_tid
+            and frame.f_code.co_filename in tool_files
+        ):
+            state["lines"] += 1
+            if state["lines"] == nth_line:
+                outcome["injected"] = True
+                if stop_event is not None:
+                    stop_event.set()
+                raise make_exc()
+        return tracer
+
+    threading.settrace(tracer)
+    sys.settrace(tracer)
+    try:
+        outcome["result"] = run()
+    except BaseException as exc:  # noqa: BLE001 — the injected stop is expected
+        outcome["exc"] = exc
+    finally:
+        sys.settrace(None)
+        threading.settrace(None)
+    return outcome
+
+
+def _assert_no_survivor(tag: str, tools: UsefulTools) -> None:
+    """Assert that no shell carrying *tag* outlives the interrupted launch for long."""
+    deadline = time.monotonic() + 5
+    survivors = _tagged_processes(tag)
+    while survivors and time.monotonic() < deadline:
+        time.sleep(0.1)
+        survivors = _tagged_processes(tag)
+    assert survivors == [], f"the shell survived the interrupted launch: {survivors}"
+    for job in tools._jobs.values():
+        assert job.process.poll() is not None, f"job {job.job_id} was left running"
+
+
+_INJECTIONS = [
+    ("task-stop", lambda: KeyboardInterrupt("injected task Stop")),
+    ("setup-failure", lambda: RuntimeError("can't start new thread")),
+]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+@pytest.mark.parametrize("kind,make_exc", _INJECTIONS, ids=[k for k, _ in _INJECTIONS])
+@pytest.mark.parametrize("nth_line", [1, 2, 3])
+def test_stop_right_after_the_foreground_spawn_leaves_no_shell(
+    nth_line: int, kind: str, make_exc: Callable[[], BaseException],
+) -> None:
+    """A Stop landing at any check point after the shell was spawned still kills it.
+
+    The shell used to be spawned before its ``done`` event, output queue
+    and cleanup region existed, so an exception at the first check
+    points after ``_spawn`` returned left it running with no monitor
+    and nothing to kill it by.
+    """
+    tag = f"concaudit-f2-fg-{uuid.uuid4().hex}"
+    stop_event = threading.Event()
+    tools = UsefulTools(stop_event=stop_event)
+    try:
+        outcome = _run_with_injection_after_spawn(
+            lambda: tools.Bash(f"sleep 30 # {tag}", "tagged sleep", timeout_seconds=30),
+            nth_line,
+            make_exc,
+            stop_event if kind == "task-stop" else None,
+        )
+        assert outcome["injected"], "the shell was never spawned under the tracer"
+        # A setup failure is reported as an ``Error:`` result; a Stop propagates.
+        assert outcome["exc"] is not None or str(outcome["result"]).startswith("Error:"), outcome
+        _assert_no_survivor(tag, tools)
+    finally:
+        stop_event.set()
+        subprocess.run(["pkill", "-f", tag], check=False)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+@pytest.mark.parametrize("kind,make_exc", _INJECTIONS, ids=[k for k, _ in _INJECTIONS])
+@pytest.mark.parametrize("nth_line", [1, 2, 3])
+def test_stop_right_after_the_background_spawn_leaves_no_job(
+    tmp_path: Path, nth_line: int, kind: str, make_exc: Callable[[], BaseException],
+) -> None:
+    """A Stop landing after a background job's shell was spawned kills it.
+
+    The job's shell used to be spawned, its log context left and its
+    watcher started in separate regions, so an exception at the check
+    points between them left the shell running unregistered, with no
+    watcher and no job id anyone could kill it by.
+    """
+    tag = f"concaudit-f2-bg-{uuid.uuid4().hex}"
+    stop_event = threading.Event()
+    tools = UsefulTools(stop_event=stop_event, work_dir=str(tmp_path))
+    try:
+        outcome = _run_with_injection_after_spawn(
+            lambda: tools.Bash(f"sleep 30 # {tag}", "tagged sleep", background=True),
+            nth_line,
+            make_exc,
+            stop_event if kind == "task-stop" else None,
+        )
+        assert outcome["injected"], "the shell was never spawned under the tracer"
+        assert outcome["exc"] is not None, outcome
+        _assert_no_survivor(tag, tools)
     finally:
         stop_event.set()
         subprocess.run(["pkill", "-f", tag], check=False)

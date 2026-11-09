@@ -154,6 +154,8 @@ def test_failed_shared_dir_removal_is_retried_by_next_close(cleanup: set[str]) -
     with open(os.path.join(locked, "f"), "w", encoding="utf-8") as fh:
         fh.write("x")
     os.chmod(locked, 0o000)  # rmtree cannot list/remove the entry
+    assert mgr.container is not None
+    mgr.container.kill()  # already gone: the container cannot empty the volume itself
     try:
         mgr.close()  # must not raise
         assert mgr.container is None
@@ -185,6 +187,8 @@ def test_close_retries_removal_of_a_tracked_leftover(cleanup: set[str]) -> None:
     locked = os.path.join(shared, "locked")
     os.mkdir(locked)
     os.chmod(locked, 0o000)
+    assert mgr.container is not None
+    mgr.container.kill()  # already gone: the container cannot empty the volume itself
     try:
         mgr.close()
         assert mgr.host_shared_path == shared

@@ -34,20 +34,37 @@ TOO_DEEP = "x = " + " + ".join(['"a"'] * 100_000) + "\n"
 
 @pytest.mark.parametrize(
     "source",
-    [b'# -*- coding: latin-1 -*-\nNAME = "caf\xe9"\n', TOO_DEEP.encode()],
-    ids=["latin-1", "too-deep"],
+    [b'NAME = "caf\xe9"\n', TOO_DEEP.encode()],
+    ids=["undecodable", "too-deep"],
 )
 @pytest.mark.parametrize("fix", [False, True])
 def test_lint_reports_an_unreadable_script_as_broken(
     tmp_path: Path, source: bytes, fix: bool
 ) -> None:
-    """The script is one ``broken: cannot parse`` finding, with or without ``--fix``."""
+    """The script is one ``broken: cannot parse`` finding, with or without ``--fix``.
+
+    Unreadable means what ``import`` cannot read: bytes that are not
+    UTF-8 and carry no coding cookie, or a parse the interpreter gives
+    up on.  A script with a ``coding`` cookie is decoded as ``import``
+    decodes it (PEP 263), so it is linted, not reported as unreadable.
+    """
     script = tmp_path / "unreadable_sea.py"
     script.write_bytes(source)
     findings = sea_lint.lint_all([script], fix=fix)
     assert [(f.path, f.code) for f in findings] == [(script.resolve(), "broken")]
     assert findings[0].message.startswith("cannot parse: ")
     assert script.read_bytes() == source  # --fix never rewrites what it cannot read
+
+
+def test_lint_reads_a_script_in_its_declared_encoding(tmp_path: Path) -> None:
+    """A ``latin-1`` cookie script is read as ``import`` reads it and linted for real."""
+    script = tmp_path / "latin_sea.py"
+    source = b'# -*- coding: latin-1 -*-\nNAME = "caf\xe9"\n'
+    script.write_bytes(source)
+    findings = sea_lint.lint_all([script], fix=False)
+    assert [f.code for f in findings] == ["broken"]
+    assert "exactly one subclass" in findings[0].message
+    assert script.read_bytes() == source
 
 
 def test_sea_docs_reports_a_named_page_that_does_not_exist(

@@ -23,12 +23,17 @@ Run with::
 import json
 import logging
 import os
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import pytest
 
+from kiss.core import processes
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
@@ -885,8 +890,6 @@ def test_codex_default_model_late_failure_keeps_a_concurrent_success(
 ) -> None:
     """Two turns miss the cache together; the one that resolves the
     default caches it, and the other's later failure does not replace it."""
-    import threading
-
     monkeypatch.setattr(codex_model, "_default_model_cache", {})
     monkeypatch.setattr(codex_model, "find_codex_executable", lambda: "/fake/codex")
     release = threading.Event()
@@ -912,6 +915,43 @@ def test_codex_default_model_late_failure_keeps_a_concurrent_success(
     assert results == ["gpt-6.1-sol"], "the late failure returns the cached answer"
     assert codex_model.codex_default_model({}) == "gpt-6.1-sol"
     assert calls == ["slow", "fast"], "served from the cache"
+
+
+def test_codex_default_model_ends_the_app_server_when_its_reader_cannot_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``Thread.start`` that fails once the app-server is spawned (no
+    thread left) still kills and reaps the server: the spawn is owned by
+    the resolver's cleanup before any fallible step runs."""
+    monkeypatch.setattr(codex_model, "_default_model_cache", {})
+    _install_app_server(tmp_path, monkeypatch, "hang")
+    spawned: list[subprocess.Popen[str]] = []
+
+    def fail_the_reader_start(frame: FrameType, event: str, arg: Any) -> None:
+        if event == "return" and frame.f_code is processes.popen_process_group.__code__:
+            spawned.append(arg)
+        elif (
+            event == "call"
+            and frame.f_code is threading.Thread.start.__code__
+            and frame.f_back is not None
+            and frame.f_back.f_code is codex_model._query_default_model.__code__
+        ):
+            sys.setprofile(None)
+            raise RuntimeError("can't start new thread")
+
+    sys.setprofile(fail_the_reader_start)
+    try:
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            codex_model.codex_default_model(dict(os.environ))
+    finally:
+        sys.setprofile(None)
+    (server,) = spawned
+    try:
+        assert server.poll() is not None, "the app-server nobody reads must be ended"
+    finally:
+        if server.poll() is None:
+            processes.kill_process_tree(server)
+            server.wait()
 
 
 def test_codex_default_model_is_none_without_a_runnable_cli(

@@ -974,12 +974,14 @@ class SorcarRunApiTest(unittest.TestCase):
 
     def test_per_task_overrides_forwarded(self) -> None:
         """``max_budget`` / ``model_config`` / ``use_web_tools`` /
-        ``use_memory`` / ``is_parallel`` reach the daemon-built agent."""
+        ``use_memory`` / ``compaction`` / ``is_parallel`` reach the
+        daemon-built agent."""
         seen: dict[str, Any] = {}
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
             seen["max_budget"] = kwargs.get("max_budget")
             seen["model_config"] = kwargs.get("model_config")
+            seen["compaction"] = kwargs.get("compaction", "MISSING")
             seen["web_tools"] = getattr(self_agent, "_use_web_tools", None)
             seen["is_parallel"] = getattr(self_agent, "_is_parallel", None)
             seen["use_memory"] = getattr(
@@ -1010,6 +1012,7 @@ class SorcarRunApiTest(unittest.TestCase):
             model_config={"base_url": "http://localhost:9999/v1"},
             use_web_tools=False,
             use_memory=False,
+            compaction=False,
             is_parallel=True,
         )
         assert result.success is True
@@ -1021,6 +1024,7 @@ class SorcarRunApiTest(unittest.TestCase):
         assert seen["is_parallel"] is True
         assert seen["use_memory"] is False
         assert seen["memory_tools"] is None
+        assert seen["compaction"] is False
 
     def test_malformed_override_fields_ignored(self) -> None:
         """Malformed override fields fall back to the daemon config.
@@ -1035,6 +1039,7 @@ class SorcarRunApiTest(unittest.TestCase):
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
             seen["max_budget"] = kwargs.get("max_budget")
             seen["model_config"] = kwargs.get("model_config")
+            seen["compaction"] = kwargs.get("compaction", "MISSING")
             seen["web_tools"] = getattr(self_agent, "_use_web_tools", None)
             seen["use_memory"] = getattr(
                 self_agent, "_use_memory_override", "MISSING",
@@ -1049,6 +1054,7 @@ class SorcarRunApiTest(unittest.TestCase):
                 "modelConfig": "junk",
                 "useWebTools": "yes",
                 "useMemory": "yes",
+                "compaction": "no",
             },
         )
         assert isinstance(seen["max_budget"], float)
@@ -1061,6 +1067,10 @@ class SorcarRunApiTest(unittest.TestCase):
         assert seen["use_memory"] is None, (
             "a malformed useMemory means no per-run override — the agent "
             "falls back to the persisted setting"
+        )
+        assert seen["compaction"] is True, (
+            "only an explicit false turns compaction off: a malformed value "
+            "leaves the run on its default"
         )
 
     def test_classify_tasks_override_forwarded(self) -> None:

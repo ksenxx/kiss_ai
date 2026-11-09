@@ -92,6 +92,19 @@ def _host_label() -> str:
     return host if _HOSTNAME_RE.match(host) and len(host) <= 253 else ""
 
 
+def _host_or_localhost() -> str:
+    """Return :func:`_host_label`, or ``localhost`` when the hostname is no label."""
+    return _host_label() or "localhost"
+
+
+def _subject(common_name: str) -> x509.Name:
+    """Return the subject name of a certificate this module issues."""
+    return x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, _ORGANIZATION),
+    ])
+
+
 def _write_private_key(path: Path, key: ec.EllipticCurvePrivateKey) -> None:
     """Write *key* as PEM to *path*, mode 0600, atomically replacing any old file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,12 +168,7 @@ def generate_local_ca(
         The generated CA certificate and private key, in that order.
     """
     key = _generate_key()
-    host = _host_label() or "localhost"
-    common_name = f"{_CA_COMMON_NAME_PREFIX} {host}"[:64]
-    name = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, _ORGANIZATION),
-    ])
+    name = _subject(f"{_CA_COMMON_NAME_PREFIX} {_host_or_localhost()}"[:64])
     now = _now()
     cert = (
         x509.CertificateBuilder()
@@ -276,10 +284,7 @@ def _issue_leaf(
 ) -> None:
     """Write an end-entity certificate and its key signed by the CA (key file first)."""
     key = _generate_key()
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, _ORGANIZATION),
-    ])
+    subject = _subject(common_name)
     now = _now()
     builder = (
         x509.CertificateBuilder()
@@ -334,9 +339,11 @@ def _current_pair(
 ) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey] | None:
     """Return the certificate and key at the paths when they need no re-issue, else ``None``.
 
-    Current means: both files exist, parse and match, the certificate is
-    not expiring within :data:`RENEWAL_THRESHOLD_DAYS` and, when
-    *issuer* is given, *issuer* signed it.
+    Current means: both files exist, parse and match, the certificate's
+    validity has started (a pair made while the clock ran ahead is one
+    clients reject as not yet valid) and is not ending within
+    :data:`RENEWAL_THRESHOLD_DAYS` and, when *issuer* is given, *issuer*
+    signed it.
     """
     if not cert_path.is_file() or not key_path.is_file():
         return None
@@ -347,7 +354,11 @@ def _current_pair(
             cert.verify_directly_issued_by(issuer)
     except Exception:
         return None
-    if _expiring(cert) or cert.public_key() != key.public_key():
+    if (
+        cert.not_valid_before_utc > _now()
+        or _expiring(cert)
+        or cert.public_key() != key.public_key()
+    ):
         return None
     return cert, key
 
@@ -436,10 +447,10 @@ def ensure_local_client_pair(tls_dir: Path) -> tuple[Path, Path]:
         # extended key usage and no SAN; its Common Name names this host.
         # A remote daemon admits it once the local CA is in its
         # TRUSTED_CLIENTS_DIR.
-        host = _host_label() or "localhost"
         _issue_leaf(
             cert_path, key_path, ca_cert, ca_key,
-            f"{PRODUCT_NAME} machine link {host}"[:64], ExtendedKeyUsageOID.CLIENT_AUTH, None,
+            f"{PRODUCT_NAME} machine link {_host_or_localhost()}"[:64],
+            ExtendedKeyUsageOID.CLIENT_AUTH, None,
         )
     return cert_path, key_path
 
@@ -500,8 +511,7 @@ def ca_label(ca_cert_path: Path) -> str:
     :data:`TRUSTED_CLIENTS_DIR`: readable (``gpu-box-1a2b3c4d``), and
     unique per CA so a regenerated CA enrols as a new file.
     """
-    host = _host_label() or "localhost"
-    return f"{host}-{_ca_digest(ca_cert_path)[:4].hex()}"
+    return f"{_host_or_localhost()}-{_ca_digest(ca_cert_path)[:4].hex()}"
 
 
 def ensure_local_tls_pair(

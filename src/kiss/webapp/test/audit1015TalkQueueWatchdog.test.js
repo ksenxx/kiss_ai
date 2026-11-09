@@ -17,38 +17,16 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, stubRaf} = require('./simplify2_harness');
+const {makePage, send, stubRaf, fakeIntervals} = require('./simplify2_harness');
 const {installAudio} = require('./speech_helpers');
 
 const B64 = 'SUQzBAAAAAAAAA==';
 const CHECK_MS = 5000;
 const STALL_CHECKS = 6;
 
-/**
- * Replace the page's interval timers with a manual clock: every
- * setInterval is recorded with its delay, and a test ticks them.
- */
-function installClock(win) {
-  const timers = new Map();
-  let nextId = 1;
-  win.setInterval = (fn, ms) => {
-    const id = nextId++;
-    timers.set(id, {fn, ms});
-    return id;
-  };
-  win.clearInterval = id => {
-    timers.delete(id);
-  };
-  return {
-    /** The pending intervals armed with exactly *ms*. */
-    pending: ms => Array.from(timers.values()).filter(t => t.ms === ms),
-    /** Run every pending interval armed with *ms* once. */
-    tick: ms => {
-      for (const t of Array.from(timers.values())) {
-        if (t.ms === ms) t.fn();
-      }
-    },
-  };
+/** The stall checks (the CHECK_MS intervals) the page has armed. */
+function stallChecks(clock) {
+  return clock.intervals.filter(iv => iv.ms === CHECK_MS);
 }
 
 function talkEv(id, text) {
@@ -58,13 +36,13 @@ function talkEv(id, text) {
 function testHealthyLongClipIsNeverOverlapped() {
   const {win} = makePage({beforeScripts: stubRaf});
   const players = installAudio(win);
-  const clock = installClock(win);
+  const clock = fakeIntervals(win);
 
   send(win, talkEv('h1', 'a three minute clip'));
   send(win, talkEv('h2', 'must wait for it'));
   assert.strictEqual(players.length, 1, 'the second clip waits');
   assert.strictEqual(
-    clock.pending(CHECK_MS).length,
+    stallChecks(clock).length,
     1,
     'one stall check is armed for the playing clip',
   );
@@ -88,7 +66,7 @@ function testHealthyLongClipIsNeverOverlapped() {
 function testStalledClipIsRetiredBeforeTheNextStarts() {
   const {win} = makePage({beforeScripts: stubRaf});
   const players = installAudio(win);
-  const clock = installClock(win);
+  const clock = fakeIntervals(win);
 
   send(win, talkEv('s1', 'stalls after ten seconds'));
   send(win, talkEv('s2', 'must still play'));
@@ -116,7 +94,7 @@ function testStalledClipIsRetiredBeforeTheNextStarts() {
   assert.strictEqual(players.length, 2, 'then the second clip starts');
   assert.strictEqual(players[1].playCalls, 1);
   assert.strictEqual(
-    clock.pending(CHECK_MS).length,
+    stallChecks(clock).length,
     1,
     'only the second clip is sampled now',
   );
@@ -137,7 +115,7 @@ function testStalledClipIsRetiredBeforeTheNextStarts() {
 function testLateEndedFromRetiredClipIsIgnored() {
   const {win} = makePage({beforeScripts: stubRaf});
   const players = installAudio(win);
-  const clock = installClock(win);
+  const clock = fakeIntervals(win);
 
   send(win, talkEv('l1', 'stalls at once'));
   send(win, talkEv('l2', 'second'));
@@ -160,13 +138,13 @@ function testLateEndedFromRetiredClipIsIgnored() {
 function testStallCheckIsClearedOnNormalCompletion() {
   const {win} = makePage({beforeScripts: stubRaf});
   const players = installAudio(win);
-  const clock = installClock(win);
+  const clock = fakeIntervals(win);
 
   send(win, talkEv('n1', 'ends normally'));
-  assert.strictEqual(clock.pending(CHECK_MS).length, 1);
+  assert.strictEqual(stallChecks(clock).length, 1);
   players[0].fire('ended');
   assert.strictEqual(
-    clock.pending(CHECK_MS).length,
+    stallChecks(clock).length,
     0,
     'the stall check is cleared when the clip ends',
   );
@@ -174,16 +152,16 @@ function testStallCheckIsClearedOnNormalCompletion() {
   // The same for the user-agent pause path.
   send(win, talkEv('n2', 'paused by the user agent'));
   assert.strictEqual(players.length, 2);
-  assert.strictEqual(clock.pending(CHECK_MS).length, 1);
+  assert.strictEqual(stallChecks(clock).length, 1);
   players[1].fire('pause');
-  assert.strictEqual(clock.pending(CHECK_MS).length, 0);
+  assert.strictEqual(stallChecks(clock).length, 0);
   assert.strictEqual(players[1].src, '', 'a paused clip is retired');
 
   // An idle queue: a later talk plays at once and is sampled again.
   send(win, talkEv('n3', 'next'));
   assert.strictEqual(players.length, 3);
   assert.strictEqual(players[2].playCalls, 1);
-  assert.strictEqual(clock.pending(CHECK_MS).length, 1);
+  assert.strictEqual(stallChecks(clock).length, 1);
   win.close();
   console.log('PASS: the stall check is cleared on normal completion');
 }

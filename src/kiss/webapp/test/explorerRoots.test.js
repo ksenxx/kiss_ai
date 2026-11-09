@@ -35,6 +35,7 @@ const {
 } = require('./simplify2_harness');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
+const {rootRows, answerWorkDirCheck} = require('./workdir_helpers');
 const {
   all,
   showSection,
@@ -104,37 +105,6 @@ function answer(win, posted, p, entries, workDir) {
     path: p,
     root: req.workDir,
     entries,
-  });
-  return req;
-}
-
-function rootRows(win) {
-  return all(win, '#explorer-tree > .explorer-row.is-root');
-}
-
-/**
- * The daemon's answer to the working-directory check "Set as Working
- * Directory" makes (the same `listDir` with a 'workdir:' token that
- * "..." > Working directory sends): the check is asserted to exist and
- * be scoped to *dir* itself, then answered (with *error* when given).
- */
-function answerWorkDirCheck(win, posted, dir, error) {
-  const checks = ofType(posted, 'listDir').filter(
-    m => String(m.token).startsWith('workdir:') && m.path === dir,
-  );
-  const req = checks[checks.length - 1];
-  assert.ok(req, 'a workdir: listDir check for ' + dir + ' was sent');
-  assert.strictEqual(req.workDir, dir, 'the check is scoped to the folder');
-  if (error) {
-    send(win, {type: 'dirListing', token: req.token, path: dir, error});
-    return req;
-  }
-  send(win, {
-    type: 'dirListing',
-    token: req.token,
-    path: dir,
-    root: dir,
-    entries: [],
   });
   return req;
 }

@@ -56,6 +56,17 @@ def test_api_daemon_names_this_process_and_its_version() -> None:
     assert info["version"] == web_server._read_version() != ""
 
 
+def test_settings_header_shows_checkout_commit() -> None:
+    """Run from a git checkout (no ``_commit.txt``), Settings shows ``version (HEAD)``."""
+    head = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=web_server.MEDIA_DIR, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert web_server._read_commit() == head != ""
+    version = web_server._read_version()
+    assert f"Configuration {version} ({head})<" in web_server._build_html()
+
+
 def test_api_daemon_token_is_stable_per_process_and_differs_between_processes() -> None:
     """Two servers of one process agree; a daemon in another process answers another token."""
     first = json.loads(_get(web_server.DAEMON_API)[2])["instance"]

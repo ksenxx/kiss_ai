@@ -45,6 +45,7 @@ const {
   announceFinished,
   openSubTabIds,
   bootParallelRun,
+  spawnSubagent,
 } = require('./subagent_tab_helpers');
 
 // ---------------------------------------------------------------------------
@@ -557,6 +558,69 @@ function testRetagReleasesTheOldTabId() {
   console.log('  ok - a retag releases the retired tab id');
 }
 
+// A sub-agent that ran a fan-out of its own owns that fan-out's panel
+// (its `_rpParentTabId`).  Renaming the sub-agent's tab must move the
+// panel's owner too: a nested child reopened from the panel afterwards
+// is otherwise resumed under a parent id that no longer exists and
+// lands as a root tab of its own instead of in the chat's group.
+function testRetagMovesNestedFanOut() {
+  const client = makeWebappClient();
+  const {win, parentId, taskIds, subTabIds} = bootParallelRun(1, client, {
+    replay: true,
+  });
+  const all = client.drain;
+  const sub = subTabIds[0];
+  send(win, {type: 'status', running: true, tabId: sub, taskId: 2});
+  send(win, {
+    type: 'tool_call',
+    name: 'run_parallel',
+    tabId: sub,
+    extras: {tasks: JSON.stringify(['nested'])},
+  });
+  const nested = spawnSubagent(client, sub, 'nested-task', 'nested', 0);
+  const newId = 'task-parent-task__sub_0';
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: newId,
+    parent_tab_id: parentId,
+    description: 'sub 1',
+    task_id: taskIds[0],
+    taskIndex: 0,
+    isSubagentTab: true,
+  });
+  assert.deepStrictEqual(openSubTabIds(win), [newId, nested], 'sanity');
+  send(win, {type: 'subagentDone', tab_id: nested});
+  const tabs = () => win._testApi.openTabs();
+  assert.ok(!tabs().some(t => t.id === nested), 'the finished child closed');
+  win._testApi.switchToTab(newId);
+  const nestedPanel = win.document.querySelector('#output .tc-run-parallel');
+  assert.ok(nestedPanel, 'the nested fan-out panel is on screen');
+  assert.ok(
+    nestedPanel.classList.contains('collapsed'),
+    'STALE OWNER: the nested fan-out did not fold when its last child closed',
+  );
+  const before = all().length;
+  togglePanel(win, nestedPanel, all);
+  const resume = all()
+    .slice(before)
+    .find(m => m.type === 'resumeSession' && m.taskId === 'nested-task');
+  assert.ok(resume, 'expanding the panel reopens the nested child');
+  assert.strictEqual(
+    resume.parentTabId,
+    newId,
+    'the child is resumed under the renamed parent',
+  );
+  const reopened = tabs().find(t => t.id === resume.tabId);
+  assert.ok(reopened, 'the reopened child has a tab');
+  assert.strictEqual(
+    reopened.rootId,
+    parentId,
+    'the reopened child stays in the chat\'s group',
+  );
+  win.close();
+  console.log('  ok - a retag moves the nested fan-out to the new id');
+}
+
 // Sub-agent broadcasts (new_tab with taskId '', openSubagentTab) reach
 // every connected client.  A client that does not own the announced
 // parent tab (another chat, another window) must neither open a tab for
@@ -622,6 +686,7 @@ const SCENARIOS = [
   testNewTabDoesNotRevivHandClosedSubagent,
   testLateSpawnHonoursItsOwnPanel,
   testRetagReleasesTheOldTabId,
+  testRetagMovesNestedFanOut,
 ];
 
 function main() {

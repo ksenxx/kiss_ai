@@ -24,7 +24,6 @@
 const assert = require('assert');
 const {
   makePage: makeChatPage,
-  send,
   stubRaf,
   loadMainCss,
   captureTimers,

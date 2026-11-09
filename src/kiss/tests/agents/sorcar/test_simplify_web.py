@@ -44,7 +44,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.agents.sorcar.web_use_tool import WebUseTool, _read_lock_pid
 from kiss.server.browser_tab import BrowserTabService
 from kiss.tests.conftest import posix_only
 from kiss.tests.server._memory_printer import MemoryPrinter
@@ -137,7 +137,8 @@ def test_ephemeral_profile_leaves_no_lock_file_behind(server: str) -> None:
         assert tool.go_to_url(f"{server}/inert").startswith("Page: Inert")
         profile = tool.user_data_dir
         assert profile is not None and os.path.isdir(profile)
-        assert tool.effective_user_data_dir == profile
+        # Chromium holds that very directory: its SingletonLock names the browser.
+        assert _read_lock_pid(profile) == tool._browser_pid
     finally:
         tool.close()
     assert not os.path.exists(profile), "ephemeral profile dir leaked"

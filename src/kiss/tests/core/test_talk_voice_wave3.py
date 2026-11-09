@@ -28,7 +28,7 @@ def test_voice_comes_between_model_and_usage_out() -> None:
     assert synthesize_talk_audio("   ", voice="alloy") is None
     usage: dict = {}
     assert synthesize_talk_audio("hello", "", "", "no-such-model-xyz", "alloy", usage) is None
-    assert usage == {"budget_used": 0.0, "total_tokens_used": 0}
+    assert usage == {"model": "no-such-model-xyz", "budget_used": 0.0, "total_tokens_used": 0}
 
 
 @requires_openai

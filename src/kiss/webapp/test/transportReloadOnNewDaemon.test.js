@@ -55,7 +55,8 @@ function page() {
   // Every /api/daemon request is answered from the front of `answers`:
   // {instance} -> 200 JSON, 'fail' -> a network error, 'http500' ->
   // 500, 'http404' -> 404, 'throw' -> fetch itself throws, a function
-  // -> a deferred answer the test resolves later.
+  // (given the request's options) -> a deferred answer the test
+  // resolves later.
   const answers = [];
   const requests = [];
   window.fetch = function (url, opts) {
@@ -70,7 +71,7 @@ function page() {
         json: () => Promise.reject(new Error('no body')),
       });
     }
-    if (typeof next === 'function') return next();
+    if (typeof next === 'function') return next(opts);
     return Promise.resolve({
       ok: true,
       status: 200,
@@ -150,39 +151,63 @@ async function main() {
   assert.strictEqual(retries(timers).length, 0, 'the good answer ends it');
   assert.strictEqual(reloads.length, 0, 'still the same daemon');
 
-  // A drop while a retry is pending cancels it, even on a page whose
-  // clearTimeout throws (the shim's other timer cancels tolerate that
-  // too): the reconnect still goes ahead.
+  // A drop while a retry is pending cancels it.
   reconnect(sockets, timers, 2);
   answers.push('fail');
   authOk(sockets[3]);
   await settle();
-  const orphan = retries(timers);
-  assert.strictEqual(orphan.length, 1, 'the failure armed a retry');
+  const dropped = retries(timers)[0];
+  assert.ok(dropped, 'the failure armed a retry');
+  sockets[3].fireClose();
+  assert.ok(dropped.cleared, 'the drop cancelled the pending retry');
+  assert.strictEqual(retries(timers).length, 0, 'no retry outlives the drop');
+
+  // The same on a page whose clearTimeout throws (the shim's timer
+  // cancels tolerate that): the reconnect still goes ahead, and the retry
+  // the page could not cancel is harmless: fired for its retired
+  // connection, it probes nothing and reloads nothing.
+  openNext(sockets, timers, 3);
+  answers.push('fail');
+  authOk(sockets[4]);
+  await settle();
+  const orphan = retries(timers)[0];
+  assert.ok(orphan, 'the failure armed a retry');
   const realClearTimeout = window.clearTimeout;
-  window.clearTimeout = function () {
+  const blocked = [];
+  window.clearTimeout = function (id) {
+    blocked.push(id);
     throw new Error('clearTimeout blocked');
   };
-  const before = pendingTimers(timers);
-  sockets[3].fireClose();
+  const armedBefore = timers.length;
+  sockets[4].fireClose();
   window.clearTimeout = realClearTimeout;
-  // The throwing clearTimeout could mark none of the timers the close
-  // path cancels (the retry, the stale check, the stable timer).
-  for (const t of before) t.ran = true;
+  assert.ok(
+    blocked.includes(timers.indexOf(orphan) + 1),
+    'the close path asked to cancel the retry',
+  );
+  assert.ok(!orphan.cleared, 'the blocked cancel left the retry armed');
+  const reconnects = timers
+    .slice(armedBefore)
+    .filter(t => !t.cleared && !t.ran && t.ms >= 500);
   assert.strictEqual(
-    pendingTimers(timers).filter(t => t.ms >= 500).length,
+    reconnects.length,
     1,
     'the close path survived and armed the reconnect',
   );
-  openNext(sockets, timers, 3);
-  answers.push({instance: 'daemon-A', version: '2026.10.21'});
-  authOk(sockets[4]);
+  const probes = requests.length;
+  fire(orphan);
   await settle();
-  assert.strictEqual(retries(timers).length, 0, 'the retry did not survive');
+  assert.strictEqual(requests.length, probes, 'the orphan retry probes nothing');
+  assert.strictEqual(reloads.length, 0, 'and reloads nothing');
+  // The other timers the blocked cancels left armed (the stale check,
+  // the stable timer) are retired from the ledger: the page asked for
+  // their cancellation, and the one whose firing matters is the retry.
+  for (const id of blocked) if (timers[id - 1]) timers[id - 1].ran = true;
+  fire(reconnects[0]);
+  assert.strictEqual(sockets.length, 6, 'the reconnect opened the next socket');
 
   // An answer without a token is final: a 404 (a daemon without the
   // endpoint) or JSON naming no instance arms no retry.
-  reconnect(sockets, timers, 4);
   answers.push('http404');
   authOk(sockets[5]);
   await settle();
@@ -287,11 +312,53 @@ async function main() {
   assert.strictEqual(requests.length, asked, 'no fetch, no request');
   assert.strictEqual(reloads.length, 2, 'no fetch, no reload');
   window.fetch = realFetch;
+
+  // A probe that never answers (a proxy holding the request while the
+  // socket stays up) is a lost probe too: its deadline aborts it, the
+  // abort is retried like any failure, and the retry's answer from a
+  // new daemon reloads the page.  Without the deadline nothing would
+  // ever ask again on this connection.
+  reconnect(sockets, timers, 13);
+  answers.push(
+    opts =>
+      new Promise((_resolve, reject) => {
+        opts.signal.addEventListener('abort', () =>
+          reject(new Error('AbortError')),
+        );
+      }),
+  );
+  authOk(sockets[14]);
+  await settle();
+  const stalled = requests[requests.length - 1];
+  assert.strictEqual(requests.length, asked + 1, 'the auth_ok probed');
+  assert.ok(stalled.opts.signal, 'the probe carries an abort signal');
+  const deadline = pendingTimers(timers).filter(t => t.ms === 12000);
+  assert.strictEqual(deadline.length, 1, 'the probe armed its deadline');
+  assert.strictEqual(retries(timers).length, 0, 'no retry while it waits');
+  fire(deadline[0]);
+  assert.ok(stalled.opts.signal.aborted, 'the deadline aborts the probe');
+  await settle();
+  const retry = retries(timers);
+  assert.strictEqual(retry.length, 1, 'the aborted probe is retried');
+  assert.strictEqual(retry[0].ms, 5000);
+  answers.push({instance: 'daemon-D', version: '2026.10.24'});
+  fire(retry[0]);
+  await settle();
+  assert.strictEqual(requests.length, asked + 2, 'the retry asked again');
+  assert.strictEqual(
+    pendingTimers(timers).filter(t => t.ms === 12000).length,
+    0,
+    'an answered probe clears its deadline',
+  );
+  sockets[14].fireMessage({type: 'pong'});
+  assert.strictEqual(reloads.length, 3, 'the new daemon reloads the page');
   window.close();
   console.log('transportReloadOnNewDaemon.test.js: all tests passed');
 }
 
 main().catch(err => {
   console.error('FAIL:', err && err.stack ? err.stack : err);
-  process.exitCode = 1;
+  // The page is left open (its fake sockets and listeners keep node
+  // alive), so exit explicitly instead of hanging until the runner's cap.
+  process.exit(1);
 });

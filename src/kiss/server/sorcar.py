@@ -95,7 +95,9 @@ import logging
 import math
 import secrets
 import time
-from collections.abc import Callable, Coroutine
+from collections import Counter
+from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeVar
@@ -135,6 +137,15 @@ logger = logging.getLogger(__name__)
 
 K = TypeVar("K")
 """The key of a pending-reply dict (see :meth:`ServerApi._spawn_after`)."""
+
+HISTORY_FIRST_WAIT = 3.0
+"""Seconds a ``ready``'s transcript replay waits for the connection's CHATS page.
+
+See :meth:`ServerApi.await_history_reply`; a second past the merged
+history's own wait for a machine that does not answer
+(:data:`~kiss.agents.sorcar.machines.HISTORY_FANOUT_WAIT`).
+"""
+
 
 def _write_tips_opt_out_marker(opt_out: bool) -> None:
     """Create (``opt_out``) or remove the tips opt-out marker file.
@@ -209,19 +220,7 @@ class ApiCommand:
     handler: str = "forward"
 
 
-def _catalog(*commands: ApiCommand) -> dict[str, ApiCommand]:
-    """Build a name-keyed command catalog.
-
-    Args:
-        commands: The commands making up the catalog.
-
-    Returns:
-        A dict mapping each command's name to the command.
-    """
-    return {c.name: c for c in commands}
-
-
-API: dict[str, ApiCommand] = _catalog(
+API: dict[str, ApiCommand] = {c.name: c for c in (
     ApiCommand("run", required=("prompt",)),
     ApiCommand("submit", required=("prompt",), handler="submit"),
     ApiCommand("appendUserMessage", required=("prompt",)),
@@ -328,7 +327,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("signinLogin", required=("provider",), handler="signin_login"),
     ApiCommand("signinPaste", required=("text",), handler="signin_paste"),
     ApiCommand("signinCancel", handler="signin_cancel"),
-)
+)}
 """Every command the daemon accepts, keyed by wire name.
 
 Each entry binds the wire name to the :class:`ServerApi` method
@@ -767,8 +766,11 @@ class ServerApi:
         # the machine's lock (made on first use) hands itself on first
         # come, first served, so two ``setWorkDir`` for one machine
         # apply, and answer, in the order they were sent, while an
-        # unreachable machine holds up no other machine's.
+        # unreachable machine holds up no other machine's.  The names
+        # come off the wire, so a lock is dropped with its last user
+        # (``_machine_lock``) instead of living for the daemon's life.
         self._machine_locks: dict[str, asyncio.Lock] = {}
+        self._machine_lock_users: Counter[str] = Counter()
         # The subpanel forward in flight per (connection, command,
         # machine): a poll repeated while its predecessor is still
         # waiting on the machine is dropped (see ``_spawn_panel_reply``).
@@ -938,15 +940,20 @@ class ServerApi:
         machine = str(cmd.get("machine") or "")
         forwarder = sidebar_panels.MACHINE_FORWARDERS.get(name) if machine else None
         if forwarder is not None:
-            forwarded = self._forwarded_reply(ctx.endpoint, forwarder, machine, cmd)
-            if name in ("cronAction", "machineAction", "startCodexLogin", "recordFileUsage") or (
-                name == "getTaskUpdate" and cmd.get("refresh")
-            ):
+            forwarded = self._forwarded_reply(
+                ctx.endpoint, forwarder, machine, cmd,
+                refetch_history=name in sidebar_panels.MACHINE_HISTORY_WRITES,
+            )
+            if name in (
+                "cronAction", "machineAction", "startCodexLogin", "recordFileUsage",
+                "shareChatTasks",
+            ) or (name == "getTaskUpdate" and cmd.get("refresh")):
                 # A user's own action (the Task update's refresh button
-                # included), never dropped; slow (the device login's
-                # CLI may take a minute to print its code) but in the
-                # background, so it holds up none of the sender's later
-                # commands.
+                # and the share button's history fetch included), never
+                # dropped; slow (the device login's CLI may take a
+                # minute to print its code, the share's reply may be
+                # megabytes of transcripts) but in the background, so
+                # it holds up none of the sender's later commands.
                 self._spawn_reply(forwarded)
             elif name == "getTaskUpdate":
                 # The Task update's 5 s poll, deduplicated per tab: a
@@ -977,15 +984,17 @@ class ServerApi:
                 # bound; the Codex login polls it every 5 s): a repeat
                 # while one is on its way is not asked again.
                 self._spawn_panel_reply((cmd["connId"], name, machine), forwarded)
-            elif name in ("gitAction", "fsAction"):
+            elif name in ("gitAction", "fsAction") or name in sidebar_panels.MACHINE_HISTORY_WRITES:
                 # A Source Control or Explorer action, waited for up to
                 # MACHINE_COMMIT_TIMEOUT (the machine may wait minutes
-                # for the repository's lock, or copy a whole folder):
-                # in the background, so none of the sender's later
-                # commands (a stop, a submit, a tab switch) is held up
-                # behind it, and one after another per connection and
-                # machine in the order sent, as inline: a paste then a
-                # delete apply in that order.
+                # for the repository's lock, or copy a whole folder),
+                # or a CHATS-panel write to the machine's history.db
+                # (every page then refetches the merged history, see
+                # ``refetch_history``): in the background, so none of
+                # the sender's later commands (a stop, a submit, a tab
+                # switch) is held up behind it, and one after another
+                # per connection and machine in the order sent, as
+                # inline: a paste then a delete apply in that order.
                 self._spawn_after(self._pending_actions, (cmd["connId"], machine), forwarded)
             else:
                 # A settings command, a model pick or a workspace read
@@ -996,9 +1005,11 @@ class ServerApi:
             return
         await getattr(self, API[name].handler)(cmd, ctx)
         if name == "ready":
-            # The client has the tabs now: replay the ones running on
-            # remote machines to it.
-            await asyncio.to_thread(self.remote_tabs.replay_to, cmd["connId"])
+            # The client has the tabs now: replay the one it shows among
+            # those running on remote machines to it, offer the others.
+            await asyncio.to_thread(
+                self.remote_tabs.replay_to, cmd["connId"], str(cmd.get("tabId") or ""),
+            )
             await asyncio.to_thread(self.remote_views.replay_to, cmd["connId"])
 
     def _spawn_reply(self, reply: Coroutine[Any, Any, None]) -> asyncio.Task[None] | None:
@@ -1090,6 +1101,30 @@ class ServerApi:
         """Drop *task* from *pending* when it is still the latest under *key*."""
         if pending.get(key) is task:
             del pending[key]
+
+    async def await_history_reply(self, conn_id: str) -> None:
+        """Wait, briefly, for the CHATS page *conn_id* asked for to be answered.
+
+        The desktop page asks for its CHATS rows (``getHistory``,
+        answered in the background by :meth:`get_history`) right
+        before its ``ready``, whose handler then queues the shown tab's
+        transcript, megabytes that a slow link carries for a minute.
+        The transcript is queued only once the page's reply is
+        (:meth:`RemoteAccessServer._handle_ready` calls this before
+        the replays), so the rows are on the wire first whatever sits
+        between the daemon and the browser, and the transcript
+        streams in under them.  The wait is bounded by
+        :data:`HISTORY_FIRST_WAIT`, past the fan-out's own bound
+        (:data:`~kiss.agents.sorcar.machines.HISTORY_FANOUT_WAIT`),
+        and a connection with no page under way (the phone's drawer
+        is closed) does not wait.
+
+        Args:
+            conn_id: The connection whose ``ready`` is being handled.
+        """
+        pending = self._pending_history.get(conn_id)
+        if pending is not None:
+            await asyncio.wait({pending}, timeout=HISTORY_FIRST_WAIT)
 
     def _dispatch_detached(self, cmd: dict[str, Any], tab_id: str, ctx: ApiContext) -> bool:
         """Dispatch *cmd* in the background when its tab binds to a machine or waits on one.
@@ -1189,17 +1224,24 @@ class ServerApi:
 
     async def _forwarded_reply(
         self, endpoint: Any, forwarder: Callable[[str, dict[str, Any]], dict[str, Any] | None],
-        machine: str, cmd: dict[str, Any],
+        machine: str, cmd: dict[str, Any], refetch_history: bool = False,
     ) -> None:
         """Answer *cmd*, stamped *machine*, with the reply of *forwarder* (run in a thread).
 
-        A forwarder of a command without a reply returns ``None``.
+        A forwarder of a command without a reply returns ``None``.  One
+        coroutine does the whole job (the nudge included) so that a
+        queued reply closed unrun at shutdown leaves nothing nested in
+        it unawaited.
 
         Args:
             endpoint: The requesting client's transport endpoint.
             forwarder: The command's :data:`~kiss.server.sidebar_panels.MACHINE_FORWARDERS` entry.
             machine: The registered machine the command names.
             cmd: The command.
+            refetch_history: Whether *cmd* writes the machine's history
+                (a :data:`~kiss.server.sidebar_panels.MACHINE_HISTORY_WRITES`
+                command): every page is then nudged to refetch the
+                merged history, as after a write here.
         """
         try:
             reply = await asyncio.to_thread(forwarder, machine, cmd)
@@ -1207,6 +1249,8 @@ class ServerApi:
                 await self._backend._reply_direct(endpoint, reply, str(cmd["type"]))
         except Exception:  # noqa: BLE001 - a background task must not die silently
             logger.warning("forwarding %s to %s failed", cmd.get("type"), machine, exc_info=True)
+        if refetch_history:
+            self._backend._printer.broadcast({"type": "tasks_updated"})
 
     def _record_tab(self, tab_id: str, ctx: ApiContext) -> None:
         """Record *tab_id* as touched by this connection.
@@ -1909,15 +1953,18 @@ class ServerApi:
         job ``jobId``, applied by
         :func:`kiss.agents.sorcar.cron_agent.apply_job_action`.  The
         direct reply is a ``cronJobs`` message (as for ``getCronJobs``)
-        carrying the ``action``, the ``jobId`` it named and an ``error``
-        text when it was refused, so the subpanel re-renders either way
+        carrying the ``action``, the ``jobId`` it named, an ``error``
+        text when it was refused and the command's ``generation`` (0
+        when it had none), so the subpanel re-renders either way
         (closes its in-place form only when its own create or update
-        went through, and re-arms a refused removal's Delete only on
-        the reply naming that job).
+        went through, matched on the generation it stamped the save
+        with, and re-arms a refused removal's Delete only on the reply
+        naming that job).
 
         Args:
             cmd: The ``cronAction`` command (``action``, optional
-                ``jobId``, ``name``, ``schedule``, ``what``, ``kind``).
+                ``jobId``, ``name``, ``schedule``, ``what``, ``kind``,
+                ``generation``).
             ctx: The transport context of the current call.
         """
         error = await asyncio.to_thread(
@@ -1932,6 +1979,7 @@ class ServerApi:
             {
                 "type": "cronJobs", "jobs": jobs, "action": str(cmd["action"]),
                 "jobId": str(cmd.get("jobId") or ""), "error": error,
+                "generation": request_generation(cmd),
             },
             "cronAction",
         )
@@ -2052,6 +2100,27 @@ class ServerApi:
         """
         self._spawn_reply(self._reply_machine_action(ctx.endpoint, cmd))
 
+    @asynccontextmanager
+    async def _machine_lock(self, machine: str) -> AsyncIterator[None]:
+        """Hold the lock that serialises the round trips to *machine*.
+
+        The lock (``_machine_locks``, made on first use) is dropped with
+        its last user: an ``asyncio.Lock`` does not tell whether anyone
+        waits for it, so its users are counted beside it.
+
+        Args:
+            machine: The machine name the request names (as sent).
+        """
+        self._machine_lock_users[machine] += 1
+        try:
+            async with self._machine_locks.setdefault(machine, asyncio.Lock()):
+                yield
+        finally:
+            self._machine_lock_users[machine] -= 1
+            if not self._machine_lock_users[machine]:
+                del self._machine_lock_users[machine]
+                del self._machine_locks[machine]
+
     async def _reply_machine_action(self, endpoint: Any, cmd: dict[str, Any]) -> None:
         """Apply the ``machineAction`` *cmd* and send the fresh ``machines`` reply to *endpoint*.
 
@@ -2070,7 +2139,7 @@ class ServerApi:
             machine = name.strip() or default_name(address)
         except ValueError:  # a malformed address: the action refuses it below
             machine = ""
-        async with self._machine_locks.setdefault(machine, asyncio.Lock()):
+        async with self._machine_lock(machine):
             try:
                 error = await asyncio.to_thread(
                     sidebar_panels.machine_action,
@@ -2121,7 +2190,7 @@ class ServerApi:
             command: The command being answered (for the reply log).
         """
         try:
-            async with self._machine_locks.setdefault(machine, asyncio.Lock()):
+            async with self._machine_lock(machine):
                 if work_dir is None:
                     reply = await asyncio.to_thread(sidebar_panels.machine_work_dirs, machine)
                 else:
@@ -2388,7 +2457,10 @@ class ServerApi:
         (oldest first) as a direct ``share_tasks`` reply; the page
         replays them into detached containers, splices in the live DOM
         for the on-screen task, and sends the assembled page back via
-        ``shareChat``.
+        ``shareChat``.  A tab bound to a machine stamps the command
+        ``machine``: that machine's history answers it
+        (:func:`~kiss.server.sidebar_panels.machine_share_tasks_reply`,
+        in the background), never this handler.
 
         Args:
             cmd: The ``shareChatTasks`` command (``chatId``, optional
@@ -2554,14 +2626,34 @@ class ServerApi:
             {"type": "notification", "id": VSCODE_RETIRED_NOTICE_ID, "close": True},
         )
 
-    def _signin_reply(self, conn_id: str) -> Callable[[dict[str, Any], bool], None]:
-        """A :data:`kiss.server.signin.Reply` for the window of *conn_id*."""
+    def _signin_reply(
+        self, conn_id: str, attempt: str = ""
+    ) -> Callable[[dict[str, Any], bool], None]:
+        """A :data:`kiss.server.signin.Reply` for the window of *conn_id*.
+
+        Args:
+            conn_id: The window that clicked.
+            attempt: The click's token (the ``attempt`` of its
+                ``signinLogin`` / ``signinPaste``), echoed on the
+                window's own answers (``signinUrl``, ``signinError``)
+                so the page tells them from an earlier click's; the
+                broadcast ``signinDone`` is every window's and carries
+                none.  Empty: nothing is echoed.
+        """
         printer = self._backend._printer
 
         def reply(event: dict[str, Any], everyone: bool) -> None:
+            if attempt and not everyone:
+                event = {**event, "attempt": attempt}
             broadcast_to_conn(printer, event, "" if everyone else conn_id)
 
         return reply
+
+    @staticmethod
+    def _signin_attempt(cmd: dict[str, Any]) -> str:
+        """The ``attempt`` token of a sign-in command, ``""`` when it sent none."""
+        attempt = cmd.get("attempt")
+        return attempt if isinstance(attempt, str) else ""
 
     async def signin_login(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Service a click on a provider button of the sign-in window.
@@ -2573,11 +2665,13 @@ class ServerApi:
         window ``signinError`` when it fails.
 
         Args:
-            cmd: The ``signinLogin`` command with the ``provider`` id.
+            cmd: The ``signinLogin`` command with the ``provider`` id
+                and, from a page that tells its clicks apart, the
+                click's ``attempt`` token.
             ctx: The transport context of the current call; supplies
                 the ``conn_id`` the URL and errors are stamped with.
         """
-        reply = self._signin_reply(ctx.conn_state["conn_id"])
+        reply = self._signin_reply(ctx.conn_state["conn_id"], self._signin_attempt(cmd))
         await asyncio.to_thread(self.signin.start, str(cmd["provider"]), reply)
 
     async def signin_paste(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
@@ -2588,12 +2682,13 @@ class ServerApi:
         gets a ``signinError`` saying to start over.
 
         Args:
-            cmd: The ``signinPaste`` command with the pasted ``text``.
+            cmd: The ``signinPaste`` command with the pasted ``text``
+                (and the click's ``attempt`` token, echoed on the error).
             ctx: The transport context of the current call.
         """
         if not await asyncio.to_thread(self.signin.paste, str(cmd["text"])):
             error = "No sign-in is in progress: click a button to start one."
-            self._signin_reply(ctx.conn_state["conn_id"])(
+            self._signin_reply(ctx.conn_state["conn_id"], self._signin_attempt(cmd))(
                 {"type": "signinError", "error": error}, False
             )
 

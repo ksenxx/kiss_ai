@@ -43,6 +43,24 @@ class TestUnknownPrintType(unittest.TestCase):
         p.print(SimpleNamespace(unknown_attr="value"), type="no_such_type")
         assert _drain(p) == []
 
+    def test_record_types_keep_their_fields(self):
+        # the provider's applied context edits are a record like a compaction:
+        # the keyword fields are the event, persisted as given
+        p = JsonPrinter()
+        p.adopt_thread_binding("task-edits")
+        _start(p)
+        edits = [{"type": "clear_tool_uses_20250919", "cleared_tool_uses": 10,
+                  "cleared_input_tokens": 80770}]
+        try:
+            p.print("", type="context_edits", step=7, edits=edits, cleared_input_tokens=80770)
+            p.print("", type="no_such_record", step=8)
+            events = p.peek_recording_for_task("task-edits")
+        finally:
+            p.adopt_thread_binding("")
+        (event,) = [e for e in events if e["type"] in ("context_edits", "no_such_record")]
+        assert event["type"] == "context_edits" and event["step"] == 7
+        assert event["edits"] == edits and event["cleared_input_tokens"] == 80770
+
 
 class TestDisplayEventTypes(unittest.TestCase):
     def test_expected_types_present(self):
@@ -54,8 +72,9 @@ class TestDisplayEventTypes(unittest.TestCase):
             "followup_suggestion", "ask_answer", "autocommit_done",
             "warning", "usage_info", "llm_call", "task_settings",
             # Proposal 10 records: a compaction, a context hand-off and a
-            # finish-gate stage are shown (and persisted) like any event.
-            "compaction", "handoff", "gate_stage",
+            # finish-gate stage are shown (and persisted) like any event;
+            # so are the provider's applied context edits.
+            "compaction", "context_edits", "handoff", "gate_stage",
         }
         assert _DISPLAY_EVENT_TYPES == expected
 

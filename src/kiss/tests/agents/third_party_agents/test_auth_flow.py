@@ -40,7 +40,8 @@ _CREDENTIAL_AGENTS: dict[str, tuple[str, list[str]]] = {
     # username/password are optional: with only the URL, Login Flow
     # v2 lets the user sign in and grant access in their browser.
     "NextcloudTalkAgent": ("authenticate_nextcloud", ["url"]),
-    "NostrAgent": ("authenticate_nostr", ["private_key"]),
+    # relays: a key with no relay could sign notes but never publish them.
+    "NostrAgent": ("authenticate_nostr", ["private_key", "relays"]),
     "SynologyChatAgent": ("authenticate_synology", ["webhook_url"]),
     "TlonAgent": ("authenticate_tlon", ["ship_url", "code"]),
     # access_token is optional: without it the device code grant

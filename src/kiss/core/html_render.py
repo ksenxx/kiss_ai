@@ -18,7 +18,7 @@ import re
 
 from rich.text import Text
 
-from kiss.core.html_to_markdown import SkippingHTMLParser
+from kiss.core.html_to_markdown import SkippingHTMLParser, list_start
 
 _BLOCK_TAGS = {
     "p",
@@ -68,7 +68,9 @@ class _HtmlToRichParser(SkippingHTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.text = Text()
-        self._style_stack: list[str] = []
+        self._style_stack: list[tuple[str, str]] = []
+        """The open styled elements, innermost last, as ``(tag, style)``
+        with *style* composed with the enclosing styles."""
         self._list_stack: list[int | None] = []
         self._in_pre = 0
         self._pre_end = 0
@@ -119,7 +121,7 @@ class _HtmlToRichParser(SkippingHTMLParser):
         if tag == "ul":
             self._list_stack.append(None)
         elif tag == "ol":
-            self._list_stack.append(1)
+            self._list_stack.append(list_start(attrs))
         elif tag == "li":
             indent = "  " * max(len(self._list_stack) - 1, 0)
             marker = self._list_stack[-1] if self._list_stack else None
@@ -130,9 +132,9 @@ class _HtmlToRichParser(SkippingHTMLParser):
                 self._list_stack[-1] = marker + 1
         style = _STYLE_TAGS.get(tag)
         if style is not None:
-            parent = self._style_stack[-1] if self._style_stack else ""
+            parent = self._style_stack[-1][1] if self._style_stack else ""
             merged = f"{parent} {style}".split()
-            self._style_stack.append(" ".join(dict.fromkeys(merged)))
+            self._style_stack.append((tag, " ".join(dict.fromkeys(merged))))
         if tag == "a":
             for name, value in attrs:
                 if name == "href" and value:
@@ -143,8 +145,8 @@ class _HtmlToRichParser(SkippingHTMLParser):
         """Close styles and terminate blocks with newlines."""
         if self.skipped(tag, True):
             return
-        if tag in _STYLE_TAGS and self._style_stack:
-            self._style_stack.pop()
+        if tag in _STYLE_TAGS:
+            self._end_style(tag)
         if tag == "pre":
             self._in_pre = max(self._in_pre - 1, 0)
         if tag in ("ul", "ol") and self._list_stack:
@@ -154,6 +156,15 @@ class _HtmlToRichParser(SkippingHTMLParser):
         if tag in ("td", "th"):
             self._crop_spaces(self._cell_start)
             self.text.append("  ")
+
+    def _end_style(self, tag: str) -> None:
+        """Close the innermost open *tag*, dropping the unclosed elements
+        inside it; an end tag with no open element is ignored, so a stray
+        or mis-nested one does not end the element around it."""
+        for index in range(len(self._style_stack) - 1, -1, -1):
+            if self._style_stack[index][0] == tag:
+                del self._style_stack[index:]
+                return
 
     def handle_data(self, data: str) -> None:
         """Append text content, collapsing whitespace outside ``<pre>``.
@@ -171,7 +182,7 @@ class _HtmlToRichParser(SkippingHTMLParser):
                 data = data.lstrip(" ")
             if not data:
                 return
-        style = self._style_stack[-1] if self._style_stack else None
+        style = self._style_stack[-1][1] if self._style_stack else None
         self.text.append(data, style=style)
         if self._in_pre:
             self._pre_end = len(self.text)

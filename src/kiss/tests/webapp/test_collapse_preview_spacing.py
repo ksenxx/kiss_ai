@@ -18,13 +18,11 @@ import subprocess
 import unittest
 from pathlib import Path
 
-_MAIN_JS = (
-    Path(__file__).resolve().parents[3]
-    / "kiss"
-    / "webapp"
-    / "media"
-    / "main.js"
-)
+_MEDIA = Path(__file__).resolve().parents[3] / "kiss" / "webapp" / "media"
+_MAIN_JS = _MEDIA / "main.js"
+# collectText leaves the panel chrome out through PanelCopy.shouldSkip,
+# so the script loads the real module as the page would.
+_PANEL_COPY_JS = _MEDIA / "panelCopy.js"
 
 
 def _run_node(script: str) -> subprocess.CompletedProcess[str]:
@@ -256,6 +254,7 @@ def _build_test_script(body_children_json: str, collapse: bool = True) -> str:
 
     script = _NODE_SHIM + "\n"
     script += "var document = { createElement: mkTestEl };\n"
+    script += f"var window = {{ PanelCopy: require({json.dumps(str(_PANEL_COPY_JS))}) }};\n"
     script += mkel_fn + "\n"
     script += collect_fn + "\n"
     script += sync_aria_fn + "\n"
@@ -371,6 +370,20 @@ class TestCollapsePreviewSpacingBehavioral(unittest.TestCase):
         assert "key: value" in preview, (
             f"Expected clean single-div preview, got: {preview!r}"
         )
+
+    def test_panel_chrome_left_out(self) -> None:
+        """The copy / stop buttons, a stale preview and the timestamps
+        (PanelCopy's chrome) never reach the preview; the content does."""
+        children = [
+            {"tag": "button", "cls": "panel-copy-btn", "text": "copy"},
+            {"tag": "button", "cls": "panel-stop-btn", "text": "stop"},
+            {"tag": "div", "cls": "extra", "text": "real output"},
+            {"tag": "span", "cls": "collapse-preview", "text": "stale"},
+            {"tag": "span", "cls": "panel-ts", "text": "12:00"},
+            {"tag": "span", "cls": "panel-time", "text": "3s"},
+        ]
+        preview = self._get_preview(children)
+        assert preview == "real output", f"chrome leaked into the preview: {preview!r}"
 
 
 if __name__ == "__main__":

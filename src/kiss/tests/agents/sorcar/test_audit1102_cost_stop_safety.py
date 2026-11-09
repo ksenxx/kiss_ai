@@ -353,11 +353,11 @@ def test_a_stop_in_the_last_classifier_fold_is_retried_so_its_spend_is_banked(
     real = SorcarAgent._fold_classifier_usage
     seen: list[str] = []
 
-    def fold(self: Any) -> None:
+    def fold(self: Any, task_id: str | None = None) -> None:
         seen.append(sys._getframe(1).f_code.co_name)
         if seen[-1] != "_retried_cleanup_step" or seen.count("_retried_cleanup_step") == 1:
             raise KeyboardInterrupt("stop injection")
-        real(self)
+        real(self, task_id)
 
     monkeypatch.setattr(SorcarAgent, "_fold_classifier_usage", fold)
     agent = _zero_session_run(env, CapturePrinter(), seed_classifier=True)

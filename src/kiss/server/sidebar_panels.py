@@ -587,7 +587,8 @@ def machine_panel_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
         the machine is not registered, unreachable, or refused the
         command with an ``error`` frame.  Either names a
         ``cronAction``'s ``action`` and ``jobId``, or a
-        ``machineAction``'s ``action`` and ``name``, as this daemon's
+        ``machineAction``'s ``action`` and ``name``, and echoes the
+        command's ``generation`` (0 when it had none), as this daemon's
         own replies do.
     """
     reply_type = MACHINE_PANEL_REPLIES[str(cmd["type"])]
@@ -618,6 +619,12 @@ def machine_panel_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
     # ``machineAction`` (this link's too), which may come before the
     # action's own reply and is the action's outcome all the same.
     reply.update(echo)
+    if echo:
+        # The link stamped the action with a generation of its own,
+        # which the machine echoed and ``_machine_reply`` dropped: the
+        # page is answered with the one it stamped its save with, so
+        # it tells two saves' replies apart whatever their order.
+        reply["generation"] = cmd.get("generation", 0)
     return reply
 
 
@@ -664,6 +671,27 @@ def machine_replay_image_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]
     """
     refused: dict[str, Any] = {k: cmd[k] for k in ("taskId", "index", "token") if k in cmd}
     return _machine_reply(name, cmd, "replayImage", refused, lane="panels")
+
+
+def machine_share_tasks_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
+    """Forward a chat page's ``shareChatTasks`` *cmd* to registered machine *name*.
+
+    A tab bound to a machine shows that machine's chat, whose
+    persisted tasks (and their sub-agents' transcripts) are in the
+    machine's history database: the share export asks it, on the
+    ``panels`` link lane like the other per-view fetches, so a submit
+    to the machine never waits behind the megabytes a reply may hold.
+
+    Returns:
+        The machine's ``share_tasks`` reply stamped ``machine``, or an
+        empty one (no tasks, not truncated) carrying the ``error`` and
+        the command's ``tabId`` and ``chatId`` when the machine is not
+        registered or unreachable; the page then reports the share
+        failed instead of exporting this daemon's history of the chat.
+    """
+    refused: dict[str, Any] = {k: cmd[k] for k in ("tabId", "chatId") if k in cmd}
+    refused.update({"tasks": [], "truncated": False})
+    return _machine_reply(name, cmd, "share_tasks", refused, lane="panels")
 
 
 FILES_INDEX_WAIT = 60.0
@@ -719,6 +747,40 @@ def machine_file_usage(name: str, cmd: dict[str, Any]) -> None:
         logger.info("mention usage not counted on %s: %s", name, reply["error"])
 
 
+MACHINE_HISTORY_WRITES = ("setFavorite", "setChatSummary", "deleteTask", "deleteChat")
+"""The CHATS-panel writes a registered machine applies to its own history.db.
+
+A history row of a remote machine lives in that machine's database:
+its favourite star, its chat's retyped title and its delete button
+send the command stamped ``machine`` (:func:`machine_history_write`)."""
+
+
+def machine_history_write(name: str, cmd: dict[str, Any]) -> dict[str, Any] | None:
+    """Forward the CHATS-panel write *cmd* to registered machine *name*.
+
+    *cmd* is one of :data:`MACHINE_HISTORY_WRITES`.  It goes on the
+    machine's default link lane, the one :func:`machines.fetch_history`
+    reads the history on, and the machine runs a connection's commands
+    in order: the refetch that follows sees the write.  A delete waits
+    for the machine's ``historyDeleted`` answer, whose ``refused``
+    names a refusal (a task it would remove is running).
+
+    Returns:
+        ``None`` once the write is done, or a ``notice`` for the
+        requesting tab: the machine's refusal, or that the machine
+        could not be reached.
+    """
+    deletes = cmd["type"] in ("deleteTask", "deleteChat")
+    reply = _machine_reply(name, cmd, "historyDeleted" if deletes else "", {})
+    if "error" in reply:
+        text = f"Could not update the history on {name}: {reply['error']}"
+    elif reply.get("refused"):
+        text = f"{name}: {reply['refused']}"
+    else:
+        return None
+    return {"type": "notice", "text": text, "tabId": str(cmd.get("tabId") or "")}
+
+
 def machine_models_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any] | None:
     """Forward the model picker's ``getModels`` / ``selectModel`` *cmd* to machine *name*.
 
@@ -755,10 +817,12 @@ MACHINE_FORWARDERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any] | N
     **dict.fromkeys(MACHINE_PANEL_REPLIES, machine_panel_reply),
     "getTaskUpdate": machine_task_update_reply,
     "getReplayImage": machine_replay_image_reply,
+    "shareChatTasks": machine_share_tasks_reply,
     "getFiles": machine_files_reply,
     "recordFileUsage": machine_file_usage,
     "getModels": machine_models_reply,
     "selectModel": machine_models_reply,
+    **dict.fromkeys(MACHINE_HISTORY_WRITES, machine_history_write),
 }
 """Every command a registered machine answers when it carries ``machine``, by its forwarder.
 
@@ -853,7 +917,9 @@ def _adopt_machine_password(machine: machines.Machine, reply: dict[str, Any]) ->
     entry takes the new password (which also drops the cached link, so
     the next request authenticates with it).  An SSH machine (no
     password here) and an unchanged or emptied password leave the
-    registry alone.
+    registry alone; so does an entry that no longer equals *machine*,
+    the one the command went to (another host registered under its
+    name, or a newer password, while the reply was in flight).
     """
     config = reply.get("config")
     password = config.get("remote_password") if isinstance(config, dict) else None
@@ -863,9 +929,9 @@ def _adopt_machine_password(machine: machines.Machine, reply: dict[str, Any]) ->
         return
     with machines.registry_lock():
         registry = machines.load_machines()
-        for entry in registry:
-            if entry.name == machine.name:
-                entry.password = password
+        if machine not in registry:
+            return
+        registry[registry.index(machine)].password = password
         machines.save_machines(registry)
 
 

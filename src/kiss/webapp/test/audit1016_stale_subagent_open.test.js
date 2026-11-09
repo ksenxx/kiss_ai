@@ -154,14 +154,79 @@ function testStaleAnnouncementNoPanelStaysClosed() {
     'BUG - with no fan-out panel the stale openSubagentTab re-created ' +
       'the finished child as a done tab',
   );
-  // The daemon's deliberate finished-history announcement (a history
-  // click, a panel expanded again) still reopens the child.
+  // The finished-history announcement the parent's automatic replay
+  // makes once the child has finished (isDone, not reopened) keeps the
+  // child closed here as it does on a surface with a fan-out panel: a
+  // finished sub-agent's tab closes when it finishes, on every surface.
   announce(win, parentId, subTabId, taskId, {isDone: true});
+  assert.strictEqual(
+    subagentTabs(win).length,
+    0,
+    'BUG - a late finished-history announcement re-created the closed ' +
+      'child on the surface without a fan-out panel',
+  );
+  // The daemon's deliberate reopening (a panel expanded again, a
+  // history click on the child) says `reopened` and opens it everywhere.
+  announce(win, parentId, subTabId, taskId, {isDone: true, reopened: true});
   const subs = subagentTabs(win);
-  assert.strictEqual(subs.length, 1, 'history reopening still works');
+  assert.strictEqual(subs.length, 1, 'a deliberate reopening still works');
   assert.ok(subs[0].isDone && !subs[0].isRunning, 'as a finished tab');
   win.close();
   console.log('  ok - a stale openSubagentTab stays closed without a panel');
+}
+
+// A child open on this surface finishes while the surface is away (its
+// subagentDone never arrives).  The reconnect replay announces the
+// finished child as closed history (isDone, closedHistory: its tab
+// closed when it finished): the surface closes its copy, as a fresh
+// surface never opens one, so both show the same tabs (L3-1).  A
+// running sibling announced by the same replay stays open.
+function testMissedCompletionClosesOnReconnect() {
+  const {win, posted, parentId} = bootDeferredParent();
+  const taskId = 'bg-sub-away';
+  const subTabId = parentId + '__sub_' + taskId;
+  announce(win, parentId, subTabId, taskId);
+  const sibling = parentId + '__sub_bg-sub-live';
+  announce(win, parentId, sibling, 'bg-sub-live', {taskIndex: 1});
+  assert.strictEqual(subagentTabs(win).length, 2, 'both children open');
+
+  send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
+  send(win, {type: 'daemonStatus', connected: true});
+  const closesBefore = posted.filter(m => m.type === 'closeTab').length;
+  announce(win, parentId, subTabId, taskId, {
+    isDone: true,
+    closedHistory: true,
+  });
+  announce(win, parentId, sibling, 'bg-sub-live', {taskIndex: 1});
+  send(win, {type: 'replay_deferred', tabId: parentId, chatId: 'c-bg'});
+  assert.strictEqual(
+    subagentTabs(win)
+      .map(t => t.id)
+      .join(','),
+    sibling,
+    'BUG - the child that finished while this surface was away stayed ' +
+      'open after the reconnect replay said it is closed history',
+  );
+  assert.ok(subagentTabs(win)[0].isRunning, 'the live sibling runs on');
+  assert.strictEqual(
+    posted.filter(m => m.type === 'closeTab').length,
+    closesBefore + 1,
+    'the close is booked with the daemon once, like a subagentDone close',
+  );
+  // The replay's later copies of the same history change nothing.
+  announce(win, parentId, subTabId, taskId, {
+    isDone: true,
+    closedHistory: true,
+  });
+  assert.strictEqual(
+    subagentTabs(win)
+      .map(t => t.id)
+      .join(','),
+    sibling,
+    'closed history stays closed',
+  );
+  win.close();
+  console.log('  ok - a completion missed while away closes on reconnect');
 }
 
 function testFinishedSetIsBounded() {
@@ -194,6 +259,7 @@ function main() {
   testStaleAnnouncementAfterDoneStaysClosed();
   testFreshAnnouncementStillOpens();
   testStaleAnnouncementNoPanelStaysClosed();
+  testMissedCompletionClosesOnReconnect();
   testFinishedSetIsBounded();
 }
 

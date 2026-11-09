@@ -232,6 +232,17 @@ def test_overview_of_a_finished_task_without_children_or_summaries() -> None:
     assert "Started: unknown" not in legacy
     assert "Started: 20" in legacy and "Elapsed: 0 min " in legacy
 
+    # A late charge (a reviewer's or a gate's, after the run) is persisted as
+    # a textless ``usage_info`` carrying the new totals, which the spend
+    # line must show instead of the earlier, smaller textual event.
+    late = task_digest.overview(_persist("Late charge", [
+        {"type": "usage_info", "text": "Steps: 3/100, Budget: $1.0000/$5.00, "},
+        {"type": "usage_info", "text": "", "total_tokens": 12345, "cost": "$2.0000",
+         "cost_usd": 2.0, "total_steps": 4},
+    ]))
+    assert "Spend: Steps: 4, Total tokens: 12,345, Budget: $2.0000" in late
+    assert "Budget: $1.0000" not in late
+
 
 def test_overview_omits_middle_summaries_and_keeps_last_three_asks() -> None:
     """Fifteen summaries print as the first 2 + last 10; only the last 3 /ask answers show."""
@@ -484,6 +495,23 @@ def test_context_keeps_the_newest_entries_within_the_budget(tmp_path: Path) -> N
     assert tight.endswith(
         "[... 399 older entries elided ...]\n[399] RESULT: result 399\n" + "y" * 300
     )
+    # The sub-agent section is bounded as well: 200 worker children (each
+    # with a full-length task and result) and no transcript entries list
+    # the first 2 and the last 20 children around a count of the omitted ones.
+    parent = _persist("Parent", [], extra={"work_dir": ""})
+    kids = [
+        _persist("k" * 160, [],
+                 extra={"subagent": {"parent_task_id": parent}, "endTs": _NOW_MS - 1000},
+                 result=f"r{i} " + "z" * 300)
+        for i in range(200)
+    ]
+    text = task_digest.context(parent)
+    assert "finished: r199 zzz" in text
+    assert len(text) <= task_digest.MAX_CONTEXT_CHARS
+    section = text.partition("== Sub-agent tasks (200) ==\n")[2].partition("\n\n== Transcript")[0]
+    listed = [k for k in kids if f"[{k}]" in section]
+    assert listed == kids[:2] + kids[-20:]
+    assert "\n... 178 earlier sub-agent tasks omitted ...\n" in section
     assert ask_sea.task_context("no-such-task") == "Error: no task with id 'no-such-task'."
     assert ask_sea.task_context("") == "Error: no task id given."
     bare = task_digest.context(_persist("Nothing yet", [], extra={"work_dir": ""}))

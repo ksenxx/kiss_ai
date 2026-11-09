@@ -54,12 +54,48 @@ if (process.platform !== 'linux') {
 // ended, "alive" means it still ran 3 s after the runner exited (the
 // helper then kills it), "not-ours" that the helper could not wait for
 // it.  Prints {"status": <runner exit status>, "fates": {file: fate}}.
+// A runner that outlives the deadline (an optional 4th argument, 60 s by
+// default) is SIGTERMed, which lets run-all.js's killAllAndExit SIGKILL
+// its suites' groups, then SIGKILLed if it stays, and reported with
+// status "timeout".  The suites a killed runner left (each in a process
+// group of its own, which no kill of the runner reaches) are adopted by
+// the helper, which kills their groups; the workers on record are then
+// waited for and killed, and whatever else was adopted is killed and
+// reaped, so a regression of the cleanup under test never leaks a suite
+// or a worker past the suite.  The runner gets a session of its own, so
+// no group the helper kills is the helper's.
 const SUBREAPER_HELPER = `
 import ctypes, json, os, signal, subprocess, sys, time
 node, runner, pid_dir = sys.argv[1:4]
+deadline = float(sys.argv[4]) if len(sys.argv) > 4 else 60
 ctypes.CDLL(None).prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
-proc = subprocess.run([node, runner], capture_output=True, text=True, timeout=60)
-sys.stderr.write(proc.stdout + proc.stderr)
+
+def adopted():
+    """Pids of this process's children: what the runner left behind."""
+    me = str(os.getpid())
+    pids = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % name) as f:
+                stat = f.read()
+        except OSError:
+            continue
+        if stat[stat.rindex(")") + 2:].split()[1] == me:
+            pids.append(int(name))
+    return pids
+
+def kill_group(pid):
+    """SIGKILL pid's process group, or pid alone when that is our group."""
+    try:
+        pgid = os.getpgid(pid)
+        if pgid == os.getpgid(0):
+            os.kill(pid, signal.SIGKILL)
+        else:
+            os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 def fate(pid):
     for _ in range(60):
@@ -76,12 +112,49 @@ def fate(pid):
     os.waitpid(pid, 0)
     return "alive"
 
+status = "timeout"
+proc = subprocess.Popen(
+    [node, runner], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    start_new_session=True,
+)
+try:
+    out, err = proc.communicate(timeout=deadline)
+    status = proc.returncode
+except subprocess.TimeoutExpired:
+    proc.terminate()
+    try:
+        out, err = proc.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        for pid in adopted():
+            kill_group(pid)
+        out, err = proc.communicate()
+sys.stderr.write(out + err)
 fates = {
     name: fate(int(open(os.path.join(pid_dir, name)).read()))
     for name in sorted(os.listdir(pid_dir))
 }
-print(json.dumps({"status": proc.returncode, "fates": fates}))
+for pid in adopted():
+    kill_group(pid)
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+print(json.dumps({"status": status, "fates": fates}))
 `;
+
+/** SIGKILL every pid a file in `pidDir` names that is still alive. */
+function killRecordedWorkers(pidDir) {
+  for (const name of fs.readdirSync(pidDir)) {
+    const pid = parseInt(fs.readFileSync(path.join(pidDir, name), 'utf8'), 10);
+    try {
+      if (pid > 0) process.kill(pid, 'SIGKILL');
+    } catch {
+      // ESRCH: already gone.
+    }
+  }
+}
 
 /** A suite that starts a `sleep` worker with stdio 'ignore' (left in the
  * suite's process group), records the worker's pid in `pidFile`, then
@@ -158,9 +231,135 @@ function testReportedSuitesTakeTheirWorkersWithThem() {
       `each worker was killed with its reported suite's group\n${out}`,
     );
   } finally {
+    killRecordedWorkers(pidDir);
     fs.rmSync(dir, {recursive: true, force: true});
   }
 }
 
+// The helper's own cleanup: a runner that hangs past the deadline is
+// killed, and the worker it left on record is killed and reported too,
+// instead of surviving the suite (as it did when the deadline fired
+// before any cleanup ran).
+function testAHungRunnerStillGetsItsWorkersCleanedUp() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runall-wave3-hang-'));
+  const pidDir = path.join(dir, 'pids');
+  fs.mkdirSync(pidDir);
+  try {
+    // A "runner" that starts a worker, records it, and never exits.
+    fs.writeFileSync(
+      path.join(dir, 'run-all.js'),
+      suiteSource(path.join(pidDir, 'stuck'), 'setInterval(() => {}, 1000);'),
+    );
+    const res = spawnSync(
+      'python3',
+      ['-c', SUBREAPER_HELPER, process.execPath, path.join(dir, 'run-all.js'), pidDir, '1'],
+      {encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL'},
+    );
+    const out = `${res.stdout || ''}${res.stderr || ''}`;
+    assert.strictEqual(res.status, 0, `the helper finished\n${out}`);
+    const result = JSON.parse(res.stdout.trim().split('\n').pop());
+    assert.strictEqual(result.status, 'timeout', `the runner timed out\n${out}`);
+    assert.deepStrictEqual(result.fates, {stuck: 'alive'}, out);
+    const pid = parseInt(fs.readFileSync(path.join(pidDir, 'stuck'), 'utf8'), 10);
+    assert.throws(
+      () => process.kill(pid, 0),
+      {code: 'ESRCH'},
+      'the worker the hung runner left behind is gone',
+    );
+  } finally {
+    killRecordedWorkers(pidDir);
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+}
+
+// The helper's timeout path against the tree the real runner leaves: a
+// suite in a process group of its own (spawned `detached`), with a
+// worker of its own.  Killing the runner at the deadline reached neither;
+// the suite was adopted by the helper, which waited for the recorded
+// worker only ("not-ours": a grandchild) and exited, and the outer
+// cleanup kills recorded pids, never the suite: both lived on.  The helper
+// now SIGTERMs the runner first, so run-all.js's killAllAndExit retires
+// its suites' groups, and after the forced kill of a runner that cannot
+// (here one ignoring SIGTERM) it kills and reaps the groups of the
+// children it adopted.  `fates.suite` tells who retired the suite:
+// "not-ours" when the runner reaped it, "signal 9" when the helper did.
+function testAHungRunnersSuiteTreeIsRetired(runnerSource, fates, why) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runall-wave3-tree-'));
+  const pidDir = path.join(dir, 'pids');
+  fs.mkdirSync(pidDir);
+  try {
+    fs.writeFileSync(path.join(dir, 'run-all.js'), runnerSource);
+    fs.writeFileSync(
+      path.join(dir, 'hang.test.js'),
+      suiteSource(
+        path.join(pidDir, 'worker'),
+        `fs.writeFileSync(${JSON.stringify(path.join(pidDir, 'suite'))}, ` +
+          'String(process.pid));\nsetInterval(() => {}, 1000);',
+      ),
+    );
+    // The deadline leaves a loaded host time to start the runner and the
+    // suite, which records both pids as soon as it runs.
+    const res = spawnSync(
+      'python3',
+      [
+        '-c',
+        SUBREAPER_HELPER,
+        process.execPath,
+        path.join(dir, 'run-all.js'),
+        pidDir,
+        '5',
+      ],
+      {encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL'},
+    );
+    const out = `${res.stdout || ''}${res.stderr || ''}`;
+    assert.strictEqual(res.status, 0, `${why}: the helper finished\n${out}`);
+    const result = JSON.parse(res.stdout.trim().split('\n').pop());
+    assert.strictEqual(
+      result.status,
+      'timeout',
+      `${why}: the runner timed out\n${out}`,
+    );
+    assert.deepStrictEqual(result.fates, fates, `${why}\n${out}`);
+    for (const name of ['suite', 'worker']) {
+      const pid = parseInt(
+        fs.readFileSync(path.join(pidDir, name), 'utf8'),
+        10,
+      );
+      assert.throws(
+        () => process.kill(pid, 0),
+        {code: 'ESRCH'},
+        `${why}: the ${name} the hung runner left behind is gone`,
+      );
+    }
+  } finally {
+    killRecordedWorkers(pidDir);
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+}
+
+// A runner that starts the suite as run-all.js does, in a process group
+// of its own, and cannot clean up: it ignores SIGTERM.
+const STUBBORN_RUNNER = [
+  "'use strict';",
+  "const {spawn} = require('child_process');",
+  "const path = require('path');",
+  "process.on('SIGTERM', () => {});",
+  "spawn(process.execPath, [path.join(__dirname, 'hang.test.js')], " +
+    "{stdio: 'ignore', detached: true});",
+  'setInterval(() => {}, 1000);',
+  '',
+].join('\n');
+
 testReportedSuitesTakeTheirWorkersWithThem();
+testAHungRunnerStillGetsItsWorkersCleanedUp();
+testAHungRunnersSuiteTreeIsRetired(
+  fs.readFileSync(path.join(__dirname, 'run-all.js'), 'utf8'),
+  {suite: 'not-ours', worker: 'signal 9'},
+  'the real runner, SIGTERMed, retires its suite',
+);
+testAHungRunnersSuiteTreeIsRetired(
+  STUBBORN_RUNNER,
+  {suite: 'signal 9', worker: 'signal 9'},
+  'the helper retires the suite of a runner that ignores SIGTERM',
+);
 console.log('runAllRetiresSuiteGroup_wave3: all tests passed');

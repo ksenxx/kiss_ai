@@ -223,6 +223,10 @@
       pinch: null, // {startDistance, startScale, focusX, focusY}
       wheelTimer: 0,
       scrollFrame: 0, // requestAnimationFrame id of a pending indicator update
+      // Whether the user last pointed (pressed, touched) outside the
+      // viewer: its shortcuts then stand aside (see onKeyDown).
+      pointedAway: false,
+      hidden: false, // the scroller had no width at the last resize
     };
 
     function fail(err) {
@@ -318,11 +322,16 @@
      * work as soon as the viewer is on screen, without a click into
      * it; it stands aside while the viewer is hidden (another tab is
      * shown), while the key is typed into a field (the page field, a
-     * search box), and for combinations it does not define, so the
-     * browser keeps those.  PageDown / ArrowRight and
-     * PageUp / ArrowLeft go one page forward and back from the page at
-     * the top of the view; the arrows are left to the browser while
-     * the pages are wider than the view, where they pan instead.
+     * search box), when the key is aimed at another element (one with
+     * the focus), once the user pointed outside the viewer while it was
+     * on screen (the chat transcript beside it, whose own scrolling
+     * keys it would take otherwise; pointing back into the viewer or
+     * showing it again makes the keys its own again), and for
+     * combinations it does not define, so the browser keeps those.
+     * PageDown / ArrowRight and PageUp / ArrowLeft go one page forward
+     * and back from the page at the top of the view; the arrows are
+     * left to the browser while the pages are wider than the view,
+     * where they pan instead.
      * Home / End go to the first / last page.  Ctrl/Cmd+0 fits the
      * width, Ctrl/Cmd with + (or =, its unshifted key) or - zooms.
      */
@@ -330,6 +339,9 @@
       if (!state.pages.length || ev.defaultPrevented) return;
       if (!root.isConnected || root.getClientRects().length === 0) return;
       if (isEditable(ev.target)) return;
+      if (!root.contains(ev.target)) {
+        if (ev.target !== document.body || state.pointedAway) return;
+      }
       if (ev.altKey) return;
       if (ev.ctrlKey || ev.metaKey) {
         if (ev.key === '0') onFitWidth();
@@ -351,6 +363,18 @@
         return;
       }
       ev.preventDefault();
+    }
+
+    /**
+     * A press outside the viewer while it is on screen hands the keys
+     * to the browser.  One while it is hidden (the viewer's own tab in
+     * the tab row, bringing it back) is not a press away from it: the
+     * keys are the viewer's as soon as it is shown, before the resize
+     * that would also hand them back (onResize) is observed.
+     */
+    function onPointerDown(ev) {
+      state.pointedAway =
+        root.getClientRects().length > 0 && !root.contains(ev.target);
     }
 
     /** Select the whole number on focus so typing replaces it. */
@@ -443,13 +467,29 @@
           if (state.disposed || entry.renderTask !== task) return;
           entry.renderTask = null;
           entry.renderedScale = scale;
-          if (entry.canvas) entry.canvas.remove();
           entry.canvas = canvas;
-          entry.box.appendChild(canvas);
+          entry.box.replaceChildren(canvas);
         },
-        () => {
+        err => {
           // Cancelled by a newer render or by dispose: nothing to show.
-          if (entry.renderTask === task) entry.renderTask = null;
+          if (state.disposed || entry.renderTask !== task) return;
+          // The draw itself failed (a decoder error): say so in the
+          // page's box, in place of a blank or an older zoom's canvas.
+          // That canvas is gone with its scale: a return to that zoom
+          // draws again rather than finding the note still there.
+          entry.renderTask = null;
+          entry.canvas = null;
+          entry.renderedScale = 0;
+          entry.box.replaceChildren(
+            el(
+              'div',
+              'content-binary-note',
+              'Cannot display page ' +
+                (Number(entry.box.dataset.pageIndex) + 1) +
+                ': ' +
+                String(err),
+            ),
+          );
         },
       );
     }
@@ -585,16 +625,48 @@
       // to fit: it keeps its scale and scroll offset for its return
       // (fitting a zero width would reset the scale, and the fit on
       // re-show would then re-anchor the view around the wrong page).
-      if (!scroller.clientWidth) return;
+      if (!scroller.clientWidth) {
+        state.hidden = true;
+        return;
+      }
+      // Shown again: the keys are the viewer's until the user points
+      // elsewhere (see onKeyDown).
+      if (state.hidden) state.pointedAway = false;
+      state.hidden = false;
       if (state.fitWidth && state.pages.length) onFitWidth();
       // Otherwise the pages stay put, but the view's middle moved with
       // its height (no scroll event for that).
       else updatePageIndicator();
     }
 
+    /**
+     * Drop pdf.js's handle on the port and stop the viewer's own
+     * worker; harmless twice.
+     */
+    function stopWorker() {
+      if (state.pdfWorker) state.pdfWorker.destroy();
+      if (state.worker) state.worker.terminate();
+      state.pdfWorker = null;
+      state.worker = null;
+    }
+
+    /**
+     * The viewer's worker failed to start (its script did not run) or
+     * died: it answers no request, so pdf.js's load would wait for
+     * ever.  The load fails with the worker's reason and the worker is
+     * stopped.
+     */
+    function onWorkerError(ev) {
+      stopWorker();
+      if (state.disposed) return;
+      const detail = ev && ev.message ? ': ' + ev.message : '';
+      fail(new Error('the PDF worker failed' + detail));
+    }
+
     function show(pdfjs) {
       if (state.disposed) return undefined;
       state.worker = new Worker(pdfjs.workerUrl, {type: 'module'});
+      state.worker.addEventListener('error', onWorkerError);
       state.pdfWorker = pdfjs.lib.PDFWorker.create({port: state.worker});
       state.loadingTask = pdfjs.lib.getDocument({
         data: bytes,
@@ -661,6 +733,7 @@
     scroller.addEventListener('touchend', onTouchEnd);
     scroller.addEventListener('touchcancel', onTouchEnd);
     document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('pointerdown', onPointerDown, true);
 
     loadPdfJs()
       .then(show)
@@ -672,6 +745,7 @@
       if (state.disposed) return;
       state.disposed = true;
       document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('pointerdown', onPointerDown, true);
       clearTimeout(state.wheelTimer);
       cancelAnimationFrame(state.scrollFrame);
       if (state.observer) state.observer.disconnect();
@@ -679,15 +753,10 @@
       for (const entry of state.pages) cancelRender(entry);
       // Free the document on both sides of the port, then drop pdf.js's
       // handle on the port and stop the viewer's own worker.  A worker
-      // started before getDocument threw has no document to free and
-      // is stopped at once.
-      const worker = state.worker;
-      const pdfWorker = state.pdfWorker;
-      function stopWorker() {
-        if (pdfWorker) pdfWorker.destroy();
-        if (worker) worker.terminate();
-      }
-      if (state.loadingTask) {
+      // with no document to free (getDocument threw, the worker failed,
+      // or the document never arrived: pdf.js's destroy waits for an
+      // answer such a worker never gives) is stopped at once.
+      if (state.loadingTask && state.worker && state.pages.length) {
         state.loadingTask
           .destroy()
           .catch(() => {})

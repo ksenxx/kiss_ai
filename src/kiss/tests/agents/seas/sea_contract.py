@@ -126,7 +126,7 @@ def tool_results(request: dict[str, Any]) -> list[str]:
 
 def tool_result_text(result: str) -> str:
     """Return a tool *result* without the ``\\n\\nSteps: ...`` status footer the agent appends."""
-    return result.split("\n\nSteps:")[0]
+    return result.split("\n\nSteps:", 1)[0]
 
 
 def assert_appending_sea_run(

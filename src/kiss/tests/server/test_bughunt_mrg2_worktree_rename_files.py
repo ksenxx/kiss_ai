@@ -30,7 +30,7 @@ from pathlib import Path
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
-from kiss.tests.server.worktree_helpers import merge_conflict
+from kiss.tests.server.worktree_helpers import merge_conflict, worktree_changed_files
 
 
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -93,7 +93,7 @@ class TestWorktreeRenameChangedFiles(unittest.TestCase):
             new_path.read_text().replace("line5\n", "line5-agent\n"),
         )
 
-        changed = self.server._get_worktree_changed_files(self.tab_id)
+        changed = worktree_changed_files(self.server, self.tab_id)
         self.assertIn(
             "new.txt", changed,
             f"new path missing from changed files: {changed}",

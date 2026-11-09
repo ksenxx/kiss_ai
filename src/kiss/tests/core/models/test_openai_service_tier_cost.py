@@ -122,8 +122,9 @@ class TestFastTierIsPricedPerModel:
     """Fast is 2x Standard on the GPT-5.x/GPT-6 line but not on older models
     (pricing page, Fast tab): gpt-5.5 $12.50/$75 on $5/$30, gpt-4.1
     $3.50/$14 on $2/$8, gpt-4o $4.25/$17 on $2.50/$10, o3 $3.50/$14 on $2/$8,
-    gpt-5-mini $0.45/$3.60 on $0.25/$2, gpt-4o-mini $0.25/$1 on $0.15/$0.60,
-    o4-mini $2/$8 on $1.10/$4.40."""
+    gpt-5-mini $0.45/$3.60 on $0.25/$2, gpt-4o-mini $0.25/$1 on $0.15/$0.60.
+    gpt-4.1-nano and o4-mini left the catalog in the 2026-11-05 refresh
+    (OpenAI no longer lists them)."""
 
     @pytest.mark.parametrize(
         ("model", "fast_input", "fast_output"),
@@ -135,10 +136,8 @@ class TestFastTierIsPricedPerModel:
             ("gpt-5-mini", 0.45, 3.6),
             ("gpt-4.1", 3.5, 14.0),
             ("gpt-4.1-mini", 0.7, 2.8),
-            ("gpt-4.1-nano", 0.2, 0.8),
             ("gpt-4o", 4.25, 17.0),
             ("gpt-4o-mini", 0.25, 1.0),
-            ("o4-mini", 2.0, 8.0),
             ("o3", 3.5, 14.0),
         ],
     )

@@ -21,6 +21,15 @@ Covers, over REAL objects (no mocks, patches, or fakes):
 * F11: ``AgentServer._teardown_tab_resources`` must survive a
   duck-typed printer without ``cleanup_tab`` (same getattr-guarded
   contract as every sibling cleanup path).
+* A21-3 (audit 2026-11-07): a ``_schedule_send`` that loses the race
+  with the loop's close (``is_running`` seen True, the loop closed
+  before ``run_coroutine_threadsafe`` hands the coroutine over) drops
+  the send AND closes the unscheduled coroutine, instead of leaking
+  it to the collector's "coroutine ... was never awaited" warning.
+* A22-1 (audit 2026-11-07): a ``ready`` resumes the tabs bound AFTER
+  its wait for the connection's CHATS page, so a tab closed on another
+  surface during that wait is not resumed (and reopened) from a stale
+  snapshot.
 
 The live-server tests drive a real :class:`RemoteAccessServer` over a
 real local WebSocket connection, mirroring the harness of
@@ -30,13 +39,16 @@ real local WebSocket connection, mirroring the harness of
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import random
 import shutil
+import sys
 import tempfile
 import threading
 import time
 import unittest
+import warnings
 from pathlib import Path
 from typing import Any, cast
 
@@ -47,6 +59,7 @@ from kiss.server.server import AgentServer
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
+from kiss.tests.server.pause import Pause
 
 
 class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
@@ -242,6 +255,39 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumes[0].get("tabId"), "rt-later")
         self.assertEqual(resumes[0].get("chatId"), "chat-rt-later")
 
+    async def test_tab_closed_during_the_history_wait_is_not_resumed(self) -> None:
+        """A22-1 (audit 2026-11-07), the ready handler's part: the resumes a ``ready``
+        issues follow the registry as it is AFTER the wait for the connection's
+        CHATS page, not the snapshot taken before it.  A tab another surface closed
+        during that wait (up to 3 s) was resumed from the stale snapshot, and the
+        replay's publication reopened it on every surface.  The page's reply is
+        held in its worker thread (:class:`Pause` on the real ``_get_history``)
+        while the tab is closed."""
+        task_id, chat_id = await asyncio.to_thread(th._add_task, "chat A task")
+        await asyncio.to_thread(
+            th._append_chat_event, {"type": "text_delta", "text": "A"}, task_id=task_id,
+        )
+        registry = self.server._agent_server.tab_registry
+        registry.update_tab("t-stale", chat_id=chat_id, create=True)
+        reader, writer = await self._connect_local()
+        pause = Pause(AgentServer._get_history.__code__, lambda _locals: True)
+        with pause:
+            await self._send(writer, {"type": "getHistory", "offset": 0, "generation": 1})
+            self.assertTrue(await asyncio.to_thread(pause.paused.wait, 10))
+            await self._send(writer, {"type": "ready", "tabId": "t-stale", "restoredTabs": []})
+            # ``focusInput`` is sent right before the registry sync; the
+            # ready is then waiting for the held page.
+            await self._drain_until(reader, "focusInput")
+            await asyncio.sleep(0.3)
+            self.server._agent_server._close_tab("t-stale")
+            self.assertFalse(registry.has_tab("t-stale"))
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            self.assertFalse(
+                registry.has_tab("t-stale"),
+                "the ready resumed the stale snapshot and reopened the closed tab",
+            )
+
 
 class TestAuthFailureBookkeeping(unittest.TestCase):
     """F2: _auth_failures pruning and cross-IP sweeping (real server)."""
@@ -317,6 +363,43 @@ class TestTeardownWithDuckTypedPrinter(unittest.TestCase):
         server._teardown_tab_resources("fixer6-tab-y", None)
         with server._state_lock:
             self.assertNotIn("fixer6-tab-y", server._tab_chat_views)
+
+
+class TestScheduleSendOnClosingLoop(unittest.TestCase):
+    """A send that loses the race with the loop's close leaks no coroutine."""
+
+    def test_coroutine_is_closed_when_the_loop_closes_under_the_handoff(self) -> None:
+        """The real loop is stopped and closed at the exact hand-off statement."""
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        printer = ws_mod.WebPrinter()
+        printer._loop = loop
+        handoff = asyncio.run_coroutine_threadsafe.__code__
+
+        def _close_loop_at_handoff(frame: Any, event: str, arg: Any) -> Any:
+            # Held at the entry of ``run_coroutine_threadsafe``: the
+            # coroutine exists, ``is_running`` was True a moment ago.
+            if event == "call" and frame.f_code is handoff:
+                sys.settrace(None)
+                loop.call_soon_threadsafe(loop.stop)
+                thread.join(10)
+                loop.close()
+            return None
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            sys.settrace(_close_loop_at_handoff)
+            try:
+                printer._schedule_send(cast(Any, object()), json.dumps({"type": "notice"}))
+            finally:
+                sys.settrace(None)
+            gc.collect()
+        self.assertTrue(loop.is_closed(), "the hand-off was not held at the closed loop")
+        with printer._ws_lock:
+            self.assertEqual(printer._pending_sends, {})
+        leaked = [str(w.message) for w in caught if "never awaited" in str(w.message)]
+        self.assertEqual(leaked, [], "the unscheduled _locked_send coroutine leaked")
 
 
 if __name__ == "__main__":

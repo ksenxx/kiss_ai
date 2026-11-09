@@ -178,7 +178,8 @@ class TestManualFixStepsExecutable:
 
         msg = agent.merge()
         assert "Merge conflict detected" in msg
-        assert f"git cherry-pick --no-commit {wt.baseline_commit}" in msg
+        assert "git cherry-pick --no-commit" in msg
+        assert f"-p {wt.baseline_commit}" in msg
         block = _extract_fix_block(msg)
 
         _run_fix_block(block, "echo resolved > f.txt")

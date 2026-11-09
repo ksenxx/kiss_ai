@@ -40,6 +40,7 @@ import pytest
 
 from kiss.core.tool_interrupt import inject_async_exception
 from kiss.server.browser_tab import BrowserTabService, _result_in_slices, normalize_url
+from kiss.tests.server.conftest import ensure_loop
 from kiss.tests.server.test_browser_tab_service import (
     _PLAYWRIGHT_CACHE,
     ConnPrinter,
@@ -87,7 +88,7 @@ def _stop_while_queued(
     Returns the future of the hold (done :data:`_HOLD` seconds after the
     Stop), once the thread has ended with the injected interrupt.
     """
-    loop = service._ensure_loop()
+    loop = ensure_loop(service)
     held = asyncio.run_coroutine_threadsafe(_hold_lifecycle_lock(service, _HOLD), loop)
     _wait(service._launch_lock.locked, "the lock held")
     caller = _Caller(call)

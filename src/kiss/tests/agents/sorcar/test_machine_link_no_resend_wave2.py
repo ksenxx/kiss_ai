@@ -14,6 +14,11 @@ out is retried; a close during the wait fails the request.
 
 A real ``wss://`` daemon stand-in (:func:`kiss.tests.local_ws.fake_daemon`)
 records every command it receives; nothing is mocked.
+
+The same stand-in, given a handler of the test's own, stages the link's
+races (audit A09): a retirement during the handshake, a socket abandoned
+under a request after the host slept, two stream handshakes of which the
+later one succeeds.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ import asyncio
 import json
 import threading
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -43,11 +49,19 @@ class _Daemon:
     and closes the connection without answering the first ``paste``.
     """
 
-    def __init__(self, tmp: Path) -> None:
+    def __init__(
+        self, tmp: Path,
+        handler: Callable[[ServerConnection], Awaitable[None]] | None = None,
+        *, answer_auth: bool = True,
+    ) -> None:
+        """*handler* (default: the one above) serves each connection; the stand-in
+        answers the ``auth`` frame first unless *answer_auth* is false."""
         self.tmp = tmp
         self.ca_file = tmp / "ca.pem"
         self.received: list[str] = []
         self.close_after_answer = False
+        self._handler = handler or self._handle
+        self._answer_auth = answer_auth
         self._loop = asyncio.new_event_loop()
         self._closed = asyncio.Event()
         self._ready = threading.Event()
@@ -60,7 +74,9 @@ class _Daemon:
             raise AssertionError("the stand-in daemon never came up")
 
     async def _serve(self) -> None:
-        async with fake_daemon(self.tmp, self._handle) as endpoint:
+        async with fake_daemon(
+            self.tmp, self._handler, answer_auth=self._answer_auth,
+        ) as endpoint:
             served = local_endpoint.read_endpoint(endpoint)
             assert served is not None
             self.url = served.url
@@ -83,7 +99,9 @@ class _Daemon:
             return
 
     def close(self) -> None:
-        """Stop serving, wait for the loop thread to end and close its loop."""
+        """Stop serving, wait for the loop thread to end and close its loop (once)."""
+        if self._loop.is_closed():
+            return
         self._loop.call_soon_threadsafe(self._closed.set)
         self._thread.join(10)
         assert not self._thread.is_alive(), "the stand-in daemon never stopped"
@@ -135,3 +153,146 @@ def test_a_kept_socket_found_closed_before_sending_is_replaced_and_the_command_s
         link.close()
         daemon.close()
     assert daemon.received == ["probe", "probe"]
+
+
+def _wait_until(condition: Callable[[], bool], what: str) -> None:
+    """Poll *condition* for up to 10 s; fail naming *what* never happened."""
+    deadline = time.monotonic() + 10
+    while not condition():
+        assert time.monotonic() < deadline, what
+        time.sleep(0.01)
+
+
+def _request_collecting(link: MachineLink, outcome: list[object]) -> None:
+    """Thread body: one ``probe`` request on *link*, its reply or error appended to *outcome*."""
+    try:
+        outcome.append(link.request({"type": "probe"}, "probeReply", timeout=10))
+    except MachineError as exc:
+        outcome.append(exc)
+
+
+def test_a_retirement_during_the_handshake_refuses_the_request_before_it_is_sent(
+    tmp_path: Path,
+) -> None:
+    """``retire()`` while the request's handshake runs (its socket not yet
+    published, so the retirement's close cannot reach it) must stop the
+    request at the end of the handshake: the command used to go out and
+    the retirement waited behind its whole exchange (audit A09)."""
+    auth_received = threading.Event()
+    retire_started = threading.Event()
+    received: list[str] = []
+
+    async def hold_auth_until_retired(ws: ServerConnection) -> None:
+        await ws.recv()  # the auth frame
+        auth_received.set()
+        await asyncio.get_running_loop().run_in_executor(None, retire_started.wait, 10)
+        await ws.send(json.dumps({"type": "auth_ok"}))
+        try:
+            command: dict[str, Any] = json.loads(await ws.recv())
+            received.append(command["type"])
+            await ws.send(json.dumps({"type": "probeReply", "generation": command["generation"]}))
+        except ConnectionClosed:
+            return
+
+    daemon = _Daemon(tmp_path, hold_auth_until_retired, answer_auth=False)
+    link = _link(daemon)
+    outcome: list[object] = []
+    requester = threading.Thread(target=_request_collecting, args=(link, outcome))
+    retirer = threading.Thread(target=link.retire)
+    try:
+        requester.start()
+        assert auth_received.wait(10), "the request never sent its auth frame"
+        retirer.start()
+        _wait_until(lambda: link._retired, "the retirement never started")
+        retire_started.set()
+        requester.join(30)
+        retirer.join(30)
+        assert not requester.is_alive() and not retirer.is_alive()
+    finally:
+        retire_started.set()
+        daemon.close()
+    assert received == [], "the command went out on a link retired during its handshake"
+    assert isinstance(outcome[0], MachineError) and "registry changed" in str(outcome[0])
+    assert link._ws is None
+
+
+def test_a_request_woken_by_abandon_does_not_back_the_machine_off(tmp_path: Path) -> None:
+    """``abandon()`` (the host back from sleep) shuts the socket down under a
+    request waiting for its answer: the request fails, but as a sleep of
+    the host, not as a failure of the machine, so the back-off ``abandon``
+    just cleared is not armed again for every lane (audit A09)."""
+    command_received = threading.Event()
+
+    async def never_answer(ws: ServerConnection) -> None:
+        try:
+            await ws.recv()  # the command; the host sleeps before the answer
+            command_received.set()
+            await ws.wait_closed()
+        except ConnectionClosed:
+            return
+
+    daemon = _Daemon(tmp_path, never_answer)
+    link = _link(daemon)
+    outcome: list[object] = []
+    requester = threading.Thread(target=_request_collecting, args=(link, outcome))
+    try:
+        requester.start()
+        assert command_received.wait(10), "the command never reached the daemon"
+        link.abandon()
+        requester.join(30)
+        assert not requester.is_alive()
+        assert isinstance(outcome[0], MachineError) and "slept" in str(outcome[0])
+        assert (link._health.failures, link._health.retry_at) == (0, 0.0), (
+            "the request woken by abandon() backed the machine off"
+        )
+        link._check_available()
+    finally:
+        link.close()
+        daemon.close()
+
+
+def test_a_handshake_that_succeeds_after_another_failed_clears_the_back_off(
+    tmp_path: Path,
+) -> None:
+    """Two stream handshakes share the machine's back-off record: when the
+    later one succeeds after the other failed, the machine is reachable
+    and the failure's back-off must go, not just its failure count
+    (audit A09)."""
+    first_auth_received = threading.Event()
+    other_failed = threading.Event()
+    connections = 0
+
+    async def answer_first_after_the_other_fails(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        await ws.recv()  # the auth frame
+        if connections != 1:
+            return  # the later handshake: closed without an answer
+        first_auth_received.set()
+        await asyncio.get_running_loop().run_in_executor(None, other_failed.wait, 10)
+        await ws.send(json.dumps({"type": "auth_ok"}))
+        try:
+            await ws.wait_closed()
+        except ConnectionClosed:
+            return
+
+    daemon = _Daemon(tmp_path, answer_first_after_the_other_fails, answer_auth=False)
+    link = _link(daemon)
+    streams: list[Any] = []
+    first = threading.Thread(target=lambda: streams.append(link.open_connection(timeout=10)))
+    try:
+        first.start()
+        assert first_auth_received.wait(10), "the first handshake never sent its auth frame"
+        with pytest.raises(MachineError, match="did not complete the handshake"):
+            link.open_connection(timeout=10)
+        assert link._health.retry_at > time.monotonic()
+        other_failed.set()
+        first.join(30)
+        assert streams, "the first handshake did not complete"
+        link._check_available()
+        assert link._health.retry_at == 0.0, "a successful handshake left the back-off"
+    finally:
+        other_failed.set()
+        for stream in streams:
+            stream.close()
+        daemon.close()

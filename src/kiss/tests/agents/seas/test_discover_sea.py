@@ -83,114 +83,109 @@ _NEXT_HEADING = next(
 
 
 def test_the_instructions_are_the_discovery_loop_and_left_the_default_prompt() -> None:
-    """``DISCOVERY_INSTRUCTIONS`` is the loop, heading to last step; ``SYSTEM.md`` lost it."""
+    """``DISCOVERY_INSTRUCTIONS`` is the loop as pseudocode; ``SYSTEM.md`` lost it."""
     instructions = discover_sea.DISCOVERY_INSTRUCTIONS
     assert instructions.startswith(_HEADING + "\n\n")
-    assert instructions.endswith(
-        "go to step 5 with the frontier\n   point it builds on as the parent."
-    )
+    assert instructions.endswith("HELDOUT_CHECK(f) := f's metrics on the held-out part, "
+                                 "run once per point\n```")
     assert instructions.count("\n## ") == 0
-    assert [line[:3] for line in instructions.splitlines() if line[:1].isdigit()] == [
-        f"{n}. " for n in range(10)
-    ]
+    assert instructions.count("```") == 2
+    # The numbered prose steps are gone: the loop is the procedures and their helpers.
+    assert not [line for line in instructions.splitlines() if line[:1].isdigit()]
+    for name in ("procedure DISCOVER(task):", "procedure ROUND(idea, parent, draw):",
+                 "procedure FINISH(winner):", "ELIGIBLE_PAIRS() :=", "NOISE_FLOOR(eval) :=",
+                 "PAIRWISE_WINNER() :=", "HELDOUT_CHECK(f) :=", "FORK_POINT() :=",
+                 "HELDOUT_PASS(f) :="):
+        assert instructions.count(name) == 1, name
     for phrase in (
         # A research-only task still gets the loop; a no-change task gets it in a lab.
-        "A task that asks only for research, ideas or a ranking still gets this loop, "
-        "ranked by\nmeasured dev metrics",
-        "When the task forbids changing its repository, work in a lab so\n"
-        "that no `git reset` touches that tree",
-        "copy the artifact's current files (not its data)\nto <scratch dir>/lab, `git init` "
-        "and commit them there, and call create_worktree on it;\nrun every round in the "
-        "worktree it returns (in the lab when it makes none)",
-        "in a lab, also write\n"
-        "   `git diff --binary <B commit> <its commit>` to <scratch dir>/best.patch",
-        # Every point is a commit with a parent, held by a ref that outlives the
-        # resets and the squash merge; the files carry both.
-        "so that every evaluated idea is a commit,\n"
-        "kept reachable through resets and squash merges by its ref "
-        "refs/discover/<task id>/<id>",
-        # The held-out ban is up front and concrete: two real runs counted the held-out
-        # rows in their very first "inspect the repo" command.  It starts when the part
-        # exists, so the split of step 1 may still write it.
-        "The held-out part (named by the task, else written by the split of step 1) is off "
-        "limits\nfrom the moment it exists, the first command included: nothing but the "
-        "held-out check of\nsteps 5 and 6 opens it, no cat, head, wc, cut, count, profile or "
-        "test.",
-        "one line per frontier point: id, parent id, commit, idea, aspect (the part of the\n"
-        "   system the idea changes",
-        "<scratch dir>/pareto.md,\n   one line per frontier point",
-        # explored-ideas.md is the one log: appended in order, with the draw and the
-        # status, which pareto.md no longer duplicates.
-        "one row appended per idea in the order evaluated, with the same fields plus draw (the\n"
-        "   step 6 draw that led to it, with a fresh draw's second draw), status and "
-        "observations",
-        "A point's status lives there alone: a point that leaves the frontier leaves "
-        "pareto.md.",
-        # Dev metrics only; the split and the noise floor come first, cover deterministic
-        # commands, and are not amended mid-run (a real run relaxed its floor after round 2).
-        "1. Fix the dev / held-out split (the task's when it names one)",
-        "<scratch dir>/split.md",
-        "the exact dev evaluation command, and its noise floor (the spread\n   of two or three "
-        "baseline runs, varied by seed or fold assignment when the command is\n   deterministic; "
-        "metric values closer than that are equal); none of it changes later in\n   the run.",
-        "Every metric in pareto.md and explored-ideas.md is a dev metric from that\n   command",
-        "Then read + profile the dev data, the tests and the baseline, commit the\n   baseline, "
-        "run `git update-ref refs/discover/<task id>/B HEAD`",
-        "insert it as the\n   first frontier point (id B, no parent)",
-        "Web-search for SOTA approaches",
-        "<scratch dir>/ideas.md",
-        "Pairwise judge the ideas not yet in <scratch dir>/explored-ideas.md",
-        # One round: parent snapshot, implement, evaluate, commit, log observations.
-        "`git reset --hard <parent commit>`",
-        "`git add -A && git commit && git update-ref\n   refs/discover/<task id>/<id> HEAD`",
-        "append id, parent, commit, idea, aspect, draw,\n   metrics, status and observations "
-        "(what the profile, errors and outputs showed",
-        "to <scratch dir>/explored-ideas.md",
-        "KEPT when no\n   frontier point dominates it",
-        "better beyond the noise\n   floor on one, in each metric's own direction",
-        "insert it in pareto.md, drop the points\n   it dominates from pareto.md and set their "
-        "explored-ideas.md status to DOMINATED",
-        "TIE\n   when it equals a frontier point on every metric (not inserted); FAILED otherwise",
-        "TIE\n   and FAILED ideas are never retried",
-        # Passing the check means meeting the goal on the held-out metrics as well (a real
-        # run invented a looser threshold); a baseline brought back is KEPT again.
-        "generalization check on it once to prove it is not\n   overfit: stop (step 6) if it "
-        "passes (the held-out metrics meet the goal too); otherwise\n   drop it from pareto.md, "
-        "set its status to OVERFIT (re-insert the baseline, KEPT again,\n   if the frontier is "
-        "now empty) and continue",
-        # Step 6: stop rule with a default round limit, else one exclusive draw by a tool.
-        "A round is one pass through step 5",
-        "the round limit (the task's; 100 rounds when the\n   task gives none)",
-        "`git reset --hard` its commit so the working\n   tree holds it",
-        "counts (KEPT, TIE, FAILED, OVERFIT, DOMINATED) and the\n"
-        "   refs/discover/<task id>/ refs that hold every evaluated commit",
-        "one Bash call, `python3 -c 'import random; print(random.random())'`",
-        "logged by step 5 as the draw of the idea it leads to",
-        "r < 0.33 -> step 7 (variant);\n"
-        "   0.33 <= r < 0.66 -> step 8 (compose); r >= 0.66 -> step 9 (fresh)",
-        "A compose draw with\n   fewer than two eligible frontier points is a fresh draw",
-        # The three operators, each ending in step 5 with a named parent.
-        "7. Variant: pick a frontier point and, from the observations logged for it",
-        "Go to step 5 with that point as the parent",
-        "8. Compose: pick two frontier points of different aspects, neither the baseline",
-        "Go to step 5 with the first as the parent",
-        "9. Fresh: extensive internet search or gpt-6-astra or gemini-4-argon (chosen by a second\n"
-        "   draw)",
+        "A task that asks only for research, ideas or a ranking\nstill gets it, ranked by "
+        "measured dev metrics.",
+        "if the task forbids changing its repository:          # a lab: no reset touches "
+        "its tree",
+        "copy the artifact's current files (not its data) to <scratch dir>/lab, `git init`",
+        "work in the worktree it\n        returns (in the lab when it makes none)",
+        "in a lab: write `git diff --binary <B commit> <best commit>` to "
+        "<scratch dir>/best.patch",
+        # Every point is a commit held by a ref that outlives resets and squash merges;
+        # every reset is followed by a clean, so data and the scratch dir are ignored.
+        "COMMIT(id) git add -A && git commit && git update-ref refs/discover/<task id>/<id> "
+        "HEAD",
+        "RESET(c)  git reset --hard c && git clean -fd",
+        # The ignore rules go into the repo worked in, the lab's for a no-change task.
+        "else: work in the task's git repo, else `git init` one around the artifact\n"
+        "    in the repo you work in, git-ignore data, large outputs and <scratch dir> (or\n"
+        "        `git clean -fd` deletes them)",
+        # The held-out ban is up front and concrete; the split command is its one exception.
+        "HELD-OUT RULE: when the task names the held-out part, it is off limits from the "
+        "first\n#   command on; else no command reads the data before the split command, "
+        "which alone reads\n#   all of it, once.  After that only HELDOUT_CHECK opens the "
+        "held-out part: no cat, head,\n#   wc, cut, count, profile or test.",
+        # The files: one frontier line per point, one log row per idea, status in the log.
+        "pareto.md          the frontier, one line per point: id, parent id, commit, idea,\n"
+        "#                      aspect, dev metrics",
+        "rows are never deleted\n#                      or reordered, only a row's status "
+        "changes, in place",
+        "written once, never changed in the run",
+        "metrics   dev metrics from the split.md evaluation command",
+        # Dominance and equality use the noise floor in each metric's direction.
+        "x DOMINATES y := x is no worse than y on every metric and better beyond noise on one",
+        # The noise floor of a deterministic command leaves the dev split as it is.
+        "for a deterministic eval, the spread of the metric over bootstrap\n    resamples of "
+        "one baseline run's per-item dev results (the dev split stays as it is),\n    or 0 "
+        "when it yields one number",
+        "COMMIT(B); B := point(id B, parent none, commit HEAD, metrics eval())",
+        "log B with draw none, status KEPT",
+        "round_limit := the task's round limit, else 100",
+        # One exclusive draw by a tool picks the operator; the fresh draw has its own.
+        "RANDOM()  one Bash call: python3 -c 'import random; print(random.random())'",
+        "if r < 0.33:",
+        "elif r < 0.66 and ELIGIBLE_PAIRS() is not empty:",
+        # A compose draw with no pair forks an older frontier point, so a pair can form.
+        "elif r < 0.66 and FORK_POINT() != none:",
+        "(o, d) := FORK_POINT()\n            idea := a change on an aspect d does not have",
+        "to ideas.md; parent := o",
+        "FORK_POINT() := (o, d) for the oldest frontier point o that is an ancestor of "
+        "another\n    frontier point d",
+        "a point's aspect is its own idea's, not its ancestors'",
+        "source := extensive internet search if s < 0.33, gpt-6-astra if s < 0.66,\n"
+        "                      else gemini-4-argon",
+        "draw := r, plus s for a fresh idea",
+        # The compose merge happens after the reset, as a merge commit.
+        "RESET(parent.commit)\n    implement idea                # a compose: "
+        "`git merge --no-commit <q commit>`, resolve",
+        "if some frontier point DOMINATES x:  status := FAILED",
+        "elif some frontier point EQUALS x:   status := TIE",
+        "remove f from pareto.md; f.status := DOMINATED",
+        "# TIE, FAILED never retried",
+        # The in-loop check needs the goal met held out; a baseline brought back is KEPT.
+        "for each frontier or TIE point f not yet held-out checked whose dev metrics meet "
+        "the goal:\n        if HELDOUT_CHECK(f) meets the goal and HELDOUT_PASS(f): return f",
+        "if pareto.md is empty: re-insert B; B.status := KEPT",
+        # "Eligible" for compose is defined.
+        "ELIGIBLE_PAIRS() := every pair (p, q) of frontier points where neither is B, they "
+        "share\n    no aspect, neither commit is an ancestor of the other",
+        "no explored-ideas.md row already merged q into p",
+        # A failed final check evicts the point and tries the next, else the baseline.
+        "for each frontier or TIE point f != B, in the task's metric priority on the dev\n"
+        "                metrics (its first-named metric when it gives none):\n"
+        "            if HELDOUT_PASS(f): best := f; break\n"
+        "            remove f from pareto.md if it is there; f.status := OVERFIT\n",
+        "if best.status == TIE: insert best in pareto.md; best.status := KEPT",
+        # Passing held out: never worse than the baseline on the first-priority metric;
+        # the baseline itself passes, and whatever is delivered is reported held out.
+        "HELDOUT_PASS(f) := f is B, or with hB := HELDOUT_CHECK(B) and hf := "
+        "HELDOUT_CHECK(f): hf is\n    no worse than hB on the task's first-priority metric "
+        "(by any amount, no noise\n    allowance), and hB neither DOMINATES nor EQUALS hf",
+        "best := B; re-insert B in pareto.md if absent; B.status := KEPT",
+        "report best with its dev and held-out metrics (HELDOUT_CHECK(best))",
+        "explored-ideas.md counts (KEPT, TIE, FAILED, OVERFIT,\n        DOMINATED)",
     ):
         assert phrase in instructions, phrase
-    # The ambiguous "with probability" wording and the unnumbered composition cap are gone.
-    # The lab keys on the task, not on being a sub-agent: /revise_and_review_paper's
-    # writer is a sub-agent that carries this loop and edits the paper in place.
-    # The status is not kept in two files any more (the two drifted apart in a real
-    # run), the draw is a row field rather than a section inserted anywhere, and
-    # profiling no longer comes before the split is fixed.
-    for gone in (
-        "With probability", "probability 0.5", "up to three", "got-6-astra", "step 10",
-        "Is subagent", "in both files", "record the draw", "dev metrics,\n   status",
-        "Read + profile the data",
-    ):
+    for gone in ("With probability", "got-6-astra", "Is subagent", "fold assignment",
+                 "Go to step", "step 5"):
         assert gone not in instructions, gone
-    assert instructions.count("Go to step 5") + instructions.count("go to step 5") == 3
+    assert instructions.count("git reset --hard") == 1
     # The loop is the SEA's alone: neither default prompt carries it, and
     # the rest of the default prompt reads on where the section used to be.
     for prompt in (SYSTEM_PROMPT, SYSTEM_PROMPT_LITE):
@@ -214,6 +209,21 @@ def test_split_cuts_a_copy_of_the_section_out_cleanly() -> None:
     assert split_discovery_section("plain") == ("plain", "")
     tail = "BASE\n\n" + _HEADING + "\n\n1. profile\n"
     assert split_discovery_section(tail) == ("BASE\n\n", _HEADING + "\n\n1. profile\n")
+    # Only a line that is the heading starts the section: a deeper heading or
+    # a mention inside a line is left alone (a substring match cut a
+    # "### AI discovery..." sub-heading after its "#" and turned the next
+    # "## B" into "### B").
+    for text in (
+        "A\n#" + _HEADING + "\nx\n## B\ny\n",
+        "A\n" + _HEADING + " notes\nx\n## B\ny\n",
+        "A see `" + _HEADING + "`\n## B\ny\n",
+    ):
+        assert split_discovery_section(text) == (text, "")
+    text = "A\n#" + _HEADING + "\nx\n" + _HEADING + "\n\n1. profile\n## B\ny\n"
+    assert split_discovery_section(text) == (
+        "A\n#" + _HEADING + "\nx\n## B\ny\n",
+        _HEADING + "\n\n1. profile\n",
+    )
 
 
 def test_system_prompt_appends_the_instructions_once_at_the_end() -> None:
@@ -420,12 +430,17 @@ def test_a_sub_agent_lab_leaves_the_callers_tree_alone_and_hands_back_a_patch() 
     commit, branch and uncommitted change stay as they were, and
     ``best.patch`` applies to the caller's tree and carries the idea.
     """
+    # Everything acquired after the home is acquired inside the ``try``,
+    # so a constructor that raises cannot leak the process-global state
+    # (``KISS_HOME``, the blanked provider keys) into the next test.
     home = IsolatedKissHome(prefix="kiss-discover-lab-")
-    credentials = _FakeCredentials()
-    parent = ChatSorcarAgent("parent")
+    credentials: _FakeCredentials | None = None
+    parent: ChatSorcarAgent | None = None
     script: _LabScript | None = None
     standin: StandInModelServer | None = None
     try:
+        credentials = _FakeCredentials()
+        parent = ChatSorcarAgent("parent")
         (home.repo / ".gitignore").write_text("tmp/\n", encoding="utf-8")
         run_git(home.repo, "add", ".gitignore")
         run_git(home.repo, "commit", "-qm", "ignore tmp")
@@ -499,7 +514,8 @@ def test_a_sub_agent_lab_leaves_the_callers_tree_alone_and_hands_back_a_patch() 
                 agent.discard()
         if standin is not None:
             standin.stop()
-        credentials.restore()
+        if credentials is not None:
+            credentials.restore()
         home.cleanup()
 
 
@@ -546,11 +562,13 @@ def test_a_typed_task_naming_discover_sees_its_help_but_its_runs_do_not() -> Non
     names it get none, so the SEA is never told to call itself.
     """
     home = IsolatedKissHome(prefix="kiss-discover-named-")
-    credentials = _FakeCredentials()
-    recorder = _Recorder()
-    standin = StandInModelServer(recorder)
-    help_line = f"- `/discover`: {DiscoverSea().description()}"
+    credentials: _FakeCredentials | None = None
+    standin: StandInModelServer | None = None
     try:
+        credentials = _FakeCredentials()
+        recorder = _Recorder()
+        standin = StandInModelServer(recorder)
+        help_line = f"- `/discover`: {DiscoverSea().description()}"
         home.write_config(max_budget=5.0, use_web_browser=False)
         server = AgentServer(printer=CapturePrinter())
         server.work_dir = str(home.repo)
@@ -586,6 +604,8 @@ def test_a_typed_task_naming_discover_sees_its_help_but_its_runs_do_not() -> Non
         assert "- Is subagent: yes\n" in sub_agent
         assert sea_commands.NAMED_COMMANDS_HEADING not in sub_agent
     finally:
-        standin.stop()
-        credentials.restore()
+        if standin is not None:
+            standin.stop()
+        if credentials is not None:
+            credentials.restore()
         home.cleanup()

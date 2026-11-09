@@ -14,7 +14,7 @@ right after a plain ``with STATE_LOCK:``'s ``__enter__`` returned skips
 ``__exit__`` (CPython gh-74174) and leaks the lock for the daemon's
 life: every later task, ``AgentServer()`` and every timer flush then
 hang on it.  Every ``STATE_LOCK`` site a task thread can reach therefore
-goes through :func:`~kiss.agents.sorcar._concurrency.locked_call`.
+goes through :func:`~kiss.core.locked.locked_call`.
 
 Each test hammers one real path from a worker thread with hundreds of
 injections, in a child process (a leaked ``STATE_LOCK`` would wedge
@@ -29,7 +29,7 @@ import threading
 
 import pytest
 
-from kiss.agents.sorcar._concurrency import locked_call
+from kiss.core.locked import locked_call
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter

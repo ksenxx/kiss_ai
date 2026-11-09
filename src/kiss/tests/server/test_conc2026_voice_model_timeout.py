@@ -31,11 +31,32 @@ import os
 import socket
 import tempfile
 import threading
+import time
 import unittest
+import urllib.request
 from pathlib import Path
 
 import kiss.server.web_server as ws
 from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.server import speech
+
+
+def _trickle(listener: socket.socket, head: bytes, tail: bytes, stop: threading.Event) -> None:
+    """Serve one connection of *listener*: *head* at once, then *tail* a byte every 0.05 s."""
+    try:
+        conn, _ = listener.accept()
+    except OSError:  # listener closed at cleanup
+        return
+    with conn:
+        try:
+            conn.recv(65536)  # the request
+            conn.sendall(head)
+            for i in range(len(tail)):
+                if stop.wait(0.05):
+                    return
+                conn.sendall(tail[i : i + 1])
+        except OSError:  # the download gave up: what the tests want
+            return
 
 
 def _assert_download_lock_released(cache: Path) -> None:
@@ -173,6 +194,83 @@ class TestVoiceModelDownloadTimeout(unittest.TestCase):
         self.assertEqual(result, [None])
         self.assertFalse(ws.VOICE_MODEL_CACHE.exists())
         _assert_download_lock_released(ws.VOICE_MODEL_CACHE)
+
+    def test_trickled_http_framing_hits_the_total_deadline(self) -> None:
+        """The deadline covers the status line, the headers and a chunk's size line too.
+
+        ``urlopen`` reads the headers, and ``read1`` a chunked body's
+        size lines, in as many socket reads as the peer makes of them:
+        a byte before every per-read timeout used to keep the download
+        running past its total deadline, with the lock held.
+        """
+        os.environ["KISS_VOICE_DOWNLOAD_TIMEOUT"] = "1"
+        os.environ["KISS_VOICE_DOWNLOAD_TOTAL_TIMEOUT"] = "0.5"
+        stop_sending = threading.Event()
+        self.addCleanup(stop_sending.set)
+        slow = b"x" * 200  # a byte every 0.05 s: 10 s of framing, 20 deadlines' worth
+        for at_once, trickled in (
+            (b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n", b"X-Slow: " + slow + b"\r\n\r\n"),
+            (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", b"5;ext=" + slow + b"\r\n"),
+        ):
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.addCleanup(listener.close)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            port = listener.getsockname()[1]
+            threading.Thread(
+                target=_trickle, args=(listener, at_once, trickled, stop_sending), daemon=True,
+            ).start()
+            url = f"http://127.0.0.1:{port}/model.tar.gz"
+            started = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                speech._download_url_to_file(url, ws.VOICE_MODEL_CACHE)
+            self.assertLess(time.monotonic() - started, 5.0, trickled[:8])
+
+    def test_a_socket_registered_after_the_deadline_is_shut_down_too(self) -> None:
+        """The deadline ends a connection made as it fires, not only those made before it.
+
+        The deadline timer runs once: it shut down the sockets registered
+        by then and a socket registered a moment later (a connect that
+        completed as the deadline fired, a redirect's next connection)
+        was left alone, so a server trickling its headers kept the
+        download, and the lock its caller holds, blocked past the
+        deadline for as long as it pleased.  Registering on an expired
+        watch must end the transfer there and then.
+        """
+        os.environ["KISS_VOICE_DOWNLOAD_TIMEOUT"] = "1"
+        stop_sending = threading.Event()
+        self.addCleanup(stop_sending.set)
+        head = b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n"
+        tail = b"X-Slow: " + b"x" * 200 + b"\r\n\r\n"  # 10 s of headers, a byte per read
+        listeners = []
+        for _ in range(2):
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.addCleanup(listener.close)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            threading.Thread(
+                target=_trickle, args=(listener, head, tail, stop_sending), daemon=True,
+            ).start()
+            listeners.append(listener)
+        # The watch of a download whose deadline fired before its connection registered.
+        watched = speech._WatchedHandler()
+        watched.expire()
+        started = time.monotonic()
+        with self.assertRaises(OSError):  # a URLError or a RemoteDisconnected
+            urllib.request.build_opener(watched).open(
+                f"http://127.0.0.1:{listeners[0].getsockname()[1]}/model.tar.gz", timeout=1,
+            )
+        self.assertLess(time.monotonic() - started, 1.0, "the late socket was not shut down")
+        # Through the download itself: a deadline so short that it fires
+        # around the connect, whichever side of the registration it lands on.
+        os.environ["KISS_VOICE_DOWNLOAD_TOTAL_TIMEOUT"] = "0.001"
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            speech._download_url_to_file(
+                f"http://127.0.0.1:{listeners[1].getsockname()[1]}/model.tar.gz",
+                ws.VOICE_MODEL_CACHE,
+            )
+        self.assertLess(time.monotonic() - started, 5.0)
 
     def test_total_deadline_env_rejects_nonfinite_values(self) -> None:
         """``inf`` / ``1e999`` must not disable the total deadline —

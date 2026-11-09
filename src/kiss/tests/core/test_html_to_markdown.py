@@ -103,6 +103,20 @@ class TestLists:
             "1. a\n2. b\n\n   more\n\n3. c\n\n   ```\n   x = 1\n   ```"
         )
 
+    def test_ordered_list_keeps_its_start_number(self) -> None:
+        """``<ol start="5">`` (what ``ensure_html`` makes of ``5. ...``) counts from 5.
+
+        Every list counted from 1, so steps numbered 5 and 6 in a
+        summary came back as 1 and 2 in the commit message and the
+        memory page; a nested list's start leaves its parent's count
+        alone, and a start that is no number means 1.
+        """
+        html = (
+            '<ol start="5"><li>five</li><li>six<ol start="3"><li>three</li></ol></li>'
+            '<li>seven</li></ol><ol start="x"><li>one</li></ol>'
+        )
+        assert html_to_markdown(html) == "5. five\n6. six\n   3. three\n7. seven\n\n1. one"
+
     def test_heading_blockquote_and_pre_stay_inside_the_list_item(self) -> None:
         html = (
             "<ol><li><p>first</p><h3>second</h3><blockquote><p>q1</p><p>q2</p>"

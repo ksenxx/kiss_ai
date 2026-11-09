@@ -367,6 +367,10 @@ def test_precedence_example_names_the_sh_lock() -> None:
     text = precedence_example()
     assert "`/sh` declares" in text and '"locked"' in text
     assert "tool_profile" in text
+    # The ``ValueError`` for a missing ``/sh`` (``bundled_commands()``
+    # without the key) is reachable only by deleting the package's
+    # bundled ``seas/sh`` folder, which no test may do; the branch is
+    # read, not driven.
 
 
 def test_wire_field_keeps_its_alias_and_camel_case() -> None:

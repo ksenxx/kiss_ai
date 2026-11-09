@@ -27,6 +27,7 @@ import psycopg
 import pytest
 
 from kiss.agents.third_party_agents.postgres.postgres_sea import (
+    _MAX_CELL_CHARS,
     PostgresAgent,
     PostgresChannelBackend,
     _config,
@@ -399,14 +400,14 @@ class TestPostgresLive:
         assert check["rows"] == [[None]]
 
     def test_max_rows_clamped_to_valid_range(self, pg_uri: str) -> None:
-        """max_rows of 0/negative behaves as 1; huge values clamp to 10000."""
+        """max_rows of 0/negative behaves as 1; huge values clamp to 10000 rows of valid JSON."""
         b = _backend(pg_uri, read_only=False)
         assert json.loads(b.pg_execute("CREATE TABLE live_clamp (n int)"))["ok"] is True
         assert (
-            json.loads(b.pg_execute("INSERT INTO live_clamp SELECT generate_series(1, 5)"))[
+            json.loads(b.pg_execute("INSERT INTO live_clamp SELECT generate_series(1, 10001)"))[
                 "row_count"
             ]
-            == 5
+            == 10001
         )
         for bad in (0, -5):
             result = json.loads(b.pg_query("SELECT n FROM live_clamp ORDER BY n", max_rows=bad))
@@ -414,9 +415,33 @@ class TestPostgresLive:
             assert result["rows"] == [[1]]
             assert result["row_count"] == 1
             assert result["truncated"] is True
+        # The upper clamp returns 10,000 of the 10,001 rows as one complete
+        # JSON document (no clipped text), and reports the cut.
         result = json.loads(b.pg_query("SELECT n FROM live_clamp ORDER BY n", max_rows=10**9))
         assert result["ok"] is True
+        assert result["row_count"] == 10000
+        assert result["rows"][-1] == [10000]
+        assert result["truncated"] is True
+        result = json.loads(
+            b.pg_query("SELECT n FROM live_clamp WHERE n <= 5 ORDER BY n", max_rows=10**9)
+        )
         assert result["row_count"] == 5
+        assert result["truncated"] is False
+
+    def test_wide_cell_is_cut_and_reported(self, pg_uri: str) -> None:
+        """A text cell past the per-cell cap is cut; the result stays valid JSON and says so."""
+        b = _backend(pg_uri, read_only=True)
+        result = json.loads(b.pg_query("SELECT repeat('x', 20000) AS wide, 7 AS n"))
+        assert result["ok"] is True
+        assert result["columns"] == ["wide", "n"]
+        [[wide, n]] = result["rows"]
+        assert wide == "x" * _MAX_CELL_CHARS
+        assert n == 7
+        assert result["row_count"] == 1
+        assert result["truncated"] is True
+        # A cell exactly at the cap is returned whole and nothing is reported cut.
+        result = json.loads(b.pg_query("SELECT repeat('y', %s)", json.dumps([_MAX_CELL_CHARS])))
+        assert result["rows"] == [["y" * _MAX_CELL_CHARS]]
         assert result["truncated"] is False
 
     def test_statement_timeout_cancels_long_query(self, pg_uri: str) -> None:

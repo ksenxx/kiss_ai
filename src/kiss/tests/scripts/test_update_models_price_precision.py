@@ -89,7 +89,7 @@ def test_small_absolute_but_large_relative_changes_are_applied(
 
 
 def test_together_prices_use_the_same_precision_and_threshold() -> None:
-    """Together's per-1M listing gets the relative comparison too; embeddings stay frozen."""
+    """Together's per-1M listing gets the relative comparison too, embeddings included."""
     current = {
         "BAAI/bge-base-en-v1.5": _entry(0.01, 0.0, emb=True),
         "moonshotai/Kimi-K3": _entry(2.7, 13.5),
@@ -112,5 +112,6 @@ def test_together_prices_use_the_same_precision_and_threshold() -> None:
     updates, new_models = mod.compute_changes(current, {}, together, {}, {}, {})
     assert new_models == []
     assert [(u["name"], u["changes"]) for u in updates] == [
+        ("BAAI/bge-base-en-v1.5", {"input_price_per_1M": 0.008}),
         ("Qwen/Qwen3-Next", {"output_price_per_1M": 0.104}),
     ]

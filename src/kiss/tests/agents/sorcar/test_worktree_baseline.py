@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
@@ -142,6 +143,61 @@ class TestCopyDirtyState:
             assert GitWorktreeOps.copy_dirty_state(repo, wt_dir)
             assert (wt_dir / "README.md").read_text() == "# Changed\n"
             assert (wt_dir / "new.txt").read_text() == "new\n"
+
+    def test_tracked_file_replaced_by_directory_is_mirrored(self) -> None:
+        """A tracked file turned into a directory (`` D README.md`` next
+        to ``?? README.md/x.txt``) is a plain directory, not a submodule:
+        its entry still replaces the worktree's stale file so the files
+        under it can land.  A staged new file turned into a directory
+        (``AD new.txt``) has no worktree file in the way and is mirrored
+        the same way."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp) / "repo")
+            (repo / "README.md").unlink()
+            (repo / "README.md").mkdir()
+            (repo / "README.md" / "x.txt").write_text("inside\n")
+            (repo / "new.txt").write_text("staged\n")
+            _git("add", "new.txt", cwd=repo)
+            (repo / "new.txt").unlink()
+            (repo / "new.txt").mkdir()
+            (repo / "new.txt" / "y.txt").write_text("under the staged name\n")
+            wt_dir = _create_worktree(repo, "kiss/wt-test-8")
+            assert (wt_dir / "README.md").is_file()
+            assert not (wt_dir / "new.txt").exists()
+            assert GitWorktreeOps.copy_dirty_state(repo, wt_dir)
+            assert (wt_dir / "README.md" / "x.txt").read_text() == "inside\n"
+            assert (wt_dir / "new.txt" / "y.txt").read_text() == "under the staged name\n"
+
+    def test_dirty_submodule_falls_back_to_the_main_checkout(self) -> None:
+        """A dirty tracked submodule cannot be snapshotted (audit S4/F4):
+        flattened into the worktree's uninitialized gitlink directory, its
+        files were invisible to git, so an agent edit there reached neither
+        a commit nor the ignored-file rescue and the finalizer deleted its
+        only copy.  The real worktree setup now refuses the snapshot,
+        removes its partial worktree and branch, and leaves the user's
+        checkout, with the submodule edit, intact."""
+        with tempfile.TemporaryDirectory() as tmp:
+            sub = _make_repo(Path(tmp) / "sub")
+            repo = _make_repo(Path(tmp) / "repo")
+            assert _git(
+                "-c", "protocol.file.allow=always",
+                "submodule", "add", str(sub), "sub", cwd=repo,
+            ).returncode == 0
+            assert _git("commit", "-q", "-m", "add submodule", cwd=repo).returncode == 0
+            (repo / "sub" / "README.md").write_text("dirty user edit\n")
+            assert _git("status", "--porcelain", cwd=repo).stdout == " M sub\n"
+
+            agent = ChatSorcarAgent("dirty-submodule-test")
+            agent.work_dir = str(repo)
+            assert agent._try_setup_worktree(repo, str(repo)) is None, (
+                "a snapshot that flattens the submodule must not be accepted"
+            )
+            assert agent._wt is None
+            assert _git("worktree", "list", "--porcelain", cwd=repo).stdout.count(
+                "worktree ") == 1, "the partial worktree was not removed"
+            assert _git("branch", "--list", "kiss/wt-*", cwd=repo).stdout.strip() == ""
+            assert (repo / "sub" / "README.md").read_text() == "dirty user edit\n"
+            assert _git("status", "--porcelain", cwd=repo).stdout == " M sub\n"
 
 
 class TestHeadSha:

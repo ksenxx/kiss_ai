@@ -20,6 +20,8 @@ const {
   fireTimers,
 } = require('./simplify2_harness');
 const {writeReport: writeReportAs} = require('./subagent_tab_helpers');
+const {pickMachine} = require('./simplify2_harness');
+const {MACHINES} = require('./picked_machine_helpers');
 
 const pages = [];
 
@@ -319,7 +321,11 @@ function testReadOnlyPreviewReportsNoBuffer() {
   const page = makePage();
   const {win, posted} = page;
   openChat(win);
-  const head = {type: 'fileContent', tabId: 'a1', path: '/ws/a/reports/chat-big.html'};
+  const head = {
+    type: 'fileContent',
+    tabId: 'a1',
+    path: '/ws/a/reports/chat-big.html',
+  };
   send(win, {
     ...head,
     name: 'chat-big.html',
@@ -379,6 +385,113 @@ function testBrowserTabIsNoEditorContext() {
   );
 }
 
+function testAFileOfAnotherMachineIsNoContextForThisOne() {
+  // The context names a file the destination can read: a run's system
+  // prompt names a path on the task's machine, and a completion is this
+  // daemon's (it reads the path from its own disk when no buffer is sent).
+  const page = makePage();
+  const {win, posted} = page;
+  send(win, {
+    type: 'tabs_state',
+    tabs: [
+      {tabId: 'a1', chatId: 'chat-1', title: 'a1', workDir: '/ws/a'},
+      {tabId: 'a2', chatId: 'chat-2', title: 'a2', workDir: '/ws/a'},
+    ],
+  });
+  send(win, {
+    type: 'configData',
+    config: {work_dir: '/ws/a', recent_work_dirs: []},
+    machine: 'laptop',
+  });
+  send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
+  // a1 shows a task of this machine; a2 is a new chat picked onto gpu-box.
+  clickTab(win, 'a1');
+  send(win, {
+    type: 'task_events',
+    events: [],
+    task: 'local task',
+    tabId: 'a1',
+    chat_id: 'chat-1',
+  });
+  send(win, {type: 'status', running: false, tabId: 'a1'});
+  clickTab(win, 'a2');
+  pickMachine(win, 'gpu-box');
+  // gpu-box answers a2's open of /same/path.py (the daemon stamps the
+  // machine on every reply a registered machine answered).
+  send(win, {
+    type: 'fileContent',
+    tabId: 'a2',
+    path: '/same/path.py',
+    name: 'path.py',
+    content: 'remote = 1\n',
+    version: 'v1',
+    machine: 'gpu-box',
+  });
+  contentTabId(win);
+  clickTab(win, 'a2');
+  const remote = submitPrompt(win, posted, 'fix it');
+  assert.strictEqual(remote.machine, 'gpu-box');
+  assert.strictEqual(
+    remote.activeFile,
+    '/same/path.py',
+    'the file is on the machine the task runs on',
+  );
+  send(win, {type: 'status', running: false, tabId: 'a2'});
+  // This daemon completes against the buffer the page sends, never
+  // against its own disk: the remote file stays the context.
+  requestGhost(page, 'rem');
+  let last = posted.filter(m => m.type === 'complete').pop();
+  assert.strictEqual(last.activeFile, '/same/path.py');
+  assert.strictEqual(last.activeFileContent, 'remote = 1\n');
+
+  // A task of the local chat runs here, where /same/path.py is another
+  // file or none: the remote file is no context for it.
+  clickTab(win, 'a1');
+  const local = submitPrompt(win, posted, 'fix it here');
+  assert.ok(!local.machine, 'the task runs on this machine');
+  assert.strictEqual(
+    local.activeFile,
+    undefined,
+    "BUG - the remote file's bare path was given to a task on this machine",
+  );
+  send(win, {type: 'status', running: false, tabId: 'a1'});
+  requestGhost(page, 'fix');
+  last = posted.filter(m => m.type === 'complete').pop();
+  assert.strictEqual(
+    last.activeFile,
+    '/same/path.py',
+    'the buffer still serves',
+  );
+
+  // A remote file without a buffer (a read-only preview) would be read
+  // from this daemon's disk: the completion names no file.
+  clickTab(win, 'a2');
+  send(win, {
+    type: 'fileContent',
+    tabId: 'a2',
+    path: '/srv/proj/reports/big.html',
+    name: 'big.html',
+    content: '<!DOCTYPE html><html><body>remote page</body></html>',
+    machine: 'gpu-box',
+  });
+  clickTab(win, 'a1');
+  send(win, {type: 'status', running: false, tabId: 'a1'});
+  requestGhost(page, 'what');
+  last = posted.filter(m => m.type === 'complete').pop();
+  assert.strictEqual(
+    last.activeFile,
+    '',
+    'BUG - a remote file this daemon would read from its own disk was named',
+  );
+  assert.strictEqual(last.activeFileContent, undefined);
+  // ...while the chat on gpu-box names it for its task.
+  clickTab(win, 'a2');
+  assert.strictEqual(
+    submitPrompt(win, posted, 'read it').activeFile,
+    '/srv/proj/reports/big.html',
+  );
+}
+
 {
   const tests = [
     testViewedFileTabIsTheEditorContext,
@@ -387,6 +500,7 @@ function testBrowserTabIsNoEditorContext() {
     testReportTabReportsItsMarkdownSource,
     testReadOnlyPreviewReportsNoBuffer,
     testBrowserTabIsNoEditorContext,
+    testAFileOfAnotherMachineIsNoContextForThisOne,
   ];
   let failures = 0;
   for (const t of tests) {

@@ -42,6 +42,7 @@ from typing import Any
 from kiss.server.autocomplete import _AutocompleteMixin, _ghost_suffix
 from kiss.server.file_index import FileIndex, FileIndexRegistry
 from kiss.server.json_printer import JsonPrinter
+from kiss.tests.server.conftest import local_view
 
 
 class _RecordingPrinter(JsonPrinter):
@@ -89,12 +90,12 @@ def _index(registry: FileIndexRegistry, work_dir: str) -> None:
     done = threading.Event()
     registry.ensure(work_dir, done.set)
     assert done.wait(10.0)
-    assert registry.view_for(work_dir) is not None
+    assert local_view(registry, work_dir) is not None
 
 
 def _paths(registry: FileIndexRegistry, work_dir: str) -> list[str]:
     """Return the current entries of *work_dir*'s view (``[]`` when unindexed)."""
-    view = registry.view_for(work_dir)
+    view = local_view(registry, work_dir)
     return [] if view is None else view.paths
 
 

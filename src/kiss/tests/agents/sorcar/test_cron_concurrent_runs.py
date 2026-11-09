@@ -12,6 +12,10 @@ Covers the scheduler behaviour added on top of the base cron agent:
 - a tick that overlaps runs from a previous tick is not skipped: it
   starts the due jobs that are idle and leaves the still-running one
   alone, which runs again on the first tick after it finishes;
+- a tick in another process over the same store (``kiss-cron --tick``
+  beside the daemon's scheduler) finds the run recorded on the job and
+  leaves it alone too; the record of a process that died mid-run is
+  dropped and the job runs;
 - the scheduler thread never blocks on a long job;
 - ``gateway_command`` turns a channel + chat into the channel CLI's
   tick command so an always-on gateway is scheduled as a command job.
@@ -25,6 +29,9 @@ daemon-client boundary of prompt jobs is captured, as in
 from __future__ import annotations
 
 import os
+import shlex
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -212,6 +219,51 @@ def test_overlapping_tick_runs_idle_jobs_and_skips_the_running_one(tmp_path: Pat
     assert tick(4.0) == 1
     assert _stored(slow["id"])["last_run_at"] == 4.0
     assert list(_runs_dir(tmp_path).iterdir()) == []
+
+
+def _tick_in_another_process(now: float) -> int:
+    """Run one scheduler tick in a second process over the same ``KISS_HOME``."""
+    completed = subprocess.run(
+        [sys.executable, "-c",
+         f"from kiss.agents.sorcar.cron_agent import tick; print(tick({now!r}))"],
+        capture_output=True, text=True, timeout=120, check=True,
+    )
+    return int(completed.stdout.strip().splitlines()[-1])
+
+
+def test_a_tick_in_another_process_leaves_the_running_job_alone(tmp_path: Path) -> None:
+    """The store, not a process's own registry, says a job is running.
+
+    A second scheduler over the same store cannot see this process's
+    threads: it must find the run recorded on the job (``running_pid``)
+    and skip it, and a record left by a process that died mid-run must
+    not block the job.
+    """
+    release = tmp_path / "release"
+    gate = shlex.quote(release.as_posix())
+    slow = _due_command_job("slow", f"until [ -f {gate} ]; do sleep 0.1; done; echo slow-done")
+    assert tick(2.0, wait=False) == 1
+    try:
+        _wait_until(lambda: running_job_ids() == {slow["id"]})
+        assert _stored(slow["id"])["running_pid"] == os.getpid()
+        # Due again for the other process: it leaves the job alone.
+        _set_job_fields(slow["id"], next_run_at=1.0)
+        assert _tick_in_another_process(3.0) == 0
+        assert _stored(slow["id"])["last_run_at"] == 2.0
+        assert running_job_ids() == {slow["id"]}
+    finally:
+        release.touch()
+    _wait_until(lambda: running_job_ids() == set())
+    assert _stored(slow["id"])["last_summary"] == "slow-done"
+    assert "running_pid" not in _stored(slow["id"])
+
+    # The record of a process that died mid-run is stale: the job runs.
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    assert dead.wait() == 0
+    _set_job_fields(slow["id"], next_run_at=1.0, running_pid=dead.pid)
+    assert _tick_in_another_process(4.0) == 1
+    assert _stored(slow["id"])["last_run_at"] == 4.0
+    assert "running_pid" not in _stored(slow["id"])
 
 
 def test_scheduler_thread_does_not_block_on_long_job(tmp_path: Path) -> None:

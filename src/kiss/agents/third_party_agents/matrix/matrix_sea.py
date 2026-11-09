@@ -703,15 +703,16 @@ class MatrixChannelBackend(ToolMethodBackend):
         """Send a Matrix text message.
 
         Raises:
-            RuntimeError: If the homeserver rejects the send (nio returns an
-                error response such as ``RoomSendError`` instead of raising;
-                a 429 included, since the client disables nio's internal
-                retry), so the channel runner's at-least-once delivery
-                ledger does not count the reply as delivered and can
-                redeliver it.
+            RuntimeError: If no client is connected, or if the homeserver
+                rejects the send (nio returns an error response such as
+                ``RoomSendError`` instead of raising; a 429 included, since
+                the client disables nio's internal retry), so the channel
+                runner's at-least-once delivery ledger does not count the
+                reply as delivered and can redeliver it.
         """
-        if self._client:  # pragma: no branch
-            self._room_send(channel_id, "m.text", text)
+        if not self._client:
+            raise RuntimeError("Matrix client not connected")
+        self._room_send(channel_id, "m.text", text)
 
     def _room_send(self, room_id: str, msgtype: str, text: str) -> Any:
         """Send *text* to *room_id* as an ``m.room.message`` of *msgtype*.

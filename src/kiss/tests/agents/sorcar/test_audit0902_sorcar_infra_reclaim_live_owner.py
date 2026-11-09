@@ -44,6 +44,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
 )
 from kiss.core.processes import pid_alive, process_identity
+from kiss.tests.conftest import posix_only
 
 
 def _make_repo(path: Path) -> Path:
@@ -291,6 +292,40 @@ class TestOwnerLiveness:
             owner.kill()
             owner.wait(timeout=30)
         assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
+
+    @posix_only("the identity probe is `ps`, which the test shims; Windows reads kernel32")
+    def test_unavailable_identity_probe_keeps_the_live_owner(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A stamped owner whose pid is alive but whose identity cannot be
+        read right now (``ps`` failing) is still the owner: a missing
+        fingerprint is not evidence of a recycled pid (audit A09)."""
+        branch, wt_dir = self._create_worktree()
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            identity = process_identity(owner.pid)
+            assert identity is not None
+            for key, value in (
+                ("kiss-owner-pid", str(owner.pid)),
+                ("kiss-owner-identity", f"{owner.pid}:{identity}"),
+            ):
+                subprocess.run(
+                    ["git", "-C", str(self.repo), "config",
+                     f"branch.{branch}.{key}", value],
+                    capture_output=True, check=True,
+                )
+            shim = Path(self.tmp) / "bin"
+            shim.mkdir()
+            (shim / "ps").write_text("#!/bin/sh\nexit 1\n")
+            (shim / "ps").chmod(0o755)
+            monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
+            assert process_identity(owner.pid) is None
+            assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+            assert wt_dir.is_dir()
+            assert GitWorktreeOps.branch_exists(self.repo, branch)
+        finally:
+            owner.kill()
+            owner.wait(timeout=30)
 
     def test_own_worktree_without_exclusion_is_still_reclaimed(self) -> None:
         """Within one process the exclusion set is authoritative: a

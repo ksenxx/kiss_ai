@@ -49,6 +49,7 @@ from kiss.tests.agents.sorcar.test_audit1012_sorcar_core_machine_link_send impor
 )
 from kiss.tests.conftest import find_free_port
 from kiss.tests.local_ws import make_test_tls, open_local_connection
+from kiss.tests.server.remote_tabs_probe import machine_of
 
 _ROUNDS = 40
 _CLOSE_FRAME = b"\x88\x02\x03\xe8"  # close, code 1000
@@ -174,8 +175,8 @@ class TestRemoteTabLostAtBind(IsolatedAsyncioTestCase):
             self.assertIn("flap", error["text"])
             # Whichever thread won: the dead stream is not the tab's binding.
             deadline = time.monotonic() + 2.0
-            while remote_tabs.machine_of(tab_id) and time.monotonic() < deadline:
+            while machine_of(remote_tabs, tab_id) and time.monotonic() < deadline:
                 await asyncio.sleep(0.02)
-            if remote_tabs.machine_of(tab_id):
+            if machine_of(remote_tabs, tab_id):
                 stuck.append(tab_id)
         self.assertEqual(stuck, [], f"{len(stuck)}/{_ROUNDS} tabs kept a dead stream as binding")

@@ -99,16 +99,19 @@ class TestFailedBatchJournal(_TempDbTestBase):
             "timestamp": batch[0][2],
             "origin_db_path": th._current_db_path(),
         }]
-        # Recovery: once the DB accepts writes again, new events persist.
+        # Recovery: once the DB accepts writes again, new events persist,
+        # behind the journalled one (replayed first, so the transcript
+        # keeps its order), and the journal is drained.
         db.execute("DROP TRIGGER reject_events")
         th._persist_batch_with_retry(
             [(task_id, json.dumps({"type": "ok"}), time.time(),
               th._current_db_path())]
         )
-        count = db.execute(
-            "SELECT COUNT(*) AS n FROM events WHERE task_id = ?", (task_id,),
-        ).fetchone()["n"]
-        assert count == 1
+        rows = db.execute(
+            "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq", (task_id,),
+        ).fetchall()
+        assert [json.loads(r["event_json"])["type"] for r in rows] == ["t", "ok"]
+        assert not th._journal_has_pending_rows(str(sidecar))
 
 
 class TestWindowsCompatibility:

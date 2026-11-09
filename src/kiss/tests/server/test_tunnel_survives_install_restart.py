@@ -45,7 +45,7 @@ from kiss.core.processes import pid_alive
 from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import install_fake_cloudflared, posix_only
 
 # Driver process: stands in for a kiss-web daemon whose event loop is
 # wedged (a callback blocking the loop thread — the exact scenario the
@@ -282,10 +282,13 @@ class TestAdoptionPreservesUrlAcrossRestart(unittest.TestCase):
         old_pidfile = ws._CLOUDFLARED_PIDFILE
         tmp = tempfile.TemporaryDirectory()
         ws._CLOUDFLARED_PIDFILE = Path(tmp.name) / "cloudflared.pid"
-        link = Path(tmp.name) / "cloudflared"
-        os.symlink(sys.executable, link)
+        # The adoption path verifies the recorded pid's identity by
+        # executable name, so the stand-in is the interpreter installed
+        # under the name ``cloudflared`` (a symlink would do on POSIX,
+        # but Windows reports its *target* as the process image).
+        fake = install_fake_cloudflared(Path(tmp.name), "import time; time.sleep(60)\n")
         proc = subprocess.Popen(
-            [str(link), "-c", "import time; time.sleep(60)"],
+            [str(fake)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

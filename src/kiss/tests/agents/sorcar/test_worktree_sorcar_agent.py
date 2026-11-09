@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import shutil
 import subprocess
 import sys
@@ -16,14 +18,22 @@ from types import FrameType
 from typing import Any, cast
 
 import pytest
+from websockets.exceptions import ConnectionClosed
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar import agent_dispatch, cron_agent
+from kiss.agents.sorcar.agent_dispatch import (
+    DEFAULT_AGENT_PATH,
+    live_agent_jobs,
+    make_run_agent_tool,
+)
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _git,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -387,6 +397,92 @@ def test_worktree_properties_survive_a_merge_between_lookup_and_dereference() ->
         if agent._wt_pending:
             agent.discard()
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class _HoldingDaemon(RecordingDaemon):
+    """A daemon stand-in whose sub-task runs until :meth:`release`.
+
+    The ``run_agent(wait="false")`` job of the parent stays live (its
+    result unrecorded) for as long as the test wants: the daemon sends
+    the running status, then the result only once released.
+    """
+
+    def __init__(self) -> None:
+        self.running = threading.Event()
+        self._release = threading.Event()
+        super().__init__()
+
+    async def _handle(self, ws: Any) -> None:
+        try:
+            command = json.loads(await ws.recv())
+        except (ConnectionClosed, ValueError):
+            return
+        self.commands.append(command)
+        tab_id = command.get("tabId", "")
+        try:
+            await ws.send(json.dumps({"type": "status", "running": True, "tabId": tab_id}))
+            self.running.set()
+            await asyncio.get_running_loop().run_in_executor(None, self._release.wait)
+            for event in (self.result, {"type": "status", "running": False}):
+                await ws.send(json.dumps({**event, "tabId": tab_id}))
+            async for line in ws:
+                self.commands.append(json.loads(line))
+        except ConnectionClosed:
+            pass
+
+    def release(self) -> None:
+        """Let the held sub-task finish."""
+        self._release.set()
+
+
+def test_commit_and_merge_is_refused_once_while_a_sub_agent_job_is_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live ``run_agent`` job holds the worktree: ``commit_and_merge`` is refused once.
+
+    A sub-task inherits its caller's worktree and may still be writing
+    there; a merge now commits without those writes and removes the
+    directory under it (audit 2026-11-07, A13_astra-1).  The first
+    ``commit_and_merge`` with live jobs is refused the way ``finish``
+    is, naming the jobs; a second call passes so the model is never
+    trapped, and once the job finished the merge goes through unasked.
+    """
+    monkeypatch.setenv("KISS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(tmp_path / "no-daemon.json"))
+    daemon = _HoldingDaemon()
+    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", str(daemon.endpoint_file))
+    agent = SorcarAgent("test-merge-live-job")
+    try:
+        agent.work_dir = str(_make_repo(tmp_path / "repo"))
+        assert agent.create_worktree().startswith("Created worktree")
+        wt = agent._wt
+        assert wt is not None
+        run_agent = make_run_agent_tool(agent.work_dir, agent)
+        notice = run_agent("child", DEFAULT_AGENT_PATH, wait="false", timeout="60")
+        assert daemon.running.wait(30), notice
+        (job,) = live_agent_jobs(agent)
+        refusal = agent._guard_tool_call("commit_and_merge", {})
+        assert isinstance(refusal, str), refusal
+        assert refusal.startswith(
+            "Error: commit_and_merge rejected — run_agent jobs are still running: "
+        ), refusal
+        assert f"{job.job_id} (sorcar, running " in refusal, refusal
+        assert "agent_job(id, 'wait') collects a job's result and 'kill' stops it" in refusal
+        assert agent._wt is wt and wt.wt_dir.is_dir()
+        # One refusal per run: the second call passes with the job still live.
+        assert agent._guard_tool_call("commit_and_merge", {}) is None
+        # A finished job no longer holds the worktree.
+        daemon.release()
+        assert agent_dispatch.join_agent_job(job, 30), job.job_id
+        assert live_agent_jobs(agent) == []
+        assert "Successfully merged" in agent.commit_and_merge()
+        assert agent._wt is None
+    finally:
+        daemon.release()
+        agent_dispatch.kill_jobs_of(agent)
+        if agent._wt_pending:
+            agent.discard()
+        daemon.close()
 
 
 

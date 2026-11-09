@@ -19,8 +19,9 @@ fixed reply, so the tests can steer the transcript exactly:
 - a transcript WITHOUT the wake word is rejected: empty ``text`` (before
   the dual check, whatever the STT hallucinated was submitted as the
   user's command);
-- a non-English transcript keeps the single local check, because
-  gpt-audio may drop the English wake word while translating;
+- a non-English transcript without the wake word is accepted only when
+  both browser recognizers heard it (``wakeAgreed``), because gpt-audio
+  may drop the English wake word while translating;
 - the audio attached to the API request is the WAV of the PCM handed
   in, proving the capture itself is what gets transcribed.
 
@@ -342,7 +343,11 @@ class TestDualCheckEndToEnd(unittest.TestCase):
     """The real transcription agent against a canned transcription API."""
 
     def _transcribe(
-        self, reply_text: str, pcm: bytes, expect_wake_prefix: bool = True,
+        self,
+        reply_text: str,
+        pcm: bytes,
+        expect_wake_prefix: bool = True,
+        wake_agreed: bool = False,
     ) -> tuple[dict[str, Any], list[bytes]]:
         """Run ``transcribe_pcm`` on *pcm* with the API answering *reply_text*."""
         canned = CannedOpenAiServer(reply_text)
@@ -350,7 +355,11 @@ class TestDualCheckEndToEnd(unittest.TestCase):
         os.environ["OPENAI_BASE_URL"] = f"http://127.0.0.1:{canned.port}/v1"
         os.environ["OPENAI_API_KEY"] = "sk-kiss-dual-check-test"
         try:
-            result = transcribe_pcm(pcm, expect_wake_prefix=expect_wake_prefix)
+            result = transcribe_pcm(
+                pcm,
+                expect_wake_prefix=expect_wake_prefix,
+                wake_agreed=wake_agreed,
+            )
         finally:
             for key, value in saved.items():
                 if value is None:
@@ -380,12 +389,24 @@ class TestDualCheckEndToEnd(unittest.TestCase):
         )
         self.assertEqual(result, {"text": "please open the editor.", "language": "en"})
 
-    def test_non_english_speech_keeps_the_single_local_check(self) -> None:
+    def test_non_english_speech_needs_both_browser_recognizers(self) -> None:
         # gpt-audio may drop the English wake word while it
         # TRANSLATES non-English speech, so an unconfirmed transcript
-        # with a non-English language tag must still be reported.
-        result, _bodies = self._transcribe("fr\nHello everyone.", _tone_pcm(1.0))
+        # with a non-English language tag is still reported when both
+        # browser recognizers heard the word (wakeAgreed).
+        result, _bodies = self._transcribe(
+            "fr\nHello everyone.", _tone_pcm(1.0), wake_agreed=True,
+        )
         self.assertEqual(result, {"text": "Hello everyone.", "language": "fr"})
+        # Without that agreement it is a false wake, like the Russian
+        # and Bengali background talk accepted on 2026-11-08.
+        result, _bodies = self._transcribe("ru\nOh, my toy fell down.", _tone_pcm(1.0))
+        self.assertEqual(result, {"text": "", "language": None})
+        # Agreement never rescues an English transcript without the word.
+        result, _bodies = self._transcribe(
+            "en\nPlease open the editor.", _tone_pcm(1.0), wake_agreed=True,
+        )
+        self.assertEqual(result, {"text": "", "language": None})
 
     def test_the_handed_in_audio_is_what_gets_transcribed(self) -> None:
         pcm = _tone_pcm(1.0)

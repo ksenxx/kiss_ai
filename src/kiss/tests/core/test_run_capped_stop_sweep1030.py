@@ -30,23 +30,32 @@ test found the guard leaked.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
 from functools import partial
+from pathlib import Path
 from types import CodeType, FrameType
 from typing import Any
 
 import pytest
 
 from kiss.core.processes import (
+    IS_WINDOWS,
+    SIGKILL,
     CappedOutput,
     _capped_timeout,
+    _wait_exited,
     kill_process_tree,
+    pid_alive,
     popen_process_group,
     run_capped,
+    run_process_group,
+    start_process_group,
 )
 from kiss.tests.lock_injection import inject, lock_is_free
 
@@ -96,22 +105,37 @@ class _GuardStop:
 
 
 class _Worker(threading.Thread):
-    """Run *target* with *hook* profiling this thread only, keeping what it raised."""
+    """Run *target* with *hook* profiling this thread only, keeping what it raised.
 
-    def __init__(self, target: Callable[[], object], hook: _GuardStop) -> None:
+    *log*, when given, traces this thread (``sys.settrace``): CPython
+    uninstalls a profile function that raises, and the Stop injected
+    while *hook* parks the thread is raised inside *hook*, so a logger
+    that must go on observing calls after the Stop is installed apart.
+    """
+
+    def __init__(
+        self,
+        target: Callable[[], object],
+        hook: Callable[[FrameType, str, Any], None],
+        log: Callable[[FrameType, str, Any], None] | None = None,
+    ) -> None:
         super().__init__(daemon=True)
         self.target = target
         self.hook = hook
+        self.log = log
         self.raised: BaseException | None = None
 
     def run(self) -> None:
         sys.setprofile(self.hook)
+        if self.log is not None:
+            sys.settrace(self.log)
         try:
             self.target()
         except BaseException as exc:  # the injected Stop is the expected outcome
             self.raised = exc
         finally:
             sys.setprofile(None)
+            sys.settrace(None)
 
 
 def _wait_in_acquire(worker: threading.Thread, caller: CodeType) -> None:
@@ -229,3 +253,301 @@ def test_stop_while_waiting_on_a_quiet_pipe_kills_and_reaps_the_child() -> None:
         kill_process_tree(proc)  # pipe EOF releases a wait the Stop could not
         worker.join(10)
         proc.wait(10)
+
+
+class _ThreadStartStop:
+    """Profile hook parking the worker as it enters *code* (``Thread.start``: its timer's).
+
+    ``run_capped`` has started its child by then; the Stop is injected
+    while the worker is parked and is raised the moment the hook
+    returns, i.e. from inside ``timer.start()``.
+    """
+
+    def __init__(self, code: CodeType = threading.Thread.start.__code__) -> None:
+        self.code = code
+        self.parked = threading.Event()
+        self.resume = threading.Event()
+        self.proc: subprocess.Popen[bytes] | None = None
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> None:
+        if event != "call" or frame.f_code is not self.code:
+            return
+        proc = _stack_local(frame, "proc")
+        if not isinstance(proc, subprocess.Popen):
+            return
+        sys.setprofile(None)
+        self.proc = proc
+        self.parked.set()
+        self.resume.wait(30)
+
+
+class _GroupKillLog:
+    """Trace or profile hook logging, per ``kill_process_tree`` call, whether the leader was reaped.
+
+    ``proc.returncode`` at the call: ``None`` while the leader is
+    unreaped (its pid, the group id, is still its own), an exit status
+    once a ``wait`` reaped it (the group id may be a stranger's by now,
+    see :func:`kiss.core.processes.kill_process_group`).
+    """
+
+    def __init__(self) -> None:
+        self.group_kills: list[int | None] = []
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> None:
+        if event == "call" and frame.f_code is kill_process_tree.__code__:
+            self.group_kills.append(frame.f_locals["proc"].returncode)
+
+
+class _SpawnReturnStop:
+    """Profile hook parking the worker as the function compiled to *code* returns.
+
+    ``Popen.__init__`` by default: the child is running.  The Stop
+    injected while the worker is parked is raised the moment the hook
+    returns, i.e. as that call returns to its caller, before the caller
+    binds its result to any name.
+    """
+
+    def __init__(self, code: CodeType = subprocess.Popen.__init__.__code__) -> None:
+        self.code = code
+        self.parked = threading.Event()
+        self.resume = threading.Event()
+        self.proc: subprocess.Popen[Any] | None = None
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> None:
+        if event != "return" or frame.f_code is not self.code:
+            return
+        sys.setprofile(None)
+        self.proc = _stack_local(frame, "proc")
+        self.parked.set()
+        self.resume.wait(30)
+
+
+def _stop_while_parked(
+    hook: _ThreadStartStop | _SpawnReturnStop,
+    run: Callable[[], object],
+    log: _GroupKillLog | None = None,
+) -> tuple[_Worker, subprocess.Popen[Any]]:
+    """Run *run* on a worker, Stop it where *hook* parks it, let it go on; the worker and child.
+
+    *log* observes the worker's group kills throughout (see
+    :class:`_Worker`).  Asserts that the Stop was raised and that the
+    child is gone (:func:`_assert_stopped_child_is_gone`) before the
+    cleanup in the ``finally``, which would otherwise reap a child the
+    product left running and so hide the leak from that assertion.
+    Fails when the worker is still running 10 s after the Stop; a child
+    the Stop left running is killed and reaped before that failure.
+    """
+    worker = _Worker(run, hook, log)
+    worker.start()
+    assert hook.parked.wait(30), "the worker never reached the parking point"
+    proc = hook.proc
+    assert proc is not None
+    try:
+        assert inject(worker) == 1
+        hook.resume.set()
+        worker.join(10)
+        assert not worker.is_alive(), "the task thread hung after the Stop"
+        _assert_stopped_child_is_gone(worker, proc)
+    finally:
+        if proc.returncode is None:
+            kill_process_tree(proc)
+            worker.join(10)
+            proc.wait(10)
+    return worker, proc
+
+
+def _assert_stopped_child_is_gone(worker: _Worker, proc: subprocess.Popen[Any]) -> None:
+    """The Stop was raised, the child (a minute's sleeper) killed and reaped, its pipes closed.
+
+    Left open, the pipes live as long as the ``Popen``, which the
+    raised Stop's traceback keeps alive for as long as the caller
+    keeps the error.  ``returncode`` is read as it stands: a ``poll()``
+    would reap the child itself and so pass a product that did not.
+    """
+    assert isinstance(worker.raised, KeyboardInterrupt)
+    assert proc.returncode is not None, "the child was left running after the Stop"
+    assert proc.stdout is not None and proc.stdout.closed, "the child's stdout was left open"
+    assert proc.stderr is None or proc.stderr.closed, "the child's stderr was left open"
+
+
+@pytest.mark.parametrize("keep_stderr", [0, 100])
+def test_stop_while_starting_the_timer_kills_and_reaps_the_child(keep_stderr: int) -> None:
+    """A Stop landing between the spawn and the read loop still takes the child down.
+
+    ``Thread.start`` blocks on the new thread's ``_started`` event, so
+    an injected Stop is delivered right there; the setup ran before the
+    ``try`` whose handler kills and reaps the child, which was left
+    running (its whole 60 s) with its stdout pipe open.  With
+    ``keep_stderr`` the first thread started is the stderr drain: a
+    Stop raised at its start leaves it never run, and the handler,
+    which left stderr to that drain, kept the pipe open.
+    """
+    _stop_while_parked(
+        _ThreadStartStop(),
+        partial(
+            run_capped, _py("import time; time.sleep(60)"),
+            limit=1000, timeout=60, keep_stderr=keep_stderr,
+        ),
+    )
+
+
+@pytest.mark.parametrize("keep_stderr", [0, 100])
+def test_stop_while_creating_the_timer_kills_and_reaps_the_child(keep_stderr: int) -> None:
+    """A Stop landing at a call between the spawn and the ``try`` still takes the child down.
+
+    The deadline, the drain's stop event and the timeout timer were set
+    up after the spawn and before the ``try``: three calls, each a
+    check point where an injected Stop is raised, with nothing to kill
+    the child it then left running (its timer never started).  Those
+    calls now run inside the ``try``, or before the spawn.  With
+    ``keep_stderr`` the stderr pipe exists but its drain thread does
+    not yet: the pipe is the handler's to close.
+    """
+    _stop_while_parked(
+        _ThreadStartStop(threading.Timer.__init__.__code__),
+        partial(
+            run_capped, _py("import time; time.sleep(60)"),
+            limit=1000, timeout=60, keep_stderr=keep_stderr,
+        ),
+    )
+
+
+def _runners(cmd: list[str]) -> list[Any]:
+    """Both runners of *cmd* (stderr kept, so ``run_capped`` opens both pipes), as test params."""
+    return [
+        pytest.param(partial(run_process_group, cmd, timeout=60), id="run_process_group"),
+        pytest.param(
+            partial(run_capped, cmd, limit=1000, timeout=60, keep_stderr=100), id="run_capped"
+        ),
+    ]
+
+
+@pytest.mark.parametrize("run", _runners(_py("import time; time.sleep(60)")))
+def test_stop_landing_as_the_spawn_returns_kills_and_reaps_the_child(
+    run: partial[Any],
+) -> None:
+    """A Stop raised as the spawn returns, before any caller holds the child, takes it down.
+
+    CPython checks for an injected exception at the end of the CALL
+    that spawned the child, before its result is bound to a name: a
+    Stop landing there (or inside ``Popen.__init__`` once the child was
+    forked) left no ``Popen`` for anyone to kill, so the child ran on,
+    a minute here, unreaped.  ``start_process_group`` now initialises a
+    ``Popen`` made before the spawn and kills what it holds on any
+    exception, closing the pipes with it.
+
+    That handler kills the group and reaps the leader before the Stop
+    reaches the runner's own handler: the group is signalled once, by
+    the handler that still owns the leader's pid.  ``run_capped``
+    signalled it again after the reap, when the pid (the group id)
+    could already be a stranger's.  On Windows the reaped leader's pid
+    stays the ``Popen`` handle's, and its Job Object may still hold
+    descendants (see :func:`kiss.core.processes.pid_handed_on`), so
+    ``run_capped``'s handler ends the group once more there, with the
+    leader's exit status set; ``run_process_group`` kills only an
+    unreaped leader on every platform.
+    """
+    log = _GroupKillLog()
+    _stop_while_parked(_SpawnReturnStop(), run, log)
+    if IS_WINDOWS and run.func is run_capped:  # pragma: no cover — Windows-only branch
+        assert len(log.group_kills) == 2, "the Job Object of the reaped leader was not ended"
+        assert log.group_kills[0] is None and log.group_kills[1] is not None
+    else:
+        assert log.group_kills == [None], "the group was signalled after its leader was reaped"
+
+
+@pytest.mark.parametrize("run", _runners(_py("import time; time.sleep(60)")))
+def test_stop_landing_as_the_spawning_call_returns_kills_and_reaps_the_child(
+    run: Callable[[], object],
+) -> None:
+    """A Stop raised as the spawning call returns to ``run_*`` still takes the child down.
+
+    The cleanup inside ``popen_process_group`` covers the spawn, not
+    its own return: a Stop raised there left its caller without the
+    child (``proc = popen_process_group(...)`` never bound it) and
+    without a handler (the assignment stood before the caller's
+    ``try``), so the child ran on with both pipes open.  The callers
+    now make the ``Popen`` first and have :func:`start_process_group`
+    initialise it inside their ``try``.
+    """
+    log = _GroupKillLog()
+    _stop_while_parked(_SpawnReturnStop(start_process_group.__code__), run, log)
+    assert log.group_kills == [None], "the group was signalled after its leader was reaped"
+
+
+_LEAVING_LAUNCHER = """\
+import pathlib, subprocess, sys
+child = subprocess.Popen(
+    [sys.executable, "-I", "-S", "-c", "import time; time.sleep(60)"],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+pathlib.Path(sys.argv[1]).write_text(str(child.pid))
+"""
+"""A launcher leaving a minute's sleeper in its group (its Job Object); writes its pid, exits."""
+
+
+def _running(pid: int) -> bool:
+    """Whether *pid* is alive and, where ``/proc`` tells, not a zombie awaiting init's reap."""
+    if not pid_alive(pid):
+        return False
+    if not Path("/proc/self").exists():
+        return True
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:  # reaped between the two looks
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+
+def test_stop_landing_as_the_exited_leader_is_seen_takes_its_descendants_down(
+    tmp_path: Path,
+) -> None:
+    """A Stop raised once the leader exited, a descendant still running, kills the group.
+
+    The launcher left a sleeper in its process group (its Job Object on
+    Windows) and exited; ``run_capped`` saw the exit through
+    :func:`_wait_exited`, which does not reap the leader, and the Stop
+    lands as that returns.  The handler must still kill the group: on
+    POSIX the unreaped leader keeps the group id its own
+    (``returncode`` is ``None`` at the kill); on Windows
+    ``exit_status_unreaped`` read the status with ``poll``, which set
+    ``returncode`` while the Job Object still held the sleeper, and the
+    handler took that for a reap and skipped the kill, leaving the
+    sleeper to its minute (:func:`kiss.core.processes.pid_handed_on`
+    tells the two apart).
+    """
+    marker = tmp_path / "grandchild.pid"
+    log = _GroupKillLog()
+    _stop_while_parked(
+        _SpawnReturnStop(_wait_exited.__code__),
+        partial(run_capped, _py(_LEAVING_LAUNCHER) + [str(marker)], limit=1000, timeout=60),
+        log,
+    )
+    grandchild = int(marker.read_text())
+    try:
+        deadline = time.monotonic() + 10
+        while _running(grandchild) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not _running(grandchild), "the exited leader's descendant outlived the Stop"
+        assert log.group_kills == [0 if IS_WINDOWS else None]
+    finally:
+        if _running(grandchild):
+            with contextlib.suppress(OSError):
+                os.kill(grandchild, SIGKILL)
+
+
+@pytest.mark.parametrize("run", _runners(["/nonexistent/kiss-no-such-command"]))
+def test_a_command_that_could_not_start_is_not_signalled(run: Callable[[], object]) -> None:
+    """A failed exec leaves a ``Popen`` with a pid and reaped already; nobody signals its group.
+
+    ``Popen.__init__`` forks, learns that the exec failed, reaps the
+    child and raises with the ``Popen`` holding its pid and exit
+    status.  ``run_capped``'s handler saw the pid and killed the group
+    of that reaped pid, which could already be a stranger's.
+    """
+    log = _GroupKillLog()
+    worker = _Worker(run, log)
+    worker.start()
+    worker.join(10)
+    assert isinstance(worker.raised, FileNotFoundError)
+    assert log.group_kills == [], "the group of a reaped pid was signalled"

@@ -39,6 +39,21 @@ function makePage() {
   return {win, posted};
 }
 
+/** Start a Bash panel with independently scrollable chat and output bodies. */
+function runningBashPanel() {
+  const {win, posted} = makePage();
+  const O = win.document.getElementById('output');
+  const geoO = {sh: 3000, ch: 500};
+  fakeGeometry(O, geoO);
+  startRunningTask(win, posted);
+
+  send(win, {type: 'tool_call', name: 'Bash', command: 'make -j'});
+  const bp = O.querySelector('.bash-panel-content');
+  const geoB = {sh: 1000, ch: 200};
+  fakeGeometry(bp, geoB);
+  return {win, O, bp, geoB};
+}
+
 function userScroll(win, el, top) {
   el.scrollTop = top;
   el.dispatchEvent(new win.Event('scroll'));
@@ -729,16 +744,7 @@ async function testStaticSubpanelsAutoScroll() {
 // --------------------------------------------------------------------
 
 async function testBashFlushOnNextToolCallScrolls() {
-  const {win, posted} = makePage();
-  const O = win.document.getElementById('output');
-  const geoO = {sh: 3000, ch: 500};
-  fakeGeometry(O, geoO);
-  startRunningTask(win, posted);
-
-  send(win, {type: 'tool_call', name: 'Bash', command: 'make -j'});
-  const bp = O.querySelector('.bash-panel-content');
-  const geoB = {sh: 1000, ch: 200};
-  fakeGeometry(bp, geoB);
+  const {win, O, bp, geoB} = runningBashPanel();
   // No frame elapses between the output and the next tool_call: the
   // pending buffer is flushed synchronously into the OLD bash panel.
   send(win, {type: 'system_output', text: 'tail line\n'});
@@ -939,16 +945,7 @@ async function testTabRestoreLandsAtEnd() {
 // --------------------------------------------------------------------
 
 async function testSubpanelStaleLockReleasedByShrink() {
-  const {win, posted} = makePage();
-  const O = win.document.getElementById('output');
-  const geoO = {sh: 3000, ch: 500};
-  fakeGeometry(O, geoO);
-  startRunningTask(win, posted);
-
-  send(win, {type: 'tool_call', name: 'Bash', command: 'make -j'});
-  const bp = O.querySelector('.bash-panel-content');
-  const geoB = {sh: 1000, ch: 200};
-  fakeGeometry(bp, geoB);
+  const {win, bp, geoB} = runningBashPanel();
   send(win, {type: 'system_output', text: 'line 1\n'});
   await nextFrames(win);
 

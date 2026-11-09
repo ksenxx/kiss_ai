@@ -59,6 +59,7 @@ from kiss.server.agent_state import AgentState
 from kiss.server.file_index import FileIndexRegistry
 from kiss.server.json_printer import JsonPrinter, _BashState
 from kiss.server.server import AgentServer
+from kiss.tests.server.conftest import local_view
 
 
 class _CapturePrinter(JsonPrinter):
@@ -385,9 +386,9 @@ def test_f13_save_config_work_dir_syncs_index_and_printer(
         assert server.work_dir == new_dir
         assert printer.work_dir == new_dir
         deadline = time.monotonic() + 10
-        while registry.view_for(new_dir) is None and time.monotonic() < deadline:
+        while local_view(registry, new_dir) is None and time.monotonic() < deadline:
             time.sleep(0.01)
-        view = registry.view_for(new_dir)
+        view = local_view(registry, new_dir)
         assert view is not None and "new.py" in view.paths, (
             "saveConfig must pre-warm the new work dir's file index"
         )

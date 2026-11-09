@@ -69,29 +69,25 @@ function bindTab(win, tabId, bindKind, extra) {
   });
 }
 
-function workDirOnMentionAfterGlobalChange(initialWd, newWd, bindKind) {
+function workDirOnMentionAfterGlobalChange(bindKind) {
   const {win, posted} = makePage();
   const tabId = initialTabId(posted);
   assert.ok(tabId, 'main.js must announce the initial tab id');
-  sendConfig(win, initialWd);
+  sendConfig(win, '/path/initial');
   bindTab(win, tabId, bindKind);
   assert.strictEqual(
     mentionWorkDir(win, posted),
-    initialWd,
+    '/path/initial',
     'before the change the tab runs in the global directory',
   );
-  sendConfig(win, newWd);
+  sendConfig(win, '/path/new');
   const wd = mentionWorkDir(win, posted);
   win.close();
   return wd;
 }
 
 function testGlobalWinsAfterChange_ClearBind() {
-  const wd = workDirOnMentionAfterGlobalChange(
-    '/path/initial',
-    '/path/new',
-    'clear',
-  );
+  const wd = workDirOnMentionAfterGlobalChange('clear');
   assert.strictEqual(
     wd,
     '/path/new',
@@ -104,11 +100,7 @@ function testGlobalWinsAfterChange_ClearBind() {
 }
 
 function testGlobalWinsAfterChange_TaskEventsBind() {
-  const wd = workDirOnMentionAfterGlobalChange(
-    '/path/initial',
-    '/path/new',
-    'task_events',
-  );
+  const wd = workDirOnMentionAfterGlobalChange('task_events');
   assert.strictEqual(
     wd,
     '/path/new',

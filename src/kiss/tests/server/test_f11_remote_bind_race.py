@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 
+from kiss.tests.server.remote_tabs_probe import machine_of
 from kiss.tests.server.test_remote_tabs import RemoteTabsHarness
 
 _ROUNDS = 12
@@ -43,7 +44,7 @@ class TestConcurrentRebindsToOneMachine(RemoteTabsHarness):
             tab = f"tab-rebind-race-{i}"
             first = await asyncio.to_thread(remote_tabs._bind, tab, "box", cmd, "first")
             assert first is not None
-            self.assertEqual(remote_tabs.machine_of(tab), "box")
+            self.assertEqual(machine_of(remote_tabs, tab), "box")
             results = await asyncio.gather(
                 asyncio.to_thread(remote_tabs._bind, tab, "box2", cmd, "race a"),
                 asyncio.to_thread(remote_tabs._bind, tab, "box2", cmd, "race b"),
@@ -53,9 +54,9 @@ class TestConcurrentRebindsToOneMachine(RemoteTabsHarness):
                 f"round {i}: a bind stood down: {results}",
             )
             self.assertIs(results[0], results[1], "the loser joined the winner's stream")
-            self.assertEqual(remote_tabs.machine_of(tab), "box2")
+            self.assertEqual(machine_of(remote_tabs, tab), "box2")
             self.assertTrue(first.retired, "the old stream was retired")
             await asyncio.to_thread(remote_tabs._unbind, tab)
-            self.assertEqual(remote_tabs.machine_of(tab), "")
+            self.assertEqual(machine_of(remote_tabs, tab), "")
         self.assertEqual(remote_tabs._unbinds, {})
         self.assertEqual(remote_tabs._connecting, {})

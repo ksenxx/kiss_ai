@@ -12,14 +12,19 @@ sync-memory tests do.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
+from kiss.agents.seas.autorouter.autorouter_sea import log_decision
+from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.scripts import sync_kiss_notes as notes
 from kiss.tests.conftest import posix_only
 
@@ -235,6 +240,71 @@ def test_merge_into_file_reports_what_it_did(tmp_path: Path) -> None:
         notes.merge_note("AGENTS.md", "a", "b")
 
 
+def _merge_rows_in_thread(path: Path, theirs: str, verdicts: list[str]) -> threading.Thread:
+    """Merge the ledger text *theirs* into *path* in a thread; the verdict goes to *verdicts*."""
+    thread = threading.Thread(
+        target=lambda: verdicts.append(
+            notes.merge_into_file("MODEL_DECISIONS.md", str(path), theirs)
+        )
+    )
+    thread.start()
+    return thread
+
+
+def test_a_row_appended_while_the_ledger_is_merged_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The merge waits for the lock the agents append under and rewrites the file they hold open.
+
+    An autorouter task that is appending a row when the sync merges the
+    ledger opened the ledger before the merge; replacing the file under
+    it would leave its row in an orphaned copy.  With the ledger locked
+    by a third party, the appender waits, the merge waits too, and once
+    the lock is released every row -- ours, the remote's and the
+    appended one -- is in the one ledger.
+    """
+    monkeypatch.setenv("KISS_HOME", str(tmp_path))
+    path = tmp_path / "MODEL_DECISIONS.md"
+    path.write_text(HEADER + ROW_A)
+    verdicts: list[str] = []
+    with path.open("a") as held:
+        lock_exclusive(held)
+        appender = threading.Thread(
+            target=log_decision, args=("grep logs", "small", "m-small", "tier small 0.9")
+        )
+        appender.start()
+        merger = _merge_rows_in_thread(path, HEADER + ROW_B, verdicts)
+        merger.join(timeout=1.0)
+        assert merger.is_alive(), "the merge went ahead while an agent held the ledger"
+        unlock(held)
+    appender.join(timeout=30)
+    merger.join(timeout=30)
+    assert not appender.is_alive() and not merger.is_alive()
+    text = path.read_text()
+    assert verdicts == ["updated"]
+    assert text.startswith(HEADER + ROW_A + ROW_B)
+    assert text.count("| - | grep logs | small | m-small | tier small 0.9 | pending |") == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["MODEL_DECISIONS.md"]
+
+
+def test_two_merges_of_the_same_ledger_at_once_lose_nothing(tmp_path: Path) -> None:
+    """Two syncs merging at once (two deploys, a deploy and a remote) take turns."""
+    path = tmp_path / "MODEL_DECISIONS.md"
+    path.write_text(HEADER + ROW_A)
+    verdicts: list[str] = []
+    with path.open("a") as held:
+        lock_exclusive(held)
+        first = _merge_rows_in_thread(path, HEADER + ROW_B, verdicts)
+        second = _merge_rows_in_thread(path, HEADER + ROW_C, verdicts)
+        first.join(timeout=1.0)
+        assert first.is_alive() and second.is_alive()
+        unlock(held)
+    first.join(timeout=30)
+    second.join(timeout=30)
+    assert verdicts == ["updated", "updated"]
+    assert path.read_text() == HEADER + ROW_A + ROW_B + ROW_C
+
+
 def test_command_line_merges_two_files_and_explains_itself(tmp_path: Path) -> None:
     """``merge NAME INTO FROM`` merges on disk; anything else prints the usage."""
     into, other = tmp_path / "into.md", tmp_path / "from.md"
@@ -263,15 +333,29 @@ def test_command_line_merges_two_files_and_explains_itself(tmp_path: Path) -> No
 
 
 class Sandbox:
-    """Two fake machines and the ssh stub that connects them."""
+    """Two fake machines and the ssh stub that connects them.
 
-    def __init__(self, tmp: Path) -> None:
-        self.local = tmp / "home" / ".kiss"
-        self.remote = tmp / "rhome" / ".kiss"
+    With *brand_home* the script runs from a copy of a checkout whose
+    ``.brand/brand.json`` overlay names that state directory, and with
+    no ``KISS_HOME`` on either machine, as ``rsorcar`` runs it.
+    """
+
+    def __init__(self, tmp: Path, brand_home: str | None = None) -> None:
+        self.brand_home = brand_home
+        self.local = tmp / "home" / (brand_home or ".kiss")
+        self.remote = tmp / "rhome" / (brand_home or ".kiss")
         self.bindir = tmp / "bin"
         for directory in (self.local, self.remote, self.bindir):
             directory.mkdir(parents=True)
         self.install("ssh", FAKE_SSH)
+        self.script = SCRIPT
+        if brand_home:
+            checkout = tmp / "checkout"
+            self.script = checkout / "src" / "kiss" / "scripts" / SCRIPT.name
+            self.script.parent.mkdir(parents=True)
+            shutil.copy(SCRIPT, self.script)
+            (checkout / ".brand").mkdir()
+            (checkout / ".brand" / "brand.json").write_text(json.dumps({"home_dir": brand_home}))
 
     def install(self, name: str, text: str) -> None:
         """Put an executable stub named *name* on the sandbox PATH."""
@@ -282,16 +366,18 @@ class Sandbox:
     def run(self) -> subprocess.CompletedProcess[str]:
         """Run the real script against the sandbox remote."""
         env = dict(os.environ)
+        env.pop("KISS_HOME", None)
         env.update(
             {
                 "HOME": str(self.local.parent),
                 "REMOTE_HOME": str(self.remote.parent),
                 "PATH": f"{self.bindir}:{env['PATH']}",
-                "KISS_HOME": str(self.local),
             }
         )
+        if not self.brand_home:
+            env["KISS_HOME"] = str(self.local)
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "me@fakehost"],
+            [sys.executable, str(self.script), "me@fakehost"],
             env=env,
             capture_output=True,
             text=True,
@@ -343,3 +429,30 @@ def test_sync_with_nothing_anywhere_and_with_a_dead_connection(tmp_path: Path) -
         "warning: AUTOROUTER.md: could not read AUTOROUTER.md on me@fakehost"
     )
     assert (box.local / "AUTOROUTER.md").read_text() == EVIDENCE
+
+
+def test_a_branded_installation_syncs_the_notes_its_agents_write(tmp_path: Path) -> None:
+    """Without ``KISS_HOME`` the notes are the brand's (``~/.s10s``), on both machines.
+
+    The agents write the notes of the brand's home directory, so stale
+    copies left in ``~/.kiss`` by a stock install are neither read nor
+    touched, here or on the remote.
+    """
+    box = Sandbox(tmp_path, brand_home=".s10s")
+    (box.local / "MODEL_DECISIONS.md").write_text(HEADER + ROW_A)
+    (box.remote / "MODEL_DECISIONS.md").write_text(HEADER + ROW_B)
+    for stock in (box.local.parent / ".kiss", box.remote.parent / ".kiss"):
+        stock.mkdir()
+        (stock / "MODEL_DECISIONS.md").write_text(HEADER + ROW_C)
+        (stock / "AUTOROUTER.md").write_text(EVIDENCE)
+    result = box.run()
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "AUTOROUTER.md: neither machine has it",
+        "MODEL_DECISIONS.md: here updated, me@fakehost updated",
+    ]
+    for side in (box.local, box.remote):
+        assert (side / "MODEL_DECISIONS.md").read_text() == HEADER + ROW_A + ROW_B
+        assert sorted(p.name for p in side.iterdir()) == ["MODEL_DECISIONS.md"]
+        assert (side.parent / ".kiss" / "MODEL_DECISIONS.md").read_text() == HEADER + ROW_C
+        assert (side.parent / ".kiss" / "AUTOROUTER.md").read_text() == EVIDENCE

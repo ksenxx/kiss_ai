@@ -178,6 +178,40 @@ def _close_active_tab(page) -> None:
     page.click("#content-tab-list .active .chat-tab-close")
 
 
+def _go_offline(context, page, harness: ExplorerHarness) -> None:
+    """Take the page's network down and have the daemon close its socket;
+    return once the page shows the reconnect banner (it heard of the
+    drop).  Offline first, so the reconnect cannot land before whatever
+    the test types while the page is down."""
+    server = harness.server
+
+    async def _drop() -> None:
+        for ws in list(server._printer._remote_clients):
+            await ws.close()
+
+    context.set_offline(True)
+    harness.run(_drop())
+    page.wait_for_function(
+        "document.getElementById('kiss-server-loading')"
+        ".classList.contains('kiss-server-loading--banner')",
+        timeout=20000,
+    )
+
+
+def _back_online(context, harness: ExplorerHarness) -> None:
+    """Restore the page's network and wait until the daemon has exactly
+    one open remote client again (the reconnect's ``ready`` re-opens the
+    tab's shell on that connection)."""
+    context.set_offline(False)
+    server = harness.server
+    deadline = time.time() + 20
+    while time.time() < deadline and not (
+        server._printer._remote_clients
+        and all(w.state.name == "OPEN" for w in server._printer._remote_clients)
+    ):
+        time.sleep(0.05)
+
+
 def test_menu_item_opens_a_shell_in_the_work_dir(browser, harness):
     """The "..." menu's Terminal item opens a tab titled "Terminal"
     whose shell runs in the chat's work dir and whose pty is sized by
@@ -325,35 +359,55 @@ def test_dropped_websocket_reattaches_the_same_shell(browser, harness):
         _open_terminal(page)
         page.keyboard.type("KEEP=alive-$$; echo set-$KEEP\n")
         _wait_for_output(page, "set-alive-")
-        server = harness.server
-
-        async def _drop() -> None:
-            for ws in list(server._printer._remote_clients):
-                await ws.close()
-
-        # Offline first, so the reconnect cannot land before the typing.
-        context.set_offline(True)
-        harness.run(_drop())
-        page.wait_for_function(
-            "document.getElementById('kiss-server-loading')"
-            ".classList.contains('kiss-server-loading--banner')",
-            timeout=20000,
-        )
+        _go_offline(context, page, harness)
         page.keyboard.type("echo typed-$KEEP\n")
-        context.set_offline(False)
-        # The reconnect's ``ready`` re-opens the tab's shell on a new
-        # connection; the daemon then has exactly one remote client again.
-        deadline = time.time() + 20
-        while time.time() < deadline and not (
-            server._printer._remote_clients and
-            all(w.state.name == "OPEN" for w in server._printer._remote_clients)
-        ):
-            time.sleep(0.05)
+        _back_online(context, harness)
         _wait_for_output(page, "typed-alive-")
         page.keyboard.type("echo still-$KEEP\n")
         text = _wait_for_output(page, "still-alive-")
         assert text.count("typed-alive-") == 1, text
         assert "while this page was disconnected" not in text
+        assert _sessions(harness) == 1
+        _close_active_tab(page)
+        _wait_sessions(harness, 0)
+    finally:
+        context.close()
+
+
+def test_enter_during_an_outage_starts_a_shell_that_runs_the_command_typed_for_it(
+    browser,
+    harness,
+):
+    """Enter on an ended shell while the page is offline asks for a new
+    shell, and the command typed right after it, before the daemon can
+    have answered the ``terminalOpen`` (nothing reaches it until the
+    page is back online), runs once in that shell.  The view holds
+    keystrokes while the tab is detached (from the drop until a
+    ``terminalOpened`` on the new connection) and used to throw them
+    away with the ``attached: false`` reply of the shell Enter asked
+    for, taking it for a shell the daemon replaced behind the page's
+    back, so the command was lost (W9 F2).  What is typed for the ended
+    shell before that Enter goes nowhere, as on a connected page."""
+    context, page = _open_page(browser, harness)
+    try:
+        _open_terminal(page)
+        page.keyboard.type("exit 7\n")
+        _wait_for_output(page, "exited with code 7")
+        _wait_sessions(harness, 0)
+        _go_offline(context, page, harness)
+        page.keyboard.type("echo stale")
+        page.keyboard.press("Enter")
+        page.keyboard.type("echo reborn-$((40+2))\n")
+        page.wait_for_timeout(300)
+        # Offline: the daemon has heard nothing of the Enter or the command.
+        assert _sessions(harness) == 0
+        _back_online(context, harness)
+        _wait_for_output(page, "reborn-42")
+        page.keyboard.type("echo then-$((1+1))\n")
+        text = _wait_for_output(page, "then-2")
+        assert text.count("reborn-42") == 1, text
+        assert "stale" not in text, text
+        assert "while this page was disconnected" not in text, text
         assert _sessions(harness) == 1
         _close_active_tab(page)
         _wait_sessions(harness, 0)

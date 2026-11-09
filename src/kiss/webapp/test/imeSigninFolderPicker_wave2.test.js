@@ -19,18 +19,7 @@ const {makePage, send} = require('./simplify2_harness');
 
 const {test, report} = h.makeRunner();
 // The two forms of an IME Enter, and a key that is no Enter at all.
-const NOT_SUBMITS = [{isComposing: true}, {keyCode: 229}, {key: 'a'}];
-
-function enter(win, el, extra) {
-  el.dispatchEvent(
-    new win.KeyboardEvent('keydown', {
-      key: 'Enter',
-      bubbles: true,
-      cancelable: true,
-      ...extra,
-    }),
-  );
-}
+const NOT_SUBMITS = [...h.IME_FORMS, {key: 'a'}];
 
 /** A page whose sign-in window shows the paste box for Google. */
 function signinPage() {
@@ -59,9 +48,9 @@ test('an IME Enter in the sign-in paste box sends nothing', () => {
   const {win, posted} = signinPage();
   const input = win.document.getElementById('signin-modal-paste-input');
   input.value = 'コード-1234';
-  for (const form of NOT_SUBMITS) enter(win, input, form);
+  for (const form of NOT_SUBMITS) h.key(win, input, 'Enter', form);
   assert.strictEqual(h.ofType(posted, 'signinPaste').length, 0);
-  enter(win, input);
+  h.key(win, input, 'Enter');
   assert.deepStrictEqual(
     h.ofType(posted, 'signinPaste').map(m => m.text),
     ['コード-1234'],
@@ -84,9 +73,9 @@ test('an IME Enter in the folder picker path box lists nothing', () => {
       .map(m => m.path);
   const before = listings().length;
   input.value = '/データ';
-  for (const form of NOT_SUBMITS) enter(win, input, form);
+  for (const form of NOT_SUBMITS) h.key(win, input, 'Enter', form);
   assert.strictEqual(listings().length, before, 'only a plain Enter lists');
-  enter(win, input);
+  h.key(win, input, 'Enter');
   assert.deepStrictEqual(
     listings().slice(before),
     ['/データ'],

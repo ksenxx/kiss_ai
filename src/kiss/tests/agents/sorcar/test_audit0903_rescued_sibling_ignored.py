@@ -244,16 +244,20 @@ class TestLandRescuedFileReturnPaths:
     siblings when the exclusion could not be written.  Every reachable
     return is pinned here through the real filesystem and real git.
 
-    Two branches are NOT reachable deterministically and stay
+    Three branches are NOT reachable deterministically and stay
     documented instead of covered (per the no-test-doubles rule):
 
     * the ``FileExistsError`` recovery inside ``_land_rescued_file``
       requires an external writer to create the destination in the
-      window between the ``exists()`` check and ``os.link`` — a true
+      window between the ``lstat`` check and ``os.link`` — a true
       cross-process race with no deterministic single-process trigger;
-    * the exclusive-create copy's mid-write cleanup (``BaseException``
-      → unlink → re-raise) requires the write itself to fail (disk
-      full / I/O error) after ``os.open`` succeeded.
+    * the ``except OSError`` exclusive-create copy requires a
+      filesystem that refuses hard links: the private copy is created
+      in the destination's own directory, so ``os.link`` never crosses
+      devices (the cross-device test below lands through the link);
+    * that copy's mid-write cleanup (``BaseException`` → unlink →
+      re-raise) requires the write itself to fail (disk full / I/O
+      error) after ``os.open`` succeeded.
     """
 
     def setup_method(self) -> None:
@@ -320,12 +324,12 @@ class TestLandRescuedFileReturnPaths:
         src_dir = Path(self.tmpdir) / "adir"
         src_dir.mkdir()
         assert GitWorktreeOps._land_rescued_file(
-            src_dir, self.repo / "adir",
+            src_dir, self.repo / "adir", self.repo,
         ) is None
         assert not (self.repo / "adir").exists()
 
     def test_cross_device_copy_fallback_returns_landed_path(self) -> None:
-        """``os.link`` EXDEV falls back to the exclusive-create copy."""
+        """A source on another device lands as a private copy (one link)."""
         shm = Path("/dev/shm")
         if not shm.is_dir():  # pragma: no cover — Linux always has it
             pytest.skip("/dev/shm not available")
@@ -338,7 +342,7 @@ class TestLandRescuedFileReturnPaths:
             src = src_dir / "xdev.log"
             src.write_text("copied across devices\n")
             dst = self.repo / "xdev.log"
-            assert GitWorktreeOps._land_rescued_file(src, dst) == dst
+            assert GitWorktreeOps._land_rescued_file(src, dst, self.repo) == dst
             assert dst.read_text() == "copied across devices\n"
             assert dst.stat().st_nlink == 1, "copied, not hard-linked"
         finally:

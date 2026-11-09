@@ -68,7 +68,13 @@ def test_openrouter_prompt_tiers_conversion() -> None:
     }
     assert mod.openrouter_prompt_tiers(two_steps) == {
         "prompt_tiers": [
-            {"min_prompt_tokens": 32000, "input_price_per_1M": 0.1},
+            # ``audio`` is a tiered price (audit 2026-11-07): Gemini Pro
+            # doubles its audio rate above 200K prompt tokens.
+            {
+                "min_prompt_tokens": 32000,
+                "input_price_per_1M": 0.1,
+                "audio_input_price_per_1M": 0.3,
+            },
             {
                 "min_prompt_tokens": 256000,
                 "input_price_per_1M": 0.2,
@@ -88,7 +94,7 @@ def test_openrouter_prompt_tiers_conversion() -> None:
         {"min_prompt_tokens": True, "prompt": "0.000001"},
         {"min_prompt_tokens": "1000", "prompt": "0.000001"},
         {"prompt": "0.000001"},
-        {"min_prompt_tokens": 1000, "audio": "0.000001"},
+        {"min_prompt_tokens": 1000, "image_output": "0.000001"},
         {"min_prompt_tokens": 1000, "prompt": ""},
         "not-a-dict",
     ]

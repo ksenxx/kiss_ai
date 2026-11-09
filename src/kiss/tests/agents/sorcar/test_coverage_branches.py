@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -287,6 +288,15 @@ class TestWebUseToolResolveLocatorBranches:
         assert isinstance(result, str)
         result = browser_tool.scroll("right", amount=1)
         assert isinstance(result, str)
+
+    def test_scroll_step_count_is_capped(self, http_server, browser_tool):
+        """One call cannot hold the task thread for hours: the steps are capped."""
+        browser_tool.go_to_url(http_server + "/")
+        started = time.monotonic()
+        result = browser_tool.scroll("down", amount=10**6)
+        assert time.monotonic() - started < 60
+        assert result.startswith("Page:"), result
+        assert float(browser_tool.evaluate_script("() => scrollY")) > 0
 
     def test_screenshot_error(self, browser_tool):
         """Screenshot to invalid path."""

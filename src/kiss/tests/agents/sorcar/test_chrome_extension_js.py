@@ -41,6 +41,7 @@ TEST_PAGE = """<!doctype html><html><head><title>Snapshot Test Page</title></hea
 <div style="cursor:pointer">Pointer card</div>
 <div style="cursor:pointer" aria-label="Close dialog"><svg><path d="M1 1l8 8"/></svg></div>
 <div style="cursor:pointer" id="bare-icon"><i></i></div>
+<button style="cursor:pointer">Export report<span style="display:none">hidden label</span></button>
 </body></html>"""
 
 
@@ -90,6 +91,10 @@ def test_snapshot_lists_visible_interactive_elements(page) -> None:
     assert '<input type=checkbox> [checked]' in snap
     assert '<div> "edit me"' in snap
     assert '<button> "icon-only-button"' in snap
+    # A hidden descendant (text, cursor inherited) must not suppress its
+    # visible clickable ancestor: the button stays, the hidden label goes.
+    assert '<button> "Export report"' in snap
+    assert "hidden label" not in snap
     # Non-visible and non-interactive elements are excluded.
     assert "Hidden by display" not in snap
     assert "Hidden by visibility" not in snap
@@ -157,6 +162,110 @@ def test_click_stale_uid_errors(page) -> None:
         page.evaluate(f"({CLICK_JS})(999)")
 
 
+def _uids(snapshot: str) -> set[int]:
+    return {int(ln.split("]", 1)[0][1:]) for ln in snapshot.splitlines() if ln.startswith("[")}
+
+
+def test_a_uid_is_never_reused_for_another_element(page) -> None:
+    """A handle from an earlier snapshot still names its element once the page changed.
+
+    Every task shares the one Chrome: agent A snapshots, the page gains a
+    control, agent B snapshots.  A's saved uid must click A's element, or
+    fail as stale once it is gone; a renumbering turned "Save" into "Delete".
+    """
+    page.evaluate(
+        """document.body.dataset.action = '';
+        const save = document.createElement('button');
+        save.id = 'save-draft';
+        save.textContent = 'Save draft';
+        save.onclick = () => { document.body.dataset.action = 'save'; };
+        document.body.prepend(save);"""
+    )
+    first = page.evaluate(SNAPSHOT_JS)
+    uid = _uid_of(first, "Save draft")
+    page.evaluate(
+        """const del = document.createElement('button');
+        del.id = 'delete-account';
+        del.textContent = 'Delete account';
+        del.onclick = () => { document.body.dataset.action = 'delete'; };
+        document.body.prepend(del);"""
+    )
+    second = page.evaluate(SNAPSHOT_JS)
+    assert _uid_of(second, "Save draft") == uid
+    assert _uid_of(second, "Delete account") not in _uids(first)  # a fresh uid for a new element
+    assert page.evaluate(f"({CLICK_JS})({uid})") == f'clicked [{uid}] <button> "Save draft"'
+    assert page.evaluate("document.body.dataset.action") == "save"
+    # A cloned node carries the attribute along (and the copy may precede
+    # the original), but the uid belongs to the element object: the old
+    # handle clicks the original, before and after the next snapshot, and
+    # the copy gets a fresh uid.
+    page.evaluate(
+        """const copy = document.getElementById('save-draft').cloneNode(true);
+        copy.id = 'save-copy';
+        copy.onclick = () => { document.body.dataset.action = 'copy'; };
+        document.body.prepend(copy);
+        document.body.dataset.action = '';"""
+    )
+    assert page.evaluate(f"({CLICK_JS})({uid})") == f'clicked [{uid}] <button> "Save draft"'
+    assert page.evaluate("document.body.dataset.action") == "save"
+    cloned = page.evaluate(SNAPSHOT_JS)
+    save_uids = _uids("\n".join(ln for ln in cloned.splitlines() if '"Save draft"' in ln))
+    assert uid in save_uids and len(save_uids) == 2
+    assert not (save_uids - {uid}) & _uids(second)  # a fresh uid for the copy
+    tagged = page.evaluate("document.querySelectorAll('[data-kiss-uid]').length")
+    assert tagged == len(_uids(cloned))
+    page.evaluate("document.body.dataset.action = ''")
+    assert page.evaluate(f"({CLICK_JS})({uid})") == f'clicked [{uid}] <button> "Save draft"'
+    assert page.evaluate("document.body.dataset.action") == "save"
+    page.evaluate("document.getElementById('save-copy').remove()")
+    # The page replaces the element with a clone (the attribute travels
+    # with it) that carries another label and handler: the old handle fails
+    # as stale before any snapshot, and at the next one the replacement
+    # gets a fresh uid while the old one is gone for good.
+    page.evaluate(
+        """const old = document.getElementById('save-draft');
+        const swapped = old.cloneNode(true);
+        swapped.id = 'delete-all';
+        swapped.textContent = 'Delete everything';
+        swapped.onclick = () => { document.body.dataset.action = 'delete-all'; };
+        old.replaceWith(swapped);
+        document.body.dataset.action = '';"""
+    )
+    with pytest.raises(Exception, match=r"no longer exists.*fresh snapshot"):
+        page.evaluate(f"({CLICK_JS})({uid})")
+    with pytest.raises(Exception, match=r"no longer exists.*fresh snapshot"):
+        page.evaluate(f"({TYPE_JS})({uid}, 'x')")
+    assert page.evaluate("document.body.dataset.action") == ""
+    third = page.evaluate(SNAPSHOT_JS)
+    assert uid not in _uids(third)
+    assert _uid_of(third, "Delete everything") not in _uids(cloned)
+    with pytest.raises(Exception, match=r"no longer exists.*fresh snapshot"):
+        page.evaluate(f"({CLICK_JS})({uid})")
+    assert page.evaluate("document.body.dataset.action") == ""
+    page.evaluate("document.getElementById('delete-all').remove()")
+    page.evaluate("document.getElementById('delete-account').remove()")
+
+
+def test_click_works_on_svg_controls(page) -> None:
+    """An ``<svg role=button>`` the snapshot lists is clickable: SVG elements lack ``click()``."""
+    page.evaluate(
+        """const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.id = 'svg-button';
+        svg.setAttribute('role', 'button');
+        svg.setAttribute('aria-label', 'Remove item');
+        svg.setAttribute('width', '20');
+        svg.setAttribute('height', '20');
+        window.__svg_clicked = false;
+        svg.addEventListener('click', () => { window.__svg_clicked = true; });
+        document.body.appendChild(svg);"""
+    )
+    snap = page.evaluate(SNAPSHOT_JS)
+    uid = _uid_of(snap, "Remove item")
+    assert page.evaluate(f"({CLICK_JS})({uid})") == f'clicked [{uid}] <svg> "Remove item"'
+    assert page.evaluate("window.__svg_clicked") is True
+    page.evaluate("document.getElementById('svg-button').remove()")
+
+
 def test_type_text_sets_value_and_fires_framework_events(page) -> None:
     page.evaluate(
         """window.__typed = [];
@@ -171,6 +280,10 @@ def test_type_text_sets_value_and_fires_framework_events(page) -> None:
     assert out == f"typed 18 chars into [{uid}] <input>"
     assert page.evaluate("document.querySelector('input[type=text]').value") == "new detector query"
     assert page.evaluate("window.__typed") == ["input", "change"]
+    # An empty text clears the populated field, with the same events (A15-8).
+    assert page.evaluate(f"({TYPE_JS})({uid}, '')") == f"typed 0 chars into [{uid}] <input>"
+    assert page.evaluate("document.querySelector('input[type=text]').value") == ""
+    assert page.evaluate("window.__typed") == ["input", "change", "input", "change"]
 
 
 def test_type_text_replaces_contenteditable(page) -> None:

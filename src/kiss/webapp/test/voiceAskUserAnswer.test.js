@@ -11,6 +11,7 @@ const {
   send,
   stubRaf,
   answering,
+  byId,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {
@@ -39,9 +40,7 @@ function makePage() {
   return page;
 }
 
-function taskInput(win) {
-  return win.document.getElementById('task-input');
-}
+const taskInput = win => byId(win, 'task-input');
 
 async function main() {
   await test('a pending question puts the composer into answer mode', () => {

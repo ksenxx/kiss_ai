@@ -4,20 +4,36 @@
 # add your name here
 """Tests for useful_tools.py module."""
 
+import errno
+import json
 import os
+import pathlib
+import re
 import shutil
 import signal
 import sys
 import tempfile
+import threading
 import time
+import tracemalloc
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar import useful_tools
 from kiss.agents.sorcar.useful_tools import (
+    _MAX_BINARY_READ_BYTES,
+    NOT_STARTED,
     UsefulTools,
     _truncate_output,
 )
+from kiss.core import tool_interrupt
+from kiss.core.processes import pid_alive
+from kiss.core.tool_verdict import ToolRedirect
+from kiss.tests.conftest import host_sed_is_gnu
 
 
 @pytest.fixture
@@ -121,6 +137,105 @@ class TestBugs:
         big = "X" * 200
         result = _truncate_output(big, 5)
         assert len(result) <= 5
+
+    def test_read_refuses_an_oversized_binary_without_loading_it(self, temp_test_dir):
+        """Read checks the binary size cap before reading, so an oversized PNG costs no memory.
+
+        A sparse file one byte over the cap with a PNG signature (invalid
+        UTF-8) used to be read whole by the text attempt before the
+        binary branch measured it (A10-7).
+        """
+        big = temp_test_dir / "big.png"
+        with open(big, "wb") as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n")
+            handle.truncate(_MAX_BINARY_READ_BYTES + 1)
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        tracemalloc.start()
+        try:
+            result = ut.Read(str(big), max_lines=1)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert result.startswith("Error: Binary file") and "too large" in result, result
+        assert peak < _MAX_BINARY_READ_BYTES // 4, f"Read allocated {peak} bytes to refuse the file"
+
+    def test_read_of_a_missing_binary_path_suggests_the_close_name(self, temp_test_dir):
+        """A mistyped image name gets the same ``Did you mean`` answer as a mistyped text name.
+
+        The size pre-check of the binary branch ran before the ``try``
+        whose ``FileNotFoundError`` handler builds the suggestion, so a
+        missing ``.png`` answered with the raw errno text (A14-1).
+        """
+        (temp_test_dir / "screenshot.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (temp_test_dir / "printer.py").write_text("x = 1\n")
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        for typo, close in (("screenshoot.png", "screenshot.png"), ("printr.py", "printer.py")):
+            result = ut.Read(typo)
+            assert result.startswith(f"Error: File not found: {typo}."), result
+            assert close in result and "Did you mean" in result, result
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="bash is found by path on Windows")
+    def test_bash_runs_bash_not_the_posix_shell(self, temp_test_dir):
+        """``Bash`` runs bash, so brace expansion and arrays work in every launch path.
+
+        ``shell=True`` ran ``/bin/sh`` (dash on Debian), which expands no
+        braces and has no arrays, so the tool named Bash failed on, or
+        silently changed, valid bash commands (A14-3 fable).
+        """
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        braces = "printf '<%s>\\n' {a,b}"
+        array = "a=(first second); printf '%s\\n' \"${a[1]}\""
+        assert ut.Bash(braces, "braces", timeout_seconds=30).startswith("<a>\n<b>\n")
+        assert ut.Bash(array, "array", timeout_seconds=30).startswith("second\n")
+        job = re.search(r"job (j[0-9a-f]{8})", ut.Bash(braces, "bg", background=True))
+        assert job is not None
+        assert ut.bash_job(job.group(1), action="wait", timeout_seconds=30).endswith("<a>\n<b>\n")
+        parallel = ut.run_commands_parallel(json.dumps([braces, array]), description="both")
+        assert "<a>\n<b>\n" in parallel and parallel.endswith("\nsecond"), parallel
+
+
+class TestConcurrentEdits:
+    """Two agents (two tool instances, two threads) editing one file lose no change.
+
+    ``Edit`` is a read-modify-write of the whole file; without a lock a
+    sibling's write landing between another's read and write was undone
+    by that write, both calls reporting success (A10-2).  Edit has no
+    synchronisation point a test could hold without a test double, so
+    the race is provoked by volume: forty edits per thread on a 4 MB
+    file, every one of which must survive.
+    """
+
+    def test_concurrent_edits_of_one_file_keep_every_change(self, temp_test_dir):
+        path = temp_test_dir / "shared.txt"
+        edits_per_thread = 40
+        lines = [f"{prefix}{i}=0\n" for prefix in "ab" for i in range(edits_per_thread)]
+        path.write_text("".join(lines) + ("x" * 200 + "\n") * 20000)
+        tools = [UsefulTools(work_dir=str(temp_test_dir)) for _ in "ab"]
+        for tool in tools:
+            assert "a0=0" in tool.Read(str(path), max_lines=2)
+        results: dict[str, list[str]] = {}
+
+        def edit(prefix: str, tool: UsefulTools) -> None:
+            results[prefix] = [
+                tool.Edit(str(path), f"{prefix}{i}=0\n", f"{prefix}{i}=1\n")
+                for i in range(edits_per_thread)
+            ]
+
+        threads = [
+            threading.Thread(target=edit, args=(prefix, tool))
+            for prefix, tool in zip("ab", tools, strict=True)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=120)
+        assert all(r.startswith("Successfully") for rs in results.values() for r in rs), results
+        text = path.read_text()
+        lost = [
+            f"{prefix}{i}" for prefix in "ab" for i in range(edits_per_thread)
+            if f"{prefix}{i}=1\n" not in text
+        ]
+        assert lost == [], f"edits undone by a concurrent Edit: {lost}"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only test (signals, bash scripts)")
@@ -228,6 +343,54 @@ class TestStopEvent:
             pass
         assert not alive, f"Child {child_pid} survived stop_event!"
 
+    def test_stop_set_before_a_parallel_call_starts_no_command(self, temp_test_dir):
+        """A pool entered with the task's stop event already set starts nothing (A10-5).
+
+        The workers used to be submitted before the stop was looked at,
+        so a quick command ran (and was then killed) after the Stop.
+        """
+        stop_event = threading.Event()
+        stop_event.set()
+        marker = temp_test_dir / "started.marker"
+        ut = UsefulTools(stop_event=stop_event, work_dir=str(temp_test_dir))
+        report = ut.run_commands_parallel(json.dumps([f"touch {marker}", f"touch {marker}"]))
+        assert report.count(NOT_STARTED) == 2, report
+        assert not marker.exists(), "a command ran after the task was stopped"
+
+    def test_stop_kills_a_background_jobs_orphans_after_its_shell_exited(self, temp_test_dir):
+        """A job's descendant that outlives the job's shell is killed by a later task Stop (A10-6).
+
+        ``sleep 100 &`` stays in the job's process group after the shell
+        exits; the watcher used to end with the shell, leaving nothing to
+        kill the group when the Stop came.
+        """
+        stop_event = threading.Event()
+        ut = UsefulTools(stop_event=stop_event, work_dir=str(temp_test_dir))
+        pid_file = temp_test_dir / "orphan.pid"
+        script = temp_test_dir / "orphan.sh"
+        script.write_text(f"sleep 100 &\necho $! > {pid_file}\n")
+        started = ut.Bash(f"bash {script}", "orphan", background=True)
+        match = re.search(r"job (j[0-9a-f]+)", started)
+        assert match is not None, started
+        job_id = match.group(1)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if "exited with code 0" in ut.bash_job(job_id) and pid_file.is_file():
+                break
+            time.sleep(0.05)
+        assert "exited with code 0" in ut.bash_job(job_id)
+        orphan = int(pid_file.read_text().strip())
+        assert pid_alive(orphan)
+        try:
+            stop_event.set()
+            deadline = time.monotonic() + 10
+            while pid_alive(orphan) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert not pid_alive(orphan), f"the job's orphan {orphan} survived the task Stop"
+        finally:
+            with suppress(OSError):
+                os.kill(orphan, signal.SIGKILL)
+
 
 class TestStreamingTimeout:
     """Test that streaming Bash correctly reports timeout."""
@@ -255,6 +418,423 @@ class TestStreamingTimeout:
         result = ut.Bash("echo hi", "quick command", timeout_seconds=0.5)
         assert "timeout" not in result.lower()
         assert "hi" in result
+
+
+class TestBashUntil:
+    """``Bash(until=<regex>)`` re-runs the command inside one call until the regex matches."""
+
+    COUNT = "n=$(cat n); n=$((n+1)); echo $n > n; echo run $n"
+
+    def test_until_polls_until_the_regex_matches_the_output(self, temp_test_dir, monkeypatch):
+        (temp_test_dir / "n").write_text("0")
+        spools = temp_test_dir / "spools"  # where the searched output is spooled for the child
+        spools.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(spools))
+        streamed: list[str] = []
+        ut = UsefulTools(stream_callback=streamed.append, work_dir=str(temp_test_dir))
+        before = time.monotonic()
+        out = ut.Bash(self.COUNT, "poll", until=r"run 2$", poll_seconds=1, timeout_seconds=30)
+        elapsed = time.monotonic() - before
+        assert 1.0 <= elapsed < 10, elapsed  # one pause of poll_seconds between the runs
+        assert re.fullmatch(
+            r"run 2\n\n\[until 'run 2\$' matched after 2 run\(s\) and 1\.\d s\]", out,
+        ), out
+        assert (temp_test_dir / "n").read_text() == "2\n"  # no run after the match
+        assert "".join(streamed).count("run ") == 2  # each run streams its output
+        assert list(spools.iterdir()) == []  # each run's spool file is removed
+        # The regex is matched against the command's output, not the exit-code line.
+        out = ut.Bash("echo nope >&2; exit 3", "fail", until="exit code", timeout_seconds=2.5)
+        assert out.startswith("Error (exit code 3):\nnope\n")
+        assert "did not match after" in out
+
+    def test_until_ends_at_the_deadline_with_the_last_run_shown(self, temp_test_dir):
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        before = time.monotonic()
+        # poll_seconds below 1 is raised to 1: at most three runs fit in 3 s, not thirty (a
+        # fourth cannot start before the deadline with 1 s pauses; a third does only while a
+        # run and its search cost under 0.5 s, which a loaded Windows box's bash spawn misses).
+        out = ut.Bash("echo nope", "poll", until="never", poll_seconds=0.1, timeout_seconds=3)
+        assert 2.9 <= time.monotonic() - before < 10
+        assert re.fullmatch(
+            r"nope\n\n\[until 'never' did not match after [23] run\(s\) and 3\.\d s: "
+            r"the call's deadline \(timeout_seconds\) passed\]", out,
+        ), out
+        # A run killed at the deadline is the last one, its partial output kept.
+        out = ut.Bash("echo part; sleep 10", "slow", until="never", timeout_seconds=1.5)
+        assert out.startswith("Error: Command execution timeout after 1.5s. Output before")
+        assert re.search(
+            r"after 1 run\(s\) and 1\.\d s: the call's deadline \(timeout_seconds\) passed\]$", out,
+        ), out
+        # A long sleep with a job running is spent waiting on the job, then the poll runs
+        # (both notes in the result); the poll's deadline is the call's, absolute, so the
+        # wait counts against it: a poll handed a deadline 1.2 s away ends there, not after
+        # poll_seconds.
+        ut.Bash("sleep 1", "job", background=True)
+        before = time.monotonic()
+        out = ut.Bash("sleep 60; echo after", "poll", until="after", timeout_seconds=100)
+        assert time.monotonic() - before < 10
+        assert "[until 'after' matched after 1 run(s)" in out and "Waited on job " in out, out
+        before = time.monotonic()
+        out = ut._poll_until(
+            "echo nope", re.compile("never"), 30, before + 1.2, 8000, str(temp_test_dir),
+        )
+        assert 1.1 <= time.monotonic() - before < 5
+        assert re.search(
+            r"did not match after 1 run\(s\) and 1\.\d s: the call's deadline "
+            r"\(timeout_seconds\) passed\]$", out,
+        ), out
+        # The search itself is bounded by the deadline: a pattern that backtracks for
+        # minutes runs in a child the poll kills at the deadline (as bash_job's wait does).
+        before = time.monotonic()
+        out = ut.Bash(f"printf '%s' {'a' * 60}!", "regex", until=r"(a+)+$", timeout_seconds=1)
+        assert time.monotonic() - before < 4
+        assert re.search(
+            r"did not match after 1 run\(s\) and 1\.\d s: the call's deadline", out,
+        ), out
+
+    def test_until_does_not_search_an_output_too_long_to_keep_whole(self, temp_test_dir):
+        """Above the capture budget only a head and a tail are kept: no match is claimed."""
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        fill = "head -c 1600000 /dev/zero | tr '\\0' {}"
+        command = f"{fill.format('a')}; echo MIDDLE; {fill.format('b')}"
+        out = ut.Bash(command, "big", until="MIDDLE|ab", poll_seconds=1, timeout_seconds=30)
+        assert re.search(
+            r"\[until 'MIDDLE\|ab' was not searched after 1 run\(s\) and \d+\.\d s: the output "
+            r"is too long to keep whole \([\d,]+ characters dropped\); poll with a command that "
+            r"prints less \(grep, tail\)\]$", out,
+        ), out[-300:]
+
+    def test_until_stops_with_the_stop_event(self, temp_test_dir):
+        stop = threading.Event()
+        ut = UsefulTools(stop_event=stop, work_dir=str(temp_test_dir))
+        threading.Timer(0.5, stop.set).start()
+        before = time.monotonic()
+        out = ut.Bash("echo once", "poll", until="never", poll_seconds=30, timeout_seconds=60)
+        assert time.monotonic() - before < 5
+        assert out.startswith("once\n\n[until 'never' did not match after 1 run(s) and 0.")
+        assert "deadline" not in out
+
+    def test_until_is_refused_for_a_background_call_a_bad_regex_or_a_rewrite(self, temp_test_dir):
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        out = ut.Bash("touch ran", "bg", background=True, until="x")
+        assert out == (
+            "Error: until= polls a foreground command; with background=True follow the "
+            "job's log with bash_job(id, \"wait\", until=<regex>) instead."
+        )
+        assert not (temp_test_dir / "ran").exists()
+        out = ut.Bash("touch ran", "bad", until="(")
+        assert out.startswith("Error: until is not a valid regular expression: missing )")
+        assert not (temp_test_dir / "ran").exists()
+        # ...before a shell rewrite of a file is applied as the Edit it stands for.
+        f = temp_test_dir / "f.txt"
+        f.write_text("old\n")
+        ut.Read(str(f))
+        assert ut.Bash("sed -i 's/old/new/' f.txt", "edit", until="(").startswith("Error: until")
+        out = ut.Bash("sed -i 's/old/new/' f.txt", "edit", until="new", background=True)
+        assert out.startswith("Error: until= polls")
+        assert f.read_text() == "old\n"
+        # A valid regex polls a command run as written: one applied as the Write/Edit it
+        # stands for is refused before any edit, with or without a rest to poll (the rest
+        # ran once, unpolled, and the redirect's follow-up lost until= and poll_seconds=:
+        # S9/F2); under an agent (redirect) too, where the refusal is returned, not raised.
+        # The file is named as the shell path maps back to the host (``host_path``:
+        # ``C:/Users/...`` on Windows, where Git Bash's ``/c/Users/...`` ran the command).
+        shown = json.dumps(f.as_posix())
+        before = time.monotonic()
+        out = ut.Bash(
+            "sed -i 's/old/new/' f.txt && echo READY", "edit", until="NEVER", poll_seconds=1,
+            timeout_seconds=3,
+        )
+        assert time.monotonic() - before < 1, out
+        assert out == (
+            "Error: until= re-runs a command as written, but this one is applied as "
+            f'Edit(file_path={shown}, old_string="old", new_string="new") instead of '
+            'running: make that call, then poll "echo READY" with until= in a Bash call '
+            "of its own."
+        )
+        out = ut.Bash("sed -i 's/old/new/' f.txt", "edit", until="new", timeout_seconds=3)
+        assert out.startswith("Error: until= re-runs") and out.endswith("make that call."), out
+        ut.redirect = True
+        out = ut.Bash(
+            "cat >> f.txt <<'EOF' && echo READY\nmore\nEOF", "append", until="READY",
+            timeout_seconds=3,
+        )
+        ut.redirect = False
+        assert out.startswith("Error: until= re-runs a command as written, but this one is")
+        assert f"applied as Write(file_path={shown}, content=" in out, out
+        assert out.endswith('then poll "echo READY" with until= in a Bash call of its own.')
+        assert f.read_text() == "old\n"
+        # A rewrite the guards let run as written (a sed -i through a hard link is not
+        # converted) is polled whole, as documented.  BSD sed (macOS) wants the backup
+        # suffix of -i as a word of its own; Git Bash's sed is GNU whatever the Windows
+        # PATH holds.
+        os.link(f, temp_test_dir / "g.txt")
+        in_place = "sed -i" if sys.platform == "win32" or host_sed_is_gnu() else "sed -i ''"
+        out = ut.Bash(
+            f"{in_place} 's/old/new/' f.txt && cat f.txt", "edit", until="new", timeout_seconds=3,
+        )
+        assert re.search(r"\[until 'new' matched after 1 run\(s\) and 0\.\d s\]$", out), out
+        assert f.read_text() == "new\n"
+
+
+_REWRITE_FILES = (str(useful_tools.__file__), os.path.dirname(str(pathlib.__file__)))
+
+
+def _run_injecting_at(run: Callable[[], str], nth: int) -> int:
+    """Run *run* raising ``KeyboardInterrupt`` at its *nth* line event on this thread.
+
+    Only the line events of the tool's own code and of ``pathlib`` (the
+    in-place ``write_text``) count: a trace event comes BEFORE its line
+    runs, so an injection at the first line of a ``finally`` body skips
+    that body, which a real injection (delivered after a call returns)
+    cannot do to the lock helper's release.  ``nth`` past the last event
+    injects nothing.
+
+    Returns:
+        The number of line events *run* produced before it returned or raised.
+    """
+    count = 0
+
+    def tracer(frame: Any, event: str, arg: Any) -> Any:
+        nonlocal count
+        if event == "line" and frame.f_code.co_filename.startswith(_REWRITE_FILES):
+            count += 1
+            if count == nth:
+                raise KeyboardInterrupt(f"injected Stop at line event {nth}")
+        return tracer
+
+    sys.settrace(tracer)
+    try:
+        run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sys.settrace(None)
+    return count
+
+
+def _swap_for_fifo_at_open(
+    path: Path,
+    run: Callable[[], str],
+    outcome: dict[str, Any],
+    nth: int = 1,
+    reader: bool = False,
+) -> None:
+    """Run *run* on this thread, replacing *path* with a FIFO right before its *nth* ``open``.
+
+    The swap happens in a profile hook at the ``c_call`` of an open
+    (``io.open`` or ``os.open``) whose calling frame holds *path* as its
+    ``resolved`` (the tool's own helpers) or ``self`` (``pathlib``),
+    after every ``is_file`` check *run* made and before the open takes
+    effect: the interval another actor needs to swap the file.  Opens
+    of other files (of ``.git`` while a path is resolved, of a spool)
+    do not count.  *nth* skips the
+    opens before the one to race (a binary Read's text attempt makes
+    two, the descriptor and its text wrapper, before the binary read's
+    own).  With *reader* the FIFO gets a reader, so an open for writing
+    succeeds instead of failing at once (``ENXIO``) and only the
+    descriptor's type check can refuse it.  *outcome* gets the result
+    or exception of *run*, the name of the function whose open the swap
+    preceded (``swapped_in``) and the reader's descriptor.
+    """
+    opens = 0
+
+    def hook(frame: Any, event: str, arg: Any) -> None:
+        nonlocal opens
+        if event != "c_call" or getattr(arg, "__name__", "") != "open":
+            return
+        if frame.f_locals.get("resolved", frame.f_locals.get("self")) != path:
+            return
+        opens += 1
+        if opens == nth:
+            path.unlink()
+            os.mkfifo(path)
+            outcome["swapped_in"] = frame.f_code.co_name
+            if reader:
+                outcome["reader"] = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+
+    sys.setprofile(hook)
+    try:
+        outcome["result"] = run()
+    except BaseException as e:  # noqa: BLE001 — reported to the test
+        outcome["exc"] = e
+    finally:
+        sys.setprofile(None)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file semantics")
+class TestInterruptedWrites:
+    """A Stop landing in or around Write/Edit leaves the file whole and is not deferred."""
+
+    @pytest.mark.parametrize("tool", ["Write", "Edit"])
+    def test_a_stop_at_any_check_point_leaves_the_old_text_or_the_new(
+        self, temp_test_dir: Path, tool: str,
+    ) -> None:
+        """Injected at every line event of a rewrite in turn, a Stop never leaves a truncated file.
+
+        ``Path.write_text`` truncated the file at its open and wrote at
+        its next statement, so a Stop injected between the two emptied
+        the file for good and a concurrent Read saw ``(file is empty)``
+        (A14-2).  No stray file may be left beside it either.
+        """
+        path = temp_test_dir / "whole.txt"
+        old, new = "old text\n" * 50, "new text\n" * 50
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        path.write_text(old)
+        assert "old text" in ut.Read(str(path))
+
+        def run() -> str:
+            if tool == "Write":
+                return ut.Write(str(path), new)
+            return ut.Edit(str(path), "old", "new", replace_all=True)
+
+        total = _run_injecting_at(run, 0)
+        assert path.read_text() == new and total > 0
+        for nth in range(1, total + 1):
+            path.write_text(old)
+            _run_injecting_at(run, nth)
+            text = path.read_text()
+            assert text in (old, new), f"check point {nth}/{total} left {text[:30]!r}..."
+            assert [p.name for p in temp_test_dir.iterdir()] == [path.name], (
+                f"check point {nth}/{total} left a stray file"
+            )
+
+    def test_a_stop_reaches_a_write_parked_on_the_held_lock(self, temp_test_dir: Path) -> None:
+        """A Write waiting for the file lock another task's write holds still gets its Stop.
+
+        The lock was a plain ``Lock`` taken with ``with``: a thread parked
+        in its untimed ``acquire`` reached no check point, so the
+        injected ``KeyboardInterrupt`` waited for the holder to release,
+        however long its write took (A14-3).
+        """
+        path = temp_test_dir / "parked.txt"
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        lock = useful_tools._FILE_WRITE_LOCK
+        parked = threading.Event()
+        outcome: dict[str, Any] = {}
+
+        def hook(frame: Any, event: str, arg: Any) -> None:
+            # The profile hook runs inside the CALL, right before the C
+            # ``acquire`` (``Lock.__enter__`` is the same function) runs:
+            # an injection made once ``parked`` is set is pending while
+            # the thread is inside it.
+            if (
+                event == "c_call"
+                and getattr(arg, "__name__", "") in ("acquire", "__enter__")
+                and getattr(arg, "__self__", None) is lock
+            ):
+                parked.set()
+
+        def write() -> None:
+            sys.setprofile(hook)
+            try:
+                outcome["result"] = ut.Write(str(path), "x\n")
+            except BaseException as e:  # noqa: BLE001 — the injected Stop is expected
+                outcome["exc"] = e
+            finally:
+                sys.setprofile(None)
+
+        writer = threading.Thread(target=write, daemon=True)
+        assert lock.acquire(timeout=5)
+        try:
+            writer.start()
+            assert parked.wait(10), "the Write never reached the lock"
+            assert writer.ident is not None
+            assert tool_interrupt.inject_async_exception(writer.ident, KeyboardInterrupt) == 1
+            writer.join(timeout=3)
+            assert not writer.is_alive(), "the Stop waited for the lock holder"
+        finally:
+            lock.release()
+            writer.join(timeout=10)
+        assert isinstance(outcome.get("exc"), KeyboardInterrupt), outcome
+        assert not path.exists()
+
+    @pytest.mark.parametrize(
+        ("tool", "nth", "reader", "expected"),
+        [
+            ("Read", 1, False, "could block forever"),
+            ("Read binary", 3, False, "could block forever"),
+            ("Edit", 1, False, "Error: File not found: "),
+            ("Edit unread", 1, False, "has not been read in this session"),
+            ("Write", 1, True, "is not a regular file (FIFO/device/socket); refusing to write"),
+            ("Write append", 1, False, os.strerror(errno.ENXIO)),
+            ("sed -i", 1, False, "not shown in this session. Read("),
+            ("cat >>", 1, False, "refusing to append to it."),
+        ],
+    )
+    def test_a_fifo_swapped_in_after_the_check_does_not_block(
+        self, temp_test_dir: Path, tool: str, nth: int, reader: bool, expected: str,
+    ) -> None:
+        """A path swapped for a FIFO between the type check and the open is refused, not waited for.
+
+        ``open`` of a FIFO with no writer (no reader, for a write) blocks
+        in C for good, where no Stop lands; under the file lock that held
+        every Write and Edit of the daemon (A14-2 fable).  Every open of
+        a file the model names is the descriptor-checked one: the text
+        and binary reads of Read, Edit's read (of an unread file too, for
+        the region its refusal shows), the in-place write of a file with
+        another hard link, the append a redirected ``>>`` Write makes, and
+        the reads a ``sed -i`` or a ``cat >>`` here-document is converted
+        with (S9/F1).
+        """
+        path = temp_test_dir / ("swap.png" if tool == "Read binary" else "swap.txt")
+        if tool == "Read binary":
+            path.write_bytes(b"\x89PNG\r\n\x1a\n\xff")
+        else:
+            path.write_text("old\n")
+        if tool == "Write":
+            os.link(path, temp_test_dir / "other.txt")  # written in place, through the link
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        if tool not in ("Edit unread", "sed -i"):
+            assert not ut.Read(str(path)).startswith("Error")
+        append = "cat >> swap.txt <<'EOF'\nmore\nEOF"
+        arguments: dict[str, Any] = {}
+        if tool == "Write append":
+            ut.redirect = True
+            with pytest.raises(ToolRedirect) as raised:
+                ut.Bash(append, "append")
+            ut.redirect = False
+            arguments = raised.value.arguments
+        outcome: dict[str, Any] = {}
+
+        def run() -> str:
+            if tool.startswith("Read"):
+                return ut.Read(str(path), force=True)
+            if tool.startswith("Edit"):
+                return ut.Edit(str(path), "old", "new")
+            if tool == "Write":
+                return ut.Write(str(path), "new\n")
+            if tool == "Write append":
+                return ut.Write(**arguments)
+            if tool == "sed -i":
+                return ut.Bash("sed -i 's/old/new/' swap.txt", "edit")
+            return ut.Bash(append, "append")
+
+        worker = threading.Thread(
+            target=_swap_for_fifo_at_open, args=(path, run, outcome, nth, reader), daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=5)
+        try:
+            assert not worker.is_alive(), f"{tool} blocked on the FIFO"
+            assert path.is_fifo(), "the swap never happened"
+            assert outcome.get("swapped_in") == "_open_regular", outcome
+            assert useful_tools._FILE_WRITE_LOCK.acquire(timeout=5), "the lock stayed held"
+            useful_tools._FILE_WRITE_LOCK.release()
+            result = outcome.get("result", "")
+            assert expected in result and (
+                result.startswith("Error:") or tool == "sed -i" and result.startswith("REFUSED")
+            ), outcome
+            if tool == "Write":
+                assert (temp_test_dir / "other.txt").read_text() == "old\n"
+        finally:
+            if "reader" in outcome:
+                os.close(outcome["reader"])
+            if worker.is_alive():
+                with suppress(OSError):
+                    os.close(os.open(path, os.O_RDWR | os.O_NONBLOCK))
+                worker.join(timeout=10)
+            path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

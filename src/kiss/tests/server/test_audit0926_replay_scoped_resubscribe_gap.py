@@ -61,6 +61,21 @@ def _wait_until_in(thread: threading.Thread, func_name: str) -> None:
     time.sleep(0.05)
 
 
+def _wait_until_top(thread: threading.Thread, func_name: str) -> None:
+    """Block until *thread*'s innermost frame is *func_name* (5 s cap).
+
+    A replay past its history read sits there only while it waits for
+    ``_state_lock`` (the view lock section its attach runs under).
+    """
+    deadline = time.monotonic() + 5.0
+    while True:
+        frame = sys._current_frames().get(thread.ident or -1)
+        if frame is not None and frame.f_code.co_name == func_name:
+            return
+        assert time.monotonic() < deadline, f"replay never waited in {func_name}"
+        time.sleep(0.005)
+
+
 class TestScopedReplayResubscribeGap(TabMirroringBase):
     """A scoped replay keeps the shared tab subscribed for other windows."""
 
@@ -114,7 +129,7 @@ class TestScopedReplayResubscribeGap(TabMirroringBase):
                 _wait_until_in(replayer, "_read_lock_gen")
                 vs._state_lock.acquire()
             try:
-                _wait_until_in(replayer, "_attach_viewer_to_running_chat")
+                _wait_until_top(replayer, "_replay_session")
                 emitter = threading.Thread(target=emit, daemon=True)
                 emitter.start()
                 emitter.join(5)
@@ -228,12 +243,13 @@ class TestScopedReplayResubscribeGap(TabMirroringBase):
                 # Runs to completion unless the replay holds a lock
                 # the allocation needs (it then finishes afterwards).
                 allocator.join(1.0)
-            elif name == "_publish_replay_reopen" and emitter.ident is None:
+            elif name == "_broadcast_viewer_running" and emitter.ident is None:
                 allocator.join(5)
                 assert not allocator.is_alive(), "allocation never finished"
-                # Inside the gap: after the attach's cleanup, before the
-                # publication's commit re-subscribes the tab, and with
-                # no replay lock held, so the event fans out at once.
+                # After the attach's cleanup and its lock section (a
+                # scoped replay publishes nothing, A18-3), before the
+                # transcript, with no replay lock held, so the event
+                # fans out at once.
                 emitter.start()
                 emitter.join(1.0)
 

@@ -76,7 +76,8 @@ def test_anthropic_ladder_per_generation(name: str, ladder: tuple[str, ...]) -> 
 
 def test_non_claude_keys_keep_their_own_ladders() -> None:
     assert mod._thinking_scale_for("gpt-6.1-sol") == mod._THINKING_LEVELS
-    assert mod._thinking_scale_for("cc/claude-opus-5-5") == mod._THINKING_LEVELS
+    assert mod._thinking_scale_for("codex/gpt-6.1") == mod._THINKING_LEVELS
+    assert mod._thinking_scale_for("cc/claude-opus-4-6") == ("low", "medium", "high", "max")
     rolling = "openrouter/~anthropic/claude-opus-latest"  # no fixed Claude model behind it
     assert mod._thinking_scale_for(rolling) == mod._THINKING_LEVELS
 

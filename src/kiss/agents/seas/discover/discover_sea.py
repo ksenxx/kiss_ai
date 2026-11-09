@@ -5,7 +5,8 @@
 """Discover agent: AI discovery, auto research and optimization on the bestrouter.
 
 The agent is the plain Sorcar agent with :data:`DISCOVERY_INSTRUCTIONS`,
-the AI discovery loop, appended to the system prompt by the SEA's
+the AI discovery loop written as pseudocode (``DISCOVER``, ``ROUND``,
+``FINISH`` and their helpers), appended to the system prompt by the SEA's
 ``system_prompt`` method.  The loop keeps a Pareto frontier of ideas
 against the user's metrics (``<scratch dir>/pareto.md``, seeded with the
 baseline), every point a git commit with a parent point, each commit
@@ -13,26 +14,42 @@ held by a ref ``refs/discover/<task id>/<id>`` so that the resets and
 the squash merge of the task branch do not orphan it: fix the dev /
 held-out split, the dev evaluation command and its noise floor
 (``split.md``, fixed for the whole run; every frontier metric is a dev
-metric, and nothing but the held-out check opens the held-out part, from
-the first command on), profile the dev data and the baseline, search for
+metric, the noise floor of a deterministic command comes from bootstrap
+resamples of one run's per-item dev results, or is 0 when it yields one
+number, and nothing opens the held-out part but the held-out check and,
+when the task names no held-out part, the split command, run before
+anything else reads the data), profile the dev data and the baseline, search for
 the state of the art, write ideas
 (``ideas.md``), judge the unexplored ones pairwise, implement the winner
 on its parent's commit, evaluate and commit it, log it with the draw
 that led to it, its status and observations (``explored-ideas.md``, one
-row per idea in the order evaluated: KEPT when no frontier point
+row per idea in the order evaluated, the baseline first, whose status
+alone changes later, in place: KEPT when no frontier point
 dominates it, TIE when it equals one, else FAILED; TIE and FAILED are
 never retried; a status lives there alone, and an evicted point leaves
 ``pareto.md`` and becomes DOMINATED), and draw the next operator with one
 random number from a Bash call: a variant of a frontier point reasoned
 from its observations (r < 0.33), a composition of two frontier points
-of different aspects (0.33 <= r < 0.66; a fresh draw when fewer than
-two are eligible), or fresh ideas from a web search or ``gpt-6-astra``
-or ``gemini-4-argon`` (r >= 0.66).  A frontier point that meets the
-goal on the dev metrics is checked once on the held-out split: the loop
-stops when it passes and evicts it as OVERFIT when it fails.  The loop
-also stops at the budget or the round limit (the task's, else 100
-rounds), resets the working tree to the best frontier point's commit
-and reports it with its dev and held-out metrics.
+(0.33 <= r < 0.66; an eligible pair has neither the baseline nor a
+shared aspect, neither commit is an ancestor of the other, a compose
+being a ``git merge`` commit, and no logged idea already merged them;
+when no pair is eligible the draw forks the oldest frontier point that
+is an ancestor of another one with an idea on an aspect that other
+point lacks, so that rounds built one on another still yield a pair to
+compose, and it is a fresh draw when there is no such point), or fresh
+ideas from a web search, ``gpt-6-astra`` or ``gemini-4-argon``, picked
+by a second draw at the same thresholds (r >= 0.66); variant, fork and
+fresh ideas go to ``ideas.md`` too.  A frontier or TIE point that meets
+the goal on the dev metrics is checked once on the held-out split: the
+loop stops when it passes and evicts it as OVERFIT when it fails.  The
+loop also stops at the budget or the round limit (the task's, else 100
+rounds); then it held-out checks the frontier and TIE points in the
+task's metric priority and takes the first that passes, else the
+baseline.  A point passes the held-out check only when it is no worse
+than the baseline there on the task's first-priority metric, by any
+amount, and the baseline neither dominates nor equals it there; one that
+fails is evicted as OVERFIT.  It resets the working tree to the chosen
+point's commit and reports it with its dev and held-out metrics.
 
 A task that asks only for research, ideas or a ranking still gets the
 loop, ranked by measured dev metrics.  The loop resets and commits the
@@ -75,6 +92,7 @@ The task names the artifact to improve, the metric and the goal.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -87,77 +105,140 @@ DISCOVERY_INSTRUCTIONS = f"""\
 
 Mandatory Instructions (MUST FOLLOW): You will be exploring, implementing, and evaluating
 novel ideas while doing AI discovery or auto research or optimization or AI research.
-Work in a git repository (the task's; `git init` one around the artifact when it has
-none, and git-ignore data and large outputs) so that every evaluated idea is a commit,
-kept reachable through resets and squash merges by its ref refs/discover/<task id>/<id>.
-The held-out part (named by the task, else written by the split of step 1) is off limits
-from the moment it exists, the first command included: nothing but the held-out check of
-steps 5 and 6 opens it, no cat, head, wc, cut, count, profile or test.
-A task that asks only for research, ideas or a ranking still gets this loop, ranked by
-measured dev metrics.  When the task forbids changing its repository, work in a lab so
-that no `git reset` touches that tree: copy the artifact's current files (not its data)
-to <scratch dir>/lab, `git init` and commit them there, and call create_worktree on it;
-run every round in the worktree it returns (in the lab when it makes none).
+Run DISCOVER(task) below exactly.  A task that asks only for research, ideas or a ranking
+still gets it, ranked by measured dev metrics.
 
-0. Keep the Pareto frontier of ideas against the user's metrics in <scratch dir>/pareto.md,
-   one line per frontier point: id, parent id, commit, idea, aspect (the part of the
-   system the idea changes: data, features, model, loss, training, algorithm, I/O, ...),
-   dev metrics; start empty.  Log every evaluated idea in <scratch dir>/explored-ideas.md,
-   one row appended per idea in the order evaluated, with the same fields plus draw (the
-   step 6 draw that led to it, with a fresh draw's second draw), status and observations.
-   A point's status lives there alone: a point that leaves the frontier leaves pareto.md.
-1. Fix the dev / held-out split (the task's when it names one) and write it to
-   <scratch dir>/split.md: what is held out (files, rows, seed, or a second workload when
-   there is no dataset), the exact dev evaluation command, and its noise floor (the spread
-   of two or three baseline runs, varied by seed or fold assignment when the command is
-   deterministic; metric values closer than that are equal); none of it changes later in
-   the run.  Every metric in pareto.md and explored-ideas.md is a dev metric from that
-   command.  Then read + profile the dev data, the tests and the baseline, commit the
-   baseline, run `git update-ref refs/discover/<task id>/B HEAD`, and insert it as the
-   first frontier point (id B, no parent).
-2. Web-search for SOTA approaches, papers, repos, issues.
-3. Append ideas with their aspect, parent frontier point and rationale to
-   <scratch dir>/ideas.md.
-4. Pairwise judge the ideas not yet in <scratch dir>/explored-ideas.md to find a winner
-   idea.
-5. One round: `git reset --hard <parent commit>`, implement the idea, run the dev
-   evaluation command, `git add -A && git commit && git update-ref
-   refs/discover/<task id>/<id> HEAD`, and append id, parent, commit, idea, aspect, draw,
-   metrics, status and observations (what the profile, errors and outputs showed, what
-   the next change should be) to <scratch dir>/explored-ideas.md.  Status: KEPT when no
-   frontier point dominates it (no worse on every metric and better beyond the noise
-   floor on one, in each metric's own direction): insert it in pareto.md, drop the points
-   it dominates from pareto.md and set their explored-ideas.md status to DOMINATED; TIE
-   when it equals a frontier point on every metric (not inserted); FAILED otherwise.  TIE
-   and FAILED ideas are never retried.  When a frontier point meets the user's goal on the
-   dev metrics, run the held-out / generalization check on it once to prove it is not
-   overfit: stop (step 6) if it passes (the held-out metrics meet the goal too); otherwise
-   drop it from pareto.md, set its status to OVERFIT (re-insert the baseline, KEPT again,
-   if the frontier is now empty) and continue.
-6. Stop or draw.  A round is one pass through step 5.  Stop when step 5 passed the
-   held-out check or when the budget or the round limit (the task's; 100 rounds when the
-   task gives none) is hit: pick the best frontier point (the one that passed the check,
-   else the frontier point the task's metric priority prefers, its first-named metric
-   when it gives none, held-out checked now), `git reset --hard` its commit so the working
-   tree holds it, and report it with its dev and held-out metrics, the
-   explored-ideas.md counts (KEPT, TIE, FAILED, OVERFIT, DOMINATED) and the
-   refs/discover/<task id>/ refs that hold every evaluated commit; in a lab, also write
-   `git diff --binary <B commit> <its commit>` to <scratch dir>/best.patch and name it in
-   the report.  Otherwise draw the
-   next operator with one Bash call, `python3 -c 'import random; print(random.random())'`,
-   logged by step 5 as the draw of the idea it leads to: r < 0.33 -> step 7 (variant);
-   0.33 <= r < 0.66 -> step 8 (compose); r >= 0.66 -> step 9 (fresh).  A compose draw with
-   fewer than two eligible frontier points is a fresh draw.
-7. Variant: pick a frontier point and, from the observations logged for it, reason out one
-   change that should move the frontier.  Go to step 5 with that point as the parent.
-8. Compose: pick two frontier points of different aspects, neither the baseline nor a
-   composition of the other, and merge the changes of the second into the first (the
-   better one on the task's first metric).  Go to step 5 with the first as the parent.
-9. Fresh: extensive internet search or gpt-6-astra or gemini-4-argon (chosen by a second
-   draw), with deep thinking, for fresh ideas that are not in
-   <scratch dir>/explored-ideas.md; pairwise judge the ideas not yet in
-   <scratch dir>/explored-ideas.md to find a winner idea; go to step 5 with the frontier
-   point it builds on as the parent."""
+```
+# Files in <scratch dir>:
+#   split.md           what is held out (files, rows, seed, or a second workload when there
+#                      is no dataset), the split command, the exact dev evaluation command
+#                      and its noise floor; written once, never changed in the run
+#   pareto.md          the frontier, one line per point: id, parent id, commit, idea,
+#                      aspect, dev metrics; a point that leaves the frontier leaves the file
+#   explored-ideas.md  the log, one row per evaluated idea in the order evaluated: the
+#                      pareto.md fields + draw, status, observations; rows are never deleted
+#                      or reordered, only a row's status changes, in place; a point's
+#                      status lives here alone
+#   ideas.md           ideas, each with its aspect, parent frontier point and rationale
+# aspect    the part of the system an idea changes: data, features, model, loss, training,
+#           algorithm, I/O, ...; a point's aspect is its own idea's, not its ancestors';
+#           a compose has both of its points' aspects
+# metrics   dev metrics from the split.md evaluation command, the only metrics in the files
+# status    KEPT | TIE | FAILED | DOMINATED | OVERFIT
+# RANDOM()  one Bash call: python3 -c 'import random; print(random.random())'
+# RESET(c)  git reset --hard c && git clean -fd
+# COMMIT(id) git add -A && git commit && git update-ref refs/discover/<task id>/<id> HEAD
+#           (the ref keeps the commit reachable through resets and squash merges)
+# HELD-OUT RULE: when the task names the held-out part, it is off limits from the first
+#   command on; else no command reads the data before the split command, which alone reads
+#   all of it, once.  After that only HELDOUT_CHECK opens the held-out part: no cat, head,
+#   wc, cut, count, profile or test.
+# Comparisons use the noise floor and each metric's own direction:
+#   x DOMINATES y := x is no worse than y on every metric and better beyond noise on one
+#   x EQUALS y    := every metric of x is within noise of y's
+
+procedure DISCOVER(task):
+    round_limit := the task's round limit, else 100
+    if the task forbids changing its repository:          # a lab: no reset touches its tree
+        copy the artifact's current files (not its data) to <scratch dir>/lab, `git init`
+        and commit them there, call create_worktree on it, and work in the worktree it
+        returns (in the lab when it makes none)
+    else: work in the task's git repo, else `git init` one around the artifact
+    in the repo you work in, git-ignore data, large outputs and <scratch dir> (or
+        `git clean -fd` deletes them)
+
+    heldout := the task's held-out part, else the part one split command holds out
+    eval    := the exact dev evaluation command
+    noise   := NOISE_FLOOR(eval)                   # dev values closer than noise are equal
+    write split.md
+    read + profile the dev data, the tests and the baseline
+    COMMIT(B); B := point(id B, parent none, commit HEAD, metrics eval())
+    pareto.md := [B]; log B with draw none, status KEPT
+
+    web-search for SOTA approaches, papers, repos, issues; append ideas to ideas.md
+    idea, parent := PAIRWISE_WINNER(); draw := none
+    rounds := 0
+    loop:
+        winner := ROUND(idea, parent, draw); rounds += 1
+        if winner != none: return FINISH(winner)
+        if the budget is spent or rounds == round_limit: return FINISH(none)
+        r := RANDOM()
+        if r < 0.33:                                                    # variant
+            p := a frontier point
+            idea := one change, reasoned from p's logged observations, that should move
+                    the frontier; append it to ideas.md; parent := p
+        elif r < 0.66 and ELIGIBLE_PAIRS() is not empty:                # compose
+            (p, q) := a pair from ELIGIBLE_PAIRS()
+            idea := "merge q into p"; parent := p
+        elif r < 0.66 and FORK_POINT() != none:          # fork, so that a pair can compose
+            (o, d) := FORK_POINT()
+            idea := a change on an aspect d does not have: the pairwise winner of such ideas
+                    in ideas.md, else one reasoned from o's logged observations, appended
+                    to ideas.md; parent := o
+        else:                             # fresh, also a compose draw with no pair or fork
+            s := RANDOM()
+            source := extensive internet search if s < 0.33, gpt-6-astra if s < 0.66,
+                      else gemini-4-argon
+            with deep thinking, append fresh ideas from source that are not in
+                explored-ideas.md to ideas.md
+            idea, parent := PAIRWISE_WINNER()
+        draw := r, plus s for a fresh idea
+
+procedure ROUND(idea, parent, draw):
+    RESET(parent.commit)
+    implement idea                # a compose: `git merge --no-commit <q commit>`, resolve
+    m := eval()
+    COMMIT(id); x := point(id, parent, HEAD, idea, aspect, m)
+    if some frontier point DOMINATES x:  status := FAILED
+    elif some frontier point EQUALS x:   status := TIE                  # not inserted
+    else:
+        status := KEPT; insert x in pareto.md
+        for each frontier point f that x DOMINATES:
+            remove f from pareto.md; f.status := DOMINATED
+    append x, draw, status and observations (what the profile, errors and outputs showed,
+        what the next change should be) to explored-ideas.md    # TIE, FAILED never retried
+    for each frontier or TIE point f not yet held-out checked whose dev metrics meet the goal:
+        if HELDOUT_CHECK(f) meets the goal and HELDOUT_PASS(f): return f  # each f once
+        remove f from pareto.md if it is there; f.status := OVERFIT
+        if pareto.md is empty: re-insert B; B.status := KEPT
+    return none
+
+procedure FINISH(winner):
+    best := winner
+    if best == none:     # budget or round limit: check frontier and TIE points in turn
+        for each frontier or TIE point f != B, in the task's metric priority on the dev
+                metrics (its first-named metric when it gives none):
+            if HELDOUT_PASS(f): best := f; break
+            remove f from pareto.md if it is there; f.status := OVERFIT
+        if best == none:                # report that no point beat the baseline held out
+            best := B; re-insert B in pareto.md if absent; B.status := KEPT
+    if best.status == TIE: insert best in pareto.md; best.status := KEPT
+    RESET(best.commit)
+    in a lab: write `git diff --binary <B commit> <best commit>` to <scratch dir>/best.patch
+    report best with its dev and held-out metrics (HELDOUT_CHECK(best)), whether it meets
+        the goal on both, the explored-ideas.md counts (KEPT, TIE, FAILED, OVERFIT,
+        DOMINATED), the refs/discover/<task id>/ refs that hold every evaluated commit, and
+        best.patch in a lab
+
+ELIGIBLE_PAIRS() := every pair (p, q) of frontier points where neither is B, they share
+    no aspect, neither commit is an ancestor of the other (`git merge-base --is-ancestor`;
+    a compose is a merge commit, so this also rules out a point composed from the other),
+    no explored-ideas.md row already merged q into p, and p is the better of the two on
+    the task's first metric
+FORK_POINT() := (o, d) for the oldest frontier point o that is an ancestor of another
+    frontier point d (`git merge-base --is-ancestor`), else none; a fork of o and d are
+    no ancestors of each other, so they make an eligible pair while both are on the frontier
+HELDOUT_PASS(f) := f is B, or with hB := HELDOUT_CHECK(B) and hf := HELDOUT_CHECK(f): hf is
+    no worse than hB on the task's first-priority metric (by any amount, no noise
+    allowance), and hB neither DOMINATES nor EQUALS hf
+NOISE_FLOOR(eval) := the spread of two or three baseline runs, with different seeds when
+    eval takes one; for a deterministic eval, the spread of the metric over bootstrap
+    resamples of one baseline run's per-item dev results (the dev split stays as it is),
+    or 0 when it yields one number
+PAIRWISE_WINNER() := judge the ideas in ideas.md not yet in explored-ideas.md pairwise;
+    return the winner and the frontier point it builds on
+HELDOUT_CHECK(f) := f's metrics on the held-out part, run once per point
+```"""
 """The AI discovery loop appended to the system prompt of every ``/discover`` run."""
 
 MODEL = "bestrouter"
@@ -170,9 +251,9 @@ TOOL_PROFILE = "full"
 def split_discovery_section(system_prompt: str) -> tuple[str, str]:
     """Cut an AI discovery section out of *system_prompt*.
 
-    The section is :data:`SECTION_HEADING` and everything up to the next
-    ``## `` heading (or the end of the text), with the blank lines that
-    separate it from that heading.
+    The section is :data:`SECTION_HEADING` on a line of its own and
+    everything up to the next ``## `` heading (or the end of the text),
+    with the blank lines that separate it from that heading.
 
     Args:
         system_prompt: A system prompt.
@@ -182,10 +263,11 @@ def split_discovery_section(system_prompt: str) -> tuple[str, str]:
         section itself; ``(system_prompt, "")`` when the prompt has no
         such section.
     """
-    start = system_prompt.find(SECTION_HEADING)
-    if start < 0:
+    match = re.search(rf"^{re.escape(SECTION_HEADING)}$", system_prompt, re.MULTILINE)
+    if match is None:
         return system_prompt, ""
-    end = system_prompt.find("\n## ", start + len(SECTION_HEADING))
+    start = match.start()
+    end = system_prompt.find("\n## ", match.end())
     end = len(system_prompt) if end < 0 else end + 1
     return system_prompt[:start] + system_prompt[end:], system_prompt[start:end]
 

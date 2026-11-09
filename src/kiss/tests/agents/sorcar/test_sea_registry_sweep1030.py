@@ -23,8 +23,7 @@ from __future__ import annotations
 
 import sys
 import threading
-import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -69,22 +68,26 @@ def _register_folder(folder: Path) -> None:
     (kiss_home() / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
 
 
-def _wait_until(done: Callable[..., bool], *args: Any) -> None:
-    """Poll ``done(*args)`` every 10 ms for up to 10 s; fail when it never holds."""
-    deadline = time.monotonic() + 10
-    while not done(*args):
-        assert time.monotonic() < deadline, f"{done.__name__}{args} never held"
-        time.sleep(0.01)
+def _rescan_parked_before_the_swap(at_swap: threading.Event, go_on: threading.Event) -> None:
+    """Rescan on this thread, parked once the folders are read, just before the swap.
 
+    A profile hook holds the thread where ``refresh_registry`` is about
+    to take ``_lock`` for ``_swap_registry``: *at_swap* is set there and
+    the thread waits for *go_on*.
+    """
+    def hold(frame: Any, event: str, arg: Any) -> None:
+        if (
+            event == "call" and frame.f_code is locked_call.__code__
+            and frame.f_locals.get("fn") is sea_commands._swap_registry
+        ):
+            at_swap.set()
+            go_on.wait(10)
 
-def _blocked_on_notify_lock(thread: threading.Thread) -> bool:
-    """Whether *thread* is parked taking ``sea_commands._notify_lock``."""
-    frame = sys._current_frames().get(thread.ident or 0)
-    return (
-        frame is not None
-        and frame.f_code is locked_call.__code__
-        and frame.f_locals.get("lock") is sea_commands._notify_lock
-    )
+    sys.setprofile(hold)
+    try:
+        sea_commands.refresh_registry()
+    finally:
+        sys.setprofile(None)
 
 
 class _HoldingSubscriber:
@@ -93,7 +96,8 @@ class _HoldingSubscriber:
     The first call (the first publish) sets :attr:`entered` and waits for
     :attr:`release`, then rescans from inside the callback (as a
     subscriber resolving a name through ``get_command`` may), so a newer
-    scan is published while another rescan waits for the lock.
+    scan is published while another rescan, its folders read, has yet
+    to publish.
     """
 
     def __init__(self) -> None:
@@ -119,15 +123,20 @@ def test_an_older_scan_is_never_published_over_a_newer_one(tmp_path: Path) -> No
     sea_commands.subscribe(subscriber)
     first = threading.Thread(target=sea_commands.refresh_registry, daemon=True)
     first.start()
+    at_swap, go_on = threading.Event(), threading.Event()
+    queued = threading.Thread(
+        target=_rescan_parked_before_the_swap, args=(at_swap, go_on), daemon=True
+    )
     try:
         assert subscriber.entered.wait(10), "the first rescan never notified"
-        queued = threading.Thread(target=sea_commands.refresh_registry, daemon=True)
         queued.start()
-        _wait_until(_blocked_on_notify_lock, queued)
-        _write_sea(folder, "beta")  # appears after the queued rescan reached the lock
+        assert at_swap.wait(10), "the queued rescan never read the folders"
+        _write_sea(folder, "beta")  # appears after the queued rescan read the folders
+        subscriber.release.set()  # the subscriber's rescan sees beta and publishes first
+        first.join(10)
     finally:
         subscriber.release.set()
-    first.join(10)
+        go_on.set()
     queued.join(10)
     assert not first.is_alive() and not queued.is_alive()
     assert "beta" in subscriber.snapshots[-1], subscriber.snapshots[-1]

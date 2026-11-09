@@ -443,7 +443,9 @@ class MemoryTools:
                 line = f"{_qualified(memory_name, name)}  —  {page.title}"
                 if page.summary:
                     line += f": {page.summary}"
-                lines.append(line)
+                # One physical line per page: the cut below counts pages
+                # by newlines, and a title or summary may contain some.
+                lines.append(" ".join(line.split("\n")))
         if not lines:
             return "No memory pages yet."
         listing = "\n".join(lines)

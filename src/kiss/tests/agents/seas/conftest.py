@@ -93,10 +93,17 @@ def git(
         check: Raise :exc:`subprocess.CalledProcessError` on a non-zero exit (default).
         timeout: Seconds after which the call fails with :exc:`subprocess.TimeoutExpired`.
     """
+    # An identity exported by the launching shell would override the
+    # repository's own ``user.*`` config; only *env* may set one.
+    inherited = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))
+    }
     result = run_process_group(
         ["git", "-C", str(repo), *args],
         timeout,
-        env={**os.environ, **HERMETIC_GIT, **(env or {})},
+        env={**inherited, **HERMETIC_GIT, **(env or {})},
     )
     if check:
         result.check_returncode()
@@ -112,9 +119,18 @@ def init_repo(repo: Path) -> None:
     """
     repo.mkdir(parents=True, exist_ok=True)
     git(repo, "init", "-q", "-b", "main")
+    set_test_identity(repo)
+    git(repo, "config", "commit.gpgsign", "false")
+
+
+def set_test_identity(repo: Path) -> None:
+    """Give *repo* its own ``user.name`` / ``user.email`` for the commits made in it.
+
+    :func:`git` drops any identity the launching shell exported, so a
+    repository the test commits in needs one of its own.
+    """
     git(repo, "config", "user.email", "test@example.com")
     git(repo, "config", "user.name", "Test User")
-    git(repo, "config", "commit.gpgsign", "false")
 
 
 def seed_repo(repo: Path) -> None:
@@ -130,6 +146,7 @@ def remote_and_clones(root: Path, *names: str) -> list[Path]:
     git(root, "init", "-q", "--bare", "-b", "main", str(origin))
     seed = root / "seed"
     git(root, "clone", "-q", str(origin), str(seed))
+    set_test_identity(seed)
     git(seed, "checkout", "-q", "-b", "main")
     commit(seed, "README.md: hello", {"README.md": "hello\n"})
     git(seed, "push", "-q", "origin", "main")
@@ -137,6 +154,7 @@ def remote_and_clones(root: Path, *names: str) -> list[Path]:
     for name in names:
         clone = root / name
         git(root, "clone", "-q", str(origin), str(clone))
+        set_test_identity(clone)
         clones.append(clone)
     return clones
 
@@ -317,6 +335,15 @@ def fake_checkout(root: Path, seas: dict[str, str]) -> Path:
         (folder / name).mkdir(parents=True)
         (folder / name / f"{name}_sea.py").write_text(source, encoding="utf-8")
     return folder
+
+
+def add_extra(path: Path) -> None:
+    """Append a harmless ``extra()`` helper to the module at *path*: a change the gate accepts.
+
+    Args:
+        path: The Python file to edit in place.
+    """
+    path.write_text(path.read_text() + "\n\ndef extra() -> int:\n    return 1\n")
 
 
 def persist_task(

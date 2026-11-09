@@ -18,7 +18,14 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, stubRaf, click, byId} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  stubRaf,
+  click,
+  byId,
+  typeInto,
+} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {
   makeSession,
@@ -32,11 +39,6 @@ const {test, report} = makeRunner();
 
 function keydown(win, el, key) {
   el.dispatchEvent(new win.KeyboardEvent('keydown', {key, bubbles: true}));
-}
-
-function typeInto(win, el, value) {
-  el.value = value;
-  el.dispatchEvent(new win.Event('input', {bubbles: true}));
 }
 
 async function main() {
@@ -58,6 +60,45 @@ async function main() {
       inp.value,
       'old prompt Promptlet A',
       'ArrowDown kept it',
+    );
+    win.close();
+  });
+
+  await test('an accepted completion or ghost ends the prompt-history cycling', () => {
+    // A completion asked for while typing can land after the draft was
+    // cleared and recalled with ArrowUp; accepting it changes the draft
+    // like typing does, so ArrowDown must move on, not erase it.
+    const {win} = makePage({beforeScripts: stubRaf});
+    const inp = win.document.getElementById('task-input');
+    send(win, {type: 'inputHistory', tasks: ['build proj', 'older prompt']});
+    keydown(win, inp, 'ArrowUp');
+    assert.strictEqual(inp.value, 'build proj');
+    send(win, {
+      type: 'completions',
+      query: 'build proj',
+      completions: [{type: 'task', text: 'build project thoroughly'}],
+    });
+    keydown(win, inp, 'Tab');
+    assert.strictEqual(inp.value, 'build project thoroughly ');
+    keydown(win, inp, 'ArrowDown');
+    assert.strictEqual(
+      inp.value,
+      'build project thoroughly ',
+      'ArrowDown after an accepted completion keeps the draft',
+    );
+    // The same for an inline ghost accepted with Tab.
+    inp.value = '';
+    inp.dispatchEvent(new win.Event('input', {bubbles: true}));
+    keydown(win, inp, 'ArrowUp');
+    assert.strictEqual(inp.value, 'build proj');
+    send(win, {type: 'ghost', suggestion: 'ect now', query: 'build proj'});
+    keydown(win, inp, 'Tab');
+    assert.strictEqual(inp.value, 'build project now ');
+    keydown(win, inp, 'ArrowDown');
+    assert.strictEqual(
+      inp.value,
+      'build project now ',
+      'ArrowDown after an accepted ghost keeps the draft',
     );
     win.close();
   });

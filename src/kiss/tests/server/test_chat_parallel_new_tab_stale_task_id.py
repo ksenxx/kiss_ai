@@ -64,7 +64,7 @@ def _finish_response(model: str = "gpt-4o-mini") -> dict:
                             "function": {
                                 "name": "finish",
                                 "arguments": json.dumps(
-                                    {"success": "true", "summary": "done"}
+                                    {"success": "true", "summary_in_html": "done"}
                                 ),
                             },
                         }

@@ -30,12 +30,12 @@ import pytest
 from kiss.agents.seas.sync import sync_sea
 from kiss.tests.agents.seas.conftest import commit, git, hermetic_git_env, remote_and_clones
 from kiss.tests.agents.seas.sea_contract import tool_names, tool_result_text, tool_results
-from kiss.tests.server.test_run_agent_machine import TwoDaemonsCase, _DelegatingModel, _finish
-
-
-def _call(name: str, **arguments: Any) -> dict[str, Any]:
-    """A scripted answer: one tool call."""
-    return {"pause": 0.0, "calls": [(name, arguments)]}
+from kiss.tests.server.test_run_agent_machine import (
+    TwoDaemonsCase,
+    _call,
+    _DelegatingModel,
+    _finish,
+)
 
 
 def _user_text(body: dict[str, Any]) -> str:

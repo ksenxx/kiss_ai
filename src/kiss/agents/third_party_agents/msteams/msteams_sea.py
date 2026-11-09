@@ -345,6 +345,8 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         """
         try:
             result = self._get("/me/joinedTeams", params={"$top": limit})
+            if result.get("ok") is False:
+                return json.dumps({"ok": False, "error": str(result.get("error", result))[:500]})
             teams = [
                 {"id": t.get("id", ""), "name": t.get("displayName", "")}
                 for t in result.get("value", [])
@@ -379,6 +381,8 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         """
         try:
             result = self._get(f"/teams/{team_id}/channels")
+            if result.get("ok") is False:
+                return json.dumps({"ok": False, "error": str(result.get("error", result))[:500]})
             channels = [
                 {
                     "id": c.get("id", ""),
@@ -409,6 +413,8 @@ class MSTeamsChannelBackend(ToolMethodBackend):
                 f"/teams/{team_id}/channels/{channel_id}/messages",
                 params={"$top": top},
             )
+            if result.get("ok") is False:
+                return json.dumps({"ok": False, "error": str(result.get("error", result))[:500]})
             messages = [
                 {
                     "id": m.get("id", ""),
@@ -481,6 +487,8 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         """
         try:
             result = self._get("/me/chats", params={"$top": top})
+            if result.get("ok") is False:
+                return json.dumps({"ok": False, "error": str(result.get("error", result))[:500]})
             chats = [
                 {"id": c.get("id", ""), "topic": c.get("topic", ""), "type": c.get("chatType", "")}
                 for c in result.get("value", [])
@@ -523,6 +531,8 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         """
         try:
             result = self._get(f"/teams/{team_id}/members", params={"$top": top})
+            if result.get("ok") is False:
+                return json.dumps({"ok": False, "error": str(result.get("error", result))[:500]})
             members = [
                 {
                     "id": m.get("id", ""),

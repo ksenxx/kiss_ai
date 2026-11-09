@@ -26,6 +26,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import shutil
 import socket
 import ssl
 import tempfile
@@ -39,15 +40,19 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar import machines as mach
 from kiss.core.brand import PRODUCT_NAME
 from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _MAX_LINE_BYTES,
     _SHARE_TASKS_MAX_REPLY_BYTES,
     RemoteAccessServer,
+    _generate_self_signed_cert,
     _share_subagent_entries,
 )
+from kiss.tests.conftest import find_free_port
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.remote_daemon import start_remote_daemon
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 _PASSWORD = "share-chat-test-password"
@@ -253,6 +258,17 @@ class TestShareChatOverLocal(_LocalServerTestCase):
         self.assertTrue(event["ok"], event)
         page = Path(event["path"]).read_text(encoding="utf-8")
         self.assertIn(f"<title>{PRODUCT_NAME} chat</title>", page)
+
+    def test_lone_surrogate_in_title_still_shares(self) -> None:
+        # The page clips a title by UTF-16 units, so one ending mid-emoji
+        # carries a lone high surrogate; JSON transports it, UTF-8 has
+        # no form for it.  The share is still written and answered
+        # (A22-4, audit 2026-11-07: the encode error escaped the handler
+        # and no share_done ever came).
+        event = self._share(chatId="emoji", html=self.BODY, title="x" * 29 + "\ud83d…")
+        self.assertTrue(event["ok"], event)
+        page = Path(event["path"]).read_text(encoding="utf-8")
+        self.assertIn("<title>" + "x" * 29 + "?…</title>", page)
 
     def test_non_string_tab_id_is_normalized(self) -> None:
         event = self._share(chatId="tabless", html=self.BODY, tabId=99)
@@ -757,6 +773,141 @@ class TestShareChatOverWss(IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             event["tasks"][1]["events"][1]["command"], "pwd"
+        )
+
+
+class TestShareChatTasksOfAMachine(IsolatedAsyncioTestCase):
+    """``shareChatTasks`` stamped ``machine`` is answered from that machine's history.
+
+    A tab bound to a registered machine shows the machine's chat, whose
+    tasks are in the machine's history database: the page stamps the
+    share export's ``shareChatTasks`` with the binding and the daemon
+    forwards it (:func:`kiss.server.sidebar_panels.machine_share_tasks_reply`)
+    in the background on the ``panels`` link lane, the reply stamped
+    ``machine``.  A real local daemon, a real remote daemon registered
+    as ``box`` and seeded with the chat, a client on the local
+    connection; this daemon holds a copy of the chat of its own, which
+    the forwarded reply must not carry.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved_db = redirect_persistence(self.tmpdir)
+        mach.save_machines([])
+        th._add_task("this daemon's task", chat_id="chat-shared")
+        self.remote = await asyncio.to_thread(
+            start_remote_daemon, Path(self.tmpdir) / "remote-home", password="pw-remote",
+            seed=[
+                {"chat_id": "chat-shared", "task": "older remote task",
+                 "timestamp": 1_700_000_000.0},
+                {"chat_id": "chat-shared", "task": "newer remote task",
+                 "timestamp": 1_700_000_001.0},
+            ],
+        )
+        await asyncio.to_thread(mach.add_machine, "box", self.remote.url, "pw-remote")
+        certfile = Path(self.tmpdir) / "cert.pem"
+        keyfile = Path(self.tmpdir) / "key.pem"
+        _generate_self_signed_cert(certfile, keyfile)
+        self.server = RemoteAccessServer(
+            host="127.0.0.1", port=find_free_port(), certfile=str(certfile),
+            keyfile=str(keyfile), url_file=Path(self.tmpdir) / "remote-url.json",
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
+        )
+        await self.server.start_async()
+        self.reader, self.writer = await open_local_connection(
+            self.server, limit=_MAX_LINE_BYTES,
+        )
+
+    async def asyncTearDown(self) -> None:
+        self.writer.close()
+        await self.server.stop_async()
+        self.remote.stop()
+        mach.save_machines([])
+        restore_persistence(self.saved_db)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    async def _send(self, cmd: dict[str, Any]) -> None:
+        self.writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
+        await self.writer.drain()
+
+    async def _next(self, reply_type: str) -> dict[str, Any]:
+        """Return the next *reply_type* message of the local connection."""
+        for _ in range(300):
+            line = await asyncio.wait_for(self.reader.readline(), timeout=60.0)
+            assert line, "local connection closed"
+            msg: dict[str, Any] = json.loads(line.decode("utf-8"))
+            if msg.get("type") == reply_type:
+                return msg
+        raise AssertionError(f"no {reply_type} reply")
+
+    async def _share_tasks(self, **fields: Any) -> dict[str, Any]:
+        """Ask ``shareChatTasks`` of ``chat-shared`` with *fields*; return the reply."""
+        await self._send({"type": "shareChatTasks", "chatId": "chat-shared", **fields})
+        return await self._next("share_tasks")
+
+    async def test_the_bound_machines_history_answers_the_stamped_share(self) -> None:
+        """The reply is the machine's tasks, stamped ``machine``; this daemon's copy stays out."""
+        older = self.remote.task_ids["chat-shared/older remote task"]
+        newer = self.remote.task_ids["chat-shared/newer remote task"]
+        reply = await self._share_tasks(tabId="tab-1", machine="box")
+        self.assertEqual(reply.get("machine"), "box", reply)
+        self.assertNotIn("error", reply)
+        self.assertEqual(
+            (reply["tabId"], reply["chatId"], reply["truncated"]), ("tab-1", "chat-shared", False),
+        )
+        self.assertEqual([t["task_id"] for t in reply["tasks"]], [older, newer])
+        self.assertEqual(
+            [t["task"] for t in reply["tasks"]], ["older remote task", "newer remote task"],
+        )
+        self.assertEqual(reply["tasks"][0]["events"][0]["type"], "task_settings")
+        # A sub-agent tab's share narrows the reply to its task: the
+        # command reaches the machine whole (minus the stamp).
+        narrowed = await self._share_tasks(tabId="tab-1", taskId=newer, machine="box")
+        self.assertEqual(narrowed["machine"], "box")
+        self.assertEqual([t["task_id"] for t in narrowed["tasks"]], [newer])
+        # Unstamped, the command is this daemon's own, answered from its
+        # history and unstamped.
+        own = await self._share_tasks(tabId="tab-1")
+        self.assertNotIn("machine", own)
+        self.assertEqual([t["task"] for t in own["tasks"]], ["this daemon's task"])
+
+    async def test_an_unknown_machine_is_an_empty_reply_carrying_the_error(self) -> None:
+        reply = await self._share_tasks(tabId="tab-2", machine="nowhere")
+        self.assertEqual(reply, {
+            "type": "share_tasks", "tabId": "tab-2", "chatId": "chat-shared",
+            "tasks": [], "truncated": False, "error": "no machine named 'nowhere'",
+            "machine": "nowhere",
+        })
+
+    async def test_the_forwarded_share_holds_up_no_later_command(self) -> None:
+        """The reply is produced in the background, on the machine's ``panels`` lane.
+
+        While that lane's link is held (as a request in flight holds
+        it), a ``ping`` sent after the share is answered; the share's
+        reply, the machine's, follows once the link is free.
+        """
+        await self._share_tasks(machine="box")  # the lane's link exists now
+        (box,) = [m for m in mach.load_machines() if m.name == "box"]
+        panels = mach.link_for(box, "panels")
+        with panels._lock:
+            await self._send({
+                "type": "shareChatTasks", "chatId": "chat-shared", "tabId": "tab-3",
+                "machine": "box",
+            })
+            await self._send({"type": "ping"})
+            while True:
+                line = await asyncio.wait_for(self.reader.readline(), timeout=10.0)
+                msg = json.loads(line.decode("utf-8"))
+                self.assertNotEqual(
+                    msg.get("type"), "share_tasks",
+                    "answered while the machine's link is held: not by the machine",
+                )
+                if msg.get("type") == "pong":
+                    break
+        reply = await self._next("share_tasks")
+        self.assertEqual((reply["tabId"], reply["machine"]), ("tab-3", "box"))
+        self.assertEqual(
+            [t["task"] for t in reply["tasks"]], ["older remote task", "newer remote task"],
         )
 
 

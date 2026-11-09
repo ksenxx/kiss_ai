@@ -21,23 +21,12 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 
-const {send, clickTab} = harness;
+const {send, clickTab, plain} = harness;
+const {bar, barButtons} = require('./worktree_bar_helpers');
 
 // The sourceURL is what audit0902_main_retryable_bar.coverage.js keys on.
 function makePage() {
   return harness.makePage({sourceUrl: 'audit0902-retrybar-main.js'});
-}
-
-function plain(x) {
-  return JSON.parse(JSON.stringify(x));
-}
-
-function bar(win) {
-  return win.document.querySelector('.wt-bar');
-}
-
-function barButtons(win) {
-  return Array.from(win.document.querySelectorAll('.wt-bar .wt-btns .wt-btn'));
 }
 
 function clickBarButton(win, text) {

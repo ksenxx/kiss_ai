@@ -21,7 +21,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import _git
 from kiss.server import agent_state
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
-from kiss.tests.server.worktree_helpers import merge_conflict
+from kiss.tests.server.worktree_helpers import merge_conflict, worktree_changed_files
 
 
 def _attach_worktree_state(
@@ -92,7 +92,7 @@ def _make_server(repo: Path) -> tuple:
 
 
 class TestBug8Fix:
-    """After fix, _get_worktree_changed_files only reports files the agent
+    """After fix, the changed-files listing only reports files the agent
     actually changed, even when the original branch has advanced.
     """
 
@@ -132,7 +132,7 @@ class TestBug8Fix:
         _git("merge", "--ff-only", "tmp-advance", cwd=self.repo)
         _git("branch", "-d", "tmp-advance", cwd=self.repo)
 
-        changed = server._get_worktree_changed_files("0")
+        changed = worktree_changed_files(server, "0")
 
         assert "fileA.txt" in changed
         assert "unrelated_file.txt" not in changed, (
@@ -156,7 +156,7 @@ class TestBug8Fix:
         (wt_dir / "fileA.txt").write_text("agent modified A\n")
         (wt_dir / "new_file.txt").write_text("brand new\n")
 
-        changed = server._get_worktree_changed_files("0")
+        changed = worktree_changed_files(server, "0")
         assert "fileA.txt" in changed
         assert "new_file.txt" in changed
 

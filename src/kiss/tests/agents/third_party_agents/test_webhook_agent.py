@@ -399,6 +399,10 @@ class _Backend:
         return False
 
     def send_message(self, channel_id, text, thread_ts=""):
+        # The dispatcher swallows exceptions raised here, so the forbidden
+        # send is recorded where the test can see it.
+        with LOG.open("a") as f:
+            f.write("send\\n")
         raise AssertionError("send_message must not run when connect() fails")
 
     def disconnect(self):
@@ -585,7 +589,7 @@ def test_deliver_only_sys_exit_factory_returns_502() -> None:
 def test_deliver_only_connect_failure_returns_502_and_disconnects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """connect() returning False fails the delivery; disconnect() still runs."""
+    """connect() returning False fails the delivery; disconnect() still runs, send never."""
     module_name = _write_delivery_module(tmp_path, monkeypatch, _CONNECT_FALSE_DELIVERY_MODULE)
     backend, base = _start_backend(
         name="dc", secret=_SECRET, kind="github", deliver_module=module_name
