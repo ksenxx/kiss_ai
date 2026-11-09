@@ -101,26 +101,20 @@ class TestParseBinaryAttachments:
 
 
 class TestDeepseekReasoning:
-    def test_reasoning_and_answer_split(self):
-        assert _extract_deepseek_reasoning("<think> why </think> ans") == ("why", "ans")
+    def test_reasoning_removed_answer_kept(self):
+        assert _extract_deepseek_reasoning("<think> why </think> ans") == "ans"
 
-    def test_every_closed_block_removed_first_kept_as_reasoning(self):
+    def test_every_closed_block_removed(self):
         text = "a<think>r1</think>b<think>r2</think>c"
-        assert _extract_deepseek_reasoning(text) == ("r1", "abc")
+        assert _extract_deepseek_reasoning(text) == "abc"
 
     def test_plain_or_unclosed_content_returned_verbatim(self):
-        assert _extract_deepseek_reasoning("Just a plain answer") == (
-            "",
-            "Just a plain answer",
-        )
-        assert _extract_deepseek_reasoning("<think>never closed") == (
-            "",
-            "<think>never closed",
-        )
+        assert _extract_deepseek_reasoning("Just a plain answer") == "Just a plain answer"
+        assert _extract_deepseek_reasoning("<think>never closed") == "<think>never closed"
 
     def test_repeated_unclosed_openers_scan_linearly(self):
         text = "<think>" * 60_000 + "tail"
-        assert _timed(_extract_deepseek_reasoning, text) == ("", text)
+        assert _timed(_extract_deepseek_reasoning, text) == text
 
 
 class TestTaskTags:

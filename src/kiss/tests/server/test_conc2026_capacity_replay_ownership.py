@@ -36,12 +36,34 @@ seam the review reproduction used (a wrapper delegating to the real
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import Any
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
+from kiss.server.server import AgentServer
 from kiss.server.tab_registry import _MAX_TABS
+from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.test_review2_stale_run_undo import _Base
+
+
+def test_a_new_run_at_capacity_is_refused_before_starting(tmp_path: Path) -> None:
+    printer = MemoryPrinter()
+    server = AgentServer(printer=printer)
+    server.use_private_tab_registry(tmp_path / "tabs.json")
+    for i in range(_MAX_TABS):
+        server.tab_registry.update_tab(f"occupied-{i}", create=True)
+    server._cmd_run({
+        "tabId": "overflow", "prompt": "/sh help", "workDir": str(tmp_path),
+    })
+    state = agent_state.find_by_tab("overflow")
+    if state is not None and state.task_thread is not None:
+        state.task_thread.join(30)
+    assert not server.tab_registry.has_tab("overflow")
+    assert any(e.get("code") == "prompt_refused" for e in printer.emitted)
+    assert not any(e["type"] == "clear" for e in printer.emitted)
+    assert agent_state.find_by_tab("overflow") is None
+
 
 
 class CapacityReplayOwnershipTest(_Base):

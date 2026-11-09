@@ -299,6 +299,8 @@ def send(ws: ClientConnection, text: str, *, timeout: float = 10.0) -> None:
     the caller for good.  The write runs on a helper thread; when it has
     not finished in time the socket is closed underneath it, which
     unblocks the write and makes every later use of *ws* fail fast.
+    An interrupt that lands while waiting (a Stop) closes the socket
+    the same way before it propagates.
 
     Args:
         ws: The connection returned by :func:`connect`.
@@ -319,7 +321,14 @@ def send(ws: ClientConnection, text: str, *, timeout: float = 10.0) -> None:
 
     worker = threading.Thread(target=_write, name="sorcar-local-send", daemon=True)
     worker.start()
-    worker.join(timeout)
+    try:
+        worker.join(timeout)
+    except BaseException:
+        # A Stop's KeyboardInterrupt lands here: the writer holds the
+        # connection's protocol mutex while it is blocked, so the
+        # caller's cleanup ``close()`` would wait behind it for good.
+        ws.close_socket()
+        raise
     if worker.is_alive():
         ws.close_socket()
         raise ConnectionError(

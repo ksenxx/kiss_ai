@@ -18,6 +18,8 @@ const {
   clickTab,
   ofType: msgsOf,
   snapshotEntry,
+  typeInto,
+  plain,
 } = require('./simplify2_harness');
 const {trackWindow, runTests} = require('./workdir_helpers');
 
@@ -38,12 +40,6 @@ function tabBarIds(win) {
 
 function tabBarTitles(win) {
   return plain(win._testApi.openTabs().map(t => t.title));
-}
-
-// JSDOM objects come from another JS realm, so deepStrictEqual's
-// prototype identity check rejects them; normalize through JSON.
-function plain(value) {
-  return JSON.parse(JSON.stringify(value));
 }
 
 function activeTabId(win) {
@@ -420,6 +416,138 @@ function testCloseTabStillAnnouncedToDaemon() {
   assert.strictEqual(closes[0].tabId, 't2');
 }
 
+// --- the boot placeholder's live draft ------------------------------------
+
+function testFirstSnapshotCarriesTheLiveBootDraft() {
+  // The text in the composer when the first non-empty snapshot retires
+  // the boot placeholder is the newest state of its draft: it follows
+  // the screen to the tab taking it instead of vanishing (a fresh
+  // draft) or rolling back to the copy the previous page instance
+  // persisted (an edited or cleared draft).
+  const fresh = makePage(undefined);
+  let inp = fresh.win.document.getElementById('task-input');
+  send(fresh.win, {type: 'tabs_state', tabs: []});
+  typeInto(fresh.win, inp, 'my half-typed draft');
+  send(fresh.win, {
+    type: 'tabs_state',
+    tabs: [snapshotEntry('t9', 'other chat', 'chat-9')],
+  });
+  assert.deepStrictEqual(tabBarIds(fresh.win), ['t9']);
+  assert.strictEqual(activeTabId(fresh.win), 't9');
+  assert.strictEqual(inp.value, 'my half-typed draft');
+
+  const persisted = {chatId: 't1', inputDrafts: {t1: 'old persisted words'}};
+  const edited = makePage(persisted);
+  inp = edited.win.document.getElementById('task-input');
+  assert.strictEqual(inp.value, 'old persisted words');
+  typeInto(edited.win, inp, 'newer words');
+  send(edited.win, {
+    type: 'tabs_state',
+    tabs: [snapshotEntry('t1', 'one', 'chat-1')],
+  });
+  assert.strictEqual(activeTabId(edited.win), 't1');
+  assert.strictEqual(inp.value, 'newer words');
+
+  const cleared = makePage(persisted);
+  inp = cleared.win.document.getElementById('task-input');
+  typeInto(cleared.win, inp, '');
+  send(cleared.win, {
+    type: 'tabs_state',
+    tabs: [snapshotEntry('t1', 'one', 'chat-1')],
+  });
+  assert.strictEqual(inp.value, '', 'a deleted draft stays deleted');
+
+  // An UNEDITED boot draft of a tab that is gone does not displace the
+  // draft the surviving tab persisted for itself.
+  const gone = makePage({chatId: 't1', inputDrafts: {t1: 'd1', t2: 'd2'}});
+  inp = gone.win.document.getElementById('task-input');
+  send(gone.win, {
+    type: 'tabs_state',
+    tabs: [snapshotEntry('t2', 'two', 'chat-2')],
+  });
+  assert.strictEqual(inp.value, 'd2');
+}
+
+function testRemoteCloseOfAnOrdinaryChatKeepsTheSuccessorsDraft() {
+  // Only the boot placeholder's draft follows the screen.  An ordinary
+  // registered chat closed by another surface takes its unsent draft
+  // with it, as a local close does: the chat taking the screen keeps
+  // its own draft, on screen and in the persisted drafts.
+  const {win, getState} = makePage(undefined);
+  const inp = win.document.getElementById('task-input');
+  send(win, {
+    type: 'tabs_state',
+    tabs: [snapshotEntry('a', 'A', 'chat-a'), snapshotEntry('b', 'B', 'chat-b')],
+  });
+  win._testApi.switchToTab('b');
+  typeInto(win, inp, 'draft belonging to B');
+  win._testApi.switchToTab('a');
+  typeInto(win, inp, 'draft belonging to A');
+  send(win, {type: 'tabs_state', tabs: [snapshotEntry('b', 'B', 'chat-b')]});
+  assert.strictEqual(activeTabId(win), 'b');
+  assert.strictEqual(inp.value, 'draft belonging to B', "B keeps its own draft");
+  assert.strictEqual(
+    getState().inputDrafts.b,
+    'draft belonging to B',
+    "the persisted copy of B's draft is untouched",
+  );
+}
+
+// --- a chat closing under the content tab it opened --------------------------
+
+function openRunningChatFile(win) {
+  send(win, {
+    type: 'tabs_state',
+    tabs: [snapshotEntry('ta', 'A', 'chat-a'), snapshotEntry('tb', 'B', 'chat-b')],
+  });
+  win._testApi.switchToTab('ta');
+  win._testApi.hideWelcome();
+  send(win, {type: 'status', running: true, tabId: 'ta', attached: true});
+  send(win, {
+    type: 'fileContent',
+    path: '/w/a.txt',
+    name: 'a.txt',
+    content: 'x',
+    tabId: 'ta',
+  });
+  const file = win._testApi.openTabs().find(t => t.isContentTab);
+  assert.strictEqual(activeTabId(win), file.id, 'the file took the screen');
+  const stop = win.document.getElementById('stop-btn');
+  assert.strictEqual(stop.style.display, 'flex', 'Stop mirrors the owner');
+  return {file, stop, status: win.document.getElementById('status-text')};
+}
+
+function assertRunCleared(win, shown) {
+  assert.strictEqual(activeTabId(win), shown.file.id, 'the file stays shown');
+  assert.strictEqual(shown.stop.style.display, 'none', 'no Stop for a gone chat');
+  assert.strictEqual(shown.status.textContent, 'Ready');
+  assert.ok(!win.document.querySelector('.spinner'), 'no spinner either');
+}
+
+function testChatClosedElsewhereUnderItsFileClearsTheRun() {
+  // Stacked layout: chat A runs, its file is on screen.  A closed on
+  // another surface arrives as a snapshot without it; the surface
+  // under the file (timer, spinner, Stop) belonged to A and is blanked,
+  // as a local close of the shown chat is.
+  const {win} = makePage(undefined);
+  const shown = openRunningChatFile(win);
+  send(win, {type: 'tabs_state', tabs: [snapshotEntry('tb', 'B', 'chat-b')]});
+  assert.deepStrictEqual(tabBarIds(win), ['tb', shown.file.id]);
+  assertRunCleared(win, shown);
+}
+
+function testChatClosedLocallyUnderItsFileClearsTheRun() {
+  // The same through the strip's close button of the owner chat.
+  const {win, posted} = makePage(undefined);
+  const shown = openRunningChatFile(win);
+  const closeBtn = win.document.querySelector(
+    '#tab-list .chat-tab[data-tab-id="ta"] .chat-tab-close',
+  );
+  closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.deepStrictEqual(msgsOf(posted, 'closeTab').map(m => m.tabId), ['ta']);
+  assertRunCleared(win, shown);
+}
+
 const tests = [
   testReadyIgnoresStaleLocalTabSet,
   testReadyWithoutLegacyStateSendsEmptyRestoredTabs,
@@ -437,6 +565,10 @@ const tests = [
   testPerTabComposerAndModelSurviveReconcile,
   testReconnectResendsReadyWithCurrentTabs,
   testCloseTabStillAnnouncedToDaemon,
+  testFirstSnapshotCarriesTheLiveBootDraft,
+  testRemoteCloseOfAnOrdinaryChatKeepsTheSuccessorsDraft,
+  testChatClosedElsewhereUnderItsFileClearsTheRun,
+  testChatClosedLocallyUnderItsFileClearsTheRun,
 ];
 
 runTests(tests.map(fn => [fn.name, fn]));

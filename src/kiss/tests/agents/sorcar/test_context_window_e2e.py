@@ -37,7 +37,10 @@ from kiss.agents.sorcar.relentless_agent import (
     RelentlessAgent,
     _capped_progress_text,
 )
+from kiss.core.kiss_agent import KISSAgent
+from kiss.core.kiss_error import ContextWindowExceededError
 from kiss.core.models import model_info
+from kiss.core.tool_verdict import ALLOW, Verdict, refuse
 from kiss.tests.conftest import requires_openai_api_key
 from kiss.tests.core.test_context_window_e2e import (
     TEST_MODEL,
@@ -86,6 +89,18 @@ class TestCappedProgressText(unittest.TestCase):
         self.assertLessEqual(len(text), MAX_PROGRESS_CHARS)
 
 
+class _NotingRelentlessAgent(RelentlessAgent):
+    """A RelentlessAgent that records the error each hand-off summarizes (no call is mocked)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.handoff_errors: list[Exception] = []
+
+    def _summarize_failed_session(self, executor: KISSAgent, session: int, exc: Exception) -> str:
+        self.handoff_errors.append(exc)
+        return super()._summarize_failed_session(executor, session, exc)
+
+
 @requires_openai_api_key
 class TestRelentlessRecovery(ShrunkContextMixin):
     """Reproduces defect D4 end-to-end: RelentlessAgent must recover from a
@@ -105,9 +120,17 @@ class TestRelentlessRecovery(ShrunkContextMixin):
         continuation prompt has gone to the model, ``load_dataset``
         therefore answers with a one-line "already loaded" note: the
         recovery under test is session 0's overflow and hand-off, not the
-        model's obedience.
+        model's obedience.  Nor is the obedience of session 0 under test:
+        a reply that only calls ``finish`` is exempt from the context
+        check (the run is ending), so a model that finishes after the
+        first part — now and then, under the prompt's "never" — would end
+        session 0 without the overflow; ``finish`` is therefore refused
+        until the continuation prompt has gone out, and the refused call
+        leaves the step to its usual context check, which hands off.
+        The hand-off must be the overflow's: a session that ran out of
+        steps is summarized and continued the same way.
         """
-        agent = RelentlessAgent("Relentless-Ctx-Recovery")
+        agent = _NotingRelentlessAgent("Relentless-Ctx-Recovery")
         continuation_header = CONTINUATION_PROMPT.strip().splitlines()[0].split("{")[0]
         continued = False
 
@@ -116,6 +139,11 @@ class TestRelentlessRecovery(ShrunkContextMixin):
             if any(continuation_header in str(m.get("content", "")) for m in messages):
                 continued = True
             return messages
+
+        def veto_early_finish(name: str, _args: dict[str, Any]) -> Verdict:
+            if name == "finish" and not continued:
+                return refuse("Not all 5 parts are loaded: call load_dataset next.")
+            return ALLOW
 
         def load_dataset(part: int) -> str:
             """Load one part of the dataset.
@@ -155,9 +183,17 @@ class TestRelentlessRecovery(ShrunkContextMixin):
                 work_dir=td,
                 verbose=False,
                 llm_call_hook=note_continuation,
+                tool_call_hook=veto_early_finish,
             )
         parsed = yaml.safe_load(result)
-        self.assertTrue(continued, "session 0 never overflowed into a continuation")
+        self.assertTrue(
+            continued, f"session 0 never overflowed into a continuation, got: {parsed}"
+        )
+        self.assertTrue(
+            agent.handoff_errors
+            and isinstance(agent.handoff_errors[0], ContextWindowExceededError),
+            f"session 0 did not hand off on a context overflow: {agent.handoff_errors}",
+        )
         self.assertNotIn("consecutive errors", parsed.get("summary", ""))
         self.assertTrue(parsed["success"], f"expected recovery, got: {parsed}")
         self.assertIn("<h3>Previous Session", parsed.get("summary", ""))

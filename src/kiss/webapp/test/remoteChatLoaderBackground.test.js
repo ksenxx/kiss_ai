@@ -22,21 +22,34 @@ const {finishedSession, sendHistory} = require('./history_helpers');
 const LOADER = '#remote-chat-loader';
 
 /** Open the page with one remote chat row and click it: its tab shows
- *  the loading line.  Returns the page and the tab's id. */
-function openRemoteChat() {
+ *  the loading line, naming the machine `box` by its label when the
+ *  history carries one (`machineLabels`).  Returns the page and the
+ *  tab's id. */
+function openRemoteChat(machineLabels) {
   const {win, posted} = makePage({bodyClass: 'remote-chat'});
   const row = finishedSession('remote', 'Remote task', {
     machine: 'box',
     task_id: 'r-task',
     has_events: true,
   });
-  sendHistory(win, posted, [row], {machines: ['box'], localMachine: 'local'});
+  sendHistory(win, posted, [row], {
+    machines: ['box'],
+    localMachine: 'local',
+    machineLabels,
+  });
   win.document.querySelector('.history-chat-header').click();
   const remote = win._testApi.getActiveTabId();
   const loader = win.document.querySelector(LOADER);
   assert(loader, 'the clicked tab says the chat is on its way');
-  assert.strictEqual(loader.textContent, 'Loading the chat from box\u2026');
+  const name = (machineLabels && machineLabels.box) || 'box';
+  assert.strictEqual(loader.textContent, `Loading the chat from ${name}\u2026`);
   return {win, remote};
+}
+
+function testTheLineNamesTheMachineByItsLabel() {
+  const {win} = openRemoteChat({box: 'Build Box'});
+  win.close();
+  console.log('  ok - the loading line names the machine by its label');
 }
 
 /** Park the remote tab behind a new chat; the line goes with it. */
@@ -95,6 +108,7 @@ function testTheLineStaysUntilTheAnswer() {
 }
 
 function main() {
+  testTheLineNamesTheMachineByItsLabel();
   testStatusInTheBackgroundTakesTheLine();
   testErrorInTheBackgroundTakesTheLine();
   testTheLineStaysUntilTheAnswer();

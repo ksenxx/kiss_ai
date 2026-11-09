@@ -4,9 +4,27 @@
 # add your name here
 """Tests for preview model handling in update_models.py compute_changes."""
 
+import json
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
+
+import kiss.scripts.update_models as mod
 from kiss.scripts.update_models import (
     _add_codex_candidates,
+    _assume_untested_capabilities,
+    apply_updates_to_file,
     compute_changes,
+    fetch_anthropic,
+    fetch_gemini,
     find_deprecated_models,
 )
 
@@ -270,3 +288,182 @@ def test_find_deprecated_codex_entries_without_slugs():
     names = {d["name"] for d in deprecated}
     assert "codex/default" not in names
     assert "codex/gpt-5.5" not in names
+
+
+def _gemini_model(model_id: str, *methods: str) -> dict[str, Any]:
+    return {
+        "name": f"models/{model_id}",
+        "inputTokenLimit": 8192,
+        "supportedGenerationMethods": list(methods),
+    }
+
+
+class _PagedListingHandler(BaseHTTPRequestHandler):
+    """Serve two-page Gemini (``/gemini``) and Anthropic (``/anthropic``) listings.
+
+    Page two of each vendor is only reachable through the cursor page one
+    returned (Gemini's ``nextPageToken`` as ``pageToken``, Anthropic's
+    ``last_id`` as ``after_id``) and answers HTTP 500 when
+    ``fail_second_page`` is set.  Every request's path and Anthropic key
+    header are recorded.
+    """
+
+    fail_second_page = False
+    requests: list[str] = []
+    anthropic_keys: list[str | None] = []
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, D102
+        return
+
+    def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
+        cls = _PagedListingHandler
+        cls.requests.append(self.path)
+        query = parse_qs(urlsplit(self.path).query)
+        if self.path.startswith("/gemini"):
+            if "pageToken" in query:
+                assert query["pageToken"] == ["page two/tok+en"]
+                second = True
+                listing: dict[str, Any] = {
+                    "models": [_gemini_model("gemini-2.5-flash", "generateContent")]
+                }
+            else:
+                second = False
+                listing = {
+                    "models": [
+                        _gemini_model("gemini-3.8-flash", "generateContent"),
+                        _gemini_model("gemini-embedding-001", "embedContent"),
+                    ],
+                    "nextPageToken": "page two/tok+en",
+                }
+        else:
+            cls.anthropic_keys.append(self.headers.get("x-api-key"))
+            if "after_id" in query:
+                assert query["after_id"] == ["claude-opus-4-6"]
+                second = True
+                listing = {"data": [{"id": "claude-sonnet-4-5-20250929"}], "has_more": False}
+            else:
+                second = False
+                listing = {
+                    "data": [{"id": "claude-opus-4-6"}],
+                    "has_more": True,
+                    "last_id": "claude-opus-4-6",
+                }
+        status = 500 if second and cls.fail_second_page else 200
+        payload = json.dumps(listing).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+
+@contextmanager
+def _paged_listings(
+    monkeypatch: pytest.MonkeyPatch, fail_second_page: bool = False
+) -> Iterator[type[_PagedListingHandler]]:
+    """Point both vendor listing URLs at a local two-page server."""
+    _PagedListingHandler.fail_second_page = fail_second_page
+    _PagedListingHandler.requests = []
+    _PagedListingHandler.anthropic_keys = []
+    server = HTTPServer(("127.0.0.1", 0), _PagedListingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    monkeypatch.setattr(mod, "GEMINI_MODELS_URL", f"{base}/gemini")
+    monkeypatch.setattr(mod, "ANTHROPIC_MODELS_URL", f"{base}/anthropic")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    try:
+        yield _PagedListingHandler
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _later_page_entries() -> dict[str, dict]:
+    """Catalog entries that only page two of the listings vouches for."""
+    entry = {
+        "context_length": 8192,
+        "input_price_per_1M": 1.0,
+        "output_price_per_1M": 2.0,
+        "fc": True,
+        "emb": False,
+        "gen": True,
+    }
+    return {
+        name: dict(entry)
+        for name in (
+            "claude-sonnet-4-5-20250929",
+            "cc/claude-sonnet-4-5-20250929",
+            "gemini-2.5-flash",
+        )
+    }
+
+
+def test_gemini_and_anthropic_listings_follow_every_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both fetchers walk the cursor chain, so page-two models are neither missed nor retired."""
+    with _paged_listings(monkeypatch) as handler:
+        gemini = fetch_gemini()
+        anthropic = fetch_anthropic()
+    assert set(gemini) == {"gemini-3.8-flash", "gemini-embedding-001", "gemini-2.5-flash"}
+    assert gemini["gemini-embedding-001"] == {
+        "context_length": 8192,
+        "source": "gemini",
+        "is_embedding": True,
+        "is_generation": False,
+    }
+    assert set(anthropic) == {"claude-opus-4-6", "claude-sonnet-4-5-20250929"}
+    # One request per page, the Gemini key on every page, the Anthropic
+    # auth header repeated on the cursor page.
+    assert len(handler.requests) == 4
+    assert all("key=gemini-key" in p for p in handler.requests if p.startswith("/gemini"))
+    assert handler.anthropic_keys == ["anthropic-key", "anthropic-key"]
+    assert find_deprecated_models(_later_page_entries(), {}, anthropic, gemini, {}) == []
+
+
+def test_skip_test_records_gemini_embedding_as_embedder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Gemini ``embedContent``-only model is catalogued as an embedder, not a tool caller."""
+    catalog = tmp_path / "MODEL_INFO.json"
+    catalog.write_text("{}\n")
+    monkeypatch.setattr(mod, "MODEL_INFO_PATH", catalog)
+    with _paged_listings(monkeypatch):
+        gemini = fetch_gemini()
+    _, candidates = compute_changes({}, {}, {}, gemini, {}, {})
+    by_name = {c["name"]: c for c in candidates}
+    assert by_name["gemini-embedding-001"]["is_embedding"] is True
+    assert by_name["gemini-embedding-001"]["is_generation"] is False
+    assert by_name["gemini-3.8-flash"]["is_generation"] is True
+
+    kept = _assume_untested_capabilities(candidates)
+    apply_updates_to_file([], kept, [], {}, dry_run=False)
+    written = json.loads(catalog.read_text())
+    assert (
+        written["gemini-embedding-001"]["gen"],
+        written["gemini-embedding-001"]["emb"],
+        written["gemini-embedding-001"]["fc"],
+    ) == (False, True, False)
+    assert (
+        written["gemini-3.8-flash"]["gen"],
+        written["gemini-3.8-flash"]["emb"],
+        written["gemini-3.8-flash"]["fc"],
+    ) == (True, False, True)
+
+
+def test_failed_later_page_publishes_no_partial_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page-two failure raises instead of returning page one as the whole listing."""
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)  # skip api_get's retry backoff
+    with _paged_listings(monkeypatch, fail_second_page=True):
+        with pytest.raises(HTTPError):
+            fetch_gemini()
+        with pytest.raises(HTTPError):
+            fetch_anthropic()
+    # Nothing was returned, so nothing can be handed to find_deprecated_models;
+    # an empty listing retires no one.
+    assert find_deprecated_models(_later_page_entries(), {}, {}, {}, {}) == []

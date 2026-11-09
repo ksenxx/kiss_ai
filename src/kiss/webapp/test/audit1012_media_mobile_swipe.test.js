@@ -169,6 +169,20 @@ function testIgnoreAndScrollers() {
   touchEvent(win, 'touchstart', plain, [point(300, 100)]);
   touchEvent(win, 'touchend', plain, [], [point(100, 100)]);
   assert.deepStrictEqual(swipes, ['left', 'left'], 'an older selection does not block');
+  // Dragging a handle of that selection (its range changes during the
+  // touch) is selecting, not swiping.
+  touchEvent(win, 'touchstart', plain, [point(300, 100)]);
+  const wider = doc.createRange();
+  wider.selectNodeContents(wide);
+  sel.removeAllRanges();
+  sel.addRange(wider);
+  touchEvent(win, 'touchend', plain, [], [point(100, 100)]);
+  assert.deepStrictEqual(swipes, ['left', 'left'], 'extending a selection is not swiping');
+  // A selection cleared by the touch does not block.
+  touchEvent(win, 'touchstart', plain, [point(300, 100)]);
+  sel.removeAllRanges();
+  touchEvent(win, 'touchend', plain, [], [point(100, 100)]);
+  assert.deepStrictEqual(swipes, ['left', 'left', 'left'], 'a cleared selection does not block');
 }
 
 function testPreviewBootstrap() {

@@ -61,7 +61,9 @@ from kiss.core.models.codex_model import codex_auth_status, codex_cli_env
 from kiss.core.processes import pid_alive, run_process_group
 from kiss.tests.conftest import install_cli_script, posix_only
 
-PROBE_TIMEOUT = 0.5
+# Long enough for the stand-in to start Python, spawn its grandchild and record
+# the pid under a loaded suite (0.5 s was not); the grandchild sleeps 60 s.
+PROBE_TIMEOUT = 2.0
 # Slack for the kill and the reap of the stand-in after the timeout.
 RETURN_GRACE = 2.0
 # A killed grandchild is a zombie until its new parent reaps it.

@@ -47,6 +47,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from kiss.agents.sorcar.edit_matching import tolerant_matches
 from kiss.agents.sorcar.shell_scan import (
     Group,
     SimpleCommand,
@@ -773,17 +774,17 @@ class HeredocCopy:
 _TEE_OPTIONS = frozenset({"-a", "--append", "-i", "--ignore-interrupts"})
 
 
-def _home_path(target: Word) -> str | None:
-    """Return the absolute POSIX path of a ``~`` / ``~/x`` *target* the shell would expand."""
+def _home_path(target: Word, home: str) -> str | None:
+    """Return the absolute POSIX path of a ``~`` / ``~/x`` *target* in the home directory *home*."""
     rest = target.text[1:]
     if target.literal or target.text[:1] != "~" or rest[:1] not in ("", "/"):
         return None
     if any(char in rest for char in "$`*?["):
         return None
-    return posixpath.normpath(bash_path(os.path.expanduser("~")) + rest)
+    return posixpath.normpath(home + rest)
 
 
-def heredoc_copy(command: str, cwd: str | None) -> HeredocCopy | None:
+def heredoc_copy(command: str, cwd: str | None, home: str | None = "~") -> HeredocCopy | None:
     """Return the one literal here-document copy that *command* is, or ``None``.
 
     Qualifies: ``cat`` (no option) or ``tee`` (``-a``/``--append``/``-i``
@@ -794,11 +795,16 @@ def heredoc_copy(command: str, cwd: str | None) -> HeredocCopy | None:
     command or as the rewrite step of ``[cd DIR &&] <copy> [&& | ; |
     newline] <rest>`` (:func:`_rewrite_segment`; the result then names
     the ``cd`` directory and the rest).  A ``~`` / ``~/x`` target is
-    resolved with the home directory.
+    resolved in *home*.
 
     Args:
         command: The shell command text.
         cwd: The absolute POSIX directory it starts in; ``None`` when unknown.
+        home: The home directory of the shell that runs the command,
+            which its ``~`` names: this process's own by default
+            (``"~"``, the host shell's), a container's or a remote
+            shell's when the command runs there, or ``None`` when that
+            is unknown, which leaves a ``~`` target's ``path`` ``None``.
     """
     rewrite = _rewrite_segment(command, cwd)
     if rewrite is None or rewrite.body is None:
@@ -829,8 +835,8 @@ def heredoc_copy(command: str, cwd: str | None) -> HeredocCopy | None:
         # operator, not the text, which may say ``>>`` in a comment or a delimiter.
         append = any(operator in (">>", "&>>") for _, operator, _ in simple.redirections)
     path = resolve(simple.cwd, target)
-    if path is None:
-        path = _home_path(target)
+    if path is None and home is not None:
+        path = _home_path(target, bash_path(os.path.expanduser(home)))
     return HeredocCopy(target.text, path, rewrite.body, append, rewrite.cwd, rewrite.remainder)
 
 
@@ -851,11 +857,14 @@ class MechanicalEdit:
             first line's part after the ``&&`` / ``;`` and the lines after
             the here-document (or the first line), joined with a newline;
             ``""`` when the rewrite is the whole command.
-        per_line: Whether the one substitution is a ``sed`` without ``-z``
-            and without ``g``, which replaces the first match of every
-            line: ``edits`` then replaces one match, which is exact
-            only while the file holds one; :meth:`edits_for` settles the
-            exact call from the file's text.
+        per_line: Whether the one substitution is a ``sed`` without
+            ``g``, which replaces the first match of every record (a
+            line, or with ``-z`` a NUL-separated record: *separator*):
+            ``edits`` then replaces one match, which is exact only while
+            the file holds one; :meth:`edits_for` settles the exact call
+            from the file's text.
+        separator: The record separator of a ``sed``: ``"\\n"``, or
+            ``"\\0"`` with ``-z``.
         universal_newlines: Whether the python rewrite reads the file
             with universal newlines (a ``newline`` keyword left out or
             ``None``), which turns a ``\\r\\n`` or ``\\r`` of the file into
@@ -872,11 +881,12 @@ class MechanicalEdit:
     remainder: str = ""
     per_line: bool = False
     universal_newlines: bool = False
+    separator: str = "\n"
 
     @property
     def text_dependent(self) -> bool:
         """Whether :meth:`edits_for` depends on the file's text (else it is :attr:`edits`)."""
-        return self.per_line or self.universal_newlines or any(
+        return self.per_line or self.universal_newlines or len(self.edits) > 1 or any(
             "\n" in old and "\r\n" not in old for old, _, _ in self.edits
         )
 
@@ -885,16 +895,25 @@ class MechanicalEdit:
 
         A :attr:`universal_newlines` read has no ``Edit`` equivalent for
         a file holding a ``\\r``: the rewrite would turn its line endings
-        into ``\\n``, which ``Edit`` keeps.  Nor has a pair whose ``old``
-        holds a bare ``\\n`` that a CRLF file lacks when the pair's turn
-        comes (``Edit`` applies the pairs in order, each to the text the
-        earlier ones left): ``Edit`` retries such a pair with ``\\r\\n``,
-        which ``str.replace`` and sed never do.  A :attr:`per_line`
+        into ``\\n``, which ``Edit`` keeps.  A :attr:`per_line`
         substitution depends on the text too: with several matches, each
-        alone on its line, sed replaces them all, so the ``Edit`` gets
-        ``replace_all``; with one match or none the pair stands as it
-        is; a line holding the pattern twice has no ``Edit`` equivalent
-        (sed would replace its first match only).
+        alone in its record (:attr:`separator`), sed replaces them all,
+        so the ``Edit`` gets ``replace_all``; a record holding the
+        pattern twice has no ``Edit`` equivalent (sed would replace its
+        first match only).  The pairs
+        are judged in order, each against the text the earlier ones
+        leave, as ``Edit`` applies them: one matching nothing is left
+        out, as ``str.replace`` and sed leave the text as it is where
+        ``Edit`` would refuse the string it did not find.  When no pair
+        matches, the rewrite changes nothing and the pairs stand as
+        they are, so that the ``Edit`` reports the first as not found;
+        not over a CRLF file when such a pair holds a bare ``\\n``:
+        ``Edit`` retries it with ``\\r\\n``, which ``str.replace`` and
+        sed never do, and no ``Edit`` is exact.  Nor when the first
+        pair replaces one match the text holds whitespace aside:
+        ``Edit`` retries it with runs of blanks and trailing whitespace
+        ignored (:func:`~kiss.agents.sorcar.edit_matching.tolerant_matches`),
+        and would change what sed left alone.
 
         Args:
             content: The text of the file the rewrite targets.
@@ -904,19 +923,28 @@ class MechanicalEdit:
         """
         if self.universal_newlines and "\r" in content:
             return None
-        if "\r\n" in content:
-            text = content
-            for old, new, every in self.edits:
-                if "\n" in old and "\r\n" not in old and old not in text:
-                    return None
-                text = text.replace(old, new) if every else text.replace(old, new, 1)
-        if not self.per_line:
-            return self.edits
-        old, new, _ = self.edits[0]
-        counts = [line.count(old) for line in content.split("\n")]
-        if max(counts) > 1:
+        pairs = self.edits
+        if self.per_line:
+            old, new, _ = pairs[0]
+            counts = [record.count(old) for record in content.split(self.separator)]
+            if max(counts) > 1:
+                return None
+            pairs = [(old, new, sum(counts) > 1)]
+        exact: list[tuple[str, str, bool]] = []
+        text = content
+        for old, new, every in pairs:
+            if old not in text:
+                continue
+            exact.append((old, new, every))
+            text = text.replace(old, new) if every else text.replace(old, new, 1)
+        if exact:
+            return exact
+        if "\r\n" in content and any("\n" in old and "\r\n" not in old for old, _, _ in pairs):
             return None
-        return [(old, new, sum(counts) > 1)]
+        old, _, every = pairs[0]
+        if not every and tolerant_matches(content, old):
+            return None
+        return pairs
 
 
 _TEXT_KEYWORDS = frozenset({"encoding", "errors", "newline"})
@@ -1120,7 +1148,7 @@ class _PythonRewrite:
             return True
         edits = self.replacements(value)
         # A replacement after the write never reaches the file.
-        if edits and self.written is None:
+        if edits is not None and self.written is None:
             self.edits.extend(edits)
             self.text = name
             return True
@@ -1143,24 +1171,34 @@ class _PythonRewrite:
         self.universal_newlines = _universal_newlines(call)
         return self.path(path)
 
-    def replacements(self, node: ast.expr) -> list[tuple[str, str, bool]]:
-        """Return the pairs of a ``text.replace(old, new)...`` chain on the text read, in order."""
+    def replacements(self, node: ast.expr) -> list[tuple[str, str, bool]] | None:
+        """Return the pairs of a ``text.replace(old, new)...`` chain on the text read, in order.
+
+        ``None`` when *node* is no such chain, or one no ``Edit`` is
+        exact for: ``replace("", x)`` inserts *x* between every
+        character.  A ``replace(x, x)`` changes nothing and gives no
+        pair (``Edit`` refuses equal strings), so a chain of such calls
+        alone gives an empty list.
+        """
         edits: list[tuple[str, str, bool]] = []
+        links = 0
         while True:
             replace = _method_call(node, "replace", 2)
             if replace is None:
                 break
+            links += 1
             node, (old, new) = replace
             if not (
                 isinstance(old, ast.Constant) and isinstance(old.value, str)
                 and isinstance(new, ast.Constant) and isinstance(new.value, str)
-            ):
-                return []
+            ) or old.value == "":
+                return None
             # str.replace replaces every occurrence: so must the Edit.
-            edits.append((old.value, new.value, True))
-        if isinstance(node, ast.Name) and node.id == self.text and self.text is not None:
+            if old.value != new.value:
+                edits.append((old.value, new.value, True))
+        if links and isinstance(node, ast.Name) and node.id == self.text and self.text is not None:
             return edits[::-1]
-        return []
+        return None
 
     def write(self, node: ast.expr) -> bool:
         """Account for ``open(p, "w").write(s)``, ``Path(p).write_text(s)``, ``p.write_text(s)``.
@@ -1581,10 +1619,12 @@ def mechanical_edit(command: str, cwd: str | None) -> MechanicalEdit | None:
         operand, edits = sed_edit(simple)
         if operand is None or not edits:
             return None
-        per_line = not edits[0][2] and not _SED_NULL_DATA & set(words)
+        # -z makes NUL the record separator; without g the first match of
+        # every record goes, whatever separates them.
+        separator = "\0" if _SED_NULL_DATA & set(words) else "\n"
         return MechanicalEdit(
             "`sed -i` call", resolve(simple.cwd, operand), operand.text, edits,
-            rewrite.cwd, rewrite.remainder, per_line,
+            rewrite.cwd, rewrite.remainder, not edits[0][2], separator=separator,
         )
     return None
 

@@ -45,6 +45,7 @@ from kiss.tests.server.parallel_agent_harness import (
     tool_call_response,
 )
 from kiss.tests.server.pause import Pause
+from kiss.tests.server.remote_tabs_probe import machine_of
 from kiss.tests.server.test_remote_tabs import RemoteTabsHarness
 
 
@@ -119,7 +120,7 @@ class TestBoundTabLeavesItsLocalChat(_BindHarness):
         await self._submit(tab, "Say hello", "box")
         await self._run_until_idle(tab)
         remote_tabs = self.server._server_api.remote_tabs
-        self.assertEqual(remote_tabs.machine_of(tab), "box")
+        self.assertEqual(machine_of(remote_tabs, tab), "box")
         self.assertEqual(self._row(tab)["chatId"], "", "a machine-bound tab holds no local chat")  # type: ignore[index]
 
         # The CHATS panel opens the local chat in a new tab: the bound
@@ -128,7 +129,7 @@ class TestBoundTabLeavesItsLocalChat(_BindHarness):
         await self._until("task_events", other)
         self.assertEqual(self._row(other)["chatId"], chat_id)  # type: ignore[index]
         self.assertIsNotNone(self._row(tab), "the bound tab is still open")
-        self.assertEqual(remote_tabs.machine_of(tab), "box")
+        self.assertEqual(machine_of(remote_tabs, tab), "box")
 
         # The chat runs on in the new tab; the bound tab is not a viewer of it.
         await self._submit(other, "Say hello again here", "")
@@ -168,7 +169,7 @@ class TestBindRacesAnotherSurface(_BindHarness):
             hold.release()
             await self._bind_settled(tab)
         self.assertIsNone(self._row(tab), "the closed tab stays closed")
-        self.assertEqual(self.server._server_api.remote_tabs.machine_of(tab), "")
+        self.assertEqual(machine_of(self.server._server_api.remote_tabs, tab), "")
 
     async def test_a_local_resume_before_the_publication_keeps_its_chat(self) -> None:
         tab = "tab-resumed-while-publishing"
@@ -184,7 +185,7 @@ class TestBindRacesAnotherSurface(_BindHarness):
             )
             hold.release()
             await self._bind_settled(tab)
-        self.assertEqual(self.server._server_api.remote_tabs.machine_of(tab), "")
+        self.assertEqual(machine_of(self.server._server_api.remote_tabs, tab), "")
         self.assertEqual(self._row(tab)["chatId"], "chat-local")  # type: ignore[index]
 
     async def test_a_local_resume_while_the_bind_connects_stands_it_down(self) -> None:
@@ -202,7 +203,7 @@ class TestBindRacesAnotherSurface(_BindHarness):
             )
             hold.release()
             await self._bind_settled(tab)
-        self.assertEqual(self.server._server_api.remote_tabs.machine_of(tab), "")
+        self.assertEqual(machine_of(self.server._server_api.remote_tabs, tab), "")
         self.assertEqual(self._row(tab)["chatId"], "chat-local")  # type: ignore[index]
 
 
@@ -215,7 +216,7 @@ class TestSubAgentTabResume(_BindHarness):
         child = f"{tab}__sub_{spawned['task_id']}"
         remote_tabs = self.server._server_api.remote_tabs
         await self._send({"type": "resumeSession", "taskId": spawned["task_id"], "tabId": child})
-        await self._poll("the join", lambda: remote_tabs.machine_of(child) == "box")
+        await self._poll("the join", lambda: machine_of(remote_tabs, child) == "box")
         # Only a resume of a task the stream relayed joins a tab to it;
         # one it never saw is answered here (nothing runs for it), and
         # the sub-agent tab, still running on the machine, keeps its stream.
@@ -226,8 +227,8 @@ class TestSubAgentTabResume(_BindHarness):
                 break
         else:
             raise AssertionError("the resume was never answered")
-        self.assertEqual(remote_tabs.machine_of(child), "box")
-        self.assertEqual(remote_tabs.machine_of(tab), "box")
+        self.assertEqual(machine_of(remote_tabs, child), "box")
+        self.assertEqual(machine_of(remote_tabs, tab), "box")
 
 
 class TestBoundTabWorktreeBar(_BindHarness):

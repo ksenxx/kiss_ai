@@ -241,8 +241,8 @@ def _poke_forever_response() -> dict:
 
 
 def _summarizer_finish_response() -> dict:
-    """``finish(success=True, summary=...)`` so the summarizer returns."""
-    args = json.dumps({"success": True, "summary": "summary-from-test"})
+    """``finish(result=...)`` (the summarizer's one tool) so the summarizer returns."""
+    args = json.dumps({"result": "summary-from-test"})
     return {
         "id": "chatcmpl-sum",
         "object": "chat.completion",

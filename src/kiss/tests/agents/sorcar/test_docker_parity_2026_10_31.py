@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import functools
 import json
+import os
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -32,7 +33,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.container_jobs import JOBS_DIR, ContainerJobs
-from kiss.agents.sorcar.docker_manager import DockerManager, fetched_bytes
+from kiss.agents.sorcar.docker_manager import STOPPED_MESSAGE, DockerManager, fetched_bytes
 from kiss.agents.sorcar.docker_tools import DockerTools
 from kiss.agents.sorcar.edit_guards import (
     HEREDOC_UNRESOLVED_VERDICT,
@@ -185,7 +186,7 @@ def test_container_rewrites_are_made_as_write_and_edit_through_the_agent(
     assert _cat(env, "/tmp/notes.md") == "hi\nthere\nmore\n"
     assert h.hook_calls[-1] == ("Edit", {
         "file_path": "/tmp/notes.md", "old_string": "hello", "new_string": "hi\nthere",
-        "replace_all": False,
+        "replace_all": False, "exact": True,
     })
     out = h.call("Bash", command=PYTHON_TWO_REPLACES, description="python")
     assert out.startswith('Applied as Edit(file_path="/tmp/notes.md", edits=[') and (
@@ -320,6 +321,15 @@ def test_fetched_bytes_reports_every_way_a_fetch_fails() -> None:
     # pipeline's exit code (tr's) says 0: the announced size tells the truncation.
     with pytest.raises(OSError, match="cannot read p: fetched 3 of its 5 bytes"):
         fetched_bytes("p", 100, 0, f"5\n{base64.b64encode(b'abc').decode()}\n")
+    # A fetch that timed out or was stopped mid-file (A08 claude-4): the base64 that
+    # arrived (megabytes of it, possibly) is no reason, what else the pipeline printed is.
+    partial = base64.b64encode(b"x" * 3000).decode()
+    with pytest.raises(OSError) as timed_out:
+        fetched_bytes("p", 100_000, None, f"5000\n{partial}")
+    assert str(timed_out.value) == "cannot read p: the fetch timed out"
+    with pytest.raises(OSError) as stopped:
+        fetched_bytes("p", 100_000, -1, f"5000\n{partial}\n{STOPPED_MESSAGE}")
+    assert str(stopped.value) == f"cannot read p: {STOPPED_MESSAGE}"
 
 
 def _rest(command: str, description: str) -> dict[str, Any]:
@@ -377,6 +387,24 @@ def test_a_container_cd_into_a_file_is_refused_before_the_rewrite(env: DockerMan
     assert head.split() == ["6f", "6c", "64", "0d", "0a"], head  # still "old\r\n"
 
 
+def test_a_container_tilde_target_is_not_resolved_in_the_daemons_home(env: DockerManager) -> None:
+    """``cat > ~/x`` in the container is refused as unresolved, not written into the daemon's home.
+
+    The rewrite expanded ``~`` with the daemon's own home directory and
+    used that path inside the container (audit A06-9), creating the
+    file under the host user's home there; only the container's shell
+    knows its home, so the copy is refused and the agent is told to
+    name the literal path.
+    """
+    h = _Harness(env)
+    daemons_home = os.path.expanduser("~")
+    out = h.call("Bash", command="cat > ~/report.txt <<'EOF'\nhello\nEOF", description="write")
+    assert out == HEREDOC_UNRESOLVED_VERDICT.format(path="~/report.txt"), out
+    assert h.hook_calls[-1][0] == "Bash" and h.tool_calls()[-1] == "Bash"
+    listing = env.Bash(f"ls {daemons_home}/report.txt ~/report.txt", "nothing written", 30, 500)
+    assert listing.count("No such file") == 2 and listing.endswith("[exit code: 2]"), listing
+
+
 def test_the_rest_of_a_compound_container_rewrite_runs_after_the_applied_call(
     env: DockerManager,
 ) -> None:
@@ -411,6 +439,7 @@ def test_the_rest_of_a_compound_container_rewrite_runs_after_the_applied_call(
     assert out.endswith(f"\nThen made {call_text('Bash', rest)}, whose result follows:\nb\nb\n")
     assert h.hook_calls[-2:] == [("Edit", {
         "file_path": "/tmp/app/f.txt", "old_string": "a", "new_string": "b", "replace_all": True,
+        "exact": True,
     }), ("Bash", rest)]
     # A line holding the pattern twice has no exact Edit: a multi-line sed is refused as
     # before, a plain one runs in the container as the shell command it is.
@@ -420,6 +449,16 @@ def test_the_rest_of_a_compound_container_rewrite_runs_after_the_applied_call(
     assert out == rewrite_guard(multiline) and _cat(env, "/tmp/app/f.txt") == "aa\n", out
     assert h.call("Bash", command=sed, description="sed") == "ba\n"
     assert h.tool_calls()[-2:] == ["Bash", "Bash"]
+    # A sed -i on a symlink or a hard link is no Edit either (A08 astra-6 / fable-5): sed
+    # replaces the name and leaves the other one as it was; an Edit writes through it.
+    env.Bash(
+        "printf 'old\\n' > /tmp/app/real.txt && ln -sf real.txt /tmp/app/link.txt"
+        " && ln -f /tmp/app/real.txt /tmp/app/twin.txt", "seed", 30, 500,
+    )
+    for name in ("link.txt", "twin.txt"):
+        linked = f"cd /tmp/app && sed -i 's/old/new/' {name} && cat {name} real.txt"
+        assert h.call("Bash", command=linked, description="sed") == "new\nold\n", name
+        assert h.tool_calls()[-1] == "Bash"
     # A cd to a missing directory is refused up front; a refused Write leaves the rest unmade.
     missing = "cd /tmp/nowhere && cat > notes.md <<'EOF' && cat notes.md\nx\nEOF"
     out = h.call("Bash", command=missing, description="cd, rewrite")

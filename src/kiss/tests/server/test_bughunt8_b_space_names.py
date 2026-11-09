@@ -40,7 +40,7 @@ from kiss.server.agent_state import AgentState
 from kiss.server.merge_flow import _capture_untracked
 from kiss.server.server import AgentServer
 from kiss.tests.conftest import IS_WINDOWS
-from kiss.tests.server.worktree_helpers import merge_conflict
+from kiss.tests.server.worktree_helpers import merge_conflict, worktree_changed_files
 
 
 def _git(cwd: str | Path, *args: str) -> str:
@@ -139,7 +139,7 @@ class TestWorktreeLeadingSpaceChangedFiles(unittest.TestCase):
         target = Path(self.wt_dir, " lead.txt")
         target.write_text("line1\nline2-agent\n")
 
-        changed = self.server._get_worktree_changed_files(self.tab_id)
+        changed = worktree_changed_files(self.server, self.tab_id)
         self.assertIn(
             " lead.txt", changed,
             "leading space stripped from the changed-file listing: "

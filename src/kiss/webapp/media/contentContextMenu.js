@@ -100,12 +100,13 @@
 
   /**
    * The text of *sel* as rendered: what the user sees highlighted and the
-   * native Copy copies.  A Range's `toString()` would serialise the
+   * native Copy copies, the selected whitespace (a code line's
+   * indentation) included.  A Range's `toString()` would serialise the
    * source instead, so a native Select All followed by Copy would hand
    * over the page's hidden elements and inline `<script>` text.
    */
   function selectionText(sel) {
-    return String(sel.toString() || '').trim();
+    return String(sel.toString() || '');
   }
 
   /**
@@ -124,8 +125,7 @@
 
   /**
    * True when *node* has a `<script>`/`<style>`/menu/unrendered ancestor
-   * below *root*, or is invisible (`visibility` is inherited, so its
-   * parent's computed value is the text's own).
+   * below *root*, or is invisible.
    */
   function inHiddenSource(node, root) {
     let el = node;
@@ -133,11 +133,39 @@
       if (el.nodeType === 1 && isHiddenSource(el)) return true;
       el = el.parentNode;
     }
+    return invisible(node);
+  }
+
+  /**
+   * True when the text node *node* is invisible: `visibility` is
+   * inherited, so its parent's computed value is the text's own.
+   */
+  function invisible(node) {
     const parent = node.parentNode;
     const win = node.ownerDocument.defaultView;
     if (!win || !parent || parent.nodeType !== 1) return false;
     const visibility = win.getComputedStyle(parent).visibility;
     return visibility === 'hidden' || visibility === 'collapse';
+  }
+
+  /** The element focused in *doc*, one inside an open shadow root included. */
+  function focusedElement(doc) {
+    let focused = doc.activeElement;
+    while (focused && focused.shadowRoot && focused.shadowRoot.activeElement) {
+      focused = focused.shadowRoot.activeElement;
+    }
+    return focused;
+  }
+
+  /** True while the page renders *el*: no ancestor-or-self is display:none. */
+  function rendered(el) {
+    const win = el.ownerDocument.defaultView;
+    let node = el;
+    while (win && node && node.nodeType === 1) {
+      if (win.getComputedStyle(node).display === 'none') return false;
+      node = node.parentNode;
+    }
+    return true;
   }
 
   function copyViaTextarea(doc, text) {
@@ -153,10 +181,7 @@
     // handed focus back to, with a text field's own selection) once the
     // command has run, else a copy from a preview's contenteditable
     // drops its highlighted text and leaves focus on the body.
-    let focused = doc.activeElement;
-    while (focused && focused.shadowRoot && focused.shadowRoot.activeElement) {
-      focused = focused.shadowRoot.activeElement;
-    }
+    const focused = focusedElement(doc);
     const tag = String((focused && focused.tagName) || '').toLowerCase();
     const field = tag === 'input' || tag === 'textarea';
     const win = doc.defaultView;
@@ -223,94 +248,51 @@
   }
 
   /**
-   * Select every visible text node of *doc*'s body and return the live
-   * Ranges installed, one per stretch.
+   * Select the visible text of *scope* (*doc*'s body by default) as one
+   * live Range, from its first visible text node to its last.
    *
-   * `<script>`/`<style>` text and the menu's own markup live in that same
-   * body — at any depth — so the document is walked text node by text node
-   * and each run of visible nodes becomes one `Range`.  Selecting the body
-   * wholesale would instead hand the user the page's inline JavaScript the
-   * moment they followed Select All with Copy.
-   *
-   * Chromium and WebKit keep at most one `Range` per `Selection`, so the
-   * caller keeps the returned Ranges and a later Copy reads them with
-   * `rangesText` rather than the selection.
+   * One selection, as the native Select All installs: the keyboard Copy
+   * (Ctrl/Cmd+C) and the menu Copy both copy what it covers as rendered
+   * (the document Selection's text), leaving out the `<script>`/`<style>`
+   * text, the menu's own markup and the elements the page does not
+   * render, as the user never sees them.  It starts and ends at visible
+   * text: a Range beginning in the whitespace before an inline `<script>`
+   * would select nothing rendered at its edge.  An end inside an editing
+   * host the scope is not part of goes before / after the host instead:
+   * Chromium cuts a selection with one end in a host and the other
+   * outside at the host, as the native Select All of the page takes the
+   * host in whole.
    */
   function selectAll(doc, scope) {
     const win = doc.defaultView;
     const body = scope || doc.body || doc.documentElement;
-    if (!win || !body || typeof win.getSelection !== 'function') return [];
+    if (!win || !body || typeof win.getSelection !== 'function') return;
     const sel = win.getSelection();
-    if (!sel) return [];
+    if (!sel) return;
     sel.removeAllRanges();
     const walker = doc.createTreeWalker(body, 4 /* SHOW_TEXT */, null, false);
-    const ranges = [];
-    let range = null;
+    let first = null;
+    let last = null;
     let node = walker.nextNode();
     while (node) {
-      if (inHiddenSource(node, body)) {
-        range = addRange(sel, range, ranges);
-      } else {
-        if (!range) {
-          range = doc.createRange();
-          range.setStart(node, 0);
-        }
-        range.setEnd(node, node.length);
+      if (node.data.trim() && !inHiddenSource(node, body)) {
+        if (!first) first = node;
+        last = node;
       }
       node = walker.nextNode();
     }
-    addRange(sel, range, ranges);
-    return ranges;
-  }
-
-  /** Commit *range* to *sel*, recording it in *ranges*, and reset it. */
-  function addRange(sel, range, ranges) {
-    if (!range || range.collapsed) return null;
+    if (!first) return;
+    const range = doc.createRange();
+    const from = editableTarget(first);
+    if (from && from !== body && !from.contains(body)) {
+      range.setStartBefore(from);
+    } else {
+      range.setStart(first, 0);
+    }
+    const to = editableTarget(last);
+    if (to && to !== body && !to.contains(body)) range.setEndAfter(to);
+    else range.setEnd(last, last.length);
     sel.addRange(range);
-    ranges.push(range);
-    return null;
-  }
-
-  /**
-   * The text the live *ranges* (Select All's stretches) cover now, one
-   * entry per stretch: a Range follows the page's edits of the text it
-   * selected, as the selection's highlight does, so an insertion inside
-   * it is read and an addition past its end is not.
-   */
-  function rangesText(doc, ranges) {
-    const parts = [];
-    for (let i = 0; i < ranges.length; i++) {
-      const text = rangeText(doc, ranges[i]).trim();
-      if (text) parts.push(text);
-    }
-    return parts;
-  }
-
-  /**
-   * The text *range* covers now, read text node by text node so a
-   * hidden source inserted into it since Select All stays out, as it
-   * would have then, and so does text the page has hidden since, by
-   * any ancestor up to the document.
-   */
-  function rangeText(doc, range) {
-    const root = range.commonAncestorContainer;
-    if (root.nodeType === 3 /* TEXT_NODE */) {
-      if (inHiddenSource(root, doc)) return '';
-      return root.data.slice(range.startOffset, range.endOffset);
-    }
-    const walker = doc.createTreeWalker(root, 4 /* SHOW_TEXT */, null, false);
-    let text = '';
-    let node = walker.nextNode();
-    while (node) {
-      if (range.intersectsNode(node) && !inHiddenSource(node, doc)) {
-        text += node.data.slice(
-          node === range.startContainer ? range.startOffset : 0,
-          node === range.endContainer ? range.endOffset : node.length,
-        );
-      }
-      node = walker.nextNode();
-    }
-    return text;
   }
 
   function closestTag(node, tag) {
@@ -331,7 +313,14 @@
       const tag = String(el.tagName || '').toLowerCase();
       if (tag === 'textarea') return el;
       if (tag === 'input') return el;
-      if (el.isContentEditable) return el;
+      if (el.isContentEditable) {
+        // The editing host, not a formatting child that only inherits
+        // the editability: Select All and Paste act on the whole field.
+        while (el.parentNode && el.parentNode.isContentEditable) {
+          el = el.parentNode;
+        }
+        return el;
+      }
       el = el.parentNode;
     }
     return null;
@@ -364,7 +353,15 @@
       text: sel,
     });
     if (isWritable(editable)) {
-      items.push({id: 'paste', label: 'Paste', key: mod + 'V', enabled: true});
+      // An opaque origin (the sandboxed preview iframe) may not read the
+      // clipboard: the row is shown disabled, its shortcut still pastes.
+      const loc = doc.location;
+      items.push({
+        id: 'paste',
+        label: 'Paste',
+        key: mod + 'V',
+        enabled: !loc || String(loc.origin) !== 'null',
+      });
     }
     if (link) {
       // The resolved property, not the raw attribute: a relative href would
@@ -423,6 +420,44 @@
     el.appendChild(node);
   }
 
+  /**
+   * What a paste into *el* acts on: the field's text and its selection
+   * (a contenteditable's as the live Range the document selection keeps
+   * in it, cloned).
+   */
+  function editState(doc, el) {
+    if (!el.isContentEditable) {
+      return {
+        text: String(el.value || ''),
+        start: el.selectionStart,
+        end: el.selectionEnd,
+        range: null,
+      };
+    }
+    const win = doc.defaultView;
+    const sel = win && win.getSelection && win.getSelection();
+    const live = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+    const inside = live && el.contains(live.commonAncestorContainer);
+    return {
+      text: el.textContent,
+      start: null,
+      end: null,
+      range: inside ? live.cloneRange() : null,
+    };
+  }
+
+  /** True when the edit states *a* and *b* (editState) are the same. */
+  function sameEditState(a, b) {
+    if (a.text !== b.text || a.start !== b.start || a.end !== b.end) {
+      return false;
+    }
+    if (!a.range || !b.range) return !a.range && !b.range;
+    return (
+      a.range.compareBoundaryPoints(a.range.START_TO_START, b.range) === 0 &&
+      a.range.compareBoundaryPoints(a.range.END_TO_END, b.range) === 0
+    );
+  }
+
   function pasteInto(doc, el) {
     const win = doc.defaultView;
     const nav = win && win.navigator;
@@ -441,15 +476,50 @@
     } catch (_e) {
       return Promise.resolve(false);
     }
+    const asked = editState(doc, el);
     return pending.then(
       text => {
+        // The read was asynchronous (the browser may have asked the user
+        // first): a field the page made read-only, disabled or removed
+        // meanwhile is left alone, as the native paste would leave it.
+        // So is one whose text or selection moved on meanwhile: the
+        // paste was asked for at the selection of that moment, which a
+        // selection the user made since is not, and the old offsets are
+        // nowhere over text the field has changed.
+        if (!isWritable(el) || !doc.contains(el)) return false;
+        if (!sameEditState(asked, editState(doc, el))) return false;
+        // Nor is one the user has moved on from: a control focused since
+        // (another content tab's chat composer) is where the insertText
+        // command would write once focus() on a field the page hides
+        // (the tab switched away from: display:none, still mounted) has
+        // failed silently.  The paste is dropped then, never moved to
+        // that control nor the focus taken back from it.
+        const focused = focusedElement(doc);
+        if (
+          focused &&
+          focused !== doc.body &&
+          focused !== el &&
+          !el.contains(focused)
+        ) {
+          return false;
+        }
+        if (!rendered(el)) return false;
         const value = String(text || '');
-        // `number` / `email` inputs expose no selection API (selectionStart
-        // is null, setRangeText throws InvalidStateError) but they do keep
-        // a native selection, which execCommand('insertText') honours; it
-        // fires the field's own `input` event.  Appending is the last
-        // resort when the command is unavailable (jsdom) or refused.
-        let fired = false;
+        // The browser's own insertText command first: it acts on the
+        // focused field, replaces the native selection (the only one a
+        // `number` / `email` input has: selectionStart is null,
+        // setRangeText throws InvalidStateError), fires the field's
+        // `input` event itself and is a step of the field's undo
+        // history, which text written in directly is not.  Without the
+        // command (jsdom) or when it is refused, the text is written in
+        // at the selection, appended as the last resort.
+        if (typeof doc.execCommand === 'function') {
+          el.focus();
+          // A field that cannot take the focus would leave the command
+          // to whatever has it.
+          if (focusedElement(doc) !== el) return false;
+          if (doc.execCommand('insertText', false, value)) return true;
+        }
         if (el.isContentEditable) insertIntoContentEditable(doc, el, value);
         else if (
           typeof el.setRangeText === 'function' &&
@@ -457,13 +527,9 @@
         ) {
           el.setRangeText(value, el.selectionStart, el.selectionEnd, 'end');
         } else {
-          el.focus();
-          fired =
-            typeof doc.execCommand === 'function' &&
-            doc.execCommand('insertText', false, value);
-          if (!fired) el.value = String(el.value || '') + value;
+          el.value = String(el.value || '') + value;
         }
-        if (!fired) el.dispatchEvent(new win.Event('input', {bubbles: true}));
+        el.dispatchEvent(new win.Event('input', {bubbles: true}));
         return true;
       },
       () => false,
@@ -471,22 +537,32 @@
   }
 
   /**
-   * The keyboard model of every context menu (this one and the sidebar
-   * trees' treeContextMenu.js): Escape closes, Up / Down move between
-   * the enabled *items* (wrapping), Home / End jump to the ends, Enter /
-   * Space run the focused item.
+   * The keyboard model of every menu (this context menu, the sidebar
+   * trees' treeContextMenu.js, and main.js's tab menu and content menu
+   * bar): Up / Down move between the enabled *items* (wrapping), Home /
+   * End jump to the ends, Enter / Space run the focused item, Escape
+   * closes through *close* and Tab leaves the menu through *onLeave*
+   * with the browser's own focus move.  A caller that handles Escape or
+   * Tab elsewhere passes no *close* / *onLeave*, and the key passes
+   * through untouched.
    *
    * @param {KeyboardEvent} e The keydown event.
    * @param {Array<HTMLElement>} items The menu's enabled items.
-   * @param {Function} close Closes the menu.
+   * @param {?Function} close Closes the menu on Escape.
+   * @param {?Function} [onLeave] Closes the menu on Tab.
+   * @returns {boolean} Whether the key belonged to the model.
    */
-  function menuKeyNav(e, items, close) {
-    if (e.key === 'Escape') {
+  function menuKeyNav(e, items, close, onLeave) {
+    if (e.key === 'Escape' && close) {
       e.preventDefault();
       close();
-      return;
+      return true;
     }
-    if (!items.length) return;
+    if (!items.length) return false;
+    if (e.key === 'Tab' && onLeave) {
+      onLeave();
+      return true;
+    }
     const idx = items.indexOf(items[0].ownerDocument.activeElement);
     let next = -1;
     if (e.key === 'ArrowDown') next = idx < 0 ? 0 : (idx + 1) % items.length;
@@ -495,13 +571,18 @@
     else if (e.key === 'End') next = items.length - 1;
     if (next >= 0) {
       e.preventDefault();
-      items[next].focus({preventScroll: true});
-      return;
+      // The menus are position: fixed and clamped into the viewport, so
+      // this scrolls nothing but a dropdown's own overflow (the content
+      // menu bar's, which brings the focused row into view).
+      items[next].focus();
+      return true;
     }
     if ((e.key === 'Enter' || e.key === ' ') && idx >= 0) {
       e.preventDefault();
       items[idx].click();
+      return true;
     }
+    return false;
   }
 
   /**
@@ -528,6 +609,11 @@
   /**
    * Install a Copy / Select All context menu on *doc*.
    *
+   * `opts.shouldOpen(event)` says whether a contextmenu event opens it;
+   * `opts.scope(target)` names the element whose text Select All selects
+   * for a right-click on *target* outside a field (the body when absent
+   * or when it returns nothing).
+   *
    * Returns a handle with `close()` so a caller can dismiss an open menu
    * (main.js closes it when a tree menu opens over it).  The listeners live
    * as long as *doc* does.
@@ -539,37 +625,9 @@
     // The element focused before the menu opened; close() hands focus back
     // to it so a keyboard user does not lose their place.
     let opener = null;
-    // Chromium keeps a single Range per Selection, so a multi-range Select
-    // All cannot be re-read from the selection: the live Ranges it
-    // installed (every stretch) are remembered and their text read
-    // afresh at Copy time, since the page (a preview's script, typing
-    // into a contenteditable) may have changed it meanwhile, and a Range
-    // is live: it follows such edits as the highlight does, so a text
-    // cached at Select All time would be stale, and the scope re-read
-    // whole would take in text added past the selection's end.  The
-    // Range the selection itself kept is remembered alongside: the
-    // cache is only honoured while the live selection is still exactly
-    // that Range, so any selection the user makes afterwards — narrower,
-    // wider or elsewhere — discards it.  `selectionchange` is dispatched
-    // asynchronously, so it cannot be relied on for this.
-    let selectAllRanges = [];
-    let selectAllRange = null;
     // The menu copy asked for most recently: an earlier one whose async
     // write rejects after it must not fall back over it (see copyText).
     let copySeq = 0;
-
-    function cachedSelectAllText() {
-      if (!selectAllRange) return '';
-      const sel = win && win.getSelection && win.getSelection();
-      if (!sel || sel.rangeCount !== 1) return '';
-      const live = sel.getRangeAt(0);
-      const same =
-        live === selectAllRange ||
-        (live.compareBoundaryPoints(live.START_TO_START, selectAllRange) ===
-          0 &&
-          live.compareBoundaryPoints(live.END_TO_END, selectAllRange) === 0);
-      return same ? rangesText(doc, selectAllRanges).join('\n') : '';
-    }
 
     // True while focus is still on the menu (or nowhere in particular):
     // Escape, Enter / Space and the menu's own clicks leave it there.  A
@@ -615,18 +673,15 @@
         // exactly like the native menu does, and a following Copy reads
         // that selection.  select() works on every input type;
         // setSelectionRange throws on `number` / `email` inputs.
-        // Elsewhere it selects the visible text as one Range per stretch
-        // between hidden sources.  Chromium keeps only the first Range, so
-        // the live Ranges are kept with that one left in place, and the
-        // next Copy reads them only while the live selection is still
-        // exactly that Range (cachedSelectAllText).
+        // Elsewhere it selects the visible text of the editing host, of
+        // the scope the caller names for the clicked element, or of the
+        // body, as one live Range the next Copy reads as the browser
+        // renders it then (the document Selection's text).
         if (item.editable && isTextField(item.editable)) {
           item.editable.focus();
           item.editable.select();
         } else {
-          selectAllRanges = selectAll(doc, item.editable);
-          const sel = win && win.getSelection && win.getSelection();
-          selectAllRange = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+          selectAll(doc, item.editable || item.scope);
         }
         return;
       }
@@ -660,13 +715,8 @@
       close();
       ensureStyle();
       const model = buildMenuModel(doc, target);
-      // Chromium truncates a multi-range Selection to its first range, so
-      // an untouched Select All is copied from the captured text instead
-      // (buildMenuModel always puts the Copy item first).
-      const cached = cachedSelectAllText();
-      if (cached && model[0].enabled) {
-        model[0].text = cached;
-      }
+      const scope =
+        (typeof options.scope === 'function' && options.scope(target)) || null;
       menu = doc.createElement('div');
       menu.id = MENU_ID;
       menu.setAttribute('role', 'menu');
@@ -695,7 +745,12 @@
           ev.preventDefault();
           ev.stopPropagation();
           if (!item.enabled) return;
-          activate({id: item.id, text: item.text, editable: item.editable});
+          activate({
+            id: item.id,
+            text: item.text,
+            editable: item.editable,
+            scope: scope,
+          });
         });
         menu.appendChild(el);
       });
@@ -722,8 +777,11 @@
       close();
     }
 
+    // Tab leaves the menu by the browser's own focus move (there is no
+    // focus trap), so it closes then, else it would go on taking the
+    // Arrow / Home / End / Enter keys of the control the focus lands on.
     function onKeyDown(e) {
-      if (menu) menuKeyNav(e, focusableItems(), close);
+      if (menu) menuKeyNav(e, focusableItems(), close, close);
     }
 
     doc.addEventListener('contextmenu', onContextMenu);
@@ -769,19 +827,21 @@
     isWritable.toString() +
     selectionText.toString() +
     selectedText.toString() +
+    focusedElement.toString() +
+    rendered.toString() +
     copyViaTextarea.toString() +
     copyText.toString() +
     isHiddenSource.toString() +
     inHiddenSource.toString() +
-    addRange.toString() +
+    invisible.toString() +
     selectAll.toString() +
-    rangesText.toString() +
-    rangeText.toString() +
     closestTag.toString() +
     editableTarget.toString() +
     isMac.toString() +
     buildMenuModel.toString() +
     insertIntoContentEditable.toString() +
+    editState.toString() +
+    sameEditState.toString() +
     pasteInto.toString() +
     menuKeyNav.toString() +
     clampMenu.toString() +

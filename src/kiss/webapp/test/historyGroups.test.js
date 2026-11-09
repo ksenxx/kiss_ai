@@ -23,6 +23,7 @@ const {
   fakeMatchMedia,
   ofType,
   stubClipboard,
+  newDom,
 } = require('./simplify2_harness');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
@@ -32,6 +33,7 @@ const {
   groupedSession: session,
   sendHistoryPage: sendHistory,
   listShape,
+  historyRow: firstRow,
 } = require('./history_helpers');
 
 function makePage() {
@@ -71,9 +73,13 @@ function interceptTimers(win, min, max) {
   const origClearTimeout = win.clearTimeout;
   const timers = [];
   const cleared = [];
+  // Ids never repeat (fire() empties `timers` but not `cleared`): a
+  // timer armed after a fire must not inherit a cancelled timer's id.
+  let lastId = 1e9;
   win.setTimeout = (fn, ms) => {
     if (ms >= min && ms <= max) {
-      const id = 1e9 + timers.length + 1;
+      lastId += 1;
+      const id = lastId;
       timers.push({fn, ms, id});
       return id;
     }
@@ -101,11 +107,68 @@ function interceptTimers(win, min, max) {
   };
 }
 
+/** A touch-pointer event with the browser's reusable pointer ID. */
+function touchPointer(win, type, id) {
+  const e = new win.MouseEvent(type, {bubbles: true, cancelable: true});
+  Object.defineProperty(e, 'pointerId', {value: id});
+  Object.defineProperty(e, 'pointerType', {value: 'touch'});
+  return e;
+}
+
+/** Fresh full-page rows, one minute apart from `base`. */
+function fullPage(tag, base) {
+  return Array.from({length: 50}, (_, i) =>
+    session('C' + tag + i, 't' + tag + i, base - i * 60),
+  );
+}
+
 async function main() {
+  await test('interceptTimers: a timer armed after a fire gets a fresh id', () => {
+    const win = newDom('outside-only');
+    const {timers, cleared, fire, restore} = interceptTimers(win, 300, 300);
+    const runs = [];
+    const first = win.setTimeout(() => runs.push('first'), 300);
+    win.clearTimeout(first);
+    fire();
+    const second = win.setTimeout(() => runs.push('second'), 300);
+    assert.notStrictEqual(second, first, 'the id of a cancelled timer is not reused');
+    assert.strictEqual(timers.length, 1);
+    fire();
+    assert.deepStrictEqual(runs, ['second'], 'the new, uncancelled timer runs');
+    assert.deepStrictEqual(cleared, [first]);
+    restore();
+    win.close();
+  });
+
   // ---- History grouping ----
 
   const DAY = 86400;
   const todayNoon = todayNoonSec();
+
+  /** Fresh rows for the two-chat page, including every identical refresh. */
+  function page1() {
+    return [
+      session('A', 'a1', todayNoon),
+      session('B', 'b1', todayNoon - 600),
+    ];
+  }
+
+  /** Park changed history data while a mouse press holds its original row. */
+  function pressedRefresh() {
+    const {win, posted} = makePage();
+    sendHistory(win, posted, 0, page1());
+    const rowBefore = firstRow(win);
+    // Rebuilding before release would swallow the ensuing click.
+    rowBefore.dispatchEvent(
+      new win.MouseEvent('mousedown', {bubbles: true, cancelable: true}),
+    );
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, 0, [
+      session('C', 'c1', todayNoon + 60),
+      ...page1(),
+    ]);
+    return {win, posted, rowBefore};
+  }
 
   // The separator label of a day that is neither today nor yesterday:
   // the year is shown only for a day outside the current year, so a
@@ -372,11 +435,7 @@ async function main() {
       searchBox.value = value;
       searchBox.dispatchEvent(new win.Event('input', {bubbles: true}));
     };
-    const page = () => [
-      session('A', 'a1', todayNoon),
-      session('B', 'b1', todayNoon - 600),
-    ];
-    sendHistory(win, posted, 0, page());
+    sendHistory(win, posted, 0, page1());
     let [gA, gB] = groups(win);
     // The user explicitly collapses A (expand + collapse stores the
     // choice), which must NOT hide A's matches inside a later search.
@@ -386,7 +445,7 @@ async function main() {
     setSearch('task');
     // The search's results equal the loaded page, so the reply lands
     // in the identical-refresh fast path: no rebuild, same nodes.
-    sendHistory(win, posted, 0, page());
+    sendHistory(win, posted, 0, page1());
     [gA, gB] = groups(win);
     assert.ok(
       !collapsed(gA),
@@ -411,14 +470,14 @@ async function main() {
     );
     assert.ok(!collapsed(gB), 'unfolded chats stay expanded for the search');
     setSearch('');
-    sendHistory(win, posted, 0, page());
+    sendHistory(win, posted, 0, page1());
     [gA, gB] = groups(win);
     assert.ok(collapsed(gA), "clearing the search restores A's saved collapse");
     assert.ok(collapsed(gB), 'clearing the search restores the default');
     // A NEW search starts from expanded matches again: the fold made
     // inside the previous search does not carry over.
     setSearch('task');
-    sendHistory(win, posted, 0, page());
+    sendHistory(win, posted, 0, page1());
     [gA, gB] = groups(win);
     assert.ok(!collapsed(gA), 'a fresh search drops the old in-search fold');
     assert.ok(!collapsed(gB));
@@ -457,10 +516,6 @@ async function main() {
     win.close();
   });
 
-  function firstRow(win) {
-    return win.document.querySelector('#history-list .sidebar-item');
-  }
-
   // The 300 ms touch release-grace timer, intercepted so a test fires
   // it by hand (the zero-delay apply hop behind it still runs for real).
   function interceptTouchGrace(win) {
@@ -469,10 +524,6 @@ async function main() {
 
   await test('History: an identical refresh keeps the same DOM rows (no lost click, no lost focus)', async () => {
     const {win, posted} = makePage();
-    const page1 = () => [
-      session('A', 'a1', todayNoon),
-      session('B', 'b1', todayNoon - 600),
-    ];
     sendHistory(win, posted, 0, page1());
     const rowBefore = firstRow(win);
     rowBefore.focus();
@@ -536,10 +587,6 @@ async function main() {
 
   await test('History: an identical refresh retires every stale pagination loader', async () => {
     const {win, posted} = makePage();
-    const page1 = () => [
-      session('A', 'a1', todayNoon),
-      session('B', 'b1', todayNoon - 600),
-    ];
     sendHistory(win, posted, 0, page1());
     const rowBefore = firstRow(win);
     // Loaders can pile up: the scroll handler appends one, then a
@@ -629,23 +676,7 @@ async function main() {
   });
 
   await test('History: a rebuild with CHANGED data is deferred while the mouse is pressed on a row', async () => {
-    const {win, posted} = makePage();
-    sendHistory(win, posted, 0, [
-      session('A', 'a1', todayNoon),
-      session('B', 'b1', todayNoon - 600),
-    ]);
-    const rowBefore = firstRow(win);
-    // Press the row, and let a refresh with DIFFERENT data land while
-    // the button is still down: rebuilding now would swallow the click.
-    rowBefore.dispatchEvent(
-      new win.MouseEvent('mousedown', {bubbles: true, cancelable: true}),
-    );
-    send(win, {type: 'tasks_updated'});
-    sendHistory(win, posted, 0, [
-      session('C', 'c1', todayNoon + 60),
-      session('A', 'a1', todayNoon),
-      session('B', 'b1', todayNoon - 600),
-    ]);
+    const {win, posted, rowBefore} = pressedRefresh();
     assert.strictEqual(
       firstRow(win),
       rowBefore,
@@ -744,26 +775,20 @@ async function main() {
     ]);
     const rowBefore = firstRow(win);
     const grace = interceptTouchGrace(win);
-    const pev = (type, id) => {
-      const e = new win.MouseEvent(type, {bubbles: true, cancelable: true});
-      Object.defineProperty(e, 'pointerId', {value: id});
-      Object.defineProperty(e, 'pointerType', {value: 'touch'});
-      return e;
-    };
     // Touch 1 presses, a changed page lands and is parked, the finger
     // lifts (arming the 300ms compatibility-event grace timer) ...
-    rowBefore.dispatchEvent(pev('pointerdown', 7));
+    rowBefore.dispatchEvent(touchPointer(win, 'pointerdown', 7));
     send(win, {type: 'tasks_updated'});
     sendHistory(win, posted, 0, [
       session('C', 'c1', todayNoon + 60),
       session('A', 'a1', todayNoon),
       session('B', 'b1', todayNoon - 600),
     ]);
-    rowBefore.dispatchEvent(pev('pointerup', 7));
+    rowBefore.dispatchEvent(touchPointer(win, 'pointerup', 7));
     // ... and touch 2 begins INSIDE the grace period, with the browser
     // reusing pointer ID 7 for the new contact.  Touch 1's grace timer
     // must not release touch 2's press.
-    rowBefore.dispatchEvent(pev('pointerdown', 7));
+    rowBefore.dispatchEvent(touchPointer(win, 'pointerdown', 7));
     grace.fire();
     await sleep(0);
     assert.strictEqual(
@@ -772,7 +797,7 @@ async function main() {
       'a reused pointer ID must not release a newer touch',
     );
     // Touch 2 lifts; its own grace period ends; the parked page lands.
-    rowBefore.dispatchEvent(pev('pointerup', 7));
+    rowBefore.dispatchEvent(touchPointer(win, 'pointerup', 7));
     grace.fire();
     await sleep(0);
     assert.notStrictEqual(
@@ -784,21 +809,7 @@ async function main() {
   });
 
   await test('History: a parked page stays parked when a second press begins before the deferred apply', async () => {
-    const {win, posted} = makePage();
-    sendHistory(win, posted, 0, [
-      session('A', 'a1', todayNoon),
-      session('B', 'b1', todayNoon - 600),
-    ]);
-    const rowBefore = firstRow(win);
-    rowBefore.dispatchEvent(
-      new win.MouseEvent('mousedown', {bubbles: true, cancelable: true}),
-    );
-    send(win, {type: 'tasks_updated'});
-    sendHistory(win, posted, 0, [
-      session('C', 'c1', todayNoon + 60),
-      session('A', 'a1', todayNoon),
-      session('B', 'b1', todayNoon - 600),
-    ]);
+    const {win, rowBefore} = pressedRefresh();
     // Release press 1 (queues the zero-delay apply), then start press 2
     // synchronously, BEFORE that macrotask can run: the apply must find
     // the new press held and re-park the page instead of rebuilding.
@@ -1040,14 +1051,8 @@ async function main() {
       session('B', 'b1', todayNoon - 600),
     ]);
     const rowBefore = firstRow(win);
-    const pev = (type, id) => {
-      const e = new win.MouseEvent(type, {bubbles: true, cancelable: true});
-      Object.defineProperty(e, 'pointerId', {value: id});
-      Object.defineProperty(e, 'pointerType', {value: 'touch'});
-      return e;
-    };
     // A touch press, then the page is hidden before any release event.
-    rowBefore.dispatchEvent(pev('pointerdown', 3));
+    rowBefore.dispatchEvent(touchPointer(win, 'pointerdown', 3));
     send(win, {type: 'tasks_updated'});
     sendHistory(win, posted, 0, [
       session('C', 'c1', todayNoon + 60),
@@ -1104,10 +1109,6 @@ async function main() {
 
   await test('History: a duplicate later page is dropped instead of duplicating rows', async () => {
     const {win, posted} = makePage();
-    const fullPage = (tag, base) =>
-      Array.from({length: 50}, (_, i) =>
-        session('C' + tag + i, 't' + tag + i, base - i * 60),
-      );
     sendHistory(win, posted, 0, fullPage('x', todayNoon));
     sendHistory(win, posted, 50, fullPage('y', todayNoon - 5000));
     assert.strictEqual(all(win, '#history-list .sidebar-item').length, 100);
@@ -1131,11 +1132,7 @@ async function main() {
 
   await test('History: no second same-generation request can overlap a pending refresh', async () => {
     const {win, posted} = makePage();
-    const fullPage = tag =>
-      Array.from({length: 50}, (_, i) =>
-        session('C' + tag + i, 't' + tag + i, todayNoon - i * 60),
-      );
-    sendHistory(win, posted, 0, fullPage('x'));
+    sendHistory(win, posted, 0, fullPage('x', todayNoon));
     // A broadcast resets pagination and refetches; until that reply
     // lands, a bottom-scroll must NOT fire an overlapping request of
     // the same generation (its late reply would re-order pagination).
@@ -1147,7 +1144,7 @@ async function main() {
       asked,
       'the scroll is parked while the refresh is in flight',
     );
-    sendHistory(win, posted, 0, fullPage('x'));
+    sendHistory(win, posted, 0, fullPage('x', todayNoon));
     byId(win, 'history-list').dispatchEvent(new win.Event('scroll'));
     assert.strictEqual(
       ofType(posted, 'getHistory').length,
@@ -1159,12 +1156,23 @@ async function main() {
 
   await test('History: a same-day clock change alone does not rebuild, a day change does', async () => {
     const {win, posted} = makePage();
-    const page1 = () => [
-      session('A', 'a1', todayNoon),
-      session('B', 'b1', todayNoon - 600),
-    ];
     sendHistory(win, posted, 0, page1());
     const rowBefore = firstRow(win);
+    // A clock shift that stays on the same local day changes no label,
+    // so the fast path keeps the node.
+    const realNow = win.Date.now;
+    win.Date.now = () => realNow() + 60000;
+    try {
+      send(win, {type: 'tasks_updated'});
+      sendHistory(win, posted, 0, page1());
+      assert.strictEqual(
+        firstRow(win),
+        rowBefore,
+        'a same-day clock change keeps the node',
+      );
+    } finally {
+      win.Date.now = realNow;
+    }
     // A wall-clock correction across local midnight must relabel
     // "Today"/"Yesterday", so the fast path is off on a new local day.
     const origToDateString = win.Date.prototype.toDateString;
@@ -1508,15 +1516,11 @@ async function main() {
 
   await test('History: a duplicate offset-0 reply in one generation does not corrupt pagination', async () => {
     const {win, posted} = makePage();
-    const fullPage = tag =>
-      Array.from({length: 50}, (_, i) =>
-        session('C' + tag + i, 't' + tag + i, todayNoon - i * 60),
-      );
-    sendHistory(win, posted, 0, fullPage('x'));
+    sendHistory(win, posted, 0, fullPage('x', todayNoon));
     // A second offset-0 reply in the SAME generation (a scroll's
     // duplicate racing a deferred rebuild) must assign the cursor, not
     // advance it past what is on screen.
-    sendHistory(win, posted, 0, fullPage('y'));
+    sendHistory(win, posted, 0, fullPage('y', todayNoon));
     byId(win, 'history-list').dispatchEvent(new win.Event('scroll'));
     const asks = ofType(posted, 'getHistory');
     const last = asks[asks.length - 1];
@@ -1568,10 +1572,6 @@ async function main() {
 
   await test('History: a locale change makes the next refresh rebuild (row times are localized)', async () => {
     const {win, posted} = makePage();
-    const page1 = () => [
-      session('A', 'a1', todayNoon),
-      session('B', 'b1', todayNoon - 600),
-    ];
     sendHistory(win, posted, 0, page1());
     const rowBefore = firstRow(win);
     const origDtf = win.Intl.DateTimeFormat;
@@ -1594,10 +1594,6 @@ async function main() {
 
   await test('History: a time-zone change makes the next refresh rebuild (row times are localized)', async () => {
     const {win, posted} = makePage();
-    const page1 = () => [
-      session('A', 'a1', todayNoon),
-      session('B', 'b1', todayNoon - 600),
-    ];
     sendHistory(win, posted, 0, page1());
     const rowBefore = firstRow(win);
     // Same data, different clock localization: the rows' timestamps

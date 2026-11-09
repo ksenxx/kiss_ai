@@ -30,6 +30,8 @@ const assert = require('assert');
 const {makePage, send, clickTab} = require('./simplify2_harness');
 const {bootParallelRun} = require('./subagent_tab_helpers');
 
+const openWindows = [];
+
 // ---------------------------------------------------------------------------
 // scenario helpers
 // ---------------------------------------------------------------------------
@@ -42,7 +44,9 @@ const {bootParallelRun} = require('./subagent_tab_helpers');
  * @returns {object} {win, parentId, taskId, subTabId}.
  */
 function bootLiveSubagent() {
-  const {win, parentId, taskIds, subTabIds} = bootParallelRun(1, makePage());
+  const page = makePage();
+  openWindows.push(page.win);
+  const {win, parentId, taskIds, subTabIds} = bootParallelRun(1, page);
   const taskId = taskIds[0];
   const subTabId = subTabIds[0];
 
@@ -220,6 +224,8 @@ for (const t of tests) {
     failures += 1;
     console.error('FAIL - ' + t.name);
     console.error(e && e.stack ? e.stack : String(e));
+  } finally {
+    while (openWindows.length) openWindows.pop().close();
   }
 }
 if (failures > 0) {
@@ -227,5 +233,3 @@ if (failures > 0) {
   process.exit(1);
 }
 console.log('all subagentLiveEventsStream tests passed');
-// pretendToBeVisual keeps a rAF scheduler alive; exit explicitly.
-process.exit(0);

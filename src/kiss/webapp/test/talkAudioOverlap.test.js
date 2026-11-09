@@ -49,6 +49,7 @@ function testSecondAudioWaitsForFirstEnded() {
     'second clip plays after the first ends',
   );
   assert.strictEqual(players[1].src, 'data:audio/mpeg;base64,' + B64);
+  win.close();
   console.log('PASS: second audio clip waits for the first to end');
 }
 
@@ -66,6 +67,7 @@ function testThreeAudioClipsPlayInFifoOrder() {
   players[1].fire('ended');
   assert.strictEqual(players.length, 3, 'then the third');
   assert.strictEqual(players[2].playCalls, 1);
+  win.close();
   console.log('PASS: three audio clips play strictly one after another');
 }
 
@@ -86,6 +88,7 @@ function testMediaFailureAdvancesQueue(eventName) {
   );
   assert.strictEqual(players[1].playCalls, 1);
   assertNoSpeech(spoken, 'audio ' + eventName + ' event');
+  win.close();
   console.log('PASS: audio ' + eventName + ' event advances the talk queue');
 }
 
@@ -111,6 +114,7 @@ function testClipLessTalkIsSilentAndAdvancesQueue() {
   );
   assert.strictEqual(players[1].src, 'data:audio/mpeg;base64,' + B64);
   assertNoSpeech(spoken, 'clip-less talk');
+  win.close();
   console.log('PASS: clip-less talk stays silent and advances the queue');
 }
 
@@ -129,73 +133,82 @@ function testLeadingClipLessTalkDoesNotDelayAudio() {
   );
   assert.strictEqual(players[0].playCalls, 1);
   assertNoSpeech(spoken, 'leading clip-less talk');
+  win.close();
   console.log('PASS: a leading clip-less talk never delays the next clip');
 }
 
 async function testRejectedPlayDegradesSilentlyThenAdvances() {
   const {win} = makePage({beforeScripts: stubRaf});
-  const spoken = installSpeech(win);
-  const players = installAudio(win, () =>
-    Promise.reject(new Error('autoplay blocked')),
-  );
+  try {
+    const spoken = installSpeech(win);
+    const players = installAudio(win, () =>
+      Promise.reject(new Error('autoplay blocked')),
+    );
 
-  send(win, talkEv('r1', 'blocked clip', {audioB64: B64}));
-  send(win, talkEv('r2', 'queued clip', {audioB64: B64}));
+    send(win, talkEv('r1', 'blocked clip', {audioB64: B64}));
+    send(win, talkEv('r2', 'queued clip', {audioB64: B64}));
 
-  assert.strictEqual(
-    players.length,
-    1,
-    'the queued clip must wait for the blocked clip to settle',
-  );
+    assert.strictEqual(
+      players.length,
+      1,
+      'the queued clip must wait for the blocked clip to settle',
+    );
 
-  await new Promise(resolve => setTimeout(resolve, 0));
-  assert.strictEqual(
-    players.length,
-    2,
-    'a rejected play() must complete silently and advance the queue',
-  );
-  assert.strictEqual(players[1].playCalls, 1);
-  assert.strictEqual(players[1].src, 'data:audio/mpeg;base64,' + B64);
-  assertNoSpeech(spoken, 'rejected play()');
-  console.log('PASS: rejected play() degrades to silence, queue advances');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.strictEqual(
+      players.length,
+      2,
+      'a rejected play() must complete silently and advance the queue',
+    );
+    assert.strictEqual(players[1].playCalls, 1);
+    assert.strictEqual(players[1].src, 'data:audio/mpeg;base64,' + B64);
+    assertNoSpeech(spoken, 'rejected play()');
+    console.log('PASS: rejected play() degrades to silence, queue advances');
+  } finally {
+    win.close();
+  }
 }
 
 async function testLateErrorAfterRejectedPlayDoesNotDoubleAdvance() {
   const {win} = makePage({beforeScripts: stubRaf});
-  const spoken = installSpeech(win);
-  const players = installAudio(win, player =>
-    players.indexOf(player) === 0
-      ? Promise.reject(new Error('decode failed'))
-      : Promise.resolve(),
-  );
+  try {
+    const spoken = installSpeech(win);
+    const players = installAudio(win, player =>
+      players.indexOf(player) === 0
+        ? Promise.reject(new Error('decode failed'))
+        : Promise.resolve(),
+    );
 
-  send(win, talkEv('L1', 'undecodable clip', {audioB64: B64}));
-  send(win, talkEv('L2', 'queued clip', {audioB64: B64}));
-  send(win, talkEv('L3', 'third clip', {audioB64: B64}));
+    send(win, talkEv('L1', 'undecodable clip', {audioB64: B64}));
+    send(win, talkEv('L2', 'queued clip', {audioB64: B64}));
+    send(win, talkEv('L3', 'third clip', {audioB64: B64}));
 
-  await new Promise(resolve => setTimeout(resolve, 0));
-  assert.strictEqual(
-    players.length,
-    2,
-    'the rejection advanced the queue to the second clip',
-  );
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.strictEqual(
+      players.length,
+      2,
+      'the rejection advanced the queue to the second clip',
+    );
 
-  players[0].fire('error');
-  assert.strictEqual(
-    players.length,
-    2,
-    "the element's late error must not advance the queue again while " +
-      'the second clip is still playing',
-  );
+    players[0].fire('error');
+    assert.strictEqual(
+      players.length,
+      2,
+      "the element's late error must not advance the queue again while " +
+        'the second clip is still playing',
+    );
 
-  players[1].fire('ended');
-  assert.strictEqual(
-    players.length,
-    3,
-    'queue advances once the playing clip actually finishes',
-  );
-  assertNoSpeech(spoken, 'late error after rejected play()');
-  console.log('PASS: late media error never double-advances the queue');
+    players[1].fire('ended');
+    assert.strictEqual(
+      players.length,
+      3,
+      'queue advances once the playing clip actually finishes',
+    );
+    assertNoSpeech(spoken, 'late error after rejected play()');
+    console.log('PASS: late media error never double-advances the queue');
+  } finally {
+    win.close();
+  }
 }
 
 function testMissingAudioApiDegradesToSilence() {
@@ -215,6 +228,7 @@ function testMissingAudioApiDegradesToSilence() {
   );
   assert.strictEqual(players[0].playCalls, 1);
   assertNoSpeech(spoken, 'missing Audio API');
+  win.close();
   console.log('PASS: missing Audio API degrades to silence, no deadlock');
 }
 
@@ -231,6 +245,7 @@ function testThrowingAudioConstructorDegradesToSilence() {
   const players = installAudio(win, Promise.resolve());
   send(win, talkEv('a5b', 'plays fine', {audioB64: B64}));
   assert.strictEqual(players.length, 1, 'queue advanced past the failure');
+  win.close();
   console.log('PASS: throwing Audio constructor degrades to silence');
 }
 
@@ -248,12 +263,7 @@ async function main() {
   console.log('All talkAudioOverlap tests passed.');
 }
 
-// The pages are left with a clip "playing": its stall sampler
-// (main.js TALK_STALL_CHECK_MS interval) would keep node alive.
-main().then(
-  () => process.exit(0),
-  err => {
-    console.error(err);
-    process.exit(1);
-  },
-);
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});

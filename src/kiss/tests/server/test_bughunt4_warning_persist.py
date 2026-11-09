@@ -59,7 +59,7 @@ class TestWarningSurvivesRecording(TestCase):
         printer = self._make_printer("t-warn-2")
         printer.start_recording()
         printer.broadcast({"type": "warning", "message": "stash pop failed"})
-        snapshot = printer.peek_recording()
+        snapshot = printer.peek_recording_for_task(printer.thread_binding())
         self.assertEqual(
             [e.get("type") for e in snapshot], ["warning"],
             "peek_recording filtered out the warning event",

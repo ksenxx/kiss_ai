@@ -11,16 +11,12 @@ job's status and log tail (``tail``), blocks until it exits (``wait``), or
 kills its whole process group (``kill``).  Every test drives the real
 tool objects against real shell processes; nothing is mocked.
 
-Not covered here, because neither can be produced without a test double:
-
-* the ``except BaseException`` guard around the watcher ``Thread.start()``
-  in ``UsefulTools._start_background_job`` (kill the just-spawned shell's
-  group, re-raise) fires only on thread exhaustion or a stop injected
-  inside ``Thread.start`` (``RLIMIT_NPROC`` would break the ``Popen`` fork
-  first);
-* the ``_kill_job_group`` branch that skips the orphan-group kill because
-  the exited shell's pid is alive again (pid recycled by an unrelated
-  process) needs the kernel to hand that exact pid out once more.
+Not covered here: the ``_kill_job_group`` branch that skips the
+orphan-group kill because the exited shell's pid is alive again (pid
+recycled by an unrelated process) needs the kernel to hand that exact
+pid out once more.  A Stop or a failure landing between the job's
+spawn and its registration is covered by
+``test_concaudit_f2_bash_setup_failure.py``.
 """
 
 from __future__ import annotations
@@ -281,6 +277,47 @@ class TestBashJob:
         # A 3-byte window starts inside "abc": the cut line is dropped.
         cut = tools.bash_job(job_id, tail_lines=10, max_output_chars=header_len + 3)
         assert cut.endswith(marker), cut
+
+    def test_tail_of_a_progress_bar_log_shows_its_last_updates(self, tmp_path: Path) -> None:
+        """A log rewriting one line with ``\\r`` (pip, docker pull, tqdm) has a tail.
+
+        The tail window started mid-line and dropped everything up to
+        the first ``\\n``, so a log of one long ``\\r``-rewritten line was
+        reported as empty while it grew (A14-2 claude).
+        """
+        tools = UsefulTools(work_dir=str(tmp_path))
+        job_id, _pid, log_path = _start(
+            tools, "for i in $(seq 1 3000); do printf 'progress %04d\\r' $i; done; echo done",
+        )
+        tools.bash_job(job_id, action="wait", timeout_seconds=30)
+        assert log_path.stat().st_size > 40_000 and log_path.read_bytes().count(b"\n") == 1
+        report = tools.bash_job(job_id, tail_lines=3, max_output_chars=400)
+        assert report.endswith("progress 2999\rprogress 3000\rdone\n"), report
+        # One line without any line break in the window is shown from the window's start.
+        # paste, not ``seq -s,``: BSD seq (macOS) ends its list with the separator
+        job_id, _pid, _log = _start(tools, "seq 1 20000 | paste -sd, - | tr -d '\\n'")
+        tools.bash_job(job_id, action="wait", timeout_seconds=30)
+        report = tools.bash_job(job_id, tail_lines=3, max_output_chars=400)
+        assert report.endswith(",19998,19999,20000") and len(report) <= 400, report
+
+    def test_tail_budget_counts_characters_not_bytes(self, tmp_path: Path) -> None:
+        """A UTF-8 line that fits ``max_output_chars`` is shown, not lost to its byte count.
+
+        The character budget left after the header was read as a byte
+        budget, so a line of 31 characters and 91 bytes started the
+        window mid-line and was dropped although it fit (A14-4 fable).
+        """
+        tools = UsefulTools(work_dir=str(tmp_path))
+        line = "\u754c" * 30
+        job_id, _pid, _log = _start(tools, f"printf '%s\\n' {line}")
+        tools.bash_job(job_id, action="wait", timeout_seconds=20)
+        full = tools.bash_job(job_id, tail_lines=50)
+        assert full.endswith("--- last 50 log lines ---\n" + line + "\n"), full
+        assert tools.bash_job(job_id, tail_lines=50, max_output_chars=len(full)) == full
+        # One character short: the line does not fit, and nothing of it is shown.
+        assert tools.bash_job(job_id, tail_lines=50, max_output_chars=len(full) - 1).endswith(
+            "--- last 50 log lines ---\n"
+        )
 
     def test_tail_lines_and_truncation(self, tmp_path: Path) -> None:
         tools = UsefulTools(work_dir=str(tmp_path))

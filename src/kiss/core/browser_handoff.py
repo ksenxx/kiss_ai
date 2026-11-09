@@ -34,6 +34,7 @@ fails at once) and never raises; a headless environment simply yields
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import subprocess
@@ -147,6 +148,15 @@ def _claim(url: str, surface: str, once: bool = True) -> str | None:
 
 def _claim_locked(url: str, surface: str, once: bool, deadline: float) -> str | None:
     """The body of :func:`_claim`; the caller holds ``_lock``."""
+    now = time.monotonic()
+    # The record is pruned here, every page's: a settled launch past the
+    # reopen guard is spent, and no two sign-in URLs are alike (each
+    # carries its own state), so one replaced only on its own next claim
+    # stayed on record for the daemon's lifetime.  A launch in flight
+    # stays until its owner settles or releases it.
+    for page, stale in list(_recent.items()):
+        if stale.settled and now - stale.opened_at >= _REOPEN_AFTER:
+            del _recent[page]
     while True:
         now = time.monotonic()
         opening = _recent.get(url)
@@ -333,7 +343,12 @@ def open_in_default_browser(url: str, *, once: bool = True) -> bool:
 
 
 def _launch_default(url: str) -> bool:
-    """Start the ``$BROWSER`` or platform opener for *url*; whether one looks successful."""
+    """Start the ``$BROWSER`` or platform opener for *url*; whether one looks successful.
+
+    A headless process starts nothing.
+    """
+    if is_headless_environment():
+        return False
     if sys.platform == "win32" and not os.environ.get("BROWSER", "").strip():  # pragma: no cover
         # Windows has no opener executable; the shell association is
         # only reachable through os.startfile (not testable on Linux).
@@ -358,13 +373,33 @@ def _open_default(url: str, once: bool) -> str:
     """
     if not _allowed(url):
         return NOT_OPENED
-    recent = _claim(url, DEFAULT_BROWSER, once)
+    return _open_on(url, DEFAULT_BROWSER, _launch_default, once) or NOT_OPENED
+
+
+def _open_on(
+    url: str, surface: str, launch: Callable[[str], bool], once: bool = True
+) -> str | None:
+    """Claim *url* for *surface* and *launch* it; where the page is, or ``None``.
+
+    Args:
+        url: The page.
+        surface: :data:`BROWSER_TAB` or :data:`DEFAULT_BROWSER`, the
+            surface *launch* opens the page on.
+        launch: Opens *url*; returns whether it could.
+        once: As for :func:`_claim`.
+
+    Returns:
+        *surface* when *launch* succeeded, the surface another caller's
+        recent or in-flight launch of the same page used (see
+        :func:`_claim`), or ``None`` when this launch failed: the claim
+        is released and the caller may try another surface.
+    """
+    recent = _claim(url, surface, once)
     if recent is not None:
         return recent
     opened = False
     try:
-        if not is_headless_environment():
-            opened = _launch_default(url)
+        opened = launch(url)
     finally:
         # Settle or release even when interrupted, so no waiter hangs on
         # a claim that will never be resolved.
@@ -372,7 +407,16 @@ def _open_default(url: str, once: bool) -> str:
             _settle(url)
         else:
             _release(url)
-    return DEFAULT_BROWSER if opened else NOT_OPENED
+    return surface if opened else None
+
+
+def _try_opener(opener: Callable[[str], bool], url: str) -> bool:
+    """Run the Browser-tab *opener* on *url*; a launch that raised counts as failed."""
+    try:
+        return opener(url)
+    except Exception as exc:  # noqa: BLE001 — a failed launch falls back
+        logger.warning("browser tab: cannot open %s: %s", url, exc)
+        return False
 
 
 def open_for_user(url: str) -> str:
@@ -403,21 +447,9 @@ def open_for_user(url: str) -> str:
         return NOT_OPENED
     opener = _browser_tab_opener
     if opener is not None:
-        recent = _claim(url, BROWSER_TAB)
-        if recent is not None:
-            return recent
-        opened = False
-        try:
-            opened = opener(url)
-        except Exception as exc:  # noqa: BLE001 — a failed launch falls back
-            logger.warning("browser tab: cannot open %s: %s", url, exc)
-        finally:
-            if opened:
-                _settle(url)
-            else:
-                _release(url)
-        if opened:
-            return BROWSER_TAB
+        opened_in = _open_on(url, BROWSER_TAB, functools.partial(_try_opener, opener))
+        if opened_in is not None:
+            return opened_in
     return _open_default(url, True)
 
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import evidence_gate as eg
+from kiss.tests.conftest import posix_only
 
 
 def test_writing_commands_and_scratch_paths_are_recognised() -> None:
@@ -53,6 +55,15 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
                     "timeout -k 5 60 bash -c 'echo a > b'", "timeout -v 1.5s bash -c 'echo a > b'",
                     "find . -name '*.py' -exec sh -c 'echo > {}' \\;",
                     "echo \\\\; bash -c 'echo a > b'",
+                    # audit 2026-11-08 (S3/F5): a nested shell whose text runs no command (a
+                    # comment, blanks) still truncates the file its redirection names
+                    "bash -c '# no command' > src/main.py", "sh -c ' ' > a.py",
+                    "bash -c '#x' >> a.py", "eval '# x' > a.py", "eval '' > a.py",
+                    # S3/F6: ``--reference=RFILE`` supplies the mode or owner, so every
+                    # operand is a file, the first too
+                    "chmod --reference=tmp/ref src/main.py tmp/log",
+                    "chmod --reference tmp/ref a.py", "chown --reference=tmp/ref a.py",
+                    "chgrp --reference=tmp/ref a.py tmp/x", "chmod -R --reference=tmp/ref src",
                     # a program in command position after a wrapper, a keyword, in a
                     # group or a substitution; an in-place sed with the option anywhere;
                     # a here-document read by a program that writes
@@ -127,6 +138,9 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
                     "S=tmp/x; cp a $S/b", "mkdir -p tmp/x && T=tmp/x && mv tmp/old $T/new",
                     "cd /repo && S=tmp/x && gh api pages > $S/pages.json", "rm -rf /tmp/probe",
                     "chmod +x tmp/x/verify.sh", "dd if=/dev/zero of=tmp/x/blob bs=1k count=1",
+                    "bash -c '# no command' > tmp/out", "sh -c ' ' > /dev/null",
+                    "chmod --reference=tmp/ref tmp/log", "chown --reference tmp/ref tmp/log",
+                    "chmod --reference=src/a.py tmp/log",  # the reference file is only read
                     # an in-place sed on scratch files (replay 2026-11-03, task 65132d04)
                     "sed -i s/a/b/ tmp/x/f", "sed -n -i.bak -e s/a/b/ --expression=p tmp/x/f tmp/y",
                     "sed -i -es/a/b/ tmp/x/f", "sed -nie s/a/b/ tmp/x/f", "sed -in s/a/b/ tmp/x/f",
@@ -189,13 +203,92 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
     assert eg.file_changes({"command": "make test; make"}) == ["make"]
     assert eg.file_changes({"command": "bash -c 'rm -rf build; mkdir out'"}) == [
         "rm", "build", "mkdir", "out"]
+    # a nested shell's text that runs no command leaves the redirection this command's
+    # (S3/F5); a reference option keeps every file operand (S3/F6)
+    assert eg.file_changes({"command": "bash -c '# no command' > src/main.py"}) == [
+        "src/main.py"]
+    # ...while one that runs commands hands them its redirection, as a subshell's
+    assert eg.file_changes({"command": "bash -c 'echo 1 > a; echo 2' > b"}) == ["a", "b", "b"]
+    assert eg.file_changes({"command": "(echo 1 > a; echo 2) > b"}) == ["a", "b", "b"]
+    assert eg.file_changes({"command": "chmod --reference=tmp/ref src/main.py tmp/log"}) == [
+        "chmod", "src/main.py", "tmp/log"]
+    assert eg.file_changes({"command": "chown --reference tmp/ref a.py"}) == ["chown", "a.py"]
+    assert eg.file_changes({"command": "chmod 755 bin/run"}) == ["chmod", "bin/run"]
     # find's ``{}`` are its matches, under its start paths
     assert eg.file_changes({"command": "find . -name '*.pyc' -exec rm {} +"}) == ["rm", "."]
     assert eg.file_changes({"command": "find src lib -delete"}) == ["find", "src", "lib"]
+    # every -exec clause counts, each read up to its own ``;`` / ``+`` (audit A06-11: the
+    # first clause once swallowed the rest), and -execdir's directory is that clause's alone
+    assert eg.file_changes({
+        "command": "find data -type f -exec true {} \\; -exec touch changed.py \\;",
+    }) == ["touch", "changed.py"]
+    assert eg.file_changes({
+        "command": "cd /w/tmp/x && find . -type f -execdir cat {} + -exec touch /w/src/x.py \\;",
+    }) == ["touch", "/w/src/x.py"]
+    # -delete does not hide a writing clause of the same find (audit 2026-11-07, A08
+    # astra-10 / fable-6), and an -execdir command that may leave the scratch tree (an
+    # operand with ``..``; a start whose own parent is not scratch, since the start itself
+    # is a match and its command runs in that parent) is judged as written (astra-11)
+    assert eg.file_changes({"command": "find tmp/x -delete -exec touch src/x.py \\;"}) == [
+        "touch", "src/x.py"]
+    assert eg.file_changes({"command": "find src -delete -exec touch tmp/x.py \\;"}) == [
+        "find", "src"]
+    assert eg.file_changes({
+        "command": "cd /w && find tmp/a -execdir cp {} ../src/x.py \\;",
+    }) == ["cp", "../src/x.py"]
+    assert eg.file_changes({
+        "command": "cd /w && find tmp -maxdepth 0 -execdir touch out.py \\;",
+    }) == ["touch", "out.py"]
+    assert eg.file_changes({"command": "cd /w && find tmp/a -execdir touch done.txt \\;"}) == []
     assert eg.file_changes({"command": "uv run check --full --fix"}) == ["uv", "run", "check"]
+    # the command ``uv run`` launches is read as itself (A08 fable-7: only package
+    # subcommands were), after uv's and run's options (valued or not)
+    assert eg.file_changes({
+        "command": "uv run --no-project --no-sync sed -i s/old/new/ source.py",
+    }) == ["sed", "s/old/new/", "source.py"]
+    assert eg.file_changes({"command": "uv -q --directory /w run -p 3.12 cp a.py b.py"}) == [
+        "cp", "b.py"]
+    assert eg.file_changes({"command": "uv run bash -c 'echo 1 > f'"}) == ["f"]
+    for command in ("uv run --with x cp a.py tmp/b.py", "uv run -q pytest -q", "uv run",
+                    "uv --directory /w run --with"):
+        assert eg.file_changes({"command": command}) == [], command
     assert eg.file_changes({"command": "(" * 20000 + "rm x"}) == []  # nested too deep to read
     assert not eg.writes_files({"commands": 7})
     assert not eg.writes_files({})
+
+
+@posix_only("bash and chmod are the oracles")
+def test_a_commandless_nested_shell_and_a_reference_mode_change_the_files_named(
+    tmp_path: Path,
+) -> None:
+    """What the shell does is what the reader says: a ``bash -c '# comment' > f`` empties
+    ``f``, and ``chmod --reference=RFILE`` changes every file operand.
+
+    The reader once dropped the redirection of a nested shell whose
+    text yields no command, and the first file operand of a ``chmod``
+    with a reference option as if it were the mode, so the coding gate
+    kept its cached verifier run current after the source was emptied or
+    made non-executable (audit 2026-11-08, S3/F5 and F6).
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tmp").mkdir()
+    source = tmp_path / "src" / "main.py"
+    for command in ("bash -c '# no command' > src/main.py", "sh -c ' ' > src/main.py",
+                    "eval '# x' > src/main.py"):
+        source.write_text("print(42)\n")
+        subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True)
+        assert source.read_text() == "", command
+        assert eg.file_changes({"command": command}) == ["src/main.py"], command
+    source.write_text("#!/usr/bin/env python3\nprint(42)\n")
+    source.chmod(0o755)
+    (tmp_path / "tmp" / "ref").write_text("ref")
+    (tmp_path / "tmp" / "ref").chmod(0o644)
+    (tmp_path / "tmp" / "log").write_text("log")
+    command = "chmod --reference=tmp/ref src/main.py tmp/log"
+    done = subprocess.run(["bash", "-c", command], cwd=tmp_path, capture_output=True, text=True)
+    if done.returncode == 0:  # GNU chmod; the BSD one has no reference option
+        assert stat.S_IMODE(source.stat().st_mode) == 0o644
+    assert eg.file_changes({"command": command}) == ["chmod", "src/main.py", "tmp/log"]
 
 
 #: Running the tests or a lint through a package or build tool is a check, not a
@@ -294,7 +387,9 @@ ADVERSARIAL = {
     # command starts with assignments or paths
     "bash -a " * 20000 + "status": False,
     "bash -c " * 20000 + "'x'": False,
-    "bash -a " * 20000 + "-c 'x > y'": True,
+    # bash stops at its first operand (the second ``bash``, a script file): the ``-c``
+    # after it is that script's argument (audit 2026-11-08, S8: shell_script_index)
+    "bash -a " * 20000 + "-c 'x > y'": False,
     "'" * 20000 + " > f": True,
     ";x=1" * 20000 + " > f": True,
     "(x=" * 20000: False,

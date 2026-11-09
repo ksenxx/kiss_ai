@@ -192,9 +192,49 @@ async function testFileDiffPerMachine() {
   console.log('  ok - a file diff keeps one tab per machine');
 }
 
+async function testChunkedFilesPerMachine() {
+  // The same path opened on two machines at once arrives as two chunked
+  // fileContent replies whose pieces interleave; each machine's pieces
+  // are joined into that machine's file (a chat's own machine answers
+  // unstamped, a registered machine's daemon stamps its reply).
+  const {win, created} = makePage();
+  H.pinWorkspace(win);
+  const piece = (machine, content, more) => {
+    const ev = {
+      type: 'fileContent',
+      tabId: win._testApi.getActiveTabId(),
+      path: '/same/path.txt',
+      name: 'path.txt',
+      content,
+    };
+    if (machine) ev.machine = machine;
+    if (more) ev.more = true;
+    return ev;
+  };
+  send(win, piece('', 'A_HEAD-', true));
+  send(win, piece('gpu-box', 'B_HEAD-', true));
+  assert.strictEqual(contentTabs(win).length, 0, 'no tab until a last piece');
+  send(win, piece('', 'A_TAIL'));
+  send(win, piece('gpu-box', 'B_TAIL'));
+  const tabs = contentTabs(win);
+  assert.deepStrictEqual(
+    tabs.map(t => t.ownerBrowseMachine),
+    ['', 'gpu-box'],
+    'one tab per machine',
+  );
+  assert.deepStrictEqual(
+    await shownTexts(win, created),
+    ['A_HEAD-A_TAIL', 'B_HEAD-B_TAIL'],
+    "BUG: a machine's pieces were joined into the other machine's file",
+  );
+  win.close();
+  console.log('  ok - chunked replies are joined per machine');
+}
+
 (async () => {
   await testCommitPatchPerMachine();
   await testFileDiffPerMachine();
+  await testChunkedFilesPerMachine();
   console.log('audit1016b_virtual_result_machine: all passed');
   process.exit(0);
 })().catch(e => {

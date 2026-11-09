@@ -114,6 +114,9 @@ def test_a_shutdown_during_the_launch_keeps_the_launch_error(
     monkeypatch.setenv("KISS_HEADLESS", "1")
     # The bundled Chromium the service falls back to is missing as well.
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "no-browsers"))
+    # Relative, as in the test above: the count is of every driver child of
+    # this pytest process, not only the service's.
+    drivers_before = _driver_processes()
     server._handle_command({"type": "browserOpen", "url": "", "connId": "c1"})
     _wait(lambda: service._playwright is not None, "driver started")
     assert service._loop is not None
@@ -121,7 +124,7 @@ def test_a_shutdown_during_the_launch_keeps_the_launch_error(
     err = _wait(lambda: _events(printer, "browserError", connId="c1"), "launch error")[0]
     assert "Executable doesn't exist" in err["text"] and "NoneType" not in err["text"]
     assert service._playwright is None
-    _wait(lambda: _driver_processes() in (None, 0), "driver exit")
+    _wait(lambda: _driver_processes() == drivers_before, "driver exit")
 
 
 @pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")

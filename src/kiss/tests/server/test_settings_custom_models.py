@@ -366,6 +366,9 @@ class TestMyModelsCommandHandlers(_MyModelsFileCase):
         assert err is not None
         self.assertEqual(err["connId"], "c9")
         self.assertIn("must not be empty", err["text"])
+        # Stamped with the command it answers: the page relays it to the
+        # pending custom-model save alone.
+        self.assertEqual(err["command"], "saveMyModel")
         self.assertIsNone(self.server.last("myModelsData"))
 
         # Without a connId the error still goes out (to all).
@@ -408,6 +411,7 @@ class TestMyModelsCommandHandlers(_MyModelsFileCase):
         err = self.server.last("error")
         assert err is not None
         self.assertEqual(err["connId"], "c2")
+        self.assertEqual(err["command"], "deleteMyModel")
         self.assertIn("_documentation", self.read_raw())
 
     @posix_only("chmod-based directory permission denial")

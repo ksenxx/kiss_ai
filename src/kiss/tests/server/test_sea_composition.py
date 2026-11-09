@@ -571,6 +571,119 @@ class Sea(BaseSea):
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
 
 
+def _wire_command(plan: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``run`` command the dispatcher sends for an admitted *plan*.
+
+    Built as ``run_agent`` builds it, from the plan's own fields.
+    """
+    kwargs = agent_dispatch.dispatch_command(
+        plan["prompt"], plan["sea_path"], plan["work_dir"], plan["model_name"], plan["budget"],
+        plan["timeout"], plan["parent_agent"], plan["scope_work_dir"], plan["options"],
+        plan["inherit"], plan["settings"], plan["workspace"], plan["siblings"],
+    )
+    kwargs["timeout"] = kwargs.pop("record_timeout")
+    return daemon_client.run_command(plan["prompt"], tab_id="t", run_token="r", **kwargs)
+
+
+def test_lock_on_a_relative_work_dir_agrees_across_the_wire_without_a_caller_directory(
+    tmp_path: Path,
+) -> None:
+    """The dispatcher and the daemon resolve a locked relative ``work_dir`` against one base.
+
+    An agent built without a work directory (the Python API) dispatches
+    with an empty ``parent_work_dir``.  The dispatcher then anchors the
+    sub-task under ``agent_work`` and must compare the lock there too,
+    and send that base as ``tabScopeWorkDir`` so the daemon's own check
+    and its anchoring of the script's ``work_dir`` read the same base:
+    a call the dispatcher admits is a call the daemon admits, and the
+    run lands in ``agent_work/x``, not ``agent_work/x/x``.
+    """
+    locking = _write(tmp_path / "rel_locked.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'work_dir': 'x', 'locked': ['work_dir']}
+""")
+    sea = sea_commands.load_sea(locking)
+    base = kiss_home() / "agent_work"
+    # The call repeats the locked value: admitted on both sides, placed once.
+    plan = agent_dispatch.plan_run_agent("", "t", str(locking), options='{"work_dir": "x"}')
+    assert isinstance(plan, dict), plan
+    assert plan["work_dir"] == str(base / "x") and plan["scope_work_dir"] == str(base)
+    cmd = _wire_command(plan)
+    assert cmd["tabScopeWorkDir"] == str(base) and cmd["provenance"]["work_dir"] == "explicit"
+    apply_sea(cmd, [sea])
+    assert cmd["workDir"] == str(base / "x")
+    # The call passes nothing: the script's relative directory is anchored once.
+    plan = agent_dispatch.plan_run_agent("", "t", str(locking))
+    assert isinstance(plan, dict), plan
+    cmd = _wire_command(plan)
+    assert "work_dir" not in cmd["provenance"]
+    apply_sea(cmd, [sea])
+    assert cmd["workDir"] == str(base / "x")
+    # The call contradicts the lock: refused by the dispatcher, naming both values.
+    out = agent_dispatch.plan_run_agent("", "t", str(locking), options='{"work_dir": "y"}')
+    assert out == "Error: rel_locked: the script locks work_dir='x' (asked for 'y')"
+    # With a caller directory the base is the caller's, as before.
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    plan = agent_dispatch.plan_run_agent(
+        str(caller), "t", str(locking), options='{"work_dir": "x"}'
+    )
+    assert isinstance(plan, dict), plan
+    assert plan["work_dir"] == str(caller / "x") and plan["scope_work_dir"] == str(caller)
+
+
+class _StrBudget(BaseSea):
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        return settings | {"max_budget": "two"}
+
+
+class _NumBudget(BaseSea):
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        return settings | {"max_budget": 2}
+
+
+class _StrOverNum(_StrBudget, _NumBudget):
+    pass
+
+
+class _NumOverStr(_NumBudget, _StrBudget):
+    pass
+
+
+class _UnknownKey(BaseSea):
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        return settings | {"budget": 1}
+
+
+class _NoOverride(BaseSea):
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        return settings | {"model": "", "max_budget": None}
+
+
+def test_an_ill_typed_write_is_refused_under_both_linearizations_of_a_diamond() -> None:
+    """Every layer's record is type-checked, so a chain's verdict does not depend on its order.
+
+    ``_StrOverNum`` folds the number first and the string last;
+    ``_NumOverStr`` the other way round, so its final record is well
+    typed.  Both are refused: the string was written by a layer, and
+    the error names that layer's method.
+    """
+    for diamond in (_StrOverNum, _NumOverStr):
+        with pytest.raises(
+            SeaError,
+            match=r"^SEA .*: settings\(\)\['max_budget'\] must be int or float, got str "
+            r"\(in _StrBudget\.settings\)$",
+        ):
+            base_settings([diamond()])
+    with pytest.raises(SeaError, match="unknown key 'budget'"):
+        declared_settings([_UnknownKey()])
+    # A ``None`` or an empty string is "no override" in every layer, as in the final record.
+    assert base_settings([_NoOverride()]) == {}
+
+
 def test_is_parallel_is_inherited_from_the_calling_agent(
     tmp_path: Path, captured: list[dict[str, Any]],
 ) -> None:

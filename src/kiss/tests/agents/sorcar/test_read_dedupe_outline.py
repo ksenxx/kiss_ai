@@ -14,6 +14,11 @@ from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.config import DEFAULT_CONFIG
 
 
+def _step_42() -> int:
+    """An agent's step counter, as ``UsefulTools.current_step`` takes it."""
+    return 42
+
+
 def _code_file(path: Path, functions: int, filler: int) -> None:
     lines = []
     for i in range(functions):
@@ -31,21 +36,39 @@ class TestDedupe:
         f.write_text("one\ntwo\nthree\n")
         assert tools.Read("a.py") == "one\ntwo\nthree\n"
         note = tools.Read("a.py")
-        assert note.startswith("Unchanged since your earlier Read of a.py (lines 1-3 of 3)")
-        assert "force=True" in note
+        assert note == (
+            "Unchanged since your earlier Read at step 1 (lines 1-3 of a.py): the content "
+            "is already in your context above. Pass force=True to re-read it."
+        )
         # A different window is new content; repeating it is deduped too.
         assert tools.Read("a.py", start_line=2, max_lines=1) == (
             "two\n\n[truncated: 1 more lines; Read(file_path, start_line=3, max_lines=N) continues]"
         )
-        assert tools.Read("a.py", start_line=2, max_lines=1).startswith("Unchanged")
+        assert tools.Read("a.py", start_line=2, max_lines=1).startswith(
+            "Unchanged since your earlier Read at step 3 (lines 2-2 of a.py)"
+        )
+        # The key is the window's text: the same text at another range of another file
+        # (its continuation note aside) is the content of the first Read.
+        (tmp_path / "b.py").write_text("zero\none\ntwo\nthree\nfour\n")
+        assert tools.Read("b.py", start_line=2, max_lines=3).startswith(
+            "Unchanged since your earlier Read at step 1 (lines 1-3 of a.py)"
+        )
+        assert tools.Read("b.py", start_line=5, max_lines=1) == "four\n"
         # force re-sends; a changed file re-sends and re-arms the dedupe.
         assert tools.Read("a.py", force=True) == "one\ntwo\nthree\n"
         f.write_text("one\ntwo\nfour\n")
         assert tools.Read("a.py") == "one\ntwo\nfour\n"
-        assert tools.Read("a.py").startswith("Unchanged")
-        # The agent forgets shown reads when they leave the model's context.
+        assert tools.Read("a.py").startswith("Unchanged since your earlier Read at step 8 ")
+        # The agent's step counter, when it sets one, is what the note cites.
+        tools.current_step = _step_42
+        (tmp_path / "c.py").write_text("c\n")
+        assert tools.Read("c.py") == "c\n"
+        assert tools.Read("c.py").startswith("Unchanged since your earlier Read at step 42 ")
+        # The agent forgets shown reads when they leave the model's context
+        # (its context_reset_hook is this method): every window is new again.
         tools.forget_reads()
         assert tools.Read("a.py") == "one\ntwo\nfour\n"
+        assert tools.Read("b.py", start_line=2, max_lines=3).startswith("one\ntwo\nthree\n")
 
     def test_dedupe_disabled_by_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -87,7 +110,7 @@ class TestOutline:
         # Explicitly asking for a bigger whole-file window is the same
         # request, and a repeated outline is deduped like any other window.
         assert tools.Read("big.py", max_lines=5000).startswith(
-            "Unchanged since your earlier Read of big.py (outline)"
+            "Unchanged since your earlier Read at step 1 (outline of big.py)"
         )
         assert tools.Read("big.py", force=True).startswith("big.py: 212 lines,")
 

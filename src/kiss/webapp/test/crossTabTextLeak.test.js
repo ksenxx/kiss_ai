@@ -28,6 +28,7 @@ const {
   send,
   stubRaf,
   twoTabs,
+  ofType,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {
@@ -52,15 +53,10 @@ function makePage(opts) {
   if (options.voice) {
     return makeVoicePage({enabled: true, sourceUrl: SOURCE_URL});
   }
-  function beforeScripts(win) {
-    stubRaf(win);
-    win.__VOICE__ = {
-      voskSrc: '/media/vosk.js',
-      modelUrl: 'https://models.example.com/model.tar.gz',
-    };
-    win.localStorage.setItem('kissVoiceEnabled', '1');
-  }
-  const {win, posted} = makeChatPage({beforeScripts, sourceUrl: SOURCE_URL});
+  const {win, posted} = makeChatPage({
+    beforeScripts: stubRaf,
+    sourceUrl: SOURCE_URL,
+  });
   return {win, posted};
 }
 
@@ -751,26 +747,37 @@ test('an untagged foreign transcript never enters an unowned visible tab', () =>
   win.close();
 });
 
-test('an unowned visible tab still shows its own header counters', () => {
+test('an unowned visible tab shows only the header counters addressed to it', () => {
   const {win} = makePage();
-  twoTabs(win);
+  const {second} = twoTabs(win);
+  const tokens = () => win.document.getElementById('status-tokens').textContent;
+  const before = tokens();
 
   // The daemon reports header counters before the page has learned the
-  // task id, and neither type is adopted, so both must still land.
-  send(win, {
+  // task id, but every copy it sends names the tab it is for: one that
+  // names only a task this tab does not own is another conversation's
+  // (A32-1) and must not drive this header.
+  const usage = {
     type: 'usage_info',
     taskId: 'task-HDR-QK86',
     text: 'Steps: 3/100, Tokens: 7,000/400,000, Budget: $0.7000/$9.00, ',
     total_tokens: 7000,
     cost: '$0.7000',
     total_steps: 3,
-  });
-
+  };
+  send(win, usage);
   assert.strictEqual(
-    win.document.getElementById('status-tokens').textContent,
+    tokens(),
+    before,
+    'BUG: a usage_info of a task the visible tab does not own drove its header',
+  );
+  assert.strictEqual(ownedTaskId(win), '');
+
+  send(win, Object.assign({tabId: second}, usage));
+  assert.strictEqual(
+    tokens(),
     'Tokens: 7.00K',
-    'a pre-adoption usage_info must still drive the header of the tab it ' +
-      'is reported for',
+    'a pre-adoption usage_info addressed to the tab drives its header',
   );
   assert.strictEqual(
     ownedTaskId(win),
@@ -784,9 +791,50 @@ test('an unowned visible tab still shows its own header counters', () => {
 test('an untagged foreign result panel never enters an unowned tab', () => {
   const {win} = makePage();
   const {first, second} = twoTabs(win);
+  const tokens = () => win.document.getElementById('status-tokens').textContent;
 
-  // `result` may precede adoption, so it is admitted while the tab owns
-  // nothing -- but the instant the tab owns a task, a foreign one is out.
+  // Task A runs in the background tab; the visible tab owns nothing.
+  // A's result, naming A's task and no tab, is A's panel and A's
+  // counters: an unowned tab is no more its owner than an owned one.
+  send(win, {
+    type: 'system_output',
+    text: 'a_own_QK87',
+    tabId: first,
+    taskId: 'task-A-QK87',
+  });
+  assert.strictEqual(
+    ownedTaskId(win),
+    '',
+    'the probe requires the visible tab to own no task',
+  );
+  const before = tokens();
+  const foreign = {
+    type: 'result',
+    taskId: 'task-A-QK87',
+    summary: 'FOREIGN_RESULT_QK87',
+    success: true,
+    total_tokens: 5,
+    cost: '$0.05',
+  };
+  send(win, foreign);
+  assert.ok(
+    !visibleText(win).includes('FOREIGN_RESULT_QK87'),
+    "BUG: another task's result rendered in a tab that owns no task",
+  );
+  assert.strictEqual(tokens(), before, 'nor did its counters move');
+  assert.strictEqual(ownedTaskId(win), '', 'nor did it adopt the task');
+  clickTab(win, first);
+  assert.ok(
+    !visibleText(win).includes('FOREIGN_RESULT_QK87'),
+    'and it must not have been parked in the other tab either',
+  );
+  clickTab(win, second);
+  assert.ok(
+    !visibleText(win).includes('FOREIGN_RESULT_QK87'),
+    "nor saved into the unowned tab's snapshot",
+  );
+
+  // The instant the tab owns a task, a foreign one is out as well.
   send(win, {
     type: 'system_output',
     text: 'own_start_QK87',
@@ -794,24 +842,10 @@ test('an untagged foreign result panel never enters an unowned tab', () => {
     taskId: 'task-MINE-QK87',
   });
   assert.strictEqual(ownedTaskId(win), 'task-MINE-QK87');
-
-  send(win, {
-    type: 'result',
-    taskId: 'task-OTHER-QK87',
-    summary: 'FOREIGN_RESULT_QK87',
-    success: true,
-    total_tokens: 5,
-    cost: '$0.05',
-  });
-
+  send(win, Object.assign({}, foreign, {taskId: 'task-OTHER-QK87'}));
   assert.ok(
     !visibleText(win).includes('FOREIGN_RESULT_QK87'),
     'an owned tab must reject a foreign result panel',
-  );
-  clickTab(win, first);
-  assert.ok(
-    !visibleText(win).includes('FOREIGN_RESULT_QK87'),
-    'and it must not have been parked in the other tab either',
   );
 
   win.close();
@@ -951,7 +985,7 @@ test('speech started in one tab is never submitted as another tab task', async (
   posted.length = 0;
   send(win, {type: 'voiceSpeech', text: 'leak7_speech_QK62', speaker: 1});
 
-  const submits = posted.filter(m => m.type === 'submit');
+  const submits = ofType(posted, 'submit');
   assert.strictEqual(
     submits.length,
     0,
@@ -978,7 +1012,7 @@ test('speech started and finished in the same tab still submits', async () => {
   posted.length = 0;
   send(win, {type: 'voiceSpeech', text: 'run the tests QK63', speaker: 1});
 
-  const submits = posted.filter(m => m.type === 'submit');
+  const submits = ofType(posted, 'submit');
   assert.strictEqual(
     submits.length,
     1,
@@ -1022,7 +1056,7 @@ test('voice dictation while a content tab is in front submits under the owning c
     speaker: 1,
   });
 
-  const submits = posted.filter(m => m.type === 'submit');
+  const submits = ofType(posted, 'submit');
   assert.strictEqual(
     submits.length,
     1,
@@ -1114,7 +1148,7 @@ test('the second of two overlapping utterances never leaks either', async () => 
   send(win, {type: 'voiceSpeech', text: 'SECOND_LEAK_QK70'});
 
   assert.strictEqual(
-    posted.filter(m => m.type === 'submit').length,
+    ofType(posted, 'submit').length,
     0,
     'neither overlapping transcript may be submitted as the visible tab: ' +
       JSON.stringify(posted),
@@ -1145,7 +1179,7 @@ test('a transcript arriving after the mic was turned off is never attributed', a
   send(win, {type: 'voiceSpeech', text: 'LATE_QK71'});
 
   assert.strictEqual(
-    posted.filter(m => m.type === 'submit').length,
+    ofType(posted, 'submit').length,
     0,
     'a cancelled round must not submit a late transcript: ' +
       JSON.stringify(posted),
@@ -1180,7 +1214,7 @@ test('a reply lost in the transcribe window never eats the next transcript', asy
   posted.length = 0;
   send(win, {type: 'voiceSpeech', text: 'after lost reply QK93', round: roundB});
 
-  const submits = posted.filter(m => m.type === 'submit');
+  const submits = ofType(posted, 'submit');
   assert.strictEqual(
     submits.length,
     1,
@@ -1208,7 +1242,7 @@ test('speech carries across tabs that are showing the same task', async () => {
   posted.length = 0;
   send(win, {type: 'voiceSpeech', text: 'same task QK72'});
 
-  const submits = posted.filter(m => m.type === 'submit');
+  const submits = ofType(posted, 'submit');
   assert.strictEqual(
     submits.length,
     1,
@@ -1241,7 +1275,7 @@ test('a live round still submits after an earlier round was cancelled', async ()
   posted.length = 0;
   send(win, {type: 'voiceSpeech', text: 'cancelled words QK91'});
   assert.strictEqual(
-    posted.filter(m => m.type === 'submit').length,
+    ofType(posted, 'submit').length,
     0,
     'a cancelled round must never submit into the tab now on screen: ' +
       JSON.stringify(posted),
@@ -1253,7 +1287,7 @@ test('a live round still submits after an earlier round was cancelled', async ()
   speak(page);
   send(win, {type: 'voiceSpeech', text: 'live round QK92'});
 
-  const submits = posted.filter(m => m.type === 'submit');
+  const submits = ofType(posted, 'submit');
   assert.strictEqual(
     submits.length,
     1,
@@ -1283,7 +1317,7 @@ test('an empty transcript closes its own round and nothing else', async () => {
   posted.length = 0;
   send(win, {type: 'voiceSpeech', text: ''});
   assert.strictEqual(
-    posted.filter(m => m.type === 'submit').length,
+    ofType(posted, 'submit').length,
     0,
     'an empty transcript submits nothing: ' + JSON.stringify(posted),
   );
@@ -1291,7 +1325,7 @@ test('an empty transcript closes its own round and nothing else', async () => {
   // Round B must still be intact and still owned by the visible tab.
   posted.length = 0;
   send(win, {type: 'voiceSpeech', text: 'after silence QK94'});
-  const submits = posted.filter(m => m.type === 'submit');
+  const submits = ofType(posted, 'submit');
   assert.strictEqual(
     submits.length,
     1,
@@ -1313,7 +1347,7 @@ test('a transcript for a round this page never started still arrives', async () 
   posted.length = 0;
   send(win, {type: 'voiceSpeech', text: 'HOST_SIDE_QK74'});
 
-  const submits = posted.filter(m => m.type === 'submit');
+  const submits = ofType(posted, 'submit');
   assert.strictEqual(
     submits.length,
     1,
@@ -1340,7 +1374,7 @@ test('voice fails closed when the page publishes no owner', async () => {
   send(win, {type: 'voiceSpeech', text: 'NO_OWNER_QK73'});
 
   assert.strictEqual(
-    posted.filter(m => m.type === 'submit').length,
+    ofType(posted, 'submit').length,
     0,
     'an unprovable transcript must not be submitted: ' + JSON.stringify(posted),
   );
@@ -1734,7 +1768,7 @@ test('the visible tab id is published for voice', () => {
   const {second} = twoTabs(win);
 
   assert.strictEqual(
-    win.kissActiveTabId(),
+    win._testApi.getActiveTabId(),
     second,
     'voice.js reads the conversation on screen through this accessor',
   );

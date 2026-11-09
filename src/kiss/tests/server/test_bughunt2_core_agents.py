@@ -75,7 +75,7 @@ class _SetModelHandler(BaseHTTPRequestHandler):
                 "function": {
                     "name": "finish",
                     "arguments": json.dumps(
-                        {"success": "true", "summary": "done"}
+                        {"success": "true", "summary_in_html": "done"}
                     ),
                 },
             }

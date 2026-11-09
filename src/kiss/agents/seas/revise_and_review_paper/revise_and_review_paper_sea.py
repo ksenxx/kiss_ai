@@ -155,9 +155,11 @@ Reviews go to `<work dir>/reports/<stem>-round<N>-review.txt`.
    with `overrides="<round>=<verdict>"`.
 4. On CONTINUE, triage each weakness: a writing fix; an allowed experiment, ablation or
    benchmark (the writer runs it; a stronger method or result goes through the `/discover`
-   SEA its task names); or a ruled-out point, stated in the paper as a
-   limitation. Put ruled-out points, allowed benchmarks and the remaining budget into
-   `coordinator_notes` of `writer_task(instructions, N + 1, review_path, coordinator_notes)`.
+   SEA its task names); or a ruled-out point, stated in the paper as a limitation that
+   narrows the claim (a ruled-out control for the central claim narrows the central
+   claim; it is never confessed as a flaw and left standing). Put ruled-out points,
+   allowed benchmarks and the remaining budget into `coordinator_notes` of
+   `writer_task(instructions, N + 1, review_path, coordinator_notes)`.
 5. Stop early when every weakness is ruled out or was answered earlier with evidence the
    reviewer disputes on judgment, not fact; report that the paper cannot improve with the
    allowed evidence. A STOP for two rounds without improvement is final, unless the latest
@@ -211,7 +213,8 @@ Rules for this round:
   paper through its macros.
 - Never remove a negative result, inflate a claim, or mention a review, a round or an
   earlier version in the paper. State a point you cannot answer with evidence as a
-  limitation in the paper.
+  limitation that narrows the claim; when the point is that the central claim has no
+  controlled comparison, cut the claim to what the evidence tests.
 - Report back in at most 300 words: the `.tex` and `.pdf` paths, the page count, the
   gate counts, each experiment run with its numbers, and (for a revision) one line per
   weakness of the review: fixed (where), experiment run (numbers), or declined (why).

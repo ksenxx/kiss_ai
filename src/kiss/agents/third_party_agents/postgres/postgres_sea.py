@@ -55,6 +55,8 @@ logger = logging.getLogger(__name__)
 
 _CONNECT_TIMEOUT = 10
 _MAX_ROWS_CAP = 10000
+# Characters kept of one cell's text, so a wide column cannot swamp a result.
+_MAX_CELL_CHARS = 2000
 
 _POSTGRES_DIR = kiss_home() / "third_party_agents" / "postgres"
 _config = ChannelConfig(_POSTGRES_DIR, ("database_uri",))
@@ -119,6 +121,35 @@ def _parse_params(params_json: str) -> tuple[list[Any] | None, str | None]:
     if not isinstance(parsed, list):
         return None, json.dumps({"ok": False, "error": "params_json must be a JSON array"})
     return parsed, None
+
+
+def _cap_cells(row: tuple[Any, ...]) -> tuple[list[Any], bool]:
+    """Render one result row for JSON, cutting any cell's text past ``_MAX_CELL_CHARS``.
+
+    JSON-native values (``None``, booleans, numbers, arrays, records,
+    objects) pass through; anything else (text, bytes, decimals,
+    timestamps, UUIDs) is rendered with ``str`` as
+    ``json.dumps(default=str)`` would, so the output shape of untouched
+    cells does not change.
+
+    Args:
+        row: One fetched row.
+
+    Returns:
+        The cells, and whether any of them was cut.
+    """
+    cells: list[Any] = []
+    cut = False
+    for value in row:
+        if value is None or isinstance(value, (bool, int, float, list, tuple, dict)):
+            cells.append(value)
+            continue
+        text = value if isinstance(value, str) else str(value)
+        if len(text) > _MAX_CELL_CHARS:
+            text = text[:_MAX_CELL_CHARS]
+            cut = True
+        cells.append(text)
+    return cells, cut
 
 
 class PostgresChannelBackend(ToolMethodBackend):
@@ -206,7 +237,10 @@ class PostgresChannelBackend(ToolMethodBackend):
 
         The query runs with a server-side statement timeout (default
         60s).  In read-only mode ``sql`` must be a single statement:
-        the server rejects multi-statement strings.
+        the server rejects multi-statement strings.  The result is
+        always one complete JSON document: at most ``max_rows`` rows,
+        each cell's text cut at 2,000 characters; ``truncated`` reports
+        either cut.
 
         Returns:
             JSON string ``{"ok": true, "columns": [...], "rows": [...],
@@ -231,7 +265,11 @@ class PostgresChannelBackend(ToolMethodBackend):
                 columns = [d.name for d in cur.description]
                 fetched = cur.fetchmany(max_rows + 1)
                 truncated = len(fetched) > max_rows
-                rows = [list(row) for row in fetched[:max_rows]]
+                rows = []
+                for row in fetched[:max_rows]:
+                    cells, cut = _cap_cells(row)
+                    rows.append(cells)
+                    truncated = truncated or cut
                 return json.dumps(
                     {
                         "ok": True,
@@ -241,7 +279,7 @@ class PostgresChannelBackend(ToolMethodBackend):
                         "truncated": truncated,
                     },
                     default=str,
-                )[:8000]
+                )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -292,7 +330,7 @@ class PostgresChannelBackend(ToolMethodBackend):
                     "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name"
                 )
                 schemas = [row[0] for row in cur.fetchall()]
-                return json.dumps({"ok": True, "schemas": schemas}, default=str)[:8000]
+                return json.dumps({"ok": True, "schemas": schemas}, default=str)
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -314,7 +352,7 @@ class PostgresChannelBackend(ToolMethodBackend):
                     (schema,),
                 )
                 tables = [{"name": row[0], "type": row[1]} for row in cur.fetchall()]
-                return json.dumps({"ok": True, "tables": tables}, default=str)[:8000]
+                return json.dumps({"ok": True, "tables": tables}, default=str)
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -351,7 +389,7 @@ class PostgresChannelBackend(ToolMethodBackend):
                 ]
                 if not columns:
                     return json.dumps({"ok": False, "error": "table not found"})
-                return json.dumps({"ok": True, "columns": columns}, default=str)[:8000]
+                return json.dumps({"ok": True, "columns": columns}, default=str)
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -375,7 +413,7 @@ class PostgresChannelBackend(ToolMethodBackend):
                     (schema, table),
                 )
                 indexes = [{"name": row[0], "definition": row[1]} for row in cur.fetchall()]
-                return json.dumps({"ok": True, "indexes": indexes}, default=str)[:8000]
+                return json.dumps({"ok": True, "indexes": indexes}, default=str)
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -414,7 +452,7 @@ class PostgresChannelBackend(ToolMethodBackend):
                 cur.execute(prefix + sql, prepare=True)  # type: ignore[arg-type]
                 row = cur.fetchone()
                 plan = row[0] if row else None
-                return json.dumps({"ok": True, "plan": plan}, default=str)[:8000]
+                return json.dumps({"ok": True, "plan": plan}, default=str)
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 

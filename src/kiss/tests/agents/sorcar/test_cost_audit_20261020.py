@@ -199,9 +199,11 @@ def test_retiring_a_pending_worktree_charges_the_finished_task(
 
     getattr(agent, retire)()
 
-    spent = _agent_usage(agent)[0] - before
+    # Charged straight to the finished row it was made for (side_call_binding),
+    # not to the agent's ledger, which no later save of that row reads.
+    spent = _row_cost(task_id) - 0.5
     assert spent > 0
-    assert _row_cost(task_id) == pytest.approx(0.5 + spent)
+    assert _agent_usage(agent)[0] == pytest.approx(before)
     _flush_chat_events(task_id)
     session = _load_chat_events_by_task_id(task_id)
     assert session is not None

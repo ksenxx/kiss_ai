@@ -82,12 +82,87 @@ def test_edit_applies_several_pairs_in_order_or_none(work: Path) -> None:
         {"old_string": "missing", "new_string": "x"},
     ])
     out = tools.Edit(str(work / "a.py"), edits=bad)
-    assert out == "Error: edit 2: String not found in file"
+    assert out.startswith("Error: edit 2: String not found in file. The closest region is lines ")
     assert (work / "a.py").read_text() == before
     assert tools.Edit(str(work / "a.py"), edits="[").startswith("Error: edits must be a JSON list")
     assert tools.Edit(str(work / "a.py"), edits="[]").startswith("Error: edits must be a non-empty")
     assert tools.Edit(str(work / "a.py"), edits='[{"old_string": 1}]').startswith(
         "Error: edit 1 must be an object"
+    )
+
+
+CODE = "def f():\n    x = 1\n    y = 2\n    return x + y\n"
+
+
+def test_edit_tolerates_whitespace_differences_and_keeps_the_files_indentation(
+    work: Path,
+) -> None:
+    tools = UsefulTools(work_dir=str(work))
+    (work / "c.py").write_text(CODE)
+    tools.Read(str(work / "c.py"))
+    # Two-space indentation and trailing blanks in old_string: the file's four-space
+    # lines are replaced, and new_string is indented as they were.
+    out = tools.Edit(str(work / "c.py"), "  x = 1  \n  y = 2\n", "  x = 10\n  y = 20\n")
+    assert out.startswith("Successfully replaced 1 occurrence(s) in ")
+    assert "    2 |     x = 10" in out and "    3 |     y = 20" in out
+    assert (work / "c.py").read_text() == "def f():\n    x = 10\n    y = 20\n    return x + y\n"
+    # A CRLF file: the retry with CRLF line endings feeds the tolerant match too.
+    (work / "d.py").write_text(CODE.replace("\n", "\r\n"), newline="")
+    tools.Read(str(work / "d.py"))
+    out = tools.Edit(str(work / "d.py"), "  return x +  y\n", "  return x - y\n")
+    assert out.startswith("Successfully replaced 1 occurrence(s) in ")
+    assert (work / "d.py").read_bytes().endswith(b"    y = 2\r\n    return x - y\r\n")
+    # replace_all keeps the exact-match semantics: whitespace differences are not found.
+    out = tools.Edit(str(work / "c.py"), "    x =  10\n", "    x = 11\n", replace_all=True)
+    assert out.startswith("Error: String not found in file. The closest region is lines 2-2:")
+    assert "    x = 10" in (work / "c.py").read_text()
+    assert tools.Edit(str(work / "c.py"), "    x =  10\n", "    x = 11\n").startswith("Success")
+
+
+def test_edit_with_an_ambiguous_whitespace_match_names_the_count(work: Path) -> None:
+    tools = UsefulTools(work_dir=str(work))
+    (work / "c.py").write_text("a\n  b\nc\na\n  b\nd\n")
+    tools.Read(str(work / "c.py"))
+    out = tools.Edit(str(work / "c.py"), "a\n b\n", "A\n")
+    assert out == (
+        "Error: String not found verbatim; ignoring whitespace it matches 2 places "
+        "(not unique). Include more surrounding lines in old_string."
+    )
+    assert (work / "c.py").read_text() == "a\n  b\nc\na\n  b\nd\n"
+    # More context makes it unique; the second match is the one edited, by position.
+    out = tools.Edit(str(work / "c.py"), "a\n b\nd\n", "A\nd\n")
+    assert out.startswith("Successfully replaced 1 occurrence(s) in ")
+    assert (work / "c.py").read_text() == "a\n  b\nc\nA\nd\n"
+
+
+def test_edit_not_found_names_the_nearest_region_for_a_read_free_retry(work: Path) -> None:
+    tools = UsefulTools(work_dir=str(work))
+    (work / "c.py").write_text(CODE)
+    tools.Read(str(work / "c.py"))
+    out = tools.Edit(str(work / "c.py"), "    y = 3\n    return x * y\n", "    return y\n")
+    assert out == (
+        "Error: String not found in file. The closest region is lines 3-4:\n"
+        "    3 |     y = 2\n"
+        "    4 |     return x + y\n"
+        "Re-issue the Edit with the exact text of those lines as old_string."
+    )
+    assert (work / "c.py").read_text() == CODE
+    out = tools.Edit(str(work / "c.py"), "    y = 2\n    return x + y\n", "    return y\n")
+    assert out.startswith("Successfully replaced 1 occurrence(s) in ")
+    assert (work / "c.py").read_text() == "def f():\n    x = 1\n    return y\n"
+    # An empty file has no region to name.
+    (work / "e.py").write_text("")
+    tools.Read(str(work / "e.py"))
+    assert tools.Edit(str(work / "e.py"), "x", "y") == "Error: String not found in file."
+    # The region is numbered by newlines, as a listing is: a form feed or a CRLF
+    # terminator inside the file does not shift what is shown.
+    (work / "f.py").write_text("header\x0cpart\r\nTARGET = 1\r\n", newline="")
+    tools.Read(str(work / "f.py"))
+    out = tools.Edit(str(work / "f.py"), "TARGET = 2\n", "TARGET = 3\n")
+    assert out == (
+        "Error: String not found in file. The closest region is lines 2-2:\n"
+        "    2 | TARGET = 1\n"
+        "Re-issue the Edit with the exact text of those lines as old_string."
     )
 
 

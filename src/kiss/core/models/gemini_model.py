@@ -9,6 +9,7 @@ import base64
 import binascii
 import json
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -17,8 +18,10 @@ import httpx
 from google import genai
 from google.genai import types
 
+from kiss.core import stop_signal
 from kiss.core.kiss_error import ContentFilterError, KISSError, OutputCapError
 from kiss.core.models.model import (
+    _AUDIO_FORMAT_TO_MIME,
     FRAMEWORK_ONLY_CONFIG_KEYS,
     Attachment,
     Model,
@@ -32,9 +35,18 @@ from kiss.core.models.model import (
     split_data_url,
     text_of_parts,
 )
-from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stall_error
+from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias
+from kiss.core.models.stream_abort import (
+    CONNECT_TIMEOUT,
+    RequestAbortWatchdog,
+    stall_error,
+    stop_or_stall_error,
+)
 
 logger = logging.getLogger(__name__)
+
+# Portable effort levels above Gemini's top ``thinking_level``.
+_GEMINI_TOP_LEVEL = {"xhigh": "high", "max": "high"}
 
 
 # The request parameters Gemini accepts, taken from the SDK's own config
@@ -113,6 +125,10 @@ class _ResponseTrackingHttpxClient(httpx.Client):
         return response
 
 
+_END_OF_STREAM = object()
+"""Sentinel for a stream that ended before its first chunk."""
+
+
 class _AbortableStream:
     """A Gemini stream in the shape :func:`stop_aware_events` expects.
 
@@ -122,7 +138,9 @@ class _AbortableStream:
     request is not issued until the first ``next()``.
     """
 
-    def __init__(self, chunks: Any, http_client: _ResponseTrackingHttpxClient) -> None:
+    def __init__(
+        self, chunks: Any, http_client: _ResponseTrackingHttpxClient, header_budget: float
+    ) -> None:
         """Wrap the SDK's chunk generator.
 
         ``last_response`` is reset here because this stream's request has
@@ -134,9 +152,12 @@ class _AbortableStream:
         Args:
             chunks: The generator ``generate_content_stream`` returned.
             http_client: The transport that recorded the response.
+            header_budget: Seconds the wait for the first chunk may take
+                before the request is cut (see :meth:`__iter__`).
         """
         self._chunks = chunks
         self._http_client = http_client
+        self._header_budget = header_budget
         self._response: httpx.Response | None = None
         self._closed = False
         http_client.last_response = None
@@ -144,16 +165,31 @@ class _AbortableStream:
     def __iter__(self) -> Any:
         """Iterate the SDK's chunks, snapshotting the in-flight response.
 
+        The first chunk is awaited under a request watchdog: until the
+        response headers are complete there is no response for the
+        stream watchdog to half-close, and the byte-level clock only
+        bounds the silence between two reads, so a peer trickling header
+        bytes would hold the turn for good and past any Stop.  The
+        watchdog cuts the client's pool at a Stop or at the header
+        budget (the SDK's own retries run inside this wait).
+
         The snapshot is taken at the first chunk so a watchdog abort that
         fires late — after this stream is dead and a retry has begun on
         the SAME shared client — still shuts down THIS request's socket,
         never the live retry's (``last_response`` is overwritten by every
         request on the shared client).
         """
-        for chunk in self._chunks:
-            if self._response is None:
-                self._response = self._http_client.last_response
-            yield chunk
+        with RequestAbortWatchdog(
+            self._http_client, self._header_budget, "gemini-header-abort-watchdog"
+        ):
+            first = next(self._chunks, _END_OF_STREAM)
+        if first is _END_OF_STREAM:
+            return
+        # The chunk came from the client's latest response, whatever an
+        # earlier poll adopted (an attempt's error reply the SDK retried).
+        self._response = self._http_client.last_response
+        yield first
+        yield from self._chunks
 
     @property
     def response(self) -> httpx.Response | None:
@@ -161,10 +197,14 @@ class _AbortableStream:
 
         Cached on first read; after :meth:`close` only the cached value
         is ever returned, so a parked abort can no longer observe a later
-        request through the shared client.
+        request through the shared client.  A response the SDK already
+        finished with (the error reply of an attempt it is retrying) is
+        not this stream's: the watchdog keeps polling for the live one.
         """
         if self._response is None and not self._closed:
-            self._response = self._http_client.last_response
+            latest = self._http_client.last_response
+            if latest is not None and not latest.is_closed:
+                self._response = latest
         return self._response
 
     def close(self) -> None:
@@ -231,9 +271,11 @@ def _media_block_to_part(block: dict[str, Any]) -> types.Part | None:
 
     Handles Anthropic ``image`` / ``document`` blocks (base64 or url
     source) and OpenAI ``image_url`` / ``file`` content parts (base64
-    data URLs).  Such blocks enter the conversation when it is handed off
-    from another provider's model (e.g. via the Sorcar ``set_model``
-    tool).  Remote (non-data) URLs cannot be inlined and are dropped.
+    data URLs) and ``input_audio`` parts (base64 data with the OpenAI
+    ``format`` name, mapped back to its MIME type).  Such blocks enter
+    the conversation when it is handed off from another provider's
+    model (e.g. via the Sorcar ``set_model`` tool).  Remote (non-data)
+    URLs cannot be inlined and are dropped.
 
     Args:
         block: The foreign media block/part dict.
@@ -260,6 +302,13 @@ def _media_block_to_part(block: dict[str, Any]) -> types.Part | None:
         part = _data_url_to_part(file_data, "application/pdf")
         if part is not None:
             return part
+    elif block_type == "input_audio":
+        audio = block.get("input_audio") or {}
+        data = _decode_base64(audio.get("data", ""))
+        if data is not None:
+            fmt = audio.get("format", "")
+            mime_type = _AUDIO_FORMAT_TO_MIME.get(fmt, f"audio/{fmt}" if fmt else "audio/mpeg")
+            return types.Part.from_bytes(data=data, mime_type=mime_type)
     logger.warning("Dropping unconvertible %s block for Gemini.", block_type)
     return None
 
@@ -280,7 +329,7 @@ def _tool_result_response_dict(content: Any) -> dict[str, Any]:
         try:
             parsed = json.loads(content)
             return parsed if isinstance(parsed, dict) else {"result": parsed}
-        except json.JSONDecodeError:
+        except ValueError:  # JSONDecodeError, or the decoder's integer digit limit
             logger.debug("Exception caught", exc_info=True)
             return {"result": content}
     return {"result": content}
@@ -467,8 +516,9 @@ class GeminiModel(Model):
         """Convert a foreign content-block list into Gemini parts.
 
         Handles Anthropic Messages blocks (``text`` / ``tool_use`` /
-        ``tool_result`` / ``image`` / ``document``; ``thinking`` blocks are
-        hidden provider state and are dropped) and OpenAI Chat Completions
+        ``tool_result``, with the ``image`` / ``document`` blocks nested in
+        it / ``image`` / ``document``; ``thinking`` blocks are hidden
+        provider state and are dropped) and OpenAI Chat Completions
         content parts (``text`` / ``image_url`` / ``file``).  Such block
         lists enter the conversation when it is handed off from another
         provider's model (e.g. via the Sorcar ``set_model`` tool).
@@ -504,14 +554,21 @@ class GeminiModel(Model):
                 )
             elif block_type == "tool_result":
                 call_id = block.get("tool_use_id")
+                content = block.get("content")
                 parts.append(
                     self._function_response_part(
-                        id_to_name.get(call_id or "", "unknown"),
-                        block.get("content"),
-                        call_id,
+                        id_to_name.get(call_id or "", "unknown"), content, call_id
                     )
                 )
-            elif block_type in ("image", "document", "image_url", "file"):
+                # The bytes a tool returned, which Anthropic nests in the
+                # result itself: the response dict above carries its text
+                # only, so they become media parts of the same turn.
+                for nested in content if isinstance(content, list) else []:
+                    if isinstance(nested, dict) and nested.get("type") in ("image", "document"):
+                        part = _media_block_to_part(nested)
+                        if part is not None:
+                            parts.append(part)
+            elif block_type in ("image", "document", "image_url", "file", "input_audio"):
                 part = _media_block_to_part(block)
                 if part is not None:
                     parts.append(part)
@@ -637,25 +694,6 @@ class GeminiModel(Model):
                 )
         return content, function_calls
 
-    def _resolve_system_instruction(self, chat_messages: list[dict[str, Any]]) -> str | None:
-        """Merge configured and conversation-level system instructions.
-
-        OpenAI-style ``role="system"`` messages (present when the
-        conversation was handed off from an OpenAI-schema model, e.g. via
-        the Sorcar ``set_model`` tool) are hoisted into Gemini's
-        ``system_instruction`` config parameter, since Gemini contents
-        accept only ``user`` / ``model`` roles.  Duplicates of the
-        configured ``system_instruction`` are skipped.
-
-        Args:
-            chat_messages: The conversation, pre-converted by
-                :meth:`_chat_messages`.
-
-        Returns:
-            str | None: The merged system instruction, or ``None``.
-        """
-        return merge_system_texts(self.system_instruction_text(), chat_messages)
-
     def _build_config(
         self,
         chat_messages: list[dict[str, Any]],
@@ -672,10 +710,17 @@ class GeminiModel(Model):
         translated.  Keys Gemini has no field for are reported rather than
         dropped in silence: ``GenerateContentConfig`` forbids extras, so
         forwarding them blindly would raise a ``ValidationError``.
+        ``thinking_config`` and ``reasoning_effort`` are merged by
+        :meth:`_thinking_config`.  OpenAI-style ``role="system"``
+        messages (present when the conversation was handed off from an
+        OpenAI-schema model, e.g. via the Sorcar ``set_model`` tool) are
+        hoisted into Gemini's ``system_instruction``, since Gemini
+        contents accept only ``user`` / ``model`` roles
+        (:func:`~kiss.core.models.model.merge_system_texts`).
 
         Args:
             chat_messages: The conversation, pre-converted by
-                :meth:`_chat_messages`, for :meth:`_resolve_system_instruction`.
+                :meth:`_chat_messages`, for the system instruction.
             tools: Optional Gemini tool declarations for this request.
 
         Returns:
@@ -691,13 +736,51 @@ class GeminiModel(Model):
             params.setdefault("max_output_tokens", max_output_tokens)
         if stop_sequences is not None:
             params.setdefault("stop_sequences", stop_sequences)
-        if params.get("thinking_config") is None:
-            params["thinking_config"] = types.ThinkingConfig(include_thoughts=True)
+        params["thinking_config"] = self._thinking_config(
+            params.get("thinking_config"), params.pop("reasoning_effort", None)
+        )
 
         params = self._keep_supported_request_params(params, _GEMINI_CONFIG_FIELDS, "Gemini")
         params["tools"] = tools
-        params["system_instruction"] = self._resolve_system_instruction(chat_messages)
+        params["system_instruction"] = merge_system_texts(
+            self.system_instruction_text(), chat_messages
+        )
         return types.GenerateContentConfig(**params)
+
+    def _thinking_config(
+        self, configured: types.ThinkingConfig | dict[str, Any] | None, effort: str | None
+    ) -> types.ThinkingConfig:
+        """Return the request's thinking config, with thought summaries on.
+
+        ``include_thoughts`` defaults to ``True`` (an explicit ``False`` is
+        kept) so the UI shows the model's thinking even when the caller
+        configures only a level or a budget.  ``thinking_level`` comes
+        from ``reasoning_effort`` when given (it replaces any configured
+        level or budget, so KISSAgent can lower the effort of a retry;
+        ``xhigh`` and ``max``, which Gemini lacks, become ``high``);
+        otherwise from the catalog ``thinking`` level of this model
+        (e.g. ``high`` for ``gemini-4-argon-high``) when the caller set
+        neither a level nor a budget, since Gemini rejects both at once.
+
+        Args:
+            configured: The ``thinking_config`` from ``model_config``.
+            effort: The ``reasoning_effort`` from ``model_config``.
+
+        Returns:
+            The thinking config to send.
+        """
+        fields = types.ThinkingConfig.model_validate(configured or {}).model_dump(
+            exclude_none=True
+        )
+        fields.setdefault("include_thoughts", True)
+        if effort:
+            fields.pop("thinking_budget", None)
+            fields["thinking_level"] = _GEMINI_TOP_LEVEL.get(effort, effort)
+        elif "thinking_level" not in fields and "thinking_budget" not in fields:
+            info = MODEL_INFO.get(self.model_name)
+            if info is not None and info.thinking:
+                fields["thinking_level"] = info.thinking
+        return types.ThinkingConfig(**fields)
 
     def _stream_parts(self, parts: list[Any]) -> None:
         """Stream parts, routing thinking tokens through the thinking callback.
@@ -773,11 +856,16 @@ class GeminiModel(Model):
         last_chunk = None
         finish_reason: str | None = None
         block_reason: str | None = None
+        # The wait for the headers is bounded as a whole (connection,
+        # request, the SDK's retries): the byte-level clock cannot see
+        # a peer that trickles them.  A cut after the budget is a stall.
+        headers_due = time.monotonic() + CONNECT_TIMEOUT + 2 * self._stream_stall_timeout
         stream = _AbortableStream(
             self.client.models.generate_content_stream(
-                model=self.model_name, contents=contents, config=config
+                model=_strip_thinking_alias(self.model_name), contents=contents, config=config
             ),
             self._http_client,
+            headers_due - time.monotonic(),
         )
         try:
             with self._watched_events(stream, "gemini-stream-abort-watchdog") as events:
@@ -798,6 +886,15 @@ class GeminiModel(Model):
             # The byte-level clock fired first; report it in the same
             # words as the event-level watchdog would have.
             raise stall_error(self._stream_stall_timeout) from e
+        except Exception as e:
+            if stream.response is None and (
+                stop_signal.stop_requested() or time.monotonic() >= headers_due
+            ):
+                # The header watchdog cut a request whose headers never
+                # completed: the user's Stop, or a stall reported like a
+                # silent one.
+                raise stop_or_stall_error(self._stream_stall_timeout) from e
+            raise
         # A refused end leaves the usage seen so far in ``_rejected_response``.
         if block_reason is not None:
             raise ContentFilterError(

@@ -269,9 +269,12 @@ def test_superseded_tunnel_is_closed_outside_the_tunnels_lock(
     try:
         _wait_for(first_ssh_started, "the first forward never started its ssh")
         stale = mach._tunnels[login]
-        # The daemon moved: the second opener replaces the tunnel while
-        # the first is still inside its login (which holds the stale
-        # tunnel's own lock, so the replaced tunnel's close must wait).
+        # The daemon moved (the machine is registered again at its new
+        # port: a forward the registry does not hold is refused, audit
+        # A09): the second opener replaces the tunnel while the first is
+        # still inside its login (which holds the stale tunnel's own
+        # lock, so the replaced tunnel's close must wait).
+        mach.save_machines([mach.Machine("far", "https://far.example.org:9797", ssh=login)])
         second.start()
         _wait_for(tunnel_replaced, "the tunnel was not replaced")
         # Another registry write: it must not queue behind that close.

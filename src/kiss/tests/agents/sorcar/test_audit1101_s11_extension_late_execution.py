@@ -43,23 +43,23 @@ _SHADOW = b'<script nonce="test">let Date = "the page shadows Date";</script>'
 _CSP = "script-src 'nonce-test'; object-src 'none'"
 _INCREMENT = "document.body.dataset.late = String(Number(document.body.dataset.late) + 1)"
 # The timed-out calls' timeout.  The extension's deadline runs a tenth
-# short of it (``ChromeBridge._send``), so its "exceeded" reply has 0.3 s
-# to arrive; 0.12 s (a 1.2 s timeout) was not enough on a loaded Mac.
-# Both stalls below last 4 s, well past the 2.7 s deadline.
-_TIMEOUT = 3.0
-_EXCEEDED = r"command exceeded its 2\.\d+s deadline"
-# Keeps the renderer's main thread busy for 4 s, starting 150 ms from now.
+# short of it (``ChromeBridge._send``), so its "exceeded" reply has 0.6 s
+# to arrive; 0.12 s (a 1.2 s timeout) and 0.3 s (3 s) were not enough on a
+# loaded Mac.  Both stalls below last 8 s, well past the 5.4 s deadline.
+_TIMEOUT = 6.0
+_EXCEEDED = r"command exceeded its 5\.\d+s deadline"
+# Keeps the renderer's main thread busy for 8 s, starting 150 ms from now.
 _BUSY_RENDERER = """() => {
-  setTimeout(() => { const end = Date.now() + 4000; while (Date.now() < end) {} }, 150);
+  setTimeout(() => { const end = Date.now() + 8000; while (Date.now() < end) {} }, 150);
 }"""
-# Keeps the renderer busy for 4 s the first time the page's CSP rejects a
+# Keeps the renderer busy for 8 s the first time the page's CSP rejects a
 # script: right after the extension's eval probe, before its debugger
 # fallback reaches the page.
 _STALL_ON_CSP_VIOLATION = """() => {
   document.body.dataset.stage = 'armed';
   document.addEventListener('securitypolicyviolation', () => {
     document.body.dataset.stage = 'busy';
-    const end = Date.now() + 4000;
+    const end = Date.now() + 8000;
     while (Date.now() < end) {}
     document.body.dataset.stage = 'done';
   }, { once: true });

@@ -18,6 +18,7 @@
 
 const assert = require('assert');
 const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {paste, settle, chipPending} = require('./attachment_helpers');
 
 function makePage() {
   return makeChatPage({
@@ -106,6 +107,10 @@ function testPlusOnUsedChatOpensATabWhenNoneIsNew() {
 
   const fresh = activeId(win);
   assert.notStrictEqual(fresh, boot, 'a tab opens');
+  assert.strictEqual(
+    win._testApi.openTabs().find(t => t.id === fresh).title,
+    'new chat',
+  );
   assert.ok(
     posted.some(m => m.type === 'newChat' && m.tabId === fresh),
     'the tab is registered with the daemon',
@@ -174,6 +179,86 @@ function testPlusMovesTheDraftToTheNewChatBroughtForward() {
   assert.ok(!chatIds(win).includes(boot));
   win.close();
   console.log('  ok - + moves the draft into the new chat it brings forward');
+}
+
+/** The names on the composer's attachment chips. */
+function chipNames(win) {
+  return Array.from(
+    win.document.querySelectorAll('#file-chips .file-chip'),
+    c => c.textContent.replace(/\u00d7$/, '').trim(),
+  );
+}
+
+/** Paste a small PNG named *name* into the composer and wait for its chip. */
+async function attachPng(win, name) {
+  paste(
+    win,
+    new win.File([new Uint8Array([137, 80, 78, 71])], name, {
+      type: 'image/png',
+    }),
+  );
+  await settle(() => !chipPending(win, name));
+}
+
+// The draft "+" carries over is the text AND the attachments: a chat
+// left behind with an unsent image must not take it down with its tab.
+async function testPlusCarriesTheAttachmentsWithTheDraft() {
+  const {win, posted} = makePage();
+  const boot = activeId(win);
+  useActiveChat(win);
+  await attachPng(win, 'draft.png');
+  composer(win).value = 'describe it';
+  assert.deepStrictEqual(chipNames(win), ['draft.png']);
+  posted.length = 0;
+
+  clickPlus(win);
+
+  const fresh = activeId(win);
+  assert.notStrictEqual(fresh, boot);
+  assert.strictEqual(composer(win).value, 'describe it', 'the text moved');
+  assert.deepStrictEqual(
+    chipNames(win),
+    ['draft.png'],
+    'BUG - the attachment did not move with the draft',
+  );
+  assert.deepStrictEqual(
+    chatIds(win),
+    [fresh],
+    'the chat left behind is retired',
+  );
+  // The chip is the new chat's own: it survives a switch away and back.
+  snapshot(win, [{tabId: 'spare', title: 'new chat'}]);
+  win._testApi.switchToTab('spare');
+  assert.deepStrictEqual(chipNames(win), []);
+  win._testApi.switchToTab(fresh);
+  assert.deepStrictEqual(chipNames(win), ['draft.png']);
+
+  // An attachment without text is a draft too: the chat keeps it when
+  // "+" brings forward a new chat that has its own draft...
+  useActiveChat(win, 'second task');
+  win._testApi.switchToTab('spare');
+  composer(win).value = 'spare draft';
+  win._testApi.switchToTab(fresh);
+  composer(win).value = '';
+  clickPlus(win);
+  assert.strictEqual(activeId(win), 'spare');
+  assert.strictEqual(composer(win).value, 'spare draft');
+  assert.deepStrictEqual(chipNames(win), []);
+  assert.deepStrictEqual(
+    chatIds(win),
+    [fresh, 'spare'],
+    'BUG - the chat holding an unsent attachment was retired',
+  );
+  // ...and the attachment moves with the text into a new chat without one.
+  composer(win).value = '';
+  win._testApi.switchToTab(fresh);
+  assert.deepStrictEqual(chipNames(win), ['draft.png']);
+  clickPlus(win);
+  assert.strictEqual(activeId(win), 'spare');
+  assert.deepStrictEqual(chipNames(win), ['draft.png'], 'the chip moved');
+  assert.deepStrictEqual(chatIds(win), ['spare']);
+  win.close();
+  console.log('  ok - + carries the attachments with the draft');
 }
 
 function testPlusKeepsTheNewChatsOwnDraftAndTheChatLeftBehind() {
@@ -251,16 +336,20 @@ function testPlusSkipsAChatWithAPendingPrompt() {
   console.log('  ok - + never reuses a chat whose prompt is in flight');
 }
 
-function main() {
+async function main() {
   testPlusOnNewChatKeepsIt();
   testPlusOnNewChatKeepsItsDraft();
   testPlusOnUsedChatOpensATabWhenNoneIsNew();
   testPlusOnUsedChatBringsAnExistingNewChatForward();
   testPlusMovesTheDraftToTheNewChatBroughtForward();
+  await testPlusCarriesTheAttachmentsWithTheDraft();
   testPlusKeepsTheNewChatsOwnDraftAndTheChatLeftBehind();
   testPlusSkipsAChatWhoseStatusIsUnknown();
   testPlusSkipsAChatWithAPendingPrompt();
-  console.log('\n8 passed, 0 failed');
+  console.log('\n9 passed, 0 failed');
 }
 
-main();
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});

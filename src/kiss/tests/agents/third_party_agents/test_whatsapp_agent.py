@@ -25,9 +25,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 import requests
@@ -47,7 +47,11 @@ from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import (
 )
 from kiss.tests.agents.third_party_agents.channel_agent_registry import EXPECTED_AUTH_TOOLS
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools, recorded_sleeps
-from kiss.tests.agents.third_party_agents.recording_http import JsonWebhookServer
+from kiss.tests.agents.third_party_agents.recording_http import (
+    JsonWebhookHandler,
+    JsonWebhookServer,
+    recording_server,
+)
 from kiss.tests.agents.third_party_agents.whatsapp_bridge import bridge_server, make_messages_db
 
 # ----------------------------------------------------------------------
@@ -57,6 +61,15 @@ from kiss.tests.agents.third_party_agents.whatsapp_bridge import bridge_server, 
 _ALICE = "14155550001@s.whatsapp.net"
 _BOB = "14155550002@s.whatsapp.net"
 _GROUP = "120363000000000001@g.us"
+
+
+class _NotTheBridgeHandler(JsonWebhookHandler):
+    """Some other service on the bridge port: answers GET with the canned status."""
+
+    def do_GET(self) -> None:  # noqa: N802
+        server = cast(JsonWebhookServer, self.server)
+        self.record()
+        self._json(server.response_status, server.response_body)
 
 
 def _make_db(repo_dir: Path) -> Path:
@@ -322,7 +335,9 @@ class TestChannelProtocol:
     def test_poll_all_messages_and_cursor(self, db_backend: WhatsAppChannelBackend) -> None:
         messages, cursor = db_backend.poll_messages("", "", limit=10)
         assert [m["id"] for m in messages] == ["m4", "m6", "m1", "m2", "m3", "m5"]
-        assert cursor == "2026-09-10 11:00:00+00:00"
+        # The cursor names the newest row by (timestamp, id), so rows sharing
+        # the newest timestamp are told apart on the next poll.
+        assert cursor == "2026-09-10 11:00:00+00:00|m5"
 
     def test_poll_filters_by_channel_and_advances_cursor(
         self, db_backend: WhatsAppChannelBackend
@@ -331,9 +346,11 @@ class TestChannelProtocol:
         assert [m["id"] for m in messages] == ["m1", "m2", "m3"]
         # ``user`` is each row's sender, not the chat JID (m2 is the bot's own "me" row).
         assert [m["user"] for m in messages] == [_ALICE, "me", _ALICE]
-        assert cursor == "2026-09-10 10:00:03+00:00"
+        assert cursor == "2026-09-10 10:00:03+00:00|m3"
         newer, cursor2 = db_backend.poll_messages(_ALICE, cursor, limit=10)
         assert newer == [] and cursor2 == cursor
+        # A legacy bare-timestamp cursor (persisted before the composite
+        # form) still means "strictly newer than this timestamp".
         some, _ = db_backend.poll_messages(_ALICE, "2026-09-10 10:00:01+00:00", limit=10)
         assert [m["id"] for m in some] == ["m2", "m3"]
 
@@ -348,19 +365,27 @@ class TestChannelProtocol:
         assert media_only[0]["id"] == "m6"
         assert media_only[0]["text"] == "[audio message]"
 
-    def test_poll_burst_larger_than_limit_is_lossless(
-        self, db_backend: WhatsAppChannelBackend
-    ) -> None:
-        # 3 unseen messages, polled 1 at a time: each tick must deliver the
-        # OLDEST unseen message so nothing is skipped.
+    def test_poll_burst_larger_than_limit_is_lossless(self, tmp_path: Path) -> None:
+        # 4 unseen messages, two of them sharing one timestamp, polled 1 at
+        # a time: each tick must deliver the OLDEST unseen message, and a
+        # page that ends inside a timestamp resumes after the delivered id
+        # instead of skipping its siblings.
+        rows = [
+            ("m1", _ALICE, _ALICE, "one", "2026-09-10 10:00:01+00:00", 0, ""),
+            ("m2a", _ALICE, _ALICE, "two-a", "2026-09-10 10:00:02+00:00", 0, ""),
+            ("m2b", _ALICE, _ALICE, "two-b", "2026-09-10 10:00:02+00:00", 0, ""),
+            ("m3", _ALICE, _ALICE, "three", "2026-09-10 10:00:03+00:00", 0, ""),
+        ]
+        make_messages_db(tmp_path, [(_ALICE, "Alice", "2026-09-10 10:00:03+00:00")], rows)
+        backend = WhatsAppChannelBackend(repo_dir=str(tmp_path))
         cursor = "2026-09-10 09:59:59+00:00"
         seen = []
-        for _ in range(3):
-            messages, cursor = db_backend.poll_messages(_ALICE, cursor, limit=1)
+        for _ in range(4):
+            messages, cursor = backend.poll_messages(_ALICE, cursor, limit=1)
             seen += [m["id"] for m in messages]
-        assert seen == ["m1", "m2", "m3"]
-        rest, _ = db_backend.poll_messages(_ALICE, cursor, limit=1)
-        assert rest == []
+        assert seen == ["m1", "m2a", "m2b", "m3"]
+        rest, same = backend.poll_messages(_ALICE, cursor, limit=1)
+        assert rest == [] and same == cursor
 
     def test_poll_without_db_returns_empty(self, tmp_path: Path) -> None:
         backend = WhatsAppChannelBackend(repo_dir=str(tmp_path / "none"))
@@ -512,9 +537,18 @@ class TestRestTools:
         assert data["ok"] is False
 
     def test_bridge_running_requires_405(self, refusing_port: int) -> None:
+        """Only a 405 to GET is the bridge: a closed port or any other status is not."""
         assert self.backend._bridge_running() is True
         down = WhatsAppChannelBackend(repo_dir="/nonexistent", bridge_port=refusing_port)
         assert down._bridge_running() is False
+        with recording_server(_NotTheBridgeHandler, JsonWebhookServer) as other:
+            stranger = WhatsAppChannelBackend(
+                repo_dir="/nonexistent", bridge_port=other.server_address[1]
+            )
+            for status in (200, 404, 500, 501):
+                other.response_status = status
+                assert stranger._bridge_running() is False, status
+            assert [r["method"] for r in other.requests] == ["GET"] * 4
 
     def test_bridge_stand_in_accepts_only_post(self) -> None:
         """The stand-in refuses every other verb, so the method assertions above bite."""
@@ -713,21 +747,19 @@ class TestAgentAndAuthTools:
         _bridge_log_path().parent.mkdir(parents=True, exist_ok=True)
         _bridge_log_path().write_text(_BRIDGE_LOG_WITH_QR, encoding="utf-8")
         _bridge_pid_path().write_text(str(os.getpid()), encoding="utf-8")
-        started = time.monotonic()
         with recorded_sleeps() as sleeps:
             result = json.loads(auth_tools(WhatsAppAgent())["wait_for_whatsapp_pairing"](timeout=1))
-        elapsed = time.monotonic() - started
         # Each poll sleep is capped at the time left before the deadline,
         # never the full 2 s poll interval, so with a 1 s timeout no sleep
         # exceeds 1 s and together they cannot exceed the timeout (each one
         # uses up its own share of the time left).  How many there are is a
         # matter of scheduling (a stall past the deadline before the first
         # check means none), so the count is not pinned, nor is a lower
-        # bound; the call itself returns by the deadline plus the slack a
-        # loaded machine adds to the loop's own work.
+        # bound; the requested sleeps are the deadline arithmetic itself,
+        # which a wall-clock bound on the call would only restate with the
+        # slack of a loaded machine added.
         assert all(0.0 <= s <= 1.0 + 0.05 for s in sleeps), sleeps
         assert sum(sleeps) <= 1.0 + 0.05, sleeps
-        assert elapsed < 1.0 + 1.5, (elapsed, sleeps)
         assert result["ok"] is False and "Still waiting" in result["error"]
         assert _QR_BLOCK in _qr_html_path().read_text(encoding="utf-8")
 

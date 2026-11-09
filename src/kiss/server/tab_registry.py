@@ -77,6 +77,10 @@ class OpenTabOutcome(enum.Enum):
     FULL = "full"
     """The registry is at its hard cap; the tab was refused."""
 
+    REPLAYED = "replayed"
+    """The open's ``ack`` token was already decided (a page's transport
+    re-sent a batch whose confirmation was lost); nothing changed."""
+
     def __bool__(self) -> bool:
         return self is OpenTabOutcome.OPENED
 
@@ -86,6 +90,12 @@ _MAX_TITLE_CHARS = 200
 _MAX_TABS = 512
 """Hard cap on registered tabs so a buggy client cannot grow the
 registry (and every ``tabs_state`` broadcast) without bound."""
+
+_MAX_DECIDED_ACKS = 4096
+"""How many ``openTab`` ``ack`` tokens :meth:`TabRegistry.open_tab`
+remembers (oldest forgotten first): a page re-sends an open whose
+confirmation its connection lost on its next connection, so the
+memory must span the opens every page makes between the two."""
 
 
 def _clean_str(value: Any, max_len: int = 0) -> str:
@@ -214,6 +224,20 @@ class TabRegistry:
         # (generation 0), which a live capture can never equal.
         self._generations: dict[str, int] = {}
         self._generation_counter = 0
+        # The ``ack`` tokens of the opens already decided (insertion
+        # ordered, so the oldest is forgotten first), see
+        # :attr:`OpenTabOutcome.REPLAYED`.  Persisted with the tabs: a
+        # page re-sends an unconfirmed open to the daemon that replaced
+        # the one that took it (before it reloads for the new daemon),
+        # when another surface may have closed the tab meanwhile.
+        self._decided_acks: dict[str, None] = {}
+        # Whether a client's legacy ``restoredTabs`` may seed the registry
+        # (:meth:`merge_if_empty`): only while no tab list was ever read
+        # from ``path`` (none there, or unreadable) and none written.  A
+        # registry emptied by closes, or loaded from an empty file, is
+        # canonical: a client's list is what it showed before it lost
+        # the daemon, and the tabs closed meanwhile must not come back.
+        self._seedable = True
         self._load()
 
     def _load(self) -> None:
@@ -233,6 +257,12 @@ class TabRegistry:
         if not isinstance(entries, list):
             return
         self._tabs = _sanitize_entries(entries, keep_task_id=True)
+        self._seedable = False
+        acks = raw.get("acks")
+        if isinstance(acks, list):
+            self._decided_acks = dict.fromkeys(
+                a for a in acks[-_MAX_DECIDED_ACKS:] if isinstance(a, str)
+            )
         # Sanitizing may change the entries — a dropped duplicate, a
         # clipped title, or a HEALED root work dir.  Do NOT write here:
         # construction alone must never touch the file, because a
@@ -253,13 +283,15 @@ class TabRegistry:
         state, the next successful mutation (or :meth:`flush`) heals
         the file.
         """
+        self._seedable = False  # mutated: canonical from now on, written or not
         try:
             # The shared unique-temp writer: a fixed ``tabs.json.tmp``
             # let a sibling registry instance (another daemon, a test
             # next to a live daemon) truncate the temp inode this one
             # was about to rename into place, publishing an empty file.
             atomic_write_text(
-                self._path, json.dumps({"tabs": self._tabs}, indent=1),
+                self._path,
+                json.dumps({"tabs": self._tabs, "acks": list(self._decided_acks)}, indent=1),
             )
         except OSError:
             if not self._persist_failed:
@@ -363,7 +395,7 @@ class TabRegistry:
             (
                 entry["tabId"],
                 entry["chatId"],
-                entry.get("taskId", ""),
+                entry["taskId"],
             )
             for entry in self._tabs
             if entry["chatId"]
@@ -490,7 +522,7 @@ class TabRegistry:
         return self._clock_locked()
 
     def open_tab(
-        self, tab_id: str, title: str = "", work_dir: str = "",
+        self, tab_id: str, title: str = "", work_dir: str = "", ack: str = "",
     ) -> OpenTabOutcome:
         """Register a new tab (no-op when it already exists).
 
@@ -498,38 +530,60 @@ class TabRegistry:
             tab_id: The shared tab identifier.
             title: Initial tab title.
             work_dir: The tab's pinned working directory, if any.
+            ack: The client command's acknowledgment token, if it sent
+                one.  An open is decided once per token: a second open
+                carrying a token already decided is the page's transport
+                re-sending a batch whose confirmation it lost, not a new
+                open, so it must not bring back a tab another surface
+                closed in between.
 
         Returns:
             The :class:`OpenTabOutcome`, decided atomically under the
             registry lock: :attr:`~OpenTabOutcome.OPENED` (truthy)
             when a new tab was appended, :attr:`~OpenTabOutcome.EXISTS`
             when the id is already registered (also returned for a
-            blank id — nothing to open, nothing to reject), and
-            :attr:`~OpenTabOutcome.FULL` when the hard cap refused it.
+            blank id — nothing to open, nothing to reject),
+            :attr:`~OpenTabOutcome.FULL` when the hard cap refused it,
+            and :attr:`~OpenTabOutcome.REPLAYED` when *ack* was already
+            decided (the registry is left as it is).
         """
         tab_id = _clean_str(tab_id)
         if not tab_id:
             return OpenTabOutcome.EXISTS
-        return locked_call(self._lock, self._open_tab_locked, tab_id, title, work_dir)
+        return locked_call(self._lock, self._open_tab_locked, tab_id, title, work_dir, ack)
 
-    def _open_tab_locked(self, tab_id: str, title: str, work_dir: str) -> OpenTabOutcome:
+    def _open_tab_locked(
+        self, tab_id: str, title: str, work_dir: str, ack: str,
+    ) -> OpenTabOutcome:
         """Under ``_lock``: the body of :meth:`open_tab`."""
+        if ack:
+            if ack in self._decided_acks:
+                return OpenTabOutcome.REPLAYED
+            self._decided_acks[ack] = None
+            if len(self._decided_acks) > _MAX_DECIDED_ACKS:
+                del self._decided_acks[next(iter(self._decided_acks))]
         if self._find_locked(tab_id) is not None:
-            return OpenTabOutcome.EXISTS
-        if len(self._tabs) >= _MAX_TABS:
+            outcome = OpenTabOutcome.EXISTS
+        elif len(self._tabs) >= _MAX_TABS:
             logger.warning(
                 "Tab registry full (%d); refusing to open %r",
                 _MAX_TABS, tab_id,
             )
-            return OpenTabOutcome.FULL
-        self._tabs.append(_entry(
-            tab_id,
-            title=_clean_str(title, _MAX_TITLE_CHARS),
-            work_dir=_clean_work_dir(work_dir),
-        ))
-        self._bump_generation_locked(tab_id)
-        self._save_locked()
-        return OpenTabOutcome.OPENED
+            outcome = OpenTabOutcome.FULL
+        else:
+            self._tabs.append(_entry(
+                tab_id,
+                title=_clean_str(title, _MAX_TITLE_CHARS),
+                work_dir=_clean_work_dir(work_dir),
+            ))
+            self._bump_generation_locked(tab_id)
+            outcome = OpenTabOutcome.OPENED
+        # A newly decided ack is persistent state whatever was decided:
+        # unsaved, the page's re-send of this open to the next daemon
+        # would be a fresh open, reopening a tab closed in between.
+        if ack or outcome is OpenTabOutcome.OPENED:
+            self._save_locked()
+        return outcome
 
     def _removal_token_locked(self) -> int:
         """Draw a removal token from the shared generation clock.
@@ -871,7 +925,7 @@ class TabRegistry:
                 changed = True
         if task_id is not None:
             task_id = _clean_str(task_id)
-            if entry.get("taskId", "") != task_id:
+            if entry["taskId"] != task_id:
                 entry["taskId"] = task_id
                 changed = True
         new_title = _clean_str(title, _MAX_TITLE_CHARS)
@@ -883,7 +937,7 @@ class TabRegistry:
             entry["workDir"] = new_wd
             changed = True
         new_scope = _clean_work_dir(scope_work_dir)
-        if new_scope and entry.get("scopeWorkDir", "") != new_scope:
+        if new_scope and entry["scopeWorkDir"] != new_scope:
             entry["scopeWorkDir"] = new_scope
             changed = True
         if changed:
@@ -895,9 +949,12 @@ class TabRegistry:
 
         One-time migration path: clients that predate the shared
         registry persisted their tab set locally and announce it via
-        ``ready.restoredTabs``.  The first such client seeds the
-        registry; once the registry is non-empty it is canonical and
-        later announcements are ignored.
+        ``ready.restoredTabs`` (the current client announces its chat
+        tabs the same way, which recovers a lost ``tabs.json``).  The
+        first such client seeds a registry that never had a tab list
+        on disk; once the registry has been written or read from disk
+        it is canonical, empty or not, and later announcements are
+        ignored.
 
         Args:
             entries: Sanitized ``restoredTabs`` entries
@@ -911,11 +968,9 @@ class TabRegistry:
 
     def _merge_if_empty_locked(self, entries: list[dict[str, str]]) -> bool:
         """Under ``_lock``: the body of :meth:`merge_if_empty`."""
-        if self._tabs:
+        if self._tabs or not self._seedable:
             return False
-        adopted = _sanitize_entries(
-            list(entries), keep_task_id=False,
-        )
+        adopted = _sanitize_entries(entries, keep_task_id=False)
         if not adopted:
             return False
         self._tabs = adopted

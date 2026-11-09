@@ -31,7 +31,10 @@ import subprocess
 import sys
 import threading
 import time
+from functools import partial
 from pathlib import Path
+from types import FrameType
+from typing import Any
 
 import pytest
 
@@ -39,6 +42,7 @@ from kiss.agents.sorcar import mcp_servers
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
 from kiss.core import tool_interrupt
 from kiss.core.processes import pid_alive as _pid_alive
+from kiss.tests.agents.sorcar.test_mcp_connection_lifecycle import _run_under_hook
 
 
 def _force_kill(pid: int) -> None:
@@ -114,16 +118,6 @@ def test_connect_timeout_straggler_killed_on_shutdown(
             _force_kill(child_pid)
 
 
-def _connect_recording(
-    manager: MCPManager, config: MCPServerConfig, errors: list[BaseException],
-) -> None:
-    """Thread body: ``connect`` and record what it raised."""
-    try:
-        manager.connect(config)
-    except BaseException as exc:  # noqa: BLE001 — the thread records any outcome
-        errors.append(exc)
-
-
 @pytest.mark.slow
 def test_stopped_connect_waiter_leaves_the_handshake_its_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -143,7 +137,9 @@ def test_stopped_connect_waiter_leaves_the_handshake_its_deadline(
     child_pid = 0
     errors: list[BaseException] = []
     try:
-        waiter = threading.Thread(target=_connect_recording, args=(manager, config, errors))
+        waiter = threading.Thread(
+            target=_run_under_hook, args=(None, partial(manager.connect, config), errors),
+        )
         waiter.start()
         child_pid = _read_child_pid(pidfile)
         assert waiter.ident is not None
@@ -169,6 +165,73 @@ def test_stopped_connect_waiter_leaves_the_handshake_its_deadline(
         good = manager.connect(healthy)
         assert good.session is not None, good.error
         assert list(manager._connections.values()) == [good]
+    finally:
+        manager.shutdown()
+        if child_pid and _pid_alive(child_pid):
+            _force_kill(child_pid)
+
+
+def _spawn_gated_config(pidfile: Path, go: Path, name: str) -> MCPServerConfig:
+    """A real FastMCP child that records its pid, then serves only once *go* exists."""
+    code = (
+        "import os, time\n"
+        "from mcp.server.fastmcp import FastMCP\n"
+        f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+        f"while not os.path.exists({str(go)!r}):\n"
+        "    time.sleep(0.02)\n"
+        "FastMCP('gated').run()\n"
+    )
+    return MCPServerConfig(
+        name=name, transport="stdio", command=sys.executable, args=("-c", code),
+    )
+
+
+def _stop_as_the_orphaning_returns(frame: FrameType, event: str, arg: Any) -> None:
+    """Profile hook: inject the task Stop as ``_orphan_timed_out`` has just orphaned the record."""
+    if event == "return" and frame.f_code is MCPManager._orphan_timed_out.__code__ and arg:
+        sys.setprofile(None)
+        tool_interrupt.inject_async_exception(threading.get_ident(), KeyboardInterrupt)
+
+
+@pytest.mark.slow
+def test_stop_as_the_timed_out_connection_is_orphaned_still_stops_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop landing right after the orphaning must not leave a live, never-stopped connection.
+
+    ``_await_ready`` orphaned the timed-out record under the lock and
+    only then, on the task thread, told it to stop.  A Stop delivered
+    in between left a connection in no pool whose ``stop`` was never
+    set: a server slower than CONNECT_TIMEOUT but faster than the
+    handshake's own deadline then connected and parked for ever, its
+    child alive until the daemon's shutdown, since no eviction looks at
+    the orphans.  The stop is now signalled under the lock, as the
+    eviction does.
+    """
+    monkeypatch.setattr(mcp_servers, "CONNECT_TIMEOUT", 1.0)
+    pidfile, go = tmp_path / "child.pid", tmp_path / "go"
+    config = _spawn_gated_config(pidfile, go, "gated-orphan")
+    manager = MCPManager()
+    child_pid = 0
+    errors: list[BaseException] = []
+    try:
+        waiter = threading.Thread(
+            target=_run_under_hook,
+            args=(_stop_as_the_orphaning_returns, partial(manager.connect, config), errors),
+        )
+        waiter.start()
+        waiter.join(30)
+        assert not waiter.is_alive() and isinstance(errors[0], KeyboardInterrupt), errors
+        child_pid = _read_child_pid(pidfile)
+        assert _pid_alive(child_pid), "child should still be waiting to serve"
+        [conn] = manager._orphans
+        assert conn.error == "connection timed out"
+        # The handshake lands now, before the maintainer's own deadline.
+        go.write_text("go", encoding="utf-8")
+        assert conn.finished.wait(20), (
+            "the orphaned connection parked for ever: its stop was never signalled"
+        )
+        assert _wait_pid_dead(child_pid, 20.0), "the orphaned connection's child survived"
     finally:
         manager.shutdown()
         if child_pid and _pid_alive(child_pid):

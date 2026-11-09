@@ -12,7 +12,11 @@ const {
   sendEmptyWorkDir,
   rowsByTitle,
 } = require('./simplify2_harness');
-const {freezeClockAndStyle, makeRow} = require('./history_helpers');
+const {
+  freezeClockAndStyle,
+  makeRow,
+  statusMark: dotOf,
+} = require('./history_helpers');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
@@ -26,10 +30,6 @@ function openSidebar(win) {
   if (sidebar && !sidebar.classList.contains('open')) {
     sidebar.classList.add('open');
   }
-}
-
-function dotOf(row) {
-  return row.querySelector('.sidebar-item-running');
 }
 
 function testDotRendersForRunningRow() {

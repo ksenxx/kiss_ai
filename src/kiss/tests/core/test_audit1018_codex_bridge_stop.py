@@ -50,6 +50,7 @@ from kiss.core import stop_signal, tool_interrupt
 from kiss.core.kiss_agent import KISSAgent, NativeTurn
 from kiss.core.kiss_error import BudgetExceededError
 from kiss.core.models.codex_mcp_bridge import STOP_WAIT_SECONDS, ServedCall, ToolBridge
+from kiss.core.models.codex_model import CodexModel
 from kiss.core.models.model import _CLIProcess, _StreamReadTimeoutError
 from kiss.core.tool_interrupt import (
     USER_INTERRUPTED_MESSAGE,
@@ -60,6 +61,7 @@ from kiss.core.tool_interrupt import (
     raise_if_interrupted,
     register_tool_call,
 )
+from kiss.core.tool_verdict import ALLOW, ToolRedirect, Verdict, refusal_result
 from kiss.core.utils import finish as structured_finish
 from kiss.tests.core.test_codex_mcp_bridge import (
     AGENT_UNDER_TEST,
@@ -549,6 +551,148 @@ def test_a_call_queued_behind_a_tool_when_the_stop_ends_the_block_is_refused(hol
         assert bridge.calls_in_flight == 0
     finally:
         RELEASE_HOLD.set()
+        stop_signal.set_thread_stop_event(None)
+
+
+class _ResultHook:
+    """A run's ``tool_result_hook``: records every result it is given."""
+
+    def __init__(self) -> None:
+        self.results: list[tuple[str, dict[str, Any], str, bool]] = []
+
+    def __call__(self, name: str, args: dict[str, Any], result: str, refused: bool) -> None:
+        self.results.append((name, args, result, refused))
+
+
+def redirect_to_hold() -> str:
+    """Redirect to :func:`hold_until_released`: the deaf tool runs nested in this call.
+
+    Raises:
+        ToolRedirect: Always.
+    """
+    raise ToolRedirect("hold_until_released", {}, "redirected:")
+
+
+@pytest.mark.parametrize("tool", [hold_until_released, redirect_to_hold])
+def test_a_tool_the_stop_abandoned_settles_nothing_once_its_turn_is_closed(tool: Any) -> None:
+    """A deaf tool the Stop abandoned returns after the agent was reset for the
+    next run, which installed its own ``tool_result_hook`` and owes a re-issue:
+    the abandoned call's result reaches neither (the turn it belongs to is
+    closed), exactly as it stays out of the conversation.  The same holds when
+    the deaf tool is the one a served call redirected to (a nested call of the
+    same turn): neither its result nor the count it restores is the next run's.
+    The call's late ``tool_result`` event goes to the printer of the run the
+    call belongs to, never to the printer the reset installed for the next run."""
+    HOLD_STARTED.clear()
+    RELEASE_HOLD.clear()
+    stop = threading.Event()
+    agent = KISSAgent("abandoned native call")
+    old_printer = _RecordingPrinter()
+    agent._reset("codex/gpt-5.5", True, 10, 10.0, None, printer=old_printer, verbose=False)
+    agent.function_map = {"hold_until_released": hold_until_released, tool.__name__: tool}
+    agent._cached_tools_schema = _schema(tool.__name__)
+    old_run = _ResultHook()
+    agent.tool_result_hook = old_run
+    stop_signal.set_thread_stop_event(stop)
+    try:
+        with agent._native_tools_exposed():
+            assert isinstance(agent.model, CodexModel)
+            bridge = agent.model._tool_bridge
+            assert bridge is not None
+            first = _call(bridge, tool.__name__)
+            assert HOLD_STARTED.wait(5)
+            stop.set()
+        assert agent._native_turn.closed.is_set()
+        new_printer = _RecordingPrinter()
+        agent._reset("codex/gpt-5.5", True, 10, 10.0, None, printer=new_printer, verbose=False)
+        new_run = _ResultHook()
+        agent.tool_result_hook = new_run
+        agent._refused_call = "Bash"
+        RELEASE_HOLD.set()
+        _reply(first)
+        assert old_run.results == []
+        assert new_run.results == [], "the abandoned call reached the next run's hook"
+        assert agent._refused_call == "Bash", "the abandoned call settled the next run's refusal"
+        assert agent.messages == [] and agent.tool_calls_made == 0
+        assert new_printer.events == [], "the abandoned call's event reached the next run's printer"
+        nested = [] if tool is hold_until_released else ["tool_call", "tool_result"]
+        assert [t for t, _, _ in old_printer.events] == ["tool_call", *nested, "tool_result"]
+        # The Stop's interrupt, drained when the deaf tool returned, is the result.
+        assert old_printer.events[-1][1].endswith(USER_INTERRUPTED_MESSAGE)
+    finally:
+        RELEASE_HOLD.set()
+        stop_signal.set_thread_stop_event(None)
+
+
+HOOK_STARTED = threading.Event()
+RELEASE_HOOK = threading.Event()
+PROBE_RAN: list[str] = []
+
+
+def probe() -> str:
+    """The tool behind the blocked hook: must never run once its turn is closed.
+
+    Returns:
+        ``"probed"``.
+    """
+    PROBE_RAN.append("probe")
+    return "probed"
+
+
+def hold_hook_until_released(name: str, args: dict[str, Any]) -> Verdict:
+    """A ``tool_call_hook`` deaf to the Stop: allows once the test releases it."""
+    HOOK_STARTED.set()
+    RELEASE_HOOK.wait(30)
+    return ALLOW
+
+
+class _Guard:
+    """A run's ``tool_call_guard``: records every call it is asked about and allows it."""
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    def __call__(self, name: str, args: dict[str, Any]) -> None:
+        self.asked.append(name)
+
+
+def test_a_hook_the_stop_abandoned_consults_no_guard_once_its_turn_is_closed() -> None:
+    """A served call blocked in its ``tool_call_hook`` is abandoned by the Stop;
+    the agent is reset for the next run, which installs its own ``tool_call_guard``.
+    When the old hook finally allows, neither that guard (Sorcar's mutates the
+    coding gate) nor the tool is called: the call is refused as the turn's."""
+    HOOK_STARTED.clear()
+    RELEASE_HOOK.clear()
+    PROBE_RAN.clear()
+    stop = threading.Event()
+    agent = KISSAgent("abandoned native hook")
+    agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
+    agent.function_map = {"probe": probe}
+    agent._cached_tools_schema = _schema("probe")
+    agent.tool_call_hook = hold_hook_until_released
+    old_guard = _Guard()
+    agent.tool_call_guard = old_guard
+    stop_signal.set_thread_stop_event(stop)
+    try:
+        with agent._native_tools_exposed():
+            assert isinstance(agent.model, CodexModel)
+            bridge = agent.model._tool_bridge
+            assert bridge is not None
+            first = _call(bridge, "probe")
+            assert HOOK_STARTED.wait(5)
+            stop.set()
+        assert agent._native_turn.closed.is_set()
+        agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
+        new_guard = _Guard()
+        agent.tool_call_guard = new_guard
+        RELEASE_HOOK.set()
+        reply = _reply(first)
+        assert reply == {"text": refusal_result("probe", "The turn has ended.")}
+        assert new_guard.asked == [], "the abandoned call consulted the next run's guard"
+        assert old_guard.asked == [] and PROBE_RAN == []
+        assert agent.messages == [] and agent.tool_calls_made == 0
+    finally:
+        RELEASE_HOOK.set()
         stop_signal.set_thread_stop_event(None)
 
 

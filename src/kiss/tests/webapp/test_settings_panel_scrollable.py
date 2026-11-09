@@ -16,16 +16,22 @@ shared rule (added back when the History / Frequent tabs used it) sets
 child grow to exactly the parent's height and clip everything past it,
 so ``#settings-panel`` never had any overflow to scroll over.
 
+The settings scroll in that ``.sidebar-section`` now: the panel itself
+is a non-scrolling shell, so the restart confirmation floating over it
+(``#server-reset-confirm-modal``, absolute over the panel) stays in
+view while the settings scroll instead of scrolling away with them
+(the section is the scroller, ``overflow: auto``, not a clipper).
+
 This test boots a real headless Chromium via Playwright, loads the
 actual ``media/main.css`` and the actual ``<div id="settings-panel">``
 markup extracted from ``media/chat.html``, sizes the viewport so the
-form is guaranteed taller than the panel, and asserts that the panel:
+form is guaranteed taller than the panel, and asserts that the
+settings' scroller (the panel's section):
 
 * reports ``scrollHeight > clientHeight`` (its content overflows), and
 * moves its ``scrollTop`` when the user (or JS) tries to scroll it.
 
-Before the CSS fix both assertions fail: the inner ``.sidebar-section``
-clips the form and the panel itself has nothing to scroll.
+With the clipping section both assertions fail: nothing scrolls.
 """
 
 from __future__ import annotations
@@ -142,11 +148,12 @@ def _browser():
 
 
 def _measure_settings_panel(_browser, viewport_height: int) -> dict:
-    """Return scroll geometry for ``#settings-panel`` at *viewport_height*.
+    """Return the settings' scroll geometry at *viewport_height*.
 
     Loads the synthesised page in a fresh context sized
     ``(420 × viewport_height)``, lets layout settle, attempts to scroll
-    the panel to the bottom, and returns the relevant measurements
+    the settings (the panel's section) to the bottom, and returns the
+    relevant measurements
     (``clientHeight``, ``scrollHeight``, ``scrollTop`` after scrolling,
     and the bounding box of the last interactive control inside the
     form so the test can assert it is or isn't reachable).
@@ -162,7 +169,9 @@ def _measure_settings_panel(_browser, viewport_height: int) -> dict:
         result = page.evaluate(
             """
             () => {
-              const p = document.getElementById('settings-panel');
+              const p = document
+                .getElementById('settings-panel')
+                .querySelector(':scope > .sidebar-section');
               p.scrollTop = 0;
               const initialScrollTop = p.scrollTop;
               p.scrollTo({top: 99999, behavior: 'instant'});

@@ -17,6 +17,7 @@ HTTP server and real child processes.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import http.server
 import os
 import subprocess
@@ -34,7 +35,11 @@ from kiss.server import speech, web_server
 
 
 class _CountingHandler(http.server.BaseHTTPRequestHandler):
-    """Serves ``server.payload`` slowly and counts the requests."""
+    """Serves ``server.payload`` slowly and counts the requests.
+
+    With ``server.cut_after`` set, it promises the whole payload but
+    closes the connection after that many bytes of it.
+    """
 
     def do_GET(self) -> None:  # noqa: N802 — http.server API
         server = cast(Any, self.server)
@@ -48,6 +53,11 @@ class _CountingHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/gzip")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
+        if server.cut_after is not None:
+            self.wfile.write(payload[: server.cut_after])
+            self.wfile.flush()
+            self.close_connection = True
+            return
         chunk = 64 * 1024
         for i in range(0, len(payload), chunk):
             self.wfile.write(payload[i : i + chunk])
@@ -65,6 +75,7 @@ def served() -> Any:
     server = cast(Any, httpd)
     server.payload = os.urandom(512 * 1024)
     server.status = 200
+    server.cut_after = None
     server.count = 0
     server.count_lock = threading.Lock()
     server.url = f"http://127.0.0.1:{httpd.server_address[1]}/model.tar.gz"
@@ -144,6 +155,27 @@ def test_empty_archive_is_downloaded_again(served: Any, tmp_path: Path) -> None:
     cache.touch()
     assert speech.download_once(served.url, cache) == cache
     assert served.count == 1
+    assert read_bytes_waiting_for_writer(cache) == served.payload
+
+
+def test_an_archive_cut_short_of_its_content_length_is_not_published(
+    served: Any, tmp_path: Path
+) -> None:
+    """A peer that closes before the promised bytes arrived fails the download, caching nothing.
+
+    ``read1`` reports that early EOF as an ordinary end of data; the
+    three bytes used to be published and served as the archive from
+    then on, without another request.
+    """
+    served.payload = os.urandom(300 * 1024)
+    served.cut_after = 3  # the handler writes this many bytes and closes
+    cache = tmp_path / "models" / "model.tar.gz"
+    with pytest.raises(http.client.IncompleteRead):
+        speech.download_once(served.url, cache)
+    assert _leftovers(cache.parent) == [".model.tar.gz.lock"]
+    served.cut_after = None
+    assert speech.download_once(served.url, cache) == cache
+    assert served.count == 2
     assert read_bytes_waiting_for_writer(cache) == served.payload
 
 

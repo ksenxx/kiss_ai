@@ -17,7 +17,7 @@ threads:
   ``_lock``, ``_shared_lock`` or playback-queue mutex silences every
   later talk of every task;
 * :class:`~kiss.server.browser_tab.BrowserTabService` through the web
-  tools (``open_for_agent`` -> ``_ensure_loop``, ``tab_for_target``): a
+  tools (``open_for_agent`` -> ``_run_threadsafe``, ``tab_for_target``): a
   leaked ``_lock`` wedges every later browser tab and the daemon's
   shutdown.
 
@@ -43,6 +43,7 @@ from kiss.server.browser_tab import BrowserTabService
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.talk_player import TalkPlayer
 from kiss.tests.lock_injection import hammer
+from kiss.tests.server.conftest import ensure_loop
 
 
 class _Player:
@@ -81,14 +82,18 @@ class _Service:
     def __init__(self) -> None:
         self.dir = tempfile.TemporaryDirectory()
         self.service = BrowserTabService(JsonPrinter(), Path(self.dir.name))
-        self.service._ensure_loop()
+        ensure_loop(self.service)
+
+
+async def _nothing() -> None:
+    """The coroutine the hammered entry submits to the loop."""
 
 
 class _Loop(_Service):
-    """``_ensure_loop`` on the worker: the entry of ``open_for_agent``."""
+    """``_run_threadsafe`` on the worker: the entry of ``open_for_agent``."""
 
     def __call__(self) -> None:
-        self.service._ensure_loop()
+        self.service._run_threadsafe(_nothing())
 
 
 class _Target(_Service):

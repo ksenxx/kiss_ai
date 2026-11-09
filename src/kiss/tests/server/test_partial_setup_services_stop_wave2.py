@@ -16,19 +16,32 @@ The server runs in a child process with its own empty ``KISS_HOME`` (no
 password, so the startup waits) holding one helper that ignores SIGTERM.
 A ticker coroutine on the same loop records how long the loop stalls
 while the cancelled startup unwinds.
+
+A22-4 (audit 2026-11-07): the same rollback after a LATE failure.
+``_bind_listeners`` arms the watchdog, version-check, machine-registry
+and deferred-restart loops and subscribes to the SEA registry, then
+claims the server-reset flag; a failure there used to roll back the
+listeners and services only, leaving four loops and the subscriber
+running in an embedder that caught the failed start.  The claim raises
+``PermissionError`` in a server subclass: Python 3.14's ``Path.is_file``
+no longer re-raises the ``EACCES`` of a flag in an unreadable directory.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import posix_only
+from kiss.tests.server.conftest import find_free_port
 
 STUBBORN = """#!/bin/sh
 trap '' TERM
@@ -123,6 +136,47 @@ class TestCancelledStartupStopsServicesOffTheLoop(unittest.TestCase):
             self.assertLess(report["max_gap"], 1.0, report)
             # And the helper is gone once the startup has unwound.
             self.assertFalse(report["service_alive"], report)
+
+
+class _FlagClaimFailingServer(RemoteAccessServer):
+    """A server whose reset-flag claim, the last step of setup, raises.
+
+    The claim runs after every background loop is armed.  No filesystem
+    state makes it raise on Python 3.14, whose ``Path.is_file`` returns
+    False instead of re-raising ``EACCES``, so the failure is injected here.
+    """
+
+    def _maybe_schedule_server_reset_complete(self) -> None:
+        raise PermissionError("reset flag unreadable")
+
+
+class TestLateSetupFailureRollsBackTheLoops(unittest.IsolatedAsyncioTestCase):
+    """A setup failing after its loops are armed cancels them and unsubscribes."""
+
+    async def test_failed_startup_leaves_no_loop_or_subscriber_behind(self) -> None:
+        tmp = Path(tempfile.mkdtemp(prefix="kiss-late-setup-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        server = _FlagClaimFailingServer(
+            host="127.0.0.1", port=find_free_port(), work_dir=str(tmp),
+            url_file=tmp / "remote-url.json", local_endpoint_file=tmp / "sorcar-local.json",
+        )
+        with self.assertRaises(PermissionError):
+            await server.start_async()
+        await asyncio.sleep(0.1)
+        self.assertIsNone(server._ws_server)
+        self.assertEqual(
+            [
+                server._watchdog_task, server._version_check_task,
+                server._machines_watch_task, server._deferred_restart_task,
+            ],
+            [None] * 4,
+        )
+        live = sorted(
+            getattr(t.get_coro(), "__qualname__", "?") for t in asyncio.all_tasks()
+            if not t.done() and t is not asyncio.current_task()
+        )
+        self.assertEqual(live, [], "background loops survived the failed start")
+        self.assertFalse(server._sea_command_subscribed, "the SEA subscriber was left behind")
 
 
 if __name__ == "__main__":

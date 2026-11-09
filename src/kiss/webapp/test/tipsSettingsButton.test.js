@@ -14,47 +14,22 @@ const fs = require('fs');
 const path = require('path');
 const {newDom, MEDIA} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {panelParts, THREE_TIPS, tipsHost: panel} = require('./tips_helpers');
 const {test, report} = makeRunner();
 
 // The real chat.html markup with its placeholders blanked and its script
 // tags removed; tips.js (and marked) are then evaluated in the page the
 // way web_server._build_html serves them (main.js is never loaded).
-function loadChatDom(cfg, {withConfig = true, withMarked = true} = {}) {
+function loadChatDom(cfg, {withConfig = true} = {}) {
   const win = newDom({runScripts: 'outside-only', bodyClass: 'remote-chat'});
   const run = file =>
     win.eval(fs.readFileSync(path.join(MEDIA, file), 'utf-8'));
-  if (withMarked) run('marked.min.js');
+  run('marked.min.js');
   if (withConfig) win.eval(`window.__TIPS__ = ${JSON.stringify(cfg)};`);
   run('panelCopy.js');
   run('tips.js');
   return win;
 }
-
-function panel(win) {
-  return win.document.body.querySelector('kiss-tips-panel');
-}
-
-function panelParts(win) {
-  const host = panel(win);
-  assert.ok(host, 'kiss-tips-panel must be mounted on document.body');
-  const root = host.shadowRoot;
-  assert.ok(root, 'kiss-tips-panel must use shadow DOM');
-  return {
-    host,
-    root,
-    body: root.querySelector('.tips-body'),
-    counter: root.querySelector('.tips-counter'),
-    prev: root.querySelector('.tips-prev'),
-    next: root.querySelector('.tips-next'),
-    close: root.querySelector('.tips-close'),
-  };
-}
-
-const THREE_TIPS = [
-  '## First tip\n\n- alpha\n- beta',
-  'Second tip with **bold** text.',
-  '### Third tip\n\n`code` here.',
-];
 
 test('Tips button sits in the settings row', () => {
   const win = loadChatDom({tips: ['Hello.'], show: false});

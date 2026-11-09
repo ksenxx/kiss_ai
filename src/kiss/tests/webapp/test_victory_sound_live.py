@@ -34,16 +34,28 @@ an untouched page whatever ``--autoplay-policy`` says (measured on
 1243), so that path is exercised by the jsdom suite
 ``test/victorySound.test.js`` with the rejection the browser would
 give.
+
+Under full-suite load Chromium drops requests in flight with
+``net::ERR_NETWORK_CHANGED`` whenever a host interface appears or
+goes away (other jobs' Docker containers add and remove veth links
+all the time).  A navigation that dies that way is retried as the
+sync tests do with ``conftest.goto_retrying_network_change``; a
+clip download cut short that way is the page's own business: it
+fetches the clip again on a fresh player (``startVictoryPlayer``),
+so a finish may leave a second clip player that never started
+beside the one that played.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from typing import Any
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright.async_api import Error as PlaywrightError
 
 from kiss.tests.server.test_remote_tabs import RemoteTabsHarness
 
@@ -108,16 +120,52 @@ class MediaLog:
 class TestVictorySoundLive(RemoteTabsHarness):
     """The served page plays the jingle to its end when its remote task finishes."""
 
-    async def _open_page(self, browser: Browser) -> tuple[Page, MediaLog]:
-        """A fresh, untouched page on the served webapp and its media log."""
+    async def _open_page(self, browser: Browser, init_script: str = "") -> tuple[Page, MediaLog]:
+        """A fresh, untouched page on the served webapp and its media log.
+
+        *init_script* runs in the page before its own scripts.
+
+        The navigation is made up to three times while it fails with
+        ``net::ERR_NETWORK_CHANGED`` (see the module docstring): a
+        ``goto`` raising it, or a page whose script died of it and
+        whose self-reload (``media/assetLoadGuard.js``) was cut the
+        same way, so it ends on Chromium's error page or never shows
+        its input.  Any other failure propagates unchanged.
+        """
         context = await browser.new_context(
             ignore_https_errors=True, service_workers="block",
             viewport={"width": 1280, "height": 900},
         )
         page = await context.new_page()
+        if init_script:
+            await page.add_init_script(init_script)
         log = await MediaLog.attach(context, page)
-        await page.goto(f"https://127.0.0.1:{self.server.port}/")
-        await page.wait_for_selector("#task-input", state="visible", timeout=30000)
+        failures: list[str] = []
+
+        def note_failed_request(request: Any) -> None:
+            failures.append(f"{request.url} ({request.resource_type}): {request.failure}")
+
+        page.on("requestfailed", note_failed_request)
+        url = f"https://127.0.0.1:{self.server.port}/"
+        for attempt in range(3):
+            failures.clear()
+            try:
+                await page.goto(url)
+                if page.url.startswith("chrome-error://"):
+                    raise PlaywrightError(f"{url} ended on {page.url}")
+                await page.wait_for_selector("#task-input", state="visible", timeout=30000)
+            except PlaywrightError as exc:
+                network_changed = "net::ERR_NETWORK_CHANGED" in str(exc) or any(
+                    "net::ERR_NETWORK_CHANGED" in failure for failure in failures
+                )
+                if not network_changed or attempt == 2:
+                    raise AssertionError(
+                        f"{url}: {exc} (page at {page.url}; failed requests: {failures})",
+                    ) from exc
+                await asyncio.sleep(1.0)
+                continue
+            break
+        page.remove_listener("requestfailed", note_failed_request)
         await page.wait_for_function(
             "() => [...document.querySelectorAll('#chat-machine option')]"
             ".some(o => o.value === 'box')",
@@ -137,6 +185,23 @@ class TestVictorySoundLive(RemoteTabsHarness):
         await page.keyboard.type(prompt)
         await page.keyboard.press("Enter")
         await self._run_until_idle(tab)
+
+    def _assert_sounded(self, log: MediaLog, count: int, url: str) -> None:
+        """*count* finishes sounded on *log*'s page, each once.
+
+        *count* clip players played to their end, every one of them
+        created for the clip's *url*; any other clip player never
+        started (``kLoad`` without ``kPlay``): its download was cut
+        short (``ERR_NETWORK_CHANGED``, see the module docstring) and
+        the page fetched the clip again on one of those that played.
+        """
+        played = log.played_to_the_end()
+        self.assertEqual(len(played), count, log.events)
+        for pid in log.players_of(CLIP):
+            loaded = next(ev for ev in log.events[pid] if ev.get("event") == "kLoad")
+            self.assertEqual(loaded["url"], f"https://127.0.0.1:{self.server.port}{url}")
+            if pid not in played:
+                self.assertNotIn("kPlay", log.names(pid), log.events)
 
     async def test_remote_task_finish_plays_the_jingle(self) -> None:
         """Typed task on "box": one clip player, played to its end under the
@@ -158,10 +223,7 @@ class TestVictorySoundLive(RemoteTabsHarness):
                 # 1. The typed task: the typing is the gesture the policy wants.
                 await self._type_task_for_box(page, tab, "Say hello")
                 await log.wait_played(1)
-                players = log.players_of(CLIP)
-                self.assertEqual(len(players), 1, log.events)
-                loaded = next(ev for ev in log.events[players[0]] if ev.get("event") == "kLoad")
-                self.assertEqual(loaded["url"], f"https://127.0.0.1:{self.server.port}{url}")
+                self._assert_sounded(log, 1, url)
 
                 # 2. A page opened to watch shows the same chat (tabs are
                 #    shared across surfaces) and sounds the next finish
@@ -170,7 +232,8 @@ class TestVictorySoundLive(RemoteTabsHarness):
                 await self._type_task_for_box(page, tab, "Say hello again")
                 await log.wait_played(2)
                 await watch_log.wait_played(1)
-                self.assertEqual(len(watch_log.players_of(CLIP)), 1, watch_log.events)
+                self._assert_sounded(log, 2, url)
+                self._assert_sounded(watch_log, 1, url)
 
                 # 3. Muted on the first page, the way the user does it:
                 #    "..." > Settings > the box.  Per page: the watcher
@@ -182,8 +245,88 @@ class TestVictorySoundLive(RemoteTabsHarness):
                     await page.evaluate("localStorage.getItem('kissVictorySound')"), "off",
                 )
                 await page.click("#settings-panel-close")
+                muted_players = len(log.players_of(CLIP))
                 await self._type_task_for_box(page, tab, "Say hello a third time")
                 await watch_log.wait_played(2)
-                self.assertEqual(len(log.players_of(CLIP)), 2, "muted: no new player")
+                self._assert_sounded(watch_log, 2, url)
+                self.assertEqual(len(log.players_of(CLIP)), muted_players, "muted: no new player")
             finally:
                 await browser.close()
+
+    async def test_a_pause_while_the_clip_still_loads_does_not_fail_the_player(self) -> None:
+        """A clip player paused before its download arrives (the user agent
+        pauses a player when the tab loses the audio focus) is over, not
+        failed: Chromium rejects its still-pending ``play()`` with
+        ``AbortError`` after the page retires it, and that rejection
+        must neither fetch the clip again from the emptied source nor
+        pass the turn a second time (review 2026-11-08, W6/F3).  The
+        next finish sounds as usual.
+
+        The elements are Chromium's own: the page's ``Audio`` is only
+        wrapped to remember them, so the test can pause the one the
+        finish made the way the user agent would.
+        """
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            try:
+                page, log = await self._open_page(browser, _REMEMBER_AUDIO_ELEMENTS_JS)
+                tab = str(await page.evaluate("window._testApi.getActiveTabId()"))
+                url = str(await page.evaluate("window.__VOICE__.victoryAudioUrl"))
+                self.assertTrue(url.startswith(CLIP), url)
+                clip_url = f"https://127.0.0.1:{self.server.port}{url}"
+                # The clip's download is held back: play() stays pending.
+                held: list[Any] = []
+                await page.route(f"**{CLIP}*", lambda route: held.append(route))
+                await self._type_task_for_box(page, tab, "Say hello")
+                await page.wait_for_function(
+                    "() => window.__audioElements.length === 1"
+                    " && window.__audioElements[0].readyState === 0"
+                    " && !window.__audioElements[0].paused",
+                )
+                self.assertEqual(await page.evaluate("window.__audioElements[0].src"), clip_url)
+                await page.evaluate("() => window.__audioElements[0].pause()")
+                # The page's `pause` handler retires the player (its source
+                # emptied); the pending play() is then rejected.
+                await page.wait_for_function(
+                    "() => window.__audioElements[0].getAttribute('src') === ''",
+                )
+                await asyncio.sleep(0.5)
+                self.assertEqual(
+                    await page.evaluate("window.__audioElements.length"),
+                    1,
+                    "BUG - the rejection of the retired player's play() made another player",
+                )
+                loaded = [
+                    ev.get("url")
+                    for evs in log.events.values()
+                    for ev in evs
+                    if ev.get("event") == "kLoad"
+                ]
+                self.assertEqual(set(loaded), {clip_url}, log.events)
+                # The clip reachable again, the next finish sounds, once.
+                await page.unroute(f"**{CLIP}*")
+                for route in held:
+                    with contextlib.suppress(PlaywrightError):
+                        await route.abort()
+                await self._type_task_for_box(page, tab, "Say hello again")
+                await log.wait_played(1)
+                self._assert_sounded(log, 1, url)
+                self.assertEqual(await page.evaluate("window.__audioElements.length"), 2)
+            finally:
+                await browser.close()
+
+
+# Wraps the page's Audio constructor to remember the elements it makes
+# (`window.__audioElements`); the elements themselves are the browser's.
+_REMEMBER_AUDIO_ELEMENTS_JS = """
+(() => {
+  const RealAudio = window.Audio;
+  const made = [];
+  window.__audioElements = made;
+  window.Audio = function Audio(src) {
+    const element = new RealAudio(src);
+    made.push(element);
+    return element;
+  };
+})();
+"""

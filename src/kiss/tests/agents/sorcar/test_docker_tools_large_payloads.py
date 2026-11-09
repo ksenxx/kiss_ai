@@ -15,6 +15,11 @@ both the Python edit and the Perl fallback of an image without Python.
 and its pooled socket to the daemon open for the life of the process;
 it now closes the client, which this module checks on the SDK's own
 connection pool.
+
+``DockerManager.run``, the finish gate's shell, promises the whole
+output (the gate parses ``-z`` file lists and hashes diffs from it) but
+used to keep only the head and tail of a flood past twice
+``_CAPTURE_CHARS``; a 6.9 MB listing is now returned uncut.
 """
 
 import hashlib
@@ -23,6 +28,7 @@ from typing import Any
 
 from kiss.agents.sorcar.docker_manager import DockerManager
 from kiss.agents.sorcar.docker_tools import DockerTools
+from kiss.agents.sorcar.useful_tools import _CAPTURE_CHARS
 from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
 
 ONE_MIB = 1024 * 1024
@@ -66,6 +72,20 @@ class TestLargePayloads(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls.env.close()
+
+    def test_run_returns_the_gate_output_uncut(self) -> None:
+        """``run`` keeps every line of an output past the capture cap; ``Bash`` cuts it.
+
+        The cap drops output only once the kept tail outgrows its first
+        piece, so the flood is well past three times ``_CAPTURE_CHARS``.
+        """
+        count = 1_000_000
+        expected = "".join(f"{n}\n" for n in range(1, count + 1))
+        self.assertGreater(len(expected), 4 * _CAPTURE_CHARS)
+        exit_code, output = self.env.run(f"seq 1 {count}", 120)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(output, expected)
+        self.assertLess(len(self.env.Bash(f"seq 1 {count}", "flood")), len(expected))
 
     def test_write_one_mib_and_read_back(self) -> None:
         """A 1 MiB Write lands byte-for-byte, and Read windows it."""
@@ -155,6 +175,20 @@ class TestLargePayloadsWithoutPython(unittest.TestCase):
         self.assertIn("String not found", self.tools.Edit("/tmp/perl.txt", "absent", "z"))
         self.assertIn("not unique", self.tools.Edit("/tmp/perl.txt", "\n", "z"))
         self.assertIn("File not found", self.tools.Edit("/tmp/missing.txt", "a", "b"))
+        # The whitespace-tolerant retry through Perl too; the bytes of the file
+        # being no UTF-8 (Perl edits them raw), it stops at the exact error.
+        tools = DockerTools(self.env.Bash, self.env.read_bytes)
+        self.tools.Write("/tmp/perl2.txt", "a  =  1\nb = 2\n")
+        self.assertIn("Successfully replaced 1", tools.Edit("/tmp/perl2.txt", "a = 1", "a = 3"))
+        self.assertEqual(self.env.read_bytes("/tmp/perl2.txt"), b"a = 3\nb = 2\n")
+        self.env.Bash(
+            "perl -e 'open(F, \">:raw\", \"/tmp/perl3.txt\"); print F \"a\\xff  =  1\\n\"'",
+            "non-UTF-8 file",
+        )
+        self.assertEqual(
+            tools.Edit("/tmp/perl3.txt", "a\xff = 1", "x").split(),
+            "Error: String not found in file\n[exit code: 1]".split(),
+        )
 
 
 @unittest.skipUnless(is_docker_available(), "Docker daemon is not running")

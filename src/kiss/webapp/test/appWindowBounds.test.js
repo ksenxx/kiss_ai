@@ -154,8 +154,15 @@ function testStorageThatThrowsIsTolerated() {
     },
   };
   const win = makeWindow('kiss-app-window', [1, 2, 300, 400], storage);
+  // jsdom reports an exception thrown by a listener to the window's
+  // `error` event instead of the dispatcher, so "dispatch did not throw"
+  // proves nothing: the event is what the resize path is checked on.
+  const errors = [];
+  win.addEventListener('error', e => errors.push(e.message));
   setBounds(win, [1, 2, 301, 400]);
   win.dispatchEvent(new win.Event('resize'));
+  win.dispatchEvent(new win.Event('pagehide'));
+  assert.deepStrictEqual(errors, [], 'a failing write is swallowed');
   win.close();
 }
 

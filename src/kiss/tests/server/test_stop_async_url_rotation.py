@@ -46,6 +46,7 @@ from unittest import IsolatedAsyncioTestCase
 from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import install_fake_cloudflared
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
 from kiss.tests.server.conftest import find_free_port
 
@@ -91,13 +92,17 @@ class TestAdoptedTunnelUrlStableAcrossStopAsync(IsolatedAsyncioTestCase):
         threading.Thread(target=self._httpd.serve_forever, daemon=True).start()
         metrics_port = self._httpd.server_address[1]
 
-        # Fake adopted cloudflared: a live process whose argv[0] is
-        # literally "cloudflared" (python behind a symlink), exactly
-        # like the harness in test_tunnel_survives_install_restart.py.
-        link = tmp / "cloudflared"
-        os.symlink(sys.executable, link)
+        # Fake adopted cloudflared: a live process whose executable is
+        # named ``cloudflared`` (the interpreter under that name: the
+        # adoption path verifies the identity of the recorded pid, and
+        # Windows reports a symlink's *target* as the image path),
+        # exactly like the harness in
+        # test_tunnel_survives_install_restart.py.
+        fake_dir = tmp / "fake-cloudflared"
+        fake_dir.mkdir()
+        fake = install_fake_cloudflared(fake_dir, "import time; time.sleep(300)\n")
         self._cf_proc = subprocess.Popen(
-            [str(link), "-c", "import time; time.sleep(300)"],
+            [str(fake)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -119,12 +124,11 @@ class TestAdoptedTunnelUrlStableAcrossStopAsync(IsolatedAsyncioTestCase):
         # the second start) decline/kill the adopted tunnel, the server
         # falls back to spawning `cloudflared` from PATH.  Put a
         # fail-fast stub FIRST on PATH so that fallback can never spawn
-        # a real tunnel on the machine running the tests.
+        # a real tunnel on the machine running the tests (a shell script
+        # would not do: Windows cannot run one by bare name).
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
-        stub = bin_dir / "cloudflared"
-        stub.write_text("#!/bin/sh\nexit 1\n")
-        stub.chmod(0o755)
+        install_fake_cloudflared(bin_dir, "import sys\nsys.exit(1)\n")
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self._old_path}"
 

@@ -100,7 +100,12 @@ class TestInstallUrl(unittest.TestCase):
             timeout=40,
         )
         self.assertEqual(result.returncode, 0, f"curl failed: {result.stderr}")
-        self.assertIn("<!DOCTYPE html>", result.stdout)
+        # GitHub answers the blob URL with an HTML page, never with the script;
+        # under load the edge may answer with its own HTML error page (a
+        # "504 Gateway Time-out" body was seen), which proves the same point.
+        body = result.stdout.lstrip()
+        self.assertIn("<html", body.lower(), f"not an HTML page: {body[:200]!r}")
+        self.assertFalse(body.startswith("#!"), "the blob URL served the raw script")
 
 
 if __name__ == "__main__":

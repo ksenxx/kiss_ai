@@ -40,6 +40,7 @@ const {
   errorNotifications,
 } = require('./workdir_helpers');
 const {click, loadMainCss} = require('./simplify2_harness');
+const {showSection} = require('./ui_antipattern_harness');
 const {cssRule} = require('./designTokens');
 
 const MEDIA = path.join(__dirname, '..', 'media');
@@ -50,6 +51,83 @@ const RECENTS = [
   {path: '/home/u/newest', ts: NOW - 30},
   {path: '/home/u/middle', ts: NOW - 2 * 86400},
 ];
+
+// A26_astra-2: the listing proves the folder exists, not that the
+// daemon adopted it (config.json may refuse the write: a permission
+// error, the config lock).  The pick asks for the daemon's answer, the
+// configData of the directory it ended on, so a refusal (a `notice`,
+// and the unchanged configuration) takes the optimistic adoption back:
+// the drop-down, the Explorer's root and the recent list are the
+// daemon's again.
+function testRefusedAdoptionIsTakenBack() {
+  const {win, posted} = makePage({desktop: true});
+  send(win, {
+    type: 'configData',
+    config: {work_dir: '/work/ws', recent_work_dirs: RECENTS},
+  });
+  showSection(win, 'meta-explorer');
+  const explorerLists = () =>
+    msgs(posted, 'listDir')
+      .filter(m => !String(m.token).startsWith('workdir:'))
+      .map(m => m.path);
+  assert.deepStrictEqual(explorerLists(), ['/work/ws'], 'precondition');
+  pick(win, '/home/u/middle');
+  const check = msgs(posted, 'listDir').find(m =>
+    String(m.token).startsWith('workdir:'),
+  );
+  send(win, {
+    type: 'dirListing',
+    token: check.token,
+    path: '/home/u/middle',
+    entries: [],
+  });
+  const sets = msgs(posted, 'setWorkDir');
+  assert.strictEqual(sets.length, 1);
+  assert.strictEqual(
+    sets[0].reply,
+    true,
+    'BUG - the pick does not ask the daemon whether it adopted the folder',
+  );
+  assert.strictEqual(currentDir(win), '/home/u/middle', 'adopted at once');
+  assert.deepStrictEqual(explorerLists(), ['/work/ws', '/home/u/middle']);
+
+  // The daemon could not record it: it keeps /work/ws and says so.
+  send(win, {
+    type: 'notice',
+    text: 'That folder cannot be used as the working directory; keeping /work/ws.',
+  });
+  send(win, {
+    type: 'configData',
+    config: {work_dir: '/work/ws', recent_work_dirs: RECENTS},
+  });
+  assert.strictEqual(currentDir(win), '/work/ws', 'the refusal is taken back');
+  assert.deepStrictEqual(
+    explorerLists(),
+    ['/work/ws', '/home/u/middle', '/work/ws'],
+    "the Explorer browses the daemon's directory again",
+  );
+  const sub = submitPrompt(win, posted, 'list the files');
+  assert.strictEqual(sub.workDir, undefined, 'the next task runs where the daemon says');
+
+  // An accepted pick: the daemon's answer agrees and changes nothing.
+  pick(win, '/home/u/newest');
+  const check2 = msgs(posted, 'listDir').filter(m => String(m.token).startsWith('workdir:'));
+  send(win, {
+    type: 'dirListing',
+    token: check2[check2.length - 1].token,
+    path: '/home/u/newest',
+    entries: [],
+  });
+  send(win, {
+    type: 'configData',
+    config: {
+      work_dir: '/home/u/newest',
+      recent_work_dirs: [{path: '/home/u/newest', ts: NOW}].concat(RECENTS),
+    },
+  });
+  assert.strictEqual(currentDir(win), '/home/u/newest');
+  win.close();
+}
 
 /** Submit *text* from the composer; the posted `submit` message. */
 function submitPrompt(win, posted, text) {
@@ -306,9 +384,10 @@ function testRemotePickIsCheckedThenAdopted() {
     path: '/home/u/middle',
     entries: [],
   });
-  // api.js spreads the fields before `type`, hence the key order.
+  // api.js spreads the fields before `type`, hence the key order; the
+  // pick asks for the daemon's answer (a refusal takes it back).
   assertJsonEqual(msgs(posted, 'setWorkDir'), [
-    {workDir: '/home/u/middle', type: 'setWorkDir'},
+    {workDir: '/home/u/middle', reply: true, type: 'setWorkDir'},
   ]);
   assert.strictEqual(msgs(posted, 'saveConfig').length, 0);
   assert.strictEqual(currentDir(win), '/home/u/middle');
@@ -517,7 +596,11 @@ function pickViaDaemon(win, posted, dir) {
     entries: [],
   });
   const sets = msgs(posted, 'setWorkDir');
-  assertJsonEqual(sets[sets.length - 1], {workDir: dir, type: 'setWorkDir'});
+  assertJsonEqual(sets[sets.length - 1], {
+    workDir: dir,
+    reply: true,
+    type: 'setWorkDir',
+  });
   assert.strictEqual(currentDir(win), dir, 'the verified pick is shown');
 }
 
@@ -788,6 +871,10 @@ const tests = [
   [
     'a picked directory keeps its trailing space',
     testPickedDirectoryKeepsItsTrailingSpace,
+  ],
+  [
+    'a pick the daemon refuses after its listing is taken back',
+    testRefusedAdoptionIsTakenBack,
   ],
 ];
 

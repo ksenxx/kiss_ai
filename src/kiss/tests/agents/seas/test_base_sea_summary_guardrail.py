@@ -91,6 +91,7 @@ def test_without_the_summary_tool_nothing_is_refused(tmp_path: Path) -> None:
     results = tool_results(requests[-1])
     assert len(results) == 11, results
     assert "step-10" in results[9], results[9]
+    assert not [r for r in results if "A summary is due" in r], results
 
 
 def test_a_second_run_on_the_same_hooks_starts_its_count_afresh(tmp_path: Path) -> None:
@@ -112,6 +113,7 @@ def test_a_second_run_on_the_same_hooks_starts_its_count_afresh(tmp_path: Path) 
     assert len(results[0]) == 9 and "step-9" in results[0][8], results[0]
     assert len(results[1]) == 2, results[1]
     assert "step-1" in results[1][0] and "step-2" in results[1][1], results[1]
+    assert not [r for r in results[1] if "A summary is due" in r], results[1]
 
 
 def summary(description: str) -> str:

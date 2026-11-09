@@ -38,6 +38,7 @@ agent accounted, and the daemon's registered task state.
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import re
 import sys
@@ -49,6 +50,7 @@ from typing import Any, cast
 
 import yaml
 
+from kiss.agents.sorcar import channel_workspace
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -78,7 +80,10 @@ from kiss.tests.server.parallel_agent_harness import (
     finish_response,
     override_attribute,
     request_text,
+    restore_env,
+    system_text,
     tool_call_response,
+    tool_names,
 )
 
 SUMMARY = "scripted summary done"
@@ -92,18 +97,6 @@ def _failed_finish(summary: str) -> dict[str, Any]:
         "finish",
         {"success": "false", "summary_in_html": summary},
     )
-
-
-def _tool_names(request: dict[str, Any]) -> list[str]:
-    """Return the function names of a chat-completions *request*'s ``tools``."""
-    return [t["function"]["name"] for t in request.get("tools", [])]
-
-
-def _system_text(request: dict[str, Any]) -> str:
-    """Return the system message of *request* (the run's system prompt)."""
-    first = request["messages"][0]
-    assert first["role"] == "system", first["role"]
-    return str(first["content"])
 
 
 def _task_text(request: dict[str, Any]) -> str:
@@ -127,22 +120,27 @@ def _only_tool_result(request: dict[str, Any]) -> str:
     return results[0]
 
 
-def _restore_env(name: str, value: str | None) -> None:
-    """Put environment variable *name* back to *value* (``None`` = unset)."""
-    if value is None:
-        os.environ.pop(name, None)
-    else:
-        os.environ[name] = value
-
-
 def _call_and_store(fn: Callable[[], str], out: list[str]) -> None:
     """Thread target: append ``fn()``'s return value to *out*."""
     out.append(fn())
 
 
+class _LogEvent(logging.Handler):
+    """Set *event* when a record whose message contains *needle* is logged."""
+
+    def __init__(self, needle: str, event: threading.Event) -> None:
+        super().__init__()
+        self.needle = needle
+        self.event = event
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self.needle in record.getMessage():
+            self.event.set()
+
+
 def _budget_line(request: dict[str, Any]) -> float:
     """Return the ``Max budget (USD)`` the run's system prompt declares."""
-    match = re.search(r"Max budget \(USD\): \$([0-9.]+)", _system_text(request))
+    match = re.search(r"Max budget \(USD\): \$([0-9.]+)", system_text(request))
     assert match is not None, "the system prompt must declare the budget"
     return float(match.group(1))
 
@@ -226,7 +224,7 @@ class _ApiLaunchBase(LocalDaemonTestCase):
         # there: point HOME at the empty tmpdir so every test observes
         # the deterministic "not authenticated" state and never the
         # developer machine's real credentials.
-        self.addCleanup(_restore_env, "HOME", os.environ.get("HOME"))
+        self.addCleanup(restore_env, "HOME", os.environ.get("HOME"))
         os.environ["HOME"] = self.tmpdir
         # Launches without an explicit model/model_config use the
         # daemon's default model (``last_model``) and the endpoint
@@ -343,7 +341,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         task = _task_text(request)
         assert "auth prompt task" in task
         assert "Slack Authentication" not in task
-        system_prompt = _system_text(request)
+        system_prompt = system_text(request)
         assert "Slack Authentication" in system_prompt
         assert "finish_slack_auth()" in system_prompt
 
@@ -361,7 +359,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             work_dir=self.repo,
         )
         first, second = self.model_server.requests
-        names = _tool_names(first)
+        names = tool_names(first)
         for expected in (
             "check_slack_auth",
             "authenticate_slack",
@@ -430,7 +428,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             work_dir=self.repo,
         )
         first, second = self.model_server.requests
-        assert "add_note" in _tool_names(first), (
+        assert "add_note" in tool_names(first), (
             "the authenticated backend's tool must come from the SEA's tools()"
         )
         assert _only_tool_result(second).startswith("recorded:from daemon")
@@ -484,6 +482,15 @@ class TestLaunchViaApi(_ApiLaunchBase):
 
         thread_a = threading.Thread(target=launch, args=("A", "wsA"), daemon=True)
         thread_b = threading.Thread(target=launch, args=("B", "wsB"), daemon=True)
+        # The guard logs that it is waiting in the same locked step that
+        # parks B on its condition (channel_workspace.enter_workspace):
+        # that record, not a lapse of time, is the signal that B is held.
+        parked = threading.Event()
+        guard_log = logging.getLogger(channel_workspace.__name__)
+        guard_level = guard_log.level
+        handler = _LogEvent("waiting for concurrent kiss-web launches", parked)
+        guard_log.addHandler(handler)
+        guard_log.setLevel(logging.INFO)
         try:
             thread_a.start()
             assert started["A"].wait(timeout=30)
@@ -498,7 +505,8 @@ class TestLaunchViaApi(_ApiLaunchBase):
             # B uses a DIFFERENT workspace: it must wait for A instead
             # of overwriting the env var A's daemon-side tools()
             # reads — that would load the wrong account's credentials.
-            assert not started["B"].wait(timeout=1.0), (
+            assert parked.wait(timeout=30), "B never waited at the workspace guard"
+            assert not started["B"].is_set(), (
                 "a launch must not reach the model while a different workspace is still exported"
             )
             assert os.environ.get("KISS_CHANNEL_WORKSPACE") == "wsA", (
@@ -511,6 +519,8 @@ class TestLaunchViaApi(_ApiLaunchBase):
             assert started["B"].wait(timeout=30)
             assert os.environ.get("KISS_CHANNEL_WORKSPACE") == "wsB"
         finally:
+            guard_log.removeHandler(handler)
+            guard_log.setLevel(guard_level)
             release["A"].set()
             release["B"].set()
             thread_a.join(timeout=30)
@@ -540,12 +550,12 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert len(explicit.requests) == 1
         request = explicit.requests[0]
         assert _budget_line(request) == 1.25
-        names = _tool_names(request)
+        names = tool_names(request)
         assert "go_to_url" not in names, "web_tools=False must drop the browser tools"
         # ``run_parallel`` is N x ``run_agent``: a ChannelSea no longer
         # forces it off, so the launcher's ``is_parallel=True`` stands.
         assert "run_parallel" in names
-        assert "Parallel mode: parallel" in _system_text(request)
+        assert "Parallel mode: parallel" in system_text(request)
 
     def test_carrier_tools_getter_restricts_the_daemon_built_agent(self) -> None:
         """A carrier's ``sea_path`` script restricts the run to its ``tools()``.
@@ -586,7 +596,7 @@ class Sea(BaseSea):
             work_dir=self.repo,
         )
         first, second = self.model_server.requests
-        assert _tool_names(first) == ["finish", "only_tool"]
+        assert tool_names(first) == ["finish", "only_tool"]
         assert _only_tool_result(second).startswith("only")
         assert "restricted ok" in yaml.safe_load(result)["summary"]
 
@@ -628,7 +638,7 @@ class Sea(BaseSea):
         result = agent.run(prompt_template="task", work_dir=self.repo, **retired)
         assert SUMMARY in yaml.safe_load(result)["summary"]
         request = self._only_request()
-        assert "LAUNCHER-SYS-SUFFIX-2210" not in _system_text(request)
+        assert "LAUNCHER-SYS-SUFFIX-2210" not in system_text(request)
         assert "LAUNCHER-PROMPT-SUFFIX-2210" not in _task_text(request)
 
     def test_zero_budget_override_is_honored(self) -> None:
@@ -655,7 +665,7 @@ class Sea(BaseSea):
         request = self._only_request()
         assert _budget_line(request) > 0, "without an override the daemon config budget applies"
         assert request["model"] == STANDIN_MODEL
-        assert f"Model name: {STANDIN_MODEL}" in _system_text(request), (
+        assert f"Model name: {STANDIN_MODEL}" in system_text(request), (
             "the daemon default model applies when none is passed"
         )
 
@@ -669,7 +679,7 @@ class Sea(BaseSea):
         )
         request = self._only_request()
         assert request["model"] == "gpt-5.5"
-        assert "Model name: gpt-5.5" in _system_text(request)
+        assert "Model name: gpt-5.5" in system_text(request)
 
     def test_stats_recorded_on_agent_for_cli_stats(self) -> None:
         self.model_server.script = [
@@ -852,7 +862,7 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         assert "direct slack" in task
         assert "Slack Authentication" not in task
         # The daemon applies the module's ``system_prompt()`` hook.
-        assert "Slack Authentication" in _system_text(request)
+        assert "Slack Authentication" in system_text(request)
 
     def test_direct_run_without_channel_prompt(self) -> None:
         agent = self._plain_agent()
@@ -864,7 +874,7 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         request = self._only_request()
         assert "direct plain" in _task_text(request)
         assert "## Slack Authentication" not in _task_text(request)
-        assert "## Slack Authentication" not in _system_text(request)
+        assert "## Slack Authentication" not in system_text(request)
 
 
 class TestKissWebChatCarrierAgents(_ApiLaunchBase):
@@ -884,7 +894,7 @@ class TestKissWebChatCarrierAgents(_ApiLaunchBase):
             "the daemon-minted chat id must be propagated onto the "
             "carrier agent so the channel runner can resume the thread later"
         )
-        assert f"Chat id: {agent.chat_id}" in _system_text(self._only_request())
+        assert f"Chat id: {agent.chat_id}" in system_text(self._only_request())
 
     def test_chat_agent_resume_chat_by_id(self) -> None:
         agent = KissWebChatAgent("Test Carrier")
@@ -964,7 +974,7 @@ class Sea(BaseSea):
         ]
         runner._handle_message("C123", {"text": "hi", "ts": "1.0"})
         first, second = self.model_server.requests
-        assert "shout" in _tool_names(first), "the runner's SEA must supply the task's tools"
+        assert "shout" in tool_names(first), "the runner's SEA must supply the task's tools"
         assert _only_tool_result(second).startswith("HI")
         prompt = _task_text(first)
         assert "'C123'" in prompt and "'1.0'" in prompt, (
@@ -1052,7 +1062,7 @@ class TestChannelMainInteractiveViaApi(_ApiLaunchBase):
         # ``DEFAULT_CONFIG``; re-sync it from the restored environment.
         self.addCleanup(_refresh_config)
         for name in _PROVIDER_KEYS:
-            self.addCleanup(_restore_env, name, os.environ.pop(name, None))
+            self.addCleanup(restore_env, name, os.environ.pop(name, None))
         self.addCleanup(setattr, sys, "argv", sys.argv)
         sys.argv = ["kiss-slack", *argv]
 
@@ -1104,10 +1114,10 @@ class TestChannelMainInteractiveViaApi(_ApiLaunchBase):
         assert request["model"] == STANDIN_MODEL
         assert "do the interactive thing" in _task_text(request)
         assert _budget_line(request) == 2.5
-        names = _tool_names(request)
+        names = tool_names(request)
         assert "go_to_url" not in names
         assert "run_parallel" not in names
-        assert "Parallel mode: sequential" in _system_text(request)
+        assert "Parallel mode: sequential" in system_text(request)
 
     def test_keyless_endpoint_gets_placeholder_token(self) -> None:
         # A Claude model served by a local OpenAI-compatible proxy: the

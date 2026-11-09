@@ -28,6 +28,7 @@ import os
 import shlex
 import shutil
 import sys
+import sysconfig
 from importlib.metadata import entry_points
 from pathlib import Path
 
@@ -110,7 +111,10 @@ def test_gateway_command_tick_is_silent_when_idle(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     install_cli_script(bin_dir / "signal-cli", _IDLE_SIGNAL_CLI)
-    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+    # The console script ``kiss-signal`` lives in this interpreter's scripts
+    # directory, on PATH only when the environment is activated.
+    scripts = sysconfig.get_path("scripts")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), scripts, os.environ["PATH"]]))
     signal_sea._config.save({"phone_number": "+1BOT"})
 
     command = cron_agent.gateway_command("signal", "+1AAA", pairing=False)

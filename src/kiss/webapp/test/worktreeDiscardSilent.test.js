@@ -32,6 +32,21 @@ function main() {
     'a plain successful discard must not print a line in the chat',
   );
 
+  // A28_claude-1: a task that made worktrees in two repositories is
+  // discarded with one line per branch (sorcar_agent.py discard(),
+  // joined by blank lines): as silent as the one-branch case.
+  send(win, {
+    type: 'worktree_result',
+    success: true,
+    message: "Discarded branch 'kiss/wt-a'.\n\nDiscarded branch 'kiss/wt-b'.",
+    tabId: activeTab,
+  });
+  assert.strictEqual(
+    win.document.querySelectorAll('.wt-result-ok, .wt-result-err').length,
+    0,
+    'BUG - a two-repository discard printed the lines the one-branch case hides',
+  );
+
   send(win, {
     type: 'worktree_result',
     success: true,

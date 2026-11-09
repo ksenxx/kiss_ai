@@ -66,12 +66,12 @@ class TestAtomicGenerationCapture(_Base):
         real_broadcast = self.server._broadcast_tabs_state
         first_call = threading.Event()
 
-        def parking_broadcast() -> None:
+        def parking_broadcast(ack: str = "") -> None:
             if not first_call.is_set():
                 first_call.set()
                 parked.set()
                 release.wait(timeout=30)
-            real_broadcast()
+            real_broadcast(ack)
 
         self.server._broadcast_tabs_state = parking_broadcast  # type: ignore[method-assign]
         try:
@@ -215,13 +215,13 @@ class TestRemovalGenerationWiring(_Base):
         release = threading.Event()
         real_broadcast = self.server._broadcast_tabs_state
 
-        def parking_broadcast() -> None:
+        def parking_broadcast(ack: str = "") -> None:
             # Park only the close's broadcast; the reopen below
             # broadcasts from this thread and must run straight through.
             if not parked.is_set():
                 parked.set()
                 release.wait(timeout=30)
-            real_broadcast()
+            real_broadcast(ack)
 
         self.server._broadcast_tabs_state = parking_broadcast  # type: ignore[method-assign]
         try:

@@ -44,7 +44,7 @@ import time
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorcar._concurrency import locked_call
+from kiss.core.locked import locked_call
 from kiss.server import signin
 from kiss.server.signin import SIGNIN_HOOK
 from kiss.tests.conftest import posix_only

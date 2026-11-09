@@ -58,6 +58,7 @@ from kiss.core.memoryfield.index import (
     hashed_embedding,
 )
 from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, slugify
+from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -150,11 +151,11 @@ def load_past_tasks(db_path: Path, limit: int, min_result_chars: int = 300) -> l
             (min_result_chars,),
         )
         for task_id, timestamp, task, result, verdict in rows:
+            if len(tasks) >= limit:
+                break
             if is_failed_result(result, verdict):
                 continue
             tasks.append(PastTask(task_id=task_id, timestamp=timestamp, task=task, result=result))
-            if len(tasks) >= limit:
-                break
     return tasks
 
 
@@ -350,6 +351,9 @@ def cached_llm_probes(memory: MemoryDir, names: list[str], args: argparse.Namesp
 
     The cache records the probe model, seed, count and a hash of the corpus
     page names; any difference (or ``--rebuild``) regenerates the probes.
+    Evaluations sharing an output directory share the cache: it is
+    published atomically, and a file that does not parse (a writer that
+    was interrupted) counts as a miss.
 
     Args:
         memory: The memory directory.
@@ -365,15 +369,19 @@ def cached_llm_probes(memory: MemoryDir, names: list[str], args: argparse.Namesp
         "corpus_sha256": hashlib.sha256("\n".join(names).encode("utf-8")).hexdigest(),
     }
     if cache_path.exists() and not args.rebuild:
-        cached = json.loads(cache_path.read_text())
+        try:
+            cached = json.loads(cache_path.read_text())
+        except ValueError:
+            cached = None
         if isinstance(cached, dict) and cached.get("meta") == meta:
             return [Probe(**p) for p in cached["probes"]]
         logger.info("Probe cache %s does not match this run; regenerating", cache_path)
     sample = random.Random(args.seed).sample(names, min(args.llm_probes, len(names)))
     generated = llm_probes(memory, sample, args.probe_model)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(
-        json.dumps({"meta": meta, "probes": [asdict(p) for p in generated]}, indent=1)
+    atomic_write_text(
+        cache_path,
+        json.dumps({"meta": meta, "probes": [asdict(p) for p in generated]}, indent=1),
     )
     return generated
 

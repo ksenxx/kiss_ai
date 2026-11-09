@@ -59,14 +59,12 @@ LIGHT_TOKEN_COLOURS = {
 # highlight.js scope class -> the VS Code TextMate scope's colour.
 DARK_SCOPE_COLOURS = {
     ".hljs-keyword": "#569cd6",          # keyword
-    ".hljs-keyword.control_": "#c586c0", # keyword.control
     ".hljs-title.function_": "#dcdcaa",  # entity.name.function
     ".hljs-title.class_": "#4ec9b0",     # entity.name.type
     ".hljs-variable": "#9cdcfe",         # variable
     ".hljs-attr": "#9cdcfe",             # entity.other.attribute-name
     ".hljs-number": "#b5cea8",           # constant.numeric
     ".hljs-string": "#ce9178",           # string
-    ".hljs-char.escape_": "#d7ba7d",     # constant.character.escape
     ".hljs-regexp": "#d16969",           # string.regexp
     ".hljs-comment": "#6a9955",          # comment
     ".hljs-addition": "#b5cea8",         # markup.inserted
@@ -74,14 +72,12 @@ DARK_SCOPE_COLOURS = {
 }
 LIGHT_SCOPE_COLOURS = {
     ".hljs-keyword": "#0000ff",
-    ".hljs-keyword.control_": "#af00db",
     ".hljs-title.function_": "#795e26",
     ".hljs-title.class_": "#267f99",
     ".hljs-variable": "#001080",
     ".hljs-attr": "#e50000",
     ".hljs-number": "#098658",
     ".hljs-string": "#a31515",
-    ".hljs-char.escape_": "#ee0000",
     ".hljs-regexp": "#811f3f",
     ".hljs-comment": "#008000",
     ".hljs-addition": "#098658",

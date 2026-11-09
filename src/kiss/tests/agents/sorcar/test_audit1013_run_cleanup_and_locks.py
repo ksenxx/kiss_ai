@@ -47,11 +47,11 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import task_classifier
-from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.persistence import TASK_USAGE_LOCK
 from kiss.agents.sorcar.relentless_agent import _OFFSET_PUBLISH_LOCK, RelentlessAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.locked import locked_call
 from kiss.core.print_to_console import ConsolePrinter
 from kiss.server.json_printer import JsonPrinter
 from kiss.tests.core.test_budget_enforcement_e2e import (

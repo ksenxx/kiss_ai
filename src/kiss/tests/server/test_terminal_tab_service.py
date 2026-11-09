@@ -8,15 +8,19 @@
 real pty here: output streams as ``terminalData`` events to the owning
 connection only, the pty follows ``resize``, the shell's exit code
 arrives as ``terminalExit``, a tab that was closed hangs its shell up
-(and kills one that ignores the hang-up), a dropped connection keeps the
-shell for a re-attach until the grace period runs out, and ``shutdown``
-reaps everything.
+(and kills one that ignores the hang-up, its foreground job with it), a
+dropped connection keeps the shell for a re-attach until the grace period
+runs out, and ``shutdown`` reaps everything.
 
 The Windows branch of ``open`` (no :mod:`pty`) and a shell spawn that
 raises cannot be reached on the Linux hosts these tests run on without
 replacing module globals, so they are not exercised here.  The browser
 half (xterm.js, the "..." menu item, the tab) is covered by
-``tests/webapp/test_remote_terminal_tab.py``.
+``tests/webapp/test_remote_terminal_tab.py``. The writer's defensive
+``BlockingIOError``/``OSError`` handlers cover a kernel readiness change
+or an invalid descriptor; the public API has one writer and never closes
+its descriptor before that writer, so those failures cannot be forced
+here without replacing an OS call or violating descriptor ownership.
 
 The service runs the developer's ``$SHELL`` as an interactive login
 shell, dotfiles included (a ``cd`` in ``~/.zshrc`` moves it out of the
@@ -28,10 +32,16 @@ with ``%``, not ``$``).  The tests therefore point ``SHELL`` at
 from __future__ import annotations
 
 import os
+import selectors
+import shlex
 import shutil
+import signal
 import sys
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +50,8 @@ import pytest
 from kiss.core.processes import find_bash
 from kiss.server import terminal_tab
 from kiss.server.terminal_tab import TerminalService, default_shell
+from kiss.tests.conftest import nproc_limit_lowered_to_one, thread_start_can_be_starved
+from kiss.tests.server.pause import Pause
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="terminal tabs need a pty",
@@ -135,6 +147,15 @@ def _wait_until(predicate: Any, timeout: float = 10.0) -> None:
     raise AssertionError("condition not met in time")
 
 
+def _alive(pid: int) -> bool:
+    """Return whether *pid* still exists (an orphan killed is reaped by init at once)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 @pytest.fixture
 def service() -> Any:
     printer = ConnPrinter()
@@ -218,20 +239,54 @@ def test_missing_work_dir_falls_back_to_home(service: Any, tmp_path: Path) -> No
 def test_close_hangs_up_and_kills_a_shell_that_ignores_sighup(
     service: Any, tmp_path: Path,
 ) -> None:
+    """The kill reaches the shell's foreground job too: it inherited the
+    ignored SIGHUP and runs in a process group of its own (job control)."""
     svc, printer = service
+    pid_file = tmp_path / "job.pid"
+    job = shlex.quote(f"echo $$ > {shlex.quote(str(pid_file))}; exec sleep 300")
     svc.open("tab-d", "conn-1", str(tmp_path), 80, 24)
-    svc.input("tab-d", "conn-1", "trap '' HUP; echo trapped; sleep 300\n")
+    svc.input("tab-d", "conn-1", f"trap '' HUP; echo trapped; /bin/sh -c {job}\n")
     printer.wait_for(lambda: "trapped" in printer.output("tab-d"))
-    # A stranger cannot close it; the owner can.
-    svc.close("tab-d", "conn-2")
-    assert session_count(svc) == 1
-    started = time.monotonic()
-    svc.close("tab-d", "conn-1")
-    svc.close("tab-d", "conn-1")  # idempotent
+    printer.wait_for(lambda: pid_file.exists() and pid_file.read_text().strip().isdigit())
+    job_pid = int(pid_file.read_text())
+    try:
+        # A stranger cannot close it; the owner can.
+        svc.close("tab-d", "conn-2")
+        assert session_count(svc) == 1
+        started = time.monotonic()
+        svc.close("tab-d", "conn-1")
+        svc.close("tab-d", "conn-1")  # idempotent
+        printer.wait_for(lambda: printer.of_type("terminalExit"), timeout=15)
+        assert time.monotonic() - started < 10
+        assert printer.of_type("terminalExit")[0]["code"] != 0
+        assert session_count(svc) == 0
+        _wait_until(lambda: not _alive(job_pid))
+    finally:
+        if _alive(job_pid):
+            os.kill(job_pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(not thread_start_can_be_starved(), reason="requires enforced RLIMIT_NPROC")
+@pytest.mark.parametrize("drop", ["close", "viewer_gone"])
+def test_a_shell_whose_timer_thread_cannot_start_is_not_stranded(
+    service: Any, tmp_path: Path, drop: str
+) -> None:
+    """``close`` (its SIGKILL timer) and a dropped connection (its grace
+    timer) each start a thread; when none can start, the shell is torn
+    down at once rather than left registered with nothing to end it."""
+    svc, printer = service
+    ready = tmp_path / "hup-ignored"
+    svc.open("no-thread", "c1", str(tmp_path), 80, 24)
+    svc.input("no-thread", "c1", f"trap '' HUP; echo > {shlex.quote(str(ready))}\n")
+    printer.wait_for(ready.exists)
+    with nproc_limit_lowered_to_one():
+        if drop == "close":
+            svc.close("no-thread", "c1")
+        else:
+            svc.viewer_gone("c1")
     printer.wait_for(lambda: printer.of_type("terminalExit"), timeout=15)
-    assert time.monotonic() - started < 10
-    assert printer.of_type("terminalExit")[0]["code"] != 0
     assert session_count(svc) == 0
+    svc.close("no-thread", "c1")  # nothing left: harmless
 
 
 def test_close_lets_a_cooperative_shell_exit_at_once(service: Any, tmp_path: Path) -> None:
@@ -401,3 +456,185 @@ def test_shutdown_reaps_every_shell(tmp_path: Path) -> None:
     assert session_count(svc) == 0
     assert len(printer.of_type("terminalExit")) == 2
     svc.shutdown()  # nothing left: returns at once
+
+
+def test_close_interrupts_a_full_pty_write(service: Any, tmp_path: Path) -> None:
+    """A foreground child retaining the slave cannot strand the input writer."""
+    svc, printer = service
+    pid_file = tmp_path / "foreground.pid"
+    script = (
+        "import os, pathlib, time; "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(120)"
+    )
+    svc.open("blocked-write", "c1", str(tmp_path), 80, 24)
+    with svc._lock:
+        session = svc._sessions["blocked-write"]
+    writer = next(t for t in threading.enumerate() if t.name == "terminal-write-blocked-")
+    try:
+        python = shlex.quote(sys.executable)
+        svc.input(
+            "blocked-write", "c1",
+            f"stty raw -echo; trap '' HUP; {python} -c {shlex.quote(script)}\n",
+        )
+        printer.wait_for(lambda: pid_file.exists() and pid_file.read_text().isdigit())
+        svc.input("blocked-write", "c1", "x" * (1024 * 1024))
+        _wait_until(session.writes.empty)
+        svc.close("blocked-write", "c1")
+        printer.wait_for(lambda: printer.of_type("terminalExit"))
+        writer.join(5)
+        assert not writer.is_alive(), "PTY input writer survived terminalExit"
+        with pytest.raises(OSError):
+            os.fstat(session.fd)
+    finally:
+        if pid_file.exists() and pid_file.read_text().isdigit():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        writer.join(5)
+
+
+def _after_reap(values: dict[str, Any], session: Any) -> bool:
+    return session.reaped and threading.current_thread().name == "terminal-read-reaped"
+
+
+def test_reconnect_never_attaches_to_a_reaped_shell(service: Any, tmp_path: Path) -> None:
+    """Hold the real output drain after waitpid; reopening must refuse the dead shell."""
+    svc, printer = service
+    svc.open("reaped", "c1", str(tmp_path), 80, 24)
+    with svc._lock:
+        session = svc._sessions["reaped"]
+    after_reap = partial(_after_reap, session=session)
+    with Pause(selectors.DefaultSelector.select.__code__, after_reap) as gate:
+        svc.input("reaped", "c1", "exit\n")
+        assert gate.paused.wait(15), "reader did not reach its post-reap drain"
+        svc.open("reaped", "c2", str(tmp_path), 80, 24)
+        assert not printer.of_type("terminalOpened", "c2")
+        assert printer.of_type("terminalError", "c2")
+    printer.wait_for(lambda: printer.of_type("terminalExit", "c1"))
+    svc.open("reaped", "c2", str(tmp_path), 80, 24)
+    assert printer.of_type("terminalOpened", "c2")[0]["attached"] is False
+
+
+def _starve_worker(values: dict[str, Any], name: str, limits: ExitStack) -> bool:
+    if values["self"].name == name:
+        limits.enter_context(nproc_limit_lowered_to_one())
+    return False
+
+
+@pytest.mark.skipif(not thread_start_can_be_starved(), reason="requires enforced RLIMIT_NPROC")
+@pytest.mark.parametrize("worker", ["read", "write"])
+def test_worker_start_failure_leaves_no_terminal(
+    tmp_path: Path, worker: str,
+) -> None:
+    """Starve each actual worker start after fork, without replacing any product code."""
+    printer = ConnPrinter()
+    svc = TerminalService(printer)
+    try:
+        with ExitStack() as limits, Pause(
+            threading.Thread.start.__code__,
+            partial(_starve_worker, name=f"terminal-{worker}-starved", limits=limits),
+        ):
+            svc.open("starved", "c1", str(tmp_path), 80, 24)
+        assert session_count(svc) == 0
+        assert not printer.of_type("terminalOpened")
+        assert printer.of_type("terminalError")
+        _wait_until(lambda: not any(t.name.endswith("-starved") for t in threading.enumerate()))
+        svc.open("starved", "c2", str(tmp_path), 80, 24)
+        assert printer.of_type("terminalOpened", "c2")[0]["attached"] is False
+    finally:
+        svc.shutdown()
+        # Also reap the orphaned shell on the unfixed implementation.
+        with svc._lock:
+            abandoned = svc._sessions.pop("starved", None)
+        if abandoned is not None:
+            os.kill(abandoned.pid, signal.SIGKILL)
+            os.waitpid(abandoned.pid, 0)
+            writers = [t for t in threading.enumerate() if t.name == "terminal-write-starved"]
+            if writers:
+                abandoned.writes.put(None)
+                for thread in writers:
+                    thread.join(5)
+            else:
+                os.close(abandoned.fd)
+
+
+@contextmanager
+def nofile_limit_lowered_to_zero() -> Iterator[None]:
+    """Lower the soft ``RLIMIT_NOFILE`` to 0 for the block: every new descriptor fails (EMFILE)."""
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (0, hard))
+    try:
+        yield
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def _starve_reader_selector(
+    values: dict[str, Any], limits: ExitStack, starved: threading.Event,
+) -> bool:
+    if threading.current_thread().name.startswith("terminal-read-"):
+        limits.enter_context(nofile_limit_lowered_to_zero())
+        starved.set()
+    return False
+
+
+def test_reader_selector_failure_releases_the_session(tmp_path: Path) -> None:
+    """A reader denied its selector (EMFILE after the fork) reaps the shell and frees the tab.
+
+    The descriptor limit is lowered on the reader thread itself, at the
+    entry of the real selector constructor, after the shell was forked
+    and the session registered: the reader must then kill and reap the
+    shell, report the failure and the exit, release the writer, and
+    leave the tab free for a fresh shell.
+    """
+    printer = ConnPrinter()
+    svc = TerminalService(printer)
+    starved = threading.Event()
+    try:
+        with ExitStack() as limits, Pause(
+            selectors.DefaultSelector.__init__.__code__,
+            partial(_starve_reader_selector, limits=limits, starved=starved),
+        ):
+            svc.open("emfile", "c1", str(tmp_path), 80, 24)
+            assert starved.wait(10), "the reader never reached its selector"
+            printer.wait_for(lambda: printer.of_type("terminalExit"), timeout=15)
+        assert session_count(svc) == 0
+        assert "Too many open files" in printer.of_type("terminalError", "c1")[0]["text"]
+        _wait_until(lambda: not any(t.name.endswith("-emfile") for t in threading.enumerate()))
+        svc.open("emfile", "c2", str(tmp_path), 80, 24)
+        assert printer.of_type("terminalOpened", "c2")[0]["attached"] is False
+    finally:
+        svc.shutdown()
+        # Also reap the stranded shell and free its writer on the unfixed
+        # implementation.
+        with svc._lock:
+            stranded = svc._sessions.pop("emfile", None)
+        if stranded is not None:
+            os.kill(stranded.pid, signal.SIGKILL)
+            os.waitpid(stranded.pid, 0)
+            stranded.ended.set()
+            stranded.writes.put(None)
+            for thread in threading.enumerate():
+                if thread.name == "terminal-write-emfile":
+                    thread.join(5)
+
+
+def test_terminal_exit_flushes_incomplete_utf8(service: Any, tmp_path: Path) -> None:
+    """A truncated final character is replaced before terminalExit, never silently lost."""
+    svc, printer = service
+    svc.open("utf8", "c1", str(tmp_path), 80, 24)
+    svc.input("utf8", "c1", "exec printf '\\342'\n")
+    printer.wait_for(lambda: printer.of_type("terminalExit"))
+    assert printer.output("utf8").endswith("\ufffd")
+
+
+def test_malformed_surrogate_paste_still_reaches_shell(service: Any, tmp_path: Path) -> None:
+    """One invalid JS code unit does not discard the rest of a paste."""
+    svc, printer = service
+    svc.open("surrogate", "c1", str(tmp_path), 80, 24)
+    svc.input("surrogate", "c1", "v='x\ud800y'; printf '\\n%s\\n' \"$v\"; exit\n")
+    printer.wait_for(lambda: printer.of_type("terminalExit"))
+    assert "\r\nx?y\r\n" in printer.output("surrogate")

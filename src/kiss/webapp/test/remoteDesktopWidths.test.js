@@ -8,18 +8,17 @@
 const assert = require('assert');
 const {makePage: makeChatPage, stubDesktop, send, byId} = require('./simplify2_harness');
 const {makeResizePage: makePage, panelW} = require('./panel_resize_helpers');
+const {MIN_W, DEFAULT_W} = require('./panel_resize_cases');
 const {installTokenisedCss} = require('./designTokens');
 
 function sidebarW(win) {
   return panelW(win, '--sidebar-w');
 }
 
-// jsdom reports window.innerWidth = 1024; the default docked width is
-// one fifth of the window (the 20vw fallback of --sidebar-default-w),
-// so 205px.  Drags, clamping and persistence of the width are covered
-// by remoteSidebarResize.test.js.
-const MIN_W = 10;
-const DEFAULT_W = Math.round(1024 * 0.2);
+// MIN_W / DEFAULT_W (the 20vw fallback of --sidebar-default-w, 205px
+// at jsdom's 1024px window) come from panel_resize_cases.  Drags,
+// clamping and persistence of the width are covered by
+// remoteSidebarResize.test.js.
 
 // The CSS checks read the computed styles of live elements.  jsdom
 // matches no width feature of an @media prelude, so each layout's width

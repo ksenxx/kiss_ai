@@ -5,15 +5,17 @@
 """Select All, then Copy, puts on the clipboard what the selection covers now.
 
 Audit 2026-11-01 W6 F5, round 2: the content context menu's Select All
-selects the visible text as one live ``Range`` per stretch between hidden
-sources (Chromium keeps only the first), and Copy reads those Ranges
+selects the visible text as one live ``Range``, and Copy reads that Range
 afresh.  The first fix re-read the whole scope instead, so a text node a
 preview's script appended after the selection's end was copied although
 the selection (its highlight, ``getSelection().toString()``) did not
-cover it.  Now the Ranges Select All installed are kept and read: text
-inserted inside a stretch is copied, text added past its end is not, as
-for Chromium's own selection, and the other stretches (which Chromium
-drops from the selection) are still copied.
+cover it.  Now the Range Select All installed is kept and read: text
+inserted inside it is copied, text added past its end is not, as for
+Chromium's own selection, whose text the copy equals.  (Audit 2026-11-07
+A23: it used to be one Range per stretch between hidden sources, of which
+Chromium keeps the first, so the keyboard Copy got the first stretch
+alone and the menu Copy joined the stretches with a line break the page
+does not render.)
 
 jsdom's live Ranges agree with Chromium's here, but the parent document
 copies through ``PanelCopy`` while the sandboxed preview iframe runs the
@@ -37,8 +39,9 @@ from kiss.tests.conftest import goto_retrying_network_change
 
 MEDIA = Path(__file__).resolve().parents[2] / "webapp" / "media"
 
-# No whitespace text node after the editable: the last stretch ends inside
-# it, so a node appended to it lands past the selection's end.
+# No whitespace text node after the editable: the selection ends right
+# after it (the editable taken in whole, as the native Select All takes
+# it), so a node appended to the body lands past the selection's end.
 CONTENT = (
     b'<p id="one">One</p><script>var hidden = 1;</script>'
     b'<div id="edit" contenteditable="true">SELECTED</div>'
@@ -60,13 +63,13 @@ PAGE = (
 )
 
 # The page's script edits the selected text after Select All: an insertion
-# inside the second stretch, a node appended after it, and data appended
-# past the end of the first stretch (*one*, the element the locator found).
+# inside the editable, a node appended to the body (past the selection's
+# end) and data appended to *one* (the element the locator found), inside.
 EDIT = """one => {
   const doc = one.ownerDocument;
   const edit = doc.getElementById('edit');
   edit.firstChild.insertData(3, '-in-');
-  edit.appendChild(doc.createTextNode(' APPENDED'));
+  doc.body.appendChild(doc.createTextNode(' APPENDED'));
   one.firstChild.appendData(' more');
   return doc.defaultView.getSelection().toString();
 }"""
@@ -122,8 +125,9 @@ def _clipboard(page: Page) -> str:
 @pytest.mark.timeout(180)
 def test_select_all_copy_reads_the_live_ranges() -> None:
     """In the parent document and in the sandboxed preview iframe, Copy after
-    Select All puts the stretches on the clipboard as the live Ranges cover
-    them now: the insertion inside, not the additions past their ends."""
+    Select All puts on the clipboard what the live Range covers now, as the
+    selection renders it: the insertions inside, not the addition past its
+    end."""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -141,14 +145,18 @@ def test_select_all_copy_reads_the_live_ranges() -> None:
                 assert page.evaluate("() => !!window.__menu"), errors
 
                 # The parent document: its copy goes through PanelCopy.
-                assert _select_edit_copy(page, page) == "One"
-                assert _clipboard(page) == "One\nSEL-in-ECTED"
+                # The copy is the selection's own text, as the native
+                # Copy (Ctrl+C) gives it: it ends with the line break of
+                # the block it ends after.
+                assert _select_edit_copy(page, page) == "One more\n\nSEL-in-ECTED\n"
+                assert _clipboard(page) == "One more\n\nSEL-in-ECTED\n"
 
                 # The preview iframe: the serialized bundle, its own
                 # execCommand copy (the async clipboard refuses there).
                 page.evaluate("() => navigator.clipboard.writeText('cleared')")
-                assert _select_edit_copy(page, page.frame_locator("#preview")) == "One"
-                assert _clipboard(page) == "One\nSEL-in-ECTED"
+                selected = _select_edit_copy(page, page.frame_locator("#preview"))
+                assert selected == "One more\n\nSEL-in-ECTED\n"
+                assert _clipboard(page) == "One more\n\nSEL-in-ECTED\n"
                 assert errors == []
             finally:
                 browser.close()

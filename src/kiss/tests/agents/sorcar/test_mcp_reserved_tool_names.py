@@ -248,6 +248,55 @@ def test_mcp_tool_colliding_with_a_caller_tool_gets_a_suffix_in_a_run(
         MCPManager.instance().shutdown()
 
 
+_LONG_NAME_SERVER = '''
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("catalogue")
+
+
+@mcp.tool(name="search_documents_by_semantic_similarity_with_filters_and_scores")
+def search(query: str) -> str:
+    """Search the catalogue."""
+    return "found " + query
+
+
+if __name__ == "__main__":
+    mcp.run()
+'''
+
+
+def test_tool_names_are_bounded_to_the_providers_limit(
+    isolated_homes: Path, tmp_path: Path, real_stdin: None,
+) -> None:
+    """A valid 63-character MCP tool name still yields a function name of at most 64.
+
+    ``<server>_<tool>`` was never length-bounded: one such tool pushed
+    the name past the 64 characters every provider's function-name
+    grammar allows, and the provider rejected the agent's whole tool
+    declaration instead of that one call.
+    """
+    script = tmp_path / "longsrv.py"
+    script.write_text(_LONG_NAME_SERVER, encoding="utf-8")
+    project = isolated_homes / "project"
+    save_mcp_server(
+        MCPServerConfig(
+            name="catalogue", transport="stdio", command=sys.executable, args=(str(script),),
+        ),
+        "user",
+        str(project),
+    )
+    try:
+        [tool] = make_mcp_tools(str(project))
+        name = tool.__name__
+        assert len(name) == 64 and name.startswith("catalogue_search_documents_by_"), name
+        assert "found kiss" in tool(query="kiss")
+        [shifted] = make_mcp_tools(str(project), taken_names={name})
+        assert len(shifted.__name__) <= 64 and shifted.__name__.endswith("_2")
+        assert shifted.__name__ != name
+    finally:
+        MCPManager.instance().shutdown()
+
+
 def test_make_mcp_tools_reserves_the_names_the_caller_passes(
     isolated_homes: Path, tmp_path: Path, real_stdin: None,
 ) -> None:

@@ -2,10 +2,10 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bug-hunt 3: ``_is_profile_in_use`` with a non-positive PID in the lock.
+"""Bug-hunt 3: ``_profile_lock_state`` with a non-positive PID in the lock.
 
 A corrupt/stale ``SingletonLock`` symlink whose target ends in ``-0``
-made ``_is_profile_in_use`` call ``os.kill(0, 0)``, which signals the
+made ``_profile_lock_state`` call ``os.kill(0, 0)``, which signals the
 CALLER'S OWN process group and therefore always succeeds — so the
 profile was treated as permanently locked.  ``_resolve_user_data_dir``
 then escalated to ``<dir>_1``, ``<dir>_2``, … forever, silently losing
@@ -17,7 +17,7 @@ import sys
 
 import pytest
 
-from kiss.agents.sorcar.web_use_tool import WebUseTool, _is_profile_in_use
+from kiss.agents.sorcar.web_use_tool import WebUseTool, _profile_lock_state
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="SingletonLock symlinks are POSIX-only"
@@ -33,7 +33,7 @@ def test_pid_zero_lock_is_not_in_use(tmp_path) -> None:
     """A lock naming PID 0 is corrupt — never a live Chromium."""
     profile = tmp_path / "profile0"
     _make_lock(profile, 0)
-    assert _is_profile_in_use(str(profile)) is False
+    assert _profile_lock_state(str(profile))[1] is False
 
 
 def test_negative_pid_lock_is_not_in_use(tmp_path) -> None:
@@ -42,7 +42,7 @@ def test_negative_pid_lock_is_not_in_use(tmp_path) -> None:
     profile = tmp_path / "profile_neg"
     profile.mkdir(parents=True, exist_ok=True)
     (profile / "SingletonLock").symlink_to("-0")
-    assert _is_profile_in_use(str(profile)) is False
+    assert _profile_lock_state(str(profile))[1] is False
 
 
 def test_resolve_user_data_dir_reuses_profile_with_pid0_lock(tmp_path) -> None:

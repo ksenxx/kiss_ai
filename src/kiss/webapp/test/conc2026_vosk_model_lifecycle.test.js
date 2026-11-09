@@ -37,7 +37,6 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
 const {
   makePage: makeChatPage,
   stubRaf,
@@ -46,23 +45,15 @@ const {
   MEDIA,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {micBtn, makeVoskWindow} = require('./voice_page_helpers');
+const {micBtn, makeVoskWindow, VOICE_CFG} = require('./voice_page_helpers');
 
 const {test, report} = makeRunner();
-
-const FALLBACK_CFG = {
-  voskSrc: '/media/vosk.js',
-  modelUrl: 'https://models.example.com/model.tar.gz',
-  ackAudioUrl: '/media/working-on-it.mp3',
-  nonce: 'test-nonce',
-};
 
 /** A KaldiRecognizer with the surface the pipeline uses. */
 class FakeRecognizer {
   setWords() {}
   on() {}
   acceptWaveform() {}
-  retrieveFinalResult() {}
   remove() {}
 }
 
@@ -200,8 +191,12 @@ function installVoiceStubs(win, options, mic, vosk, bootWorkers, loadTimers) {
   if (options.realVosk) {
     // Integrated mode: the REAL vendored vosk.js is loaded below and
     // window.Vosk comes from it; its Workers fail to boot (the leak the
-    // boot-error path exists for).
-    win.Worker = fakeWorkerClass(bootWorkers, 'worker boot failed');
+    // boot-error path exists for) or, with `silentWorker`, never report
+    // at all (the leak the give-up cancel exists for).
+    win.Worker = fakeWorkerClass(
+      bootWorkers,
+      options.silentWorker ? null : 'worker boot failed',
+    );
     if (typeof win.URL.createObjectURL !== 'function') {
       win.URL.createObjectURL = () => 'blob:fake-vosk-worker';
     }
@@ -209,14 +204,24 @@ function installVoiceStubs(win, options, mic, vosk, bootWorkers, loadTimers) {
     win.Vosk = {
       createModel: () => {
         vosk.createModelCalls++;
-        return new Promise((resolve, reject) => {
-          vosk.settlers.push({resolve, reject});
+        const settler = {cancelled: false};
+        const load = new Promise((resolve, reject) => {
+          settler.resolve = resolve;
+          settler.reject = reject;
         });
+        // The engine's give-up handle (vosk.js createModel.cancel): the
+        // real one terminates the worker, then rejects the load.
+        load.cancel = () => {
+          settler.cancelled = true;
+          settler.reject(new Error('Gave up loading the speech model'));
+        };
+        vosk.settlers.push(settler);
+        return load;
       },
     };
   }
 
-  win.__VOICE__ = Object.assign({}, FALLBACK_CFG, options.cfg || {});
+  win.__VOICE__ = Object.assign({}, VOICE_CFG, options.cfg || {});
   win.localStorage.setItem('kissVoiceEnabled', '0');
 }
 
@@ -361,6 +366,77 @@ async function main() {
   );
 
   await test(
+    'CAND-4: a load that two attempts in a row timed out on is given up as ' +
+      'stalled: the engine cancels it and the next enable downloads afresh',
+    async () => {
+      const page = makePage({cfg: {modelLoadTimeoutMs: LOAD_TIMEOUT_MS}});
+      const {win, mic, vosk, fireLoadTimeout} = page;
+      micBtn(win).click();
+      await sleep(20);
+      fireLoadTimeout();
+      await sleep(20);
+      assert.ok(!vosk.settlers[0].cancelled, 'the first timeout keeps sharing');
+      micBtn(win).click(); // the retry shares the load still in flight
+      await sleep(20);
+      assert.strictEqual(vosk.createModelCalls, 1);
+      fireLoadTimeout(); // ... which never settles either
+      await sleep(20);
+      assert.ok(micBtn(win).classList.contains('voice-error'));
+      assert.ok(vosk.settlers[0].cancelled, 'the second timeout cancels it');
+      micBtn(win).click();
+      await sleep(20);
+      assert.strictEqual(
+        vosk.createModelCalls,
+        2,
+        'the third attempt must not wait on the stalled load again',
+      );
+      assert.ok(
+        micBtn(win).classList.contains('voice-loading'),
+        `the fresh load must be visibly loading: ${micBtn(win).className}`,
+      );
+      vosk.settlers[1].resolve(fakeModel());
+      await sleep(20);
+      assert.strictEqual(mic.calls.length, 1, 'the fresh model opens the mic');
+      assert.ok(!vosk.settlers[1].cancelled, 'the fresh load is never cancelled');
+      win.close();
+    },
+  );
+
+  await test(
+    'W10/F1 integrated: real vosk.js+voice.js — a worker that never reports ' +
+      'is terminated when its load is given up, so retries never pile up ' +
+      'live workers',
+    async () => {
+      const page = makePage({
+        realVosk: true,
+        silentWorker: true,
+        cfg: {modelLoadTimeoutMs: LOAD_TIMEOUT_MS},
+      });
+      const {win, bootWorkers, fireLoadTimeout} = page;
+      for (let attempt = 1; attempt <= 6; attempt++) {
+        micBtn(win).click();
+        await sleep(20);
+        fireLoadTimeout();
+        await sleep(20);
+        assert.ok(micBtn(win).classList.contains('voice-error'));
+        const live = bootWorkers.filter(w => !workerReclaimed(w));
+        assert.ok(
+          live.length <= 1,
+          `attempt ${attempt}: ${live.length} live workers of ${bootWorkers.length}`,
+        );
+        assert.strictEqual(
+          live.length,
+          attempt % 2,
+          `attempt ${attempt}: the given-up worker must be terminated`,
+        );
+      }
+      assert.strictEqual(bootWorkers.length, 3, 'one fresh load per give-up');
+      assert.ok(bootWorkers.every(w => w.terminated), 'all hard-terminated');
+      win.close();
+    },
+  );
+
+  await test(
     'CAND-4: a load failure reported before the timeout still paints the ' +
       'error and clears busy (regression guard)',
     async () => {
@@ -434,6 +510,28 @@ async function main() {
       'the failed model must terminate its worker: ' +
         JSON.stringify(worker.posted),
     );
+    win.close();
+  });
+
+  await test('W10/F1: createModel(...).cancel() terminates a worker that never reports and rejects once; after the load it is a no-op', async () => {
+    const {win, workers} = makeVoskWindow(fakeWorkerClass);
+    let rejection = null;
+    const load = win.Vosk.createModel('https://models.example.com/m.tar.gz');
+    load.catch(e => {
+      rejection = e;
+    });
+    load.cancel();
+    load.cancel();
+    await sleep(20);
+    assert.ok(workers[0].terminated, 'the silent worker is hard-terminated');
+    assert.match(rejection && rejection.message, /Gave up loading the speech model/);
+    const loaded = win.Vosk.createModel('https://models.example.com/m.tar.gz');
+    workers[1].emit({event: 'load', result: true});
+    const model = await loaded;
+    loaded.cancel();
+    await sleep(20);
+    assert.ok(!workers[1].terminated, 'cancel after the load leaves it alone');
+    assert.ok(model.ready, 'the loaded model stays ready');
     win.close();
   });
 

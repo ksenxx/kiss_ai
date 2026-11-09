@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import http.server
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -49,13 +49,21 @@ style="display:none">HIDDEN_DISPLAY</span><script>window.__inline = 'NOT_VISIBLE
 <input id="num" type="number" value="12">
 <input id="mail" type="email" value="a@b">
 <input id="txt" type="text" value="ab">
+<div id="ce" contenteditable="true"></div>
+<pre id="pre">    indented()  </pre>
+<div id="view"><input id="url" type="text" value="https://original.test/"></div>
+<textarea id="composer">NEW CHAT DRAFT</textarea>
+<div id="cases"></div>
 <script>/*MENU_JS*/</script>
 <script>
 window.__inputs = [];
-for (const el of document.querySelectorAll('input')) {
-  el.addEventListener('input', () => window.__inputs.push(el.id + '=' + el.value));
+window.__value = el => (el.value === undefined ? el.textContent : el.value);
+for (const el of document.querySelectorAll('input, [contenteditable]')) {
+  el.addEventListener('input', () => window.__inputs.push(el.id + '=' + window.__value(el)));
 }
-window.__menu = ContentContextMenu.installContentContextMenu(document);
+window.__menu = ContentContextMenu.installContentContextMenu(document, {
+  scope: target => target.closest('main, pre, .case'),
+});
 </script>
 </body></html>"""
 
@@ -88,20 +96,40 @@ def _paste(page: Page, selector: str, text: str) -> str:
     page.evaluate("() => { window.__inputs.length = 0; }")
     _menu(page, selector, "paste")
     page.wait_for_function("() => window.__inputs.length > 0", timeout=10000)
-    return str(page.evaluate(f"document.getElementById('{selector[1:]}').value"))
+    return _value(page, selector)
+
+
+def _value(page: Page, selector: str) -> str:
+    """The value of the field *selector* (the text of a contenteditable)."""
+    return str(page.evaluate(f"() => window.__value(document.querySelector('{selector}'))"))
+
+
+def _clipboard_after(page: Page, action: Callable[[], None]) -> str:
+    """Run *action* with a sentinel on the clipboard and return what replaced it.
+
+    Line breaks come back as ``\\n``: the Windows clipboard holds text
+    with ``\\r\\n`` (Chromium converts on the way in, for a ``writeText``
+    and a Ctrl+C alike, and reads it back as is), and what the tests
+    compare is which text was copied, not the platform's line ending.
+    """
+    page.evaluate("() => navigator.clipboard.writeText('<before>')")
+    action()
+    page.wait_for_function(
+        "async () => (await navigator.clipboard.readText()) !== '<before>'", timeout=10000
+    )
+    return str(page.evaluate("() => navigator.clipboard.readText()")).replace("\r\n", "\n")
 
 
 def _copy(page: Page, selector: str, position: Position | None = None) -> str:
     """Right-click *selector* (at *position* in it), menu-Copy, return the clipboard."""
-    page.evaluate("() => navigator.clipboard.writeText('<before>')")
-    page.click(selector, button="right", position=position)
-    item = page.locator('#sorcar-content-context-menu .sorcar-ctx-item[data-action="copy"]')
-    assert item.get_attribute("aria-disabled") is None, "Copy is disabled"
-    item.click()
-    page.wait_for_function(
-        "async () => (await navigator.clipboard.readText()) !== '<before>'", timeout=10000
-    )
-    return str(page.evaluate("() => navigator.clipboard.readText()"))
+
+    def copy() -> None:
+        page.click(selector, button="right", position=position)
+        item = page.locator('#sorcar-content-context-menu .sorcar-ctx-item[data-action="copy"]')
+        assert item.get_attribute("aria-disabled") is None, "Copy is disabled"
+        item.click()
+
+    return _clipboard_after(page, copy)
 
 
 @contextmanager
@@ -179,23 +207,152 @@ def test_copy_reads_the_native_selection_of_number_and_email_inputs() -> None:
 
 
 @pytest.mark.timeout(180)
+def test_paste_is_undone_by_the_native_undo() -> None:
+    """A menu Paste is one step of the field's own undo history, in a text
+    input and in a contenteditable alike: Ctrl+Z takes the paste back and
+    leaves what was typed before it (it used to write the value directly,
+    which the input could not undo and the contenteditable undid past)."""
+    with _page() as page:
+        for selector, before in (("#txt", "ab"), ("#ce", "")):
+            assert _value(page, selector) == before
+            page.click(selector)
+            page.keyboard.press("ControlOrMeta+a")
+            page.keyboard.type("A")
+            assert _value(page, selector) == "A"
+            assert _paste(page, selector, "B") == "AB"
+            page.keyboard.press("ControlOrMeta+z")
+            assert _value(page, selector) == "A", selector
+            page.keyboard.press("ControlOrMeta+z")
+            assert _value(page, selector) == before, selector
+
+
+@pytest.mark.timeout(180)
 def test_copy_puts_the_rendered_selection_on_the_clipboard() -> None:
     """Copy after a native Select All copies the selection as rendered, the
     hidden elements and the inline script source left out like the native
     Copy does; the menu's own Select All leaves them out the same way, and
-    so does text the page hides between Select All and Copy."""
+    so does text the page hides between Select All and Copy.  The menu's
+    Select All is one selection over the visible text of the scope the
+    page names (``<main>`` here), the one the native Copy (Ctrl+C) reads
+    too: the inline hidden elements between VISIBLE_A and VISIBLE_B do not
+    split it into two, nor break the line."""
     with _page() as page:
         page.click("#a")
         page.keyboard.press("ControlOrMeta+a")
-        shown = str(page.evaluate("() => getSelection().toString()")).strip()
+        shown = str(page.evaluate("() => getSelection().toString()"))
         assert "VISIBLE_A" in shown and "VISIBLE_B" in shown and "HIDDEN" not in shown
         assert _copy(page, "#a") == shown
         _menu(page, "#a", "select-all")
-        # Chromium on Windows puts CRLF line breaks on the clipboard.
-        assert _copy(page, "#a").replace("\r\n", "\n") == "VISIBLE_A\nVISIBLE_B"
+        assert page.evaluate("() => getSelection().toString()") == "VISIBLE_AVISIBLE_B"
+        assert _copy(page, "#a") == "VISIBLE_AVISIBLE_B"
+        _menu(page, "#a", "select-all")
+        native = _clipboard_after(page, lambda: page.keyboard.press("ControlOrMeta+c"))
+        assert native == "VISIBLE_AVISIBLE_B"
         # The second stretch (one text node, between two scripts) is
         # hidden after Select All: Copy leaves it out, as the native Copy
         # would.
         _menu(page, "#a", "select-all")
         page.evaluate("() => { document.getElementById('b').style.display = 'none'; }")
         assert _copy(page, "#a") == "VISIBLE_A"
+
+
+@pytest.mark.timeout(180)
+def test_paste_asked_for_in_a_hidden_field_does_not_land_in_the_focused_control() -> None:
+    """A paste asked for in one content tab stays out of another (W1 F1):
+    while the clipboard read is pending the user switches tabs, which
+    hides the field's view (``display:none``, still mounted) and focuses a
+    chat composer.  ``focus()`` on the hidden field fails silently, so the
+    ``insertText`` command used to write the clipboard text into the
+    composer.  The paste is dropped instead, the composer and the focus
+    left alone; one whose field is shown and focused again lands.
+
+    The clipboard is the real one.  The tab switch is a one-shot
+    ``click`` listener on the Paste item, added after the menu's own
+    (the item's first listener), so it runs in the same click dispatch,
+    once the menu has started the real ``readText`` and before that
+    read can settle: the browser answers it from a later task.  The
+    test's own ``readText`` afterwards is answered behind the menu's,
+    so once it resolves the menu's read has settled and run on."""
+    with _page() as page:
+        page.evaluate("t => navigator.clipboard.writeText(t)", "CLIPBOARD FOR OLD BROWSER TAB")
+        page.evaluate("() => { window.__inputs.length = 0; }")
+        page.click("#url", button="right")
+        item = '#sorcar-content-context-menu .sorcar-ctx-item[data-action="paste"]'
+        page.evaluate(
+            """item => document.querySelector(item).addEventListener('click', () => {
+              document.getElementById('view').style.display = 'none';
+              const composer = document.getElementById('composer');
+              composer.focus();
+              composer.setSelectionRange(composer.value.length, composer.value.length);
+            }, {once: true})""",
+            item,
+        )
+        page.click(item)
+        assert page.evaluate("() => navigator.clipboard.readText()") == (
+            "CLIPBOARD FOR OLD BROWSER TAB"
+        )
+        page.wait_for_timeout(100)
+        assert _value(page, "#composer") == "NEW CHAT DRAFT"
+        assert _value(page, "#url") == "https://original.test/"
+        assert page.evaluate("document.activeElement.id") == "composer"
+        assert page.evaluate("window.__inputs") == []
+        # Shown again and focused by the right-click: the paste lands.
+        page.evaluate("() => { document.getElementById('view').style.display = ''; }")
+        pasted = _paste(page, "#url", "X")
+        assert pasted.replace("X", "", 1) == "https://original.test/" and "X" in pasted
+        assert page.evaluate("window.__inputs") == ["url=" + pasted]
+
+
+@pytest.mark.timeout(180)
+def test_select_all_then_copy_puts_the_native_selection_text_on_the_clipboard() -> None:
+    """The menu's Select All then Copy copies the selection as Chromium
+    renders it (``getSelection().toString()``, what Ctrl+C copies): the
+    content of a closed ``<details>``, a ``user-select:none`` span, a
+    textarea's text and a select's options are not in the selection, a
+    text transform shows, and a ``<pre>`` next to a block is one line
+    break apart.  Copy used to replace that text with its own reading of
+    the selected nodes' source (W1 F2), which had all of them wrong."""
+    cases = {
+        "closed details": (
+            "<p>Alpha</p><details><summary>Label</summary><p>SECRET</p></details><p>Omega</p>",
+            "SECRET",
+        ),
+        "user-select none": (
+            '<p>Alpha <span style="user-select:none">UNSELECTABLE</span> Omega</p>',
+            "UNSELECTABLE",
+        ),
+        "text transform": ('<p style="text-transform:uppercase">Mixed case</p>', "Mixed"),
+        "textarea": ("<p>Alpha</p><textarea>INITIAL</textarea><p>Omega</p>", "INITIAL"),
+        "select": (
+            "<p>Alpha</p><select><option>Chosen</option><option>UNCHOSEN</option></select>"
+            "<p>Omega</p>",
+            "UNCHOSEN",
+        ),
+        "pre then block": ("<pre>Alpha\n</pre><div>Beta</div>", "Alpha\n\nBeta"),
+    }
+    with _page() as page:
+        for name, (html, absent) in cases.items():
+            page.evaluate(
+                "h => { document.getElementById('cases').innerHTML = "
+                "'<div class=\"case\"><p>Lead</p>' + h + '</div>'; }",
+                html,
+            )
+            _menu(page, ".case > p", "select-all")
+            native = str(page.evaluate("() => getSelection().toString()"))
+            assert native.startswith("Lead") and absent not in native, (name, native)
+            assert _copy(page, ".case > p") == native, name
+
+
+@pytest.mark.timeout(180)
+def test_copy_keeps_the_selected_whitespace() -> None:
+    """Copy puts the selection on the clipboard as rendered, its leading
+    and trailing whitespace included: the indentation of a selected code
+    line is part of it (it used to be trimmed off)."""
+    with _page() as page:
+        page.evaluate("() => getSelection().selectAllChildren(document.getElementById('pre'))")
+        shown = str(page.evaluate("() => getSelection().toString()"))
+        assert shown == "    indented()  "
+        assert _copy(page, "#pre") == shown
+        _menu(page, "#pre", "select-all")
+        assert page.evaluate("() => getSelection().toString()") == shown
+        assert _copy(page, "#pre") == shown

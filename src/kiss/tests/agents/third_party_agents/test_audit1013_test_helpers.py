@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import sys
 import threading
-import time
 
 import pytest
 import requests
@@ -54,26 +53,31 @@ class _HeaderRecorder(RecordingHandler):
         self.end_headers()
 
 
+class _PollRecorder(ThreadedHTTPServer):
+    """Records the ``poll_interval`` its ``serve_forever`` is started with."""
+
+    poll_interval: float | None = None
+
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
+        self.poll_interval = poll_interval
+        super().serve_forever(poll_interval)
+
+
 def test_serving_teardown_does_not_wait_for_the_default_poll() -> None:
-    """Ten immediate teardowns finish well inside ten of the stdlib's 0.5 s polls.
+    """The serving thread polls its shutdown flag every 50 ms, not the stdlib's 0.5 s.
 
     A teardown right after the start waits one whole poll: the serving
     thread is already blocked in ``select(poll_interval)`` when
     ``shutdown()`` raises its flag, and sees the flag only once that
-    select times out.  Measured over ten cycles: 5.0 s with the stdlib's
-    0.5 s poll, 0.5 s with the helper's 50 ms poll.  Only the ``stop``
-    half of each cycle is timed (binding a port and starting a thread is
-    the same either way); the 4 s bound gives the helper 8x headroom on
-    a loaded machine and still fails the stdlib poll by a second.
+    select times out.  The interval ``serve_forever`` is given is the
+    contract (a wall-clock bound on the teardown would also fail on a
+    loaded machine with the helper intact), so a server records it.
     """
-    stopping = 0.0
-    for _ in range(10):
-        server = ThreadedHTTPServer(("127.0.0.1", 0), _HeaderRecorder)
-        thread = start_serving(server)
-        started = time.monotonic()
-        stop_http_server(server, thread)
-        stopping += time.monotonic() - started
-    assert stopping < 4.0
+    server = _PollRecorder(("127.0.0.1", 0), _HeaderRecorder)
+    thread = start_serving(server)
+    stop_http_server(server, thread)
+    assert not thread.is_alive()
+    assert server.poll_interval == 0.05
 
 
 def test_raw_post_status_sends_header_values_as_latin1() -> None:

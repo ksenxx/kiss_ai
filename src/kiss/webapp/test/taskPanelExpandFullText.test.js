@@ -29,9 +29,21 @@ function makePage() {
   });
 }
 
-function cs(win, selector) {
-  const el = win.document.querySelector(selector);
-  assert.ok(el, `element ${selector} must exist`);
+/** Start the live task shared by the two chevron-pass scenarios. */
+function liveTaskPage() {
+  const {win, posted} = makePage();
+  const ready = posted.find(m => m.type === 'ready');
+  const parentId = ready.tabId;
+  win._testApi.hideWelcome();
+  send(win, {type: 'status', running: true, tabId: parentId, startTs: 1});
+  send(win, {type: 'setTaskText', text: 'live task', tabId: parentId});
+  return {win, posted, parentId};
+}
+
+/** The computed style of the open task panel's text element. */
+function taskTextCs(win) {
+  const el = win.document.querySelector('#output .task-panel .task-panel-text');
+  assert.ok(el, 'element #output .task-panel .task-panel-text must exist');
   return win.getComputedStyle(el);
 }
 
@@ -51,7 +63,7 @@ function showTaskPanel(win, posted, task) {
 }
 
 function assertFullTextPanel(win, why) {
-  const textCs = cs(win, '#output .task-panel .task-panel-text');
+  const textCs = taskTextCs(win);
   assert.strictEqual(
     textCs.whiteSpace,
     'pre-wrap',
@@ -132,7 +144,7 @@ function testTaskPanelFoldsLikeAnyPanel() {
   header.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.ok(panel.classList.contains('collapsed'), 'a header click folds');
   assert.strictEqual(
-    cs(win, '#output .task-panel .task-panel-text').display,
+    taskTextCs(win).display,
     'none',
     'the folded panel hides the task text',
   );
@@ -155,13 +167,8 @@ function testTaskPanelFoldsLikeAnyPanel() {
 // paired taskPanelExpandFullText.coverage.js gate requires them here
 // (it spawns this file and demands 100% line coverage of that pass).
 function testChevronPassWorksWithoutButton() {
-  const {win, posted} = makePage();
+  const {win, posted, parentId} = liveTaskPage();
   const d = win.document;
-  const ready = posted.find(m => m.type === 'ready');
-  const parentId = ready.tabId;
-  win._testApi.hideWelcome();
-  send(win, {type: 'status', running: true, tabId: parentId, startTs: 1});
-  send(win, {type: 'setTaskText', text: 'live task', tabId: parentId});
 
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: parentId});
   send(win, {
@@ -350,13 +357,8 @@ function testChevronPassWorksWithoutButton() {
 // panel; the chevron pass a trailing event triggers leaves the panels
 // inside the Trajectory exactly as the fold left them.
 function testTrajectoryPanelsSkipChevronPass() {
-  const {win, posted} = makePage();
+  const {win, parentId} = liveTaskPage();
   const d = win.document;
-  const ready = posted.find(m => m.type === 'ready');
-  const parentId = ready.tabId;
-  win._testApi.hideWelcome();
-  send(win, {type: 'status', running: true, tabId: parentId, startTs: 1});
-  send(win, {type: 'setTaskText', text: 'live task', tabId: parentId});
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: parentId});
   send(win, {type: 'tool_result', name: 'Bash', content: 'f', tabId: parentId});
   send(win, {type: 'result', tabId: parentId, summary: 'done', success: true});

@@ -22,6 +22,7 @@ so callers can swap implementations without changing call sites.
 import base64
 import json
 import logging
+import re
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
@@ -166,14 +167,15 @@ def _pending_index(calls: list[dict[str, str]], func_name: str, call_id: str) ->
         call_id: The result's explicit ``tool_use_id`` (``""`` when none).
 
     Returns:
-        The entry carrying *call_id* when one does, else the first entry
-        named *func_name*, else ``None``.
+        The entry carrying *call_id* when the result names one (an id no
+        entry carries answers nothing: matching it by name would consume
+        another call and record the result under an id the conversation
+        does not hold), else the first entry named *func_name*, else
+        ``None``.
     """
     for j, pending in enumerate(calls):
-        if call_id and pending.get("call_id") == call_id:
-            return j
-    for j, pending in enumerate(calls):
-        if pending.get("name") == func_name:
+        matched = pending.get("call_id") == call_id if call_id else pending.get("name") == func_name
+        if matched:
             return j
     return None
 
@@ -183,6 +185,30 @@ def _pending_index(calls: list[dict[str, str]], func_name: str, call_id: str) ->
 # ``stream_options`` declares (the Chat Completions shape differs).
 _RESPONSES_REQUEST_PARAMS = accepted_request_params(Responses.create)
 _RESPONSES_STREAM_OPTION_KEYS = frozenset(response_create_params.StreamOptions.__annotations__)
+
+
+_GPT_VERSION = re.compile(r"(?:^|/)gpt-(\d+)(?:\.(\d+))?")
+
+
+def supports_reasoning_context(model_name: str) -> bool:
+    """Return whether *model_name* takes the Responses ``reasoning.context`` field.
+
+    OpenAI's GPT-5.6 family and later (``gpt-5.6-*``, ``gpt-6-*``, with or
+    without a route prefix) render the reasoning of earlier turns by
+    default and accept ``current_turn`` to stop; earlier GPT models and
+    other vendors reject or ignore the field.
+
+    Args:
+        model_name: The model name as the catalog spells it.
+    """
+    from kiss.core.models.model_families import family_of
+
+    if family_of(model_name) != "openai":
+        return False
+    version = _GPT_VERSION.search(model_name.strip().lower())
+    if version is None:
+        return False
+    return (int(version.group(1)), int(version.group(2) or 0)) >= (5, 6)
 
 
 class OpenAICompatibleModel2(OpenAICompatibleBase):
@@ -230,6 +256,22 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             thinking_callback=thinking_callback,
         )
         self._pending_function_calls: list[dict[str, str]] = []
+
+    def keeps_reasoning_turns(self) -> bool:
+        """Return whether the requests render the current turn's reasoning only.
+
+        True for the models that take ``reasoning.context``
+        (:func:`supports_reasoning_context`) when ``Config.reasoning_keep_turns``
+        is positive and the caller set no ``reasoning.context`` of its own.
+        """
+        from kiss.core.config import DEFAULT_CONFIG
+
+        reasoning_cfg = self.model_config.get("reasoning")
+        if isinstance(reasoning_cfg, dict) and "context" in reasoning_cfg:
+            return False
+        return DEFAULT_CONFIG.reasoning_keep_turns > 0 and supports_reasoning_context(
+            self.model_name
+        )
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with ``prompt`` and any ``attachments``.
@@ -341,8 +383,11 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
 
         Raises:
             KISSError: When no pending (or unanswered) function_call
-                carries ``func_name``.
+                carries ``func_name`` (``explicit_call_id`` when given).
         """
+        wanted = f"named {func_name!r}"
+        if explicit_call_id:
+            wanted += f" with call_id {explicit_call_id!r}"
         if self._pending_function_calls:
             j = _pending_index(self._pending_function_calls, func_name, explicit_call_id)
             if j is not None:
@@ -352,7 +397,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 return call_id
             pending_names = [p.get("name", "") for p in self._pending_function_calls]
             raise KISSError(
-                f"No pending function_call named {func_name!r}; pending calls are {pending_names!r}"
+                f"No pending function_call {wanted}; pending calls are {pending_names!r}"
             )
         if fallback_unanswered is not None:
             j = _pending_index(fallback_unanswered, func_name, explicit_call_id)
@@ -361,8 +406,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             if fallback_unanswered:
                 fallback_names = [p.get("name", "") for p in fallback_unanswered]
                 raise KISSError(
-                    f"No unanswered function_call named {func_name!r}; "
-                    f"unanswered calls are {fallback_names!r}"
+                    f"No unanswered function_call {wanted}; unanswered calls are {fallback_names!r}"
                 )
         raise KISSError(
             f"No prior function_call found for tool result {func_name!r}; "
@@ -573,7 +617,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             return False
         try:
             json.loads(s)
-        except (json.JSONDecodeError, ValueError):
+        except ValueError:  # json.JSONDecodeError is one
             return False
         return True
 
@@ -643,7 +687,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         final_text: str,
         text_part_buffers: dict[tuple[int, int], str],
         text_delta_seen: set[tuple[int, int]],
-        allow_suffix: bool = True,
         thinking: bool = False,
     ) -> str:
         """Record an authoritative final text value for a content part.
@@ -652,18 +695,19 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         token callback the text the deltas did not already stream, and
         returns that text for the caller to append to its ``content``:
         the full value for done-only parts (marking ``key`` as seen so the
-        terminal merge doesn't duplicate it), or — when ``allow_suffix`` —
-        the missing suffix when earlier deltas streamed a strict prefix of
-        the final value.  A reasoning part (``thinking``) opens the
-        thinking bracket before forwarding, and only when there is
-        something to forward.
+        terminal merge doesn't duplicate it), or the missing suffix when
+        earlier deltas streamed a strict prefix of the final value (the
+        terminal merge forwards it only when the terminal response
+        carries the text, which a sparse one does not).  A reasoning part
+        (``thinking``) opens the thinking bracket before forwarding, and
+        only when there is something to forward.
         """
         old_text = text_part_buffers.get(key, "")
         text_part_buffers[key] = final_text
         if key not in text_delta_seen and final_text:
             text_delta_seen.add(key)
             emitted = final_text
-        elif allow_suffix and key in text_delta_seen and final_text.startswith(old_text):
+        elif key in text_delta_seen and final_text.startswith(old_text):
             emitted = final_text[len(old_text) :]
         else:
             emitted = ""
@@ -873,6 +917,11 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             reasoning_cfg["effort"] = reasoning_effort
         if "effort" in reasoning_cfg:
             reasoning_cfg.setdefault("summary", "auto")
+            kwargs["reasoning"] = reasoning_cfg
+        if self.keeps_reasoning_turns():
+            # The keep-K policy: the reasoning of earlier turns is not
+            # rendered (the agent starts a turn every few steps).
+            reasoning_cfg.setdefault("context", "current_turn")
             kwargs["reasoning"] = reasoning_cfg
         kwargs.pop("tools", None)
         tool_choice = kwargs.pop("tool_choice", None)
@@ -1411,7 +1460,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                             part_text,
                             text_part_buffers,
                             text_delta_seen,
-                            allow_suffix=False,
                         )
             elif etype in ("response.failed", "error", "response.incomplete"):
                 resp = getattr(event, "response", None)
@@ -1507,6 +1555,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                         "Responses API returned identityless function_call without id/call_id/name"
                     )
                 idx = candidate_idx
+                occupant = tool_calls.get(idx, {})
+                if (iid or fcid) and (occupant.get("item_id") or occupant.get("id")):
+                    # A call the stream never carried, at a position a
+                    # streamed call holds: a sparse terminal list is not
+                    # indexed like the stream, and both calls are real.
+                    idx = max(tool_calls) + 1
             slot = tool_calls.setdefault(idx, _new_tool_slot())
             if final_tc.get("id"):
                 slot["id"] = final_tc["id"]
@@ -1744,7 +1798,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         content, _tc, response, _order = self._request_response(kwargs)
 
         if self._is_deepseek_reasoning_model():
-            _, content = _extract_deepseek_reasoning(content)
+            content = _extract_deepseek_reasoning(content)
             if content.strip():
                 self.conversation.append({"role": "assistant", "content": content})
             self._rejected_response = None

@@ -126,7 +126,8 @@ def test_server_readme_names_the_gate_additions() -> None:
                    "the first refusal buys one round whatever refused it",
                    "only while the verifier fails",
                    "Nothing in the `finish` call itself is refused",
-                   f"{coding_gate.REVIEW_DEADLINE} s to answer", "`tmp/<task-id>/ledger.md`"):
+                   f"{coding_gate.REVIEW_DEADLINE} s per attempt", "is retried once",
+                   "`tmp/<task-id>/ledger.md`"):
         assert phrase in gate_bullet, phrase
     for stale in ("writes or deletes files", "every finding counts as answered",
                   "refused once with the phrases", "hedge", "unchecked-change",

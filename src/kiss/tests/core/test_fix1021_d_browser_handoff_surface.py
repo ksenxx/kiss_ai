@@ -117,3 +117,31 @@ def test_first_caller_reports_the_browser_tab_its_successor_opened(
     assert open_for_user(url) == BROWSER_TAB
     assert opener.calls == 2
     assert time.monotonic() - started < browser_handoff._SETTLE_TIMEOUT / 4
+
+
+def _opens(url: str) -> bool:
+    """A Browser-tab opener whose every launch succeeds."""
+    return True
+
+
+def test_settled_claims_past_the_reopen_guard_are_forgotten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A settled hand-off stays on record only until the reopen guard has passed.
+
+    Every sign-in URL carries a fresh state parameter, so a record that
+    only ever replaced the one URL being claimed again kept every page
+    the daemon had opened in its lifetime.
+    """
+    set_browser_tab_opener(_opens)
+    monkeypatch.setattr(browser_handoff, "_REOPEN_AFTER", _REOPEN_AFTER / 10)
+    browser_handoff._recent.clear()
+    urls = [f"https://example.test/signin/{uuid.uuid4()}" for _ in range(3)]
+    try:
+        assert open_for_user(urls[0]) == BROWSER_TAB
+        assert open_for_user(urls[1]) == BROWSER_TAB
+        _wait_until_stale(browser_handoff._recent[urls[1]].opened_at)
+        assert open_for_user(urls[2]) == BROWSER_TAB
+    finally:
+        set_browser_tab_opener(None)
+    assert set(browser_handoff._recent) == {urls[2]}

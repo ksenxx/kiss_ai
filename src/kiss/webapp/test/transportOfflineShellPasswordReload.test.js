@@ -16,38 +16,27 @@ const {
   installFakeWebSocket,
   frames,
   settle,
+  ok,
+  fail,
 } = require('./transport_page_helpers');
 
 const KEY = 'sorcar-remote-pwd';
 const RELOADED_FLAG = 'sorcar-offline-reloaded';
 
-function ok(msg) {
-  console.log('  ok -', msg);
-}
-
-function fail(msg, err) {
-  console.error('  FAIL -', msg);
-  if (err) console.error('       ', err.message || err);
-  process.exit(1);
-}
-
 /**
- * A tab on the real shim.  *offlineShell* adds the meta the service
- * worker's cached page carries; *storage* shares localStorage and
- * sessionStorage with an earlier tab, as a reload of the same tab keeps
- * both.  *reloads* counts ``window.location.reload()`` calls: jsdom
- * cannot navigate and reports each as a "Not implemented: navigation"
- * jsdomError.
+ * A tab on the real shim, carrying the meta the service worker's cached
+ * page has.  *storage* shares localStorage and sessionStorage with an
+ * earlier tab, as a reload of the same tab keeps both.  *reloads* counts
+ * ``window.location.reload()`` calls: jsdom cannot navigate and reports
+ * each as a "Not implemented: navigation" jsdomError.
  */
-function newTab(offlineShell, storage, reloads) {
+function newTab(storage, reloads) {
   const dom = newAuthDom('https://example.test/');
   const {window} = dom;
-  if (offlineShell) {
-    const meta = window.document.createElement('meta');
-    meta.setAttribute('name', 'kiss-offline-shell');
-    meta.setAttribute('content', '1');
-    window.document.head.appendChild(meta);
-  }
+  const meta = window.document.createElement('meta');
+  meta.setAttribute('name', 'kiss-offline-shell');
+  meta.setAttribute('content', '1');
+  window.document.head.appendChild(meta);
   if (storage) {
     Object.defineProperty(window, 'localStorage', {
       value: storage.local,
@@ -73,7 +62,7 @@ async function run() {
   const reloads = [];
   // 1. The cached page: the user types the password, the server
   //    accepts it, the page reloads with the password stored.
-  const cached = newTab(true, null, reloads);
+  const cached = newTab(null, reloads);
   const storage = {
     local: cached.window.localStorage,
     session: cached.window.sessionStorage,
@@ -112,7 +101,7 @@ async function run() {
   // 2. The reloaded page (the worker may serve the cached copy again):
   //    its first auth frame carries the stored password, so the user
   //    is not asked twice, and the reload-once flag keeps it in place.
-  const reloaded = newTab(true, storage, reloads);
+  const reloaded = newTab(storage, reloads);
   reloaded.sockets[0].fireOpen();
   try {
     assert.deepStrictEqual(frames(reloaded.sockets[0]), [

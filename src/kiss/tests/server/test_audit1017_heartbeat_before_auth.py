@@ -71,9 +71,13 @@ class TestDaemonHeartbeatsOnlyAuthenticatedSockets(TestCase):
             first = json.loads(ws.recv(timeout=5))
             self.assertEqual(first.get("type"), "auth_ok", first)
             # Once authenticated the socket does get the watchdog's
-            # heartbeats (the browser transport's proof of life).
-            second = json.loads(ws.recv(timeout=5))
-            self.assertEqual(second, {"type": "heartbeat"})
+            # heartbeats (the browser transport's proof of life); other
+            # broadcasts (the periodic ``update_available``) may come first.
+            deadline = time.monotonic() + 5
+            frame: dict = {}
+            while frame != {"type": "heartbeat"}:
+                frame = json.loads(ws.recv(timeout=max(deadline - time.monotonic(), 0.01)))
+            self.assertEqual(frame, {"type": "heartbeat"})
 
 
 async def _legacy_daemon(ws: ServerConnection) -> None:

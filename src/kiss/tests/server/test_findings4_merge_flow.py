@@ -26,6 +26,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import assert_repo_root, run_git, run_git_checked
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 from ._memory_printer import MemoryPrinter
 
@@ -124,7 +125,7 @@ class TestF421GitFailureNotMistakenForClean:
         rename = run_git(repo, "branch", "-m", "main", "renamed")
         assert rename.returncode == 0, rename.stderr
         try:
-            changed = server._get_worktree_changed_files("wt-421")
+            changed = worktree_changed_files(server, "wt-421")
             assert "committed.txt" in changed, (
                 "a worktree with COMMITTED task work was reported as "
                 f"clean ({changed!r}); automatic finalization would "

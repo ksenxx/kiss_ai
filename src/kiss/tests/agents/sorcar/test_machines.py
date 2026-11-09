@@ -12,6 +12,7 @@ test session's ``KISS_HOME``.
 
 from __future__ import annotations
 
+import asyncio
 import dis
 import json
 import logging
@@ -19,19 +20,23 @@ import os
 import random
 import socket
 import ssl
+import subprocess
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import FrameType
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives.serialization import Encoding
+from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as ws_connect
@@ -39,9 +44,11 @@ from websockets.sync.client import connect as ws_connect
 from kiss.agents.sorcar import machines as mach
 from kiss.core import tls_certs
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.locked import locked_call
 from kiss.server import sidebar_panels
 from kiss.server.task_runner import inject_keyboard_interrupt
 from kiss.server.web_server import _get_local_ips
+from kiss.tests.agents.sorcar.test_machine_link_no_resend_wave2 import _Daemon
 from kiss.tests.conftest import posix_only
 from kiss.tests.local_ws import make_test_tls
 from kiss.tests.remote_daemon import RemoteDaemon, start_remote_daemon
@@ -51,6 +58,11 @@ from kiss.tests.ssh_server import SSHD, SshServer, start_sshd
 needs_sshd = pytest.mark.skipif(not SSHD, reason="no sshd on this host")
 
 ID_SHARED = "a" * 32
+
+#: How much earlier than its timeout a timed wait may end: on Windows the
+#: kernel expires a wait on its 15.6 ms timer tick while ``time.monotonic()``
+#: reads the high-resolution counter, so a 2 s wait can measure 1.995 s.
+WAIT_SLACK = 0.02
 
 
 def _clear_registry_and_pins() -> None:
@@ -124,6 +136,22 @@ def _titles(page: mach.HistoryPage) -> list[str]:
     return [str(r["title"]) for r in page.rows]
 
 
+def _endpoint_json(url: str, **extra: str) -> str:
+    """An endpoint file as a running daemon writes it: its pid (this process's) alive."""
+    return json.dumps({"url": url, "token": "t", "pid": os.getpid(), **extra}, indent=2)
+
+
+def _hold_send_thread(frame: FrameType, event: str, arg: Any) -> None:
+    """Profile hook for new threads: hold the link's write helper for 50 ms, as a loaded box would.
+
+    Installed with ``threading.setprofile``; every thread started while it
+    is installed runs it once, on its first event, and drops it again.
+    """
+    sys.setprofile(None)
+    if threading.current_thread().name == "sorcar-local-send":
+        time.sleep(0.05)
+
+
 def test_normalize_url_accepts_the_usual_spellings() -> None:
     """A bare host, host:port, https and wss forms all become https://host:port."""
     assert mach.normalize_url("10.0.0.5") == "https://10.0.0.5:8787"
@@ -174,6 +202,8 @@ def test_ssh_addresses_are_recognised_normalised_and_named() -> None:
         "sh -c 'for d in \"$KISS_HOME\" \"$HOME/" + mach.HOME_DIR + "\" \"$HOME\"/.*; do "
         'case "$d" in ""|*/.|*/..) continue;; esac; '
         'if [ -f "$d/sorcar-local.json" ]; then '
+        'p=$(sed -n "s/^ *\\"pid\\": *\\([0-9]*\\),*$/\\1/p" "$d/sorcar-local.json"); '
+        '[ -n "$p" ] && kill -0 "$p" 2>/dev/null || continue; '
         '[ -d "$d/tls/trusted-clients" ] || { '
         'echo "its daemon predates certificate enrollment: upgrade it" >&2; exit 3; }; '
         'cat > "$d/tls/trusted-clients/.NAME.$$.tmp" && '
@@ -221,6 +251,139 @@ def test_local_machine_name_is_the_short_hostname() -> None:
     """The local label is the host's short name (never empty)."""
     name = mach.local_machine_name()
     assert name and "." not in name
+
+
+def test_machine_on_host_finds_the_machine_a_synced_row_ran_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host name maps to the machine whose daemon reported it, else by name or address."""
+    by_ip = mach.Machine(name="10.0.0.7", url="https://10.0.0.7:8787")
+    by_dns = mach.Machine(name="lab", url="https://gpu.example.com:8787")
+    machines = [by_ip, by_dns]
+    mach._hosts.pop(by_ip.name, None)
+    mach._hosts.pop(by_dns.name, None)
+    assert mach.machine_on_host("gpu-box", machines) is None
+    mach.note_host(by_ip, "gpu-box")
+    try:
+        # Saved, so a restarted daemon still knows it while the machine is down.
+        assert mach._saved_hosts()["10.0.0.7"] == "gpu-box"
+        assert mach.machine_on_host("GPU-box", machines) is by_ip
+        assert mach.machine_on_host("lab", machines) is by_dns
+        assert mach.machine_on_host("gpu", machines) is by_dns
+        assert mach.machine_on_host(" ", machines) is None
+        rows: list[dict[str, Any]] = [{"origin": "gpu-box"}, {"origin": "elsewhere"}, {}]
+        mach.label_synced_rows(rows, machines)
+        assert rows == [
+            {"machine": "10.0.0.7", "machine_url": "https://10.0.0.7:8787"}, {}, {},
+        ]
+        # A home whose hosts file cannot be locked keeps the name in memory only.
+        home = tmp_path / "home"
+        (home / mach.HOSTS_FILE).with_suffix(".lock").mkdir(parents=True)
+        monkeypatch.setenv("KISS_HOME", str(home))
+        mach.note_host(by_dns, "lab-host")
+        assert mach.machine_on_host("lab-host", machines) is by_dns
+        assert not (home / mach.HOSTS_FILE).exists()
+        # The same observation once the file can be locked saves the name after all.
+        (home / mach.HOSTS_FILE).with_suffix(".lock").rmdir()
+        mach.note_host(by_dns, "lab-host")
+        assert mach._saved_hosts() == {"lab": "lab-host"}
+        assert by_dns.name not in mach._unsaved_hosts
+    finally:
+        mach._hosts.pop(by_ip.name, None)
+        mach._hosts.pop(by_dns.name, None)
+        mach._unsaved_hosts.discard(by_dns.name)
+
+
+_NOTE_HOST_IN_A_PROCESS = """
+import sys, time
+from pathlib import Path
+from kiss.agents.sorcar import machines as mach
+name, host, go = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+print("ready", flush=True)
+while not go.exists():
+    time.sleep(0.01)
+mach.note_host(mach.Machine(name, "https://" + name + ".example.org:8787"), host)
+"""
+
+
+def test_host_names_noted_at_once_all_survive(tmp_path: Path) -> None:
+    """Host names noted by two threads, or two processes, at once are all saved.
+
+    ``note_host`` wrote this process's whole mapping: a first writer
+    delayed between serialising and writing put its older mapping over
+    a second writer's newer file, and the second machine's name was
+    lost from disk for good, as a later identical observation finds it
+    in memory and writes nothing (audit S5/F2).  A ``/sync_history_and_memory``
+    process noting a machine beside the daemon lost names the same way.
+    The thread schedule is forced with a profile hook that holds the
+    first writer at its write while the second one notes (now waiting
+    for the file lock, so the hold times out); the processes load the
+    module first and note on a signal, so each starts from the same
+    saved mapping.
+    """
+    machines = [
+        mach.Machine("first", "https://first.example.org:8787"),
+        mach.Machine("second", "https://second.example.org:8787"),
+        mach.Machine("p1", "https://p1.example.org:8787"),
+        mach.Machine("p2", "https://p2.example.org:8787"),
+    ]
+    for machine in machines:
+        mach._hosts.pop(machine.name, None)
+    write_code = mach.atomic_write_text.__code__
+    writing, noted = threading.Event(), threading.Event()
+
+    def hold_the_first_write(frame: FrameType, event: str, arg: Any) -> None:
+        if event == "call" and frame.f_code is write_code and not writing.is_set():
+            writing.set()
+            noted.wait(2.0)
+
+    second = threading.Thread(target=mach.note_host, args=(machines[1], "host-second"))
+    try:
+        threading.setprofile(hold_the_first_write)
+        try:
+            first = threading.Thread(target=mach.note_host, args=(machines[0], "host-first"))
+            first.start()
+        finally:
+            threading.setprofile(None)
+        assert writing.wait(30), "the first writer never reached its write"
+        second.start()
+        second.join(30)
+        noted.set()
+        first.join(30)
+        assert not first.is_alive() and not second.is_alive()
+        saved = mach._saved_hosts()
+        assert {"first": "host-first", "second": "host-second"}.items() <= saved.items(), saved
+
+        go = tmp_path / "go"
+        script = [sys.executable, "-c", _NOTE_HOST_IN_A_PROCESS]
+        processes = [
+            subprocess.Popen(
+                [*script, name, "host-" + name, str(go)], stdout=subprocess.PIPE, text=True,
+            )
+            for name in ("p1", "p2")
+        ]
+        try:
+            for process in processes:
+                assert process.stdout is not None and process.stdout.readline() == "ready\n"
+            go.touch()
+            for process in processes:
+                assert process.wait(60) == 0
+        finally:
+            for process in processes:
+                process.kill()
+        saved = mach._saved_hosts()
+        assert {
+            "first": "host-first", "second": "host-second", "p1": "host-p1", "p2": "host-p2",
+        }.items() <= saved.items(), saved
+        # Reloaded, every machine's synced rows name it although none answers.
+        rows: list[dict[str, Any]] = [{"origin": "host-" + m.name} for m in machines]
+        mach.label_synced_rows(rows, machines)
+        assert [row["machine"] for row in rows] == ["first", "second", "p1", "p2"]
+    finally:
+        threading.setprofile(None)
+        noted.set()
+        for machine in machines:
+            mach._hosts.pop(machine.name, None)
 
 
 def test_add_machine_pins_the_ca_checks_the_password_and_saves(remote: RemoteDaemon) -> None:
@@ -352,14 +515,21 @@ def test_link_survives_a_dropped_socket_and_reports_a_dead_machine(
     assert link._health.retry_at > time.monotonic()
     link._health.retry_at = 0.0
     assert link.request({"type": "ping"}, "pong")["type"] == "pong"
-    # An already expired deadline fails even when the reply is buffered.
+    # An already expired deadline fails even when the reply is buffered,
+    # and with the reply's timeout when the thread that writes the
+    # command waits for a core first (a loaded box: full-suite run of
+    # 2026-11-05), not with a write failure that blames the daemon.
     assert link._ws is not None
     # (A raw frame on the link's socket must carry the machine's password
     # like the link's own frames do, or the daemon closes the socket.)
     link._ws.send(json.dumps({"type": "ping", "password": "secret-1"}))
     time.sleep(0.3)
-    with pytest.raises(mach.MachineError, match="no pong within 0s"):
-        link.request({"type": "ping"}, "pong", timeout=0.0)
+    threading.setprofile(_hold_send_thread)
+    try:
+        with pytest.raises(mach.MachineError, match="no pong within 0s"):
+            link.request({"type": "ping"}, "pong", timeout=0.0)
+    finally:
+        threading.setprofile(None)
     assert link._health.retry_at > time.monotonic()
     link._health.retry_at = 0.0
     assert link.request({"type": "ping"}, "pong")["type"] == "pong"
@@ -395,6 +565,83 @@ def test_link_survives_a_dropped_socket_and_reports_a_dead_machine(
     assert "no usable pinned certificate" in mach.machine_status(wrong)
     os.unlink(wrong.cert_file())
     os.unlink(dead.cert_file())
+
+
+def _request_a_reply_that_never_comes(link: mach.MachineLink, timeout: float) -> None:
+    """Thread body: a request that holds the link's lock for its whole *timeout*."""
+    with pytest.raises(mach.MachineError, match="did not answer"):
+        link.request({"type": "ping"}, "never-sent", timeout=timeout)
+
+
+def test_a_stream_handshake_does_not_wait_behind_a_request(remote: RemoteDaemon) -> None:
+    """A stream connects beside a request in flight on the shared socket.
+
+    ``open_connection`` counted its handshake in and out under the
+    link's lock, which a request holds for its whole exchange: a chat
+    tab's stream could not even start its handshake until an unrelated
+    request on the machine had returned (its reply budget, up to the
+    request's timeout), and its own timeout did not bound that wait.
+    """
+    machine = mach.add_machine("box", remote.url, "secret-1")
+    link = mach.link_for(machine)
+    assert link.request({"type": "ping"}, "pong")["type"] == "pong"
+    waiting = threading.Thread(target=_request_a_reply_that_never_comes, args=(link, 6.0))
+    waiting.start()
+    try:
+        time.sleep(0.3)  # the request is in its exchange, holding the lock
+        assert waiting.is_alive()
+        stream = link.open_connection(timeout=5.0)
+        stream.close()
+        assert waiting.is_alive(), "the stream was opened only after the request had returned"
+    finally:
+        waiting.join(30)
+        link._health.retry_at = 0.0
+
+
+def _opens_a_stream(
+    link: mach.MachineLink, streams: list[ClientConnection], errors: list[Exception],
+) -> None:
+    """Thread body: ``open_connection`` on *link*, its result or error collected."""
+    try:
+        streams.append(link.open_connection(timeout=5.0))
+    except mach.MachineError as exc:
+        errors.append(exc)
+
+
+def test_a_retired_link_never_starts_a_stream_handshake(remote: RemoteDaemon) -> None:
+    """A retirement that returned leaves no stream handshake to start afterwards.
+
+    ``open_connection`` checks the link's availability outside the
+    dial lock, then counts its handshake in under it: a ``retire``
+    landing between the two found no handshake to wait for and
+    returned, and the handshake went on to open its socket (for an
+    SSH machine, its tunnel) after ``close_links`` had swept them.
+    The retirement check is repeated under the dial lock, where the
+    count is: a handshake counted in is one the retirement waits for,
+    and one the retirement no longer waits for never starts.
+    """
+    machine = mach.add_machine("box", remote.url, "secret-1")
+    link = mach.link_for(machine)
+    streams: list[ClientConnection] = []
+    errors: list[Exception] = []
+    opening = threading.Thread(target=_opens_a_stream, args=(link, streams, errors))
+    # Held at the entry of ``locked_call(self._idle, self._start_dial)``:
+    # the availability check has passed, the handshake is not counted.
+    with Pause(
+        locked_call.__code__, lambda local: getattr(local["fn"], "__name__", "") == "_start_dial",
+    ) as held:
+        opening.start()
+        assert held.paused.wait(30), "open_connection about to count its handshake in"
+        started = time.monotonic()
+        link.retire()
+        assert time.monotonic() - started < 5.0, "retire waited for a handshake not started"
+    opening.join(30)
+    assert not opening.is_alive()
+    for stream in streams:
+        stream.close()
+    assert streams == [], "a stream handshake started on the retired link"
+    assert len(errors) == 1 and "registry changed" in str(errors[0])
+    assert link._dialing == 0
 
 
 def test_registry_change_keeps_the_links_of_unchanged_machines(
@@ -507,7 +754,8 @@ def test_merged_history_keeps_a_machines_last_page_while_it_does_not_answer(
     """A machine that stops answering keeps its chats in the CHATS panel.
 
     Its last unfiltered page is served again (trimmed to the limit)
-    until it answers afresh; a filtered view contributes nothing then.
+    until it answers afresh; a filtered view it has not answered
+    contributes nothing then.
     """
     seed = [
         {"chat_id": "c", "task": f"flaky {i}", "timestamp": 1_700_000_000.0 + i}
@@ -517,7 +765,7 @@ def test_merged_history_keeps_a_machines_last_page_while_it_does_not_answer(
     flaky = start_remote_daemon(tmp_path / "flaky-home", seed=seed)
     try:
         machine = mach.add_machine("flaky", flaky.url)
-        # A filtered fetch is not remembered: nothing to fall back on yet.
+        # The unfiltered view was never fetched: nothing to fall back on yet.
         assert _titles(mach.merged_history(empty, [machine], "flaky 2", "", 0, 50)) == ["flaky 2"]
     finally:
         flaky.stop()
@@ -532,7 +780,7 @@ def test_merged_history_keeps_a_machines_last_page_while_it_does_not_answer(
         flaky.stop()
     # The daemon is gone: the remembered page stands in, with its date
     # range, trimmed to what the caller asked for, and the failure is
-    # still logged; a filtered view has nothing to show.
+    # still logged; a filtered view it never answered has nothing to show.
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="kiss.agents.sorcar.machines"):
         again = mach.merged_history(empty, [machine], "", "", 0, 50)
@@ -552,6 +800,386 @@ def test_merged_history_keeps_a_machines_last_page_while_it_does_not_answer(
     other = mach.Machine("flaky", f"https://127.0.0.1:{_closed_port()}")
     other.cert_file().write_text(machine.cert_file().read_text(), encoding="utf-8")
     assert mach.merged_history(empty, [other], "", "", 0, 50).rows == []
+
+
+class _HeldRelay:
+    """A TCP relay to *upstream* that holds each new connection *hold* seconds first.
+
+    A machine behind a slow link, or one whose SSH port-forward takes
+    a while to open: the connection goes through, late.
+    """
+
+    def __init__(self, upstream: tuple[str, int], hold: float) -> None:
+        self.upstream, self.hold = upstream, hold
+        self.accepted = 0
+        self._server = socket.create_server(("127.0.0.1", 0))
+        self._server.settimeout(0.2)
+        self.port = self._server.getsockname()[1]
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._accept, daemon=True)
+        self._thread.start()
+
+    def _accept(self) -> None:
+        while not self._stop.is_set():
+            try:
+                client, _peer = self._server.accept()
+            except TimeoutError:
+                continue
+            self.accepted += 1
+            threading.Thread(target=self._relay, args=(client,), daemon=True).start()
+
+    def _relay(self, client: socket.socket) -> None:
+        if self._stop.wait(self.hold):
+            client.close()
+            return
+        upstream = socket.create_connection(self.upstream, timeout=5)
+        for src, dst in ((client, upstream), (upstream, client)):
+            threading.Thread(target=self._pump, args=(src, dst), daemon=True).start()
+
+    @staticmethod
+    def _pump(src: socket.socket, dst: socket.socket) -> None:
+        try:
+            while data := src.recv(65536):
+                dst.sendall(data)
+        except OSError:
+            pass
+        finally:
+            for sock in (src, dst):
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(2)
+        self._server.close()
+
+
+def test_merged_history_does_not_wait_long_for_a_slow_machine(tmp_path: Path) -> None:
+    """The reply goes out after ``HISTORY_FANOUT_WAIT`` without a machine still being fetched.
+
+    The rows this daemon has are shown at once; the machine's page is
+    fetched on (one fetch, shared by the replies meanwhile) and, once
+    it lands, the ``late`` callback asks the panels to refresh, so the
+    next reply has its rows.  A machine that never answers (a port
+    that takes the connection and says nothing) costs the reply the
+    same bounded wait, and no refresh is asked for when its fetch
+    fails with nothing new to show.
+    """
+    seed = [
+        {"chat_id": "c", "task": f"slow {i}", "timestamp": 1_700_000_000.0 + i}
+        for i in range(2)
+    ]
+    local = mach.HistoryPage([_local_row("b" * 32, "local newest", 1_800_000_000.0, False)])
+    daemon = start_remote_daemon(tmp_path / "slow-home", seed=seed)
+    relay = _HeldRelay(("127.0.0.1", daemon.port), hold=mach.HISTORY_FANOUT_WAIT + 1.0)
+    hole = socket.create_server(("127.0.0.1", 0))  # accepts in the kernel, never answers
+    nudges: list[float] = []
+    try:
+        enrolled = mach.add_machine("slow", daemon.url)  # pins the daemon's certificate
+        # Registered again at the relay's address (the pin is by name).
+        slow = mach.Machine("slow", f"https://127.0.0.1:{relay.port}")
+        assert slow.cert_file() == enrolled.cert_file()
+        silent = mach.Machine("silent", f"https://127.0.0.1:{hole.getsockname()[1]}")
+        silent.cert_file().write_text(enrolled.cert_file().read_text(), encoding="utf-8")
+        mach.save_machines([slow, silent])
+        started = time.monotonic()
+        first = mach.merged_history(
+            local, [slow], "", "", 0, 50, late=lambda: nudges.append(time.monotonic()),
+        )
+        waited = time.monotonic() - started
+        assert mach.HISTORY_FANOUT_WAIT - WAIT_SLACK <= waited < relay.hold, waited
+        assert _titles(first) == ["local newest"], "the local rows go out without the machine's"
+        assert nudges == []
+        # A reply asked for meanwhile waits for the same fetch (one
+        # connection), which lands within its own wait.
+        second = mach.merged_history(local, [slow], "", "", 0, 50)
+        assert _titles(second) == ["local newest", "slow 1", "slow 0"]
+        assert relay.accepted == 1
+        # The first reply's page landed late: one nudge, once.
+        deadline = time.monotonic() + 5
+        while len(nudges) < 1 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert len(nudges) == 1
+        # With the link up, a reply has the rows well within the wait.
+        started = time.monotonic()
+        third = mach.merged_history(local, [slow], "", "", 0, 50, late=lambda: nudges.append(0.0))
+        assert time.monotonic() - started < mach.HISTORY_FANOUT_WAIT
+        assert _titles(third) == ["local newest", "slow 1", "slow 0"]
+        assert len(nudges) == 1
+        # A machine that never answers: the same bounded wait, no nudge.
+        started = time.monotonic()
+        page = mach.merged_history(local, [silent], "", "", 0, 50, late=lambda: nudges.append(0.0))
+        waited = time.monotonic() - started
+        assert mach.HISTORY_FANOUT_WAIT - WAIT_SLACK <= waited < mach.REQUEST_TIMEOUT, waited
+        assert _titles(page) == ["local newest"]
+        deadline = time.monotonic() + mach.REQUEST_TIMEOUT + 5
+        while mach._fetches and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not mach._fetches, "the silent machine's fetch gave up"
+        assert len(nudges) == 1, "a fetch that brings nothing new asks for no refresh"
+    finally:
+        hole.close()
+        relay.stop()
+        daemon.stop()
+
+
+def _history_daemon(tmp: Path, title: str, hold: Callable[[], Awaitable[object]]) -> _Daemon:
+    """A stand-in daemon answering every ``getHistory`` with one row *title*, after *hold*."""
+
+    async def handle(ws: ServerConnection) -> None:
+        try:
+            async for message in ws:
+                command: dict[str, Any] = json.loads(message)
+                if command["type"] != "getHistory":
+                    continue
+                await hold()
+                await ws.send(json.dumps({
+                    "type": "history", "generation": command["generation"],
+                    "sessions": [{"task_id": "c" * 32, "title": title, "timestamp": 1.7e9}],
+                    "dateRange": {"min": 1.7e9, "max": 1.7e9},
+                }))
+        except ConnectionClosed:
+            return
+
+    return _Daemon(tmp, handle)
+
+
+def _register_stand_in(daemon: _Daemon, name: str, password: str = "pw") -> mach.Machine:
+    """Register *daemon* as *name*, its CA pinned, and return the machine."""
+    port = daemon.url.split(":")[2].split("/")[0]
+    machine = mach.Machine(name, f"https://127.0.0.1:{port}", password=password)
+    machine.cert_file().parent.mkdir(parents=True, exist_ok=True)
+    machine.cert_file().write_text(daemon.ca_file.read_text(encoding="utf-8"), encoding="utf-8")
+    mach.save_machines([machine])
+    return machine
+
+
+def _wait_for_fetches_to_end() -> None:
+    """Wait until no history fetch is under way (the fan-out pool is idle)."""
+    deadline = time.monotonic() + mach.REQUEST_TIMEOUT + 5
+    while mach._fetches and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not mach._fetches, "a history fetch never ended"
+
+
+def test_a_slow_filtered_page_reaches_the_refresh_its_late_callback_asked_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A filtered view (a query) whose fetch takes longer than
+    ``HISTORY_FANOUT_WAIT`` every time must show its rows on the refresh
+    the ``late`` callback asks for, and that refresh must not ask for
+    another: the filtered page was not remembered, so every refresh
+    served the empty fallback and fetched afresh, without end (audit A09)."""
+    monkeypatch.setattr(mach, "HISTORY_FANOUT_WAIT", 0.2)
+    daemon = _history_daemon(tmp_path, "remote hit", lambda: asyncio.sleep(1.0))
+    empty = mach.HistoryPage()
+    nudges: list[float] = []
+    try:
+        slow = _register_stand_in(daemon, "slow")
+        first = mach.merged_history(
+            empty, [slow], "hit", "", 0, 50, late=lambda: nudges.append(time.monotonic()),
+        )
+        assert first.rows == [], "the slow page is not waited for"
+        deadline = time.monotonic() + 10
+        while not nudges and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert len(nudges) == 1, "the page landed late: one refresh asked for"
+        # The refresh the late callback asked for: the page it brought.
+        second = mach.merged_history(
+            empty, [slow], "hit", "", 0, 50, late=lambda: nudges.append(time.monotonic()),
+        )
+        assert _titles(second) == ["remote hit"], "the late page never reached a reply"
+        _wait_for_fetches_to_end()
+        assert len(nudges) == 1, "the refresh fetched the same page again and asked for another"
+        # Another query is fetched afresh, not served the remembered one.
+        other = mach.merged_history(empty, [slow], "miss", "", 0, 50)
+        assert other.rows == []
+        _wait_for_fetches_to_end()
+    finally:
+        mach.close_links()
+        daemon.close()
+
+
+def test_a_stale_registrations_late_page_does_not_hide_the_replacements(
+    tmp_path: Path,
+) -> None:
+    """A name registered again for another daemon keeps the page the new
+    registration answered with when the previous registration's fetch,
+    answered before the change, stores its page afterwards: the pages
+    are remembered by registration, not by name (audit A09)."""
+    released = threading.Event()
+    old_daemon = _history_daemon(
+        tmp_path / "old", "old chat",
+        lambda: asyncio.get_running_loop().run_in_executor(None, released.wait, 30),
+    )
+    new_daemon = _history_daemon(tmp_path / "new", "new chat", lambda: asyncio.sleep(0))
+    fetched = threading.Event()
+    stored = threading.Event()
+    fetch_code = mach.fetch_history.__code__
+
+    def hold_before_the_store(frame: Any, event: str, arg: Any) -> None:
+        if event == "return" and frame.f_code is fetch_code and not fetched.is_set():
+            fetched.set()
+            stored.wait(30)
+
+    empty = mach.HistoryPage()
+    try:
+        old = _register_stand_in(old_daemon, "box")
+        threading.setprofile(hold_before_the_store)
+        try:
+            stale = threading.Thread(target=mach._fetch_quietly, args=(old, "", "", 50))
+            stale.start()
+        finally:
+            threading.setprofile(None)
+        released.set()
+        assert fetched.wait(30), "the old registration's fetch never got its page"
+        new = _register_stand_in(new_daemon, "box")
+        assert _titles(mach.merged_history(empty, [new], "", "", 0, 50)) == ["new chat"]
+        stored.set()
+        stale.join(30)
+        assert not stale.is_alive()
+        new_daemon.close()  # the new daemon stops answering: its page stands in
+        assert _titles(mach.merged_history(empty, [new], "", "", 0, 50)) == ["new chat"], (
+            "the stale registration's page replaced the new registration's"
+        )
+    finally:
+        stored.set()
+        mach.close_links()
+        old_daemon.close()
+        new_daemon.close()
+
+
+def test_a_name_registered_again_does_not_join_the_previous_daemons_fetch(tmp_path: Path) -> None:
+    """A fetch is shared by registration, not by name alone.
+
+    While ``box`` at one address is still being fetched, ``box``
+    registered again at another address (another daemon's chats) gets
+    a fetch of its own, as :func:`_last_page` already keeps the pages
+    apart; the same registration asked again shares the fetch under
+    way.  Both addresses here take the connection and never answer, so
+    the fetches stay under way until the holes close.  Both
+    registrations are in the registry at once: only a registered
+    machine gets a live link (:func:`link_for`), and the retired link of
+    an unregistered one fails the fetch in the pool thread at once, so
+    that whether the second call joined it would depend on which thread
+    ran first.
+
+    Not covered end to end: ``_shared_fetch`` registering its
+    forget-callback outside ``_fetches_lock``.  A fetch that is done by
+    then runs the callback in the caller's thread, where the
+    non-reentrant lock would have deadlocked every later history reply;
+    a real pool thread never finishes before the next statement of the
+    caller (300 tries, also with a microsecond switch interval), so that
+    path is reachable only with a stand-in fetch.
+    """
+    certfile, _key, _ca = make_test_tls(tmp_path)
+    holes = [socket.create_server(("127.0.0.1", 0)) for _ in range(2)]
+    try:
+        old = mach.Machine("box", f"https://127.0.0.1:{holes[0].getsockname()[1]}")
+        new = mach.Machine("box", f"https://127.0.0.1:{holes[1].getsockname()[1]}")
+        old.cert_file().parent.mkdir(parents=True, exist_ok=True)
+        old.cert_file().write_text(certfile.read_text(encoding="utf-8"), encoding="utf-8")
+        mach.save_machines([old, new])
+        first = mach._shared_fetch(old, "", "", 50)
+        assert mach._shared_fetch(old, "", "", 50) is first, "the same registration shares"
+        assert not first.done(), "the hole holds the fetch"
+        assert mach._shared_fetch(new, "", "", 50) is not first, "another daemon, another fetch"
+        # Registered again with other credentials (a corrected password):
+        # the fetch under way would answer with the old ones' refusal.
+        corrected = mach.Machine("box", old.url, password="corrected")
+        assert mach._shared_fetch(corrected, "", "", 50) is not first, (
+            "other credentials joined the previous registration's fetch"
+        )
+    finally:
+        for hole in holes:
+            hole.close()
+        deadline = time.monotonic() + mach.REQUEST_TIMEOUT + 5
+        while mach._fetches and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not mach._fetches, "the fetches ended once the holes closed"
+
+
+def test_a_page_stored_while_another_fetch_prunes_breaks_neither(tmp_path: Path) -> None:
+    """Two fan-out workers storing their pages at once break neither fetch.
+
+    A filtered fetch prunes its registration's stale filtered views
+    with a comprehension over ``_last_pages`` while another worker
+    stores another machine's page: without one lock around the cache
+    the store raised ``RuntimeError: dictionary changed size during
+    iteration`` out of the pruning fetch, which ``merged_history``
+    re-raised, losing the CHATS reply (audit S5/F1).  The schedule is
+    forced with a trace function: the pruning fetch, run in this
+    thread, pauses at the second step of its comprehension while a
+    second thread fetches and stores the other machine's page (locked,
+    that store waits for the pruning to end, so the pause times out).
+    """
+    a_daemon = _history_daemon(tmp_path / "a", "a chat", lambda: asyncio.sleep(0))
+    b_daemon = _history_daemon(tmp_path / "b", "b chat", lambda: asyncio.sleep(0))
+    paused, stored = threading.Event(), threading.Event()
+    code = mach._fetch_quietly.__code__
+    # The first FOR_ITER of the function: the comprehension's walk over the cache.
+    comprehension = next(i.offset for i in dis.get_instructions(code) if i.opname == "FOR_ITER")
+    steps = [0]
+
+    def trace(frame: Any, event: str, arg: object) -> Any:
+        if frame.f_code is not code:
+            return None
+        frame.f_trace_opcodes = True
+        if event == "opcode" and frame.f_lasti == comprehension:
+            steps[0] += 1
+            if steps[0] == 2:
+                paused.set()
+                stored.wait(2.0)
+        return trace
+
+    def store_b() -> mach.HistoryPage:
+        assert paused.wait(30), "the pruning fetch never walked the cache"
+        try:
+            return mach._fetch_quietly(b, "", "", 50)
+        finally:
+            stored.set()
+
+    previous = sys.gettrace()
+    try:
+        a = _register_stand_in(a_daemon, "a")
+        b = _register_stand_in(b_daemon, "b")
+        mach.save_machines([a, b])
+        # Two remembered pages give the comprehension a second step; both links are open.
+        assert _titles(mach._fetch_quietly(a, "old", "", 50)) == ["a chat"]
+        assert _titles(mach._fetch_quietly(b, "warm", "", 50)) == ["b chat"]
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            storing = pool.submit(store_b)
+            sys.settrace(trace)
+            try:
+                pruning = mach._fetch_quietly(a, "new", "", 50)
+            finally:
+                sys.settrace(previous)
+                paused.set()
+            assert steps[0] >= 2, "the pruning fetch never reached its comprehension"
+            assert _titles(pruning) == ["a chat"]
+            assert _titles(storing.result(timeout=30)) == ["b chat"]
+        assert {k[:1] + k[4:] for k in mach._last_pages} == {
+            ("a", "new", ""), ("b", "warm", ""), ("b", "", ""),
+        }, "the stale filtered view went, every other page stayed"
+        # Both daemons gone: the pages stored under the race stand in for them.
+        a_daemon.close()
+        b_daemon.close()
+        local = mach.HistoryPage([_local_row("d" * 32, "local", 3.0, False)])
+        assert sorted(_titles(mach.merged_history(local, [a, b], "", "", 0, 50))) == [
+            "b chat", "local",
+        ]
+        assert sorted(_titles(mach.merged_history(local, [a, b], "new", "", 0, 50))) == [
+            "a chat", "local",
+        ]
+        _wait_for_fetches_to_end()
+    finally:
+        sys.settrace(previous)
+        paused.set()
+        mach.close_links()
+        a_daemon.close()
+        b_daemon.close()
 
 
 def test_merged_pages_are_consistent_with_tied_timestamps(
@@ -821,7 +1449,11 @@ def test_ssh_enrollment_failures_are_reported_and_store_nothing(
         with pytest.raises(mach.MachineError, match=r"no Sorcar daemon is running on .*: no .*"):
             mach.add_machine("", idle.login)
         endpoint = nothing / "sorcar-local.json"
+        # An endpoint file no daemon wrote (no pid alive) is passed over.
         endpoint.write_text("junk", encoding="utf-8")
+        with pytest.raises(mach.MachineError, match=r"no Sorcar daemon is running on .*: no .*"):
+            mach.add_machine("", idle.login)
+        endpoint.write_text(_endpoint_json("wss://127.0.0.1/ws"), encoding="utf-8")
         with pytest.raises(mach.MachineError, match="cannot enroll on .*: its daemon predates"):
             mach.add_machine("", idle.login)
         trusted = nothing / "tls" / tls_certs.TRUSTED_CLIENTS_DIR
@@ -832,17 +1464,15 @@ def test_ssh_enrollment_failures_are_reported_and_store_nothing(
         assert [p.name for p in trusted.iterdir()] == [
             tls_certs.ca_label(mach.kiss_home() / "tls" / "ca.pem") + ".pem",
         ]
-        endpoint.write_text(json.dumps({"url": "wss://127.0.0.1/ws", "token": "t"}), "utf-8")
+        endpoint.write_text(_endpoint_json("wss://127.0.0.1/ws"), "utf-8")
         with pytest.raises(mach.MachineError, match="did not answer the enrollment as a Sorcar"):
             mach.add_machine("", idle.login)
         (nothing / "tls" / "ca.pem").unlink()
-        endpoint.write_text(json.dumps({"url": "wss://127.0.0.1:1/ws", "token": "t"}), "utf-8")
+        endpoint.write_text(_endpoint_json("wss://127.0.0.1:1/ws"), "utf-8")
         with pytest.raises(mach.MachineError, match="did not answer the enrollment as a Sorcar"):
             mach.add_machine("", idle.login)
         (nothing / "tls" / "ca.pem").write_text(_local_ca_pem(), encoding="utf-8")
-        endpoint.write_text(
-            json.dumps({"url": f"wss://127.0.0.1:{_closed_port()}/ws", "token": "t"}), "utf-8",
-        )
+        endpoint.write_text(_endpoint_json(f"wss://127.0.0.1:{_closed_port()}/ws"), "utf-8")
         started = time.monotonic()
         with pytest.raises(mach.MachineError, match=r"is unreachable: .*refused"):
             mach.add_machine("", idle.login)
@@ -951,7 +1581,9 @@ def test_ssh_enrollment_finds_the_daemon_whatever_its_brand_home(
     A remote re-installed under another brand moves its state directory
     (``~/.kiss`` to ``~/.s10s`` or back); enrollment must find the
     running daemon through such a change without any remote
-    configuration.
+    configuration.  The endpoint file a crashed daemon or an earlier
+    install left in another home (its pid gone) is passed over, never
+    enrolled into (audit A09).
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -980,9 +1612,21 @@ def test_ssh_enrollment_finds_the_daemon_whatever_its_brand_home(
     # directory is found; a KISS_HOME naming no endpoint file is skipped.
     assert enroll_via(None) == live
     assert enroll_via(missing) == live
-    # The local brand's home wins over other brands' directories.
+    # The local brand's home holds the endpoint file of a daemon that
+    # is gone (its pid exited), then one no daemon wrote (no pid): the
+    # running daemon's home is found instead, and nothing is written
+    # into the stale one.
+    exited = subprocess.Popen([sys.executable, "-c", "pass"])
+    exited.wait()
+    stale_endpoint = {"url": f"wss://127.0.0.1:{stale_port}/ws", "token": "stale"}
+    for endpoint in ({**stale_endpoint, "pid": exited.pid}, stale_endpoint):
+        (stale / "sorcar-local.json").write_text(json.dumps(endpoint, indent=2), "utf-8")
+        assert enroll_via(None) == live
+        assert list((stale / "tls" / tls_certs.TRUSTED_CLIENTS_DIR).iterdir()) == []
+    # The local brand's home wins over other brands' directories while
+    # its daemon runs.
     (stale / "sorcar-local.json").write_text(
-        json.dumps({"url": f"wss://127.0.0.1:{stale_port}/ws", "token": "stale"}), "utf-8",
+        json.dumps({**stale_endpoint, "pid": os.getpid()}, indent=2), "utf-8",
     )
     assert enroll_via(None) == (f"https://127.0.0.1:{stale_port}", stale_ca)
     assert [p.name for p in (stale / "tls" / tls_certs.TRUSTED_CLIENTS_DIR).iterdir()] == [
@@ -1618,7 +2262,7 @@ def test_failed_ssh_add_machine_closes_the_forward_it_opened(
     (remote_home / "tls" / tls_certs.TRUSTED_CLIENTS_DIR).mkdir(parents=True)
     (remote_home / "tls" / tls_certs.CA_CERT_FILE).write_text(_local_ca_pem(), encoding="utf-8")
     (remote_home / mach.LOCAL_ENDPOINT_FILE).write_text(
-        json.dumps({"url": f"wss://127.0.0.1:{_closed_port()}/ws", "token": "t"}), "utf-8",
+        _endpoint_json(f"wss://127.0.0.1:{_closed_port()}/ws"), "utf-8",
     )
     _install_fake_ssh(tmp_path, monkeypatch, remote_home)
     pidfile = tmp_path / "ssh.pid"
@@ -1632,6 +2276,66 @@ def test_failed_ssh_add_machine_closes_the_forward_it_opened(
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)  # the forward is reaped, not left running
     assert not mach.load_machines() and not list((mach.kiss_home() / "machines").glob("*down*"))
+
+
+@fake_ssh_only
+def test_a_stale_dial_never_replaces_the_forward_of_a_new_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handshake dialling the OLD registration's daemon port must not close
+    the login's forward the NEW registration opened (audit A09).
+
+    ``box`` is registered again with its daemon on another port while a
+    stream's handshake on the old link is about to open the login's
+    forward.  The registration retires the old link and waits for that
+    handshake; the new registration's link meanwhile opens the login's
+    forward to the new port.  The old handshake, resumed, asked
+    ``tunnel_port`` for the old port: the cache, keyed by login alone,
+    replaced and closed the live forward before any registry check, and
+    the check knew the login but not the port.
+    """
+    daemon = start_remote_daemon(tmp_path / "home", password="pw")
+    _install_fake_ssh(tmp_path, monkeypatch, daemon.home)
+    login = "ksen@box.example.org"
+    streams: list[ClientConnection] = []
+    errors: list[Exception] = []
+    try:
+        machine = mach.add_machine("box", login)
+        link = mach.link_for(machine)
+        old_port = urlsplit(machine.url).port
+        moved = mach.Machine(
+            machine.name, url=f"https://127.0.0.1:{_closed_port()}", ssh=login,
+            password=machine.password,
+        )
+        with Pause(mach.tunnel_port.__code__, lambda local: local["remote_port"] == old_port):
+            dialling = threading.Thread(target=_opens_a_stream, args=(link, streams, errors))
+            dialling.start()
+            registering = threading.Thread(target=mach.save_machines, args=([moved],))
+            # The old link's handshake is held; the registration retires
+            # the link and waits for it; the new registration's link
+            # opens the login's forward to the moved port meanwhile.
+            registering.start()
+            deadline = time.monotonic() + 30
+            while not link._retired:
+                assert time.monotonic() < deadline, "the registration never retired the link"
+                time.sleep(0.01)
+            with pytest.raises(mach.MachineError, match="refused the forwarded connection"):
+                mach.link_for(moved).request({"type": "ping"}, "pong", timeout=5.0)
+            current = mach._tunnels[login]
+            assert current.remote_port == urlsplit(moved.url).port and current.alive()
+        dialling.join(60)
+        registering.join(60)
+        assert not dialling.is_alive() and not registering.is_alive()
+        assert mach._tunnels[login] is current and current.alive(), (
+            "the stale dial replaced and closed the new registration's forward"
+        )
+        assert streams == [] and len(errors) == 1
+        assert "registry changed" in str(errors[0])
+    finally:
+        for stream in streams:
+            stream.close()
+        mach.close_links()
+        daemon.stop()
 
 
 @fake_ssh_only
@@ -1670,10 +2374,10 @@ def test_failed_ssh_re_registration_keeps_the_shared_forward_and_its_streams(
         monkeypatch.setattr(mach, "ENROLL_TIMEOUT", 2.0)
         wrong = tmp_path / "wrong"
         (wrong / "tls" / tls_certs.TRUSTED_CLIENTS_DIR).mkdir(parents=True)
-        (wrong / mach.LOCAL_ENDPOINT_FILE).write_text(json.dumps({
-            "url": f"wss://127.0.0.1:{daemon.port}/ws", "token": "t",
-            "ca": str(mach.kiss_home() / "tls" / tls_certs.CA_CERT_FILE),
-        }, indent=2), encoding="utf-8")
+        (wrong / mach.LOCAL_ENDPOINT_FILE).write_text(_endpoint_json(
+            f"wss://127.0.0.1:{daemon.port}/ws",
+            ca=str(mach.kiss_home() / "tls" / tls_certs.CA_CERT_FILE),
+        ), encoding="utf-8")
         monkeypatch.setenv("FAKE_SSH_HOME", str(wrong))
         with pytest.raises(mach.MachineError, match="refused the TLS handshake"):
             mach.add_machine("box", login)

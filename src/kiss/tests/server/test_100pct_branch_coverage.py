@@ -34,7 +34,7 @@ from kiss.tests.agents.sorcar.test_100pct_branch_coverage import (
     _restore_db,
 )
 from kiss.tests.conftest import seed_worktree
-from kiss.tests.server.worktree_helpers import merge_conflict
+from kiss.tests.server.worktree_helpers import merge_conflict, worktree_changed_files
 
 
 def _register_worktree_state(tab_id: str) -> AgentState:
@@ -93,13 +93,13 @@ class TestAgentServerUncoveredBranches:
             agent_state.unregister(state.task_id, state)
 
     def test_get_worktree_changed_files_no_branches(self) -> None:
-        """_get_worktree_changed_files returns [] when no branches."""
+        """The changed-files listing is [] when no branches."""
         server = AgentServer()
         state = _register_worktree_state("0")
         try:
             assert state.agent is not None
             seed_worktree(state.agent, None)
-            assert server._get_worktree_changed_files("0") == []
+            assert worktree_changed_files(server, "0") == []
         finally:
             agent_state.unregister(state.task_id, state)
 
@@ -175,10 +175,10 @@ class TestBrowserPrinterPeekRecording:
         p._thread_local.task_id = "t1"
         p.start_recording()
         p.broadcast({"type": "text_delta", "text": "hello"})
-        events = p.peek_recording()
+        events = p.peek_recording_for_task(p.thread_binding())
         assert len(events) == 1
         p.broadcast({"type": "text_delta", "text": " world"})
-        events2 = p.peek_recording()
+        events2 = p.peek_recording_for_task(p.thread_binding())
         assert len(events2) == 1
         assert events2[0]["text"] == "hello world"
         p.stop_recording()

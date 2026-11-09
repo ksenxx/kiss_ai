@@ -11,6 +11,10 @@ to shut down, and the watchdog thread exited — so the task then waited
 for the whole byte-level read timeout (``stream_stall_timeout``, 180 s
 by default) before the stop was reported.
 
+Since A03-2a/A03-1f the wait for the headers runs under a request
+watchdog of its own, so the Stop no longer waits for the headers at
+all: it lands within the abort budget of the request being issued.
+
 Real ``google-genai`` SDK, real httpx, a real loopback SSE server that
 holds the headers back, then writes one function-call-only chunk (no
 text, so no token callback ever checks the stop flag) and goes silent.
@@ -40,6 +44,8 @@ class _Clock:
     """What the endpoint and the worker observed, in ``time.monotonic()``."""
 
     def __init__(self) -> None:
+        self.request_seen = threading.Event()
+        self.request_at = 0.0
         self.headers_sent = threading.Event()
         self.headers_at = 0.0
         self.release = threading.Event()
@@ -52,6 +58,8 @@ class _SlowHeadersHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
         """Answer ``streamGenerateContent`` with delayed headers and silence."""
+        self.clock.request_at = time.monotonic()
+        self.clock.request_seen.set()
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
         time.sleep(HEADER_DELAY)
         self.send_response(200)
@@ -121,18 +129,18 @@ def _generate_under_stop(stop: threading.Event) -> dict[str, object]:
 class TestStopBeforeHeaders:
     """A Stop set before the request is issued must not wait out the stall."""
 
-    def test_pre_header_stop_lands_right_after_the_headers(self, endpoint: _Clock) -> None:
-        """The watchdog must keep polling until the socket exists, then abort it."""
+    def test_pre_header_stop_lands_before_the_headers(self, endpoint: _Clock) -> None:
+        """The header watchdog cuts the request as soon as its socket exists."""
         stop = threading.Event()
         stop.set()
         outcome = _generate_under_stop(stop)
 
         assert isinstance(outcome.get("error"), KeyboardInterrupt), f"got {outcome!r}"
-        assert endpoint.headers_sent.is_set()
-        after_headers = float(outcome["finished_at"]) - endpoint.headers_at  # type: ignore[arg-type]
-        assert after_headers < ABORT_BUDGET, (
-            f"stop landed {after_headers:.2f}s after the headers; the watchdog died "
-            f"and the task waited for the {STALL}s read timeout"
+        assert endpoint.request_seen.is_set(), "the request never reached the endpoint"
+        after_request = float(outcome["finished_at"]) - endpoint.request_at  # type: ignore[arg-type]
+        assert after_request < ABORT_BUDGET, (
+            f"stop landed {after_request:.2f}s after the request was issued; it waited "
+            f"for the headers ({HEADER_DELAY}s) or for the {STALL}s read timeout"
         )
 
     def test_post_header_stop_is_the_yardstick(self, endpoint: _Clock) -> None:

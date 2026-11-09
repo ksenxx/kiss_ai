@@ -66,6 +66,7 @@ function testTaskRowDelete() {
   const sent = ofType(posted, 'deleteTask');
   assert.strictEqual(sent.length, 1, 'Delete asks the daemon once');
   assert.strictEqual(sent[0].taskId, 'task-1');
+  assert.ok(!('machine' in sent[0]), 'a local task is deleted here');
   assert.ok(row.isConnected, 'the row stays until the daemon answers');
   assert.strictEqual(
     ofType(posted, 'resumeSession').length,
@@ -160,8 +161,8 @@ function testChatWithRunningTaskStaysUntilRefresh() {
   );
 }
 
-function testRemoteChatHeaderHasNoDelete() {
-  const {win} = makePage();
+function testRemoteChatDeletesOnItsMachine() {
+  const {win, posted} = makePage();
   send(win, {
     type: 'history',
     offset: 0,
@@ -176,17 +177,32 @@ function testRemoteChatHeaderHasNoDelete() {
   const del = header.querySelector(
     '.history-chat-actions > .sidebar-item-delete',
   );
-  assert.ok(
-    !del || del.style.display === 'none',
-    'a chat that lives on another machine has no delete button',
-  );
+  assert.ok(del, 'a chat that lives on another machine has a delete button');
+  assert.notStrictEqual(del.style.display, 'none');
+  click(win, del);
+  click(win, header.querySelector('.sidebar-confirm-yes'));
+  const chat = ofType(posted, 'deleteChat');
+  assert.strictEqual(chat.length, 1);
+  assert.strictEqual(chat[0].chatId, 'chat-1');
+  assert.strictEqual(chat[0].machine, '10.0.0.9', 'sent to its machine');
+
+  const row = win.document.querySelector('#history-list .running-item');
+  const rowDel = row.querySelector('.sidebar-item-actions > .sidebar-item-delete');
+  assert.ok(rowDel, 'a remote task row has a delete button');
+  click(win, rowDel);
+  click(win, row.querySelector('.sidebar-confirm-yes'));
+  const task = ofType(posted, 'deleteTask');
+  assert.strictEqual(task.length, 1);
+  assert.strictEqual(task[0].taskId, 'task-1');
+  assert.strictEqual(task[0].machine, '10.0.0.9', 'sent to its machine');
+  // A local row's command names no machine (testTaskRowDelete).
   win.close();
-  console.log('  ok - a remote-only chat header has no delete button');
+  console.log('  ok - a remote chat and task are deleted on their machine');
 }
 
 testTaskRowDelete();
 testRunningRowHasNoDelete();
 testChatHeaderDelete();
 testChatWithRunningTaskStaysUntilRefresh();
-testRemoteChatHeaderHasNoDelete();
+testRemoteChatDeletesOnItsMachine();
 console.log('historyDeleteButtons.test.js passed');

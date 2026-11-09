@@ -18,6 +18,12 @@ These tests render the REAL page returned by
   theme's favourite colour and a copied button the theme's ok colour.
 * The settings dialog carries the theme's widget-border hairline and
   the large elevation.
+* The Schedule / Machines inline form's Save button reads in the accent,
+  not in the delete confirmation's red it shares a class with.
+* The elements whose classes meet in main.js (a promptlet row, the
+  prompt toast's field, a strip tab, the Stop button, the folder
+  picker's buttons, a history row's ids copy button) render as the
+  winning rules say.
 
 The static server never answers the websocket, so main.js keeps the
 page in its shipped state (no machine registered).  No mocks, patches
@@ -257,3 +263,266 @@ def test_settings_dialog_has_the_widget_hairline_and_elevation(page: Page, theme
     got = page.evaluate(_SETTINGS_FRAME_JS)
     assert got["border"] == f"1px solid {got['widgetBorder']}", got
     assert got["shadow"] == got["shadowLg"] != "none", got
+
+
+# A colour of the palette, resolved where the sidebar rows live.
+_PALETTE_JS = """
+(value) => {
+  const el = document.createElement('span');
+  el.style.color = value;
+  document.getElementById('history-list').appendChild(el);
+  const colour = getComputedStyle(el).color;
+  el.remove();
+  return colour;
+}
+"""
+
+# A button's text, border and background colours as computed.
+_BUTTON_JS = """
+(sel) => {
+  const cs = getComputedStyle(document.querySelector(sel));
+  return {color: cs.color, border: cs.borderTopColor, background: cs.backgroundColor};
+}
+"""
+
+# The Schedule / Machines inline form's Save button as main.js builds it
+# (the delete confirmation's class for its shape plus its own) next to
+# a delete confirmation's Yes button.
+_INLINE_FORM_JS = """
+() => {
+  const wrap = document.createElement('div');
+  wrap.innerHTML =
+    '<div class="sidebar-inline-form"><div class="sidebar-inline-form-buttons">' +
+    '<button id="probe-save" class="sidebar-confirm-yes sidebar-inline-form-save">' +
+    'Save</button><button class="sidebar-confirm-no">Cancel</button></div></div>' +
+    '<button id="probe-delete" class="sidebar-confirm-yes">Yes, delete</button>';
+  document.getElementById('history-list').appendChild(wrap);
+}
+"""
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_inline_form_save_takes_the_accent_not_the_delete_red(page: Page, theme: str) -> None:
+    """The inline form's Save button shares the delete confirmation's
+    class for its shape and hover background, but it is not
+    destructive: it reads in the accent and its hover tints the border
+    the accent, while "Yes, delete" keeps the failure red."""
+    if theme == "dark":
+        page.evaluate("() => document.body.classList.remove('light-theme')")
+    page.emulate_media(reduced_motion="reduce")  # hover colours settle at once
+    page.evaluate(_INLINE_FORM_JS)
+    accent = page.evaluate(_PALETTE_JS, "var(--accent)")
+    fail = page.evaluate(_PALETTE_JS, "var(--status-fail)")
+    assert accent != fail
+    assert page.evaluate(_BUTTON_JS, "#probe-save")["color"] == accent
+    assert page.evaluate(_BUTTON_JS, "#probe-delete")["color"] == fail
+    page.hover("#probe-save")
+    save = page.evaluate(_BUTTON_JS, "#probe-save")
+    assert save["border"] == accent, save
+    page.hover("#probe-delete")
+    delete = page.evaluate(_BUTTON_JS, "#probe-delete")
+    assert delete["border"] == fail, delete
+    assert save["background"] == delete["background"], (save, delete)
+
+
+# Elements whose classes meet in main.js, as computed: a promptlet row
+# (`sidebar-item tricks-item`, its editor `editing`), the prompt toast's
+# field (`kiss-notification-input explorer-input`), a tab of the strip,
+# the Stop button, the folder picker's buttons and a history row's ids
+# copy button next to its sidebar copy button.
+_MET_CLASSES_JS = """
+() => {
+  const wrap = document.createElement('div');
+  wrap.innerHTML =
+    '<div id="probe-trick" class="sidebar-item tricks-item">' +
+    '<span class="sidebar-item-text">a promptlet</span></div>' +
+    '<div id="probe-trick-edit" class="sidebar-item tricks-item editing"></div>' +
+    '<div class="kiss-notification-field">' +
+    '<input id="probe-prompt" class="kiss-notification-input explorer-input"></div>' +
+    '<div class="folder-picker-actions">' +
+    '<button id="probe-cancel" class="folder-picker-cancel">Cancel</button>' +
+    '<button id="probe-select" class="folder-picker-select">Select Folder</button>' +
+    '</div><div class="sidebar-item running-item"><div class="sidebar-item-actions">' +
+    '<button id="probe-copy" class="sidebar-item-copy"></button></div>' +
+    '<div class="running-item-info"><span class="running-item-ids">ids' +
+    '<button id="probe-ids" class="ids-copy-btn"></button></span></div></div>' +
+    '<span id="probe-tint" style="background: color-mix(in srgb, var(--accent) 25%, ' +
+    'transparent)"></span><span id="probe-bg" style="background: var(--bg)"></span>';
+  document.getElementById('history-list').appendChild(wrap);
+  const tab = document.createElement('button');
+  tab.className = 'chat-tab';
+  tab.id = 'probe-tab';
+  document.getElementById('tab-list').appendChild(tab);
+  const cs = (sel) => getComputedStyle(document.querySelector(sel));
+  const pick = (sel, props) => Object.fromEntries(props.map(p => [p, cs(sel)[p]]));
+  const shared = ['borderTopStyle', 'cursor', 'borderRadius', 'color', 'opacity',
+                  'backgroundColor', 'transitionProperty', 'transitionDuration'];
+  const out = {
+    trick: pick('#probe-trick', ['padding', 'cursor', 'borderRadius', 'whiteSpace', 'gap']),
+    trickEditing: cs('#probe-trick-edit').cursor,
+    prompt: cs('#probe-prompt').height,
+    tab: cs('#probe-tab').padding,
+    stop: cs('#stop-btn').borderTopStyle,
+    select: pick('#probe-select', ['borderTopColor', 'backgroundColor', 'padding']),
+    cancel: pick('#probe-cancel', ['borderTopColor', 'backgroundColor', 'padding']),
+    tint: cs('#probe-tint').backgroundColor,
+    bg: cs('#probe-bg').backgroundColor,
+    ids: pick('#probe-ids', ['display', 'verticalAlign', 'padding', 'margin']),
+    idsShared: pick('#probe-ids', shared),
+    copyShared: pick('#probe-copy', shared),
+  };
+  tab.remove();
+  wrap.remove();
+  return out;
+}
+"""
+
+
+def test_met_classes_render_as_the_winning_rules_say(page: Page) -> None:
+    """Where two classes meet on one element, the later equally specific
+    rule wins: a promptlet row is laid out as a sidebar item, the prompt
+    toast's field as an explorer input, the strip's tabs as the chat
+    page's, the Stop button has no border, the folder picker's Select
+    button takes the accent frame and its Cancel the plain one, and the
+    ids copy button is the sidebar copy button inline."""
+    got = page.evaluate(_MET_CLASSES_JS)
+    accent = page.evaluate(_PALETTE_JS, "var(--accent)")
+    border = page.evaluate(_PALETTE_JS, "var(--border)")
+    assert got["trick"] == {
+        "padding": "6px 10px 3.5px", "cursor": "pointer", "borderRadius": "6px",
+        "whiteSpace": "nowrap", "gap": "6px",
+    }, got
+    assert got["trickEditing"] == "default", got
+    assert got["prompt"] == "20px", got
+    assert got["tab"] == "2px 10px", got
+    assert got["stop"] == "none", got
+    assert got["select"] == {
+        "borderTopColor": accent, "backgroundColor": got["tint"], "padding": "4px 12px",
+    }, got
+    assert got["cancel"] == {
+        "borderTopColor": border, "backgroundColor": got["bg"], "padding": "4px 12px",
+    }, got
+    assert got["ids"] == {
+        "display": "inline-flex", "verticalAlign": "middle", "padding": "0px 2px",
+        "margin": "0px 0px 0px 4px",
+    }, got
+    assert got["idsShared"] == got["copyShared"], got
+    assert got["copyShared"]["cursor"] == "pointer", got
+
+
+# The settings dialog, open, with its restart confirmation open or not.
+_RESTART_CONFIRM_JS = """
+(open) => {
+  document.getElementById('settings-panel').classList.add('open');
+  document.getElementById('server-reset-confirm-modal').classList.toggle('open', open);
+}
+"""
+
+# Where the dialog, its confirmation (scrim and box) and its Restart
+# button are, and whether the confirmation covers the dialog's centre.
+_RESTART_RECTS_JS = """
+() => {
+  const rect = (sel) => {
+    const r = document.querySelector(sel).getBoundingClientRect();
+    return [r.left, r.top, r.right, r.bottom].map(Math.round);
+  };
+  const panel = rect('#settings-panel');
+  const modal = document.getElementById('server-reset-confirm-modal');
+  const hit = document.elementFromPoint((panel[0] + panel[2]) / 2, (panel[1] + panel[3]) / 2);
+  return {
+    panel, scrim: rect('#server-reset-confirm-modal'),
+    box: rect('.server-reset-confirm-content'), reset: rect('#cfg-server-reset-btn'),
+    covered: modal.contains(hit),
+  };
+}
+"""
+
+# Two frames: a wheel's scroll is applied by the next frame.
+_TWO_FRAMES_JS = "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
+
+
+def _within(inner: list[int], outer: list[int]) -> bool:
+    return (
+        inner[0] >= outer[0] - 1 and inner[1] >= outer[1] - 1
+        and inner[2] <= outer[2] + 1 and inner[3] <= outer[3] + 1
+    )
+
+
+def test_restart_confirmation_stays_over_the_settings_while_they_scroll(page: Page) -> None:
+    """In a short window the settings overflow their dialog.  The
+    restart confirmation (a scrim and a box inside the dialog) covers
+    the dialog's visible area, and a wheel over it does not carry it
+    away: the settings under it do not scroll while it is open.  Once
+    it is dismissed they scroll again."""
+    page.set_viewport_size({"width": 1280, "height": 480})
+    page.evaluate(_RESTART_CONFIRM_JS, True)
+    before = page.evaluate(_RESTART_RECTS_JS)
+    assert before["covered"], before
+    assert _within(before["box"], before["panel"]), before
+    assert _within(before["scrim"], before["panel"]), before
+    page.mouse.move((before["panel"][0] + before["panel"][2]) / 2,
+                    (before["panel"][1] + before["panel"][3]) / 2)
+    page.mouse.wheel(0, 1500)
+    page.evaluate(_TWO_FRAMES_JS)
+    after = page.evaluate(_RESTART_RECTS_JS)
+    assert after == before, (before, after)
+    # Dismissed, the settings scroll under the wheel: Restart moves up.
+    page.evaluate(_RESTART_CONFIRM_JS, False)
+    page.mouse.wheel(0, 300)
+    page.wait_for_function(
+        "top => document.getElementById('cfg-server-reset-btn')"
+        ".getBoundingClientRect().top < top - 100",
+        arg=before["reset"][1],
+    )
+
+
+# The settings dialog open, its remote-password eye toggle
+# (setupSecretInput, a positioned button in the scrolling section)
+# scrolled up under the Close button; the point where the two overlap
+# and what the browser hits there.
+_CLOSE_OVER_PASSWORD_TOGGLE_JS = """
+() => {
+  document.getElementById('settings-panel').classList.add('open');
+  const close = document.getElementById('settings-panel-close');
+  const eye = document.getElementById('cfg-remote-password-toggle');
+  const section = document.querySelector('#settings-panel > .sidebar-section');
+  const c = close.getBoundingClientRect();
+  const before = eye.getBoundingClientRect();
+  section.scrollTop += (before.top + before.bottom - c.top - c.bottom) / 2;
+  const e = eye.getBoundingClientRect();
+  const left = Math.max(c.left, e.left), right = Math.min(c.right, e.right);
+  const top = Math.max(c.top, e.top), bottom = Math.min(c.bottom, e.bottom);
+  const x = (left + right) / 2, y = (top + bottom) / 2;
+  const hit = document.elementFromPoint(x, y);
+  return {
+    x, y, overlap: right - left > 2 && bottom - top > 2,
+    hitClose: close.contains(hit), hitEye: eye.contains(hit),
+    hit: hit && (hit.id || hit.tagName),
+  };
+}
+"""
+
+_SETTINGS_STATE_JS = """
+() => ({
+  open: document.getElementById('settings-panel').classList.contains('open'),
+  type: document.getElementById('cfg-remote-password').type,
+})
+"""
+
+
+@pytest.mark.parametrize("size", [(1280, 600), (375, 667)])
+def test_settings_close_button_stays_over_the_scrolled_password_toggle(
+    page: Page, size: tuple[int, int]
+) -> None:
+    """The settings scroll under the dialog's Close button.  The
+    remote-password eye toggle is a positioned button, so without a
+    stacking level on Close it would paint over Close once scrolled
+    under it, and the click meant to close the dialog would unmask the
+    password instead.  Close wins the hit, and clicking it closes the
+    dialog with the password still masked."""
+    page.set_viewport_size({"width": size[0], "height": size[1]})
+    got = page.evaluate(_CLOSE_OVER_PASSWORD_TOGGLE_JS)
+    assert got["overlap"], got
+    assert got["hitClose"] and not got["hitEye"], got
+    page.mouse.click(got["x"], got["y"])
+    assert page.evaluate(_SETTINGS_STATE_JS) == {"open": False, "type": "password"}

@@ -47,6 +47,10 @@ from kiss.server import agent_state
 from kiss.tests.conftest import find_free_port as find_free_port
 
 if TYPE_CHECKING:
+    import asyncio
+
+    from kiss.server.browser_tab import BrowserTabService
+    from kiss.server.file_index import FileIndexRegistry, FileView
     from kiss.server.server import AgentServer
 
 PersistenceState = tuple[Path, Any, Path]
@@ -56,6 +60,22 @@ PersistenceState = tuple[Path, Any, Path]
 # loopback peer without a password, so tests of the password handshake pass
 # these as ``additional_headers`` to ``websockets.connect``.
 FORWARDED_VISITOR = {"X-Forwarded-For": "203.0.113.9"}
+
+
+def ensure_loop(service: BrowserTabService) -> asyncio.AbstractEventLoop:
+    """Start *service*'s private loop thread as its first call would, and return the loop.
+
+    The service starts the loop lazily inside ``_run_threadsafe``; tests
+    that drive coroutines on the loop directly start it here.
+    """
+    with service._lock:
+        return service._ensure_loop_locked()
+
+
+def local_view(registry: FileIndexRegistry, work_dir: str) -> FileView | None:
+    """Return the local view of *work_dir*'s picker, or ``None`` while unindexed."""
+    picker = registry.picker_for(work_dir)
+    return None if picker is None else picker.local
 
 
 def no_verify_ssl() -> ssl.SSLContext:

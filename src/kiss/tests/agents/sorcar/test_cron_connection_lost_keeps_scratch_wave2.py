@@ -55,7 +55,7 @@ class _DropOnStopDaemon(_RecordingDaemon):
 
 def _run_job(
     daemon: _RecordingDaemon, monkeypatch: pytest.MonkeyPatch, name: str, prompt: str,
-    timeout: str = "",
+    timeout: str = "", in_chat: bool = False,
 ) -> dict:
     """Create the prompt job *name*, run it once against *daemon*; return its record."""
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
@@ -63,6 +63,7 @@ def _run_job(
     try:
         created = yaml.safe_load(cron_job(
             "create", name=name, prompt=prompt, schedule="every 1d", timeout=timeout,
+            in_chat=in_chat,
         ))["created"]
         jobs = load_jobs()
         for job in jobs:
@@ -95,6 +96,24 @@ def test_connection_lost_while_the_task_runs_keeps_the_scratch_directory(
     assert f"may still be running in {kept} (its scratch directory {kept} is kept)" in summary
     assert "the connection to the daemon failed while the" in summary
     assert "MAY STILL BE RUNNING" in summary
+
+
+def test_in_chat_job_connection_lost_while_the_task_runs_says_it_may_still_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``in_chat`` job's lost connection is recorded as a task that may still be running."""
+    monkeypatch.setenv("KISS_HOME", str(tmp_path))
+    stored = _run_job(
+        _RecordingDaemon(mode="drop"), monkeypatch, name="dropped-chat", prompt="say hi",
+        in_chat=True,
+    )
+
+    assert stored["last_status"] == "error"
+    summary = stored["last_summary"]
+    chat_dir = tmp_path / "cron" / "chats" / stored["id"]
+    assert summary.startswith("in-chat job lost its connection to the daemon")
+    assert f"MAY STILL BE RUNNING (and spending) in {chat_dir}" in summary
+    assert summary.endswith("The sorcar daemon closed the connection before the task finished")
 
 
 def test_connection_lost_while_cron_stops_the_timed_out_task_keeps_the_scratch_directory(

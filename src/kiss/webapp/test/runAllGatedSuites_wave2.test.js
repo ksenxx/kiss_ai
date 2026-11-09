@@ -35,12 +35,18 @@ function writeSuite(dir, name, log) {
   );
 }
 
-/** Write the gate a.coverage.js into `dir`: it runs `suites`, in order. */
+/**
+ * Write the gate a.coverage.js into `dir`: it runs `suites`, in order.
+ * Its comments name c.test.js, which it does not run: a suite named in
+ * a comment only must still be run by the runner itself.
+ */
 function writeGate(dir, suites) {
   fs.writeFileSync(
     path.join(dir, 'a.coverage.js'),
     [
       "'use strict';",
+      "// Compare with 'c.test.js', which this gate does not run.",
+      "/* Nor does it run 'c.test.js' from a block comment. */",
       "const path = require('path');",
       "const {execFileSync} = require('child_process');",
       `const SUITES = [${suites.map(s => `'${s}'`).join(', ')}];`,
@@ -81,5 +87,34 @@ function testGatedSuitesRunOnce() {
   console.log('ok - a suite a gate names runs through the gate only');
 }
 
+// A failing suite that a gate names only in a comment fails the run: the
+// runner must run it itself, not trust the gate with it.
+function testASuiteNamedInAGateCommentStillRunsAndFails() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runall-gated-'));
+  try {
+    const log = path.join(dir, 'runs.log');
+    fs.copyFileSync(RUNNER, path.join(dir, 'run-all.js'));
+    writeSuite(dir, 'a.test.js', log);
+    fs.writeFileSync(
+      path.join(dir, 'c.test.js'),
+      "throw new Error('THIS SUITE MUST FAIL');\n",
+    );
+    writeGate(dir, ['a.test.js']);
+    const res = spawnSync(process.execPath, [path.join(dir, 'run-all.js')], {
+      encoding: 'utf8',
+      timeout: 60000,
+      killSignal: 'SIGKILL',
+    });
+    const out = (res.stdout || '') + (res.stderr || '');
+    assert.notStrictEqual(res.status, 0, `the failing suite fails the run\n${out}`);
+    assert.match(out, /THIS SUITE MUST FAIL/, 'c.test.js ran');
+    assert.match(out, /\n1\/2 suites passed/, 'the gate and c.test.js');
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+  console.log('ok - a suite a gate only mentions in a comment is run');
+}
+
 testGatedSuitesRunOnce();
+testASuiteNamedInAGateCommentStillRunsAndFails();
 console.log('runAllGatedSuites_wave2: all tests passed');

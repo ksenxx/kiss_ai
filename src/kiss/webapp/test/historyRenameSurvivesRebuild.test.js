@@ -26,6 +26,7 @@ const {
   openChatsPage: makePage,
   chatHeader,
 } = require('./history_helpers');
+const {key} = require('./ui_antipattern_harness');
 
 /** Chat `chatId`'s panel in the Chats list, or null. */
 function group(win, chatId) {
@@ -36,10 +37,6 @@ function group(win, chatId) {
 
 function title(win, chatId) {
   return chatHeader(win, chatId).querySelector(':scope > .history-chat-title');
-}
-
-function key(win, el, k) {
-  el.dispatchEvent(new win.KeyboardEvent('keydown', {key: k, bubbles: true}));
 }
 
 async function testRenameBoxSurvivesChangedRows() {
@@ -143,6 +140,9 @@ async function testConcurrentRenameOverlayExpires() {
   sendHistory(win, posted, [
     makeRow({id: 'A', task_id: 1, chat_summary: 'Fix the login bug'}),
   ]);
+  // The rename itself arms the overlay's expiry (W8 F2), so the capture
+  // starts before it.
+  const timers = captureTimers(win);
   win.document.querySelector('#history-list .history-chat-rename').click();
   const input = title(win, 'A').querySelector('input');
   input.value = 'First surface title';
@@ -150,7 +150,6 @@ async function testConcurrentRenameOverlayExpires() {
   await tick();
   assert.strictEqual(title(win, 'A').textContent, 'First surface title');
   // The other surface's rename won: every refresh carries its title.
-  const timers = captureTimers(win);
   for (let i = 0; i < 2; i++) {
     send(win, {type: 'tasks_updated'});
     sendHistory(win, posted, [

@@ -503,21 +503,24 @@ def _close_quietly(ws: ClientConnection) -> None:
         pass
 
 
-def _wait_interruptible(seconds: float) -> None:
+def _wait_interruptible(seconds: float, cancel: threading.Event | None = None) -> None:
     """Sleep *seconds*, honouring the calling tool call's Stop on every wake.
 
     Waking every :data:`_TOOL_CALL_WAKE_SECONDS` to call
     :func:`tool_interrupt.raise_if_interrupted` keeps a reconnect wait
     as responsive to the ``run_agent`` panel's Stop button as the
-    event wait of :func:`run` is.
+    event wait of :func:`run` is.  A *cancel* event (an ``agent_job``
+    kill of the ``run_agent`` job thread, which is no tool call) ends
+    the sleep the moment it is set.
     """
+    waiter = cancel if cancel is not None else threading.Event()
     end = time.monotonic() + seconds
     while True:
         tool_interrupt.raise_if_interrupted()
         left = end - time.monotonic()
-        if left <= 0:
+        if left <= 0 or waiter.is_set():
             return
-        time.sleep(min(left, _TOOL_CALL_WAKE_SECONDS))
+        waiter.wait(min(left, _TOOL_CALL_WAKE_SECONDS))
 
 
 def _read_frames(ws: ClientConnection) -> queue.SimpleQueue[str | bytes | BaseException]:
@@ -682,7 +685,11 @@ class _Inbox:
         return None if whole is None else whole[0]
 
     def reconnect(
-        self, window: float, seen: _Observed, deadline: float | None = None,
+        self,
+        window: float,
+        seen: _Observed,
+        deadline: float | None = None,
+        cancel: threading.Event | None = None,
     ) -> None:
         """Replace the lost connection and have the daemon replay the run's tab.
 
@@ -717,7 +724,10 @@ class _Inbox:
         plain ``TimeoutError``, or the ``stop_on_timeout`` stop, which
         :func:`_stop_and_await_confirmation` sends after a reconnect of
         its own (no deadline, the same window; the window is never
-        restarted by any of this).
+        restarted by any of this).  A *cancel* set meanwhile ends the
+        attempts the same way: :func:`run`'s loop then sends its stop
+        through that reconnect of the stop path instead of waiting out
+        a backoff first.
 
         Args:
             window: Seconds the window opened by the first drop lasts
@@ -727,6 +737,7 @@ class _Inbox:
                 is incremented on success.
             deadline: :func:`run`'s absolute ``time.monotonic()``
                 deadline, or ``None`` for none.
+            cancel: :func:`run`'s *cancel* event, or ``None``.
 
         Raises:
             ConnectionLostError: When no connection was established
@@ -746,6 +757,7 @@ class _Inbox:
                 self._give_up_at,
                 "the re-established connection dropped before the daemon replayed the run",
                 deadline,
+                cancel,
             )
         give_up_at = self._give_up_at
         replay_id = uuid.uuid4().hex
@@ -766,9 +778,11 @@ class _Inbox:
             "replayId": replay_id,
         }
         while True:
-            if deadline is not None and time.monotonic() >= deadline:
-                # The caller's timeout wins: no replay is due any more
-                # (the connection one was due on is gone).
+            if (deadline is not None and time.monotonic() >= deadline) or (
+                cancel is not None and cancel.is_set()
+            ):
+                # The caller's timeout or cancel wins: no replay is due
+                # any more (the connection one was due on is gone).
                 self.replay_id = ""
                 return
             self._attempts += 1
@@ -784,7 +798,7 @@ class _Inbox:
                 ws = _connect_and_resume(self._endpoint_file, resume, open_timeout=open_timeout)
                 break
             except ConnectionError as exc:
-                self._pause_or_give_up(give_up_at, str(exc), deadline)
+                self._pause_or_give_up(give_up_at, str(exc), deadline, cancel)
         self.ws = ws
         self._frames = _read_frames(ws)
         self._joiner = local_endpoint.FrameJoiner()
@@ -798,7 +812,11 @@ class _Inbox:
         )
 
     def _pause_or_give_up(
-        self, give_up_at: float, why: str, deadline: float | None = None,
+        self,
+        give_up_at: float,
+        why: str,
+        deadline: float | None = None,
+        cancel: threading.Event | None = None,
     ) -> None:
         """Wait the window's current backoff before its next attempt, or give up.
 
@@ -807,6 +825,8 @@ class _Inbox:
             why: What ended the last attempt, for the log and the error.
             deadline: The caller's own deadline (see :meth:`reconnect`),
                 which caps the pause; ``None`` for none.
+            cancel: The caller's *cancel* event, which ends the pause
+                (see :meth:`reconnect`); ``None`` for none.
 
         Raises:
             ConnectionLostError: When the window is spent.
@@ -820,7 +840,7 @@ class _Inbox:
         logger.info(
             "reconnect attempt %d failed (%s); next try in %.1fs", self._attempts, why, pause,
         )
-        _wait_interruptible(pause)
+        _wait_interruptible(pause, cancel)
         self._backoff = min(self._backoff * 2, _RECONNECT_MAX_BACKOFF_SECONDS)
 
     def _expired(self, why: str) -> ConnectionLostError:
@@ -1064,6 +1084,7 @@ def run_command(
     use_web_tools: bool | None = None,
     auto_classify: bool | None = None,
     use_memory: bool | None = None,
+    compaction: bool | None = None,
     is_parallel: bool = True,
     add_to_system_prompt: str = "",
     add_to_prompt: str = "",
@@ -1077,6 +1098,7 @@ def run_command(
     machine: str = "",
     sea_command: str = "",
     attachments: list[dict[str, str]] | None = None,
+    budget_cap: float | None = None,
 ) -> dict[str, Any]:
     """Encode a run's arguments as the ``run`` command :func:`run` sends the daemon.
 
@@ -1093,6 +1115,12 @@ def run_command(
         sea_path: The resolved SEA file (``""`` for none).
         timeout: The seconds recorded as the run's ``timeout`` setting
             (``None`` for the daemon default).
+        budget_cap: The bound a dispatch puts on the run's budget, the
+            caller's unreserved remainder and no more than the job's
+            reservation (``agent_dispatch.budget_cap_of``; wire field
+            ``budgetCap``, set only when not ``None``); the daemon
+            lowers the effective ``maxBudget`` to it after the SEA's
+            settings apply.
         machine: The registered remote machine the run executes on
             (wire field ``machine``, set only when non-empty).
         sea_command: The registered command whose SEA the executing
@@ -1114,6 +1142,7 @@ def run_command(
         "use_web_tools": use_web_tools,
         "auto_classify": auto_classify,
         "use_memory": use_memory,
+        "compaction": compaction,
         "tool_profile": tool_profile,
         "docker_image": docker_image,
     }
@@ -1146,6 +1175,8 @@ def run_command(
         cmd["seaCommand"] = sea_command
     if attachments:
         cmd["attachments"] = list(attachments)
+    if budget_cap is not None:
+        cmd["budgetCap"] = budget_cap
     return cmd
 
 
@@ -1168,6 +1199,7 @@ def run(
     use_web_tools: bool | None = None,
     auto_classify: bool | None = None,
     use_memory: bool | None = None,
+    compaction: bool | None = None,
     is_parallel: bool = True,
     add_to_system_prompt: str = "",
     add_to_prompt: str = "",
@@ -1186,6 +1218,7 @@ def run(
     machine: str = "",
     sea_command: str = "",
     attachments: list[dict[str, str]] | None = None,
+    budget_cap: float | None = None,
     reconnect_seconds: float = 300.0,
 ) -> TaskResult:
     """Run *prompt* as a task on the local Sorcar daemon and block until done.
@@ -1420,6 +1453,15 @@ def run(
             ``none`` tool profile), a Docker run, or a
             caller-supplied ``model_config["system_instruction"]``
             stays memory-free even with ``True``.
+        compaction: Per-task context-compaction override, mapped to
+            the agent's ``compaction`` option
+            (:meth:`kiss.agents.sorcar.sorcar_agent.SorcarAgent.run`).
+            ``False`` keeps the run (and the sub-agents that inherit
+            it) from replacing old tool outputs in its context with
+            stubs; ``True`` or ``None`` (the default) lets it compact
+            while the daemon's global Compaction setting (the settings
+            panel's "Compaction" checkbox, persisted as ``compaction``)
+            is on.
         is_parallel: Whether the agent gets the ``run_parallel`` tool
             (the user's parallel-mode toggle).  Defaults to True.
         add_to_system_prompt: Extra text appended to the run's
@@ -1571,6 +1613,8 @@ def run(
         attachments: Files sent with the prompt (an image or PDF the
             user attached), each ``{"mimeType", "data"}`` with base64
             *data* — the webapp's ``submit`` wire shape.
+        budget_cap: The bound a ``run_agent`` dispatch puts on the
+            task's budget (:func:`run_command`); ``None`` for none.
         reconnect_seconds: How long, in seconds, to keep reconnecting
             when the daemon connection closes while the task runs
             (after its ``status running=true``, with no stop pending).
@@ -1716,6 +1760,7 @@ def run(
             use_web_tools=use_web_tools,
             auto_classify=auto_classify,
             use_memory=use_memory,
+            compaction=compaction,
             is_parallel=is_parallel,
             add_to_system_prompt=add_to_system_prompt,
             add_to_prompt=add_to_prompt,
@@ -1730,6 +1775,7 @@ def run(
             machine=machine,
             sea_command=sea_command,
             attachments=attachments,
+            budget_cap=budget_cap,
         )
         try:
             local_endpoint.send(inbox.ws, json.dumps(cmd))
@@ -1851,8 +1897,10 @@ def run(
                 # connection failure is surfaced as every other one.
                 # The wait's own deadline bounds the attempts: past it,
                 # the loop goes on without a connection and the
-                # ``remaining <= 0`` branch above decides, as usual.
-                inbox.reconnect(reconnect_seconds, seen, deadline)
+                # ``remaining <= 0`` branch above decides, as usual.  So
+                # does a cancel: the cancel branch above sends the stop
+                # through the stop path's own reconnect.
+                inbox.reconnect(reconnect_seconds, seen, deadline, cancel)
                 continue
             if not isinstance(event, dict):
                 continue

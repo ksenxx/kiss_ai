@@ -90,6 +90,9 @@ def test_parse_int() -> None:
     assert _parse_int(None) is None
     assert _parse_int("abc") is None
     assert _parse_int([1]) is None
+    # Valid JSON a client may send: ``1e400`` parses as infinity.
+    assert _parse_int(json.loads("1e400")) is None
+    assert _parse_int(json.loads("1" + "0" * 400)) == 10**400
 
 
 

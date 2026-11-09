@@ -366,14 +366,10 @@ body {
   border-color: var(--error);
 }
 
-/* Text field of a prompt toast (promptText), aligned with the message text. */
+/* Text field of a prompt toast (promptText), aligned with the message
+   text; the field itself is an .explorer-input. */
 .kiss-notification-field {
   padding: 0 var(--space-2-5) var(--space-2) var(--space-10);
-}
-
-.kiss-notification-input {
-  width: 100%;
-  height: 24px;
 }
 
 .kiss-notification-action-icon {
@@ -543,15 +539,13 @@ body.content-tab-open #chat-header { display: none; }
 #content-tab-bar,
 #pane-resizer { display: none; }
 
-/* The strip: slightly shorter tabs on the chat background. */
+/* The strip: smaller type on the chat background. */
 #tab-bar {
   background: var(--bg);
   padding-left: var(--space-3);
 }
 
 #tab-bar .chat-tab {
-  padding-top: var(--space-1);
-  padding-bottom: var(--space-1);
   font-size: var(--fs-sm);
 }
 
@@ -586,8 +580,6 @@ body.content-tab-open #chat-header { display: none; }
 }
 
 .config-label textarea { resize: vertical; }
-
-.config-label input[readonly] { color: var(--dim); }
 
 .config-label select { cursor: pointer; }
 
@@ -1530,12 +1522,16 @@ body.ask-answering #input-container {
    textarea's: browsers reset a textarea's letter-spacing to normal and
    wrap it with overflow-wrap: break-word, while the overlay would
    inherit the body's -0.08px and start the ghost early, over the last
-   typed characters. */
+   typed characters.  The right padding (the same as #task-input's)
+   keeps the text clear of the 24px clear button over the box's right
+   end, else a click on the last characters of a full line clears the
+   draft instead of moving the caret. */
 #ghost-overlay {
   position: absolute; top: 0; left: 0; right: 0;
   pointer-events: none; white-space: pre-wrap; overflow-wrap: break-word;
   font-family: inherit; font-size: var(--fs-base); line-height: 1.5; letter-spacing: normal;
-  color: transparent; padding: var(--space-0-5) var(--space-4) var(--space-0-5) var(--space-0-5); min-height: 4.5em;
+  color: transparent; min-height: 4.5em;
+  padding: var(--space-0-5) calc(var(--space-6) + var(--space-1)) var(--space-0-5) var(--space-0-5);
 }
 
 #ghost-overlay .ghost-text {
@@ -1647,21 +1643,29 @@ body.content-tab-open #send-btn { display: none !important; }
   width: 100%; background: transparent; border: none; color: var(--fg);
   font-size: var(--fs-base); line-height: 1.5;
   resize: none; outline: none;
-  padding: var(--space-0-5) var(--space-4) var(--space-0-5) var(--space-0-5);
+  padding: var(--space-0-5) calc(var(--space-6) + var(--space-1)) var(--space-0-5) var(--space-0-5);
 }
 
 /* 24x24 is the WCAG 2.2 minimum pointer target; the glyph keeps its
    size, the padding grows the hit area so a near miss does not land in
-   the input and move the caret instead of clearing. */
-#input-clear-btn {
-  position: absolute; top: 0; right: 0; z-index: var(--z-float-top);
+   the input and move the caret instead of clearing.  The same control
+   clears the input and the sidebar's search boxes; only its anchor in
+   the box differs. */
+#input-clear-btn,
+.search-clear-btn {
+  position: absolute; z-index: var(--z-float-top);
   background: none; border: none; color: color-mix(in srgb, var(--fg) 50%, transparent);
   font-size: var(--fs-xl); line-height: 1; cursor: pointer;
   width: 24px; height: 24px; border-radius: var(--radius-sm); padding: 3px;
   display: flex; align-items: center; justify-content: center;
   transition: color var(--dur-base), background var(--dur-base);
 }
-#input-clear-btn:hover { color: color-mix(in srgb, var(--fg) 74%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
+#input-clear-btn { top: 0; right: 0; }
+
+.search-clear-btn { top: 50%; right: 5px; transform: translateY(-50%); }
+
+#input-clear-btn:hover,
+.search-clear-btn:hover { color: color-mix(in srgb, var(--fg) 74%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 
 #input-actions { display: flex; gap: var(--space-2); align-items: center; flex-shrink: 0; }
 
@@ -1674,11 +1678,11 @@ body.content-tab-open #send-btn { display: none !important; }
 #send-btn:disabled { cursor: not-allowed; }
 
 #stop-btn {
-  border-radius: var(--radius-round); cursor: pointer; transition: background var(--dur-base), border-color var(--dur-base); display: none;
+  border-radius: var(--radius-round); cursor: pointer; transition: background var(--dur-base); display: none;
   align-items: center; justify-content: center; flex-shrink: 0;
 }
 #stop-btn svg { width: 15px; height: 15px; }
-#stop-btn:hover { background: color-mix(in srgb, var(--red) 20%, transparent); border-color: color-mix(in srgb, var(--red) 35%, transparent); }
+#stop-btn:hover { background: color-mix(in srgb, var(--red) 20%, transparent); }
 
 /* Stop requested, agent not there yet: pulse so a pending stop cannot be
    mistaken for a click the daemon never received. */
@@ -1797,17 +1801,6 @@ body.content-tab-open #send-btn { display: none !important; }
 #model-dropdown.open { display: flex; }
 
 .search-wrap { position: relative; }
-
-/* 24x24 hit target (WCAG 2.2 minimum), same glyph size as before. */
-.search-clear-btn {
-  position: absolute; top: 50%; right: 5px; transform: translateY(-50%); z-index: var(--z-float-top);
-  background: none; border: none; color: color-mix(in srgb, var(--fg) 50%, transparent);
-  font-size: var(--fs-xl); line-height: 1; cursor: pointer;
-  width: 24px; height: 24px; border-radius: var(--radius-sm); padding: 3px;
-  display: flex; align-items: center; justify-content: center;
-  transition: color var(--dur-base), background var(--dur-base);
-}
-.search-clear-btn:hover { color: color-mix(in srgb, var(--fg) 74%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 
 #model-search {
   width: 100%; background: transparent; border: none;
@@ -2297,8 +2290,10 @@ body.meta-section-resizing {
   gap: var(--space-1);
 }
 
-.sidebar-inline-form-save { color: var(--accent); }
-.sidebar-inline-form-save:hover { background: color-mix(in srgb, var(--accent) 12%, var(--surface2)); border-color: var(--accent); }
+/* The form's Save: the delete confirmation's button shape and hover
+   background (main.js gives it both classes), not its red. */
+.sidebar-confirm-yes.sidebar-inline-form-save { color: var(--accent); }
+.sidebar-confirm-yes.sidebar-inline-form-save:hover:not(:disabled) { border-color: var(--accent); }
 
 .meta-info-status.is-error { color: var(--status-fail); }
 
@@ -2491,10 +2486,17 @@ button.app-row-main .app-state { color: var(--accent); }
 
 #meta-spend-graph:hover .spend-nav { opacity: 0.9; }
 
-.spend-nav:hover { color: var(--fg); opacity: 1; }
+/* A keyboard focus shows the pager too: a focused control the user
+   cannot see is no control. */
+.spend-nav:hover,
+.spend-nav:focus-visible { color: var(--fg); opacity: 1; }
 
+/* The pager at the end the heatmap has reached: out of the way of
+   the pointer AND of the Tab order (visibility, which opacity alone
+   does not take it out of), while its box keeps the layout. */
 .spend-nav.nav-hidden {
   opacity: 0 !important;
+  visibility: hidden;
   pointer-events: none;
 }
 
@@ -2621,7 +2623,11 @@ button.app-row-main .app-state { color: var(--accent); }
 #settings-panel.for-machine #cfg-update-models-btn { display: none; }
 
 /* The settings panel: a centered dialog. No entry animation — it is
-   display-toggled, never slid in from an edge. */
+   display-toggled, never slid in from an edge.  The panel itself does
+   not scroll: its section does (below), so the restart confirmation
+   (#server-reset-confirm-modal, absolute over the panel) covers the
+   panel wherever the settings are scrolled to, instead of scrolling
+   away with them. */
 #settings-panel {
   position: fixed;
   left: 50%;
@@ -2638,7 +2644,7 @@ button.app-row-main .app-state { color: var(--accent); }
   box-shadow: var(--shadow-lg);
   z-index: var(--z-drawer);
   padding: var(--space-4);
-  overflow-y: auto;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
 
@@ -2672,8 +2678,10 @@ button.app-row-main .app-state { color: var(--accent); }
 
 #tricks-panel.open { transform: translateY(0); }
 
-/* The "x" of every side panel; the bottom sheet's button also stacks
-   above its own list pane. */
+/* The "x" of every side panel; the settings dialog's and the bottom
+   sheet's buttons also stack above their own scrolling panes (the
+   settings' positioned password toggles would otherwise paint over
+   Close once scrolled under it). */
 #sidebar-close,
 #settings-panel-close,
 #tricks-panel-close {
@@ -2681,6 +2689,7 @@ button.app-row-main .app-state { color: var(--accent); }
   color: color-mix(in srgb, var(--fg) 50%, transparent); font-size: var(--fs-2xl); cursor: pointer; padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm);
 }
 
+#settings-panel-close,
 #tricks-panel-close { z-index: var(--z-raised); }
 
 #sidebar-close:hover,
@@ -2726,11 +2735,9 @@ button.app-row-main .app-state { color: var(--accent); }
   white-space: nowrap;
 }
 
+/* A promptlet row is a .sidebar-item (main.js gives it both classes),
+   which lays it out; this adds the gap between its text and buttons. */
 .tricks-item {
-  padding: var(--space-2) var(--space-2-5);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  white-space: normal;
   word-break: break-word;
   gap: var(--space-1-5);
 }
@@ -2794,9 +2801,16 @@ button.app-row-main .app-state { color: var(--accent); }
   margin-top: var(--space-0-5);
 }
 
+/* The settings scroll in their section, which bleeds into the panel's
+   padding so the scrollport is the panel's inner box (the scrollbar at
+   its edge, the content under the panel's padding), as when the panel
+   scrolled; the padding pays the section's usual top margin back. */
 #settings-panel > .sidebar-section {
-  flex: 0 0 auto;
-  overflow: visible;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  margin: calc(-1 * var(--space-4));
+  padding: calc(var(--space-4) + var(--space-0-5)) var(--space-4) var(--space-4);
 }
 
 /* The history list spans the whole panel width so the chat panels
@@ -3450,9 +3464,9 @@ button.app-row-main .app-state { color: var(--accent); }
   cursor: pointer;
 }
 
-.folder-picker-select {
-  border-color: var(--accent) !important;
-  background: color-mix(in srgb, var(--accent) 25%, transparent) !important;
+.folder-picker-actions .folder-picker-select {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
 /* PDF / image viewer tabs (binary fileContent). */
@@ -4204,16 +4218,9 @@ body.remote-chat .running-item.history-active-task:hover {
 }
 
 /* The row's workspace line and, under it, its machine / max budget /
-   agent line. */
+   agent line and its ids line. */
 .running-item-workspace,
-.running-item-settings {
-  flex-basis: 100%;
-  font-size: var(--fs-sm);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
+.running-item-settings,
 .running-item-ids {
   flex-basis: 100%;
   font-size: var(--fs-sm);
@@ -4222,33 +4229,10 @@ body.remote-chat .running-item.history-active-task:hover {
   text-overflow: ellipsis;
 }
 
-.ids-copy-btn {
-  display: inline-flex;
-  align-items: center;
-  vertical-align: middle;
-  border: none;
-  background: none;
-  cursor: pointer;
-  padding: 0 var(--space-0-5);
-  margin: 0 0 0 var(--space-1);
-  border-radius: var(--radius-sm);
-  line-height: 1;
-  color: var(--fg);
-  opacity: 0.45;
-  transition: opacity var(--dur-base), background var(--dur-base), color var(--dur-base);
-}
-
 .ids-copy-btn svg {
   width: 10px;
   height: 10px;
 }
-
-.ids-copy-btn:hover {
-  opacity: 0.9;
-  background: color-mix(in srgb, var(--fg) 10%, transparent);
-}
-
-.ids-copy-btn.copied { opacity: 0.9; color: var(--status-ok); }
 
 .sidebar-item-actions {
   display: flex;
@@ -4263,12 +4247,21 @@ body.remote-chat .running-item.history-active-task:hover {
 .sidebar-item-copy,
 .sidebar-item-edit,
 .sidebar-item-collapse,
-.sidebar-item-favorite {
+.sidebar-item-favorite,
+.ids-copy-btn {
   flex-shrink: 0; border: none; cursor: pointer; padding: var(--space-0-5) 0; margin-left: var(--space-0-5);
   border-radius: var(--radius-sm); line-height: 1; display: flex; align-items: center;
   color: var(--fg); opacity: 0.45;
   background: none;
   transition: opacity var(--dur-base), background var(--dur-base), color var(--dur-base);
+}
+
+/* The ids line's copy buttons: the same buttons, inline in the text. */
+.ids-copy-btn {
+  display: inline-flex;
+  vertical-align: middle;
+  padding: 0 var(--space-0-5);
+  margin: 0 0 0 var(--space-1);
 }
 
 .sidebar-item-actions > .sidebar-item-copy,
@@ -4283,7 +4276,8 @@ body.remote-chat .running-item.history-active-task:hover {
 .sidebar-item-copy:hover,
 .sidebar-item-edit:hover,
 .sidebar-item-collapse:hover,
-.sidebar-item-favorite:hover { opacity: 0.9; background: color-mix(in srgb, var(--fg) 10%, transparent); }
+.sidebar-item-favorite:hover,
+.ids-copy-btn:hover { opacity: 0.9; background: color-mix(in srgb, var(--fg) 10%, transparent); }
 
 .sidebar-item-collapse svg { transition: transform var(--dur-base) var(--ease); }
 .running-item:not(.collapsed) .sidebar-item-collapse svg { transform: rotate(180deg); }
@@ -4324,7 +4318,8 @@ body.remote-chat .running-item.history-active-task:hover {
   margin-right: var(--space-0-5);
 }
 
-.sidebar-item-copy.copied { opacity: 0.9; color: var(--status-ok); }
+.sidebar-item-copy.copied,
+.ids-copy-btn.copied { opacity: 0.9; color: var(--status-ok); }
 
 .sidebar-item-favorite.favorited,
 .sidebar-item-favorite.favorited:hover { color: var(--favorite); opacity: 1; }
@@ -5090,8 +5085,14 @@ code { font-family: var(--font-mono); }
   white-space: nowrap;
 }
 
+/* An error is a sentence: it shrinks and wraps rather than pushing Save
+   and Reload out of the pane, which clips its overflow. */
 #content-tab-area .content-save-status.error {
+  flex-shrink: 1;
+  min-width: 0;
   color: var(--red);
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 #content-tab-area .content-save-btn {

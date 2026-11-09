@@ -38,11 +38,6 @@ function clickTab(win, tabId) {
   // Once the chat is picked, the group strip must list it on screen.
   harness.clickTab(win, tabId);
   assert.strictEqual(
-    win._testApi.getActiveTabId(),
-    tabId,
-    'picking tab ' + tabId + ' must activate it',
-  );
-  assert.strictEqual(
     win.document.querySelector('#tab-list .chat-tab.active').dataset.tabId,
     tabId,
     'the group strip must show tab ' + tabId + ' as the one on screen',

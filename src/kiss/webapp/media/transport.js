@@ -1,4 +1,4 @@
-/* global sessionStorage, WebSocket, PasswordCredential, prompt */
+/* global sessionStorage, WebSocket, PasswordCredential, prompt, AbortController */
 // WebSocket transport of the webapp: provides acquireTransport(), the
 // postMessage / getState / setState object media/main.js and
 // media/api.js talk to the daemon through.  Every frame sent through
@@ -252,6 +252,27 @@
   // frame posted after them): sent once, after a ``pong`` confirmed
   // the batch, and never part of a batch a reconnect re-sends.
   let _held = [];
+  // The frames a re-sent batch must never carry: the daemon cannot tell
+  // a re-sent one from a new one and would run the user's action again
+  // (a prompt, a scheduled job, a device login, a keystroke, an Explorer
+  // paste that names its copy afresh each time).  Posted while the
+  // daemon is unreachable (main.js holds prompts back once it hears of
+  // the drop, but a socket is CLOSING before ``onclose`` says so) such
+  // a frame waits in ``_held``, never in ``_pending``.
+  const _ONCE_ONLY = new Set([
+    'submit',
+    'appendUserMessage',
+    'userAnswer',
+    'newChat',
+    'cronAction',
+    'addTrick',
+    'startCodexLogin',
+    'openExternal',
+    'shareChat',
+    'browserInput',
+    'terminalInput',
+    'fsAction',
+  ]);
   try {
     if (_offlineShell) {
       _reloadOnFirstAuth =
@@ -289,14 +310,21 @@
   let _daemonCheckDelayMs = 0;
   const _DAEMON_RETRY_MIN_MS = 5000;
   const _DAEMON_RETRY_MAX_MS = 60000;
+  // A probe that gets no answer (a proxy holding the request while the
+  // socket stays up) is a lost probe too: past this deadline it is
+  // aborted, which fails it into the retry below.
+  const _DAEMON_PROBE_TIMEOUT_MS = 12000;
 
   function _checkDaemonInstance() {
     if (typeof fetch !== 'function' || !_authenticated) return;
     const sock = _ws;
+    const abort = new AbortController();
+    const deadline = setTimeout(() => abort.abort(), _DAEMON_PROBE_TIMEOUT_MS);
     let req;
     try {
-      req = fetch('/api/daemon', {cache: 'no-store'});
+      req = fetch('/api/daemon', {cache: 'no-store', signal: abort.signal});
     } catch (_e) {
+      _clearTimer(deadline);
       _retryDaemonCheck(sock);
       return;
     }
@@ -307,6 +335,7 @@
         return null;
       })
       .then(info => {
+        _clearTimer(deadline);
         if (sock !== _ws || !_authenticated) return;
         _daemonCheckDelayMs = 0;
         const instance =
@@ -319,13 +348,16 @@
         if (instance === _daemonInstance) return;
         _reloadForDaemon(instance);
       })
-      .catch(() => _retryDaemonCheck(sock));
+      .catch(() => {
+        _clearTimer(deadline);
+        _retryDaemonCheck(sock);
+      });
   }
 
   // Reload the page for the daemon process *instance*, once the batch
   // flushed on this connection (if any) has been confirmed.
   function _reloadForDaemon(instance) {
-    if (_inflight.length > 0) {
+    if (_inflight.length > 0 || _held.length > 0) {
       _pendingDaemonInstance = instance;
       return;
     }
@@ -786,9 +818,28 @@
   function _reopenPasswordPrompt() {
     _promptDeclined = false;
     _setOverlayAction(null, null);
-    _dispatchToApp({type: 'daemonStatus', connected: true});
+    _dispatchConnected();
     _promptForPassword();
     _reconnectNowIfNeeded();
+  }
+
+  // Tell main.js the daemon is reachable, naming the commands whose
+  // delivery is still owed (``unconfirmed``): the ones queued for the
+  // next flush, the flushed batch no ``pong`` has confirmed yet
+  // (re-sent on the next connection if this one dies first) and the
+  // frames held back behind it.  A reconnect settles the optimistic
+  // state main.js keeps for a command (a new tab's shield, see its
+  // ``pendingOpenTabs``) by the daemon's ``ready`` reply, unless the
+  // command is among these: the daemon has not answered it because it
+  // has not received it yet, and will.
+  function _dispatchConnected() {
+    _dispatchToApp({
+      type: 'daemonStatus',
+      connected: true,
+      unconfirmed: _pending
+        .concat(_inflight, _held)
+        .map(data => JSON.parse(data)),
+    });
   }
 
   window.acquireTransport = function () {
@@ -803,6 +854,8 @@
           _held.push(data);
         } else if (_ws && _ws.readyState === WebSocket.OPEN && _authenticated) {
           _sendFrame(data);
+        } else if (_ONCE_ONLY.has(msg && msg.type)) {
+          _held.push(data);
         } else {
           _pending.push(data);
         }
@@ -823,8 +876,8 @@
   // proves nothing about the batch flushed on it: the next connection
   // sends the batch again.  The frames held back behind it (never sent
   // yet) stay in ``_held`` until that re-sent batch is confirmed: a
-  // ``submit`` among them is not replayable, and a second lost
-  // ``pong`` must not send it twice.
+  // ``submit`` among them is not replayable (``_ONCE_ONLY``), and a
+  // second lost ``pong`` must not send it twice.
   function _requeueUnconfirmed() {
     if (_inflight.length === 0) return;
     _pending = _inflight.concat(_pending);
@@ -997,14 +1050,22 @@
           // that the server is reachable.  Nothing posted so far
           // matters — the overlay kept the app off screen, so the
           // queue holds only the boot commands the fresh page repeats.
+          // The guard is written first: a page that cannot record the
+          // reload (storage quota) keeps running its cached code, as a
+          // second cached load does, since the next load would find no
+          // guard and reload again, for as long as the page fetch fails.
           _reloadOnFirstAuth = false;
+          let guarded = false;
           try {
             sessionStorage.setItem(_OFFLINE_RELOADED_FLAG, '1');
+            guarded = true;
           } catch (_e) {}
-          try {
-            window.location.reload();
-          } catch (_e) {}
-          return;
+          if (guarded) {
+            try {
+              window.location.reload();
+            } catch (_e) {}
+            return;
+          }
         }
         // Recover from a server restart / network blip in place: the
         // page keeps its state and main.js, on the ``daemonStatus``
@@ -1055,13 +1116,13 @@
         // is held back behind the batch (see ``postMessage``) through
         // every reconnect until a ``pong`` confirms it: sent once,
         // after it, so a re-sent batch never overwrites a newer change
-        // and a ``submit`` posted meanwhile never runs twice.  main.js
-        // holds prompts back while the daemon is down, so a prompt
-        // rarely sits in the batch itself.
+        // and a ``submit`` posted meanwhile never runs twice.  A
+        // ``submit`` never sits in the batch itself (``_ONCE_ONLY``):
+        // the ``ping`` goes out for the held frames alone as well.
         const batch = _pending;
         _pending = [];
         for (let i = 0; i < batch.length; i++) _sendFrame(batch[i]);
-        if (batch.length > 0) {
+        if (batch.length > 0 || _held.length > 0) {
           _inflight = batch;
           _sendFrame(JSON.stringify({type: 'ping'}));
         }
@@ -1075,7 +1136,7 @@
         // (its ``daemonWasDown`` path), which is what resyncs the
         // page: it goes out after the batch above, so a queued change
         // is applied before the server replays state to this client.
-        _dispatchToApp({type: 'daemonStatus', connected: true});
+        _dispatchConnected();
         _checkDaemonInstance();
         return;
       }
@@ -1120,7 +1181,7 @@
           return;
         }
         _setOverlayAction(null, null);
-        _dispatchToApp({type: 'daemonStatus', connected: true});
+        _dispatchConnected();
         _promptForPassword();
         return;
       }

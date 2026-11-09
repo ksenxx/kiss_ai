@@ -102,7 +102,7 @@ def _finish_response(summary: str) -> dict[str, Any]:
                             "function": {
                                 "name": "finish",
                                 "arguments": json.dumps(
-                                    {"success": "true", "summary": summary},
+                                    {"success": "true", "summary_in_html": summary},
                                 ),
                             },
                         }

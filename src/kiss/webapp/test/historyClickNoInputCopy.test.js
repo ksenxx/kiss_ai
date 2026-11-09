@@ -27,6 +27,7 @@ const {
   historyRows,
   openChatsPanel: openSidebar,
   answerHistory: sendHistory,
+  chatTabs,
 } = require('./history_helpers');
 
 function makePage() {
@@ -47,14 +48,6 @@ function input(win) {
 function taskPanelText(win) {
   const text = win.document.querySelector('#output .task-panel-text');
   return text ? text.textContent : '';
-}
-
-// The open chat tabs (no row renders them any more: the chat on
-// screen is the one picked in the Chats panel, the others are hidden).
-function chatTabs(win) {
-  return win._testApi
-    .openTabs()
-    .filter(t => !t.isSubagentTab && !t.isContentTab);
 }
 
 /** The active tab's label: it names the task the user is looking at. */

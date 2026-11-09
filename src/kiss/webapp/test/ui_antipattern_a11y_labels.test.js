@@ -73,11 +73,13 @@ test('every data-tooltip-only button carries a matching aria-label', () => {
   ]) {
     const el = doc.getElementById(id);
     assert.ok(el, `#${id} must exist`);
-    assert.strictEqual(
-      el.getAttribute('aria-label'),
-      el.getAttribute('data-tooltip'),
-      `#${id} aria-label must equal its data-tooltip`,
-    );
+    // Both must be there and say something: two missing attributes are
+    // "equal" too, and would certify an unnamed icon button.
+    const name = (el.getAttribute('aria-label') || '').trim();
+    const tip = (el.getAttribute('data-tooltip') || '').trim();
+    assert.ok(name, `#${id} must carry a non-empty aria-label`);
+    assert.ok(tip, `#${id} must carry a non-empty data-tooltip`);
+    assert.strictEqual(name, tip, `#${id} aria-label must equal its data-tooltip`);
   }
   assert.strictEqual(label('autocommit-btn'), 'Git commit');
 });

@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 from kiss.agents.seas.base.base_sea import BaseSea
-from kiss.agents.sorcar._concurrency import _race_delay, locked_call
 from kiss.agents.sorcar.channel_workspace import (
     WORKSPACE_WAIT_TIMEOUT_SECONDS,
     enter_workspace,
@@ -71,6 +70,7 @@ from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, canonical_too
 from kiss.agents.sorcar.task_classifier import classification_enabled
 from kiss.core import tool_interrupt
 from kiss.core.llm_reply import LLMReply
+from kiss.core.locked import _race_delay, locked_call
 from kiss.core.models.model import Attachment, framework_flags_over
 from kiss.core.models.model_info import (
     custom_model_config,
@@ -1186,7 +1186,9 @@ class _TaskRunnerMixin:
         # not from the SEA run this turned into.
         submitted_cmd = dict(cmd)
         state: AgentState | None = None
-        client_task_id = ""
+        # The client's run token is a client field the scripts never
+        # rewrite.
+        client_task_id = _client_task_id_of(cmd)
         try:
             if cmd.pop("_pre_cancelled", False):
                 # ``_cmd_run`` observed an accepted stop / shutdown
@@ -1195,19 +1197,30 @@ class _TaskRunnerMixin:
                 # runs on the dispatch thread purely to route the run
                 # through the normal cancellation handlers below — no
                 # user setup (SEA getters) may execute.
-                client_task_id = _client_task_id_of(cmd)
                 raise KeyboardInterrupt("run cancelled before start")
+            # The run's start status goes out BEFORE the agent-script
+            # overrides below: they are untrusted user code of unbounded
+            # duration, and the worker thread is already installed (the
+            # chat is busy), so every surface must show the tab running
+            # from here on — the tab header's spinner reads nothing but
+            # this event.
+            status_start: dict[str, Any] = {
+                "type": "status",
+                "running": True,
+                "tabId": tab_id,
+                "startTs": start_ms,
+            }
+            if client_task_id:
+                status_start["taskId"] = client_task_id
+            self.printer.broadcast(status_start)
             # Agent-script overrides (wire field ``seaPath``) rewrite the
             # run command's parameter fields, so they run FIRST — before
             # any field is read, including the ``chatId`` that
             # ``_resolve_run_state`` below consumes.  The script is
             # untrusted user code, so it executes here on the task's worker
-            # thread, never on the dispatch loop.  A
-            # broken script must still fail the task with the
-            # status-running → result → status-end guarantees of the try
-            # below, so the raise is deferred until after the start status.
-            sea_error: SeaError | None = None
-            overridden_fields: set[str] = set()
+            # thread, never on the dispatch loop.  A broken script fails
+            # the task through the handler below, with the start status
+            # already out: result, then the end status.
             # Decided on the task text as SUBMITTED: a cron prompt job
             # carries its unattended preamble there, and the SEA a
             # ``/xxx`` prompt turns into may replace the text (the
@@ -1219,11 +1232,7 @@ class _TaskRunnerMixin:
                 str(cmd.get("prompt", "")) + str(cmd.get("appendToPrompt") or "")
             )
             cmd["cronJob"] = bool(cmd.get("cronJob")) or cmd["_unattended"]
-            try:
-                overridden_fields = self._apply_sea(cmd)
-            except SeaError as exc:
-                sea_error = exc
-            client_task_id = _client_task_id_of(cmd)
+            overridden_fields = self._apply_sea(cmd)
             # Capture the state OBJECT up front: the printer bridge re-keys
             # it to the persisted task id mid-run, so a key lookup in the
             # finally below would miss and skip the end-of-run cleanup.
@@ -1292,17 +1301,6 @@ class _TaskRunnerMixin:
                     # That ``clear`` wipes the transcript again, so the
                     # run's notice (dropped attachments) must follow it.
                     self._broadcast_run_notice(cmd, tab_id)
-            status_start: dict[str, Any] = {
-                "type": "status",
-                "running": True,
-                "tabId": tab_id,
-                "startTs": start_ms,
-            }
-            if client_task_id:
-                status_start["taskId"] = client_task_id
-            self.printer.broadcast(status_start)
-            if sea_error is not None:
-                raise sea_error
             self._run_task_inner(cmd)
         except BaseException as exc:
             if state is None:
@@ -1541,11 +1539,9 @@ class _TaskRunnerMixin:
         Args:
             tab_id: The tab whose picker should be restored.
         """
-        self.printer.restore_model_pick(self._user_model_for_tab(tab_id), tab_id)
-
-    def _user_model_for_tab(self, tab_id: str) -> str:
-        """Under ``_state_lock``: *tab_id*'s own pick, else the last saved or default model."""
-        return self._tab_models.get(tab_id, "") or (_load_last_model() or self._default_model)
+        # The tab's own pick, else the last saved model, else the default.
+        model = self._tab_models.get(tab_id, "") or (_load_last_model() or self._default_model)
+        self.printer.restore_model_pick(model, tab_id)
 
     def _broadcast_status_end_to_viewers(
         self,
@@ -2222,6 +2218,15 @@ class _TaskRunnerMixin:
             # ``useWebTools`` no config fallback is read here.
             _raw_memory = cmd.get("useMemory")
             _agent_memory = _raw_memory if isinstance(_raw_memory, bool) else None
+            # Per-run context compaction: the ``compaction`` wire field
+            # (``compaction`` on ``kiss.server.sorcar.run``, a SEA's
+            # ``compaction`` setting, a ``run_agent`` option).  Only an
+            # explicit ``False`` turns it off: absent or malformed is
+            # the agent's default (on), and the daemon's global
+            # Compaction setting (``DEFAULT_CONFIG.tool_output_compaction``,
+            # mirrored from the persisted ``compaction`` key) is read by
+            # the agent itself at every step.
+            _agent_compaction = cmd.get("compaction") is not False
             # Tool profile (``run(tool_profile=...)`` / an agent
             # script's ``tool_profile()``): absent or malformed means
             # the agent's usual choice.  An unknown name is rejected
@@ -2337,6 +2342,7 @@ class _TaskRunnerMixin:
                         web_tools=(_agent_web if _agent_web is not None else _cfg_web),
                         live_browser=self.browser_tabs,
                         use_memory=_agent_memory,
+                        compaction=_agent_compaction,
                         model_config=_effective_config,
                         tools_hook=_tools_hook,
                         append_basic_tools=_append_basic_tools,
@@ -2516,19 +2522,6 @@ class _TaskRunnerMixin:
                         queued_followups = [t + append_to_prompt for t in queued_followups]
                     subtasks.extend(queued_followups)
                 if subtask_index < len(subtasks) - 1:
-                    if task_history_id is not None and parent_task_id:
-                        # A multi-``<task>`` dispatch allocates one
-                        # child row (and broadcasts one ``new_tab``)
-                        # per subtask: complete each intermediate
-                        # row's sub-agent tab as its subtask ends —
-                        # the end-of-run signal below covers only
-                        # the LAST row.
-                        self._broadcast_dispatch_subagent_done(
-                            task_history_id,
-                            "",
-                            model,
-                            parent_tab_id,
-                        )
                     self._persist_subtask_row(
                         state,
                         task_id=task_history_id,
@@ -2538,6 +2531,29 @@ class _TaskRunnerMixin:
                         sub_start_ms=sub_start_ms,
                         end_event=task_end_event,
                     )
+                    if task_history_id is not None and parent_task_id:
+                        # A multi-``<task>`` dispatch allocates one
+                        # child row (and broadcasts one ``new_tab``)
+                        # per subtask: complete each intermediate
+                        # row's sub-agent tab as its subtask ends —
+                        # the end-of-run signal below covers only
+                        # the LAST row.  Persisted and re-keyed off
+                        # the row FIRST, as the last row is signalled
+                        # only once its thread slot is released
+                        # (C3-F1): the registry reported the finished
+                        # row live until the NEXT row re-keyed the
+                        # state, so a parent replay landing after the
+                        # signal reopened the row as running and
+                        # nothing closed it again (A20-1).  The next
+                        # row re-keys the state once more
+                        # (``_register_agent_task`` finds it by agent).
+                        agent_state.rekey(state, uuid.uuid4().hex)
+                        self._broadcast_dispatch_subagent_done(
+                            task_history_id,
+                            "",
+                            model,
+                            parent_tab_id,
+                        )
                     # The row is final: a stop (or any raise) before
                     # the next subtask's ``finally`` re-resolves the
                     # id must find no row to re-persist as stopped,
@@ -2852,7 +2868,7 @@ class _TaskRunnerMixin:
         model: str,
         work_dir: str,
         sub_start_ms: int,
-        end_event: dict[str, Any] | None = None,
+        end_event: dict[str, Any],
         end_ms: int | None = None,
         cleanup: bool = True,
     ) -> None:
@@ -2890,8 +2906,7 @@ class _TaskRunnerMixin:
             model: Model name used for the task.
             work_dir: Working directory the task ran from.
             sub_start_ms: The subtask's start timestamp (ms epoch).
-            end_event: The chat end event to append; defaults to
-                ``{"type": "task_done"}``.  Its ``success`` key, when
+            end_event: The chat end event to append.  Its ``success`` key, when
                 the agent's result carried one, is the verdict the
                 row stores (``_save_task_result``), so the history
                 sidebar shows a ``finish(success=False)`` run as
@@ -2905,8 +2920,6 @@ class _TaskRunnerMixin:
         if task_id is None:
             return
         try:
-            if end_event is None:
-                end_event = {"type": "task_done"}
             _append_chat_event(end_event, task_id=task_id)
             verdict = end_event.get("success")
             _save_task_result(
@@ -2968,6 +2981,10 @@ class _TaskRunnerMixin:
         launcher tab receives the terminal ``result`` event addressed
         by task id — the printer records and persists it under that
         row (see :meth:`JsonPrinter._keep_tab_stamped_task_event`).
+        A viewer that opened the chat while ``description()`` ran is
+        subscribed to the run's provisional id, not to this row: it
+        gets a transient copy, as after a setup failure
+        (:meth:`_broadcast_setup_result`).
 
         Args:
             state: The launching tab's agent state; its ``chat_id`` is
@@ -3011,7 +3028,13 @@ class _TaskRunnerMixin:
             "taskId": str(task_id),
             "tabId": tab_id,
         }
-        self.printer.broadcast(result)
+        locked_call(
+            self.printer.delivery_lock,
+            self._broadcast_setup_result,
+            result,
+            state,
+            tab_id,
+        )
         _append_chat_event(
             {"type": "task_done"} if success else {"type": "task_error"},
             task_id=task_id,

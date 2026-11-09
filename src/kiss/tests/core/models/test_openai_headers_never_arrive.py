@@ -17,10 +17,22 @@ below talks to a real loopback HTTP server that reads the request and
 writes nothing at all until the test releases it.  Non-streaming calls
 keep the long client default: the control test proves a silent-but-slow
 non-streaming reply still succeeds past the stall timeout.
+
+Audit C4 (2026-11-08).  The per-request timeout bounds the silence
+between two reads only: a gateway that trickled one header byte at a
+time kept every read short of it, and until the header was complete
+there was no response for the stream watchdog to cut, so the turn hung
+for good and a Stop went unseen.  The stream is now opened under a
+request watchdog (a Stop-aware absolute deadline), whose cut is
+reported as the same stall or Stop; the client it cut is retired so the
+next turn of the same model instance sends through a fresh one.  The
+``_TricklingHeaderServer`` tests below talk to a raw loopback socket
+that never finishes its header.
 """
 
 from __future__ import annotations
 
+import socket
 import threading
 import time
 from collections.abc import Generator
@@ -47,6 +59,47 @@ _DEADLINE = 12.0
 _MODEL = "gpt-silent-gateway-under-test"
 
 
+def _responses_stream_chunks() -> list[bytes]:
+    """A complete Responses stream: one ``response.completed`` event."""
+    return [
+        responses_event(
+            "response.completed",
+            {
+                "response": {
+                    "id": "resp_late",
+                    "status": "completed",
+                    "output": [],
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 0,
+                        "total_tokens": 1,
+                    },
+                }
+            },
+        )
+    ]
+
+
+def _chat_stream_chunks() -> list[bytes]:
+    """A complete Chat Completions stream: one chunk carrying the text and the finish."""
+    return [
+        chat_chunk(
+            {
+                "id": "chatcmpl-late",
+                "object": "chat.completion.chunk",
+                "model": _MODEL,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": "late"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        )
+    ]
+
+
 class _SilentGateway:
     """Reads every request and answers nothing until ``release`` is set.
 
@@ -65,46 +118,9 @@ class _SilentGateway:
         if self.release_after is not None:
             threading.Timer(self.release_after, self.release.set).start()
         if request.path == "/v1/responses":
-            return Reply(
-                headers_gate=self.release,
-                sse_chunks=[
-                    responses_event(
-                        "response.completed",
-                        {
-                            "response": {
-                                "id": "resp_late",
-                                "status": "completed",
-                                "output": [],
-                                "usage": {
-                                    "input_tokens": 1,
-                                    "output_tokens": 0,
-                                    "total_tokens": 1,
-                                },
-                            }
-                        },
-                    )
-                ],
-            )
+            return Reply(headers_gate=self.release, sse_chunks=_responses_stream_chunks())
         if request.body.get("stream"):
-            return Reply(
-                headers_gate=self.release,
-                sse_chunks=[
-                    chat_chunk(
-                        {
-                            "id": "chatcmpl-late",
-                            "object": "chat.completion.chunk",
-                            "model": _MODEL,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"role": "assistant", "content": "late"},
-                                    "finish_reason": "stop",
-                                }
-                            ],
-                        }
-                    )
-                ],
-            )
+            return Reply(headers_gate=self.release, sse_chunks=_chat_stream_chunks())
         return Reply(
             headers_gate=self.release,
             json_body={
@@ -122,6 +138,118 @@ class _SilentGateway:
                 "usage": {"prompt_tokens": 1, "completion_tokens": 3, "total_tokens": 4},
             },
         )
+
+
+class _TricklingHeaderServer:
+    """A loopback endpoint that never finishes its response header.
+
+    While ``trickle`` is set, a request gets the status line and the
+    start of an ``X-Padding`` header at once, then one more header byte
+    every 20 ms until ``release`` fires or the client hangs up: every
+    read returns a byte, so the SDK's read timeout never fires, and until
+    the header is complete there is no response for the stream watchdog
+    to cut.  With ``trickle`` cleared a request gets a complete
+    one-event stream, so a test can check that the same model instance
+    recovers.  A connection that sends no request (the SDK's retry of a
+    cut request, shut down before its request is written) is dropped
+    unrecorded.
+    """
+
+    def __init__(self) -> None:
+        self.trickle = True
+        self.release = threading.Event()
+        self.started = threading.Event()
+        self.requests: list[str] = []
+        self._listener = socket.socket()
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self._listener.settimeout(0.05)  # ``accept`` notices the close within a slice
+        self._closed = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        """The ``/v1`` base URL to hand to the model under test."""
+        return f"http://127.0.0.1:{self._listener.getsockname()[1]}/v1"
+
+    def __enter__(self) -> _TricklingHeaderServer:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.release.set()
+        self._closed.set()
+        self._thread.join(5.0)
+        self._listener.close()
+
+    def _serve(self) -> None:
+        """Accept connections until the server exits; each is handled on its own thread."""
+        while not self._closed.is_set():
+            try:
+                connection, _ = self._listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            connection.settimeout(None)
+            threading.Thread(target=self._handle, args=(connection,), daemon=True).start()
+
+    def _handle(self, connection: socket.socket) -> None:
+        """Read one request's head, then trickle the header or send the complete stream."""
+        with connection:
+            connection.settimeout(_DEADLINE)
+            head = b""
+            try:
+                while b"\r\n\r\n" not in head:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        return
+                    head += chunk
+                path = head.split(b" ", 2)[1].decode()
+                self.requests.append(path)
+                if self.trickle:
+                    connection.sendall(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Padding: "
+                    )
+                    self.started.set()
+                    while not self.release.wait(0.02):
+                        connection.sendall(b"x")
+                    return
+                chunks = (
+                    _responses_stream_chunks()
+                    if path.endswith("/responses")
+                    else _chat_stream_chunks()
+                )
+                body = b"".join(chunks)
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                    b"Content-Length: %d\r\nConnection: close\r\n\r\n%s" % (len(body), body)
+                )
+            except OSError:
+                return
+
+
+def _assert_trickling_header_is_cut_then_the_instance_recovers(model: Any, stop: bool) -> None:
+    """Run one turn against a header that never completes, then a healthy turn.
+
+    Args:
+        model: The initialised model under test, pointed at a
+            :class:`_TricklingHeaderServer` (``model.base_url``).
+        stop: Whether the user presses Stop a quarter-stall into the
+            turn (expected: the Stop surfaces) or not (expected: the
+            stall surfaces at the stream-opening deadline).
+    """
+    with _TricklingHeaderServer() as server:
+        model.base_url = server.base_url
+        if stop:
+            _assert_stopped(*_run_with_deadline(lambda: _generate_then_stop(model)))
+        else:
+            _assert_stalled(*_run_with_deadline(model.generate))
+        assert server.started.is_set(), "the request never reached the server"
+        server.trickle = False
+        error, _elapsed = _run_with_deadline(model.generate)
+        assert error is None, f"the next turn of the same instance failed: {error!r}"
+        assert len(server.requests) == 2, server.requests
 
 
 @pytest.fixture
@@ -276,6 +404,19 @@ class TestChatCompletionsHeadersNeverArrive:
         _assert_stopped(*_run_with_deadline(lambda: _generate_then_stop(model)))
         assert server.requests, "the request never reached the server"
 
+    @pytest.mark.parametrize("stop", [False, True], ids=["timeout", "stop"])
+    def test_a_trickling_header_is_cut(self, stop: bool) -> None:
+        """A header that never completes is cut at the deadline, or at once on Stop."""
+        model = OpenAICompatibleModel(
+            _MODEL,
+            base_url="http://127.0.0.1:9/v1",
+            api_key="test-key",
+            model_config={"stream_stall_timeout": _STALL_TIMEOUT},
+            token_callback=lambda _t: None,
+        )
+        model.initialize("Say something.")
+        _assert_trickling_header_is_cut_then_the_instance_recovers(model, stop)
+
     def test_non_streaming_call_keeps_the_long_client_timeout(self) -> None:
         """Without a token callback the stall timeout must not apply.
 
@@ -333,3 +474,16 @@ class TestResponsesHeadersNeverArrive:
         model.initialize("Say something.")
         _assert_stopped(*_run_with_deadline(lambda: _generate_then_stop(model)))
         assert server.requests, "the request never reached the server"
+
+    @pytest.mark.parametrize("stop", [False, True], ids=["timeout", "stop"])
+    def test_a_trickling_header_is_cut(self, stop: bool) -> None:
+        """v2 shares the stream-opening deadline and the Stop with v1."""
+        model = OpenAICompatibleModel2(
+            _MODEL,
+            base_url="http://127.0.0.1:9/v1",
+            api_key="test-key",
+            model_config={"stream_stall_timeout": _STALL_TIMEOUT},
+            token_callback=lambda _t: None,
+        )
+        model.initialize("Say something.")
+        _assert_trickling_header_is_cut_then_the_instance_recovers(model, stop)

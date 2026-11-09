@@ -385,6 +385,31 @@ def test_function_to_openai_tool_schema() -> None:
     assert m._resolve_openai_tools_schema({"_sample_tool": _sample_tool}, None) == schema
 
 
+def test_bare_collection_annotations_are_advertised_as_object_and_array() -> None:
+    """``payload: dict`` and ``rows: list`` must not be advertised as strings.
+
+    A schema-following model sends what the schema says: a tool declared
+    with the bare collection types received JSON strings and failed on
+    ``payload.get(...)``; the parameterised ``dict[...]``/``list[...]``
+    forms were already right.
+    """
+
+    def accept(payload: dict, rows: list) -> str:
+        """Accept a record.
+
+        Args:
+            payload: The record.
+            rows: Its rows.
+        """
+        return f"{payload.get('id')}:{len(rows)}"
+
+    props = _ConcreteModel("m")._function_to_openai_tool(accept)["function"]["parameters"][
+        "properties"
+    ]
+    assert props["payload"] == {"type": "object", "description": "The record."}
+    assert props["rows"] == {"type": "array", "description": "Its rows."}
+
+
 def test_function_to_openai_tool_resolves_pep563_string_annotations() -> None:
     """PEP 563 string annotations resolve to real JSON-schema types.
 
@@ -441,8 +466,9 @@ def test_python_type_to_json_schema_variants() -> None:
     assert conv(float) == {"type": "number"}
     assert conv(int | None) == {"type": "integer"}
     assert conv(int | str) == {"anyOf": [{"type": "integer"}, {"type": "string"}]}
-    assert conv(list) == {"type": "string"}
+    assert conv(list) == {"type": "array"}
     assert conv(list[int]) == {"type": "array", "items": {"type": "integer"}}
+    assert conv(dict) == {"type": "object"}
     assert conv(dict[str, int]) == {"type": "object"}
     assert conv(object) == {"type": "string"}
 

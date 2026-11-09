@@ -43,6 +43,7 @@ from kiss.tests.server.parallel_agent_harness import (
     request_text,
     tool_call_response,
 )
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 
 class TestPendingWorktreeSurvivesNextRun(unittest.TestCase):
@@ -300,7 +301,7 @@ class TestPendingWorktreeSurvivesNextRun(unittest.TestCase):
 
     def test_changed_files_probe_ignores_unknown_tabs(self) -> None:
         """A tab with no state has no worktree changes to report."""
-        assert self.server._get_worktree_changed_files("no-such-tab") == []
+        assert worktree_changed_files(self.server, "no-such-tab") == []
 
 
 if __name__ == "__main__":

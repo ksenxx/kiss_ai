@@ -68,23 +68,53 @@ A task naming an existing paper for review, check or change is a revision round:
 what it asks, keep every rule below, rebuild the PDF after any edit. A review-only task
 ("do not edit") reports findings with line numbers and changes nothing.
 
+## The contribution
+
+Reviewers reject a paper they cannot state in one sentence. Before the outline, write in
+`./tmp/PLAN.md`: the research question; the central claim; the controlled comparison
+that tests it (same model, same budget, same hardware, with the component against
+without it, or against the closest system); what a reader learns that holds beyond our
+system. A system description, a case study or a deployment log is evidence, never the
+contribution. If the sources hold no comparison that tests the central claim, say so to
+the user before writing (a revision round runs the experiment it is allowed) and narrow
+the claim to what the evidence tests. Never write the paper around an untested claim and
+confess it in Limitations: ICLR 2027 reviewers gave a candid paper with released
+artifacts and no ablation 1 of 4 from all four reviewers.
+
 ## Contents, in this order
 
-1. Abstract, 150 to 250 words: problem, approach, main result with its number, what is
-   not claimed. No per-run numbers.
-2. Introduction: the problem; the state of the art and its limits; a short list of
-   contributions; a scope paragraph on what we do not claim.
+1. Abstract, 150 to 250 words: problem, approach, main result with its number, at most
+   one scope sentence. No per-run numbers, no caveat list, no comparison within noise.
+2. Introduction: the problem; the state of the art and its limits, the closest prior
+   work named with what differs; a short list of contributions, each a finding with
+   its evidence, none an artifact count; an overview figure on page 1 or 2; a scope
+   paragraph.
 3. Background or problem setting: workload, threat model, hardware, harness, whatever the
-   reader needs to interpret the numbers.
-4. The system (or method) as it is today, present tense: each mechanism and why. No
-   narrative of bugs fixed, audits, or how the system improved.
-5. Evaluation: setup, baselines with exact versions and the source of their numbers,
-   metrics, results tables, negative results, threats to validity.
-7. Related work: the well known work and the closest recent work (after the task's
+   reader needs to interpret the numbers; a motivating example (a figure when the
+   method transforms something) that shows what existing methods miss.
+4. The system (or method) as it is today, present tense: what each component is for,
+   then how it works and why this choice, the challenge that forced it, and what
+   distinguishes it from the conventional design (a generate-evaluate-refine loop, a
+   grid search). No narrative of bugs fixed, audits, or how the system improved.
+5. Evaluation: setup; baselines rerun by us on the same hardware, model and budget, with
+   exact versions (a published number is cited with its configuration and is never the
+   headline comparison); an ablation of each claimed component; runs or seeds with
+   spread and the test used; the full pool and the selection rule with denominators
+   (never only the cases we won); every automated judgment (an LLM judge, generated
+   labels, agent-reported findings) checked on a human-labeled subset with the
+   agreement number; the data characterized (task types, sizes, distribution); cost in
+   full; negative results; threats to validity. A case study is reported as an
+   experiment (setup, metric, baseline, result), not as a chronology of costs, hours,
+   crashes and steering.
+6. Related work: the well known work and the closest recent work (after the task's
    cutoff date). Read each paper before citing it; say in a sentence or two how it
-   relates to ours. No bare list.
-8. Limitations, Conclusion, Acknowledgments. The conclusion restates the main result with
-   its number and nothing the body does not support.
+   relates to ours. No bare list. The 3 to 5 closest systems get a direct comparison on
+   the dimensions that matter (what is searched or measured, how, how correctness is
+   checked, the setting); a table when there are more than three.
+7. Limitations, Conclusion, Acknowledgments. Each limitation names what was not run and
+   the claim it narrows; none concedes that the central claim is untested (run it or
+   cut the claim). The conclusion restates the main result with its number and nothing
+   the body does not support.
 
 ## Facts and numbers
 
@@ -93,11 +123,16 @@ what it asks, keep every rule below, rebuild the PDF after any edit. A review-on
   beside the macro.
 - One number, one configuration, across abstract, introduction, evaluation and
   conclusion. Two metrics reported together come from the same run.
-- Baseline numbers come from the baseline's own paper or leaderboard; cite it and state
-  the configuration. If our rerun differs, report only the latest number.
+- A headline comparison reruns the baseline on our hardware, model and budget. A number
+  from the baseline's paper, leaderboard, README or the task text is cited with its
+  configuration, labeled as not rerun, and never the headline. If our rerun differs
+  from the published number, report only the latest rerun.
+- A difference within noise is not a result: state it in the evaluation with the test
+  and the spread; keep it out of the abstract, introduction and conclusion. Reviewers
+  read a within-noise gap in the abstract as an inflated claim, hedge or no hedge.
 - Arithmetic in the text (ratios, percentages, sums of table rows) must reconcile.
-- Claim only what the experiments support. Say in Limitations what was not run. Keep
-  negative results and unmet goals; do not round up.
+- Claim only what the experiments support. Say in Limitations what was not run and
+  which claim it narrows. Keep negative results and unmet goals; do not round up.
 - Recompute line counts, model counts, version numbers and similar facts from the current
   code with the paper's stated counting rule.
 
@@ -124,7 +159,15 @@ what it asks, keep every rule below, rebuild the PDF after any edit. A review-on
 - No marketing: no "powerful", "seamless", "elegant", "unique", "novel" as praise,
   "state-of-the-art" about our own work, "compares favorably", "outperforms" without the
   number, "to our knowledge the first".
-- Definite, specific, concrete language: numbers, names, file names.
+- Definite, specific, concrete language about the problem, the method and the evidence:
+  numbers, names, configurations. Engineering trivia is not evidence: line counts,
+  module counts, prompt word counts, file paths, per-run dollar costs, wall-clock
+  narrative, crash messages and steering messages go to an appendix or the artifact
+  README, never into the abstract, introduction or method. Reviewers read them as a
+  README and the paper as a technical report.
+- Conventional headings: Introduction, Background, System or Method, Evaluation, Related
+  Work, Limitations, Conclusion. No hedged, ironic or question headings ("Result, and
+  what it does not show").
 - Say each thing once. The architecture list appears in full once; elsewhere refer to
   it. Do not restate a quoted prompt in the prose after it.
 - Present tense for the system, past tense for what we did.
@@ -219,17 +262,22 @@ they are the tells.
     author field, arXiv ids with XXXX, "to be updated", pages 1234-1243, a real title
     with the wrong authors, venue or year. GPTZero found 100 such citations in 51
     accepted NeurIPS 2025 papers; ICLR 2026 desk-rejects papers that contain them.
+25. Padding: a sentence that negates a claim nobody made ("This oracle, not the wording
+    of the prompt, defines correctness"), states the obvious, or hedges a finding a
+    second time. A reviewer quoted one as "empty padding" and read the paper as
+    machine-written from there. Delete it.
 
 ## Figures and tables
 
-At least one architecture figure and one results figure (TikZ, or matplotlib to PDF with
-the script committed beside the paper). Every table caption states the configuration;
-every table number comes from a macro or a script. Nothing spills into the margin.
+At least one overview figure, placed before the component details, and one results
+figure (TikZ, or matplotlib to PDF with the script committed beside the paper). Every
+table caption states the configuration; every table number comes from a macro or a
+script. Nothing spills into the margin.
 
 ## Process for a new paper
 
-1. Read the sources. Write `./tmp/PLAN.md`: section outline and the numbers to compute,
-   each with its command.
+1. Read the sources. Write `./tmp/PLAN.md`: the contribution statement (above), the
+   section outline and the numbers to compute, each with its command.
 2. Search the internet extensively for the state of the art and related work: at least
    20 distinct sources, each logged in `./tmp/information-<paper>.md` with a summary of
    what it says about the topic.
@@ -242,11 +290,19 @@ every table number comes from a macro or a script. Nothing spills into the margi
    under 30% full, a table wider than the text) and look at those; fix spilling tables,
    badly split prompt boxes, orphan headings, and `??`.
 5. Run the `check_paper` tool; fix everything it flags.
-6. Independent review: run the reviewer model read-only. Ask it to check, with line
-   numbers, (a) every number against the raw results and code, (b) every citation
-   against a primary source, (c) internal consistency, (d) overclaims, (e) the AI-slop
-   list above. Fix each finding you confirm; if one needs a new experiment, state the
-   limitation instead.
+6. Independent review: run the reviewer model read-only, as the venue's reviewers. Ask
+   it to check, with line numbers, (a) every number against the raw results and code,
+   (b) every citation against a primary source, (c) internal consistency, (d)
+   overclaims, (e) the AI-slop list above, (f) whether the central claim and the
+   headline comparison have a controlled baseline and an ablation, (g) the selection
+   rule and denominators behind every reported set, (h) the closest systems and what
+   the paper says it adds to each, (i) whether it can state the research question and
+   the reader's takeaway in one sentence each, (j) the appendix and the artifact: run
+   or compute one claimed equivalence or number from the listings, and read the
+   README against the paper; then to score the venue's form. Fix each finding you
+   confirm; a finding that needs an experiment the task allows gets the experiment; one
+   it rules out narrows the claim. A predicted rating below the venue's accept line is
+   a finding, not a report line.
 7. Open the venue's website; check the paper against the current guidelines: page limit,
    anonymity, checklist, fonts, margins, LLM-usage disclosure.
 8. Rebuild, rerun `check_paper`, delete the planning and research files under `./tmp`,
@@ -299,10 +355,22 @@ when the task caps the reviewer's share, sum the costs the reviewers' results re
   `artifact/README.md`, the .bib, a log), `Read` it (or the region you will change) in
   this session: the first `Edit` of an unread file is refused and only shows the region,
   so the same call is sent twice.
-- Inside a worktree, never put a parent-checkout path (`/home/ksen/kiss/...`) in a Bash
-  command; use the worktree path, or `git show main:<path>` for a file of the main branch.
+- Inside a worktree, never put a parent-checkout path (`/home/ksen/kiss/...`,
+  `/home/ksen/kiss/tmp/...`) in a Bash command, `ls`/`grep`/`find` included; use the
+  worktree path (an earlier round's tools live under `<worktree>/tmp/` or `/tmp`), or
+  `git show main:<path>` for a file of the main branch. When the guard refuses a
+  command, re-issue the rewritten command it prints, verbatim.
 - Give every reviewer sub-agent an explicit `max_budget` (for example `"25"`); never let
-  it inherit the parent's remaining budget."""
+  it inherit the parent's remaining budget.
+- In a batched `Edit`, drop every entry whose `new_string` equals its `old_string`: one
+  no-op entry ("new_string must be different from old_string") rejects the whole batch.
+- In the final summary, describe a review point the task rules out as "ruled out by the
+  task: <its words>"; never "declined", "skipped", "left as is" or "not done": the finish
+  gate reads those as an unmet requirement and refuses the finish, and the retry can push
+  the session over the context limit.
+- In a worktree, run project commands as the shared environment's binary:
+  `PYTHONPATH=<worktree>/src:<worktree>/projects /home/ksen/kiss/.venv/bin/<cmd>`, never
+  `uv run <cmd>` (it times out after 600 s)."""
 """The template's rules, appended to the default system prompt."""
 
 # LaTeX environments whose bodies are not prose: verbatim prompts, listings, table
@@ -446,6 +514,50 @@ _BIB_SUSPECTS = (
 )
 """Signatures of fabricated references (GPTZero's NeurIPS 2025 and ICLR 2026 scans)."""
 
+_NUMBER_OR_MACRO = r"(?:\d[\d,]*|\\[A-Za-z]+(?:\{\})?)"
+"""A number written out or as the macro the rules require (``4,449`` or ``\\LocFive{}``)."""
+
+_ENGINEERING_TRIVIA = (
+    rf"(?<![\w\\]){_NUMBER_OR_MACRO}\s+(?:(?:significant|source|non-blank)\s+lines"
+    r"|lines\s+of\s+(?:code|python|c\+\+|rust|go|java))\b"
+    r"|\b(?:\d+|two|three|four|five|six|seven|eight|nine|ten)\s+(?:[a-z+#]+\s+)?modules\b"
+    rf"|(?<![\w\\]){_NUMBER_OR_MACRO}-word\s+(?:[a-z-]+\s+){{0,2}}(?:prompts?|instructions?)\b"
+    r"|\./[\w./-]+|(?<![/.\w:-])/?[\w-]+(?:/[\w.-]+)+\.(?:md|py|json|txt|ya?ml|toml|csv|log)\b"
+    r"|\\\$\s?\d|\bwall-clock\b|\bsteering\s+messages?\b"
+)
+"""README facts (line counts, module counts, prompt word counts, file paths, dollar costs,
+wall-clock narrative, steering messages) that make reviewers read the paper as a technical
+report when they sit in the abstract or the introduction (ICLR 2027 reviews of KS Gov).
+A path inside a URL (``.../blob/main/README.md``, ``:8000/x/y.json``) follows a slash, a
+dot, a colon or a word character and is not one; an absolute path (``/home/user/train.py``)
+is."""
+
+_CONCESSIONS = (
+    r"\b(?:one|a\s+single|single)\s+run\b"
+    r"|\bwithout\s+(?:a\s+|any\s+)?(?:controlled\s+|comparable\s+)?baseline\b"
+    r"|\bno\s+(?:controlled\s+|comparable\s+|separate\s+)?(?:baseline|ablation|rerun|control)s?\b"
+    r"|\bnot\s+ablated\b|\bwithin\s+(?:sampling\s+|statistical\s+|the\s+)?(?:error|noise)\b"
+    r"|\bcannot\s+tell\b|\bwe\s+(?:cannot|could\s+not|did\s+not)\s+(?:rerun|ablate|separate"
+    r"|attribute|compare|measure|run|isolate)\b|\bwe\s+do\s+not\s+claim\b"
+    r"|\bnot\s+(?:statistically\s+)?significant\b"
+    r"|\bcannot\s+be\s+(?:attributed|separated|isolated|read)\b|\bno\s+analysis\s+here\b"
+)
+"""Phrases that concede the evidence a claim lacks (``\\s+`` so a hard-wrapped line still
+matches).  One scope sentence in the abstract is fine; a list of them, or a Limitations
+section that concedes the central claim is untested, got the KS Gov and Who Catches What?
+submissions 1 of 4 from every reviewer."""
+
+_HEADING = re.compile(
+    r"\\(?:(?:sub)*section|paragraph)\*?(?:\[[^\]]*\])?\{((?:[^{}]|\{[^{}]*\})*)\}"
+)
+"""A sectioning command with its title (an optional short title is skipped; one level of
+braces inside the title, ``\\emph{this}``, is allowed)."""
+
+_HEADING_TELLS = r"\?|\bnot\b|\bwhat it\b"
+"""A hedged, ironic or question heading ("Result, and what it does not show"), checked on
+the title's words (math and command names dropped).  A comma counts too unless the title
+is an enumeration with "and" or "or" ("Datasets, metrics and baselines")."""
+
 _MIN_DUPLICATE_WORDS = 4
 """Shorter repeated sentences ("We measure.") are not flagged as duplicates."""
 
@@ -578,6 +690,61 @@ def _abstract_words(abstract: str) -> int:
     return len(re.sub(r"[{}\[\]~]", " ", text).split())
 
 
+def _only(prose: str, start: int, end: int) -> str:
+    """Return *prose* with everything outside ``[start, end)`` blanked; line numbers are kept."""
+    return "\n" * prose[:start].count("\n") + prose[start:end] + "\n" * prose[end:].count("\n")
+
+
+def _without(prose: str, start: int, end: int) -> str:
+    """Return *prose* with ``[start, end)`` blanked; line numbers are kept."""
+    return prose[:start] + "\n" * prose[start:end].count("\n") + prose[end:]
+
+
+def _front_matter(prose: str) -> str:
+    """Return the abstract and the first section of *prose*, the rest blanked.
+
+    A paper with fewer than two ``\\section`` commands is all front matter.
+    """
+    sections = list(re.finditer(r"\\section\*?(?:\[[^\]]*\])?\{", prose))
+    return _only(prose, 0, sections[1].start()) if len(sections) > 1 else prose
+
+
+def _is_hedged(title: str) -> bool:
+    """Return whether a heading *title* reads as hedged, ironic, an aside or a question."""
+    words = re.sub(r"\$[^$]*\$|\\[A-Za-z]+\*?", " ", title)
+    if re.search(_HEADING_TELLS, words, flags=re.IGNORECASE):
+        return True
+    return "," in words and not re.search(r"\b(?:and|or)\b", words, flags=re.IGNORECASE)
+
+
+def _hedged_headings(prose: str) -> list[str]:
+    """Return ``L<line>: <title>`` for every heading that :func:`_is_hedged` flags."""
+    return [
+        f"L{prose.count(chr(10), 0, m.start()) + 1}: {m.group(1).strip()}"
+        for m in _HEADING.finditer(prose)
+        if _is_hedged(m.group(1))
+    ]
+
+
+def _concessions(text: str) -> list[str]:
+    """Return ``L<line>: <sentence>`` once per sentence of *text* that matches ``_CONCESSIONS``.
+
+    Two concessions in one sentence ("one scope sentence") count once; the line
+    is the sentence's first line.  A paragraph break or a command (a heading,
+    a label) followed by a capital or another command ends a sentence as end
+    punctuation does.
+    """
+    boundary = _SENTENCE_END + r"|\}\s+(?=[A-Z\\])|\n[ \t]*\n"
+    ends = [m.end() for m in re.finditer(boundary, text)]
+    found: dict[int, str] = {}
+    for m in re.finditer(_CONCESSIONS, text, flags=re.IGNORECASE):
+        start = max((e for e in ends if e <= m.start()), default=0)
+        end = min((e for e in ends if e > m.end()), default=len(text))
+        sentence = re.sub(r"\s+", " ", text[start:end]).strip()
+        found.setdefault(start, f"L{text.count(chr(10), 0, start) + 1}: {sentence[:120]}")
+    return [found[k] for k in sorted(found)]
+
+
 def _abstract_orphans(source: str, prose: str, abstract: re.Match[str]) -> list[str]:
     """Return the numbers and number macros of the abstract that the body never uses again.
 
@@ -644,10 +811,12 @@ def check_paper(tex_path: str, bib_path: str = "") -> str:
     Returns:
         One block per gate marked ``PASS``, ``FAIL`` or ``CHECK`` (list only):
         the word gates, the abstract word count, abstract numbers unused
-        elsewhere, duplicated sentences, single-word ``\\emph``, non-ASCII
-        lines, dangling ``\\ref``, the ``\\cite`` keys against the bib
-        entries, and bib lines with fabricated-reference signatures; then
-        the number of failed gates.
+        elsewhere, concessions in the abstract (one scope sentence at most),
+        engineering trivia in the abstract and introduction, hedged or
+        question headings, concessions in the body (listed), duplicated
+        sentences, single-word ``\\emph``, non-ASCII lines, dangling
+        ``\\ref``, the ``\\cite`` keys against the bib entries, and bib lines
+        with fabricated-reference signatures; then the number of failed gates.
     """
     path = Path(tex_path).expanduser()
     if not path.is_file():
@@ -658,6 +827,7 @@ def check_paper(tex_path: str, bib_path: str = "") -> str:
     for name, pattern, limit, note in _GATES:
         lines += _section(name, _hits(prose, pattern), limit, note)
     abstract = _abstract(prose)
+    body = prose
     if abstract is None:
         lines.append("abstract: not found FAIL")
     else:
@@ -669,6 +839,33 @@ def check_paper(tex_path: str, bib_path: str = "") -> str:
             _abstract_orphans(source, prose, abstract),
             0,
         )
+        lines += _section(
+            "concessions in the abstract",
+            _concessions(_only(prose, abstract.start(1), abstract.end(1))),
+            1,
+            "one scope sentence at most; a comparison within noise is not a result",
+        )
+        body = _without(prose, abstract.start(1), abstract.end(1))
+    lines += _section(
+        "engineering trivia in the abstract and introduction",
+        _hits(_front_matter(prose), _ENGINEERING_TRIVIA),
+        0,
+        "line counts, module counts, prompt word counts, file paths and dollar costs belong "
+        "in an appendix or the artifact README",
+    )
+    lines += _section(
+        "hedged or question headings",
+        _hedged_headings(prose),
+        0,
+        "conventional headings: no comma, question mark or \"not\" in a title",
+    )
+    lines += _section(
+        "concessions in the body",
+        _concessions(body),
+        -1,
+        "each must narrow a claim, never concede the central one: run the experiment or cut "
+        "the claim",
+    )
     lines += _section("duplicated sentences", _duplicated_sentences(prose), 0)
     lines += _section(
         "single-word \\emph", _hits(prose, r"\\emph\{[A-Za-z]+\}"), -1, "term introductions only"

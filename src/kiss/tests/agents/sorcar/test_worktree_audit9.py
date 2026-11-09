@@ -47,6 +47,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _manual_merge_cmd,
 )
+from kiss.core.processes import find_bash
 from kiss.tests.conftest import seed_worktree
 
 
@@ -129,7 +130,8 @@ class TestBug43Fix:
         )
         cmd = _manual_merge_cmd(wt)
         assert "cherry-pick" in cmd
-        assert "abc123..kiss/wt-test" in cmd
+        assert "-p abc123" in cmd
+        assert "kiss/wt-test^{tree}" in cmd
         assert "merge --squash" not in cmd
 
     def test_manual_merge_cmd_without_baseline(self):
@@ -148,7 +150,14 @@ class TestBug43Fix:
 
 
     def test_functional_instructions_match_auto_merge(self, tmp_path):
-        """Instructions produce the same result as auto-merge when baseline exists."""
+        """Instructions produce the same result as auto-merge when baseline exists.
+
+        The branch history also holds a merge commit (the task merged
+        main's progress): the advertised command must apply the net
+        change like the auto-merge does instead of replaying the
+        range commit by commit, which git refuses for a merge commit
+        (``is a merge but no -m option was given``).
+        """
         repo = _make_repo(tmp_path)
 
         branch = "kiss/wt-bug43-test"
@@ -172,6 +181,16 @@ class TestBug43Fix:
             ["git", "commit", "-m", "agent work"],
             cwd=wt_dir, capture_output=True,
         )
+        (repo / "main.txt").write_text("main progress")
+        subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "main progress"],
+            cwd=repo, capture_output=True, check=True,
+        )
+        subprocess.run(
+            ["git", "merge", "--no-ff", "-m", "merge main", "main"],
+            cwd=wt_dir, capture_output=True, check=True,
+        )
 
         wt = GitWorktree(
             repo_root=repo,
@@ -184,18 +203,21 @@ class TestBug43Fix:
 
         assert "cherry-pick" in cmd
 
+        # A POSIX shell command, run by bash as the agent's Bash tool runs it
+        # (``shell=True`` would hand it to cmd.exe on Windows).
+        bash = find_bash()
+        assert bash is not None
         result = subprocess.run(
-            cmd.split(), cwd=repo, capture_output=True, text=True,
+            [bash, "-c", cmd], cwd=repo, capture_output=True, text=True,
         )
-        assert result.returncode == 0
+        assert result.returncode == 0, result.stderr
         status = subprocess.run(
             ["git", "diff", "--cached", "--name-only"],
             cwd=repo, capture_output=True, text=True,
         )
         files = set(status.stdout.strip().splitlines())
-        assert "agent.txt" in files
-        assert "dirty.txt" not in files, (
-            "Cherry-pick should NOT include baseline dirty state"
+        assert files == {"agent.txt"}, (
+            "the net change only: no baseline dirty state, no main commit"
         )
 
         subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=repo, capture_output=True)

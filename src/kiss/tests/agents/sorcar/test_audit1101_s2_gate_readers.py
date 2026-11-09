@@ -30,7 +30,6 @@ from kiss.agents.sorcar.coding_gate import (
     REVIEW_VERDICT,
     CodingGate,
     bash_exit_code,
-    container_run,
     run_on_host,
 )
 from kiss.agents.sorcar.useful_tools import UsefulTools
@@ -60,7 +59,7 @@ def test_host_failure_prefix_wins_over_a_marker_in_the_output(
     assert bash_exit_code("[exit code: 0]\n") == "0"
     assert bash_exit_code("fixture says [exit code: 5]\n") == "5"
     assert bash_exit_code("Error (exit code 2):\nno marker") == "2"
-    assert container_run("Error (exit code 2):\n[exit code: 4]") == (2, "Error (exit code 2):")
+    assert bash_exit_code("Error (exit code 2):\n[exit code: 4]") == "2"
 
 
 def test_a_review_without_a_verdict_or_whose_call_fails_refuses_nothing(

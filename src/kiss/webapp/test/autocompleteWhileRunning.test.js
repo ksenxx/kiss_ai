@@ -281,6 +281,41 @@ function testProgrammaticTabSwitchDropsPickerAndGhost() {
   );
 }
 
+// Audit 2026-11-08 (W7 F4): the reply to a completion asked before the
+// user left the composer (blur: the picker is dismissed) must not reopen
+// the picker, running or idle; the next edit asks and shows again.
+function testReplyAfterBlurStaysDismissed() {
+  for (const running of [true, false]) {
+    const {win, posted} = openPage();
+    const tabId = running ? startRunning(win) : win._testApi.getActiveTabId();
+    const inp = typeText(win, 'fix');
+    fireDebounce(win);
+    assert.ok(
+      posted.some(p => p && p.type === 'complete' && p.query === 'fix'),
+      'the completion is asked',
+    );
+    inp.dispatchEvent(new win.Event('blur'));
+    assert.strictEqual(pickerVisible(win), false, 'a blur hides the picker');
+    send(win, {type: 'completions', completions: COMPLETIONS, query: 'fix', tabId});
+    assert.strictEqual(
+      pickerVisible(win),
+      false,
+      'BUG - the reply of a completion asked before the blur reopened the picker (running=' +
+        running +
+        ')',
+    );
+    inp.focus();
+    typeChar(win, ' ');
+    send(win, {
+      type: 'completions',
+      completions: COMPLETIONS,
+      query: 'fix ',
+      tabId,
+    });
+    assert.strictEqual(pickerVisible(win), true, 'the next edit shows suggestions again');
+  }
+}
+
 const tests = [
   testTypingWhileRunningRequestsCompletion,
   testCompletionsPickerOpensWhileRunning,
@@ -289,6 +324,7 @@ const tests = [
   testCompletionSurvivesRunEndingMidDraft,
   testEmptyCompletionsStillHidePickerWhileRunning,
   testProgrammaticTabSwitchDropsPickerAndGhost,
+  testReplyAfterBlurStaysDismissed,
 ];
 
 async function main() {

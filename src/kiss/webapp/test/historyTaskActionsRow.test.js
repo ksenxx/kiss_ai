@@ -28,7 +28,7 @@ const {
   loadRemoteCss,
   stubClipboard,
 } = require('./simplify2_harness');
-const {loadHistory, makeSession} = require('./history_helpers');
+const {loadHistory, makeSession, historyRow} = require('./history_helpers');
 
 // The compact sidebar button is a 12x16 box: a 12px icon with "2px 0"
 // padding and no explicit min-width/min-height.  A history task panel
@@ -73,10 +73,6 @@ function assertCompactIcon(win, svg, what) {
 
 function makePage() {
   return makeChatPage({beforeScripts: win => loadRemoteCss(win, true)});
-}
-
-function historyRow(win) {
-  return win.document.querySelector('#history-list .sidebar-item');
 }
 
 function px(value) {

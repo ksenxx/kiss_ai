@@ -72,19 +72,21 @@ _SERVER = "/home/ubuntu/kiss"
 
 
 def _run(
-    *command: str, env: dict[str, str] | None = None
+    *command: str, env: dict[str, str] | None = None, timeout: float = 300
 ) -> subprocess.CompletedProcess[str]:
     """Run a command and capture its output as text.
 
     Args:
         command: Program and arguments.
         env: Environment for the command; the caller's when None.
+        timeout: Seconds after which the command is killed and
+            :class:`subprocess.TimeoutExpired` raised.
 
     Returns:
         The completed process.
     """
     return subprocess.run(
-        list(command), capture_output=True, text=True, timeout=300, env=env, check=False
+        list(command), capture_output=True, text=True, timeout=timeout, env=env, check=False
     )
 
 
@@ -450,6 +452,45 @@ class RunningTasksTest(unittest.TestCase):
 
         self.assertEqual(done.returncode, 1)
         self.assertEqual(done.stdout.splitlines()[0], "unknown")
+
+    @unittest.skipIf(
+        IS_WINDOWS or getattr(os, "geteuid", lambda: 1)() == 0, "needs an unreadable file"
+    )
+    def test_a_database_whose_header_cannot_be_read_is_not_idle_either(self) -> None:
+        """A live task behind a permission denial is still a live task.
+
+        Reading as "nothing is running" what was a failure to open the
+        file is how a deploy kills the task it was told to look for.
+        """
+        self._make([("LIVE", 0, 2.0)])
+        self.assertEqual(self._count("300")[0], 1)
+        self.db.chmod(0)
+        try:
+            for mode in ((), ("--unfinished",)):
+                done = _run(sys.executable, str(_RUNNING_TASKS), str(self.db), "300", *mode)
+                self.assertEqual(done.returncode, 1, mode)
+                self.assertEqual(done.stdout.splitlines()[0], "unknown", mode)
+        finally:
+            self.db.chmod(0o644)
+        self.assertEqual(self._count("300")[0], 1)
+
+    @posix_only("needs a named pipe")
+    def test_a_named_pipe_at_the_database_path_is_not_a_database(self) -> None:
+        """Only a regular file can be a database; a pipe is not read at all.
+
+        Opening a named pipe for reading waits for a writer that never
+        comes, and a deploy guard that waits forever is no guard.
+        """
+        os.mkfifo(self.db)
+        for mode in ((), ("--unfinished",)):
+            try:
+                done = _run(
+                    sys.executable, str(_RUNNING_TASKS), str(self.db), "300", *mode, timeout=30
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(f"running_tasks.py {' '.join(mode)} blocked opening the pipe")
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(done.stdout.splitlines()[0], "0", mode)
 
     def test_the_wrong_number_of_arguments_is_a_usage_error(self) -> None:
         """A silent 0 would read as "nothing is running"."""

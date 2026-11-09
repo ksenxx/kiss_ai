@@ -33,21 +33,6 @@ class TestOperatorRegistry:
         assert subtract.eval(5, 3) == 2
         assert subtract.eval(0, 5) == -5
 
-    def test_multiply(self):
-        from test_data.calculator.operators import multiply
-        assert multiply.eval(6, 7) == 42
-        assert multiply.eval(-3, 2) == -6
-
-    def test_divide(self):
-        from test_data.calculator.operators import divide
-        assert divide.eval(10, 4) == 2.5
-        assert divide.eval(-6, 3) == -2
-
-    def test_divide_by_zero_raises(self):
-        from test_data.calculator.operators import divide
-        with pytest.raises(ValueError, match="division by zero"):
-            divide.eval(1, 0)
-
 
 class TestTokenizer:
     def test_simple(self):
@@ -104,29 +89,6 @@ class TestEvaluator:
     def test_complex_expression(self):
         assert evaluate("2 + (3 - 4)") == 1
 
-    def test_multiplication(self):
-        assert evaluate("6 * 7") == 42
-
-    def test_division(self):
-        assert evaluate("10 / 4") == 2.5
-
-    def test_precedence_over_addition(self):
-        assert evaluate("2 + 3 * 4") == 14
-        assert evaluate("10 - 6 / 2") == 7
-
-    def test_parentheses_override_precedence(self):
-        assert evaluate("(2 + 3) * 4") == 20
-
-    def test_division_left_associativity(self):
-        assert evaluate("100 / 5 / 2") == 10
-
-    def test_mixed_precedence_expression(self):
-        assert evaluate("2 * 3 + 4 * 5") == 26
-
-    def test_division_by_zero(self):
-        with pytest.raises(ValueError, match="division by zero"):
-            evaluate("1 / 0")
-
     def test_unknown_operator_via_get_operator(self):
         with pytest.raises(ValueError, match="unknown operator"):
             _get_operator("^")
@@ -151,18 +113,6 @@ class TestCLI:
         captured = capsys.readouterr()
         assert "Error" in captured.err
 
-    def test_multiplication_expression(self, capsys):
-        ret = main(["6 * 7"])
-        captured = capsys.readouterr()
-        assert ret == 0
-        assert captured.out.strip() == "42"
-
-    def test_division_by_zero_reports_error(self, capsys):
-        ret = main(["1 / 0"])
-        assert ret == 1
-        captured = capsys.readouterr()
-        assert "Error" in captured.err
-
     def test_unregistered_operator_is_rejected(self, capsys):
         ret = main(["6 % 7"])
         assert ret == 1
@@ -178,11 +128,42 @@ class TestCLI:
         assert result.returncode == 0
         assert result.stdout.strip() == "7"
 
-    def test_subprocess_integration_mul_div(self):
+    @pytest.mark.parametrize(
+        ("expression", "expected"),
+        [
+            ("6 * 7", "42"),
+            ("10 / 4", "2.5"),
+            ("2 + 3 * 4", "14"),
+            ("(2 + 3) / 4", "1.25"),
+            ("-6*-2", "12"),
+            ("12/-2", "-6"),
+            ("24 / 4 / 2", "3"),
+            ("24 / 4 * 2", "12"),
+            ("24 / (4 * 2)", "3"),
+            ("2 * 3 - 8 / 4", "4"),
+            ("0 * 7 / 2", "0"),
+        ],
+    )
+    def test_multiplication_and_division(self, expression, expected):
+        assert evaluate(expression) == float(expected)
         result = subprocess.run(
-            [sys.executable, "-m", "test_data.calculator.cli", "8 * 3 / 4"],
+            [sys.executable, "-m", "test_data.calculator.cli", expression],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0
-        assert result.stdout.strip() == "6"
+        assert result.stdout.strip() == expected
+        assert result.stderr == ""
+
+    @pytest.mark.parametrize("expression", ["1 / 0", "1 / (2 - 2)", "0 / -0.0"])
+    def test_division_by_zero(self, expression):
+        with pytest.raises(ValueError, match="^division by zero$"):
+            evaluate(expression)
+        result = subprocess.run(
+            [sys.executable, "-m", "test_data.calculator.cli", expression],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert result.stderr.strip() == "Error: division by zero"

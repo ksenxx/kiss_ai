@@ -249,6 +249,29 @@ class TestEndRunFromImplicitFinishProbe:
         assert len(requests) == 2
 
 
+class TestFailedFinish:
+    """A ``finish`` call its tool rejected is a tool error the model corrects, not the result."""
+
+    def test_a_finish_missing_an_argument_is_reported_to_the_model(self) -> None:
+        def respond(turn: int, request: dict[str, Any]) -> dict[str, Any]:
+            if turn == 0:
+                # The structured finish requires ``success``: this call raises.
+                return _tool_calls_response(
+                    "Done.", [("finish", {"summary_in_html": "<p>first</p>"})]
+                )
+            return _tool_calls_response(
+                "Done.", [("finish", {"success": True, "summary_in_html": "<p>second</p>"})]
+            )
+
+        result, _agent, requests = _run(respond, [structured_finish])
+        assert len(requests) == 2, "The failed finish is not the task's result"
+        second_turn_text = json.dumps(requests[1]["messages"])
+        assert "missing 1 required positional argument: 'success'" in second_turn_text
+        payload = yaml.safe_load(result)
+        assert payload["success"] is True
+        assert payload["summary"] == "<p>second</p>"
+
+
 class TestLLMResponseHook:
     """``llm_response_hook`` sees every reply with its usage; ``end_run`` ends the run."""
 

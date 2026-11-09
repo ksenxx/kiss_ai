@@ -19,15 +19,33 @@ The one reload the shim still performs is for a page the service
 worker served from its offline cache (``<meta name="kiss-offline-shell">``):
 its code may be older than the server's, so it reloads once, on its
 first ``auth_ok``, and never again in the same browsing session.
+
+The once-only test runs the shim against a real localhost WebSocket
+server (:class:`_ScriptedDaemon`, speaking the daemon's handshake
+frames) with the browser's own ``WebSocket`` and timers: a frame the
+daemon must not receive twice (an Explorer copy) posted while the
+socket is down is delivered once, after a ``pong`` confirmed the
+reconnect's batch, however many connections die before one.
 """
 
 
 from __future__ import annotations
 
+import asyncio
+import json
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
 import pytest
 from playwright.sync_api import sync_playwright
+from websockets.asyncio.server import ServerConnection, serve
+from websockets.exceptions import ConnectionClosed
+from websockets.http11 import Request, Response
 
-from kiss.server.web_server import MEDIA_DIR
+from kiss.server.fs_actions import fs_action
+from kiss.server.web_server import MEDIA_DIR, _http_response
 from kiss.tests.conftest import goto_retrying_network_change
 
 PAGE_URL = "https://shim.test/"
@@ -197,6 +215,190 @@ def _load_shim_page(browser, offline_shell: bool = False):
 def _authenticate_current_socket(page) -> None:
     page.evaluate("window.__fireOpen()")
     page.evaluate("window.__fireAuthOk()")
+
+
+def _real_shim_page() -> str:
+    """The shim's page for a real WebSocket: the overlay nodes, a recorder
+    of the ``daemonStatus`` events the shim posts to the app, the
+    production shim and the app's handle on it (``window.__t``)."""
+    return f"""<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>shim test</title></head>
+<body>
+  <div id="kiss-server-loading" role="status" aria-live="polite">
+    <div id="kiss-server-loading-msg">KISS Sorcar Server is starting ...</div>
+  </div>
+  <div id="app" style="display:none;"></div>
+  <script>
+    window.__connected = [];
+    window.addEventListener('message', function(e) {{
+      var d = e && e.data;
+      if (d && d.type === 'daemonStatus') window.__connected.push(d.connected);
+    }});
+  </script>
+  <script>
+{_TRANSPORT_JS}
+  </script>
+  <script>window.__t = window.acquireTransport();</script>
+</body>
+</html>
+"""
+
+
+class _ScriptedDaemon:
+    """A localhost WebSocket server speaking the daemon's frames to the
+    real shim, on a script: ``auth`` is answered with ``auth_ok``; the
+    ``ping`` that ends a reconnect's batch is answered with ``pong`` on
+    connection *pong_on* and, on every earlier connection, with the
+    connection's close (the daemon died before confirming the batch);
+    an ``fsAction`` is run through the daemon's own :func:`fs_action`.
+    ``frames`` lists every frame received as ``(connection number,
+    frame)``.  It serves the shim's page at ``/`` too, and the
+    ``/api/daemon`` probe the shim makes on every ``auth_ok`` (one
+    constant instance: the shim never reloads for it)."""
+
+    def __init__(self, pong_on: int) -> None:
+        self._pong_on = pong_on
+        self.frames: list[tuple[int, dict[str, Any]]] = []
+        self.results: list[dict[str, Any]] = []
+        self.url = ""
+        self._connections: dict[int, ServerConnection] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop: asyncio.Event | None = None
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self) -> _ScriptedDaemon:
+        self._thread.start()
+        assert self._ready.wait(10), "the scripted daemon failed to start"
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        assert self._loop is not None and self._stop is not None
+        self._loop.call_soon_threadsafe(self._stop.set)
+        self._thread.join(timeout=30)
+        assert not self._thread.is_alive(), "the scripted daemon failed to stop"
+
+    def _run(self) -> None:
+        asyncio.run(self._serve())
+
+    async def _serve(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._stop = asyncio.Event()
+        async with serve(self._handle, "127.0.0.1", 0, process_request=self._http) as server:
+            port = next(iter(server.sockets)).getsockname()[1]
+            self.url = f"http://127.0.0.1:{port}/"
+            self._ready.set()
+            await self._stop.wait()
+
+    def _http(self, connection: ServerConnection, request: Request) -> Response | None:
+        if request.path == "/ws":
+            return None
+        if request.path == "/":
+            return _http_response(200, "text/html; charset=utf-8", _real_shim_page().encode())
+        if request.path == "/api/daemon":
+            return _http_response(200, "application/json", b'{"instance": "scripted"}')
+        return _http_response(404, "text/plain", b"")
+
+    async def _handle(self, ws: ServerConnection) -> None:
+        number = len(self._connections) + 1
+        self._connections[number] = ws
+        try:
+            async for raw in ws:
+                msg = json.loads(raw)
+                self.frames.append((number, msg))
+                if msg["type"] == "auth":
+                    await ws.send(
+                        json.dumps({"type": "auth_ok", "local": True, "echoesGeneration": True})
+                    )
+                elif msg["type"] == "ping":
+                    if number < self._pong_on:
+                        await ws.close()
+                    else:
+                        await ws.send(json.dumps({"type": "pong"}))
+                elif msg["type"] == "fsAction":
+                    self.results.append(
+                        fs_action(
+                            msg["action"],
+                            msg["path"],
+                            msg["dest"],
+                            overwrite=msg["overwrite"],
+                        )
+                    )
+        except ConnectionClosed:
+            pass
+
+    def close(self, number: int) -> None:
+        """Close connection *number* from the server's side (the outage)."""
+        assert self._loop is not None
+        asyncio.run_coroutine_threadsafe(self._connections[number].close(), self._loop).result(10)
+
+    def wait_for(self, number: int, frame_type: str, timeout: float = 30) -> None:
+        """Block until connection *number* has delivered a *frame_type* frame."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if any(n == number and f["type"] == frame_type for n, f in self.frames):
+                return
+            time.sleep(0.05)
+        raise AssertionError(f"no {frame_type} frame on connection {number}: {self.frames}")
+
+
+@pytest.mark.timeout(120)
+def test_fs_action_posted_while_disconnected_is_sent_once_after_the_pong(
+    _browser,
+    tmp_path: Path,
+) -> None:
+    """An Explorer copy posted while the socket is down goes out once,
+    after a ``pong`` confirmed the reconnect's batch, however many
+    connections die before one (W9 F1).  The batch is at-least-once: a
+    connection lost before its ``pong`` re-sends it on the next, which
+    for a replayable frame (``setModel``) means a repeated delivery and
+    for a copy into the file's own folder would mean a second file
+    (``notes copy 2.txt`` behind ``notes copy.txt``: the daemon names
+    every such copy afresh).  The shim runs in Chromium with the
+    browser's own ``WebSocket`` and timers against a real localhost
+    server speaking the daemon's frames, which runs the copy it receives
+    through the daemon's own ``fs_action``."""
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    src = folder / "notes.txt"
+    src.write_text("kept once")
+    with _ScriptedDaemon(pong_on=4) as daemon:
+        context = _browser.new_context()
+        page = context.new_page()
+        try:
+            goto_retrying_network_change(page, daemon.url, wait_until="load")
+            page.wait_for_function("window.__connected.at(-1) === true", timeout=15000)
+            daemon.close(1)
+            page.wait_for_function("window.__connected.at(-1) === false", timeout=15000)
+            page.evaluate(
+                """args => {
+                  window.__t.postMessage({type: 'setModel', model: 'replayable'});
+                  window.__t.postMessage({
+                    type: 'fsAction', action: 'copy', path: args.src, dest: args.dest,
+                    name: '', query: '', overwrite: false, workDir: args.root,
+                    tabId: 't1', token: 'fs-1',
+                  });
+                }""",
+                {"src": str(src), "dest": str(folder), "root": str(tmp_path)},
+            )
+            daemon.wait_for(4, "fsAction")
+            page.wait_for_function("window.__connected.at(-1) === true", timeout=15000)
+        finally:
+            context.close()
+    by_type: dict[str, list[int]] = {}
+    for number, frame in daemon.frames:
+        by_type.setdefault(frame["type"], []).append(number)
+    # The batch went out on every connection after the drop, its copy on
+    # the confirmed one only, behind the batch's ping.
+    assert by_type["setModel"] == [2, 3, 4], daemon.frames
+    assert by_type["fsAction"] == [4], daemon.frames
+    assert by_type["ping"] == [2, 3, 4], daemon.frames
+    kinds = [frame["type"] for number, frame in daemon.frames if number == 4]
+    assert kinds.index("ping") < kinds.index("fsAction"), kinds
+    assert daemon.results == [{"ok": True, "path": str(folder / "notes copy.txt")}]
+    assert sorted(p.name for p in folder.iterdir()) == ["notes copy.txt", "notes.txt"]
+    assert (folder / "notes copy.txt").read_text() == "kept once"
 
 
 def test_reconnect_after_drop_resyncs_in_place(_browser):

@@ -11,7 +11,7 @@ tool that ignores the Stop must not hang the task), so a client that
 connected and never sent its newline used to keep its handler thread,
 its socket and a reference to the bridge's state alive for good after
 the block ended.  The handler's socket I/O is now bounded by
-``_BridgeHandler.timeout``: the idle reader times out, logs, and its
+``REQUEST_TIMEOUT_SECONDS``: the idle reader times out, logs, and its
 socket is closed, while a request completed late is still answered with
 the closed-bridge refusal (``test_audit1018_codex_bridge_stop``).
 """
@@ -22,7 +22,7 @@ import socket
 import threading
 import time
 
-from kiss.core.models.codex_mcp_bridge import ToolBridge, _BridgeHandler
+from kiss.core.models.codex_mcp_bridge import REQUEST_TIMEOUT_SECONDS, ToolBridge
 
 
 def _handler_threads(before: set[threading.Thread]) -> list[threading.Thread]:
@@ -58,10 +58,57 @@ def test_idle_connections_do_not_keep_handler_threads_after_the_block() -> None:
         for handler in handlers:
             handler.join(max(0.0, deadline - time.monotonic()))
         assert [t.is_alive() for t in handlers] == [False, False, False]
-        assert _BridgeHandler.timeout is not None and 0 < _BridgeHandler.timeout <= 5
+        assert 0 < REQUEST_TIMEOUT_SECONDS <= 5
         # Each client's connection was closed by the bridge: EOF, no reply.
         for client in clients:
             assert client.recv(1024) == b""
     finally:
         for client in clients:
+            client.close()
+
+
+def _trickle(client: socket.socket, stop: threading.Event) -> None:
+    """Send a byte every 50 ms until *stop* or the connection ends (no newline, ever)."""
+    while not stop.is_set():
+        try:
+            client.sendall(b" ")
+        except OSError:
+            return
+        stop.wait(0.05)
+
+
+def test_a_trickling_connection_retires_within_the_bound_too() -> None:
+    """A client that keeps sending bytes without ever finishing its line
+    would reset a per-read bound at every byte and keep its handler (and
+    its growing line) alive for as long as it trickles, past the block.
+    The bound covers the whole read: the handler retires within it, the
+    client still trickling, and the client sees the connection end."""
+    before = set(threading.enumerate())
+    stop = threading.Event()
+    bridge = ToolBridge([], lambda call: (call["name"], "unused"))
+    client: socket.socket | None = None
+    trickler: threading.Thread | None = None
+    try:
+        with bridge:
+            client = socket.create_connection(("127.0.0.1", bridge.port), timeout=5)
+            accepted_at = time.monotonic()
+            trickler = threading.Thread(target=_trickle, args=(client, stop), daemon=True)
+            trickler.start()
+            deadline = accepted_at + 5
+            while not _handler_threads(before) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            (handler,) = _handler_threads(before)
+            time.sleep(0.2)  # a few bytes in, the handler is still reading its line
+            assert handler.is_alive()
+            assert bridge.calls_in_flight == 0
+            handler.join(REQUEST_TIMEOUT_SECONDS + 2)
+            assert not handler.is_alive(), "the trickling client kept its handler alive"
+            assert time.monotonic() - accepted_at >= REQUEST_TIMEOUT_SECONDS - 0.5
+            trickler.join(5)
+            assert not trickler.is_alive(), "the client's sends went on after the handler left"
+    finally:
+        stop.set()
+        if trickler is not None:
+            trickler.join(5)
+        if client is not None:
             client.close()

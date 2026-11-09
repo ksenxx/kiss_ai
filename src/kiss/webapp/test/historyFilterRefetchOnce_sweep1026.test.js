@@ -15,7 +15,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, ofType} = require('./simplify2_harness');
 const {makeRow, selectFilter} = require('./history_helpers');
 
 function session(i, tags) {
@@ -32,10 +32,6 @@ function session(i, tags) {
   });
 }
 
-function getHistoryPosts(posted) {
-  return posted.filter(m => m && m.type === 'getHistory');
-}
-
 function bootFullPage() {
   const {win, posted} = makePage({bodyClass: 'remote-chat'});
   send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
@@ -44,7 +40,7 @@ function bootFullPage() {
   const page = [];
   for (let i = 1; i <= 50; i++)
     page.push(session(i, i % 2 ? 'work,coding' : 'personal'));
-  const first = getHistoryPosts(posted).pop();
+  const first = ofType(posted, 'getHistory').pop();
   send(win, {
     type: 'history',
     sessions: page,
@@ -60,9 +56,9 @@ function bootFullPage() {
 
 function checkOneRequest(filterId, value, field) {
   const {win, posted} = bootFullPage();
-  const before = getHistoryPosts(posted).length;
+  const before = ofType(posted, 'getHistory').length;
   selectFilter(win, filterId, value);
-  const posts = getHistoryPosts(posted).slice(before);
+  const posts = ofType(posted, 'getHistory').slice(before);
   assert.strictEqual(
     posts.length,
     1,

@@ -34,6 +34,7 @@ from kiss.server.remote_tabs import RemoteTabs
 from kiss.server.server import AgentServer
 from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.pause import Pause, Pauses
+from kiss.tests.server.remote_tabs_probe import machine_of
 from kiss.tests.server.test_remote_tabs import RemoteTabsHarness
 
 
@@ -80,8 +81,8 @@ class TestOneTabPerRemoteChat(RemoteTabsHarness):
         self.assertEqual(frames[-1].get("chat_id"), chat)
         # The displaced tab: binding gone, stream ended, registry entry closed.
         self.assertIn({"tabId": first, "machine": ""}, self._bindings_told(frames))
-        self.assertEqual(tabs.machine_of(first), "")
-        self.assertEqual(tabs.machine_of(second), "box")
+        self.assertEqual(machine_of(tabs, first), "")
+        self.assertEqual(machine_of(tabs, second), "box")
         self.assertEqual({tid: t.chat_id for tid, t in tabs._tabs.items()}, {second: chat})
         registry = self._registry()
         self.assertNotIn(first, registry, "the displaced tab left the registry")
@@ -106,7 +107,7 @@ class TestOneTabPerRemoteChat(RemoteTabsHarness):
             "type": "resumeSession", "tabId": second, "chatId": chat, "machine": "box",
         })
         await self._until("task_events", second)
-        self.assertEqual(tabs.machine_of(first), "", "the chat moved to the second tab")
+        self.assertEqual(machine_of(tabs, first), "", "the chat moved to the second tab")
 
         # A resume by task alone: the tab learns the chat from the
         # replay's first frame, and the chat's other tab goes then.
@@ -119,7 +120,7 @@ class TestOneTabPerRemoteChat(RemoteTabsHarness):
         # ``status`` or its transcript): maybe among these frames, maybe next.
         if {"tabId": second, "machine": ""} not in self._bindings_told(frames):
             self.assertEqual((await self._until("tabMachine", second))["machine"], "")
-        self.assertEqual(tabs.machine_of(second), "")
+        self.assertEqual(machine_of(tabs, second), "")
         self.assertEqual({tid: t.chat_id for tid, t in tabs._tabs.items()}, {first: chat})
         registry = self._registry()
         self.assertNotIn(second, registry)
@@ -166,7 +167,7 @@ class TestOneTabPerRemoteChat(RemoteTabsHarness):
                     await asyncio.to_thread(pause.paused.wait, 20),
                     "the displacement never reached the stream's end",
                 )
-                self.assertEqual(tabs.machine_of(first), "")
+                self.assertEqual(machine_of(tabs, first), "")
                 # Another surface resumes a local chat into the displaced tab.
                 writer2.write(json.dumps({
                     "type": "resumeSession", "tabId": first, "chatId": local_chat,
@@ -187,7 +188,7 @@ class TestOneTabPerRemoteChat(RemoteTabsHarness):
             # The old displacement's close stood down: the local chat's tab stays.
             self.assertEqual(server.tab_registry.bindings().get(first), local_chat)
             self.assertEqual(server._tab_chat_views.get(first), local_chat)
-            self.assertEqual(tabs.machine_of(second), "box")
+            self.assertEqual(machine_of(tabs, second), "box")
             self.assertEqual({tid: t.chat_id for tid, t in tabs._tabs.items()}, {second: chat})
         finally:
             writer2.close()
@@ -228,7 +229,7 @@ class TestOneTabPerRemoteChat(RemoteTabsHarness):
                 await asyncio.to_thread(close.paused.wait, 20),
                 "the displacement never reached the close",
             )
-            self.assertEqual(tabs.machine_of(first), "")
+            self.assertEqual(machine_of(tabs, first), "")
             restore.release()
             await asyncio.to_thread(relay.join, 20)
             self.assertFalse(relay.is_alive(), "the relay never went past the restore")
@@ -236,7 +237,7 @@ class TestOneTabPerRemoteChat(RemoteTabsHarness):
             await self._until("task_events", second)
         self.assertNotIn(first, self._registry(), "the displaced tab left the registry")
         self.assertIn(second, self._registry())
-        self.assertEqual(tabs.machine_of(second), "box")
+        self.assertEqual(machine_of(tabs, second), "box")
         self.assertEqual({tid: t.chat_id for tid, t in tabs._tabs.items()}, {second: chat})
 
 

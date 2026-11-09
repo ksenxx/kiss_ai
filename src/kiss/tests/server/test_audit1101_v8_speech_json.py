@@ -43,6 +43,17 @@ class EmbeddedJsonIsDictation(unittest.TestCase):
         self.assertEqual(text, reply)
         self.assertIsNone(language)
 
+    def test_object_with_envelope_keys_inside_an_untagged_sentence_is_plain_text(self) -> None:
+        """An object inside a sentence is dictation whatever its keys: envelopes are whole lines."""
+        for reply in (
+            'Update config to {"language": "fr"}',
+            'Set the response to {"text": "Welcome"} and save',
+            'Both {"language": "en", "text": "x"} keys, mid-sentence',
+        ):
+            text, language = parse_transcription_reply(reply)
+            self.assertEqual(text, reply)
+            self.assertIsNone(language, reply)
+
     def test_fenced_tagged_dictation_with_object(self) -> None:
         text, language = parse_transcription_reply(
             '```\nfr\nSet {"debug": false} in the file.\n```'

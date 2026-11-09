@@ -172,6 +172,22 @@ class TestRemoteSubagentCosts(unittest.TestCase):
         # Its final save writes the banked spend; the row is untouched until then.
         self.assertEqual(_agent_usage(agent), (pytest.approx(0.25), 25, 1))
         self.assertEqual(_row(parent), (3.0, 300, 5))
+        # The charge the row owes is recorded and marked banked with the ledger
+        # totals it was banked over (the agent's $0 before it); the final save's
+        # totals from that ledger hold it, so the save adds nothing to them,
+        # and the charge stays with the row, settled into it.
+        charges = th._get_db().execute(
+            "SELECT parent_task_id, cost, banked, banked_cost, settled FROM remote_charges"
+        ).fetchall()
+        self.assertEqual([tuple(c) for c in charges], [(parent, 0.25, 1, 0.0, 0)])
+        th._save_task_extra(
+            {"cost": 3.25, "tokens": 325, "steps": 6, "endTs": time.time()}, parent
+        )
+        self.assertEqual(_row(parent), (3.25, 325, 6))
+        charges = th._get_db().execute(
+            "SELECT parent_task_id, cost, banked, banked_cost, settled FROM remote_charges"
+        ).fetchall()
+        self.assertEqual([tuple(c) for c in charges], [(parent, 0.25, 1, 0.0, 1)])
 
     def test_a_task_never_recorded_is_not_charged(self) -> None:
         parent = _task(OPUS, 1.0, 100, 1)

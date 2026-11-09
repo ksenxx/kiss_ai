@@ -194,3 +194,73 @@ def test_exit_after_the_last_read_keeps_the_job_and_its_log(
     assert job.log_path.read_text() == "early\nlate\n"
     report = tools.bash_job(job.job_id, action="wait", timeout_seconds=10)
     assert "exited with code 0" in report and report.endswith("early\nlate\n")
+
+
+# --- A10-1 (fable): a character the job writes in two pieces -------------------
+
+
+class _ReleaseOnceTheFirstPieceWasRead(threading.Event):
+    """A task Stop that never fires but, looked at by the wait once the
+    first piece reached the tool panel, releases the gated child to write
+    the rest of the character and exit before the wait reads again."""
+
+    def __init__(self, release: Path, jobs: dict[str, BackgroundJob]) -> None:
+        super().__init__()
+        self.release = release
+        self.jobs = jobs
+        self.armed = False
+        self.released = False
+
+    def is_set(self) -> bool:
+        if self.armed and not self.released:
+            self.released = True
+            self.release.touch()
+            for job in self.jobs.values():
+                _wait_exit(job)
+        return False
+
+
+def test_a_character_the_job_writes_in_two_pieces_is_read_whole(tmp_path: Path) -> None:
+    """The wait decodes the growing log incrementally: U+65E5 split over two
+    writes of the command (its lead bytes, then its last byte) reaches the
+    tool panel and the result as that character, not as two U+FFFD."""
+    jobs: dict[str, BackgroundJob] = {}
+    gate = _ReleaseOnceTheFirstPieceWasRead(tmp_path / "release", jobs)
+    pieces: list[str] = []
+
+    def on_piece(piece: str) -> None:
+        pieces.append(piece)
+        gate.armed = True
+
+    tools = UsefulTools(
+        stream_callback=on_piece, stop_event=gate, work_dir=str(tmp_path), jobs=jobs,
+    )
+    command = (
+        "printf 'abc\\346\\227'; while [ ! -e release ]; do sleep 0.01; done; printf '\\245\\n'"
+    )
+    out = tools.Bash(command, "split character", timeout_seconds=30, on_timeout="background")
+    assert gate.released, "the wait never took the first piece"
+    assert "".join(pieces) == "abc\u65e5\n", pieces
+    assert out == "abc\u65e5\n", out
+
+
+def test_crlf_output_reads_as_the_foreground_pipe_reads_it(tmp_path: Path) -> None:
+    """A job's CRLF line endings come back as ``\\n``, as a foreground run's
+    text-mode pipe returns them (Windows tools print CRLF), even when the
+    CR and the LF land in two pieces of the growing log."""
+    jobs: dict[str, BackgroundJob] = {}
+    gate = _ReleaseOnceTheFirstPieceWasRead(tmp_path / "release", jobs)
+    pieces: list[str] = []
+
+    def on_piece(piece: str) -> None:
+        pieces.append(piece)
+        gate.armed = True
+
+    tools = UsefulTools(
+        stream_callback=on_piece, stop_event=gate, work_dir=str(tmp_path), jobs=jobs,
+    )
+    command = "printf 'one\\r\\ntwo\\r'; while [ ! -e release ]; do sleep 0.01; done; printf '\\n'"
+    out = tools.Bash(command, "crlf output", timeout_seconds=30, on_timeout="background")
+    assert gate.released, "the wait never took the first piece"
+    assert "".join(pieces) == "one\ntwo\n", pieces
+    assert out == "one\ntwo\n", out

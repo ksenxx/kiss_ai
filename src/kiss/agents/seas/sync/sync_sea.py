@@ -126,6 +126,17 @@ once more, so that every checkout ends up with what all the others pushed. Nothi
    or nothing), what was merged (fast-forward, merge commit or nothing), what was
    pushed, any warning, and one line per machine and round saying what its sync did or
    why it failed.
+""" """\
+
+
+## Lessons from recent runs (rsi7d)
+- The calls above are the whole job: after the machines' results and the `git_sync`
+  report are in, run no Bash (`git rev-parse`, `git reflog`, `git status`, here or on a
+  machine) to verify them; the reports are the evidence. One run spent 20 of its 32
+  steps on such checks.
+- A machine whose round-1 result says it has no checkout of the repository is listed in
+  the summary with that reason and skipped in round 2: a missing checkout does not
+  appear between the rounds. Every other failure is retried in round 2 as step 5 says.
 """
 """The whole base system prompt of the sync agent (replaces ``SYSTEM.md``)."""
 

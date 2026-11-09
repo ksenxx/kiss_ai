@@ -94,6 +94,7 @@ def test_bash_refuses_the_rewrites_a_docker_task_refuses(
         bridge.Bash("sed -i 's/v1/v1\\nv2/' data.txt", "multi-line sed")
     assert (sed.value.name, sed.value.arguments) == ("Edit", {
         "file_path": str(data), "old_string": "v1", "new_string": "v1\nv2", "replace_all": False,
+        "exact": True,
     })
     assert data.read_text() == "v1\n"
     # Other rewrites stay refused: a sed the Edit cannot spell, a target only the shell knows.
@@ -139,6 +140,7 @@ def test_the_rest_of_a_compound_rewrite_is_the_redirects_follow_up(
         bridge.Bash("sed -i 's/v1/v2/' data.txt; wc -l data.txt", "sed")
     assert (sed.value.name, sed.value.arguments) == ("Edit", {
         "file_path": str(data), "old_string": "v1", "new_string": "v2", "replace_all": True,
+        "exact": True,
     })
     assert sed.value.followup == ("Bash", {
         "command": "wc -l data.txt", "description": "sed",
@@ -172,6 +174,27 @@ def test_a_plain_sed_without_an_exact_edit_runs_in_the_environment(
     workdir, bridge = bridged
     (workdir / "data.txt").write_text("v1 v1\n")
     assert bridge.Bash("sed -i 's/v1/v2/' data.txt && cat data.txt", "sed") == "v2 v1\n"
+
+
+@local_shell
+def test_a_sed_on_a_link_runs_in_the_environment(bridged: tuple[Path, ExecBridge]) -> None:
+    """A ``sed -i`` on a symlink or a hard link is no Edit: sed replaces the name, Edit writes
+    through it (A08 astra-6 / fable-5; the host declines the same way).  BSD sed (macOS)
+    takes the next word of ``-i`` as its backup suffix, so it gets an empty one, and refuses
+    to edit a symlink in place: its own error shows the command ran in the environment."""
+    workdir, bridge = bridged
+    gnu = host_sed_is_gnu()
+    in_place = "sed -i" if gnu else "sed -i ''"
+    (workdir / "link.txt").symlink_to(workdir / "data.txt")
+    out = bridge.Bash(f"{in_place} 's/v1/v2/' link.txt && cat link.txt", "sed")
+    if gnu:
+        assert out == "v2\n" and not (workdir / "link.txt").is_symlink()
+    else:
+        assert "in-place editing only works for regular files" in out
+    assert (workdir / "data.txt").read_text() == "v1\n"
+    (workdir / "twin.txt").hardlink_to(workdir / "data.txt")
+    assert bridge.Bash(f"{in_place} 's/v1/v3/' twin.txt && cat twin.txt", "sed") == "v3\n"
+    assert (workdir / "data.txt").read_text() == "v1\n"
 
 
 @local_shell

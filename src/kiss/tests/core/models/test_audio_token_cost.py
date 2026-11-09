@@ -82,10 +82,9 @@ class TestAudioPricesRegistered:
         assert info.audio_input_price_per_1M == 32.0
         assert info.audio_output_price_per_1M == 64.0
 
-    @pytest.mark.parametrize(
-        "model_name",
-        ["gpt-audio-mini", "gpt-audio-mini-2025-10-06", "gpt-audio-mini-2025-12-15"],
-    )
+    # gpt-audio-mini-2025-10-06 left the catalog in the 2026-11-05 refresh
+    # (OpenAI no longer lists it).
+    @pytest.mark.parametrize("model_name", ["gpt-audio-mini", "gpt-audio-mini-2025-12-15"])
     def test_gpt_audio_mini_family_audio_prices(self, model_name: str) -> None:
         info = MODEL_INFO[model_name]
         assert info.input_price_per_1M == 0.6

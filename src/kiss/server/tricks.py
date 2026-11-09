@@ -65,7 +65,17 @@ MY_INJECTION_DEFAULT_BODY = (
     "  Then implement the feature."
 )
 
-DEFAULT_MY_INJECTION = "## Trick\n\n" + MY_INJECTION_DEFAULT_BODY + "\n"
+
+def _section_text(body: str) -> str:
+    """Return *body* as a stored ``## Trick`` section (no trailing newline).
+
+    Backslashes the reader (:func:`_parse_trick_sections`) would strip
+    are doubled, so the body round-trips through the parser.
+    """
+    return "## Trick\n\n" + _MARKDOWN_ESCAPABLE_BACKSLASH.sub(r"\\\\", body)
+
+
+DEFAULT_MY_INJECTION = _section_text(MY_INJECTION_DEFAULT_BODY) + "\n"
 
 
 class TricksData(TypedDict):
@@ -343,8 +353,7 @@ def edit_my_injection_trick(text: str, new_text: str) -> str | None:
         # Keep the section's own spacing (usually one blank line) so the
         # file's layout survives the edit.
         trailing = "\n" * max(1, old[len(old.rstrip("\r\n")) :].count("\n"))
-        escaped = _MARKDOWN_ESCAPABLE_BACKSLASH.sub(r"\\\\", new_body)
-        sections[index] = "## Trick\n\n" + escaped + trailing
+        sections[index] = _section_text(new_body) + trailing
         atomic_write_text(user_path, preamble + "".join(sections))
     return None
 
@@ -384,12 +393,11 @@ def append_my_injection_trick(text: str) -> str | None:
             return str(e)
         if body in _parse_trick_sections(existing):
             return f"That promptlet is already in ~/{HOME_DIR}/MY_INJECTION.md"
-        escaped = _MARKDOWN_ESCAPABLE_BACKSLASH.sub(r"\\\\", body)
         separator = "" if existing == "" or existing.endswith("\n") else "\n"
         # Atomic like the delete and edit rewrites: readers (panel,
         # completions, bootstrap) take no lock and must never observe
         # a cut body.
-        atomic_write_text(user_path, existing + separator + "\n## Trick\n\n" + escaped + "\n")
+        atomic_write_text(user_path, existing + separator + "\n" + _section_text(body) + "\n")
     return None
 
 

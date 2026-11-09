@@ -36,6 +36,7 @@ from kiss.core import stop_signal
 from kiss.core.models.openai_compatible_model import (
     _ADAPTIVE_TOOL_EFFORT_LOCK,
     OpenAICompatibleModel,
+    _tool_effort_verdict,
 )
 from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 from kiss.tests.core.models.openai_sse_harness import Reply, Request, ScriptedOpenAIServer
@@ -110,6 +111,23 @@ class _SilentThenPromptGateway:
             self._first = False
             return Reply(headers_gate=self.release, json_body=body)
         return Reply(json_body=body)
+
+
+class _TricklingGateway:
+    """Answer every request with its headers at once and a body that never ends.
+
+    One JSON space every 20 ms until ``release``: each read timeout is
+    reset before it can fire, and no stream watchdog exists for a reply
+    the SDK hands back whole.
+    """
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+
+    def __call__(self, request: Request) -> Reply:
+        """Return the trickling reply."""
+        assert not request.body.get("stream"), "the callback-less path must not stream"
+        return Reply(json_body=_json_reply(request.path), trickle=self.release)
 
 
 class _StopAsReplyLandsGateway:
@@ -426,6 +444,50 @@ def test_an_abandoned_adaptive_probe_never_retries_through_the_next_turns_client
         )
 
 
+def test_an_abandoned_probe_records_its_verdict_under_its_own_endpoint() -> None:
+    """A stopped probe's 400 is a verdict on the endpoint it was sent to, not the next one.
+
+    The worker is parked on the old endpoint's 400 until the Stop unwound
+    the turn and the model was moved to a new endpoint (what a model
+    switch does before the next turn).  The verdict the worker then
+    records must be the old endpoint's: the new endpoint, never probed,
+    must get its first tools turn with the effort attached.
+    """
+    rejection = {"error": {"message": "reasoning_effort is not supported with tools"}}
+    with (
+        ScriptedOpenAIServer(lambda request: Reply(status=400, json_body=rejection)) as old,
+        ScriptedOpenAIServer(lambda request: Reply(json_body=_json_reply(request.path))) as new,
+    ):
+        model = OpenAICompatibleModel(
+            _MODEL,
+            base_url=old.base_url,
+            api_key="k",
+            model_config={"reasoning_effort": "high"},
+        )
+        model.initialize("Use the finish tool.")
+        # The worker is held as it builds the 400's error, before the
+        # adaptive wrapper acts on it.
+        with Pause(openai.APIStatusError.__init__.__code__, _on_the_worker) as held:
+            error, _elapsed = _run_with_stop(
+                lambda: model.generate_and_process_with_tools({}, tools_schema=_TOOLS_SCHEMA),
+                _stop_when(held.paused.is_set),
+                None,
+            )
+            assert isinstance(error, KeyboardInterrupt), f"the stopped turn returned {error!r}"
+            model.base_url = new.base_url
+        deadline = time.monotonic() + _UNWIND_WITHIN
+        while _worker_threads() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _worker_threads(), "the abandoned probe is still running"
+        assert _tool_effort_verdict((old.base_url, model._api_model_name)) is False
+        assert _tool_effort_verdict((new.base_url, model._api_model_name)) is None
+        model.generate_and_process_with_tools({}, tools_schema=_TOOLS_SCHEMA)
+        assert len(new.requests) == 1
+        assert new.requests[0].body.get("reasoning_effort") == "high", (
+            "the new endpoint inherited the old endpoint's rejection"
+        )
+
+
 def test_a_turn_nobody_can_stop_still_completes() -> None:
     """Control: outside a stoppable task (no stop event) the call runs inline and returns."""
     with ScriptedOpenAIServer(_StopAsReplyLandsGateway(threading.Event())) as server:
@@ -445,6 +507,46 @@ def test_a_turn_nobody_stopped_still_completes() -> None:
         assert error is None, f"the unstopped turn failed: {error!r}"
         assert model.conversation[-1]["content"] == "late but complete"
         assert model.take_partial_usage_response() is None
+
+
+def test_a_trickling_reply_is_cut_at_the_request_deadline() -> None:
+    """A peer sending a byte before every read timeout is cut at the whole-request deadline.
+
+    The per-request ``timeout`` bounds the silence between two reads
+    only, so a trickling body resets it for ever (audit 2026-11-07,
+    A05-2 / L4-F3): the request is cut from outside the SDK call, in a
+    task nobody stops and outside any task alike, as a retryable stall;
+    the cut reaches the peer, so no reader or socket outlives the call,
+    and the next turn gets a fresh connection.
+    """
+    gateway = _TricklingGateway()
+    with ScriptedOpenAIServer(gateway) as server:
+        model = OpenAICompatibleModel(
+            _MODEL, base_url=server.base_url, api_key="k", model_config={"timeout": 0.3}
+        )
+        model.initialize("Say something.")
+        for stop in (threading.Event(), None):
+            server.client_disconnected.clear()
+            started = time.monotonic()
+            if stop is None:
+                try:
+                    model.generate()
+                    error: BaseException | None = None
+                except BaseException as caught:  # noqa: BLE001 - the error is the result
+                    error = caught
+            else:
+                error, _ = _run_with_stop(model.generate, stop, None)
+            elapsed = time.monotonic() - started
+            assert isinstance(error, TimeoutError) and "exceeded" in str(error), repr(error)
+            assert elapsed < _UNWIND_WITHIN, f"the trickling request ran {elapsed:.2f}s"
+            assert server.client_disconnected.wait(_UNWIND_WITHIN), "the cut request kept reading"
+            deadline = time.monotonic() + _UNWIND_WITHIN
+            while _worker_threads() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert not _worker_threads(), "the cut request is still blocked on its worker thread"
+            assert model.take_partial_usage_response() is None, "nothing arrived, nothing to bill"
+        assert len(server.requests) == 2, "the SDK retried the cut request"
+    gateway.release.set()
 
 
 def test_a_reply_landing_as_the_abort_runs_is_billed() -> None:

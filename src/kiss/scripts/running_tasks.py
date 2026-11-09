@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import stat
 import sys
 import time
 
@@ -67,21 +68,29 @@ SQLITE_MAGIC = b"SQLite format 3\x00"
 UNFINISHED_RESULT = "Agent Failed Abruptly"
 
 
-def is_sqlite_file(path: str) -> bool:
+def is_sqlite_file(path: str) -> bool | None:
     """Report whether a file starts with SQLite's format marker.
 
     Args:
         path: File to look at.
 
     Returns:
-        True when the file could be a database.  A file that is not one
-        cannot be holding a running task, whatever else is wrong with it.
+        True when the file could be a database; False when there is no
+        such file, it is not a regular file (a directory, or a named pipe
+        that an open for reading would wait on) or its header is not
+        SQLite's -- none of those can be holding a running task, whatever
+        else is wrong with it; None when the file is there but cannot be
+        read, which says nothing about what it holds.
     """
     try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return False
         with open(path, "rb") as handle:
             return handle.read(len(SQLITE_MAGIC)) == SQLITE_MAGIC
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return False
+    except OSError:
+        return None
 
 
 def running_tasks(
@@ -147,7 +156,10 @@ def _query(
     is -- only a database that cannot be read answers None.
     """
     path = os.path.expanduser(database)
-    if not os.path.isfile(path) or not is_sqlite_file(path):
+    header = is_sqlite_file(path)
+    if header is None:
+        return None
+    if not header:
         return []
     moment = time.time() if now is None else now
     try:

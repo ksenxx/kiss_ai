@@ -44,6 +44,7 @@ import pytest
 
 from kiss.server.file_index import FileIndexRegistry, FileView
 from kiss.server.server import AgentServer
+from kiss.tests.server.conftest import local_view
 
 _Workspace = tuple[str, AgentServer, list[dict[str, Any]]]
 
@@ -87,11 +88,11 @@ def _wait_for_view(
     """Poll until the view of *work_dir* lists *containing* and return it."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        view = registry.view_for(work_dir)
+        view = local_view(registry, work_dir)
         if view is not None and containing in view:
             return view
         time.sleep(0.01)
-    view = registry.view_for(work_dir)
+    view = local_view(registry, work_dir)
     raise AssertionError(
         f"{containing!r} never appeared in the index of {work_dir}; "
         f"got {None if view is None else view.paths}"
@@ -226,7 +227,7 @@ def test_refresh_is_silent_when_no_files_added_or_removed(
     server._refresh_files_after_task(wd)
     _wait_for_worker_idle(server._file_index, wd)
 
-    view = server._file_index.view_for(wd)
+    view = local_view(server._file_index, wd)
     assert view is not None and view.paths == ["old_file.py"]
     files_events = [e for e in events if e.get("type") == "files"]
     assert files_events == [], (
@@ -245,7 +246,7 @@ def test_refresh_no_op_when_index_never_built(
     wd, server, events = workspace
     registry = server._file_index
 
-    assert registry.view_for(wd) is None
+    assert local_view(registry, wd) is None
 
     (Path(wd) / "new_file.py").write_text("# new\n")
     server._refresh_files_after_task(wd)
@@ -254,5 +255,5 @@ def test_refresh_no_op_when_index_never_built(
     # nothing to wait for: the registry must stay empty.
     time.sleep(0.3)
     assert wd not in registry._indexes
-    assert registry.view_for(wd) is None
+    assert local_view(registry, wd) is None
     assert [e for e in events if e.get("type") == "files"] == []

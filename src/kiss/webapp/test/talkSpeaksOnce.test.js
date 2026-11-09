@@ -9,7 +9,16 @@ const assert = require('assert');
 const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {installAudio} = require('./speech_helpers');
-const {test, report} = makeRunner();
+const runner = makeRunner();
+const report = runner.report;
+const openWindows = [];
+
+/** Run one test through the shared runner, then close its windows. */
+async function test(name, fn) {
+  const result = runner.test(name, fn);
+  if (result) await result;
+  while (openWindows.length) openWindows.pop().close();
+}
 
 const B64 = 'SUQzBAAAAAAAAA==';
 
@@ -21,6 +30,7 @@ function makePage() {
       played = installAudio(win);
     },
   });
+  openWindows.push(win);
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'page must post ready with its tab id');
   return {win, posted, played, tabId: ready.tabId};
@@ -158,6 +168,3 @@ test('dedupe memory is bounded (oldest talkIds forgotten, recent kept)', () => {
 });
 
 report('talkSpeaksOnce');
-// The pages are left with a clip "playing": its stall sampler
-// (main.js TALK_STALL_CHECK_MS interval) would keep node alive.
-process.exit(0);

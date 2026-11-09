@@ -582,9 +582,9 @@ class TestReplayBoundary(TabMirroringBase):
         fanned out before B's replay, which wipes them) instead of the
         stale database events.
         """
-        view = await self._finish_after(
-            ("_attach_viewer_to_running_chat", "return"),
-        )
+        # The attach returns inside the replay's view lock section;
+        # ``_race_delay`` is its first statement after the release.
+        view = await self._finish_after(("_race_delay", "call"))
         self.assertEqual(_text(view), "HEAD FINAL", view)
         results = [ev for ev in view if ev.get("type") == "result"]
         self.assertEqual([ev.get("text") for ev in results], ["all done"])
@@ -658,7 +658,7 @@ class TestReplayBoundary(TabMirroringBase):
                 printer.stop_recording()
 
         view = await self._finish_after(
-            ("_attach_viewer_to_running_chat", "return"), other_runs_stop,
+            ("_race_delay", "call"), other_runs_stop,
         )
         self.assertEqual(_text(view), "HEAD FINAL", view)
         results = [ev for ev in view if ev.get("type") == "result"]
@@ -679,7 +679,7 @@ class TestReplayBoundary(TabMirroringBase):
             printer.cleanup_task(task_id)
 
         view = await self._finish_after(
-            ("_attach_viewer_to_running_chat", "return"), end_and_clean_up,
+            ("_race_delay", "call"), end_and_clean_up,
         )
         self.assertEqual(_text(view), "HEAD FINAL", view)
         results = [ev for ev in view if ev.get("type") == "result"]
@@ -713,7 +713,7 @@ class TestReplayBoundary(TabMirroringBase):
             assert state.task_id == str(next_id)
 
         view = await self._finish_after(
-            ("_attach_viewer_to_running_chat", "return"), next_subtask,
+            ("_race_delay", "call"), next_subtask,
         )
         self.assertEqual(_text(view), "HEAD FINAL", view)
         results = [ev for ev in view if ev.get("type") == "result"]

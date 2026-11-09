@@ -33,5 +33,5 @@ def test_runner_start_cursor_polls_the_newest_rows(tmp_path: Path) -> None:
     backend = WhatsAppChannelBackend(repo_dir=str(tmp_path))
     messages, cursor = backend.poll_messages(_CHAT, "0", limit=2)
     assert [m["id"] for m in messages] == ["m2", "m3"]
-    assert cursor == "2026-09-10 10:00:03+00:00"
+    assert cursor == "2026-09-10 10:00:03+00:00|m3"
     assert backend.poll_messages(_CHAT, "", limit=2) == (messages, cursor)

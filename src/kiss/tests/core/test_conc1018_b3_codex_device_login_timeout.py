@@ -22,15 +22,21 @@ gone.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from kiss.core.models import codex_model
+from kiss.tests.conftest import posix_only
+
+pytestmark = posix_only("the fake codex is a /bin/sh script whose banner forks a setsid grandchild")
 
 _LATE_CODEX = """#!/bin/sh
 if [ "$1" = "login" ] && [ "$2" = "--device-auth" ]; then
@@ -79,4 +85,112 @@ def test_prompt_arriving_after_the_timer_killed_the_cli_is_an_error(late_codex: 
     assert "error" in result, result
     assert "printed no login code" in result["error"]
     # Nothing is left behind as the login alive: the next call starts over.
+    assert codex_model._device_login is None
+
+
+# The wrapper exits at once; its grandchild leaves the process group with
+# stdout inherited and holds it, silent, for longer than any timeout here.
+# Its stderr goes to /dev/null so only stdout is held.
+_HOLDING_BANNER = """
+import os, sys, time
+pid = os.fork()
+if pid == 0:
+    os.setsid()
+    os.dup2(os.open(os.devnull, os.O_WRONLY), 2)
+    time.sleep(20)
+    os._exit(0)
+with open(sys.argv[1], "w") as f:
+    f.write(str(pid))
+"""
+
+_HOLDING_CODEX = """#!/bin/sh
+if [ "$1" = "login" ] && [ "$2" = "--device-auth" ]; then
+  exec "{python}" "{banner}" "{pid_file}"
+fi
+echo "Not logged in" >&2
+exit 1
+"""
+
+
+@pytest.fixture
+def holding_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    banner = tmp_path / "banner.py"
+    banner.write_text(_HOLDING_BANNER)
+    pid_file = tmp_path / "holder.pid"
+    script = bin_dir / "codex"
+    script.write_text(
+        _HOLDING_CODEX.format(python=sys.executable, banner=banner, pid_file=pid_file)
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    yield pid_file
+    with contextlib.suppress(OSError, ValueError):
+        os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+
+def test_timeout_holds_while_a_stray_descendant_keeps_stdout_open(holding_codex: Path) -> None:
+    """The wait for the code ends at *timeout* even when the pipe never reaches EOF.
+
+    A plain read of the CLI's stdout returns only when every holder of
+    the pipe's write end is gone; a descendant in its own session
+    survives the timeout's group kill, so the caller (the settings
+    panel's reply thread, holding the login lock) sat in that read for
+    as long as the descendant lived.
+    """
+    started = time.monotonic()
+    result = codex_model.codex_device_login(timeout=0.2)
+    elapsed = time.monotonic() - started
+    assert "error" in result, result
+    assert "printed no login code within 0.2s" in result["error"]
+    assert elapsed < 5, f"the login wait outlived its timeout: {elapsed:.1f}s"
+    assert codex_model._device_login is None
+
+
+# A CLI that floods stdout before the banner: the lines queue up faster
+# than the caller takes them, so at the deadline the queue is still full.
+_NOISY_BANNER = """
+import sys, time
+sys.stdout.write("noise\\n" * 200000)
+sys.stdout.write("   https://auth.openai.com/codex/device\\n   CODE-NOISY\\n")
+sys.stdout.flush()
+time.sleep(20)
+"""
+
+_NOISY_CODEX = """#!/bin/sh
+if [ "$1" = "login" ] && [ "$2" = "--device-auth" ]; then
+  exec "{python}" "{banner}"
+fi
+echo "Not logged in" >&2
+exit 1
+"""
+
+
+@pytest.fixture
+def noisy_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    banner = tmp_path / "banner.py"
+    banner.write_text(_NOISY_BANNER)
+    script = bin_dir / "codex"
+    script.write_text(_NOISY_CODEX.format(python=sys.executable, banner=banner))
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    yield script
+    for reaper in threading.enumerate():
+        if reaper.name == "codex-device-login":
+            reaper.join(10)
+
+
+def test_the_deadline_holds_while_stdout_has_queued_lines(noisy_codex: Path) -> None:
+    """A prompt buried under more output than the timeout allows reading is not
+    published: the deadline is checked before every line, not only when the
+    queue runs dry, so a chatty CLI cannot hold the login lock past the timeout."""
+    started = time.monotonic()
+    result = codex_model.codex_device_login(timeout=0.1)
+    elapsed = time.monotonic() - started
+    assert "error" in result, result
+    assert "printed no login code within 0.1s" in result["error"]
+    assert elapsed < 5, f"the login wait outlived its timeout: {elapsed:.1f}s"
     assert codex_model._device_login is None

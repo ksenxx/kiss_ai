@@ -46,7 +46,7 @@ def _make_finish_response() -> dict:
                                     {
                                         "success": True,
                                         "is_continue": False,
-                                        "summary": "done",
+                                        "summary_in_html": "done",
                                     }
                                 ),
                             },

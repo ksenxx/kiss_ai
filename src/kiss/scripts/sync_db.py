@@ -82,6 +82,14 @@ the task starts and rewrites it when the task ends -- and the caller
 holds such rows back with ``--edit-delta`` (``scripts/sync-task-db.sh``
 does, both ways) until they are final.
 
+A copied task row also says where it ran: the extract stamps the
+source's own rows (an empty ``machine``) with the source's short host
+name, a row that came to the source from a third machine keeps that
+machine's name, and the merge clears the stamp of a row that ran on the
+target's own host.  So ``machine`` is '' exactly for the rows a database's
+own machine ran, and the web app's CHATS panel lists every other row as
+the registered machine it ran on instead of as one of its own.
+
 The one thing the history loses is a task the user deleted (a task, or
 a whole chat, from the web app's panels).  Such a row is gone from the
 database, and a sync that only adds rows would bring it back from the
@@ -157,6 +165,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -193,6 +202,11 @@ DELETED_KEY = {DELETED_TABLE: "id", DELETED_CHATS_TABLE: "chat_id"}
 # placeholder).
 UNFINISHED_RESULT = "Agent Failed Abruptly"
 RUNNING_WINDOW = 300.0
+# The task column naming the machine a task ran on: '' on that machine's
+# own database, its short host name on every database a sync copied the
+# row into (see ``_stamp_origin``), so the CHATS panel there can say
+# where the task ran.
+ORIGIN_COLUMN = "machine"
 # The web app's own code this script runs on the target: the chat-summary
 # module and the task-column module.  Both are stdlib-only; they are
 # shipped to a remote host with this script (see ``_remote_shell_command``)
@@ -427,6 +441,8 @@ def add_missing_columns(conn: sqlite3.Connection, table: str) -> list[str]:
         try:
             conn.execute(f"ALTER TABLE main.{quote_name(table)} ADD COLUMN {declaration}")
         except sqlite3.OperationalError as exc:
+            if "readonly" in str(exc):
+                raise  # _apply_delta says what a read-only target means
             raise SyncError(
                 f"cannot add the source's column {name!r} ({declaration.strip()})"
                 f" to the target's {table!r} table: {exc}"
@@ -652,6 +668,7 @@ def phase_extract(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> N
             _load_target_tasks(conn, manifest.get("tasks") or {})
             _load_target_deletions(conn, manifest.get("deleted") or {})
             _extract_tasks(conn)
+            _stamp_origin(conn)
             _extract_events(conn)
             _extract_deletions(conn, DELETED_TABLE, manifest.get("deleted") or {})
             _extract_deletions(conn, DELETED_CHATS_TABLE, manifest.get("deleted_chats") or {})
@@ -687,17 +704,39 @@ def _create_delta_tables(conn: sqlite3.Connection) -> None:
 
 
 def _load_target_deletions(conn: sqlite3.Connection, deleted: dict[str, Any]) -> None:
-    """Load the ids of the tasks deleted on the target into a temporary table.
+    """Load the tasks deleted on the target, and when, into a temporary table.
 
     Args:
         conn: Connection to the delta database, inside its transaction.
         deleted: Manifest entries ``{task_id: deleted_ts}``; empty for a
             ``--full`` sync or a target from before deletions were recorded.
     """
-    conn.execute('CREATE TEMP TABLE "_sync_deleted" (task_id TEXT PRIMARY KEY)')
+    conn.execute('CREATE TEMP TABLE "_sync_deleted" (task_id TEXT PRIMARY KEY, deleted_ts REAL)')
     conn.executemany(
-        'INSERT OR REPLACE INTO temp."_sync_deleted" VALUES (?)',
-        [(task_id,) for task_id in deleted],
+        'INSERT OR REPLACE INTO temp."_sync_deleted" VALUES (?, ?)',
+        [(task_id, float(deleted_ts or 0.0)) for task_id, deleted_ts in deleted.items()],
+    )
+
+
+def _target_deletion_join(alias: str, columns: list[str]) -> str:
+    """Return the join of a source task row with the target deletion that dooms it.
+
+    A deletion dooms the row unless the row is younger than it (a reused
+    id is a new task), the same test :func:`_deleted_task_filter` applies
+    at the merge; a row without a ``timestamp`` is as old as can be.
+
+    Args:
+        alias: Alias of the ``task_history`` row in the surrounding statement.
+        columns: The columns that row has.
+
+    Returns:
+        A ``LEFT JOIN`` clause whose alias ``x`` is NULL for a row no
+        deletion of the target's applies to.
+    """
+    started = f'COALESCE({alias}."timestamp", 0)' if "timestamp" in columns else "0"
+    return (
+        f' LEFT JOIN temp."_sync_deleted" x ON x.task_id = {alias}."id"'
+        f" AND x.deleted_ts > {started}"
     )
 
 
@@ -715,15 +754,18 @@ def _extract_deletions(conn: sqlite3.Connection, table: str, known: dict[str, An
     key = quote_name(DELETED_KEY[table])
     quoted = quote_name(table)
     conn.execute('DROP TABLE IF EXISTS temp."_sync_known"')
-    conn.execute('CREATE TEMP TABLE "_sync_known" (deleted_id TEXT PRIMARY KEY)')
+    conn.execute('CREATE TEMP TABLE "_sync_known" (deleted_id TEXT PRIMARY KEY, deleted_ts REAL)')
     conn.executemany(
-        'INSERT OR REPLACE INTO temp."_sync_known" VALUES (?)',
-        [(deleted_id,) for deleted_id in known],
+        'INSERT OR REPLACE INTO temp."_sync_known" VALUES (?, ?)',
+        [(deleted_id, float(deleted_ts or 0.0)) for deleted_id, deleted_ts in known.items()],
     )
+    # A deletion the target knows of travels again when the source's is
+    # newer: the key was deleted once more after living again.
     conn.execute(
         f'INSERT INTO main.{quoted} ({key}, "deleted_ts")'
         f' SELECT s.{key}, s."deleted_ts" FROM src.{quoted} s'
         f' LEFT JOIN temp."_sync_known" x ON x.deleted_id = s.{key}'
+        f' AND x.deleted_ts >= COALESCE(s."deleted_ts", 0)'
         f" WHERE s.{key} IS NOT NULL AND x.deleted_id IS NULL"
     )
     conn.execute('DROP TABLE temp."_sync_known"')
@@ -751,7 +793,8 @@ def _extract_tasks(conn: sqlite3.Connection) -> None:
     Task ids are unique and a finished task's row is never modified, so
     an id the target already holds identifies a row that is already
     there in full and never has to travel; an id the target deleted
-    must not travel either.  A row with a NULL id cannot be matched
+    must not travel either, unless the row is younger than the deletion
+    (a reused id is a new task).  A row with a NULL id cannot be matched
     across databases and would be duplicated on every run, so such rows
     are skipped.
 
@@ -768,8 +811,34 @@ def _extract_tasks(conn: sqlite3.Connection) -> None:
         f"INSERT INTO main.{table} ({names})"
         f" SELECT {', '.join('s.' + quote_name(c) for c in columns)} FROM src.{table} s"
         ' LEFT JOIN temp."_sync_have" w ON w.task_id = s."id"'
-        ' LEFT JOIN temp."_sync_deleted" x ON x.task_id = s."id"'
-        ' WHERE s."id" IS NOT NULL AND w.task_id IS NULL AND x.task_id IS NULL'
+        + _target_deletion_join("s", columns)
+        + ' WHERE s."id" IS NOT NULL AND w.task_id IS NULL AND x.task_id IS NULL'
+    )
+
+
+def host_name() -> str:
+    """Return this host's short name, as ``history_columns.host_name`` spells it."""
+    return socket.gethostname().strip().split(".")[0] or "localhost"
+
+
+def _stamp_origin(conn: sqlite3.Connection) -> None:
+    """Stamp the delta's task rows that ran on the source machine with its host name.
+
+    A row whose ``machine`` is empty ran on the machine whose database
+    it comes from, this one; a row already stamped came here from a
+    third machine and keeps that machine's name.  A source from before
+    the column existed gets it in the delta, so the target learns where
+    its rows ran whatever release the source runs.
+
+    Args:
+        conn: Connection to the delta database, its task rows extracted.
+    """
+    table = quote_name(TASK_TABLE)
+    if ORIGIN_COLUMN not in table_columns(conn, "main", TASK_TABLE):
+        conn.execute(f"ALTER TABLE main.{table} ADD COLUMN {ORIGIN_COLUMN} TEXT DEFAULT ''")
+    conn.execute(
+        f"UPDATE main.{table} SET {ORIGIN_COLUMN} = ? WHERE COALESCE({ORIGIN_COLUMN}, '') = ''",
+        (host_name(),),
     )
 
 
@@ -803,8 +872,8 @@ def _extract_events(conn: sqlite3.Connection) -> None:
     conn.execute(
         f"{insert} FROM src.{quote_name(TASK_TABLE)} t"
         ' LEFT JOIN temp."_sync_have" w ON w.task_id = t."id"'
-        ' LEFT JOIN temp."_sync_deleted" x ON x.task_id = t."id"'
-        f' CROSS JOIN src.{table} s ON s."task_id" = t."id"'
+        + _target_deletion_join("t", table_columns(conn, "src", TASK_TABLE))
+        + f' CROSS JOIN src.{table} s ON s."task_id" = t."id"'
         ' WHERE w.high_seq IS NULL AND x.task_id IS NULL AND s."seq" IS NOT NULL'
     )
     conn.execute(
@@ -940,10 +1009,14 @@ def _record_deletions(conn: sqlite3.Connection) -> int:
             continue
         key = quote_name(DELETED_KEY[table])
         quoted = quote_name(table)
+        # A key deleted again after living again carries a newer moment,
+        # which the comparisons downstream need; an older one is never
+        # let lower what the target recorded.
         recorded += conn.execute(
             f'INSERT INTO main.{quoted} ({key}, "deleted_ts")'
             f' SELECT {key}, "deleted_ts" FROM delta.{quoted} WHERE {key} IS NOT NULL'
-            f" ON CONFLICT({key}) DO NOTHING"
+            f' ON CONFLICT({key}) DO UPDATE SET "deleted_ts" = excluded."deleted_ts"'
+            ' WHERE excluded."deleted_ts" > "deleted_ts"'
         ).rowcount
     return recorded
 
@@ -1062,7 +1135,16 @@ def _merge_tasks(conn: sqlite3.Connection) -> int:
         f' SELECT {names} FROM delta.{table} s WHERE "id" IS NOT NULL AND NOT {doomed}'
         ' ON CONFLICT("id") DO NOTHING'
     )
-    return conn.execute(sql).rowcount
+    inserted = conn.execute(sql).rowcount
+    if ORIGIN_COLUMN in columns:
+        # A row that ran on this very machine (it went out and came back
+        # through a third database) is one of this database's own again.
+        conn.execute(
+            f"UPDATE main.{table} SET {ORIGIN_COLUMN} = '' WHERE {ORIGIN_COLUMN} = ?"
+            f" AND id IN (SELECT id FROM delta.{table})",
+            (host_name(),),
+        )
+    return inserted
 
 
 def _merge_events(conn: sqlite3.Connection) -> int:

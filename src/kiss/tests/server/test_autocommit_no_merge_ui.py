@@ -41,6 +41,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import init_repo, kiss_wt_branches, run_git
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 #: Events of the removed hunk-by-hunk diff/merge UI; must never reappear.
 MERGE_UI_EVENTS = ("merge_data", "merge_started")
@@ -325,7 +326,7 @@ class TestResumeRefusesUnsafeState(_Base):
         wt_dir = agent._wt_dir
         assert wt_dir is not None
         Path(wt_dir, "agent_out.txt").unlink()
-        assert self.server._get_worktree_changed_files(tab_id) == [], (
+        assert worktree_changed_files(self.server, tab_id) == [], (
             "this test needs an empty worktree to exercise the discard "
             "path"
         )

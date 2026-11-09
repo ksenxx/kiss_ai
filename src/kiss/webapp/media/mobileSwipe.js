@@ -73,11 +73,18 @@
     return out;
   }
 
-  function selectionCollapsed() {
+  /**
+   * The selection's end points, or null while nothing is selected: a
+   * touch that leaves a selection other than the one it found (text
+   * selected, or a handle of the selection dragged) is not a swipe.
+   */
+  function selectionEnds() {
     const sel = global.getSelection ? global.getSelection() : null;
-    return !sel || sel.isCollapsed;
+    if (!sel || sel.isCollapsed) return null;
+    return [sel.anchorNode, sel.anchorOffset, sel.focusNode, sel.focusOffset];
   }
 
+  /** Whether the arrays *a* and *b* hold the same items (by identity). */
   function sameNumbers(a, b) {
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -124,7 +131,7 @@
         at: Date.now(),
         scrollers: sidewaysScrollers(target),
         positions: scrollPositions(),
-        selectionWasCollapsed: selectionCollapsed(),
+        selection: selectionEnds(),
       };
     }
 
@@ -144,7 +151,12 @@
       if (Date.now() - start.at > SWIPE_MAX_MS) return;
       if (start.scrollers.some(s => s.el.scrollLeft !== s.left)) return;
       if (!sameNumbers(start.positions, scrollPositions())) return;
-      if (start.selectionWasCollapsed && !selectionCollapsed()) return;
+      const selection = selectionEnds();
+      if (
+        selection &&
+        !(start.selection && sameNumbers(start.selection, selection))
+      )
+        return;
       onSwipe(dx < 0 ? 'left' : 'right', e);
     }
 
@@ -188,7 +200,7 @@
     ';' +
     scrollsSideways.toString() +
     sidewaysScrollers.toString() +
-    selectionCollapsed.toString() +
+    selectionEnds.toString() +
     sameNumbers.toString() +
     install.toString() +
     postSwipeToParent.toString() +

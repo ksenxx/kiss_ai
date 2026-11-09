@@ -19,9 +19,13 @@ Unreachable without test doubles, documented rather than mocked: the
 
 import json
 import os
+import signal
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import pytest
@@ -31,7 +35,9 @@ import pytest
 # the adapters import it lazily, so a name bound at import time would patch
 # an object the code under test no longer reads.
 from kiss.core import config as config_module
+from kiss.core import processes
 from kiss.core.kiss_error import KISSError
+from kiss.core.models import codex_model
 from kiss.core.models.codex_model import (
     API_KEY_LOGIN_ERROR,
     SUBSCRIPTION_HINT,
@@ -437,6 +443,105 @@ def test_device_login_survives_a_cli_that_floods_stderr_first(fake_codex: _FakeC
     assert len(reaper) == 1
     reaper[0].join(10)
     assert not reaper[0].is_alive()
+
+
+def _end_device_login() -> None:
+    """Kill the CLI of the current device login, if any, and join its finisher."""
+    login = codex_model._device_login
+    if login is not None and login[1].poll() is None:
+        processes.kill_process_tree(login[1])
+    for thread in threading.enumerate():
+        if thread.name == "codex-device-login":
+            thread.join(10)
+            assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("failing_start", [1, 2, 3])
+def test_device_login_ends_the_cli_when_a_thread_cannot_start(
+    fake_codex: _FakeCodex, failing_start: int
+) -> None:
+    """A ``Thread.start`` that fails (no thread left) after the CLI was
+    spawned, whether a reader's (1, 2) or the finisher's (3), ends the
+    CLI nobody would read or reap, and the sheet gets an ``error``
+    answer rather than an exception."""
+    fake_codex.configure(login_sleep=30)
+    spawned: list[subprocess.Popen[str]] = []
+    starts = 0
+
+    def fail_the_start(frame: FrameType, event: str, arg: Any) -> None:
+        nonlocal starts
+        if event == "return" and frame.f_code is processes.popen_process_group.__code__:
+            spawned.append(arg)
+        elif (
+            event == "call"
+            and frame.f_code is threading.Thread.start.__code__
+            and frame.f_back is not None
+            and frame.f_back.f_code is codex_device_login.__code__
+        ):
+            starts += 1
+            if starts == failing_start:
+                sys.setprofile(None)
+                raise RuntimeError("can't start new thread")
+
+    sys.setprofile(fail_the_start)
+    try:
+        result = codex_device_login()
+    except RuntimeError as e:
+        result = {"raised": str(e)}
+    finally:
+        sys.setprofile(None)
+    (cli,) = spawned
+    try:
+        assert "can't start new thread" in result.get("error", ""), result
+        assert cli.poll() is not None, "the CLI nobody watches must be ended"
+        assert codex_model._device_login is None
+    finally:
+        if cli.poll() is None:
+            processes.kill_process_tree(cli)
+            cli.wait()
+        _end_device_login()
+
+
+def test_a_fresh_login_signals_the_old_cli_only_while_it_is_unreaped(
+    fake_codex: _FakeCodex,
+) -> None:
+    """The finisher reaps the old CLI only under the login lock, so a
+    ``fresh`` login that saw it alive under that lock kills a group that
+    is still the CLI's: a pid reaped meanwhile could already name a
+    stranger's group.  The CLI exits exactly as the fresh login is about
+    to kill it, and the finisher gets every chance to reap it then."""
+    fake_codex.configure(login_sleep=30)
+    assert "code" in codex_device_login()
+    assert codex_model._device_login is not None
+    old = codex_model._device_login[1]
+    reaped_before_the_kill: list[bool] = []
+
+    def end_the_cli_as_it_is_killed(frame: FrameType, event: str, arg: Any) -> None:
+        if (
+            event == "call"
+            and frame.f_code is processes.kill_process_tree.__code__
+            and frame.f_locals.get("proc") is old
+        ):
+            sys.setprofile(None)
+            os.kill(old.pid, signal.SIGKILL)
+            deadline = time.monotonic() + 5
+            while not processes.exited_unreaped(old) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert processes.exited_unreaped(old)
+            deadline = time.monotonic() + 0.5
+            while old.returncode is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            reaped_before_the_kill.append(old.returncode is not None)
+
+    sys.setprofile(end_the_cli_as_it_is_killed)
+    try:
+        prompt = codex_device_login(fresh=True)
+    finally:
+        sys.setprofile(None)
+        _end_device_login()
+    assert "code" in prompt
+    assert reaped_before_the_kill == [False], "the old CLI was reaped before its group kill"
+    assert old.returncode is not None, "the old finisher reaped it once the lock was free"
 
 
 def test_device_login_without_a_banner_is_an_error(fake_codex: _FakeCodex) -> None:

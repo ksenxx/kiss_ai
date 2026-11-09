@@ -15,6 +15,7 @@ project goes through this module.
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import selectors
@@ -240,6 +241,11 @@ def popen_process_group(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
     Object right after it starts (descendants inherit the job
     automatically).
 
+    A caller whose cleanup must also cover an exception raised as this
+    call itself returns to it (a Stop injected into its thread) makes
+    the ``Popen`` first and has :func:`start_process_group` initialise
+    it inside its own ``try``, as :func:`run_process_group` does.
+
     Args:
         *args: Positional arguments for :class:`subprocess.Popen`.
         **kwargs: Keyword arguments for :class:`subprocess.Popen`.
@@ -247,14 +253,48 @@ def popen_process_group(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
     Returns:
         The started process.
     """
+    proc: subprocess.Popen[Any] = object.__new__(subprocess.Popen)
+    start_process_group(proc, *args, **kwargs)
+    return proc
+
+
+def start_process_group(proc: subprocess.Popen[Any], *args: Any, **kwargs: Any) -> None:
+    """Start *proc*, a ``Popen`` made with ``object.__new__``, as :func:`popen_process_group` would.
+
+    The ``Popen`` exists before the spawn: a Stop injected into this
+    thread is raised at the check that ends a call, before its result
+    is bound to any name (or inside ``Popen.__init__`` once the child is
+    forked), so a ``proc = Popen(...)`` lost the child it started.  Held
+    from the start, the child this call started is killed and reaped on
+    any exception raised here, with its pipes closed (a child whose exec
+    failed, ``__init__`` reaped itself); and a caller holding *proc*
+    across the call still has the child when the exception is raised as
+    this call returns to it, so its own handler can act on it.
+
+    Args:
+        proc: ``object.__new__(subprocess.Popen)``, not yet initialised.
+        *args: Positional arguments for :class:`subprocess.Popen`.
+        **kwargs: Keyword arguments for :class:`subprocess.Popen`.
+    """
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
     else:
         kwargs["start_new_session"] = True
-    proc: subprocess.Popen[Any] = subprocess.Popen(*args, **kwargs)
-    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        _windows_enrol_in_job(proc)
-    return proc
+    try:
+        subprocess.Popen.__init__(proc, *args, **kwargs)
+        if IS_WINDOWS:  # pragma: no cover — Windows-only branch
+            _windows_enrol_in_job(proc)
+    except BaseException:
+        if getattr(proc, "pid", None) is not None and proc.returncode is None:
+            kill_process_tree(proc)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=_REAP_GRACE_SECONDS)
+            # Nothing reads the pipes of a child that never reached its
+            # caller; closed here, they do not live on with the error.
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+        raise
 
 
 def kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
@@ -352,7 +392,11 @@ def terminate_process_group(proc: subprocess.Popen[Any], grace: float = 5.0) -> 
     alive *grace* seconds later (the leader, or a descendant that
     ignored the signal after the leader honoured it) is killed with
     :func:`kill_process_tree` and given another *grace* seconds to be
-    reaped.  Windows has no ``SIGTERM``: both rounds terminate the Job
+    reaped.  The leader is reaped last, after the group's last signal:
+    reaped earlier, its pid (the group id) could be a stranger's by the
+    time that signal is sent (see :func:`kill_process_group`), so an
+    exited leader waits as a zombie while its descendants run out their
+    grace.  Windows has no ``SIGTERM``: both rounds terminate the Job
     Object.  Same precondition as :func:`kill_process_group`: a caller
     that has already ``poll()``ed *proc* as exited must skip this call
     (``if proc.poll() is None: terminate_process_group(proc)``) unless
@@ -366,41 +410,67 @@ def terminate_process_group(proc: subprocess.Popen[Any], grace: float = 5.0) -> 
         kill_process_group(proc.pid, signal.SIGTERM)
     except OSError:
         proc.terminate()
-    if _group_exited(proc, grace):
-        return
-    kill_process_tree(proc)
+    if not _group_exited(proc, grace):
+        kill_process_tree(proc)
     with contextlib.suppress(subprocess.TimeoutExpired):
         proc.wait(timeout=grace)
 
 
 def _group_exited(proc: subprocess.Popen[Any], grace: float) -> bool:
-    """Reap *proc* and wait for its whole group to be gone, at most *grace* seconds.
+    """Wait for *proc*'s whole group to be gone, at most *grace* seconds, without reaping *proc*.
 
-    The leader is reaped first: an unreaped leader is a zombie that
-    still counts as a group member, so ``killpg(pgid, 0)`` could never
-    report the group empty.  Once it is reaped, POSIX keeps its pid
-    reserved as the group id for as long as any member lives, so the
-    probe names this group and nothing else; a ``ProcessLookupError``
-    means every member is gone.  On Windows the first round terminated
-    the whole Job Object, so the leader's exit is the group's.
+    The leader is only watched (:func:`exited_unreaped`), never reaped
+    here: a zombie leader keeps its pid, and with it the group id,
+    reserved, so the ``SIGKILL`` the caller sends to the group when
+    this returns False still names this group and not a stranger's (a
+    later session leader's, which the kernel may hand the number to
+    the moment the group's last member is gone).  The zombie is itself
+    a member for ``killpg(pgid, 0)``, which could therefore never
+    report the group empty: the other members are counted in the
+    process table instead (:func:`_other_group_members`).  A leader
+    the caller reaped already (against the precondition of
+    :func:`terminate_process_group`) whose pid a stranger now holds
+    has no group of ours left to wait for.  On Windows the first round
+    terminated the whole Job Object, so the leader's exit is the
+    group's.
     """
     deadline = time.monotonic() + grace
-    try:
-        proc.wait(timeout=grace)
-    except subprocess.TimeoutExpired:
+    if not _wait_exited(proc, deadline):
         return False
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
         return True
-    while True:
-        try:
-            os.killpg(proc.pid, 0)
-        except ProcessLookupError:
-            return True
-        except PermissionError:  # pragma: no cover — needs a setuid descendant
-            pass  # a member we may not signal still exists
+    if proc.returncode is not None and pid_alive(proc.pid):  # pragma: no cover — pid recycled
+        return True
+    while _other_group_members(proc.pid):
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.05)
+    return True
+
+
+def _other_group_members(pid: int) -> bool:
+    """Whether the process table lists a member of process group *pid* other than *pid* itself.
+
+    Read with ``ps`` (POSIX): the group's leader, kept as a zombie so
+    that the group id stays reserved, is a member too, which is why
+    ``killpg(pgid, 0)`` cannot answer this.  A ``ps`` that is missing
+    or fails counts as members present: the caller then waits out its
+    grace and kills the group it still owns, the harmless side.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-A", "-o", "pid=,pgid="], capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):  # pragma: no cover — ps missing/unresponsive
+        return True
+    if result.returncode != 0:  # pragma: no cover — ps failing
+        return True
+    group = str(pid)
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1] == group and fields[0] != group:
+            return True
+    return False
 
 
 # Seconds a killed child is given to exit before the caller stops waiting
@@ -438,22 +508,45 @@ def run_process_group(
         subprocess.TimeoutExpired: When the child did not exit within
             *timeout*; it and its group have been killed and reaped.
     """
-    proc = popen_process_group(
-        args,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
-    )
+    # The Popen is held from before the spawn, which runs inside the
+    # ``try``: a Stop raised as the spawning call returns reaches the
+    # handler with the child in hand (see :func:`start_process_group`).
+    proc: subprocess.Popen[Any] = object.__new__(subprocess.Popen)
+    reading = False  # ``communicate`` entered: on Windows its reader threads own the pipes
     try:
+        start_process_group(
+            proc,
+            args,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+        reading = True
         stdout, stderr = proc.communicate(timeout=timeout)
     except BaseException:
-        kill_process_tree(proc)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=_REAP_GRACE_SECONDS)
+        if getattr(proc, "pid", None) is None:
+            raise  # never spawned; ``Popen.__init__`` closed what it had opened
+        # ``communicate`` may have reaped the child before the exception
+        # landed: its group id could be a stranger's by then (see
+        # :func:`kill_process_group`), so only a live child is killed.
+        if proc.returncode is None:
+            kill_process_tree(proc)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=_REAP_GRACE_SECONDS)
+        # The pipes go with the child: left open, they lived as long as
+        # the Popen, which the raised error's traceback keeps alive for
+        # as long as the caller keeps the error.  On Windows
+        # ``communicate``'s reader threads own them and close them at
+        # EOF; closing under their read would park this thread instead.
+        # A Stop raised as the spawn returned found no reader yet.
+        if not (IS_WINDOWS and reading):
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
         raise
     return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
@@ -536,6 +629,30 @@ def _time_out_unless_finished(proc: subprocess.Popen[bytes], out: CappedOutput) 
     kill_process_tree(proc)
 
 
+def waitid_exited(pid: int) -> os.waitid_result | None:
+    """Return the exit of this process's child *pid* without reaping it, or None.
+
+    ``waitid(WEXITED | WNOHANG | WNOWAIT)``, except that a report of a
+    child that has not exited is None too: macOS answers that call for a
+    STOPPED child as well (``si_code`` ``CLD_STOPPED``), as if it had
+    exited.  POSIX only.
+
+    Args:
+        pid: A child of this process.
+
+    Returns:
+        The ``waitid`` result once *pid* has exited (``si_code``
+        ``CLD_EXITED``, ``CLD_KILLED`` or ``CLD_DUMPED``), else None.
+
+    Raises:
+        ChildProcessError: *pid* is no unreaped child of this process.
+    """
+    info = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    if info is None or info.si_code not in (os.CLD_EXITED, os.CLD_KILLED, os.CLD_DUMPED):
+        return None
+    return info
+
+
 def exited_unreaped(proc: subprocess.Popen[Any]) -> bool:
     """Whether *proc* has exited, without reaping it.
 
@@ -551,11 +668,117 @@ def exited_unreaped(proc: subprocess.Popen[Any]) -> bool:
     Returns:
         True once *proc* has exited, reaped or not.
     """
+    return exit_status_unreaped(proc) is not None
+
+
+def exit_status_unreaped(proc: subprocess.Popen[Any]) -> int | None:
+    """Return *proc*'s exit status without reaping it, or ``None`` while it runs.
+
+    :func:`exited_unreaped` with the status: what ``Popen.poll`` would
+    report (negative for a death by signal), for a caller that must act
+    on the exit but keep the leader a zombie through its last group
+    signal (the CLI supervisor of :mod:`kiss.core.models.model`).  A
+    child already reaped reports its ``returncode``.
+
+    Args:
+        proc: A child started with :func:`popen_process_group`.
+
+    Returns:
+        The exit status, or ``None`` while *proc* is running.
+    """
     if proc.returncode is not None:
-        return True
+        return proc.returncode
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        return proc.poll() is not None
-    return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        return proc.poll()
+    try:
+        info = waitid_exited(proc.pid)
+    except ChildProcessError:  # pragma: no cover — reaped by another thread meanwhile
+        return proc.returncode
+    if info is None:
+        return None
+    return info.si_status if info.si_code == os.CLD_EXITED else -info.si_status
+
+
+def pid_handed_on(proc: subprocess.Popen[Any]) -> bool:
+    """Whether *proc*'s pid, and so its group's id, may already belong to a stranger.
+
+    A POSIX child's pid is free once it is reaped (``returncode`` set by
+    a ``wait``): every :func:`popen_process_group` child is a session
+    leader, so the kernel may hand the id to another one, whose group a
+    signal would then hit (see :func:`kill_process_group`).  Windows
+    never reaps: the ``Popen`` handle keeps the pid reserved, and the
+    status :func:`exit_status_unreaped` reads there with ``poll`` says
+    nothing about the descendants a leader left in its Job Object,
+    which the group kill must still end.  A handler deciding whether to
+    kill the group of a child it may no longer own asks this rather
+    than ``returncode``.
+
+    Args:
+        proc: A child started with :func:`popen_process_group`.
+
+    Returns:
+        True when a group signal to *proc*'s pid could hit a stranger.
+    """
+    return proc.returncode is not None and not IS_WINDOWS
+
+
+def signal_unreaped_child(pid: int, sig: int) -> bool:
+    """Send *sig* to this process's child *pid* unless it has exited or been reaped.
+
+    A pid is signalled only while it is this process's unreaped child
+    (``waitid`` without reaping, as :func:`exit_status_unreaped` asks),
+    so a pid that another thread's wait has reaped and the kernel has
+    handed to a stranger is left alone.  Where the kernel has pidfds
+    (Linux) the signal goes through one opened before the check: it
+    names that process and no later holder of the pid, which closes the
+    window between the check and the signal that ``os.kill`` leaves
+    open (and ``Popen.send_signal`` accepts).  The bare pid is signalled
+    only where pidfds do not exist (no ``os.pidfd_open``, a kernel or
+    seccomp profile without the call); a pidfd that cannot be opened
+    for another reason (no descriptor left) raises instead.  POSIX only.
+
+    Args:
+        pid: A child of this process.
+        sig: The signal to send.
+
+    Returns:
+        True while *pid* is this process's unreaped child (signalled
+        now, or exited and waiting to be reaped), False once reaped.
+
+    Raises:
+        OSError: The pidfd could not be opened although the kernel has
+            pidfds (``EMFILE`` and the like); nothing was signalled.
+    """
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd = -1
+    if pidfd_open is not None:
+        try:
+            pidfd = pidfd_open(pid)
+        except ProcessLookupError:
+            return False
+        except OSError as exc:
+            if exc.errno not in (errno.ENOSYS, errno.EPERM):
+                raise
+            # pragma: no cover — a kernel or seccomp profile without pidfd_open
+            logger.debug("pidfd_open(%d): %s; signalling the pid instead", pid, exc.strerror)
+    try:
+        try:
+            exited = waitid_exited(pid)
+        except ChildProcessError:
+            return False
+        if exited is not None:
+            return True
+        try:
+            if pidfd >= 0:
+                signal.pidfd_send_signal(pidfd, sig)
+            else:
+                os.kill(pid, sig)
+        except ProcessLookupError:  # pragma: no cover — reaped between the check and the signal
+            return False
+        return True
+    finally:
+        if pidfd >= 0:
+            os.close(pidfd)
 
 
 def _wait_exited(proc: subprocess.Popen[bytes], deadline: float) -> bool:
@@ -567,25 +790,38 @@ def _wait_exited(proc: subprocess.Popen[bytes], deadline: float) -> bool:
     return True
 
 
-def _drain_stderr(stream: IO[bytes], out: CappedOutput, keep: int, give_up: float) -> None:
-    """Read *stream* (stderr) to the end or *give_up*, publishing its first *keep* bytes.
+def _drain_stderr(
+    stream: IO[bytes], out: CappedOutput, keep: int, give_up: float, stop: threading.Event,
+) -> None:
+    """Read *stream* (stderr) to the end, *give_up* or *stop*, publishing its first *keep* bytes.
 
     ``out.stderr`` is updated after every chunk (an atomic reference
     store), so a caller that stops waiting for this thread while a
     stray group member still holds the pipe gets the stderr read so far.
+    *stop* is that caller giving the pipe up: the read ends within a
+    poll slice, so the thread neither keeps the pipe open nor rewrites
+    ``out.stderr`` after the result was returned.  The pipe is closed
+    here, by its only reader; found set before the first read, *stop*
+    says the caller closed the pipe itself, so it is not touched (see
+    :func:`run_capped`).
     """
     kept = b""
-    while True:
-        chunk = _read_some(stream, 65536, give_up)
-        if not chunk:
-            break
-        if len(kept) < keep:
-            kept = (kept + chunk)[:keep]
-            out.stderr = kept.decode("utf-8", "replace")
+    try:
+        while not stop.is_set():
+            chunk = _read_some(stream, 65536, give_up, stop)
+            if not chunk:
+                break
+            if len(kept) < keep:
+                kept = (kept + chunk)[:keep]
+                out.stderr = kept.decode("utf-8", "replace")
+    finally:
+        stream.close()
 
 
-def _read_some(stream: IO[bytes], limit: int, give_up: float) -> bytes:
-    """Read up to *limit* bytes of a child's pipe; ``b""`` at EOF or past *give_up*.
+def _read_some(
+    stream: IO[bytes], limit: int, give_up: float, stop: threading.Event | None = None,
+) -> bytes:
+    """Read up to *limit* bytes of a child's pipe; ``b""`` at EOF, past *give_up* or on *stop*.
 
     A plain ``read`` would stay blocked for as long as ANY process
     holds the pipe's write end: a hook git ran that started a daemon
@@ -613,10 +849,13 @@ def _read_some(stream: IO[bytes], limit: int, give_up: float) -> bytes:
         limit: The most bytes to return.
         give_up: ``time.monotonic()`` deadline, :data:`PIPE_GIVE_UP_SECONDS`
             past the watchdog's timeout.
+        stop: Set by the caller that no longer wants the pipe read (the
+            stderr drain, once the command's result was returned);
+            checked once per slice.
 
     Returns:
-        The bytes read, possibly fewer than *limit*; ``b""`` at EOF or
-        once *give_up* has passed.
+        The bytes read, possibly fewer than *limit*; ``b""`` at EOF,
+        once *give_up* has passed, or once *stop* is set.
     """
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
         return stream.read(limit)
@@ -625,6 +864,8 @@ def _read_some(stream: IO[bytes], limit: int, give_up: float) -> bytes:
         with selectors.DefaultSelector() as ready:
             ready.register(stream, selectors.EVENT_READ)
             while remaining > 0:
+                if stop is not None and stop.is_set():
+                    return b""
                 if ready.select(min(remaining, _STOP_POLL_SECONDS)):
                     return os.read(stream.fileno(), limit)
                 remaining = give_up - time.monotonic()
@@ -679,26 +920,38 @@ def run_capped(
         OSError: When the command could not be started.
     """
     out = CappedOutput()
-    proc = popen_process_group(
-        cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE if keep_stderr else subprocess.DEVNULL,
-    )
-    stdout = proc.stdout
-    assert stdout is not None
-    deadline = time.monotonic() + timeout
-    give_up = deadline + PIPE_GIVE_UP_SECONDS
+    drain_stop = threading.Event()
+    proc: subprocess.Popen[Any] = object.__new__(subprocess.Popen)
     err_thread = None
-    if proc.stderr is not None:
-        err_thread = threading.Thread(
-            target=_drain_stderr, args=(proc.stderr, out, keep_stderr, give_up), daemon=True,
-        )
-        err_thread.start()
-    timer = threading.Timer(timeout, _capped_timeout, args=(proc, out))
-    timer.daemon = True
-    timer.start()
+    timer = None
     chunks: list[bytes] = []
     size = 0
     try:
+        # Every call from the spawn on is inside the ``try``, the spawn
+        # included (the Popen is held from before it, see
+        # :func:`start_process_group`): an injected Stop is raised at the
+        # check point that ends a call (and the thread starts block on
+        # the new thread's bootstrap, so one is likely delivered right
+        # there), and the handler kills and reaps the child, which
+        # nothing else would once the timer is dead.
+        start_process_group(
+            proc, cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE if keep_stderr else subprocess.DEVNULL,
+        )
+        stdout = proc.stdout
+        assert stdout is not None
+        deadline = time.monotonic() + timeout
+        give_up = deadline + PIPE_GIVE_UP_SECONDS
+        timer = threading.Timer(timeout, _capped_timeout, args=(proc, out))
+        timer.daemon = True
+        if proc.stderr is not None:
+            err_thread = threading.Thread(
+                target=_drain_stderr,
+                args=(proc.stderr, out, keep_stderr, give_up, drain_stop),
+                daemon=True,
+            )
+            err_thread.start()
+        timer.start()
         while size < limit:
             chunk = _read_some(stdout, min(65536, limit - size), give_up)
             if not chunk:
@@ -734,23 +987,48 @@ def run_capped(
                 # holds the stderr pipe: it has nothing left to say.
                 kill_process_tree(proc)
                 err_thread.join(timeout=PIPE_GIVE_UP_SECONDS)
+                # A holder outside the group (its own session) survived
+                # the kill: stop reading rather than leave the thread,
+                # the pipe and ``out.stderr`` to it until ``give_up``.
+                drain_stop.set()
+                err_thread.join(timeout=1)
     except BaseException:
+        if getattr(proc, "pid", None) is None:
+            raise  # never spawned; ``Popen.__init__`` closed what it had opened
         # A wait cut short (a Stop landing as ``KeyboardInterrupt``, an
         # injected exception) must not leave the child running with
         # its stdout open; the reap is bounded as in
-        # :func:`run_process_group`.  Stderr is left to its drain
-        # thread, which sees EOF once the group is dead (closing the
-        # pipe under its read would only turn that into an error).  The
-        # leader is still unreaped here, so the group kill is safe; the
-        # timer must not kill again after the reap below.
+        # :func:`run_process_group`.  Stderr is its drain thread's once
+        # that runs: told to stop, it closes the pipe within a poll
+        # slice (closing it under its read would only turn that into an
+        # error).  Until the drain runs (the exception landed in the
+        # setup, or the thread could not start) the pipe is still this
+        # thread's to close; a drain that starts after the check below
+        # finds ``drain_stop`` set and leaves the pipe alone.  The
+        # leader is unreaped here unless :func:`start_process_group`
+        # already killed and reaped it (a Stop raised as the spawn
+        # returned) or the exec failed (``Popen.__init__`` reaped it):
+        # a reaped one's group id could be a stranger's, so the group is
+        # signalled only while the pid is still ours (:func:`pid_handed_on`:
+        # on Windows the ``poll`` behind :func:`_wait_exited` set
+        # ``returncode`` while the Job Object, descendants included, is
+        # still ours to end) and only a live child is waited for; the
+        # timer must not kill again after the reap below either.
         locked_call(out._guard, _mark_finished, out)
-        kill_process_tree(proc)
-        stdout.close()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=_REAP_GRACE_SECONDS)
+        if not pid_handed_on(proc):
+            kill_process_tree(proc)
+        drain_stop.set()
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.stderr is not None and (err_thread is None or not err_thread.is_alive()):
+            proc.stderr.close()
+        if proc.returncode is None:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=_REAP_GRACE_SECONDS)
         raise
     finally:
-        timer.cancel()
+        if timer is not None:
+            timer.cancel()
     if exited_unreaped(proc):
         out.returncode = proc.wait()
     data = b"".join(chunks)

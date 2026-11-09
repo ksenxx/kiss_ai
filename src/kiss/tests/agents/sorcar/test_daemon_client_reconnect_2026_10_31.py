@@ -505,6 +505,39 @@ class ReconnectTest(ReconnectHarness):
         self.assertEqual(error.task_result.reconnects, 1)
         self.assertFalse(self._task_over(), "the swallowed stop must not have reached the task")
 
+    def test_a_cancel_during_the_reconnect_backoff_sends_the_stop_at_once(self) -> None:
+        """A kill while the client waits out a reconnect backoff does not wait it out.
+
+        The daemon is down (the relay refuses connections), so the client
+        sits in the pause before its next attempt.  The cancel cuts the
+        pause short: the stop reaches the daemon, back by then, and is
+        confirmed long before the pause would have ended.
+        """
+        cancel = threading.Event()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(daemon_client, "_RECONNECT_FIRST_BACKOFF_SECONDS", 40.0)
+            patch.setattr(daemon_client, "_RECONNECT_MAX_BACKOFF_SECONDS", 40.0)
+            with self.assertLogs(daemon_client.logger, level="INFO") as logs:
+                worker, out = self._start_run(reconnect_seconds=120.0, cancel=cancel)
+                self._await_blocked_task()
+                self.relay.pause()
+                self.relay.cut()
+                self.assertTrue(
+                    wait_for(lambda: any("next try in 40.0s" in line for line in logs.output),
+                             timeout=30),
+                    "the client never entered the reconnect backoff",
+                )
+                self.relay.resume()
+                started = time.monotonic()
+                cancel.set()
+                error = self._collect(worker, out)
+        elapsed = time.monotonic() - started
+        self.assertIsInstance(error, daemon_client.CancelledError, error)
+        self.assertTrue(error.confirmed, error)
+        self.assertLess(elapsed, 30.0, "the cancel waited out the reconnect backoff")
+        self.assertEqual(error.result.reconnects, 1)
+        self.assertTrue(wait_for(self._task_over, timeout=60), "the task was not stopped")
+
     def test_a_sub_agent_finishing_while_away_is_resumed_from_its_transcript(self) -> None:
         """A sub-agent dispatch's replay carries no status: its transcript alone ends the wait."""
         parent = daemon_client.run(

@@ -108,7 +108,7 @@ from types import ModuleType
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlsplit
 
-from kiss.agents.sorcar._concurrency import locked
+from kiss.core.locked import locked
 from kiss.core.processes import terminate_process_group
 
 logger = logging.getLogger(__name__)
@@ -387,7 +387,7 @@ def user_agent_matches_version(user_agent: str, version: str) -> bool:
         True when the ``Chrome/<major>`` token equals *version*'s major.
     """
     match = _CHROME_MAJOR_RE.search(user_agent)
-    return match is not None and match.group(1) == version.split(".")[0]
+    return match is not None and match.group(1) == version.split(".", 1)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -459,16 +459,24 @@ def virtual_display() -> str | None:
         os.close(write_fd)
         write_fd = -1
         display = _read_display_number(read_fd, proc)
+        if display is not None:
+            # Published inside the guarded region, the owner last: a Stop
+            # injected into the task thread between the read and the
+            # publication (or between the two stores) finds the owner
+            # unset below and terminates the wrapper, where it used to
+            # outlive the call with nothing able to reap it.
+            _XVFB_DISPLAY = display
+            _XVFB_PROC = proc
     finally:
         # Both pipe ends are ours to close whether or not Popen raised.
         if write_fd >= 0:
             os.close(write_fd)
         if read_fd >= 0:
             os.close(read_fd)
-        if proc is not None and display is None and proc.poll() is None:
-            # Timed out, or a Stop injected into the task thread while
-            # the display number was awaited: the wrapper (and its Xvfb)
-            # must not outlive this call unowned, since ``_XVFB_PROC`` is
+        if proc is not None and _XVFB_PROC is not proc and proc.poll() is None:
+            # Timed out, or a Stop injected into the task thread before
+            # the owner was published: the wrapper (and its Xvfb) must
+            # not outlive this call unowned, since ``_XVFB_PROC`` is
             # still ``None`` and nothing could reap it.  A wrapper that
             # ``_read_display_number`` already saw exit is reaped and its
             # group gone (the wrapper kills Xvfb before it exits), so its
@@ -477,7 +485,6 @@ def virtual_display() -> str | None:
     if display is None:
         logger.warning("Xvfb did not start; falling back to headless Chromium")
         return None
-    _XVFB_PROC, _XVFB_DISPLAY = proc, display
     logger.info("virtual display %s started for headed Chromium", display)
     return display
 

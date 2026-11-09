@@ -29,8 +29,10 @@ Command line: ``python -m kiss.agents.sorcar.mcp_oauth <name> [url]``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -38,8 +40,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
-from kiss.agents.sorcar._concurrency import locked, locked_call
 from kiss.agents.sorcar.mcp_servers import (
+    CONNECT_TIMEOUT,
     FileTokenStorage,
     MCPServerConfig,
     _enter_transport,
@@ -50,6 +52,7 @@ from kiss.agents.sorcar.mcp_servers import (
 from kiss.core import tool_interrupt
 from kiss.core.brand import PRODUCT_NAME
 from kiss.core.browser_handoff import BROWSER_TAB, open_for_user
+from kiss.core.locked import locked, locked_call
 
 #: Well-known remote MCP servers: name -> (transport, URL).
 KNOWN_MCP_SERVERS: dict[str, tuple[str, str]] = {
@@ -205,7 +208,36 @@ class _RedirectServer(HTTPServer):
 
     def __init__(self) -> None:
         self.query: dict[str, str] | None = None
+        # The browser connection being served, so :meth:`server_close`
+        # can end it: the handler's socket timeout is an inactivity
+        # timeout, which a connection that keeps sending header bytes
+        # never trips, and the flow cannot finish while it is served.
+        self.accepted: socket.socket | None = None
         super().__init__(("127.0.0.1", MCP_REDIRECT_PORT), _RedirectHandler)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        """Serve *request* (one accepted connection), remembering it meanwhile.
+
+        Recorded before the listener is checked, and :meth:`server_close`
+        closes the listener before it reads the record: a close that
+        lands between the accept and here is seen by one side or the other.
+        """
+        self.accepted = request
+        try:
+            if self.socket.fileno() < 0:  # closed since the accept
+                self.shutdown_request(request)
+            else:
+                super().process_request(request, client_address)
+        finally:
+            self.accepted = None
+
+    def server_close(self) -> None:
+        """Close the listener and end the connection being served, if any."""
+        super().server_close()
+        accepted = self.accepted
+        if accepted is not None:
+            with contextlib.suppress(OSError):
+                accepted.shutdown(socket.SHUT_RDWR)
 
 
 class MCPLoginSession:
@@ -240,6 +272,10 @@ class MCPLoginSession:
         self._url_ready = threading.Event()
         self._finished = threading.Event()
         self._server: _RedirectServer | None = None
+        # The flow's loop and task, set by ``_login`` so ``cancel`` can
+        # cancel the flow from another thread.
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._task: asyncio.Task[Any] | None = None
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     @classmethod
@@ -284,8 +320,19 @@ class MCPLoginSession:
             cls._set_active(None)
         session = cls(cfg)
         session._server = _RedirectServer()
-        cls._set_active(session)
-        session._thread.start()
+        try:
+            cls._set_active(session)
+            session._thread.start()
+        except BaseException:
+            # A Stop landing here (the tool runs on the task thread), or
+            # a thread that cannot start: nothing would ever finish the
+            # session, and no later sign-in could bind its port.
+            session.cancel()
+            session.error = "sign-in cancelled"
+            session._finished.set()
+            if cls._get_active() is session:
+                cls._set_active(None)
+            raise
         return session
 
     @classmethod
@@ -309,12 +356,19 @@ class MCPLoginSession:
     def cancel(self) -> None:
         """Stop the session and free the redirect port at once.
 
-        The login thread exits at its next wake-up, but it may sit in a
-        network call to the MCP server for much longer; closing the
-        listener here lets a replacement session bind the port without
-        waiting for that call to return.
+        The flow's task is cancelled on its own loop, so a login sitting
+        in a network call to the MCP server (a first request the server
+        never answers) unwinds at once instead of holding the thread
+        until the transport's read timeout; closing the listener here
+        lets a replacement session bind the port without waiting even
+        for that.
         """
         self._cancelled = True
+        loop, task = self._loop, self._task
+        if loop is not None and task is not None:
+            # A finished flow has closed its loop: nothing left to cancel.
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(task.cancel)
         if self._server is not None:
             self._server.server_close()
 
@@ -351,13 +405,27 @@ class MCPLoginSession:
             self._finished.set()
 
     async def _login(self) -> None:
-        """Open the transport with the OAuth provider and initialize."""
+        """Open the transport with the OAuth provider and initialize.
+
+        The whole flow is bounded by :data:`_LOGIN_TIMEOUT` (the user's
+        consent allowance, enforced again by :meth:`_await_callback`)
+        plus :data:`~kiss.agents.sorcar.mcp_servers.CONNECT_TIMEOUT`
+        for the handshake itself: the SDK's session has no read
+        timeout, so a server that accepts the transport and never
+        answers ``initialize`` would otherwise hold the thread for ever.
+        """
         from contextlib import AsyncExitStack
 
         from mcp import ClientSession
 
+        self._loop = asyncio.get_running_loop()
+        self._task = asyncio.current_task()
+        # A cancel that landed before the task was published above
+        # could not cancel it; it is honoured here instead.
+        if self._cancelled:
+            raise RuntimeError("sign-in cancelled")
         auth = build_provider(self.cfg, self._on_redirect, self._await_callback)
-        async with AsyncExitStack() as stack:
+        async with asyncio.timeout(_LOGIN_TIMEOUT + CONNECT_TIMEOUT), AsyncExitStack() as stack:
             read, write = await _enter_transport(stack, self.cfg, auth)
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
@@ -406,14 +474,28 @@ class MCPLoginSession:
         self._url_ready.set()
 
     async def _await_callback(self) -> tuple[str, str | None]:
-        """Serve the loopback port until the redirect arrives."""
+        """Serve the loopback port until the redirect arrives.
+
+        A flow that fails here closes the server itself (``_run`` closes
+        it again, harmlessly): the deadline of :meth:`_login` cancels
+        this task while ``handle_request`` may be serving a connection
+        that keeps sending header bytes (its inactivity timeout never
+        fires), ``to_thread`` cannot stop that worker, and ``asyncio.run``
+        waits for it (five minutes at most) before ``_run`` gets to close
+        the server.  Closing it here ends the connection, and the worker
+        with it, before that wait.
+        """
         server = self._server
         assert server is not None
         deadline = time.monotonic() + _LOGIN_TIMEOUT
-        while server.query is None:
-            if self._cancelled or time.monotonic() > deadline:
-                raise RuntimeError("sign-in was not completed")
-            await asyncio.to_thread(server.handle_request)
+        try:
+            while server.query is None:
+                if self._cancelled or time.monotonic() > deadline:
+                    raise RuntimeError("sign-in was not completed")
+                await asyncio.to_thread(server.handle_request)
+        except BaseException:
+            server.server_close()
+            raise
         query = server.query
         if query.get("error"):
             raise RuntimeError(f"sign-in refused ({query['error']})")

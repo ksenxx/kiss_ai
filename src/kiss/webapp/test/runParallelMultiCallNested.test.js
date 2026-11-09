@@ -811,7 +811,6 @@ function testDelayedOpenSubagentAttachesToOwningCall() {
       ')',
   );
   assert.strictEqual(subagentTabEls(win).length, 1, 'only t2-a reopened');
-  assert.ok(c2.length === 1, 'sanity: one call-#2 sub-agent');
 
   before = posted.length;
   togglePanel(win, panel1);

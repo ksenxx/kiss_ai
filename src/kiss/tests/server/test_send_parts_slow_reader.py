@@ -143,13 +143,19 @@ class _SlowReaderCase(unittest.IsolatedAsyncioTestCase):
     """A printer serving real loopback peers, with or without deflate."""
 
     compression: str | None = None
+    # Whether the listener's buffers are shrunk (:func:`_small_buffers`);
+    # a case that measures how far the sender runs ahead of a slow peer
+    # keeps the kernel's own sizing, which grows for such a peer.
+    small_buffers = True
 
     async def asyncSetUp(self) -> None:
         self.printer = WebPrinter()
         self.printer._loop = asyncio.get_running_loop()
         self.printer._send_timeout = _SEND_TIMEOUT
         self.registered: asyncio.Queue[ServerConnection] = asyncio.Queue()
-        listener = _small_buffers(socket.create_server(("127.0.0.1", 0)))
+        listener = socket.create_server(("127.0.0.1", 0))
+        if self.small_buffers:
+            _small_buffers(listener)
         self.server = await serve(
             self._handler, sock=listener,
             ping_interval=None, max_size=None, compression=self.compression,
@@ -162,10 +168,13 @@ class _SlowReaderCase(unittest.IsolatedAsyncioTestCase):
 
     # Whether the peers register as joining parts (every real client does).
     parts = True
+    # Whether the peers register as loopback (``daemon_client``) peers,
+    # which the printer does not pace, or as remote browsers.
+    local = True
 
     async def _handler(self, ws: ServerConnection) -> None:
-        """Register *ws* with the printer as a local peer until it closes."""
-        self.printer.add_client(ws, local=True, parts=self.parts)
+        """Register *ws* with the printer as a peer until it closes."""
+        self.printer.add_client(ws, local=self.local, parts=self.parts)
         await self.registered.put(ws)
         try:
             await ws.wait_closed()

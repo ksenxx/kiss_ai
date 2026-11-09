@@ -132,9 +132,21 @@ def test_denied_tool_is_judged_on_its_base_name_and_reserves_no_suffix(
 def test_config_save_keeps_existing_bits_and_token_file_is_private(
     isolated_homes: Path,
 ) -> None:
-    """``mcp.json`` keeps a deliberate chmod; the token file is always ``0o600``."""
+    """``mcp.json`` is created private and keeps a deliberate chmod; the token file is ``0o600``.
+
+    A new config file was created world-readable (``0o666`` under the
+    umask) on the premise that it holds no secrets, but its ``env``
+    and ``headers`` carry API keys and bearer tokens.
+    """
     project = isolated_homes / "project"
-    path = save_mcp_server(MCPServerConfig(name="s", command="a"), "user", str(project))
+    path = save_mcp_server(
+        MCPServerConfig(
+            name="s", command="a", transport="http", url="https://x.example/mcp",
+            headers=(("Authorization", "Bearer dummy-secret"),),
+        ),
+        "user", str(project),
+    )
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
     os.chmod(path, 0o640)
     save_mcp_server(MCPServerConfig(name="t", command="b"), "user", str(project))
     assert stat.S_IMODE(path.stat().st_mode) == 0o640

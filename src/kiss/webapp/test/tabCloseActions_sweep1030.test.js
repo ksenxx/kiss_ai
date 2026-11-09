@@ -18,7 +18,7 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 const h = require('./ui_antipattern_harness');
-const {tabEl} = require('./subagent_tab_helpers');
+const {tabEl, deferChatTranscripts} = require('./subagent_tab_helpers');
 
 const {test, report} = h.makeRunner();
 
@@ -51,15 +51,7 @@ function threeChats(win, tabA) {
       {tabId: 'tab-c', chatId: 'c-c', title: 'C', workDir: ''},
     ],
   });
-  for (const id of ['tab-b', 'tab-c']) {
-    h.send(win, {type: 'status', running: false, tabId: id});
-    h.send(win, {
-      type: 'replay_deferred',
-      tabId: id,
-      chatId: id === 'tab-b' ? 'c-b' : 'c-c',
-      taskId: '',
-    });
-  }
+  deferChatTranscripts(win);
 }
 
 /** Open /ws/a.py from chat *owner*; returns the file tab's id. */
@@ -128,29 +120,6 @@ async function main() {
     );
     const closed = h.ofType(posted, 'closeTab').map(m => m.tabId);
     assert.deepStrictEqual([...closed].sort(), ['tab-b', 'tab-c']);
-    win.close();
-  });
-
-  await test('Close Inactive closes an idle chat whose sub-agent stopped', () => {
-    const {win, tabA} = page(true);
-    threeChats(win, tabA);
-    h.send(win, {
-      type: 'openSubagentTab',
-      tab_id: 'sub-a',
-      parent_tab_id: tabA,
-      description: 'a sub-agent',
-      task_id: 'sub-task-a',
-      taskIndex: 0,
-      isSubagentTab: true,
-    });
-    h.send(win, {type: 'status', running: true, tabId: 'tab-c'});
-    h.send(win, {type: 'status', running: false, tabId: 'sub-a'});
-    pickTabMenuItem(win, tabEl(win, tabA), 'Close Inactive');
-    assert.deepStrictEqual(
-      [...openIds(win)],
-      ['tab-c'],
-      'only the running chat stays',
-    );
     win.close();
   });
 

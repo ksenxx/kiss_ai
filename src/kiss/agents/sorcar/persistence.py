@@ -23,6 +23,7 @@ Thread safety is achieved with:
 from __future__ import annotations
 
 import atexit
+import gc
 import itertools
 import json
 import logging
@@ -36,13 +37,12 @@ import time
 import uuid
 import weakref
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from types import TracebackType
 from typing import IO, Any, Literal, TypeGuard, cast
 
-from kiss.agents.sorcar._concurrency import _race_delay, locked, locked_call
 from kiss.agents.sorcar.chat_summary import NOT_SUBAGENT, launch_ms, upsert_chat_summary
 from kiss.agents.sorcar.history_columns import (
     ADDED_SUMMARY_COLUMNS,
@@ -52,11 +52,19 @@ from kiss.agents.sorcar.history_columns import (
     add_missing_columns,
     complete_rows,
     missing_columns,
+    task_origins,
 )
-from kiss.agents.sorcar.task_metadata import trajectory_has_secret, write_task_tags
+from kiss.agents.sorcar.task_metadata import (
+    has_secret_value,
+    trajectory_has_secret,
+    write_task_tags,
+)
 from kiss.core.config import adopt_legacy_file, is_pre_2026_04_db, kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
-from kiss.core.locked import LockTimeoutError
+from kiss.core.locked import LockTimeoutError, _race_delay, locked, locked_call
+from kiss.core.memoryfield.evaluate import (
+    is_failed_result as _is_failed_result,  # noqa: F401  (server.py imports it)
+)
 from kiss.core.models.model_info import _strip_provider_prefix
 from kiss.core.printer import event_cost
 
@@ -101,12 +109,40 @@ def _immediate_txn(db: sqlite3.Connection) -> Iterator[None]:
         yield
         db.execute("COMMIT")
     except BaseException:
+        _roll_back_through_stops(db)
+        raise
+
+
+def _roll_back_through_stops(db: sqlite3.Connection) -> None:
+    """Roll back the transaction open on *db*, retrying through stops injected meanwhile.
+
+    A stop landing anywhere on the way to the ``ROLLBACK`` statement
+    (the ``in_transaction`` check, the cursor, the connection lock)
+    would otherwise leave the transaction open: every later ``BEGIN`` on
+    the connection fails with "cannot start a transaction within a
+    transaction", and SQLite's write lock stays held, so every other
+    writer waits out the 30 s ``busy_timeout``.  The attempts are
+    bounded, and the last stop caught is re-raised once the rollback is
+    done, as :meth:`_RWLock._teardown` does.
+
+    Args:
+        db: The connection whose transaction to roll back.
+    """
+    caught: BaseException | None = None
+    for _ in range(8):
         try:
             if db.in_transaction:  # raises too once the connection is closed
                 db.execute("ROLLBACK")
+            break
         except sqlite3.Error:  # a closed connection: nothing left to roll back
-            pass
-        raise
+            break
+        except BaseException as exc:  # a stop injected mid-rollback
+            caught = exc
+    if caught is not None:
+        try:
+            raise caught
+        finally:
+            caught = None  # no cycle through this frame (see _RWLock._teardown)
 
 
 class _Token:
@@ -313,27 +349,39 @@ class _RWLock:
         Doubles as the token's weakref callback: it runs even when an
         injected stop skipped the acquisition's own teardown, as soon
         as the acquisition frame — the only strong token holder — is
-        destroyed.
+        destroyed.  A callback runs on whatever thread dropped the
+        token, a task thread with a stop pending included, so the
+        mutex is taken through :func:`locked_call`: a plain ``with``
+        would keep it for that thread when the stop lands right after
+        its ``acquire`` returns.
 
         Args:
             ref: The reader acquisition's weak reference.
         """
-        with self._cond:
-            self._reader_refs.discard(ref)
-            self._cond.notify_all()
+        locked_call(self._cond, self._discard_reader_locked, ref)
+
+    def _discard_reader_locked(self, ref: weakref.ref[_Token]) -> None:
+        """Body of :meth:`_drop_reader_ref`; the caller holds the mutex."""
+        self._reader_refs.discard(ref)
+        self._cond.notify_all()
 
     def _drop_writer_ref(self, ref: weakref.ref[_Token]) -> None:
         """Withdraw a writer registration (pending or holding) and wake
-        waiters; also the writer token's weakref callback.
+        waiters; also the writer token's weakref callback (see
+        :meth:`_drop_reader_ref` for why it takes the mutex through
+        :func:`locked_call`).
 
         Args:
             ref: The writer acquisition's weak reference.
         """
-        with self._cond:
-            self._pending_refs.discard(ref)
-            if self._writer_ref is ref:
-                self._writer_ref = None
-            self._cond.notify_all()
+        locked_call(self._cond, self._discard_writer_locked, ref)
+
+    def _discard_writer_locked(self, ref: weakref.ref[_Token]) -> None:
+        """Body of :meth:`_drop_writer_ref`; the caller holds the mutex."""
+        self._pending_refs.discard(ref)
+        if self._writer_ref is ref:
+            self._writer_ref = None
+        self._cond.notify_all()
 
     def read_lock(self) -> AbstractContextManager[None]:
         """Acquire shared read access (use as ``with lock.read_lock():``).
@@ -484,7 +532,14 @@ class _RWLock:
             except BaseException as exc:  # second injected stop mid-repair
                 caught = exc
         if caught is not None:
-            raise caught
+            try:
+                raise caught
+            finally:
+                # The raise puts this frame in the stop's traceback; a
+                # local still naming the stop would be a cycle that keeps
+                # the stop, and through its context the frames of the
+                # stop it unwound, alive until a garbage collection.
+                caught = None
 
 
 _rw_lock = _RWLock()
@@ -501,13 +556,14 @@ _init_tables_lock = threading.RLock()
 # newer totals that the run's stale last event then overwrites.  Held
 # only around those short DB/ledger/printer sections, never across a
 # join or a model call.  Task threads take it through
-# :func:`kiss.agents.sorcar._concurrency.locked_call` (hence the
+# :func:`kiss.core.locked.locked_call` (hence the
 # reentrant type: it is never taken reentrantly, but a Stop interrupt
 # landing right after the acquisition must be able to release it).
 TASK_USAGE_LOCK = threading.RLock()
 
 
-_chat_context_text_cache: dict[str, str] = {}
+# chat id -> (text, the connection that read it, its data_version then)
+_chat_context_text_cache: dict[str, tuple[str, sqlite3.Connection, int]] = {}
 _chat_context_cache_lock = threading.RLock()
 _chat_context_cache_gen: int = 0
 
@@ -559,6 +615,15 @@ _MAX_STEER_INPUTS = 1000
 # client.  Unbounded, a long-lived install ships every prompt ever
 # typed (tens of thousands of rows, megabytes) on each connect.
 _MAX_INPUT_HISTORY = 500
+
+# The longest text the ArrowUp history offers, in characters.  A
+# pasted document or a generated continuation prompt (tens of
+# kilobytes each) is not something the arrow keys recall, yet a
+# hundred of them made the list a fresh page downloads two megabytes
+# (half a megabyte deflated) ahead of its CHATS rows on a slow link.
+# The texts stay persisted and listable; only the arrow history skips
+# them.
+INPUT_HISTORY_TEXT_CHARS = 4_000
 
 _OWNER_DIR_NAME = "task-owners"
 
@@ -833,14 +898,59 @@ class _LockedCursor(sqlite3.Cursor):
         super().__init__(connection)
         self.lock = cast(_LockedConnection, connection).lock
 
+    def _run(self, step: Callable[..., Any], *args: Any) -> None:
+        """Call *step* under the lock; after ``SQLITE_BUSY_SNAPSHOT``, collect garbage and retry.
+
+        That error means a write found this connection's own read
+        snapshot stale: one of its SELECTs is still active (executed,
+        not read to the end) while another connection committed.  Every
+        cursor a caller can reach is read to the end or dropped before
+        the next write, so the active one is unreachable garbage: a
+        stop landed on its thread between the SELECT's execute and its
+        fetch, and the interrupted frames, which hold the cursor, ended
+        in a reference cycle (a second stop that unwinds the first is
+        retained together with it, and the ``__exit__`` of a generator
+        context manager keeps the stop it was unwinding in a frame that
+        stop's own traceback reaches).  Collecting frees the cursor,
+        whose statement is then reset and the snapshot ended.  A
+        snapshot a reachable cursor holds fails the retry the same way.
+
+        The retry replays *step* whole, so it happens only when the
+        failed attempt changed nothing: an autocommit ``executemany``
+        commits each parameter set on its own, and the snapshot can go
+        stale between two of them, after the first ones were written.
+        """
+        if not locked_call(self.lock, self._attempt, step, *args):
+            gc.collect()
+            locked_call(self.lock, step, *args)
+
+    def _attempt(self, step: Callable[..., Any], *args: Any) -> bool:
+        """Run *step*; false when it hit a stale snapshot before changing anything."""
+        changes = self.connection.total_changes
+        try:
+            step(*args)
+        except sqlite3.OperationalError as exc:
+            if (
+                getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_BUSY_SNAPSHOT
+                or self.connection.total_changes != changes
+            ):
+                raise
+            return False
+        return True
+
     def execute(self, sql: str, parameters: Any = (), /) -> _LockedCursor:
         """Run *sql* with *parameters* under the connection's lock."""
-        locked_call(self.lock, super().execute, sql, parameters)
+        self._run(super().execute, sql, parameters)
         return self
 
     def executemany(self, sql: str, seq_of_parameters: Any, /) -> _LockedCursor:
-        """Run *sql* once per parameter set under the connection's lock."""
-        locked_call(self.lock, super().executemany, sql, seq_of_parameters)
+        """Run *sql* once per parameter set under the connection's lock.
+
+        The sets are read into a list first: SQLite takes a set before
+        the write that may find the snapshot stale, and the retry has
+        to replay every one of them.
+        """
+        self._run(super().executemany, sql, list(seq_of_parameters))
         return self
 
     def fetchone(self) -> Any:
@@ -1264,12 +1374,12 @@ _HISTORY_SELECT = (
     "model, work_dir, version, tokens, cost, steps, "
     "is_parallel, "
     "start_ts, end_ts, is_favorite, parent_task_id, max_budget, "
-    "is_side_channel, tags, sea, success, is_cron "
+    "is_side_channel, tags, sea, success, is_cron, machine "
     "FROM task_history "
 )
 
 # Row shape shared by the composer-history queries
-# (``_prefix_match_tasks``, ``_load_input_history``): task_history rows
+# (``_prefix_match_tasks``, ``_load_input_texts``): task_history rows
 # are UNIONed with ``steer_inputs`` rows, whose ``rid`` is 0 so a
 # timestamp tie is broken in favour of the task_history row.
 _INPUT_TEXTS_SELECT = (
@@ -1391,57 +1501,6 @@ def _history_row_to_dict(row: sqlite3.Row) -> dict[str, object]:
     out: dict[str, object] = {col: row[col] for col in row.keys()}
     out["extra"] = _row_to_extra_json(row)
     return out
-
-
-def _is_failed_result(result: str, success: object = None) -> bool:
-    """Return True when a ``task_history`` row represents a failed task
-    that should be flagged with a red cross in the history sidebar
-    (``.sidebar-item-failed``).
-
-    A row fails either by the agent's own verdict or by how it ended:
-
-    * ``success == 0`` — the row's ``success`` column, written by
-      :func:`_save_task_result` from the ``success`` key of the
-      agent's ``finish()`` result.  A ``finish(success=False)`` run
-      keeps its HTML summary as the result text, so the text alone
-      reads like a success; the chat tab strip already shows such a
-      run as failed (``success === false`` on its terminal event) and
-      the history must agree.
-
-    Recognized failure markers in *result*:
-
-    * ``Task failed*`` — the standard in-process failure prefix
-      written by ``_save_task_result`` for ``task_error`` events.
-    * ``Agent Failed Abruptly`` — the sentinel inserted by
-      ``_add_task`` that survives only when the host process was
-      SIGKILL'd / OOM-killed mid-task before any
-      Python ``finally`` could run.
-    * ``Task terminated unexpectedly (process killed)`` — the rewrite
-      that ``_recover_orphaned_tasks`` applies to surviving sentinel
-      rows on fresh-server boot.
-    * ``Task stopped by user`` — an explicit user cancellation.  It is
-      not a successful completion, so the history sidebar should mark
-      it with the same red status dot used for failed runs.
-    * ``Task interrupted*`` — an interrupted run.  Covers both the
-      bare ``Task interrupted`` marker persisted by
-      ``ChatSorcarAgent.run``'s ``except BaseException`` handler (a
-      ``KeyboardInterrupt`` reaching a sub-agent / channel-agent
-      run) and ``Task interrupted by server restart/shutdown`` (a
-      graceful daemon/server shutdown cancellation).  Both are
-      incomplete task outcomes rather than successes.
-
-    Args:
-        result: The row's ``result`` text.
-        success: The row's ``success`` column (``0``, ``1`` or ``None``).
-    """
-    return (
-        success == 0
-        or result.startswith("Task failed")
-        or result == "Agent Failed Abruptly"
-        or result == "Task terminated unexpectedly (process killed)"
-        or result == "Task stopped by user"
-        or result.startswith("Task interrupted")
-    )
 
 
 _INDEX_DDL: tuple[str, ...] = (
@@ -1613,7 +1672,11 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             -- (its llm_call events), written with the final cost, so the
             -- Spend panel files a set_model switch under the model that
             -- ran; '' = not recorded (legacy row).
-            model_costs TEXT DEFAULT ''
+            model_costs TEXT DEFAULT '',
+            -- Short host name of the machine the task ran on, stamped
+            -- by kiss.scripts.sync_db when it copies the row in from
+            -- that machine's database; '' = this database's machine.
+            machine TEXT DEFAULT ''
         );
         -- One row per chat: a 6-8 word summary of what the chat's tasks
         -- did, the launch instant (epoch ms) of its latest task and
@@ -1714,11 +1777,44 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             model_costs TEXT DEFAULT '',
             timestamp REAL NOT NULL
         );
+        -- A late charge (task_id's spend) owed to or held by a row
+        -- (parent_task_id) whose ledger did not carry it: the growth of a
+        -- remote_subtasks record owed to a RUNNING ancestor, whose live
+        -- agent banks it on its ledger, marked so first (banked, with the
+        -- ledger totals before it), or late spend added straight to a
+        -- FINISHED row whose ledger never had it (settled at once).  The
+        -- row holds a charge once settled into its totals; every
+        -- absolute snapshot of the row's ledger settles the charges it
+        -- does not hold again.  Kept as long as the row exists.  See
+        -- _charge_remote_subtask, _add_late_usage_locked and
+        -- _settle_remote_charges.
+        CREATE TABLE IF NOT EXISTS remote_charges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            parent_task_id TEXT NOT NULL,
+            cost REAL NOT NULL,
+            tokens INTEGER NOT NULL,
+            steps INTEGER NOT NULL,
+            banked INTEGER NOT NULL DEFAULT 0,
+            banked_cost REAL NOT NULL DEFAULT 0,
+            banked_tokens INTEGER NOT NULL DEFAULT 0,
+            banked_steps INTEGER NOT NULL DEFAULT 0,
+            settled INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_rc_parent_task_id
+            ON remote_charges(parent_task_id);
     """)
     # Columns first: an index over a column this version added to an
     # existing table can only be created once the column is there.
     _add_missing_columns(conn)
+    # A charge of a remote_charges table from before ``settled`` is one
+    # its row has not settled (settling dropped them then): the default.
+    add_missing_columns(conn, "remote_charges", _ADDED_CHARGE_COLUMNS)
     _apply_index_ddl(conn)
+
+
+_ADDED_CHARGE_COLUMNS: tuple[tuple[str, str], ...] = (("settled", "INTEGER NOT NULL DEFAULT 0"),)
+"""Columns of ``remote_charges`` added after its first release (as ``ADDED_TASK_COLUMNS``)."""
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
@@ -1761,6 +1857,53 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
     with txn:
         complete_rows(conn, add_missing_columns(conn, TASK_TABLE, ADDED_TASK_COLUMNS))
         add_missing_columns(conn, CHAT_TABLE, ADDED_SUMMARY_COLUMNS)
+
+
+_MACHINES_BACKFILLED = "task-machines-backfilled"
+"""Marker file, next to ``history.db``, of a database :func:`_backfill_task_machines` repaired."""
+
+
+def _backfill_task_machines() -> int:
+    """Stamp ``machine`` on the rows a history sync copied in before the column existed.
+
+    Such rows read '' like this machine's own, so the CHATS panel listed
+    them as tasks of this machine;
+    :func:`~kiss.agents.sorcar.history_columns.task_origins` works out
+    where each one ran from its first events.  That read takes about a
+    minute on a history of several GB, so it runs on a connection of its
+    own and outside ``_rw_lock``, on the daemon thread ``AgentServer``
+    starts for it; only the UPDATE takes SQLite's write lock, and it
+    sets rows that are still unstamped only.  Runs once per database: a
+    marker file next to it records the repair, and a failure (logged)
+    leaves no marker, so the next start tries again.
+
+    Returns:
+        The number of rows stamped.
+    """
+    db_path = _DB_PATH
+    marker = db_path.parent / _MACHINES_BACKFILLED
+    if marker.exists():
+        return 0
+    try:
+        _get_db()  # the migration that adds the column
+        conn = sqlite3.connect(db_path, isolation_level=None, timeout=30.0)
+        try:
+            origins = task_origins(conn)
+            with _immediate_txn(conn):
+                conn.executemany(
+                    "UPDATE task_history SET machine = ?"
+                    " WHERE id = ? AND COALESCE(machine, '') = ''",
+                    origins,
+                )
+        finally:
+            conn.close()
+        marker.touch()
+    except (sqlite3.Error, OSError):
+        logger.warning(
+            "Could not work out where the synced tasks of %s ran", db_path, exc_info=True,
+        )
+        return 0
+    return len(origins)
 
 
 def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
@@ -2294,6 +2437,12 @@ def _add_task(
     given (so an ``is_favorite`` flag set in the meantime survives).
 
     Thread-safe: all writes are protected by ``_rw_lock.write_lock()``.
+    The row's ``timestamp`` is taken once ``BEGIN IMMEDIATE`` holds the
+    database's write lock: a reader's ``newest`` watermark (the
+    composer history's incremental refresh, ``timestamp > since``) is
+    the time of a committed row, so a row stamped before the lock but
+    committed after another process's newer row would sit behind a
+    watermark already issued and never reach the page.
 
     Args:
         task: The task description string.
@@ -2315,7 +2464,7 @@ def _add_task(
     # Minting the marker is file I/O (first call per home); keep it out
     # of the write lock.
     owner = _process_owner_token()
-    with _rw_lock.write_lock():
+    with _rw_lock.write_lock(), _immediate_txn(db):
         if chat_id == "":
             chat_id = _allocate_chat_id()
         task_id = uuid.uuid4().hex
@@ -2432,6 +2581,7 @@ def _history_order_sql(running_task_ids: set[str] | None) -> tuple[str, tuple[st
 def _load_history(
     limit: int = 0, offset: int = 0, tag: str = "", *,
     query: str = "", work_dir: str = "", running_task_ids: set[str] | None = None,
+    own_only: bool = False,
 ) -> list[_HistoryEntry]:
     """Load task history entries (most-recent-first). Thread-safe.
 
@@ -2446,6 +2596,9 @@ def _load_history(
             (the history panel's WORKDIR dropdown).
         running_task_ids: Tasks to put before completed history, including
             tasks older than the first chronological page.
+        own_only: When True, only the tasks that ran on this machine:
+            rows a history sync copied in from another machine (a
+            non-empty ``machine``) are left out.
 
     Returns:
         List of history entry dicts with ``id``, ``timestamp``,
@@ -2459,6 +2612,7 @@ def _load_history(
         query_params = (f"%{escaped}%",)
     work_dir_sql = "AND work_dir = ? " if work_dir else ""
     work_dir_params: tuple[str, ...] = (work_dir,) if work_dir else ()
+    own_sql = "AND COALESCE(machine, '') = '' " if own_only else ""
     db = _get_db()
     with _rw_lock.read_lock():
         effective_limit = limit if limit > 0 else -1
@@ -2470,6 +2624,7 @@ def _load_history(
             + query_sql
             + tag_sql
             + work_dir_sql
+            + own_sql
             + f"ORDER BY {order_sql} LIMIT ? OFFSET ?"
         )
         rows = db.execute(
@@ -2823,7 +2978,7 @@ def _record_remote_subtask(
     parent's, and a later charge to the sub-agent's row on the machine
     (an ``/ask`` answer or task update finishing after it) reaches the
     parent as the growth of the machine's totals over the recorded ones
-    (:func:`_advance_remote_subtask`).  A task already recorded keeps
+    (:func:`_charge_remote_subtask`).  A task already recorded keeps
     its record.
     """
     db = _get_db()
@@ -2849,28 +3004,55 @@ def _remote_subtask_ids(machine: str, since: float) -> list[str]:
     return [str(row[0]) for row in rows]
 
 
-def _advance_remote_subtask(
+def _charge_remote_subtask(
     task_id: str, cost: float, tokens: int, steps: int, models: object,
-) -> tuple[str, float, int, int, str] | None:
-    """Move *task_id*'s record up to the machine's current totals; return what is new.
+) -> tuple[str, float, int, int, list[tuple[str, int, float, int]], str, int] | None:
+    """Move *task_id*'s record up to the machine's current totals and charge its parent the growth.
 
     The machine reported *cost*, *tokens* and *steps* as the sub-agent's
     row holds them now, cumulative, and *models* as their split by model
     (stored when it is a dict).  The growth over the recorded totals is
-    what its local parent has not been charged yet; the record moves up
-    to the reported totals in the same transaction, so a report seen
-    twice, or one equal to the folded amount, yields nothing.  A report
-    below the record (spend the fold counted before the machine's row
-    did) lowers nothing.
+    what its local parent has not been charged yet: it is added to the
+    parent's row and its finished ancestors' the way a side channel's
+    late spend is (:func:`_add_late_task_usage`), in the transaction
+    that moves the record up to the reported totals, so a report seen
+    twice, or one equal to the folded amount, charges nothing, a daemon
+    killed between the record and the charge charges nothing twice or
+    not at all, and a charge that fails leaves the record where it was,
+    so a later report owes the growth again.  A report below the record
+    (spend the fold counted before the machine's row did) lowers
+    nothing.
+
+    The growth the chain's first unfinished row owes is written to
+    ``remote_charges`` in the same transaction: the caller banks it on
+    that row's live agent afterwards (marking it so first,
+    :func:`_mark_remote_charge_banked`), but the record's advance is
+    durable before the bank, and a daemon that dies in between would
+    otherwise have acknowledged growth nobody was charged.  The row's
+    final save or orphan recovery settles the charge into the row's
+    totals (:func:`_settle_remote_charges`), and the charge stays with
+    the row, as does the share added to each finished row
+    (:func:`_add_late_usage_locked`), so that any later absolute
+    snapshot of a row's ledger settles them again rather than
+    overwriting them.
 
     Returns:
-        ``(parent_task_id, cost, tokens, steps, previous model_costs)``:
-        what is still to charge and the split the record held, or
-        ``None`` for a task not recorded.  Should charging it fail, the
-        caller takes it back (:func:`_restore_remote_subtask`) so a later
-        report owes it again.
+        ``(parent_task_id, cost, tokens, steps, updated, running,
+        charge)``: the growth charged, with the finished rows it was
+        added to and the first unfinished row of the chain as
+        :func:`_add_late_task_usage` returns them (the caller banks the
+        growth on that row's live agent), and the ``remote_charges`` id
+        of the growth that row owes (``0`` when every row is finished);
+        or ``None`` for a task not recorded.
     """
     db = _get_db()
+    with _rw_lock.read_lock():
+        row = db.execute(
+            "SELECT parent_task_id FROM remote_subtasks WHERE task_id = ?", (task_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    _flush_chat_events(str(row["parent_task_id"]))
     with _rw_lock.write_lock(), _immediate_txn(db):
         row = db.execute(
             "SELECT parent_task_id, cost, tokens, steps, model_costs FROM remote_subtasks "
@@ -2888,33 +3070,103 @@ def _advance_remote_subtask(
             (cost, tokens, steps, cost,
              json.dumps(models) if isinstance(models, dict) else row["model_costs"], task_id),
         )
-    return (
-        str(row["parent_task_id"]),
-        max(cost - _safe_float(row["cost"]), 0.0),
-        max(tokens - _safe_int(row["tokens"]), 0),
-        max(steps - _safe_int(row["steps"]), 0),
-        str(row["model_costs"] or ""),
-    )
+        parent_id = str(row["parent_task_id"])
+        cost = max(cost - _safe_float(row["cost"]), 0.0)
+        tokens = max(tokens - _safe_int(row["tokens"]), 0)
+        steps = max(steps - _safe_int(row["steps"]), 0)
+        updated: list[tuple[str, int, float, int]] = []
+        running = ""
+        charge = 0
+        if cost > 0 or tokens > 0 or steps > 0:
+            updated, running = _add_late_usage_locked(db, parent_id, tokens, cost, steps)
+            if running:
+                cursor = db.execute(
+                    "INSERT INTO remote_charges (task_id, parent_task_id, cost, tokens, steps) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (task_id, running, cost, tokens, steps),
+                )
+                charge = int(cursor.lastrowid or 0)
+    return parent_id, cost, tokens, steps, updated, running, charge
 
 
-def _restore_remote_subtask(
-    task_id: str, cost: float, tokens: int, steps: int, models: str,
-) -> None:
-    """Take back what :func:`_advance_remote_subtask` owed for *task_id*: charging it failed.
+def _mark_remote_charge_banked(charge: int, cost: float, tokens: int, steps: int) -> None:
+    """Mark ``remote_charges`` row *charge* banked on its row's live agent, before the bank.
 
-    The record moves back down by the owed *cost*, *tokens* and *steps*
-    and gets its previous split by model *models* back, so the parent is
-    not left short and the Spend panel shows no uncharged split: the
-    next report owes them again.  Called with ``TASK_USAGE_LOCK`` held,
-    like the advance, so no other report moved the record in between.
+    Committed before the ledger record is appended, so a process that
+    dies anywhere around the bank leaves either a mark with no bank
+    (the row's usage events persisted meanwhile hold the ledger before
+    the charge) or a bank with its mark: never a bank nobody can tell
+    from an unbanked charge.  *cost*, *tokens* and *steps* are the
+    ledger totals the charge is banked over, read under the publish
+    lock with the mark and the bank (``task_update._bank_remote_charge``),
+    so a persisted usage event of the row holds the charge exactly when
+    its offsets reach them plus the charge
+    (:func:`_charges_held_by_usage_event`).
+
+    Args:
+        charge: The ``remote_charges`` id :func:`_charge_remote_subtask`
+            returned.
+        cost: The row's ledger USD before the bank.
+        tokens: The row's ledger tokens before the bank.
+        steps: The row's ledger steps before the bank.
     """
     db = _get_db()
     with _rw_lock.write_lock(), _immediate_txn(db):
         db.execute(
-            "UPDATE remote_subtasks SET cost = MAX(cost - ?, 0), tokens = MAX(tokens - ?, 0), "
-            "steps = MAX(steps - ?, 0), model_costs = ? WHERE task_id = ?",
-            (cost, tokens, steps, models, task_id),
+            "UPDATE remote_charges SET banked = 1, banked_cost = ?, banked_tokens = ?, "
+            "banked_steps = ? WHERE id = ?",
+            (float(cost), int(tokens), int(steps), int(charge)),
         )
+
+
+def _settle_remote_charges(db: sqlite3.Connection, task_id: str) -> None:
+    """Add to the finished row *task_id* the remote charges its totals do not hold yet.
+
+    Inside the transaction that finalizes the row (its final save, a
+    replay refresh, its orphan recovery).  ``settled`` says which
+    charges the row's totals hold: a writer of absolute totals resets
+    the flags to what its totals hold first (the banked charges for a
+    snapshot of the row's ledger, :func:`_save_task_extra_locked`; the
+    charges its last persisted usage event held for an orphan recovery,
+    :func:`_backfill_orphan_progress`), then this adds the others and
+    marks them settled.  A finalization that rewrites no totals (a
+    refresh, a save without them) adds nothing twice, and the charges
+    stay with the row (:func:`_delete_task_rows` drops them with it) so
+    the next absolute snapshot settles them again instead of losing
+    them.
+
+    Args:
+        db: The connection holding the write transaction.
+        task_id: The finished row's id.
+    """
+    charges = db.execute(
+        "SELECT id, cost, tokens, steps FROM remote_charges "
+        "WHERE parent_task_id = ? AND settled = 0 ORDER BY id",
+        (task_id,),
+    ).fetchall()
+    for charge in charges:
+        _add_usage_locked(
+            db, task_id, _safe_int(charge["tokens"]), _safe_float(charge["cost"]),
+            _safe_int(charge["steps"]),
+        )
+        db.execute("UPDATE remote_charges SET settled = 1 WHERE id = ?", (charge["id"],))
+
+
+def _hold_remote_charges(db: sqlite3.Connection, task_id: str, held: Collection[int]) -> None:
+    """Record which remote charges the absolute totals just written to row *task_id* hold.
+
+    Args:
+        db: The connection holding the write transaction.
+        task_id: The row whose totals were written.
+        held: The ``remote_charges`` ids those totals hold; the row's
+            other charges are unsettled again, for
+            :func:`_settle_remote_charges` to add.
+    """
+    db.execute(
+        "UPDATE remote_charges SET settled = 0 WHERE parent_task_id = ?", (task_id,)
+    )
+    for charge in held:
+        db.execute("UPDATE remote_charges SET settled = 1 WHERE id = ?", (int(charge),))
 
 
 def user_tasks_since(since: float) -> list[dict[str, object]]:
@@ -3022,13 +3274,24 @@ def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
     return [_safe_str(row["task"]) for row in rows]
 
 
-def _load_input_history(limit: int = _MAX_INPUT_HISTORY, since: float = 0.0) -> list[str]:
-    """Return the most recent distinct texts the user typed into the composer.
+def _load_input_texts(
+    limit: int = _MAX_INPUT_HISTORY, since: float = 0.0,
+) -> list[tuple[str, float]]:
+    """Return ``(text, time of its most recent use)`` pairs of the composer history.
 
-    Combines the listable ``task_history`` rows (sub-agent rows
-    excluded) with the ``steer_inputs`` table, most recent first —
-    a text's position is that of its most recent use in either
-    table.  Feeds the composer's ArrowUp history.  Thread-safe.
+    The most recent distinct texts the user typed into the composer,
+    most recent first: the listable ``task_history`` rows (sub-agent
+    rows excluded) combined with the ``steer_inputs`` table, a text's
+    position being that of its most recent use in either table.  Feeds
+    the composer's ArrowUp history (the server's ``inputHistory``
+    reply).  Thread-safe.
+
+    With a positive *since* only the texts used after that time are
+    returned: a page that holds the whole list refreshes it with the
+    one or two texts a task start or finish added, not the whole list
+    again (half a megabyte on a slow network, at every task event).
+
+    Texts longer than :data:`INPUT_HISTORY_TEXT_CHARS` are left out.
 
     The texts go through :func:`_safe_str`, as every other JSON-bound
     column read does: a BLOB in the TEXT ``task`` column (a hand-edited
@@ -3040,36 +3303,21 @@ def _load_input_history(limit: int = _MAX_INPUT_HISTORY, since: float = 0.0) -> 
     depends on how SQLite was built (``LIKE_DOESNT_MATCH_BLOBS``).
 
     Args:
-        limit: Maximum number of texts returned (the most recent ones);
+        limit: Maximum number of pairs returned (the most recent ones);
             defaults to :data:`_MAX_INPUT_HISTORY`.
-        since: When positive, only the texts used after this time
-            (:func:`_load_input_texts`).
-    """
-    return [text for text, _used in _load_input_texts(limit, since)]
-
-
-def _load_input_texts(
-    limit: int = _MAX_INPUT_HISTORY, since: float = 0.0,
-) -> list[tuple[str, float]]:
-    """Return ``(text, time of its most recent use)`` pairs of the composer history.
-
-    The pairs behind :func:`_load_input_history`, most recent first.
-    With a positive *since* only the texts used after that time are
-    returned: a page that holds the whole list refreshes it with the
-    one or two texts a task start or finish added, not the whole list
-    again (half a megabyte on a slow network, at every task event).
-
-    Args:
-        limit: Maximum number of pairs returned (the most recent ones).
         since: A time (seconds, as the rows' ``timestamp``) a reply
             reported as its newest use; ``0`` for every text.
     """
-    task_where, steer_where = NOT_SUBAGENT, ""
-    params: list[float] = []
+    task_where = f"{NOT_SUBAGENT} AND LENGTH(task) <= ?"
+    steer_where = "LENGTH(text) <= ?"
+    params: list[float] = [INPUT_HISTORY_TEXT_CHARS, INPUT_HISTORY_TEXT_CHARS]
     if since > 0:
-        task_where = f"{NOT_SUBAGENT} AND timestamp > ?"
-        steer_where = "timestamp > ?"
-        params = [float(since), float(since)]
+        task_where += " AND timestamp > ?"
+        steer_where += " AND timestamp > ?"
+        params = [
+            INPUT_HISTORY_TEXT_CHARS, float(since),
+            INPUT_HISTORY_TEXT_CHARS, float(since),
+        ]
     db = _get_db()
     with _rw_lock.read_lock():
         rows = db.execute(
@@ -3132,7 +3380,7 @@ def _record_steer_input(text: str) -> None:
     bound to a remote machine, whose task row and steer echo are the
     machine's (``RemoteTabs.route``).  Without the row the composer
     history (ArrowUp, ghost completions, ``/`` popup order) built by
-    :func:`_load_input_history` would never offer the text again.
+    :func:`_load_input_texts` would never offer the text again.
 
     Upserts the ``steer_inputs`` row so a repeated message only
     refreshes its ``timestamp``.  The table is capped at
@@ -3316,7 +3564,7 @@ _USAGE_COST_RE = re.compile(r"Budget:\s*\$([0-9][\d,]*\.?\d*)")
 
 def _recovered_progress_from_events(
     db: sqlite3.Connection, task_id: str,
-) -> dict[str, int | float]:
+) -> tuple[dict[str, int | float], list[int]]:
     """Reconstruct a killed task's last known progress from its events.
 
     When the owning process dies before the task runner's cleanup can
@@ -3346,18 +3594,20 @@ def _recovered_progress_from_events(
     Returns:
         Mapping of the subset of ``steps``/``tokens``/``cost``/
         ``end_ts`` columns that could be recovered — empty when the
-        task has no events.  Values are parsed defensively: a
-        malformed or foreign-format ``usage_info`` event contributes
-        nothing and never raises.
+        task has no events — and the ``remote_charges`` ids the
+        recovered totals hold (:func:`_charges_held_by_usage_event`).
+        Values are parsed defensively: a malformed or foreign-format
+        ``usage_info`` event contributes nothing and never raises.
     """
     progress: dict[str, int | float] = {}
+    held: list[int] = []
     last = db.execute(
         "SELECT MAX(timestamp) AS ts FROM events WHERE task_id = ?",
         (task_id,),
     ).fetchone()
     last_ts = _safe_float(last["ts"] if last is not None else None, 0.0)
     if last_ts <= 0:
-        return progress
+        return progress, held
     progress["end_ts"] = int(last_ts * 1000)
     usage_rows = db.execute(
         "SELECT event_json FROM events "
@@ -3399,10 +3649,103 @@ def _recovered_progress_from_events(
         # the printer rewrites the structured fields of the same event
         # to task totals (sessions banked by earlier continuations
         # added), which is what the task actually spent.
-        found.update(_structured_usage_totals(event))
+        totals = _structured_usage_totals(event)
+        session = found if text[steps_m.end():steps_m.end() + 1] == "/" else {}
+        held = _charges_held_by_usage_event(
+            db, task_id, _usage_event_offsets(event, session, totals),
+        )
+        if held and session and "banked" not in event:
+            logger.warning(
+                "Task %s: a usage event from before the stamp holds remote charges %s by its "
+                "totals; a charge of cost alone among them banked after the event is lost once",
+                task_id, held,
+            )
+        found.update(totals)
         progress.update(found)
         break
-    return progress
+    return progress, held
+
+
+def _usage_event_offsets(
+    event: dict[str, Any], session: dict[str, int | float], totals: dict[str, int | float],
+) -> tuple[float, int, int]:
+    """Return the ledger totals ``(cost, tokens, steps)`` a persisted usage event rests on.
+
+    They are the printer's offsets when the event was printed: the
+    task's ledger as last published (``publish_usage_offsets``), which
+    holds a remote charge exactly when the charge was banked before
+    that publication (:func:`_charges_held_by_usage_event`).  A
+    per-step event carries them as its ``banked`` stamp, the triple the
+    printer added to the session's counters, exactly as published.  The
+    run's closing event (text ``Steps: N,``; no stamp, it is sent with
+    the ledger's own totals) rests on its totals themselves, its exact
+    ``cost_usd`` included.  An event from before the stamp rests at
+    most on its totals: its token and step offsets are its totals less
+    the session's figures in its text, exact; its cost offset is its
+    cost total, the most it can be (the session's own cost is in the
+    total, and its text carries the task's cumulative budget, not the
+    session's).  A charge that total falls short of is never held; one
+    it reaches is: a charge of cost alone marked before and banked
+    after such an event is lost once when the session had already
+    spent as much (the recovery logs the charges such an event holds).
+    No released version marked charges, so only a daemon upgraded from
+    an intermediate build of this version recovers such an event.
+
+    Args:
+        event: The decoded per-step or closing ``usage_info`` event.
+        session: The session-relative ``steps``/``tokens`` of its text,
+            empty for the closing event.
+        totals: Its structured task totals
+            (:func:`_structured_usage_totals`).
+    """
+    stamp = event.get("banked")
+    if isinstance(stamp, list) and len(stamp) == 3 and all(
+        isinstance(value, (int, float)) and not isinstance(value, bool) for value in stamp
+    ):
+        return _safe_float(stamp[0]), _safe_int(stamp[1]), _safe_int(stamp[2])
+    tokens = _safe_int(totals.get("tokens")) - _safe_int(session.get("tokens"))
+    steps = _safe_int(totals.get("steps")) - _safe_int(session.get("steps"))
+    return _safe_float(totals.get("cost")), tokens, steps
+
+
+def _charges_held_by_usage_event(
+    db: sqlite3.Connection, task_id: str, offsets: tuple[float, int, int],
+) -> list[int]:
+    """Return the ids of the remote charges a persisted usage event's totals hold.
+
+    A remote charge is banked on the ledger after its mark
+    (:func:`_mark_remote_charge_banked`): the ledger totals before the
+    charge, committed under the publish lock with the bank, so every
+    publication of the ledger is either before the mark, at most those
+    totals in every dimension, or after the bank, at least them plus
+    the charge in every dimension (the ledger's sums never decrease;
+    its cost is a left-to-right sum of doubles, so the publication
+    after the bank is exactly the marked cost plus the charge, or
+    larger).  The event's *offsets*, the publication its totals rest on
+    (:func:`_usage_event_offsets`), therefore hold a marked charge
+    exactly when they reach the marked totals plus the charge in cost,
+    tokens and steps, each compared exactly.  An unmarked charge is on
+    no ledger.
+
+    Args:
+        db: Active database connection.
+        task_id: The row the charges are owed to.
+        offsets: The event's ``(cost, tokens, steps)`` offsets.
+
+    Returns:
+        The ``remote_charges`` ids the event holds, oldest first.
+    """
+    cost, tokens, steps = offsets
+    charges = db.execute(
+        "SELECT id, cost, banked_cost FROM remote_charges WHERE parent_task_id = ? "
+        "AND banked = 1 AND banked_tokens + tokens <= ? AND banked_steps + steps <= ? "
+        "ORDER BY id",
+        (task_id, tokens, steps),
+    ).fetchall()
+    return [
+        int(charge["id"]) for charge in charges
+        if _safe_float(charge["banked_cost"]) + _safe_float(charge["cost"]) <= cost
+    ]
 
 
 def _structured_usage_totals(event: dict[str, Any]) -> dict[str, int | float]:
@@ -3464,8 +3807,11 @@ def _backfill_orphan_progress(
             ).fetchone()
             if row is None or not row["id"]:
                 continue
-            progress = _recovered_progress_from_events(db, str(row["id"]))
+            progress, held = _recovered_progress_from_events(db, str(row["id"]))
             if progress:
+                adopted = db.execute(
+                    "SELECT COALESCE(cost, 0) = 0 FROM task_history WHERE rowid = ?", (rid,),
+                ).fetchone()[0]
                 sets = [
                     f"{col} = CASE WHEN {col} IS NULL OR {col} = 0 "
                     f"THEN ? ELSE {col} END"
@@ -3475,11 +3821,16 @@ def _backfill_orphan_progress(
                     f"UPDATE task_history SET {', '.join(sets)} WHERE rowid = ?",
                     [*progress.values(), rid],
                 )
-            # The row's result was just rewritten to its terminal text
-            # and its ``end_ts`` recovered above: derive its tags
-            # (``failed`` included) and refresh its chat's summary row
-            # (``last_finished`` reads that ``end_ts``), as
-            # _save_task_extra does for a task that ends normally.
+                # The event's totals, now the row's, hold the remote charges
+                # the event held; the finalization below adds the others.
+                if adopted and "cost" in progress:
+                    _hold_remote_charges(db, str(row["id"]), held)
+            # The row's result is terminal (just rewritten, or committed
+            # before the process died) and its ``end_ts`` recovered above
+            # when an event dates it: derive its tags (``failed`` included)
+            # and refresh its chat's summary row (``last_finished`` reads
+            # that ``end_ts``), as _save_task_extra does for a task that
+            # ends normally.  The tags written mark the row finalized.
             _finalize_task_metadata(db, str(row["id"]))
         except Exception:
             logger.warning(
@@ -3518,7 +3869,14 @@ def _recover_orphaned_tasks(
     columns of each rewritten row are then backfilled from the task's
     surviving events (see :func:`_backfill_orphan_progress`) so the
     history sidebar shows the real last-known step/token/cost state
-    instead of "0 steps, 0 tok".
+    instead of "0 steps, 0 tok".  A dead row that already carries a
+    terminal result but no ``end_ts`` (the shutdown placeholder of
+    :func:`_shutdown_persist_in_flight_results`, or a result
+    :func:`_save_task_result` committed before the process died ahead
+    of :func:`_save_task_extra`) keeps its result and is finalized the
+    same way: ``end_ts`` when an event dates it, tags and its chat's
+    summary.  Its empty ``tags`` is what marks it unfinalized, so a row
+    no event could date is finalized once, not at every sweep.
 
     Liveness is decided from the DATABASE, not from process memory:
     every row records the ``owner`` token of the process that created
@@ -3550,7 +3908,8 @@ def _recover_orphaned_tasks(
             applies no time filter.
 
     Returns:
-        The number of rows whose ``result`` column was rewritten.
+        The number of rows recovered (``result`` rewritten or the row
+        finalized).
     """
     db = _get_db()
     active_ids = {str(t) for t in active_task_ids}
@@ -3560,7 +3919,8 @@ def _recover_orphaned_tasks(
     # targeted by an id-based UPDATE.  Every non-WITHOUT-ROWID table
     # has a unique, non-NULL rowid.
     select_sql = (
-        "SELECT rowid AS rid, id, owner FROM task_history WHERE result = ? "
+        "SELECT rowid AS rid, id, owner, result FROM task_history "
+        "WHERE (result = ? OR (COALESCE(tags, '') = '' AND COALESCE(end_ts, 0) = 0)) "
     )
     params: list[object] = ["Agent Failed Abruptly"]
     if created_before is not None:
@@ -3588,23 +3948,28 @@ def _recover_orphaned_tasks(
         return 0
     with _rw_lock.write_lock(), _immediate_txn(db):
         placeholders = ",".join(["?"] * len(probed))
-        still_sentinel = {
-            int(row["rid"]): str(row["id"] or "")
+        still_dead = {
+            int(row["rid"]): (str(row["id"] or ""), str(row["result"] or ""))
             for row in db.execute(
                 f"{select_sql}AND rowid IN ({placeholders})",
                 [*params, *[rid for rid, _tid in probed]],
             ).fetchall()
         }
-        dead_rows = [(rid, tid) for rid, tid in probed if still_sentinel.get(rid) == tid]
+        dead_rows = [
+            (rid, tid) for rid, tid in probed
+            if rid in still_dead and still_dead[rid][0] == tid]
+        sentinel_rows = [
+            (rid, tid) for rid, tid in dead_rows
+            if still_dead[rid][1] == "Agent Failed Abruptly"]
         # A dead row whose final result survives in the sidecar journal
         # was NOT killed mid-task: its result was saved to the database
         # but the committed pages were later lost (e.g. the 2026-09-12
         # WAL loss after a ``disk I/O error``).  Restore the journalled
         # result instead of mislabeling the task as "process killed".
-        restored = [(rid, tid) for rid, tid in dead_rows if tid in journalled]
-        killed_rowids = [rid for rid, tid in dead_rows if tid not in journalled]
+        restored = [(rid, tid) for rid, tid in sentinel_rows if tid in journalled]
+        killed_rowids = [rid for rid, tid in sentinel_rows if tid not in journalled]
         _log_orphaned_task_forensics(db, killed_rowids)
-        rowcount = 0
+        rowcount = len(dead_rows) - len(sentinel_rows)
         for rid, tid in restored:
             cursor = db.execute(
                 "UPDATE task_history SET result = ?, success = ? "
@@ -3758,7 +4123,8 @@ def _update_task_columns(
         row = db.execute(
             "SELECT chat_id FROM task_history WHERE id = ?", (resolved,),
         ).fetchone()
-        return (row["chat_id"] or "") if row is not None else ""
+        # The row resolved above cannot vanish inside this transaction.
+        return row["chat_id"] or ""
 
 
 def _save_task_result(
@@ -3853,7 +4219,7 @@ def _add_usage_locked(
 
 
 def _add_late_task_usage(
-    task_id: str, tokens: int, cost: float, steps: int,
+    task_id: str, tokens: int, cost: float, steps: int, banked: bool = False,
 ) -> tuple[list[tuple[str, int, float, int]], str]:
     """Charge side-channel spend to *task_id* and its finished ancestors.
 
@@ -3874,6 +4240,11 @@ def _add_late_task_usage(
         tokens: Tokens to add.
         cost: USD to add.
         steps: Steps to add.
+        banked: The spend is already on *task_id*'s own ledger (its
+            agent's counters: ``charge_side_channel_usage`` with no
+            live agent, ``SorcarAgent._charge_last_task``), so its row's
+            share is mirrored without a retained charge: the next
+            absolute snapshot of that ledger carries it.
 
     Returns:
         ``(updated, running)``: the finished rows updated, as ``(id,
@@ -3884,24 +4255,61 @@ def _add_late_task_usage(
     """
     _flush_chat_events(task_id)
     db = _get_db()
+    with _rw_lock.write_lock(), _immediate_txn(db):
+        return _add_late_usage_locked(db, task_id, tokens, cost, steps, banked)
+
+
+def _add_late_usage_locked(
+    db: sqlite3.Connection, task_id: str, tokens: int, cost: float, steps: int,
+    banked: bool = False,
+) -> tuple[list[tuple[str, int, float, int]], str]:
+    """The walk and the updates of :func:`_add_late_task_usage`, in the caller's write transaction.
+
+    Each finished row's share is also retained as a settled
+    ``remote_charges`` row of that row: its totals hold the spend, but
+    its ledger never did, so a later absolute snapshot of the ledger
+    (a second final save, a repeated finalization) would erase it;
+    such a save settles the retained charges again instead
+    (:func:`_save_task_extra_locked`, :func:`_settle_remote_charges`).
+    Not retained: the share of *task_id*'s own row when the spend is
+    *banked* on its ledger already, which every later snapshot of that
+    ledger carries (its finished ancestors' ledgers never did: their
+    shares are retained).
+
+    Args:
+        db: The connection holding the write transaction.
+        task_id: Primary key of the ``task_history`` row the spend is for.
+        tokens: Tokens to add.
+        cost: USD to add.
+        steps: Steps to add.
+        banked: As :func:`_add_late_task_usage` takes it.
+
+    Returns:
+        ``(updated, running)`` as :func:`_add_late_task_usage` returns them.
+    """
     updated: list[tuple[str, int, float, int]] = []
     seen: set[str] = set()
     current = task_id
-    with _rw_lock.write_lock(), _immediate_txn(db):
-        while current and current not in seen:
-            seen.add(current)
-            row = db.execute(
-                "SELECT end_ts, parent_task_id FROM task_history WHERE id = ?",
-                (current,),
-            ).fetchone()
-            if row is None:
-                return updated, ""
-            if not _safe_int(row["end_ts"], 0):
-                return updated, current
-            totals = _add_usage_locked(db, current, tokens, cost, steps)
-            if totals is not None:  # pragma: no branch — row read just above
-                updated.append((current, *totals))
-            current = _safe_str(row["parent_task_id"])
+    while current and current not in seen:
+        seen.add(current)
+        row = db.execute(
+            "SELECT end_ts, parent_task_id FROM task_history WHERE id = ?",
+            (current,),
+        ).fetchone()
+        if row is None:
+            return updated, ""
+        if not _safe_int(row["end_ts"], 0):
+            return updated, current
+        totals = _add_usage_locked(db, current, tokens, cost, steps)
+        if totals is not None:  # pragma: no branch — row read just above
+            updated.append((current, *totals))
+            if not (banked and current == task_id):
+                db.execute(
+                    "INSERT INTO remote_charges (task_id, parent_task_id, cost, tokens, steps, "
+                    "settled) VALUES (?, ?, ?, ?, ?, 1)",
+                    (task_id, current, float(cost), int(tokens), int(steps)),
+                )
+        current = _safe_str(row["parent_task_id"])
     return updated, ""
 
 
@@ -3955,47 +4363,142 @@ def _save_task_extra(
     Args:
         extra: Dictionary of metadata to persist.
         task_id: Stable row id to update.
+
+    Raises:
+        ValueError: When *extra* carries ``is_favorite`` (checked before
+            any I/O: the flush, the trajectory scan and the write lock
+            are all for a payload this function will write).
     """
+    if "is_favorite" in extra:
+        raise ValueError(
+            "_save_task_extra does not write 'is_favorite'; "
+            "use _set_task_favorite() instead"
+        )
     _flush_chat_events(task_id if is_task_history_id(task_id) else None)
     db = _get_db()
     finished = _safe_int(extra.get("endTs"), 0) > 0
-    has_secret = _scan_finished_trajectory(db, task_id) if finished else None
-    with _rw_lock.write_lock(), _immediate_txn(db):
-        resolved = _resolve_task_id(db, task_id)
-        if resolved is None:
-            return
-        pairs: list[tuple[str, object]] = []
-        parent = _extract_parent_task_id(extra)
-        if parent:
-            pairs.append(("parent_task_id = ?", parent))
-        for k, v in extra.items():
-            if k == "is_favorite":
-                raise ValueError(
-                    "_save_task_extra does not write 'is_favorite'; "
-                    "use _set_task_favorite() instead"
-                )
-            if k in ("parent_task_id", "subagent"):
-                continue
-            mapping = _EXTRA_COL_MAP.get(k)
-            if mapping is None:
-                continue
-            col, coerce = mapping
-            pairs.append((f"{col} = ?", coerce(v)))
-        if "cost" in extra:
-            pairs.append(("model_costs = ?", _own_model_costs(db, resolved)))
-        if not pairs:
-            return
-        sets = [s for s, _ in pairs]
-        vals = [v for _, v in pairs]
-        vals.append(resolved)
+    scan = _scan_finished_trajectory(db, task_id) if finished else None
+    _write_finished_row(db, task_id, scan, _save_task_extra_locked, extra, finished)
+
+
+def _save_task_extra_locked(
+    db: sqlite3.Connection,
+    task_id: str | None,
+    scan: tuple[int, bool] | None,
+    extra: dict[str, object],
+    finished: bool,
+) -> None:
+    """The UPDATE of :func:`_save_task_extra`, in :func:`_write_finished_row`'s transaction.
+
+    Totals in *extra* are a snapshot of the task's ledger (its final
+    saves), which holds the remote charges banked on it and no other:
+    the charges' ``settled`` flags are reset to that, so the
+    finalization adds the others on top, every time such a snapshot is
+    written (:func:`_settle_remote_charges`).
+
+    Args:
+        db: The connection holding the write transaction.
+        task_id: The row to update.
+        scan: The up-to-date :func:`_scan_finished_trajectory` result,
+            or ``None``.
+        extra: The metadata to persist.
+        finished: Whether *extra* carries an ``endTs``: the row's tags
+            and its chat's summary are then derived.
+    """
+    resolved = _resolve_task_id(db, task_id)
+    if resolved is None:
+        return
+    pairs: list[tuple[str, object]] = []
+    parent = _extract_parent_task_id(extra)
+    if parent:
+        pairs.append(("parent_task_id = ?", parent))
+    for k, v in extra.items():
+        if k in ("parent_task_id", "subagent"):
+            continue
+        mapping = _EXTRA_COL_MAP.get(k)
+        if mapping is None:
+            continue
+        col, coerce = mapping
+        pairs.append((f"{col} = ?", coerce(v)))
+    if "cost" in extra:
+        pairs.append(("model_costs = ?", _own_model_costs(db, resolved)))
+    if not pairs:
+        return
+    sets = [s for s, _ in pairs]
+    vals = [v for _, v in pairs]
+    vals.append(resolved)
+    db.execute(
+        f"UPDATE task_history SET {', '.join(sets)} WHERE id = ?", vals
+    )
+    if "cost" in extra:
         db.execute(
-            f"UPDATE task_history SET {', '.join(sets)} WHERE id = ?", vals
+            "UPDATE remote_charges SET settled = banked WHERE parent_task_id = ?", (resolved,)
         )
-        if finished:
-            _finalize_task_metadata(db, resolved, has_secret)
+    if finished:
+        _finalize_task_metadata(db, resolved, scan)
 
 
-def _scan_finished_trajectory(db: sqlite3.Connection, task_id: str | None) -> bool | None:
+def _write_finished_row(
+    db: sqlite3.Connection,
+    task_id: str | None,
+    scan: tuple[int, bool] | None,
+    write: Callable[..., None],
+    *args: object,
+) -> None:
+    """Run *write* in a write transaction whose secret scan of *task_id* is current.
+
+    *scan* is the :func:`_scan_finished_trajectory` result taken holding
+    no lock (``None`` when nothing was scanned: *write* then scans in
+    place, or has no verdict to derive).  Inside
+    ``_rw_lock.write_lock()`` and ``BEGIN IMMEDIATE`` the scan may have
+    been overtaken: a journal replay by another thread or process
+    landed between it and the transaction, a whole deferred transcript
+    at times.  Those events are never read there, where every reader
+    and writer of the daemon and every other process writing
+    ``history.db`` would wait for it: the transaction is left with
+    nothing written (one indexed read of the newest event id is all it
+    cost), the newer events are scanned with both locks free, and the
+    transaction retried, until a round is not overtaken.  A finished
+    task's events come from a finite journal and a few late usage
+    events, so the rounds end; a ``secret`` verdict ends them at once.
+    Shared by the finish save (:func:`_save_task_extra`) and the
+    refresh after a replay (:func:`_refresh_finished_rows`).
+
+    Args:
+        db: The calling thread's connection.
+        task_id: The finished row's id.
+        scan: The unlocked scan's ``(watermark, verdict)``, or ``None``.
+        write: Called as ``write(db, task_id, scan, *args)`` inside
+            the transaction, *scan* brought up to date.
+        *args: Passed on to *write*.
+    """
+    while True:
+        with _rw_lock.write_lock(), _immediate_txn(db):
+            if scan is None or not _scan_overtaken(db, task_id, scan):
+                write(db, task_id, scan, *args)
+                return
+        scan = _secret_since_scan(db, task_id, scan)
+
+
+def _scan_overtaken(
+    db: sqlite3.Connection, task_id: str | None, scan: tuple[int, bool]
+) -> bool:
+    """Whether events of *task_id* landed after *scan*'s watermark (one indexed read).
+
+    A ``True`` verdict is never overtaken: no event can clear it.
+    """
+    last_event, has_secret = scan
+    if has_secret:
+        return False
+    (newest,) = db.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM events WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    return int(newest) > last_event
+
+
+def _scan_finished_trajectory(
+    db: sqlite3.Connection, task_id: str | None
+) -> tuple[int, bool] | None:
     """Scan the trajectory of finished task *task_id* for a secret, holding no lock.
 
     :func:`_save_task_extra` calls this before it takes the write lock
@@ -4004,12 +4507,20 @@ def _scan_finished_trajectory(db: sqlite3.Connection, task_id: str | None) -> bo
     every reader and writer of the daemon and every other process
     writing ``history.db``.  A WAL reader needs neither lock.
 
+    The id of the task's newest event is read BEFORE the scan: an
+    event committed after it (a journal replay by another thread or
+    process landing between this scan and the save's transaction) has
+    a greater id, and :func:`_write_finished_row` scans those newer
+    events, holding no lock either, before the verdict is written, so
+    no verdict missed an event.
+
     Args:
         db: The calling thread's connection.
         task_id: The finished row's id.
 
     Returns:
-        The :func:`trajectory_has_secret` verdict, or ``None`` when no
+        The newest event id before the scan and the
+        :func:`trajectory_has_secret` verdict, or ``None`` when no
         row has the id (the save then finds none either, or scans under
         its lock should the row appear in between).
     """
@@ -4020,7 +4531,72 @@ def _scan_finished_trajectory(db: sqlite3.Connection, task_id: str | None) -> bo
     ).fetchone()
     if row is None:
         return None
-    return trajectory_has_secret(db, task_id, row["task"], row["result"])
+    (last_event,) = db.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM events WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    return last_event, trajectory_has_secret(db, task_id, row["task"], row["result"])
+
+
+def _secret_since_scan(
+    db: sqlite3.Connection, task_id: str | None, scan: tuple[int, bool]
+) -> tuple[int, bool]:
+    """Extend a :func:`_scan_finished_trajectory` result over the events committed since.
+
+    Only the events above *scan*'s watermark are read, up to the newest
+    id read first (the next round covers what lands meanwhile).  Called
+    holding no lock by :func:`_write_finished_row`'s rounds, never
+    inside a transaction: a replay can land any number of events
+    between a scan and the write, and reading them under the locks
+    would stall every reader and writer for as long as they take.
+
+    Args:
+        db: The calling thread's connection.
+        task_id: The finished row's id.
+        scan: The ``(watermark, verdict)`` so far.
+
+    Returns:
+        The ``(watermark, verdict)`` covering the newer events; *scan*
+        itself when there are none or the verdict is already ``True``.
+    """
+    last_event, has_secret = scan
+    if has_secret:
+        return scan
+    (newest,) = db.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM events WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    if int(newest) <= last_event:
+        return scan
+    newer = db.execute(
+        "SELECT event_json FROM events WHERE task_id = ? AND id > ? AND id <= ? "
+        "ORDER BY seq, id",
+        (task_id, last_event, newest),
+    )
+    return int(newest), has_secret_value(str(ev[0] or "") for ev in newer)
+
+
+def _charge_recorded(db: sqlite3.Connection, task_id: str, key: str) -> bool:
+    """Whether a charge record (:func:`_record_model_charge`) with *key* exists under *task_id*."""
+    return db.execute(
+        "SELECT 1 FROM events WHERE task_id = ? AND event_json LIKE '%\"gate_stage\"%' "
+        "AND json_extract(event_json, '$.type') = 'gate_stage' "
+        "AND json_extract(event_json, '$.stage') = 'charge' "
+        "AND json_extract(event_json, '$.key') = ? LIMIT 1",
+        (task_id, key),
+    ).fetchone() is not None
+
+
+def _charge_key(event_json: str) -> str | None:
+    """The key of a charge record of :func:`_record_model_charge`; ``None`` for any other event."""
+    if '"gate_stage"' not in event_json:
+        return None
+    try:
+        event = json.loads(event_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(event, dict) or event.get("stage") != "charge":
+        return None
+    key = event.get("key")
+    return key if isinstance(key, str) and key else None
 
 
 def _own_model_costs(db: sqlite3.Connection, task_id: str) -> str:
@@ -4031,11 +4607,12 @@ def _own_model_costs(db: sqlite3.Connection, task_id: str) -> str:
     carrying the model that served it, its USD cost and its token
     counts.  The Spend panel splits a task's own spend by this record, so
     a task that switched models with ``set_model`` is not filed entirely
-    under the model it was launched with.  A finish-gate review runs on
-    another model and emits no ``llm_call``; the ``gate_stage`` record
-    each charged attempt leaves (``stage`` ``charge``, with ``model``,
-    ``cost_usd`` and ``tokens``, see :func:`_record_gate_charge`) is
-    counted under the reviewer's model the same way.
+    under the model it was launched with.  A model call made for the task
+    outside its agent loop (a finish-gate review, the commit message, a
+    ``talk`` synthesis, a ``decide`` call) emits no ``llm_call``; the
+    ``gate_stage`` record each such charge leaves (``stage`` ``charge``,
+    with ``model``, ``cost_usd`` and ``tokens``, see
+    :func:`_record_model_charge`) is counted under its model the same way.
 
     Args:
         db: The connection (inside the caller's transaction).
@@ -4076,31 +4653,43 @@ def _own_model_costs(db: sqlite3.Connection, task_id: str) -> str:
     return json.dumps(sums)
 
 
-def _record_gate_charge(task_id: str, model: str, cost: float, tokens: int, key: str) -> None:
-    """Record under *task_id* that a finish-gate review attempt on *model* was charged to it.
+def _record_model_charge(task_id: str, model: str, cost: float, tokens: int, key: str) -> None:
+    """Record under *task_id* that a model call on *model* outside its agent loop was charged to it.
 
-    The reviewer emits no ``llm_call``: this ``gate_stage`` record
-    (``stage`` ``charge``) is what files the attempt's *cost* and
-    *tokens* under *model* in the row's split by model
-    (:func:`_own_model_costs`).  Written as the attempt is charged, so a
+    A finish-gate review attempt, the commit message, a ``talk``
+    synthesis or a ``decide`` call emits no ``llm_call``: this
+    ``gate_stage`` record (``stage`` ``charge``) is what files its *cost*
+    and *tokens* under *model* in the row's split by model
+    (:func:`_own_model_costs`).  Written as the spend is charged, so a
     review a Stop ended is recorded too.  A row already finished (the
     charge landed after its final save) has its split refreshed now;
     an unfinished row's final save computes it.
 
+    Idempotent by *key*: a record already persisted (or queued) under
+    the row with the same key is not written again, so a caller may
+    retry a recording a Stop cut short; the finished row's split is
+    refreshed either way.  A copy the database refused and the journal
+    still holds (its replay deferred behind a peer's lock) is not seen
+    here; the event writer drops the later copy when it inserts it
+    (:func:`_write_event_batch_locked`).
+
     Args:
         task_id: The run's persisted row id.
-        model: The reviewer model.
-        cost: The attempt's spend in USD.
+        model: The model the call ran on.
+        cost: The call's spend in USD.
         tokens: Its tokens.
-        key: The attempt's charge key (counted once by the caller).
+        key: The charge's key, unique to the charge.
     """
-    _append_chat_event({
-        "type": "gate_stage", "stage": "charge", "seconds": 0.0, "outcome": "charged",
-        "model": model, "cost_usd": cost, "tokens": tokens, "key": key,
-        "taskId": task_id, "ts": int(time.time() * 1000),
-    }, task_id=task_id)
-    _flush_chat_events()
+    _flush_chat_events(task_id)
     db = _get_db()
+    with _rw_lock.read_lock():
+        recorded = _charge_recorded(db, task_id, key)
+    if not recorded:
+        _append_chat_event({
+            "type": "gate_stage", "stage": "charge", "seconds": 0.0, "outcome": "charged",
+            "model": model, "cost_usd": cost, "tokens": tokens, "key": key,
+            "taskId": task_id, "ts": int(time.time() * 1000),
+        }, task_id=task_id)
     with _rw_lock.write_lock(), _immediate_txn(db):
         resolved = _resolve_task_id(db, task_id)
         if resolved is None:
@@ -4112,21 +4701,26 @@ def _record_gate_charge(task_id: str, model: str, cost: float, tokens: int, key:
 
 
 def _finalize_task_metadata(
-    db: sqlite3.Connection, task_id: str, has_secret: bool | None = None
+    db: sqlite3.Connection, task_id: str, scan: tuple[int, bool] | None = None
 ) -> None:
     """Derive the finished task's ``tags`` and refresh its chat's summary row.
 
     Called inside :func:`_save_task_extra`'s transaction once the row
-    carries an ``endTs``: the result (``_save_task_result`` runs first)
-    decides the ``failed`` tag, the persisted events decide whether the
-    trajectory holds a secret (``secret`` tag), and a listable
-    (non-sub-agent) task refreshes the ``chat_summaries`` row of its chat.
+    carries an ``endTs`` (and by the replay refresh and the orphan
+    sweep): the late remote spend the row owes is settled into its
+    totals (:func:`_settle_remote_charges`), the result
+    (``_save_task_result`` runs first) decides the ``failed`` tag, the
+    persisted events decide whether the trajectory holds a secret
+    (``secret`` tag), and a listable (non-sub-agent) task refreshes the
+    ``chat_summaries`` row of its chat.
 
     Args:
         db: The connection holding the write transaction.
         task_id: The finished row's id.
-        has_secret: The secret verdict the caller computed before it
-            took the write lock; ``None`` scans the events here.
+        scan: The :func:`_scan_finished_trajectory` result
+            :func:`_write_finished_row` brought up to date before this
+            transaction (its verdict covers every event of the task,
+            so nothing is read here); ``None`` scans the events here.
     """
     row = db.execute(
         "SELECT task, result, success, chat_id, parent_task_id "
@@ -4135,6 +4729,8 @@ def _finalize_task_metadata(
     ).fetchone()
     if row is None:
         return
+    _settle_remote_charges(db, task_id)
+    has_secret = None if scan is None else scan[1]
     write_task_tags(db, task_id, row, has_secret)
     if not row["parent_task_id"] and row["chat_id"]:
         upsert_chat_summary(db, _safe_str(row["chat_id"]))
@@ -4260,7 +4856,7 @@ def _task_tree_ids(db: sqlite3.Connection, root_ids: list[str]) -> list[str]:
         rows = db.execute(
             f"SELECT id FROM task_history WHERE parent_task_id IN ({marks})", batch
         ).fetchall()
-        frontier = [str(row["id"]) for row in rows]
+        frontier = [str(row[0]) for row in rows]
     return found
 
 
@@ -4271,10 +4867,21 @@ def _chat_tree_ids(db: sqlite3.Connection, chat_id: str) -> list[str]:
 
 
 def _delete_task_rows(db: sqlite3.Connection, task_ids: list[str], chat_id: str = "") -> int:
-    """Under the write lock: drop *task_ids* and their events in one transaction.
+    """Under the write lock: drop *task_ids*, their sub-tasks and their events in one transaction.
 
-    When *chat_id* is set, the chat's ``chat_summaries`` row goes in
-    the same transaction.  Each deleted id is recorded in
+    When *chat_id* is set, the chat's tasks are dropped too and its
+    ``chat_summaries`` row goes in the same transaction; otherwise the
+    rows of the chats the dropped listable tasks belonged to are
+    recomputed from the tasks that remain (:func:`upsert_chat_summary`;
+    the derived fields are cleared when none remains, the user's title
+    is kept).  The sub-tasks
+    (and the chat's tasks) are looked up inside the transaction, once
+    ``BEGIN IMMEDIATE`` holds the database's write lock: ``_rw_lock``
+    orders this process only, and a sub-task another process committed
+    while the deletion waited for that lock would otherwise stay behind
+    under a parent that is gone.  The ``remote_subtasks`` records of the
+    dropped tasks (their side of the account of sub-agents run on other
+    machines) go with them, and the ``remote_charges`` they owe.  Each deleted id is recorded in
     ``deleted_tasks`` in that transaction too (and the chat in
     ``deleted_chats``), so that the deletion travels to the other
     machines the database is synced with instead of the task coming
@@ -4284,12 +4891,33 @@ def _delete_task_rows(db: sqlite3.Connection, task_ids: list[str], chat_id: str 
         The number of ``task_history`` rows removed.
     """
     removed = 0
-    marks = ",".join("?" * len(task_ids))
     with _immediate_txn(db):
+        if chat_id:
+            rows = db.execute(
+                "SELECT id FROM task_history WHERE chat_id = ?", (chat_id,)
+            ).fetchall()
+            task_ids = [*task_ids, *(str(row[0]) for row in rows)]
+        task_ids = _task_tree_ids(db, task_ids)
+        marks = ",".join("?" * len(task_ids))
+        chats: list[str] = []
         if task_ids:
+            if not chat_id:
+                chats = [
+                    _safe_str(row[0]) for row in db.execute(
+                        f"SELECT DISTINCT chat_id FROM task_history WHERE id IN ({marks}) "
+                        f"AND {NOT_SUBAGENT} AND chat_id != ''",
+                        task_ids,
+                    ).fetchall()
+                ]
             db.execute(f"DELETE FROM events WHERE task_id IN ({marks})", task_ids)
             cursor = db.execute(f"DELETE FROM task_history WHERE id IN ({marks})", task_ids)
             removed = cursor.rowcount or 0
+            db.execute(
+                f"DELETE FROM remote_subtasks WHERE parent_task_id IN ({marks})", task_ids
+            )
+            db.execute(
+                f"DELETE FROM remote_charges WHERE parent_task_id IN ({marks})", task_ids
+            )
             now = time.time()
             db.executemany(
                 "INSERT OR REPLACE INTO deleted_tasks (id, deleted_ts) VALUES (?, ?)",
@@ -4301,6 +4929,13 @@ def _delete_task_rows(db: sqlite3.Connection, task_ids: list[str], chat_id: str 
                 "INSERT OR REPLACE INTO deleted_chats (chat_id, deleted_ts) VALUES (?, ?)",
                 (chat_id, time.time()),
             )
+        for chat in chats:
+            db.execute(
+                "UPDATE chat_summaries SET summary = '', last_launched = 0, last_finished = 0 "
+                "WHERE chat_id = ?",
+                (chat,),
+            )
+            upsert_chat_summary(db, chat)
     locked_call(_caches_lock, _drop_event_caches, set(task_ids))
     return removed
 
@@ -4336,8 +4971,9 @@ def _delete_task(task_id: str) -> int:
 
     Sub-tasks are the rows whose ``parent_task_id`` chain leads to
     *task_id* (a ``run_parallel`` child's trajectory is meaningless
-    without its parent).  The chat's ``chat_summaries`` row is kept:
-    the chat may still hold other tasks.
+    without its parent).  The chat's ``chat_summaries`` row is kept,
+    recomputed from the tasks that remain: the chat may still hold
+    other tasks.
 
     Args:
         task_id: Primary key of the ``task_history`` row to delete.
@@ -4350,7 +4986,7 @@ def _delete_task(task_id: str) -> int:
     _flush_chat_events(task_id)
     db = _get_db()
     with _rw_lock.write_lock():
-        removed = _delete_task_rows(db, _task_tree_ids(db, [task_id]))
+        removed = _delete_task_rows(db, [task_id])
     _invalidate_chat_context_cache("")
     return removed
 
@@ -4369,7 +5005,7 @@ def _delete_chat(chat_id: str) -> int:
     _flush_chat_events()
     db = _get_db()
     with _rw_lock.write_lock():
-        removed = _delete_task_rows(db, _chat_tree_ids(db, chat_id), chat_id)
+        removed = _delete_task_rows(db, [], chat_id)
     _invalidate_chat_context_cache(chat_id)
     return removed
 
@@ -4516,7 +5152,21 @@ def _persist_batch_with_retry(batch: list[tuple[str, str, float, str]]) -> None:
     writer from stalling forever while still recovering the common
     case.  Events are only abandoned — with an ``error`` log — after
     every attempt fails.
+
+    A batch is written live only once the journal is empty: a
+    journalled row gets its ``seq`` when it is replayed, so a live row
+    written while an older one still sits in the journal would order
+    before it in the transcript for good.  The journal is replayed
+    first (a database that accepts writes again just takes the batch
+    after it); rows it still refuses hold the batch back in the
+    journal behind them.
     """
+    path = _failed_events_path(_current_db_path())
+    if _journal_has_pending_rows(path):
+        _replay_failed_events()
+        if _journal_has_pending_rows(path):
+            _journal_failed_events(batch, 0)
+            return
     attempts = 4
     for attempt in range(attempts):
         try:
@@ -4702,28 +5352,41 @@ def _load_final_results(sidecar: str) -> dict[str, dict[str, object]]:
         the sidecar and a spill file do not order each other.  Missing
         or unreadable files and corrupt lines (a torn write from a
         killed process) yield/skip to an empty or partial map.
+
+        The files are read without the journal lock.  A peer's prune
+        (:func:`_prune_final_results_journal`) folds the spill files
+        into a new sidecar and then deletes them, so a spill listed
+        here and gone by the end of the read may have been read as
+        empty while the sidecar read predates the fold: the read then
+        starts over on the new sidecar (a few times at most; prunes
+        are one per sweep).
     """
     results: dict[str, dict[str, object]] = {}
-    journalled_at: dict[str, float] = {}
-    for path in (sidecar, *_journal_spills(sidecar)):
-        for raw in _journal_lines(path):
-            try:
-                entry = json.loads(raw)
-                task_id = entry["task_id"]
-                result = entry["result"]
-                success = entry.get("success")
-                ts = _safe_float(entry.get("ts"), 0.0)
-            except (ValueError, TypeError, KeyError, AttributeError):
-                continue
-            if not (isinstance(task_id, str) and isinstance(result, str)):
-                continue
-            if ts < journalled_at.get(task_id, ts):
-                continue
-            journalled_at[task_id] = ts
-            results[task_id] = {
-                "result": result,
-                "success": success if success in (0, 1) else None,
-            }
+    for _attempt in range(3):
+        results = {}
+        journalled_at: dict[str, float] = {}
+        spills = _journal_spills(sidecar)
+        for path in (sidecar, *spills):
+            for raw in _journal_lines(path):
+                try:
+                    entry = json.loads(raw)
+                    task_id = entry["task_id"]
+                    result = entry["result"]
+                    success = entry.get("success")
+                    ts = _safe_float(entry.get("ts"), 0.0)
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    continue
+                if not (isinstance(task_id, str) and isinstance(result, str)):
+                    continue
+                if ts < journalled_at.get(task_id, ts):
+                    continue
+                journalled_at[task_id] = ts
+                results[task_id] = {
+                    "result": result,
+                    "success": success if success in (0, 1) else None,
+                }
+        if all(os.path.exists(spill) for spill in spills):
+            break
     return results
 
 
@@ -4873,7 +5536,9 @@ def _journal_failed_events(
     appended as JSON lines to ``<db>.failed_events.jsonl`` and replayed
     by :func:`_replay_failed_events` as soon as the database accepts
     writes again, so the transcript is recoverable instead of merely
-    inspectable.
+    inspectable.  *attempts* is ``0`` for a batch journalled without a
+    write attempt, behind rows the database still refuses
+    (:func:`_persist_batch_with_retry`).
 
     Each row is journalled next to the database it was PRODUCED
     against (its own ``origin_db_path``), not next to whichever
@@ -4924,9 +5589,9 @@ def _journal_failed_events(
                     else:
                         target = _spill_journal_lines(sidecar, lines)
                 logger.error(
-                    "%d chat events could not be written after %d attempts; "
-                    "journalled in %s for replay",
-                    len(rows), attempts, target, exc_info=True,
+                    "%d chat events journalled in %s for replay "
+                    "(%d failed write attempts)",
+                    len(rows), target, attempts, exc_info=attempts > 0,
                 )
             except OSError:
                 logger.error(
@@ -5191,6 +5856,7 @@ def _replay_journal_snapshot(snapshot: str) -> bool:
     if batch:
         try:
             _write_event_batch(batch, replay_marker=marker)
+            _refresh_finished_rows({tid for tid, _ev, _ts, _op in batch})
         except Exception:
             logger.warning(
                 "replay of %d journalled events failed; keeping %s",
@@ -5206,6 +5872,42 @@ def _replay_journal_snapshot(snapshot: str) -> bool:
         return True
     _delete_replay_marker(marker)
     return True
+
+
+def _refresh_finished_rows(task_ids: set[str]) -> None:
+    """Derive again the metadata of the finished rows among *task_ids* after a replay.
+
+    A row finalized while its events waited in the journal (the
+    replay deferred behind a peer's lock, :func:`_journal_file_lock`)
+    derived its split by model (``model_costs``) and its tags from the
+    transcript without them; now that they are in, the final save's
+    derivation (:func:`_save_task_extra`) is repeated, the secret scan
+    before the write lock as there (:func:`_write_finished_row`).
+    """
+    db = _get_db()
+    for task_id in task_ids:
+        with _rw_lock.read_lock():
+            row = db.execute(
+                "SELECT end_ts FROM task_history WHERE id = ?", (task_id,)).fetchone()
+        if row is None or not _safe_int(row["end_ts"], 0):
+            continue
+        scan = _scan_finished_trajectory(db, task_id)
+        _write_finished_row(db, task_id, scan, _refresh_finished_row_locked)
+
+
+def _refresh_finished_row_locked(
+    db: sqlite3.Connection, task_id: str, scan: tuple[int, bool] | None
+) -> None:
+    """One row's write of :func:`_refresh_finished_rows`, in the shared write transaction.
+
+    Args:
+        db: The connection holding the write transaction.
+        task_id: The finished row's id.
+        scan: The up-to-date :func:`_scan_finished_trajectory` result.
+    """
+    db.execute("UPDATE task_history SET model_costs = ? WHERE id = ?",
+               (_own_model_costs(db, task_id), task_id))
+    _finalize_task_metadata(db, task_id, scan)
 
 
 def _delete_replay_marker(marker: str) -> None:
@@ -5349,6 +6051,13 @@ def _write_event_batch_locked(
     ``replayed_journals``, a previous replayer committed this very
     snapshot and died before removing its file: nothing is inserted,
     so the transcript never gets duplicate events.
+
+    A charge record (:func:`_record_model_charge`) is unique by its key
+    under its task: a second copy, in this batch or already persisted,
+    is dropped.  The recorder's own lookup cannot see a copy the
+    journal still holds (its replay deferred behind a peer's lock), so
+    a retry of the same key queues it again; the two copies meet here,
+    inside the database's write lock, whichever is replayed first.
     """
     with _immediate_txn(db):
         if replay_marker is not None:
@@ -5377,10 +6086,16 @@ def _write_event_batch_locked(
                 ).fetchone()
                 _next_seq_cache[tid] = row["next_seq"] if row else 0
         rows: list[tuple[str, int, str, float]] = []
+        charged: set[tuple[str, str]] = set()
         for tid, ev_json, ts, _op in batch:
             seq = _next_seq_cache.get(tid)
             if seq is None:
                 continue
+            key = _charge_key(ev_json)
+            if key is not None:
+                if (tid, key) in charged or _charge_recorded(db, tid, key):
+                    continue
+                charged.add((tid, key))
             _next_seq_cache[tid] = seq + 1
             rows.append((tid, seq, ev_json, ts))
         db.executemany(
@@ -5636,29 +6351,28 @@ def _task_has_transcript_events(task_id: str) -> bool:
     _flush_chat_events(task_id)
     db = _get_db()
     with _rw_lock.read_lock():
+        # Read lazily: a transcript's first rows settle it, and a run's
+        # metadata rows (its settings, the charges of its decide/talk and
+        # review calls) are not bounded, so no window of them is proof.
         rows = db.execute(
-            "SELECT event_json FROM events WHERE task_id = ? "
-            "ORDER BY seq ASC LIMIT 20",
-            (task_id,),
-        ).fetchall()
-    for row in rows:
-        try:
-            event = json.loads(row["event_json"])
-        except (json.JSONDecodeError, TypeError):
+            "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq ASC", (task_id,)
+        )
+        for row in rows:
+            try:
+                event = json.loads(row["event_json"])
+            except (json.JSONDecodeError, TypeError):
+                return True
+            if not isinstance(event, dict):
+                return True
+            # Metadata, not transcript: the run's settings, and the charge
+            # records of its model calls outside the agent loop
+            # (_record_model_charge: finish-gate reviews, commit message, ...).
+            if event.get("type") == "task_settings" or (
+                event.get("type") == "gate_stage" and event.get("stage") == "charge"
+            ):
+                continue
             return True
-        if not isinstance(event, dict):
-            return True
-        # Metadata, not transcript: the run's settings, and the charge
-        # records of its finish-gate reviews (_record_gate_charge).
-        if event.get("type") == "task_settings" or (
-            event.get("type") == "gate_stage" and event.get("stage") == "charge"
-        ):
-            continue
-        return True
-    # A run broadcasts task_settings once and a gate charges a few review
-    # attempts, so a window of metadata-only rows this long cannot occur;
-    # anything beyond it is transcript.
-    return len(rows) >= 20
+    return False
 
 
 def _select_event_rows(db: sqlite3.Connection, task_id: str) -> list[sqlite3.Row]:
@@ -6156,6 +6870,11 @@ def _load_chat_context_text(chat_id: str) -> str:
     :func:`_save_task_result` so callers (notably the ghost-text
     autocomplete, which calls this on every keystroke) never re-run
     the SQL or rejoin the text while the chat context is unchanged.
+    That invalidation reaches this process only, so an entry is also
+    dropped once another connection committed, in this process or
+    another (a CLI run, a database sync): the entry records the
+    connection that read it and its ``PRAGMA data_version`` then,
+    which every other connection's commit changes.
 
     Args:
         chat_id: The string chat session identifier.  Empty string
@@ -6168,9 +6887,13 @@ def _load_chat_context_text(chat_id: str) -> str:
     """
     if not chat_id:
         return ""
-    current_path = _current_db_path()
-    _maybe_reset_caches(current_path, _db_file_identity(current_path))
-    cached, snapshot_gen = locked_call(_chat_context_cache_lock, _cached_chat_context, chat_id)
+    db = _get_db()
+    # Read before the rows: a commit landing between the two makes the
+    # stored version stale, so the next call reads again.
+    with _rw_lock.read_lock():
+        version = _safe_int(db.execute("PRAGMA data_version").fetchone()[0], 0)
+    cached, snapshot_gen = locked_call(
+        _chat_context_cache_lock, _cached_chat_context, chat_id, db, version)
     if cached is not None:
         return cached
     parts: list[str] = []
@@ -6182,19 +6905,32 @@ def _load_chat_context_text(chat_id: str) -> str:
         if isinstance(result, str):
             parts.append(result)
     text = "\n".join(parts)
-    locked_call(_chat_context_cache_lock, _store_chat_context, chat_id, text, snapshot_gen)
+    locked_call(
+        _chat_context_cache_lock, _store_chat_context, chat_id, text, snapshot_gen, db, version)
     return text
 
 
-def _cached_chat_context(chat_id: str) -> tuple[str | None, int]:
-    """Return the cached text of *chat_id* (or None) and the cache generation."""
-    return _chat_context_text_cache.get(chat_id), _chat_context_cache_gen
+def _cached_chat_context(
+    chat_id: str, db: sqlite3.Connection, version: int,
+) -> tuple[str | None, int]:
+    """Return the cached text of *chat_id* (None when absent or stale) and the cache generation.
+
+    The entry is current while *db* is the connection that filled it
+    and *version*, its ``PRAGMA data_version`` now, is the one read
+    then: no other connection has committed since.
+    """
+    entry = _chat_context_text_cache.get(chat_id)
+    if entry is None or entry[1] is not db or entry[2] != version:
+        return None, _chat_context_cache_gen
+    return entry[0], _chat_context_cache_gen
 
 
-def _store_chat_context(chat_id: str, text: str, snapshot_gen: int) -> None:
+def _store_chat_context(
+    chat_id: str, text: str, snapshot_gen: int, db: sqlite3.Connection, version: int,
+) -> None:
     """Cache *text* for *chat_id* unless the cache changed since *snapshot_gen*."""
     if _chat_context_cache_gen == snapshot_gen:
-        _chat_context_text_cache[chat_id] = text
+        _chat_context_text_cache[chat_id] = (text, db, version)
 
 
 def _load_model_usage() -> dict[str, int]:

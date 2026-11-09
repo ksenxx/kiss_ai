@@ -24,6 +24,7 @@ const {
   rowByTitle,
   answerHistory,
   openChatsPanel,
+  statusMark,
 } = require('./history_helpers');
 
 function makePage() {
@@ -33,10 +34,6 @@ function makePage() {
       loadMainCss(win);
     },
   });
-}
-
-function statusMark(row) {
-  return row.querySelector('.sidebar-item-running');
 }
 
 function assertSpinner(row, where) {

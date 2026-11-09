@@ -51,7 +51,15 @@ const {
   pinWorkspace,
 } = require('./ui_antipattern_harness');
 
-const {test, report} = makeRunner();
+const runner = makeRunner();
+const report = runner.report;
+const openWindows = [];
+
+/** Run one test through the shared runner, then close its windows. */
+async function test(name, fn) {
+  await runner.test(name, fn);
+  while (openWindows.length) openWindows.pop().close();
+}
 
 function makePage() {
   let copied;
@@ -76,6 +84,7 @@ function makePage() {
       'treeContextMenu.js',
     ],
   });
+  openWindows.push(win);
   return {win, posted, copied};
 }
 
@@ -723,8 +732,59 @@ async function main() {
     );
   });
 
+  // The menu is installed on the whole document and filters on the
+  // content area, so a Select All there must select the opened file's
+  // pane alone: the body would take in the chat beside it in the split
+  // layout and the following Copy would carry the conversation (A23).
+  await test('Menus: Select All in a content tab selects the file, not the chat beside it', async () => {
+    const {win, copied} = makePage();
+    send(win, {type: 'system_output', text: 'PRIVATE CHAT CONTENT'});
+    assert.ok(
+      win.document.body.textContent.includes('PRIVATE CHAT CONTENT'),
+      'the chat pane shows the message',
+    );
+    send(win, {
+      type: 'fileContent',
+      name: 'n.txt',
+      path: '/tmp/n.txt',
+      content: 'FILE CONTENT',
+    });
+    // No Monaco in jsdom: the CDN loader fails and the <pre> fallback
+    // renders the file's text.
+    const loader = win.document.head.querySelector(
+      'script[src*="vs/loader.js"]',
+    );
+    assert.ok(loader, 'the Monaco loader is requested');
+    loader.dispatchEvent(new win.Event('error'));
+    await sleep(0);
+    const view = byId(win, 'content-tab-area').querySelector(
+      '.content-tab-view',
+    );
+    const code = view.querySelector('.content-code-fallback');
+    assert.ok(code, 'the file renders as text');
+    rightClick(win, code);
+    const item = win.document.querySelector(
+      '#sorcar-content-context-menu .sorcar-ctx-item[data-action="select-all"]',
+    );
+    assert.ok(item, 'the content menu offers Select All');
+    click(win, item);
+    assert.strictEqual(
+      win.getSelection().toString(),
+      'FILE CONTENT',
+      'BUG: Select All in the file pane selected the page, chat included',
+    );
+    rightClick(win, code);
+    click(
+      win,
+      win.document.querySelector(
+        '#sorcar-content-context-menu .sorcar-ctx-item[data-action="copy"]',
+      ),
+    );
+    await sleep(0);
+    assert.deepStrictEqual(copied, ['FILE CONTENT']);
+  });
+
   report('sidebarMenuFixes');
-  process.exit(0);
 }
 
 main().catch(err => {

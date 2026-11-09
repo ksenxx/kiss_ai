@@ -11,15 +11,17 @@ checks its model through :func:`~kiss.agents.sorcar.sea_commands.model_sea`,
 and the registry watcher republishes under ``_notify_lock`` -> ``_lock``
 while those calls wait.  ``MCPManager._lock`` is taken by every MCP
 tool call, and once more by the done callback a timed-out ``connect``
-registers on its straggler's future: a future that already finished
-runs that callback inline, on the task thread.  The Stop watchdog
-delivers ``KeyboardInterrupt`` to the task thread with
+registers on its straggler's future.  The Stop watchdog delivers
+``KeyboardInterrupt`` to the task thread with
 ``PyThreadState_SetAsyncExc``; a thread blocked in a contended
 ``acquire`` receives it at the check point right after ``__enter__``
 returns, outside the ``with`` block (CPython gh-74174), so a plain
 ``with lock:`` there leaks the lock for the daemon's life and every
 later call of every task hangs on it.  Every site a task thread
-reaches therefore goes through :func:`~kiss.core.locked.locked_call`.
+reaches therefore goes through :func:`~kiss.core.locked.locked_call`,
+and the straggler's callback is registered on the manager loop: the
+stdlib's ``Future.add_done_callback`` takes the future's condition
+with a plain ``with``, which a task thread must not run.
 
 Each hammer runs in a child process (a leaked lock would wedge the
 pytest process): a contender thread holds the lock half the time so
@@ -33,6 +35,8 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
+import threading
+from typing import Any
 
 import pytest
 
@@ -67,7 +71,7 @@ async def _finished() -> None:
 
 
 class _ReapFinishedStraggler:
-    """``_reap_straggler`` of a connection whose task is done: the callback runs on the worker."""
+    """``_reap_straggler`` of a connection whose task is done, on the worker."""
 
     def __init__(self) -> None:
         self.manager = mcp_servers.MCPManager()
@@ -112,6 +116,60 @@ def test_tool_lock_survives_injection(name: str) -> None:
         capture_output=True, text=True, timeout=120, check=False,
     )
     assert proc.returncode == 0, f"{name}: {proc.stderr[-3000:]}"
+
+
+_CONDITION_ENTER = threading.Condition.__enter__.__code__
+
+
+def _stop_on_condition_enter(frame: Any, event: str, arg: Any) -> Any:
+    """Trace function raising the Stop where ``Condition.__enter__`` returns (gh-74174)."""
+    if event == "call" and frame.f_code is _CONDITION_ENTER:
+        return _stop_on_enter_return
+    return None
+
+
+def _stop_on_enter_return(frame: Any, event: str, arg: Any) -> Any:
+    if event == "return":
+        raise KeyboardInterrupt
+    return _stop_on_enter_return
+
+
+def test_a_stop_in_the_straggler_reap_leaves_the_futures_condition_free() -> None:
+    """A Stop on the task thread cannot leave the straggler's future condition held.
+
+    ``Future.add_done_callback`` takes the future's condition with a
+    plain ``with``; a Stop landing right after that ``__enter__`` on
+    the task thread kept the condition for the thread's life, and the
+    loop's own completion of the task, like every other taker, hung on
+    it.  The Stop is delivered through a trace function at exactly that
+    point, should the reap enter a condition on the task thread at all.
+    """
+    driver = _ReapFinishedStraggler()
+    task = driver.conn.task
+    stopped: list[bool] = []
+
+    def reap_under_a_stop() -> None:
+        sys.settrace(_stop_on_condition_enter)
+        try:
+            driver()
+        except KeyboardInterrupt:
+            stopped.append(True)
+        finally:
+            sys.settrace(None)
+
+    try:
+        worker = threading.Thread(target=reap_under_a_stop, daemon=True)
+        worker.start()
+        worker.join(10.0)
+        assert not worker.is_alive(), "the reap hung"
+        # A bounded take rather than a probe: the loop may still be inside
+        # the registration the reap handed it, holding the condition briefly.
+        taken = task._condition.acquire(timeout=5.0)
+        assert taken, f"the future's condition stayed held: {stopped}"
+        task._condition.release()
+        assert task.result(5.0) is None  # another thread uses the future
+    finally:
+        driver.manager.shutdown()
 
 
 if __name__ == "__main__":

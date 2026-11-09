@@ -24,6 +24,7 @@ is not safe against it, whoever calls it).
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import os
 import signal
@@ -32,9 +33,12 @@ import sys
 import textwrap
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import FrameType
 from typing import Any
+
+import pytest
 
 from kiss.core import processes
 from kiss.core.models import model as model_module
@@ -51,8 +55,9 @@ _MODEL_FILE = model_module.__file__
 class _InterruptAfterSpawn:
     """Profile hook injecting ``KeyboardInterrupt`` at the k-th model call after the spawn."""
 
-    def __init__(self, k: int) -> None:
+    def __init__(self, k: int, task_ident: int) -> None:
         self.k = k
+        self.task_ident = task_ident
         self.calls = 0
         self.child: subprocess.Popen[str] | None = None
 
@@ -61,6 +66,8 @@ class _InterruptAfterSpawn:
         if self.child is None:
             if event == "return" and frame.f_code is processes.popen_process_group.__code__:
                 self.child = arg
+            return
+        if threading.get_ident() != self.task_ident:
             return
         caller = frame.f_back
         if event == "call" and caller is not None and caller.f_code.co_filename == _MODEL_FILE:
@@ -72,8 +79,9 @@ class _InterruptAfterSpawn:
 
 def _construct_with_interrupt(k: int) -> tuple[_CLIProcess | None, subprocess.Popen[str]]:
     """Build a ``_CLIProcess`` with an interrupt at the k-th call after the spawn."""
-    hook = _InterruptAfterSpawn(k)
+    hook = _InterruptAfterSpawn(k, threading.get_ident())
     proc: _CLIProcess | None = None
+    threading.setprofile(hook)  # the child is spawned on a helper thread
     sys.setprofile(hook)
     try:
         proc = _CLIProcess(_CHILD, "probe", 60)
@@ -81,6 +89,7 @@ def _construct_with_interrupt(k: int) -> tuple[_CLIProcess | None, subprocess.Po
         pass
     finally:
         sys.setprofile(None)
+        threading.setprofile(None)
     assert hook.child is not None
     return proc, hook.child
 
@@ -103,6 +112,312 @@ def test_an_interrupt_at_any_call_after_the_spawn_kills_the_child() -> None:
                 pipe.close()
     assert k > 1, "the constructor made no call after the spawn"
     assert leaked == []
+
+
+class _InterruptAtReturn:
+    """Profile hook injecting ``KeyboardInterrupt`` at the k-th return into *frames* of model.py.
+
+    The spawned child is recorded on whichever thread spawns it (the
+    hook is installed for new threads too); the interrupt is delivered
+    at the end of the call instruction in the model.py frame, before
+    the callee's result is stored, which is where a Stop lands when the
+    daemon forces it while the task thread waits inside that call.
+    """
+
+    def __init__(self, k: int, task_ident: int, code_names: tuple[str, ...]) -> None:
+        self.k = k
+        self.task_ident = task_ident
+        self.code_names = code_names
+        self.returns = 0
+        self.child: subprocess.Popen[str] | None = None
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> None:
+        """Record the child; count returns into the watched model.py frames; inject at the k-th."""
+        if event == "return" and frame.f_code is processes.popen_process_group.__code__:
+            self.child = arg
+        if threading.get_ident() != self.task_ident:
+            return
+        if event == "return":
+            into = frame.f_back
+        elif event == "c_return":
+            into = frame
+        else:
+            return
+        if into is None or into.f_code.co_filename != _MODEL_FILE:
+            return
+        if into.f_code.co_name not in self.code_names:
+            return
+        self.returns += 1
+        if self.returns == self.k:
+            sys.setprofile(None)
+            _set_async_exc(self.task_ident, ctypes.py_object(KeyboardInterrupt))
+
+
+def _sweep_returns(run: Callable[[], Any], code_names: tuple[str, ...]) -> list[tuple[int, str]]:
+    """Run *run* with an interrupt at every return into *code_names*; list the leaks.
+
+    Each round injects at the k-th return (k = 1, 2, ...) until a round
+    completes without an interrupt; a leak is a round after which the
+    spawned child is still alive or its stdin still open.
+    """
+    leaked: list[tuple[int, str]] = []
+    k = 0
+    while True:
+        k += 1
+        hook = _InterruptAtReturn(k, threading.get_ident(), code_names)
+        threading.setprofile(hook)
+        sys.setprofile(hook)
+        interrupted = False
+        try:
+            run()
+        except KeyboardInterrupt:
+            interrupted = True
+        finally:
+            sys.setprofile(None)
+            threading.setprofile(None)
+        child = hook.child
+        if child is not None:
+            assert child.stdin is not None
+            if child.poll() is None or not child.stdin.closed:
+                leaked.append((k, "alive" if child.poll() is None else "stdin open"))
+                child.kill()
+                child.wait(timeout=30)
+            for pipe in (child.stdin, child.stdout, child.stderr):
+                assert pipe is not None
+                pipe.close()
+        if not interrupted:
+            break
+    assert k > 1, "the sweep made no return to interrupt"
+    return leaked
+
+
+def test_an_interrupt_at_any_return_during_construction_kills_the_child() -> None:
+    """A Stop landing as the spawn helper itself returns must not lose the child.
+
+    Only the constructor's own frame is watched: the Stop lands at every
+    return into ``__init__``, the one as ``popen_process_group`` returns
+    (before ``self._proc`` exists) included.
+    """
+
+    def construct() -> None:
+        _CLIProcess(_CHILD, "probe", 60).close()
+
+    assert _sweep_returns(construct, ("__init__",)) == []
+
+
+def test_an_interrupt_as_the_turn_enters_the_with_block_kills_the_child() -> None:
+    """A Stop landing as the constructor or ``__enter__`` returns to ``_cli_turn`` closes the child.
+
+    ``with _CLIProcess(...) as proc:`` never reaches ``__exit__`` when the
+    interrupt lands before the block is entered, so the turn itself must
+    own the supervisor from the moment it exists.
+    """
+    from kiss.core.models.claude_code_model import ClaudeCodeModel
+
+    cli_model = ClaudeCodeModel("cc/opus")
+    cli_model.model_config = {"timeout": 60}
+
+    def turn() -> None:
+        with cli_model._cli_turn(_CHILD, "probe"):
+            pass
+
+    assert _sweep_returns(turn, ("_cli_turn",)) == []
+
+
+def test_a_child_spawned_after_the_constructor_gave_up_is_ended_by_the_helper() -> None:
+    """A Stop whose grace runs out while the spawn is still in progress leaves no orphan.
+
+    The constructor used to wait the grace for the spawn helper and then
+    leave with nothing: a child the helper returned afterwards went into
+    a list nobody read again, alive behind three open pipes, and the
+    supervisor was already marked closed.  The helper must end the child
+    it returns once the constructor has given the start up.
+    """
+    from kiss.core.models.claude_code_model import ClaudeCodeModel
+
+    cli_model = ClaudeCodeModel("cc/opus")
+    cli_model.model_config = {"timeout": 60}
+    spawn_held = threading.Event()
+    release_spawn = threading.Event()
+    helpers: list[threading.Thread] = []
+    spawned: list[subprocess.Popen[str]] = []
+
+    def hold_the_spawn(frame: FrameType, event: str, arg: Any) -> None:
+        """Hold the helper at the spawn until released; record the child it returns."""
+        if frame.f_code is not processes.popen_process_group.__code__:
+            return
+        if event == "call":
+            helpers.append(threading.current_thread())
+            spawn_held.set()
+            assert release_spawn.wait(timeout=60), "the test never released the spawn"
+        elif event == "return":
+            spawned.append(arg)
+
+    def stop_as_the_helper_starts(frame: FrameType, event: str, arg: Any) -> None:
+        """Raise the Stop as the helper's ``start()`` returns, with the spawn held."""
+        if event == "return" and frame.f_code is threading.Thread.start.__code__:
+            sys.setprofile(None)
+            assert spawn_held.wait(timeout=30), "the helper never reached the spawn"
+            raise KeyboardInterrupt("Stop while the spawn is in progress")
+
+    interrupted = False
+    threading.setprofile(hold_the_spawn)
+    sys.setprofile(stop_as_the_helper_starts)
+    try:
+        with cli_model._cli_turn(_CHILD, "probe"):
+            pass
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        sys.setprofile(None)
+        threading.setprofile(None)
+        release_spawn.set()
+    assert interrupted
+    (helper,) = helpers
+    helper.join(timeout=30)
+    (child,) = spawned
+    assert child.stdin is not None and child.stdout is not None and child.stderr is not None
+    try:
+        assert not helper.is_alive()
+        assert child.returncode is not None, "the late child was not reaped"
+        assert [pipe.closed for pipe in (child.stdin, child.stdout, child.stderr)] == [True] * 3
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=30)
+        for pipe in (child.stdin, child.stdout, child.stderr):
+            pipe.close()
+
+
+# A child that ignores SIGTERM: only the SIGKILL after the grace ends it.
+_TERM_IGNORING_CHILD = [
+    sys.executable,
+    "-c",
+    "import signal, time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    'print("ready", flush=True)\n'
+    "time.sleep(60)",
+]
+
+
+@posix_only("the child ignores SIGTERM, which Windows has no equivalent of")
+@pytest.mark.parametrize("interrupted_after", ["_signal_tree", "_reap"])
+def test_a_stop_during_teardown_still_kills_reaps_and_releases_the_child(
+    interrupted_after: str,
+) -> None:
+    """A Stop landing inside ``close()`` leaves the child dead, reaped and its pipes closed.
+
+    ``close()`` used to mark itself closed before doing anything, so a
+    Stop delivered as the SIGTERM returned (before the SIGKILL) left a
+    child that ignores SIGTERM alive behind its readers and pipes, and
+    the retry from ``_cli_turn``'s outer cleanup was a no-op.  The
+    teardown must run its hard kill, reap and release however the grace
+    wait ends, and a retry must finish a teardown the Stop cut short
+    after the reap.
+    """
+    from kiss.core.models.claude_code_model import ClaudeCodeModel
+
+    cli_model = ClaudeCodeModel("cc/opus")
+    cli_model.model_config = {"timeout": 60}
+    task_ident = threading.get_ident()
+    code = getattr(_CLIProcess, interrupted_after).__code__
+    supervisors: list[_CLIProcess] = []
+
+    def stop_as_it_returns(frame: FrameType, event: str, arg: Any) -> None:
+        """Deliver the Stop as the first call of the watched method returns."""
+        if event == "return" and frame.f_code is code and threading.get_ident() == task_ident:
+            sys.setprofile(None)
+            _set_async_exc(task_ident, ctypes.py_object(KeyboardInterrupt))
+
+    interrupted = False
+    try:
+        with cli_model._cli_turn(_TERM_IGNORING_CHILD, "probe") as proc:
+            supervisors.append(proc)
+            assert next(proc.lines()).strip() == "ready"
+            sys.setprofile(stop_as_it_returns)
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        sys.setprofile(None)
+    (proc,) = supervisors
+    child = proc._proc
+    assert child.stdin is not None and child.stdout is not None and child.stderr is not None
+    try:
+        assert interrupted
+        assert child.returncode is not None, "the child was not reaped"
+        for reader in proc._readers:
+            reader.join(timeout=30)
+        assert [reader.is_alive() for reader in proc._readers] == [False, False]
+        assert [pipe.closed for pipe in (child.stdin, child.stdout, child.stderr)] == [True] * 3
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=30)
+        for pipe in (child.stdin, child.stdout, child.stderr):
+            pipe.close()
+
+
+# A launcher that exits on its own, leaving a grandchild of its process
+# group (of its Job Object on Windows) behind, as a CLI leaves a
+# background command; the marker file names the grandchild once it exists.
+_LEAVING_LAUNCHER = textwrap.dedent(
+    """
+    import pathlib, subprocess, sys
+    grandchild = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    pathlib.Path(sys.argv[1]).write_text(str(grandchild.pid))
+    print("ready", flush=True)
+    """
+)
+
+
+def _running(pid: int) -> bool:
+    """Whether *pid* still runs: it exists and, where ``/proc`` tells, is no zombie."""
+    if not processes.pid_alive(pid):
+        return False
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return True
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+
+def test_a_descendant_outliving_a_launcher_that_exited_is_ended_by_the_turn(
+    tmp_path: Path,
+) -> None:
+    """The normal turn ends a grandchild that outlived a launcher exiting on its own.
+
+    ``close()`` signals the child's whole group (its Job Object on
+    Windows) whatever the child's own state, but nothing once the child
+    has been reaped, since its pid may then belong to a stranger.  Only
+    a POSIX reap hands the pid on: Windows keeps it reserved through the
+    ``Popen`` handle while the exit status, which ``wait_for_exit`` reads
+    there with ``poll()``, is already set.  Guarding the signals on
+    ``returncode`` alone therefore left the Job Object alive after a
+    clean exit (review R2 C3/F2): the grandchild must be gone on every
+    platform.
+    """
+    from kiss.core.models.claude_code_model import ClaudeCodeModel
+
+    marker = tmp_path / "grandchild.pid"
+    launcher = [sys.executable, "-c", _LEAVING_LAUNCHER, str(marker)]
+    cli_model = ClaudeCodeModel("cc/opus")
+    cli_model.model_config = {"timeout": 60}
+    with cli_model._cli_turn(launcher, "probe") as proc:
+        assert [line.strip() for line in proc.lines()] == ["ready"]
+        proc.raise_for_exit()
+        grandchild = int(marker.read_text())
+        assert _running(grandchild), "the launcher's grandchild was not left behind"
+    try:
+        deadline = time.monotonic() + 30
+        while _running(grandchild) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _running(grandchild), "the grandchild outlived the turn"
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(grandchild, processes.SIGKILL)
 
 
 # A child whose grandchild, in its own session, inherits stdout and so

@@ -17,13 +17,12 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {JSDOM} = require('jsdom');
-const {click} = require('./share_helpers');
-
-const MEDIA = path.join(__dirname, '..', 'media');
-const SHARE_JS = fs.readFileSync(path.join(MEDIA, 'share.js'), 'utf8');
+const {
+  click,
+  makeSharePage: makePlainSharePage,
+  SHARE_JS,
+} = require('./share_helpers');
 
 /**
  * Build the exact document shape _build_share_page writes (theme
@@ -127,17 +126,14 @@ function testPageWithoutThemeChromeStillLoads() {
   // A legacy shared page (written before the toggle existed) carries
   // neither the button nor the style pair; share.js must still load
   // and keep its collapse/expand behaviour working.
-  const dom = new JSDOM(
-    '<!DOCTYPE html><html><body><div id="app"><div id="output">' +
+  const win = makePlainSharePage(
+    '<div id="output">' +
       '<div class="ev tc collapsible">' +
       '<div class="tc-h collapse-header">Bash' +
       '<span class="collapse-preview"></span></div>' +
       '<pre>ls</pre></div>' +
-      '</div></div></body></html>',
-    {runScripts: 'dangerously', pretendToBeVisual: true, url: 'https://x/'},
+      '</div>',
   );
-  const win = dom.window;
-  win.eval(SHARE_JS + '\n//# sourceURL=share.js');
   const panel = win.document.querySelector('.collapsible');
   click(win.document.querySelector('.collapse-header'));
   assert.ok(

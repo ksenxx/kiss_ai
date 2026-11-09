@@ -248,6 +248,30 @@ class TestStrayCloudflared(unittest.TestCase):
             (proc.pid, metrics_port, "https://stray-tunnel.trycloudflare.com"),
         )
 
+    def test_recorded_tunnel_to_another_port_is_declined(self) -> None:
+        """A healthy pidfile tunnel forwarding to the daemon's previous port is
+        declined and terminated: adopted, its public URL would reach a port
+        this daemon no longer listens on (the watchdog sees a healthy tunnel
+        and never replaces it).
+        """
+        old_port = find_free_port()
+        while old_port == self.local_port:
+            old_port = find_free_port()
+        old_metrics = self._metrics_server(_HealthyHandler)
+        old = self._spawn_fake(old_metrics, old_port)
+        ws._cloudflared_pidfile().write_text(json.dumps({
+            "pid": old.pid, "metrics_port": old_metrics, "url": "https://old.trycloudflare.com",
+        }))
+
+        self.assertIsNone(
+            ws._try_adopt_existing_cloudflared(self.local_port),
+            "regression: adopted the recorded tunnel to another local port",
+        )
+        self.assertTrue(
+            _wait_until(lambda: old.poll() is not None, 5),
+            "the declined tunnel to the previous port must be terminated",
+        )
+
     def test_malformed_pidfile_falls_back_to_stray(self) -> None:
         """A pidfile without an integer ``metrics_port`` is skipped, not fatal."""
         ws._cloudflared_pidfile().write_text(json.dumps({"pid": os.getpid()}))

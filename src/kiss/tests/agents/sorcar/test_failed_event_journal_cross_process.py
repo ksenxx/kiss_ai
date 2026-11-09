@@ -32,6 +32,8 @@ from pathlib import Path
 import pytest
 
 import kiss.agents.sorcar.persistence as persistence
+from kiss.core.file_lock import lock_exclusive
+from kiss.tests.agents.sorcar.test_cost_audit_20261023 import _llm_call
 
 # How long the parent waits for the child to finish appending before it
 # releases the database lock.  A process that is free to append does so
@@ -289,8 +291,71 @@ def test_nothing_is_lost_while_the_database_keeps_refusing_writes(
     assert _journal_residue(kiss_home) == []
 
 
+def test_a_live_batch_does_not_overtake_a_journalled_one(kiss_home: Path) -> None:
+    """An event written after a batch was journalled lands behind it, never ahead.
+
+    A journalled row gets its ``seq`` when it is replayed.  An event the
+    database refused (journalled after every attempt) followed by one it
+    accepted (written live) used to put the later event first in the
+    transcript for good.  A trigger makes the database refuse one
+    event's INSERT, as a disk I/O error would, until it is dropped; the
+    writer must hold the later event back behind the earlier one.
+    """
+    task_id, _chat = persistence._add_task("ordered transcript")
+    db = persistence._get_db()
+    db.execute(
+        "CREATE TRIGGER refuse_earlier BEFORE INSERT ON events "
+        "WHEN NEW.event_json LIKE '%earlier%' "
+        "BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END"
+    )
+    try:
+        persistence._queue_chat_event({"type": "text", "text": "earlier"}, task_id)
+        persistence._flush_chat_events(task_id)  # refused, journalled, replay refused
+        assert _event_texts(task_id) == []
+        assert persistence._journal_has_pending_rows(
+            persistence._failed_events_path(str(persistence._DB_PATH)),
+        )
+        persistence._queue_chat_event({"type": "text", "text": "later"}, task_id)
+        persistence._flush_chat_events(task_id)
+    finally:
+        db.execute("DROP TRIGGER refuse_earlier")
+    persistence._flush_chat_events(task_id)
+
+    assert _event_texts(task_id) == ["earlier", "later"]
+    assert _journal_residue(kiss_home) == []
+
+
 def test_replay_without_a_journal_is_a_no_op(kiss_home: Path) -> None:
     """The common case touches nothing and raises nothing."""
     task_id, _chat = persistence._add_task("no journal task")
     persistence._replay_failed_events()
     assert _event_texts(task_id) == []
+
+
+def test_a_replay_refreshes_the_rows_finalized_while_it_was_deferred(kiss_home: Path) -> None:
+    """A11-2 (astra): the metadata derived without the journalled events stayed stale.
+
+    The final save flushes, but a replay a peer's lock defers leaves
+    the journalled events out of the transcript it scans: the row's
+    split by model misses their calls and its tags the secret they
+    carry.  The replay that lands them refreshes the finished row.
+    """
+    task_id, _chat = persistence._add_task("audit the keys", extra={"model": "main-model"})
+    origin = str(persistence._DB_PATH)
+    persistence._journal_failed_events([
+        (task_id, json.dumps(_llm_call("other-model", 0.5, 100)), 1.0, origin),
+        (task_id, json.dumps({"type": "text", "text": "-----BEGIN RSA PRIVATE KEY-----\nMIIE"}),
+         2.0, origin),
+    ], 4)
+    with open(persistence._failed_events_path(origin) + ".lock", "a+") as peer:
+        assert lock_exclusive(peer, blocking=False)
+        persistence._save_task_extra({"endTs": 3_000, "cost": 0.5}, task_id=task_id)
+    for _attempt in range(5):
+        persistence._replay_failed_events()
+
+    assert _event_texts(task_id) == ["", "-----BEGIN RSA PRIVATE KEY-----\nMIIE"]
+    row = persistence._get_db().execute(
+        "SELECT tags, model_costs FROM task_history WHERE id = ?", (task_id,),
+    ).fetchone()
+    assert "secret" in str(row["tags"]).split(","), row["tags"]
+    assert json.loads(row["model_costs"]) == {"other-model": [0.5, 100]}

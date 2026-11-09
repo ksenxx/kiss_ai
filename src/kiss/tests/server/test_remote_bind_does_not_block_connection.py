@@ -41,6 +41,7 @@ from kiss.agents.sorcar import machines as mach
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.conftest import find_free_port
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.remote_tabs_probe import machine_of
 
 
 class BindDoesNotBlockConnectionTest(IsolatedAsyncioTestCase):
@@ -128,7 +129,7 @@ class BindDoesNotBlockConnectionTest(IsolatedAsyncioTestCase):
             "the machine did not hold the connect: the test exercised nothing",
         )
         await self._wait_route_done(api, tab)
-        self.assertEqual(api.remote_tabs.machine_of(tab), "")
+        self.assertEqual(machine_of(api.remote_tabs, tab), "")
 
     async def test_the_tabs_own_close_follows_its_bind(self) -> None:
         """A ``closeTab`` sent while the bind connects is applied after it, in wire order.
@@ -152,7 +153,7 @@ class BindDoesNotBlockConnectionTest(IsolatedAsyncioTestCase):
         tabs = await self._until("tabs_state")
         self.assertNotIn(tab, [t["tabId"] for t in tabs["tabs"]], "the close followed the bind")
         await self._wait_route_done(api, tab)
-        self.assertEqual(api.remote_tabs.machine_of(tab), "")
+        self.assertEqual(machine_of(api.remote_tabs, tab), "")
 
     async def test_a_stop_sent_during_the_bind_follows_it(self) -> None:
         """A ``stop`` sent while the bind connects queues behind it.
@@ -170,7 +171,7 @@ class BindDoesNotBlockConnectionTest(IsolatedAsyncioTestCase):
         error = await self._until("error", tab)
         self.assertEqual(error["code"], "prompt_refused")
         await self._wait_route_done(api, tab)
-        self.assertEqual(api.remote_tabs.machine_of(tab), "")
+        self.assertEqual(machine_of(api.remote_tabs, tab), "")
 
     async def test_an_open_tab_after_a_queued_close_reopens_the_tab(self) -> None:
         """Every command of the tab queues behind its bind, not only the routed ones.
@@ -196,7 +197,7 @@ class BindDoesNotBlockConnectionTest(IsolatedAsyncioTestCase):
         tabs = {t["tabId"]: t for t in self.server._agent_server.tab_registry.snapshot()}
         self.assertIn(tab, tabs, "the queued close undid the later openTab")
         self.assertEqual(tabs[tab]["title"], "hole again")
-        self.assertEqual(api.remote_tabs.machine_of(tab), "")
+        self.assertEqual(machine_of(api.remote_tabs, tab), "")
 
     async def test_another_connection_s_close_of_the_tab_is_not_held_behind_the_bind(self) -> None:
         """Only the binding connection's own commands for the tab queue behind its bind.
@@ -204,7 +205,9 @@ class BindDoesNotBlockConnectionTest(IsolatedAsyncioTestCase):
         A second surface showing the same tab closes it while the bind
         connects: inline, the two connections never waited for each
         other (the registry orders them), so the close is applied at
-        once and the bind's late refusal lands on a closed tab.
+        once.  The close unbinds the tab, which stands the bind down:
+        its late refusal is not sent, as a ``prompt_refused`` would
+        lower the running state of whatever the tab shows next.
         """
         tab = "tab-hole-other-surface"
         await self._send({"type": "openTab", "tabId": tab, "title": "hole"})
@@ -232,7 +235,24 @@ class BindDoesNotBlockConnectionTest(IsolatedAsyncioTestCase):
             "the other connection's close waited for the bind's connect",
         )
         self.assertTrue(self._pending(api, tab), "the bind is still connecting")
-        error = await self._until("error", tab)
-        self.assertEqual(error["code"], "prompt_refused")
         await self._wait_route_done(api, tab)
-        self.assertEqual(api.remote_tabs.machine_of(tab), "")
+        self.assertEqual(machine_of(api.remote_tabs, tab), "")
+        self.assertGreaterEqual(
+            time.monotonic() - started, mach.REQUEST_TIMEOUT / 2,
+            "the machine did not hold the connect: the test exercised nothing",
+        )
+        # The frames of the binding connection since the close: the
+        # stood-down bind sent nothing for the closed tab.
+        await self._send({"type": "ping"})
+        for_tab: list[dict[str, Any]] = []
+        for _ in range(300):
+            line = await asyncio.wait_for(self.reader.readline(), timeout=30.0)
+            assert line, "local connection closed"
+            frame: dict[str, Any] = json.loads(line.decode("utf-8"))
+            if frame.get("type") == "pong":
+                break
+            if frame.get("tabId") == tab:
+                for_tab.append(frame)
+        else:
+            raise AssertionError("no pong within 300 frames")
+        self.assertEqual(for_tab, [], "the stood-down bind still answered on the closed tab")

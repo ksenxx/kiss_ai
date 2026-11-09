@@ -5,9 +5,10 @@
 # add your name here
 """Two-way semantic sync of the KISS notes between this machine and a remote host.
 
-The notes are two Markdown files in the KISS home directory (``~/.kiss``)
-that the agents write on every machine they run on and that a plain copy
-would clobber:
+The notes are two Markdown files in the KISS home directory (``$KISS_HOME``,
+else ``~/<home_dir>`` of the brand -- ``~/.kiss`` for stock KISS Sorcar; see
+:func:`brand_home_dir`) that the agents write on every machine they run on
+and that a plain copy would clobber:
 
 * ``AUTOROUTER.md`` -- the observed model evidence the autorouter SEA
   splices into its prompt: a stamp line ``_Observed in the task history,
@@ -36,26 +37,41 @@ Usage::
 Called by ``./rsorcar`` on every deploy (step 4d).  For each note the
 remote's copy is fetched over ssh and merged into this machine's, and the
 result is sent back: the remote merges it into whatever it holds by then
-(so a ledger row appended there meanwhile survives) and writes the file
-in one atomic rename.  The remote side runs this file's own source under
-its system ``python3`` (shipped inline on the ssh command line), so it
-needs nothing installed.  Only the standard library is used here for the
-same reason.  A note that could not be synced is reported and makes the
-exit status 1; the other note is still synced.
+(so a ledger row appended there meanwhile survives).  A merge reads,
+merges and rewrites the note under the lock the agents take on it to
+append a row (see :func:`merge_into_file`), so a row appended while the
+sync runs is never lost.  The remote side runs this file's own source
+under its system ``python3`` (shipped inline on the ssh command line), so
+it needs nothing installed.  Only the standard library is used here for
+the same reason.  A note that could not be synced is reported and makes
+the exit status 1; the other note is still synced.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import shlex
 import subprocess
 import sys
-import tempfile
+from typing import IO
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover -- Windows has no fcntl
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt  # type: ignore[import-not-found]
+except ImportError:  # POSIX has no msvcrt
+    msvcrt = None  # type: ignore[assignment]
 
 NOTES = ("AUTOROUTER.md", "MODEL_DECISIONS.md")
 """The notes synced, by file name inside the KISS home directory."""
+
+DEFAULT_HOME_DIR = ".kiss"
+"""The stock brand's state directory name under ``$HOME``."""
 
 PHASE_MERGE = "_merge"
 """Internal sub-command the remote runs: merge stdin into its copy of a note."""
@@ -363,9 +379,50 @@ def merge_note(name: str, ours: str, theirs: str) -> str:
     return MERGERS[name](ours, theirs)
 
 
-def kiss_dir() -> str:
-    """Return the KISS home directory: ``$KISS_HOME`` when set, else ``~/.kiss``."""
-    return os.environ.get("KISS_HOME") or os.path.expanduser("~/.kiss")
+def brand_home_dir() -> str:
+    """Return the name of the brand's state directory under ``$HOME``.
+
+    Read as ``install.sh`` reads it (``brand_home_dir_name`` there):
+    ``home_dir`` of the checkout's ``.brand/brand.json`` overlay when
+    there is one, else of the ``brand.json`` next to the ``kiss`` package
+    this script belongs to -- the file ``kiss.core.brand`` reads, so the
+    answer is the directory the agents write the notes in (``.s10s`` for
+    Seamless Loop, :data:`DEFAULT_HOME_DIR` for stock KISS Sorcar).  A
+    value that is not a single path component, or no file at all, falls
+    back to :data:`DEFAULT_HOME_DIR`.  The remote runs this source with
+    no file of its own and is told the name instead (:data:`PHASE_MERGE`).
+    """
+    script = globals().get("__file__")
+    if not script:
+        return DEFAULT_HOME_DIR
+    package = os.path.dirname(os.path.dirname(os.path.realpath(script)))
+    checkout = os.path.dirname(os.path.dirname(package))
+    for candidate in (
+        os.path.join(checkout, ".brand", "brand.json"),
+        os.path.join(package, "webapp", "media", "brand.json"),
+    ):
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            with open(candidate, encoding="utf-8") as handle:
+                name = json.load(handle).get("home_dir")
+        except (OSError, ValueError, AttributeError):
+            return DEFAULT_HOME_DIR
+        one_component = (
+            isinstance(name, str) and name not in ("", ".", "..") and not set(name) & set("/\\")
+        )
+        return name if one_component else DEFAULT_HOME_DIR
+    return DEFAULT_HOME_DIR
+
+
+def kiss_dir(home_dir: str | None = None) -> str:
+    """Return the KISS home directory: ``$KISS_HOME`` when set, else ``~/<home_dir>``.
+
+    Args:
+        home_dir: The brand's state directory name; :func:`brand_home_dir`
+            when ``None``.
+    """
+    return os.environ.get("KISS_HOME") or os.path.expanduser("~/" + (home_dir or brand_home_dir()))
 
 
 def read_note(path: str) -> str | None:
@@ -377,25 +434,40 @@ def read_note(path: str) -> str | None:
         return None
 
 
-def write_note(path: str, text: str) -> None:
-    """Write *text* to *path* in one atomic rename (a reader never sees a partial file)."""
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    fd, partial = tempfile.mkstemp(prefix=os.path.basename(path) + ".", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        os.replace(partial, path)
-    except BaseException:
-        try:
-            os.unlink(partial)
-        except OSError:
-            pass
-        raise
+def lock_note(handle: IO[str]) -> None:
+    """Take the lock the agents take to append to a note: ``flock`` on the open note.
+
+    The same lock as ``kiss.core.file_lock.lock_exclusive`` (``flock`` on
+    POSIX, the note's first byte on Windows), so that the autorouter's
+    ``log_decision`` and this script's merges take turns on the ledger.
+    Waits for the holder; released by :func:`unlock_note` or by closing
+    the file.
+    """
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    elif msvcrt is not None:  # pragma: no cover -- Windows-only branch
+        os.lseek(handle.fileno(), 0, os.SEEK_SET)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def unlock_note(handle: IO[str]) -> None:
+    """Release the lock :func:`lock_note` took on *handle*."""
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    elif msvcrt is not None:  # pragma: no cover -- Windows-only branch
+        os.lseek(handle.fileno(), 0, os.SEEK_SET)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def merge_into_file(name: str, path: str, theirs: str | None) -> str:
     """Merge *theirs* into the note at *path* and write the result when it changed.
+
+    The read, the merge and the write are one step under the lock the
+    agents take on the note to append a row to it (:func:`lock_note`),
+    and the note is rewritten in place rather than replaced by a rename:
+    an agent that opened the note to append and is waiting for the lock
+    keeps the file it opened, so its row lands after the merged text
+    instead of in an orphaned copy -- and two merges at once take turns.
 
     Args:
         name: The note's name (picks the merge rule).
@@ -406,10 +478,24 @@ def merge_into_file(name: str, path: str, theirs: str | None) -> str:
         ``"unchanged"``, ``"created"`` or ``"updated"``.
     """
     ours = read_note(path)
-    merged = merge_note(name, ours or "", theirs or "")
-    if merged == (ours or "") or (ours is None and not merged.strip()):
-        return "unchanged"
-    write_note(path, merged)
+    if ours is None and not merge_note(name, "", theirs or "").strip():
+        return "unchanged"  # nothing to create
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+", encoding="utf-8") as handle:
+        lock_note(handle)
+        try:
+            current = handle.read()
+            merged = merge_note(name, current, theirs or "")
+            if merged == current:
+                return "unchanged"
+            handle.seek(0)
+            handle.write(merged)
+            handle.truncate()
+            handle.flush()
+        finally:
+            unlock_note(handle)
     return "created" if ours is None else "updated"
 
 
@@ -428,16 +514,24 @@ def _ssh(host: str, command: str, stdin: bytes = b"") -> subprocess.CompletedPro
     )
 
 
-def fetch_remote(host: str, name: str) -> str | None:
+def fetch_remote(host: str, name: str, home_dir: str) -> str | None:
     """Return the remote's copy of the note *name*, or ``None`` when it has no such file.
 
-    The remote's KISS home is resolved as :func:`kiss_dir` does there.
+    The remote's KISS home is resolved as :func:`kiss_dir` resolves it
+    there: ``$KISS_HOME`` of the ssh session when set, else
+    ``$HOME/<home_dir>``.
+
+    Args:
+        host: ``user@host`` of the remote machine.
+        name: One of :data:`NOTES`.
+        home_dir: The brand's state directory name (:func:`brand_home_dir`).
 
     Raises:
         SyncError: When ssh or the remote command fails.
     """
     command = (
-        f'f="${{KISS_HOME:-$HOME/.kiss}}/{name}"; if [ -f "$f" ]; then cat "$f"; else exit 3; fi'
+        f'h=$HOME/{shlex.quote(home_dir)}; f="${{KISS_HOME:-$h}}/{name}";'
+        ' if [ -f "$f" ]; then cat "$f"; else exit 3; fi'
     )
     done = _ssh(host, command)
     if done.returncode == 3:
@@ -450,19 +544,29 @@ def fetch_remote(host: str, name: str) -> str | None:
     return done.stdout.decode("utf-8", "replace")
 
 
-def push_remote(host: str, name: str, text: str) -> str:
+def push_remote(host: str, name: str, text: str, home_dir: str) -> str:
     """Merge *text* into the remote's copy of the note *name* and return the remote's verdict.
 
     The remote runs this file's source under its ``python3`` with the
     text on stdin, so whatever it appended to the note since it was
-    fetched is merged rather than overwritten.
+    fetched is merged rather than overwritten.  It is told *home_dir*,
+    the directory :func:`fetch_remote` read, since it has no checkout to
+    read the brand from.
+
+    Args:
+        host: ``user@host`` of the remote machine.
+        name: One of :data:`NOTES`.
+        text: The merged note to merge into the remote's copy.
+        home_dir: The brand's state directory name (:func:`brand_home_dir`).
 
     Raises:
         SyncError: When ssh or the remote merge fails.
     """
     payload = base64.b64encode(_script_source()).decode("ascii")
     bootstrap = f"import base64;exec(base64.b64decode('{payload}'))"
-    command = " ".join(shlex.quote(p) for p in ("python3", "-c", bootstrap, PHASE_MERGE, name))
+    command = " ".join(
+        shlex.quote(p) for p in ("python3", "-c", bootstrap, PHASE_MERGE, name, home_dir)
+    )
     done = _ssh(host, command, text.encode("utf-8"))
     stderr = done.stderr.decode("utf-8", "replace").strip()
     if done.returncode != 0:
@@ -482,12 +586,14 @@ def _script_source() -> bytes:
         return handle.read()
 
 
-def sync(host: str, home: str) -> int:
+def sync(host: str, home: str, home_dir: str) -> int:
     """Sync every note of :data:`NOTES` both ways with *host*.
 
     Args:
         host: ``user@host`` of the remote machine.
         home: This machine's KISS home directory.
+        home_dir: The brand's state directory name, which places the
+            notes on the remote (:func:`brand_home_dir`).
 
     Returns:
         0 when every note is in sync, 1 when at least one could not be.
@@ -496,13 +602,13 @@ def sync(host: str, home: str) -> int:
     for name in NOTES:
         path = os.path.join(home, name)
         try:
-            theirs = fetch_remote(host, name)
+            theirs = fetch_remote(host, name, home_dir)
             local_state = merge_into_file(name, path, theirs)
             merged = read_note(path)
             if merged is None:
                 print(f"{name}: neither machine has it")
                 continue
-            remote_state = push_remote(host, name, merged)
+            remote_state = push_remote(host, name, merged, home_dir)
         except (SyncError, OSError) as exc:
             print(f"warning: {name}: {exc}", file=sys.stderr)
             failed = 1
@@ -521,15 +627,17 @@ def main(argv: list[str] | None = None) -> int:
     """Run the sync, a local merge or the remote merge phase; return the exit status."""
     args = list(sys.argv[1:] if argv is None else argv)
     try:
-        if len(args) == 2 and args[0] == PHASE_MERGE:
-            print(merge_into_file(args[1], os.path.join(kiss_dir(), args[1]), sys.stdin.read()))
+        if len(args) == 3 and args[0] == PHASE_MERGE:
+            name, home_dir = args[1], args[2]
+            print(merge_into_file(name, os.path.join(kiss_dir(home_dir), name), sys.stdin.read()))
             return 0
         if len(args) == 4 and args[0] == "merge":
             print(merge_into_file(args[1], args[2], read_note(args[3])))
             return 0
         is_host = len(args) == 1 and not args[0].startswith("-")
         if is_host and args[0] not in ("merge", PHASE_MERGE):
-            return sync(args[0], kiss_dir())
+            home_dir = brand_home_dir()
+            return sync(args[0], kiss_dir(home_dir), home_dir)
     except (SyncError, OSError) as exc:
         print(f"sync_kiss_notes: {exc}", file=sys.stderr)
         return 1

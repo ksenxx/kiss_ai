@@ -75,6 +75,11 @@ class _ScriptedAgent(ChatSorcarAgent):
         )
         with self._task_id_lock:
             self._last_task_id = task_id
+        on_allocated = kwargs.get("_on_task_id_allocated")
+        if on_allocated is not None:
+            # As the real run announces the row: the runner subscribes
+            # the launching tab to the task's stream.
+            on_allocated(task_id, self._chat_id)
         if printer is not None:
             printer._thread_local.task_id = str(task_id)
             printer._thread_local.task_id = ""

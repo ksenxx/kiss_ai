@@ -28,6 +28,7 @@ from typing import Any
 
 from kiss.core import user_config as vc
 from kiss.tests.server.parallel_agent_harness import StandInModelServer, finish_response
+from kiss.tests.server.remote_tabs_probe import machine_of
 from kiss.tests.server.test_remote_tab_binding_sweep1030 import _BindHarness, _restore_config
 
 LOCAL_SUMMARY = "<p>local run result 7c1e</p>"
@@ -78,7 +79,7 @@ class BoundTabLeavesTheLocalStreamTest(_BindHarness):
 
         await self._submit(viewer, "Say hello", "box")
         await self._poll(
-            "the bind", lambda: self.server._server_api.remote_tabs.machine_of(viewer) == "box",
+            "the bind", lambda: machine_of(self.server._server_api.remote_tabs, viewer) == "box",
         )
         await self._bind_settled(viewer)
 

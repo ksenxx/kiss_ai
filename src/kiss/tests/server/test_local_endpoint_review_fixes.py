@@ -39,6 +39,7 @@ import json
 import shutil
 import socket
 import ssl
+import sys
 import tempfile
 import threading
 import time
@@ -238,6 +239,50 @@ class TestEndpointNamesABoundSocket(_ServerBase):
         self.assertEqual(_bound_loopback(server._ws_loopback_server)[1], server.port)
         self.assertEqual(server._ws_server.sockets[0].getsockname()[1], server.port)
 
+    async def test_no_loopback_listener_publishes_no_endpoint(self) -> None:
+        """A LAN listener whose ``127.0.0.1`` port another process holds
+        publishes no local endpoint: a same-machine client dialling the
+        LAN address is a non-loopback peer, refused as plaintext and
+        never honoured with the token, so the ``ws://LAN:port/ws`` the
+        fallback used to publish could only fail.  The watchdog's
+        reclaim publishes the loopback endpoint, which then works."""
+        lan_ips = sorted(ip for ip in _get_local_ips() if not is_loopback_ip(ip) and ":" not in ip)
+        if not lan_ips:
+            self.skipTest("no non-loopback IPv4 address on this host")
+        server = self._make_server(host=lan_ips[0])
+        await server.start_async()
+        holder = socket.socket()
+        self.addCleanup(holder.close)
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        held = holder.getsockname()[1]
+        for listener in (server._ws_loopback_server, server._ws_server):
+            listener.close()
+            await listener.wait_closed()
+        server._ws_loopback_server = None
+        server.port = held
+        server._ws_server = await server._serve_wss(lan_ips[0])
+        await server._bind_loopback_alias_or_repick_port(ephemeral=False)
+        self.assertIsNone(server._ws_loopback_server)
+        # What ``start_async`` published names the closed port: a fresh
+        # daemon in this situation has published nothing yet.
+        self.endpoint_file.unlink()
+
+        server._write_local_endpoint_file()
+        self.assertIsNone(
+            local_endpoint.read_endpoint(self.endpoint_file),
+            "regression: an endpoint no same-machine client can use was published",
+        )
+
+        holder.close()
+        await server._watchdog_reclaim_loopback()
+        endpoint = local_endpoint.read_endpoint(self.endpoint_file)
+        assert endpoint is not None
+        self.assertEqual(endpoint.url, f"ws://127.0.0.1:{held}/ws")
+        ws = await connect_local(server, open_timeout=5.0)
+        await _ping(ws)
+        await ws.close()
+
     async def test_stuck_endpoint_lock_fails_startup_and_rolls_back(self) -> None:
         saved = local_endpoint._LOCK_TIMEOUT
         local_endpoint._LOCK_TIMEOUT = 0.3
@@ -423,6 +468,60 @@ class TestBoundedSend(TestCase):
                 local_endpoint.send(ws, "x" * (64 * 1024 * 1024), timeout=1.0)
             self.assertLess(time.monotonic() - started, 5.0)
             ws.close()
+        finally:
+            stop.set()
+            thread.join(5)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_an_interrupted_send_releases_its_blocked_writer(self) -> None:
+        """A Stop that lands while ``send`` waits for its writer must still
+        close the socket underneath the writer.
+
+        The writer holds the connection's protocol mutex while the
+        daemon does not read, so the caller's cleanup ``ws.close()``
+        would otherwise wait behind it for good (audit A09).
+        """
+        tmp = Path(tempfile.mkdtemp(prefix="kiss-ep-send-"))
+        thread, port, ca_file, stop = _upgrade_only_server(tmp)
+        path = tmp / "sorcar-local.json"
+        local_endpoint.write_endpoint(path, local_endpoint.LocalEndpoint(
+            url=f"wss://127.0.0.1:{port}/ws", token="t" * 64, ca=str(ca_file), pid=1,
+        ))
+        join = threading.Thread.join.__code__
+
+        def interrupt_the_join(frame: object, event: str, arg: object) -> None:
+            # The KeyboardInterrupt of a Stop, delivered the moment the
+            # caller's thread reaches the join (no sleeps, no patches).
+            if event == "call" and getattr(frame, "f_code", None) is join:
+                sys.setprofile(None)
+                raise KeyboardInterrupt
+
+        try:
+            endpoint = local_endpoint.read_endpoint(path)
+            assert endpoint is not None
+            from websockets.sync.client import connect as sync_connect
+            ws = sync_connect(
+                endpoint.url, ssl=local_endpoint.client_ssl_context(endpoint),
+                open_timeout=5.0, compression=None,
+            )
+            sys.setprofile(interrupt_the_join)
+            try:
+                with self.assertRaises(KeyboardInterrupt):
+                    local_endpoint.send(ws, "x" * (64 * 1024 * 1024), timeout=30.0)
+            finally:
+                sys.setprofile(None)
+            closer = threading.Thread(target=ws.close, daemon=True)
+            closer.start()
+            closer.join(5.0)
+            self.assertFalse(
+                closer.is_alive(), "ws.close() hung behind the writer the interrupt abandoned",
+            )
+            for writer in threading.enumerate():
+                if writer.name == "sorcar-local-send":
+                    writer.join(5.0)
+                    self.assertFalse(
+                        writer.is_alive(), "the abandoned writer is still blocked on the daemon",
+                    )
         finally:
             stop.set()
             thread.join(5)

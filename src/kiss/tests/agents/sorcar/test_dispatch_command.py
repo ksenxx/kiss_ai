@@ -17,16 +17,18 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar import agent_dispatch, daemon_client, fanout_guard, sea_apply, sea_commands
 from kiss.agents.sorcar.sea_settings import SeaError
 
 
-def _command(plan: dict[str, Any]) -> dict[str, Any]:
-    """Encode a plan as the ``run`` command ``dispatch_result`` would send."""
+def _command(plan: dict[str, Any], job: agent_dispatch.AgentJob | None = None) -> dict[str, Any]:
+    """Encode a plan as the ``run`` command ``dispatch_result`` would send (for *job*, if any)."""
     kwargs = agent_dispatch.dispatch_command(
         plan["prompt"], plan["sea_path"], plan["work_dir"], plan["model_name"], plan["budget"],
         plan["timeout"], plan["parent_agent"], plan["scope_work_dir"], plan["options"],
-        plan["inherit"], plan["settings"], plan["workspace"], plan["siblings"],
+        plan["inherit"], plan["settings"], plan["workspace"], plan["siblings"], job=job,
     )
     kwargs["timeout"] = kwargs.pop("record_timeout")
     return daemon_client.run_command(plan["prompt"], tab_id="t", run_token="r", **kwargs)
@@ -174,6 +176,95 @@ def test_review_without_a_budget_holds_one_sized_by_the_diff(tmp_path: Path) -> 
     assert budget("Verify the listed changes", tool_profile="shell") == 50.0
     # The cap never raises a small share.
     assert budget("Review the diff", tool_profile="review", max_budget="3") == 3.0
+
+
+_BUDGETED_SEA = """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {"max_budget": 80.0}
+"""
+
+
+def test_a_sea_pinned_budget_is_the_one_reserved_on_the_job(tmp_path: Path) -> None:
+    """A child of a SEA that pins ``max_budget`` holds that budget, not the share it was sent.
+
+    The daemon's ``apply_sea`` pins the inherited $50 share to the
+    SEA's $80 (an inherited value loses to the script's), so the
+    sub-task spends up to $80 of the caller's remainder: the job's
+    reservation, what the caller's next child is taken off, must be
+    the $80 (``reserved_budget`` sums it), not the $50 placeholder.
+    """
+    (tmp_path / "budgeted.py").write_text(_BUDGETED_SEA)
+    plan = agent_dispatch.plan_run_agent(
+        str(tmp_path), "size the budgets", "budgeted.py", parent_agent=_Caller(),
+    )
+    assert isinstance(plan, dict), plan
+    job = agent_dispatch.new_agent_job(plan["name"], plan, plan["parent_agent"])
+    cmd = _command(plan, job)
+    assert cmd["maxBudget"] == 50.0 and cmd["provenance"]["max_budget"] == "inherited"
+    sea_apply.apply_sea(cmd, [sea_commands.load_sea(Path(plan["sea_path"]))])
+    assert cmd["maxBudget"] == 80.0
+    assert cmd[sea_apply.RUN_CONFIG_FIELD]["pinned"]["max_budget"] == [50.0, 80.0]
+    assert job.budget == pytest.approx(80.0)
+    assert agent_dispatch.reserved_budget([job]) == pytest.approx(80.0)
+    # An explicit budget still wins over the SEA's, on the daemon and in the reservation.
+    plan = agent_dispatch.plan_run_agent(
+        str(tmp_path), "size the budgets", "budgeted.py", max_budget="20", parent_agent=_Caller(),
+    )
+    assert isinstance(plan, dict), plan
+    job = agent_dispatch.new_agent_job(plan["name"], plan, plan["parent_agent"])
+    cmd = _command(plan, job)
+    sea_apply.apply_sea(cmd, [sea_commands.load_sea(Path(plan["sea_path"]))])
+    assert cmd["maxBudget"] == 20.0 and job.budget == pytest.approx(20.0)
+
+
+class _CallerWithEightLeft(_Caller):
+    """A calling agent with $8 left."""
+
+    def _subagent_budget_share(self, num_tasks: int) -> float:
+        """The remainder split among the sub-tasks plus the caller's own share."""
+        return 8.0 / (num_tasks + 1)
+
+
+def test_a_budget_named_above_the_remainder_is_capped_at_it(tmp_path: Path) -> None:
+    """A call or a SEA that names more than the caller has left gets the remainder, not a refusal.
+
+    The dispatcher sends the named value as named, marked explicit or
+    pinned by the SEA on the daemon as before, beside the caller's
+    remainder (``budgetCap``); ``apply_sea`` keeps the precedence, the
+    lock check and the provenance record, then lowers the effective
+    budget to the cap; the job's reservation is the capped value.
+    """
+    (tmp_path / "budgeted.py").write_text(_BUDGETED_SEA)
+    caller = _CallerWithEightLeft()
+
+    def dispatched(agent: str, **kwargs: Any) -> tuple[dict[str, Any], agent_dispatch.AgentJob]:
+        plan = agent_dispatch.plan_run_agent(
+            str(tmp_path), "size the budgets", agent, parent_agent=caller, **kwargs,
+        )
+        assert isinstance(plan, dict), plan
+        job = agent_dispatch.new_agent_job(plan["name"], plan, caller)
+        cmd = _command(plan, job)
+        sea_apply.apply_sea(cmd, [sea_commands.load_sea(Path(plan["sea_path"]))])
+        return cmd, job
+
+    # The call names 16 of the caller's 8: the wire carries 16 marked explicit and the cap 8.
+    cmd, job = dispatched("", max_budget="16")
+    assert cmd["provenance"]["max_budget"] == "explicit" and cmd["budgetCap"] == 8.0
+    assert cmd["maxBudget"] == 8.0 and job.budget == pytest.approx(8.0)
+    # The SEA names 80: the record still says the SEA pinned the $4 share to 80; the run gets 8.
+    cmd, job = dispatched("budgeted.py")
+    assert cmd[sea_apply.RUN_CONFIG_FIELD]["pinned"]["max_budget"] == [4.0, 80.0]
+    assert cmd["maxBudget"] == 8.0 and job.budget == pytest.approx(8.0)
+    # A budget within the remainder, named or inherited, is what it was;
+    # the cap sent is the job's own bound, never more than its reservation.
+    cmd, job = dispatched("", max_budget="5")
+    assert cmd["maxBudget"] == 5.0 and cmd["budgetCap"] == 5.0 and job.budget == pytest.approx(5.0)
+    cmd, job = dispatched("")
+    assert cmd["maxBudget"] == 4.0 and cmd["budgetCap"] == 4.0 and job.budget == pytest.approx(4.0)
 
 
 def test_daemon_refuses_a_marked_explicit_value_the_plan_would_refuse(tmp_path: Path) -> None:

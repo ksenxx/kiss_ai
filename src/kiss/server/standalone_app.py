@@ -125,6 +125,7 @@ from kiss.core.brand import BRAND
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import run_process_group
+from kiss.core.utils import atomic_write_text
 from kiss.server.helpers import MEDIA_DIR
 
 ICON_FILE = MEDIA_DIR / "kiss-icon.png"
@@ -259,6 +260,21 @@ def start_page_url(
     return f"{APP_START_PAGE.as_uri()}?{urllib.parse.urlencode(query)}"
 
 
+PLAYWRIGHT_TIMEOUT_SECS = 60.0
+"""How long :func:`playwright_chromium` waits for Playwright's driver to name the browser.
+
+The lookup is answered within a second or two once the driver is up;
+one whose driver starts and never answers must not park ``kiss-app``
+before its window, so the lookup is given up on at this deadline.
+"""
+
+_PLAYWRIGHT_LOOKUP = (
+    "from playwright.sync_api import sync_playwright\n"
+    "with sync_playwright() as pw:\n"
+    "    print(pw.chromium.executable_path)\n"
+)
+
+
 @functools.cache
 def playwright_chromium() -> Path | None:
     """Return the Chromium executable Playwright installed, or None.
@@ -266,18 +282,23 @@ def playwright_chromium() -> Path | None:
     Asks Playwright itself (``BrowserType.executable_path``), which
     resolves the browsers directory and revision the installed
     ``playwright`` package expects; nothing is launched.  None when the
-    package or the browser is missing.  Cached: the lookup starts the
-    Playwright node driver and waits for its handshake, and both
+    package or the browser is missing.  The question is put to a child
+    interpreter: entering ``sync_playwright()`` starts the Playwright
+    node driver and waits for its handshake with no deadline, so a
+    driver that stays silent is given up on, and killed with that
+    child, after :data:`PLAYWRIGHT_TIMEOUT_SECS`.  Cached: both
     :func:`find_browser` and :func:`sandboxed` need the answer in one
     ``kiss-app`` run (conc1018 H1-F2).
     """
     try:
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as pw:
-            path = Path(pw.chromium.executable_path)
-    except Exception:  # noqa: BLE001 - any failure means "no bundled browser"
+        result = run_process_group(
+            [sys.executable, "-c", _PLAYWRIGHT_LOOKUP], PLAYWRIGHT_TIMEOUT_SECS
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return None
+    if result.returncode != 0:
+        return None
+    path = Path(result.stdout.strip())
     return path if path.is_file() else None
 
 
@@ -549,10 +570,13 @@ def linux_launcher_path(home: Path, brand: dict[str, str] = BRAND) -> Path:
 def write_linux_launcher(
     entry: Path, brand: dict[str, str], icon: Path, exe: Path, kiss_home: Path, browser: Path
 ) -> None:
-    """Write the ``.desktop`` file *entry* (see :func:`linux_launcher_path`)."""
-    entry.parent.mkdir(parents=True, exist_ok=True)
-    entry.write_text(desktop_entry(brand, icon, exe, kiss_home, browser), encoding="utf-8")
-    entry.chmod(0o755)
+    """Write the ``.desktop`` file *entry* (see :func:`linux_launcher_path`).
+
+    Published whole (staged next to it, then renamed over it): the
+    desktop reads the entry at any moment and must never see it empty
+    or cut short.
+    """
+    atomic_write_text(entry, desktop_entry(brand, icon, exe, kiss_home, browser), mode=0o755)
 
 
 SETUP_TIMEOUT_SECS = 120.0
@@ -837,8 +861,14 @@ APP_WINDOW_GONE_CLOSE_CODE = 1001
 APP_WINDOW_SWEEP_STRIKES = 3
 """How many sweeps in a row must find the browser without popup and window before it is quit."""
 
+_app_lock = threading.Lock()
+"""Guards :data:`_app_windows` and :data:`_quit_armings`, and the quit decided against them."""
+
 _app_windows = 0
 """How many WebSocket connections of the daemon come from the popup (0: no popup, or none yet)."""
+
+_quit_armings = 0
+"""How many quit timers :func:`app_window_event` armed; only the latest one may act."""
 
 _windowless: tuple[int | None, int] = (None, 0)
 """The browser pid the last sweep found without popup and window, and how many sweeps in a row."""
@@ -865,22 +895,29 @@ def app_window_event(event: str) -> bool:
     window may be minimized, which the quit check cannot tell from
     closed), and leaves the browser to :func:`sweep_windowless_app`.
     Only macOS needs either: elsewhere Chromium quits by itself when
-    its last window closes.
+    its last window closes.  Each arming counts (:data:`_quit_armings`):
+    the timer of a ``closing`` acts only while it is the latest, so a
+    reload's timer cannot cut short the grace period of a later reload.
     """
-    global _app_windows
-    if event == "open":
-        _app_windows += 1
-    elif event in ("closing", "dropped"):
-        _app_windows -= 1
-        if event == "closing" and _app_windows == 0 and platform.system() == "Darwin":
-            timer = threading.Timer(
-                APP_WINDOW_QUIT_GRACE_SECS, quit_closed_app, args=(macos_bundle_path(),)
-            )
-            # A daemon's exit must not wait out the grace period.
-            timer.daemon = True
-            timer.start()
-    else:
-        return False
+    global _app_windows, _quit_armings
+    with _app_lock:
+        if event == "open":
+            _app_windows += 1
+        elif event in ("closing", "dropped"):
+            _app_windows -= 1
+            if event == "closing" and _app_windows == 0:
+                _quit_armings += 1
+                if platform.system() == "Darwin":
+                    timer = threading.Timer(
+                        APP_WINDOW_QUIT_GRACE_SECS,
+                        quit_closed_app,
+                        args=(macos_bundle_path(), _quit_armings),
+                    )
+                    # A daemon's exit must not wait out the grace period.
+                    timer.daemon = True
+                    timer.start()
+        else:
+            return False
     return True
 
 
@@ -903,16 +940,35 @@ def windowless_app_pid(bundle: Path) -> int | None:
     return pid
 
 
-def quit_closed_app(bundle: Path) -> bool:
+def quit_closed_app(bundle: Path, armed: int | None = None) -> bool:
     """Quit the browser running from *bundle* (the brand bundle) if its app window closed.
 
     Nothing happens, and False is returned, unless the browser has
     neither popup nor window (:func:`windowless_app_pid`).  Otherwise
     the browser gets SIGTERM, which Chromium answers with a regular
     quit, and True is returned (False when it exited meanwhile).
+    *armed* is the arming of the quit timer calling (see
+    :func:`app_window_event`): an older one than the latest quits
+    nothing.
     """
     pid = windowless_app_pid(bundle)
-    return pid is not None and _terminate(pid)
+    return pid is not None and _quit_if_still_windowless(pid, armed)
+
+
+def _quit_if_still_windowless(pid: int, armed: int | None = None) -> bool:
+    """SIGTERM *pid*, found without popup and window, unless the popup connected since.
+
+    Decided under :data:`_app_lock`, the one :func:`app_window_event`
+    counts the popup's connections under: a popup that connected
+    between the (slow) look at the processes and windows and this
+    signal must not lose its browser.  With *armed*, the quit timer's
+    arming, a timer that a later ``closing`` superseded quits nothing
+    either (:func:`app_window_event`).
+    """
+    with _app_lock:
+        if _app_windows > 0 or (armed is not None and armed != _quit_armings):
+            return False
+        return _terminate(pid)
 
 
 def _terminate(pid: int) -> bool:
@@ -949,7 +1005,7 @@ def sweep_windowless_app(bundle: Path) -> bool:
         _windowless = (pid, strikes)
         return False
     _windowless = (None, 0)
-    return _terminate(pid)
+    return _quit_if_still_windowless(pid)
 
 
 def ask_app_window_open(url: str, timeout: float = 2.0) -> bool | None:
@@ -1124,11 +1180,16 @@ def write_macos_launcher(
         info = macos_bundle_plist(brand, browser_info if clone and browser_info else {})
         if not write_icns(icon, contents / "Resources" / "AppIcon.icns"):
             info.pop("CFBundleIconFile", None)
-        with (contents / "Info.plist").open("wb") as f:
-            plistlib.dump(info, f)
-        launcher = contents / "MacOS" / "launcher"
-        launcher.write_text(macos_launcher_script(exe, kiss_home), encoding="utf-8")
-        launcher.chmod(0o755)
+        # Both published whole (staged, then renamed into place): Launch
+        # Services, Finder and :func:`read_plist` read the plist, and a
+        # shell runs the launcher, at any moment, and the lock above keeps
+        # out other writers only.
+        atomic_write_text(
+            contents / "Info.plist", plistlib.dumps(info).decode("utf-8"), create_mode=0o666
+        )
+        atomic_write_text(
+            contents / "MacOS" / "launcher", macos_launcher_script(exe, kiss_home), mode=0o755
+        )
         # Launch Services caches bundle metadata by modification time.
         bundle.touch()
     return clone

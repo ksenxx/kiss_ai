@@ -7,7 +7,9 @@
 
 import json
 import logging
+import re
 import threading
+import time
 from abc import abstractmethod
 from collections.abc import Callable
 from functools import partial
@@ -45,6 +47,8 @@ from kiss.core.models.model import (
 )
 from kiss.core.models.stream_abort import (
     CONNECT_TIMEOUT,
+    STALL_MARKER,
+    RequestAbortWatchdog,
     make_pool_abortable,
     shutdown_pool_sockets,
     stop_error,
@@ -71,6 +75,14 @@ _CHAT_REQUEST_PARAMS = accepted_request_params(Completions.create)
 # One retry keeps resilience against one-off connect failures while
 # bounding the duplication, matching ``anthropic_model._MAX_RETRIES``.
 _MAX_RETRIES = 1
+# The SDK's delay before that retry (its ``INITIAL_RETRY_DELAY``; a
+# ``retry-after`` header may stretch it, and the whole-request deadline
+# then cuts the retry, which the agentic loop makes up for).
+_RETRY_BACKOFF_SECONDS = 0.5
+# The client's read timeout: a non-streamed reasoning turn legitimately
+# sends nothing for minutes.  ``model_config["timeout"]`` overrides it
+# per request.
+_CLIENT_TIMEOUT = 1800.0
 
 # How often ``_blocking_request`` looks at the stop event while its worker
 # thread waits on the provider; the stream watchdog's stop poll rate.
@@ -301,6 +313,25 @@ def _tool_effort_verdict(key: tuple[str, str]) -> bool | None:
     return _ADAPTIVE_TOOL_EFFORT_VERDICTS.get(key)
 
 
+def _rejects_effort_value(error: BadRequestError) -> bool:
+    """Return whether a ``reasoning_effort`` 400 refuses the level sent, not the parameter.
+
+    ``Invalid value: 'xhigh'. Supported values are: ...`` (OpenAI's
+    ``invalid_value`` code) is a verdict on one level, not on ``tools``
+    + ``reasoning_effort``: caching it would silently strip every level
+    from the pair's later requests.
+
+    Args:
+        error: The rejection whose message mentions ``reasoning_effort``.
+
+    Returns:
+        True for a value rejection.
+    """
+    if error.code in ("invalid_value", "unsupported_value"):
+        return True
+    return re.search(r"\b(?:invalid|unsupported) value\b", str(error), re.IGNORECASE) is not None
+
+
 @locked(_ADAPTIVE_TOOL_EFFORT_LOCK)
 def _record_tool_effort_verdict(key: tuple[str, str], accepted: bool) -> None:
     """Record what one ``(endpoint, model)`` did with the combination.
@@ -339,23 +370,23 @@ OPENAI_INPUT_IMAGE_MIME_TYPES = frozenset(
 OPENAI_INPUT_AUDIO_FORMATS = frozenset({"mp3", "wav"})
 
 
-def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
-    """Extract reasoning and final answer from DeepSeek R1 response.
+def _extract_deepseek_reasoning(content: str) -> str:
+    """Return a DeepSeek R1 response without its ``<think>...</think>`` blocks.
 
-    DeepSeek R1 models wrap their reasoning in <think>...</think> tags.
+    The reasoning itself reaches the thinking callback through the
+    streamed ``reasoning_content`` deltas, never through this scan.
 
     Args:
         content: The raw response content from a DeepSeek R1 model.
 
     Returns:
-        A tuple of (reasoning, final_answer) where reasoning is the content
-        within <think> tags and final_answer is the remaining content.
+        The content outside the closed ``<think>`` blocks, stripped;
+        *content* itself when it holds no closed block.
     """
     # A find() loop rather than ``<think>(.*?)</think>``: the lazy regex
     # rescans to the end of the text for every unclosed opener, which is
     # quadratic on model output that repeats the tag (and ``re`` holds
     # the GIL while it does so).
-    reasoning = ""
     answer_parts: list[str] = []
     cursor = 0
     while True:
@@ -365,14 +396,12 @@ def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
         end = content.find("</think>", start + len("<think>"))
         if end == -1:
             break
-        if not answer_parts:
-            reasoning = content[start + len("<think>") : end].strip()
         answer_parts.append(content[cursor:start])
         cursor = end + len("</think>")
     if not answer_parts:
-        return "", content
+        return content
     answer_parts.append(content[cursor:])
-    return reasoning, "".join(answer_parts).strip()
+    return "".join(answer_parts).strip()
 
 
 def _delta_reasoning_text(delta: Any) -> str | None:
@@ -710,7 +739,7 @@ class OpenAICompatibleBase(Model):
         client = OpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
-            timeout=1800.0,
+            timeout=_CLIENT_TIMEOUT,
             max_retries=_MAX_RETRIES,
             default_headers=self.model_config.get("extra_headers") or {},
         )
@@ -725,15 +754,16 @@ class OpenAICompatibleBase(Model):
     ) -> _StreamResult:
         """Open a streamed request under the stall clocks and hand it to *consume*.
 
-        Two clocks bound the wait for a silent provider: the SDK's
+        Three clocks bound the wait for a silent provider: the SDK's
         connect/read timeout (``stream_stall_timeout`` between bytes,
-        ``stream_abort.CONNECT_TIMEOUT`` to connect) and, once the headers
-        arrive, the abort watchdog the transport's *consume* runs the
-        events under.  Both raise the same retryable stall error (or the
-        Stop error when the user stopped meanwhile).  The client's one
-        silent retry (:data:`_MAX_RETRIES`, kept for a transient 429/5xx
-        or connect failure) also re-sends a request whose headers never
-        came, so a provider that never answers is reported after two
+        ``stream_abort.CONNECT_TIMEOUT`` to connect), the deadline on the
+        headers :meth:`_open_stream` holds the opening call to, and, once
+        the headers arrive, the abort watchdog the transport's *consume*
+        runs the events under.  All raise the same retryable stall error
+        (or the Stop error when the user stopped meanwhile).  The client's
+        one silent retry (:data:`_MAX_RETRIES`, kept for a transient
+        429/5xx or connect failure) also re-sends a request whose headers
+        never came, so a provider that never answers is reported after two
         header timeouts.
 
         A Stop that landed after *consume* left its loop early (a
@@ -755,12 +785,57 @@ class OpenAICompatibleBase(Model):
         kwargs["stream"] = True
         kwargs["timeout"] = httpx.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT)
         try:
-            result = consume(create(**kwargs))
+            result = consume(self._open_stream(create, kwargs))
         except (httpx.TimeoutException, APITimeoutError) as err:
             raise stop_or_stall_error(self._stream_stall_timeout) from err
         if stop_signal.stop_requested():
             raise stop_error()
         return result
+
+    def _open_stream(self, create: Callable[..., Any], kwargs: dict[str, Any]) -> Any:
+        """Call *create* (which opens the stream) under a Stop-aware deadline on its headers.
+
+        The SDK's read timeout bounds the silence between two reads
+        only, and until the headers are complete there is no response
+        whose socket the stream watchdog could shut down: a peer
+        trickling header bytes would hold the turn for good, past any
+        Stop.  So the call runs under a :class:`RequestAbortWatchdog`
+        that shuts the pool's sockets down at the thread's Stop or at the
+        request's deadline (:meth:`_request_deadline`: the read timeout
+        for every attempt the SDK may make, so its one silent retry of a
+        header timeout is kept).  The pool is then dead for good
+        (:func:`make_pool_abortable`), so the client is retired
+        (:meth:`_abort_pending_request`) for the next turn to build a
+        fresh one, and the cut request's connection error is reported as
+        the Stop, or as the stall the stream watchdog would have raised.
+        Leaving the block disarms the watchdog, so the stream handed back
+        runs under the event watchdog only.
+
+        Args:
+            create: The SDK call that opens the stream.
+            kwargs: Its keyword arguments, ``timeout`` already set.
+
+        Returns:
+            The open stream.
+
+        Raises:
+            KeyboardInterrupt: The user pressed Stop before the headers came.
+            TimeoutError: The headers were not complete by the deadline.
+        """
+        seconds = self._request_deadline(kwargs)
+        due = time.monotonic() + seconds
+        try:
+            with RequestAbortWatchdog(
+                self.client._client, seconds, "openai-stream-open-abort-watchdog"
+            ):
+                return create(**kwargs)
+        except BaseException as err:
+            if not (stop_signal.stop_requested() or time.monotonic() >= due):
+                raise
+            self._abort_pending_request()
+            if isinstance(err, APIConnectionError):
+                raise stop_or_stall_error(self._stream_stall_timeout) from err
+            raise
 
     def _blocking_request(self, create: Callable[..., Any], kwargs: dict[str, Any]) -> Any:
         """Issue one non-streamed request, aborting it as soon as the user presses Stop.
@@ -781,12 +856,19 @@ class OpenAICompatibleBase(Model):
         otherwise the worker is simply abandoned (a daemon thread) until
         the client timeout.
 
+        The request as a whole has a deadline too: its read timeout over
+        every SDK attempt (:meth:`_request_deadline`), since that timeout
+        bounds the silence between two reads only and a peer sending a
+        byte before each would hold the call for good.  Past it the
+        request is torn down the same way and reported as a retryable
+        stall (:func:`~kiss.core.models.stream_abort.stall_error`).
+
         A reply that arrived was billed, whatever the caller then makes
         of it (a Stop already set, a failed status, a tool call the agent
         rejects), so it is recorded in ``_rejected_response`` (as the
         streamed path records its usage chunk) before anything can raise.
-        Outside a stoppable task (no stop event bound) the call runs
-        inline.
+        Outside a stoppable task (no stop event bound) the deadline alone
+        bounds the call.
 
         Args:
             create: The SDK call (``client.chat.completions.create``,
@@ -798,12 +880,11 @@ class OpenAICompatibleBase(Model):
 
         Raises:
             KeyboardInterrupt: The user pressed Stop during the request.
+            TimeoutError: No reply arrived by the request's deadline.
         """
-        stop_event = stop_signal.get_thread_stop_event()
-        if stop_event is None:
-            response = create(**kwargs)
-            self._rejected_response = response
-            return response
+        stop_event = stop_signal.get_thread_stop_event() or threading.Event()
+        seconds = self._request_deadline(kwargs)
+        deadline = time.monotonic() + seconds
         outcome: dict[str, Any] = {}
         worker = threading.Thread(
             target=_call_into,
@@ -818,6 +899,8 @@ class OpenAICompatibleBase(Model):
                     # A reply landing this very moment is billed too: give
                     # the worker one poll interval to store it.
                     worker.join(_BLOCKING_STOP_POLL_SECONDS)
+                    break
+                if time.monotonic() >= deadline:
                     break
         finally:
             # Also on a KeyboardInterrupt raised into this thread (the
@@ -841,12 +924,35 @@ class OpenAICompatibleBase(Model):
                 self._rejected_response = outcome["response"]
         if stop_event.is_set():
             raise stop_error()
+        if "response" not in outcome and time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"{STALL_MARKER}: the request exceeded {seconds:.0f}s (model_config "
+                f"'timeout' over every attempt). It was aborted instead of hanging; "
+                f"it will be retried."
+            )
         if "error" in outcome:
             raise outcome["error"]
         return outcome["response"]
 
+    def _request_deadline(self, kwargs: dict[str, Any]) -> float:
+        """Seconds a non-streamed request, or a stream's opening call, may take as a whole.
+
+        Its read timeout (``kwargs["timeout"]``, else the client's) for
+        every attempt the SDK may make, plus the backoff between them: a
+        request that answered within its timeouts is never cut, a peer
+        that keeps the read alive without answering is.
+
+        Args:
+            kwargs: The request kwargs.
+        """
+        timeout = kwargs.get("timeout", _CLIENT_TIMEOUT)
+        read = timeout.read if isinstance(timeout, httpx.Timeout) else timeout
+        if read is None:
+            read = _CLIENT_TIMEOUT
+        return float(read) * (_MAX_RETRIES + 1) + _RETRY_BACKOFF_SECONDS
+
     def _abort_pending_request(self) -> None:
-        """Tear down the client whose blocking request the user stopped.
+        """Tear down the client whose blocking request the user stopped (or the deadline cut).
 
         Shuts the pool's sockets down (the only thing that wakes the
         worker parked in ``recv()``), then closes the client and drops it
@@ -935,7 +1041,23 @@ class OpenAICompatibleBase(Model):
         injected ``KeyboardInterrupt``, and that cannot land while the
         thread waits in ``connect()``.  The client's one silent retry
         (:data:`_MAX_RETRIES`) may send the request twice, so a silent
-        endpoint is reported after up to twice the timeout.
+        endpoint is reported after up to twice the timeout.  The timeout
+        also bounds the whole request (:class:`RequestAbortWatchdog`,
+        which cuts it at the thread's Stop as well): the SDK's own
+        timeout bounds the silence between two reads only, which a peer
+        sending a byte before each read resets for as long as it likes,
+        holding a memory-search worker that process exit joins.  A
+        configured ``timeout`` of ``None`` (no SDK timeout) leaves the
+        watchdog's bound at the default.
+
+        The request goes through a client of its own, closed with the
+        call, not the shared ``self.client``: the watchdog's cut shuts
+        down every socket of the pool it watches, and that pool
+        (:func:`make_pool_abortable`) then refuses every later
+        connection, so a shared client would be dead for good after one
+        cut request, and the cut would reach the concurrent requests of
+        the same instance (the memory tools embed a search's query while
+        the index sync embeds its changed pages).
 
         Args:
             model_to_use: The embeddings model's catalog name.
@@ -949,22 +1071,32 @@ class OpenAICompatibleBase(Model):
                 malformed response (a ``null`` embedding, a missing index,
                 a vector count that does not match the input).
         """
-        self._ensure_client()
         timeout = self.model_config.get("timeout", EMBEDDINGS_TIMEOUT)
         if isinstance(timeout, int | float):
             timeout = httpx.Timeout(timeout, connect=min(timeout, CONNECT_TIMEOUT))
+        read = timeout.read if isinstance(timeout, httpx.Timeout) else None
+        deadline = read if read is not None else EMBEDDINGS_TIMEOUT
+        client = self._build_client()
         try:
-            response = self.client.embeddings.create(
-                model=_provider_model_name(model_to_use), input=text_or_texts, timeout=timeout
-            )
+            with RequestAbortWatchdog(client._client, deadline, "embeddings-abort-watchdog"):
+                response = client.embeddings.create(
+                    model=_provider_model_name(model_to_use), input=text_or_texts, timeout=timeout
+                )
             ordered = sorted(response.data, key=lambda item: item.index)
             expected = 1 if isinstance(text_or_texts, str) else len(text_or_texts)
-            if len(ordered) != expected:
-                raise ValueError(f"expected {expected} embeddings, got {len(ordered)}")
+            if [item.index for item in ordered] != list(range(expected)):
+                raise ValueError(
+                    f"expected the embeddings of indices 0..{expected - 1}, got indices "
+                    f"{[item.index for item in ordered]}"
+                )
             return [list(item.embedding) for item in ordered]
         except Exception as e:
+            if stop_signal.stop_requested():  # the watchdog cut the request
+                raise stop_error() from e
             logger.debug("Exception caught", exc_info=True)
             raise KISSError(f"Embedding generation failed for model {model_to_use}: {e}") from e
+        finally:
+            client.close()
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Generate an embedding vector for the given text.
@@ -1023,7 +1155,7 @@ class OpenAICompatibleBase(Model):
         """
         tools_prompt = _build_text_based_tools_prompt(function_map)
         content, response = self._request_with_tools_prompt(tools_prompt)
-        _, content_clean = _extract_deepseek_reasoning(content)
+        content_clean = _extract_deepseek_reasoning(content)
         function_calls = _parse_text_based_tool_calls(content_clean)
         self._append_text_based_tool_turn(content_clean, function_calls)
         return function_calls, content, response
@@ -1880,7 +2012,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 content = getattr(audio, "transcript", None) or ""
 
         if self._is_deepseek_reasoning_model():
-            _, content = _extract_deepseek_reasoning(content)
+            content = _extract_deepseek_reasoning(content)
 
         self.conversation.append({"role": "assistant", "content": content})
         self._rejected_response = None
@@ -1998,14 +2130,19 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         """
         return (self.base_url, self._api_model_name)
 
-    def _tools_reasoning_effort_capability(self) -> bool | None:
-        """Return whether this endpoint accepts ``tools`` + ``reasoning_effort``.
+    @staticmethod
+    def _tools_reasoning_effort_capability(key: tuple[str, str]) -> bool | None:
+        """Return whether the endpoint of *key* accepts ``tools`` + ``reasoning_effort``.
 
         The verdict is the vendor's declared
         ``tools_accept_reasoning_effort`` capability from
         ``model_info.OPENAI_COMPATIBLE_PROVIDERS`` when the endpoint is
         registered and verified; otherwise the cached adaptive verdict
         learned from the endpoint's actual responses, if any.
+
+        Args:
+            key: The ``(base_url, api_model_name)`` pair of the request
+                (see :attr:`_effort_verdict_key`).
 
         Returns:
             True when the combination is known to be accepted, False when
@@ -2014,11 +2151,11 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         """
         from kiss.core.models.model_info import openai_compatible_provider_for_base_url
 
-        provider = openai_compatible_provider_for_base_url(self.base_url)
+        provider = openai_compatible_provider_for_base_url(key[0])
         declared = provider.tools_accept_reasoning_effort if provider else None
         if declared is not None:
             return declared
-        return _tool_effort_verdict(self._effort_verdict_key)
+        return _tool_effort_verdict(key)
 
     def _create_chat_completion_adaptive(self, client: OpenAI, **kwargs: Any) -> Any:
         """Create a chat completion, learning the effort capability if unknown.
@@ -2037,6 +2174,10 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         began: a Stop meanwhile drops ``self.client`` (and a later turn
         rebuilds it), and the retry of a stopped turn must neither
         re-send its messages through the next turn's client nor at all.
+        The verdict key is bound the same way, before the request: the
+        reply of a stopped turn may be handled after the next turn moved
+        the model to another endpoint, and it is a verdict on the
+        endpoint it was sent to.
 
         Args:
             client: The SDK client the turn started with.
@@ -2047,8 +2188,9 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Returns:
             The API response (or stream iterator when ``stream=True``).
         """
+        key = self._effort_verdict_key
         capability = (
-            self._tools_reasoning_effort_capability()
+            self._tools_reasoning_effort_capability(key)
             if kwargs.get("tools") and "reasoning_effort" in kwargs
             else True
         )
@@ -2065,20 +2207,30 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             response = client.chat.completions.create(**kwargs)
         except BadRequestError as e:
             if unverified and "reasoning_effort" in str(e):
-                _record_tool_effort_verdict(self._effort_verdict_key, False)
                 dropped = kwargs.pop("reasoning_effort")
+                if _rejects_effort_value(e):
+                    # The level, not the combination, is refused: no
+                    # verdict, so the pair's other levels are still sent.
+                    logger.warning(
+                        "Endpoint %s rejected reasoning_effort=%r (%s); retrying without it.",
+                        key[0],
+                        dropped,
+                        e,
+                    )
+                else:
+                    _record_tool_effort_verdict(key, False)
+                    logger.debug(
+                        "Endpoint %s rejected tools + reasoning_effort=%r; "
+                        "retrying without it and caching the verdict.",
+                        key[0],
+                        dropped,
+                    )
                 if client is not self.client:
                     raise  # the user stopped this turn meanwhile
-                logger.debug(
-                    "Endpoint %s rejected tools + reasoning_effort=%r; "
-                    "retrying without it and caching the verdict.",
-                    self.base_url,
-                    dropped,
-                )
                 return client.chat.completions.create(**kwargs)
             raise
         if unverified:
-            _record_tool_effort_verdict(self._effort_verdict_key, True)
+            _record_tool_effort_verdict(key, True)
         return response
 
     @staticmethod

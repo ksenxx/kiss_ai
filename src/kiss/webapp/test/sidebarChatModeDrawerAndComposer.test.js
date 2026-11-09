@@ -48,7 +48,15 @@ const {
   lastPoll,
 } = require('./remote_drawer_helpers');
 
-const {test, report} = makeRunner();
+const runner = makeRunner();
+const report = runner.report;
+const openWindows = [];
+
+/** Run one test through the shared runner, then close its windows. */
+async function test(name, fn) {
+  await runner.test(name, fn);
+  while (openWindows.length) openWindows.pop().close();
+}
 
 function makePage(desktop = false) {
   let timers;
@@ -64,6 +72,7 @@ function makePage(desktop = false) {
       timers = fakeIntervals(win);
     },
   });
+  openWindows.push(win);
   return {win, posted, tick: timers.tick, intervals: timers.intervals};
 }
 
@@ -138,7 +147,6 @@ function burgerAndToggleDisplay(desktop) {
     applyMedia: desktop ? /\(width >= 900px\)/ : null,
   });
   const shown = [display(win, 'menu-btn'), display(win, 'meta-drawer-btn')];
-  win.close();
   return shown;
 }
 
@@ -516,7 +524,6 @@ async function main() {
         stop.classList.contains('stopping'),
         'the pending stop pulses on the file tab too',
       );
-      win.close();
     },
   );
 
@@ -586,7 +593,6 @@ async function main() {
   );
 
   report('sidebarChatModeDrawerAndComposer');
-  process.exit(0);
 }
 
 main().catch(e => {

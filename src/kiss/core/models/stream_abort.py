@@ -171,7 +171,12 @@ class StreamAbortWatchdog:
         response yet: Gemini arms the watchdog before its lazy generator
         issues the request, so a Stop pressed in that window would
         otherwise be acted on once (with nothing to shut down) and then
-        forgotten, leaving the task to wait for the read timeout.
+        forgotten, leaving the task to wait for the read timeout.  A
+        claim still pending when :meth:`stop` disarms the watchdog is
+        withdrawn, as :meth:`_abort` withdraws one it finds disarmed:
+        the stream ended on its own (headers and body all arrived
+        within one poll), so the caller has a complete result, not a
+        stall; a user stop still surfaces through its event.
         """
         poll = self._poll_interval()
         claimed = False
@@ -180,6 +185,8 @@ class StreamAbortWatchdog:
                 claimed = self._claim_abort()
             if claimed and self._abort():
                 return
+        if claimed:
+            self.stalled = self.stopped = False
 
     def _claim_abort(self) -> bool:
         """Decide whether to abort, atomically with respect to :meth:`stop`.
@@ -314,10 +321,13 @@ def shutdown_pool_sockets(http_client: Any) -> bool:
     httpcore's pools (:func:`_client_pools`: the default one and every
     proxy mount's).  A pool given an :class:`AbortableNetworkBackend`
     (:func:`make_pool_abortable`, as the OpenAI-compatible adapters'
-    pools are) is aborted for good: the backend kept every stream the pool's
-    connections hold, so its abort shuts them all down, and a connection
-    still being set up (an SDK retry's included) has no stream in the
-    pool yet and is shut down as soon as it is up.  Any other pool is
+    pools are) is aborted until its backend is re-armed
+    (:meth:`AbortableNetworkBackend.rearm`, which only a
+    :class:`RequestAbortWatchdog` does, once its request is over): the
+    backend kept every stream the pool's connections hold, so its abort
+    shuts them all down, and a connection still being set up (an SDK
+    retry's included) has no stream in the pool yet and is shut down as
+    soon as it is up.  Any other pool is
     walked best-effort, each of its ``connections`` and each
     connection's ``_connection._network_stream``: the pool's
     ``connections`` and the stream's ``get_extra_info("socket")`` are
@@ -376,7 +386,11 @@ class RequestAbortWatchdog:
 
     Leaving the block disarms the watchdog under the same lock the
     abort decision is taken under, so once it returns no abort can
-    happen and the pool may carry the next request.
+    happen and the pool may carry the next request: a pool with an
+    :class:`AbortableNetworkBackend`, which an abort leaves refusing
+    every new connection (the aborted request's retries must not get
+    through), is re-armed then (:meth:`AbortableNetworkBackend.rearm`),
+    the request being over.
     """
 
     _POLL_SECONDS = 0.1
@@ -399,6 +413,7 @@ class RequestAbortWatchdog:
         self._stop_event = stop_signal.get_thread_stop_event()
         self._lock = threading.RLock()
         self._done = threading.Event()
+        self._aborted = False
         self._thread = threading.Thread(target=self._watch, name=name, daemon=True)
 
     def __enter__(self) -> "RequestAbortWatchdog":
@@ -413,8 +428,18 @@ class RequestAbortWatchdog:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
-        locked_call(self._lock, self._done.set)
+        locked_call(self._lock, self._disarm)
         self._thread.join(self._JOIN_SECONDS)
+
+    def _disarm(self) -> None:
+        """End the watch; after an abort, let the pool connect again.  Called under the lock."""
+        self._done.set()
+        if not self._aborted:
+            return
+        for pool in _client_pools(self._http_client):
+            backend = getattr(pool, "_network_backend", None)
+            if isinstance(backend, AbortableNetworkBackend):
+                backend.rearm()
 
     def _watch(self) -> None:
         """Poll until disarmed; abort at every poll once the stop or the deadline is due."""
@@ -424,6 +449,7 @@ class RequestAbortWatchdog:
                     return
                 stopped = self._stop_event is not None and self._stop_event.is_set()
                 if stopped or time.monotonic() >= self._deadline:
+                    self._aborted = True
                     shutdown_pool_sockets(self._http_client)
 
 
@@ -471,7 +497,7 @@ def _shutdown_network_streams(streams: Iterable[Any]) -> bool:
 
 
 class AbortableNetworkBackend(httpcore.NetworkBackend):
-    """An httpcore network backend whose sockets one :meth:`abort` shuts down, for good.
+    """An httpcore network backend whose sockets one :meth:`abort` shuts down, until :meth:`rearm`.
 
     It wraps the backend of an httpx client's connection pool
     (:func:`make_pool_abortable`) and keeps every stream it opens, and
@@ -552,6 +578,16 @@ class AbortableNetworkBackend(httpcore.NetworkBackend):
         self._aborted = True
         return list(self._streams)
 
+    def rearm(self) -> None:
+        """Keep the connections opened from now on again, the aborted request being over.
+
+        The streams :meth:`abort` shut down stay down (httpx's pool
+        discards them as expired), so only a request that starts after
+        this call gets through: the aborted one's retries, inside its
+        :class:`RequestAbortWatchdog` block, were all cut.
+        """
+        locked_call(self._lock, setattr, self, "_aborted", False)
+
 
 class _AbortableStream(httpcore.NetworkStream):
     """A stream of an :class:`AbortableNetworkBackend`: the wrapped stream, TLS upgrade kept."""
@@ -604,8 +640,50 @@ class _AbortableStream(httpcore.NetworkStream):
         server_hostname: str | None = None,
         timeout: float | None = None,
     ) -> httpcore.NetworkStream:
-        """Upgrade the wrapped stream to TLS; the backend keeps the upgraded stream."""
-        return self._backend.track(self._stream.start_tls(ssl_context, server_hostname, timeout))
+        """Upgrade the wrapped stream to TLS; the backend keeps the upgraded stream.
+
+        The upgraded stream is kept before its handshake: ``wrap_socket``
+        detaches the plain socket the backend kept, so an abort during
+        the handshake (a Stop while a peer that accepted the connection
+        never answers it) reached nothing, and the connect timeout
+        bounded the Stop instead.  What httpcore's ``start_tls`` does,
+        the handshake split off; a stream without a socket (a mock
+        backend's) or already on TLS (TLS in TLS, through an HTTPS
+        proxy) is upgraded by the wrapped stream as before.
+
+        Raises:
+            httpcore.ConnectTimeout: The handshake outlasted *timeout*.
+            httpcore.ConnectError: The handshake failed (an aborted
+                socket included).
+        """
+        sock = self._stream.get_extra_info("socket")
+        if sock is None or isinstance(sock, ssl.SSLSocket):
+            return self._backend.track(
+                self._stream.start_tls(ssl_context, server_hostname, timeout)
+            )
+        try:
+            sock.settimeout(timeout)
+            tls = ssl_context.wrap_socket(
+                sock, server_hostname=server_hostname, do_handshake_on_connect=False
+            )
+        except OSError as exc:
+            self.close()
+            raise httpcore.ConnectError(exc) from exc
+        # The wrapped stream's class (httpcore's ``SyncStream``) takes the
+        # socket; ``NetworkStream`` itself declares no constructor.
+        stream_cls: Any = type(self._stream)
+        stream = self._backend.track(stream_cls(tls))
+        try:
+            tls.do_handshake()
+        except TimeoutError as exc:
+            tls.close()
+            raise httpcore.ConnectTimeout(exc) from exc
+        except (OSError, AttributeError) as exc:
+            # AttributeError: the abort's ``SSLSocket.shutdown`` dropped
+            # the SSL object from under the handshake it was cutting.
+            tls.close()
+            raise httpcore.ConnectError(exc) from exc
+        return stream
 
     def get_extra_info(self, info: str) -> Any:
         """Return the wrapped stream's extra info (its ``socket``, ``ssl_object``, ...)."""

@@ -19,7 +19,11 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-MODEL = "gpt-4.1-nano-2025-04-14"  # 500k window, cheap per-token accounting
+# A catalog entry the scripted server answers for: a 500k window, cheap
+# per-token accounting, in the catalog the refresh of 2026-11-05 kept
+# (it dropped gpt-4.1-nano).  Every test that prices a request reads the
+# figures from the catalog rather than pinning them.
+MODEL = "gpt-4.1-mini-2025-04-14"
 
 
 def tool_call_body(

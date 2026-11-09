@@ -23,11 +23,17 @@ against a local HTTP server answering the canned homeserver reply;
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from urllib.parse import unquote
 
 import pytest
 from nio.responses import RoomSendError, RoomSendResponse
 
+from kiss.agents.third_party_agents import _channel_agent_utils
+from kiss.agents.third_party_agents._channel_agent_utils import (
+    ChannelRunner,
+    load_channel_state,
+)
 from kiss.agents.third_party_agents.matrix.matrix_sea import (
     MatrixChannelBackend,
     _client_from_config,
@@ -114,8 +120,21 @@ class TestSendMessageLedgerContract:
         assert homeserver.header("Authorization") == "Bearer tok"
         assert request["json"] == {"msgtype": "m.text", "body": "hello"}
 
-    def test_send_message_without_client_is_noop(self) -> None:
-        """No client configured: send_message returns without raising."""
+    def test_send_message_without_client_raises_and_keeps_the_ledger(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No client configured: the send raises, so the runner's ledger keeps the reply."""
         backend = MatrixChannelBackend()
         assert backend._client is None
-        backend.send_message("!room:example.org", "hello")
+        with pytest.raises(RuntimeError, match="not connected"):
+            backend.send_message("!room:example.org", "hello")
+        monkeypatch.setattr(_channel_agent_utils, "_SEND_RETRY_DELAY_SECONDS", 0.0)
+        state_path = tmp_path / "channel_state_default_gen.json"
+        runner = ChannelRunner(
+            backend=backend, channel_name="", agent_name="Matrix Test", state_path=state_path
+        )
+        runner._state = load_channel_state(state_path)
+        runner._send_reply("!room:example.org", "hello", "")
+        [entry] = load_channel_state(state_path)["ledger"]
+        assert entry["channel_id"] == "!room:example.org"
+        assert entry["text"] == "hello"

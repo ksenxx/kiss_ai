@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from kiss.tests.server.remote_tabs_probe import machine_of
 from kiss.tests.server.test_remote_machine_settings import (
     RemoteMachineCase,
     _as_another_client,
@@ -199,10 +200,10 @@ class TestGitCommitOnMachine(RemoteMachineCase):
         })
         remote_tabs = self.server._server_api.remote_tabs
         for _ in range(200):
-            if remote_tabs.machine_of("t-box") == "box":
+            if machine_of(remote_tabs, "t-box") == "box":
                 break
             await asyncio.sleep(0.05)
-        self.assertEqual(remote_tabs.machine_of("t-box"), "box", "the tab is bound to the box")
+        self.assertEqual(machine_of(remote_tabs, "t-box"), "box", "the tab is bound to the box")
         (self.box_work / "f.txt").write_text("one\ntwo\n")
 
         seen = await self._commit_outcome({

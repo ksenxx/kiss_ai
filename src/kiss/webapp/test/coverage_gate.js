@@ -39,8 +39,14 @@ const V8_FLAGS = ['--no-maglev', '--no-concurrent-sparkplug'];
 // timeout kills the suite itself.
 const WINDOWS = process.platform === 'win32';
 
-/** SIGKILL process group `pgid`; a group already gone is fine. */
+/**
+ * SIGKILL process group `pgid`; a group already gone is fine.  Anything
+ * but a positive safe integer is refused: `process.kill(-0)` (0, '',
+ * null, false, an empty pid file read as a number) would signal the
+ * caller's own group, a negative number the process it negates to.
+ */
 function killGroup(pgid) {
+  if (!Number.isSafeInteger(pgid) || pgid <= 0) return;
   try {
     process.kill(-pgid, 'SIGKILL');
   } catch {
@@ -312,6 +318,6 @@ function guardSuite(suite) {
   gate.resume();
 }
 
-module.exports = {runCovered, measure, gateRegions};
+module.exports = {runCovered, measure, gateRegions, killGroup};
 
 if (require.main === module) guardSuite(process.argv[2]);

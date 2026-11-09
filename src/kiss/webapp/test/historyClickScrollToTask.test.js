@@ -58,7 +58,7 @@ function historySession(id, taskId, title) {
 // jsdom computes no layout, so give the transcript a fake geometry that
 // tracks O.scrollTop: the neighbour occupies content rows [0, 1000) and the
 // tab's own task rows [1000, 2000), with a 500px viewport.
-function fakeRegionGeometry(win, O) {
+function fakeRegionGeometry(O) {
   Object.defineProperty(O, 'scrollHeight', {value: 2000, configurable: true});
   Object.defineProperty(O, 'clientHeight', {value: 500, configurable: true});
   O.getBoundingClientRect = () => ({top: 0, bottom: 500, left: 0, right: 400});
@@ -109,7 +109,7 @@ function setupTabWithNeighbour() {
     'sanity: the neighbour task must be spliced into the transcript',
   );
   // Park the reader on the tab's own task, as after a real splice.
-  fakeRegionGeometry(win, O);
+  fakeRegionGeometry(O);
   O.scrollTop = 1200;
   O.dispatchEvent(new win.Event('scroll'));
   assert.strictEqual(

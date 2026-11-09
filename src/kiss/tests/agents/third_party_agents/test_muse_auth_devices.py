@@ -244,7 +244,7 @@ def lan_api_server() -> Any:
     ip = _local_ip()
     if not ip:
         pytest.skip("machine has no non-loopback IPv4 address")
-    server = _DeviceApiServer(("0.0.0.0", 0), _DeviceApiHandler)
+    server = _DeviceApiServer((ip, 0), _DeviceApiHandler)
     server.lan_ip = ip  # type: ignore[attr-defined]
     with serving(server):
         yield server
@@ -1225,12 +1225,14 @@ def test_authenticate_rejects_malformed_ports(muse_env: Path) -> None:
     assert not firecrawl_config.path.exists()
 
     # A malformed api_key value (daemon-rejected) surfaces as a JSON
-    # error from the Muse enrollment path.  The non-secret base_url
-    # metadata is written first (transactional order) but the plaintext
-    # key never reaches disk.
+    # error from the Muse enrollment path.  The refused rotation leaves
+    # the prior enrollment as it was (its cloud key, no config file), so
+    # the vault credential and the base_url stay paired, and the
+    # plaintext key never reaches disk.
     failed = json.loads(fc_tools["authenticate_firecrawl"]("fc\nnew", "https://fc.example"))
     assert failed["ok"] is False and "invalid credential token value" in failed["error"]
-    assert json.loads(firecrawl_config.path.read_text()) == {"base_url": "https://fc.example"}
+    assert vault_has_credentials("firecrawl")
+    assert not firecrawl_config.path.exists()
 
 
 def test_govee_legacy_mode_unchanged(

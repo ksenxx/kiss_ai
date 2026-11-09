@@ -31,6 +31,7 @@ from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, MergeRe
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.tests.conftest import seed_worktree
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 
 @pytest.fixture(autouse=True)
@@ -415,7 +416,7 @@ class TestBug51DiffFailureSilentDiscard:
             baseline_commit=bogus_baseline,
         ))
 
-        changed = server._get_worktree_changed_files("bug51a-tab")
+        changed = worktree_changed_files(server, "bug51a-tab")
 
         assert len(changed) > 0, (
             "BUG-51: _get_worktree_changed_files returned [] on diff "
@@ -440,7 +441,7 @@ class TestBug51DiffFailureSilentDiscard:
             wt_dir=wt_dir, baseline_commit=baseline,
         ))
 
-        changed = server._get_worktree_changed_files("bug51b-tab")
+        changed = worktree_changed_files(server, "bug51b-tab")
         assert "agent.txt" in changed
 
         _cleanup(repo, branch, wt_dir)
@@ -460,7 +461,7 @@ class TestBug51DiffFailureSilentDiscard:
             wt_dir=wt_dir, baseline_commit=baseline,
         ))
 
-        changed = server._get_worktree_changed_files("bug51c-tab")
+        changed = worktree_changed_files(server, "bug51c-tab")
         assert changed == [], (
             "No agent changes — should return empty list"
         )
@@ -494,7 +495,7 @@ class TestBug51DiffFailureSilentDiscard:
             baseline_commit=bogus,
         ))
 
-        changed = server._get_worktree_changed_files("bug51d-tab")
+        changed = worktree_changed_files(server, "bug51d-tab")
         assert len(changed) > 0, (
             "BUG-51: branch diff with bad baseline returned [] — "
             "agent work would be lost"

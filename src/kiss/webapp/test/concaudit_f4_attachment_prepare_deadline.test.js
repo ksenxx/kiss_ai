@@ -37,11 +37,8 @@ const {
   typeAndEnter,
   submits,
   settle,
+  chipText,
 } = require('./attachment_helpers');
-
-function chipText(win) {
-  return win.document.getElementById('file-chips').textContent;
-}
 
 async function main() {
   const {win, posted, decodeCount, fireDeadline} = makeHeldDeadlinePage();

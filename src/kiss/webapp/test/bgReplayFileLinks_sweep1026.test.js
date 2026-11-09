@@ -124,8 +124,10 @@ function testFailedReplayRestoresTheOldTranscriptAndItsLinks() {
 function testHiddenReplayReleasesTheOldTranscriptsLinks() {
   const {win, posted, tabA, tabB} = bootTwoTabs();
 
-  // Ten panels in hidden B, none of them ever answered.
-  for (let i = 0; i < 10; i += 1) {
+  // Ten panels in hidden B, none of them ever answered; the first
+  // names the path the replay below names too.
+  sendToolResult(win, tabB, 'touched ./src/replayed.py');
+  for (let i = 1; i < 10; i += 1) {
     sendToolResult(win, tabB, `touched ./src/gen${i}.py`);
   }
   const before = pendingCounts(win);
@@ -167,6 +169,22 @@ function testHiddenReplayReleasesTheOldTranscriptsLinks() {
     'the replayed panel asked about its own path',
   );
 
+  // Audit 2026-11-08 (W6 F1): the old transcript's check of that same
+  // path is answered first (the replies come in the order asked); it
+  // read the disk before the replay and must not settle the replayed
+  // span.
+  send(win, {
+    type: 'pathsExist',
+    tabId: tabB,
+    workDir: WORK_DIR,
+    results: {'./src/replayed.py': false},
+  });
+  assert.deepStrictEqual(
+    pendingCounts(win),
+    {spans: 1, checks: 1},
+    'BUG - the discarded transcript\'s reply settled the replayed span',
+  );
+
   // The daemon's answer settles the replayed check; nothing else waits.
   send(win, {
     type: 'pathsExist',
@@ -178,6 +196,12 @@ function testHiddenReplayReleasesTheOldTranscriptsLinks() {
     pendingCounts(win),
     {spans: 0, checks: 0},
     'the replayed check is answered and nothing of the old transcript lingers',
+  );
+  win._testApi.switchToTab(tabB);
+  assert.strictEqual(
+    findLinks(win, './src/replayed.py').length,
+    1,
+    'the replayed panel\'s link follows its own check',
   );
   win.close();
 }

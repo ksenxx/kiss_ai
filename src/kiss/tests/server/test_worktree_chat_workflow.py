@@ -33,6 +33,7 @@ from kiss.tests.agents.sorcar.test_worktree_chat_workflow import (
     _restore_db,
     _unpatch_super_run,
 )
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 
 def _patch_super_run(
@@ -133,7 +134,7 @@ class TestServerWorktreeWorkflow:
 
         tab_agent = _agent(server)
         tab_agent._commit_worktree(tab_agent.worktrees[0])
-        changed = server._get_worktree_changed_files("0")
+        changed = worktree_changed_files(server, "0")
         assert len(changed) > 0
 
         server.printer.broadcast({
@@ -239,7 +240,7 @@ class TestServerWorktreeWorkflow:
 
         tab_agent = _agent(server)
         tab_agent._commit_worktree(tab_agent.worktrees[0])
-        changed = server._get_worktree_changed_files("0")
+        changed = worktree_changed_files(server, "0")
         assert len(changed) == 0
 
         _agent(server).discard()
@@ -317,7 +318,7 @@ class TestServerWorktreeWorkflow:
             "Worktree branch should have no new commits before user action"
         )
 
-        changed = server._get_worktree_changed_files("0")
+        changed = worktree_changed_files(server, "0")
         assert "agent_file.txt" in changed
 
         _agent(server).discard()
@@ -358,7 +359,7 @@ class TestServerWorktreeWorkflow:
         assert not _file_in_repo(self.repo, "agent_file.txt")
 
     def test_get_worktree_changed_files_detects_uncommitted(self) -> None:
-        """_get_worktree_changed_files() must detect uncommitted changes."""
+        """The changed-files listing must detect uncommitted changes."""
         server, events = _make_server(self.repo)
         _agent(server).run(
             prompt_template="task1", work_dir=str(self.repo)
@@ -369,7 +370,7 @@ class TestServerWorktreeWorkflow:
         (wt_dir / "new.txt").write_text("new file")
         (wt_dir / "README.md").write_text("modified\n")
 
-        changed = server._get_worktree_changed_files("0")
+        changed = worktree_changed_files(server, "0")
         assert "README.md" in changed
         assert "new.txt" in changed
 
@@ -391,7 +392,7 @@ class TestServerWorktreeWorkflow:
 
         (wt_dir / "tool_output.txt").write_text("from tool")
 
-        changed = server._get_worktree_changed_files("0")
+        changed = worktree_changed_files(server, "0")
         assert len(changed) > 0
 
         branch = _agent(server)._wt_branch

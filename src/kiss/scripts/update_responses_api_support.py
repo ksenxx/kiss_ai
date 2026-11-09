@@ -47,6 +47,7 @@ import logging
 import os
 import sys
 import threading
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -328,24 +329,6 @@ def probe_responses_support(name: str, fc: bool = True) -> ProbeResult:
     return ProbeResult(name=name, supported=True, detail="ok")
 
 
-def _probe_model(name: str, entry: dict[str, Any]) -> ProbeResult:
-    """Probe one catalog model and report whether v2 works for it.
-
-    Args:
-        name: The catalog key.
-        entry: The model's MODEL_INFO.json entry.
-
-    Returns:
-        The probe outcome.
-    """
-    return probe_responses_support(name, fc=entry.get("fc", True))
-
-
-def _is_alias(name: str, entry: dict[str, Any]) -> bool:
-    """Return True when *name*/*entry* is a generated thinking alias."""
-    return _alias_base_name(name, entry) is not None
-
-
 def _candidate_names(
     data: dict[str, dict[str, Any]], only_prefix: str | None
 ) -> tuple[list[str], list[str]]:
@@ -369,8 +352,9 @@ def _candidate_names(
     for name, entry in data.items():
         if prefixes is not None and not name.startswith(prefixes):
             continue
-        if _is_alias(name, entry):
-            skipped.append(f"{name} (alias of {_alias_base_name(name, entry)})")
+        alias_base = _alias_base_name(name, entry)
+        if alias_base is not None:
+            skipped.append(f"{name} (alias of {alias_base})")
             continue
         if not entry.get("gen", True):
             skipped.append(f"{name} (not a generation model)")
@@ -464,10 +448,8 @@ def main() -> None:
     candidates, skipped = _candidate_names(data, args.only)
     print(f"Probing {len(candidates)} models ({len(skipped)} skipped) ...")
 
-    results: list[ProbeResult] = []
-
     def run_one(name: str) -> ProbeResult:
-        result = _probe_model(name, data[name])
+        result = probe_responses_support(name, fc=data[name].get("fc", True))
         with _PRINT_LOCK:
             status = "PASS" if result.supported else "fail"
             print(f"  [{status}] {name}: {result.detail}", flush=True)
@@ -478,18 +460,61 @@ def main() -> None:
     # whole batch on pool shutdown, so the batch runs against one shared
     # monotonic deadline; probes still unfinished at the deadline get an
     # INCONCLUSIVE verdict (their existing catalog flag survives) and the
-    # pool is abandoned (not joined).
-    hung = False
+    # pool is abandoned (not joined) on every exit path, including a
+    # failed publication and Ctrl-C.  Submission and shutdown are inside
+    # the guard too: submission starts the workers, so an interrupt that
+    # lands there already has a running probe to abandon, and one that
+    # lands after publication, before or inside the shutdown, still has
+    # the stuck worker to abandon.
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=args.workers)
-    futures = {pool.submit(run_one, name): name for name in candidates}
-    done, not_done = concurrent.futures.wait(
-        futures, timeout=_BATCH_WALL_CLOCK_SECONDS
-    )
-    for future in done:
-        results.append(future.result())
+    try:
+        futures = {pool.submit(run_one, name): name for name in candidates}
+        partial = _publish_batch(args, catalog_path, data, futures)
+        _shutdown_pool(pool, futures)
+    except BaseException:
+        # No join can be trusted here: a submit() the interrupt cut short
+        # may have queued, even started, a probe whose future never came
+        # back, and a worker inside a vendor stream is a non-daemon thread
+        # that interpreter exit would wait on forever.  os._exit skips
+        # that; what print() buffered is flushed first.  The diagnostics
+        # themselves may fail (a stdout pipe whose reader went away keeps
+        # raising BrokenPipeError on every flush), so the exit is in a
+        # finally: it happens whatever they do.
+        try:
+            traceback.print_exc()
+            sys.stdout.flush()
+            sys.stderr.flush()
+        finally:
+            os._exit(1)
+    # Status 2 tells automation the run was PARTIAL (some probes were cut
+    # off as inconclusive), while the publication did succeed.
+    if partial:
+        sys.exit(2)
+
+
+def _publish_batch(
+    args: argparse.Namespace,
+    catalog_path: Path,
+    data: dict[str, dict[str, Any]],
+    futures: dict[concurrent.futures.Future[ProbeResult], str],
+) -> bool:
+    """Wait for the probe batch, report it and publish the verdicts.
+
+    Args:
+        args: The parsed command line.
+        catalog_path: The catalog the verdicts are written to.
+        data: The catalog as loaded before the probes started; used for
+            the ``--dry-run`` report only.  A real publication re-reads
+            the catalog under its writer lock so that entries and fields
+            another updater committed while the probes ran survive.
+        futures: The submitted probes, keyed to their catalog names.
+
+    Returns:
+        True when the batch deadline cut probes off (a partial run).
+    """
+    done, not_done = concurrent.futures.wait(futures, timeout=_BATCH_WALL_CLOCK_SECONDS)
+    results: list[ProbeResult] = []
     for future in not_done:
-        hung = True
-        future.cancel()
         name = futures[future]
         results.append(
             ProbeResult(
@@ -501,8 +526,7 @@ def main() -> None:
         )
         with _PRINT_LOCK:
             print(f"  [fail] {name}: probe timed out (inconclusive)", flush=True)
-    if not hung:
-        pool.shutdown(wait=True)
+    results.extend(future.result() for future in done)
 
     passed = sorted(r.name for r in results if r.supported)
     failed = sorted(r.name for r in results if not r.supported)
@@ -519,31 +543,48 @@ def main() -> None:
             encoding="utf-8",
         )
 
-    flagged, unflagged = _apply_results(data, results)
+    if args.dry_run:
+        flagged, unflagged = _apply_results(data, results)
+    else:
+        with update_models_module.catalog_lock(catalog_path):
+            data = _read_model_info_json(catalog_path)
+            flagged, unflagged = _apply_results(data, results)
+            _write_model_info_json(catalog_path, data)
     print(f"Entries flagged: {flagged}, flags removed: {unflagged} (aliases included).")
     if args.dry_run:
         print("(dry-run, no files modified)")
-        if hung:
-            sys.stdout.flush()
-            sys.stderr.flush()
-            os._exit(2)
-        return
-    _write_model_info_json(catalog_path, data)
+        return bool(not_done)
     print(f"Written to {catalog_path}")
     if failed:
         print("\nModels staying on Chat Completions (probe failed):")
         for name in failed:
             print(f"  - {name}")
-    if hung:
-        # A stuck vendor stream keeps its (non-daemon) worker thread alive
-        # forever; every result is already written, so exit hard instead of
-        # letting interpreter shutdown join the abandoned pool.  os._exit
-        # skips interpreter cleanup, so flush what print() buffered first.
-        # Status 2 tells automation the run was PARTIAL (some probes were
-        # cut off as inconclusive), while the catalog write did succeed.
+    return bool(not_done)
+
+
+def _shutdown_pool(
+    pool: concurrent.futures.ThreadPoolExecutor,
+    futures: dict[concurrent.futures.Future[ProbeResult], str],
+) -> None:
+    """Shut the published batch's pool down, or exit hard when a worker cannot be stopped.
+
+    Pending probes are cancelled.  A worker still inside a vendor stream
+    (a probe the deadline cut off) is a non-daemon thread that
+    ``shutdown(wait=True)`` -- and interpreter exit, which joins such
+    threads -- would wait on forever, so the process exits with status 2
+    (PARTIAL) instead; ``os._exit`` skips interpreter cleanup, so what
+    print() buffered is flushed first.
+
+    Args:
+        pool: The batch's executor.
+        futures: The submitted probes, keyed to their catalog names.
+    """
+    stuck = [f for f in futures if not f.done() and not f.cancel()]
+    if stuck:
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(2)
+    pool.shutdown(wait=True)
 
 
 if __name__ == "__main__":

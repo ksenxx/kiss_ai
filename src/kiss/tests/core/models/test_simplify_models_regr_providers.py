@@ -525,6 +525,9 @@ class TestGeminiHelpers:
         assert _tool_result_response_dict('{"a": 1}') == {"a": 1}
         assert _tool_result_response_dict("[1, 2]") == {"result": [1, 2]}
         assert _tool_result_response_dict("plain") == {"result": "plain"}
+        # A decimal beyond the decoder's digit limit raises a plain
+        # ValueError, not a JSONDecodeError: still ordinary result text.
+        assert _tool_result_response_dict("9" * 4301) == {"result": "9" * 4301}
         assert _tool_result_response_dict(
             [{"type": "text", "text": "x"}, {"type": "text", "text": "y"}]
         ) == {"result": "xy"}
@@ -647,7 +650,7 @@ class TestGeminiConversion:
             {"role": "system", "content": "cfg"},
             {"role": "user", "content": "hi"},
         ]
-        assert m._resolve_system_instruction(m._chat_messages()) == "cfg\n\nsys1\n\nsys2"
+        assert m._build_config(m._chat_messages()).system_instruction == "cfg\n\nsys1\n\nsys2"
 
     def test_build_config(self) -> None:
         m = GeminiModel(

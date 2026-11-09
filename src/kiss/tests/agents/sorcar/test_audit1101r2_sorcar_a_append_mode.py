@@ -28,7 +28,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools, _write_file, _write_regular
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.tool_verdict import ToolRedirect
 from kiss.tests.conftest import posix_only
@@ -70,8 +70,14 @@ class AppendWhen:
 
 
 def opens_for_writing(frame: FrameType) -> bool:
-    """Whether *frame* is ``Path.open`` opening a file for writing or appending."""
-    return frame.f_code is Path.open.__code__ and frame.f_locals.get("mode") in ("w", "a")
+    """Whether *frame* is the Write about to write the file.
+
+    An append opens the file itself (:func:`_write_regular`, for
+    appending); an overwrite writes a sibling temporary file and renames
+    it over the file (:func:`_write_file`), so its frame's entry is the
+    moment before the file changes.
+    """
+    return frame.f_code in (_write_regular.__code__, _write_file.__code__)
 
 
 def shell_append(cwd: Path, name: str, line: str) -> None:

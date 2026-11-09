@@ -84,16 +84,26 @@ _GZIP = GzipCache()
 
 
 def accepts_gzip(accept_encoding: str) -> bool:
-    """Whether an ``Accept-Encoding`` value admits gzip (``gzip;q=0`` refuses it)."""
+    """Whether an ``Accept-Encoding`` value admits gzip (``gzip;q=0`` refuses it).
+
+    ``*`` stands for every coding not listed (RFC 9110 12.5.3), so
+    ``*`` admits gzip unless a ``gzip`` member of its own refuses it.
+    """
+    wildcard = False
     for part in accept_encoding.lower().split(","):
         coding, _, params = part.partition(";")
-        if coding.strip() == "gzip":
-            weight = params.replace(" ", "").removeprefix("q=")
-            try:
-                return float(weight or "1") > 0
-            except ValueError:
-                return True
-    return False
+        coding = coding.strip()
+        if coding not in ("gzip", "*"):
+            continue
+        weight = params.replace(" ", "").removeprefix("q=")
+        try:
+            admits = float(weight or "1") > 0
+        except ValueError:
+            admits = True
+        if coding == "gzip":
+            return admits
+        wildcard = admits
+    return wildcard
 
 
 def is_versioned_media(target: str) -> bool:

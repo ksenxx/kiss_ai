@@ -572,11 +572,12 @@ function testMalformedStateGracefulBoot() {
 
 // On a phone a code-driven focus of the composer raises the software
 // keyboard over whatever the user was looking at. Touching a tab, closing
-// one, opening a new chat, the server's `focusInput` nudge (sent on every
-// reconnect) and a task finishing must all leave the focus alone there,
-// including the composer's deferred 100/300 ms re-focus timers, which
-// the test fires by hand right after each action. On a desktop the same
-// actions focus the composer as before.
+// one, the server's `focusInput` nudge (sent on every reconnect) and a
+// task finishing must all leave the focus alone there, including the
+// composer's deferred 100/300 ms re-focus timers, which the test fires by
+// hand right after each action. Tapping "+" is the exception: the user
+// asked for a new chat to type in. On a desktop every action focuses the
+// composer as before.
 function testMobileRemoteNeverFocusesComposerByCode() {
   for (const [name, userAgent, focuses] of [
     ['iPhone remote', UA_IPHONE, false],
@@ -637,7 +638,7 @@ function testMobileRemoteNeverFocusesComposerByCode() {
           );
         },
       ],
-      ['opening a new chat', () => click(win, 'new-chat-btn')],
+      ['opening a new chat', () => click(win, 'new-chat-btn'), true],
       ['the server focusInput nudge', () => send(win, {type: 'focusInput'})],
       [
         'a task finishing',
@@ -650,13 +651,13 @@ function testMobileRemoteNeverFocusesComposerByCode() {
           }),
       ],
     ];
-    for (const [what, act] of steps) {
+    for (const [what, act, focusesOnPhone] of steps) {
       inp.blur();
       focusCalls = 0;
       const armedBefore = timers.length;
       act();
       fireCapturedTimers(win, timers, armedBefore);
-      if (focuses) {
+      if (focuses || focusesOnPhone) {
         assert.ok(focusCalls > 0, `${name}: ${what} must focus the composer`);
       } else {
         assert.strictEqual(
@@ -673,6 +674,55 @@ function testMobileRemoteNeverFocusesComposerByCode() {
     }
     win.close();
   }
+}
+
+// "+" on a phone opens the new chat with its textbox unfolded and focused,
+// whether a running task or the user's own tap on the handle folded it,
+// and later news of the task running elsewhere does not fold it again.
+function testMobileNewChatUnfoldsAndFocusesComposer() {
+  const {win, posted} = makePage({userAgent: UA_IPHONE});
+  const d = win.document;
+  const inp = d.getElementById('task-input');
+  showTaskPanel(win, posted);
+  setRunning(win, posted, true);
+  assertInputDrawer(win, true, 'the running task folds the phone composer');
+
+  inp.blur();
+  click(win, 'new-chat-btn');
+  const newTab = win._testApi.getActiveTabId();
+  assert.notStrictEqual(newTab, readyTabId(posted), '+ opens a new chat');
+  assertInputDrawer(win, false, '+ unfolds the textbox of the new chat');
+  assert.strictEqual(d.activeElement, inp, '+ focuses the textbox');
+
+  send(win, {
+    type: 'tabs_state',
+    tabs: [
+      {tabId: readyTabId(posted), chatId: 'chat-drawer', title: 'a'},
+      {tabId: newTab, chatId: '', title: 'new chat'},
+      {tabId: 'tab-other', chatId: 'chat-other', title: 'b'},
+    ],
+  });
+  send(win, {type: 'status', running: true, tabId: 'tab-other', startTs: 5});
+  assertInputDrawer(
+    win,
+    false,
+    'a task running in another chat leaves the new chat textbox open',
+  );
+
+  // Back on the running chat the phone folds the composer again.
+  win._testApi.switchToTab('tab-other');
+  send(win, {type: 'status', running: true, tabId: 'tab-other', startTs: 5});
+  assertInputDrawer(win, true, 'a running chat on screen folds it again');
+
+  // A fold the user made by hand gives way to "+" as well.
+  click(win, 'input-drawer-btn');
+  click(win, 'input-drawer-btn');
+  assertInputDrawer(win, true, 'the user folded the composer by hand');
+  inp.blur();
+  click(win, 'new-chat-btn');
+  assertInputDrawer(win, false, '+ unfolds a hand-folded textbox');
+  assert.strictEqual(d.activeElement, inp, '+ focuses the hand-folded one');
+  win.close();
 }
 
 async function runTests() {
@@ -695,6 +745,7 @@ async function runTests() {
     testLegacyStateDoesNotResurrectFoldedComposer,
     testMalformedStateGracefulBoot,
     testMobileRemoteNeverFocusesComposerByCode,
+    testMobileNewChatUnfoldsAndFocusesComposer,
   ];
   for (const t of tests) {
     await t();

@@ -51,6 +51,13 @@ ALLOW = Verdict(True)
 """The verdict that lets the tool call run."""
 
 
+def _non_blank(text: object, needed: str) -> str:
+    """Return *text* when it is a non-blank string, else raise ``ValueError(needed)``."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError(needed)
+    return text
+
+
 def allow_with_note(text: str) -> Verdict:
     """Return the verdict that lets the tool call run and appends *text* to its result.
 
@@ -65,9 +72,9 @@ def allow_with_note(text: str) -> Verdict:
     Raises:
         ValueError: When *text* is not a non-blank string.
     """
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("allow_with_note() needs the non-blank text appended to the result")
-    return Verdict(True, text)
+    return Verdict(
+        True, _non_blank(text, "allow_with_note() needs the non-blank text appended to the result")
+    )
 
 
 class ToolRedirect(Exception):  # noqa: N818 - a control-flow signal, not an error
@@ -153,9 +160,10 @@ def refuse(text: str) -> Verdict:
     Raises:
         ValueError: When *text* is not a non-blank string.
     """
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("refuse() needs the non-blank text the model reads as the tool result")
-    return Verdict(False, text)
+    return Verdict(
+        False,
+        _non_blank(text, "refuse() needs the non-blank text the model reads as the tool result"),
+    )
 
 
 def end_run(result: str, *, success: bool = True) -> Verdict:
@@ -177,9 +185,12 @@ def end_run(result: str, *, success: bool = True) -> Verdict:
     Raises:
         ValueError: When *result* is not a non-blank string.
     """
-    if not isinstance(result, str) or not result.strip():
-        raise ValueError("end_run() needs the non-blank text that becomes the run's result")
-    return Verdict(False, result, ends_run=True, success=success)
+    return Verdict(
+        False,
+        _non_blank(result, "end_run() needs the non-blank text that becomes the run's result"),
+        ends_run=True,
+        success=success,
+    )
 
 
 REFUSED_PREFIX = "REFUSED: the {name} call did NOT run and had no effect. "

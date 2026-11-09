@@ -211,10 +211,18 @@ class TestProbeAgainstRealCloudflaredWireFormat(unittest.TestCase):
         )
 
     def test_200_with_unparsable_body_is_unknown(self) -> None:
-        """A 200 reply with a non-JSON body is unknown."""
+        """A 200 reply with a non-JSON body is unknown.
+
+        So is valid JSON that carries no ``readyConnections``: a missing
+        field is no "confirmed zero" (it would count toward the
+        watchdog's unhealthy streak), and a non-object body must not
+        raise out of the probe into adoption or the watchdog tick.
+        """
         self.assertIs(
             self._probe(ready_status=200, ready_body="not json"), None,
         )
+        for body in ("{}", '{"status": 200}', "null", "[]", "7"):
+            self.assertIs(self._probe(ready_status=200, ready_body=body), None, body)
 
 
 class TestWatchdogRestartsDeregisteredTunnel(IsolatedAsyncioTestCase):

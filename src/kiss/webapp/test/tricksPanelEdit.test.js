@@ -20,11 +20,9 @@ const {
   send,
   click,
   typeInto: input,
+  promptletRows: rows,
 } = require('./simplify2_harness');
-
-function rows(doc) {
-  return Array.from(doc.getElementById('tricks-list').children);
-}
+const {key} = require('./ui_antipattern_harness');
 
 function texts(doc) {
   return rows(doc).map(el => {
@@ -33,18 +31,7 @@ function texts(doc) {
   });
 }
 
-function key(win, el, keyName, init) {
-  el.dispatchEvent(
-    new win.KeyboardEvent('keydown', {
-      key: keyName,
-      bubbles: true,
-      cancelable: true,
-      ...init,
-    }),
-  );
-}
-
-function editor(doc, row) {
+function editor(row) {
   return row.querySelector('.tricks-edit-input');
 }
 
@@ -99,7 +86,7 @@ function runPanel() {
   assert.ok(panel.classList.contains('open'), 'the panel stays open');
   const row = rows(doc)[1];
   assert.ok(row.classList.contains('editing'));
-  let ta = editor(doc, row);
+  let ta = editor(row);
   assert.ok(ta, 'the row holds a textarea');
   assert.strictEqual(ta.tagName, 'TEXTAREA');
   assert.strictEqual(ta.value, 'Mine two', 'prefilled with the promptlet');
@@ -192,7 +179,7 @@ function runPanel() {
 
   // --- Enter saves; the new text is what the daemon later broadcasts
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
-  ta = editor(doc, rows(doc)[0]);
+  ta = editor(rows(doc)[0]);
   input(win, ta, 'Mine one, by Enter');
   key(win, ta, 'Enter');
   assert.deepStrictEqual(editsPosted(posted).slice(1), [
@@ -213,7 +200,7 @@ function runPanel() {
 
   // --- Shift+Enter breaks a line instead of saving
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
-  ta = editor(doc, rows(doc)[0]);
+  ta = editor(rows(doc)[0]);
   const shiftEnter = new win.KeyboardEvent('keydown', {
     key: 'Enter',
     shiftKey: true,
@@ -238,7 +225,7 @@ function runPanel() {
 
   // --- Escape cancels: nothing posted, the old text stays
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
-  ta = editor(doc, rows(doc)[0]);
+  ta = editor(rows(doc)[0]);
   input(win, ta, 'thrown away');
   key(win, ta, 'Escape');
   assert.strictEqual(editsPosted(posted).length, 3, 'Escape posts nothing');
@@ -247,7 +234,7 @@ function runPanel() {
 
   // --- the Cancel button does the same
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
-  ta = editor(doc, rows(doc)[0]);
+  ta = editor(rows(doc)[0]);
   input(win, ta, 'also thrown away');
   click(win, rows(doc)[0].querySelector('.tricks-edit-cancel'));
   assert.strictEqual(editsPosted(posted).length, 3, 'Cancel posts nothing');
@@ -257,7 +244,7 @@ function runPanel() {
 
   // --- saving unchanged (or only re-spaced) text posts nothing
   click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
-  ta = editor(doc, rows(doc)[1]);
+  ta = editor(rows(doc)[1]);
   input(win, ta, '  Mine two, edited\n');
   click(win, rows(doc)[1].querySelector('.tricks-edit-save'));
   assert.strictEqual(
@@ -270,7 +257,7 @@ function runPanel() {
 
   // --- saving emptied text posts nothing and keeps the promptlet
   click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
-  ta = editor(doc, rows(doc)[1]);
+  ta = editor(rows(doc)[1]);
   input(win, ta, '   ');
   key(win, ta, 'Enter');
   assert.strictEqual(editsPosted(posted).length, 3, 'empty text posts nothing');
@@ -281,7 +268,7 @@ function runPanel() {
   // editor, its draft and the search box's focus
   const search = doc.getElementById('tricks-search');
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
-  ta = editor(doc, rows(doc)[0]);
+  ta = editor(rows(doc)[0]);
   input(win, ta, 'My unsaved draft');
   search.focus();
   input(win, search, 'line');
@@ -291,7 +278,7 @@ function runPanel() {
     'filtered on the stored text',
   );
   assert.strictEqual(
-    editor(doc, rows(doc)[0]),
+    editor(rows(doc)[0]),
     ta,
     'the same editor element is re-attached',
   );
@@ -314,7 +301,7 @@ function runPanel() {
   );
   input(win, search, '');
   assert.strictEqual(
-    editor(doc, rows(doc)[0]),
+    editor(rows(doc)[0]),
     ta,
     'the editor comes back with its draft',
   );
@@ -324,7 +311,7 @@ function runPanel() {
 
   // --- Enter / Escape confirming an IME composition are left to the IME
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
-  ta = editor(doc, rows(doc)[0]);
+  ta = editor(rows(doc)[0]);
   input(win, ta, '変換中');
   for (const init of [{isComposing: true}, {keyCode: 229}]) {
     const composingEnter = new win.KeyboardEvent('keydown', {
@@ -370,12 +357,12 @@ function runPanel() {
   assert.ok(!rows(doc)[0].classList.contains('editing'));
   assert.ok(rows(doc)[1].classList.contains('editing'));
   assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 1);
-  key(win, editor(doc, rows(doc)[1]), 'Escape');
+  key(win, editor(rows(doc)[1]), 'Escape');
 
   // --- a rejected edit: the daemon answers `error` + the list on disk,
   // stamped for this window, and the old text comes back
   click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
-  input(win, editor(doc, rows(doc)[1]), 'Line one\nLine two');
+  input(win, editor(rows(doc)[1]), 'Line one\nLine two');
   click(win, rows(doc)[1].querySelector('.tricks-edit-save'));
   assert.deepStrictEqual(editsPosted(posted).at(-1), {
     type: 'editTrick',
@@ -418,7 +405,7 @@ function runPanel() {
   // else (a line starting with "## ", say) keeps the draft: the editor
   // reopens on the promptlet with the refused text and the reason.
   click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
-  input(win, editor(doc, rows(doc)[1]), 'Unique draft\n## Context\nmore');
+  input(win, editor(rows(doc)[1]), 'Unique draft\n## Context\nmore');
   click(win, rows(doc)[1].querySelector('.tricks-edit-save'));
   send(win, {
     type: 'error',
@@ -442,7 +429,7 @@ function runPanel() {
     'the editor reopens',
   );
   assert.ok(rows(doc)[1].classList.contains('editing'));
-  ta = editor(doc, rows(doc)[1]);
+  ta = editor(rows(doc)[1]);
   assert.strictEqual(ta.value, 'Unique draft\n## Context\nmore', 'the draft');
   assert.strictEqual(doc.activeElement, ta);
   const note = rows(doc)[1].querySelector('.config-field-note-error');
@@ -479,7 +466,7 @@ function runPanel() {
   // --- a list change from elsewhere closes an open editor: its index
   // could now point at another promptlet
   click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
-  input(win, editor(doc, rows(doc)[1]), 'typing...');
+  input(win, editor(rows(doc)[1]), 'typing...');
   send(win, {
     type: 'tricksData',
     tricks: ['Mine two, edited', 'Bundled alpha', 'Bundled beta'],
@@ -495,25 +482,138 @@ function runPanel() {
     rows(doc).map(r => r.querySelectorAll('.sidebar-item-edit').length),
     [1, 0, 0],
   );
-  // ...and so does deleting another row from this window
+  // ...but deleting ANOTHER promptlet from this window keeps the editor
+  // and its draft, as the same deletion from another window does (below):
+  // the Delete confirm authorised deleting A, not discarding B's edit.
+  send(win, {
+    type: 'tricksData',
+    tricks: ['Mine A', 'Mine B', 'Mine C', 'Bundled alpha'],
+    userCount: 3,
+  });
+  click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
+  assert.ok(rows(doc)[1].classList.contains('editing'));
+  ta = editor(rows(doc)[1]);
+  input(win, ta, 'DRAFT B\nsecond line');
+  // The trash icon reveals an inline Delete confirm first
+  // (ui_antipattern_destructive_confirm.test.js).  Deleting the row
+  // AFTER the edited one leaves it where it is...
+  click(win, rows(doc)[2].querySelector('.sidebar-item-delete'));
+  click(win, rows(doc)[2].querySelector('.sidebar-confirm-yes'));
+  assert.deepStrictEqual(texts(doc), [
+    'Mine A',
+    'DRAFT B\nsecond line',
+    'Bundled alpha',
+  ]);
+  assert.strictEqual(
+    editor(rows(doc)[1]),
+    ta,
+    'BUG - deleting a later promptlet closed the editor and lost the draft',
+  );
+  // ...and deleting the row BEFORE it moves the editor up with the draft.
+  click(win, rows(doc)[0].querySelector('.sidebar-item-delete'));
+  click(win, rows(doc)[0].querySelector('.sidebar-confirm-yes'));
+  assert.deepStrictEqual(texts(doc), ['DRAFT B\nsecond line', 'Bundled alpha']);
+  assert.strictEqual(
+    editor(rows(doc)[0]),
+    ta,
+    'BUG - deleting an earlier promptlet closed the editor and lost the draft',
+  );
+  assert.strictEqual(ta.value, 'DRAFT B\nsecond line', 'the draft survives');
+  assert.deepStrictEqual(
+    posted.filter(m => m.type === 'deleteTrick').map(m => m.text),
+    ['Mine C', 'Mine A'],
+  );
+  // The daemon's answers find the editor on its promptlet, and the save
+  // names that promptlet.
+  send(win, {
+    type: 'tricksData',
+    tricks: ['Mine B', 'Bundled alpha'],
+    userCount: 1,
+  });
+  assert.strictEqual(editor(rows(doc)[0]), ta);
+  key(win, ta, 'Enter');
+  assert.deepStrictEqual(editsPosted(posted).at(-1), {
+    type: 'editTrick',
+    text: 'Mine B',
+    newText: 'DRAFT B\nsecond line',
+  });
+  send(win, {
+    type: 'tricksData',
+    tricks: ['DRAFT B\nsecond line', 'Bundled alpha'],
+    userCount: 1,
+  });
+  assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
+  assert.strictEqual(editsPosted(posted).length, 8, 'deleting posts no edit');
+  // (The editor row itself has Save / Cancel instead of a Delete button,
+  // so the edited promptlet is never the one deleted from this window.)
+
+  // --- another window deleting a PRECEDING promptlet leaves the edited
+  // one in place: the editor follows it to its new row with the draft,
+  // and the save names the promptlet, not the row it had
   send(win, {
     type: 'tricksData',
     tricks: ['Mine A', 'Mine B', 'Bundled alpha'],
     userCount: 2,
   });
   click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
-  assert.ok(rows(doc)[1].classList.contains('editing'));
-  // The trash icon reveals an inline Delete confirm first
-  // (ui_antipattern_destructive_confirm.test.js).
-  click(win, rows(doc)[0].querySelector('.sidebar-item-delete'));
-  click(win, rows(doc)[0].querySelector('.sidebar-confirm-yes'));
-  assert.deepStrictEqual(texts(doc), ['Mine B', 'Bundled alpha']);
-  assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
+  ta = editor(rows(doc)[1]);
+  input(win, ta, 'UNSAVED B\nsecond line');
+  send(win, {
+    type: 'tricksData',
+    tricks: ['Mine B', 'Bundled alpha'],
+    userCount: 1,
+  });
   assert.strictEqual(
-    rows(doc)[0].querySelectorAll('.sidebar-item-edit').length,
-    1,
+    editor(rows(doc)[0]),
+    ta,
+    'the editor follows its promptlet to its new row',
   );
-  assert.strictEqual(editsPosted(posted).length, 7, 'closing posts no edit');
+  assert.strictEqual(ta.value, 'UNSAVED B\nsecond line', 'the draft survives');
+  assert.deepStrictEqual(texts(doc), [
+    'UNSAVED B\nsecond line',
+    'Bundled alpha',
+  ]);
+  key(win, ta, 'Enter');
+  assert.deepStrictEqual(editsPosted(posted).slice(8), [
+    {type: 'editTrick', text: 'Mine B', newText: 'UNSAVED B\nsecond line'},
+  ]);
+  assert.deepStrictEqual(texts(doc), [
+    'UNSAVED B\nsecond line',
+    'Bundled alpha',
+  ]);
+  // The daemon's answer settles the edit.
+  send(win, {
+    type: 'tricksData',
+    tricks: ['UNSAVED B\nsecond line', 'Bundled alpha'],
+    userCount: 1,
+  });
+  assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
+
+  // --- another window changing an UNRELATED promptlet repaints the
+  // list: the editor keeps the keyboard focus and the caret
+  send(win, {
+    type: 'tricksData',
+    tricks: ['Mine A', 'Mine B', 'Bundled alpha'],
+    userCount: 2,
+  });
+  click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
+  ta = editor(rows(doc)[0]);
+  input(win, ta, 'Mine A draft');
+  ta.focus();
+  ta.setSelectionRange(4, 4);
+  assert.strictEqual(doc.activeElement, ta, 'setup: the editor has focus');
+  send(win, {
+    type: 'tricksData',
+    tricks: ['Mine A', 'Mine B2', 'Bundled alpha'],
+    userCount: 2,
+  });
+  assert.strictEqual(editor(rows(doc)[0]), ta, 'the editor is kept');
+  assert.strictEqual(ta.value, 'Mine A draft');
+  assert.strictEqual(doc.activeElement, ta, 'the editor keeps the focus');
+  assert.strictEqual(ta.selectionStart, 4, 'and the caret');
+  assert.strictEqual(ta.selectionEnd, 4);
+  key(win, ta, 'Escape');
+  assert.strictEqual(editsPosted(posted).length, 9, 'nothing more posted');
 
   // --- a filtered list edits the right promptlet (index into the full list)
   send(win, {
@@ -524,7 +624,7 @@ function runPanel() {
   input(win, doc.getElementById('tricks-search'), 'mine b');
   assert.deepStrictEqual(texts(doc), ['Mine B']);
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
-  ta = editor(doc, rows(doc)[0]);
+  ta = editor(rows(doc)[0]);
   assert.strictEqual(ta.value, 'Mine B');
   input(win, ta, 'Mine B2');
   key(win, ta, 'Enter');
@@ -552,7 +652,7 @@ function runPanel() {
   const drafts = ['Draft A\n## Context\nA', 'Draft B\n## Context\nB'];
   for (let i = 0; i < 2; i++) {
     click(win, rows(doc)[i].querySelector('.sidebar-item-edit'));
-    input(win, editor(doc, rows(doc)[i]), drafts[i]);
+    input(win, editor(rows(doc)[i]), drafts[i]);
     click(win, rows(doc)[i].querySelector('.tricks-edit-save'));
   }
   assert.deepStrictEqual(
@@ -577,7 +677,7 @@ function runPanel() {
     connId: 'c1',
   });
   assert.ok(rows(doc)[0].classList.contains('editing'), "A's editor reopens");
-  assert.strictEqual(editor(doc, rows(doc)[0]).value, drafts[0]);
+  assert.strictEqual(editor(rows(doc)[0]).value, drafts[0]);
   send(win, refusal);
   send(win, {
     type: 'tricksData',
@@ -590,7 +690,7 @@ function runPanel() {
     "A's editor is still open",
   );
   assert.strictEqual(
-    editor(doc, rows(doc)[0]).value,
+    editor(rows(doc)[0]).value,
     drafts[0],
     "A's draft survives B's refusal",
   );
@@ -607,15 +707,15 @@ function runPanel() {
     userCount: 2,
   });
   assert.strictEqual(
-    editor(doc, rows(doc)[0]).value,
+    editor(rows(doc)[0]).value,
     drafts[0],
     'the editor outlives an unrelated change',
   );
   // A done with (cancelled): B's draft takes the editor, with its reason.
-  key(win, editor(doc, rows(doc)[0]), 'Escape');
+  key(win, editor(rows(doc)[0]), 'Escape');
   assert.ok(rows(doc)[1].classList.contains('editing'), "B's editor reopens");
   assert.strictEqual(
-    editor(doc, rows(doc)[1]).value,
+    editor(rows(doc)[1]).value,
     drafts[1],
     "B's draft, intact",
   );
@@ -625,7 +725,7 @@ function runPanel() {
       .textContent.includes("'## '"),
     "with B's reason",
   );
-  assert.strictEqual(doc.activeElement, editor(doc, rows(doc)[1]));
+  assert.strictEqual(doc.activeElement, editor(rows(doc)[1]));
   // The promptlet it edits replaced from elsewhere: the editor closes.
   send(win, {
     type: 'tricksData',
@@ -652,7 +752,7 @@ function runPanel() {
   function saveRowTwiceRefused() {
     for (const draft of same) {
       click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
-      input(win, editor(doc, rows(doc)[0]), draft);
+      input(win, editor(rows(doc)[0]), draft);
       click(win, rows(doc)[0].querySelector('.tricks-edit-save'));
     }
     assert.deepStrictEqual(
@@ -667,30 +767,30 @@ function runPanel() {
     refuse(stored.slice());
     refuse(stored.slice());
     assert.ok(rows(doc)[0].classList.contains('editing'), "A's editor reopens");
-    assert.strictEqual(editor(doc, rows(doc)[0]).value, same[0], 'with A');
+    assert.strictEqual(editor(rows(doc)[0]).value, same[0], 'with A');
     assert.ok(
       !values().some(v => v.includes('Same B')),
       'B waits: no input holds it, intact or mangled',
     );
   }
   saveRowTwiceRefused();
-  key(win, editor(doc, rows(doc)[0]), 'Escape');
+  key(win, editor(rows(doc)[0]), 'Escape');
   assert.ok(rows(doc)[0].classList.contains('editing'), "B's editor reopens");
-  assert.strictEqual(editor(doc, rows(doc)[0]).value, same[1], 'B, intact');
-  assert.strictEqual(doc.activeElement, editor(doc, rows(doc)[0]));
+  assert.strictEqual(editor(rows(doc)[0]).value, same[1], 'B, intact');
+  assert.strictEqual(doc.activeElement, editor(rows(doc)[0]));
   assert.ok(
     rows(doc)[0]
       .querySelector('.config-field-note-error')
       .textContent.includes("'## '"),
     "with B's reason",
   );
-  key(win, editor(doc, rows(doc)[0]), 'Escape');
+  key(win, editor(rows(doc)[0]), 'Escape');
   assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
   // A fixed and accepted instead: B's editor reopens on the row that
   // reads the accepted text now.
   saveRowTwiceRefused();
-  input(win, editor(doc, rows(doc)[0]), 'Same A, fixed');
-  key(win, editor(doc, rows(doc)[0]), 'Enter');
+  input(win, editor(rows(doc)[0]), 'Same A, fixed');
+  key(win, editor(rows(doc)[0]), 'Enter');
   assert.deepStrictEqual(editsPosted(posted).at(-1), {
     type: 'editTrick',
     text: 'Mine A',
@@ -699,8 +799,8 @@ function runPanel() {
   stored[0] = 'Same A, fixed';
   send(win, {type: 'tricksData', tricks: stored.slice(), userCount: 2});
   assert.ok(rows(doc)[0].classList.contains('editing'), "B's editor reopens");
-  assert.strictEqual(editor(doc, rows(doc)[0]).value, same[1], 'B, intact');
-  key(win, editor(doc, rows(doc)[0]), 'Escape');
+  assert.strictEqual(editor(rows(doc)[0]).value, same[1], 'B, intact');
+  key(win, editor(rows(doc)[0]), 'Escape');
 
   // --- a refused draft whose promptlet is gone meanwhile: a one-line
   // draft goes to the empty Add box with its reason; a multi-line one
@@ -708,14 +808,14 @@ function runPanel() {
   // back, and reopens its editor then.
   const addBox = doc.getElementById('tricks-add-input');
   click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
-  input(win, editor(doc, rows(doc)[1]), same[1]);
-  key(win, editor(doc, rows(doc)[1]), 'Enter');
+  input(win, editor(rows(doc)[1]), same[1]);
+  key(win, editor(rows(doc)[1]), 'Enter');
   refuse(['Same A, fixed', 'Bundled gamma'], 1);
   assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
   assert.strictEqual(addBox.value, '', 'the Add box is no place for it');
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
-  input(win, editor(doc, rows(doc)[0]), 'One line');
-  key(win, editor(doc, rows(doc)[0]), 'Enter');
+  input(win, editor(rows(doc)[0]), 'One line');
+  key(win, editor(rows(doc)[0]), 'Enter');
   const taken = {type: 'error', text: 'That promptlet is taken', connId: 'c1'};
   refuse(['Bundled gamma'], 0, taken);
   assert.strictEqual(addBox.value, 'One line', 'in the Add box');
@@ -729,8 +829,8 @@ function runPanel() {
     rows(doc)[0].classList.contains('editing'),
     'the promptlet is back',
   );
-  assert.strictEqual(editor(doc, rows(doc)[0]).value, same[1], 'B, intact');
-  key(win, editor(doc, rows(doc)[0]), 'Escape');
+  assert.strictEqual(editor(rows(doc)[0]).value, same[1], 'B, intact');
+  key(win, editor(rows(doc)[0]), 'Escape');
 
   // A page loaded without the count global shows no pencils:
   // tricksPanelCopyDelete.test.js (its bare page).

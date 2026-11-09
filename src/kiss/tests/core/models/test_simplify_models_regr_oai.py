@@ -82,8 +82,8 @@ def test_audio_mime_to_format() -> None:
 
 
 def test_extract_deepseek_reasoning() -> None:
-    assert _extract_deepseek_reasoning("<think> why </think> ans") == ("why", "ans")
-    assert _extract_deepseek_reasoning("no tags here") == ("", "no tags here")
+    assert _extract_deepseek_reasoning("<think> why </think> ans") == "ans"
+    assert _extract_deepseek_reasoning("no tags here") == "no tags here"
 
 
 def test_anthropic_media_block_to_openai_part() -> None:

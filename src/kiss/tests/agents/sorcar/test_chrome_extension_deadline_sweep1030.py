@@ -132,9 +132,13 @@ def _evaluate(chrome: _Chrome, script: str, timeout: float) -> object:
 
 
 def test_an_overrun_is_answered_and_the_connection_stays(chrome: _Chrome) -> None:
-    """A 5 s script with ``timeout=2`` fails with the extension's reply; the socket lives on."""
-    with pytest.raises(ChromeBridgeError, match=r"command exceeded its 1\.\d+s deadline"):
-        _evaluate(chrome, "new Promise(r => setTimeout(() => r(1), 5000))", timeout=2)
+    """A 15 s script with ``timeout=10`` fails with the extension's reply; the socket lives on.
+
+    ``timeout=10`` leaves the reply the full 1 s margin (``timeout=2`` left
+    0.2 s, which a loaded machine's Chromium missed).
+    """
+    with pytest.raises(ChromeBridgeError, match=r"command exceeded its (8\.\d+|9)s deadline"):
+        _evaluate(chrome, "new Promise(r => setTimeout(() => r(1), 15000))", timeout=10)
     assert chrome.bridge.extension_connected
     assert _evaluate(chrome, "6 * 7", timeout=10) == 42
 

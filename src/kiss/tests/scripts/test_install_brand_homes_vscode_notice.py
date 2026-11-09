@@ -314,7 +314,10 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         )
         self.assertIn("https://brandx.trycloudflare.com", out)
         self.assertIn("*  Remote access password:  pw-.brandx", out)
-        self.assertNotIn("pw-.kiss", out.split("=== App install complete ===")[-1])
+        final = out.split("=== App install complete ===")[-1]
+        self.assertNotIn("pw-.kiss", final)
+        # The closing summary names the app the daemon runs from.
+        self.assertIn(f"\nApp directory: {brandx / 'brandx'}\n", final)
         self.assertIn(f"*  {PASSWORD_HINT}  *", out)
         self.assertEqual(out.count("Remote access password:"), 1, "a nested pass printed a box")
         self.assertEqual(out.count("=== App install complete ==="), 1, out)
@@ -341,6 +344,9 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
             [f"KISS_HOME=unset APP={app / '.venv' / 'bin' / 'kiss-web'}"],
         )
         self.assertIn("https://stock.trycloudflare.com", out)
+        self.assertIn(
+            f"\nApp directory: {app}\n", out.split("=== App install complete ===")[-1]
+        )
         self.assertIn("   Set a new remote-access password (shown at the end).", out)
         self.assertIn("*  Remote access password:  pw-.kiss", out)
         self.assertIn(f"*  {PASSWORD_HINT}  *", out)

@@ -161,15 +161,21 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
             llm_response_hook=merge.llm_response_hook,
             web_tools=merge_settings["use_web_tools"],
             use_memory=merge_settings["use_memory"],
+            compaction=merge_settings.get("compaction", True),
         )
     finally:
         budget, tokens, steps = _live_agent_usage(agent)
-        _attribute_sub_usage(parent_agent, budget, tokens, steps, epoch=epoch)
-        if printer is not None:
-            _notify_subagent_done(
-                printer, _persisted_task_id(agent), sub_tab_id, model_name,
-                parent_tab_id,
-            )
+        try:
+            _attribute_sub_usage(parent_agent, budget, tokens, steps, epoch=epoch)
+        finally:
+            # Whatever the attribution did (a Stop can land in its lock
+            # wait): without ``subagentDone`` every surface watching the
+            # parent keeps the resolver's tab open, spinner and all.
+            if printer is not None:
+                _notify_subagent_done(
+                    printer, _persisted_task_id(agent), sub_tab_id, model_name,
+                    parent_tab_id,
+                )
 
 
 def resolve_merge_conflict(

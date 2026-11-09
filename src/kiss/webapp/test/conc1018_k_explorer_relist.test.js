@@ -205,6 +205,91 @@ function testVanishedRenameRowIsCancelled() {
   console.log('  ok - a vanished rename row is cancelled with its entry');
 }
 
+// A26_astra-6 / A26_fable-5: a re-listing of the parent keeps the row of
+// a folder still there, and must also take over the folder's real
+// location from the fresh listing: a symlink that pointed back at an
+// ancestor (a cycle, never listed) and now points at an ordinary folder
+// lists that folder on its next expansion instead of repeating the old
+// "(symbolic link cycle)" verdict.
+function testRelistingUpdatesASymlinkTarget(retarget) {
+  const {win, posted} = makeExplorerPage();
+  const lst = () => listings(posted);
+  // `link` -> the workspace root itself: a cycle.
+  answer(win, lst()[0], [{name: 'link', isDir: true, real: WD}]);
+  click(win, win.document.getElementById('explorer-refresh'));
+  // The link now points elsewhere (an explicit target, or none: a plain
+  // folder at the parent's real path + name).
+  answer(win, lst()[1], [Object.assign({name: 'link', isDir: true}, retarget)]);
+  const link = row(win, WD + '/link');
+  assert.ok(link, 'the link row survives the re-listing');
+  click(win, link);
+  const asked = lst().slice(2).map(m => m.path);
+  assert.deepStrictEqual(
+    asked,
+    [WD + '/link'],
+    'BUG - the retargeted link was still judged a cycle: ' +
+      JSON.stringify(notes(win)),
+  );
+  answer(win, lst()[2], [{name: 'x.py'}]);
+  assert.ok(row(win, WD + '/link/x.py'), 'the new target is listed');
+  assert.ok(
+    !notes(win).includes('(symbolic link cycle)'),
+    'no cycle note for a link that no longer points at an ancestor',
+  );
+  win.close();
+  console.log(
+    '  ok - a re-listing takes over a symlink\'s new target (' +
+      (retarget.real ? 'explicit' : 'derived') +
+      ')',
+  );
+}
+
+// Audit 2026-11-08 (W5 F1): a cycle refused on expansion is not a
+// listed folder.  Refresh re-lists listed folders only, so it must not
+// ask the daemon for the cyclic link (whose reply would paint a copy of
+// the ancestor under it, link included, one level deeper per refresh);
+// the cycle note stays while the link cycles, and once the parent's
+// fresh listing retargets the link at an ordinary folder, expanding it
+// again lists that folder.
+function testRefreshKeepsABlockedCycleUnlisted() {
+  const {win, posted} = makeExplorerPage();
+  const lst = () => listings(posted);
+  answer(win, lst()[0], [{name: 'loop', isDir: true, real: WD}]);
+  const loop = () => row(win, WD + '/loop');
+  click(win, loop());
+  assert.deepStrictEqual(notes(win), ['(symbolic link cycle)']);
+  assert.strictEqual(lst().length, 1, 'the cycle is not listed');
+  click(win, win.document.getElementById('explorer-refresh'));
+  assert.deepStrictEqual(
+    lst().slice(1).map(m => m.path),
+    [WD],
+    'BUG - Refresh asked the daemon to list the cyclic link',
+  );
+  answer(win, lst()[1], [{name: 'loop', isDir: true, real: WD}]);
+  assert.ok(loop().classList.contains('expanded'), 'the link row stays expanded');
+  assert.deepStrictEqual(notes(win), ['(symbolic link cycle)'], 'the note stays');
+  assert.strictEqual(row(win, WD + '/loop/loop'), null, 'no copy of the ancestor');
+  // The link now points at an ordinary folder: the next expansion
+  // lists it.
+  click(win, win.document.getElementById('explorer-refresh'));
+  answer(win, lst()[2], [{name: 'loop', isDir: true, real: WD + '/real'}]);
+  click(win, loop());
+  click(win, loop());
+  assert.deepStrictEqual(
+    lst().slice(3).map(m => m.path),
+    [WD + '/loop'],
+    'the retargeted link is listed on its expansion',
+  );
+  answer(win, lst()[3], [{name: 'x.py'}]);
+  assert.ok(row(win, WD + '/loop/x.py'), 'the new target is listed');
+  assert.deepStrictEqual(notes(win), []);
+  win.close();
+  console.log('  ok - Refresh leaves a blocked cycle unlisted; a retarget lists it');
+}
+
 testErrorRelistingDropsSubfolders();
 testErrorRelistingKeepsEditedFolder();
 testVanishedRenameRowIsCancelled();
+testRelistingUpdatesASymlinkTarget({real: WD + '/real-folder'});
+testRelistingUpdatesASymlinkTarget({});
+testRefreshKeepsABlockedCycleUnlisted();

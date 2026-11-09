@@ -25,6 +25,7 @@ a cache: deleting the ``.sqlite3`` file loses nothing.
 """
 
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -120,7 +121,7 @@ def hashed_embedding(text: str, dims: int = HASHED_EMBEDDING_DIMS) -> list[float
     """
     vector = [0.0] * dims
     words = _tokens(text)
-    features = words + [f"{a} {b}" for a, b in zip(words, words[1:], strict=False)]
+    features = words + [f"{a} {b}" for a, b in itertools.pairwise(words)]
     counts: dict[str, int] = {}
     for feature in features:
         counts[feature] = counts.get(feature, 0) + 1
