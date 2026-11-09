@@ -65,7 +65,7 @@ function siblingSetsSensitivity(win, value) {
 
 /** Recognize a trailing-alias phrase, which wakes only at sensitivity >= 75. */
 function hearTrailingAlias(page) {
-  fireWake(page, 'so abracadabra');
+  fireWake(page, 'so hey sore car');
 }
 
 /**

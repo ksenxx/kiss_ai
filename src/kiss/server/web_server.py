@@ -7012,7 +7012,7 @@ class RemoteAccessServer:
 
         voice.js cannot call gpt-audio itself (the API key lives on
         this machine), so after the in-page wake-word detector hears
-        "Abracadabra" it captures the utterance that follows and ships
+        "Hey Sorcar" it captures the utterance that follows and ships
         it here as ``{type: 'voiceTranscribe', audio: <base64 16kHz
         mono s16le PCM>}``.  The audio is translated into English by
         the KISS transcription agent (:func:`transcribe_pcm`) — which

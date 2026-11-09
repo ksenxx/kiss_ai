@@ -277,7 +277,8 @@ async function startPipeline(page) {
 
 /**
  * Feed `blocks` onaudioprocess blocks (4096 samples at 16 kHz = 256 ms
- * each), loud or silent, to a processor node.
+ * each), loud or silent, to a processor node; returns the samples the
+ * node wrote to its output.
  */
 function feed(proc, loud, blocks) {
   const samples = new Float32Array(4096);
@@ -287,7 +288,10 @@ function feed(proc, loud, blocks) {
     sampleRate: 16000,
     numberOfChannels: 1,
   };
-  for (let i = 0; i < blocks; i++) proc.onaudioprocess({inputBuffer});
+  const output = new Float32Array(4096);
+  const outputBuffer = {getChannelData: () => output};
+  for (let i = 0; i < blocks; i++) proc.onaudioprocess({inputBuffer, outputBuffer});
+  return output;
 }
 
 /** The audio processor node of the current pipeline. */
@@ -316,10 +320,10 @@ function lastFreeRecognizer(page) {
  * grammar recognizer's final `text`, then the grammar-free one's, which
  * must agree before the page wakes.
  */
-function fireWake(page, text = 'abracadabra') {
+function fireWake(page, text = 'hey sore car') {
   page.clock.now += 3000; // clear the 2 s wake cooldown
   lastRecognizer(page).handlers.result({result: {text}});
-  lastFreeRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+  lastFreeRecognizer(page).handlers.result({result: {text: 'hey soccer'}});
 }
 
 /**

@@ -178,15 +178,20 @@ def test_a_failed_matcher_launch_ends_the_wait_with_an_error(tmp_path: Path) -> 
     there (the daemon at its fd or process limit) ended the thread
     silently, so the wait ran to its full deadline without ever
     searching the log and returned a normal report (A14-3 claude).
-    The limit is lowered for real: ``RLIMIT_NOFILE`` set to the open
-    count plus one makes the matcher's pipes fail with ``EMFILE``.
+    The limit is lowered for real: ``RLIMIT_NOFILE`` set to the second
+    fd number the listing left unused makes the matcher's pipes fail
+    with ``EMFILE``. Only that fd and the listing's own stay usable,
+    whatever holes earlier tests left in the fd table (the open count
+    plus one left a free number in every hole).
     """
     import resource  # POSIX only, like the /proc this test needs
 
     tools = UsefulTools(work_dir=str(tmp_path))
     job = _job_id(tools.Bash("sleep 30", "job", background=True))
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (len(os.listdir("/proc/self/fd")) + 1, hard))
+    listed = {int(name) for name in os.listdir("/proc/self/fd")}
+    unused = [fd for fd in range(max(listed) + 3) if fd not in listed]
+    resource.setrlimit(resource.RLIMIT_NOFILE, (unused[1], hard))
     before = time.monotonic()
     try:
         report = tools.bash_job(job, action="wait", until="NEVER", timeout_seconds=20)
