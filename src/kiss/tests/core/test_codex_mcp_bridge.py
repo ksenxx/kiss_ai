@@ -132,6 +132,12 @@ def test_bridge_port_is_closed_after_the_block() -> None:
         socket.create_connection(("127.0.0.1", port), timeout=1)
 
 
+def _send_then_end(sock: socket.socket, data: bytes) -> None:
+    """Send *data*, then shut the writing side so the reader sees end of stream."""
+    sock.sendall(data)
+    sock.shutdown(socket.SHUT_WR)
+
+
 @pytest.mark.parametrize(
     ("cap", "size", "accepted"),
     [
@@ -157,11 +163,16 @@ def test_request_line_cap_holds_whatever_the_last_receive_brings(
     with reader, writer:
         reader.settimeout(2)
         # From a thread: a payload larger than the socket's buffer blocks the sender.
-        sender = threading.Thread(target=writer.sendall, args=(payload,))
+        sender = threading.Thread(target=_send_then_end, args=(writer, payload))
         sender.start()
         line = _read_request_line(reader, time.monotonic() + 2)
         assert reader.gettimeout() == 2  # the reply's write keeps the socket's own bound
+        # A dropped line leaves the sender blocked in sendall: closing the
+        # writer under it raised EBADF in the thread, so drain the rest.
+        while reader.recv(1 << 16):
+            pass
         sender.join(timeout=5)
+        assert not sender.is_alive()
     assert line == (payload if accepted else b"")
 
 

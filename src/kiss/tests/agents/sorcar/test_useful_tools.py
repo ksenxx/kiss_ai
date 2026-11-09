@@ -424,6 +424,9 @@ class TestBashUntil:
     """``Bash(until=<regex>)`` re-runs the command inside one call until the regex matches."""
 
     COUNT = "n=$(cat n); n=$((n+1)); echo $n > n; echo run $n"
+    # The elapsed time a report prints: each call's own monotonic bounds check its
+    # size; a loaded Windows box (49 suite splits at once) adds seconds to a run.
+    SECONDS = r"\d+\.\d s"
 
     def test_until_polls_until_the_regex_matches_the_output(self, temp_test_dir, monkeypatch):
         (temp_test_dir / "n").write_text("0")
@@ -437,7 +440,7 @@ class TestBashUntil:
         elapsed = time.monotonic() - before
         assert 1.0 <= elapsed < 10, elapsed  # one pause of poll_seconds between the runs
         assert re.fullmatch(
-            r"run 2\n\n\[until 'run 2\$' matched after 2 run\(s\) and 1\.\d s\]", out,
+            rf"run 2\n\n\[until 'run 2\$' matched after 2 run\(s\) and {self.SECONDS}\]", out,
         ), out
         assert (temp_test_dir / "n").read_text() == "2\n"  # no run after the match
         assert "".join(streamed).count("run ") == 2  # each run streams its output
@@ -452,18 +455,21 @@ class TestBashUntil:
         before = time.monotonic()
         # poll_seconds below 1 is raised to 1: at most three runs fit in 3 s, not thirty (a
         # fourth cannot start before the deadline with 1 s pauses; a third does only while a
-        # run and its search cost under 0.5 s, which a loaded Windows box's bash spawn misses).
+        # run and its search cost under 0.5 s, which a loaded Windows box's bash spawn misses;
+        # there the third run can also start late and be killed at the deadline).
         out = ut.Bash("echo nope", "poll", until="never", poll_seconds=0.1, timeout_seconds=3)
         assert 2.9 <= time.monotonic() - before < 10
         assert re.fullmatch(
-            r"nope\n\n\[until 'never' did not match after [23] run\(s\) and 3\.\d s: "
-            r"the call's deadline \(timeout_seconds\) passed\]", out,
+            rf"(nope\n|Error: Command execution timeout.*)\n\[until 'never' did not match "
+            rf"after [23] run\(s\) and {self.SECONDS}: the call's deadline \(timeout_seconds\) "
+            r"passed\]", out, re.DOTALL,
         ), out
         # A run killed at the deadline is the last one, its partial output kept.
         out = ut.Bash("echo part; sleep 10", "slow", until="never", timeout_seconds=1.5)
         assert out.startswith("Error: Command execution timeout after 1.5s. Output before")
         assert re.search(
-            r"after 1 run\(s\) and 1\.\d s: the call's deadline \(timeout_seconds\) passed\]$", out,
+            rf"after 1 run\(s\) and {self.SECONDS}: the call's deadline \(timeout_seconds\) "
+            r"passed\]$", out,
         ), out
         # A long sleep with a job running is spent waiting on the job, then the poll runs
         # (both notes in the result); the poll's deadline is the call's, absolute, so the
@@ -480,7 +486,7 @@ class TestBashUntil:
         )
         assert 1.1 <= time.monotonic() - before < 5
         assert re.search(
-            r"did not match after 1 run\(s\) and 1\.\d s: the call's deadline "
+            rf"did not match after 1 run\(s\) and {self.SECONDS}: the call's deadline "
             r"\(timeout_seconds\) passed\]$", out,
         ), out
         # The search itself is bounded by the deadline: a pattern that backtracks for

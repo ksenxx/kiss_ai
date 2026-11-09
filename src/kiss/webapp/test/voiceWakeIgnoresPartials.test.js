@@ -30,6 +30,13 @@
 // audio heard "which can remember" and "government".  A wake now needs
 // both recognizers' finals to contain the word within 2.5 s of each
 // other; the tests at the end pin that agreement rule.
+//
+// 2026-11-08 (later): the wake phrase became "Hey Sorcar".  Its grammar
+// spells the name as "sore car" / "sir car" / "sar car" (Sorcar is not
+// in the model's vocabulary).  The grammar-free recognizer cannot spell
+// the name ("hey soccer", "hey saga", "hey saw car", "he's order"), so its
+// final confirms the wake when it heard the word "hey" or ends in words
+// within 3 edits of "heysorcar".
 
 const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
@@ -75,9 +82,9 @@ async function main() {
     feed(proc, true, 2);
     feed(proc, false, 3);
     for (const partial of [
-      'abracadabra',
-      '[unk] abracadabra',
-      '[unk] [unk] abracadabra',
+      'hey sore car',
+      '[unk] hey sore car',
+      '[unk] [unk] hey sore car',
     ]) {
       rec.handlers.partialresult({result: {partial}});
       assert.ok(
@@ -98,7 +105,7 @@ async function main() {
     const rec = lastRecognizer(page);
     page.clock.now += 3000;
     feed(lastProcessor(page), true, 4);
-    rec.handlers.partialresult({result: {partial: '[unk] abracadabra'}});
+    rec.handlers.partialresult({result: {partial: '[unk] hey sore car'}});
     assert.ok(!triggered(page), 'a partial mid-speech must not wake');
   });
 
@@ -108,7 +115,7 @@ async function main() {
     const rec = lastRecognizer(page);
     // The partials a genuine wake produces on the way to its final
     // result are ignored; the final result is what wakes.
-    rec.handlers.partialresult({result: {partial: '[unk] abracadabra'}});
+    rec.handlers.partialresult({result: {partial: '[unk] hey sore car'}});
     assert.ok(!triggered(page), 'the partial alone must not wake');
     wake(page); // the final result wakes
     // Half a second of speech and two seconds of silence end the
@@ -134,17 +141,27 @@ async function main() {
     const page = makeVoicePage();
     await startPipeline(page);
     page.clock.now += 3000;
-    lastRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    lastRecognizer(page).handlers.result({result: {text: 'hey sore car'}});
     assert.ok(!triggered(page), 'the grammar recognizer alone must not wake');
     page.clock.now += 260; // one 4096-sample block later
     lastFreeRecognizer(page).handlers.result({
       result: {text: 'which can remember'},
     });
-    assert.ok(!triggered(page), 'a free final without the word must not wake');
-    lastFreeRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    assert.ok(!triggered(page), 'a free final without "hey" must not wake');
+    lastFreeRecognizer(page).handlers.result({
+      result: {text: 'they saw a car'},
+    });
+    assert.ok(!triggered(page), '"they" is not "hey"');
+    lastFreeRecognizer(page).handlers.result({result: {text: "he's sorry"}});
+    assert.ok(!triggered(page), '"he\'s sorry" is 4 edits from "heysorcar"');
+    // What the free recognizer heard for "Hey Sorcar" played through
+    // this Mac's speaker into its microphone: 3 edits away.
+    lastFreeRecognizer(page).handlers.result({
+      result: {text: "open it he's order"},
+    });
     assert.ok(triggered(page), 'both recognizers agree: the page wakes');
     // A free result during the capture is ignored.
-    lastFreeRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    lastFreeRecognizer(page).handlers.result({result: {text: 'hey soccer'}});
     speak(page);
   });
 
@@ -153,14 +170,14 @@ async function main() {
     await startPipeline(page);
     page.clock.now += 3000;
     lastFreeRecognizer(page).handlers.result({
-      result: {text: 'the abracadabra'},
+      result: {text: 'okay hey soccer'},
     });
     assert.ok(!triggered(page), 'the free recognizer alone must not wake');
     page.clock.now += 2600; // past the 2.5 s agreement window
-    lastRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    lastRecognizer(page).handlers.result({result: {text: 'hey sore car'}});
     assert.ok(!triggered(page), 'finals 2.6 s apart are not one wake');
     page.clock.now += 1000;
-    lastFreeRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    lastFreeRecognizer(page).handlers.result({result: {text: 'hey soccer'}});
     assert.ok(triggered(page), 'a free final 1 s after the grammar one wakes');
   });
 
@@ -169,14 +186,21 @@ async function main() {
     await startPipeline(page);
     const proc = lastProcessor(page);
     page.clock.now += 3000;
-    feed(proc, true, 4); // ~1 s of "abracadabra"
-    feed(proc, false, 4); // the endpointing silence
-    lastRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    feed(proc, true, 4); // ~1 s of "hey sorcar"
+    const out = feed(proc, false, 4); // the endpointing silence
+    // Chrome swaps a sink that hears 30 s of exact zeros for a fake one
+    // that runs the processor at under half speed, so the processor
+    // always writes an inaudible non-zero level.
+    assert.ok(
+      out.every(v => v !== 0 && Math.abs(v) < 1e-6),
+      'the processor output is never exact silence and never audible',
+    );
+    lastRecognizer(page).handlers.result({result: {text: 'hey sore car'}});
     for (let i = 0; i < 6; i++) {
       page.clock.now += 256; // 1.5 s more before the free final
       feed(proc, false, 1);
     }
-    lastFreeRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+    lastFreeRecognizer(page).handlers.result({result: {text: 'hey soccer'}});
     assert.ok(triggered(page), 'the free final within 2.5 s wakes');
     speak(page);
     const sent = page.posted.find(m => m.type === 'voiceTranscribe');
