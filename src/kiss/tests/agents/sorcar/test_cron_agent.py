@@ -32,6 +32,7 @@ from typing import Any
 
 import pytest
 import yaml
+from websockets.sync.server import ServerConnection
 
 from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.sorcar import cron_agent
@@ -47,6 +48,7 @@ from kiss.agents.sorcar.cron_agent import (
 )
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS
 from kiss.core.config import kiss_home
+from kiss.tests.agents.sorcar.test_audit0903_stop_timeout_lost_result import _TOKEN, _FakeDaemon
 from kiss.tests.server.pause import Pause
 
 
@@ -597,6 +599,12 @@ def test_in_chat_prompt_job_is_submitted_as_typed(
     assert cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0) == (
         "error", "Task failed",
     )
+    # A failed run is an error however quiet its summary: a silent
+    # status would advance the coverage watermark over an unchecked window.
+    outcome.update(text="[SILENT]", success=False)
+    assert cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0) == (
+        "error", "Task failed",
+    )
     outcome["raise"] = ConnectionError("daemon down")
     assert cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0) == (
         "error", "Error: daemon down",
@@ -782,6 +790,13 @@ def test_writers_refuse_a_corrupt_store(tmp_path: Path) -> None:
     created = cron_job("create", name="new", command="echo 2", schedule="every 1m")
     assert "not a JSON list" in created
     assert store.read_text(encoding="utf-8") == '{"a": 1}'
+    # A store that cannot be read (a directory in its place, wrong
+    # permissions) is reported as unreadable, not as corrupt JSON.
+    store.unlink()
+    store.mkdir()
+    created = cron_job("create", name="new", command="echo 2", schedule="every 1m")
+    assert "cannot be read" in created and "not a JSON list" not in created
+    assert store.is_dir() and load_jobs() == []
 
 
 def test_tick_runs_due_command_job(tmp_path: Path) -> None:
@@ -1481,14 +1496,18 @@ def test_unconfirmed_prompt_timeout_names_the_job_work_dir(
     ``run_agent`` bound hands the task back and cron kills it, reports
     the stop as unconfirmed.
     """
-    from kiss.agents.sorcar import daemon_client
+    from kiss.agents.sorcar import daemon_client, persistence
+
+    task_id, _ = persistence._add_task("think hard", "")
 
     def hang(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
         kwargs["running"].set()
         kwargs["cancel"].wait()
         raise daemon_client.CancelledError(
             "no terminal status",
-            daemon_client.TaskResult(text="", success=False, cost=0.0, tokens=0, steps=0),
+            daemon_client.TaskResult(
+                text="", success=False, cost=0.0, tokens=0, steps=0, task_id=task_id,
+            ),
             confirmed=False,
         )
 
@@ -1509,6 +1528,225 @@ def test_unconfirmed_prompt_timeout_names_the_job_work_dir(
     kept = [p for p in (tmp_path / "cron" / "runs").iterdir() if p.is_dir()]
     assert len(kept) == 1 and kept[0].is_dir()
     assert f"scratch directory {kept[0]}" in stored["last_summary"]
+    # The task the sub-task's dispatch named is the job's claim: a due
+    # tick launches nothing while its row is unfinished.
+    assert stored["running_task_id"] == task_id
+    _set_job_fields(job["id"], next_run_at=2.5)
+    assert tick(3.0) == 0
+    assert load_jobs()[0]["last_run_at"] == 2.0
+
+
+class _IgnoresStopDaemon(_FakeDaemon):
+    """A daemon stand-in whose task names its ``task_history`` row and never answers a stop.
+
+    Each run gets ``status running=true`` and a ``task_settings`` event
+    naming the next of *task_ids* (a real run's first events); every
+    command after that is recorded and ignored, so the stop a timeout
+    sends is never confirmed and the task may still be running.
+    """
+
+    def __init__(self, task_ids: list[str]) -> None:
+        self.task_ids = task_ids
+        self.runs = 0
+        super().__init__()
+
+    def _handle(self, ws: ServerConnection, tab_id: str) -> None:
+        task_id = self.task_ids[self.runs]
+        self.runs += 1
+        self._send(ws, {"type": "status", "running": True, "tabId": tab_id})
+        self._send(ws, {
+            "type": "task_settings", "tabId": tab_id, "taskId": task_id, "settings": {},
+        })
+        while True:
+            cmd = self._recv(ws)
+            if cmd is None:
+                return
+            self.commands.append(cmd)
+
+
+def test_an_unconfirmed_stop_claims_the_job_until_its_task_row_is_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job whose task may still be running is not launched again until that task ends.
+
+    A real local-WSS daemon stand-in names the in-chat run's task row
+    and never answers the stop the 0.3-s timeout sends: the run is
+    recorded as the "MAY STILL BE RUNNING" error and the task's row id
+    stays on the job.  While that row is unfinished the next due tick
+    launches nothing and "run now" (the Schedule panel's button and the
+    tool) refuses, naming the task, so the job never overlaps its own
+    task in its chat directory; once the row is finished (the daemon's
+    final save) the tick runs the job again and the new run's task
+    replaces the claim.
+    """
+    from kiss.agents.sorcar import daemon_client, persistence
+
+    first, _ = persistence._add_task("say good morning", "")
+    second, _ = persistence._add_task("say good morning", "")
+    daemon = _IgnoresStopDaemon([first, second])
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+    monkeypatch.setattr(daemon_client, "_STOP_CONFIRM_GRACE_SECONDS", 0.5)
+    try:
+        job = _create(cron_job(
+            "create", name="morning", prompt="say good morning", schedule="every 1m",
+            in_chat=True, timeout="0.3",
+        ))
+        _set_job_fields(job["id"], next_run_at=1.0)
+        assert tick(2.0) == 1
+        assert daemon.wait_for_command("stop")
+        stored = load_jobs()[0]
+        assert stored["last_status"] == "error"
+        assert "MAY STILL BE RUNNING" in stored["last_summary"]
+        assert stored["running_task_id"] == first
+        _set_job_fields(job["id"], next_run_at=2.5)
+        assert tick(3.0) == 0
+        assert daemon.runs == 1
+        assert cron_agent.running_job_ids() == set()
+        refused = cron_agent.start_job(load_jobs()[0])
+        assert first in refused and "may still be running" in refused
+        refused = yaml.safe_load(cron_job("run_now", job_id=job["id"]))["error"]
+        assert first in refused and "may still be running" in refused
+        assert daemon.runs == 1
+        persistence._save_task_extra({"endTs": int(time.time() * 1000)}, first)
+        assert tick(4.0) == 1
+        assert daemon.runs == 2
+        assert load_jobs()[0]["running_task_id"] == second
+    finally:
+        daemon.close()
+
+
+class _NamesThenDropsDaemon(_FakeDaemon):
+    """A daemon stand-in that names the run's task row, then loses the run for good.
+
+    The run's connection gets ``status running=true`` and a
+    ``task_settings`` event naming *task_id* (a real run's first events)
+    and is then closed.  The client's reconnect (its ``resumeSession``)
+    is answered with a bare ``replayDone``: the daemon neither
+    re-attached the task as running nor replayed a result, so the client
+    reports the connection lost, naming the task that may still be
+    running, long before the run's timeout.
+    """
+
+    def __init__(self, task_id: str) -> None:
+        self.task_id = task_id
+        self.runs = 0
+        super().__init__()
+
+    def _serve(self, ws: ServerConnection) -> None:
+        auth = self._recv(ws)
+        if auth is None or auth.get("type") != "auth":
+            return
+        self._send(ws, {"type": "auth_ok", "local": auth.get("token") == _TOKEN})
+        cmd = self._recv(ws)
+        if cmd is None:
+            return
+        self.commands.append(cmd)
+        tab_id = cmd.get("tabId", "")
+        if cmd.get("type") == "resumeSession":
+            self._send(ws, {"type": "replayDone", "tabId": tab_id, "replayId": cmd["replayId"]})
+            while self._recv(ws) is not None:  # until the client hangs up
+                pass
+            return
+        self.runs += 1
+        self._send(ws, {"type": "status", "running": True, "tabId": tab_id})
+        self._send(ws, {
+            "type": "task_settings", "tabId": tab_id, "taskId": self.task_id, "settings": {},
+        })
+        # Returning closes the connection under the running task.
+
+
+def test_a_connection_lost_before_the_timeout_claims_the_job_for_the_named_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run whose daemon connection fails claims the job for the task the daemon named.
+
+    The daemon stand-in names the run's task row, then drops the run:
+    the dispatch ends before the run's timeout with the connection-lost
+    error (no detached job to collect), carrying the task's row id.
+    That id is the job's claim exactly as an unconfirmed stop's is: the
+    next due tick launches nothing and "run now" refuses while the row
+    is unfinished, so the job never runs twice over its own task; once
+    the row ends the job runs again.
+    """
+    from kiss.agents.sorcar import persistence
+
+    task_id, _ = persistence._add_task("say hi", "")
+    daemon = _NamesThenDropsDaemon(task_id)
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+    try:
+        job = _create(cron_job("create", name="dropped", prompt="say hi", schedule="every 1m"))
+        _set_job_fields(job["id"], next_run_at=1.0)
+        assert tick(2.0) == 1
+        stored = load_jobs()[0]
+        assert stored["last_status"] == "error"
+        assert "MAY STILL BE RUNNING" in stored["last_summary"]
+        assert stored["running_task_id"] == task_id
+        assert [c["type"] for c in daemon.commands] == ["run", "resumeSession"]
+        _set_job_fields(job["id"], next_run_at=2.5)
+        assert tick(3.0) == 0
+        assert daemon.runs == 1
+        refused = cron_agent.start_job(load_jobs()[0])
+        assert task_id in refused and "may still be running" in refused
+        persistence._save_task_extra({"endTs": int(time.time() * 1000)}, task_id)
+        assert tick(4.0) == 1
+        assert daemon.runs == 2
+    finally:
+        daemon.close()
+
+
+def _any_run(frame_locals: dict[str, Any]) -> bool:
+    """Hold every ``_run_prompt_job`` call entered."""
+    del frame_locals
+    return True
+
+
+def test_an_edit_during_an_unresolved_run_keeps_the_claim_of_its_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job edited while its run's task may still be running stays claimed by that task.
+
+    The run's outcome is the old task's and is not recorded on the
+    edited job (test_apply_job_action_pause_resume_update_remove), but
+    the daemon task the run left behind still works in the job's chat
+    directory: the edited job keeps that task's claim, so neither a due
+    tick nor "run now" launches it before the task's row is finished.
+    The run is held at its dispatch while the edit lands, then the
+    daemon stand-in never answers the stop its 0.3-s timeout sends.
+    """
+    from kiss.agents.sorcar import daemon_client, persistence
+
+    first, _ = persistence._add_task("say good morning", "")
+    second, _ = persistence._add_task("say good evening", "")
+    daemon = _IgnoresStopDaemon([first, second])
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+    monkeypatch.setattr(daemon_client, "_STOP_CONFIRM_GRACE_SECONDS", 0.5)
+    try:
+        job = _create(cron_job(
+            "create", name="morning", prompt="say good morning", schedule="every 1m",
+            in_chat=True, timeout="0.3",
+        ))
+        with Pause(cron_agent._run_prompt_job.__code__, _any_run) as held:
+            assert cron_agent.apply_job_action("run_now", job["id"]) == ""
+            assert held.paused.wait(30), "the run never reached its dispatch"
+            assert cron_agent.apply_job_action(
+                "update", job["id"], name="evening", schedule="every 1m",
+                what="say good evening",
+            ) == ""
+            held.release()
+        stored = _wait_for_run(job["id"])
+        assert stored["prompt"] == "say good evening" and stored["last_status"] == ""
+        assert stored["running_task_id"] == first
+        _set_job_fields(job["id"], next_run_at=1.0)
+        assert tick(2.0) == 0
+        refused = cron_agent.start_job(load_jobs()[0])
+        assert first in refused and "may still be running" in refused
+        assert daemon.runs == 1
+        persistence._save_task_extra({"endTs": int(time.time() * 1000)}, first)
+        assert tick(3.0) == 1
+        assert daemon.runs == 2
+        assert load_jobs()[0]["running_task_id"] == second
+    finally:
+        daemon.close()
 
 
 def test_cli_create_with_work_dir_flags(
@@ -1631,6 +1869,25 @@ def test_apply_job_action_pause_resume_update_remove(tmp_path: Path) -> None:
     assert updated["schedule"] == "2h" and updated["one_shot"] is True
     assert updated["next_run_at"] > before
 
+    # An update while the job runs: the run's outcome is the old task's,
+    # so it does not retire, back off or stamp the edited job (audit
+    # 2026-11-07, A07-2); the run's output is in the job's log all the same.
+    assert cron_agent.apply_job_action(
+        "update", job_id, name="greeter", schedule="every 5m", what="sleep 1; echo old",
+    ) == ""
+    _set_job_fields(job_id, until_delivered=True)
+    covered = load_jobs()[0]["covered_until"]
+    assert cron_agent.apply_job_action("run_now", job_id) == ""
+    assert cron_agent.apply_job_action(
+        "update", job_id, name="greeter", schedule="every 2h", what="echo new",
+    ) == ""
+    edited = _wait_for_run(job_id)
+    assert edited["command"] == "echo new" and edited["schedule"] == "every 2h"
+    assert edited["enabled"] is True and edited["next_run_at"] is not None
+    assert edited["last_status"] != "ok" and edited["covered_until"] == covered
+    log = (tmp_path / "cron" / "output" / f"{job_id}.md").read_text(encoding="utf-8")
+    assert "old" in log
+
     assert cron_agent.apply_job_action("remove", job_id) == ""
     assert load_jobs() == []
 
@@ -1694,7 +1951,12 @@ def test_apply_job_action_create_schedules_a_job() -> None:
 
 
 def test_apply_job_action_run_now_starts_a_thread_once(tmp_path: Path) -> None:
-    """``run_now`` returns at once; the job runs in its own thread; a second start is refused."""
+    """``run_now`` returns at once; the job runs in its own thread; a second start is refused.
+
+    The run is recorded on the stored job (``running_pid``) until it
+    ends, so a start is also refused while another live process runs
+    the job; a dead process's record does not block it.
+    """
     job = _create(cron_job(
         "create", name="slow", command="sleep 1; echo ran now", schedule="every 1d",
     ))
@@ -1702,12 +1964,26 @@ def test_apply_job_action_run_now_starts_a_thread_once(tmp_path: Path) -> None:
     cron_job("pause", job_id=job_id)
     assert cron_agent.apply_job_action("run_now", job_id) == ""
     assert job_id in cron_agent.running_job_ids()
+    assert next(j for j in load_jobs() if j["id"] == job_id)["running_pid"] == os.getpid()
     assert cron_agent.apply_job_action("run_now", job_id) == f"job {job_id!r} is already running"
     stored = _wait_for_run(job_id)
     assert stored["last_status"] == "ok"
     assert stored["last_summary"] == "ran now"
     assert stored["enabled"] is False, "a run now does not resume a paused job"
+    assert "running_pid" not in stored
     assert cron_agent.apply_job_action("run_now", "nope") == "no job with id 'nope'"
+
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        _set_job_fields(job_id, running_pid=other.pid)
+        refused = cron_agent.apply_job_action("run_now", job_id)
+        assert refused == f"job {job_id!r} is already running"
+        assert job_id not in cron_agent.running_job_ids()
+    finally:
+        other.kill()
+        other.wait()
+    assert cron_agent.apply_job_action("run_now", job_id) == ""
+    assert _wait_for_run(job_id)["last_summary"] == "ran now"
 
 
 def test_run_context_names_time_window_and_previous_result() -> None:
@@ -1803,6 +2079,19 @@ def test_repeated_identical_failure_is_delivered_once_and_backs_off(tmp_path: Pa
     third = load_jobs()[0]
     assert third["failure_streak"] == 0
     assert log_path.read_text(encoding="utf-8").count("other-error") == 1
+    # A failure whose delivery failed is not one the user has: its repeat is
+    # delivered again, not suppressed (audit 2026-11-07, A07-5).
+    _set_job_fields(job["id"], next_run_at=1.0, deliver="nowhere:1",
+                    command="echo third-error >&2; exit 5")
+    assert tick(2.0) == 1
+    assert load_jobs()[0]["last_delivery"] == ["error: unknown channel 'nowhere'"]
+    assert log_path.read_text(encoding="utf-8").count("third-error") == 1
+    _set_job_fields(job["id"], next_run_at=1.0)
+    assert tick(2.0) == 1
+    again = load_jobs()[0]
+    assert again["last_delivery"] == ["error: unknown channel 'nowhere'"]
+    assert again["failure_streak"] == 0 and again["next_run_at"] < time.time() + 3600
+    assert log_path.read_text(encoding="utf-8").count("third-error") == 2
 
 
 def test_prompt_job_naming_an_unconnected_connector_does_not_dispatch(

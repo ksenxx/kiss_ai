@@ -19,18 +19,7 @@ const assert = require('assert');
 const h = require('./ui_antipattern_harness');
 
 const {test, report} = h.makeRunner();
-const IME_FORMS = [{isComposing: true}, {keyCode: 229}];
-
-function keydown(win, el, key, extra) {
-  el.dispatchEvent(
-    new win.KeyboardEvent('keydown', {
-      key,
-      bubbles: true,
-      cancelable: true,
-      ...extra,
-    }),
-  );
-}
+const {IME_FORMS} = h;
 
 function explorerPage() {
   const page = h.makePage();
@@ -53,12 +42,12 @@ async function main() {
     assert.ok(input, 'the rename box is open');
     input.value = 'にほんご';
     for (const form of IME_FORMS) {
-      keydown(win, input, 'Enter', form);
-      keydown(win, input, 'Escape', form);
+      h.key(win, input, 'Enter', form);
+      h.key(win, input, 'Escape', form);
     }
     assert.strictEqual(fsActions(posted, 'rename').length, 0);
     assert.ok(input.isConnected, 'the box is still open');
-    keydown(win, input, 'Enter');
+    h.key(win, input, 'Enter');
     const renames = fsActions(posted, 'rename');
     assert.strictEqual(renames.length, 1, 'a plain Enter commits');
     assert.strictEqual(renames[0].dest, h.WD + '/にほんご');
@@ -73,12 +62,12 @@ async function main() {
     const input = h.toastInput(toastEl);
     input.value = 'けんさく';
     for (const ime of IME_FORMS) {
-      keydown(win, input, 'Enter', ime);
-      keydown(win, input, 'Escape', ime);
+      h.key(win, input, 'Enter', ime);
+      h.key(win, input, 'Escape', ime);
     }
     assert.strictEqual(fsActions(posted, 'findInFolder').length, 0);
     assert.ok(toastEl.isConnected, 'the prompt is still open');
-    keydown(win, input, 'Enter');
+    h.key(win, input, 'Enter');
     assert.strictEqual(fsActions(posted, 'findInFolder').length, 1);
     win.close();
   });

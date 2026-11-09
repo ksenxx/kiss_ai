@@ -47,6 +47,7 @@ from kiss.tests.server.parallel_agent_harness import (
     finish_response,
     request_text,
     tool_call_response,
+    tool_names,
 )
 
 PARENT_SCRIPT = textwrap.dedent('''
@@ -130,15 +131,6 @@ def _last_text(request: dict[str, Any]) -> str:
     return ""
 
 
-def _tool_names(request: dict[str, Any]) -> list[str]:
-    """Return the function names of the ``tools`` array of *request*."""
-    return [
-        tool["function"]["name"]
-        for tool in request.get("tools", [])
-        if isinstance(tool, dict) and "function" in tool
-    ]
-
-
 @pytest.fixture
 def env(monkeypatch: pytest.MonkeyPatch) -> Iterator[IsolatedKissHome]:
     """An isolated KISS home whose config disables worktrees and auto-commit."""
@@ -203,7 +195,7 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
         # A child's first (and only) step.
         for marker in ("CHILD-A", "CHILD-B", "CHILD-C"):
             if marker in last:
-                child_tools[marker] = _tool_names(request)
+                child_tools[marker] = tool_names(request)
                 child_prompts[marker] = request_text(request)
                 child_last_messages[marker] = last
                 return finish_response(f"done-{marker}")

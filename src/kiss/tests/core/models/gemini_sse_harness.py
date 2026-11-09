@@ -104,6 +104,14 @@ class GeminiScript:
             streamed response pauses that long before writing each chunk,
             a unary one pauses ``delay * len(chunks)`` before its single
             body, so both model the same total generation time.
+        headers: ``"complete"`` sends the response headers at once;
+            ``"drip"`` writes the status line and then one header byte
+            every 30 ms, never completing the headers — bytes that reset
+            any byte-level read deadline while no response exists yet
+            for a stream watchdog to cut.
+        refusals: How many of the next requests are answered with an
+            HTTP 503 and no body before the scripted response, so a test
+            can drive the SDK's own retry (``http_options.retry_options``).
         release: Set by the fixture teardown to free a silent handler.
         requests: The decoded JSON bodies the endpoint received.
         paths: The request paths, in order, so a test can tell a
@@ -114,13 +122,19 @@ class GeminiScript:
         self.chunks: list[dict[str, Any]] = []
         self.after = "close"
         self.delay = 0.0
+        self.headers = "complete"
+        self.refusals = 0
         self.serving = threading.Event()
         self.release = threading.Event()
         self.requests: list[dict[str, Any]] = []
         self.paths: list[str] = []
 
     def play(
-        self, chunks: list[dict[str, Any]], after: str = "close", delay: float = 0.0
+        self,
+        chunks: list[dict[str, Any]],
+        after: str = "close",
+        delay: float = 0.0,
+        headers: str = "complete",
     ) -> None:
         """Script the next response.
 
@@ -128,10 +142,12 @@ class GeminiScript:
             chunks: Chunks to write before the trailing behaviour.
             after: ``"close"``, ``"silent"``, ``"cut"`` or ``"keepalive"``.
             delay: Seconds of generation time per chunk (see ``delay``).
+            headers: ``"complete"`` or ``"drip"`` (see ``headers``).
         """
         self.chunks = chunks
         self.after = after
         self.delay = delay
+        self.headers = headers
         self.serving.clear()
 
 
@@ -146,9 +162,26 @@ class _Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b"{}"
         self.script.requests.append(json.loads(raw))
         self.script.paths.append(self.path)
+        if self.script.refusals > 0:
+            self.script.refusals -= 1
+            self.send_response(503)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         streaming = "streamGenerateContent" in self.path
         if not streaming:
             self._send_unary()
+            return
+        if self.script.headers == "drip":
+            self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Pad: ")
+            self.wfile.flush()
+            self.script.serving.set()
+            while not self.script.release.wait(timeout=0.03):
+                try:
+                    self.wfile.write(b"a")
+                    self.wfile.flush()
+                except OSError:
+                    return
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")

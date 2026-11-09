@@ -43,8 +43,10 @@ function makeView() {
   return {win, view, sent, timers};
 }
 
-function keydown(win, el, key) {
-  el.dispatchEvent(new win.KeyboardEvent('keydown', {key, bubbles: true}));
+function keydown(win, el, key, init) {
+  el.dispatchEvent(
+    new win.KeyboardEvent('keydown', Object.assign({key, bubbles: true}, init)),
+  );
 }
 
 /** A touch event as the handlers read it (jsdom has no TouchEvent). */
@@ -85,6 +87,29 @@ async function testAddressBarAndState() {
   url.value = 'typing';
   url.blur();
   assert.strictEqual(url.value, 'https://c.test/');
+
+  // An IME's Enter commits the composition and its Escape cancels it:
+  // neither is the field's shortcut (W1 F3: they navigated to the
+  // half-composed text and reset the field).  Chromium flags such keys
+  // with isComposing, or with keyCode 229 alone on some platforms.
+  url.focus();
+  url.value = '日本';
+  for (const init of [{isComposing: true}, {keyCode: 229}]) {
+    for (const key of ['Enter', 'Escape']) {
+      const e = new win.KeyboardEvent(
+        'keydown',
+        Object.assign({key, bubbles: true, cancelable: true}, init),
+      );
+      url.dispatchEvent(e);
+      assert.strictEqual(e.defaultPrevented, false, key + ' composing');
+      assert.strictEqual(url.value, '日本', key + ' composing keeps the text');
+      assert.strictEqual(win.document.activeElement, url, key + ' composing');
+    }
+  }
+  assert.strictEqual(sent.length, 0, 'a composing Enter navigates nowhere');
+  // The composition committed, the next Enter navigates.
+  keydown(win, url, 'Enter');
+  assert.strictEqual(sent.pop().url, '日本');
 
   back.click();
   assert.strictEqual(sent.pop().action, 'back');
@@ -213,12 +238,53 @@ async function testTwoFingerTouchIsNoClick() {
   );
 }
 
+// A keyup goes to wherever the focus is then: one that leaves the
+// screen (the address field, another tab, another application) never
+// reaches it, and the remote page kept the key pressed.  Keys forwarded
+// down are released when the screen loses focus, when the view is
+// hidden and on dispose; a keyup the screen does get is forwarded as
+// before.
+async function testHeldKeysReleasedWithFocus() {
+  const {win, view, sent} = makeView();
+  const screen = view.el.querySelector('.browser-screen');
+  const keys = () =>
+    sent
+      .filter(m => m.type === 'browserInput' && m.event.kind === 'key')
+      .map(m => m.event.action + ':' + m.event.key);
+  screen.focus();
+  keydown(win, screen, 'Shift', {shiftKey: true});
+  keydown(win, screen, 'a', {shiftKey: true});
+  assert.deepStrictEqual(keys(), ['down:Shift', 'down:a']);
+  // The user clicks into the address field with both keys still down.
+  view.el.querySelector('.browser-url').focus();
+  assert.deepStrictEqual(keys().slice(2), ['up:Shift', 'up:a']);
+  assert.ok(
+    sent
+      .filter(m => m.event && m.event.action === 'up')
+      .every(m => m.event.shift),
+    'the releases carry the modifiers of the press',
+  );
+  // Back on the screen, the key's own keyup is forwarded, once.
+  screen.focus();
+  screen.dispatchEvent(
+    new win.KeyboardEvent('keyup', {key: 'a', bubbles: true}),
+  );
+  assert.deepStrictEqual(keys().slice(4), ['up:a']);
+  // Hidden with a key down: released.  Disposed with one: released too.
+  keydown(win, screen, 'b');
+  view.setVisible(false);
+  keydown(win, screen, 'c');
+  view.dispose();
+  assert.deepStrictEqual(keys().slice(5), ['down:b', 'up:b', 'down:c', 'up:c']);
+}
+
 (async () => {
   await testAddressBarAndState();
   await testViewportAndDispose();
   await testShowHideBeforeTick();
   await testHideThenDispose();
   await testTwoFingerTouchIsNoClick();
+  await testHeldKeysReleasedWithFocus();
   console.log('browserTabView.test.js passed');
 })().catch(err => {
   console.error(err);

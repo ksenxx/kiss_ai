@@ -35,9 +35,7 @@ const {
 
 const {test, report} = makeRunner();
 
-function submits(posted) {
-  return posted.filter(m => m.type === 'submit');
-}
+const {submits} = require('./attachment_helpers');
 
 function audioRounds(posted) {
   return posted.filter(m => m.type === 'voiceTranscribe').map(m => m.round);
@@ -64,6 +62,7 @@ async function cancelAThenPostBElsewhere(page, chatX, chatY) {
   speak(page); // round B posts its audio before A's reply lands
   const [roundA, roundB] = audioRounds(page.posted);
   assert.strictEqual(typeof roundA, 'number', 'the audio carries its round');
+  assert.strictEqual(typeof roundB, 'number', 'the audio carries its round');
   assert.notStrictEqual(roundA, roundB, 'each round has its own tag');
   return {roundA, roundB};
 }

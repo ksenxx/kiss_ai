@@ -9,7 +9,8 @@ The catalog's ``thinking`` field is the reasoning effort an entry runs at
 ``-{level}`` alias: its suffix level).  The adapters have to turn it into
 the vendor's request parameter — ``output_config.effort`` for Claude
 (direct and through Bedrock), ``reasoning.effort`` on the Responses API,
-``reasoning_effort`` on Chat Completions — unless ``model_config`` says
+``reasoning_effort`` on Chat Completions, ``thinking_config.thinking_level``
+for Gemini, ``--effort`` for the Claude Code CLI (``cc/*``) — unless ``model_config`` says
 otherwise.  The bare ``claude-opus-5-5`` used to be the exception: its
 ``thinking: "high"`` was treated as a nominal cap and nothing was sent, so
 Anthropic ran it at its omitted-effort default (``medium`` on Opus 5.5).
@@ -59,6 +60,13 @@ def _wire_level(m: Model) -> Any:
     if cls == "OpenAICompatibleModel":
         kw = m._build_chat_kwargs(m.conversation)  # type: ignore[attr-defined]
         return kw.get("reasoning_effort")
+    if cls == "GeminiModel":
+        level = m._build_config(m._chat_messages()).thinking_config.thinking_level  # type: ignore[attr-defined]
+        return level and level.value.lower()
+    if cls == "ClaudeCodeModel":
+        # The value ``_build_cli_args`` passes as ``--effort``; read directly
+        # because building the argv needs the ``claude`` CLI on PATH.
+        return m._effort_level()  # type: ignore[attr-defined]
     pytest.fail(f"{cls} has no effort surface but its catalog entry carries a thinking level")
 
 
@@ -95,7 +103,13 @@ def test_every_catalog_thinking_level_is_sent() -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["claude-opus-5-5", "bedrock/us.anthropic.claude-opus-5-5", "gpt-5.5", "claude-fable-5-1"],
+    [
+        "claude-opus-5-5",
+        "bedrock/us.anthropic.claude-opus-5-5",
+        "gpt-5.5",
+        "claude-fable-5-1",
+        "gemini-4-argon",
+    ],
 )
 def test_explicit_reasoning_effort_still_wins(name: str) -> None:
     """``model_config["reasoning_effort"]`` overrides the catalog level everywhere."""

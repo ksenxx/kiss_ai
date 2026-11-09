@@ -37,13 +37,18 @@ Branches not exercised:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import secrets
 import socket
+import socketserver
+import sys
 import threading
 import time
 from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from types import FrameType
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -77,11 +82,12 @@ from kiss.agents.sorcar.mcp_servers import (
     FileTokenStorage,
     MCPManager,
     MCPServerConfig,
+    _connection_key,
     build_oauth_provider,
     load_mcp_servers,
     user_mcp_config_path,
 )
-from kiss.tests.conftest import occupy_loopback_port
+from kiss.tests.conftest import occupy_loopback_port, wait_for
 
 # ---------------------------------------------------------------------------
 # A real OAuth-protected MCP server
@@ -398,6 +404,45 @@ def test_manager_refreshes_expired_tokens(server: _AuthMCPServer, home: Path) ->
     assert new in server.provider.access
 
 
+def test_manager_refreshes_a_token_that_expires_while_connected(
+    server: _AuthMCPServer, home: Path,
+) -> None:
+    """A token valid at connect time is refreshed once its stored expiry passes.
+
+    The SDK loads stored tokens without a deadline and treats a loaded
+    token as valid until a request fails, so a long-lived connection
+    kept sending an access token past its stored ``expires_at``; the
+    server's 401 then took the interactive sign-in path, which an agent
+    run refuses, although a refresh token was at hand.  The provider
+    now starts with the stored deadline (less the refresh margin).
+    """
+    _login(server)
+    storage = FileTokenStorage("authdemo", server.url)
+    tokens = storage._read()["tokens"]
+    old = tokens["access_token"]
+    # Expires in 3 s on the server; the stored record (an integer
+    # ``expires_in``, as the token model demands) puts it 2 s past the
+    # 60 s refresh margin, so it is valid when the connection starts and
+    # due for a refresh before the tool call below.
+    server.provider.access[old] = server.provider.access[old].model_copy(
+        update={"expires_at": int(time.time()) + 3}
+    )
+    storage.put("tokens", {**tokens, "expires_in": 62})
+    cfg = _cfg(server)
+    manager = MCPManager()
+    try:
+        conn = manager.connect(cfg)
+        assert conn.error == "", conn.error
+        time.sleep(2.5)
+        result = manager.call_tool(_connection_key(cfg), "_echo", {"text": "hi"})
+        assert result == "echo: hi", result
+    finally:
+        manager.shutdown()
+    new = storage._read()["tokens"]["access_token"]
+    assert new != old
+    assert new in server.provider.access
+
+
 def test_login_refused_by_user(server: _AuthMCPServer, home: Path) -> None:
     server.provider.refuse = True
     session = MCPLoginSession.start(_cfg(server))
@@ -450,6 +495,135 @@ def test_half_open_redirect_connection_does_not_pin_the_port(
         assert replacement.done, replacement.error
     finally:
         half_open.close()
+
+
+def _callback_connection_accepted() -> bool:
+    """Whether the redirect server is inside its request handler (a connection accepted)."""
+    handling = BaseHTTPRequestHandler.handle_one_request.__code__
+    for top in sys._current_frames().values():
+        frame: FrameType | None = top
+        while frame is not None:
+            if frame.f_code is handling:
+                return True
+            frame = frame.f_back
+    return False
+
+
+#: What ``recv`` raises, besides returning ``b""``, once the server ended a
+#: connection the feeder was still writing to: a reset, which Windows reports
+#: as the connection aborted (``WSAECONNABORTED``) when the send met it.
+_ENDED_BY_THE_SERVER = (ConnectionResetError, ConnectionAbortedError)
+
+
+def test_cancel_ends_a_callback_connection_that_keeps_the_handler_busy(
+    server: _AuthMCPServer, home: Path
+) -> None:
+    """A browser connection that keeps sending header bytes never trips the
+    handler's inactivity timeout; a cancel must shut that connection down
+    too, else the flow waits for it for good and the session never ends
+    (audit A09)."""
+    session = MCPLoginSession.start(_cfg(server))
+    assert session.auth_url
+    slow = socket.create_connection(("127.0.0.1", mcp_oauth.MCP_REDIRECT_PORT), timeout=10)
+    stop = threading.Event()
+
+    def keep_the_header_coming() -> None:
+        # One header byte a second: well within the handler's 5 s timeout.
+        with contextlib.suppress(OSError):
+            while not stop.wait(1.0):
+                slow.sendall(b"X")
+
+    feeder = threading.Thread(target=keep_the_header_coming, daemon=True)
+    try:
+        slow.sendall(b"GET /callback HTTP/1.1\r\nX-Slow: ")
+        assert wait_for(_callback_connection_accepted, timeout=10)
+        feeder.start()
+        session.cancel()
+        assert session.wait(10), "the accepted connection kept the cancelled flow alive"
+        assert session.done is False
+        assert session.error == "sign-in cancelled"
+        stop.set()
+        feeder.join(5)
+        with contextlib.suppress(*_ENDED_BY_THE_SERVER):
+            assert slow.recv(1) == b""  # the server ended the connection
+        replacement = MCPLoginSession.start(_cfg(server))
+        assert replacement.auth_url, replacement.error
+    finally:
+        stop.set()
+        slow.close()
+
+
+def test_the_deadline_ends_a_callback_connection_that_keeps_the_handler_busy(
+    server: _AuthMCPServer, home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The login deadline, not just a cancel, must end a busy callback connection.
+
+    The deadline cancels the flow's task, but the ``to_thread`` worker
+    serving the trickling connection cannot be cancelled, and the server
+    was only closed by ``_run`` after ``asyncio.run`` returned: which it
+    does only once its executor shutdown gave up on the worker (five
+    minutes), so the session and its port outlived the deadline by that
+    much (audit 2026-11-08, S5 F3).  The flow closes the server itself
+    now, so the worker is freed before the executor is shut down.
+    """
+    monkeypatch.setattr(mcp_oauth, "_LOGIN_TIMEOUT", 5.0)
+    monkeypatch.setattr(mcp_oauth, "CONNECT_TIMEOUT", 1.0)
+    session = MCPLoginSession.start(_cfg(server))
+    assert session.auth_url
+    slow = socket.create_connection(("127.0.0.1", mcp_oauth.MCP_REDIRECT_PORT), timeout=10)
+    stop = threading.Event()
+
+    def keep_the_header_coming() -> None:
+        with contextlib.suppress(OSError):
+            while not stop.wait(0.5):
+                slow.sendall(b"X")
+
+    feeder = threading.Thread(target=keep_the_header_coming, daemon=True)
+    try:
+        slow.sendall(b"GET /callback HTTP/1.1\r\nX-Slow: ")
+        assert wait_for(_callback_connection_accepted, timeout=10)
+        assert not session._finished.is_set(), "the flow ended before the connection was served"
+        feeder.start()
+        assert session.wait(6.0 + 5.0), "the busy connection kept the timed-out flow alive"
+        assert session.done is False
+        assert "TimeoutError" in session.error, session.error
+        stop.set()
+        feeder.join(5)
+        with contextlib.suppress(*_ENDED_BY_THE_SERVER):
+            assert slow.recv(1) == b""  # the server ended the connection
+        replacement = MCPLoginSession.start(_cfg(server))  # the port is free again
+        assert replacement.auth_url, replacement.error
+    finally:
+        stop.set()
+        slow.close()
+
+
+def test_a_stop_between_publishing_the_session_and_starting_it_leaves_nothing(
+    server: _AuthMCPServer, home: Path
+) -> None:
+    """A Stop (``KeyboardInterrupt`` on the task thread) that lands after the
+    listener is bound and the session published, before its worker starts,
+    must unpublish the session and free the port: nothing would ever finish
+    that session and no later sign-in could bind the port (audit A09)."""
+    start = threading.Thread.start.__code__
+
+    def interrupt_the_start(frame: Any, event: str, arg: Any) -> None:
+        if event == "call" and frame.f_code is start:
+            sys.setprofile(None)
+            raise KeyboardInterrupt
+
+    sys.setprofile(interrupt_the_start)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            MCPLoginSession.start(_cfg(server))
+    finally:
+        sys.setprofile(None)
+    assert MCPLoginSession.active("authdemo") is None
+    replacement = MCPLoginSession.start(_cfg(server))  # the port is free again
+    assert replacement.auth_url, replacement.error
+    _approve(replacement.auth_url)
+    assert replacement.wait(30)
+    assert replacement.done, replacement.error
 
 
 def test_login_opens_the_browser_tab_and_hands_off_without_a_url(
@@ -598,6 +772,59 @@ def test_unreachable_server_reports_error(home: Path) -> None:
     assert session.done is False
     assert session.error
     assert "ConnectError" in session.error
+
+
+class _SilentHandler(socketserver.BaseRequestHandler):
+    """Accept the connection, read the request, never answer."""
+
+    def handle(self) -> None:
+        with contextlib.suppress(OSError):
+            while self.request.recv(65536):
+                pass
+
+
+@pytest.fixture
+def silent_server() -> Iterator[str]:
+    """A server that accepts the MCP transport but never answers a request."""
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _SilentHandler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/mcp"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_cancel_ends_a_login_stuck_on_a_silent_server(home: Path, silent_server: str) -> None:
+    """``cancel()`` must end the login flow, not just flag it.
+
+    The flow sits in its first request to a server that never answers;
+    ``cancel()`` only set a flag the flow checks at the redirect and in
+    the callback loop, which it never reaches, so the login thread kept
+    waiting on the server (the transport's read timeout, minutes) after
+    the user cancelled or a replacement session took over.
+    """
+    cfg = MCPServerConfig(name="silent", transport="http", url=silent_server)
+    session = MCPLoginSession.start(cfg, wait_seconds=1.0)
+    assert not session.auth_url and not session._finished.is_set()
+    session.cancel()
+    assert session.wait(10), "the cancelled login kept waiting on the silent server"
+    assert session.done is False
+    assert session.error == "sign-in cancelled"
+
+
+def test_login_stuck_on_a_silent_server_times_out(
+    home: Path, silent_server: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flow the server never answers ends at the sign-in deadline with an error."""
+    monkeypatch.setattr(mcp_oauth, "_LOGIN_TIMEOUT", 0.5)
+    monkeypatch.setattr(mcp_oauth, "CONNECT_TIMEOUT", 0.5)
+    cfg = MCPServerConfig(name="silent", transport="http", url=silent_server)
+    session = MCPLoginSession.start(cfg, wait_seconds=10.0)
+    assert session.wait(10), "the login outlived its deadline"
+    assert session.done is False
+    assert "TimeoutError" in session.error, session.error
 
 
 # ---------------------------------------------------------------------------

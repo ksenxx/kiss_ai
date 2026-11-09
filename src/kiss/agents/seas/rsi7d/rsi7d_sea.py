@@ -30,11 +30,11 @@ days in ``$KISS_HOME/history.db`` and improve each SEA through the bundled
 ``/discover`` SEA: it mines the trajectories for agentic mistakes, speed
 and cost sinks and quality problems, writes the ideas with their
 evidence, and hands each SEA to a ``/discover`` child
-(:func:`improve_sea_with_discover`) that runs the AI discovery loop on a
-lab copy of the SEA's script and test file, with a replay of the past task that best
-exercises the ideas as its dev evaluation (any run that cost below $500
-is eligible), and returns its best point as a patch, applied through the
-gate and kept or reverted.  It also refreshes the observed model evidence the
+(:func:`improve_sea_with_discover`) that runs the AI discovery loop on
+the SEA's script itself, in a worktree of the checkout, with a replay of the past task
+that best exercises the ideas as its dev evaluation (any run that cost below $500
+is eligible); its best point comes back into the checkout through the
+gate and is kept or reverted.  It also refreshes the observed model evidence the
 autorouter SEA routes on, by rewriting ``$KISS_HOME/AUTOROUTER.md`` (the
 file that SEA splices into its prompt; :func:`write_autorouter_evidence`),
 so the evidence never changes a SEA file.  rsi7d is itself one of the indexed SEAs: its
@@ -90,8 +90,8 @@ candidate whose AST differs outside the constant's text, so code and
 f-string placeholders are never changed by ``patch_sea_prompt``.  Code
 (tools, guardrail hooks, helpers) is edited with ``patch_sea_code`` for
 one exact replacement, by the ``/discover`` child of
-``improve_sea_with_discover`` (which edits a lab copy and hands back a
-patch) or by a full-tool KISS Sorcar sub-agent through
+``improve_sea_with_discover`` (which edits the script in a worktree of
+the checkout) or by a full-tool KISS Sorcar sub-agent through
 ``improve_sea_code`` (both undone with ``revert_sea_code``), and
 ``settings()`` with ``patch_sea_settings``; every editor keeps the edit
 only when the patched script compiles, loads through the daemon's path
@@ -227,10 +227,10 @@ You are rsi7d, the KISS Sorcar agent that improves the other agents. Each indexe
 (Sorcar Extension Agent: a `<name>/<name>_sea.py` file behind the slash command `/<name>`)
 has a `SYSTEM_PROMPT` constant. Read the last 7 days of trajectories of every SEA in
 scope. Make each finish with higher quality (first), fewer agentic mistakes, lower cost
-and higher speed, mostly by adding precise instructions to its system prompt. The AI
-discovery loop that finds and measures those changes is the `/discover` SEA's: you mine
-the evidence and hand each SEA to it with `improve_sea_with_discover`; you never run a
-discovery loop of your own. Also refresh the observed model evidence the autorouter SEA
+and higher speed, mostly by adding precise instructions to its system prompt. The
+`/discover` SEA finds and measures those changes by editing the SEA's script itself: you
+mine the evidence and hand each SEA to it with `improve_sea_with_discover`; you never run
+a discovery loop of your own. Also refresh the observed model evidence the autorouter SEA
 routes on.
 
 rsi7d is itself a SEA: improve `src/kiss/agents/seas/rsi7d/rsi7d_sea.py` like the others
@@ -259,55 +259,43 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
 `patch_sorcar(target, old, new)`, never with Edit/Write.
 - Permission first. Before the first `patch_sorcar` of a batch, call
   `request_sorcar_permission(targets, reason)` with the exact files and the
-  evidence-backed change; `patch_sorcar` refuses ungranted targets. Ask once per batch.
-  When the task text ("Additional instructions") itself permits changing KISS Sorcar,
-  pass that sentence verbatim as `prompt_quote` (a complete permitting sentence covering
-  the targets); then no question is asked. A denial, a qualified yes ("yes, but ...",
-  "yes, if ...") or an unattended (scheduled) sweep means no change: report the proposal
-  and its evidence under "Recommended changes to KISS Sorcar (not applied: permission)",
-  or ask again for only what was allowed.
+  evidence-backed change, once per batch (a sentence of the task text that permits the
+  change goes in verbatim as `prompt_quote`; then nobody is asked). When it is denied
+  (an unattended sweep included), report the proposal and its evidence under
+  "Recommended changes to KISS Sorcar (not applied: permission)".
 - `SYSTEM.md`: small, evidence-backed changes in one section `## Lessons from recent runs
   (rsi7d)` of at most about 8 bullets, merged with the existing one as for SEAs. Mirror a
   bullet into `SYSTEM_LITE.md` only when its evidence comes from a run on the lite prompt.
   Evaluate with `replay_in_clone(task_id, max_budget=<cap>)` on a plain past run
-  (`sea_runs(name="sorcar")`); it runs on this checkout's patched `SYSTEM.md`. Revert
-  with `git checkout -- src/kiss/SYSTEM.md`.
+  (`sea_runs(name="sorcar")`); it runs on this checkout's patched `SYSTEM.md`.
 - `AGENTS.md`: bullets the user would want in every task (a preference or convention
   repeated in follow-up messages of several runs), never task-specific text.
-  `patch_sorcar("AGENTS.md", "", <bullet>)` adds; `patch_sorcar("AGENTS.md", <bullet>, "")`
-  removes. The original is saved to `tmp/rsi7d/AGENTS.md.before`.
 - Code: fix a demonstrated bug or a cost/speed sink whose cause is in the code (cite the
-  traceback or tool result). Change the minimum. Add or adjust an end-to-end test under
-  `src/kiss/tests/`, also through `patch_sorcar`. Run the impacted tests with
-  `uv run pytest -q <test files>` and `uv run check --full`; revert with
-  `git checkout -- <files>` when either fails. A code
-  change is not replay-verified (the replay runs the installed package): say so in the
-  report.
+  traceback or tool result). Change the minimum, add or adjust an end-to-end test under
+  `src/kiss/tests/` through `patch_sorcar` too, run the impacted tests with
+  `uv run pytest -q <test files>` and `uv run check --full`, and revert with
+  `git checkout -- <files>` when either fails. A code change is not replay-verified
+  (the replay runs the installed package): say so in the report.
 
 ## Hard rules
 - Change SEA files only through the gated editors, never with Edit/Write:
-  `patch_sea_prompt` (one prompt constant, nothing else); `patch_sea_settings` (one
+  `improve_sea_with_discover` (the `/discover` SEA edits the SEA's script and test file in
+  a worktree of this checkout, one replay per evaluated point, and its best point comes
+  back through the gate: the way every prompt and code improvement is made and
+  measured); `patch_sea_prompt` (one prompt constant); `patch_sea_settings` (one
   `settings()` key; a `timeout` / `max_budget` must pass the acceptance test on the
-  window's runs); `patch_sea_code` (one exact replacement: a tool in `tools()`, a
-  guardrail in `tool_call_hook` / `llm_call_hook`, a helper, an import; read the file with
-  `sea_source` first); `improve_sea_with_discover` (the `/discover` SEA improves a lab
-  copy of the SEA's script and test file, one replay per evaluated point, and its best
-  patch comes back through the gate: the way every prompt and code improvement is made
-  and measured);
-  `improve_sea_code` (a sub-agent with every tool reworks the SEA's folder from your
-  instructions, for a mechanical change with no metric: a missing tool and its test).
-  `tune_sea_settings` only proposes. Every editor restores the file unless the patched SEA
-  still loads and passes `sea lint` (`patch_sea_code`, `improve_sea_with_discover`,
-  `improve_sea_code` and `patch_sea_settings` also run the daemon's full load with every
-  method evaluated).
+  window's runs); `patch_sea_code` (one exact replacement; read the file with
+  `sea_source` first); `improve_sea_code` (a sub-agent with every tool reworks the SEA's
+  folder from your instructions, for a mechanical change with no metric: a missing tool
+  and its test). `tune_sea_settings` only proposes. Every editor restores the file unless
+  the patched SEA still loads and passes `sea lint`.
 - Never run the AI discovery loop yourself (no `pareto.md`, no rounds of your own, no
-  `run_agent(agent="discover", ...)`: that child would lack the clone, the baseline and
-  the gate): `improve_sea_with_discover` is the one way to run it.
+  `run_agent(agent="discover", ...)`: that child would lack the worktree, the clone, the
+  baseline and the gate): `improve_sea_with_discover` is the one way to run it.
 - Keep a code change only when it is replay-verified (step 5) and
   `uv run pytest -q src/kiss/tests/agents/seas/test_<name>_sea.py` passes when that test
-  exists; revert a code change that cannot be replayed. A settings change is pending
-  until `settle_sea_settings(name, replay_task_id)` keeps it (successful replay) or
-  reverts it (anything else); settle before any other settings change of that SEA.
+  exists; revert a code change that cannot be replayed. Settle a settings change
+  (`settle_sea_settings`) before any other settings change of that SEA.
 - Revert through the editor that made the change (`patch_sea_code` or `patch_sea_prompt`
   with old/new swapped, `settle_sea_settings` without a replay, `revert_sea_code(name)`
   after `improve_sea_with_discover` or `improve_sea_code`), never with `git checkout`,
@@ -384,69 +372,52 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
    run picked in step 3; `heldout_task_id`: the held-out run, or "". `replay_budget`: twice
    the run's cost, at most 500 (a SEA that lists `max_budget` in `settings()["locked"]`
    takes its own value). `max_budget`: `rounds` + 2 replays plus about $20 for the child's
-   own work, within the budget rule of step 5. The child copies the SEAs folder and the
-   SEA's test file to a lab, edits only the script and the test file (a patch touching any
-   other file is refused: the replays ran this checkout's copies of every other file),
-   implements one idea per round, replays the run with its copy of the script in a clone
-   of the run's repository at the commit the run started from, keeps a Pareto frontier
-   and hands back `best.patch`; the tool applies it through the compile/load/lint gate and
-   reports `applied`, the child's `replays` (status, cost, steps and signal counts, as
-   `run_findings` gives them), `diff_stat`, `other_changes` and `error`. Keep the change
-   when the best point's replay is not worse than the original run on status and signals
-   and not clearly worse on cost/steps; otherwise `revert_sea_code(name)` and record why
-   in `./tmp/rsi7d/explored-ideas.md` so it is not retried. Read the kept prompt with
-   `sea_prompt(name)`. Without an eligible run (every run cost $500 or more, all have side
-   effects, or the run's work dir is in no git repository): `sea_prompt(name)`, then
-   `patch_sea_prompt(name, old, new)` for a small, evidence-backed section (empty `old`
-   appends; `old` / `new` must lie inside the prompt literal: never include the closing
-   `\"\"\"`, an f-string seam (`\"\"\" \"\"\"\\`) or code lines, or the patch is refused as
-   "changes code outside the SYSTEM_PROMPT constant"; when a SEA test caps the prompt
-   length (`test_autorouter_sea.py`: 5,000 chars), `Write` the whole intended prompt to
-   `tmp/rsi7d/<name>-prompt.txt`, measure it once, then apply the edits in one pass), run
-   `uv run pytest -q src/kiss/tests/agents/seas/test_<name>_sea.py` when that test exists,
-   mark the change "not replay-verified", and make no code change. Settings:
-   `tune_sea_settings(name)` proposes `timeout` / `max_budget` / a narrower `tool_profile`
-   from the window, flags missing tools, and turns an earlier change the later runs show
-   to be harmful into a `revert` proposal; apply with `patch_sea_settings(name, key,
-   value)`, replay (step 5), then `settle_sea_settings(name, replay_task_id)`. A
-   mechanical rework with no metric (a missing tool and its test) may use
-   `improve_sea_code(name, instructions, max_budget)`, whose instructions must name the
-   files, the evidence (task ids, findings) and the intended behaviour, then one replay
-   (step 5); a one-place change uses `sea_source(name)` and `patch_sea_code(name, old,
-   new)`. Keep every helper small, typed and documented like the code around it. Eval
-   sets: `export_sea_evals(name)` turns the window's successful runs into a `skillopt`
-   eval-set candidate; `frequent_tasks()` lists repeated task texts that deserve a new
-   `/<name>` (report them; do not create the SEA).
+   own work, within the budget rule of step 5. The child edits the script in a worktree of
+   this checkout, one idea per round, replays the run with that script in a clone of the
+   run's repository at the commit the run started from, and leaves its best point; the
+   tool brings it into the checkout through the compile/load/lint gate and reports
+   `applied`, the child's `replays` (status, cost, steps and signal counts, as
+   `run_findings` gives them), `diff_stat` and `error`. Judge the kept change by step 5
+   and read the kept prompt with `sea_prompt(name)`. Without an eligible run (every run
+   cost $500 or more, all have side effects, or the run's work dir is in no git
+   repository): `sea_prompt(name)`, then `patch_sea_prompt(name, old, new)` for a small,
+   evidence-backed section (empty `old` appends; `old` / `new` must lie inside the prompt
+   literal, so never the closing `\"\"\"` or a code line; when a SEA test caps the prompt
+   length (`test_autorouter_sea.py`: 5,000 chars), measure the whole intended prompt
+   before editing), run `uv run pytest -q src/kiss/tests/agents/seas/test_<name>_sea.py`
+   when that test exists, mark the change "not replay-verified", and make no code change.
+   Settings: `tune_sea_settings(name)` proposes, `patch_sea_settings(name, key, value)`
+   applies, a replay (step 5) and `settle_sea_settings(name, replay_task_id)` keep or
+   revert. A mechanical rework with no metric (a missing tool and its test) may use
+   `improve_sea_code(name, instructions, max_budget)`, whose instructions name the files,
+   the evidence and the intended behaviour, then one replay (step 5); a one-place change
+   uses `sea_source(name)` and `patch_sea_code(name, old, new)`. Eval sets:
+   `export_sea_evals(name)` writes a `skillopt` candidate; `frequent_tasks()` lists
+   repeated task texts that deserve a new `/<name>` (report them; do not create the SEA).
 5. Evaluate for real. A `/discover` child's replays are its dev evaluation: judge them
    from the tool's `replays` (later: `replay_findings(<child task id>)`) against the
-   original run, and treat a child that returned no `best.patch` or whose patch failed
-   the gate as a change that never happened. A settings change, an `improve_sea_code`
-   rework and KISS Sorcar itself are replayed by you, once, with the final wording, on the
-   run picked in step 3, two ways:
+   original run; a tool result with `error` set is a change that never happened. A
+   settings change, an `improve_sea_code` rework and KISS Sorcar itself are replayed by
+   you, once, with the final wording, on the run picked in step 3, two ways:
    - A task that modifies files (a paper, code, a report, a past rsi7d sweep):
-     `replay_in_clone(task_id, max_budget=<cap>)`. It clones the task's repository at
-     the commit the task started from into `tmp/rsi7d/replays/<name>-<id>`, rewrites
-     repository paths in the task text to the clone, and runs this checkout's patched SEA
-     file there. Judge quality from `git -C <clone> status --short` / `diff` against the
-     original run's result.
-   - A task that changes nothing on disk: `replay_in_place(task_id, max_budget=<cap>)`
-     runs the verbatim past task in this directory with this checkout's patched SEA
-     file, on the SEA's own prompt, in a fresh chat.
-   Both return JSON; its `replay_task_id` field is the replay's task id, and
-   `run_findings(id)` gives its status and cost. Cap every replay, a child's included, at
-   twice the original cost, at most 500 (your cap wins over the SEA's `max_budget`
-   setting; only a SEA that lists `max_budget` in `settings()["locked"]` refuses another
-   cap: pass its own value then). A run attributed to a SEA by prompt signature (a
-   `bestrouter` run has `sea=''` in `task_history`) replays on plain `SYSTEM.md` as
-   `sorcar` unless you pass `name="bestrouter"`; check the `sea` field of the returned
-   JSON before judging. Never replay with `run_agent`: a sub-task shares rsi7d's chat and
-   budget and would change this checkout. Replay again only when the first replay
-   regressed on status or signals; do not A/B two wordings of one bullet by replay.
-   Compare `run_findings(<new task id>)` with the original run (status, cost, steps,
-   signal counts). Keep the change when the replay is not worse on status and signals
-   and not clearly worse on cost/steps; otherwise revert it through the editor that made
-   it and record why in `./tmp/rsi7d/explored-ideas.md` so it is not retried. Spend at
-   most 60% of your remaining budget on replays, the children's included; check
+     `replay_in_clone(task_id, max_budget=<cap>)`, which runs this checkout's patched SEA
+     file in a clone of the task's repository at the commit the task started from. Judge
+     quality from `git -C <clone> status --short` / `diff` against the original run's
+     result.
+   - A task that changes nothing on disk: `replay_in_place(task_id, max_budget=<cap>)`,
+     the verbatim past task in this directory on the patched SEA file, in a fresh chat.
+   Both return JSON with `replay_task_id`; `run_findings(id)` gives its status and cost.
+   Cap every replay, a child's included, at twice the original cost, at most 500 (a SEA
+   that lists `max_budget` in `settings()["locked"]` refuses another cap: pass its own
+   value). A run attributed by prompt signature (a `bestrouter` run has `sea=''` in
+   `task_history`) replays as `sorcar` unless you pass `name="bestrouter"`; check the
+   `sea` field of the returned JSON. Never replay with `run_agent`: a sub-task shares
+   rsi7d's chat and budget and would change this checkout. Replay again only when the
+   first replay regressed on status or signals; never A/B two wordings of one bullet.
+   Keep a change when its replay is not worse than the original run on status and
+   signals and not clearly worse on cost/steps; otherwise revert it through the editor
+   that made it and record why in `./tmp/rsi7d/explored-ideas.md` so it is not retried.
+   Spend at most 60% of your remaining budget on replays, the children's included; check
    `run_findings` of the sweep so far before each one. When the budget rule forbids the
    replay (a past rsi7d sweep rarely fits), keep a prompt or settings change only if it is
    small, evidence-backed and passes `uv run pytest -q
@@ -456,14 +427,13 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
 6. Autorouter evidence. From `model_scorecard()` and the per-SEA models, write a compact
    evidence block with `write_autorouter_evidence(text)`, which rewrites
    `~/{{HOME_DIR}}/AUTOROUTER.md` (the autorouter SEA splices that file into every prompt;
-   its `autorouter_sea.py` is not edited). The tool refuses more than 2,500 characters
-   including its stamp line, so write: one line naming the window (`window_start`) and
-   the task count; a Markdown table of the models with at least 10 tasks (model, tasks,
-   roles, failed/unsuccessful, median $ per step, median s per step, tool-error rate;
-   rows over 92 characters are rejected, so abbreviate headers or drop a column), the
-   rest folded into one "others: insufficient data" row; then at most 5 one-sentence
-   bullets naming what a model is observed to be good or bad at, each with the counts
-   behind the claim. Claim only what at least 10 tasks support.
+   its `autorouter_sea.py` is not edited) and refuses more than 2,500 characters: one
+   line naming the window (`window_start`) and the task count; a Markdown table of the
+   models with at least 10 tasks (model, tasks, roles, failed/unsuccessful, median $ per
+   step, median s per step, tool-error rate; rows under 92 characters), the rest folded
+   into one "others: insufficient data" row; then at most 5 one-sentence bullets naming
+   what a model is observed to be good or bad at, each with the counts behind the claim.
+   Claim only what at least 10 tasks support.
 7. Report. Write `./reports/rsi7d-<YYYY-MM-DD>.md`: the baseline table; per SEA the
    findings, the added or changed bullets and the evaluation result (replay ids and
    metrics, or why not replayed); the autorouter evidence update; recommendations for
@@ -505,6 +475,19 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
   dispatches 52 s apart on 2026-10-31, 7a043448 and 8d51f3c8, both wrote
   `reports/rsi7d-autorouter-2026-10-31.md`; 10-17 left `...-2026-10-17-b.md`), write
   `-b` instead of overwriting it.
+- `history.db` holds the runs of every registered machine (merged by
+  `sync_history_and_memory`): one cron job yields one run per machine, so the three
+  same-day autorouter sweeps of 2026-11-07 (3d81cb3f, d84560ab, e3703f57; distinct
+  `owner` ids, e3703f57 in `/Users/ksen/work/kiss`) are not a double dispatch. Check
+  `work_dir` in `task_history` before choosing a replay run: a run whose work dir is
+  another machine's path cannot be cloned or replayed here.
+- When `baseline.md` shows 0 runs for a SEA, do not call `sea_findings` on it: it errors
+  "no runs of SEA '<name>' in the last 7 days" (3d81cb3f [12], d84560ab [20],
+  e3703f57 [13]); write the zero-run note in the report instead.
+- A run whose work dir is a cron scratch dir (`~/.s10s/cron/runs/<job>-<id>`, e.g.
+  git_extract_knowledge 0a2b1cb8 [134]) is in no git repository: `replay_in_clone` and
+  `improve_sea_with_discover` refuse it (sweep 1027f9dc); use `replay_in_place` when the
+  task changes nothing on disk, else patch the prompt unverified.
 """
 
 
@@ -553,11 +536,11 @@ class Rsi7dSea(BaseSea):
             f"Mines the last 7 days of the indexed SEAs' runs in ~/{HOME_DIR}/history.db for "
             "agentic "
             "mistakes, cost sinks and quality problems and hands each SEA (its own included) to "
-            "the /discover SEA, which runs its AI discovery loop on a lab copy of the SEA's script "
-            "with a replay of a past run as the dev evaluation (file-modifying tasks are replayed "
-            "in a clone at the task's commit) and returns the best point as a patch, applied "
-            "through gated editors that keep the script loading and lint-clean: instructions in "
-            "its prompt, settings() limits tuned from the runs, tools and guardrail hooks in its "
+            "the /discover SEA, which edits the SEA's script directly in a worktree of the "
+            "checkout, one replay of a past run per evaluated point (file-modifying tasks are "
+            "replayed in a clone at the task's commit); the best point comes back through a gate "
+            "that keeps the script loading and lint-clean: instructions in its prompt, "
+            "settings() limits tuned from the runs, tools and guardrail hooks in its "
             "code; mines eval sets for skillopt; refreshes the autorouter SEA's model evidence "
             "and, with the "
             "user's permission (asked for, unless the task text grants it), improves KISS Sorcar "
@@ -1983,15 +1966,15 @@ REPLAY_NOISE_PERCENT = 25
 """Cost or step differences within this share of the baseline are noise to a ``/discover`` child."""
 
 DISCOVER_PROMPT = """\
-Improve the Sorcar Extension Agent (SEA) `{name}` by AI discovery. Its script is `{file}` in
-the checkout `{checkout}`; its test file is `{test}` (when it exists). Do not change this
-repository: copy `{seas_dir}` (the folder of every SEA folder, so that sibling SEAs the
-script names by path exist) and the test file into your lab under their checkout-relative
-paths (`{rel_seas_dir}/` and `{rel_test}`), so that `best.patch` applies at the checkout root
-with `git apply`; every round edits the lab's copy of the script and every replay runs that
-copy. Edit only the script and its test file: the replay runs this checkout's copies of
-every other file (a sibling module reaches the script through the installed kiss package),
-so a patch that touches anything else is refused; fold a helper you need into the script.
+Improve the Sorcar Extension Agent (SEA) `{name}` by AI discovery. Your work dir `{worktree}`
+is a git worktree of the checkout `{checkout}` made for this run, at a detached HEAD: call
+`create_worktree()` once before your first edit (it answers that none can be created, so
+your edits land in place, as intended). Edit the script `{file}` and, when a change needs
+one, its test file `{test}`, and nothing else: every replay runs the installed kiss package
+for every other file, so a change to any other file is unmeasured and refused; fold a helper
+you need into the script. Run `uv run ...` commands from `{checkout}` (`cd {checkout} &&
+uv run ...`): the worktree has no environment of its own. Never commit, reset or edit
+anything in `{checkout}` itself.
 Evidence, metric and goal from the rsi7d sweep:
 
 {task}
@@ -2001,11 +1984,14 @@ Dev evaluation: one replay of a past run per evaluated point, never more.
 Rules: keep the SEA's contract (one `BaseSea` subclass with `description()`, `settings()`,
 `system_prompt()` and `tools()` methods; `SYSTEM_PROMPT` a plain literal or f-string); keep
 every helper small, typed and documented like the code around it; a point whose script fails
-`uv run sea lint <script>` is FAILED before any replay. Round limit: {rounds}. Never commit,
-reset or edit anything in `{checkout}`. Report the best point's dev and held-out metrics,
-every replay's task id and the path of `best.patch`.
+`uv run sea lint {file}` is FAILED before any replay. Round limit: {rounds}. Leave the
+worktree at the best point's commit and report its dev and held-out metrics and every
+replay's task id.
 """
 """The task ``improve_sea_with_discover`` gives the ``/discover`` child (``str.format`` fields)."""
+
+DISCOVER_DIR = Path("tmp") / "rsi7d" / "discover"
+"""Where ``improve_sea_with_discover`` checks out the worktree a ``/discover`` child edits."""
 
 
 def improve_sea_code(
@@ -2160,7 +2146,7 @@ def _discover_evaluation(
 - Work dir of every dev replay: `{dev["work_dir"]}`, inside `{dev["clone"]}`, a clone of the
   run's repository at the commit the run started from; before each replay run
   `{_reset_command(dev)}`.
-- Replay: `run_agent(agent="<your lab copy of {sea_file}>", task=<the text of
+- Replay: `run_agent(agent="{sea_file}", task=<the text of
   {dev["task_file"]}, verbatim>, {model}max_budget="{replay_budget:g}",
   timeout="{REPLAY_TIMEOUT_SECONDS:g}", options='{{"work_dir": "{dev["work_dir"]}",
   "inherit": false}}')`.
@@ -2199,83 +2185,100 @@ def _restore_snapshot(name: str, folder: Path, checkout: Path) -> None:
         test.unlink(missing_ok=True)
 
 
-_DIFF_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)$", re.MULTILINE)
-"""One file's header in a git patch: the path before and after (they differ for a rename)."""
+def _checkout_relative(path: Path, checkout: Path) -> str:
+    """Return *path* relative to *checkout* as a git path (``/``-separated on Windows too)."""
+    return path.resolve().relative_to(checkout.resolve()).as_posix()
 
 
-def _patch_paths(checkout: Path, patch: Path, directory: str) -> list[str] | str:
-    """Return the checkout-relative paths *patch* touches when applied under *directory*.
+def _remove_worktree(checkout: Path, worktree: Path) -> None:
+    """Delete *worktree* of *checkout* and its registration (a stale one of its path too)."""
+    _git("worktree", "remove", "--force", "--force", str(worktree), cwd=checkout)
+    rmtree_force(worktree)
+    _git("worktree", "prune", cwd=checkout)
 
-    ``git apply --numstat`` lists every file git would write, a
-    traditional ``---``/``+++`` section without a ``diff --git`` header
-    included, but names only the destination of a rename; both sides of
-    every ``diff --git`` header are added so a rename's source counts
-    too.  An ``Error: ...`` string when ``git apply --check`` refuses the
-    patch or a header cannot be read (a quoted path).
+
+def _discover_worktree(
+    name: str, checkout: Path, script: Path, test: Path
+) -> tuple[Path, str] | str:
+    """Check out the worktree a ``/discover`` child edits SEA *name* in; return it and its start.
+
+    A detached worktree of *checkout*'s HEAD under :data:`DISCOVER_DIR`
+    (an earlier one of the same SEA is removed first) holding the
+    checkout's current *script* and *test* file, the SEA as the sweep has
+    patched it so far, committed there as the commit the child's changes
+    are measured from.  An ``Error: ...`` string when git fails.
     """
-    option = [f"--directory={directory}"] if directory else []
-    check = _git("apply", "--check", *option, str(patch), cwd=checkout)
-    if check.returncode:
-        return f"Error: {check.stderr.strip() or 'git apply --check failed'}"
-    numstat = _git("apply", "--numstat", "-z", *option, str(patch), cwd=checkout)
-    if numstat.returncode:
-        return f"Error: {numstat.stderr.strip() or 'git apply --numstat failed'}"
-    paths = {row.split("\t", 2)[2] for row in numstat.stdout.split("\0") if row}
-    text = patch.read_text(encoding="utf-8", errors="replace")
-    headers = _DIFF_HEADER.findall(text)
-    if len(headers) != text.count("\ndiff --git ") + text.startswith("diff --git "):
-        return "Error: best.patch has a file header this tool cannot read (a quoted path?)"
-    prefix = f"{directory}/" if directory else ""
-    paths.update(prefix + name for header in headers for name in header)
-    return sorted(paths)
+    worktree = _work_root() / DISCOVER_DIR / name
+    _remove_worktree(checkout, worktree)
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    added = _git("worktree", "add", "--detach", "--quiet", str(worktree), "HEAD", cwd=checkout)
+    if added.returncode:
+        return f"Error: git worktree add failed: {added.stderr.strip()}"
+    for source in (script, test):
+        target = worktree / _checkout_relative(source, checkout)
+        if source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+        else:
+            target.unlink(missing_ok=True)
+    message = f"rsi7d: {name} as the checkout holds it"
+    for args in (("add", "-A"), ("commit", "--quiet", "--allow-empty", "-m", message)):
+        proc = _git(*args, cwd=worktree)
+        if proc.returncode:
+            _remove_worktree(checkout, worktree)
+            return f"Error: git {args[0]} in the worktree failed: {proc.stderr.strip()}"
+    return worktree, _git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
 
 
-def _apply_sea_patch(checkout: Path, patch: Path, script: Path, test: Path) -> list[str] | str:
-    """Apply *patch* to *checkout*; return the paths it changed or an ``Error: ...`` string.
+def _keep_discovered_sea(
+    worktree: Path, start: str, checkout: Path, script: Path, test: Path, source: str
+) -> list[str] | str:
+    """Bring the script and test file a ``/discover`` child left in *worktree* into *checkout*.
 
-    The patch is tried as the lab laid it out: checkout-relative paths
-    first, then paths relative to the SEA's folder.  A patch that touches
-    anything but the SEA's *script* and *test* file is refused unapplied:
-    the child's replays ran this checkout's copies of every other file.
+    The paths changed since the *start* commit, committed or not, must be
+    the SEA's *script* and *test* file only: the child's replays ran this
+    checkout's copies of every other file.  The script then goes through
+    :func:`_accept_sea_file` (compile, load, ``sea lint``), which restores
+    *source* when it fails, and the test file follows it; a failure or a
+    Stop while the test file is copied puts both files back.  Returns the
+    changed paths, or why nothing was kept.
     """
-    allowed = {script.resolve(), test.resolve()}
-    # A git path ("/"-separated on Windows too): it prefixes the paths git reports.
-    rel_folder = script.resolve().parent.relative_to(checkout.resolve()).as_posix()
-    outside_errors: list[str] = []
-    apply_errors: list[str] = []
-    for directory in ("", rel_folder):
-        paths = _patch_paths(checkout, patch, directory)
-        if isinstance(paths, str):
-            apply_errors.append(paths.removeprefix("Error: "))
-            continue
-        outside = sorted(p for p in paths if (checkout / p).resolve() not in allowed)
-        if outside:
-            outside_errors.append(
-                f"Error: best.patch touches files other than the SEA's script and test: {outside}"
-            )
-            continue
-        option = [f"--directory={directory}"] if directory else []
-        applied = _git("apply", *option, str(patch), cwd=checkout)
-        if applied.returncode:
-            return f"Error: git apply failed: {applied.stderr.strip()}"
-        return paths
-    if outside_errors:
-        return outside_errors[0]
-    return "Error: best.patch does not apply to this checkout: " + "; ".join(apply_errors)
-
-
-def _best_patch(checkout: Path, task_id: str, result: Any) -> Path | None:
-    """Return the ``best.patch`` a ``/discover`` child wrote, found by its scratch dir or report."""
-    if task_id and (checkout / "tmp" / task_id / "best.patch").is_file():
-        return checkout / "tmp" / task_id / "best.patch"
-    text = result.get("summary", "") if isinstance(result, dict) else str(result)
-    # "\" and ":" so that a child on Windows may name the patch as the OS spells it.
-    for match in re.findall(r"[\w./\\:~-]*best\.patch", text):
-        candidate = Path(match).expanduser()
-        candidate = candidate if candidate.is_absolute() else checkout / candidate
-        if candidate.is_file():
-            return candidate
-    return None
+    diff = _git("diff", "--name-only", start, cwd=worktree)
+    if diff.returncode:
+        return f"git diff in the worktree failed: {diff.stderr.strip()}"
+    changed = sorted({line for line in diff.stdout.splitlines() if line} | _dirty_files(worktree))
+    rel_script, rel_test = _checkout_relative(script, checkout), _checkout_relative(test, checkout)
+    outside = [path for path in changed if path not in (rel_script, rel_test)]
+    if outside:
+        return f"the child changed files other than the SEA's script and test: {outside}"
+    if not changed:
+        return "the child kept the baseline: nothing to apply"
+    if not (worktree / rel_script).is_file():
+        return "the child deleted the script"
+    try:
+        candidate = (worktree / rel_script).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return "the script the child left is not UTF-8 text"
+    why = _accept_sea_file(script, source, candidate)
+    if why:
+        return why
+    if rel_test not in changed:
+        return changed
+    before = test.read_bytes() if test.is_file() else None
+    try:
+        if (worktree / rel_test).is_file():
+            test.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(worktree / rel_test, test)
+        else:
+            test.unlink(missing_ok=True)
+    except BaseException:  # the checkout never keeps the new script with the old test
+        script.write_text(source, encoding="utf-8")
+        if before is None:
+            test.unlink(missing_ok=True)
+        elif not test.is_file() or test.read_bytes() != before:
+            test.write_bytes(before)
+        raise
+    return changed
 
 
 def improve_sea_with_discover(
@@ -2289,33 +2292,38 @@ def improve_sea_with_discover(
     rounds: int = DISCOVER_ROUNDS,
     timeout: float = DISCOVER_TIMEOUT_SECONDS,
 ) -> str:
-    """Run the `/discover` SEA on editable SEA *name* and apply the best point it finds.
+    """Have the `/discover` SEA improve editable SEA *name* by editing its script directly.
 
     The AI discovery loop (the bundled `/discover` SEA: bestrouter, full
     toolset) gets *task* — the evidence (task ids, findings), the metric
-    and the goal — and works on a lab copy of the SEAs folder, never on
-    this checkout.  Its dev evaluation is a replay of past run
-    *replay_task_id*: the run's repository is cloned at the commit it
-    started from (as `replay_in_clone` does) and the child replays the
-    run once per evaluated point with its lab copy of the script, each
-    replay capped at *replay_budget* USD; *heldout_task_id* names a
-    second past run for the held-out check (empty: a second dev replay
-    of the winning point), capped at *heldout_budget* USD (0: twice that
-    run's cost, at most 500); *rounds* is the round limit.  *max_budget*
-    (USD) caps the child and every replay it dispatches, so it must hold
-    about *rounds* + 2 replays plus the child's own work; *timeout*
-    (seconds) bounds the whole run.  When the child returns, its
-    `best.patch` is applied to the SEA's script and test file (a patch
-    touching any other file is refused: the replays ran this checkout's
-    copies of every other file) and the script goes through the same
-    gate as `patch_sea_code` (compile, load with every method, `sea
-    lint`); on any failure the script and the test file are restored
-    from the snapshot taken first (`tmp/rsi7d/snapshots/<name>`), which
-    `revert_sea_code(name)` restores later too.  Returns JSON with
-    `task_id` (the child), its `result`, `patch`, the `applied` paths,
-    `replays` (every replay the child dispatched, measured as
-    `run_findings` does), `diff_stat`, `other_changes` outside the
-    folder, the `clones` to delete, and `error` when nothing was kept.
+    and the goal — and a worktree of this checkout
+    (`tmp/rsi7d/discover/<name>`, holding the SEA's script and test file
+    as this checkout has them) where it edits the script in place, one
+    idea per round, every evaluated point a commit.  Its dev evaluation
+    is a replay of past run *replay_task_id*: the run's repository is
+    cloned at the commit it started from (as `replay_in_clone` does) and
+    the child replays the run once per evaluated point with the
+    worktree's script, each replay capped at *replay_budget* USD;
+    *heldout_task_id* names a second past run for the held-out check
+    (empty: a second dev replay of the winning point), capped at
+    *heldout_budget* USD (0: twice that run's cost, at most 500);
+    *rounds* is the round limit.  *max_budget* (USD) caps the child and
+    every replay it dispatches, so it must hold about *rounds* + 2
+    replays plus the child's own work; *timeout* (seconds) bounds the
+    whole run.  When the child reports success, the script it left in
+    the worktree (its best point) goes through the same gate as
+    `patch_sea_code` (compile, load with every method, `sea lint`) into
+    this checkout, and the test file with it; a child that did not
+    succeed, changed any other file (the replays ran this checkout's
+    copies of every other file) or left a script the gate refuses
+    changes nothing.  The worktree is then removed; every evaluated
+    commit stays under `refs/discover/<child task id>/`.  The folder and
+    the test file are copied to `tmp/rsi7d/snapshots/<name>` first, and
+    `revert_sea_code(name)` restores that copy.  Returns JSON with
+    `task_id` (the child), its `result`, the `applied` paths, `replays`
+    (every replay the child dispatched, measured as `run_findings`
+    does), `diff_stat`, `other_changes` outside the folder, the `clones`
+    to delete, `refs`, and `error` when nothing was kept.
     """
     path = _editable_path(name)
     if path is None:
@@ -2331,44 +2339,47 @@ def improve_sea_with_discover(
     folder = path.parent
     checkout = _folder_checkout(folder)
     test = _sea_test_file(name, checkout)
+    started = _discover_worktree(name, checkout, path, test)
+    if isinstance(started, str):
+        return started
+    worktree, start = started
     snapshot = _take_snapshot(name, folder, checkout)
     source = path.read_text(encoding="utf-8")
     dirty_before = _dirty_files(checkout)
     if heldout and not heldout_budget:
         heldout_budget = min(2 * float(heldout["baseline"]["cost"]), 500.0)
+    script = worktree / _checkout_relative(path, checkout)
     prompt = DISCOVER_PROMPT.format(
-        name=name, file=path, checkout=checkout, test=test, seas_dir=folder.parent,
-        # Patch paths are git paths: "/"-separated on Windows too.
-        rel_seas_dir=folder.resolve().parent.relative_to(checkout.resolve()).as_posix(),
-        rel_test=test.relative_to(checkout).as_posix(), task=task.strip(), rounds=rounds,
+        name=name, worktree=worktree, checkout=checkout, file=script,
+        test=worktree / _checkout_relative(test, checkout), task=task.strip(), rounds=rounds,
         evaluation=_discover_evaluation(
-            dev, heldout, path, checkout, replay_budget, heldout_budget
+            dev, heldout, script, checkout, replay_budget, heldout_budget
         ),
     )
-    outcome = _dispatch_replay(
-        "discover", str(_discover_sea_file()), prompt, str(checkout), "", max_budget, timeout,
-    )
+    try:
+        outcome = _dispatch_replay(
+            "discover", str(_discover_sea_file()), prompt, str(worktree), "", max_budget, timeout,
+        )
+        result = outcome["result"]
+        if isinstance(result, dict) and result["success"]:
+            kept = _keep_discovered_sea(worktree, start, checkout, path, test, source)
+        else:
+            kept = "the child did not report success"
+    finally:  # the evaluated commits stay under the child's refs
+        _remove_worktree(checkout, worktree)
     child = outcome["replay_task_id"]
     report: dict[str, Any] = {
         "sea": name,
         "task_id": child,
-        "result": outcome["result"],
+        "result": result,
         "snapshot": str(snapshot),
         "clones": [dev["clone"]] + ([heldout["clone"]] if heldout else []),
+        "refs": f"refs/discover/{child}/" if child else "",
     }
-    patch = _best_patch(checkout, child, outcome["result"])
-    try:
-        if patch is None:
-            why = "the child reported no best.patch"
-        else:
-            report["patch"] = str(patch)
-            why = _gate_sea_patch(checkout, patch, path, test, source, report)
-    except BaseException:  # the folder must never keep a half-applied patch
-        _restore_snapshot(name, folder, checkout)
-        raise
-    if why:
-        _restore_snapshot(name, folder, checkout)
-        report["error"] = f"{why}; folder restored from the snapshot"
+    if isinstance(kept, str):
+        report["error"] = kept
+    else:
+        report["applied"] = kept
     report["replays"] = _replay_rows(child) if child else []
     diff = _git("diff", "--stat", "--", str(folder), str(test), cwd=checkout)
     report["diff_stat"] = diff.stdout.strip() if diff.returncode == 0 else "not a git checkout"
@@ -2378,29 +2389,6 @@ def improve_sea_with_discover(
         and (checkout / f).resolve() != test.resolve()
     )
     return json.dumps(report, indent=1, default=str)
-
-
-def _gate_sea_patch(
-    checkout: Path, patch: Path, script: Path, test: Path, source: str, report: dict[str, Any]
-) -> str:
-    """Apply *patch* and gate the SEA *script*; return why it was refused, or ``""``.
-
-    *report* gets the ``applied`` paths once the patch is on disk; the
-    script then goes through :func:`_accept_sea_file` (compile, load,
-    ``sea lint``), which restores *source* when it fails.  The caller
-    restores the snapshot on any non-empty answer.
-    """
-    applied = _apply_sea_patch(checkout, patch, script, test)
-    if isinstance(applied, str):
-        return applied.removeprefix("Error: ")
-    report["applied"] = applied
-    if not script.is_file():
-        return "the patch deleted the script"
-    try:
-        candidate = script.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return "the patched script is not UTF-8 text"
-    return _accept_sea_file(script, source, candidate)
 
 
 def _replay_rows(parent_task_id: str) -> list[dict[str, Any]]:

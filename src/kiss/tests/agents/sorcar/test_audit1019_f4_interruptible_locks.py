@@ -53,7 +53,6 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
@@ -64,6 +63,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.kiss_error import KISSError
+from kiss.core.locked import locked_call
 from kiss.core.processes import PIPE_GIVE_UP_SECONDS
 from kiss.server.task_runner import inject_keyboard_interrupt
 from kiss.tests.conftest import posix_only, seed_worktree

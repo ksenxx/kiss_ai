@@ -103,27 +103,41 @@ def _run_one_turn(server: ScriptedAnthropicServer, monkeypatch) -> None:
     model.generate()
 
 
-def test_workspace_id_header_sent_when_env_var_set(monkeypatch) -> None:
-    """ANTHROPIC_WORKSPACE_ID is sent as the anthropic-workspace-id header."""
-    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_test123")
+def _set_workspace_id(monkeypatch, value: str) -> None:
+    """Set the configured ``ANTHROPIC_WORKSPACE_ID`` to *value* for one test.
+
+    The adapter reads the config singleton (where ``load_api_keys`` and
+    the settings panel put the id, next to the API key it belongs to),
+    not the environment: a value set on the config alone must reach the
+    request (audit 2026-11-07, A01-4).
+    """
+    from kiss.core.config import DEFAULT_CONFIG
+
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    monkeypatch.setattr(DEFAULT_CONFIG, "ANTHROPIC_WORKSPACE_ID", value, raising=False)
+
+
+def test_workspace_id_header_sent_when_configured(monkeypatch) -> None:
+    """The configured ANTHROPIC_WORKSPACE_ID is sent as the anthropic-workspace-id header."""
+    _set_workspace_id(monkeypatch, "wrkspc_test123")
     with ScriptedAnthropicServer() as server:
         _run_one_turn(server, monkeypatch)
         headers = server.request_headers[-1]
     assert headers["anthropic-workspace-id"] == "wrkspc_test123"
 
 
-def test_no_workspace_header_when_env_var_absent(monkeypatch) -> None:
-    """No anthropic-workspace-id header is sent when the variable is unset."""
-    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+def test_no_workspace_header_when_unset(monkeypatch) -> None:
+    """No anthropic-workspace-id header is sent when no id is configured."""
+    _set_workspace_id(monkeypatch, "")
     with ScriptedAnthropicServer() as server:
         _run_one_turn(server, monkeypatch)
         headers = server.request_headers[-1]
     assert "anthropic-workspace-id" not in headers
 
 
-def test_no_workspace_header_when_env_var_blank(monkeypatch) -> None:
+def test_no_workspace_header_when_blank(monkeypatch) -> None:
     """A whitespace-only ANTHROPIC_WORKSPACE_ID is treated as unset."""
-    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "   ")
+    _set_workspace_id(monkeypatch, "   ")
     with ScriptedAnthropicServer() as server:
         _run_one_turn(server, monkeypatch)
         headers = server.request_headers[-1]
@@ -170,7 +184,7 @@ def test_400_naming_but_not_requiring_the_header_is_not_rewritten(
     who HAS configured an id — the match must require the API's full
     "anthropic-workspace-id is required" phrase.
     """
-    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_badvalue")
+    _set_workspace_id(monkeypatch, "wrkspc_badvalue")
     malformed = {
         "type": "error",
         "error": {

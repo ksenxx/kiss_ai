@@ -39,6 +39,7 @@ from kiss.server.server import AgentServer
 from kiss.server.tab_registry import _MAX_TABS, OpenTabOutcome, TabRegistry
 
 from ._memory_printer import MemoryPrinter
+from .conftest import local_view
 
 
 def _noop() -> None:
@@ -237,7 +238,7 @@ class TestDR1SharedWorkDirUpdate:
             server._cmd_set_work_dir({"workDir": str(new_dir), "connId": "c1"})
             assert server.work_dir == str(new_dir)
             assert getattr(server.printer, "work_dir") == str(new_dir)
-            _wait_for(lambda: registry.view_for(str(new_dir)) is not None)
+            _wait_for(lambda: local_view(registry, str(new_dir)) is not None)
             index = _index_of(registry, str(new_dir))
             assert index is not None and "a.py" in index.paths, (
                 "changing the work dir must pre-warm the new directory's index"
@@ -277,7 +278,7 @@ class TestDR1SharedWorkDirUpdate:
             })
             assert server.work_dir == str(new_dir)
             assert getattr(server.printer, "work_dir") == str(new_dir)
-            _wait_for(lambda: registry.view_for(str(new_dir)) is not None)
+            _wait_for(lambda: local_view(registry, str(new_dir)) is not None)
             index = _index_of(registry, str(new_dir))
             assert index is not None and "b.py" in index.paths
         finally:

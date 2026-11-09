@@ -45,7 +45,7 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -594,12 +594,22 @@ def test_github_read_only_survives_token_migration(
     backend = GitHubChannelBackend()
     assert backend.connect()
     assert backend._read_only is True
-    # Finish the migration: drop the token key, keep read_only.
-    config_path.write_text(json.dumps({"read_only": "true"}))
+    # connect() finished the migration itself: the token key is scrubbed
+    # from the config, read_only is kept.
+    assert json.loads(config_path.read_text()) == {"read_only": "true"}
     backend2 = GitHubChannelBackend()
     assert backend2.connect()
     assert backend2._read_only is True
     assert backend2._token.startswith("muse-sgt.github.")
+
+
+def _run_recording(run: Callable[[], Any], outcome: dict[str, Any]) -> None:
+    """Thread target: call *run*; record ``ok`` or the exception it died with."""
+    try:
+        run()
+        outcome["ok"] = True
+    except BaseException as exc:  # noqa: BLE001 (surfaced on the test thread)
+        outcome["exc"] = exc
 
 
 def test_reachable_edge_paths(muse_env: Path, api_server: RecordingServer) -> None:
@@ -649,11 +659,17 @@ def test_reachable_edge_paths(muse_env: Path, api_server: RecordingServer) -> No
     assert _common.is_loopback_host("127.0.0.1") is True
     assert _common.is_loopback_host("www.googleapis.com") is False
 
-    # A second daemon instance detects the running one and returns.
-    second = threading.Thread(target=MuseAuthDaemon().run, daemon=True)
+    # A second daemon instance detects the running one and returns
+    # (a thread that died of an exception is "not alive" too, so the
+    # outcome is recorded).
+    outcome: dict[str, Any] = {}
+    second = threading.Thread(
+        target=_run_recording, args=(MuseAuthDaemon().run, outcome), daemon=True
+    )
     second.start()
     second.join(timeout=30)
     assert not second.is_alive(), "a second daemon did not detect the running one"
+    assert outcome == {"ok": True}, f"the second daemon died: {outcome.get('exc')!r}"
 
     # CLI audit before any records.
     assert muse_cli.main(["audit"]) == 0

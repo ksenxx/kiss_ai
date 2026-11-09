@@ -13,7 +13,7 @@ against a real sqlite file and check the two consumers:
 * the fast-complete picker / ghost text (``_complete`` ->
   ``completions`` event, backed by ``_prefix_match_tasks``);
 * the ArrowUp history (``_get_input_history`` -> ``inputHistory``
-  event, backed by ``_load_input_history``).
+  event, backed by ``_load_input_texts``).
 
 The DB-failure branch of the recorder guard is exercised by pointing
 the DB path at a directory (sqlite cannot open it): no mocks.
@@ -26,10 +26,15 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
+from kiss.tests.server._memory_printer import MemoryPrinter
+from kiss.tests.server.pause import Pause
 
 
 def _make_server() -> tuple[AgentServer, list[dict[str, Any]]]:
@@ -113,6 +118,50 @@ class TestSteerInputSavedForAutocomplete:
         assert [e["text"] for e in events if e.get("type") == "prompt"] == [
             "prefer pytest -x",
         ]
+
+    @pytest.mark.parametrize("allocated", [False, True])
+    def test_delayed_echo_does_not_enter_a_rebound_chat(
+        self, tmp_path: Path, allocated: bool,
+    ) -> None:
+        printer = MemoryPrinter()
+        server = AgentServer(printer=printer)
+        server.use_private_tab_registry(tmp_path / "tabs.json")
+        owner_id, owner_chat = th._add_task("original chat")
+        _other_id, other_chat = th._add_task("replacement chat")
+        agent = ChatSorcarAgent("steering")
+        agent._last_task_id = owner_id if allocated else None
+        owner = AgentState(
+            str(owner_id) if allocated else "starting", agent=agent,
+            chat_id=owner_chat, tab_id="reused", server_owned=True, is_task_active=True,
+        )
+        agent_state.register(owner)
+        server._registry_update_tab("reused", chat_id=owner_chat, create=True)
+        printer.subscribe_tab(owner.task_id, "reused")
+        gate = Pause(th._record_steer_input.__code__, bool)
+        worker = threading.Thread(
+            target=server._cmd_append_user_message,
+            args=({"tabId": "reused", "prompt": "private old instruction"},),
+        )
+        with gate:
+            worker.start()
+            assert gate.paused.wait(10)
+            server._replay_session(other_chat, "reused")
+            printer.emitted.clear()
+            gate.release()
+        worker.join(10)
+        assert not worker.is_alive()
+        assert owner.pending_user_messages == ["private old instruction"]
+        assert "private old instruction" in _steer_texts()
+        assert not [e for e in printer.emitted if e.get("type") == "prompt"]
+        if allocated:
+            th._flush_chat_events()
+            session = th._load_chat_events_by_task_id(str(owner_id))
+            assert session is not None
+            events = session["events"]
+            assert isinstance(events, list)
+            assert any(e.get("text") == "private old instruction" for e in events)
+        else:
+            assert owner.unattributed_prompt_echoes == ["private old instruction"]
 
     def test_dropped_message_is_not_saved(self) -> None:
         """A message no live task accepts is neither queued nor remembered."""

@@ -117,13 +117,15 @@ class TestAnthropicInitializeClosesTheReplacedClient:
 
     def test_changed_workspace_closes_the_old_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A new workspace id rebuilds the client and closes the old one."""
-        monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_one")
+        from kiss.core.config import DEFAULT_CONFIG
+
+        monkeypatch.setattr(DEFAULT_CONFIG, "ANTHROPIC_WORKSPACE_ID", "wrkspc_one")
         model = AnthropicModel("claude-under-test", api_key="key-1")
         model.initialize("first run")
         old = model.client
         assert old is not None and not old.is_closed()
 
-        monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_two")
+        monkeypatch.setattr(DEFAULT_CONFIG, "ANTHROPIC_WORKSPACE_ID", "wrkspc_two")
         model.initialize("second run")
 
         assert model.client is not old
@@ -132,7 +134,9 @@ class TestAnthropicInitializeClosesTheReplacedClient:
 
     def test_unchanged_inputs_keep_the_open_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Same inputs: the client is reused and stays open."""
-        monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_one")
+        from kiss.core.config import DEFAULT_CONFIG
+
+        monkeypatch.setattr(DEFAULT_CONFIG, "ANTHROPIC_WORKSPACE_ID", "wrkspc_one")
         model = AnthropicModel("claude-under-test", api_key="key-1")
         model.initialize("first run")
         client = model.client

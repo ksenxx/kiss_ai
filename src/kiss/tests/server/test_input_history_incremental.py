@@ -67,13 +67,15 @@ class TestIncrementalInputHistory:
         assert th._load_input_texts() == [
             ("second task", 30.0), ("steer one", 20.0), ("first task", 10.0),
         ]
-        assert th._load_input_history(since=15.0) == ["second task", "steer one"]
+        assert th._load_input_texts(since=15.0) == [("second task", 30.0), ("steer one", 20.0)]
         assert th._load_input_texts(since=30.0) == []
         # A text used again moves to the front with its newest use.
         th._record_steer_input("first task")
         _set_steer_timestamp("first task", 40.0)
         assert th._load_input_texts(since=30.0) == [("first task", 40.0)]
-        assert th._load_input_history(limit=2, since=15.0) == ["first task", "second task"]
+        assert th._load_input_texts(limit=2, since=15.0) == [
+            ("first task", 40.0), ("second task", 30.0),
+        ]
 
     def test_full_reply_names_its_newest_use_and_a_refresh_is_a_delta(self) -> None:
         self._seed()
@@ -104,12 +106,14 @@ class TestIncrementalInputHistory:
         self._seed()
         self.server._handle_command({"type": "getInputHistory", "since": 20.0})
         self.server._handle_command({"type": "getInputHistory", "since": "20"})
-        for bad in ("abc", None, True, float("nan"), -5, 0):
+        # ``10**400`` is a valid JSON integer a client may send; it
+        # overflows ``float`` and must count as malformed, not raise.
+        for bad in ("abc", None, True, float("nan"), -5, 0, 10**400):
             self.server._handle_command({"type": "getInputHistory", "since": bad})
         replies = self._replies()
         assert [r["tasks"] for r in replies[:2]] == [["second task"], ["second task"]]
         assert all(r["since"] == 20.0 for r in replies[:2])
-        assert len(replies) == 8
+        assert len(replies) == 9
         for whole in replies[2:]:
             assert whole["tasks"] == ["second task", "steer one", "first task"]
             assert "since" not in whole

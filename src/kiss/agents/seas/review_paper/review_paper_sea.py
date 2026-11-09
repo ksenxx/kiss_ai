@@ -35,7 +35,12 @@ web tools, metadata triage with a full read of the closest papers, and
 scores on seven dimensions (originality, importance, support for the
 claims, soundness, clarity, value, contextualization) from which the
 overall rating follows.  The related-work search uses the browser and
-Bash the agent already has; no search tool is bundled.
+Bash the agent already has; no search tool is bundled.  The checks and
+the rating caps are calibrated on the 20 ICLR 2027 reviews of six
+submissions (November 2026): human reviewers ask first for the one-sentence
+research question and for causal evidence (a controlled baseline, an
+ablation, spread, denominators, human-checked judgments) and cap the
+rating on those, whatever the writing and the artifacts.
 
 Two tools implement the mechanical steps:
 
@@ -90,40 +95,82 @@ not in the task's working directory. Use model names literally; never invent one
 
 ## What a review must do
 
-1. Judge the novelty; machine reviewers skip it (Liang et al. 2024; Shin et al. 2025).
+1. State the paper in one sentence: the research question, the central claim, and what
+   a reader learns beyond the authors' system. If you cannot, that is the first
+   weakness; human reviewers wrote it on every ICLR 2027 paper they rejected.
+2. Check the causal evidence for the central claim: a controlled comparison on the same
+   model, budget and hardware (with the component against without it, or against the
+   closest system); runs or seeds with spread and a test; the full pool and the
+   selection rule with denominators; every automated judgment (an LLM judge, generated
+   labels, agent-reported findings) checked against human labels. Name the confound the
+   design leaves open: the base model, a larger budget, a stronger second model, a
+   wider search space, unpaired item sets, a judge that is also a judged model. A
+   single run with no baseline or ablation caps the rating at reject whatever the
+   writing, the artifacts or the candor.
+3. Judge the novelty; machine reviewers skip it (Liang et al. 2024; Shin et al. 2025).
    Name the closest prior work (authors, venue, year) and say in a sentence what the
-   paper adds to each, or that it adds nothing.
-2. Check the claims against the paper's own evidence: abstract and introduction against
+   paper adds to each, or that it adds nothing. Ask what distinguishes the method from
+   the conventional design (a generate-evaluate-refine loop, a checklist, a grid search).
+4. Check the claims against the paper's own evidence: abstract and introduction against
    the tables, text numbers against the tables, conclusions against the experiments run,
-   baselines against their own papers.
-3. Pinpoint each problem: page, section, table or figure, sentence or number. "The
+   baselines against their own papers. A gap within noise placed in the abstract is an
+   overclaim, hedged or not; a baseline number copied from a README or the task text is
+   not a comparison.
+5. Read the appendix and the artifact as the authors' peers do: compute one claimed
+   equivalence or number from the listings on a small input, read the README and the
+   code's accounting against the paper, check that promised data exists. Two ICLR 2027
+   rejections rested on appendix listings that were not equivalent and on a README that
+   contradicted the headline.
+6. Pinpoint each problem: page, section, table or figure, sentence or number. "The
    evaluation is limited" is not a finding; "Table 3 reports the median of 3 runs with
    no spread, so the 4% gap between rows 2 and 4 may be noise" is.
-4. For each weakness, name the fix: which experiment, baseline, analysis, or rewrite.
-5. Flag machine-written prose in the paper (the AI-slop list below, plus coined
-   capitalized concepts and per-run numbers in the abstract). Quote one or two examples
-   with their page, not all.
-6. No stock AI-reviewer complaints ("more baselines", "larger scale", "more ablations",
+7. For each weakness, name the fix: which experiment, baseline, analysis, or rewrite.
+8. Flag machine-written prose in the paper (the AI-slop list below, plus coined
+   capitalized concepts, per-run numbers and caveat lists in the abstract, line counts,
+   module counts, prompt word counts, file paths and dollar costs in the introduction,
+   hedged headings, padding that negates a claim nobody made, and a Limitations section
+   that concedes the central claim is untested). Quote one or two examples with their
+   page, not all.
+9. No stock AI-reviewer complaints ("more baselines", "larger scale", "more ablations",
    "clarity could be improved", "the authors should consider", "it would be interesting
    to"). Name the specific baseline, scale, ablation, or unclear sentence and why it
    matters for the claim.
-7. Weigh the paper against the venue's bar: read its reviewer instructions on the web
-   and some recent related papers there to calibrate. Score the seven dimensions under
-   Scores first; the venue's own scores (rating, confidence, soundness, presentation,
-   contribution, or its own names) follow, one line each. Ignore the venue rules the
-   task tells you to ignore.
-8. Write for the authors as much as for the area chair: ask only for what fits before a
-   rebuttal (one baseline, one ablation, one statistic), never a new study.
+10. Weigh the paper against the venue's bar: read its reviewer instructions on the web
+    and some recent related papers there to calibrate. Score the seven dimensions under
+    Scores first; the venue's own scores (rating, confidence, soundness, presentation,
+    contribution, or its own names) follow, one line each. Ignore the venue rules the
+    task tells you to ignore.
+11. Write for the authors as much as for the area chair: ask only for what fits before a
+    rebuttal (one baseline, one ablation, one statistic), never a new study.
+
+## Calibration (ICLR 2027)
+
+Form: Paper summary, Critical strengths, Critical weaknesses, Questions for authors;
+Rating 1 Clear rejection, 2 Weak rejection, 3 Weak acceptance, 4 Clear acceptance;
+Soundness, Presentation and Informativeness 1 to 3; Confidence 1 to 4. Use it when the
+venue is ICLR and its guide is unreachable (the 2027 guide is a 404). Its reviewers gave 1
+from all four to a system paper with released artifacts, candid limitations and a
++11-point paired result, because the central claim had no ablation and the benchmark
+omitted the claimed procedures; 1 from all three to a deployment study with no
+builder-only or same-model baseline and no human check of the findings; 2 to a systems
+paper that beat its baseline on all 40 reported problems, because the 40 were the
+disagreements, each a single run, and two appendix listings were not equivalent. The same
+pool gave 2 to 3 to benchmark papers with a judge-human agreement study. Rate like them:
+the research question and the causal evidence set the ceiling; writing, artifacts and
+candor move a paper within it, never above it.
 
 ## Process
 
 1. Sanity check: `read_paper` page 1. Record the title and, when shown, the authors and
    venue. If the file is not a research paper (a slide deck, a blank or garbled
    conversion, no claims to check), stop and report that.
-2. Read it all, appendix included, with `read_paper`, a few pages per call. Write
-   `./tmp/PAPER-NOTES.md`: the claims, each number the abstract and introduction rely
-   on and its source, the baselines, suspected AI slop, open questions, and the word
-   limit L (700, the `check_review` default, when the task names none).
+2. Read it all, appendix included, with `read_paper`, a few pages per call; open the
+   linked artifact (README, listings, data) when there is one. Write
+   `./tmp/PAPER-NOTES.md`: the one-sentence statement of item 1, the claims, each
+   number the abstract and introduction rely on and its source, the baselines and
+   whether each was rerun, the controls, runs and denominators behind the central
+   claim (item 2), the artifact checks (item 5), suspected AI slop, open questions,
+   and the word limit L (700, the `check_review` default, when the task names none).
 3. Search the related work before judging novelty. Write 6 to 9 queries in
    `./tmp/information-<paper stem>.md`: three perspectives (the paper's benchmarks and
    baselines; other work on the problem; the technique in other settings) at three
@@ -146,10 +193,15 @@ not in the task's working directory. Use model names literally; never invent one
    arXiv ids in one Bash call. Cite no paper you could not open.
 4. Score the seven dimensions in `./tmp/PAPER-NOTES.md`, 1 to 10 each with the page,
    table or prior work that justifies it. The Summary's judgment and the venue's rating
-   follow from these seven, never the reverse.
+   follow from these seven, never the reverse. Caps: no controlled comparison for the
+   central claim, or an unvalidated automated judgment behind the headline number,
+   puts Support for the claims at 3/10 or below and the venue rating at reject; a
+   paper you cannot state in one sentence puts Clarity at 3/10 or below.
 5. Allot words from L: Summary 3 sentences (0.08 L), Strengths 3 bullets (0.12 L),
-   Weaknesses 5 to 7 bullets of at most 0.05 L each (0.32 L), Detailed review 0.20 L,
-   Scores 7 one-clause lines plus the venue's lines (0.13 L). Draft to 85% of L and
+   Weaknesses 5 to 7 bullets of at most 0.05 L each (0.32 L), the one that caps the
+   rating first, Detailed review 0.20 L, ending with at most five numbered questions
+   for the authors that a rebuttal can answer, Scores 7 one-clause lines plus the
+   venue's lines (0.13 L). Draft to 85% of L and
    write the file once; `Read` an existing file at the output path first, since `Write`
    and `Edit` refuse unread files. Plain text, this order, these headings on their own
    lines:
@@ -166,8 +218,9 @@ not in the task's working directory. Use model names literally; never invent one
 
        Detailed review
        (paragraphs: the novelty judgment with the named prior work, the claims you
-       checked and what you found, the AI-slop examples, the improvements in the order
-       the authors should make them)
+       checked and what you found, the artifact checks, the AI-slop examples, the
+       improvements in the order the authors should make them, then the numbered
+       questions for the authors)
 
        Scores
        Originality: N/10. (one clause of evidence)
@@ -319,6 +372,13 @@ _REVIEW_GATES: tuple[tuple[str, str, int, str], ...] = tuple(
 )
 """The word gates of a review: the paper gates minus "draft talk", plus reviewer tells."""
 
+
+_EVIDENCE_WORDS = (
+    r"\b(?:baselines?|ablations?|controls?|controlled|seeds?|spread|variance|confidence"
+    r" intervals?|denominators?|selection|human[- ]labeled|agreement|rerun|single run)\b"
+)
+"""Words of a review that says whether the central claim has causal evidence: the check
+every ICLR 2027 reviewer made first.  Their absence is listed, not failed."""
 
 _MIN_MARGIN_LINES = 20
 """Length of a counting chain of bare-number lines before it is taken for margin numbers."""
@@ -563,6 +623,13 @@ def check_review(review_path: str, word_limit: int = DEFAULT_WORD_LIMIT) -> str:
     detail = ", ".join(years) or "name the closest prior work with its year"
     proxy = "a rough proxy for named prior work"
     lines.append(f"years named: {len(years)} ({proxy}) {status}; {detail}")
+    evidence = sorted({w.lower() for w in re.findall(_EVIDENCE_WORDS, review, flags=re.IGNORECASE)})
+    status = "PASS" if evidence else "CHECK"
+    detail = ", ".join(evidence) or (
+        "say whether the central claim has a controlled comparison, an ablation and spread"
+    )
+    proxy = "a rough proxy for the causal-evidence check"
+    lines.append(f"evidence words: {len(evidence)} ({proxy}) {status}; {detail}")
     # The word gates run on unwrapped paragraphs so a phrase split by a hard line
     # break still counts; the line numbers name the paragraph's first line.
     unwrapped = _unwrap(review)

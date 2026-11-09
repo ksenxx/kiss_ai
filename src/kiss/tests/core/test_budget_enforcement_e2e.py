@@ -182,8 +182,50 @@ class _CheapTwoToolsHandler(BaseHTTPRequestHandler):
 
 
 
+def _parent_budget_exhausted() -> None:
+    """A parent's ``budget_check_hook`` whose budget is already spent."""
+    raise KISSError("Parent budget exceeded.")
+
+
 class TestMidStepBudgetEnforcement:
     """The agent must not execute further tools once over budget."""
+
+    def test_a_non_agentic_run_is_under_the_same_caps(self) -> None:
+        """``is_agentic=False`` is one paid generation: a zero-dollar budget makes
+        no provider request, and a parent whose budget is spent vetoes it through
+        ``budget_check_hook`` exactly as it vetoes an agentic step."""
+        _ExpensiveNoopHandler.requests = 0
+        srv, url = _start_server(_ExpensiveNoopHandler)
+        config = {"base_url": url, "api_key": "test-key"}
+        try:
+            agent = KISSAgent("zero-budget non-agentic")
+            with pytest.raises(KISSError, match="budget exceeded"):
+                agent.run(
+                    model_name="gpt-4o-mini",
+                    prompt_template="Say hi.",
+                    is_agentic=False,
+                    max_steps=10,
+                    max_budget=0.0,
+                    verbose=False,
+                    model_config=config,
+                )
+            assert _ExpensiveNoopHandler.requests == 0
+            assert agent.budget_used == 0.0
+            child = KISSAgent("vetoed non-agentic")
+            child.budget_check_hook = _parent_budget_exhausted
+            with pytest.raises(KISSError, match="Parent budget exceeded"):
+                child.run(
+                    model_name="gpt-4o-mini",
+                    prompt_template="Say hi.",
+                    is_agentic=False,
+                    max_steps=10,
+                    max_budget=10.0,
+                    verbose=False,
+                    model_config=config,
+                )
+            assert _ExpensiveNoopHandler.requests == 0
+        finally:
+            srv.shutdown()
 
     def test_exhausted_budget_blocks_model_request(self) -> None:
         """A budget is a hard cap: once exactly exhausted, the agent must

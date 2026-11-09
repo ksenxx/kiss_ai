@@ -18,7 +18,7 @@
 //   is withdrawn when the file is deleted, and is not offered on another
 //   machine's tree.
 
-/* global require, console, process */
+/* global require */
 
 'use strict';
 
@@ -45,6 +45,7 @@ const {
   explorerRow,
   makeRunner,
 } = require('./ui_antipattern_harness');
+const {answerListing} = require('./workdir_helpers');
 
 const openWindows = [];
 
@@ -68,28 +69,6 @@ function makePage() {
 function click(win, el) {
   assert.ok(el, 'the element to click exists');
   harnessClick(win, el);
-}
-
-/** Answer the last listDir for *p* (stamped *machine*, '' for none). */
-function answerListing(win, posted, p, machine, entries) {
-  const reqs = ofType(posted, 'listDir').filter(
-    m => m.path === p && (m.machine || '') === machine,
-  );
-  const req = reqs[reqs.length - 1];
-  assert.ok(
-    req,
-    `a listDir for ${p} on '${machine || 'this machine'}' was sent`,
-  );
-  const reply = {
-    type: 'dirListing',
-    token: req.token,
-    path: p,
-    root: req.workDir,
-    entries,
-  };
-  if (machine) reply.machine = machine;
-  send(win, reply);
-  return req;
 }
 
 function closeMenu(win) {
@@ -379,7 +358,7 @@ function testMachinesAddFormKeepsTheKeyboardAcrossAPoll() {
 }
 
 /** Open the same path as a file of this machine and of gpu-box. */
-async function openOnBothMachines(win, posted, editors, p) {
+async function openOnBothMachines(win, editors, p) {
   const chat = win._testApi.getActiveTabId();
   const before = editors.length;
   send(win, {
@@ -424,12 +403,7 @@ function savePathOf(win, tabId) {
 async function testRenameFollowsOnlyTheMachinesTabs() {
   const {win, posted, editors} = boot();
   goToBox(win, posted);
-  const {home, box} = await openOnBothMachines(
-    win,
-    posted,
-    editors,
-    '/srv/proj/a.py',
-  );
+  const {home, box} = await openOnBothMachines(win, editors, '/srv/proj/a.py');
   // The chat still browses gpu-box: rename a.py there.
   win._testApi.switchToTab(win._testApi.openTabs()[0].id);
   const req = renameInExplorer(win, posted, '/srv/proj/a.py', 'c.py');
@@ -467,12 +441,7 @@ async function testRenameFollowsOnlyTheMachinesTabs() {
 async function testDeleteClosesOnlyTheMachinesTabs() {
   const {win, posted, editors} = boot();
   goToBox(win, posted);
-  const {home, box} = await openOnBothMachines(
-    win,
-    posted,
-    editors,
-    '/srv/proj/a.py',
-  );
+  const {home, box} = await openOnBothMachines(win, editors, '/srv/proj/a.py');
   win._testApi.switchToTab(win._testApi.openTabs()[0].id);
   const req = deleteInExplorer(win, posted, '/srv/proj/a.py');
   assert.strictEqual(req.machine, 'gpu-box');
@@ -682,7 +651,7 @@ function openDeleteConfirmation(win, row) {
   return cancel;
 }
 
-function assertConfirmationOpen(win, row, why) {
+function assertConfirmationOpen(row, why) {
   assert.strictEqual(
     row.querySelector('.sidebar-item-confirm').style.display,
     '',
@@ -704,7 +673,7 @@ function testScheduleDeleteConfirmationSurvivesAPoll() {
   openDeleteConfirmation(win, list.children[1]);
   send(win, {type: 'cronJobs', jobs});
   let row = list.children[1];
-  assertConfirmationOpen(win, row, 'the poll');
+  assertConfirmationOpen(row, 'the poll');
   assert.strictEqual(
     list.children[0].querySelector('.sidebar-item-confirm').style.display,
     'none',
@@ -724,7 +693,7 @@ function testScheduleDeleteConfirmationSurvivesAPoll() {
     row.querySelector('.sidebar-panel-name').textContent,
     'Weekly',
   );
-  assertConfirmationOpen(win, row, 'a reordered poll');
+  assertConfirmationOpen(row, 'a reordered poll');
   assert.strictEqual(
     win.document.activeElement,
     row.querySelector('.sidebar-confirm-yes'),
@@ -735,7 +704,7 @@ function testScheduleDeleteConfirmationSurvivesAPoll() {
   composer.focus();
   send(win, {type: 'cronJobs', jobs: [jobs[1], jobs[0]]});
   row = list.children[0];
-  assertConfirmationOpen(win, row, 'a poll with the composer focused');
+  assertConfirmationOpen(row, 'a poll with the composer focused');
   assert.strictEqual(win.document.activeElement, composer);
   // Cancel in the rebuilt row still closes it.
   click(win, row.querySelector('.sidebar-confirm-no'));
@@ -775,7 +744,7 @@ function testMachinesDeleteConfirmationSurvivesAPoll() {
   showSection(win, 'meta-machines');
   openDeleteConfirmation(win, machineRow(win, 'gpu-box'));
   send(win, {type: 'machines', machines: MACHINES, checkedAt: 2});
-  assertConfirmationOpen(win, machineRow(win, 'gpu-box'), 'the poll');
+  assertConfirmationOpen(machineRow(win, 'gpu-box'), 'the poll');
   assert.strictEqual(
     win.document.activeElement,
     machineRow(win, 'gpu-box').querySelector('.sidebar-confirm-no'),

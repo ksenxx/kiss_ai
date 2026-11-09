@@ -26,6 +26,7 @@ const {
   stubRaf,
   ofType,
   installXtermStub,
+  settle,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 
@@ -82,10 +83,6 @@ function bindToBox(win) {
     workDir: '/remote/ws',
     recentWorkDirs: [],
   });
-}
-
-async function settle() {
-  for (let i = 0; i < 4; i++) await Promise.resolve();
 }
 
 const {test, report} = makeRunner();

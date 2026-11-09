@@ -21,19 +21,8 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-
-function plain(x) {
-  return JSON.parse(JSON.stringify(x));
-}
-
-function bar(win) {
-  return win.document.querySelector('.wt-bar');
-}
-
-function barButtons(win) {
-  return Array.from(win.document.querySelectorAll('.wt-bar .wt-btns .wt-btn'));
-}
+const {makePage, send, plain} = require('./simplify2_harness');
+const {bar, barButtons} = require('./worktree_bar_helpers');
 
 function clickBarButton(win, text) {
   const btn = barButtons(win).find(b => b.textContent === text);

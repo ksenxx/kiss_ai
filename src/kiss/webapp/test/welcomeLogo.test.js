@@ -63,9 +63,12 @@ function testNewChatRequestsWelcomeInfoOnly() {
     .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   const types = posted.map(m => m.type);
   assert.ok(types.includes('newChat'), `new chat posts newChat: ${types}`);
-  assert.ok(
-    types.includes('getWelcomeInfo'),
-    `new chat asks for the welcome info (remote URL): ${types}`,
+  // The welcome info (remote URL) is the only information a new chat asks
+  // for: no config, model list or history fetch rides along.
+  assert.deepStrictEqual(
+    types.filter(t => t.startsWith('get')),
+    ['getWelcomeInfo'],
+    `new chat asks for the welcome info and nothing else: ${types}`,
   );
   assert.ok(
     welcome.querySelector('#welcome-logo'),

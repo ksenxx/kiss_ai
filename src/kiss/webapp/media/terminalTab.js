@@ -180,12 +180,15 @@
     // Set while an Enter on an ended shell asks for a new one, so the
     // fresh shell's terminalOpened is not reported as a lost session.
     let restarting = false;
-    // Set while the WebSocket is down: keystrokes typed meanwhile wait
-    // in heldInput until terminalOpened says the daemon re-attached the
-    // shell to the new connection.  Sent before that they would reach
-    // the daemon ahead of the reconnect's terminalOpen, from a
-    // connection that does not own the shell yet, and be dropped.
-    let detached = false;
+    // Set until terminalOpened says the daemon attached the shell to
+    // the current connection, and again while the WebSocket is down:
+    // keystrokes typed meanwhile wait in heldInput.  Sent before that
+    // they would reach the daemon ahead of the terminalOpen, from a
+    // connection that does not own the shell yet, and be dropped; or,
+    // posted while the socket is down, join the transport's offline
+    // batch, which a reconnect re-sends until a pong confirms it (a
+    // shell command run twice is not a settings save applied twice).
+    let detached = true;
     let heldInput = [];
     let lastSize = {cols: 0, rows: 0};
 
@@ -214,6 +217,9 @@
     function restartShell() {
       view.exited = false;
       restarting = true;
+      // Typed for the ended shell while the socket was down: not for
+      // the one asked for now.  What is typed from here on is.
+      heldInput = [];
       if (term) term.write('\r\n');
       openShell();
     }
@@ -221,8 +227,9 @@
     // Runs before xterm's own key handling (which stops propagation).
     function keyHandler(ev) {
       if (ev.type !== 'keydown') return true;
-      // Enter on an ended shell starts a new one in the same tab.
-      if (ev.key === 'Enter' && view.exited && hadShell) {
+      // Enter on an ended shell (or one the daemon could not start)
+      // asks for a new one in the same tab.
+      if (ev.key === 'Enter' && view.exited) {
         restartShell();
         return false;
       }
@@ -337,10 +344,11 @@
     };
 
     view.opened = function (ev) {
-      // A fresh shell in place of one this page had: what was typed for
-      // the old one is not run in the new one.
-      const replaced = hadShell && !ev.attached;
-      if (replaced && !restarting) {
+      // A fresh shell in place of one this page had, other than the
+      // one Enter asked for: what was typed for the old one is not run
+      // in the new one.
+      const lost = hadShell && !ev.attached && !restarting;
+      if (lost) {
         note(
           'The shell ended while this page was disconnected; a new one started.',
         );
@@ -351,7 +359,7 @@
       detached = false;
       const held = heldInput;
       heldInput = [];
-      if (replaced) return;
+      if (lost) return;
       held.forEach(data =>
         send({type: 'terminalInput', tab_id: tabId, data: data}),
       );
@@ -371,7 +379,7 @@
       // is not its fresh shell.
       restarting = false;
       view.exited = true;
-      note(text, RED);
+      note(text + '  Press Enter to try again.', RED);
     };
 
     view.disconnected = function () {

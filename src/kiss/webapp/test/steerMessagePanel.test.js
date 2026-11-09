@@ -15,6 +15,7 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 const {readyTabId, output} = harness;
+const {sendStep} = require('./prompt_step_helpers');
 
 /** A harness page with main.css applied: {win, posted}. */
 function makePage() {
@@ -29,24 +30,6 @@ function startedPage(task) {
 }
 
 const send = harness.send;
-
-function sendStep(win, i) {
-  send(win, {type: 'thinking_start'});
-  send(win, {type: 'thinking_delta', text: 'thought ' + i});
-  send(win, {type: 'thinking_end'});
-  send(win, {
-    type: 'tool_call',
-    name: 'Bash',
-    command: 'echo ' + i,
-    description: 'step ' + i,
-  });
-  send(win, {
-    type: 'tool_result',
-    name: 'Bash',
-    output: String(i),
-    success: true,
-  });
-}
 
 function testSteerPromptRendersLikeTaskPanel() {
   const win = startedPage('Fix the login bug');

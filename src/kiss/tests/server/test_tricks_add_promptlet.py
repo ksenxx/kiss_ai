@@ -263,6 +263,10 @@ class TestAddTrickCommand(_TricksHome):
         assert err is not None
         self.assertEqual(err["connId"], "c9")
         self.assertEqual(err["text"], "Promptlet must not be empty")
+        # Stamped with the command it answers, so the page relays it to
+        # that one pending operation (not to a custom-model save or a
+        # promptlet edit awaiting their own answers).
+        self.assertEqual(err["command"], "addTrick")
         # The error is followed by the list on disk, for the sender only.
         resync = self.server.printer.messages[-1]
         self.assertEqual(resync["type"], "tricksData")
@@ -276,6 +280,7 @@ class TestAddTrickCommand(_TricksHome):
         assert err is not None
         self.assertNotIn("connId", err)
         self.assertEqual(err["text"], "Promptlet must not be empty")
+        self.assertEqual(err["command"], "addTrick")
 
     @posix_only("directory permission bits")
     @unittest.skipIf(is_root(), "root ignores file permissions")

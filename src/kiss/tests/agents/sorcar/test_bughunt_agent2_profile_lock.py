@@ -2,9 +2,9 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bug-hunt integration tests for ``_is_profile_in_use`` (web_use_tool).
+"""Bug-hunt integration tests for ``_profile_lock_state`` (web_use_tool).
 
-``_is_profile_in_use`` decides whether a Chromium profile directory is
+``_profile_lock_state`` decides whether a Chromium profile directory is
 locked by a *live* process by sending ``os.kill(pid, 0)`` to the PID
 recorded in the ``SingletonLock`` symlink target (``hostname-pid``).
 
@@ -37,7 +37,7 @@ import sys
 
 import pytest
 
-from kiss.agents.sorcar.web_use_tool import WebUseTool, _is_profile_in_use
+from kiss.agents.sorcar.web_use_tool import WebUseTool, _profile_lock_state
 from kiss.tests.conftest import is_root, posix_only
 
 pytestmark = pytest.mark.skipif(
@@ -58,13 +58,13 @@ def test_profile_locked_by_unsignalable_live_process_is_in_use(tmp_path) -> None
     PID 1 (init/launchd) always exists.  When the test runs as a normal
     user, ``os.kill(1, 0)`` raises ``PermissionError`` — the kernel's
     way of saying "that process exists but is not yours".  The profile
-    is therefore locked and ``_is_profile_in_use`` must return True.
+    is therefore locked and ``_profile_lock_state`` must return True.
     """
     profile = tmp_path / "profile_eperm"
     _make_lock(profile, 1)
     if is_root():  # pragma: no cover — root CI can signal PID 1
         pytest.skip("running as root: cannot provoke EPERM from os.kill")
-    assert _is_profile_in_use(str(profile)) is True
+    assert _profile_lock_state(str(profile))[1] is True
 
 
 @posix_only("Chromium's SingletonLock symlink is the POSIX profile lock")
@@ -74,7 +74,7 @@ def test_profile_locked_by_own_live_process_is_in_use(tmp_path) -> None:
     """A lock held by our own live process (signalable) reads as in-use."""
     profile = tmp_path / "profile_alive"
     _make_lock(profile, os.getpid())
-    assert _is_profile_in_use(str(profile)) is True
+    assert _profile_lock_state(str(profile))[1] is True
 
 
 def test_profile_locked_by_dead_process_is_free(tmp_path) -> None:
@@ -84,7 +84,7 @@ def test_profile_locked_by_dead_process_is_free(tmp_path) -> None:
     pid = proc.pid
     profile = tmp_path / "profile_dead"
     _make_lock(profile, pid)
-    assert _is_profile_in_use(str(profile)) is False
+    assert _profile_lock_state(str(profile))[1] is False
 
 
 def test_profile_with_garbage_lock_target_is_free(tmp_path) -> None:
@@ -92,14 +92,14 @@ def test_profile_with_garbage_lock_target_is_free(tmp_path) -> None:
     profile = tmp_path / "profile_garbage"
     profile.mkdir(parents=True, exist_ok=True)
     os.symlink("not-a-pid-at-all", str(profile / "SingletonLock"))
-    assert _is_profile_in_use(str(profile)) is False
+    assert _profile_lock_state(str(profile))[1] is False
 
 
 def test_profile_without_lock_is_free(tmp_path) -> None:
     """No ``SingletonLock`` symlink at all reads as free."""
     profile = tmp_path / "profile_empty"
     profile.mkdir(parents=True, exist_ok=True)
-    assert _is_profile_in_use(str(profile)) is False
+    assert _profile_lock_state(str(profile))[1] is False
 
 
 @posix_only("pid 1 PermissionError probe")

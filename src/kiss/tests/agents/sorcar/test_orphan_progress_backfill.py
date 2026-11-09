@@ -156,7 +156,12 @@ class OrphanProgressBackfillTest(_BackfillTestCase):
         self.assertEqual(row["end_ts"], 200000)
 
     def test_task_without_events_keeps_zeros(self) -> None:
-        """No evidence means no backfill — and no crash."""
+        """No evidence means no backfill — and no crash.
+
+        The row is finalized all the same (its tags are written), so
+        the next sweep, which also picks up unfinalized rows without an
+        ``end_ts`` (A11-3 fable), leaves it alone.
+        """
         task_id = self._insert_orphan_row()
 
         rewritten = th._recover_orphaned_tasks(set(), time.time())
@@ -170,6 +175,7 @@ class OrphanProgressBackfillTest(_BackfillTestCase):
         self.assertEqual(row["tokens"], 0)
         self.assertEqual(row["cost"], 0.0)
         self.assertEqual(row["end_ts"], 0)
+        self.assertEqual(th._recover_orphaned_tasks(set(), time.time()), 0)
 
     def test_events_without_usage_info_still_date_the_end(self) -> None:
         """Only ``end_ts`` is recoverable from non-usage events."""

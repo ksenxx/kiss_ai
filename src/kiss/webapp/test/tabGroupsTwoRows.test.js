@@ -25,6 +25,7 @@ const {
   send,
   click,
   clickTab,
+  tabIds: openIds,
 } = require('./simplify2_harness');
 
 function makePage(extraScripts) {
@@ -33,12 +34,6 @@ function makePage(extraScripts) {
 
 function entry(tabId, title) {
   return {tabId, chatId: 'chat-' + tabId, title: title || tabId, workDir: ''};
-}
-
-// Every open tab, in tab order (copied into this realm's Array so
-// deepStrictEqual compares values, not realms' prototypes).
-function openIds(win) {
-  return Array.from(win._testApi.openTabs(), t => t.id);
 }
 
 function stripIds(win) {

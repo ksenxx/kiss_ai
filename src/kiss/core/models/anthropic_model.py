@@ -6,10 +6,14 @@
 """Anthropic model implementation for Claude models."""
 
 import base64
+import contextlib
 import hashlib
 import json
 import logging
 import os
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -21,9 +25,10 @@ from anthropic import Anthropic, APITimeoutError
 from anthropic.lib.bedrock import AnthropicBedrock
 from anthropic.resources.messages import Messages
 
-from kiss.core import stop_signal
+from kiss.core import stop_signal, user_config
 from kiss.core.brand import HOME_DIR
 from kiss.core.kiss_error import KISSError, ModelRefusalError, OutputCapError
+from kiss.core.locked import locked_call
 from kiss.core.models.model import (
     _AUDIO_FORMAT_TO_MIME,
     FRAMEWORK_ONLY_CONFIG_KEYS,
@@ -59,6 +64,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 1
+
+_RETRY_BACKOFF_SECONDS = 8.0
+"""The SDK's longest delay before a retry (``MAX_RETRY_DELAY``).
+
+The header deadline leaves room for every retry and its backoff, so a
+silent peer is still reported by the SDK's own timeout after them.
+"""
 
 _WORKSPACE_ID_REQUIRED_MARKER = "anthropic-workspace-id is required"
 """The API's own words for the missing-workspace-id 400.
@@ -111,8 +123,12 @@ def _effort_level_for(model_name: str, model_config: dict[str, Any]) -> str | No
     Resolution order:
 
     1. An explicit ``reasoning_effort`` in ``model_config`` (the
-       framework-wide spelling shared with the OpenAI adapters) wins.
-    2. Otherwise the catalog entry's ``thinking`` level, when it is one
+       framework-wide spelling shared with the OpenAI adapters) wins: it
+       is the key the agent sets when it lowers the effort for one turn
+       (``KISSAgent._turn_effort``), so a caller's native setting must
+       not outrank it.
+    2. Otherwise the caller's native ``output_config.effort``.
+    3. Otherwise the catalog entry's ``thinking`` level, when it is one
        of :data:`ANTHROPIC_EFFORT_LEVELS`: a generated ``-{level}`` alias
        carries its own level (``claude-opus-5-5-medium`` → ``"medium"``)
        and a base entry carries the level the catalog runs it at
@@ -123,9 +139,6 @@ def _effort_level_for(model_name: str, model_config: dict[str, Any]) -> str | No
        (``medium`` when omitted) and the request must match the catalog.
        Entries that reject the parameter (Haiku 4.5, Sonnet 4.5) carry no
        ``thinking`` and get none.
-
-    A native ``output_config`` already carrying ``effort`` is left to the
-    caller (see :meth:`AnthropicModel._build_create_kwargs`).
 
     Args:
         model_name: The catalog model name as passed to the adapter.
@@ -139,6 +152,9 @@ def _effort_level_for(model_name: str, model_config: dict[str, Any]) -> str | No
     explicit = model_config.get("reasoning_effort")
     if explicit is not None:
         return str(explicit)
+    native = model_config.get("output_config")
+    if isinstance(native, dict) and native.get("effort") is not None:
+        return str(native["effort"])
     info = MODEL_INFO.get(model_name)
     if info is not None and info.thinking in ANTHROPIC_EFFORT_LEVELS:
         return str(info.thinking)
@@ -449,21 +465,31 @@ def _tool_calls_to_tool_use_blocks(tool_calls: list[dict[str, Any]]) -> list[dic
 # OpenAI ``input_audio`` part) and is converted again for every request
 # and keep-alive ping, each of which would otherwise pay for one more
 # Whisper call and could get a different transcript, changing the prompt
-# bytes the prompt cache is keyed on.
-_TRANSCRIPTS: dict[tuple[bytes, str], str] = {}
+# bytes the prompt cache is keyed on.  The daemon lives for days and its
+# conversations do not: only the clips used most recently are kept.
+_TRANSCRIPT_CACHE_SIZE = 256
+_TRANSCRIPTS: OrderedDict[tuple[bytes, str], str] = OrderedDict()
+_TRANSCRIPTS_LOCK = threading.Lock()
 
 
 def _transcript(att: Attachment) -> str:
     """Return the Whisper transcript of audio *att*, transcribing each clip once.
 
-    A failure is not remembered, so the next request tries again; two
+    The :data:`_TRANSCRIPT_CACHE_SIZE` clips used most recently are
+    remembered; a failure is not, so the next request tries again; two
     threads converting the same new clip at once may both transcribe it.
     """
     key = (hashlib.sha256(att.data).digest(), att.mime_type)
-    text = _TRANSCRIPTS.get(key)
-    if text is None:
-        text = transcribe_audio(att.data, att.mime_type)
+    with _TRANSCRIPTS_LOCK:
+        text = _TRANSCRIPTS.get(key)
+        if text is not None:
+            _TRANSCRIPTS.move_to_end(key)
+            return text
+    text = transcribe_audio(att.data, att.mime_type)
+    with _TRANSCRIPTS_LOCK:
         _TRANSCRIPTS[key] = text
+        if len(_TRANSCRIPTS) > _TRANSCRIPT_CACHE_SIZE:
+            _TRANSCRIPTS.popitem(last=False)
     return text
 
 
@@ -483,15 +509,15 @@ def _attachments_to_blocks(attachments: list[Attachment]) -> list[dict[str, Any]
     """
     blocks: list[dict[str, Any]] = []
     for att in attachments:
-        source = {
-            "type": "base64",
-            "media_type": att.mime_type,
-            "data": att.to_base64(),
-        }
-        if att.mime_type.startswith("image/"):
-            blocks.append({"type": "image", "source": source})
-        elif att.mime_type == "application/pdf":
-            blocks.append({"type": "document", "source": source})
+        if att.mime_type.startswith("image/") or att.mime_type == "application/pdf":
+            # Encoded only when sent: audio is transcribed, the rest dropped.
+            block_type = "image" if att.mime_type.startswith("image/") else "document"
+            source = {
+                "type": "base64",
+                "media_type": att.mime_type,
+                "data": att.to_base64(),
+            }
+            blocks.append({"type": block_type, "source": source})
         elif att.mime_type.startswith("audio/"):
             try:
                 text = _transcript(att)
@@ -523,6 +549,75 @@ def _content_as_block_list(content: Any) -> list[dict[str, Any]]:
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
     return list(content)
+
+
+CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
+"""The beta header of the server-side context edits (``context_management``)."""
+
+
+def context_edits(thinking: bool = True) -> list[dict[str, Any]]:
+    """Return the server-side context edits of a request under the keep-K policy.
+
+    The retained context holds the model's reasoning for the last
+    ``Config.reasoning_keep_turns`` turns (``clear_thinking_20251015``; the
+    agent starts a turn every ``Config.reasoning_turn_steps`` steps) and the
+    inputs and results of the last ``Config.context_edit_keep_tool_uses``
+    tool calls once the input passes ``Config.context_edit_trigger_tokens``
+    (``clear_tool_uses_20250919`` with ``clear_tool_inputs``, applied only
+    when it clears ``Config.context_edit_clear_at_least`` tokens, the price
+    of the cache write it causes).  The thinking edit comes first, as the
+    API requires.  Empty when both settings are 0.
+
+    Args:
+        thinking: Whether the request's thinking is enabled or adaptive;
+            the API rejects the thinking edit on a request without it, so
+            ``False`` leaves that edit out.
+    """
+    from kiss.core.config import DEFAULT_CONFIG
+
+    edits: list[dict[str, Any]] = []
+    if thinking and DEFAULT_CONFIG.reasoning_keep_turns > 0:
+        edits.append({
+            "type": "clear_thinking_20251015",
+            "keep": {"type": "thinking_turns", "value": DEFAULT_CONFIG.reasoning_keep_turns},
+        })
+    if DEFAULT_CONFIG.context_edit_trigger_tokens > 0:
+        trigger = DEFAULT_CONFIG.context_edit_trigger_tokens
+        clearing: dict[str, Any] = {
+            "type": "clear_tool_uses_20250919",
+            "trigger": {"type": "input_tokens", "value": trigger},
+            "keep": {"type": "tool_uses", "value": DEFAULT_CONFIG.context_edit_keep_tool_uses},
+            "clear_tool_inputs": True,
+        }
+        if DEFAULT_CONFIG.context_edit_clear_at_least > 0:
+            clearing["clear_at_least"] = {
+                "type": "input_tokens", "value": DEFAULT_CONFIG.context_edit_clear_at_least,
+            }
+        edits.append(clearing)
+    return edits
+
+
+def applied_context_edits(source: Any) -> list[dict[str, Any]]:
+    """Return the ``context_management.applied_edits`` of a response or stream event as dicts.
+
+    Args:
+        source: A final message or a ``message_delta`` event (SDK object
+            or dict); the field is a pydantic extra on the non-beta types.
+
+    Returns:
+        One dict per applied edit (``type``, ``cleared_input_tokens``,
+        ``cleared_thinking_turns`` or ``cleared_tool_uses``); empty when the
+        response reports none.
+    """
+    management = _get_attr_or_key(source, "context_management")
+    edits = _get_attr_or_key(management, "applied_edits") if management is not None else None
+    if not isinstance(edits, list):
+        return []
+    return [
+        edit if isinstance(edit, dict) else edit.model_dump()
+        for edit in edits
+        if isinstance(edit, dict) or hasattr(edit, "model_dump")
+    ]
 
 
 def _add_beta(kwargs: dict[str, Any], token: str) -> None:
@@ -763,8 +858,14 @@ def _supports_inference_geo(model_name: str) -> bool:
 
 
 def _workspace_id() -> str:
-    """Return the ``ANTHROPIC_WORKSPACE_ID`` an identity-linked key must send (``""`` if unset)."""
-    return os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
+    """Return the ``ANTHROPIC_WORKSPACE_ID`` an identity-linked key must send (``""`` if unset).
+
+    Read from ``DEFAULT_CONFIG`` like the key it belongs to (the settings
+    panel's key store, or the environment variable at startup).
+    """
+    from kiss.core.config import DEFAULT_CONFIG
+
+    return DEFAULT_CONFIG.ANTHROPIC_WORKSPACE_ID.strip()
 
 
 def _bedrock_credentials() -> tuple[str, str, str, str]:
@@ -782,6 +883,12 @@ def _bedrock_credentials() -> tuple[str, str, str, str]:
         DEFAULT_CONFIG.AWS_SESSION_TOKEN,
         DEFAULT_CONFIG.AWS_REGION or _BEDROCK_DEFAULT_REGION,
     )
+
+
+def _unset_blank_bedrock_token() -> None:
+    """Remove an EMPTY exported ``AWS_BEARER_TOKEN_BEDROCK``; run under the key store's lock."""
+    if os.environ.get("AWS_BEARER_TOKEN_BEDROCK") == "":
+        del os.environ["AWS_BEARER_TOKEN_BEDROCK"]
 
 
 def _bedrock_client(bearer_token: str, timeout: httpx2.Timeout) -> AnthropicBedrock:
@@ -815,16 +922,12 @@ def _bedrock_client(bearer_token: str, timeout: httpx2.Timeout) -> AnthropicBedr
     # it refuses the key pair next to it and sends ``Authorization:
     # Bearer`` with nothing behind it.  An empty key is unset by KISS's
     # own rules (``DEFAULT_CONFIG`` reads it as ""), so it is unset for
-    # the SDK too.  Two task threads may both read the empty value before
-    # either removes it, and the loser of that race must not raise:
-    # ``os.environ.pop(key, None)`` is not atomic either (it reads, then
-    # deletes outside its KeyError handler), so the deletion itself is
-    # guarded.
-    if os.environ.get("AWS_BEARER_TOKEN_BEDROCK") == "":
-        try:
-            del os.environ["AWS_BEARER_TOKEN_BEDROCK"]
-        except KeyError:
-            pass
+    # the SDK too.  The check and the deletion run under the key store's
+    # lock, which the settings panel holds while it exports a token it
+    # just saved: read outside it, the empty value could be replaced by
+    # that token between the check and the deletion, and the new token
+    # deleted with it.
+    locked_call(user_config._config_lock, _unset_blank_bedrock_token)
     return AnthropicBedrock(
         aws_access_key=access_key or None,
         aws_secret_key=secret_key or None,
@@ -893,6 +996,78 @@ class AnthropicModel(Model):
             self._api_model_name = _strip_thinking_alias(model_name)
             self._catalog_model_name = model_name
 
+    def _thinking_and_max_tokens(self) -> tuple[dict[str, Any] | None, int]:
+        """Return the ``thinking`` parameter and the ``max_tokens`` of the requests.
+
+        An explicit ``model_config["thinking"]`` goes out as is; a thinking
+        model without one gets the default: adaptive thinking on the models
+        that use it, otherwise a budget of up to 10000 tokens under
+        ``max_tokens`` (none when fewer than 1024 remain).  ``max_tokens``
+        is the configured one (``max_tokens`` or ``max_completion_tokens``),
+        16384 by default, raised to the model's output cap when the default
+        thinking is on.  ``None`` as the parameter means the request carries
+        none.
+        """
+        max_tokens = self.model_config.get("max_tokens")
+        if max_tokens is None:
+            max_tokens = self.model_config.get("max_completion_tokens")
+        user_set_max_tokens = max_tokens is not None
+        if max_tokens is None:
+            max_tokens = 16384
+        if "thinking" in self.model_config:
+            return self.model_config["thinking"], max_tokens
+        profile = _claude_profile(self._catalog_model_name)
+        if not _supports_extended_thinking(profile):
+            return None, max_tokens
+        if not user_set_max_tokens:
+            version = profile[1]
+            # Opus 4.6+ allows 65536 output tokens; Opus 4.5 (like
+            # every Sonnet) is capped at 64000 and answers HTTP 400
+            # "max_tokens: 65536 > 64000" otherwise (verified live
+            # 2026-10-07).
+            is_big_opus = (
+                version is not None
+                and version[0] == "opus"
+                and (version[1], version[2] or 0) >= (4, 6)
+            )
+            max_tokens = 65536 if is_big_opus else 64000
+        if _uses_adaptive_thinking(profile):
+            return {"type": "adaptive", "display": "summarized"}, max_tokens
+        budget = min(10000, max_tokens - 1)
+        if budget >= 1024:
+            return {"type": "enabled", "budget_tokens": budget}, max_tokens
+        return None, max_tokens
+
+    def _context_edits(self) -> list[dict[str, Any]]:
+        """Return the server-side context edits the requests carry (:func:`context_edits`).
+
+        The thinking edit only when the request's thinking is on (the API
+        rejects it otherwise); nothing on Bedrock, which rejects the field.
+        """
+        if self.bedrock:
+            return []
+        thinking, _max_tokens = self._thinking_and_max_tokens()
+        return context_edits((thinking or {}).get("type") in ("enabled", "adaptive"))
+
+    def server_side_context_editing(self) -> bool:
+        """Return whether the requests carry the server-side context edits (:func:`context_edits`).
+
+        True on the Anthropic API when the configuration asks for a tool-use
+        clearing, or for a thinking clearing on a request whose thinking is
+        on; never on Bedrock, which rejects the field.
+        """
+        return bool(self._context_edits())
+
+    def keeps_reasoning_turns(self) -> bool:
+        """Return whether the requests clear the thinking of all but the last turns.
+
+        True when the requests carry the thinking edit: the context edits go
+        out (:meth:`server_side_context_editing`), ``Config.reasoning_keep_turns``
+        is positive and the request's thinking is on.  The agent then starts
+        a new turn every ``Config.reasoning_turn_steps`` steps.
+        """
+        return any(edit["type"] == "clear_thinking_20251015" for edit in self._context_edits())
+
     def _build_client(self) -> Anthropic | AnthropicBedrock:
         """Return a new SDK client for the current key, workspace id and backend."""
         timeout = httpx2.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT)
@@ -920,10 +1095,10 @@ class AnthropicModel(Model):
         # An identity-linked Anthropic API key is only valid together with
         # the id of the workspace the request acts in; the API rejects a
         # request without it (400: "anthropic-workspace-id is required when
-        # authenticating with an identity-linked API key").  The id comes
-        # from the ANTHROPIC_WORKSPACE_ID environment variable, which
-        # load_api_keys() imports from ~/.kiss/api_keys.env at daemon
-        # startup and ./rsorcar ships to remote installs.
+        # authenticating with an identity-linked API key").  The id is the
+        # ANTHROPIC_WORKSPACE_ID setting, which load_api_keys() imports
+        # from ~/.kiss/api_keys.env (or the environment variable) at
+        # daemon startup and ./rsorcar ships to remote installs.
         #
         # The client is built once and reused across runs; see
         # Model._reuse_client.
@@ -1116,15 +1291,13 @@ class AnthropicModel(Model):
         }
         # ``reasoning_effort`` is the framework-wide spelling (shared with
         # the OpenAI adapters); the Messages API wants it as
-        # ``output_config.effort``.  A native ``output_config.effort`` set
-        # by the caller wins over both the framework key and a catalog
-        # alias level.
+        # ``output_config.effort`` (precedence: see ``_effort_level_for``).
         kwargs.pop("reasoning_effort", None)
         effort_level = _effort_level_for(self._catalog_model_name, self.model_config)
         if effort_level is not None:
             output_config = kwargs.get("output_config")
             output_config = dict(output_config) if isinstance(output_config, dict) else {}
-            output_config.setdefault("effort", effort_level)
+            output_config["effort"] = effort_level
             kwargs["output_config"] = output_config
         enable_cache = self.model_config.get("enable_cache", True)
         # The same hoisting Gemini applies (see Model docstring of
@@ -1134,10 +1307,7 @@ class AnthropicModel(Model):
             self.model_config.get("system_instruction"), self.conversation
         )
 
-        max_tokens, stop_sequences = pop_max_tokens_and_stop(kwargs)
-        user_set_max_tokens = max_tokens is not None
-        if max_tokens is None:
-            max_tokens = 16384
+        _, stop_sequences = pop_max_tokens_and_stop(kwargs)
         if stop_sequences is not None:
             kwargs.setdefault("stop_sequences", stop_sequences)
 
@@ -1147,32 +1317,21 @@ class AnthropicModel(Model):
             "Anthropic Messages",
         )
 
-        profile = _claude_profile(self._catalog_model_name)
-        if "thinking" not in kwargs and _supports_extended_thinking(profile):
-            if not user_set_max_tokens:
-                version = profile[1]
-                # Opus 4.6+ allows 65536 output tokens; Opus 4.5 (like
-                # every Sonnet) is capped at 64000 and answers HTTP 400
-                # "max_tokens: 65536 > 64000" otherwise (verified live
-                # 2026-10-07).
-                is_big_opus = (
-                    version is not None
-                    and version[0] == "opus"
-                    and (version[1], version[2] or 0) >= (4, 6)
-                )
-                max_tokens = 65536 if is_big_opus else 64000
-            if _uses_adaptive_thinking(profile):
-                kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
-            else:
-                budget = min(10000, max_tokens - 1)
-                if budget >= 1024:
-                    kwargs["thinking"] = {
-                        "type": "enabled",
-                        "budget_tokens": budget,
-                    }
+        thinking, max_tokens = self._thinking_and_max_tokens()
+        if thinking is not None:
+            kwargs["thinking"] = thinking
 
         if "thinking" in kwargs:
             _add_beta(kwargs, "interleaved-thinking-2025-05-14")
+        # The keep-K policy, applied by the server (a client-side edit of an
+        # earlier message would invalidate every later thinking block on
+        # Claude 5.1 and later).  Bedrock rejects the field.
+        edits = self._context_edits()
+        if edits:
+            _add_beta(kwargs, CONTEXT_MANAGEMENT_BETA)
+            body: dict[str, Any] = dict(kwargs.get("extra_body") or {})
+            body["context_management"] = {"edits": edits}
+            kwargs["extra_body"] = body
 
         normalized_messages = checked_nonempty(
             self._normalize_conversation_for_api(self.conversation)
@@ -1275,14 +1434,30 @@ class AnthropicModel(Model):
             TimeoutError: When the streaming connection delivers no data
                 (or no events) for ``stream_stall_timeout`` seconds.
         """
+        # Until the response headers are complete there is no response
+        # for the stream watchdog to cut, and the byte-level clock only
+        # bounds the silence between two reads: a peer trickling header
+        # bytes (or 1xx replies) would hold this thread for good and
+        # past any Stop.  So the request is sent under a request
+        # watchdog that cuts the pool at a Stop or at this deadline.
+        headers_due = time.monotonic() + (
+            self._stream_stall_timeout * (_MAX_RETRIES + 1) + _RETRY_BACKOFF_SECONDS
+        )
+        stream = None
         try:
             # `get_final_message()` only drains the already-exhausted
             # iterator and returns the in-memory snapshot, so it is safe
             # after the watchdog wrapper has closed the response.
-            with (
-                self.client.messages.stream(**kwargs) as stream,
-                self._watched_events(stream, "anthropic-stream-abort-watchdog") as events,
-            ):
+            with contextlib.ExitStack() as stack:
+                with RequestAbortWatchdog(
+                    self.client._client,
+                    headers_due - time.monotonic(),
+                    "anthropic-header-abort-watchdog",
+                ):
+                    stream = stack.enter_context(self.client.messages.stream(**kwargs))
+                events = stack.enter_context(
+                    self._watched_events(stream, "anthropic-stream-abort-watchdog")
+                )
                 saw_message_stop = False
                 raw_tool_inputs: dict[int, str] = {}
                 for event in events:
@@ -1292,6 +1467,9 @@ class AnthropicModel(Model):
                     self._rejected_response = stream.current_message_snapshot
                     if event.type == "message_stop":
                         saw_message_stop = True
+                    elif event.type == "message_delta":
+                        # The server's context edits ride on the final delta.
+                        self.last_context_edits = applied_context_edits(event)
                     elif (
                         event.type == "content_block_delta"
                         and event.delta.type == "input_json_delta"
@@ -1348,6 +1526,12 @@ class AnthropicModel(Model):
         except Exception as exc:
             if stop_signal.stop_requested():
                 raise stop_error() from exc
+            if stream is None and time.monotonic() >= headers_due:
+                # The header watchdog cut a request whose headers never
+                # completed: a stall, reported like a silent one.
+                raise stop_or_stall_error(
+                    self._stream_stall_timeout, f"Anthropic model {self.model_name}"
+                ) from exc
             if _WORKSPACE_ID_REQUIRED_MARKER in str(exc):
                 # The API's own message names the missing header but not
                 # where KISS reads it from; replace it with an actionable

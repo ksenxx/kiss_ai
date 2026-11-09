@@ -39,11 +39,8 @@ const {
   paste,
   settle,
   removeChip,
+  chipText,
 } = require('./attachment_helpers');
-
-function chipText(win) {
-  return win.document.getElementById('file-chips').textContent;
-}
 
 function errorChips(win) {
   return Array.from(

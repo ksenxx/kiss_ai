@@ -187,8 +187,80 @@ function testInlineImagesOfABoundTabLoadFromTheMachine() {
   console.log("  ok - a bound tab's inline images are read on the machine");
 }
 
+// A26_astra-1: a task's links are relative to the directory THAT task
+// ran in on the machine (its replayed header says which), not to the
+// directory the machine's drop-down shows by now: another surface may
+// have moved the machine's working directory since the task started.
+function testATasksOwnDirectoryWinsOverTheMachinesCurrentOne(hidden) {
+  const {win, posted} = makeBoundPage(hidden);
+  const OLD = '/home/me/old';
+  send(win, {
+    type: 'task_events',
+    tabId: BOX,
+    task: 'write the report',
+    task_id: 't1',
+    chat_id: 'chat-box',
+    extra: JSON.stringify({work_dir: OLD, startTs: 1}),
+    events: [],
+  });
+  send(win, {
+    type: 'machineWorkDirs',
+    machine: 'box',
+    workDir: '/home/me/new',
+    recentWorkDirs: [],
+    error: '',
+  });
+  posted.length = 0;
+  result(win, 'Review: reports/result.txt');
+  const checks = ofType(posted, 'checkPaths');
+  assert.strictEqual(checks.length, 1, 'one checkPaths for the result');
+  assert.strictEqual(checks[0].machine, 'box');
+  assert.strictEqual(
+    checks[0].workDir,
+    OLD,
+    "BUG - the link was checked in the machine's current directory, not the task's",
+  );
+  if (!hidden) {
+    send(win, {
+      type: 'pathsExist',
+      tabId: BOX,
+      machine: 'box',
+      workDir: OLD,
+      results: {'reports/result.txt': true},
+    });
+    click(win, win.document.querySelector('#output [data-path]'));
+    const opens = ofType(posted, 'openFile');
+    assert.strictEqual(opens.length, 1, 'the click sends one openFile');
+    assert.strictEqual(opens[0].workDir, OLD, "the open names the task's directory");
+    assert.strictEqual(opens[0].machine, 'box');
+  }
+  // The daemon binds the tab elsewhere: the directory recorded for
+  // `box` names nothing on `other`, whose own directory is used.
+  send(win, {type: 'tabMachine', tabId: BOX, machine: 'other'});
+  send(win, {
+    type: 'machineWorkDirs',
+    machine: 'other',
+    workDir: '/srv/other',
+    recentWorkDirs: [],
+    error: '',
+  });
+  posted.length = 0;
+  result(win, 'See: reports/next.txt');
+  const again = ofType(posted, 'checkPaths');
+  assert.strictEqual(again.length, 1);
+  assert.strictEqual(again[0].machine, 'other');
+  assert.strictEqual(again[0].workDir, '/srv/other', "the other machine's directory");
+  win.close();
+  console.log(
+    "  ok - a task's own directory on the machine wins over its current one" +
+      (hidden ? ' (parked tab)' : ''),
+  );
+}
+
 testCheckAndOpenUseTheMachinesDirectory();
 testHiddenBoundTabChecksOnTheMachineToo();
 testInlineImagesOfABoundTabLoadFromTheMachine();
 testUnknownMachineDirectoryFallsBackToItsDaemon();
 testLocalTabKeepsThisDaemonsDirectory();
+testATasksOwnDirectoryWinsOverTheMachinesCurrentOne(false);
+testATasksOwnDirectoryWinsOverTheMachinesCurrentOne(true);

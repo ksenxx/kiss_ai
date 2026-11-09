@@ -21,7 +21,13 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.edit_guards import HEREDOC_VERDICT, heredoc_guard, heredoc_targets
-from kiss.agents.sorcar.shell_scan import bash_path, host_path, simple_commands
+from kiss.agents.sorcar.shell_scan import (
+    MAX_NESTING,
+    TooDeepError,
+    bash_path,
+    host_path,
+    simple_commands,
+)
 from kiss.agents.sorcar.useful_tools import UsefulTools, sleep_guard
 from kiss.tests.conftest import posix_only
 
@@ -94,6 +100,25 @@ def test_nested_expressions_that_do_not_close_are_each_tried_once() -> None:
     started = time.monotonic()
     assert sleep_guard("x=" + command) is not None
     assert time.monotonic() - started < 5
+
+
+def test_nested_arithmetic_expansions_count_toward_the_nesting_limit() -> None:
+    """Audit 2026-11-05 A09-7 (astra): ``$((1+$((1+...))))`` 600 deep raised ``RecursionError``
+    out of the scanner, whose expression scanners did not count toward ``MAX_NESTING``; they
+    do now, so the scan ends with the limit's own error, and ``MAX_NESTING`` levels are read."""
+    nested = "echo " + "$((1+" * 600 + "1" + "))" * 600
+    with pytest.raises(TooDeepError):
+        simple_commands(nested, None)
+    assert [c.program() for c in simple_commands(nested, None, optimistic=True)] == ["echo"]
+    within = "echo " + "$((1+" * MAX_NESTING + "1" + "))" * MAX_NESTING
+    [simple] = simple_commands(within, None)
+    assert [word.text for word in simple.words] == ["echo", within[5:]]
+    assert not simple.words[1].literal
+    # An arithmetic command's expressions count the same way.
+    with pytest.raises(TooDeepError):
+        simple_commands("((" + "$((1+" * MAX_NESTING + "1" + "))" * MAX_NESTING + "))", None)
+    levels = MAX_NESTING - 1
+    assert simple_commands("((" + "$((1+" * levels + "1" + "))" * levels + "))", None) == []
 
 
 @posix_only("the host Bash tool runs bash")

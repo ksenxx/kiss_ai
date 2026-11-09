@@ -64,13 +64,13 @@ class TestTrajectoryRoutes(IsolatedAsyncioTestCase):
         return status, body
 
     async def _fetch(
-        self, path: str, headers: dict[str, str] | None = None,
+        self, path: str, headers: dict[str, str] | None = None, port: int = 0,
     ) -> tuple[int, str, dict[str, str]]:
         """GET *path* with *headers*; return the status, body and reply headers."""
         import urllib.error
         import urllib.request
 
-        url = f"https://127.0.0.1:{self.port}{path}"
+        url = f"https://127.0.0.1:{port or self.port}{path}"
         ctx = no_verify_ssl()
 
         def _get() -> tuple[int, str, dict[str, str]]:
@@ -160,6 +160,30 @@ class TestTrajectoryRoutes(IsolatedAsyncioTestCase):
         save_config({"remote_password": ""})
         status, body, _ = await self._fetch(job_path, right)
         self.assertEqual((status, "Agent A" in body), (403, False))
+
+    async def test_private_daemon_serves_no_trajectory_data(self) -> None:
+        """The token-only private daemon hands its jobs to no HTTP requester.
+
+        It replaces an owner-only channel (:attr:`RemoteAccessServer.local_only`),
+        and HTTP carries no local token, so the loopback admission of the
+        public daemon's data routes would open the owner's trajectories
+        to every user of the machine.
+        """
+        private = RemoteAccessServer(
+            host="127.0.0.1", port=0, work_dir=self.server.work_dir,
+            url_file=Path(tempfile.mkdtemp(prefix="kiss_private_")) / "unused-url.json",
+            local_endpoint_file=Path(tempfile.mkdtemp(prefix="kiss_private_")) / "local.json",
+        )
+        await private.start_private_async()
+        self.addAsyncCleanup(private.stop_async)
+        job_path = "/api/jobs/job_2024_01_01_00_00_00_1/trajectories"
+        for path in ("/api/jobs", job_path):
+            status, body, _ = await self._fetch(path, port=private.port)
+            self.assertEqual(status, 403, path)
+            self.assertNotIn("job_2024", body)
+            self.assertNotIn("Agent A", body)
+        status, _body = await self._http_get("/api/jobs")
+        self.assertEqual(status, 200, "the public daemon still serves this machine")
 
     async def test_api_password_guesses_share_the_handshake_lockout(self) -> None:
         """Wrong passwords lock the visitor's IP out; bare requests do not count."""

@@ -147,17 +147,26 @@ function testFilePathInStreamedTextLinkifiedOnFlush() {
 }
 
 function testFilePathInsideCodeBlockLinkified() {
-  const {win} = makePage();
+  // The prompt renders through the real Markdown renderer, so the fence
+  // becomes an actual <pre><code> block (without marked.min.js the page
+  // falls back to escaped plain text and no code block exists).
+  const {win} = makeChatPage({
+    beforeScripts: answerCheckPaths,
+    extraScripts: ['marked.min.js'],
+  });
   send(win, {
     type: 'prompt',
     text: '```\nmv /tmp/a.txt /tmp/b.txt\n```',
   });
+  const code = win.document.querySelector('#output .prompt-body pre code');
+  assert.ok(code, 'the fenced prompt renders as a code block');
   const links = findLinks(win, '/tmp/a.txt');
   assert.strictEqual(
     links.length,
     1,
     'path inside code block must be linkified (code paths are exact)',
   );
+  assert.ok(code.contains(links[0]), 'the link sits inside the code block');
   win.close();
   console.log('  ok - path in code block is linkified');
 }

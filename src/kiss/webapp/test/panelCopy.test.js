@@ -13,7 +13,7 @@ const {JSDOM} = require('jsdom');
 const PANEL_COPY_PATH = path.join(__dirname, '..', 'media', 'panelCopy.js');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
-const {stubClipboard} = require('./simplify2_harness');
+const {stubClipboard, flushMicrotasks} = require('./simplify2_harness');
 
 // Every window made, closed once the run is over so node can exit.
 const openWindows = [];
@@ -63,10 +63,6 @@ function clickFirst(el, selector) {
   );
 }
 
-function flushMicrotasks() {
-  return new Promise(resolve => setImmediate(resolve));
-}
-
 async function run() {
   await test('exports getRawText + addCopyButton on window.PanelCopy', () => {
     const {PanelCopy} = makeWindow();
@@ -93,6 +89,31 @@ async function run() {
       '<span class="collapse-preview">preview</span>' +
       '<div>real content</div>';
     assert.strictEqual(PanelCopy.getRawText(panel), 'real content');
+  });
+
+  // The one chrome predicate every text walker shares (getRawText here,
+  // main.js's collapsed-preview text): the panel's copy and stop
+  // buttons, its collapsed preview and its timestamp / elapsed labels
+  // are chrome; anything else, and a non-element, is content.
+  await test('shouldSkip is exported and names exactly the panel chrome', () => {
+    const {document, PanelCopy} = makeWindow();
+    assert.strictEqual(typeof PanelCopy.shouldSkip, 'function');
+    [
+      'panel-copy-btn',
+      'panel-stop-btn',
+      'collapse-preview',
+      'panel-ts',
+      'panel-time',
+    ].forEach(cls => {
+      const el = document.createElement('span');
+      el.className = 'other ' + cls;
+      assert.strictEqual(PanelCopy.shouldSkip(el), true, cls + ' is chrome');
+    });
+    const content = document.createElement('div');
+    content.className = 'tc-body panel-text';
+    assert.strictEqual(PanelCopy.shouldSkip(content), false);
+    assert.strictEqual(PanelCopy.shouldSkip(document.createTextNode('t')), false);
+    assert.strictEqual(PanelCopy.shouldSkip(null), false);
   });
 
   await test('getRawText recurses through children when no override is set', () => {

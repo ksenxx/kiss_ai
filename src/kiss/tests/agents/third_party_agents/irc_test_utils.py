@@ -14,6 +14,7 @@ nothing but a socket to close.
 from __future__ import annotations
 
 import socket
+import time
 
 
 def read_lines(conn: socket.socket, until: str, timeout: float = 5.0) -> list[str]:
@@ -22,19 +23,29 @@ def read_lines(conn: socket.socket, until: str, timeout: float = 5.0) -> list[st
     Args:
         conn: An accepted client connection.
         until: Prefix of the last line to read (e.g. ``"USER "``).
-        timeout: Bound on each ``recv``.
+        timeout: Bound on the whole wait for the matching line.
 
     Returns:
         Every line read, the matching one last.
 
     Raises:
-        AssertionError: The client closed the connection first.
+        AssertionError: The client closed the connection first, or
+            *timeout* passed without a matching line.
     """
-    conn.settimeout(timeout)
+    deadline = time.monotonic() + timeout
     buf = ""
     lines: list[str] = []
     while True:
-        chunk = conn.recv(4096).decode("utf-8", errors="replace")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(
+                f"no line starting with {until!r} within {timeout} s; got {lines[-5:]}"
+            )
+        conn.settimeout(remaining)
+        try:
+            chunk = conn.recv(4096).decode("utf-8", errors="replace")
+        except TimeoutError:
+            continue
         if not chunk:
             raise AssertionError(f"connection closed before {until!r}; got {lines}")
         buf += chunk

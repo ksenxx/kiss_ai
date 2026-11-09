@@ -90,11 +90,13 @@ def precedence_example() -> str:
     and a call an unlocked key lets through.
 
     Raises:
-        ValueError: When ``/sh`` no longer locks ``tool_profile``; pick
-            another example SEA then.
+        ValueError: When ``/sh`` is not bundled or no longer locks
+            ``tool_profile``; pick another example SEA then.
     """
     name = "sh"
-    path = bundled_commands()[name]
+    path = bundled_commands().get(name)
+    if path is None:
+        raise ValueError(f"/{name} is not a bundled command; the precedence example needs one")
     sea = load_sea(path)
     declared = own_settings(sea)
     refused = locked_conflicts(base_settings([sea]), {"tool_profile": "review"})

@@ -5,7 +5,7 @@
 """The daemon's one dispatch path serves the chat page's commands.
 
 Remote browsers (WSS) and local token-authenticated peers share one
-backend dispatch path (:meth:`RemoteAccessServer._dispatch_client_command`).
+backend dispatch path (:meth:`RemoteAccessServer._ws_handler` to ``ServerApi.dispatch``).
 These tests lock in:
 
 * ``submit`` must forward the page's per-run fields (``useWebTools``,
@@ -18,7 +18,7 @@ These tests lock in:
 
 All tests drive the server through a real local client connection, the
 same JSON protocol browsers speak over WSS — both kinds of peer share
-:meth:`_dispatch_client_command` verbatim.
+that ``ServerApi.dispatch`` call verbatim.
 """
 
 from __future__ import annotations

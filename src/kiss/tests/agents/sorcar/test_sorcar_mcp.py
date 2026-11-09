@@ -353,8 +353,10 @@ def test_result_text_flattening() -> None:
 
 
 def test_wrapper_docstring_carries_schema_descriptions() -> None:
-    """Wrapper Args lines carry the inputSchema property descriptions."""
+    """The wrapper's docstring is the tool's description; the declared schema carries the rest."""
     from mcp.types import Tool
+
+    from kiss.core.tool_schema import declared_schema
 
     tool = Tool(
         name="search",
@@ -370,13 +372,194 @@ def test_wrapper_docstring_carries_schema_descriptions() -> None:
     )
     wrapper = make_mcp_tool_wrapper(MCPManager.instance(), "my srv", tool, "my srv")
     assert wrapper.__name__ == "my_srv_search"
-    doc = wrapper.__doc__ or ""
-    assert doc.startswith("Search the index. Second line.")
-    assert "query: The query text" in doc
-    assert "limit: See tool description. (optional)" in doc
+    assert wrapper.__doc__ == "Search the index. Second line."
+    declared = declared_schema(wrapper)
+    assert declared is not None
+    assert declared["description"] == "Search the index. Second line."
+    assert declared["parameters"]["properties"]["query"]["description"] == "The query text"
+    assert "description" not in declared["parameters"]["properties"]["limit"]
     params = inspect.signature(wrapper).parameters
     assert params["limit"].annotation is int
     assert params["limit"].default is None
+
+
+def test_wrapper_declares_the_structured_input_schema() -> None:
+    """The model sees the tool's arrays, objects, enums and null unions, not strings.
+
+    The wrapper reduced every property to a Python type and let the
+    model converter regenerate its schema: arrays and objects became
+    ``{"type": "string"}``, enums, nested properties and ``null``
+    unions vanished, so models sent strings where the server required
+    structured input.  The declared schema keeps that structure under
+    the sanitized parameter names, and leaves out the keywords the
+    providers' tool declarations reject (``$schema``,
+    ``additionalProperties``, ``title``).  A ``oneOf`` union is
+    declared as ``anyOf``: Gemini's declaration schema knows no
+    ``oneOf`` and refused the whole tool before any request, where the
+    string the property used to fall back to went through.
+    """
+    from google.genai import types
+    from mcp.types import Tool
+
+    from kiss.agents.sorcar.decide_tool import DEFAULT_DECISIONS_MODEL
+    from kiss.core.models.model_info import model
+
+    tool = Tool(
+        name="file",
+        description="File findings.",
+        inputSchema={
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"id": {"type": "integer"}},
+                        "required": ["id"],
+                        "additionalProperties": False,
+                    },
+                },
+                "severity": {"type": "string", "enum": ["low", "high"], "title": "Severity"},
+                "max-age": {"type": ["integer", "null"], "description": "Days"},
+                "query": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+            },
+            "required": ["findings", "query"],
+        },
+    )
+    wrapper = make_mcp_tool_wrapper(MCPManager.instance(), "srv", tool, "srv")
+    schema = model(DEFAULT_DECISIONS_MODEL)._function_to_openai_tool(wrapper)["function"]
+    assert schema["description"] == "File findings."
+    assert schema["parameters"] == {
+        "type": "object",
+        "properties": {
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"id": {"type": "integer"}},
+                    "required": ["id"],
+                },
+            },
+            "severity": {"type": "string", "enum": ["low", "high"]},
+            "max_age": {"anyOf": [{"type": "integer"}, {"type": "null"}], "description": "Days"},
+            "query": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+        },
+        "required": ["findings", "query"],
+    }
+    assert inspect.signature(wrapper).parameters["max_age"].annotation is int
+    # The declaration Gemini builds from it, as ``generate_and_process_with_tools`` does.
+    declaration = types.FunctionDeclaration(
+        name=schema["name"], description=schema["description"], parameters=schema["parameters"],
+    )
+    assert declaration.parameters is not None
+    assert declaration.parameters.properties is not None
+    query_members = declaration.parameters.properties["query"].any_of
+    assert query_members is not None
+    assert [m.type for m in query_members] == ["INTEGER", "STRING"]
+
+
+def test_wrapper_resolves_local_schema_references() -> None:
+    """A ``$ref`` property declares the referenced structure, not a string.
+
+    Pydantic (so FastMCP) emits a nested model as ``{"$ref":
+    "#/$defs/Address"}`` with the model under ``$defs``.  The reducer
+    dropped the reference and, left with no type, declared a string:
+    the model was told to send a string where the server required an
+    object.  A self-referencing model stops at the reference's type.  A
+    reference to a reference (an alias) is followed to the end, the
+    keywords next to each hop winning over the next (audit 2026-11-08,
+    S5 F4: the alias was dereferenced once, leaving its own reference
+    unresolved, and the object was declared a string); a cycle of
+    aliases ends at the type of the first alias seen again.
+    """
+    from mcp.types import Tool
+
+    from kiss.core.tool_schema import declared_schema
+
+    tool = Tool(
+        name="ship",
+        description="Ship an order.",
+        inputSchema={
+            "$defs": {
+                "Address": {
+                    "type": "object",
+                    "title": "Address",
+                    "properties": {
+                        "street": {"type": "string"},
+                        "zip_code": {"type": "string", "description": "Postal code"},
+                    },
+                    "required": ["street", "zip_code"],
+                },
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string"},
+                        "children": {"type": "array", "items": {"$ref": "#/$defs/Node"}},
+                    },
+                    "required": ["label"],
+                },
+                "ShippingAddress": {"$ref": "#/$defs/Address", "description": "Alias"},
+                "Ping": {"$ref": "#/$defs/Pong", "type": "integer"},
+                "Pong": {"$ref": "#/$defs/Ping"},
+            },
+            "type": "object",
+            "properties": {
+                "address": {"$ref": "#/$defs/Address", "description": "Where to ship"},
+                "tree": {"$ref": "#/$defs/Node"},
+                "lost": {"$ref": "#/$defs/Missing"},
+                "billing": {"$ref": "#/$defs/ShippingAddress"},
+                "origin": {"$ref": "#/$defs/ShippingAddress", "description": "Sender"},
+                "loop": {"$ref": "#/$defs/Pong"},
+            },
+            "required": ["address"],
+        },
+    )
+    wrapper = make_mcp_tool_wrapper(MCPManager.instance(), "srv", tool, "srv")
+    declared = declared_schema(wrapper)
+    assert declared is not None
+    assert declared["parameters"]["properties"] == {
+        "address": {
+            "type": "object",
+            "description": "Where to ship",
+            "properties": {
+                "street": {"type": "string"},
+                "zip_code": {"type": "string", "description": "Postal code"},
+            },
+            "required": ["street", "zip_code"],
+        },
+        "tree": {
+            "type": "object",
+            "properties": {
+                "label": {"type": "string"},
+                "children": {"type": "array", "items": {"type": "object"}},
+            },
+            "required": ["label"],
+        },
+        "lost": {"type": "string"},
+        "billing": {
+            "type": "object",
+            "description": "Alias",
+            "properties": {
+                "street": {"type": "string"},
+                "zip_code": {"type": "string", "description": "Postal code"},
+            },
+            "required": ["street", "zip_code"],
+        },
+        "origin": {
+            "type": "object",
+            "description": "Sender",
+            "properties": {
+                "street": {"type": "string"},
+                "zip_code": {"type": "string", "description": "Postal code"},
+            },
+            "required": ["street", "zip_code"],
+        },
+        "loop": {"type": "integer"},
+    }
+    assert inspect.signature(wrapper).parameters["address"].annotation is dict
+    assert inspect.signature(wrapper).parameters["billing"].annotation is dict
 
 
 

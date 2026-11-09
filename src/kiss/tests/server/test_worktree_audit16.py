@@ -57,7 +57,7 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
 from kiss.tests.conftest import seed_worktree
-from kiss.tests.server.worktree_helpers import merge_conflict
+from kiss.tests.server.worktree_helpers import merge_conflict, worktree_changed_files
 
 
 @pytest.fixture(autouse=True)
@@ -261,7 +261,7 @@ class TestBug70UntrackedFileConflict:
 
         (repo / "foo.py").write_text("user untracked content\n")
 
-        changed = server._get_worktree_changed_files(tab_id)
+        changed = worktree_changed_files(server, tab_id)
         assert "foo.py" in changed, (
             f"Precondition failed: worktree change not detected: {changed}"
         )

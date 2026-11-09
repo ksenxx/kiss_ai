@@ -6,11 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const {
-  makePage: makeChatPage,
-  send,
-  fakeMatchMedia,
-} = require('./simplify2_harness');
+const {makePage: makeChatPage, fakeMatchMedia} = require('./simplify2_harness');
 const {makeRow, sendHistory} = require('./history_helpers');
 
 const OLD_TASK = makeRow({task_id: '7', title: 'Old task', has_events: true});

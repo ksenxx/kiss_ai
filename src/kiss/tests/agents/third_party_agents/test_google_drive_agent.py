@@ -34,7 +34,6 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
 )
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
-    RecordingServer,
     serve_recording,
 )
 
@@ -161,10 +160,6 @@ def backend(drive_server, composio):
     return b, drive_server
 
 
-def _last(server: RecordingServer) -> dict[str, Any]:
-    return server.requests[-1]
-
-
 def test_search_files_defaults(backend) -> None:
     """gdrive_search_files lists files with the condensed fields projection."""
     b, server = backend
@@ -172,7 +167,7 @@ def test_search_files_defaults(backend) -> None:
     assert result["ok"] is True
     assert result["files"] == list(_FILES.values())
     assert result["next_page_token"] == "tok-next"
-    req = _last(server)
+    req = server.requests[-1]
     assert req["method"] == "GET"
     assert req["path"] == "/files"
     query = req["query"]
@@ -198,7 +193,7 @@ def test_search_files_with_query_and_paging(backend) -> None:
         )
     )
     assert result["ok"] is True
-    query = _last(server)["query"]
+    query = server.requests[-1]["query"]
     assert query["q"] == ["name contains 'report'"]
     assert query["pageSize"] == ["5"]
     assert query["pageToken"] == ["tok-1"]
@@ -211,7 +206,7 @@ def test_get_file(backend) -> None:
     result = json.loads(b.gdrive_get_file("bin1"))
     assert result["ok"] is True
     assert result["file"] == _FILES["bin1"]
-    req = _last(server)
+    req = server.requests[-1]
     assert req["path"] == "/files/bin1"
     assert req["query"]["fields"] == ["id,name,mimeType,size,modifiedTime,webViewLink,parents"]
 
@@ -224,7 +219,7 @@ def test_read_google_doc_uses_export(backend) -> None:
     assert result["name"] == "Design Doc"
     assert result["mime_type"] == "application/vnd.google-apps.document"
     assert result["content"] == "exported gdoc1 as text/plain"
-    req = _last(server)
+    req = server.requests[-1]
     assert req["path"] == "/files/gdoc1/export"
     assert req["query"]["mimeType"] == ["text/plain"]
 
@@ -235,7 +230,7 @@ def test_read_spreadsheet_defaults_to_csv_export(backend) -> None:
     result = json.loads(b.gdrive_read_file("sheet1"))
     assert result["ok"] is True
     assert result["content"] == "exported sheet1 as text/csv"
-    assert _last(server)["query"]["mimeType"] == ["text/csv"]
+    assert server.requests[-1]["query"]["mimeType"] == ["text/csv"]
 
 
 def test_read_with_export_mime_type_override(backend) -> None:
@@ -244,7 +239,7 @@ def test_read_with_export_mime_type_override(backend) -> None:
     result = json.loads(b.gdrive_read_file("gdoc1", export_mime_type="text/markdown"))
     assert result["ok"] is True
     assert result["content"] == "exported gdoc1 as text/markdown"
-    assert _last(server)["query"]["mimeType"] == ["text/markdown"]
+    assert server.requests[-1]["query"]["mimeType"] == ["text/markdown"]
 
 
 def test_read_binary_file_uses_alt_media(backend) -> None:
@@ -253,7 +248,7 @@ def test_read_binary_file_uses_alt_media(backend) -> None:
     result = json.loads(b.gdrive_read_file("bin1"))
     assert result["ok"] is True
     assert result["content"] == _BIN_CONTENT.decode()
-    req = _last(server)
+    req = server.requests[-1]
     assert req["path"] == "/files/bin1"
     assert req["query"]["alt"] == ["media"]
     # The preceding metadata request used the fields projection, not alt=media.
@@ -289,7 +284,7 @@ def test_upload_file_multipart(backend, tmp_path) -> None:
     )
     assert result["ok"] is True
     assert result["file"] == {"id": "up1", "name": "uploaded"}
-    req = _last(server)
+    req = server.requests[-1]
     assert req["method"] == "POST"
     assert req["path"] == "/upload/files"
     assert req["query"]["uploadType"] == ["multipart"]
@@ -310,16 +305,16 @@ def test_upload_file_defaults_name_and_guessed_mime(backend, tmp_path) -> None:
     source = tmp_path / "diagram.png"
     source.write_bytes(b"\x89PNG fake")
     assert json.loads(b.gdrive_upload_file(str(source)))["ok"] is True
-    body = cast(bytes, _last(server)["body"])
+    body = cast(bytes, server.requests[-1]["body"])
     metadata = json.loads(body.split(b"\r\n\r\n", 1)[1].split(b"\r\n", 1)[0])
     assert metadata == {"name": "diagram.png"}
     assert b"Content-Type: image/png" in body
     source = tmp_path / "data.unknownext"
     source.write_bytes(b"x")
     assert json.loads(b.gdrive_upload_file(str(source), mime_type="application/x-custom"))["ok"]
-    assert b"Content-Type: application/x-custom" in cast(bytes, _last(server)["body"])
+    assert b"Content-Type: application/x-custom" in cast(bytes, server.requests[-1]["body"])
     assert json.loads(b.gdrive_upload_file(str(source)))["ok"]
-    assert b"Content-Type: application/octet-stream" in cast(bytes, _last(server)["body"])
+    assert b"Content-Type: application/octet-stream" in cast(bytes, server.requests[-1]["body"])
 
 
 def test_upload_file_size_limit_and_missing_file(backend, tmp_path) -> None:
@@ -350,7 +345,7 @@ def test_create_folder(backend) -> None:
     result = json.loads(b.gdrive_create_folder("Reports", parent_id="root9"))
     assert result["ok"] is True
     assert result["folder"]["id"] == "folder-new"
-    req = _last(server)
+    req = server.requests[-1]
     assert req["method"] == "POST"
     assert req["path"] == "/files"
     assert req["body"] == {
@@ -364,7 +359,7 @@ def test_create_folder_without_parent(backend) -> None:
     """gdrive_create_folder omits parents when parent_id is empty."""
     b, server = backend
     assert json.loads(b.gdrive_create_folder("Loose"))["ok"] is True
-    assert _last(server)["body"] == {
+    assert server.requests[-1]["body"] == {
         "name": "Loose",
         "mimeType": "application/vnd.google-apps.folder",
     }
@@ -376,7 +371,7 @@ def test_share_file(backend) -> None:
     result = json.loads(b.gdrive_share_file("bin1", "ada@example.com", role="writer"))
     assert result["ok"] is True
     assert result["permission"]["id"] == "perm1"
-    req = _last(server)
+    req = server.requests[-1]
     assert req["method"] == "POST"
     assert req["path"] == "/files/bin1/permissions"
     assert req["body"] == {"type": "user", "role": "writer", "emailAddress": "ada@example.com"}
@@ -402,7 +397,7 @@ def test_move_file_without_existing_parents(backend) -> None:
     b, server = backend
     result = json.loads(b.gdrive_move_file("orphan1", "newfolder"))
     assert result["ok"] is True
-    query = _last(server)["query"]
+    query = server.requests[-1]["query"]
     assert query["addParents"] == ["newfolder"]
     assert "removeParents" not in query
 
@@ -412,7 +407,7 @@ def test_trash_file(backend) -> None:
     b, server = backend
     result = json.loads(b.gdrive_trash_file("bin1"))
     assert result == {"ok": True}
-    req = _last(server)
+    req = server.requests[-1]
     assert req["method"] == "PATCH"
     assert req["path"] == "/files/bin1"
     assert req["body"] == {"trashed": True}
@@ -439,11 +434,14 @@ def test_path_unsafe_ids_rejected_before_any_request(backend, tmp_path) -> None:
 
 def _call_every_tool(b: GoogleDriveChannelBackend, tmp_path: Path) -> list[str]:
     """Invoke every backend tool once with valid arguments; return the results."""
+    source = tmp_path / "in.txt"
+    source.write_bytes(b"upload body")
     return [
         b.gdrive_search_files(),
         b.gdrive_get_file("bin1"),
         b.gdrive_read_file("bin1"),
         b.gdrive_download_file("bin1", str(tmp_path / "out")),
+        b.gdrive_upload_file(str(source)),
         b.gdrive_create_folder("x"),
         b.gdrive_share_file("bin1", "a@example.com"),
         b.gdrive_move_file("bin1", "f"),
@@ -520,6 +518,7 @@ def test_connection_refused_returns_ok_false(backend, tmp_path, refusing_port: i
     """Tools return ok:false when the server is unreachable — never raise."""
     b, _ = backend
     b._base_url = f"http://127.0.0.1:{refusing_port}"
+    b._upload_base_url = b._base_url + "/upload"
     for result_str in _call_every_tool(b, tmp_path):
         result = json.loads(result_str)
         assert result["ok"] is False

@@ -17,6 +17,7 @@ const {
   rowByTitle,
   lastGetHistory,
   sendHistory,
+  statusMark: findDot,
 } = require('./history_helpers');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
@@ -31,10 +32,6 @@ function clickBurgerMenu(win) {
   const btn = win.document.getElementById('menu-btn');
   assert.ok(btn, 'burger menu button (#menu-btn) must exist');
   btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function findDot(row) {
-  return row.querySelector('.sidebar-item-running');
 }
 
 function findCompletedDot(row) {

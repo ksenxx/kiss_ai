@@ -13,29 +13,9 @@
 // `kiss-tips-opt-out` window event.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {newDom, MEDIA} = require('./simplify2_harness');
+const {loadTipsPage: loadChatDom, tipsHost: panel} = require('./tips_helpers');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
-
-// The dialog is tips.js alone on the chat page: main.js must not run,
-// so this is the bare chat.html window with only tips.js eval'd.
-function loadChatDom(cfg, storage) {
-  const win = newDom('outside-only');
-  win.localStorage.clear();
-  if (storage) {
-    for (const k of Object.keys(storage))
-      win.localStorage.setItem(k, storage[k]);
-  }
-  win.eval(`window.__TIPS__ = ${JSON.stringify(cfg)};`);
-  win.eval(fs.readFileSync(path.join(MEDIA, 'tips.js'), 'utf8'));
-  return win;
-}
-
-function panel(win) {
-  return win.document.body.querySelector('kiss-tips-panel');
-}
 
 function part(win, selector) {
   const host = panel(win);

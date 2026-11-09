@@ -29,6 +29,7 @@ const {
   submits,
   settle,
   failDecode,
+  chipPending,
 } = require('./attachment_helpers');
 const {clickTab} = require('./simplify2_harness');
 
@@ -97,31 +98,58 @@ async function main() {
 
   // Switching tabs during the wait abandons the submit (it no longer
   // matches what the user sees) but keeps the tab's attachment for later.
+  // The wait ends while A is on screen with a draft in its composer: the
+  // continuation must send nothing at all (C's prompt, or A's draft in
+  // its place, with A's empty attachment list) and leave A's draft alone.
+  // The reader's completion is observed, not waited out, so the check
+  // does not depend on how long the FileReader takes.
   win._testApi.createNewTab();
   const tabC = win._testApi.getActiveTabId();
   const png3 = new win.File([new Uint8Array([137, 80, 78, 71, 1])], 'c.png', {
     type: 'image/png',
   });
+  // The page's only FileReader is the one blobToBase64 opens for the
+  // pasted file, once isHeifFile has looked at its header: the first
+  // reader built after the paste is c.png's.
+  const RealFileReader = win.FileReader;
+  let cRead = false;
+  win.FileReader = function () {
+    win.FileReader = RealFileReader;
+    const reader = new RealFileReader();
+    reader.addEventListener('loadend', () => {
+      cRead = true;
+    });
+    return reader;
+  };
   paste(win, png3);
   typeAndEnter(win, 'prompt for C');
   clickTab(win, tabA);
   assert.strictEqual(win._testApi.getActiveTabId(), tabA);
-  await settle();
+  const inp = win.document.getElementById('task-input');
+  inp.value = 'UNSENT A DRAFT';
+  const sentBefore = submits(posted).length;
+  await settle(() => cRead);
+  assert.strictEqual(win.FileReader, RealFileReader, "c.png's reader ran");
   assert.strictEqual(
-    submits(posted).filter(m => m.tabId === tabC).length,
-    0,
-    'a submit whose tab was switched away from must not be sent',
+    submits(posted).length,
+    sentBefore,
+    'a submit whose tab was switched away from must not be sent, ' +
+      "neither as C's prompt nor as the draft of the tab on screen",
   );
+  assert.strictEqual(inp.value, 'UNSENT A DRAFT', "A's draft survives");
   clickTab(win, tabC);
   assert.strictEqual(win._testApi.getActiveTabId(), tabC);
+  assert.strictEqual(chipPending(win, 'c.png'), false, 'C kept its photo');
   typeAndEnter(win, 'prompt for C again');
   await settle(() => submits(posted).some(m => m.tabId === tabC));
   const fromC = submits(posted).filter(m => m.tabId === tabC);
   assert.strictEqual(fromC.length, 1, 'C sends once its user is back');
+  assert.strictEqual(fromC[0].prompt, 'prompt for C again');
   assert.strictEqual(fromC[0].attachments.length, 1, 'C kept its photo');
   assert.strictEqual(fromC[0].attachments[0].name, 'c.png');
   clickTab(win, tabA);
   assert.strictEqual(win._testApi.getActiveTabId(), tabA);
+  assert.strictEqual(inp.value, 'UNSENT A DRAFT', "A's draft is back");
 
   // Same-tab deduplication still holds with a pending attachment: a burst
   // of Enters while a photo is still being read submits exactly once.

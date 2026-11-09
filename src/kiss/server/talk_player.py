@@ -179,22 +179,34 @@ class TalkPlayer:
         # put is a Python ``with self.not_full:``, which the same
         # injection leaks, wedging the worker's get and every later
         # play.
-        self._queue: queue.SimpleQueue[dict[str, Any]] = queue.SimpleQueue()
+        self._queue: queue.SimpleQueue[tuple[dict[str, Any], list[str]]] = queue.SimpleQueue()
         self._worker: threading.Thread | None = None
 
-    def play(self, event: dict[str, Any]) -> None:
+    def play(self, event: dict[str, Any]) -> bool:
         """Queue one ``talk`` *event* for playback (non-blocking).
 
-        Events without a clip and already-spoken ``talkId`` values
-        are dropped (the latter matching the browser client).
+        The machine's player (:func:`player_command`) is resolved here,
+        once per event, and travels with the queued entry.  Events
+        without a clip, events on a machine without a player and
+        already-spoken ``talkId`` values are dropped (the latter
+        matching the browser client).
 
         Args:
             event: The broadcast ``talk`` event dictionary.
+
+        Returns:
+            ``True`` when the machine has a player and the event carries
+            a clip (it is queued, unless already spoken); ``False``
+            otherwise.
         """
         if not event.get("audioB64"):
-            return
+            return False
+        player = player_command()
+        if player is None:
+            return False
         if locked_call(self._lock, self._admit_locked, event.get("talkId")):
-            self._queue.put(dict(event))
+            self._queue.put((dict(event), player))
+        return True
 
     def _admit_locked(self, talk_id: Any) -> bool:
         """Make sure the worker runs and record *talk_id*; ``False`` when already spoken."""
@@ -218,24 +230,23 @@ class TalkPlayer:
     def _drain(self) -> None:
         """Worker loop: play queued events one at a time, forever."""
         while True:
-            event = self._queue.get()
+            event, player = self._queue.get()
             try:
-                self._play_clip(event)
+                self._play_clip(event, player)
             except Exception:
                 logger.exception("talk playback failed")
 
-    def _play_clip(self, event: dict[str, Any]) -> None:
-        """Play the event's ``audioB64`` clip with the machine's audio player.
+    def _play_clip(self, event: dict[str, Any], player: list[str]) -> None:
+        """Play the event's ``audioB64`` clip with the *player* argv prefix.
 
-        An undecodable or empty clip, or a machine without a player, is
-        skipped silently; the browser clients still play their copy.
+        An undecodable or empty clip is skipped silently; the browser
+        clients still play their copy.
         """
         try:
             audio = base64.b64decode(event["audioB64"], validate=True)
         except (ValueError, TypeError):
             return
-        player = player_command()
-        if not audio or player is None:
+        if not audio:
             return
         suffix = ".mp3" if "mpeg" in str(event.get("audioMime") or "") else ".audio"
         fd, path = tempfile.mkstemp(prefix="sorcar-talk-", suffix=suffix)

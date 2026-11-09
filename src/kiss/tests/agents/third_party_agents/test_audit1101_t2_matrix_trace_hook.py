@@ -22,7 +22,6 @@ from kiss.tests.agents.third_party_agents import test_matrix_wave4 as wave4
 
 def _sentinel_tracer(frame: Any, event: str, arg: Any) -> None:
     """A global trace function that traces nothing; only its identity matters."""
-    return None
 
 
 def _test_name(test: Callable[[], None]) -> str:

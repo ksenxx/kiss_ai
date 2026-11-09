@@ -397,8 +397,9 @@ def _seed_new_custom_entry(name: str) -> dict[str, Any]:
     prefix such as ``openai/gpt-6.1-sol``, or as a ``bedrock/<id>``
     profile of a ``claude-*`` entry; the one rule of
     :func:`_lookup_model_info`) copies THAT model's context length,
-    ``thinking`` level and prices, cache prices included and scaled by a
-    Bedrock profile's premium (see :func:`bedrock_price_factor`) —
+    ``thinking`` level, capability flags, transport flag, fallback,
+    thinking overrides and prices, cache prices included and scaled by
+    a Bedrock profile's premium (see :func:`bedrock_price_factor`) —
     seeding the generic :data:`_CUSTOM_MODEL_DEFAULTS` over e.g.
     ``gpt-5.6-sol`` would replace its real 500K context and per-token
     prices with 128K and $0, silently breaking budget accounting for
@@ -408,10 +409,24 @@ def _seed_new_custom_entry(name: str) -> dict[str, Any]:
     info = _lookup_model_info(name)
     if info is None:
         return dict(_CUSTOM_MODEL_DEFAULTS)
-    # Every per-million price, audio and image output included: the
-    # loader replaces the catalog entry with this one, so a dropped
-    # field would bill audio/image tokens at the text rates.
-    entry: dict[str, Any] = {"context_length": info.context_length, "thinking": info.thinking}
+    # Every field the loader reads (see :func:`_build_model_info_entry`),
+    # audio and image prices included: the loader replaces the catalog
+    # entry with this one, so a dropped field would bill audio/image
+    # tokens at the text rates, turn a decisions-only or embedding model
+    # into a generation one, and drop the Responses transport from the
+    # entry and (see :func:`_sync_alias_transport_flags`) its aliases.
+    entry: dict[str, Any] = {
+        "context_length": info.context_length,
+        "thinking": info.thinking,
+        "fc": info.is_function_calling_supported,
+        "emb": info.is_embedding_supported,
+        "gen": info.is_generation_supported,
+        "dec": info.is_decisions_supported,
+        "use_responses_api": info.use_responses_api,
+        "fallback": info.fallback,
+        "extended_thinking": info.extended_thinking,
+        "adaptive_thinking": info.adaptive_thinking,
+    }
     entry.update({field: getattr(info, field) for field in _PER_1M_PRICE_FIELDS})
     if info.prompt_tiers:
         entry["prompt_tiers"] = [
@@ -732,6 +747,8 @@ PROMPT_TIER_PRICE_FIELDS = (
     "cache_read_price_per_1M",
     "cache_write_price_per_1M",
     "cache_write_1h_price_per_1M",
+    "audio_input_price_per_1M",
+    "audio_output_price_per_1M",
 )
 
 
@@ -839,9 +856,15 @@ def _read_model_info_json(path: Path) -> dict[str, Any]:
 
 # Catalog fields a generated ``-{level}`` thinking alias shares with its
 # base: an alias sends requests to the same provider model over the same
-# transport, so it is billed at the base's prices.
+# transport, so it is billed at the base's prices and has the same
+# context window and capabilities.
 _ALIAS_MIRRORED_FIELDS = (
     "use_responses_api",
+    "context_length",
+    "fc",
+    "emb",
+    "gen",
+    "dec",
     "input_price_per_1M",
     "output_price_per_1M",
     "cache_read_price_per_1M",
@@ -855,13 +878,15 @@ _ALIAS_MIRRORED_FIELDS = (
 
 
 def _sync_alias_transport_flags(raw: dict[str, Any], user_keys: set[str]) -> None:
-    """Mirror a user-overridden base's transport flag and prices onto its aliases.
+    """Mirror a user-overridden base's shared catalog fields onto its aliases.
 
     Generated ``-{level}`` thinking aliases ship with a copy of their
-    base's ``use_responses_api`` flag and prices.  When ``MY_MODELS.json``
-    overrides only the base entry, the bundled alias copies would
-    otherwise keep the old values and silently bypass the user's
-    transport choice and prices whenever an alias name is selected.
+    base's ``use_responses_api`` flag, context length, capability flags
+    and prices.  When ``MY_MODELS.json`` overrides only the base entry,
+    the bundled alias copies would otherwise keep the old values and
+    silently bypass the user's transport choice, context window (what
+    the agent budgets compaction on) and prices whenever an alias name
+    is selected.
     Each field in :data:`_ALIAS_MIRRORED_FIELDS` is copied from the base,
     or removed from the alias when the base lacks it (so derived cache
     prices are recomputed from the base's input price).  Aliases the user
@@ -2433,15 +2458,23 @@ def model(
         # preserve a per-task API key) — the probe verified that exact
         # model/endpoint pair.  Any other endpoint (a custom gateway, or a
         # different vendor's default URL) has unverified /v1/responses
-        # support for this model and stays on the v1 adapter.
+        # support for this model and stays on the v1 adapter; that holds
+        # for a ``MY_MODELS.json`` entry of a vendor-routed name too, whose
+        # seeded flag is a copy of the catalog's (see
+        # :func:`_seed_new_custom_entry`).  A name no vendor routes has no
+        # catalog but its own entry, so that entry's flag — written by the
+        # user for the endpoint it names — decides there.
         use_v2 = model_config.get("use_responses_api")
         if use_v2 is None:
-            endpoint_provider = _registered_provider_for_exact_base_url(base_url)
-            use_v2 = (
-                endpoint_provider is not None
-                and endpoint_provider is _match_openai_compatible_provider(model_name)
-                and _wants_responses_api(info, None)
-            )
+            vendor = _match_openai_compatible_provider(model_name)
+            if vendor is None and info is not None and _is_registered_endpoint_model(model_name):
+                use_v2 = info.use_responses_api
+            else:
+                use_v2 = (
+                    vendor is not None
+                    and _registered_provider_for_exact_base_url(base_url) is vendor
+                    and _wants_responses_api(info, None)
+                )
         return _openai_compatible(
             model_name,
             base_url,
@@ -2626,12 +2659,17 @@ _DEFAULT_PROVIDER_PRIORITY = (
     "Gemini",
     "OpenRouter",
     "Together",
+    "Z.AI",
+    "Moonshot",
     "Bedrock",
     "Claude Code CLI",
     "Codex CLI",
 )
 """Provider labels in the order :func:`get_default_model` and
-:func:`get_fast_model` prefer them."""
+:func:`get_fast_model` prefer them: every label of
+:func:`_configured_providers`, so an install whose only credential is
+for one provider never gets ``"No model"`` while that provider's models
+are offered."""
 
 
 def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
@@ -2658,9 +2696,9 @@ def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
 def get_fast_model() -> str:
     """Return a cheap/fast model based on which API keys are available.
 
-    Priority: Anthropic → OpenAI → Gemini → OpenRouter → Together → Bedrock
-    (the Bedrock id of the Anthropic fast model, see
-    :func:`registered_bedrock_model`) → Claude Code CLI.
+    Priority: Anthropic → OpenAI → Gemini → OpenRouter → Together → Z.AI →
+    Moonshot → Bedrock (the Bedrock id of the Anthropic fast model, see
+    :func:`registered_bedrock_model`) → Claude Code CLI → Codex CLI.
 
     Returns:
         A fast model name for the first available provider.
@@ -2672,6 +2710,8 @@ def get_fast_model() -> str:
             "Gemini": "gemini-3.5-flash-lite",
             "OpenRouter": "openrouter/anthropic/claude-sonnet-5.5",
             "Together": "deepseek-ai/DeepSeek-V4.1-Flash",
+            "Z.AI": "glm-4.5-air",
+            "Moonshot": "kimi-k2.5",
             "Bedrock": registered_bedrock_model(cheapest=True) or "",
             "Claude Code CLI": "cc/haiku",
             "Codex CLI": "codex/default",
@@ -2683,9 +2723,9 @@ def get_default_model() -> str:
     """Return the best default model based on which API keys are configured.
 
     Priority order: Anthropic > OpenAI > Gemini > OpenRouter > Together AI >
-    Bedrock (the Bedrock id of the Anthropic default model, see
-    :func:`registered_bedrock_model`) > Claude Code CLI.
-    Falls back to ``"No model"`` if no keys are set.
+    Z.AI > Moonshot > Bedrock (the Bedrock id of the Anthropic default
+    model, see :func:`registered_bedrock_model`) > Claude Code CLI >
+    Codex CLI.  Falls back to ``"No model"`` if no keys are set.
     """
     return _model_for_first_configured_provider(
         {
@@ -2694,6 +2734,8 @@ def get_default_model() -> str:
             "Gemini": "gemini-3.8-flash",
             "OpenRouter": "openrouter/anthropic/claude-opus-5.5",
             "Together": "moonshotai/Kimi-K3",
+            "Z.AI": "glm-4.7",
+            "Moonshot": "kimi-k3",
             "Bedrock": registered_bedrock_model(cheapest=False) or "",
             "Claude Code CLI": "cc/opus",
             "Codex CLI": "codex/default",
@@ -2835,7 +2877,10 @@ def calculate_cost(
 
     A catalog entry with ``prompt_tiers`` (OpenRouter's published
     long-prompt prices, see :func:`_parse_prompt_tiers`) is priced by
-    them alone; :func:`_long_context_uplift` covers the entries without.
+    them alone; :func:`_long_context_uplift` covers the entries without,
+    except decisions-only entries (``dec`` without ``gen``, e.g.
+    ``openrouter/openai/gpt-6-luna-decisions``): their flat listed price
+    is not the generation model's tiered one.
 
     Returns:
         float: Cost in USD.
@@ -2883,7 +2928,17 @@ def calculate_cost(
     cw1h_price = prices["cache_write_1h_price_per_1M"]
     if cw1h_price is None:
         cw1h_price = cw_price
-    uplift = _long_context_uplift(model_name) if single_request and not info.prompt_tiers else None
+    # Audio rates are tiered like text (OpenRouter's Gemini Pro overrides
+    # double ``audio`` above 200K prompt tokens); unset, they follow the
+    # (tiered, uplifted) text rate.
+    explicit_audio_in = prices["audio_input_price_per_1M"]
+    explicit_audio_out = prices["audio_output_price_per_1M"]
+    decisions_only = info.is_decisions_supported and not info.is_generation_supported
+    uplift = (
+        _long_context_uplift(model_name)
+        if single_request and not info.prompt_tiers and not decisions_only
+        else None
+    )
     if uplift is not None and prompt_tokens > uplift[0]:
         _, input_mult, output_mult = uplift
         input_price *= input_mult
@@ -2891,14 +2946,12 @@ def calculate_cost(
         cr_price *= input_mult
         cw_price *= input_mult
         cw1h_price *= input_mult
-    audio_in_price = (
-        info.audio_input_price_per_1M if info.audio_input_price_per_1M is not None else input_price
-    )
-    audio_out_price = (
-        info.audio_output_price_per_1M
-        if info.audio_output_price_per_1M is not None
-        else output_price
-    )
+        if explicit_audio_in is not None:
+            explicit_audio_in *= input_mult
+        if explicit_audio_out is not None:
+            explicit_audio_out *= output_mult
+    audio_in_price = explicit_audio_in if explicit_audio_in is not None else input_price
+    audio_out_price = explicit_audio_out if explicit_audio_out is not None else output_price
     image_out_price = (
         info.image_output_price_per_1M
         if info.image_output_price_per_1M is not None

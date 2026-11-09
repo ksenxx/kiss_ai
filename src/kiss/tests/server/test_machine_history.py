@@ -144,6 +144,29 @@ class TestMachineHistory(IsolatedAsyncioTestCase):
         reply = await self._history(machine="nobody")
         self.assertEqual(reply["sessions"], [])
 
+    async def test_a_synced_row_is_listed_as_the_machine_it_ran_on(self) -> None:
+        """A row a history sync copied in from a machine is that machine's, not this daemon's."""
+        synced, _chat = th._add_task("synced from box", chat_id="chat-synced")
+        stray, _chat = th._add_task("synced from an unregistered host", chat_id="chat-stray")
+        db = th._get_db()
+        db.execute("UPDATE task_history SET machine = 'box' WHERE id = ?", (synced,))
+        db.execute("UPDATE task_history SET machine = 'gone-host' WHERE id = ?", (stray,))
+        db.commit()
+        reply = await self._history()
+        rows = {s["title"]: s for s in reply["sessions"]}
+        self.assertEqual(rows["synced from box"]["machine"], "box")
+        self.assertEqual(rows["synced from box"]["machine_url"], self.remote.url)
+        self.assertNotIn("machine", rows["synced from an unregistered host"])
+        self.assertNotIn("machine", rows["local only"])
+        self.assertTrue(all("origin" not in s for s in reply["sessions"]))
+        # This machine's own rows -- what another daemon's fan-out asks
+        # for -- leave out every row that ran elsewhere.
+        reply = await self._history(machine=mach.LOCAL_MACHINE)
+        self.assertEqual(
+            sorted(s["title"] for s in reply["sessions"]),
+            ["local only", "shared task (local copy)"],
+        )
+
     async def test_a_daemon_registered_with_itself_does_not_recurse(self) -> None:
         """A machine pointing back at this daemon adds nothing and never loops."""
         await asyncio.to_thread(
@@ -211,6 +234,60 @@ class TestMachineHistory(IsolatedAsyncioTestCase):
         # A search is not remembered: it reaches the machine or shows nothing of it.
         reply = await self._history(query="alpha")
         self.assertEqual(reply["sessions"], [])
+
+    async def _write(
+        self, cmd: dict[str, Any], reply_type: str = "tasks_updated",
+    ) -> dict[str, Any]:
+        """Send the CHATS-panel write *cmd* and return the first *reply_type* message."""
+        self.writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
+        await self.writer.drain()
+        for _ in range(100):
+            line = await asyncio.wait_for(self.reader.readline(), timeout=20.0)
+            assert line, "local connection closed"
+            msg: dict[str, Any] = json.loads(line.decode("utf-8"))
+            if msg.get("type") == reply_type:
+                return msg
+            self.assertNotEqual(msg.get("type"), "notice", msg)
+        raise AssertionError(f"no {reply_type}")
+
+    async def test_writes_to_a_remote_row_reach_its_machine(self) -> None:
+        """Favourite, rename and delete stamped ``machine`` change that machine's history only."""
+        rows = {s["title"]: s for s in (await self._history(machine="box"))["sessions"]}
+        alpha = rows["remote alpha"]["task_id"]
+        await self._write(
+            {"type": "setFavorite", "taskId": alpha, "isFavorite": True, "machine": "box"},
+        )
+        rows = {s["title"]: s for s in (await self._history())["sessions"]}
+        self.assertTrue(rows["remote alpha"]["is_favorite"])
+        self.assertFalse(rows["local only"].get("is_favorite"))
+
+        await self._write(
+            {"type": "setChatSummary", "chatId": "chat-r", "summary": "Renamed", "machine": "box"},
+        )
+        rows = {s["title"]: s for s in (await self._history())["sessions"]}
+        self.assertEqual(rows["remote alpha"]["chat_summary"], "Renamed")
+
+        # The shared chat goes from the machine; this daemon's copy stays.
+        await self._write(
+            {"type": "deleteChat", "chatId": "chat-shared", "tabId": "t", "machine": "box"},
+        )
+        await self._write(
+            {"type": "deleteTask", "taskId": alpha, "tabId": "t", "machine": "box"},
+        )
+        self.assertEqual((await self._history(machine="box"))["sessions"], [])
+        self.assertEqual(
+            sorted(s["title"] for s in (await self._history())["sessions"]),
+            ["local only", "shared task (local copy)"],
+        )
+
+    async def test_a_write_to_an_unknown_machine_tells_the_tab(self) -> None:
+        """A write naming no registered machine answers with a notice for the tab."""
+        notice = await self._write(
+            {"type": "deleteTask", "taskId": "x", "tabId": "tab-9", "machine": "nobody"},
+            "notice",
+        )
+        self.assertEqual(notice["tabId"], "tab-9")
+        self.assertIn("nobody", notice["text"])
 
     async def test_a_dead_machine_hides_nothing_local(self) -> None:
         """A machine down before it ever answered lists nothing; the local rows stay."""

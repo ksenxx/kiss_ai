@@ -79,6 +79,12 @@ _JPEG_QUALITY = 60
 _MIN_FRAME_INTERVAL = 1 / 15
 _OPEN_TIMEOUT = 90.0
 _CALL_TIMEOUT = 30.0
+# How long attaching a CDP session to a new page gets (_register): two
+# round trips to a browser that has just created the page.  A browser
+# that stops answering would otherwise hold every waiter on the
+# attachment for good: the open, a second registration of the page and
+# the cleanup of a cancelled open.
+_ATTACH_TIMEOUT = 10.0
 # Longest an agent thread waiting for an open goes without a bytecode
 # check point, i.e. without noticing the task runner's Stop.
 _WAIT_SLICE = 0.5
@@ -182,9 +188,9 @@ def normalize_url(text: str) -> str:
 
     Returns:
         ``text`` unchanged when it has a scheme, ``https://`` + text
-        for a host name, ``http://`` + text for an IP address (as
-        browsers do: a LAN device or local server has no certificate),
-        otherwise a Google search for the words.
+        for a host name, ``http://`` + text for an IP address or
+        ``localhost`` (as browsers do: a LAN device or local server has
+        no certificate), otherwise a Google search for the words.
     """
     text = text.strip()
     if not text:
@@ -192,10 +198,10 @@ def normalize_url(text: str) -> str:
     if "://" in text or text.startswith(("about:", "chrome:", "data:", "file:")):
         return text
     if " " not in text:
-        if _HOST_RE.match(text) or text.startswith("localhost"):
-            return "https://" + text
         if _is_ip_address(text):
             return "http://" + text
+        if _HOST_RE.match(text):
+            return "https://" + text
     return "https://www.google.com/search?q=" + quote(text)
 
 
@@ -248,10 +254,14 @@ def launch_failure_summary(exc: BaseException) -> str:
 
 
 def _is_ip_address(text: str) -> bool:
-    """Whether *text* is an IP address (IPv6 in brackets), with an optional ``:port`` and path."""
+    """Whether *text* is an IP address (IPv6 in brackets) or ``localhost``.
+
+    An optional ``:port`` and path may follow.
+    """
     try:
         parts = urlsplit("//" + text)
-        ipaddress.ip_address(parts.hostname or "")
+        if parts.hostname != "localhost":
+            ipaddress.ip_address(parts.hostname or "")
         _ = parts.port  # a port that is not a number raises
     except ValueError:
         return False
@@ -485,6 +495,15 @@ class BrowserTabService:
             future.result(_CALL_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — shutdown must not raise
             logger.debug("browser tab: shutdown error: %s", exc)
+        # Teardown can leave independent navigation/input callbacks
+        # suspended. Settle their submitted futures and finalizers before
+        # closing the loop, including a teardown that missed its deadline.
+        drain = asyncio.run_coroutine_threadsafe(self._cancel_pending(), loop)
+        try:
+            drain.result(_CLOSE_TIMEOUT + 1)
+        except Exception as exc:  # noqa: BLE001 — a wedged loop must not block shutdown
+            drain.cancel()
+            logger.debug("browser tab: draining shutdown tasks: %s", exc)
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=10)
         if thread.is_alive():
@@ -493,6 +512,15 @@ class BrowserTabService:
             logger.warning("browser tab: the loop thread did not stop; leaving it behind")
             return
         loop.close()
+
+    async def _cancel_pending(self) -> None:
+        """Cancel outstanding service operations while the private loop still runs."""
+        current = asyncio.current_task()
+        pending = {task for task in asyncio.all_tasks() if task is not current}
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.wait(pending, timeout=_CLOSE_TIMEOUT)
 
     # ------------------------------------------------------------------
     # Loop plumbing
@@ -534,17 +562,8 @@ class BrowserTabService:
             coro = asyncio.wait_for(coro, timeout)
         return asyncio.run_coroutine_threadsafe(coro, loop)
 
-    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
-        """Start the private event loop thread on first use.
-
-        Test probe only: the service itself starts the loop through
-        :meth:`_run_threadsafe`; the tests under ``src/kiss/tests/server``
-        drive coroutines on the loop (and hammer this entry's lock) here.
-        """
-        return locked_call(self._lock, self._ensure_loop_locked)
-
     def _ensure_loop_locked(self) -> asyncio.AbstractEventLoop:
-        """:meth:`_ensure_loop` with ``_lock`` held by the caller."""
+        """Start the private event loop thread on first use; ``_lock`` held by the caller."""
         if self._closed:
             raise RuntimeError("The browser service is shut down.")
         if self._loop is None:
@@ -807,10 +826,43 @@ class BrowserTabService:
                 page = await context.new_page()
             finally:
                 self._creating -= 1
-        rec = await self._register(page, popup=False)
+        rec = None
+        try:
+            rec = await self._register(page, popup=False)
+        finally:
+            if rec is None:
+                # The open timed out (``_OPEN_TIMEOUT``) while the page
+                # was being attached, or the attach failed (the browser
+                # closed the page, refused a CDP session or stopped
+                # answering, ``_ATTACH_TIMEOUT``): nobody wants the page,
+                # and a claim cannot close it (its tab id is unknown
+                # until here), so it goes once its attachment has settled.
+                self._schedule(self._close_unwanted(page))
         if rec is None:
             raise RuntimeError("The browser closed the new page before it could be attached.")
         return rec
+
+    async def _close_unwanted(self, page: Page) -> None:
+        """Close *page*, whose open gave it up while it was being attached.
+
+        The open was cancelled, or its registration came back without a
+        record.  The page event's own registration may still be
+        attaching it: once that has settled (within ``_ATTACH_TIMEOUT``,
+        whatever the browser does), a page it announced closes like any
+        tab (its listener tells every surface); one never announced has
+        no listener and is closed directly.
+        """
+        with self._lock:
+            rec = self._by_page.get(id(page))
+        if rec is not None:
+            await rec.attached.wait()
+            if rec.cdp is not None:
+                await self._close_page(rec)
+                return
+        try:
+            await asyncio.wait_for(page.close(), _CLOSE_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 — the page may be gone already
+            logger.debug("browser tab: unwanted page not closed: %s", exc)
 
     async def _register(self, page: Page, popup: bool) -> _PageRecord | None:
         """Give *page* a tab id, wire its events and announce it (idempotent).
@@ -818,16 +870,21 @@ class BrowserTabService:
         Both ``context.new_page()`` in :meth:`_open` and the context's
         ``page`` event call this for the same page, so the record is
         reserved under the lock before the first ``await``.  A page that
-        closes (or refuses a CDP session) while being attached is
+        closes (or refuses a CDP session, or whose browser does not
+        answer within ``_ATTACH_TIMEOUT``) while being attached is
         forgotten again and never announced; the caller gets ``None``.
+        The bound is what lets every waiter on ``attached`` settle: the
+        second registration below, and :meth:`_close_unwanted`.
         """
         rec, is_new = self._reserve(page)
         if not is_new:
             await rec.attached.wait()
             return rec if rec.cdp is not None else None
         try:
-            cdp = await page.context.new_cdp_session(page)
-            rec.target_id = (await cdp.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
+            async with asyncio.timeout(_ATTACH_TIMEOUT):
+                cdp = await page.context.new_cdp_session(page)
+                info = await cdp.send("Target.getTargetInfo")
+            rec.target_id = info["targetInfo"]["targetId"]
             # Checked AFTER the last await: the transport dispatches every
             # message it has buffered without yielding, so the page's
             # ``close`` can be delivered (with no listener yet) between
@@ -849,6 +906,11 @@ class BrowserTabService:
             rec.attached.set()
             if isinstance(exc, asyncio.CancelledError):
                 raise
+            if popup:
+                # No open waits for a popup (``_new_tab`` closes the
+                # page of a failed open itself): close it here, or it
+                # lives on with no record, shown by no surface.
+                self._schedule(self._close_unwanted(page))
             return None
         rec.cdp = cdp
         rec.attached.set()
@@ -1044,7 +1106,13 @@ class BrowserTabService:
         if rec is None or rec.cdp is None:
             return
         try:
-            await rec.cdp.send("Runtime.terminateExecution")
+            # Bounded like the probe: a browser that stops answering
+            # would otherwise keep the recovery (and the agent's blocked
+            # input call behind it) waiting on the terminate request
+            # for good, the bounded close below never reached.
+            await asyncio.wait_for(
+                rec.cdp.send("Runtime.terminateExecution"), _INTERRUPT_PROBE_TIMEOUT,
+            )
             await asyncio.wait_for(rec.page.evaluate("1"), _INTERRUPT_PROBE_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — still wedged: the tab is lost
             logger.warning("browser tab: %s does not answer, closing it: %s", tab_id, exc)

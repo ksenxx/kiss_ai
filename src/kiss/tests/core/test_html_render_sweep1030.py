@@ -81,3 +81,12 @@ def test_preformatted_spaces_survive_line_breaks_and_the_closing_tag() -> None:
     assert html_to_rich("<pre>a  <br>b</pre><p>after</p>").plain == "a  \nb\n\nafter"
     assert html_to_rich("<pre>a  </pre><p>after</p>").plain == "a  \n\nafter"
     assert html_to_rich("<pre>x</pre>y <br>z").plain == "x\ny\nz"
+
+
+def test_an_ordered_list_counts_from_its_start_attribute() -> None:
+    """``<ol start="5">`` renders steps 5, 6, 7 on the console, as the web page shows them."""
+    html = (
+        '<ol start="5"><li>five</li><li>six<ol start="3"><li>three</li></ol></li>'
+        '<li>seven</li></ol><ol start="x"><li>one</li></ol>'
+    )
+    assert html_to_rich(html).plain == "5. five\n6. six\n  3. three\n7. seven\n1. one"

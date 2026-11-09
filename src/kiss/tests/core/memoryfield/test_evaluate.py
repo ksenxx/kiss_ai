@@ -5,6 +5,7 @@ probe model returning an empty completion). It cannot be reached without a
 fake model and is a one-line skip-with-warning.
 """
 
+import argparse
 import json
 import os
 import sqlite3
@@ -22,6 +23,7 @@ from kiss.core.memoryfield.evaluate import (
     PastTask,
     Probe,
     build_memory_from_tasks,
+    cached_llm_probes,
     duplicate_family_count,
     family_rank_of,
     format_results_table,
@@ -112,6 +114,9 @@ def test_load_past_tasks_filters_failed_and_child_rows(tmp_path: Path) -> None:
     ]
     assert load_past_tasks(db, limit=2, min_result_chars=20)[1].task_id.startswith("f69f2770")
     assert load_past_tasks(db, limit=10, min_result_chars=500) == []
+    # The limit is a maximum: a zero (or negative) one loads no task at all.
+    assert load_past_tasks(db, limit=0, min_result_chars=20) == []
+    assert load_past_tasks(db, limit=-1, min_result_chars=20) == []
     # NULL parent_task_id is also a top-level task (Sorcar's canonical predicate).
     with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute(
@@ -323,6 +328,23 @@ def test_main_cli_with_real_embedding_model(
     drive = next(p for p in data["probes"] if p["gold"].startswith("how-do-i-complete-drive-cycle"))
     assert drive["rank_vector"] == 1
     assert "Corpus: 5 pages" in capsys.readouterr().out
+
+
+def test_a_truncated_probe_cache_is_a_cache_miss(tmp_path: Path) -> None:
+    """Two evaluations sharing an output directory share ``llm_probes.json``: a
+    reader that finds the file truncated (a writer mid-publish, or one that was
+    interrupted) regenerates the probes instead of failing, and the cache it
+    publishes is complete."""
+    memory = MemoryDir(tmp_path / "memory")
+    out = tmp_path / "eval" / "results.json"
+    out.parent.mkdir()
+    cache = out.with_name("llm_probes.json")
+    cache.write_text("")  # what Path.write_text leaves before the content lands
+    args = argparse.Namespace(out=out, llm_probes=0, probe_model="none", seed=0, rebuild=False)
+    assert cached_llm_probes(memory, [], args) == []
+    cached = json.loads(cache.read_text())
+    assert cached["probes"] == [] and cached["meta"]["count"] == 0
+    assert cached_llm_probes(memory, [], args) == []
 
 
 @live_api

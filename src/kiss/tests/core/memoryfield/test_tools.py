@@ -112,6 +112,22 @@ def test_write_warns_when_page_exceeds_embedding_limit(tmp_path: Path) -> None:
     assert "Warning" not in result
 
 
+def test_list_counts_pages_not_lines_of_a_multiline_summary(tmp_path: Path) -> None:
+    """A summary with newlines is one page: listed on one line, counted once.
+
+    The listing's cut used to count physical lines, so a five-line summary
+    made ``memory_list`` report ``-1 more pages not shown`` while the
+    second page was missing.
+    """
+    tools = make_tools(tmp_path)
+    tools.memory_write("first", "body", title="First", summary="one\ntwo\nthree\nfour\nfive")
+    tools.memory_write("second", "body", title="Second", summary="short")
+    whole = tools.memory_list()
+    assert whole == "first  —  First: one two three four five\nsecond  —  Second: short"
+    cut = tools.memory_list(max_output_chars=45)
+    assert cut.startswith("first  —  First: one two three four five\n... [1 more pages not shown")
+
+
 def test_pull_caps_total_output(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     body = "alpha beta gamma delta " * 500  # ~11.5 KB per page

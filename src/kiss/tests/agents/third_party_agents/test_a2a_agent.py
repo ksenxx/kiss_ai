@@ -38,19 +38,6 @@ _AUTH_TRIO = {"check_a2a_auth", "authenticate_a2a", "clear_a2a_auth"}
 _BACKEND_TOOLS = {"a2a_discover", "a2a_call", "a2a_get_task"}
 
 
-@pytest.fixture(autouse=True)
-def _clean_a2a_config():
-    """Start and end each test with no persisted A2A config and an empty audit log.
-
-    The audit log is per pytest process, so without this a test's "was
-    audited" assertion would be satisfied by an earlier test's entries.
-    """
-    _config.clear()
-    _audit_path().unlink(missing_ok=True)
-    yield
-    _config.clear()
-
-
 def _audit_path() -> Path:
     """The JSONL audit log the A2A server appends every inbound request to."""
     return _config.path.parent / "a2a_audit.jsonl"

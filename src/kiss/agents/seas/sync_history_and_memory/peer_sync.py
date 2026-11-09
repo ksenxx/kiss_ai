@@ -66,7 +66,7 @@ from urllib.parse import urlsplit
 from kiss.agents.seas.sync_history_and_memory import memory_delta
 from kiss.agents.seas.sync_history_and_memory.ssh_peer import PeerError, SshPeer, control_directory
 from kiss.agents.sorcar.local_endpoint import LOCAL_ENDPOINT_FILE
-from kiss.agents.sorcar.machines import Machine
+from kiss.agents.sorcar.machines import Machine, note_host
 from kiss.core.brand import DEFAULT_BRAND, HOME_DIR
 from kiss.core.config import kiss_home
 from kiss.scripts import sync_db
@@ -84,6 +84,8 @@ MEMORIES_DIR = "memories"
 HOME_CANDIDATES = tuple(dict.fromkeys((HOME_DIR, DEFAULT_BRAND["home_dir"])))
 """Names a peer's KISS home may have under ``$HOME``: this install's brand, then the stock one."""
 MEMORY_DELTA_PATH = Path(memory_delta.__file__)
+HOST_PROBE = "import socket; print(socket.gethostname())"
+"""Prints a peer's host name, which ``sync_db`` stamps on the history rows it ran."""
 MERGE_PAGES_PATH = Path(sync_db.__file__).with_name("merge_memory_pages.py")
 
 
@@ -257,6 +259,7 @@ class PeerSync:
         """
         self.home = home or kiss_home()
         self.home_candidates = home_candidates
+        self.machines = {machine.name: machine for machine in machines}
         self.remote_homes: dict[str, str] = {}
         self.daemon_ports: dict[str, int | None] = {}
         self.dry_run = dry_run
@@ -342,6 +345,11 @@ class PeerSync:
         if name in ("", ".", "..") or "/" in name:
             raise PeerError(f"{peer.name} ({peer.ssh}): unexpected KISS home {name!r}")
         report.home = self.remote_homes[peer.name] = f"~/{name}"
+        # The CHATS panel names the rows pulled from the peer by this host
+        # name (machines.label_synced_rows), even before its daemon answers.
+        probe_host = f"{shlex.quote(peer.python)} -c {shlex.quote(HOST_PROBE)}"
+        host = peer.run(probe_host).decode("utf-8").strip().split(".")[0]
+        note_host(self.machines[peer.name], host)
         before = time.time()
         probe = json.loads(peer.run(self.memory_command(peer, "probe")).decode("utf-8"))
         report.skew = round(float(probe["now"]) - (before + time.time()) / 2, 3)

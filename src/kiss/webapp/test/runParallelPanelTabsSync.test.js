@@ -17,6 +17,20 @@ const {
   announceFinished,
 } = require('./subagent_tab_helpers');
 
+/** Start a parent fan-out before any child announcements arrive. */
+function runningParallelPanel() {
+  const {win, posted} = makePage();
+  const ready = posted.find(m => m.type === 'ready');
+  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
+  const parentId = ready.tabId;
+
+  send(win, {type: 'status', running: true, tabId: parentId});
+  send(win, {type: 'tool_call', name: 'run_parallel', tabId: parentId});
+  const panel = runParallelPanel(win);
+  assert.ok(panel, 'run_parallel tool_call must render a panel');
+  return {win, posted, parentId, panel};
+}
+
 function testCollapseKeepsRunningSubTabsUntilTheyFinish() {
   const {win, posted, panel, subTabIds} = bootParallelRun(2, makePage());
   assert.ok(
@@ -296,15 +310,7 @@ function testAutoCollapseKeepsInvariant() {
 }
 
 function testDelayedOpenSubagentTabDoesNotReopenCollapsedPanel() {
-  const {win, posted} = makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const parentId = ready.tabId;
-
-  send(win, {type: 'status', running: true, tabId: parentId});
-  send(win, {type: 'tool_call', name: 'run_parallel', tabId: parentId});
-  const panel = runParallelPanel(win);
-  assert.ok(panel, 'run_parallel tool_call must render a panel');
+  const {win, posted, parentId, panel} = runningParallelPanel();
 
   send(win, {
     type: 'new_tab',
@@ -360,15 +366,7 @@ function testDelayedOpenSubagentTabDoesNotReopenCollapsedPanel() {
 }
 
 function testOpenSubagentTabOnlyPathIsAssociated() {
-  const {win, posted} = makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const parentId = ready.tabId;
-
-  send(win, {type: 'status', running: true, tabId: parentId});
-  send(win, {type: 'tool_call', name: 'run_parallel', tabId: parentId});
-  const panel = runParallelPanel(win);
-  assert.ok(panel, 'run_parallel tool_call must render a panel');
+  const {win, posted, parentId, panel} = runningParallelPanel();
 
   send(win, {
     type: 'openSubagentTab',

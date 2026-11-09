@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 
 from kiss.agents.sorcar import machines as mach
+from kiss.server import sidebar_panels
 from kiss.tests.server.test_remote_machine_settings import RemoteMachineCase
 
 
@@ -39,17 +40,23 @@ class TestRemoteMachinePanels(RemoteMachineCase):
         created = await self._ask_box({
             "type": "cronAction", "action": "create", "name": "box nightly",
             "schedule": "every 1d", "what": "echo hi", "kind": "command",
+            "generation": 5,
         }, "cronJobs")
         self.assertEqual(created.get("error", ""), "")
         self.assertEqual(created["action"], "create")
         self.assertEqual(created["machine"], "box")
         self.assertIs(created["forwarded"], True)
+        # The page's own stamp comes back (the link's, which the
+        # machine echoed, does not): the page matches the reply to the
+        # save that sent it, however the replies are ordered.
+        self.assertEqual(created["generation"], 5)
         (job,) = [j for j in created["jobs"] if j["name"] == "box nightly"]
         self.assertEqual(job["what"], "echo hi")
 
         # The machine's own default jobs (the recommendations one) are listed with it.
         listed = await self._ask_box({"type": "getCronJobs"}, "cronJobs")
         self.assertIn("box nightly", [j["name"] for j in listed["jobs"]])
+        self.assertNotIn("generation", listed, "a poll's reply carries no stamp")
         mine = await self._ask({"type": "getCronJobs"}, "cronJobs")
         self.assertNotIn("forwarded", mine)
         self.assertNotIn("box nightly", [j["name"] for j in mine["jobs"]])
@@ -59,15 +66,18 @@ class TestRemoteMachinePanels(RemoteMachineCase):
         )
         self.assertEqual(removed.get("error", ""), "")
         self.assertEqual(removed["action"], "remove")
+        self.assertEqual(removed["generation"], 0, "an unstamped action is answered with 0")
         self.assertNotIn("box nightly", [j["name"] for j in removed["jobs"]])
 
     async def test_a_refused_cron_action_is_the_machines_error(self) -> None:
         refused = await self._ask_box({
             "type": "cronAction", "action": "create", "name": "broken",
             "schedule": "whenever you feel like it", "what": "echo hi", "kind": "command",
+            "generation": 6,
         }, "cronJobs")
         self.assertTrue(refused["error"], refused)
         self.assertEqual(refused["action"], "create")
+        self.assertEqual(refused["generation"], 6, "a refusal answers the save that sent it")
         self.assertNotIn("broken", [j["name"] for j in refused["jobs"]])
         missing = await self._ask_box(
             {"type": "cronAction", "action": "remove", "jobId": "no-such-job"}, "cronJobs",
@@ -87,10 +97,13 @@ class TestRemoteMachinePanels(RemoteMachineCase):
         # box registers a machine of its own (its own daemon, reachable).
         added = await self._ask_box({
             "type": "machineAction", "action": "add", "name": "loop",
-            "address": self.remote.url, "machinePassword": "pw-remote",
+            "address": self.remote.url, "machinePassword": "pw-remote", "generation": 9,
         }, "machines")
         self.assertEqual(added.get("error", ""), "")
         self.assertEqual(added["action"], "add")
+        # The page's stamp, not the link's the machine echoed on its reply.
+        self.assertEqual(added["generation"], 9)
+        self.assertNotIn("generation", listed, "a poll's reply carries no stamp")
         self.assertIn("loop", [m["name"] for m in added["machines"]])
         mine = await self._ask({"type": "getMachines"}, "machines")
         self.assertNotIn("forwarded", mine)
@@ -176,11 +189,13 @@ class TestRemoteMachinePanels(RemoteMachineCase):
     async def test_unknown_machine_answers_each_with_an_empty_reply_and_the_error(self) -> None:
         for cmd, reply_type, empty in (
             ({"type": "getCronJobs"}, "cronJobs", {"jobs": []}),
-            ({"type": "cronAction", "action": "pause", "jobId": "x"}, "cronJobs",
-             {"jobs": [], "action": "pause"}),
+            ({"type": "cronAction", "action": "pause", "jobId": "x", "generation": 3},
+             "cronJobs", {"jobs": [], "action": "pause", "jobId": "x", "generation": 3}),
             ({"type": "getMachines"}, "machines", {"machines": [], "checkedAt": 0}),
-            ({"type": "machineAction", "action": "remove", "name": "x"}, "machines",
-             {"machines": [], "checkedAt": 0, "action": "remove"}),
+            ({"type": "machineAction", "action": "remove", "name": "x", "generation": 4},
+             "machines",
+             {"machines": [], "checkedAt": 0, "action": "remove", "name": "x",
+              "generation": 4}),
             ({"type": "getAppsStatus"}, "appsStatus", {"apps": [], "checkedAt": 0}),
             ({"type": "getSpendReport"}, "spendReport", {}),
             ({"type": "getRecommendations"}, "recommendations",
@@ -192,3 +207,29 @@ class TestRemoteMachinePanels(RemoteMachineCase):
             self.assertIn("no machine named 'nowhere'", reply["error"])
             for key, value in empty.items():
                 self.assertEqual(reply[key], value, (reply_type, key))
+
+
+def test_a_late_save_config_reply_leaves_a_replaced_or_recredentialed_entry_alone() -> None:
+    """The password a ``saveConfig`` reply reports goes to the entry the command went to only.
+
+    The machine is snapshotted before the round trip; while the reply
+    is in flight the registry may have been given another password for
+    it (a newer ``saveConfig``) or another host under its name.  Both
+    keep their password: the late reply is older, or another host's.
+    """
+    old = mach.Machine("box", url="https://old.invalid:8787", password="old-password")
+    late_reply = {"type": "configData", "config": {"remote_password": "old-rotated"}}
+    try:
+        newer = mach.Machine("box", url=old.url, password="newer-password")
+        mach.save_machines([newer])  # a newer saveConfig's password landed first
+        sidebar_panels._adopt_machine_password(old, late_reply)
+        assert mach.load_machines() == [newer]
+        replacement = mach.Machine("box", url="https://new.invalid:8787", password="new-password")
+        mach.save_machines([replacement])  # removed and another host registered as ``box``
+        sidebar_panels._adopt_machine_password(old, late_reply)
+        assert mach.load_machines() == [replacement]
+        # The entry the command went to, unchanged meanwhile, takes the password as before.
+        sidebar_panels._adopt_machine_password(replacement, late_reply)
+        assert [m.password for m in mach.load_machines()] == ["old-rotated"]
+    finally:
+        mach.save_machines([])

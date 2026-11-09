@@ -67,11 +67,12 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar._concurrency import locked, locked_call
 from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
 from kiss.core import tool_interrupt
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.locked import locked, locked_call
+from kiss.core.tool_schema import tool_schema
 from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -314,7 +315,8 @@ def save_mcp_server(cfg: MCPServerConfig, scope: str, work_dir: str) -> Path:
 def remove_mcp_server(name: str, work_dir: str) -> list[Path]:
     """Remove server *name* from every writable MCP config file.
 
-    Used by ``connectors/enable.py`` (``disable``).
+    No product command removes a server yet; the config tests exercise
+    it as the write path's counterpart of :func:`save_mcp_server`.
 
     Args:
         name: The server name to remove.
@@ -345,11 +347,10 @@ def remove_mcp_server(name: str, work_dir: str) -> list[Path]:
 def _atomic_write_config(path: Path, raw: dict[str, Any]) -> None:
     """Atomically replace the MCP config *path* with *raw* as JSON.
 
-    A new file gets plain ``write_text`` permissions (``0o666`` filtered
-    by the umask: the config holds no secrets); an existing file keeps
-    its bits.
+    A new file is private (``0o600``: a server's ``env`` and ``headers``
+    carry API keys and bearer tokens); an existing file keeps its bits.
     """
-    atomic_write_text(path, json.dumps(raw, indent=2) + "\n", create_mode=0o666)
+    atomic_write_text(path, json.dumps(raw, indent=2) + "\n")
 
 
 _RESERVED_BASENAMES = frozenset(
@@ -458,14 +459,22 @@ class FileTokenStorage:
         """
         from mcp.shared.auth import OAuthToken
 
-        data = self._read()
-        token = self._load(data, "tokens", OAuthToken)
+        token = self._load(self._read(), "tokens", OAuthToken)
         if token is None:
             return None
-        expires_at = data.get("expires_at")
-        if isinstance(expires_at, (int, float)) and time.time() >= expires_at - 60:
+        deadline = self.refresh_deadline()
+        if deadline is not None and time.time() >= deadline:
             token.access_token = ""
         return token
+
+    def refresh_deadline(self) -> float | None:
+        """When the stored access token is due for a refresh, if its expiry was recorded.
+
+        A minute before the stored ``expires_at``, so a token is never
+        sent in its last seconds.
+        """
+        expires_at = self._read().get("expires_at")
+        return expires_at - 60 if isinstance(expires_at, (int, float)) else None
 
     def get_oauth_metadata(self) -> Any:
         """Return the authorization server metadata saved at sign-in, if any."""
@@ -592,7 +601,13 @@ def build_oauth_provider(cfg: MCPServerConfig) -> Any:
     """
     from kiss.agents.sorcar.mcp_oauth import build_provider
 
-    return build_provider(cfg, _refuse_login, _refuse_login)
+    provider = build_provider(cfg, _refuse_login, _refuse_login)
+    # The SDK loads a stored token without a deadline and holds it valid
+    # until a request fails, which starts the (refused) full sign-in
+    # although a refresh token is at hand; the stored deadline makes it
+    # refresh first.
+    provider.context.token_expiry_time = provider.context.storage.refresh_deadline()
+    return provider
 
 
 @dataclass
@@ -902,8 +917,8 @@ class MCPManager:
 
     Runs a private asyncio event loop on a daemon thread; every server
     gets one long-lived task that owns its transport + session.  The
-    synchronous facade (:meth:`get_tools`, :meth:`call_tool`) is what
-    the agent tool wrappers use.
+    synchronous facade (:meth:`connect_all`, :meth:`call_tool`) is what
+    :func:`make_mcp_tools` and the agent tool wrappers use.
     """
 
     _instance: MCPManager | None = None
@@ -933,18 +948,31 @@ class MCPManager:
         self._thread = threading.Thread(
             target=self._loop.run_forever, name="mcp-manager", daemon=True,
         )
-        self._thread.start()
         self._connections: dict[str, _Connection] = {}
         # Every configuration ever connected, so a connection dropped by
         # eviction or a server crash can be rebuilt on demand.
         self._configs: dict[str, MCPServerConfig] = {}
         self._orphans: list[_Connection] = []
         self._lock = threading.RLock()
+        # Held for the whole of :meth:`disconnect_all` and :meth:`shutdown`
+        # (never while waiting under ``_lock``): a shutdown that found the
+        # registries emptied by another thread's disconnect stopped and
+        # closed the loop underneath the transports that disconnect was
+        # still closing.
+        self._teardown_lock = threading.RLock()
         self._shut_down = False
         self._idle_timeout_s = idle_timeout_s
         self._max_connections = max_connections
         self._health_interval_s = health_interval_s
         atexit.register(self.shutdown)
+        try:
+            self._thread.start()
+        except BaseException:
+            # A Stop landing as the thread starts (the task thread builds
+            # the singleton): the construction fails, so nothing would
+            # own the loop thread that may be running already.
+            self.shutdown()
+            raise
 
     @classmethod
     @locked(_instance_lock)
@@ -984,10 +1012,7 @@ class MCPManager:
         Returns:
             The connection record; ``error`` is non-empty on failure.
         """
-        key, conn = self._start(config)
-        self._evict_surplus({key})
-        self._await_ready(key, conn, time.monotonic() + CONNECT_TIMEOUT)
-        return conn
+        return self.connect_all((config,))[0]
 
     def connect_all(self, configs: Iterable[MCPServerConfig]) -> list[_Connection]:
         """Connect to every one of *configs* at once (see :meth:`connect`).
@@ -1039,7 +1064,6 @@ class MCPManager:
         if tool_interrupt.wait_interruptible(conn.ready, max(0.0, deadline - time.monotonic())):
             return
         if locked_call(self._lock, self._orphan_timed_out, key, conn):
-            self._loop.call_soon_threadsafe(conn.stop.set)
             self._reap_straggler(conn, task)
 
     def _connection_for(self, key: str, config: MCPServerConfig) -> _Connection:
@@ -1057,10 +1081,22 @@ class MCPManager:
         auth = build_oauth_provider(config) if config.transport in ("http", "sse") else None
         conn = _Connection(config=config)
         self._connections[key] = conn
-        conn.task = asyncio.run_coroutine_threadsafe(
-            _maintain_connection(conn, auth, self._health_interval_s),
-            self._loop,
-        )
+        try:
+            conn.task = asyncio.run_coroutine_threadsafe(
+                _maintain_connection(conn, auth, self._health_interval_s),
+                self._loop,
+            )
+        except BaseException:
+            # A Stop landed before the handle was stored: unpublish the
+            # record (every later connect would reuse it as a connection
+            # that never becomes ready, its wait returning at once for
+            # want of a task) and stop the maintainer in case it was
+            # already queued.
+            del self._connections[key]
+            conn.error = "connection start interrupted"
+            conn.ready.set()
+            self._loop.call_soon_threadsafe(conn.stop.set)
+            raise
         return conn
 
     def _orphan_timed_out(self, key: str, conn: _Connection) -> bool:
@@ -1078,6 +1114,11 @@ class MCPManager:
         conn.error = conn.error or "connection timed out"
         if conn.task is not None and not conn.task.done():
             self._orphans.append(conn)
+        # Told to stop under the lock, as the eviction does: a Stop
+        # landing on the task thread once this returns must not leave a
+        # connection in no pool whose handshake then lands and parks it
+        # for ever, its child alive until the daemon's shutdown.
+        self._loop.call_soon_threadsafe(conn.stop.set)
         return True
 
     def _evict_surplus(self, keep: set[str]) -> None:
@@ -1117,8 +1158,8 @@ class MCPManager:
         """
         locked_call(self._lock, self._pop_surplus, keep)
 
-    def _pop_surplus(self, keep: set[str]) -> list[_Connection]:
-        """Stop and remove the idle and over-cap connections, returning them (locked)."""
+    def _pop_surplus(self, keep: set[str]) -> None:
+        """Stop and remove the idle and over-cap connections (locked)."""
         now = time.monotonic()
         evictable = {
             key for key, conn in self._connections.items()
@@ -1136,14 +1177,38 @@ class MCPManager:
                 key=lambda key: self._connections[key].last_used,
             )
             doomed.update(oldest[:surplus])
-        popped: list[_Connection] = []
         for key in doomed:
             conn = self._connections[key]
             conn.error = conn.error or "evicted: idle or over the connection cap"
             self._loop.call_soon_threadsafe(conn.stop.set)
-            popped.append(conn)
             del self._connections[key]
-        return popped
+            # Still owned until its transport has unwound: a
+            # ``disconnect_all`` meanwhile must wait for the teardown
+            # (and ``shutdown`` not stop the loop underneath it), or a
+            # stdio child needing the SDK's SIGTERM outlives the manager.
+            if conn.task is not None:
+                self._orphans.append(conn)
+                self._forget_when_done(conn, conn.task)
+
+    def _forget_when_done(self, conn: _Connection, task: Any) -> None:
+        """Drop *conn* from ``_orphans`` once *task* finishes, however it finishes.
+
+        The done callback is registered on the manager loop, never on
+        the calling task thread: ``add_done_callback`` takes the
+        future's condition with a plain ``with``, and a Stop landing
+        right after its ``__enter__`` (CPython gh-74174) would leave
+        that condition held by a thread that then dies, so the loop's
+        own completion of *task* would hang on it for good.  The loop
+        thread receives no injections.
+
+        Args:
+            conn: The orphaned connection.
+            task: ``conn.task``, the connection's maintainer.
+        """
+        self._loop.call_soon_threadsafe(
+            task.add_done_callback,
+            functools.partial(locked_call, self._lock, self._forget_orphan, conn),
+        )
 
     def _reap_straggler(self, conn: _Connection, task: Any) -> None:
         """Arrange teardown of a connection evicted by a connect() timeout.
@@ -1159,12 +1224,7 @@ class MCPManager:
             conn: The timed-out connection whose task may be stuck.
             task: ``conn.task``, the connection's maintainer.
         """
-        # A future that already finished runs the callback right here,
-        # on the task thread, so it takes the manager lock through
-        # ``locked_call`` like every other task-reachable section.
-        task.add_done_callback(
-            functools.partial(locked_call, self._lock, self._forget_orphan, conn),
-        )
+        self._forget_when_done(conn, task)
         # The cancel raises ``CancelledError`` at the task's stuck
         # ``await`` so the transport context unwinds and its child dies;
         # a task whose own handshake deadline already started that
@@ -1269,14 +1329,25 @@ class MCPManager:
             try:
                 result = tool_interrupt.result_interruptible(future, CALL_TIMEOUT + 5)
             except Exception as exc:
-                return f"Error: MCP tool call failed: {exc}"
+                # The outer deadline's ``TimeoutError`` carries no text.
+                why = str(exc) or (
+                    f"no answer within {CALL_TIMEOUT + 5:g}s" if isinstance(exc, TimeoutError)
+                    else type(exc).__name__
+                )
+                return f"Error: MCP tool call failed: {why}"
         finally:
             # Leased inside this try, so a Stop landing anywhere after a
             # lease still returns it.  Cancelling is a no-op once the
             # call completed; a timeout, an interrupt or an injected Stop
             # must not leave the call running on the loop with its lease
-            # released.
-            future.cancel()
+            # released.  Cancelled on the loop thread, which receives no
+            # injections: ``Future.cancel`` takes the future's condition
+            # with a plain ``with``, and a Stop landing right after its
+            # ``__enter__`` (CPython gh-74174) would leave that condition
+            # held by a thread that then dies, with the loop's ``_settle``
+            # blocked on it for good.
+            if not self._loop.is_closed():
+                self._loop.call_soon_threadsafe(future.cancel)
             for leased_conn in leases:
                 locked_call(self._lock, _release_lease, leased_conn)
         return _result_text(result)
@@ -1314,7 +1385,14 @@ class MCPManager:
         the cancelled stragglers to finish) each share one deadline
         across every connection, so a shutdown is bounded by
         2 × :data:`_DISCONNECT_WAIT_S` however many servers hang.
+        Serialized with :meth:`shutdown` by the teardown lock: a
+        shutdown that ran while the connections were taken out of the
+        registries but still closing stopped the loop underneath them.
         """
+        locked_call(self._teardown_lock, self._disconnect_all_locked)
+
+    def _disconnect_all_locked(self) -> None:
+        """Body of :meth:`disconnect_all`; the caller holds the teardown lock."""
         conns = locked_call(self._lock, self._take_all)
         for conn in conns:
             self._loop.call_soon_threadsafe(conn.stop.set)
@@ -1344,8 +1422,11 @@ class MCPManager:
         manager, so a later :meth:`instance` call builds a fresh manager
         with a live loop instead of scheduling work on a stopped one
         (which would silently never run and time out every connect).
-        Idempotent: concurrent or repeated calls after the first are
-        no-ops.
+        Once the loop thread has stopped, the loop is closed (its
+        selector and self-pipe descriptors released) and this manager's
+        ``atexit`` hook withdrawn, so rebuilt managers leak neither
+        descriptors nor the old manager object.  Idempotent: concurrent
+        or repeated calls after the first are no-ops.
         """
         with MCPManager._instance_lock:
             if MCPManager._instance is self:
@@ -1353,13 +1434,22 @@ class MCPManager:
             if self._shut_down:
                 return
             self._shut_down = True
+        locked_call(self._teardown_lock, self._shutdown_locked)
+
+    def _shutdown_locked(self) -> None:
+        """Body of :meth:`shutdown` past its idempotence check (teardown lock held)."""
         # No ``is_running()`` guard: right after construction the loop
         # thread may not have entered ``run_forever`` yet, and a stop
         # scheduled on a not-yet-running loop still takes effect as soon
-        # as it starts, so the thread never outlives this call.
+        # as it starts, so the thread never outlives this call.  A thread
+        # never started (its ``start`` interrupted) cannot be joined.
         self.disconnect_all()
         self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=10)
+        if self._thread.is_alive():
+            self._thread.join(timeout=10)
+        if not self._thread.is_alive():
+            self._loop.close()
+        atexit.unregister(self.shutdown)
 
 
 def _result_text(result: Any) -> str:
@@ -1441,13 +1531,126 @@ def _pick[T](registry: dict[str, T], server: str) -> T | None:
     return named[0] if len(named) == 1 else None
 
 
-def _json_schema_to_annotation(prop: Any) -> type:
-    """Map one inputSchema property to the Python annotation for kiss."""
-    if isinstance(prop, dict):
-        ann = _JSON_TO_PY.get(str(prop.get("type", "")))
-        if ann is not None:
-            return ann
-    return str
+def _json_schema_to_annotation(declared: dict[str, Any]) -> type:
+    """Map one reduced schema node to the Python annotation for kiss.
+
+    Args:
+        declared: A node :func:`_declared_schema` produced.
+
+    Returns:
+        The Python type of the node's ``type``, of its first non-null
+        ``anyOf`` member for a union, and ``str`` for anything else.
+    """
+    kind = declared.get("type") or next(
+        (m.get("type") for m in declared.get("anyOf", ()) if m.get("type") != "null"), None,
+    )
+    return _JSON_TO_PY.get(str(kind), str)
+
+
+#: JSON-schema ``type`` names every provider's tool declaration accepts.
+_JSON_TYPES = frozenset(_JSON_TO_PY) | {"null"}
+
+
+def _local_ref_target(ref: str, root: dict[str, Any]) -> Any:
+    """The node the local JSON pointer *ref* (``#/$defs/Name``) names in *root*.
+
+    Args:
+        ref: The ``$ref`` value.
+        root: The tool's whole ``inputSchema``.
+
+    Returns:
+        The referenced node, or ``None`` for a remote or dangling reference.
+    """
+    if not ref.startswith("#/"):
+        return None
+    node: Any = root
+    for step in ref[2:].split("/"):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(step.replace("~1", "/").replace("~0", "~"))
+    return node
+
+
+def _declared_schema(
+    prop: Any, root: dict[str, Any], resolving: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Reduce one MCP ``inputSchema`` node to the keywords every provider accepts.
+
+    Keeps ``type`` (a union list becomes ``anyOf``), ``description``, a
+    string ``enum`` and ``required``, and recurses into ``properties``,
+    ``items`` and the union members of ``anyOf`` and ``oneOf``, both
+    declared as ``anyOf`` (the one union keyword Gemini's declaration
+    schema knows; the model picks a member either way).  A local
+    ``$ref`` (pydantic, so FastMCP, emits a nested model as
+    ``{"$ref": "#/$defs/Name"}``) is replaced by its target, the
+    keywords next to it (a description) winning, and so on while the
+    target is a reference itself (an alias); a reference already being
+    resolved (a self-referencing model, a cycle of aliases) stops at the
+    target's type.  Every other keyword (``$schema``, ``$defs``,
+    ``additionalProperties``, ``title``, ``default``, ``format``,
+    bounds, ...) is left out: Gemini's declaration schema rejects
+    keywords it does not know, and the model needs the argument
+    structure, not the validation extras.  A node left without a type
+    (a dangling reference, a malformed schema) declares an object when
+    it has properties, an array when it has items, and a string
+    otherwise, as every provider wants a typed node.
+
+    Args:
+        prop: The schema node (a property, ``items`` or union member).
+        root: The tool's whole ``inputSchema``, where ``$ref`` targets live.
+        resolving: The references on the path to this node.
+
+    Returns:
+        The reduced JSON schema of the node.
+    """
+    if not isinstance(prop, dict):
+        return {"type": "string"}
+    while isinstance(ref := prop.get("$ref"), str):
+        target = _local_ref_target(ref, root)
+        if not isinstance(target, dict):
+            break
+        source = {"type": target.get("type")} if ref in resolving else target
+        prop = {**source, **{k: v for k, v in prop.items() if k != "$ref"}}
+        resolving |= {ref}
+    out: dict[str, Any] = {}
+    kind = prop.get("type")
+    if isinstance(kind, list):
+        members = [{"type": k} for k in kind if k in _JSON_TYPES]
+        if members:
+            out["anyOf"] = members
+    elif kind in _JSON_TYPES:
+        out["type"] = kind
+    if isinstance(prop.get("description"), str):
+        out["description"] = prop["description"]
+    enum = prop.get("enum")
+    if isinstance(enum, list) and enum and all(isinstance(v, str) for v in enum):
+        out["enum"] = enum
+    props = prop.get("properties")
+    if isinstance(props, dict):
+        out["properties"] = {
+            str(k): _declared_schema(v, root, resolving) for k, v in props.items()
+        }
+        required = prop.get("required")
+        if isinstance(required, list):
+            out["required"] = [r for r in required if isinstance(r, str) and r in props]
+    if "items" in prop:
+        out["items"] = _declared_schema(prop["items"], root, resolving)
+    union = [
+        member for key in ("anyOf", "oneOf") if isinstance(prop.get(key), list)
+        for member in prop[key]
+    ]
+    if union:
+        out["anyOf"] = [_declared_schema(member, root, resolving) for member in union]
+    if not out.keys() & {"type", "anyOf"}:
+        out["type"] = "object" if "properties" in out else "array" if "items" in out else "string"
+    return out
+
+
+def _admits_null(schema: dict[str, Any]) -> bool:
+    """Whether the reduced *schema* accepts ``null`` (itself or through ``anyOf``)."""
+    return schema.get("type") == "null" or any(
+        _admits_null(member) for member in schema.get("anyOf", ())
+    )
 
 
 def _one_line(text: str) -> str:
@@ -1492,9 +1695,13 @@ def make_mcp_tool_wrapper(
 ) -> Any:
     """Wrap one MCP tool as a kiss-compatible Python function.
 
-    The wrapper's ``__signature__`` and docstring are synthesized from
-    the MCP ``inputSchema`` so kiss's docstring/signature-based schema
-    builder reproduces the tool's parameters faithfully; calling it
+    The wrapper's ``__signature__`` is synthesized from the MCP
+    ``inputSchema``, its docstring is the tool's description, and the
+    schema itself is declared on the wrapper
+    (:func:`~kiss.core.tool_schema.tool_schema`, reduced by
+    :func:`_declared_schema`, under the Python parameter names) so the
+    model sees the tool's arrays, objects, enums and null unions
+    instead of the strings a type round trip would leave; calling it
     forwards to :meth:`MCPManager.call_tool`.
 
     Args:
@@ -1516,52 +1723,79 @@ def make_mcp_tool_wrapper(
     required_raw = schema.get("required")
     required = set(required_raw) if isinstance(required_raw, list) else set()
 
-    entries: list[tuple[bool, inspect.Parameter, str]] = []
+    params: list[inspect.Parameter] = []
     param_map: dict[str, tuple[str, bool]] = {}
+    declared_props: dict[str, Any] = {}
+    declared_required: list[str] = []
     used_names: set[str] = set()
     for prop_name in props:
-        prop = props[prop_name]
-        ann = _json_schema_to_annotation(prop)
         is_required = prop_name in required
         py_name = _python_param_name(str(prop_name), used_names)
-        param_map[py_name] = (str(prop_name), is_required)
-        param = inspect.Parameter(
+        declared = _declared_schema(props[prop_name], schema)
+        declared_props[py_name] = declared
+        if is_required:
+            declared_required.append(py_name)
+        # ``None`` is forwarded as ``null`` only where the schema admits
+        # it: models send ``null`` for optionals they leave unused, which
+        # a server would reject for a non-nullable property.
+        param_map[py_name] = (str(prop_name), is_required or _admits_null(declared))
+        params.append(inspect.Parameter(
             py_name,
             kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
             default=inspect.Parameter.empty if is_required else None,
-            annotation=ann,
-        )
-        desc = ""
-        if isinstance(prop, dict):
-            desc = _one_line(prop.get("description", "") or "")
-        suffix = "" if is_required else " (optional)"
-        doc_line = f"    {py_name}: {desc or 'See tool description.'}{suffix}"
-        entries.append((is_required, param, doc_line))
-    entries.sort(key=lambda e: not e[0])
-    params = [e[1] for e in entries]
-    doc_args = [e[2] for e in entries]
+            annotation=_json_schema_to_annotation(declared),
+        ))
+    # A signature wants its required parameters before the defaulted ones.
+    params.sort(key=lambda p: p.default is not inspect.Parameter.empty)
 
     def wrapper(**kwargs: Any) -> str:
         arguments: dict[str, Any] = {}
         for py_name, value in kwargs.items():
-            original, is_required = param_map.get(py_name, (py_name, True))
-            if value is None and not is_required:
+            original, keep_none = param_map.get(py_name, (py_name, True))
+            if value is None and not keep_none:
                 continue
             arguments[original] = value
         return manager.call_tool(connection_key, tool_name, arguments)
 
     description = _one_line(tool.description or f"MCP tool {tool_name} on server {server}.")
-    doc = f"{description}\n"
-    if doc_args:
-        doc += "\nArgs:\n" + "\n".join(doc_args) + "\n"
-    doc += "\nReturns:\n    The MCP tool's result text.\n"
     wrapper.__name__ = full_name
     wrapper.__qualname__ = full_name
-    wrapper.__doc__ = doc
+    wrapper.__doc__ = description
     wrapper.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
         params, return_annotation=str,
     )
-    return wrapper
+    return tool_schema(
+        parameters={
+            "type": "object",
+            "properties": declared_props,
+            "required": declared_required,
+        },
+        description=description,
+    )(wrapper)
+
+
+#: The longest function name the providers' tool grammars accept.
+_MAX_TOOL_NAME = 64
+
+
+def _bounded_tool_name(base: str, counter: int = 0) -> str:
+    """*base* (``<base>_<counter>`` for a collision) within :data:`_MAX_TOOL_NAME`.
+
+    A longer name is cut and ends in a digest of the whole, so two long
+    names sharing a prefix still differ.
+
+    Args:
+        base: The sanitized ``<server>_<tool>`` name.
+        counter: The collision suffix, ``0`` for none.
+
+    Returns:
+        The name to register.
+    """
+    suffix = f"_{counter}" if counter else ""
+    room = _MAX_TOOL_NAME - len(suffix)
+    if len(base) > room:
+        base = f"{base[:room - 9]}_{hashlib.sha1(base.encode()).hexdigest()[:8]}"
+    return base + suffix
 
 
 # Names of the agent's built-in tools ("cron_job" is built in only to
@@ -1617,7 +1851,12 @@ def make_mcp_tools(
     taken = set(taken_names)
     connections = manager.connect_all(servers.values())
     for (name, config), conn in zip(servers.items(), connections, strict=True):
-        if conn.session is None:
+        # Wrapped from the tools the handshake discovered, not from the
+        # session's presence now: another task's startup enforcing the
+        # pool cap can evict an idle, ready connection between the batch
+        # returning and this read, and a wrapper reconnects on call
+        # where a skipped server is lost to the task for good.
+        if conn.session is None and not conn.tools:
             logger.warning(
                 "MCP server %s unavailable: %s", name, conn.error or "unknown error",
             )
@@ -1644,10 +1883,10 @@ def make_mcp_tools(
             # before it can reserve a suffix another tool would get.
             if skill_permission(base, rules) == "deny":
                 continue
-            full_name = base
+            full_name = _bounded_tool_name(base)
             counter = 2
             while full_name in taken:
-                full_name = f"{base}_{counter}"
+                full_name = _bounded_tool_name(base, counter)
                 counter += 1
             taken.add(full_name)
             wrapper.__name__ = full_name

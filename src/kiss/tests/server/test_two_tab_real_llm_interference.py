@@ -171,7 +171,7 @@ class _FinishHandler(BaseHTTPRequestHandler):
         if cl:
             self.rfile.read(cl)
         time.sleep(random.uniform(0.0, 0.05))
-        args = json.dumps({"success": "true", "summary": "done"})
+        args = json.dumps({"success": "true", "summary_in_html": "done"})
         _write_sse_chunks(
             self, _sse_chunks_for_tool_call("finish", args),
         )
@@ -210,7 +210,7 @@ def _start_fake_ask_then_finish() -> tuple[ThreadingHTTPServer, str]:
             body_str = body_bytes.decode("utf-8", errors="replace")
             time.sleep(random.uniform(0.0, 0.04))
             if "ANSWER_A" in body_str or "ANSWER_B" in body_str:
-                args = json.dumps({"success": "true", "summary": "done"})
+                args = json.dumps({"success": "true", "summary_in_html": "done"})
                 chunks = _sse_chunks_for_tool_call("finish", args)
             else:
                 tag = "A" if "tab A prompt" in body_str else "B"

@@ -85,6 +85,11 @@ class Reply:
             usual.  An overloaded gateway that accepted the connection
             and queued the request: the phase no stream watchdog can see
             because there is no stream yet.
+        trickle: When set, the JSON reply's headers go out at once (no
+            ``Content-Length``) and its body is preceded by one space
+            every 20 ms until this event fires (bounded) or the client
+            hangs up — a peer that keeps every read timeout from firing
+            without ever answering.
     """
 
     status: int = 200
@@ -95,6 +100,7 @@ class Reply:
     hold: threading.Event | None = None
     drop: bool = False
     headers_gate: threading.Event | None = None
+    trickle: threading.Event | None = None
 
 
 def chat_chunk(payload: dict[str, Any]) -> bytes:
@@ -160,12 +166,25 @@ class _ScriptedHandler(BaseHTTPRequestHandler):
             server.client_disconnected.set()
 
     def _write_json(self, reply: Reply) -> None:
-        """Write a complete JSON reply, keeping the connection alive."""
+        """Write a complete JSON reply, keeping the connection alive (or trickling it)."""
         body = json.dumps(reply.json_body).encode()
         self.send_response(reply.status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
+        if reply.trickle is None:
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            return
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()  # no Content-Length: the body ends with the connection
+        deadline = time.monotonic() + _HOLD_TIMEOUT
+        while not reply.trickle.wait(timeout=0.02):
+            if time.monotonic() > deadline:
+                return
+            self.wfile.write(b" ")
+            self.wfile.flush()
         self.wfile.write(body)
         self.wfile.flush()
 

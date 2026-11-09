@@ -87,6 +87,7 @@ function testImagesRenderInToolPanel() {
     !img.classList.contains('tr-img-full'),
     'clicking again must restore the capped preview',
   );
+  win.close();
   console.log('ok: images render inside the tool-call event panel');
 }
 
@@ -127,6 +128,7 @@ function testImagesRenderOnStreamedBashPath() {
     img.getAttribute('src'),
     'data:image/png;base64,' + PNG_B64,
   );
+  win.close();
   console.log('ok: images render on the streamed-bash early-break path');
 }
 
@@ -188,6 +190,7 @@ function testNoImagesNoPanelAndBadEntriesSkipped() {
     null,
     'no caption without a path',
   );
+  win.close();
   console.log('ok: image-less results and bad entries render no images');
 }
 
@@ -217,6 +220,7 @@ function testSharePageClickToZoom() {
     !img.classList.contains('tr-img-full'),
     'caption clicks must not zoom the image',
   );
+  win.close();
   console.log('ok: exported share page keeps click-to-zoom');
 }
 
@@ -226,9 +230,6 @@ function main() {
   testNoImagesNoPanelAndBadEntriesSkipped();
   testSharePageClickToZoom();
   console.log('All tests passed');
-  // The page keeps ticking panel-time intervals; exit explicitly
-  // like the other tests so node does not wait on them forever.
-  process.exit(0);
 }
 
 try {

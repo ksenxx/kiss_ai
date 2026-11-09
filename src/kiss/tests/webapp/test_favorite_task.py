@@ -50,10 +50,13 @@ class TestMainJsFavoriteButton:
 
     def test_favorite_click_posts_set_favorite_message(self) -> None:
         src = self._js()
+        # The click posts `api.setFavorite(historyWrite({taskId, isFavorite},
+        # machine))`: the payload goes through historyWrite so a row of a
+        # remote machine is written on that machine (f2be976174).
         assert re.search(
-            r"api\.setFavorite\(\s*\{",
+            r"api\.setFavorite\(\s*historyWrite\(\s*\{",
             src,
-        ), "main.js must call api.setFavorite({...}) on click"
+        ), "main.js must call api.setFavorite(historyWrite({...}, machine)) on click"
         api_src = MAIN_JS.with_name("api.js").read_text()
         assert "'setFavorite'" in api_src, (
             "api.js must catalog the setFavorite wire command"

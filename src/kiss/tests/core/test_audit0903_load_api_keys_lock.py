@@ -28,7 +28,7 @@ the saver's whole locked edit+tail (the loader's ``_migrate_legacy_rc_keys``
 also takes ``_config_lock`` *before* the snapshot, so the two serialize
 up to that point).  The store is therefore padded with long
 expansion-skipped assignments (``export PAD_i=aaa…a$KISS_PAD``): the
-loader's ``_shell_would_expand`` walks every value character by
+loader's ``_shell_words`` walks every value character by
 character, while the saver's ``_env_line_sets_key`` only scans up to the
 ``=`` — so the same padding costs the loader ~95 ms of parsing but the
 saver only ~7 ms of editing.  Sweeping the save's start across the
@@ -72,7 +72,7 @@ _KEY = "GEMINI_API_KEY"
 # between load_api_keys' read_text snapshot and its import of the target
 # key (which save_api_key keeps after them).  Each line's value is long
 # and ends in an unquoted `$`, so the loader pays a full
-# _shell_would_expand character walk per line (and then skips the import,
+# _shell_words character walk per line (and then skips the import,
 # leaving os.environ unpolluted) while the saver's per-line key check
 # stops at the `=`.
 _PAD_LINES = 2_000

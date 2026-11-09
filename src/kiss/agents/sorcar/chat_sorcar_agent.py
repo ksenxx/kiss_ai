@@ -11,6 +11,7 @@ management — the same workflow that the daemon performs in
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import platform
@@ -23,7 +24,6 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar._concurrency import _race_delay, locked_call
 from kiss.agents.sorcar.bare_path_task import with_open_directive
 from kiss.agents.sorcar.git_worktree import strip_worktree_suffix
 from kiss.agents.sorcar.persistence import (
@@ -53,6 +53,7 @@ from kiss.agents.sorcar.sorcar_agent import (
 from kiss.core._version import __version__
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.llm_reply import LLMReply
+from kiss.core.locked import _race_delay, locked_call
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.core.tool_verdict import Verdict
@@ -183,7 +184,10 @@ def _retire_printer_task(agent: Any, run_printer: Any, task_key: str) -> None:
     daemon's lifetime, so the idempotent hook is called once more
     before the Stop goes on.  ``stop_recording`` runs whatever the
     hook did: it reads the thread's task binding, which the caller
-    restores next.
+    restores next, so it runs only while that binding is *task_key*'s.
+    A Stop that landed before the run bound the thread leaves the
+    binding the calling task's (a sub-agent runs on its caller's
+    thread), whose live recording an unkeyed stop would retire.
 
     Args:
         agent: The agent whose run is over.
@@ -196,11 +200,17 @@ def _retire_printer_task(agent: Any, run_printer: Any, task_key: str) -> None:
             _finish_printer_task(finished, agent, task_key)
     finally:
         stop_rec = getattr(run_printer, "stop_recording", None)
+        tl = getattr(run_printer, "_thread_local", None)
+        if tl is not None and getattr(tl, "task_id", "") != task_key:
+            stop_rec = None
         if stop_rec is not None:
             try:
                 stop_rec()
             except Exception:
-                pass
+                # The recording then stays live for the daemon's lifetime
+                # (every later broadcast under the task's id appends to it):
+                # a failure worth a trace, like the finish hook's.
+                logger.warning("stop_recording(%r) raised", task_key, exc_info=True)
 
 
 def _finish_printer_task(finished: Callable[[Any, str], Any], agent: Any, task_key: str) -> None:
@@ -762,6 +772,7 @@ class ChatSorcarAgent(SorcarAgent):
         _history_prompt: str | None = None,
         _open_bare_path: bool = True,
         _start_ms: int = 0,
+        compaction: bool = True,
     ) -> str:
         """Run the agent with chat-session context management.
 
@@ -841,6 +852,10 @@ class ChatSorcarAgent(SorcarAgent):
             _start_ms: The run's start as a ms epoch, when the caller
                 stamped it before calling (the daemon's ``<task>``
                 block); 0 (default) dates the run at row allocation.
+            compaction: Whether the run compacts its context (see
+                :meth:`SorcarAgent.run`): False never compacts, True (the
+                default) compacts while the global Compaction setting is
+                on.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -1104,6 +1119,7 @@ class ChatSorcarAgent(SorcarAgent):
                 system_prompt_hook=system_prompt_hook,
                 tools_hook=tools_hook,
                 task_begun=True,
+                compaction=compaction,
             )
             parsed = _parse_result(result)
             result_summary = _result_summary_text(result, parsed)
@@ -1134,8 +1150,12 @@ class ChatSorcarAgent(SorcarAgent):
                 # never gets there.  The fold is keyed and consumes the
                 # record, so after a normal run it is a no-op; a Stop
                 # landing in it gets it one retry (_retried_cleanup_step).
+                # The row's id is passed: a Stop can land before it is
+                # published as ``last_task_id``, which then still names the
+                # previous row.
                 first = _retried_cleanup_step(
-                    first, "_fold_classifier_usage", self._fold_classifier_usage,
+                    first, "_fold_classifier_usage",
+                    functools.partial(self._fold_classifier_usage, task_id),
                 )
             finally:
                 self._last_result_summary = result_summary

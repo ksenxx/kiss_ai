@@ -212,7 +212,7 @@ class TestPromptTruncationIsByteBased(_LocalHarness):
         """JSON permits escaped lone surrogates; prompt sizing must too.
 
         A strict ``prompt.encode('utf-8')`` raises UnicodeEncodeError on
-        this value and used to escape from ``_dispatch_client_command``;
+        this value and used to escape from the ``_ws_handler`` dispatch;
         the command produced no ``setTaskText`` reply (and less-isolated
         transports may close their receive loop).
         """

@@ -21,7 +21,8 @@ module is the daemon side of that pipeline:
   prefix is cut and only the rest is reported, while an unconfirmed
   transcript is rejected as a false wake — except for speech reported
   as non-English, where the model may drop the wake word in
-  translation and the local check alone decides.
+  translation and the browser's two recognizers decide, but only
+  when both heard the word (``wakeAgreed``).
 - :class:`SpeakerIdentifier` numbers distinct voices with the Vosk
   x-vector speaker model so dictated text arrives as ``Speaker #n:``.
 - :func:`_download_url_to_file`, :func:`default_models_dir` and
@@ -33,22 +34,28 @@ module is the daemon side of that pipeline:
 from __future__ import annotations
 
 import array
+import contextlib
+import functools
+import http.client
 import io
 import json
 import math
 import os
 import re
 import shutil
+import socket
 import sys
+import threading
 import time
 import urllib.request
+import uuid
 import wave
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from kiss.core.file_lock import lock_exclusive
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.speech_synthesis import _env_timeout_seconds, audio_timeout_seconds
 from kiss.core.utils import replace_waiting_for_readers
 
@@ -355,6 +362,71 @@ def pcm_to_wav_bytes(pcm: bytes) -> bytes:
     return buf.getvalue()
 
 
+VOICE_DEBUG_KEEP = 200
+"""How many recent recordings :func:`save_voice_recording` keeps on disk."""
+
+
+def voice_debug_dir() -> Path:
+    """Return the folder that keeps recent wake recordings for debugging."""
+    from kiss.core.config import kiss_home
+
+    return kiss_home() / "voice-debug"
+
+
+def save_voice_recording(pcm: bytes, info: dict[str, Any]) -> Path | None:
+    """Save one received utterance as WAV plus a JSON note, for debugging.
+
+    The WAV holds *pcm* exactly as the client sent it, before any
+    trimming or transcription: for a wake-word capture that is the
+    wake word's own audio (the pre-wake ring) followed by the speech
+    after it, so a false trigger can be replayed later.  *info* (the
+    wake flags, and later the transcription outcome) goes into a
+    ``.json`` file of the same name.  Only the newest
+    :data:`VOICE_DEBUG_KEEP` recordings are kept.  A disk error is
+    reported on stderr and never stops the transcription.
+
+    Args:
+        pcm: Raw 16kHz mono s16le PCM as received.
+        info: JSON-serializable details stored next to the audio.
+
+    Returns:
+        The path of the written WAV file, or ``None`` when it could
+        not be written.
+    """
+    folder = voice_debug_dir()
+    now = time.time()
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+    millis = int(now * 1000) % 1000
+    wav_path = folder / f"{stamp}-{millis:03d}-{uuid.uuid4().hex[:6]}.wav"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        wav_path.write_bytes(pcm_to_wav_bytes(pcm))
+        update_voice_recording_info(wav_path, info)
+        for old in sorted(folder.glob("*.wav"))[:-VOICE_DEBUG_KEEP]:
+            old.unlink(missing_ok=True)
+            old.with_suffix(".json").unlink(missing_ok=True)
+    except OSError as err:
+        print(f"could not save voice recording: {err}", file=sys.stderr, flush=True)
+        return None
+    return wav_path
+
+
+def update_voice_recording_info(wav_path: Path, info: dict[str, Any]) -> None:
+    """Write *info* as the JSON note of the recording at *wav_path*.
+
+    Args:
+        wav_path: A WAV path returned by :func:`save_voice_recording`.
+        info: JSON-serializable details (replaces the previous note).
+            A disk error is reported on stderr, not raised.
+    """
+    try:
+        wav_path.with_suffix(".json").write_text(
+            json.dumps(info, indent=2), encoding="utf-8",
+        )
+    except OSError as err:
+        print(f"could not save voice recording note: {err}", file=sys.stderr, flush=True)
+
+
 def download_timeout_seconds() -> float:
     """Return the per-read model-download network timeout in seconds.
 
@@ -381,6 +453,76 @@ def download_total_timeout_seconds() -> float:
     )
 
 
+class _WatchedHTTP(http.client.HTTPConnection):
+    """An HTTP connection that registers its socket with *watch* once connected.
+
+    For :func:`_download_url_to_file`'s deadline, which shuts the
+    socket down (:func:`_shut_down`) to end a transfer wherever it is:
+    in the headers ``urlopen`` reads, a chunked body's size lines, or
+    the body.
+    """
+
+    def __init__(self, *args: Any, watch: _WatchedHandler, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.watch = watch
+
+    def connect(self) -> None:
+        """Connect, then register the socket with the deadline's watch."""
+        super().connect()
+        self.watch.register(self.sock)
+
+
+class _WatchedHTTPS(_WatchedHTTP, http.client.HTTPSConnection):
+    """:class:`_WatchedHTTP` over TLS."""
+
+
+class _WatchedHandler(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
+    """``urlopen``'s HTTP(S) handlers opening watched connections: a download's deadline watch.
+
+    :meth:`register` (a connection, once it has its socket) and
+    :meth:`expire` (the deadline timer) exclude each other, so a socket
+    connecting as the deadline fires is shut down whichever side of it
+    the registration lands on: by ``expire`` when registered before,
+    by ``register`` itself after.  A one-shot timer alone missed the
+    latter, and a server trickling its headers then kept the download
+    (and the lock its caller holds) going past the deadline.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self._sockets: list[socket.socket] = []
+        self._expired = False
+
+    def register(self, sock: socket.socket) -> None:
+        """Watch *sock*; shut it down at once when the deadline has already passed."""
+        with self._lock:
+            self._sockets.append(sock)
+            if self._expired:
+                _shut_down([sock])
+
+    def expire(self) -> None:
+        """End every transfer on the watched sockets, and on any registered from now on."""
+        with self._lock:
+            self._expired = True
+            _shut_down(self._sockets)
+
+    def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        """Open *req* over a :class:`_WatchedHTTP` connection."""
+        return self.do_open(functools.partial(_WatchedHTTP, watch=self), req)
+
+    def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        """Open *req* over a :class:`_WatchedHTTPS` connection (the default TLS context)."""
+        return self.do_open(functools.partial(_WatchedHTTPS, watch=self), req)
+
+
+def _shut_down(sockets: list[socket.socket]) -> None:
+    """End every transfer on *sockets*: a read blocked on one returns EOF at once."""
+    for sock in sockets:
+        with contextlib.suppress(OSError):  # closed already
+            sock.shutdown(socket.SHUT_RDWR)
+
+
 def _download_url_to_file(url: str, dest: Path) -> None:
     """Download *url* to *dest* with per-read AND total time bounds.
 
@@ -392,29 +534,42 @@ def _download_url_to_file(url: str, dest: Path) -> None:
     read, but a per-read bound alone is not enough: a server
     trickling one byte before each socket timeout keeps every read
     alive and the copy running indefinitely (gpt-5.6-sol conc review,
-    finding 3).  The copy therefore also enforces a monotonic
-    wall-clock deadline (:func:`download_total_timeout_seconds`),
-    checked between bounded chunks — ``read1`` performs at most one
-    raw socket read, so with the per-read timeout every loop iteration
-    finishes promptly and the deadline is honoured within one read.
+    finding 3), and a check between chunks does not bound the headers
+    (read inside ``urlopen``) or a chunked body's size lines (read
+    inside ``read1``), each as many socket reads as the peer makes of
+    them.  So a timer shuts the connection's socket down at the
+    wall-clock deadline (:func:`download_total_timeout_seconds`):
+    whatever the transfer is reading then ends at once, and the
+    failure is reported as a ``TimeoutError``.  A body that ends short
+    of its ``Content-Length`` (``read1`` reports that EOF like any
+    other) is an ``http.client.IncompleteRead``, never *dest*.
     """
     total = download_total_timeout_seconds()
     deadline = time.monotonic() + total
-    with (
-        urllib.request.urlopen(  # noqa: S310 — vosk mirror / test URL
-            url, timeout=download_timeout_seconds()
-        ) as response,
-        open(dest, "wb") as out,
-    ):
-        while True:
+    exceeded = f"download of {url} exceeded the {total:g}s total deadline"
+    watched = _WatchedHandler()
+    cut_off = threading.Timer(total, watched.expire)
+    cut_off.daemon = True
+    cut_off.start()
+    try:
+        with (
+            urllib.request.build_opener(watched).open(  # noqa: S310 — vosk mirror / test URL
+                url, timeout=download_timeout_seconds()
+            ) as response,
+            open(dest, "wb") as out,
+        ):
+            while chunk := response.read1(65536):
+                out.write(chunk)
             if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"download of {url} exceeded the {total:g}s total deadline"
-                )
-            chunk = response.read1(65536)
-            if not chunk:
-                break
-            out.write(chunk)
+                raise TimeoutError(exceeded)
+            if getattr(response, "length", None):  # bytes promised, never sent (not file://)
+                raise http.client.IncompleteRead(b"", response.length)
+    except Exception as exc:
+        if time.monotonic() >= deadline and not isinstance(exc, TimeoutError):
+            raise TimeoutError(exceeded) from exc
+        raise
+    finally:
+        cut_off.cancel()
 
 
 def _is_downloaded(dest: Path) -> bool:
@@ -453,9 +608,8 @@ def download_once(
     """
     if _is_downloaded(dest):
         return dest
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(dest.parent / f".{dest.name}.lock", "w", encoding="utf-8") as lock_file:
-        lock_exclusive(lock_file, timeout=2 * download_total_timeout_seconds())
+    lock = dest.parent / f".{dest.name}.lock"
+    with exclusive_file_lock(lock, timeout=2 * download_total_timeout_seconds()):
         if _is_downloaded(dest):
             return dest
         print(f"downloading {url} ...", file=sys.stderr, flush=True)
@@ -472,6 +626,8 @@ _LANGUAGE_TAG_RE = re.compile(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})*")
 _FENCE_RE = re.compile(
     r"^```[a-zA-Z0-9_-]*\s*\n?(.*?)\n?\s*```$", re.DOTALL
 )
+_ENVELOPE_RE = re.compile(r"^\{.*\}[ \t]*$", re.DOTALL | re.MULTILINE)
+"""A JSON object on lines of its own: from a ``{`` opening a line to the last ``}`` closing one."""
 
 
 def _normalize_language_tag(raw: object) -> str | None:
@@ -510,10 +666,12 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
       tag line).  Tried first: dictation that mentions a JSON object
       (``en\\nPut {"enabled": true} in the config``) is text, not an
       envelope.
-    - Otherwise a JSON envelope (an object tried from the first ``{``
-      to the last ``}`` that carries a ``text`` or ``language`` key)
-      yields its string ``text`` value (else ``""``) and normalized
-      ``language`` value.
+    - Otherwise a JSON envelope (an object on lines of its own, from
+      a ``{`` opening a line to the last ``}`` closing one, that
+      carries a ``text`` or ``language`` key) yields its string
+      ``text`` value (else ``""``) and normalized ``language`` value.
+      An object inside a sentence (``Update config to {"language":
+      "fr"}``) is dictation, whatever its keys.
     - Anything else falls back to the fence- and preamble-stripped
       reply as the text with no language.
 
@@ -533,11 +691,10 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
         language = _normalize_language_tag(first)
         if language is not None:
             return rest.strip(), language
-    start = candidate.find("{")
-    end = candidate.rfind("}")
-    if 0 <= start < end:
+    envelope = _ENVELOPE_RE.search(candidate)
+    if envelope:
         try:
-            parsed: object = json.loads(candidate[start:end + 1])
+            parsed: object = json.loads(envelope.group())
         except ValueError:
             parsed = None
         if isinstance(parsed, dict) and ("text" in parsed or "language" in parsed):
@@ -554,6 +711,7 @@ def transcribe_pcm(
     pcm: bytes,
     audio_model: str = DEFAULT_AUDIO_MODEL,
     expect_wake_prefix: bool = False,
+    wake_agreed: bool = False,
 ) -> dict[str, Any]:
     """Transcribe spoken audio with a KISS (Sorcar) transcription agent.
 
@@ -576,15 +734,21 @@ def transcribe_pcm(
     returned; when it does not, the local wake detection was a false
     positive and the whole utterance is rejected (empty ``text``,
     details on stderr) instead of being submitted as a command.  The
-    one exception is speech the agent reports as non-English: the
-    model may drop the English wake word while translating, so
-    such utterances keep the single local check instead.
+    one exception is speech the agent reports as non-English AND
+    whose wake both browser recognizers heard (*wake_agreed*): the
+    model may drop the English wake word while translating, so such
+    utterances rest on the two local checks instead.  Without that
+    agreement a foreign transcript is rejected like an English one
+    (two Russian and Bengali false wakes got through on 2026-11-08
+    when the language alone sufficed).
 
     Args:
         pcm: Raw 16kHz mono s16le PCM of the utterance.
         audio_model: GPT audio-chat model name (default ``gpt-audio``).
         expect_wake_prefix: Whether *pcm* begins with the wake-word
             audio whose transcript must confirm the wake.
+        wake_agreed: Whether the browser's grammar and grammar-free
+            recognizers both heard the wake word (``wakeAgreed``).
 
     Returns:
         ``{"text": <english str>, "language": <tag str or None>}``.
@@ -653,7 +817,11 @@ def transcribe_pcm(
             confirmed, rest = split_wake_prefix(cleaned)
             if confirmed:
                 return {"text": rest, "language": language}
-            if language is not None and language.split("-")[0] != "en":
+            if (
+                wake_agreed
+                and language is not None
+                and language.split("-")[0] != "en"
+            ):
                 # gpt-audio may DROP the English wake word when it
                 # translates non-English speech (measured with the
                 # earlier "Sorcar": + French "Bonjour tout le monde"
@@ -661,8 +829,9 @@ def transcribe_pcm(
                 # survived the same test, but the model's wording
                 # is not guaranteed), so the transcript cannot be
                 # relied on to re-confirm the wake.  Fall back to the
-                # single local check for foreign speech instead of
-                # swallowing every non-English command.
+                # browser's two agreeing local checks for foreign
+                # speech instead of swallowing every non-English
+                # command.
                 return {"text": text, "language": language}
             print(
                 "wake word not confirmed by the transcript; "

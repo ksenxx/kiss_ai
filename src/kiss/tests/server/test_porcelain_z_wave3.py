@@ -25,6 +25,7 @@ from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.tests.conftest import posix_only
 from kiss.tests.server.conftest import init_repo, run_git_checked
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 from ._memory_printer import MemoryPrinter
 
@@ -85,7 +86,7 @@ def test_changed_files_fallback_lists_exact_names_and_both_rename_sides(
     # fails and the listing falls back to ``git status``.
     run_git_checked(repo, "branch", "-m", "main", "renamed")
     try:
-        changed = server._get_worktree_changed_files("wt-z")
+        changed = worktree_changed_files(server, "wt-z")
     finally:
         run_git_checked(repo, "branch", "-m", "renamed", "main")
         wt_agent.discard()

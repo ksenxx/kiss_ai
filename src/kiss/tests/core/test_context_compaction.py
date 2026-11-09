@@ -26,17 +26,25 @@ from kiss.core.context_compaction import (
     COMPACTION_STEP_TOKENS,
     PAYBACK_STEPS,
     STUB_PREFIX,
+    TURN_REMOVAL_NOTE,
+    CompactionTable,
     apply_compaction,
+    apply_turn_removal,
     compaction_target_tokens,
     dropped_chars,
+    expand_stubs,
+    make_argument_stub,
     make_stub,
     payback_floor,
     plan_compaction,
+    plan_turn_removal,
     should_compact,
 )
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model_info import get_cache_discount
 from kiss.core.printer import Printer
+from kiss.core.tool_verdict import ALLOW, Verdict
+from kiss.core.utils import finish
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -160,30 +168,62 @@ def big_output() -> str:
     return "line\n" * 1600
 
 
+WRITTEN: list[str] = []
+
+
 def Write(text: str) -> str:  # noqa: N802
     """Pretend to write a file and return a large confirmation (a protected tool name).
 
     Args:
-        text: Ignored.
+        text: Recorded in :data:`WRITTEN`, otherwise ignored.
     """
+    WRITTEN.append(text)
     return "written " + "y" * 3000
 
 
-def _run_agent(base_url: str, script_len: int, hook_calls: list[int]) -> KISSAgent:
+class _ArgumentsSeen:
+    """A ``tool_call_hook`` (the instance) or ``tool_result_hook`` (:meth:`result`)
+    recording each ``text`` argument it is given."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    def __call__(self, name: str, args: dict[str, Any]) -> Verdict:
+        self.result(name, args, "", False)
+        return ALLOW
+
+    def result(self, name: str, args: dict[str, Any], response: str, refused: bool) -> None:
+        if "text" in args:
+            self.texts.append(str(args["text"]))
+
+
+def _run_agent(
+    base_url: str,
+    script_len: int,
+    hook_calls: list[int],
+    compaction: bool = True,
+    tool_call_hook: _ArgumentsSeen | None = None,
+    tool_result_hook: _ArgumentsSeen | None = None,
+) -> KISSAgent:
     agent = KISSAgent("compaction-test")
 
     def on_reset() -> None:
         hook_calls.append(agent.step_count)
 
     agent.context_reset_hook = on_reset
+    if tool_result_hook is not None:
+        agent.tool_result_hook = tool_result_hook.result
     agent.run(
         model_name=MODEL,
         prompt_template="Call big_output repeatedly.",
-        tools=[big_output, Write],
+        # The scripted ``finish`` has the structured contract of ``finish_body``.
+        tools=[big_output, Write, finish],
         max_steps=script_len + 5,
         max_budget=50.0,
         verbose=False,
         model_config={"base_url": base_url, "api_key": "local"},
+        compaction=compaction,
+        tool_call_hook=tool_call_hook,
     )
     return agent
 
@@ -284,7 +324,7 @@ def test_second_compaction_waits_for_the_step_gap() -> None:
         agent.run(
             model_name=MODEL,
             prompt_template="Call the outputs repeatedly.",
-            tools=[big_output, bigger_output],
+            tools=[big_output, bigger_output, finish],
             max_steps=len(script) + 5,
             max_budget=50.0,
             verbose=False,
@@ -308,10 +348,47 @@ def test_compaction_disabled_by_config(monkeypatch: pytest.MonkeyPatch) -> None:
     with serve(script) as (url, _requests):
         agent = _run_agent(url, len(script), hook_calls)
     assert hook_calls == []
-    assert not any(
-        str(m.get("content", "")).startswith(STUB_PREFIX)
-        for m in agent.model.conversation if m.get("role") == "tool"
-    )
+    assert not any(_stubbed(agent))
+    # The run's own option was on: the global setting alone turned it off.
+    assert agent.compaction is True
+
+
+def test_compaction_disabled_by_run_option() -> None:
+    """``run(compaction=False)`` leaves every output whole while the global setting is on.
+
+    The script is the one ``test_agent_compaction_replaces_old_outputs_but_not_writes``
+    compacts at step 32, so the option is the only difference.
+    """
+    assert DEFAULT_CONFIG.tool_output_compaction is True
+    script = [tool_call_body("big_output", {}, 3000) for _ in range(30)]
+    script.append(tool_call_body("big_output", {}, COMPACTION_START_TOKENS))
+    script.append(finish_body("<p>done</p>", prompt_tokens=60_000))
+    hook_calls: list[int] = []
+    with serve(script) as (url, requests):
+        agent = _run_agent(url, len(script), hook_calls, compaction=False)
+    assert agent.compaction is False
+    assert hook_calls == []
+    assert agent._next_compaction_at == COMPACTION_START_TOKENS
+    assert len(_stubbed(agent)) == 31
+    assert not any(_stubbed(agent))
+    # The finish request still carried every output in full (a stub keeps 200 chars).
+    sent = [m for m in requests[-1]["messages"] if m.get("role") == "tool"]
+    assert len(sent) == 31
+    assert all(big_output() in str(m["content"]) for m in sent)
+    # The option is per run: the next run of the same agent compacts again.
+    with serve(script) as (url, _requests):
+        agent.run(
+            model_name=MODEL,
+            prompt_template="Call big_output repeatedly.",
+            tools=[big_output, Write, finish],
+            max_steps=len(script) + 5,
+            max_budget=50.0,
+            verbose=False,
+            model_config={"base_url": url, "api_key": "local"},
+        )
+    assert agent.compaction is True
+    assert hook_calls == [32]
+    assert any(_stubbed(agent))
 
 
 def test_results_after_the_last_assistant_turn_are_never_compacted() -> None:
@@ -407,9 +484,8 @@ def test_old_write_and_edit_arguments_are_stubbed_and_point_at_the_file(shape: s
     # A long shell command is stubbed with its tool and argument named; the
     # short description is left alone.
     command_chars = len(str(calls[2][2]["command"]))
-    assert b1["command"].startswith(
-        f"{ARGUMENT_STUB_PREFIX} {command_chars:,} chars of Bash.command;"
-    )
+    assert b1["command"].startswith(ARGUMENT_STUB_PREFIX + " #")
+    assert f": {command_chars:,} chars of Bash.command;" in b1["command"]
     assert b1["description"] == "make b"
     # The last Write of c.py is the file's current content.
     assert "this call made the file's current content" in w2["content"]
@@ -421,6 +497,142 @@ def test_old_write_and_edit_arguments_are_stubbed_and_point_at_the_file(shape: s
     assert plan_compaction(conversation, keep_recent=1) == []
     # Arguments can be left alone.
     assert plan_compaction(conversation, keep_recent=0, arguments=False) == []
+
+
+def test_stubs_are_references_the_table_expands() -> None:
+    # One id per distinct text, whatever the kind of stub; re-planning a
+    # skipped compaction (the same texts again) adds nothing to the table.
+    table = CompactionTable()
+    result_stub = make_stub(BIG, table=table)
+    argument_stub = make_argument_stub("Bash", "command", BIG, "", False, table)
+    other = make_argument_stub("Write", "content", FILE_TEXT, "/app/a.py", True, table)
+    assert result_stub.startswith(f"{STUB_PREFIX} #1: {len(BIG):,} chars;")
+    assert argument_stub.startswith(
+        f"{ARGUMENT_STUB_PREFIX} #1: {len(BIG):,} chars of Bash.command;")
+    assert other.startswith(f"{ARGUMENT_STUB_PREFIX} #2:")
+    assert make_stub(BIG, table=table) == result_stub
+    assert table.originals == {1: BIG, 2: FILE_TEXT}
+    # A whole-argument stub (the model copied what it saw) is expanded, with a
+    # note; a preview the model cut short is still the stub.
+    args, notes, refusal = expand_stubs(
+        {"command": argument_stub, "description": "run", "timeout_seconds": 5}, table)
+    assert (args, refusal) == ({"command": BIG, "description": "run", "timeout_seconds": 5}, None)
+    assert notes == ["argument 'command' (#1) restored from the compaction table"]
+    args, notes, refusal = expand_stubs({"content": other[:-50]}, table)
+    assert (args["content"], refusal) == (FILE_TEXT, None)
+    # The whole stub as the model saw it in a result (a tool output stub).
+    args, notes, refusal = expand_stubs({"content": result_stub}, table)
+    assert (args["content"], notes) == (
+        BIG, ["argument 'content' (#1) restored from the compaction table"])
+    # Refused before the tool runs: a stub inside a longer text, a stub the
+    # table does not hold, a stub followed by text that is not its preview,
+    # and the older stub format without an id (its table is long gone).
+    for bad, reason in [
+        ("header\n" + argument_stub, "inside a longer text"),
+        ("<p>The model saw this:</p>\n" + result_stub, "inside a longer text"),
+        (other.replace("#2:", "#9:"), "does not hold"),
+        (argument_stub + "\nmore that is not the original", "not its preview"),
+        (f"{ARGUMENT_STUB_PREFIX}: 2,000 chars of Bash.command]\npartial", "does not hold"),
+    ]:
+        args, notes, refusal = expand_stubs({"content": bad, "file_path": "/x"}, table)
+        assert refusal is not None and reason in refusal, bad[:40]
+        assert (args, notes) == ({"content": bad, "file_path": "/x"}, [])
+    # A stub is a whole head line.  Text that merely carries a stub's opening
+    # words (a source line of the compaction module, a grep for them, prose
+    # naming them) or a head that does not end its line is content: it passes
+    # untouched, as the very dict the caller gave.
+    for plain in [
+        "ls",
+        f'STUB_PREFIX = "{STUB_PREFIX}"\n',
+        f"grep -n '{ARGUMENT_STUB_PREFIX}' src/kiss/core/context_compaction.py",
+        f"<p>Each old result becomes a {STUB_PREFIX} #n: ...] stub.</p>",
+        f"{STUB_PREFIX} #1: 3,000 chars",
+        argument_stub.replace("]\n", "] EXTRA CONTENT\n", 1),
+    ]:
+        given = {"command": plain, "n": 3}
+        args, notes, refusal = expand_stubs(given, table)
+        assert args is given and (notes, refusal) == ([], None), plain[:40]
+    # A plan fed the table records every original under the ids its stubs carry.
+    conversation = _generic(3)
+    plan = plan_compaction(conversation, keep_recent=0, table=table)
+    assert apply_compaction(plan) == 2  # the newest result is not seen by the model yet
+    assert all(text.startswith(f"{STUB_PREFIX} #1:") for text in _texts(conversation)[:2])
+    assert table.originals[1] == BIG
+
+
+def test_agent_expands_a_stub_the_model_passes_back_and_refuses_an_embedded_one() -> None:
+    # 30 Writes of the same 10k-character text; step 31 reports 100k context,
+    # so the compaction before step 32 stubs the arguments of the old Writes
+    # (their results are protected): one text, one stub id.  The model then
+    # passes that stub back as a Write argument: the tool runs on the
+    # original text and says so; a stub inside a longer text is refused
+    # before the tool runs; then the model finishes.
+    text = "data\n" * 2000
+    stub = make_argument_stub("Write", "text", text, "", False)
+    script = [tool_call_body("Write", {"text": text}, 3000) for _ in range(30)]
+    script.append(tool_call_body("Write", {"text": text}, COMPACTION_START_TOKENS))
+    script.append(tool_call_body("Write", {"text": stub}, 100_000))
+    script.append(tool_call_body("Write", {"text": "# header\n" + stub}, 100_000))
+    script.append(finish_body("<p>done</p>", prompt_tokens=60_000))
+    hook_calls: list[int] = []
+    call_hook, result_hook = _ArgumentsSeen(), _ArgumentsSeen()
+    WRITTEN.clear()
+    with serve(script) as (url, requests):
+        agent = _run_agent(
+            url, len(script), hook_calls, tool_call_hook=call_hook, tool_result_hook=result_hook
+        )
+    assert hook_calls == [32]
+    assert agent._compaction_table.originals == {1: text}
+    tool_msgs = [m for m in agent.model.conversation if m.get("role") == "tool"]
+    expanded, refused = str(tool_msgs[-2]["content"]), str(tool_msgs[-1]["content"])
+    assert expanded.startswith("written ")
+    assert "[argument 'text' (#1) restored from the compaction table]" in expanded
+    assert "carries a compaction stub inside a longer text" in refused
+    assert not refused.startswith("written ")
+    # The call hook, the tool and the result hook all see the restored
+    # original, so a result is booked under the arguments that ran; the
+    # refused call (no hook consulted, the tool not run) keeps what was sent.
+    assert call_hook.texts == [text] * 32
+    assert WRITTEN == [text] * 32
+    assert result_hook.texts == [text] * 32 + ["# header\n" + stub]
+    # The conversation's own record of the call keeps the stub as the model sent it.
+    sent = [m for m in requests[-1]["messages"] if m.get("role") == "assistant"]
+    assert json.loads(sent[-2]["tool_calls"][0]["function"]["arguments"]) == {"text": stub}
+
+
+def test_agent_runs_tools_on_text_that_merely_names_the_stub_prefix() -> None:
+    # A Write of a source line of the compaction module and a finish summary
+    # that mentions the stubs are content, not stubs: the tool runs on the
+    # text as sent and the finish is accepted at the first attempt.
+    source_line = f'STUB_PREFIX = "{STUB_PREFIX}"\n'
+    script = [
+        tool_call_body("Write", {"text": source_line}, 3000),
+        finish_body(f"<p>Old results are {STUB_PREFIX} #n: ...] stubs.</p>"),
+    ]
+    WRITTEN.clear()
+    with serve(script) as (url, requests):
+        agent = _run_agent(url, len(script), [])
+    assert WRITTEN == [source_line] and len(requests) == len(script)
+    tool_msgs = [m for m in agent.model.conversation if m.get("role") == "tool"]
+    assert str(tool_msgs[0]["content"]).startswith("written ")
+
+
+@pytest.mark.parametrize("path", [
+    "/app/[id]/page.tsx", "/app/[...slug]/page.tsx", "/tmp/a b;c#1:(x)'y\".md",
+    "/tmp/odd\nname].md",
+])
+def test_argument_stubs_round_trip_for_any_file_path(path: str) -> None:
+    """A stub the generator makes for a file of any name is one its parser expands."""
+    table = CompactionTable()
+    shown = path.replace("\n", "\\n")  # the head line stays one line
+    for name, key in [("Write", "content"), ("Edit", "old_string"), ("Edit", "new_string")]:
+        stub = make_argument_stub(name, key, FILE_TEXT, path, name == "Edit", table)
+        head, preview = stub.split("\n", 1)
+        assert head.endswith("follow]") and preview == FILE_TEXT[:ARGUMENT_PREVIEW_CHARS]
+        assert f"{name}.{key} to {shown};" in head and f"Read {shown} to see it" in head
+        assert expand_stubs({key: stub, "file_path": path}, table) == (
+            {key: FILE_TEXT, "file_path": path},
+            [f"argument {key!r} (#1) restored from the compaction table"], None)
 
 
 def test_malformed_arguments_are_skipped() -> None:
@@ -499,7 +711,9 @@ def test_agent_emits_a_compaction_event_with_the_tokens_removed(
     A printer makes the agent stream, so the scripted Anthropic stand-in
     (which serves server-sent events) plays the model; its tool-use turns
     are the Anthropic shape, so a Write's content is compacted as an
-    argument too.
+    argument too.  The server-side context edits are off (the provider
+    would otherwise do the clearing and the client-side compaction
+    stays out of its way).
     """
     script = [anthropic_server.tool_use_message("big_output", {}, 3000, f"toolu_{i}")
               for i in range(30)]
@@ -510,15 +724,18 @@ def test_agent_emits_a_compaction_event_with_the_tokens_removed(
     script.append(anthropic_server.tool_use_message(
         "finish", {"result": "<p>done</p>"}, 60_000, "toolu_31"))
     recorder = _Recorder()
-    with anthropic_server.serve(script) as (url, _requests):
+    with anthropic_server.serve(script) as (url, requests):
         monkeypatch.setenv("ANTHROPIC_BASE_URL", url)
         monkeypatch.setattr(DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "local")
+        monkeypatch.setattr(DEFAULT_CONFIG, "reasoning_keep_turns", 0)
+        monkeypatch.setattr(DEFAULT_CONFIG, "context_edit_trigger_tokens", 0)
         agent = KISSAgent("compaction-event-test")
         agent.run(
             model_name=anthropic_server.MODEL, prompt_template="Call big_output repeatedly.",
             tools=[big_output, Write], max_steps=len(script) + 5, max_budget=50.0,
             printer=recorder,
         )
+    assert not any("context_management" in r for r in requests)
     events = [e for e in recorder.events if e["type"] == "compaction"]
     assert len(events) == 1
     event = events[0]
@@ -538,3 +755,80 @@ def test_agent_emits_a_compaction_event_with_the_tokens_removed(
     calls = [e for e in recorder.events if e["type"] == "llm_call"]
     assert len(calls) == len(script)
     assert all(e["stop_reason"] == "tool_use" for e in calls)
+
+
+# ---------------------------------------------------------------------------
+# Whole-turn removal: the compaction of the families whose API wants every
+# earlier turn's reasoning back (DeepSeek), where a turn goes out entire.
+# ---------------------------------------------------------------------------
+
+PASSBACK_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
+"""A catalog name of the DeepSeek family; the local server answers for it."""
+
+
+@pytest.mark.parametrize("build", [_generic, _anthropic, _responses])
+def test_turn_removal_keeps_the_task_and_the_newest_turns(build) -> None:
+    conversation = build(12)
+    removal = plan_turn_removal(conversation, keep_recent=10)
+    assert removal is not None
+    assert (removal.start, removal.turns) == (1, 2)
+    assert removal.dropped > 0
+    kept = list(conversation[removal.stop:])
+    assert apply_turn_removal(conversation, removal) == removal.stop - 1
+    assert conversation[0] == {"role": "user", "content": "task"}
+    assert conversation[1] == {"role": "user", "content": TURN_REMOVAL_NOTE.format(turns=2)}
+    assert conversation[2:] == kept
+    # Three more turns: the next removal absorbs the earlier note, so one
+    # note states the cumulative count, and the newest ten turns stay.
+    conversation.extend(build(3)[1:])
+    again = plan_turn_removal(conversation, keep_recent=10)
+    assert again is not None
+    assert (again.start, again.turns) == (1, 5)
+    apply_turn_removal(conversation, again)
+    assert conversation[1] == {"role": "user", "content": TURN_REMOVAL_NOTE.format(turns=5)}
+    assert sum(1 for m in conversation if m.get("role") == "user") == 2 + (
+        10 if build is _anthropic else 0
+    )
+    assert plan_turn_removal(conversation, keep_recent=10) is None
+    assert plan_turn_removal(build(2), keep_recent=10) is None
+
+
+def test_agent_removes_whole_old_turns_for_a_reasoning_passback_family() -> None:
+    # The same 30 outputs as the stub test, on a DeepSeek-named model: at
+    # the 100k context the oldest 21 of the 31 turns go out whole (their
+    # calls and results together, no stubs), one user note stands where
+    # they were, and the reset hook tells the harness the context changed.
+    script = [tool_call_body("big_output", {}, 3000) for _ in range(30)]
+    script.append(tool_call_body("big_output", {}, COMPACTION_START_TOKENS))
+    script.append(finish_body("<p>done</p>", prompt_tokens=60_000))
+    hook_calls: list[int] = []
+    agent = KISSAgent("whole-turn-test")
+
+    def on_reset() -> None:
+        hook_calls.append(agent.step_count)
+
+    agent.context_reset_hook = on_reset
+    with serve(script) as (url, requests):
+        agent.run(
+            model_name=PASSBACK_MODEL, prompt_template="Call big_output repeatedly.",
+            tools=[big_output, Write, finish], max_steps=len(script) + 5, max_budget=50.0,
+            verbose=False, model_config={"base_url": url, "api_key": "local"},
+        )
+    assert agent.model.compacts_whole_turns()
+    assert hook_calls == [32]
+    conversation = agent.model.conversation
+    note = conversation[1]
+    assert note["role"] == "user"
+    assert note["content"].startswith(TURN_REMOVAL_NOTE.format(turns=21))
+    assistants = [m for m in conversation if m.get("role") == "assistant"]
+    tool_msgs = [m for m in conversation if m.get("role") == "tool"]
+    # The ten kept turns and the finish call (whose result never enters).
+    assert (len(assistants), len(tool_msgs)) == (11, 10)
+    assert not any(_stubbed(agent))
+    # The finish request carried the shortened conversation, the note first.
+    sent = requests[-1]["messages"]
+    users = [m for m in sent if m.get("role") == "user"]
+    assert users[1]["content"].startswith(TURN_REMOVAL_NOTE.format(turns=21))
+    assert sum(1 for m in sent if m.get("role") == "assistant") == 10
+    # The agent's own trajectory keeps every turn.
+    assert sum(1 for m in agent.messages if m.get("role") == "model") == len(script)

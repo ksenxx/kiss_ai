@@ -1,72 +1,53 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **997 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **1058 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, such as `bedrock/us.anthropic.claude-opus-4-6-v1` or `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`) are the Claude ids the updater found in its AWS region (`AWS_REGION`, default `us-east-1`): the system-defined cross-region inference profiles and any foundation model id that accepts on-demand calls there. Each one is a copy of its `claude-*` entry (same context length, capabilities and `-low`/`-medium`/`-high`/`-max` effort suffixes) with the prices scaled by Bedrock's regional premium: a `global.` profile costs the same as the `claude-*` entry, a geographic (`us.`, `eu.`, `apac.`, `jp.`, `au.`) or in-region (`anthropic.`) id of a Claude 4.5-or-later model 10% more. Configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`, to use them; re-running the updater on a machine in another region relists the ids that region serves. An id the region serves that is not in the catalog can still be used by name or added under Settings → Custom Models.
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 116 |
+| OpenAI | 89 |
 | Anthropic | 76 |
 | Amazon Bedrock (`bedrock/*`) | 144 |
-| Gemini | 22 |
-| Together AI | 105 |
+| Gemini | 49 |
+| Together AI | 109 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 488 |
-| Claude Code CLI (`cc/*`) | 17 |
+| OpenRouter | 489 |
+| Claude Code CLI (`cc/*`) | 73 |
 | Codex CLI (`codex/*`) | 11 |
 
 Current catalog capability totals:
 
-- **952** generation-capable models
-- **802** function-calling-capable models
+- **1014** generation-capable models
+- **866** function-calling-capable models
 - **7** embedding models
-- **31** decision models
+- **30** decision models
 
 Full model list:
 
 <details>
-<summary><strong>OpenAI (116)</strong></summary>
+<summary><strong>OpenAI (89)</strong></summary>
 
-- `gpt-3.5-turbo`
-- `gpt-3.5-turbo-0125`
-- `gpt-3.5-turbo-1106`
-- `gpt-3.5-turbo-16k`
-- `gpt-4`
-- `gpt-4-0613`
-- `gpt-4-turbo`
-- `gpt-4-turbo-2024-04-09`
 - `gpt-4.1`
 - `gpt-4.1-2025-04-14`
 - `gpt-4.1-mini`
 - `gpt-4.1-mini-2025-04-14`
-- `gpt-4.1-nano`
-- `gpt-4.1-nano-2025-04-14`
 - `gpt-4o`
-- `gpt-4o-2024-05-13`
 - `gpt-4o-2024-08-06`
 - `gpt-4o-2024-11-20`
 - `gpt-4o-mini`
 - `gpt-4o-mini-2024-07-18`
-- `gpt-4o-mini-search-preview`
-- `gpt-4o-mini-search-preview-2025-03-11`
-- `gpt-4o-search-preview`
-- `gpt-4o-search-preview-2025-03-11`
 - `gpt-5`
 - `gpt-5-2025-08-07`
-- `gpt-5-chat-latest`
 - `gpt-5-mini`
 - `gpt-5-mini-2025-08-07`
 - `gpt-5-nano`
 - `gpt-5-nano-2025-08-07`
 - `gpt-5.1`
 - `gpt-5.1-2025-11-13`
-- `gpt-5.1-chat-latest`
 - `gpt-5.2`
 - `gpt-5.2-2025-12-11`
-- `gpt-5.2-chat-latest`
-- `gpt-5.3-chat-latest`
 - `gpt-5.4`
 - `gpt-5.4-2026-03-05`
 - `gpt-5.4-mini`
@@ -127,21 +108,13 @@ Full model list:
 - `gpt-audio-1.5`
 - `gpt-audio-2025-08-28`
 - `gpt-audio-mini`
-- `gpt-audio-mini-2025-10-06`
 - `gpt-audio-mini-2025-12-15`
-- `gpt-image-1`
 - `gpt-image-1-mini`
 - `gpt-image-1.5`
 - `gpt-image-2`
 - `gpt-image-2-2026-04-21`
-- `o1`
-- `o1-2024-12-17`
 - `o3`
 - `o3-2025-04-16`
-- `o3-mini`
-- `o3-mini-2025-01-31`
-- `o4-mini`
-- `o4-mini-2025-04-16`
 - `text-embedding-3-large`
 - `text-embedding-3-small`
 - `text-embedding-ada-002`
@@ -381,26 +354,53 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Gemini (22)</strong></summary>
+<summary><strong>Gemini (49)</strong></summary>
 
 - `gemini-2.5-flash`
 - `gemini-2.5-flash-image`
 - `gemini-2.5-flash-lite`
 - `gemini-2.5-pro`
 - `gemini-3-flash-preview`
+- `gemini-3-flash-preview-high`
+- `gemini-3-flash-preview-low`
+- `gemini-3-flash-preview-medium`
 - `gemini-3-pro-image`
 - `gemini-3.1-flash-image`
 - `gemini-3.1-flash-lite`
+- `gemini-3.1-flash-lite-high`
 - `gemini-3.1-flash-lite-image`
+- `gemini-3.1-flash-lite-low`
+- `gemini-3.1-flash-lite-medium`
 - `gemini-3.1-flash-lite-preview`
+- `gemini-3.1-flash-lite-preview-high`
+- `gemini-3.1-flash-lite-preview-low`
+- `gemini-3.1-flash-lite-preview-medium`
 - `gemini-3.1-flash-tts-preview`
 - `gemini-3.1-pro-preview`
 - `gemini-3.5-flash`
+- `gemini-3.5-flash-high`
 - `gemini-3.5-flash-lite`
+- `gemini-3.5-flash-lite-high`
+- `gemini-3.5-flash-lite-low`
+- `gemini-3.5-flash-lite-medium`
+- `gemini-3.5-flash-low`
+- `gemini-3.5-flash-medium`
 - `gemini-3.6-flash`
+- `gemini-3.6-flash-high`
+- `gemini-3.6-flash-low`
+- `gemini-3.6-flash-medium`
 - `gemini-3.7-flash`
+- `gemini-3.7-flash-high`
+- `gemini-3.7-flash-low`
+- `gemini-3.7-flash-medium`
 - `gemini-3.8-flash`
+- `gemini-3.8-flash-high`
+- `gemini-3.8-flash-low`
+- `gemini-3.8-flash-medium`
 - `gemini-4-argon`
+- `gemini-4-argon-high`
+- `gemini-4-argon-low`
+- `gemini-4-argon-medium`
 - `gemini-embedding-001`
 - `gemini-embedding-2`
 - `gemini-embedding-2-preview`
@@ -409,7 +409,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Together AI (105)</strong></summary>
+<summary><strong>Together AI (109)</strong></summary>
 
 - `BAAI/bge-base-en-v1.5`
 - `Qwen/QwQ-32B`
@@ -494,6 +494,10 @@ Full model list:
 - `moonshotai/Kimi-K3-high`
 - `moonshotai/Kimi-K3-low`
 - `moonshotai/Kimi-K3-max`
+- `moonshotai/Kimi-K3.1-Pro`
+- `moonshotai/Kimi-K3.1-Pro-high`
+- `moonshotai/Kimi-K3.1-Pro-low`
+- `moonshotai/Kimi-K3.1-Pro-max`
 - `nvidia/Llama-3.1-Nemotron-70B-Instruct-HF`
 - `nvidia/NVIDIA-Nemotron-3.5-Super-VL`
 - `nvidia/NVIDIA-Nemotron-Nano-9B-v2`
@@ -550,7 +554,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (488)</strong></summary>
+<summary><strong>OpenRouter (489)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -692,6 +696,8 @@ Full model list:
 - `openrouter/google/gemini-3.7-flash`
 - `openrouter/google/gemini-3.8-flash`
 - `openrouter/google/gemini-4-argon`
+- `openrouter/google/gemini-omni-1.1-flash`
+- `openrouter/google/gemini-omni-1.2-flash`
 - `openrouter/google/gemma-2-27b-it`
 - `openrouter/google/gemma-3-12b-it`
 - `openrouter/google/gemma-3-27b-it`
@@ -702,12 +708,9 @@ Full model list:
 - `openrouter/google/lyria-3-pro-preview`
 - `openrouter/gryphe/mythomax-l2-13b`
 - `openrouter/ibm-granite/granite-4.2-8b`
-- `openrouter/inception/mercury-2`
-- `openrouter/inception/mercury-2.5`
-- `openrouter/inception/mercury-3`
-- `openrouter/inception/mercury-decide`
 - `openrouter/inclusionai/ling-3.0-flash`
 - `openrouter/inclusionai/ling-3.0-flash-vl`
+- `openrouter/inclusionai/ling-3.0-tiny`
 - `openrouter/inclusionai/ling-3.1-flash`
 - `openrouter/inference-net/schematron-v2-small`
 - `openrouter/inference-net/schematron-v2-turbo`
@@ -716,6 +719,7 @@ Full model list:
 - `openrouter/liquid/d1-ultra`
 - `openrouter/liquid/d1.1`
 - `openrouter/liquid/lfm-2.5-24b-a2b`
+- `openrouter/liquid/lfm-3-1.7b`
 - `openrouter/mancer/weaver`
 - `openrouter/meituan/longcat-2.0`
 - `openrouter/meta-llama/llama-3.1-70b-instruct`
@@ -929,6 +933,7 @@ Full model list:
 - `openrouter/relace/relace-apply-3`
 - `openrouter/relace/relace-search`
 - `openrouter/respan/span-02`
+- `openrouter/ricursiveai/ripple-65b-preview`
 - `openrouter/sakana/fugu-max`
 - `openrouter/sakana/fugu-ultra`
 - `openrouter/sakana/fugu-ultra-v2`
@@ -1044,22 +1049,78 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Claude Code CLI (cc/*) (17)</strong></summary>
+<summary><strong>Claude Code CLI (cc/*) (73)</strong></summary>
 
 - `cc/claude-fable-5`
 - `cc/claude-fable-5-1`
+- `cc/claude-fable-5-1-high`
+- `cc/claude-fable-5-1-low`
+- `cc/claude-fable-5-1-max`
+- `cc/claude-fable-5-1-medium`
+- `cc/claude-fable-5-1-xhigh`
+- `cc/claude-fable-5-high`
+- `cc/claude-fable-5-low`
+- `cc/claude-fable-5-max`
+- `cc/claude-fable-5-medium`
+- `cc/claude-fable-5-xhigh`
 - `cc/claude-haiku-4-5-20251001`
 - `cc/claude-haiku-5-5`
+- `cc/claude-haiku-5-5-high`
+- `cc/claude-haiku-5-5-low`
+- `cc/claude-haiku-5-5-max`
+- `cc/claude-haiku-5-5-medium`
+- `cc/claude-haiku-5-5-xhigh`
 - `cc/claude-opus-4-5-20251101`
+- `cc/claude-opus-4-5-20251101-high`
+- `cc/claude-opus-4-5-20251101-low`
+- `cc/claude-opus-4-5-20251101-medium`
 - `cc/claude-opus-4-6`
+- `cc/claude-opus-4-6-high`
+- `cc/claude-opus-4-6-low`
+- `cc/claude-opus-4-6-max`
+- `cc/claude-opus-4-6-medium`
 - `cc/claude-opus-4-7`
+- `cc/claude-opus-4-7-high`
+- `cc/claude-opus-4-7-low`
+- `cc/claude-opus-4-7-max`
+- `cc/claude-opus-4-7-medium`
+- `cc/claude-opus-4-7-xhigh`
 - `cc/claude-opus-4-8`
+- `cc/claude-opus-4-8-high`
+- `cc/claude-opus-4-8-low`
+- `cc/claude-opus-4-8-max`
+- `cc/claude-opus-4-8-medium`
+- `cc/claude-opus-4-8-xhigh`
 - `cc/claude-opus-5`
 - `cc/claude-opus-5-5`
+- `cc/claude-opus-5-5-high`
+- `cc/claude-opus-5-5-low`
+- `cc/claude-opus-5-5-max`
+- `cc/claude-opus-5-5-medium`
+- `cc/claude-opus-5-5-xhigh`
+- `cc/claude-opus-5-high`
+- `cc/claude-opus-5-low`
+- `cc/claude-opus-5-max`
+- `cc/claude-opus-5-medium`
+- `cc/claude-opus-5-xhigh`
 - `cc/claude-sonnet-4-5-20250929`
 - `cc/claude-sonnet-4-6`
+- `cc/claude-sonnet-4-6-high`
+- `cc/claude-sonnet-4-6-low`
+- `cc/claude-sonnet-4-6-max`
+- `cc/claude-sonnet-4-6-medium`
 - `cc/claude-sonnet-5`
 - `cc/claude-sonnet-5-5`
+- `cc/claude-sonnet-5-5-high`
+- `cc/claude-sonnet-5-5-low`
+- `cc/claude-sonnet-5-5-max`
+- `cc/claude-sonnet-5-5-medium`
+- `cc/claude-sonnet-5-5-xhigh`
+- `cc/claude-sonnet-5-high`
+- `cc/claude-sonnet-5-low`
+- `cc/claude-sonnet-5-max`
+- `cc/claude-sonnet-5-medium`
+- `cc/claude-sonnet-5-xhigh`
 - `cc/haiku`
 - `cc/opus`
 - `cc/sonnet`

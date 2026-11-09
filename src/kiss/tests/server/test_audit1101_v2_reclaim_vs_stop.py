@@ -79,7 +79,10 @@ class TestReclaimPublicationVsStop(IsolatedAsyncioTestCase):
         self.assertTrue(self.server._wants_loopback_alias())
         await self.server.start_async()
         self.assertIsNone(self.server._ws_loopback_server)
-        self.assertIsNotNone(local_endpoint.read_endpoint(self.endpoint_file))
+        # No loopback listener, no endpoint: the LAN address is unusable
+        # for a same-machine client (plaintext refused, token not
+        # honoured from a non-loopback peer); the reclaim publishes it.
+        self.assertIsNone(local_endpoint.read_endpoint(self.endpoint_file))
         # The test drives the reclaim tick itself.
         watchdog = self.server._watchdog_task
         assert watchdog is not None

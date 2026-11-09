@@ -27,33 +27,12 @@ function makePage(opts) {
   let fireChange;
   const {win, posted} = makeSharedPage({
     bodyClass: 'remote-chat',
+    extraScripts: ['browserTab.js'],
     beforeScripts: win => {
       ({fireChange} = stubDesktop(win, desktopMatches));
-      stubBrowserTabView(win);
     },
   });
   return {win, posted, fireChange};
-}
-
-function stubBrowserTabView(win) {
-  const noop = function () {};
-  win.BrowserTabView = {
-    create: function () {
-      const el = win.document.createElement('div');
-      el.className = 'browser-screen';
-      el.tabIndex = 0;
-      return {
-        el: el,
-        setBadge: noop,
-        setVisible: noop,
-        state: noop,
-        error: noop,
-        frame: noop,
-        resubscribe: noop,
-        dispose: noop,
-      };
-    },
-  };
 }
 
 function openTabs(win) {
@@ -203,6 +182,65 @@ function testBrowserTabComesBackAfterStackedRoundTrip() {
   win.close();
 }
 
+/**
+ * Widening a stacked page puts a surviving file in the content pane
+ * even when nothing remembers it: a file opened in the background
+ * while stacked (no pane selection was recorded), and a browser that
+ * was the pane's tab until another surface closed it while stacked.
+ * Either way the row must not sit over "No open files".
+ */
+function testWideningSelectsASurvivingContentTab() {
+  for (const browserClosedWhileStacked of [false, true]) {
+    const {win, fireChange} = makePage({desktopMatches: false});
+    send(win, {
+      type: 'tabs_state',
+      tabs: [{tabId: 'a1', chatId: 'chat-1', title: 'a1', workDir: '/ws'}],
+    });
+    if (browserClosedWhileStacked) {
+      fireChange(true);
+      openBrowser(win);
+      assert.strictEqual(shownContentTab(win), 'browser-1');
+      fireChange(false);
+    }
+    send(win, {
+      type: 'fileContent',
+      tabId: 'a1',
+      path: '/ws/b.txt',
+      name: 'b.txt',
+      content: 'B',
+      version: 'v1',
+      background: true,
+    });
+    if (browserClosedWhileStacked) {
+      send(win, {type: 'closeBrowserTab', tab_id: 'browser-1'});
+    }
+    const fileTab = openTabs(win).find(t => t.contentPath === '/ws/b.txt');
+    assert.ok(fileTab, 'the file is open');
+    assert.strictEqual(activeId(win), 'a1', 'stacked: the chat stays on screen');
+
+    fireChange(true);
+    const label = browserClosedWhileStacked
+      ? 'browser closed while stacked'
+      : 'background open while stacked';
+    assert.strictEqual(
+      shownContentTab(win),
+      fileTab.id,
+      label + ': the surviving file is selected on widening',
+    );
+    const view = win.document.querySelector(
+      '.content-tab-view[data-tab-id="' + fileTab.id + '"]',
+    );
+    assert.notStrictEqual(view.style.display, 'none', label + ': its view is shown');
+    assert.strictEqual(
+      win.document.getElementById('content-pane-empty').style.display,
+      'none',
+      label + ': "No open files" is hidden',
+    );
+    assert.strictEqual(activeId(win), 'a1', label + ': the chat is unchanged');
+    win.close();
+  }
+}
+
 function testComposerFocusRetriesLeaveTheBrowserScreen() {
   const {win} = makePage();
   twoChats(win);
@@ -284,6 +322,7 @@ const tests = [
   testRegistryChatIsRetiredOnlyOnceItsStateIsKnown,
   testEmptiedRegistryKeepsAChatBesideOpenFiles,
   testBrowserTabComesBackAfterStackedRoundTrip,
+  testWideningSelectsASurvivingContentTab,
   testComposerFocusRetriesLeaveTheBrowserScreen,
   testGridFitsBetweenDockedPanels,
 ];

@@ -28,22 +28,33 @@ import platform
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
 from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.core.user_config as vc
 from kiss.server import standalone_app
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.tests.conftest import posix_only
 from kiss.tests.server.conftest import (
     find_free_port,
     no_verify_ssl,
     redirect_persistence,
     restore_persistence,
 )
+
+# The macOS quit of a windowless browser, stood in for with what Linux has as well:
+# a shebang script ``ps`` lists under the bundle's path, quit with SIGTERM.
+_WINDOWLESS_QUIT = posix_only("a stand-in browser ps lists by its bundle path, quit with SIGTERM")
 
 
 class TestAppWindowConnection(IsolatedAsyncioTestCase):
@@ -180,3 +191,98 @@ class TestAppWindowConnection(IsolatedAsyncioTestCase):
             if False
             else standalone_app.ask_app_window_open(f"http://127.0.0.1:{self.port}/", timeout=5)
         )
+
+
+@pytest.fixture
+def windowless_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[tuple[Path, subprocess.Popen[bytes]]]:
+    """A stand-in browser running from a bundle under ``tmp_path``, with no window on screen.
+
+    Its argv[0] is the bundle's executable, as ``ps`` shows a real
+    one; a stub ``osascript`` first on ``PATH`` answers the window
+    count with 0.  The popup count is left at 0 afterwards.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "osascript").write_text("#!/bin/sh\necho 0\n")
+    (bin_dir / "osascript").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    bundle = tmp_path / "Brand.app"
+    exe = bundle / "Contents" / "MacOS" / "Chromium"
+    exe.parent.mkdir(parents=True)
+    exe.write_text('#!/bin/bash\nexec -a "$0" sleep 300\n')
+    exe.chmod(0o755)
+    browser = subprocess.Popen([str(exe)])
+    try:
+        deadline = time.monotonic() + 10
+        while standalone_app.macos_bundle_pid(bundle) != browser.pid:
+            assert time.monotonic() < deadline, "ps never listed the stand-in browser"
+            time.sleep(0.1)
+        yield bundle, browser
+    finally:
+        if browser.poll() is None:
+            browser.kill()
+        browser.wait()
+        standalone_app._app_windows = 0
+
+
+@_WINDOWLESS_QUIT
+def test_a_popup_connecting_after_the_windowless_check_is_not_quit(
+    windowless_browser: tuple[Path, subprocess.Popen[bytes]],
+) -> None:
+    """The quit decides against the popup count under the lock the connections update.
+
+    The quit (the timer's :func:`standalone_app.quit_closed_app`) is
+    held, by a profile hook, once ``windowless_app_pid`` has named the
+    browser; the popup connects meanwhile; the browser must live on.
+    """
+    bundle, browser = windowless_browser
+    named = threading.Event()
+    popup_connected = threading.Event()
+    outcome: list[bool] = []
+
+    def hold_once_named(frame: Any, event: str, arg: Any) -> None:
+        if event == "return" and frame.f_code is standalone_app.windowless_app_pid.__code__:
+            named.set()
+            popup_connected.wait(10)
+
+    def quit_from_the_timer() -> None:
+        sys.setprofile(hold_once_named)
+        outcome.append(standalone_app.quit_closed_app(bundle))
+
+    timer = threading.Thread(target=quit_from_the_timer)
+    timer.start()
+    assert named.wait(10)
+    assert standalone_app.app_window_event("open")  # the popup connects (a reload came back)
+    popup_connected.set()
+    timer.join(10)
+    assert outcome == [False]
+    assert browser.poll() is None, "the browser was quit with its popup connected"
+    assert standalone_app.app_window_event("closing")
+    assert standalone_app.quit_closed_app(bundle)  # no popup any more: quit
+    browser.wait(10)
+    assert browser.returncode == -signal.SIGTERM
+
+
+@_WINDOWLESS_QUIT
+def test_a_quit_timer_armed_before_a_later_close_does_not_act(
+    windowless_browser: tuple[Path, subprocess.Popen[bytes]],
+) -> None:
+    """Only the latest close's timer may quit: an older one would cut a later reload's grace short.
+
+    Two reloads in a row arm two timers; the first one's deadline
+    falls inside the second reload's grace period, with the popup
+    between connections (and off screen when minimized).
+    """
+    bundle, browser = windowless_browser
+    assert standalone_app.app_window_event("open")
+    assert standalone_app.app_window_event("closing")  # reload 1: the first timer is armed
+    first = standalone_app._quit_armings
+    assert standalone_app.app_window_event("open")
+    assert standalone_app.app_window_event("closing")  # reload 2: a second timer
+    assert not standalone_app.quit_closed_app(bundle, armed=first)
+    assert browser.poll() is None, "the first timer quit the browser inside the second grace"
+    assert standalone_app.quit_closed_app(bundle, armed=standalone_app._quit_armings)
+    browser.wait(10)
+    assert browser.returncode == -signal.SIGTERM

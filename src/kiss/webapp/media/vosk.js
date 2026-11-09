@@ -117,34 +117,10 @@
 
     var ClientMessage;
     (function (ClientMessage) {
-        function isTerminateMessage(message) {
-            return (message === null || message === void 0 ? void 0 : message.action) === "terminate";
-        }
-        ClientMessage.isTerminateMessage = isTerminateMessage;
-        function isLoadMessage(message) {
-            return (message === null || message === void 0 ? void 0 : message.action) === "load";
-        }
-        ClientMessage.isLoadMessage = isLoadMessage;
-        function isSetMessage(message) {
-            return (message === null || message === void 0 ? void 0 : message.action) === "set";
-        }
-        ClientMessage.isSetMessage = isSetMessage;
         function isAudioChunkMessage(message) {
             return (message === null || message === void 0 ? void 0 : message.action) === "audioChunk";
         }
         ClientMessage.isAudioChunkMessage = isAudioChunkMessage;
-        function isRecognizerCreateMessage(message) {
-            return (message === null || message === void 0 ? void 0 : message.action) === "create";
-        }
-        ClientMessage.isRecognizerCreateMessage = isRecognizerCreateMessage;
-        function isRecognizerRetrieveFinalResultMessage(message) {
-            return (message === null || message === void 0 ? void 0 : message.action) === "retrieveFinalResult";
-        }
-        ClientMessage.isRecognizerRetrieveFinalResultMessage = isRecognizerRetrieveFinalResultMessage;
-        function isRecognizerRemoveMessage(message) {
-            return (message === null || message === void 0 ? void 0 : message.action) === "remove";
-        }
-        ClientMessage.isRecognizerRemoveMessage = isRecognizerRemoveMessage;
     })(ClientMessage || (ClientMessage = {}));
     var ModelMessage;
     (function (ModelMessage) {
@@ -159,16 +135,6 @@
             return ["result", "partialresult"].includes(message.event) || Reflect.has(message, 'recognizerId');
         }
         ServerMessage.isRecognizerMessage = isRecognizerMessage;
-        function isResult(message) {
-            var _a, _b;
-            return ((_a = message === null || message === void 0 ? void 0 : message.result) === null || _a === void 0 ? void 0 : _a.text) != null || ((_b = message === null || message === void 0 ? void 0 : message.result) === null || _b === void 0 ? void 0 : _b.result) != null;
-        }
-        ServerMessage.isResult = isResult;
-        function isPartialResult(message) {
-            var _a;
-            return ((_a = message === null || message === void 0 ? void 0 : message.result) === null || _a === void 0 ? void 0 : _a.partial) != null;
-        }
-        ServerMessage.isPartialResult = isPartialResult;
     })(ServerMessage || (ServerMessage = {}));
 
     class Logger {
@@ -363,7 +329,8 @@
         }
     }
     function createModel(modelUrl, logLevel = 0) {
-        return __awaiter(this, void 0, void 0, function* () {
+        let fail = null;
+        const load = __awaiter(this, void 0, void 0, function* () {
             const model = new Model(modelUrl, logLevel);
             return new Promise((resolve, reject) => {
                 let settled = false;
@@ -387,7 +354,7 @@
                     }
                     model.removeEventListener("error", onLoadError);
                 };
-                const fail = (message) => {
+                fail = (message) => {
                     if (settled)
                         return;
                     settled = true;
@@ -427,6 +394,15 @@
                 });
             });
         });
+        // The page may give a load up before its worker reports (the model
+        // fetch hanging on a dead tunnel, WASM init stalling): cancel()
+        // reclaims the Worker with the same hard terminate and rejects the
+        // load, one-shot like every other path, so a load that already
+        // settled is left alone.
+        load.cancel = () => {
+            if (fail) fail("Gave up loading the speech model from " + modelUrl);
+        };
+        return load;
     }
 
     exports.Model = Model;

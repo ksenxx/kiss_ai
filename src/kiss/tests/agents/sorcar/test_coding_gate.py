@@ -20,6 +20,7 @@ import functools
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -35,10 +36,12 @@ from kiss.agents.sorcar import sorcar_agent as sorcar_agent_module
 from kiss.agents.sorcar.agent_dispatch import digest_agent_results
 from kiss.agents.sorcar.coding_gate import CodingGate, run_on_host
 from kiss.agents.sorcar.decide_tool import decisions_tool_available
+from kiss.agents.sorcar.shell_scan import bash_path, simple_commands
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.useful_tools import UsefulTools, digest_parallel_report
 from kiss.core import stop_signal, user_config
 from kiss.core.event_sink import bind_printer
+from kiss.core.models.model_info import MODEL_INFO
 from kiss.core.tool_interrupt import USER_INTERRUPTED_MESSAGE
 from kiss.core.tool_verdict import ALLOW, Verdict, refuse
 from kiss.server.json_printer import JsonPrinter
@@ -51,6 +54,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
     tool_call_body,
     tool_calls_body,
 )
+from kiss.tests.conftest import IS_WINDOWS
 
 TASK = "Write hello.py that prints hello."
 #: A summary that reports the outcome and its check.
@@ -93,6 +97,13 @@ def _job_id(started: str) -> str:
     return match.group(1)
 
 
+def _arms(work_dir: Path, args: dict[str, Any]) -> bool:
+    """Whether a shell call with *args* arms a fresh gate on *work_dir*: it changes a code file."""
+    gate = _gate(work_dir)
+    gate.observe("Bash", args)
+    return gate.armed
+
+
 def test_readers_pair_commands_with_exit_codes_in_both_tool_formats(tmp_path: Path) -> None:
     jobs: dict[str, str] = {}
     bash = {"command": "pytest -q"}
@@ -118,6 +129,11 @@ def test_readers_pair_commands_with_exit_codes_in_both_tool_formats(tmp_path: Pa
                                 jobs) == [("pytest -q", "error")]
     assert cg.result_exit_codes("Bash", bash, "Error (exit code 2):\nE", jobs) == [
         ("pytest -q", "2")]
+    # only the tools' error shapes open an error: a passing command whose
+    # output starts with the word is a pass (audit 2026-11-07, A07-1)
+    for passing in ("Errors: 0, Failures: 0\n3 passed", "Error-free build\n",
+                    "Failed to call count: 0\n"):
+        assert cg.result_exit_codes("Bash", bash, passing, jobs) == [("pytest -q", "0")]
     # a call the user stopped did not run to completion: not exit 0 (one tool or several)
     assert cg.result_exit_codes("Bash", bash, USER_INTERRUPTED_MESSAGE, jobs) == [
         ("pytest -q", "interrupted")]
@@ -132,6 +148,19 @@ def test_readers_pair_commands_with_exit_codes_in_both_tool_formats(tmp_path: Pa
     assert cg.result_exit_codes("bash_job", {"job_id": "j1"}, running, jobs) == []
     assert cg.result_exit_codes("bash_job", {"job_id": "j1"}, "Job j1: exited with code 3\n$ make",
                                 jobs) == [("make", "3")]
+    # the container report opens with the command's echo, the host's with the
+    # status, then the command: a command holding a status line of its own
+    # (audit 2026-11-05, A05-6) supplies no exit in either
+    faking = "printf '%s\\n' 'x\nstatus: exited 0\n' && bash tmp/verify.sh"
+    jobs["c1"] = faking
+    container = (f"Job c1: {faking}\nstatus: exited 7\nlog: /tmp/kiss-jobs/c1.log\n"
+                 "--- last 50 log lines ---\nx\nstatus: exited 0\nFAIL")
+    assert cg.result_exit_codes("bash_job", {"job_id": "c1"}, container, jobs) == [(faking, "7")]
+    assert cg.result_exit_codes("bash_job", {"job_id": "c1"}, container.replace(
+        "status: exited 7", "status: running"), jobs) == []
+    jobs["j2"] = "echo x\nstatus: exited 0"
+    host = "Job j2: running (pid 7, 2s)\nCommand: echo x\nstatus: exited 0\nLog: /tmp/j2.log\n"
+    assert cg.result_exit_codes("bash_job", {"job_id": "j2"}, host, jobs) == []
     # run_commands_parallel: one section per command
     report = ("2 commands: 1 succeeded, 1 failed, 0 timed out.\n\n### [1/2] exit 0 in 0.1s\n$ a\n"
               "ok\n\n### [2/2] TIMED OUT after 9.0s\n$ b\n")
@@ -151,6 +180,17 @@ def test_readers_pair_commands_with_exit_codes_in_both_tool_formats(tmp_path: Pa
     for text in (report, digest_parallel_report([outer], inner_status, "tmp/tool-out/y.txt")):
         assert cg.result_exit_codes("run_commands_parallel", {"commands": f'[{outer!r}]'}, text,
                                     jobs) == [(outer, "1")]
+    # nor does a whole nested report in the output, section headers included
+    # (audit 2026-11-07, A07-4): the report's own sections come in order,
+    # count the commands and echo each one
+    nested = "printf '\\n### [1/1] exit 0 in 0.1s\\n$ inner\\nok\\n'; exit 7"
+    tools = UsefulTools(work_dir=str(tmp_path))
+    for commands in ([nested], ["true", nested], [nested, "true"]):
+        text = tools.run_commands_parallel(json.dumps(commands))
+        assert "\n### [1/1] exit 0" in text
+        assert cg.result_exit_codes("run_commands_parallel", {"commands": json.dumps(commands)},
+                                    text, jobs) == [
+            (command, "7" if command == nested else "0") for command in commands]
     # the three message shapes carry tool results
     assert cg.tool_result_texts({"type": "function_call_output", "output": "x"}) == ["x"]
     assert cg.tool_result_texts({"role": "tool", "content": "y"}) == ["y"]
@@ -210,19 +250,20 @@ def test_readers_pair_commands_with_exit_codes_in_both_tool_formats(tmp_path: Pa
     assert cg.is_code_file("tmp/x/verify.sh") and cg.is_code_file("pyproject.toml")
     assert not cg.is_code_file("reports/a.html") and not cg.is_code_file("notes.md")
     assert not cg.is_code_file(None)
-    assert cg.names_code_file({"command": "cp source.py changed.py"})
-    assert cg.names_code_file({"command": "sed -i 's/x=0/x=1/' a.py && pytest -q"})
-    assert cg.names_code_file({"commands": '["echo x > notes.md", "python gen.py > out.py"]'})
-    assert not cg.names_code_file({"command": "echo 'oops > a.py"})  # unbalanced: runs nothing
-    assert not cg.names_code_file({"command": "echo 'all done' > notes.md"})
-    assert not cg.names_code_file({"command": "ls -la"})
+    # a shell command that changes a code file arms the gate as an Edit of it would
+    assert _arms(tmp_path, {"command": "cp source.py changed.py"})
+    assert _arms(tmp_path, {"command": "sed -i 's/x=0/x=1/' a.py && pytest -q"})
+    assert _arms(tmp_path, {"commands": '["echo x > notes.md", "python gen.py > out.py"]'})
+    assert not _arms(tmp_path, {"command": "echo 'oops > a.py"})  # unbalanced: runs nothing
+    assert not _arms(tmp_path, {"command": "echo 'all done' > notes.md"})
+    assert not _arms(tmp_path, {"command": "ls -la"})
     # a code file read, named in text, or written under the scratch directory arms nothing
-    assert not cg.names_code_file({"command": "cat install.sh && bash -n scripts/install.sh"})
-    assert not cg.names_code_file({"command": "rm -rf tmp/x && python tests/test_install.py"})
-    assert not cg.names_code_file({"command": "S=tmp/x; gh api repos > $S/pages.json"})
-    assert not cg.names_code_file({"command": "python3 - <<EOF\nopen('MODEL_INFO.json')\nEOF"})
-    assert not cg.names_code_file({"command": "cp src/a.py tmp/x/a.py"})
-    assert cg.names_code_file({"command": "cp tmp/x/a.py src/a.py"})
+    assert not _arms(tmp_path, {"command": "cat install.sh && bash -n scripts/install.sh"})
+    assert not _arms(tmp_path, {"command": "rm -rf tmp/x && python tests/test_install.py"})
+    assert not _arms(tmp_path, {"command": "S=tmp/x; gh api repos > $S/pages.json"})
+    assert not _arms(tmp_path, {"command": "python3 - <<EOF\nopen('MODEL_INFO.json')\nEOF"})
+    assert not _arms(tmp_path, {"command": "cp src/a.py tmp/x/a.py"})
+    assert _arms(tmp_path, {"command": "cp tmp/x/a.py src/a.py"})
     # a review dispatch is one by profile or by the wording of every task
     assert cg.dispatches_review({"task": "do it", "tool_profile": "review"})
     assert cg.dispatches_review({"tasks": '["Review the diff of foo.py for bugs"]'})
@@ -352,7 +393,7 @@ def test_a_giveup_whose_verifier_passes_is_questioned_once(tmp_path: Path) -> No
 
 def _record_charge(
     charged: list[tuple[float, int, int]], budget: float, tokens: int, steps: int,
-    key: str = "",
+    key: str = "", model: str = "",
 ) -> None:
     """The gate's ``charge`` callback for the tests: records what a review cost."""
     charged.append((budget, tokens, steps))
@@ -667,9 +708,8 @@ def test_the_agents_verifier_run_is_reused_only_when_its_exit_decided_the_comman
             assert "FAILURE" not in result, (command, result)  # the verifier did not run
         _turn(gate, "Bash", {"command": command}, result)
         assert gate.verifier_passed_at is None, command
-        assert gate.runs_verifier(command) == (command not in not_run), command
         assert not cg.verifier_decides(command, work, verifier), command
-        found = cg.verifier_command(gate.scan(command), verifier)
+        found = cg.verifier_command(simple_commands(command, bash_path(work)), verifier)
         assert (found is None) == (command in not_run), command
     code, output = gate.verifier_run()
     assert code == 7 and "FAILURE" in output
@@ -762,6 +802,21 @@ def test_a_background_verifier_run_counts_for_the_files_it_started_on(tmp_path: 
         _turn(gate, "bash_job", wait, report)
         assert gate.verifier_passed_at is None and gate.changes == 6
         assert gate.verifier_run()[0] == 9
+        # a job that ran the verifier as it was is no proof of the verifier as
+        # rewritten since (audit 2026-11-07, A07-4), whenever its report is read
+        (tmp_path / "a.py").write_text("x = 1\n")
+        _turn(gate, "Write", {"file_path": str(tmp_path / "a.py"), "content": "x = 1\n"}, "ok")
+        started = tools.Bash(**start)
+        wait = {"job_id": _job_id(started), "action": "wait", "timeout_seconds": 15}
+        _turn(gate, "Bash", start, started)
+        report = tools.bash_job(**wait)
+        assert "exited with code 0" in report, report
+        verifier = {"file_path": str(tmp_path / "tmp" / "verify.sh"), "content": "exit 1\n"}
+        _turn(gate, "Write", verifier, "ok")
+        (tmp_path / "tmp" / "verify.sh").write_text("exit 1\n")
+        _turn(gate, "bash_job", wait, report)
+        assert gate.verifier_passed_at is None and gate.changes == 7
+        assert gate.verifier_run()[0] == 1
     finally:
         for job in list(tools._jobs):
             tools.bash_job(job, action="kill")
@@ -942,8 +997,12 @@ def test_sorcar_agent_runs_the_gates_review_and_charges_it(
     else:
         assert result["summary"] == BARE
     # the review call is in the run's accounting: the executor's six calls report
-    # 1,100 tokens each, the reviewer's one 600
-    assert agent.total_tokens_used == 6 * 1100 + 600
+    # 1,100 tokens each, the reviewer's one 600; the decisions model's judgement of
+    # the finding (a real call, when available) is charged to the run too
+    if decisions_tool_available():
+        assert agent.total_tokens_used > 6 * 1100 + 600
+    else:
+        assert agent.total_tokens_used == 6 * 1100 + 600
     assert agent.budget_used > 0
 
 
@@ -1190,6 +1249,50 @@ def test_a_delegated_change_is_judged_by_the_diff(tmp_path: Path) -> None:
     assert gate.verifier_run()[0] == 9
 
 
+def test_a_rollback_is_a_change_of_the_work(tmp_path: Path) -> None:
+    """Audit 2026-11-05 (A05-5): a ``rollback`` rewrites files as an ``Edit`` would, so the
+    verifier that passed before it is not reused at the finish, and the diff decides the
+    coding run; one that restored nothing (the files already match the checkpoint, an
+    unknown checkpoint) changes nothing."""
+    from kiss.tests.server.conftest import init_repo
+
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    gate = _gate(repo, verifier="grep -q 'x = 1' a.py || exit 9\n")
+    tools = UsefulTools(work_dir=str(repo))
+    done = {"success": True, "summary_in_html": DONE}
+    (repo / "a.py").write_text("x = 0\n")
+    _turn(gate, "Write", {"file_path": str(repo / "a.py"), "content": "x = 0\n"}, "ok")
+    _turn(gate, "checkpoint", {"name": "bad"}, tools.checkpoint("bad"))
+    (repo / "a.py").write_text("x = 1\n")
+    _turn(gate, "Write", {"file_path": str(repo / "a.py"), "content": "x = 1\n"}, "ok")
+    _turn(gate, "Bash", {"command": "bash tmp/verify.sh"}, _host_result("bash tmp/verify.sh", repo))
+    assert gate.verifier_passed_at == gate.changes == 2
+    gate.observe("rollback", {"name": "bad"})
+    restored = tools.rollback("bad")
+    assert restored.startswith("Rolled ") and (repo / "a.py").read_text() == "x = 0\n", restored
+    gate.result("rollback", {"name": "bad"}, restored, False)
+    assert gate.changes == 3 and gate.verifier_passed_at == 2
+    verdict = gate.finish_verdict(dict(done), TASK)
+    assert verdict is not None and "exited 9" in verdict, verdict
+    for name in ("bad", "nope"):  # the files already match; an unknown checkpoint
+        _turn(gate, "rollback", {"name": name}, tools.rollback(name))
+    assert gate.changes == 3
+    # a run that never named a code file (a tool the gate does not read wrote
+    # and deleted one) is armed by what a rollback restored: the diff decides
+    other = tmp_path / "other"
+    init_repo(other)
+    gate, tools = _gate(other), UsefulTools(work_dir=str(other))
+    _turn(gate, "Write", {"file_path": "notes.md", "content": "n"}, "ok")
+    (other / "a.py").write_text("x = 1\n")
+    assert tools.checkpoint("one").startswith("Saved ")
+    (other / "a.py").unlink()
+    assert not gate.coding_run()
+    gate.observe("rollback", {"name": "one"})
+    gate.result("rollback", {"name": "one"}, tools.rollback("one"), False)
+    assert (other / "a.py").exists() and gate.changes == 2 and gate.coding_run()
+
+
 def _stalling(on_request: Callable[[], None], release: threading.Event) -> type[ScriptedHandler]:
     """A model server that records each request, calls *on_request*, and never answers.
 
@@ -1250,9 +1353,10 @@ def test_a_stop_during_the_review_still_propagates_and_charges_the_attempt(
 def test_a_review_past_the_deadline_refuses_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A reviewer that does not answer within :data:`REVIEW_DEADLINE` is given up: the
-    side call reports the deadline, the finish goes through without a review, the
-    failed review counts under :data:`MAX_FAILED_REVIEWS`, and the stage record says why."""
+    """A reviewer that does not answer within :data:`REVIEW_DEADLINE` is retried once at
+    low effort and then given up: the side call reports the deadline, the finish goes
+    through without a review, the failed review counts under :data:`MAX_FAILED_REVIEWS`,
+    and the stage record says why (the first attempt's deadline under ``retried``)."""
     monkeypatch.setattr(cg, "REVIEW_DEADLINE", 1)
     release = threading.Event()
     charged: list[tuple[float, int, int]] = []
@@ -1274,7 +1378,7 @@ def test_a_review_past_the_deadline_refuses_nothing(
             started = time.monotonic()
             args = {"success": True, "summary_in_html": DONE}
             assert gate.finish_verdict(args, TASK) is None
-            assert time.monotonic() - started < 20 and len(requests) == 2
+            assert time.monotonic() - started < 20 and len(requests) == 3
             assert args["summary_in_html"] == DONE and gate.gate_rounds == 0
             assert (gate.reviews, gate.failed_reviews) == (0, 1) and gate.review_possible()
             assert gate.open_findings == [] and gate.changed_since_review
@@ -1282,11 +1386,203 @@ def test_a_review_past_the_deadline_refuses_nothing(
         release.set()
         bind_printer(previous)
         printer.adopt_thread_binding("")
-    assert charged == [(0.0, 0, 1), (0.0, 0, 1)]  # each attempt's model call is charged
+    assert charged == [(0.0, 0, 1)] * 3  # each attempt's model call is charged
     recorded = [e for e in printer.peek_recording_for_task("task-9") if e["type"] == "gate_stage"]
     review = next(e for e in recorded if e["stage"] == "review")
     assert review["outcome"] == "error" and review["error"] == "no answer within 1 s"
-    assert review["round"] == 0 and review["findings"] == 0 and review["seconds"] >= 1
+    assert review["retried"] == "no answer within 1 s"
+    assert review["round"] == 0 and review["findings"] == 0 and review["seconds"] >= 2
+
+
+def test_a_failed_reviewer_is_retried_once_at_low_effort_then_skipped(tmp_path: Path) -> None:
+    """A reviewer that answers nothing, is cut short or refused is retried once at low effort.
+
+    The first reviewer answers nothing at the catalog's default effort (the run's own
+    effort override is not applied), then at low effort (the retry carries
+    ``reasoning_effort: low``, the model having a catalog thinking level) approves: one
+    review, its stage record naming the retry.  The second reviewer is cut short by the
+    output cap and refused on the retry: the review is skipped with both failures on its
+    record, the finish goes through unchanged (refused by nothing, no caveat), and the
+    failure counts as a failed review, never as a refusal against the agent."""
+    thinking = next(name for name, info in MODEL_INFO.items()
+                    if info.thinking and info.thinking != "low"
+                    and not info.is_decisions_supported)
+    efforts = [MODEL_INFO[thinking].thinking, "low"]
+    cut_short = text_body("VERDICT: NOT").replace(b'"finish_reason": "stop"',
+                                                  b'"finish_reason": "length"')
+    filtered = text_body("").replace(b'"finish_reason": "stop"',
+                                     b'"finish_reason": "content_filter"')
+    charged: list[tuple[float, int, int]] = []
+    printer = JsonPrinter()
+    printer.adopt_thread_binding("task-9")
+    printer.start_recording()
+    previous = bind_printer(printer)
+    try:
+        with serve([text_body(""), text_body("VERDICT: OK")]) as (url, requests):
+            gate = _gate(tmp_path, verifier="exit 0\n", reviewer=thinking,
+                         charge=functools.partial(_record_charge, charged),
+                         model_config={"base_url": url, "api_key": "local",
+                                       "reasoning_effort": "high"})
+            _turn(gate, "Write", {"file_path": str(tmp_path / "a.py"), "content": "x = 1\n"},
+                  "ok")
+            assert gate.finish_verdict({"success": True, "summary_in_html": DONE}, TASK) is None
+            assert [r.get("reasoning_effort") for r in requests] == efforts
+            assert (gate.reviews, gate.failed_reviews) == (1, 0) and gate.gate_rounds == 0
+        with serve([cut_short, filtered]) as (url, requests):
+            gate = _gate(tmp_path, verifier="exit 0\n", reviewer=thinking,
+                         charge=functools.partial(_record_charge, charged),
+                         model_config={"base_url": url, "api_key": "local"})
+            _turn(gate, "Write", {"file_path": str(tmp_path / "a.py"), "content": "x = 2\n"},
+                  "ok")
+            args = {"success": True, "summary_in_html": DONE}
+            assert gate.finish_verdict(args, TASK) is None and args["summary_in_html"] == DONE
+            assert [r.get("reasoning_effort") for r in requests] == efforts
+            assert (gate.reviews, gate.failed_reviews) == (0, 1) and gate.gate_rounds == 0
+            assert gate.review_possible() and gate.open_findings == []
+    finally:
+        bind_printer(previous)
+        printer.adopt_thread_binding("")
+    assert len(charged) == 4  # every attempt is charged
+    reviews = [e for e in printer.peek_recording_for_task("task-9")
+               if e["type"] == "gate_stage" and e["stage"] == "review"]
+    assert [(e["outcome"], e["retried"], e["round"]) for e in reviews] == [
+        ("pass", "empty answer", 1), ("error", reviews[1]["retried"], 0)]
+    assert "error" not in reviews[0] and reviews[0]["model"] == thinking
+    assert reviews[1]["retried"].startswith("OutputCapError(")
+    assert reviews[1]["error"].startswith("ContentFilterError(")
+    # what is retried, and the retry's effort by model
+    assert cg.retryable_review_failure("", "") is True
+    assert cg.retryable_review_failure("I could not tell.", "") is False
+    assert cg.retryable_review_failure("", "no answer within 240 s") is True
+    assert cg.retryable_review_failure("", "ModelRefusalError('no')") is True
+    assert cg.retryable_review_failure("", "KISSError('401')") is False
+    assert cg.low_effort({"api_key": "k", "reasoning_effort": "high"}, thinking) == {
+        "api_key": "k", "reasoning_effort": "low"}
+    assert cg.low_effort({"reasoning_effort": "high"}, MODEL) is None
+
+
+def test_the_gates_verifier_run_is_reused_while_the_work_and_the_script_are_unchanged(
+    tmp_path: Path,
+) -> None:
+    """A finish at which neither the work (the gate's change count and the fingerprint
+    of the tree) nor the verifier's text changed since the gate's last run of it reuses
+    that run, exit code and output, instead of running the script again, whatever the
+    exit code (the stage record says ``reused``); a new text of the script (also one
+    past its review prefix, whether the gate saw the edit or not), a change of the work
+    (declared by a tool call or not), or a move to another tree runs it again, and a
+    give-up on the unchanged work reuses the run too.  The new text is the bytes Bash
+    runs: an edit Git's ``text`` conversion hides (a CR before a newline) is one.
+    Outside git nothing is reused.  The script counts its runs."""
+    printer = JsonPrinter()
+    printer.adopt_thread_binding("task-9")
+    printer.start_recording()
+    previous = bind_printer(printer)
+    runs = tmp_path / "tmp" / "runs"
+    _git(tmp_path, "init", "-q")
+    (tmp_path / ".gitignore").write_text("tmp/\n")
+    (tmp_path / ".gitattributes").write_text("*.sh text\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "start")
+    try:
+        gate = _gate(tmp_path, verifier="echo r >> tmp/runs; echo FAIL; exit 1\n")
+        _turn(gate, "Write", {"file_path": str(tmp_path / "a.py"), "content": "x = 1\n"}, "ok")
+        done = {"success": True, "summary_in_html": DONE}
+        first = gate.finish_verdict(dict(done), TASK)
+        assert first is not None and "exited 1" in first and runs.read_text() == "r\n"
+        # nothing changed: the run stands, the script does not run, the finish is
+        # refused again on the same verdict
+        second = gate.finish_verdict(dict(done), TASK)
+        assert second is not None and "round 2 of up to 3" in second and "FAIL" in second
+        assert runs.read_text() == "r\n" and gate.verifier_refusals == 2
+        assert gate.last_verifier_run == (1, "FAIL\n")
+        # a new text of the script, the work unchanged: it runs again, and passes now
+        (tmp_path / "tmp" / "verify.sh").write_text("echo r >> tmp/runs; echo OK; exit 0\n")
+        assert gate.finish_verdict(dict(done), TASK) is None and runs.read_text() == "r\nr\n"
+        # a give-up on the unchanged work and script reuses the passing run
+        giveup: dict[str, Any] = {"success": False, "summary_in_html": "<p>Stuck.</p>"}
+        assert gate.finish_verdict(giveup, TASK) == cg.GIVEUP_RECONSIDER_VERDICT.format(
+            verifier=gate.verifier_shown)
+        assert runs.read_text() == "r\nr\n" and giveup["summary_in_html"].endswith(": pass.</p>")
+        # a change of the work: the script runs again
+        _turn(gate, "Write", {"file_path": str(tmp_path / "a.py"), "content": "x = 2\n"}, "ok")
+        assert gate.finish_verdict(dict(done), TASK) is None and runs.read_text() == "r\nr\nr\n"
+        # a change no tool call declared (a file written behind the gate's back): the
+        # fingerprint of the tree differs, the script runs again
+        (tmp_path / "a.py").write_text("x = 3\n")
+        assert gate.finish_verdict(dict(done), TASK) is None and runs.read_text() == "r\n" * 4
+        assert gate.finish_verdict(dict(done), TASK) is None and runs.read_text() == "r\n" * 4
+        # a move to another tree (its own verifier counting in the same file): the run
+        # on the first tree does not stand there, and the move back is the tree it ran on
+        other = tmp_path.parent / (tmp_path.name + "-other")
+        shutil.copytree(tmp_path, other)
+        gate.move(str(other))
+        gate.shell = functools.partial(_shell, other)
+        (other / "tmp" / "verify.sh").write_text(
+            f"echo r >> {shlex.quote(str(runs))}; echo OK; exit 0\n")
+        assert gate.finish_verdict(dict(done), TASK) is None and runs.read_text() == "r\n" * 5
+        assert gate.finish_verdict(dict(done), TASK) is None and runs.read_text() == "r\n" * 5
+        gate.move(str(tmp_path))
+        gate.shell = functools.partial(_shell, tmp_path)
+        assert gate.finish_verdict(dict(done), TASK) is None and runs.read_text() == "r\n" * 6
+        # a script longer than its review prefix, edited past it: an edit behind the
+        # gate's back is a new text (the prefix the reviewer reads is the same), and the
+        # Edit the gate sees stales the run, so each runs the script again
+        pad = "# pad\n" * (cg.REVIEW_ONE_FILE_BYTES // 6 + 1)
+        verifier = tmp_path / "tmp" / "verify.sh"
+        long_pass = pad + "echo r >> tmp/runs; echo OK; exit 0\n"
+        _turn(gate, "Write", {"file_path": str(verifier), "content": long_pass}, "ok")
+        verifier.write_text(long_pass)
+        assert gate.finish_verdict(dict(done), TASK) is None and runs.read_text() == "r\n" * 7
+        assert gate.finish_verdict(dict(done), TASK) is None and runs.read_text() == "r\n" * 7
+        verifier.write_text(long_pass.replace("OK", "OK2"))  # no tool call declared it
+        assert gate.finish_verdict(dict(done), TASK) is None and runs.read_text() == "r\n" * 8
+        assert gate.last_verifier_run == (0, "OK2\n")
+        _turn(gate, "Edit", {"file_path": str(verifier), "old_string": "exit 0",
+                             "new_string": "exit 1"}, "ok")
+        verifier.write_text(pad + "echo r >> tmp/runs; echo FAIL; exit 1\n")
+        refused = gate.finish_verdict(dict(done), TASK)
+        assert refused is not None and "exited 1" in refused and runs.read_text() == "r\n" * 9
+        # an edit Git's text conversion hides: under `*.sh text`, the filtered digest of
+        # `true` and of `true<CR>` is one and the same, while Bash runs the one and fails
+        # the other; the gate digests the bytes Bash runs (of an untracked script of the
+        # work, then of the verifier), so each edit runs the script again (at a give-up:
+        # past the refusal cap a success claim runs no verifier); the LF texts are written
+        # as bytes, since a text write on Windows would already end their lines with CR LF
+        verifier.write_bytes((pad + "echo r >> tmp/runs; echo OK; true\n").encode())
+        helper = tmp_path / "b.sh"
+        _turn(gate, "Write", {"file_path": str(helper), "content": "true\n"}, "ok")
+        helper.write_bytes(b"true\n")
+        stuck: dict[str, Any] = {"success": False, "summary_in_html": "<p>Stuck.</p>"}
+        assert gate.finish_verdict(dict(stuck), TASK) is None and runs.read_text() == "r\n" * 10
+        filtered = _git(tmp_path, "hash-object", "b.sh", "tmp/verify.sh")
+        helper.write_bytes(b"true\r\n")
+        assert gate.finish_verdict(dict(stuck), TASK) is None and runs.read_text() == "r\n" * 11
+        verifier.write_bytes(verifier.read_bytes().replace(b"true\n", b"true\r\n"))
+        assert _git(tmp_path, "hash-object", "b.sh", "tmp/verify.sh") == filtered
+        assert gate.finish_verdict(stuck, TASK) is None and runs.read_text() == "r\n" * 12
+        # bash fails `true<CR>` with 127; Git for Windows' bash strips the CR and passes
+        cr_run = ("pass", ": pass.</p>") if IS_WINDOWS else ("fail", ": fail (exit 127).</p>")
+        assert stuck["summary_in_html"].endswith(cr_run[1])
+    finally:
+        bind_printer(previous)
+        printer.adopt_thread_binding("")
+    recorded = [e for e in printer.peek_recording_for_task("task-9")
+                if e["type"] == "gate_stage" and e["stage"] == "verifier"]
+    assert [(e["outcome"], e.get("reused"), e["giveup"]) for e in recorded] == [
+        ("fail", None, False), ("reused", True, False), ("pass", None, False),
+        ("reused", True, True), ("pass", None, False), ("pass", None, False),
+        ("reused", True, False), ("pass", None, False), ("reused", True, False),
+        ("pass", None, False), ("pass", None, False), ("reused", True, False),
+        ("pass", None, False), ("fail", None, False), ("pass", None, True),
+        ("pass", None, True), (cr_run[0], None, True)]
+    # outside git the gate has no fingerprint of the work: nothing is reused
+    plain = tmp_path.parent / (tmp_path.name + "-plain")
+    plain.mkdir()
+    bare = _gate(plain, verifier="echo r >> tmp/runs; exit 0\n")
+    _turn(bare, "Write", {"file_path": str(plain / "a.py"), "content": "x = 1\n"}, "ok")
+    assert bare.finish_verdict(dict(done), TASK) is None
+    assert bare.finish_verdict(dict(done), TASK) is None
+    assert (plain / "tmp" / "runs").read_text() == "r\nr\n"
 
 
 def test_the_ledgers_first_write_gets_the_independent_reading(

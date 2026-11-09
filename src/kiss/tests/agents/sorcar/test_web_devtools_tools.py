@@ -34,9 +34,12 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 import queue
 import re
+import signal
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -47,6 +50,7 @@ import pytest
 from kiss.agents.sorcar import web_stealth
 from kiss.agents.sorcar.sorcar_agent import BROWSER_TOOL_NAMES
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.tests.conftest import posix_only
 
 _PAGE = b"""<html><head><title>devtools-test</title></head><body>
 <button id="go" aria-label="Go">Go</button>
@@ -157,6 +161,12 @@ _SPLIT_PAGE = (
     b"<p>Soft<br hidden> break</p>"
     b'<select><option label="Completed">Internal</option></select>'
     b"<pre>Pre <b> formatted</b></pre>"
+    b'<input type="checkbox" value="TickValue"><input type="radio" value="DotValue">'
+    b'<input type="password" value="UnrenderedSecret"><input type="submit" value="Send it">'
+    b'<input type="hidden" value="HiddenField">'
+    b'<table><tr style="visibility:collapse"><td>CollapsedRow</td></tr>'
+    b"<tr><td>ShownRow</td></tr></table>"
+    b'<p style="visibility:collapse">CollapsedPara</p>'
     b"</body></html>"
 )
 
@@ -271,6 +281,38 @@ def web(tmp_path: Path) -> Any:
     tool.close()
 
 
+def _chromium_persists_cookies() -> bool:
+    """Whether a Chromium profile on this machine keeps its cookies across a relaunch.
+
+    Chromium stores cookies encrypted, on Windows with DPAPI; a logon
+    session without the user's credentials (an ssh login by key) gets
+    ``ERROR_ACCESS_DENIED`` from ``CryptProtectData``, and Chromium then
+    writes no cookie to the profile at all.
+    """
+    if sys.platform != "win32":
+        return True
+    import ctypes
+    from ctypes import wintypes
+
+    class Blob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    plain = Blob(5, ctypes.create_string_buffer(b"probe", 5))
+    sealed = Blob()
+    sealed_ok = ctypes.windll.crypt32.CryptProtectData(
+        ctypes.byref(plain), None, None, None, None, 0, ctypes.byref(sealed)
+    )
+    if sealed_ok:
+        ctypes.windll.kernel32.LocalFree(sealed.pbData)
+    return bool(sealed_ok)
+
+
+needs_cookie_persistence = pytest.mark.skipif(
+    not _chromium_persists_cookies(),
+    reason="Chromium persists no cookies here: DPAPI refuses this logon session",
+)
+
+
 def _find_id(tree: str, label: str) -> int:
     match = re.search(rf"\[(\d+)\].*{label}", tree)
     assert match, f"Element {label!r} not found in tree:\n{tree}"
@@ -330,6 +372,11 @@ class _UserChrome:
                 reply.put(
                     len([p for c in browser.contexts for p in c.pages if not p.is_closed()])
                 )
+            elif command == "close_pages":
+                for context in browser.contexts:
+                    for page in context.pages:
+                        page.close()
+                reply.put(True)
             elif command == "close_browser":
                 browser.close()
                 reply.put(True)
@@ -356,6 +403,10 @@ class _UserChrome:
 
     def page_count(self) -> int:
         return int(self._call("pages"))
+
+    def close_pages(self) -> None:
+        """The user closes every tab (the browser keeps running)."""
+        self._call("close_pages")
 
     def close_browser(self) -> None:
         self._call("close_browser")
@@ -665,6 +716,20 @@ class TestWaitFor:
         web.evaluate_script("() => { document.getElementById('area').value = 'Typed'; return 1; }")
         assert web.wait_for("OldDefault", timeout=0.5).startswith("Timed out")
         assert web.wait_for("Typed", timeout=2).startswith("Page: split")
+        # Only a value rendered as text counts: a submit button's label
+        # does; a checkbox's or radio's submission value, a password's
+        # cleartext and a hidden field's value do not.  Nor does text under
+        # visibility:collapse (a collapsed table row, a collapsed block).
+        assert web.wait_for("Send it", timeout=2).startswith("Page: split")
+        assert web.wait_for("TickValue", timeout=0.5).startswith("Timed out")
+        assert web.wait_for("DotValue", timeout=0.5).startswith("Timed out")
+        assert web.wait_for("UnrenderedSecret", timeout=0.5).startswith("Timed out")
+        assert web.wait_for("HiddenField", timeout=0.5).startswith("Timed out")
+        assert web.wait_for("TickValue", disappear=True, timeout=2).startswith("Page: split")
+        assert web.wait_for("CollapsedRow", timeout=0.5).startswith("Timed out")
+        assert web.wait_for("ShownRow", timeout=2).startswith("Page: split")
+        assert web.wait_for("CollapsedPara", timeout=0.5).startswith("Timed out")
+        assert web.wait_for("CollapsedRow", disappear=True, timeout=2).startswith("Page: split")
         # White space is forgiving on both sides: a source line break,
         # &nbsp;, a white-space:pre-line run, a hidden <br> and preserved
         # spaces across inline markup all read as one space, and the
@@ -766,10 +831,12 @@ class TestAttachToChrome:
                 "() => { document.cookie = 'session=secret'; localStorage.t = 'tok'; return 1; }"
             )
             # What show_browser() would carry into the daemon's browser:
-            # the URL only.  The user's jar and localStorage stay put.
+            # the URL only.  The user's jar and localStorage stay put, and
+            # a jar that was not read is not an empty one (nothing of what
+            # an earlier switch carried is deleted for it).
             session = web._capture_session()
             assert session.url.startswith(server)
-            assert session.cookies == []
+            assert session.cookies is None
             assert session.local_storage == []
             web.close_browser()
             # The built-in Chromium's jar is untouched by the attachment.
@@ -815,6 +882,96 @@ class TestAttachToChrome:
             assert web._playwright is None
             assert chrome.is_connected()
             assert chrome.page_count() == 1
+        finally:
+            chrome.stop()
+
+    @posix_only("the driver is frozen with SIGSTOP")
+    def test_detach_with_a_stalled_driver_is_bounded_and_spares_the_users_chrome(
+        self, web: WebUseTool, server: str
+    ) -> None:
+        """The tool's Node driver stops answering while attached (frozen
+        here): the disconnect sent to it never returned, and nothing else
+        could end it (the user's browser is never signalled).  It is cut
+        off on the Python side and the tool's own driver discarded; the
+        user's Chrome and its tab survive."""
+        chrome = _UserChrome(_dead_port())
+        try:
+            chrome.launch()
+            chrome.new_page(server)
+            web.attach_to_chrome(f"http://localhost:{chrome.port}")
+            driver_pid = web._playwright._impl_obj._connection._transport._proc.pid
+            os.kill(driver_pid, signal.SIGSTOP)
+            resume = threading.Timer(60, os.kill, args=(driver_pid, signal.SIGCONT))
+            resume.daemon = True
+            resume.start()
+            started = time.monotonic()
+            try:
+                assert web.close_browser().startswith("Browser closed.")
+            finally:
+                resume.cancel()
+                try:
+                    os.kill(driver_pid, signal.SIGCONT)
+                except OSError:
+                    pass
+            elapsed = time.monotonic() - started
+            assert elapsed < 30, f"close_browser() waited {elapsed:.0f}s for the frozen driver"
+            assert web._attached_url is None and web._playwright is None
+            assert chrome.is_connected()
+            assert chrome.page_count() == 1
+            # A fresh driver and the built-in Chromium take over.
+            web.go_to_url(f"{server}/plain")
+            assert web.evaluate_script("() => document.title") == "plain"
+        finally:
+            chrome.stop()
+
+    @needs_cookie_persistence
+    def test_hiding_the_browser_while_attached_returns_to_the_stealth_browser(
+        self, web: WebUseTool, server: str
+    ) -> None:
+        """The user's Chrome is a visible browser: ``show_browser(False)`` leaves
+        it (running) for the headless stealth Chromium on the same page, and
+        the cookie an earlier switch carried into that profile survives the
+        switch (the attached capture carries no jar, not an empty one: it is
+        the profile on disk that keeps the cookie)."""
+        web.go_to_url(f"{server}/plain")
+        web._context.add_cookies(
+            [{"name": "carried", "value": "earlier", "url": server, "expires": time.time() + 3600}]
+        )
+        web._headless = False
+        web.show_browser(visible=False)
+        assert [c["name"] for c in web._carried_cookies] == ["carried"]
+        chrome = _UserChrome(_dead_port())
+        try:
+            chrome.launch()
+            chrome.new_page(server)
+            web.attach_to_chrome(f"http://localhost:{chrome.port}")
+
+            tree = web.show_browser(visible=False)
+
+            assert tree.startswith("Page: devtools-test"), tree
+            assert web._attached_url is None and web._browser_pid is not None
+            assert chrome.is_connected() and chrome.page_count() == 1
+            assert web.evaluate_script("() => document.cookie") == "carried=earlier"
+            assert web.show_browser(visible=False) == "Browser is already headless."
+        finally:
+            chrome.stop()
+
+    def test_tab_the_user_closed_is_told_apart_from_a_disconnect(
+        self, web: WebUseTool, server: str
+    ) -> None:
+        chrome = _UserChrome(_dead_port())
+        try:
+            chrome.launch()
+            chrome.new_page(server)
+            web.attach_to_chrome(f"http://localhost:{chrome.port}")
+            chrome.close_pages()
+            # The first call after the close may fail on the closed page
+            # itself (its close is learnt during the call); the next one
+            # diagnoses the state the user left.
+            content = _eventually(lambda: _guidance_shown(web))
+            assert "The attached tab was closed" in content, content
+            assert "open one there" in content and "disconnected" not in content
+            assert chrome.is_connected()
         finally:
             chrome.stop()
 

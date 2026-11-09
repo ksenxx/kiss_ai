@@ -221,6 +221,78 @@ function testRefusedCheckKeepsOtherHiddenCandidatesResolvable() {
   );
 }
 
+// A check whose transcript was cleared while it was on its way is no
+// longer in flight but its reply is still one to ignore
+// (dropPendingPathChecksOf).  When that check comes back refused, no
+// reply is coming: the refusal must release that count too, or the
+// rebuilt transcript's fresh check of the same path has its only valid
+// reply consumed as the old answer and its link stays inert.  A
+// refusal of another owner leaves the count alone.
+function testRefusalAfterAClearReleasesTheDroppedCheck() {
+  const {win, posted} = makeBoundPage(false);
+  mention(win, 'see src/box.py please');
+  assert.strictEqual(checks(posted).length, 1);
+  send(win, {type: 'clear', tabId: BOX});
+  assertCounts(win, 0, 0, 'the cleared transcript left nothing in flight');
+
+  // Another tab's refusal: the dropped check's reply is still to come
+  // and still answers the dropped check, not the rebuilt transcript's.
+  send(win, {
+    type: 'pathsExist',
+    tabId: 'some-other-tab',
+    machine: 'box',
+    error: 'timed out',
+  });
+  mention(win, 'see src/box.py please');
+  assert.strictEqual(checks(posted).length, 2, 'the new transcript asks afresh');
+  send(win, {
+    type: 'pathsExist',
+    tabId: BOX,
+    machine: 'box',
+    workDir: '/box/work',
+    results: {'src/box.py': false},
+  });
+  assert.ok(
+    win.document.querySelector('#output [data-path-candidate="src/box.py"]'),
+    "the old check's late reply is ignored after another owner's refusal",
+  );
+  send(win, {
+    type: 'pathsExist',
+    tabId: BOX,
+    machine: 'box',
+    workDir: '/box/work',
+    results: {'src/box.py': true},
+  });
+  assertCounts(win, 0, 0, 'the fresh reply settled the fresh check');
+
+  // The tab's own refusal after a clear: nothing is coming for the
+  // dropped check, so the next check of the path is answered by its
+  // own reply.
+  mention(win, 'see src/box.py please');
+  assert.strictEqual(checks(posted).length, 3);
+  send(win, {type: 'clear', tabId: BOX});
+  send(win, {type: 'pathsExist', tabId: BOX, machine: 'box', error: 'timed out'});
+  mention(win, 'see src/box.py please');
+  assert.strictEqual(checks(posted).length, 4, 'the new transcript asks afresh');
+  send(win, {
+    type: 'pathsExist',
+    tabId: BOX,
+    machine: 'box',
+    workDir: '/box/work',
+    results: {'src/box.py': true},
+  });
+  assert.strictEqual(
+    win.document.querySelectorAll('#output [data-path="src/box.py"]').length,
+    1,
+    'BUG - the refusal left the dropped check counted and its late reply ' +
+      'consumed the fresh one: the link stays inert',
+  );
+  assertCounts(win, 0, 0, 'nothing is left in flight');
+  win.close();
+  console.log('  ok - a refusal after a clear releases the dropped check');
+}
+
 testErrorReplyReleasesTheCheck();
 testErrorOfAnotherMachineKeepsTheCheck();
 testRefusedCheckKeepsOtherHiddenCandidatesResolvable();
+testRefusalAfterAClearReleasesTheDroppedCheck();

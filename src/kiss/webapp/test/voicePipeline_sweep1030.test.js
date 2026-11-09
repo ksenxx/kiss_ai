@@ -18,7 +18,7 @@
 //         now pairs an untagged reply only with a round whose audio was
 //         posted, and tags every posted round so that a daemon echoing the
 //         tag refuses the late reply even after the next round posted its
-//         own audio.
+//         own audio (the tagged case is voiceRoundFailsClosed_wave3's).
 //  SENS   The wake sensitivity of a sibling same-origin tab did not follow
 //         a change made in another one (only auto-submit did), so the
 //         slider showed a stale value and the wake detector kept using it.
@@ -36,7 +36,7 @@ const {
   micBtn,
   settle,
   startPipeline,
-  lastRecognizer,
+  fireWake,
   wake,
   speak,
   fireTimer,
@@ -48,13 +48,7 @@ const SENSITIVITY_KEY = 'kissVoiceSensitivity';
 // voice.js bounds the vosk.js load by its default 30 s model-load bound.
 const LOAD_TIMEOUT_MS = 30000;
 
-function submits(posted) {
-  return posted.filter(m => m.type === 'submit');
-}
-
-function transcribes(posted) {
-  return posted.filter(m => m.type === 'voiceTranscribe');
-}
+const {submits} = require('./attachment_helpers');
 
 function taskInput(win) {
   return win.document.getElementById('task-input');
@@ -71,8 +65,7 @@ function siblingSetsSensitivity(win, value) {
 
 /** Recognize a trailing-alias phrase, which wakes only at sensitivity >= 75. */
 function hearTrailingAlias(page) {
-  page.clock.now += 3000; // clear the 2 s wake cooldown
-  lastRecognizer(page).handlers.result({result: {text: 'so abracadabra'}});
+  fireWake(page, 'so abracadabra');
 }
 
 /**
@@ -126,50 +119,6 @@ async function main() {
       const subs = submits(posted);
       assert.strictEqual(subs.length, 1, JSON.stringify(posted));
       assert.ok(subs[0].prompt.includes('round B words QW2'));
-      assert.strictEqual(subs[0].tabId, second);
-      win.close();
-    },
-  );
-
-  await test(
-    "ROUND: with round tags echoed, a cancelled round's reply arriving " +
-      'after the next round posted its audio is refused',
-    async () => {
-      const page = makeVoicePage();
-      const {win, posted} = page;
-      const {first, second} = twoTabs(win);
-      await cancelRoundThenMoveTab(page, first, second);
-      wake(page);
-      speak(page); // round B posts its audio before A's reply lands
-
-      const [roundA, roundB] = transcribes(posted).map(m => m.round);
-      assert.strictEqual(typeof roundA, 'number', 'audio carries its round');
-      assert.strictEqual(typeof roundB, 'number', 'audio carries its round');
-      assert.notStrictEqual(roundA, roundB, 'each round has its own tag');
-
-      // The daemon answers in order and echoes each round's tag.
-      posted.length = 0;
-      send(win, {
-        type: 'voiceSpeech',
-        text: 'round A words QW3',
-        round: roundA,
-      });
-      assert.strictEqual(
-        submits(posted).length,
-        0,
-        "the cancelled round's words must not reach tab Y: " +
-          JSON.stringify(posted),
-      );
-      assert.ok(!taskInput(win).value.includes('QW3'));
-
-      send(win, {
-        type: 'voiceSpeech',
-        text: 'round B words QW4',
-        round: roundB,
-      });
-      const subs = submits(posted);
-      assert.strictEqual(subs.length, 1, JSON.stringify(posted));
-      assert.ok(subs[0].prompt.includes('round B words QW4'));
       assert.strictEqual(subs[0].tabId, second);
       win.close();
     },
@@ -240,9 +189,17 @@ async function main() {
       retry.onload();
       await settle();
       assert.strictEqual(mic.calls.length, 1, 'the retry reaches the mic');
+      // The microphone request is bounded too (W10/F2): its timer is live
+      // until the browser answers.
+      mic.calls[0].grant();
+      await settle();
+      assert.ok(
+        micBtn(win).classList.contains('voice-listening'),
+        `the retry must end live: ${micBtn(win).className}`,
+      );
       assert.ok(
         page.timers.every(t => t.cleared || t.ms !== LOAD_TIMEOUT_MS),
-        'no load bound is left armed once the bundle loaded',
+        'no load bound is left armed once the bundle loaded and the mic was granted',
       );
       win.close();
     },

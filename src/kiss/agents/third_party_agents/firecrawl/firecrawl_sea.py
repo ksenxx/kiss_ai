@@ -37,6 +37,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
+    enroll_credential,
     save_json_config,
 )
 from kiss.core.browser_handoff import portal_handoff
@@ -653,28 +654,22 @@ class FirecrawlAgent(BaseChannelAgent):
             )
 
             if muse_auth_enabled():
-                # The key goes straight into the vault (never onto disk),
-                # transactionally: validate the base URL, write the
-                # non-secret base_url metadata FIRST, then store — a
-                # failure never leaves plaintext behind or destroys the
-                # prior credential without a replacement.
-                from kiss.agents.third_party_agents.muse_auth.client import (
-                    MuseAuthError,
-                    store_credentials,
-                )
+                # The key goes straight into the vault (never onto disk)
+                # as one enrollment with its non-secret base_url metadata
+                # (``enroll_credential``): a refused store puts the prior
+                # config back, so the enrolled key and the base_url it
+                # is bound to stay paired for the next backend.
+                from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
 
                 base = base_url.strip() or _DEFAULT_BASE_URL
                 if base_url.strip() and not valid_http_url(base):
                     return "base_url must be an http(s):// URL with a hostname and valid port."
                 try:
-                    if base_url.strip():
-                        save_json_config(_config.path, {"base_url": base})
-                    else:
-                        _config.clear()
-                    store_credentials(
+                    enroll_credential(
+                        _config.path,
+                        {"base_url": base} if base_url.strip() else None,
                         "firecrawl",
                         {"kind": "bearer", "token": api_key.strip()},
-                        [],
                         hosts=_extra_hosts(base),
                         insecure_hosts=_insecure_extra_hosts(base),
                     )

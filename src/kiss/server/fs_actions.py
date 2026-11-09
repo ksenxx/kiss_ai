@@ -28,8 +28,12 @@ nothing and run alongside.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
 import shutil
+import sys
+import tempfile
 import threading
 import uuid
 from collections.abc import Callable
@@ -114,7 +118,14 @@ def fs_action(
             return find_in_folder(path, query)
         if action == "compare":
             return compare_files(path, dest)
-    except OSError as exc:
+    except FileExistsError as exc:
+        return {
+            "error": f"A file or folder {Path(exc.filename or dest).name} already exists",
+            "exists": True,
+        }
+    except (OSError, ValueError) as exc:
+        # ValueError: an embedded NUL byte, which pathlib's exists()
+        # answers False to and the creating call then refuses.
         return {"error": f"{action} failed: {exc}"}
     return {"error": f"Unknown file action: {action}"}
 
@@ -122,7 +133,7 @@ def fs_action(
 def _safe_name(name: str) -> str:
     """Validate a new-entry name: no empty segments, no ``..``."""
     parts = name.replace("\\", "/").split("/")
-    if any(p in ("", ".", "..") for p in parts):
+    if "\0" in name or any(p in ("", ".", "..") for p in parts):
         raise OSError("invalid name")
     return "/".join(parts)
 
@@ -137,6 +148,12 @@ def _new_entry(parent: str, name: str, is_dir: bool) -> dict[str, Any]:
     except OSError:
         return {"error": f"Not a valid name: {name!r}"}
     target = Path(parent) / rel
+    # The caller confined *parent*; a nested name must not leave it
+    # through a symlinked intermediate folder that mkdir/touch would
+    # follow (the missing tail of the name resolves lexically).
+    real_parent = os.path.realpath(parent)
+    if os.path.commonpath([os.path.realpath(target.parent), real_parent]) != real_parent:
+        return {"error": f"Not inside the folder: {rel}"}
     if target.exists() or target.is_symlink():
         return {"error": f"A file or folder {rel} already exists", "exists": True}
     if is_dir:
@@ -168,7 +185,7 @@ def _rename(path: str, dest: str, overwrite: bool) -> dict[str, Any]:
     if target.parent != src.parent or target.name in ("", ".", ".."):
         return {"error": f"Not a valid name: {target.name!r}"}
     if not os.path.lexists(target):
-        os.rename(src, target)
+        _rename_noreplace(src, target)
     elif _is_same_entry(src, target):
         _rename_case(src, target)
     elif not overwrite:
@@ -177,8 +194,32 @@ def _rename(path: str, dest: str, overwrite: bool) -> dict[str, Any]:
             "exists": True,
         }
     else:
-        _replace(target, os.rename, src)
+        # No-clobber, as a paste publishes: a destination an editor
+        # recreated after the old entry was put aside is kept, with the
+        # source, and the old entry stays at the backup the error names.
+        _replace(target, _rename_noreplace, src)
     return {"ok": True, "path": str(target)}
+
+
+def _rename_noreplace(src: Path, target: Path) -> None:
+    """Atomically rename an entry without replacing a concurrently created target."""
+    if os.name == "nt":
+        os.rename(src, target)
+        return
+    if "\0" in str(src) or "\0" in str(target):
+        raise ValueError("embedded null byte")
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = getattr(libc, "renamex_np", None)
+        args: tuple[int | bytes, ...] = (os.fsencode(src), os.fsencode(target), 4)  # RENAME_EXCL
+    else:
+        rename = getattr(libc, "renameat2", None)
+        args = (-100, os.fsencode(src), -100, os.fsencode(target), 1)  # AT_FDCWD, NOREPLACE
+    if rename is None:
+        raise OSError(errno.ENOTSUP, "Atomic no-replace rename is unavailable", str(target))
+    if rename(*args) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(target))
 
 
 def _is_same_entry(src: Path, target: Path) -> bool:
@@ -220,29 +261,27 @@ def _remove(target: Path) -> None:
         shutil.rmtree(target)
 
 
-def _replace(target: Path, operation: Callable[..., Any], *args: Any) -> None:
+def _replace(target: Path, operation: Callable[..., Any], *args: Any) -> Any:
     """Run ``operation(*args, target)`` -- which creates *target* -- over an existing *target*.
 
     The old entry is first renamed aside (same folder, so atomic) and
-    only deleted once the operation succeeded; if it fails, whatever
-    partial *target* it left is removed and the old entry is put back,
-    so a confirmed overwrite never loses the previous content when the
-    replacement itself cannot be produced.  The operation must leave
-    its source intact when it fails (see :func:`_move_over`): a partial
-    *target* is disposable only while the source still holds the data.
+    only deleted once the operation succeeded. Operations publish atomically;
+    on failure the old entry is put back only if the name is still free.
+    Otherwise the backup is retained and named in the error, never restored
+    over a concurrent writer's entry.
     """
     backup = target.with_name(f".{target.name}.replaced-{uuid.uuid4().hex}")
     os.rename(target, backup)
     try:
-        operation(*args, target)
+        result = operation(*args, target)
     except BaseException:
         try:
-            if os.path.lexists(target):
-                _remove(target)
-        finally:
-            os.rename(backup, target)
+            _rename_noreplace(backup, target)
+        except OSError as exc:
+            raise OSError(f"Replacement failed; retained entry at {backup}: {exc}") from exc
         raise
     _remove(backup)
+    return result
 
 
 @locked(_mutation_lock)
@@ -297,6 +336,7 @@ def _paste(path: str, dest_dir: str, move: bool, overwrite: bool) -> dict[str, A
     target = dest / src.name
     if same_folder:
         target = _copy_name(dest, src)
+        overwrite = False
     if not os.path.lexists(target):
         _transfer(move, src, target)
     elif not overwrite:
@@ -314,11 +354,15 @@ def _paste(path: str, dest_dir: str, move: bool, overwrite: bool) -> dict[str, A
 def _transfer(move: bool, src: Path, target: Path) -> None:
     """Move or copy *src* to the not-yet-existing *target* (symlinks as links)."""
     if move:
-        shutil.move(str(src), str(target))
-    elif src.is_dir() and not src.is_symlink():
-        shutil.copytree(src, target, symlinks=True)
+        _finish_move(_rename_or_copy(src, target))
     else:
-        shutil.copy2(src, target, follow_symlinks=False)
+        with tempfile.TemporaryDirectory(prefix=".kiss-copy-", dir=target.parent) as folder:
+            staged = Path(folder) / "entry"
+            if src.is_dir() and not src.is_symlink():
+                shutil.copytree(src, staged, symlinks=True)
+            else:
+                shutil.copy2(src, staged, follow_symlinks=False)
+            _rename_noreplace(staged, target)
 
 
 def _move_over(src: Path, target: Path) -> None:
@@ -333,17 +377,53 @@ def _move_over(src: Path, target: Path) -> None:
     failure, the source untouched) and deleted only once *target* is
     complete: a failed deletion then leaves the data at *target*.
     """
-    _replace(target, _rename_or_copy, src)
-    if os.path.lexists(src):
-        _remove(src)
+    _finish_move(_replace(target, _rename_or_copy, src))
 
 
-def _rename_or_copy(src: Path, target: Path) -> None:
-    """Rename *src* to the not-yet-existing *target*, or copy it when no rename is possible."""
+def _rename_or_copy(src: Path, target: Path) -> Path | OSError | None:
+    """Rename, or copy an owned source; return its cleanup path or deferred error."""
     try:
-        os.rename(src, target)
+        _rename_noreplace(src, target)
+        return None
+    except FileExistsError:
+        raise
     except OSError:
+        pass
+    try:
+        folder = Path(tempfile.mkdtemp(prefix=".kiss-move-", dir=src.parent))
+    except OSError as exc:
+        # Keep the historical copy-on-rename-denial behavior, but never attempt
+        # to delete a pathname we could not claim. Report after committing the copy.
         _transfer(False, src, target)
+        return exc
+    claimed = folder / "entry"
+    try:
+        try:
+            os.rename(src, claimed)
+        except OSError as exc:
+            _transfer(False, src, target)
+            return exc
+        _transfer(False, claimed, target)
+    except BaseException:
+        if os.path.lexists(claimed):
+            try:
+                _rename_noreplace(claimed, src)
+            except OSError as exc:
+                raise OSError(f"Source changed; retained entry at {claimed}: {exc}") from exc
+        raise
+    finally:
+        if not os.path.lexists(claimed):
+            folder.rmdir()
+    return claimed
+
+
+def _finish_move(copied: Path | OSError | None) -> None:
+    """Clean only an owned copied source, after the destination is committed."""
+    if isinstance(copied, OSError):
+        raise copied
+    if copied is not None:
+        _remove(copied)
+        copied.parent.rmdir()
 
 
 #: Stderr bytes :func:`find_in_folder` and :func:`compare_files` keep

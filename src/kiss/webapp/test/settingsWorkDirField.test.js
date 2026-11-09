@@ -39,7 +39,7 @@ function makePage() {
 
 function assertNoDirectoryFields(win) {
   const labels = Array.from(
-    win.document.querySelectorAll('#config-form .config-label'),
+    win.document.querySelectorAll('#settings-panel .config-label'),
   ).map(l => l.textContent.trim());
   assert.ok(
     !labels.some(t => /^(Working|Memory) directory/.test(t)),

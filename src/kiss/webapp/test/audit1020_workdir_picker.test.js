@@ -22,9 +22,9 @@ const {
   send,
   click,
   byId,
-  showSection,
   ofType,
   makeRunner,
+  openExplorer,
   WD,
 } = require('./ui_antipattern_harness');
 
@@ -38,21 +38,6 @@ function makePage() {
       fakeMatchMedia(win, true);
     },
     extraScripts: ['contentContextMenu.js', 'treeContextMenu.js'],
-  });
-}
-
-/** Open the Explorer on WD and answer its root listing. */
-function openExplorer(win, posted) {
-  send(win, {type: 'configData', config: {work_dir: WD}});
-  showSection(win, 'meta-explorer');
-  const list = ofType(posted, 'listDir');
-  const req = list[list.length - 1];
-  send(win, {
-    type: 'dirListing',
-    token: req.token,
-    path: req.path,
-    root: req.path,
-    entries: [],
   });
 }
 
@@ -74,7 +59,7 @@ function answerPickerListing(win, posted) {
 async function run() {
   await test("another surface's pick keeps the Add Folder dialog open and lists it", async () => {
     const {win, posted} = makePage();
-    openExplorer(win, posted);
+    openExplorer(win, posted, []);
     send(win, {
       type: 'configData',
       config: {
@@ -115,7 +100,7 @@ async function run() {
 
   await test("another surface's pick keeps the Open Folder dialog and its listing", async () => {
     const {win, posted} = makePage();
-    openExplorer(win, posted);
+    openExplorer(win, posted, []);
     click(win, byId(win, 'explorer-pick-folder'));
     const picker = byId(win, 'folder-picker');
     assert.ok(!picker.hidden, 'the open-folder dialog is open');
@@ -140,6 +125,62 @@ async function run() {
     // This client's own pick closes it.
     click(win, picker.querySelector('.folder-picker-select'));
     assert.ok(picker.hidden, 'the own pick closes the dialog');
+    win.close();
+  });
+
+  await test('a Select on a typed path edited away before its listing lands picks nothing', async () => {
+    // "Add Folder" on a typed path lists it first and adds it when the
+    // listing succeeds; a path typed over it meanwhile is the user's
+    // newer intent, so the listing only fills the browser.
+    const {win, posted} = makePage();
+    openExplorer(win, posted, []);
+    click(win, byId(win, 'explorer-add-folder'));
+    const picker = byId(win, 'folder-picker');
+    answerPickerListing(win, posted);
+    const pickerLists = () =>
+      ofType(posted, 'listDir').filter(m =>
+        String(m.token).startsWith('picker:'),
+      );
+    const explorerLists = () =>
+      ofType(posted, 'listDir').filter(
+        m => !String(m.token).startsWith('picker:'),
+      ).length;
+    const input = picker.querySelector('.folder-picker-input');
+    input.value = '/ws/first';
+    input.dispatchEvent(new win.Event('input', {bubbles: true}));
+    click(win, picker.querySelector('.folder-picker-select'));
+    const pending = pickerLists().pop();
+    assert.strictEqual(pending.path, '/ws/first', 'the typed path is listed');
+    assert.ok(!picker.hidden, 'and picked only once listed');
+    input.value = '/ws/second';
+    input.dispatchEvent(new win.Event('input', {bubbles: true}));
+    const added = explorerLists();
+    send(win, {
+      type: 'dirListing',
+      token: pending.token,
+      path: '/ws/first',
+      root: '/ws/first',
+      entries: [],
+    });
+    assert.ok(
+      !picker.hidden,
+      'BUG: the listing picked the path the user had edited away',
+    );
+    assert.strictEqual(input.value, '/ws/second', 'the edit stands');
+    assert.strictEqual(explorerLists(), added, 'no folder was added');
+    // Select on the edited path lists and then adds that one.
+    click(win, picker.querySelector('.folder-picker-select'));
+    const second = pickerLists().pop();
+    assert.strictEqual(second.path, '/ws/second');
+    send(win, {
+      type: 'dirListing',
+      token: second.token,
+      path: '/ws/second',
+      root: '/ws/second',
+      entries: [],
+    });
+    assert.ok(picker.hidden, 'the listed pick closes the dialog');
+    assert.strictEqual(explorerLists(), added + 1, 'and adds the folder');
     win.close();
   });
 }

@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,8 @@ import pytest
 from kiss.agents.seas.base.base_sea import BaseSea, LLMReply
 from kiss.agents.seas.coding import coding_sea
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.container_jobs import JOBS_DIR
+from kiss.agents.sorcar.docker_manager import DockerManager
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, resolve_settings
 from kiss.core.kiss_error import BudgetExceededError
 from kiss.core.tool_verdict import ALLOW, refuse
@@ -294,8 +297,16 @@ def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
         nul = {"file_path": "pkg/\x00bad.py", "old_string": "x", "new_string": "y"}
         assert harness.on_tool_call("Edit", nul) == ALLOW
         assert harness.read_container_file("/repo/pkg/\x00bad.py") is None
-        live.exec_run(["sh", "-c", "head -c 500000 /dev/zero | tr '\0' 'a' > /repo/pkg/big.py; "
-                      "printf 'a\0b' > /repo/pkg/bin.py"])
+        # (the escapes are for tr/printf, not Python: a NUL inside the command
+        # makes Docker refuse to start the shell and leaves both files missing)
+        setup_big_and_binary = (
+            "head -c 500000 /dev/zero | tr '\\0' 'a' > /repo/pkg/big.py; "
+            "printf 'a\\0b' > /repo/pkg/bin.py"
+        )
+        exit_code, out = live.exec_run(["sh", "-c", setup_big_and_binary])
+        assert exit_code == 0, out
+        assert live.exec_run(["wc", "-c", "/repo/pkg/big.py"])[1].split()[0] == b"500000"
+        assert live.exec_run(["cat", "/repo/pkg/bin.py"])[1] == b"a\0b"
         assert harness.read_container_file("/repo/pkg/big.py") is None
         assert harness.read_container_file("/repo/pkg/bin.py") is None
         text = harness.read_container_file("/repo/tests/test_fields.py") or ""
@@ -737,6 +748,109 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         events = [json.loads(line) for line in lines]
         assert [e["event"] for e in events].count("shell_note") == 10
     finally:
+        live.remove(force=True)
+
+
+def test_shell_notes_adopt_survivors_as_jobs(tmp_path: Path) -> None:
+    """A survivor of a foreground call becomes a background job, named with its log in the note.
+
+    The registry is the one behind the run's real ``bash_job`` tool (the
+    harness takes it from the toolset the agent builds), so the job is
+    waited on with ``bash_job`` and recorded for the gate's exit codes.
+    The log is read off the command's redirection, relative to a ``cd``
+    in the command or the workdir; a survivor without one gets no log.
+    The processes of a job the registry already knows (a started job, an
+    adopted job's watcher) are not reported again; a survivor the
+    registry cannot adopt keeps the plain wording.
+    """
+    from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+
+    # The log parser: a quoted cd, adjacent and repeated redirections (the last one
+    # counts), escapes in a target and an escaped operator, other descriptors.
+    assert coding_sea.command_logs("cd '/a b' && x >/tmp/1.log>2.log 2>&1 &", "/w") == [
+        ("x >/tmp/1.log>2.log 2>&1", "/a b/2.log")]
+    assert coding_sea.command_logs(
+        "printf R > /t/a\\;b.log; y \\> z.log; w 2> e.log; v >&2; u >/dev/null", "/w",
+    ) == [("printf R > /t/a\\;b.log", "/t/a;b.log")]
+    live = _live_container("python:3.11-slim", "mkdir -p /app/sub '/app/run dir'")
+    if live is None:
+        pytest.skip("Docker is not available")
+    agent = SorcarAgent("coding-adopt")
+    agent._use_web_tools = False
+    agent.docker_manager = DockerManager(f"container:{live.id}", workdir="/app")
+    try:
+        agent.docker_manager.open()
+        config = tmp_path / "config.json"
+        config.write_text(json.dumps({
+            "container": live.id, "workdir": "/app", "prompt": "Do the task.", "model": MODEL,
+            "trajectory": str(tmp_path / "trajectory.jsonl"),
+        }))
+        harness = coding_sea.ContainerHarness(str(config))
+        tools = {t.__name__: t for t in harness.tools(agent._get_tools())}
+        assert harness.jobs is agent._container_jobs
+        harness.on_llm_call([{"role": "user", "content": "Do the task."}])
+
+        def shell(command: str, **kwargs: Any) -> str:
+            """Run *command* as one ``Bash`` tool call of a turn; the result with the notes."""
+            assert harness.on_tool_call("Bash", {"command": command, **kwargs}) == ALLOW
+            result = {"role": "tool", "content": str(tools["Bash"](command, "run", **kwargs))}
+            harness.on_llm_call([result])
+            return result["content"]
+
+        # The survivors stand in as ``tail -s N -f /dev/null`` (a literal ``sleep N``
+        # behind ``nohup`` is refused as a polling turn by the shell guard).
+        # The log is the redirection's target, resolved against the command's cd
+        # (a quoted directory is one word; the last of two redirections is the one).
+        note = shell("cd '/app/run dir' && nohup sh -c 'echo begun; exec tail -s 300 -f /dev/null' "
+                     "> /app/other.log > run.log 2>&1 &")
+        match = re.search(r"left running as job (\w+) \(tail -s 300 -f /dev/null, "
+                          r"log /app/run dir/run.log\)", note)
+        assert match is not None, note
+        job_id = match.group(1)
+        assert note.endswith(coding_sea.ADOPTED_HINT) and "(parent " not in note
+        assert harness.background_jobs[job_id] == "tail -s 300 -f /dev/null"
+        assert harness.jobs is not None and harness.jobs.last_running() == job_id
+        waited = tools["bash_job"](job_id, action="wait", timeout_seconds=10, until="^begun$")
+        assert waited.startswith(f"Job {job_id}: tail -s 300 -f /dev/null\nstatus: running")
+        assert waited.rstrip().endswith("begun")
+        # Nothing new the next turn: the watcher and its sleeps are the job's.
+        assert shell("echo quiet") == "quiet\n"
+        # No redirection: no log.  A command line the shell rewrote (quotes) still
+        # gets the only log of the turn; /dev/null is no log.
+        note = shell("nohup sh -c 'exec tail -s 301 -f /dev/null' >/dev/null 2>&1 & "
+                     "nohup sh -c 'exec tail -s 302 -f /dev/null' &")
+        for seconds in (301, 302):
+            assert re.search(
+                rf"left running as job \w+ \(tail -s {seconds} -f /dev/null, no log\)", note,
+            ), note
+        note = shell("nohup python3 -c 'import time; time.sleep(303)' > /app/py.log 2>&1 &")
+        assert re.search(r"left running as job \w+ \(python3 -c import time; time.sleep\(303\), "
+                         r"log /app/py.log\)", note), note
+        # A job the registry started is its own: no survivors note for its processes.
+        started = shell("sleep 304", background=True)
+        assert started.startswith("Started background job ") and "Harness note" not in started
+        # A survivor the registry cannot adopt keeps the plain wording.
+        live.exec_run(["sh", "-c", f"mv {JOBS_DIR} {JOBS_DIR}.bak && touch {JOBS_DIR}"])
+        try:
+            note = shell("nohup sh -c 'exec tail -s 305 -f /dev/null' >/dev/null 2>&1 &")
+        finally:
+            live.exec_run(["sh", "-c", f"rm -f {JOBS_DIR}; mv {JOBS_DIR}.bak {JOBS_DIR}"])
+        assert re.search(r"still running: \d+ tail -s 305 -f /dev/null \(parent 1\)\. Before",
+                         note), note
+        assert "left running" not in note
+        # Every survivor is adopted; past the listing cap the rest are only counted.
+        known = set(harness.background_jobs)
+        note = shell("for i in $(seq 310 318); do nohup sleep $i >/dev/null 2>&1 & done")
+        assert note.count("left running as job") == 8 and "; and 1 more. Before" in note
+        assert sorted(cmd for job, cmd in harness.background_jobs.items() if job not in known) == [
+            f"sleep {i}" for i in range(310, 319)]
+        events = [json.loads(line)
+                  for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
+        failed = [e for e in events if e["event"] == "adopt_failed"]
+        assert len(failed) == 1 and failed[0]["error"].startswith("Error: process ")
+        assert [e["event"] for e in events].count("shell_note") == 5
+    finally:
+        agent.docker_manager.close()
         live.remove(force=True)
 
 

@@ -223,6 +223,20 @@ def test_show_browser_keeps_the_tab_the_user_opened(tool, server):
     assert tool._page.url == f"{server}/cookies"
 
 
+def test_switching_headless_carries_the_tab_the_agent_is_on(tool, server):
+    """While no window shows, nobody but the agent opens tabs: the session
+    captured for the switch is the page the agent is on, not the newest tab
+    (a popup it followed earlier and left again)."""
+    tool.go_to_url(f"{server}/inert")
+    popup = tool._context.new_page()
+    popup.goto(f"{server}/cookies")
+    tool.go_to_url("tab:1")
+    tool.go_to_url("tab:0")
+
+    assert tool._capture_session().url == f"{server}/inert"
+    assert tool._page.url == f"{server}/inert"
+
+
 def test_show_browser_without_an_open_page_reports_state(tmp_path):
     """Switching visibility before any navigation just launches the browser."""
     web = WebUseTool(user_data_dir=str(tmp_path / "profile"))

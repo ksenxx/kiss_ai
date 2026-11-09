@@ -51,6 +51,7 @@ from kiss.server import agent_state
 from kiss.server.file_index import FileIndexRegistry
 from kiss.server.server import AgentServer
 from kiss.tests.server._memory_printer import MemoryPrinter
+from kiss.tests.server.conftest import local_view
 
 _CONN = "conn-stale"
 _PREFIX = "marker"
@@ -72,6 +73,7 @@ class _ParkingEmitServer(AgentServer):
         loading: bool = False,
         prefix: str = "",
         tab_id: str = "",
+        work_dir: str = "",
     ) -> None:
         """Park the populated reply naming ``park_marker``, then delegate."""
         if (
@@ -85,6 +87,7 @@ class _ParkingEmitServer(AgentServer):
                 raise TimeoutError("parked too long in _emit_files")
         super()._emit_files(
             ranked, conn_id, loading=loading, prefix=prefix, tab_id=tab_id,
+            work_dir=work_dir,
         )
 
 
@@ -118,7 +121,7 @@ class TestAutocompleteStaleReply(TestCase):
 
     def _indexed(self, work_dir: Path) -> bool:
         """Whether the registry has published an index covering *work_dir*."""
-        return self.registry.view_for(str(work_dir)) is not None
+        return local_view(self.registry, str(work_dir)) is not None
 
     def _files_events(self, conn_id: str) -> list[dict[str, Any]]:
         return [

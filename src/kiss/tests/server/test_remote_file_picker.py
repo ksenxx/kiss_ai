@@ -152,6 +152,20 @@ class TestRemoteFilePicker(IsolatedAsyncioTestCase):
         await self._send(cmd)
         return await self._read(reply_type)
 
+    async def _ask_this_daemon_for_files(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Send a ``getFiles`` this daemon answers itself and return its populated list.
+
+        A folder this daemon has never indexed is answered with an empty
+        ``loading`` list at once and the real list follows on the same
+        connection when the scan is done (``autocomplete._get_files``);
+        asking again meanwhile only supersedes the request and earns a
+        second ``loading`` list (full-suite run of 2026-11-05).
+        """
+        reply = await self._ask(cmd, "files")
+        while reply.get("loading"):
+            reply = await self._read("files")
+        return reply
+
     def _get_files(
         self, prefix: str, machine: str | None, work_dir: Path | None = None,
     ) -> dict[str, Any]:
@@ -190,10 +204,7 @@ class TestRemoteFilePicker(IsolatedAsyncioTestCase):
         self.assertEqual(self._texts(named, "file"), ["./box_only_module.py"])
 
     async def test_files_without_a_machine_are_answered_here(self) -> None:
-        reply = await self._ask(self._get_files("only_module", None), "files")
-        if reply.get("loading"):
-            # This daemon's own first scan: its real list follows.
-            reply = await self._ask(self._get_files("only_module", None), "files")
+        reply = await self._ask_this_daemon_for_files(self._get_files("only_module", None))
         self.assertNotIn("machine", reply)
         self.assertEqual(self._texts(reply, "file"), ["./home_only_module.py"])
 
@@ -212,9 +223,7 @@ class TestRemoteFilePicker(IsolatedAsyncioTestCase):
         self.assertEqual(frequent, ["./box_only_module.py"])
         # This daemon, asked about the same folder (the test's daemons
         # share one disk), never counted the mention.
-        local = await self._ask(self._get_files("", None, self.box_work), "files")
-        if local.get("loading"):
-            local = await self._ask(self._get_files("", None, self.box_work), "files")
+        local = await self._ask_this_daemon_for_files(self._get_files("", None, self.box_work))
         self.assertIn("./box_only_module.py", self._texts(local, "file"))
         self.assertEqual(self._texts(local, "frequent"), [])
 

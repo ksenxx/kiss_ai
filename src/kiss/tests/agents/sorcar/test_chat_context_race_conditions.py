@@ -16,14 +16,25 @@ to make the failure deterministic.
 
 from __future__ import annotations
 
+import os
 import random
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+
+_PEER_SCRIPT = """
+import sys
+
+from kiss.agents.sorcar import persistence
+
+persistence._save_task_result(sys.argv[2], task_id=sys.argv[1])
+"""
 
 
 def _redirect(tmpdir: str):
@@ -118,3 +129,47 @@ class TestChatContextCacheStaleWrite:
         finally:
             th._load_chat_context = original  # type: ignore[assignment]
             let_r1_finish.set()
+
+
+class TestChatContextCachePeerCommit:
+    """Race 2 (A11-5 astra / A11-4 fable): a peer process's commit left the cached text stale.
+
+    The invalidation of :func:`_invalidate_chat_context_cache` reaches
+    this process only; a result another process committed (a CLI run,
+    a database sync) was served from the cache for ever after.
+    """
+
+    def setup_method(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = _redirect(self.tmpdir)
+
+    def teardown_method(self) -> None:
+        th._stop_event_writer()
+        th._close_db()
+        _restore(self.saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_a_peer_process_commit_refreshes_the_cached_text(self) -> None:
+        chat_id = "peer-chat"
+        task_id, _ = th._add_task("peer task", chat_id=chat_id)
+        th._save_task_result("old result", task_id=task_id)
+        assert th._load_chat_context_text(chat_id) == "peer task\nold result"
+
+        peer = subprocess.run(
+            [sys.executable, "-c", _PEER_SCRIPT, task_id, "new result from peer"],
+            env={**os.environ, "KISS_HOME": str(th._KISS_DIR)},
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        assert peer.returncode == 0, peer.stderr
+        assert th._load_chat_context(chat_id)[0]["result"] == "new result from peer"
+        assert th._load_chat_context_text(chat_id) == "peer task\nnew result from peer"
+
+        # Nothing committed since: the text comes from the cache, no query.
+        statements: list[str] = []
+        db = th._get_db()
+        db.set_trace_callback(statements.append)
+        try:
+            assert th._load_chat_context_text(chat_id) == "peer task\nnew result from peer"
+        finally:
+            db.set_trace_callback(None)
+        assert not [s for s in statements if s.lstrip().upper().startswith("SELECT")], statements

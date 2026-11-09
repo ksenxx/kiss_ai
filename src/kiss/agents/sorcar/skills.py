@@ -348,7 +348,10 @@ def discover_skills(work_dir: str) -> dict[str, Skill]:
     (low → high precedence) is: bundled, claude-user, agents-user,
     user, claude-project, agents-project, project — so project skills
     win over user skills, and a native ``.kiss`` skill wins over a
-    Claude Code skill at the same level.
+    Claude Code skill at the same level.  The user's home directory as
+    *work_dir* contributes no ``.kiss`` project skills: ``~/.kiss`` is
+    the stock brand's global home, whose live counterpart is
+    :func:`user_skills_dir`.
 
     Skills denied by the ``skill_permissions`` config rules are
     excluded entirely (hidden from the catalog rather than blocked at
@@ -371,7 +374,12 @@ def discover_skills(work_dir: str) -> dict[str, Skill]:
     skills.update(
         _load_skills_dir(wd / ".agents" / "skills", "agents-project")
     )
-    skills.update(_load_skills_dir(wd / ".kiss" / "skills", "project"))
+    # ``~/.kiss`` is the stock brand's global home, not a project
+    # directory: a task working in the user's home must not load the
+    # stale skills of an install this brand's ``kiss_home()`` replaced
+    # over the live user skills scanned above.
+    if wd.resolve() != Path.home().resolve():
+        skills.update(_load_skills_dir(wd / ".kiss" / "skills", "project"))
     rules = load_permission_rules("skill_permissions")
     if rules:
         skills = {
@@ -489,7 +497,7 @@ def load_skill_content(skill: Skill) -> str:
     return "\n".join(parts)
 
 
-def make_skill_tool(work_dir: str) -> Callable[[str], str] | None:
+def make_skill_tool(work_dir: str, agent: Any = None) -> Callable[[str], str] | None:
     """Build the ``skill`` tool for the agent running in *work_dir*.
 
     The available skills are embedded — name and description only — in
@@ -500,6 +508,10 @@ def make_skill_tool(work_dir: str) -> Callable[[str], str] | None:
 
     Args:
         work_dir: The project directory whose skills to expose.
+        agent: The agent the tool is built for, when there is one: a
+            call reads its ``work_dir`` then (a task's moves into its
+            worktree with ``create_worktree``), so the project skills
+            loaded are those of the directory the task works in.
 
     Returns:
         The tool callable, or ``None`` when no user or project skills
@@ -515,7 +527,8 @@ def make_skill_tool(work_dir: str) -> Callable[[str], str] | None:
         return None
 
     def skill(name: str) -> str:
-        current = discover_skills(work_dir)
+        live = getattr(agent, "work_dir", None) if agent is not None else None
+        current = discover_skills(str(live) if live else work_dir)
         found = current.get(name)
         if found is None:
             available = ", ".join(sorted(current)) or "(none)"

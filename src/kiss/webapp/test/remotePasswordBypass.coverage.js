@@ -9,7 +9,9 @@
 // test/transportReloadOnNewDaemon.test.js (the shim's GET /api/daemon
 // reload check, whose pages have a fetch),
 // test/transportAuthBatch_sweep1030.test.js (a failed Unlock reconnect,
-// frames held behind an unconfirmed batch) and
+// frames held behind an unconfirmed batch),
+// test/transportHeldFrames_wave3.test.js (a once-only frame posted while
+// the socket is down) and
 // test/transportFramePassword.test.js (the per-frame password, a frame
 // with no fields), plus every branch except the spec-unreachable
 // `location.reload()` catch.  run-all.js runs these suites through this
@@ -30,6 +32,7 @@ const SUITES = [
   'remotePasswordBypass.test.js',
   'transportReloadOnNewDaemon.test.js',
   'transportAuthBatch_sweep1030.test.js',
+  'transportHeldFrames_wave3.test.js',
   'transportFramePassword.test.js',
 ];
 

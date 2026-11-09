@@ -17,9 +17,15 @@
 // directory and kills the group when it is done, so a regression (an
 // endless chain of gates, a hung suite) is bounded and cleaned up; the
 // hung suite's case also kills the group of the gate's guard, which the
-// gate's does not include.  Process groups are POSIX: the cases that
-// leave a process to kill are skipped on Windows.  A last case checks
-// that this harness keeps output written after the process exits.
+// gate's does not include.  The suite names that guard in a pid file,
+// published by a rename so the file is complete or absent, never the
+// empty file a `writeFileSync` paused between truncating and writing
+// left: `Number('')` is 0, and `process.kill(-0)` signals the group of
+// this very process.  The cleanup refuses such a file, and `killGroup`
+// itself refuses anything but a positive integer; a case run in a process
+// group of its own checks each.  Process groups are POSIX: the cases
+// that leave a process to kill are skipped on Windows.  A last case
+// checks that this harness keeps output written after the process exits.
 //
 // The gate's own CHILD_TIMEOUT_MS kill (90 s) is exercised, on a copy
 // with the timeout lowered, by runAllRetiresSuiteGroup_wave3.test.js.
@@ -33,16 +39,10 @@ const path = require('path');
 const {spawn} = require('child_process');
 
 const GATE = path.join(__dirname, 'coverage_gate.js');
+const {killGroup} = require(GATE);
 const WAIT_MS = 20000;
-
-/** SIGKILL process group `pgid`; a group already gone is fine. */
-function killGroup(pgid) {
-  try {
-    process.kill(-pgid, 'SIGKILL');
-  } catch {
-    // ESRCH: every process of the group has exited.
-  }
-}
+// argv[2] of a run of this file that runs emptyPidFileScenario only.
+const EMPTY_PID_FILE = '--empty-pid-file';
 
 /** Resolves after `ms`, without holding the process open. */
 function delay(ms) {
@@ -101,6 +101,52 @@ function suiteArg(dir, file) {
   return path.relative(__dirname, path.join(dir, file));
 }
 
+/** Write `gate.js` into `dir`: a gate running `dir`'s hung.test.js. */
+function writeHungGate(dir) {
+  fs.writeFileSync(
+    path.join(dir, 'gate.js'),
+    `require(${JSON.stringify(GATE)}).runCovered(` +
+      `${JSON.stringify(suiteArg(dir, 'hung.test.js'))}, 'hunggate');\n`,
+  );
+  return path.join(dir, 'gate.js');
+}
+
+/**
+ * The pid published in `pidFile`, or null when the file is absent or
+ * holds anything but a positive integer: `Number('')` is 0, no pid, and
+ * `process.kill(-0)` signals the group of the process calling it, this
+ * one (`killGroup` refuses such a value too).
+ */
+function publishedPid(pidFile) {
+  if (!fs.existsSync(pidFile)) return null;
+  const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+/**
+ * Retire what a run of a hung gate left behind.  The kill reached the
+ * gate only.  Its guard leads its own group, holds the gate's pipes, and
+ * once it notices the gate is gone writes its V8 coverage into the
+ * scratch TMPDIR before killing its group (`process.kill` of one's own
+ * group runs the exit hooks first): removing the directory before that
+ * write recreated it, with the coverage file in it, one directory per
+ * run.  So kill the guard's group when `pidFile` names it, wait for the
+ * pipes to close, which only the exit of their last holder does, and
+ * then remove `dir`.  The pid file, not the captured output, names the
+ * guard: a SIGKILL reaches a stopped process, so no SIGCONT is needed.
+ * Resolves with whether the pipes closed within WAIT_MS.
+ */
+async function retireGuard(res, pidFile, dir) {
+  const pid = publishedPid(pidFile);
+  if (pid !== null) killGroup(pid);
+  const closed = await Promise.race([
+    res.closed.then(() => true),
+    delay(WAIT_MS).then(() => false),
+  ]);
+  fs.rmSync(dir, {recursive: true, force: true});
+  return closed;
+}
+
 async function testEvalGateRunsTheSuiteOnce() {
   const {dir, env} = scratch({'once.test.js': "console.log('suite ran');\n"});
   try {
@@ -133,23 +179,25 @@ async function testHungSuiteOutputStreams() {
     // hangs well past WAIT_MS; exits on its own if nothing kills it.  It
     // stops the guard first: a guard that cannot react to the gate's
     // death stands for one too slow to do so before this test cleans up,
-    // so the cleanup below has to retire it itself.
+    // so the cleanup below has to retire it itself.  The guard's pid goes
+    // to a file before the stop, so the cleanup finds it even when the
+    // output never reached this process (the failure the test detects):
+    // a stopped guard that only the captured output named leaked for ever.
+    // A rename publishes the file whole: a suite paused between
+    // truncating and writing it (then timed out) left it empty, and the
+    // cleanup's `killGroup(Number(''))` signalled this process's group.
     'hung.test.js':
+      "const fs = require('fs');\n" +
+      "const pidFile = require('path').join(__dirname, 'guard.pid');\n" +
+      "fs.writeFileSync(pidFile + '.tmp', String(process.ppid));\n" +
+      "fs.renameSync(pidFile + '.tmp', pidFile);\n" +
       "process.kill(process.ppid, 'SIGSTOP');\n" +
       "console.log('ok - first ' + process.ppid);\n" +
       'setTimeout(() => process.exit(3), 60000);\n',
   });
-  fs.writeFileSync(
-    path.join(dir, 'gate.js'),
-    `require(${JSON.stringify(GATE)}).runCovered(` +
-      `${JSON.stringify(suiteArg(dir, 'hung.test.js'))}, 'hunggate');\n`,
-  );
-  const res = await runGroup(
-    [path.join(dir, 'gate.js')],
-    env,
-    /ok - first \d+\n/,
-  );
+  const res = await runGroup([writeHungGate(dir)], env, /ok - first \d+\n/);
   const guard = /ok - first (\d+)\n/.exec(res.out);
+  const pidFile = path.join(dir, 'guard.pid');
   let closed = false;
   try {
     assert.ok(
@@ -157,25 +205,96 @@ async function testHungSuiteOutputStreams() {
       "the hung suite's output did not reach the gate's stdout while it ran",
     );
     assert.strictEqual(res.code, null, 'the suite was still running');
+    assert.strictEqual(
+      fs.readFileSync(pidFile, 'utf8'),
+      guard[1],
+      'the suite named its guard in the pid file before stopping it',
+    );
+    assert.ok(
+      !fs.existsSync(pidFile + '.tmp'),
+      'the rename took the temp file',
+    );
   } finally {
-    // The kill reached the gate only.  Its guard leads its own group,
-    // holds the gate's pipes, and once it notices the gate is gone
-    // writes its V8 coverage into the scratch TMPDIR before killing its
-    // group (`process.kill` of one's own group runs the exit hooks
-    // first): removing the directory before that write recreated it,
-    // with the coverage file in it, one directory per run.  So kill the
-    // guard's group here and wait for the pipes to close, which only the
-    // exit of their last holder does, before removing the directory.
-    if (guard) killGroup(Number(guard[1]));
-    closed = await Promise.race([
-      res.closed.then(() => true),
-      delay(WAIT_MS).then(() => false),
-    ]);
-    fs.rmSync(dir, {recursive: true, force: true});
+    closed = await retireGuard(res, pidFile, dir);
   }
   assert.ok(closed, "the guard and the suite released the gate's pipes");
   assert.ok(!fs.existsSync(dir), 'nothing recreated the scratch directory');
   console.log("ok - a hung suite's output streams through the gate");
+}
+
+/**
+ * The hung suite's cleanup with an empty guard.pid.  The window that
+ * left one, inside the suite's `writeFileSync`, cannot be opened from
+ * here (a rename now closes it), so the suite writes the empty file
+ * itself, prints, and hangs without stopping its guard.  Run by
+ * testEmptyPidFileRetiresNothing in a process group of its own, which a
+ * cleanup signalling group 0 then kills instead of the suite's.
+ */
+async function emptyPidFileScenario() {
+  const {dir, env} = scratch({
+    'hung.test.js':
+      "require('fs').writeFileSync(" +
+      "require('path').join(__dirname, 'guard.pid'), '');\n" +
+      "console.log('ok - empty');\n" +
+      'setTimeout(() => process.exit(3), 60000);\n',
+  });
+  const res = await runGroup([writeHungGate(dir)], env, /ok - empty\n/);
+  const pidFile = path.join(dir, 'guard.pid');
+  let closed = false;
+  try {
+    assert.ok(!res.timedOut, `the suite did not run:\n${res.out}`);
+    assert.strictEqual(fs.readFileSync(pidFile, 'utf8'), '');
+  } finally {
+    closed = await retireGuard(res, pidFile, dir);
+  }
+  // Nothing stopped the guard: it saw the gate die and killed its group.
+  assert.ok(closed, "the guard released the gate's pipes on its own");
+  assert.ok(!fs.existsSync(dir), 'nothing recreated the scratch directory');
+  console.log('ok - the cleanup outlived an empty pid file');
+}
+
+async function testEmptyPidFileRetiresNothing() {
+  if (process.platform === 'win32') {
+    console.log('ok - an empty pid file retires nothing (skipped on Windows)');
+    return;
+  }
+  const res = await runGroup(
+    [...process.execArgv, __filename, EMPTY_PID_FILE],
+    process.env,
+  );
+  assert.ok(!res.timedOut, `the scenario did not finish:\n${res.out}`);
+  assert.strictEqual(
+    res.code,
+    0,
+    `the cleanup of an empty pid file killed its own group (exit ${res.code}):\n${res.out}`,
+  );
+  assert.match(res.out, /ok - the cleanup outlived an empty pid file\n/);
+  console.log('ok - an empty pid file retires nothing');
+}
+
+/**
+ * `killGroup` refuses what is no pid.  Without its guard `process.kill(-x)`
+ * of 0, -0, '', null, false or [] signals group 0, the caller's own, a
+ * negative number signals the process it negates to and a numeric string
+ * the group it negates to; NaN, undefined and 1.5 only throw, which it
+ * swallows.  The caller runs in a process group of its own, so a signal
+ * that gets through kills it, not this process.
+ */
+async function testKillGroupRefusesWhatIsNoPid() {
+  const code =
+    `const {killGroup} = require(${JSON.stringify(GATE)});` +
+    "for (const v of [0, -0, '', null, false, [], NaN, undefined, 1.5, " +
+    '-process.pid, String(process.pid)]) killGroup(v);' +
+    "console.log('alive');";
+  const res = await runGroup(['-e', code], process.env);
+  assert.ok(!res.timedOut, `the caller did not finish:\n${res.out}`);
+  assert.strictEqual(
+    res.code,
+    0,
+    `killGroup signalled its caller (exit ${res.code}):\n${res.out}`,
+  );
+  assert.strictEqual(res.out, 'alive\n');
+  console.log('ok - killGroup refuses what is no pid');
 }
 
 async function testRunGroupKeepsOutputWrittenAfterTheExit() {
@@ -201,8 +320,14 @@ async function testRunGroupKeepsOutputWrittenAfterTheExit() {
 }
 
 async function main() {
+  if (process.argv[2] === EMPTY_PID_FILE) {
+    await emptyPidFileScenario();
+    return;
+  }
   await testEvalGateRunsTheSuiteOnce();
   await testHungSuiteOutputStreams();
+  await testEmptyPidFileRetiresNothing();
+  await testKillGroupRefusesWhatIsNoPid();
   await testRunGroupKeepsOutputWrittenAfterTheExit();
   console.log('coverageGateChild_sweep1030: all tests passed');
 }

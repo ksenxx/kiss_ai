@@ -58,12 +58,13 @@ function makeDom() {
   return win;
 }
 
-function key(win, name, init) {
+function key(win, name) {
   win.document.dispatchEvent(
-    new win.KeyboardEvent(
-      'keydown',
-      Object.assign({key: name, bubbles: true, cancelable: true}, init),
-    ),
+    new win.KeyboardEvent('keydown', {
+      key: name,
+      bubbles: true,
+      cancelable: true,
+    }),
   );
 }
 
@@ -199,11 +200,6 @@ function pointerClick(win, el) {
   );
 }
 
-function typeInto(win, text) {
-  const el = active(win);
-  el.value = String(el.value || '') + text;
-}
-
 test('R3-1: dismissing the menu by clicking another field keeps focus (and typing) there', () => {
   const win = makeDom();
   const doc = win.document;
@@ -229,7 +225,8 @@ test('R3-1: dismissing the menu by clicking another field keeps focus (and typin
     destination,
     'focus stays on the field the user clicked, not the old opener',
   );
-  typeInto(win, 'Z');
+  const el = active(win);
+  el.value = String(el.value || '') + 'Z';
   assert.strictEqual(destination.value, 'twoZ');
   assert.strictEqual(
     opener.value,
@@ -258,6 +255,45 @@ test('R3-1: dismissing the menu by clicking another field keeps focus (and typin
     opener,
     'a click on non-focusable text still returns focus to the opener',
   );
+});
+
+// Tab / Shift+Tab leave the menu by the browser's own focus move (there
+// is no focus trap), so the menu closes then.  Left open, its
+// document-level key handler went on intercepting Arrow / Home / End /
+// Enter in whatever control the focus had landed on.  jsdom performs
+// no default focus move for Tab, so the test moves focus as the
+// browser would, on from the opener the closing menu handed it to.
+test('Tab / Shift+Tab out of the menu closes it; the keys then stay with the new control', () => {
+  const win = makeDom();
+  const doc = win.document;
+  const ta = doc.getElementById('ta');
+  win.ContentContextMenu.installContentContextMenu(doc);
+  for (const shiftKey of [true, false]) {
+    ta.focus();
+    open(win, doc.getElementById('para'));
+    assert.ok(items(win).includes(active(win)), 'focus is on a menu item');
+    const tab = new win.KeyboardEvent('keydown', {
+      key: 'Tab',
+      shiftKey,
+      bubbles: true,
+      cancelable: true,
+    });
+    active(win).dispatchEvent(tab);
+    assert.strictEqual(tab.defaultPrevented, false, 'the browser moves focus');
+    assert.strictEqual(items(win).length, 0, 'Tab closed the menu');
+    assert.strictEqual(active(win), ta, 'focus is back on the opener');
+    const link = doc.getElementById('link');
+    link.focus();
+    const arrow = new win.KeyboardEvent('keydown', {
+      key: 'ArrowDown',
+      bubbles: true,
+      cancelable: true,
+    });
+    link.dispatchEvent(arrow);
+    assert.strictEqual(arrow.defaultPrevented, false, 'ArrowDown stays');
+    assert.strictEqual(active(win), link, 'focus stays on the control');
+    assert.strictEqual(items(win).length, 0);
+  }
 });
 
 report('ui_antipattern_content_menu_keyboard');

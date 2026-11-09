@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -824,18 +825,53 @@ def _worktree_file_text(repo: str, path: str) -> tuple[str | None, bool, str]:
     never followed, so the read stays inside the repository.
     """
     full = os.path.join(repo, path)
-    if os.path.islink(full):
-        try:
-            return os.readlink(full), False, ""
-        except OSError as exc:
-            return None, False, f"Cannot read {path}: {exc}"
-    if not os.path.isfile(full):
-        return None, False, ""
+    parent_fd: int | None = None
     try:
-        with open(full, "rb") as fh:
+        if os.open in os.supports_dir_fd:
+            # Pin every directory, rejecting symlinked parents. A path
+            # check followed by an absolute open can follow a directory
+            # swapped out between the two operations.
+            parent_fd = os.open(repo, os.O_RDONLY | os.O_DIRECTORY)
+            parts = path.split("/")
+            for part in parts[:-1]:
+                if part in ("", ".", ".."):
+                    return None, False, f"Invalid path: {path}"
+                next_fd = os.open(
+                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd,
+                )
+                os.close(parent_fd)
+                parent_fd = next_fd
+            full = parts[-1]
+        elif os.path.commonpath((os.path.realpath(repo), os.path.realpath(
+            os.path.dirname(full),
+        ))) != os.path.realpath(repo):
+            return None, False, f"Path leaves repository: {path}"
+        mode = os.stat(full, dir_fd=parent_fd, follow_symlinks=False).st_mode
+        if stat.S_ISLNK(mode):
+            return os.readlink(full, dir_fd=parent_fd), False, ""
+        if not stat.S_ISREG(mode):
+            return None, False, ""
+        # NONBLOCK prevents a replacement FIFO from waiting for a writer;
+        # NOFOLLOW refuses a replacement leaf symlink instead of reading it.
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(full, flags, dir_fd=parent_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                return None, False, ""
+            fh = os.fdopen(fd, "rb")
+        except OSError:
+            os.close(fd)
+            raise
+        with fh:
             data = fh.read(GIT_SHOW_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return None, False, ""
     except OSError as exc:
         return None, False, f"Cannot read {path}: {exc}"
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
     text = data[:GIT_SHOW_MAX_BYTES].decode("utf-8", "surrogateescape")
     return _text_side(text, len(data) > GIT_SHOW_MAX_BYTES, path)
 

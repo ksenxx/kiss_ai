@@ -39,6 +39,7 @@ from typing import Any
 
 from kiss.agents.sorcar import persistence
 from kiss.server.remote_tabs import RemoteTab
+from kiss.tests.server.remote_tabs_probe import machine_of
 from kiss.tests.server.test_remote_tabs import RemoteTabsHarness, _FinishingModel
 
 
@@ -105,7 +106,7 @@ class TestLocalChatResumeLeavesTheStream(RemoteTabsHarness):
         await self._send({"type": "resumeSession", "taskId": remote_task, "tabId": child})
         await self._until("task_events", child)
         tabs = self.server._server_api.remote_tabs
-        self.assertEqual(tabs.machine_of(child), "box", "the sub-agent tab joined the stream")
+        self.assertEqual(machine_of(tabs, child), "box", "the sub-agent tab joined the stream")
 
         local_task, local_chat = persistence._add_task("ONLY LOCAL CHAT CONTENT")
         persistence._save_task_result("<p>Only local result</p>", task_id=local_task)
@@ -127,8 +128,8 @@ class TestLocalChatResumeLeavesTheStream(RemoteTabsHarness):
             {"type": "tabMachine", "tabId": child, "machine": ""},
             [{k: m.get(k) for k in ("type", "tabId", "machine")} for m in frames],
         )
-        self.assertEqual(tabs.machine_of(child), "")
-        self.assertEqual(tabs.machine_of(root), "box", "the parent stays bound")
+        self.assertEqual(machine_of(tabs, child), "")
+        self.assertEqual(machine_of(tabs, root), "box", "the parent stays bound")
         self.assertNotIn(child, tabs._tabs[root].tab_ids)
 
         # The remote sub-agent finishes: its result is the machine's
@@ -170,14 +171,14 @@ class TestLocalChatResumeLeavesTheStream(RemoteTabsHarness):
             # eligible, then held with the stream's lock released.
             await self._send({"type": "resumeSession", "taskId": remote_task, "tabId": child})
             self.assertTrue(await asyncio.to_thread(hold.held.wait, 30), "no remote replay")
-            self.assertEqual(tabs.machine_of(child), "box", "the sub-agent tab joined the stream")
+            self.assertEqual(machine_of(tabs, child), "box", "the sub-agent tab joined the stream")
             await self._send({
                 "type": "resumeSession", "taskId": local_task, "chatId": local_chat,
                 "tabId": child,
             })
             local = await self._until("task_events", child)
             self.assertEqual(local.get("chat_id"), local_chat)
-            self.assertEqual(tabs.machine_of(child), "", "the tab left the stream")
+            self.assertEqual(machine_of(tabs, child), "", "the tab left the stream")
             hold.release()
             self.assertTrue(await asyncio.to_thread(hold.passed.wait, 30), "relay stuck")
         # The relay returned: what it delivered was sent before the
@@ -212,14 +213,14 @@ class TestLocalChatResumeLeavesTheStream(RemoteTabsHarness):
             # then held with the stream's lock released.
             _FinishingModel.released.set()
             self.assertTrue(await asyncio.to_thread(hold.held.wait, 30), "no subagentDone")
-            self.assertEqual(tabs.machine_of(child), "box", "the sub-agent tab joined the stream")
+            self.assertEqual(machine_of(tabs, child), "box", "the sub-agent tab joined the stream")
             await self._send({
                 "type": "resumeSession", "taskId": local_task, "chatId": local_chat,
                 "tabId": child,
             })
             local = await self._until("task_events", child)
             self.assertEqual(local.get("chat_id"), local_chat)
-            self.assertEqual(tabs.machine_of(child), "", "the tab left the stream")
+            self.assertEqual(machine_of(tabs, child), "", "the tab left the stream")
             hold.release()
             self.assertTrue(await asyncio.to_thread(hold.passed.wait, 30), "relay stuck")
         await self._send({"type": "getHistory"})

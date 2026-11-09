@@ -6,7 +6,7 @@
 
 Bug 1 — ``ready`` fan-out drops the per-connection ``workDir`` stamp.
 
-``RemoteAccessServer._dispatch_client_command`` stamps every command
+``ServerApi.dispatch`` (reached from ``RemoteAccessServer._ws_handler``) stamps every command
 from a connection with that connection's announced ``setWorkDir``
 folder, and ``_cmd_get_config`` documents that the reported
 ``work_dir`` is taken from the command's ``workDir`` "stamped per

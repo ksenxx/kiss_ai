@@ -13,10 +13,21 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send: deliver,
+  stubRaf,
+} = require('./simplify2_harness');
 
 function makePage() {
   return makeChatPage({beforeScripts: stubRaf}).win;
+}
+
+/** Deliver `ev` stamped with the page's tab, as the daemon stamps every
+ *  copy of a task's events (a tab that owns no task takes none addressed
+ *  by task id alone, A32-1). */
+function send(win, ev) {
+  deliver(win, Object.assign({tabId: win._testApi.getActiveTabId()}, ev));
 }
 
 function headerCost(win) {

@@ -72,11 +72,35 @@ function violation(kind, word, lineHeight) {
 }
 
 function checkDeclaration(decl, result) {
-  const kind = family(decl.prop.toLowerCase());
+  // Custom property names are case-sensitive (`--FS-gap` is no `--fs-*`
+  // token); ordinary property names are not.
+  const prop = decl.prop.startsWith('--') ? decl.prop : decl.prop.toLowerCase();
+  const kind = family(prop);
+  // The raw value keeps the comments PostCSS strips from `decl.value`, so a
+  // word's parser offsets, after the property and the `:`, locate it in the
+  // source (two equal words get their own ranges; `--z-1: 1` points at the
+  // value, not at the `1` of the name).
+  const valueIndex = decl.prop.length + (decl.raws.between || ':').length;
+  const parsed = valueParser(decl.raws.value ? decl.raws.value.raw : decl.value);
   let lineHeight = false;
-  valueParser(decl.value).walk(node => {
-    if (node.type === 'function' && node.value.toLowerCase() === 'url') return false;
-    if (node.type === 'div' && node.value === '/') lineHeight = true;
+  // Whether each node list is the `font` shorthand's own text, where a `/`
+  // separates the size from the line height: the top level of a `font`
+  // declaration and a var() fallback written there (a parent is walked
+  // before its children).  Inside a math function
+  // (`min(var(--fs-base) / 2, 12px)`), and in a var() fallback nested in
+  // one, a `/` is a division; `font-size` has no line height at all.
+  const shorthandText = new Map([[parsed.nodes, prop === 'font']]);
+  parsed.walk((node, _index, siblings) => {
+    if (node.type === 'function') {
+      if (node.value.toLowerCase() === 'url') return false;
+      shorthandText.set(
+        node.nodes,
+        node.value.toLowerCase() === 'var' && shorthandText.get(siblings),
+      );
+    }
+    if (node.type === 'div' && node.value === '/' && shorthandText.get(siblings)) {
+      lineHeight = true;
+    }
     if (node.type !== 'word') return undefined;
     const key = violation(kind, node.value, lineHeight);
     if (key) {
@@ -85,7 +109,8 @@ function checkDeclaration(decl, result) {
         ruleName,
         message: messages[key](node.value),
         node: decl,
-        word: node.value,
+        index: valueIndex + node.sourceIndex,
+        endIndex: valueIndex + node.sourceEndIndex,
       });
     }
     return undefined;
@@ -96,8 +121,8 @@ function checkDeclaration(decl, result) {
  * Stylelint rule function for `kiss/design-tokens`.
  *
  * @param {boolean} primary `true` enables the rule.
- * @param {{tokenSelectors?: string[]}} [secondary] Selectors whose custom
- *   properties are the token block and may hold raw values.
+ * @param {{tokenSelectors?: string|string[]}} [secondary] Selectors whose
+ *   custom properties are the token block and may hold raw values.
  * @returns {Function} PostCSS walker that reports each raw value.
  */
 function rule(primary, secondary) {
@@ -113,7 +138,9 @@ function rule(primary, secondary) {
       },
     );
     if (!valid) return;
-    const tokenSelectors = (secondary && secondary.tokenSelectors) || [':root'];
+    // The validator accepts one selector string as well as an array; a string
+    // would otherwise match as a substring (`':root'.includes('root')`).
+    const tokenSelectors = [].concat((secondary && secondary.tokenSelectors) || [':root']);
     root.walkDecls(decl => {
       if (!isTokenDeclaration(decl, tokenSelectors)) checkDeclaration(decl, result);
     });

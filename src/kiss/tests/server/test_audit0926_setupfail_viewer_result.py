@@ -120,6 +120,13 @@ class TestSetupFailureResultReachesViewer(TestCase):
             self._wait((self.tmp / "entered").exists, 30.0),
             "the run never reached the SEA getter",
         )
+        # Every surface must show the launcher running during SEA setup,
+        # not only after the (possibly unbounded) getters finish.
+        started = self._events(launcher, "status")
+        self.assertEqual([ev.get("running") for ev in started], [True])
+        self.assertEqual(started[0]["taskId"], f"tok-{launcher}")
+        self.assertGreater(started[0]["startTs"], 0)
+        self.assertEqual(self._events(launcher, "result"), [])
         state = agent_state.find_by_tab(launcher)
         assert state is not None
         provisional_id = state.task_id

@@ -67,8 +67,10 @@ import ssl
 import sys
 import time
 from collections.abc import Iterable
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
@@ -194,16 +196,25 @@ def api_get(url: str, headers: dict[str, str] | None = None) -> Any:
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_DECISIONS_MODELS_URL = f"{OPENROUTER_MODELS_URL}?output_modalities=decisions"
 TOGETHER_MODELS_URL = "https://api.together.xyz/v1/models"
+GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
 
 
 # OpenRouter ``pricing`` fields (USD per token) carried into the catalog
 # beside the plain input/output prices: cache hits, cache writes and, for
 # image-generation models, the per-token rate of generated images
-# (gemini-nano-banana-2.1 bills images at $30/1M vs $7.50/1M for text).
+# (gemini-nano-banana-2.1 bills images at $30/1M vs $7.50/1M for text),
+# and audio input/output rates (gemini-3.5-flash bills audio input at
+# $3/1M vs $1.50/1M for text; voxtral-small $100/1M vs $0.10/1M).
+# ``calculate_cost`` derives the audio cache-read rate from these as
+# ``audio_input * cache_read / input``, which matches OpenRouter's
+# ``input_audio_cache`` for every model that publishes one.
 _OPENROUTER_CACHE_PRICE_FIELDS = (
     ("input_cache_read", "cache_read_price_per_1M"),
     ("input_cache_write", "cache_write_price_per_1M"),
     ("image_output", "image_output_price_per_1M"),
+    ("audio", "audio_input_price_per_1M"),
+    ("audio_output", "audio_output_price_per_1M"),
 )
 _CACHE_PRICE_CATALOG_FIELDS = tuple(field for _api, field in _OPENROUTER_CACHE_PRICE_FIELDS)
 # Catalog fields an update removes when OpenRouter stops publishing them.
@@ -236,9 +247,12 @@ def openrouter_cache_prices(pricing: dict[str, Any]) -> dict[str, float]:
     model whose upstream bills cache hits / cache writes at a rate other
     than the plain input price, and ``pricing.image_output`` for
     image-generation models whose generated images cost more than text
-    output.  They are the billing authority for ``openrouter/*`` models,
-    so the catalog stores them verbatim as ``cache_read_price_per_1M`` /
-    ``cache_write_price_per_1M`` / ``image_output_price_per_1M`` and
+    output, and ``pricing.audio`` / ``pricing.audio_output`` for models
+    that bill audio tokens.  They are the billing authority for
+    ``openrouter/*`` models, so the catalog stores them verbatim as
+    ``cache_read_price_per_1M`` / ``cache_write_price_per_1M`` /
+    ``image_output_price_per_1M`` / ``audio_input_price_per_1M`` /
+    ``audio_output_price_per_1M`` and
     ``model_info._apply_cache_pricing`` leaves such entries alone.  A
     field OpenRouter omits (``None`` / ``""``) is left out of the result
     so ``calculate_cost`` falls back to the input (or text output) price
@@ -248,7 +262,7 @@ def openrouter_cache_prices(pricing: dict[str, Any]) -> dict[str, float]:
         pricing: The ``pricing`` object of one ``/api/v1/models`` entry.
 
     Returns:
-        Zero to three catalog fields, rounded to 6 decimals per 1M
+        Zero to five catalog fields, rounded to 6 decimals per 1M
         tokens (sub-cent cache rates such as $0.0083/M need the extra
         precision that the 3-decimal input/output rounding would drop).
     """
@@ -269,14 +283,14 @@ _OPENROUTER_TIER_PRICE_FIELDS = (
     ("input_cache_read", "cache_read_price_per_1M"),
     ("input_cache_write", "cache_write_price_per_1M"),
     ("input_cache_write_1h", "cache_write_1h_price_per_1M"),
+    ("audio", "audio_input_price_per_1M"),
+    ("audio_output", "audio_output_price_per_1M"),
 )
 # Other ``pricing`` keys an override may set that the catalog does not
 # tier.  Any key outside these two sets is a condition this importer does
 # not understand (e.g. the ``utc_*`` time-of-day windows).
 _OPENROUTER_UNTIERED_PRICE_KEYS = frozenset(
     {
-        "audio",
-        "audio_output",
         "discount",
         "image",
         "image_output",
@@ -461,8 +475,6 @@ def fetch_gemini(verbose: bool = False) -> dict[str, dict]:
         return {}
     if verbose:  # pragma: no branch
         print("  Fetching Gemini models...")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-    data = api_get(url)
     skip_fragments = (
         "-latest",
         "-preview-tts",
@@ -474,23 +486,34 @@ def fetch_gemini(verbose: bool = False) -> dict[str, dict]:
         "-robotics",
     )
     models: dict[str, dict] = {}
-    for m in data.get("models", []):  # pragma: no branch
-        raw_name = m.get("name", "")
-        model_id = raw_name.replace("models/", "")
-        if not model_id.startswith("gemini-"):  # pragma: no branch
-            continue
-        if any(s in model_id for s in skip_fragments):  # pragma: no branch
-            continue
-        ctx = _cap_context_length(m.get("inputTokenLimit", 0) or 0)
-        methods = m.get("supportedGenerationMethods", [])
-        is_emb = "embedContent" in methods
-        is_gen = "generateContent" in methods
-        models[model_id] = {
-            "context_length": ctx,
-            "source": "gemini",
-            "is_embedding": is_emb,
-            "is_generation": is_gen,
-        }
+    # The listing is paged: every page after the first is reached through
+    # its predecessor's ``nextPageToken``.  A page that cannot be fetched
+    # raises (like the first page), so a partial listing never reaches
+    # find_deprecated_models, which would retire every model on the
+    # pages it did not see.
+    query = {"key": api_key}
+    while True:
+        data = api_get(f"{GEMINI_MODELS_URL}?{urlencode(query)}")
+        for m in data.get("models", []):  # pragma: no branch
+            raw_name = m.get("name", "")
+            model_id = raw_name.replace("models/", "")
+            if not model_id.startswith("gemini-"):  # pragma: no branch
+                continue
+            if any(s in model_id for s in skip_fragments):  # pragma: no branch
+                continue
+            ctx = _cap_context_length(m.get("inputTokenLimit", 0) or 0)
+            methods = m.get("supportedGenerationMethods", [])
+            is_emb = "embedContent" in methods
+            is_gen = "generateContent" in methods
+            models[model_id] = {
+                "context_length": ctx,
+                "source": "gemini",
+                "is_embedding": is_emb,
+                "is_generation": is_gen,
+            }
+        if not data.get("nextPageToken"):
+            break
+        query["pageToken"] = data["nextPageToken"]
     if verbose:  # pragma: no branch
         print(f"    Found {len(models)} models")
     return models
@@ -509,13 +532,21 @@ def fetch_anthropic(verbose: bool = False) -> dict[str, dict]:
     if workspace_id:  # pragma: no branch
         # Required when the key is identity-linked; harmless otherwise.
         headers["anthropic-workspace-id"] = workspace_id
-    data = api_get("https://api.anthropic.com/v1/models", headers=headers)
     models: dict[str, dict] = {}
-    for m in data.get("data", []):  # pragma: no branch
-        model_id = m.get("id", "")
-        if not model_id.startswith("claude-"):  # pragma: no branch
-            continue
-        models[model_id] = {"source": "anthropic"}
+    # Paged like Gemini's listing: ``has_more`` + ``last_id`` lead to the
+    # next page through ``after_id``; a page that cannot be fetched raises
+    # so no partial listing retires the models on the pages not seen.
+    url = ANTHROPIC_MODELS_URL
+    while True:
+        data = api_get(url, headers=headers)
+        for m in data.get("data", []):  # pragma: no branch
+            model_id = m.get("id", "")
+            if not model_id.startswith("claude-"):  # pragma: no branch
+                continue
+            models[model_id] = {"source": "anthropic"}
+        if not data.get("has_more") or not data.get("last_id"):
+            break
+        url = f"{ANTHROPIC_MODELS_URL}?{urlencode({'after_id': data['last_id']})}"
     if verbose:  # pragma: no branch
         print(f"    Found {len(models)} models")
     return models
@@ -765,7 +796,88 @@ def _probe_attachments(model_name: str) -> list[Any] | None:
     return [Attachment(data=_tiny_wav_bytes(), mime_type="audio/wav")]
 
 
-def test_generate(model_name: str) -> bool:
+UNVERIFIED = "unverified"
+"""The ``thinking`` verdict of a probe that endpoint or credential trouble cut short.
+
+Unlike ``None`` ("no level accepted") it never reaches the catalog: a
+retest keeps the stored level and its aliases, a new entry gets no level.
+"""
+
+
+def _is_inconclusive_probe_error(exc: Exception) -> bool:
+    """Return True when a failed probe says nothing about the model's capability.
+
+    A missing or rejected credential, a rate limit, a timeout, a dropped
+    connection or a vendor 5xx is trouble with the endpoint or the key,
+    not a verdict on the model, so the capability it was testing must
+    keep its stored value.  Only a definitive rejection of the request
+    itself (an unknown model, an unsupported parameter) or an empty answer
+    is a verdict.  A transport failure is recognised by type: the builtin
+    ``TimeoutError`` / ``ConnectionError``, httpx's (what google-genai and
+    the decisions adapter raise or wrap) and the openai / anthropic SDKs'
+    ``APIConnectionError``.  Status codes are read from the openai /
+    anthropic SDK (``status_code``), google-genai (``code``) and the
+    decisions adapter's ``KISSError`` message (``HTTP nnn``).  An adapter
+    wraps the SDK's error in its own (``raise KISSError(...) from err``),
+    so the ``__cause__`` chain is walked, outermost verdict first;
+    everything else falls back to the Responses probe's transient-error
+    test.
+
+    Args:
+        exc: The exception a probe caught.
+    """
+    import httpx
+    from anthropic import APIConnectionError as AnthropicConnectionError
+    from openai import APIConnectionError as OpenAIConnectionError
+
+    transport = (
+        TimeoutError,
+        ConnectionError,
+        httpx.TransportError,
+        AnthropicConnectionError,
+        OpenAIConnectionError,
+    )
+    error: BaseException | None = exc
+    while error is not None:
+        if isinstance(error, transport):
+            return True
+        status = getattr(error, "status_code", None)
+        if status is None:
+            status = getattr(error, "code", None)
+        if not isinstance(status, int):
+            match = re.search(r"\bHTTP (\d{3})\b", str(error))
+            status = int(match.group(1)) if match else None
+        if status is not None:
+            return status in (401, 403, 408, 429) or status >= 500
+        error = error.__cause__
+    from kiss.scripts.update_responses_api_support import _is_transient_error
+
+    return _is_transient_error(exc)
+
+
+def _probe_credential_configured(model_name: str) -> bool:
+    """Return whether the key the probes of ``model_name`` would send is configured.
+
+    Without it every probe would fail before reaching the vendor, which
+    says nothing about the model; a provider the registry does not know
+    counts as configured so that its probes decide.
+
+    Args:
+        model_name: The catalog name about to be probed.
+    """
+    from kiss.core.models.model_info import _configured_providers, get_model_provider
+
+    return _configured_providers().get(get_model_provider(model_name), True)
+
+
+def test_generate(model_name: str) -> bool | None:
+    """Live-probe plain text generation.
+
+    Returns:
+        True when the model answered, False when the request was
+        rejected or answered empty, None when endpoint or credential
+        trouble (:func:`_is_inconclusive_probe_error`) left it untested.
+    """
     from kiss.core.models.model_info import model as create_model
 
     try:
@@ -773,9 +885,9 @@ def test_generate(model_name: str) -> bool:
         m.initialize("Say hello in one word.", attachments=_probe_attachments(model_name))
         text, _ = m.generate()
         return bool(text and text.strip())
-    except Exception:
+    except Exception as e:
         logger.debug("Exception caught", exc_info=True)
-        return False
+        return None if _is_inconclusive_probe_error(e) else False
 
 
 def test_embedding(model_name: str) -> bool:
@@ -791,7 +903,7 @@ def test_embedding(model_name: str) -> bool:
         return False
 
 
-def test_decisions(model_name: str) -> bool:
+def test_decisions(model_name: str) -> bool | None:
     """Live-probe a decisions model with one question of each type.
 
     The candidate is not in the catalog yet, so the ``model()`` factory
@@ -804,12 +916,17 @@ def test_decisions(model_name: str) -> bool:
         model_name: Catalog name, e.g. ``openrouter/~typesafe/jev-latest``.
 
     Returns:
-        True when the probe round-trips, False on any error.
+        True when the probe round-trips, False when the endpoint rejected
+        it or answered off-shape, None when the key is missing or the
+        failure was endpoint trouble (:func:`_is_inconclusive_probe_error`).
     """
     from kiss.core.models.decisions_model import DecisionsModel, choice, noul, score
 
+    api_key = os.getenv("OPENROUTER_API_KEY", "")
+    if not api_key:
+        return None
     try:
-        m = DecisionsModel(model_name, api_key=os.getenv("OPENROUTER_API_KEY", ""))
+        m = DecisionsModel(model_name, api_key=api_key)
         answers = m.decide(
             "The package arrived crushed and the item inside is broken.",
             {
@@ -823,9 +940,9 @@ def test_decisions(model_name: str) -> bool:
             and answers["issue"].get("choice") in ("damage", "delay", "other")
             and isinstance(answers["severity"].get("score"), (int, float))
         )
-    except Exception:
+    except Exception as e:
         logger.debug("Exception caught", exc_info=True)
-        return False
+        return None if _is_inconclusive_probe_error(e) else False
 
 
 _THINKING_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
@@ -918,6 +1035,12 @@ Unlike ``grok-4.5``/``grok-4.3``, the mini family accepts ONLY ``low`` and
 ``high`` — ``medium`` returns HTTP 400 (docs.x.ai). The alias-writer emits
 ``-low`` and ``-high`` siblings only; a bogus ``-medium`` alias would be a
 correctness bug."""
+
+_GEMINI_THINKING_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+"""The Gemini ``thinking_config.thinking_level`` scale that ``GeminiModel``
+sends for ``reasoning_effort``. ``gemini-4-argon`` and ``gemini-3.8-flash``
+accept these three and reject ``minimal`` with HTTP 400 (live probe,
+2026-11-05); models without thinking levels (Gemini 2.5) reject them all."""
 
 _XAI_MODEL_PREFIXES: tuple[str, ...] = (
     "openrouter/x-ai/",
@@ -1076,12 +1199,15 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
       (``low``/``medium``/``high``).
     * z-ai ``GLM-5.2`` uses :data:`_GLM_5_2_EFFORT_LEVELS`
       (``high``/``max``).
+    * Direct ``gemini-*`` models use :data:`_GEMINI_THINKING_LEVELS`
+      (``low``/``medium``/``high``).
     * Direct ``claude-*`` models use the Anthropic ``output_config.effort``
       ladder from :func:`_anthropic_effort_scale` (up to
-      ``low``/``medium``/``high``/``xhigh``/``max``); a ``bedrock/`` id
-      and an ``openrouter/anthropic/claude-*`` slug use the ladder of the
-      Claude model behind them (OpenRouter forwards ``reasoning.effort``
-      to Anthropic unchanged).
+      ``low``/``medium``/``high``/``xhigh``/``max``); a ``bedrock/`` id,
+      an ``openrouter/anthropic/claude-*`` slug and a ``cc/claude-*`` key
+      use the ladder of the Claude model behind them (OpenRouter forwards
+      ``reasoning.effort`` to Anthropic unchanged; the Claude Code CLI
+      takes the level as ``--effort``).
     * Every other model uses the OpenAI ladder :data:`_THINKING_LEVELS`
       (``low``/``medium``/``high``/``xhigh``) — including Together's
       OpenAI-compatible ``openai/gpt-oss-*`` entries, which naturally top
@@ -1105,6 +1231,8 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
         return _GROK_EFFORT_LEVELS
     if _is_glm_5_2_family(model_name):
         return _GLM_5_2_EFFORT_LEVELS
+    if model_name.startswith("gemini-"):
+        return _GEMINI_THINKING_LEVELS
     if model_name.startswith("claude-"):
         return _anthropic_effort_scale(model_name)
     if model_name.startswith("bedrock/"):
@@ -1113,6 +1241,8 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
         return _anthropic_effort_scale(bedrock_claude_name(model_name) or model_name)
     if model_name.startswith(_OPENROUTER_CLAUDE_PREFIX):
         return _anthropic_effort_scale(_openrouter_claude_slug(model_name))
+    if model_name.startswith(_CLAUDE_CODE_PREFIX):
+        return _anthropic_effort_scale(model_name.removeprefix(_CLAUDE_CODE_PREFIX))
     return _THINKING_LEVELS
 
 
@@ -1135,10 +1265,10 @@ def detect_thinking_level(model_name: str) -> str | None:
 
     * ``codex/*`` — routed through the Codex CLI, which controls reasoning
       via its own ``model_reasoning_effort`` config rather than per-call.
-    * ``cc/*`` — routed through the Claude Code CLI, which has no
-      ``reasoning_effort`` surface at all.
-    * ``gemini-*`` — Gemini's ``thinking_config.thinking_level`` is not
-      wired to ``reasoning_effort``.
+    * ``cc/*`` — routed through the Claude Code CLI, which runs an
+      unsupported ``--effort`` level at the highest one below it instead
+      of rejecting it, so a probe proves nothing; the level is mirrored
+      from the direct ``claude-*`` twin by :func:`_sync_claude_code_thinking`.
     * Variants known to reject ``reasoning_effort`` entirely (``-pro``,
       ``-chat-latest``, ``-image``).
 
@@ -1148,6 +1278,16 @@ def detect_thinking_level(model_name: str) -> str | None:
     probe yields the model's ladder top (see :func:`_anthropic_effort_scale`
     for the per-generation ladders). Claude models without the effort
     parameter (Haiku 4.5, Sonnet 4.5) fail every level and return ``None``.
+
+    Direct ``gemini-*`` models are probed too: ``GeminiModel`` sends
+    ``reasoning_effort`` as ``thinking_config.thinking_level``, which
+    Gemini 2.5 models and unsupported levels reject with HTTP 400. A
+    ``high`` verdict (e.g. ``gemini-4-argon``) makes
+    :func:`_write_entry_with_thinking_split` emit the ``-low`` /
+    ``-medium`` / ``-high`` aliases.
+
+    Also returns ``None`` without an API call for:
+
     * Moonshot models outside the Kimi K3 family (K2.x controls thinking
       via ``thinking.type``, ``moonshot-v1-*`` has none; see
       :func:`_is_kimi_k3_family`).
@@ -1168,7 +1308,7 @@ def detect_thinking_level(model_name: str) -> str | None:
     """
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
-    if model_name.startswith(("codex/", "cc/", "gemini-")):
+    if model_name.startswith(("codex/", "cc/")):
         return None
     if any(marker in model_name for marker in ("-pro", "chat-latest", "-image")):
         return None
@@ -1186,7 +1326,8 @@ def detect_thinking_level(model_name: str) -> str | None:
     )
     is_glm_5_2 = _is_glm_5_2_family(model_name)
     if not (
-        is_openai
+        model_name.startswith("gemini-")
+        or is_openai
         or is_anthropic
         or is_openrouter_openai
         or is_together_gpt_oss
@@ -1209,8 +1350,12 @@ def detect_thinking_level(model_name: str) -> str | None:
             text, _ = m.generate()
             if text and text.strip():
                 return level
-        except Exception:
+        except Exception as e:
             logger.debug("Exception caught", exc_info=True)
+            if _is_inconclusive_probe_error(e):
+                # The ladder's maximum is unknown: a lower level answering
+                # would wrongly demote the stored level and delete aliases.
+                return UNVERIFIED
             continue
     return None
 
@@ -1271,7 +1416,8 @@ def safe_arithmetic(expression: str) -> str:
         return "error"
 
 
-def test_function_calling(model_name: str) -> bool:
+def test_function_calling(model_name: str) -> bool | None:
+    """Live-probe tool calling; ``None`` when endpoint or credential trouble left it unknown."""
     from kiss.core.models.model_info import model as create_model
 
     def calculator(expression: str = "") -> str:
@@ -1290,9 +1436,9 @@ def test_function_calling(model_name: str) -> bool:
         )
         calls, _, _ = m.generate_and_process_with_tools({"calculator": calculator})
         return len(calls) > 0
-    except Exception:
+    except Exception as e:
         logger.debug("Exception caught", exc_info=True)
-        return False
+        return None if _is_inconclusive_probe_error(e) else False
 
 
 def test_responses_api(model_name: str, fc: bool) -> bool | None:
@@ -1324,9 +1470,10 @@ def test_responses_api(model_name: str, fc: bool) -> bool | None:
 
 
 def _print_capability_flags(results: dict[str, Any]) -> None:
-    """Print one probe's results as ``key=Y/N`` (or the level string) flags."""
+    """Print one probe's results as ``key=Y/N`` flags (``?`` untested, or the level string)."""
     flags = " ".join(
-        f"{k}={v if isinstance(v, str) else ('Y' if v else 'N')}" for k, v in results.items()
+        f"{k}={v if isinstance(v, str) else '?' if v is None else ('Y' if v else 'N')}"
+        for k, v in results.items()
     )
     print(f" {flags}")
 
@@ -1348,11 +1495,16 @@ def test_model_capabilities(
 
     Returns:
         ``{"gen", "emb", "fc", "thinking", "use_responses_api", "dec"}``.
+        ``gen``, ``fc``, ``dec`` and ``use_responses_api`` are ``None`` and
+        ``thinking`` is :data:`UNVERIFIED` when endpoint or credential
+        trouble left the capability untested; callers keep the stored
+        value then (a probe that was never answered is not a verdict).
     """
     results: dict[str, Any] = {}
     if verbose:  # pragma: no branch
         print(f"    Testing {model_name}...", end="", flush=True)
 
+    configured = _probe_credential_configured(model_name)
     if decisions:
         results.update(
             gen=False,
@@ -1360,38 +1512,42 @@ def test_model_capabilities(
             fc=False,
             thinking=None,
             use_responses_api=None,
-            dec=test_decisions(model_name),
+            dec=test_decisions(model_name) if configured else None,
         )
         if verbose:  # pragma: no branch
             _print_capability_flags(results)
         return results
     results["dec"] = False
 
-    results["gen"] = test_generate(model_name)
+    results["gen"] = test_generate(model_name) if configured else None
     time.sleep(0.5)
 
-    results["emb"] = test_embedding(model_name)
+    results["emb"] = test_embedding(model_name) if configured else False
     time.sleep(0.5)
 
     if results["gen"]:  # pragma: no branch
         results["fc"] = test_function_calling(model_name)
         time.sleep(0.5)
-    else:
-        results["fc"] = False
-
-    if results["gen"]:  # pragma: no branch
         results["thinking"] = detect_thinking_level(model_name)
         time.sleep(0.5)
-    else:
-        results["thinking"] = None
-
-    if results["gen"]:  # pragma: no branch
-        results["use_responses_api"] = test_responses_api(model_name, results["fc"])
+        # Whether v2 carries tools is only verified for a model known to
+        # call them; an untested ``fc`` leaves the transport unverified too.
+        results["use_responses_api"] = (
+            test_responses_api(model_name, results["fc"]) if results["fc"] is not None else None
+        )
         time.sleep(0.5)
+    elif results["gen"] is None:
+        # Endpoint outage or missing key: nothing about the model was
+        # verified, so no dependent capability gets a verdict either.
+        results["fc"] = None
+        results["thinking"] = UNVERIFIED
+        results["use_responses_api"] = None
     else:
-        # The generation probe itself failed (endpoint outage, missing
-        # key, deprecated model): nothing was verified either way, so the
-        # verdict is inconclusive rather than a negative.
+        # The model definitively does not generate text (rejected or
+        # deprecated): it calls no tools and has no effort ladder, while
+        # the v2 transport was never exercised.
+        results["fc"] = False
+        results["thinking"] = None
         results["use_responses_api"] = None
 
     if verbose:  # pragma: no branch
@@ -1765,6 +1921,25 @@ def _openrouter_claude_slug(name: str) -> str:
     return _twin_key(name.rsplit("/", 1)[-1])
 
 
+_CLAUDE_CODE_PREFIX = "cc/"
+"""Catalog-key prefix of the models routed through the Claude Code CLI."""
+
+
+def _claude_code_twin_key(name: str, names: Iterable[str]) -> str | None:
+    """Return the direct ``claude-*`` key in ``names`` behind a ``cc/`` key.
+
+    The slug after ``cc/`` is the Anthropic model id the CLI is given
+    (``cc/claude-opus-5-5`` → ``claude-opus-5-5``), dated or not, so the
+    twin is resolved like a Bedrock id's (:func:`_bedrock_twin_key`: the
+    dated key first, else the undated one).  None when ``name`` is not a
+    ``cc/`` key, for the CLI's own short aliases (``cc/opus`` names
+    whichever Opus the CLI picks) and when ``names`` lacks the twin.
+    """
+    if not name.startswith(_CLAUDE_CODE_PREFIX):
+        return None
+    return _bedrock_twin_key(name.removeprefix(_CLAUDE_CODE_PREFIX), names)
+
+
 def _openrouter_claude_twin_key(name: str, names: Iterable[str]) -> str | None:
     """Return the direct ``claude-*`` key in ``names`` serving an OpenRouter Claude id.
 
@@ -1955,6 +2130,50 @@ def _sync_openrouter_claude_thinking(
         )
 
 
+def _sync_claude_code_thinking(
+    current: dict[str, dict],
+    updates: list[dict],
+    new_models: list[dict],
+) -> None:
+    """Give every ``cc/claude-*`` entry the effort level of its ``claude-*`` twin.
+
+    ``ClaudeCodeModel`` passes the entry's ``thinking`` level to the CLI
+    as ``--effort``, which runs the same ``low`` … ``max`` ladder as the
+    direct model's ``output_config.effort``, yet a ``cc/`` key is never
+    probed (:func:`detect_thinking_level` is gated off for it: the CLI
+    runs an unsupported level at the highest one below it instead of
+    rejecting it, so a probe proves nothing).  The level is therefore a
+    mirror of the direct twin's, resolved exactly as
+    :func:`_sync_openrouter_claude_thinking` resolves a slug's.  The
+    CLI's short aliases (``cc/opus``, ``cc/sonnet``, ``cc/haiku``) name no
+    fixed model and keep no level: the CLI's own default applies.  Called
+    from :func:`compute_changes` and again from ``main`` after the probes
+    and retests, like the other mirror syncs.
+
+    Args:
+        current: The current catalog.
+        updates: This run's update records; extended in place.
+        new_models: This run's candidates (probed); mutated in place.
+    """
+    new_by_name = {nm["name"]: nm for nm in new_models}
+    update_by_name = {upd["name"]: upd for upd in updates}
+    bases = [
+        name
+        for name in sorted(set(current) | set(new_by_name))
+        if name.startswith(_CLAUDE_CODE_PREFIX) and not (current.get(name) or {}).get("alias_of")
+    ]
+    for name in bases:
+        if (key := _claude_code_twin_key(name, new_by_name)) is not None:
+            level = new_by_name[key].get("thinking")
+        elif (key := _claude_code_twin_key(name, current)) is not None:
+            level = _run_thinking_level(key, current, update_by_name)
+        else:
+            level = None
+        _set_mirror_thinking(
+            name, level, "claude-code", current, updates, new_by_name, update_by_name
+        )
+
+
 def _run_thinking_level(
     key: str, current: dict[str, dict], update_by_name: dict[str, dict]
 ) -> str | None:
@@ -2029,9 +2248,12 @@ def _cache_price_changes(cur: dict[str, Any], fetched: dict[str, Any]) -> dict[s
     Compares ``cache_read_price_per_1M`` / ``cache_write_price_per_1M`` /
     ``image_output_price_per_1M``
     (see :func:`openrouter_cache_prices`) with the catalog entry ``cur``
-    (``{}`` for a brand-new model) and returns the fields whose values
-    differ by more than a tenth of a cent per 1M tokens, so a sub-cent
-    DeepSeek cache rate still registers while float noise does not.  A
+    (``{}`` for a brand-new model) and returns the fields that moved
+    past :func:`_price_changed`'s tolerance, the one the input and
+    output prices use.  A fixed absolute tolerance ($0.0001/1M) once
+    held a sub-cent cache rate while its equal input price moved
+    (glm-flash-latest: input $0.0284, cache read $0.0285 -- a cache
+    hit billed above a plain input token).  A
     price the catalog stores but OpenRouter no longer publishes is
     returned as ``None`` so :func:`apply_updates_to_file` drops the field
     and the model reverts to the input-price fallback.
@@ -2051,7 +2273,7 @@ def _cache_price_changes(cur: dict[str, Any], fetched: dict[str, Any]) -> dict[s
         if value is None:
             if current_value is not None:
                 changed[catalog_field] = None
-        elif current_value is None or abs(value - current_value) > 0.0001:
+        elif current_value is None or _price_changed(current_value, value):
             changed[catalog_field] = value
     return changed
 
@@ -2182,11 +2404,9 @@ def compute_changes(
                 fetched["context_length"] and fetched["context_length"] != cur["context_length"]
             ):
                 changed["context_length"] = fetched["context_length"]
-            inp_changed = _price_changed(cur["input_price_per_1M"], fetched["input_price_per_1M"])
-            out_changed = _price_changed(cur["output_price_per_1M"], fetched["output_price_per_1M"])
-            if inp_changed and not cur["emb"]:  # pragma: no branch
+            if _price_changed(cur["input_price_per_1M"], fetched["input_price_per_1M"]):
                 changed["input_price_per_1M"] = fetched["input_price_per_1M"]
-            if out_changed and not cur["emb"]:  # pragma: no branch
+            if _price_changed(cur["output_price_per_1M"], fetched["output_price_per_1M"]):
                 changed["output_price_per_1M"] = fetched["output_price_per_1M"]
             changed.update(_cache_price_changes(cur, fetched))
             if changed:  # pragma: no branch
@@ -2236,6 +2456,8 @@ def compute_changes(
                 "output_price_per_1M": out,
                 "source": "gemini",
                 "needs_pricing": inp == 0,
+                "is_embedding": fetched.get("is_embedding", False),
+                "is_generation": fetched.get("is_generation", True),
             }
             # Image models bill generated images far above text output
             # (nano-banana-2.1: $30/1M vs $7.50/1M); without the rate the
@@ -2302,6 +2524,7 @@ def compute_changes(
         # as a change); main() re-syncs after the probes and retests.
         _sync_bedrock_thinking(bedrock, current, updates, new_models)
     _sync_openrouter_claude_thinking(current, updates, new_models)
+    _sync_claude_code_thinking(current, updates, new_models)
 
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
@@ -2644,6 +2867,33 @@ def _has_thinking_normalization_changes(data: dict[str, dict]) -> bool:
     return normalized != data
 
 
+def catalog_lock(path: Path) -> AbstractContextManager[bool]:
+    """Return the cross-process lock every writer of the catalog at ``path`` holds.
+
+    Catalog writes are read-modify-write cycles: this script's updates,
+    scrubbing and seeding, and the Responses scan of
+    ``update_responses_api_support`` all read the file, change entries and
+    publish the whole table.  Atomic replacement keeps the JSON intact but
+    not the cycles apart: a scan that read the catalog before an update
+    committed would publish its stale copy over the committed prices and
+    new entries.  Each writer therefore holds this lock from its read to
+    its publish (never during probes).  The lock file lives under the
+    kiss home, keyed by the resolved catalog path, because the default
+    catalog is a tracked repository file and a sibling lock would be
+    committed with it.
+
+    Args:
+        path: The catalog file whose writers to serialize.
+    """
+    import hashlib
+
+    from kiss.core.config import kiss_home
+    from kiss.core.file_lock import exclusive_file_lock
+
+    digest = hashlib.sha1(str(path.resolve()).encode()).hexdigest()[:16]
+    return exclusive_file_lock(kiss_home() / "locks" / f"model-info-{digest}.lock")
+
+
 def _read_model_info_json(path: Path) -> dict[str, dict]:
     """Read MODEL_INFO.json into a name → entry-dict mapping.
 
@@ -2733,84 +2983,85 @@ def apply_updates_to_file(
         dry_run: When True, print what would change and return without
             touching disk.
     """
-    data = _read_model_info_json(MODEL_INFO_PATH)
-    _normalize_thinking_splits(data)
+    with catalog_lock(MODEL_INFO_PATH):
+        data = _read_model_info_json(MODEL_INFO_PATH)
+        _normalize_thinking_splits(data)
 
-    deprecated_names = {d["name"] for d in deprecated}
-    removed = 0
-    for name in deprecated_names:
-        if data.pop(name, None) is not None:
-            removed += 1
-        for level in _ALL_THINKING_LEVELS:
-            sibling_name = f"{name}-{level}"
-            sibling = data.get(sibling_name)
-            if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
-                data.pop(sibling_name)
+        deprecated_names = {d["name"] for d in deprecated}
+        removed = 0
+        for name in deprecated_names:
+            if data.pop(name, None) is not None:
                 removed += 1
+            for level in _ALL_THINKING_LEVELS:
+                sibling_name = f"{name}-{level}"
+                sibling = data.get(sibling_name)
+                if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
+                    data.pop(sibling_name)
+                    removed += 1
 
-    applied = 0
-    for upd in updates:  # pragma: no branch
-        name = upd["name"]
-        if name in deprecated_names:
-            continue
-        cur = current.get(name, {})
-        entry = data.get(name) or _build_entry(
-            ctx=cur.get("context_length", 0),
-            inp=cur.get("input_price_per_1M", 0.0),
-            out=cur.get("output_price_per_1M", 0.0),
-            fc=cur.get("fc", True),
-            emb=cur.get("emb", False),
-            gen=cur.get("gen", True),
-            thinking=cur.get("thinking"),
-            use_responses_api=bool(cur.get("use_responses_api")),
-            dec=cur.get("dec", False),
-        )
-        changes = upd["changes"]
-        for field, value in changes.items():  # pragma: no branch
-            if field == "thinking" and value is None:  # pragma: no branch
-                entry.pop("thinking", None)
-            elif field in ("use_responses_api", "dec") and not value:
-                entry.pop(field, None)
-            elif field in _REMOVABLE_PRICE_FIELDS and value is None:
-                entry.pop(field, None)
-            else:
-                entry[field] = value
-        if entry.get("comment") == "NEW: needs pricing" and entry["input_price_per_1M"] > 0:
-            entry["comment"] = "NEW"
-        _write_entry_with_thinking_split(
-            data,
-            name,
-            entry,
-            remove_stale_siblings="thinking" in changes,
-        )
-        applied += 1
+        applied = 0
+        for upd in updates:  # pragma: no branch
+            name = upd["name"]
+            if name in deprecated_names:
+                continue
+            cur = current.get(name, {})
+            entry = data.get(name) or _build_entry(
+                ctx=cur.get("context_length", 0),
+                inp=cur.get("input_price_per_1M", 0.0),
+                out=cur.get("output_price_per_1M", 0.0),
+                fc=cur.get("fc", True),
+                emb=cur.get("emb", False),
+                gen=cur.get("gen", True),
+                thinking=cur.get("thinking"),
+                use_responses_api=bool(cur.get("use_responses_api")),
+                dec=cur.get("dec", False),
+            )
+            changes = upd["changes"]
+            for field, value in changes.items():  # pragma: no branch
+                if field == "thinking" and value is None:  # pragma: no branch
+                    entry.pop("thinking", None)
+                elif field in ("use_responses_api", "dec") and not value:
+                    entry.pop(field, None)
+                elif field in _REMOVABLE_PRICE_FIELDS and value is None:
+                    entry.pop(field, None)
+                else:
+                    entry[field] = value
+            if entry.get("comment") == "NEW: needs pricing" and entry["input_price_per_1M"] > 0:
+                entry["comment"] = "NEW"
+            _write_entry_with_thinking_split(
+                data,
+                name,
+                entry,
+                remove_stale_siblings="thinking" in changes,
+            )
+            applied += 1
 
-    added = 0
-    for nm in new_models:  # pragma: no branch
-        comment = "NEW: needs pricing" if nm.get("needs_pricing") else "NEW"
-        entry = _build_entry(
-            ctx=nm["context_length"],
-            inp=nm["input_price_per_1M"],
-            out=nm["output_price_per_1M"],
-            fc=nm.get("fc", True),
-            emb=nm.get("emb", False),
-            gen=nm.get("gen", True),
-            thinking=nm.get("thinking"),
-            comment=comment,
-            use_responses_api=nm.get("use_responses_api", False),
-            dec=nm.get("dec", False),
-        )
-        entry.update(_cache_price_changes({}, nm))
-        entry.update(_prompt_tier_changes({}, nm))
-        _write_entry_with_thinking_split(data, nm["name"], entry)
-        added += 1
+        added = 0
+        for nm in new_models:  # pragma: no branch
+            comment = "NEW: needs pricing" if nm.get("needs_pricing") else "NEW"
+            entry = _build_entry(
+                ctx=nm["context_length"],
+                inp=nm["input_price_per_1M"],
+                out=nm["output_price_per_1M"],
+                fc=nm.get("fc", True),
+                emb=nm.get("emb", False),
+                gen=nm.get("gen", True),
+                thinking=nm.get("thinking"),
+                comment=comment,
+                use_responses_api=nm.get("use_responses_api", False),
+                dec=nm.get("dec", False),
+            )
+            entry.update(_cache_price_changes({}, nm))
+            entry.update(_prompt_tier_changes({}, nm))
+            _write_entry_with_thinking_split(data, nm["name"], entry)
+            added += 1
 
-    print(f"\n  Removed {removed} deprecated, applied {applied} updates, added {added} new")
-    if dry_run:
-        print("  (dry-run, no files modified)")
-        return
-    _write_model_info_json(MODEL_INFO_PATH, data)
-    print(f"  Written to {MODEL_INFO_PATH}")
+        print(f"\n  Removed {removed} deprecated, applied {applied} updates, added {added} new")
+        if dry_run:
+            print("  (dry-run, no files modified)")
+            return
+        _write_model_info_json(MODEL_INFO_PATH, data)
+        print(f"  Written to {MODEL_INFO_PATH}")
 
 
 # Runtime routing label (from model_info.get_model_provider) -> README
@@ -2869,17 +3120,6 @@ _README_CATEGORIES: tuple[str, ...] = (
     "Claude Code CLI (`cc/*`)",
     "Codex CLI (`codex/*`)",
 )
-
-
-def _summary_label(category: str) -> str:
-    """Map a README category label to its ``<summary>`` form (no backticks).
-
-    The table rows keep the backticks (``| Claude Code CLI (`cc/*`) | 3 |``)
-    but the collapsible-section headers strip them
-    (``<summary><strong>Claude Code CLI (cc/*) (3)</strong></summary>``),
-    so the rewriter must produce both spellings.
-    """
-    return category.replace("`", "")
 
 
 def sync_catalog_docs() -> bool:
@@ -2965,7 +3205,10 @@ def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
         count = len(names)
         table_pat = rf"(\| {re.escape(category)} \| )\d+( \|)"
         text = re.sub(table_pat, rf"\g<1>{count}\g<2>", text)
-        summary = _summary_label(category)
+        # The table rows keep the backticks (``| Claude Code CLI (`cc/*`) | 3 |``)
+        # but the collapsible-section headers strip them
+        # (``<summary><strong>Claude Code CLI (cc/*) (3)</strong></summary>``).
+        summary = category.replace("`", "")
         # Rewrite the whole <details> body: the <summary> count and the
         # full sorted bullet list of model names. The body is matched
         # line-by-line up to the closing </details> (never crossing it),
@@ -3004,19 +3247,20 @@ def _run_scrub_only(dry_run: bool = False) -> None:
     print("=" * 60)
     print("Model Info Updater (scrub-only mode)")
     print("=" * 60)
-    data = _read_model_info_json(MODEL_INFO_PATH)
-    print(f"\n[1/3] Loaded {len(data)} entries from {MODEL_INFO_PATH}")
-    removed = [name for name in list(data) if _is_excluded_model(name)]
-    print(f"\n[2/3] {len(removed)} excluded entries to remove:")
-    for name in removed:
-        print(f"    {name}")
-    if dry_run:
-        print("  (dry-run, no files modified)")
-        return
-    for name in removed:
-        data.pop(name, None)
-    _write_model_info_json(MODEL_INFO_PATH, data)
-    print(f"  Written to {MODEL_INFO_PATH}")
+    with catalog_lock(MODEL_INFO_PATH):
+        data = _read_model_info_json(MODEL_INFO_PATH)
+        print(f"\n[1/3] Loaded {len(data)} entries from {MODEL_INFO_PATH}")
+        removed = [name for name in list(data) if _is_excluded_model(name)]
+        print(f"\n[2/3] {len(removed)} excluded entries to remove:")
+        for name in removed:
+            print(f"    {name}")
+        if dry_run:
+            print("  (dry-run, no files modified)")
+            return
+        for name in removed:
+            data.pop(name, None)
+        _write_model_info_json(MODEL_INFO_PATH, data)
+        print(f"  Written to {MODEL_INFO_PATH}")
     if _writes_default_catalog():
         print("\n[3/3] Syncing README.md totals and MODELS.md model lists...")
         sync_catalog_docs()
@@ -3051,13 +3295,15 @@ def _probe_new_models(new_models: list[dict], verbose: bool = False) -> list[dic
         caps = test_model_capabilities(
             nm["name"], verbose=verbose, decisions=nm.get("is_decisions", False)
         )
-        nm["gen"] = caps["gen"]
+        # A brand-new entry gets a capability only on a verified pass: an
+        # inconclusive verdict (None / UNVERIFIED) is the conservative
+        # default, so an unverifiable candidate is dropped and retried on
+        # the next run rather than catalogued with guessed flags.
+        nm["gen"] = bool(caps["gen"])
         nm["emb"] = caps["emb"]
-        nm["fc"] = caps["fc"]
-        nm["dec"] = caps.get("dec", False)
-        nm["thinking"] = caps["thinking"]
-        # A brand-new entry is flagged only on a verified pass; an
-        # inconclusive (None) verdict stays on Chat Completions.
+        nm["fc"] = bool(caps["fc"])
+        nm["dec"] = bool(caps.get("dec"))
+        nm["thinking"] = None if caps["thinking"] == UNVERIFIED else caps["thinking"]
         nm["use_responses_api"] = bool(caps.get("use_responses_api"))
         if not caps["gen"] and not caps["emb"] and not nm["dec"]:
             nm["_skip"] = True
@@ -3070,29 +3316,38 @@ instead of being live-probed: the Codex and Claude Code CLIs, and Bedrock
 ids mirrored from their ``claude-*`` entry."""
 
 
-def _assume_untested_capabilities(new_models: list[dict]) -> None:
+def _assume_untested_capabilities(new_models: list[dict]) -> list[dict]:
     """Fill capability flags for ``--skip-test`` from the vendor listing alone.
 
     A candidate the listing marked ``is_embedding`` becomes an embedder,
-    one marked ``is_decisions`` a decisions model, everything else a
-    function-calling generator.  ``thinking`` stays unknown and the v2
-    transport flag stays off: both are only ever written after a live
-    probe.  Mirror candidates (:data:`_MIRROR_PREFIXES`) already carry the
-    flags of the entry they copy and are left alone.
+    one marked ``is_decisions`` a decisions model, and a candidate the
+    listing marked ``is_generation`` (Gemini's ``generateContent``) or
+    left unmarked and neither of the two becomes a generator; only
+    generators are assumed to call tools.  ``thinking`` stays unknown and
+    the v2 transport flag stays off: both are only ever written after a
+    live probe.  Mirror candidates (:data:`_MIRROR_PREFIXES`) already
+    carry the flags of the entry they copy and are left alone.
 
     Args:
         new_models: Candidate dicts from :func:`compute_changes`; mutated
             in place.
+
+    Returns:
+        The candidates with at least one capability, as
+        :func:`_probe_new_models` keeps only those that passed a probe.
     """
     for nm in new_models:
         if nm["name"].startswith(_MIRROR_PREFIXES):
             continue
         nm["dec"] = nm.get("is_decisions", False)
         nm["emb"] = nm.get("is_embedding", False)
-        nm["gen"] = not nm["emb"] and not nm["dec"]
-        nm["fc"] = not nm["dec"]
+        nm["gen"] = nm.get("is_generation", not nm["emb"] and not nm["dec"])
+        nm["fc"] = nm["gen"]
         nm["thinking"] = None
         nm["use_responses_api"] = False
+        if not nm["gen"] and not nm["emb"] and not nm["dec"]:
+            nm["_skip"] = True
+    return [nm for nm in new_models if not nm.get("_skip")]
 
 
 def main() -> None:
@@ -3148,10 +3403,14 @@ def main() -> None:
             # bundled catalog; without the seed, apply_updates_to_file
             # would begin from an empty table and publish a catalog
             # holding only the entries this very run happened to touch.
-            _write_model_info_json(
-                MODEL_INFO_PATH, _read_model_info_json(DEFAULT_MODEL_INFO_PATH)
-            )
-            print(f"Seeded {MODEL_INFO_PATH} from {DEFAULT_MODEL_INFO_PATH}")
+            # Under the target's lock, a concurrent writer that created
+            # the target meanwhile is not overwritten by the seed.
+            with catalog_lock(MODEL_INFO_PATH):
+                if not MODEL_INFO_PATH.exists():
+                    _write_model_info_json(
+                        MODEL_INFO_PATH, _read_model_info_json(DEFAULT_MODEL_INFO_PATH)
+                    )
+                    print(f"Seeded {MODEL_INFO_PATH} from {DEFAULT_MODEL_INFO_PATH}")
 
     if args.scrub_only:
         _run_scrub_only(dry_run=args.dry_run)
@@ -3248,7 +3507,7 @@ def main() -> None:
         print(f"  {len(new_models)} models passed testing")
     elif new_models and args.skip_test:  # pragma: no branch
         print("\n[5/6] Skipping model testing (--skip-test)")
-        _assume_untested_capabilities(new_models)
+        new_models = _assume_untested_capabilities(new_models)
     else:
         print("\n[5/6] No new models to test")
 
@@ -3265,21 +3524,29 @@ def main() -> None:
             caps = test_model_capabilities(
                 name, verbose=args.verbose, decisions=cur.get("dec", False)
             )
-            fc_changed = caps["fc"] != cur["fc"]
+            # None (or UNVERIFIED for the level) means the probe never ran
+            # or died on endpoint or credential trouble — a stored value
+            # must survive an unexecuted probe.
+            if caps["gen"] is None or (cur.get("dec") and caps.get("dec") is None):
+                print(f"    {name}: probe inconclusive, stored capabilities kept")
+                continue
+            fc_changed = caps["fc"] is not None and caps["fc"] != cur["fc"]
             stored_thinking = _stored_max_thinking_level(current, name, cur)
-            # An OpenRouter Claude slug's level mirrors its claude-* twin
-            # (_sync_openrouter_claude_thinking below); its own probe is
-            # gated off and says nothing about the ladder.
-            thinking_changed = caps["thinking"] != stored_thinking and not name.startswith(
-                _OPENROUTER_CLAUDE_PREFIX
+            # An OpenRouter Claude slug's or a cc/ key's level mirrors its
+            # claude-* twin (_sync_openrouter_claude_thinking and
+            # _sync_claude_code_thinking below); its own probe is gated
+            # off and says nothing about the ladder.
+            thinking_changed = (
+                caps["thinking"] != UNVERIFIED
+                and caps["thinking"] != stored_thinking
+                and not name.startswith((_OPENROUTER_CLAUDE_PREFIX, _CLAUDE_CODE_PREFIX))
             )
             responses_verdict = caps.get("use_responses_api")
-            # None means the probe never ran or died on transient endpoint
-            # errors — a stored flag must survive an unexecuted probe.
             responses_changed = responses_verdict is not None and bool(
                 responses_verdict
             ) != bool(cur.get("use_responses_api"))
-            dec_changed = bool(caps.get("dec")) != bool(cur.get("dec"))
+            dec_verdict = caps.get("dec")
+            dec_changed = dec_verdict is not None and bool(dec_verdict) != bool(cur.get("dec"))
             if not (fc_changed or thinking_changed or responses_changed or dec_changed):
                 continue
             existing = update_by_name.get(name)
@@ -3309,6 +3576,7 @@ def main() -> None:
     if bedrock_models:
         _sync_bedrock_thinking(bedrock_models, current, updates, new_models)
     _sync_openrouter_claude_thinking(current, updates, new_models)
+    _sync_claude_code_thinking(current, updates, new_models)
 
     print("\n[6/6] Applying changes...")
     apply_updates_to_file(updates, new_models, deprecated, current, dry_run=args.dry_run)

@@ -458,6 +458,154 @@ test('an answer being typed when another client answers is kept, above the parke
   );
 });
 
+// A27_astra-1: another surface answered the question while this one was
+// away (its askUserDone was missed), so the replay that follows the
+// reconnect carries the question's tool_result.  The tab leaves answer
+// mode with it, as the daemon re-announces only a question still
+// pending: the next message is a prompt again, not an answer to a
+// question that is gone (the daemon drops such an answer).
+test('a question answered elsewhere while away is retired by its replayed result', () => {
+  const {win, posted, tab} = makePage(true);
+  const inp = win.document.getElementById('task-input');
+  inp.value = 'old prompt';
+  askQuestionCall(win, tab, 'Proceed?');
+  send(win, {type: 'askUser', question: 'Proceed?', questionId: 'q1', tabId: tab});
+  inp.value = 'half an ans';
+  send(win, {type: 'daemonStatus', connected: false});
+  send(win, {type: 'daemonStatus', connected: true});
+  send(win, {
+    type: 'task_events',
+    tabId: tab,
+    task: 'deploy',
+    task_id: 't1',
+    chat_id: 'chat-q',
+    events: [
+      {
+        type: 'tool_call',
+        name: 'ask_user_question',
+        extras: {question: 'Proceed?'},
+        callId: 41,
+        ts: 1,
+      },
+      {type: 'tool_result', callId: 41, content: 'yes, go', ts: 2},
+      {type: 'text', content: 'Deploying.', ts: 3},
+    ],
+  });
+  assert.ok(!answering(win), 'BUG - still answering a question that was answered');
+  assert.strictEqual(inp.value, 'half an ans\nold prompt', 'nothing typed is lost');
+  assert.ok(
+    !win.document.querySelector('.tc-question-pending'),
+    'the replayed question panel is not pending',
+  );
+  posted.length = 0;
+  pressEnter(win);
+  assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 0);
+  assert.strictEqual(
+    posted.filter(m => m.type === 'appendUserMessage').length,
+    1,
+    'the message is a prompt again',
+  );
+  // A question still open at replay time stays open (the daemon
+  // re-announces it right after the replay; the typed answer stands).
+  inp.value = 'next prompt';
+  askQuestionCall(win, tab, 'Region?');
+  send(win, {type: 'askUser', question: 'Region?', questionId: 'q2', tabId: tab});
+  inp.value = 'eu';
+  send(win, {
+    type: 'task_events',
+    tabId: tab,
+    task: 'deploy',
+    task_id: 't1',
+    chat_id: 'chat-q',
+    events: [
+      {
+        type: 'tool_call',
+        name: 'ask_user_question',
+        extras: {question: 'Region?'},
+        callId: 42,
+        ts: 4,
+      },
+    ],
+  });
+  send(win, {type: 'askUser', question: 'Region?', questionId: 'q2', tabId: tab});
+  assert.ok(answering(win), 'the open question is still being answered');
+  assert.strictEqual(inp.value, 'eu', 'the typed answer stands');
+  // Audit 2026-11-08 (W6 F2): the agent asked the same words twice
+  // (calls 43 and 44); the first was answered, the second is the open
+  // one.  Its replayed answer belongs to the earlier call, not to the
+  // question being answered here: answer mode, the typed answer and
+  // the parked prompt all stand, and only the last panel is pending.
+  send(win, {
+    type: 'task_events',
+    tabId: tab,
+    task: 'deploy',
+    task_id: 't1',
+    chat_id: 'chat-q',
+    events: [
+      {
+        type: 'tool_call',
+        name: 'ask_user_question',
+        extras: {question: 'Region?'},
+        callId: 43,
+        ts: 5,
+      },
+      {type: 'tool_result', callId: 43, content: 'us', ts: 6},
+      {
+        type: 'tool_call',
+        name: 'ask_user_question',
+        extras: {question: 'Region?'},
+        callId: 44,
+        ts: 7,
+      },
+    ],
+  });
+  send(win, {type: 'askUser', question: 'Region?', questionId: 'q3', tabId: tab});
+  assert.ok(answering(win), 'BUG - the earlier call\'s answer retired the open question');
+  assert.strictEqual(inp.value, 'eu', 'the typed answer stands');
+  const panels = win.document.querySelectorAll('.tc-question');
+  const pendingPanels = win.document.querySelectorAll('.tc-question-pending');
+  assert.strictEqual(pendingPanels.length, 1, 'one pending panel');
+  assert.strictEqual(pendingPanels[0], panels[panels.length - 1], 'the last one');
+  send(win, {type: 'askUserDone', tabId: tab});
+  assert.strictEqual(
+    inp.value,
+    'eu\nnext prompt',
+    'the parked prompt comes back under the answer once the question closes',
+  );
+});
+
+// A27_astra-2: the question changed under this surface (another one
+// answered Q1 and the agent asked Q2; Q1's close was missed).  Entering
+// answer mode for Q2 must not take the Q1 answer draft for a prompt and
+// overwrite the prompt parked before Q1: the old mode is retired first,
+// losslessly, so both come back once Q2 is answered.
+test('a replacement question keeps the parked prompt and the old answer draft', () => {
+  const {win, posted, tab} = makePage(true);
+  const inp = win.document.getElementById('task-input');
+  inp.value = 'ORIGINAL PARKED PROMPT';
+  askQuestionCall(win, tab, 'Q1?');
+  send(win, {type: 'askUser', question: 'Q1?', questionId: 'q1', tabId: tab});
+  inp.value = 'DRAFT ANSWER FOR Q1';
+  askQuestionCall(win, tab, 'Q2?');
+  send(win, {type: 'askUser', question: 'Q2?', questionId: 'q2', tabId: tab});
+  assert.ok(answering(win));
+  assert.strictEqual(inp.value, '', 'the composer starts empty for Q2');
+  posted.length = 0;
+  inp.value = 'answer 2';
+  pressEnter(win);
+  const answers = posted.filter(m => m.type === 'userAnswer');
+  assert.deepStrictEqual(
+    answers.map(a => [a.answer, a.questionId]),
+    [['answer 2', 'q2']],
+  );
+  assert.strictEqual(
+    inp.value,
+    'DRAFT ANSWER FOR Q1\nORIGINAL PARKED PROMPT',
+    'BUG - the parked prompt was lost to the replacement question',
+  );
+  assert.ok(!answering(win));
+});
+
 test('a background tab parks its prompt too and shows it again once answered', () => {
   const {win, posted, tab} = makePage(true);
   const inp = win.document.getElementById('task-input');

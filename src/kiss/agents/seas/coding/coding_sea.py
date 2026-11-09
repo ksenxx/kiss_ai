@@ -44,8 +44,7 @@ way an unattended run goes wrong: a plausible result claimed without a check,
 a reading of the statement settled by assumption and shared by every check
 the same model writes, a reviewer argued down instead of answered, a context
 restart that forgets what was already tried.  What the gate no longer does,
-after the measurement of 2026-11-04
-(``reports/terminal-bench-4-cost-deep-analysis-2026-11-04.html``):
+after the measurement of 2026-11-04:
 refuse on the wording of the summary, on the ``evidence`` field, on a review
 that came back blank, or on review findings past the first refused round,
 and review the same work again after an approval; those refusals cost rounds
@@ -82,6 +81,7 @@ from kiss.agents.seas.base.base_sea import ALLOW, Verdict, WorkerSea, allow_with
 from kiss.agents.seas.coding import coding_test_context as test_context
 from kiss.agents.sorcar.checkpoints import CHECKPOINT_NAME
 from kiss.agents.sorcar.coding_gate import (
+    EXIT_CODE_MARKER,
     REVIEW_VERDICT_LINE,
     STOP_POLL_SECONDS,
     answered_findings,
@@ -89,16 +89,18 @@ from kiss.agents.sorcar.coding_gate import (
     default_effort,
     evidence_commands,
     gate_refusal,
+    low_effort,
     numbered_items,
     result_exit_codes,
+    retryable_review_failure,
     review_findings,
     tool_result_texts,
     verifier_decides,
 )
-from kiss.agents.sorcar.container_jobs import KILL_ALL_SCRIPT
+from kiss.agents.sorcar.container_jobs import JOBS_DIR, KILL_ALL_SCRIPT, ContainerJobs
 from kiss.agents.sorcar.docker_manager import _EXEC_TOKEN_VAR, kill_tagged_tree_script
 from kiss.agents.sorcar.edit_guards import heredoc_targets
-from kiss.agents.sorcar.evidence_gate import writes_files
+from kiss.agents.sorcar.evidence_gate import shell_commands, writes_files
 from kiss.agents.sorcar.exec_bridge import BRIDGE_PREFIX, bridge_alive, bridge_exec
 from kiss.agents.sorcar.shell_guards import (
     INSTALL_COMMANDS,
@@ -106,7 +108,7 @@ from kiss.agents.sorcar.shell_guards import (
     destructive_pattern,
 )
 from kiss.core.event_sink import adopt_thread_context, thread_context
-from kiss.core.kiss_error import BudgetExceededError, StepLimitExceededError
+from kiss.core.kiss_error import BudgetExceededError, KISSError, StepLimitExceededError
 
 #: Harness instances by config path (see :meth:`ContainerHarness.shared`).
 _HARNESSES: dict[str, ContainerHarness] = {}
@@ -358,6 +360,14 @@ VERIFIER_TIMEOUT_VERDICT = (
     "Not finished: your own verifier {path} did not finish within {seconds:.0f} seconds. "
     "Make it fast enough to run at the end (or run its slow part yourself and keep the "
     "quick checks in it), then call finish again."
+)
+#: Appended to the verdict of a check the gate did not run again: neither a file under
+#: the workdir nor the script changed since its last run (:meth:`ContainerHarness.script_run`).
+REUSED_NOTE = (
+    "\n(This is the result of the gate's last run of {path}, reused: neither a file under "
+    "{workdir} nor the script changed since. The check runs again after a change under "
+    "{workdir}; a fix outside it is seen when you run {path} yourself, whose passing run "
+    "stands.)"
 )
 
 #: Largest total size of changed files shown to the reviewer.
@@ -639,10 +649,29 @@ FILE_LIST_COMMAND = (
 #: Longest ``ls -la`` shown with the task statement.
 MAX_LISTING_LINES = 60
 #: Processes started by the last shell call and still alive when it returned.
+#: Each one the harness adopted as a background job is listed as ``left
+#: running as job <id> (<command>, log <path>)``; the others as ``pid
+#: command (parent N)``.
 SURVIVORS_NOTE = (
     "\n\nHarness note: processes started by your last shell command(s) are still running: {procs}. "
     "Before you finish, stop the ones that are not meant to keep running."
 )
+#: Follows the survivors note when one of them became a job.
+ADOPTED_HINT = (
+    " A job is waited on with bash_job(<id>, 'wait', timeout_seconds=N, until='<regex>'), which "
+    "returns the moment it exits or its log matches: use that instead of sleeping and polling."
+)
+#: A stdout redirection operator of a shell command: ``>``, ``>>``, ``&>``,
+#: ``&>>``; not ``2>`` (another descriptor) nor the ``>`` of ``>&1`` (a
+#: duplication).  Looked for on a copy whose quoted and escaped pieces are
+#: masked (:func:`stdout_target`), so a quoted or escaped ``>`` is data.
+REDIRECTION = re.compile(r"(?<![\d&>])(?:&>>?|>>?)(?!&)")
+#: The pieces of a shell command line: a quoted string or an escaped
+#: character (kept whole), a separator between simple commands (``&&``,
+#: ``||``, ``;``, ``|``, a newline, a parenthesis, a lone ``&`` that is not
+#: part of ``2>&1`` or ``&>``), or any other character.
+SHELL_PIECE = re.compile(
+    r"'[^']*'|\"(?:\\.|[^\"\\])*\"|\\.|(?P<sep>&&|\|\||[;|\n()]|(?<!>)&(?!>))|.", re.DOTALL)
 #: Processes the agent started earlier that outlived a command meant to stop something.
 STILL_RUNNING_NOTE = (
     "\n\nHarness note: processes you started earlier are still running after your last shell "
@@ -730,6 +759,24 @@ class ContainerHarness:
         self.verifier_timeout = float(cfg.get("verifier_timeout", VERIFIER_TIMEOUT))
         #: ``(script, exit code, output)`` of the verifier's last run by the gate.
         self.last_verifier_run: tuple[str, int | None, str] = ("", None, "")
+        #: The last run of each check the gate ran (``verifier``, ``blind``), as
+        #: ``((files under the workdir after it, script text), (script, exit code,
+        #: output))``: a finish at which neither changed reuses the run
+        #: (:meth:`script_run`).
+        self.stage_memo: dict[str, tuple[tuple[dict[str, tuple[str, str]], str],
+                                         tuple[str, int | None, str]]] = {}
+        #: The verifier's last verdict, by whoever ran it: ``(exit code, when,
+        #: turn, who, output)``; the hand-off inventory shows it and the restart
+        #: budget compares it (:meth:`restart_denied`).
+        self.last_verdict: tuple[str, float, int, str, str] | None = None
+        #: Hand-offs so far (config ``restart_budget``, :data:`RESTART_BUDGET`), the
+        #: change count and the verifier verdict at the last one, and whether the
+        #: last one was counted at the ``finish`` that asked for it.
+        self.restarts = 0
+        self.restart_budget = int(cfg.get("restart_budget", RESTART_BUDGET))
+        self.restart_changes = 0
+        self.restart_verdict: str | None = None
+        self.restart_counted = False
         #: How many changes of the work tree the agent made (an edit under the
         #: workdir, a writing shell command, a rollback), and the count at the
         #: agent's own last passing run of its verifier: equal at a finish,
@@ -792,8 +839,12 @@ class ContainerHarness:
         self.failed_reviews = 0
         self.max_reviews = int(cfg.get("max_reviews", MAX_REVIEWS))
         self.open_findings: list[str] = []
-        #: Workdir snapshot (:meth:`file_snapshot`) when the last review ran.
+        #: Workdir snapshot (:meth:`file_snapshot`) when the last review ran, the
+        #: claim it judged (:func:`claim_text`) and its verdict: a finish with the
+        #: same claim on the same files reuses the verdict (:meth:`reused_review`).
         self.review_snapshot: dict[str, tuple[str, str]] | None = None
+        self.review_claim: str | None = None
+        self.review_result: str | None = None
         self.ledger_refusals = 0
         #: Whether the ledger file was seen in the container (checked until it is).
         self.ledger_seen = False
@@ -830,6 +881,13 @@ class ContainerHarness:
         #: Process listing taken before the first shell call of the current turn
         #: (``None`` when no shell tool ran since the last model call).
         self.processes_before: dict[tuple[int, str], tuple[int, str]] | None = None
+        #: The shell commands of the current turn, in order (the log a survivor
+        #: writes is read off their redirections).
+        self.turn_shell_commands: list[str] = []
+        #: The container's background-job registry (the one behind the run's
+        #: ``bash_job`` tool), where the survivors of a shell call are adopted;
+        #: ``None`` until :meth:`tools` saw the tool.
+        self.jobs: ContainerJobs | None = None
         #: Whether a shell command of the current turn tried to stop a process.
         self.kill_attempted = False
         #: ``(pid, start time)`` of processes the agent started that outlived the call that
@@ -942,6 +1000,12 @@ class ContainerHarness:
         """
         dropped = ("decide", "summary", "checkpoint", "rollback")
         kept = [t for t in tools if getattr(t, "__name__", "") not in dropped]
+        # ``bash_job`` is a bound method of the container's job registry: the
+        # survivors of a shell call are adopted there (:meth:`shell_notes`).
+        for tool in tools:
+            owner = getattr(tool, "__self__", None)
+            if isinstance(owner, ContainerJobs):
+                self.jobs = owner
         return kept + [self.checkpoint, self.rollback]
 
     def settings(self) -> dict[str, Any]:
@@ -1017,12 +1081,21 @@ class ContainerHarness:
                     with self._lock:
                         self.pending_notes.append(note)
             if turn > 1 and is_continuation_start(new_messages[0]):
+                # A hand-off the agent asked for was counted at its finish; one
+                # the context limit forced is counted here, and the restart
+                # budget may end the run before this session's first model call.
+                denied = not self.restart_counted and self.restart_denied()
+                self.restart_counted = False
+                state = ""
                 try:
-                    append_user_text(new_messages[0], self.inventory())
+                    state = self.inventory()
+                    append_user_text(new_messages[0], state)
                     self._log({"event": "inventory", "turn": turn})
                 except Exception as error:
                     self._log({"event": "hook_error", "turn": turn, "hook": "inventory",
                                "error": repr(error)})
+                if denied:
+                    raise RestartBudgetError(self.restart_caveat(state))
         self._log({"event": "llm_call", "turn": turn, "new_messages": _jsonable(new_messages)})
         if not self.container_alive():
             # The caller tore the container down (OOM-killed, Docker
@@ -1116,6 +1189,7 @@ class ContainerHarness:
         with self._lock:
             take = self.processes_before is None
             self.kill_attempted = self.kill_attempted or bool(KILL_COMMANDS.search(text))
+            self.turn_shell_commands.extend(shell_commands(args))
         if take:
             snapshot = self.process_snapshot()
             with self._lock:
@@ -1138,6 +1212,7 @@ class ContainerHarness:
         with self._lock:
             before, self.processes_before = self.processes_before, None
             kill_attempted, self.kill_attempted = self.kill_attempted, False
+            commands, self.turn_shell_commands = self.turn_shell_commands, []
         if before is None:
             return []
         notes: list[str] = []
@@ -1145,14 +1220,19 @@ class ContainerHarness:
         with self._lock:
             # Children of a process already reported (a build's compiler
             # steps, a server's workers) are tracked without a new note.
+            # The processes of a background job (a started job's shell, an
+            # adopted job's watcher, their children) are the registry's.
             offspring = descendants(after, self.tracked_pids)
+            jobs_own = {key for key, (_, cmd) in after.items() if JOBS_DIR in cmd}
+            jobs_own |= descendants(after, jobs_own)
             new = {key: info for key, info in after.items()
-                   if key not in before and key not in offspring and key not in self.tracked_pids}
+                   if key not in before and key not in offspring and key not in self.tracked_pids
+                   and key not in jobs_own}
             self.tracked_pids |= set(new) | offspring
             self.tracked_pids &= set(after)
             alive = {key: after[key] for key in sorted(self.tracked_pids)}
         if new:
-            notes.append(SURVIVORS_NOTE.format(procs=describe_processes(new)))
+            notes.append(self.survivors_note(new, commands))
         elif kill_attempted and alive:
             notes.append(STILL_RUNNING_NOTE.format(procs=describe_processes(alive)))
         if self.file_baseline:
@@ -1163,6 +1243,47 @@ class ContainerHarness:
         for note in notes:
             self._log({"event": "shell_note", "turn": self.turns, "note": note.strip()})
         return notes
+
+    def survivors_note(
+        self, new: dict[tuple[int, str], tuple[int, str]], commands: list[str],
+    ) -> str:
+        """The survivors note for the processes *new* the turn's shell *commands* left running.
+
+        With a job registry at hand (:attr:`jobs`), each survivor is adopted
+        as a background job, with the log its command redirected its output
+        to (:func:`command_logs`), and listed as ``left running as job <id>
+        (<command>, log <path>)``; a survivor the registry could not adopt
+        (it exited meanwhile) is listed as before.  Adopted jobs are recorded
+        in :attr:`background_jobs` so a later ``bash_job`` wait on them
+        reports an exit code the gate can read.
+
+        Args:
+            new: ``(pid, start time) -> (ppid, cmdline)`` of the survivors.
+            commands: The shell commands of the turn, in order.
+
+        Returns:
+            The note text (:data:`SURVIVORS_NOTE`, plus :data:`ADOPTED_HINT`
+            when a survivor became a job).
+        """
+        logs = [log for command in commands for log in command_logs(command, self.workdir)]
+        items: list[str] = []
+        adopted = False
+        for key, (ppid, cmdline) in sorted(new.items()):
+            line = ""
+            if self.jobs is not None:
+                job_id, line = self.jobs.adopt(key[0], cmdline, survivor_log(cmdline, logs))
+                if job_id is None:
+                    self._log({"event": "adopt_failed", "turn": self.turns, "pid": key[0],
+                               "error": line})
+                    line = ""
+                else:
+                    adopted = True
+                    with self._lock:
+                        self.background_jobs[job_id] = cmdline
+            items.append(line or describe_processes({key: (ppid, cmdline)}))
+        if len(items) > MAX_LISTED_SURVIVORS:
+            items[MAX_LISTED_SURVIVORS:] = [f"and {len(items) - MAX_LISTED_SURVIVORS} more"]
+        return SURVIVORS_NOTE.format(procs="; ".join(items)) + (ADOPTED_HINT if adopted else "")
 
     def process_snapshot(self) -> dict[tuple[int, str], tuple[int, str]]:
         """``(pid, start time) -> (ppid, cmdline)`` of every process in the container.
@@ -1360,7 +1481,18 @@ class ContainerHarness:
         findings (:meth:`unanswered_verdict`).  The summary's wording and the
         ``evidence`` field refuse nothing: they are the reviewer's input.
         There is no clock: a finish refused for being early buys a second
-        round that breaks as much as it fixes.
+        round that breaks as much as it fixes.  A round in which nothing
+        changed runs nothing: each script's last run stands while neither
+        the files under the workdir nor its text changed (:meth:`script_run`),
+        and the review's verdict while the claim and the files are those
+        it judged (:meth:`reused_review`); the stages that do run, run at
+        once (:meth:`run_stages`).
+
+        A pause (``is_continue=True``) is checked by nothing, but counts as
+        a restart: from the :attr:`restart_budget`-th on, one that comes
+        with no new edit and the same verifier verdict as the restart
+        before it ends the run instead, as ``finish(success=False)`` with
+        the state block as the caveat (:meth:`restart_denied`).
 
         The first refusal buys one round whatever refused it.  A later
         round is refused only when a script refused (the verifier or the
@@ -1408,10 +1540,19 @@ class ContainerHarness:
             return IMPLICIT_FINISH_VERDICT
         if str(args.get("success")).lower() != "true":
             if str(args.get("is_continue")).lower() == "true":
-                return None  # a pause for a fresh context, not a give-up: nothing to check yet
+                # a pause for a fresh context, not a give-up: nothing to check,
+                # unless the restart budget ends the run here instead
+                if self.restart_denied():
+                    args["is_continue"] = False
+                    args["summary_in_html"] = (str(args.get("summary_in_html", ""))
+                                               + self.restart_caveat(self.inventory()))
+                else:
+                    self.restart_counted = True
+                return None
             return self.giveup_verdict(args)
         self.checks_passed = True
-        stages = self.run_stages(args, review=self.review_wanted())
+        review = self.review_wanted()
+        stages = self.run_stages(args, review=review)
         checks = [stages["verifier"], stages["blind"]]
         skipped = not self.checks_passed  # past the refusal cap: the checks did not run
         self.checks_passed = not skipped and not any(checks)
@@ -1420,6 +1561,8 @@ class ContainerHarness:
         verdicts = list(checks)
         if stages.get("review") is not None:
             verdicts.append(stages["review"])
+        elif not review and self.reused_review(args):  # the same claim on the same files
+            verdicts.append(self.review_result)
         else:  # no review this round, or one that passed or failed: its findings stand
             verdicts.append(self.unanswered_verdict(args))
         open_verdicts = [v for v in verdicts if v]
@@ -1483,8 +1626,12 @@ class ContainerHarness:
         verdicts: dict[str, str | None] = {"blind": None}
         seconds: dict[str, float] = {}
         stop = stop_signal.get_thread_stop_event()  # the run's Stop reaches every stage
+        # a review that could not run is no verdict (a check that did not happen
+        # is never a refusal); a check that could not run is one
         threads = [threading.Thread(target=self.run_stage, name=f"gate-{name}", daemon=True,
-                                    args=(name, stage, verdicts, seconds, failed_stage, stop))
+                                    args=(name, stage, verdicts, seconds,
+                                          self.failed_review if name == "review" else
+                                          failed_stage, stop))
                    for name, stage in stages.items()]
         for thread in threads:
             thread.start()
@@ -1656,7 +1803,8 @@ class ContainerHarness:
         states = {name: check_state(*runs[name]) for name in ("verifier", "blind")}
         for name, state in states.items():
             outcome = state if state in ("pass", "missing") else "fail"
-            self.gate_stage(name, seconds[name], outcome, giveup=True)
+            self.gate_stage(name, seconds[name], outcome, giveup=True,
+                            **self.stage_fields.pop(name, {}))
         return states
 
     def review_possible(self) -> bool:
@@ -1677,7 +1825,10 @@ class ContainerHarness:
         :attr:`verifier_passed_snapshot`): the exit code it showed is what
         a run now would show, and a third of the gated finishes came right
         after such a run.  Such a run also stands past the refusal cap: it
-        asks for no run of the script.
+        asks for no run of the script.  The gate's own last run stands
+        while neither the files under the workdir nor the script changed
+        since it (:meth:`script_run`); its verdict then says so
+        (:data:`REUSED_NOTE`).
         """
         if (self.verifier_passed_at == self.changes and self.verifier_passed_snapshot is not None
                 and self.file_snapshot() == self.verifier_passed_snapshot):
@@ -1700,38 +1851,97 @@ class ContainerHarness:
             return None
         self.count_refusal()
         if code is None:
-            return VERIFIER_TIMEOUT_VERDICT.format(path=VERIFIER_PATH,
-                                                   seconds=self.verifier_timeout)
-        tail = text[-3000:]
-        return VERIFIER_FAILED_VERDICT.format(path=VERIFIER_PATH, code=code, output=tail)
+            verdict = VERIFIER_TIMEOUT_VERDICT.format(path=VERIFIER_PATH,
+                                                      seconds=self.verifier_timeout)
+        else:
+            verdict = VERIFIER_FAILED_VERDICT.format(path=VERIFIER_PATH, code=code,
+                                                     output=text[-3000:])
+        return verdict + self.reused_note("verifier", VERIFIER_PATH)
 
     def verifier_run(self) -> tuple[str, int | None, str]:
         """Run the agent's own verifier and return ``(script, exit code, output)``.
 
-        The script is read once and that text is run (:meth:`run_script`),
-        so what the reviewer sees is what ran (:attr:`last_verifier_run`).
-        A missing script is ``("", None, "")``; a run past
-        ``verifier_timeout`` has exit code ``None``.
+        The script is read once and that text is run (:meth:`script_run`,
+        or its last run reused), so what the reviewer sees is what ran
+        (:attr:`last_verifier_run`).  A missing script is ``("", None,
+        "")``; a run past ``verifier_timeout`` has exit code ``None``.
         """
         script = self.read_container_file(VERIFIER_PATH)
         if script is None:
             self._log({"event": "verifier", "turn": self.turns, "result": "missing"})
+            self.record_verdict("missing", "gate", "")
             return ("", None, "")
-        result = self.run_script(script, VERIFIER_PATH, self.verifier_timeout)
+        self.last_verifier_run = self.script_run("verifier", VERIFIER_PATH, script)
+        return self.last_verifier_run
+
+    def script_run(self, stage: str, path: str, script: str) -> tuple[str, int | None, str]:
+        """Run *script*, the *stage*'s check kept at *path*, or reuse the stage's last run.
+
+        The last run stands while neither the files under the workdir
+        (:meth:`file_snapshot`, as they were when that run started: the
+        state its verdict was computed on) nor the script's text changed
+        since it (:attr:`stage_memo`): a round in which nothing changed
+        re-runs nothing, whatever the exit code was.  A script that changes
+        the tree itself leaves a different snapshot behind, so its next
+        round runs it again.  No reuse without file tracking.  The run (or
+        its reuse, ``reused: True``) is logged as the
+        stage's event (``verifier`` / ``blind_verifier``) and marked on its
+        ``gate_stage`` record (:attr:`stage_fields`); the verifier's verdict
+        is remembered for the hand-off (:meth:`record_verdict`).
+
+        Args:
+            stage: ``verifier`` or ``blind``.
+            path: Where the agent sees the script.
+            script: The script's text.
+
+        Returns:
+            ``(script, exit code, output)``; the exit code is ``None`` past
+            ``verifier_timeout``.
+        """
+        event = "verifier" if stage == "verifier" else "blind_verifier"
+        snapshot = self.file_snapshot()
+        memo = self.stage_memo.get(stage)
+        if memo is not None and snapshot is not None and memo[0] == (snapshot, script):
+            _script, code, text = memo[1]
+            self._log({"event": event, "turn": self.turns, "exit_code": code, "reused": True})
+            self.stage_fields[stage] = {"reused": True}
+            return (script, code, text)
+        result = self.run_script(script, path, self.verifier_timeout)
         code, output = (None, b"") if result is None else result
         text = output.decode("utf-8", errors="replace")
-        self.last_verifier_run = (script, code, text)
-        self._log({"event": "verifier", "turn": self.turns, "exit_code": code,
+        if snapshot is not None:
+            self.stage_memo[stage] = ((snapshot, script), (script, code, text))
+        self._log({"event": event, "turn": self.turns, "exit_code": code,
                    "output": text[-4000:]})
+        if stage == "verifier":
+            self.record_verdict("timeout" if code is None else str(code), "gate", text)
         return (script, code, text)
+
+    def reused_note(self, stage: str, path: str) -> str:
+        """The note a reused failing verdict of *stage* ends with (``""`` when the check ran)."""
+        if not self.stage_fields.get(stage, {}).get("reused"):
+            return ""
+        return REUSED_NOTE.format(path=path, workdir=self.workdir)
+
+    def record_verdict(self, code: str, who: str, output: str) -> None:
+        """Remember the verifier's latest verdict for the hand-off and the restart budget.
+
+        Args:
+            code: The exit code (``0``, ``1``, ...), ``timeout`` or ``missing``.
+            who: ``gate`` or ``agent``.
+            output: The run's output (its head is kept).
+        """
+        with self._lock:
+            self.last_verdict = (code, time.time(), self.turns, who,
+                                 "\n".join(output.splitlines()[:VERDICT_LINES]))
 
     def count_refusal(self) -> None:
         """Count a verifier or blind-check refusal (the stages run on threads of their own)."""
         with self._lock:
             self.verifier_refusals += 1
 
-    def review_call(self, label: str, model: str, prompt: str,
-                    event: str = "review") -> tuple[str, str, float, int, dict[str, Any]]:
+    def review_call(self, label: str, model: str, prompt: str, event: str = "review",
+                    lowered: bool = False) -> tuple[str, str, float, int, dict[str, Any]]:
         """One non-agentic call of *model* at the provider's default effort, with a deadline.
 
         The call runs on the calling thread under a stop event of its own
@@ -1743,7 +1953,9 @@ class ContainerHarness:
         Stop ends logs its spend itself as a failed *event* before the Stop
         propagates (the caller never gets to log it).  The trial's model
         overrides apply without their effort
-        (:func:`~kiss.agents.sorcar.coding_gate.default_effort`).
+        (:func:`~kiss.agents.sorcar.coding_gate.default_effort`), or at
+        low effort for the retry of a failed attempt (*lowered*,
+        :func:`~kiss.agents.sorcar.coding_gate.low_effort`).
 
         Args:
             label: The agent's name in the logs.
@@ -1751,6 +1963,7 @@ class ContainerHarness:
             prompt: The whole prompt.
             event: The side-agent event the caller logs the call under
                 (:data:`SIDE_AGENT_EVENTS`), for the spend of a stopped call.
+            lowered: Whether this is the retry of a failed attempt, at low effort.
 
         Returns:
             ``(answer, error, cost, tokens, last_call)``: the answer (``""``
@@ -1762,6 +1975,8 @@ class ContainerHarness:
         from kiss.core.kiss_agent import KISSAgent
 
         agent = KISSAgent(label)
+        config = (low_effort(self.model_overrides, model) if lowered
+                  else default_effort(self.model_overrides))
         previous = stop_signal.get_thread_stop_event()
         done = threading.Event()
         deadline = call_stop_event(REVIEW_DEADLINE, done)
@@ -1769,8 +1984,7 @@ class ContainerHarness:
         answer, error = "", ""
         try:
             answer = str(agent.run(model_name=model, prompt_template="{p}", arguments={"p": prompt},
-                                   is_agentic=False, verbose=False,
-                                   model_config=default_effort(self.model_overrides)) or "")
+                                   is_agentic=False, verbose=False, model_config=config) or "")
         except Exception as failure:
             error = repr(failure)
         except BaseException:
@@ -1803,13 +2017,17 @@ class ContainerHarness:
         trial's own effort override is not applied: at the highest effort
         the reviewer thought for a median 399 s, past the prompt cache's
         life, and its verdicts were no better) with :data:`REVIEW_DEADLINE`
-        seconds to answer (:meth:`review_call`).  A review without a
-        ``VERDICT:`` line, past the deadline, or whose model call failed is
-        logged as failed and refuses nothing: it keeps the previous findings
-        open, does not use up a review, and counts under
-        :data:`MAX_FAILED_REVIEWS`, past which no review is asked for again.
-        Each ``NOT DONE`` finding is kept (:attr:`open_findings`) for the
-        next finish to answer.
+        seconds to answer (:meth:`review_call`).  An attempt that answered
+        nothing, was cut short by the output cap, was refused or missed the
+        deadline (:func:`~kiss.agents.sorcar.coding_gate.retryable_review_failure`)
+        is retried once at low effort.  A review that still failed, or
+        answered without a ``VERDICT:`` line, is logged as failed (with the
+        first attempt's failure under ``retried``) and refuses nothing: it
+        keeps the previous findings open, does not use up a review, and
+        counts under :data:`MAX_FAILED_REVIEWS`, past which no review is
+        asked for again.  Each ``NOT DONE`` finding is kept
+        (:attr:`open_findings`) for the next finish to answer, and the
+        verdict with the claim it judged for :meth:`reused_review`.
 
         Args:
             args: Arguments of the ``finish`` call.
@@ -1837,6 +2055,12 @@ class ContainerHarness:
         )
         answer, error, cost, tokens, last_call = self.review_call("Finish reviewer",
                                                                   self.reviewer, prompt)
+        retried = ""
+        if retryable_review_failure(answer, error):
+            retried = error or "empty answer"
+            answer, error, more_cost, more_tokens, last_call = self.review_call(
+                "Finish reviewer", self.reviewer, prompt, lowered=True)
+            cost, tokens = cost + more_cost, tokens + more_tokens
         findings = review_findings(answer)
         failed = bool(error or not REVIEW_VERDICT_LINE.search(answer))
         if failed:
@@ -1846,17 +2070,58 @@ class ContainerHarness:
         self._log({"event": "review", "turn": self.turns, "model": self.reviewer,
                    "round": self.reviews, "answer": answer[:8000], "findings": findings,
                    "error": error, "failed": failed, "last_call": last_call,
-                   "cost_usd": cost, "tokens": tokens})
+                   "cost_usd": cost, "tokens": tokens, **({"retried": retried} if retried
+                                                            else {})})
         self.stage_fields["review"] = {"model": self.reviewer, "cost_usd": cost,
                                        "round": self.reviews}
+        if retried:
+            self.stage_fields["review"]["retried"] = retried[:500]
         if failed:
-            self.stage_fields["review"]["error"] = (error or "no verdict")[:500]
+            self.stage_fields["review"]["error"] = (
+                error or ("empty answer" if not answer.strip() else "no verdict"))[:500]
             return None
         self.review_snapshot = self.file_snapshot()
         self.open_findings = numbered_items(findings)
-        if not findings:
-            return None
-        return REVIEW_VERDICT.format(findings=findings)
+        self.review_claim = claim_text(args)
+        self.review_result = REVIEW_VERDICT.format(findings=findings) if findings else None
+        return self.review_result
+
+    def reused_review(self, args: dict[str, Any]) -> bool:
+        """Whether the last review's verdict stands for this finish, and record the reuse.
+
+        It does when the finish makes the claim that review judged
+        (:func:`claim_text`: the summary and the evidence named) on the
+        files it saw (:attr:`review_snapshot`): the same input gets the
+        same verdict (:attr:`review_result`) without a model call, and
+        the stage is recorded as reused.  A changed claim on the same
+        files is judged on the review's findings by
+        :meth:`unanswered_verdict` instead; a changed tree gets a review
+        when one is still possible (:meth:`review_wanted`).
+
+        Args:
+            args: Arguments of the ``finish`` call.
+        """
+        if self.review_claim is None or self.review_claim != claim_text(args):
+            return False
+        current = self.file_snapshot()
+        if (self.review_snapshot is None or current is None
+                or changed_paths(self.review_snapshot, current)):
+            return False
+        self.gate_stage("review", 0.0, "fail" if self.review_result else "pass", reused=True,
+                        model=self.reviewer, round=self.reviews)
+        return True
+
+    def failed_review(self, error: Exception) -> None:
+        """The verdict of a review stage that raised: none, the error on its stage record.
+
+        A check that did not happen is never a refusal against the agent
+        (the verifier and the independent check differ: :func:`failed_stage`).
+
+        Args:
+            error: What the stage raised.
+        """
+        self.stage_fields["review"] = {"model": self.reviewer, "error": repr(error)[:500]}
+        return None
 
     def unanswered_verdict(self, args: dict[str, Any]) -> str | None:
         """The open review findings this finish does not answer by quoted evidence.
@@ -1873,8 +2138,13 @@ class ContainerHarness:
         if not self.open_findings:
             return None
         summary = str(args.get("summary_in_html", ""))
-        answered = answered_findings(summary, self.open_findings)
-        self._log({"event": "findings_answered", "turn": self.turns, "answered": answered})
+        spent: list[tuple[float, int]] = []
+        answered = answered_findings(summary, self.open_findings,
+                                     lambda cost, tokens: spent.append((cost, tokens)))
+        # A side-agent record (SIDE_AGENT_EVENTS): the decisions call's spend is
+        # outside the daemon's accounting, like the reviewer's.
+        self._log({"event": "findings_answered", "turn": self.turns, "answered": answered,
+                   "cost_usd": sum(c for c, _ in spent), "tokens": sum(t for _, t in spent)})
         if answered is None:
             return None
         unanswered = [f for f, ok in zip(self.open_findings, answered, strict=True) if not ok]
@@ -1909,27 +2179,24 @@ class ContainerHarness:
         self.count_refusal()
         shown = text[-BLIND_OUTPUT_CHARS:] if code is not None else (
             f"(timed out after {self.verifier_timeout:.0f} seconds)")
-        return BLIND_VERIFIER_FAILED_VERDICT.format(path=BLIND_VERIFIER_PATH, code=code,
-                                                    output=shown)
+        return BLIND_VERIFIER_FAILED_VERDICT.format(
+            path=BLIND_VERIFIER_PATH, code=code, output=shown,
+        ) + self.reused_note("blind", BLIND_VERIFIER_PATH)
 
     def blind_run(self) -> tuple[str, int | None, str]:
         """Run the independent check from the host's copy; ``(script, exit code, output)``.
 
         Waits for the check's author when it is still writing
         (:meth:`blind_script_ready`).  ``("", None, "")`` when there is no
-        check; a run past ``verifier_timeout`` has exit code ``None``.
+        check; a run past ``verifier_timeout`` has exit code ``None``; the
+        last run is reused while nothing changed (:meth:`script_run`).
         """
         script = self.blind_script_ready() if self.blind_verifier else ""
         if not script:
             return ("", None, "")
         self.write_container_file(BLIND_VERIFIER_PATH, script)
-        result = self.run_script(script, BLIND_VERIFIER_PATH, self.verifier_timeout)
-        code, output = (None, b"") if result is None else result
-        text = output.decode("utf-8", errors="replace")
-        self.last_blind_run = (script, code, text)
-        self._log({"event": "blind_verifier", "turn": self.turns, "exit_code": code,
-                   "output": text[-4000:]})
-        return (script, code, text)
+        self.last_blind_run = self.script_run("blind", BLIND_VERIFIER_PATH, script)
+        return self.last_blind_run
 
     def start_blind_author(self) -> None:
         """Start the independent check's author on a thread of its own, once per trial.
@@ -2422,7 +2689,11 @@ class ContainerHarness:
         changed what the run checked) sets :attr:`verifier_passed_at` to the
         change count of its call and :attr:`verifier_passed_snapshot` to the
         files as they are now: the gate reuses that run while neither
-        changes (:meth:`verifier_verdict`).
+        changes (:meth:`verifier_verdict`).  A run of the verifier that
+        ends as a background job (its ``bash_job`` report shows the exit)
+        records its verdict too (:attr:`last_verdict`, for the hand-off and
+        the restart budget), but is never reused by the gate: the tree may
+        have changed while it ran.
 
         Args:
             new_messages: The messages added since the previous model call.
@@ -2442,46 +2713,126 @@ class ContainerHarness:
                     self.commands_run.append((command, code))
                     del self.commands_run[:-INVENTORY_COMMANDS]
                     self.exit_codes[command.strip()] = code
-                    if (code == "0" and name == "Bash" and at == last_change
-                            and not writes_files(args)
-                            and verifier_decides(command, self.workdir, VERIFIER_PATH)):
+                    decides = (name in ("Bash", "bash_job")
+                               and not writes_files({"command": command})
+                               and verifier_decides(command, self.workdir, VERIFIER_PATH))
+                    if decides and code != "background":
+                        # the output before the tool's exit-code marker (the usage
+                        # footer follows it)
+                        markers = list(EXIT_CODE_MARKER.finditer(text))
+                        output = text[:markers[-1].start()] if markers else text
+                        self.last_verdict = (code, time.time(), self.turns, "agent",
+                                             "\n".join(output.splitlines()[:VERDICT_LINES]))
+                    if decides and name == "Bash" and code == "0" and at == last_change:
                         self.verifier_passed_at = changes
                         self.verifier_passed_snapshot = self.file_snapshot()
 
     def inventory(self) -> str:
-        """The machine-written state block appended to a continuation session's first message.
+        """The state block appended to a continuation session's first message, in a fixed form.
 
-        Files read (with size and content hash, so the new session can tell
-        what changed), files the agent wrote, the last commands with their
-        exit codes, the checkpoints, and whether the ledger and verifiers
-        exist; the statement itself is already in the message.
+        Four sections, in this order: the files changed since the run
+        started (:meth:`changed_files_lines`), the verifier's last verdict
+        (:meth:`verdict_lines`), the ledger's open checklist
+        (:meth:`checklist_lines`) and the running background jobs
+        (:meth:`running_jobs_lines`).  The statement is already in the
+        message; what the last session thought is not: the new session
+        reads the state, not a narrative.
+        """
+        lines = ["", "# Inventory (written by the harness at this restart)"]
+        for title, section in (("Files changed since the start", self.changed_files_lines),
+                               ("Verifier's last verdict", self.verdict_lines),
+                               ("Ledger open checklist", self.checklist_lines),
+                               ("Running background jobs", self.running_jobs_lines)):
+            lines.append(f"## {title}")
+            lines += ["  " + line for line in section()]
+        return "\n".join(lines)
+
+    def changed_files_lines(self) -> list[str]:
+        """The files under the workdir created, modified or deleted since the run started.
+
+        A created file with its line count, a modified one with its size
+        before and after (the original is not kept, so line counts of a
+        diff are not cheap), a deleted one as such; at most
+        :data:`INVENTORY_FILES`.  ``(no file tracking)`` without a baseline.
+        """
+        baseline, current = self.file_baseline, self.file_snapshot()
+        if baseline is None or current is None:
+            return ["(no file tracking)"]
+        changed = changed_paths(baseline, current)
+        if not changed:
+            return ["(none)"]
+        shown = changed[:INVENTORY_FILES]
+        created = [path for path in shown if path in current and path not in baseline]
+        counts: dict[str, str] = {}
+        if created:
+            out = self.container_exec(["sh", "-c", "wc -l \"$@\"", "sh", *created]) or ""
+            for line in out.splitlines():
+                parts = line.split(None, 1)
+                if len(parts) == 2 and parts[1] in current:
+                    counts[parts[1]] = parts[0]
+        lines = []
+        for path in shown:
+            if path not in current:
+                lines.append(f"{path} (deleted)")
+            elif path not in baseline:
+                lines.append(f"{path} (created, {counts.get(path, '?')} lines)")
+            else:
+                lines.append(f"{path} (modified, {baseline[path][0]} -> {current[path][0]} bytes)")
+        if len(changed) > len(shown):
+            lines.append(f"and {len(changed) - len(shown)} more")
+        return lines
+
+    def verdict_lines(self) -> list[str]:
+        """The verifier's last verdict: exit code, who ran it and when, the head of its output."""
+        with self._lock:
+            verdict = self.last_verdict
+        if verdict is None:
+            return [f"(the verifier {VERIFIER_PATH} has not run)"]
+        code, at, turn, who, head = verdict
+        when = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(at))
+        lines = [f"exit {code}, run by the {who} at {when} (turn {turn}); output head:"]
+        return lines + ["  " + line for line in head.splitlines()] if head else lines
+
+    def checklist_lines(self) -> list[str]:
+        """The ledger's unchecked ``- [ ]`` items (``(no ledger)`` without the file)."""
+        ledger = self.read_container_file(LEDGER_PATH)
+        if ledger is None:
+            return ["(no ledger)"]
+        items = [line.strip() for line in ledger.splitlines() if OPEN_ITEM.match(line)]
+        return items[:INVENTORY_FILES] or ["(none open)"]
+
+    def running_jobs_lines(self) -> list[str]:
+        """The background jobs still running, as ``<id>: <command>`` (from the jobs directory)."""
+        out = self.container_exec(["sh", "-c", RUNNING_JOBS_COMMAND]) or ""
+        return out.splitlines()[:INVENTORY_FILES] or ["(none)"]
+
+    def restart_denied(self) -> bool:
+        """Count a hand-off; whether the restart budget denies it a session.
+
+        It does from the :attr:`restart_budget`-th restart on, when the
+        hand-off comes with no new edit (:attr:`changes` as at the previous
+        restart) and no change of the verifier's verdict since it
+        (:attr:`last_verdict`): the run ends with the state as the caveat
+        (:meth:`restart_caveat`), and the trajectory records
+        ``restart_budget``.
         """
         with self._lock:
-            read = list(self.files_read)
-            commands = list(self.commands_run)
-            written = sorted(self.owned_files)
-        lines = ["", "# Inventory (written by the harness at this restart)"]
-        if read:
-            listing = self.container_exec(
-                ["sh", "-c", "for f in \"$@\"; do if [ -f \"$f\" ]; then printf '%s %s %s\\n' "
-                 "\"$(wc -c < \"$f\")\" \"$(md5sum \"$f\" | cut -c1-8)\" \"$f\"; "
-                 "else echo \"- - $f\"; "
-                 "fi; done", "sh", *read[-INVENTORY_FILES:]]) or ""
-            lines.append("Files read (bytes md5 path; '-' = missing now):")
-            lines += ["  " + line for line in listing.splitlines()]
-        if written:
-            lines.append("Files written with Edit/Write: " + ", ".join(written[:INVENTORY_FILES]))
-        if commands:
-            lines.append(f"Last {len(commands)} shell commands (exit code: command):")
-            lines += [f"  {code}: {command[:160]}" for command, code in commands]
-        present = self.container_exec(
-            ["sh", "-c", f"for f in {LEDGER_PATH} {VERIFIER_PATH} {BLIND_VERIFIER_PATH}; do "
-             "[ -s \"$f\" ] && echo \"$f\"; done; true"]) or ""
-        lines.append("Present: " + (", ".join(present.split()) or "none of the ledger/verifiers"))
-        if self.checkpoints:
-            lines.append("Checkpoints: " + ", ".join(self.checkpoints))
-        lines.append("Do not re-read unchanged files you already know from the summary above.")
-        return "\n".join(lines)
+            verdict = self.last_verdict[0] if self.last_verdict else None
+            idle = self.changes == self.restart_changes and verdict == self.restart_verdict
+            self.restarts += 1
+            self.restart_changes, self.restart_verdict = self.changes, verdict
+            restarts = self.restarts
+        denied = idle and restarts >= self.restart_budget
+        self._log({"event": "restart", "turn": self.turns, "restarts": restarts, "idle": idle,
+                   "changes": self.changes, "verdict": verdict})
+        if denied:
+            self._log({"event": "restart_budget", "turn": self.turns, "restarts": restarts,
+                       "changes": self.changes, "verdict": verdict})
+        return denied
+
+    def restart_caveat(self, state: str) -> str:
+        """The caveat of a run the restart budget ended: why, and the state block *state*."""
+        return RESTART_BUDGET_CAVEAT.format(restarts=self.restarts, state=html.escape(state))
 
     def changed_since(self, baseline: dict[str, tuple[str, str]]) -> list[str]:
         """The files created, modified or deleted under the workdir since *baseline*.
@@ -2682,10 +3033,33 @@ INVENTORY_COMMANDS = 40
 #: only by these is still what the gate would see (:meth:`ContainerHarness.record_exit_codes`).
 READ_ONLY_TOOLS = frozenset({"Read", "checkpoint", "finish", "refused"})
 INVENTORY_FILES = 60
+#: Lines of the verifier's output the hand-off inventory keeps.
+VERDICT_LINES = 20
+#: An unchecked item of the ledger's checklist.
+OPEN_ITEM = re.compile(r"^\s*[-*]\s+\[ \]\s")
+#: Prints ``<id>: <command>`` for every background job started and not yet
+#: exited (the job files :mod:`kiss.agents.sorcar.container_jobs` keeps).
+RUNNING_JOBS_COMMAND = (
+    f"for f in {JOBS_DIR}/*.pid; do [ -e \"$f\" ] || continue; id=$(basename \"$f\" .pid); "
+    f"[ -e {JOBS_DIR}/$id.exit ] && continue; printf '%s: ' \"$id\"; "
+    f"head -c 200 {JOBS_DIR}/$id.cmd 2>/dev/null; echo; done; true"
+)
+#: Hand-offs (context restarts) a run gets before an idle one ends it: from this
+#: restart on, a hand-off with no new edit and the same verifier verdict as at
+#: the previous restart gets no session (config ``restart_budget``,
+#: :meth:`ContainerHarness.restart_denied`).
+RESTART_BUDGET = 4
+#: The caveat of a run the restart budget ended, appended to its summary.
+RESTART_BUDGET_CAVEAT = (
+    "\n<h4>Ended by the restart budget</h4>\n<p>Restart {restarts} came with no new edit and "
+    "no change of the verifier's verdict since the restart before it; the run ends with the "
+    "work as it is. Its state:</p>\n<pre>{state}</pre>"
+)
 #: First line of a continuation session's prompt (``CONTINUATION_PROMPT``).
 CONTINUATION_MARKER = "# Task Progress (Continuation "
 #: Side agents of the gate whose spend the trial runner adds to the trial's cost.
-SIDE_AGENT_EVENTS = frozenset({"review", "blind_verifier_written", "reading_check"})
+SIDE_AGENT_EVENTS = frozenset({"review", "blind_verifier_written", "reading_check",
+                               "findings_answered"})
 
 
 def changed_paths(baseline: dict[str, tuple[str, str]],
@@ -2693,6 +3067,24 @@ def changed_paths(baseline: dict[str, tuple[str, str]],
     """The paths created, deleted or changed (size or mtime) between two file snapshots."""
     return sorted(set(current) ^ set(baseline)
                   | {p for p in current if p in baseline and current[p] != baseline[p]})
+
+
+def claim_text(args: dict[str, Any]) -> str:
+    """The claim a ``finish`` call makes, as the reviewer judges it: its summary and its evidence.
+
+    Args:
+        args: Arguments of the ``finish`` call.
+    """
+    return f"{args.get('summary_in_html', '')}\n{args.get('evidence', '')}"
+
+
+class RestartBudgetError(KISSError):
+    """Raised at the first model call of a session the restart budget denies.
+
+    The session loop ends the run on it with ``finish(success=False)``
+    whose summary is the message: the restart budget's caveat with the
+    state block (:meth:`ContainerHarness.restart_caveat`).
+    """
 
 
 def user_text(message: Any) -> str:
@@ -2727,8 +3119,9 @@ def append_user_text(message: dict[str, Any], note: str) -> None:
 def review_usage(trajectory_path: Path, since: int = 0) -> tuple[float, int]:
     """``(USD, tokens)`` spent by the gate's side agents logged in *trajectory_path*.
 
-    The reviewer and the blind verifier's author are model calls outside
-    the daemon's accounting (:data:`SIDE_AGENT_EVENTS`), so the trial runner
+    The reviewer, the blind verifier's author, the reading check and the
+    decisions model's findings check are model calls outside the daemon's
+    accounting (:data:`SIDE_AGENT_EVENTS`), so the trial runner
     adds their spend to the trial's cost from the log.  The log is
     append-only: a runner that reuses a trial directory passes the file's
     size before its run as *since* so earlier runs' reviews are not counted
@@ -2865,13 +3258,115 @@ def descendants(
     return found
 
 
-def describe_processes(procs: dict[tuple[int, str], tuple[int, str]], limit: int = 8) -> str:
+#: Survivors named per note; the rest are counted (every one is adopted).
+MAX_LISTED_SURVIVORS = 8
+
+
+def describe_processes(
+    procs: dict[tuple[int, str], tuple[int, str]], limit: int = MAX_LISTED_SURVIVORS,
+) -> str:
     """``pid cmdline (parent ppid)`` for up to *limit* processes, lowest pid first."""
     items = [f"{pid} {cmd[:120]} (parent {ppid})"
              for (pid, _), (ppid, cmd) in sorted(procs.items())]
     if len(items) > limit:
         items = items[:limit] + [f"and {len(items) - limit} more"]
     return "; ".join(items)
+
+
+def shell_segments(command: str) -> list[str]:
+    """The simple commands of *command*, as written (quotes kept), in order.
+
+    Split at the separators :data:`SHELL_PIECE` recognises outside quotes;
+    blank pieces are dropped.
+
+    Args:
+        command: The shell command as the agent wrote it.
+    """
+    segments: list[str] = []
+    current: list[str] = []
+    for piece in SHELL_PIECE.finditer(command):
+        if piece.group("sep") is None:
+            current.append(piece.group())
+        else:
+            segments.append("".join(current))
+            current = []
+    segments.append("".join(current))
+    return [segment.strip() for segment in segments if segment.strip()]
+
+
+def shell_words(text: str) -> list[str]:
+    """The words of the simple command *text* as the shell would pass them (quotes removed).
+
+    Args:
+        text: One simple command; unbalanced quoting falls back to a blank split.
+    """
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
+def command_logs(command: str, workdir: str) -> list[tuple[str, str]]:
+    """``(simple command, log path)`` for each part of *command* that redirects its output.
+
+    The parts are the simple commands :func:`shell_segments` finds; a ``cd
+    DIR`` part sets the directory the relative paths of the later parts
+    resolve against, *workdir* to begin with.  The log is the target of
+    the part's last stdout redirection (:data:`REDIRECTION`, the one the
+    shell honours); ``/dev/null`` is no log.
+
+    Args:
+        command: The shell command as the agent wrote it.
+        workdir: The directory the command starts in.
+    """
+    logs: list[tuple[str, str]] = []
+    cwd = workdir
+    for text in shell_segments(command):
+        words = shell_words(text)
+        if len(words) == 2 and words[0] == "cd":
+            cwd = posixpath.normpath(posixpath.join(cwd, words[1]))
+            continue
+        path = stdout_target(text)
+        if path and path != "/dev/null":
+            logs.append((text, posixpath.normpath(posixpath.join(cwd, path))))
+    return logs
+
+
+def stdout_target(text: str) -> str:
+    """The file the simple command *text* redirects its output to, or ``""``.
+
+    The operator (:data:`REDIRECTION`) is looked for outside quotes and
+    escapes, the target is the shell word after it (quotes and escapes
+    decoded); the last redirection is the one the shell honours.
+
+    Args:
+        text: One simple command.
+    """
+    masked = SHELL_PIECE.sub(
+        lambda piece: "x" * len(piece.group()) if piece.group()[0] in "'\"\\" else piece.group(),
+        text)
+    operators = list(REDIRECTION.finditer(masked))
+    words = shell_words(text[operators[-1].end():]) if operators else []
+    return words[0] if words else ""
+
+
+def survivor_log(cmdline: str, logs: list[tuple[str, str]]) -> str:
+    """The log path among *logs* (:func:`command_logs`) of the process running *cmdline*.
+
+    The log of the first simple command whose words (as the shell passed
+    them, :func:`shell_words`) or text contain the command line, blank
+    runs collapsed; when none does, the only log when there is exactly
+    one; else ``""``.
+
+    Args:
+        cmdline: The process's command line as ``/proc`` shows it.
+        logs: The redirected simple commands of the turn and their logs.
+    """
+    wanted = " ".join(cmdline.split())
+    for text, path in logs:
+        if wanted and (wanted in " ".join(shell_words(text)) or wanted in " ".join(text.split())):
+            return path
+    return logs[0][1] if len(logs) == 1 else ""
 
 
 def append_to_last_tool_result(message: Any, note: str) -> bool:

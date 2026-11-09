@@ -21,8 +21,18 @@ its environment, so the deadline sweep that kills a timed-out foreground
 command's process tree leaves the job alone.  Its state is three files
 under :data:`JOBS_DIR`: ``<id>.log`` (stdout and stderr), ``<id>.pid``
 (the session leader, whose process group is the job) and ``<id>.exit``
-(written when the command ends).  A ``wait`` is one polling script run in
-the container, so a long wait costs one tool call, not one per poll.
+(written when the command ends; the shell opens it before it writes the
+exit code, so only a non-empty marker is a finished job).  A ``wait`` is
+one polling script run in the container, so a long wait costs one tool
+call, not one per poll.
+
+A process the agent left running from a foreground command (``nohup …
+&``) can be adopted as a job too (:meth:`ContainerJobs.adopt`): the same
+files are written for it (plus ``<id>.owner``, its start time as adopted,
+which with the pid identifies the process through any exec), the log
+linked to the file its redirection named, and a detached watcher writes
+the exit file once the pid is gone, so every job script works on it
+unchanged.
 """
 
 from __future__ import annotations
@@ -45,7 +55,7 @@ JOB_ID = re.compile(r"[0-9a-f]{8}")
 #: The status line of a :data:`REPORT_SCRIPT` report.
 STATUS_LINE = re.compile(r"^status: (.+)$", re.MULTILINE)
 #: Prints the ids among ``{ids}`` (space-separated) whose job has not exited.
-RUNNING_SCRIPT = "for id in {ids}; do [ -e {d}/$id.exit ] || echo $id; done; true"
+RUNNING_SCRIPT = "for id in {ids}; do [ -s {d}/$id.exit ] || echo $id; done; true"
 
 BashFn = Callable[[str, str, int, int], str]
 
@@ -69,7 +79,7 @@ INNER_SCRIPT = (
 #: then prints the status line and the log tail (:data:`REPORT_SCRIPT`).
 WAIT_SCRIPT = (
     "end=$(( $(date +%s) + {timeout} )); "
-    "while [ ! -e {d}/{id}.exit ]; do "
+    "while [ ! -s {d}/{id}.exit ]; do "
     "{match}"
     "[ $(date +%s) -ge $end ] && break; sleep 1; done; "
 )
@@ -80,31 +90,127 @@ MATCH_CLAUSE = "grep -qE -- {pattern} {d}/{id}.log 2>/dev/null && break; "
 UNTIL_CHECK = "grep -qE -- {pattern} /dev/null 2>&1; true"
 #: Prints ``status: exited N`` or ``status: running`` and the last lines of the log.
 REPORT_SCRIPT = (
-    "if [ -e {d}/{id}.exit ]; then echo \"status: exited $(cat {d}/{id}.exit)\"; "
+    "if [ -s {d}/{id}.exit ]; then echo \"status: exited $(cat {d}/{id}.exit)\"; "
     "else echo 'status: running'; fi; "
     "echo 'log: {d}/{id}.log'; echo '--- last {n} log lines ---'; "
     "tail -n {n} {d}/{id}.log 2>/dev/null; true"
 )
-#: Kills the job's process group (the session ``setsid`` created), then its
-#: leader.  ``kill -TERM -<pgid>`` is the spelling every shell accepts
-#: (dash rejects ``--`` before a negative pid).
-KILL_SCRIPT = (
-    "p=$(cat {d}/{id}.pid 2>/dev/null); if [ -n \"$p\" ]; then kill -TERM -$p 2>/dev/null; "
-    "sleep 1; kill -KILL -$p 2>/dev/null; kill -KILL $p 2>/dev/null; fi; "
-    "[ -e {d}/{id}.exit ] || echo 'killed' > {d}/{id}.exit; true"
+#: Defines ``ident <pid>``: prints the start time of the process *pid*
+#: (clock ticks since boot, field 22 of ``/proc/<pid>/stat``), nothing when
+#: the pid is gone or a zombie (``kill -0`` alone would not say so: a
+#: container whose pid 1 is ``sleep infinity`` never reaps an orphan, and
+#: the harness's process listing drops zombies too).  Pid and start time
+#: together identify a process: an exec keeps both, and a later process the
+#: kernel gave the pid has another start time.
+IDENT_FN = (
+    "ident() {{ set -- $(sed 's/.*) //' /proc/$1/stat 2>/dev/null); "
+    "[ $# -ge 20 ] && [ \"$1\" != Z ] && echo \"${{20}}\"; }}; "
 )
-#: Kills the process group of every job ever started, exited or not (the
-#: ``.exit`` file records the job's shell, not a child it left running in the
-#: background): the harness runs it before it restores a checkpoint, so a
-#: process still writing into the work tree cannot undo the restore.  Prints
-#: the ids of the jobs whose process group still existed (a zombie the
-#: container's init never reaped counts), one per line.
-KILL_ALL_SCRIPT = (
-    f"for f in {JOBS_DIR}/*.pid; do [ -e \"$f\" ] || continue; id=$(basename \"$f\" .pid); "
-    "p=$(cat \"$f\"); kill -TERM -$p 2>/dev/null || continue; echo $id; done; sleep 1; "
-    f"for f in {JOBS_DIR}/*.pid; do [ -e \"$f\" ] || continue; id=$(basename \"$f\" .pid); "
-    "p=$(cat \"$f\"); kill -KILL -$p 2>/dev/null; kill -KILL $p 2>/dev/null; "
-    f"[ -e {JOBS_DIR}/$id.exit ] || echo 'killed' > {JOBS_DIR}/$id.exit; done; true"
+#: Defines ``owned <pid> <pidfile>``: true when the process group *pid* is
+#: the job's, that is its leader is the job's shell (its command line names
+#: the pid file the shell wrote) or the leader has ended (no process, or a
+#: zombie, whose command line is empty) and only its group may live on (a
+#: pid in use as a group id is never reused).  A recycled pid, one the kernel
+#: gave an unrelated process after the job's group drained, fails the check,
+#: so the kill scripts never signal a stranger.  An adopted job (its
+#: ``.owner`` file holds the start time of the process as adopted) is owned
+#: while the pid belongs to the process with that start time, whatever it
+#: has exec'd since: an adopted process ended is nobody's to signal, and so
+#: is a stranger wearing its pid.
+OWNED_FN = IDENT_FN + (
+    "owned() {{ if [ -s \"${{2%.pid}}.owner\" ]; then "
+    "[ \"$(ident $1)\" = \"$(cat \"${{2%.pid}}.owner\")\" ]; return; fi; "
+    "c=$(tr '\\0' ' ' < /proc/$1/cmdline 2>/dev/null); "
+    "case \"$c\" in (''|*\"$2\"*) true;; (*) false;; esac; }}; "
+)
+#: Defines ``tree <pid> <pidfile>``, which prints ``pid:start time`` of every
+#: descendant of the adopted process *pid* (nothing for a started job: its
+#: process group is the job), and ``hit <signal> <pid:start time>...``, which
+#: sends the signal to each of those processes still running with that start
+#: time.  An adopted process leads no process group as a rule (a ``nohup …
+#: &`` of a shell without job control stays in the shell's group, which is
+#: not the job's to signal), so its children are found by their parent pids
+#: in ``/proc/*/stat``, captured before the parent is signalled (its death
+#: reparents them) and signalled by identity (a pid reused meanwhile is a
+#: stranger's).
+TREE_FN = (
+    "tree() {{ [ -s \"${{2%.pid}}.owner\" ] || return 0; "
+    "procs=$(cat /proc/[0-9]*/stat 2>/dev/null | while read -r pid rest; do "
+    "set -- ${{rest##*) }}; [ $# -ge 20 ] && echo \"$pid:$2:${{20}}\"; done); "
+    "todo=\" $1 \"; while [ -n \"$todo\" ]; do next=; for e in $procs; do k=${{e%:*}}; "
+    "case \"$todo\" in (*\" ${{k#*:}} \"*) echo \"${{e%%:*}}:${{e##*:}}\"; "
+    "next=\"$next ${{e%%:*}} \";; esac; done; todo=$next; done; }}; "
+    "hit() {{ s=$1; shift; for k in \"$@\"; do "
+    "[ \"$(ident ${{k%:*}})\" = \"${{k#*:}}\" ] && kill -$s ${{k%:*}} 2>/dev/null; done; }}; "
+)
+#: Kills the job's process group (the session ``setsid`` created), then its
+#: leader, when the group is still the job's.  ``kill -TERM -<pgid>`` is the
+#: spelling every shell accepts (dash rejects ``--`` before a negative pid).
+#: An adopted pid that leads no group gets the TERM itself, and so do its
+#: descendants (:data:`TREE_FN`), then the KILL every job's leader gets,
+#: the descendants found again at that point (a parent that ignored the TERM
+#: may have spawned more).  A job still running is marked ``killed`` before
+#: the signals: an adopted job's watcher would otherwise record the kill as
+#: a plain exit.
+KILL_SCRIPT = OWNED_FN + TREE_FN + (
+    "p=$(cat {d}/{id}.pid 2>/dev/null); if [ -n \"$p\" ] && owned $p {d}/{id}.pid; then "
+    "[ -e {d}/{id}.exit ] || echo 'killed' > {d}/{id}.exit; t=$(tree $p {d}/{id}.pid); "
+    "kill -TERM -$p 2>/dev/null; kill -TERM $p 2>/dev/null; hit TERM $t; sleep 1; "
+    "if owned $p {d}/{id}.pid; then t=\"$t $(tree $p {d}/{id}.pid)\"; "
+    "kill -KILL -$p 2>/dev/null; kill -KILL $p 2>/dev/null; fi; hit KILL $t; fi; "
+    "[ -s {d}/{id}.exit ] || echo 'killed' > {d}/{id}.exit; true"
+)
+#: Kills the process group of every job ever started or adopted, exited or
+#: not (the ``.exit`` file records the job's shell, not a child it left
+#: running in the background), as long as the group, or the adopted process,
+#: is still the job's, and the descendants of every adopted process
+#: (:data:`TREE_FN`): the harness runs it at the end of a trial, before it
+#: restores a checkpoint, so a process still writing into the work tree
+#: cannot undo the restore.  Prints the ids of the jobs whose process group,
+#: or adopted pid, still existed (a zombie the container's init never reaped
+#: counts), one per line.
+KILL_ALL_SCRIPT = (OWNED_FN + TREE_FN + (
+    "kids=; for f in {d}/*.pid; do [ -e \"$f\" ] || continue; id=$(basename \"$f\" .pid); "
+    "p=$(cat \"$f\"); owned $p \"$f\" || continue; "
+    "[ -e {d}/$id.exit ] || echo 'killed' > {d}/$id.exit; t=$(tree $p \"$f\"); kids=\"$kids $t\"; "
+    "kill -TERM -$p 2>/dev/null || kill -TERM $p 2>/dev/null || continue; echo $id; "
+    "hit TERM $t; done; sleep 1; "
+    "for f in {d}/*.pid; do [ -e \"$f\" ] || continue; id=$(basename \"$f\" .pid); "
+    "p=$(cat \"$f\"); owned $p \"$f\" && {{ kids=\"$kids $(tree $p \"$f\")\"; "
+    "kill -KILL -$p 2>/dev/null; kill -KILL $p 2>/dev/null; }}; "
+    "[ -s {d}/$id.exit ] || echo 'killed' > {d}/$id.exit; done; hit KILL $kids; true"
+)).format(d=JOBS_DIR)
+#: Registers the running process ``{pid}`` as job ``{id}``: its command,
+#: owner (the process's start time, which ``owned`` and the watcher compare
+#: against, so a recycled pid is never signalled and an exec is not taken
+#: for an exit) and pid files, its log (a link to ``{log}``, the quoted
+#: absolute path of the file its redirection named, or an empty file for
+#: ``''``) and the detached watcher (:data:`WATCH_SCRIPT`, quoted as
+#: ``{watch}``), started like a job so the deadline sweep leaves it alone.
+#: Prints ``adopted`` once all of that is in place, or ``gone`` when the
+#: pid is not alive; nothing when the jobs dir cannot be made, and only the
+#: shell's complaint when a job file cannot be written (the files written
+#: before it are removed: a half-registered job is no job).
+ADOPT_SCRIPT = IDENT_FN + (
+    "mkdir -p {d} || exit 0; s=$(ident {pid}); [ -n \"$s\" ] || {{ echo gone; exit 0; }}; "
+    "printf '%s' {cmd} > {d}/{id}.cmd && echo \"$s\" > {d}/{id}.owner && "
+    "echo {pid} > {d}/{id}.pid && "
+    "{{ [ -n {log} ] && ln -s {log} {d}/{id}.log || : > {d}/{id}.log; }} && "
+    "{{ env -u {token} setsid nohup sh -c {watch} > /dev/null 2>&1 < /dev/null & }} && "
+    "echo adopted || rm -f {d}/{id}.cmd {d}/{id}.owner {d}/{id}.pid {d}/{id}.log"
+)
+#: Polls every second until the exit file exists, writing it once the
+#: adopted process is gone, that is once the pid no longer belongs to the
+#: process with the start time the owner file holds (a kill may have written
+#: the file first; an exec is not an exit).  The exit code is unknown (the
+#: watcher is not the process's parent), and the file says so.  The exit
+#: file's path opens the script, as the argument of the null command, so the
+#: watcher's command line names the jobs dir within the first characters a
+#: process listing keeps, whatever ``ident``'s definition adds before the loop.
+WATCH_SCRIPT = ": {d}/{id}.exit; " + IDENT_FN + (
+    "until [ -e {d}/{id}.exit ]; do [ \"$(ident {pid})\" = \"$(cat {d}/{id}.owner)\" ] || "
+    "[ -e {d}/{id}.exit ] || echo '(exit code unknown: adopted process)' > {d}/{id}.exit; "
+    "sleep 1; done"
 )
 
 
@@ -146,6 +252,42 @@ class ContainerJobs:
             f"Use bash_job({job_id!r}, action='wait', timeout_seconds=N, until='<regex>') "
             "to block until it exits or its log matches, 'tail' for the current log, "
             "'kill' to stop it.")
+
+    def adopt(self, pid: int, command: str, log_path: str) -> tuple[str | None, str]:
+        """Register the running process *pid* the agent left behind as a job.
+
+        The job gets the files a started job has (command, pid, log, and
+        the exit file once a detached watcher sees the pid gone), so
+        ``bash_job`` waits, tails and kills it, :meth:`last_running` finds
+        it and the end-of-task kill stops it.  Nothing kills it before
+        that: a server the task started on purpose keeps running.
+
+        Args:
+            pid: The process (as the container sees it).
+            command: Its command line, shown in the reports.
+            log_path: The absolute path of the file its output goes to
+                (the target of its redirection), linked as the job's log so
+                a wait can match it; ``""`` when its output goes nowhere.
+
+        Returns:
+            ``(job id, report)``: the report is ``left running as job <id>
+            (<command>, log <path>)`` (``no log`` without a path), or, with
+            a ``None`` job id, a string starting with ``Error:`` (the pid
+            is not alive, or the job files could not be written).
+        """
+        job_id = uuid.uuid4().hex[:8]
+        watch = WATCH_SCRIPT.format(d=JOBS_DIR, id=job_id, pid=int(pid))
+        script = ADOPT_SCRIPT.format(d=JOBS_DIR, pid=int(pid), id=job_id,
+                                     cmd=shlex.quote(command), log=shlex.quote(log_path),
+                                     token=_EXEC_TOKEN_VAR, watch=shlex.quote(watch))
+        out = self.bash_fn(script, f"adopt process {pid} as job {job_id}", QUICK_TIMEOUT,
+                           2000).strip()
+        if out.splitlines()[-1:] != ["adopted"]:
+            what = "is not running" if out.endswith("gone") else f"could not be adopted: {out}"
+            return None, f"Error: process {pid} {what}"
+        self.commands[job_id] = command
+        where = f"log {log_path}" if log_path else "no log"
+        return job_id, f"left running as job {job_id} ({command}, {where})"
 
     def last_running(self) -> str | None:
         """Return the id of the job of this registry started last that is still running.
@@ -221,11 +363,6 @@ class ContainerJobs:
                 known = ", ".join(self.commands) or "none"
                 return f"Error: unknown job id {job_id!r}. Known jobs: {known}."
             self.commands[job_id] = probe
-        if until:
-            complaint = self.bash_fn(UNTIL_CHECK.format(pattern=shlex.quote(until)),
-                                     "check the until pattern", QUICK_TIMEOUT, 2000).strip()
-            if complaint:
-                return f"Error: until is not a valid grep -E regex: {complaint}"
         lines = max(1, int(tail_lines))
         report = REPORT_SCRIPT.format(d=JOBS_DIR, id=job_id, n=lines)
         timeout = QUICK_TIMEOUT
@@ -233,6 +370,10 @@ class ContainerJobs:
             seconds = max(1, int(timeout_seconds))
             match = ""
             if until:
+                complaint = self.bash_fn(UNTIL_CHECK.format(pattern=shlex.quote(until)),
+                                         "check the until pattern", QUICK_TIMEOUT, 2000).strip()
+                if complaint:
+                    return f"Error: until is not a valid grep -E regex: {complaint}"
                 match = MATCH_CLAUSE.format(pattern=shlex.quote(until), d=JOBS_DIR, id=job_id)
             script = WAIT_SCRIPT.format(timeout=seconds, d=JOBS_DIR, id=job_id, match=match)
             script += report

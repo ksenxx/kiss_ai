@@ -35,6 +35,7 @@ import json
 from typing import Any
 
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.remote_tabs_probe import machine_of
 from kiss.tests.server.test_remote_tabs import RemoteTabsHarness, _FinishingModel
 
 
@@ -112,4 +113,4 @@ class TestBindingReachesEveryPeer(RemoteTabsHarness):
         else:
             self.fail(f"the parent's replay never announced the sub-agent tab: {seen}")
         self.assertEqual(seen[0], ("tabMachine", "box"), seen)
-        self.assertEqual(self.server._server_api.remote_tabs.machine_of(sub), "box")
+        self.assertEqual(machine_of(self.server._server_api.remote_tabs, sub), "box")

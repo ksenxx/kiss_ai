@@ -59,10 +59,13 @@ No file other than a page or a tombstone is touched -- in particular not the
 keyed by page content, and the next agent that opens the memory re-embeds
 what changed.  Pages are put in place by an atomic rename, so an agent
 reading the memory meanwhile sees either the old page or the new one, never
-a half-written file.  An agent that rewrites the very page being merged in
-the instant between the comparison and the rename loses that write, the
-same way it would to a second agent writing the page: the memory has no page
-locks, and this script takes no more than an agent does.
+a half-written file.  Run from the command line, the merge holds the locks
+an agent takes to write or delete a page (``kiss.core.memoryfield.pages
+.MemoryDir``: ``<memory>.lock`` beside the memory, ``<memory>/<domain>.lock``
+for a domain memory; see :func:`memory_locks`), so an agent's write lands
+either before the comparison or after the rename, never between them, and
+is never lost.  :func:`merge` itself takes no lock: a caller holding the
+locks already (the sync_history_and_memory SEA) calls it directly.
 
 Stdlib-only and self-contained, so it can be copied to a remote machine and
 run there with the system ``python3`` before the project's environment exists.
@@ -74,12 +77,25 @@ Prints one summary line -- ``added N updated N kept N conflicts N removed N``
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
 import sys
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt  # type: ignore[import-not-found]
+except ImportError:  # POSIX
+    msvcrt = None  # type: ignore[assignment]
 
 # The page filename rules of kiss.core.memoryfield.pages (PAGE_NAME_RE,
 # DEBRIS_NAMES, is_debris, TOMBSTONES_DIR), repeated here because this file
@@ -93,6 +109,11 @@ FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.DOTAL
 UPDATED_RE = re.compile(r"^updated:[ \t]*(.+?)[ \t\r]*$", re.MULTILINE)
 # Written by kiss.core.memoryfield.pages.now_iso.
 UPDATED_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+# Longest wait for an agent holding a memory's lock
+# (kiss.core.memoryfield.pages.MUTATION_LOCK_TIMEOUT), and the time between
+# two attempts at it.
+LOCK_TIMEOUT = 60.0
+LOCK_POLL = 0.05
 
 
 def is_page(path: Path) -> bool:
@@ -360,8 +381,102 @@ def install_tombstone(tombstone: Path, dest_dir: Path, name: str) -> None:
     install_file(tombstone, directory / name)
 
 
+@contextmanager
+def memory_locks(memory_dir: Path, domains: list[str]) -> Iterator[None]:
+    """Hold the mutation locks of a memory and of the named domain memories for the block.
+
+    The locks are the ones ``kiss.core.memoryfield.pages.MemoryDir`` takes
+    around every write and delete (``kiss.core.file_lock``): an exclusive
+    lock on ``<memory>.lock`` beside the memory directory and on
+    ``<memory>/<domain>.lock`` for a domain memory, ``flock`` on POSIX and
+    ``msvcrt.locking`` of the file's first byte on Windows.  An agent never
+    holds two of them at once, so taking several here, in a fixed order,
+    cannot deadlock with one.  The same protocol as ``memory_locks`` of the
+    sync_history_and_memory SEA (``memory_delta.py``), repeated here
+    because this file cannot import the package.
+
+    Args:
+        memory_dir: The memory; it must exist for the domain locks to be
+            created inside it.
+        domains: Names of its domain memories to lock as well.
+
+    Raises:
+        TimeoutError: When a lock is still held after :data:`LOCK_TIMEOUT`.
+    """
+    paths = [Path(f"{memory_dir}.lock")] + [memory_dir / f"{name}.lock" for name in sorted(domains)]
+    descriptors: list[int] = []
+    try:
+        for path in paths:
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            descriptors.append(descriptor)
+            _lock(descriptor, path)
+        yield
+    finally:
+        for descriptor in reversed(descriptors):
+            _unlock(descriptor)
+            os.close(descriptor)
+
+
+def _lock(descriptor: int, path: Path) -> None:
+    """Take the exclusive lock on *descriptor*, polling for up to :data:`LOCK_TIMEOUT` seconds."""
+    deadline = time.monotonic() + LOCK_TIMEOUT
+    while not _try_lock(descriptor):
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"{path} still locked by another process after {LOCK_TIMEOUT:g}s")
+        time.sleep(LOCK_POLL)
+
+
+def _try_lock(descriptor: int) -> bool:
+    """Probe the lock once without waiting; True when it is now held."""
+    if fcntl is not None:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+    if msvcrt is not None:  # pragma: no cover - Windows
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EDEADLK):
+                return False
+            raise
+        return True
+    return True  # pragma: no cover - a platform with neither primitive has no lock to take
+
+
+def _unlock(descriptor: int) -> None:
+    """Release the lock :func:`_try_lock` took on *descriptor*."""
+    if fcntl is not None:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    elif msvcrt is not None:  # pragma: no cover - Windows
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def locked_merge(
+    source_dir: Path, dest_dir: Path, tolerance: float
+) -> tuple[dict[str, int], list[str]]:
+    """Run :func:`merge` holding the mutation locks of *dest_dir* and of its domain memories.
+
+    The domain memories locked are the ones *source_dir* holds, the only
+    ones the merge touches.  A source that is not a directory holds no
+    pages: nothing is locked, and the destination is not even created.
+
+    Raises:
+        TimeoutError: When a lock is still held after :data:`LOCK_TIMEOUT`.
+    """
+    if not source_dir.is_dir():
+        return merge(source_dir, dest_dir, tolerance)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    domains = [entry.name for entry in source_dir.iterdir() if is_domain_memory(entry)]
+    with memory_locks(dest_dir, domains):
+        return merge(source_dir, dest_dir, tolerance)
+
+
 def main(argv: list[str]) -> int:
-    """Run the merge named on the command line and print its summary.
+    """Run the merge named on the command line, under the memory's locks, and print its summary.
 
     Args:
         argv: ``[--tolerance SECONDS] SOURCE_DIR DEST_DIR``.
@@ -379,7 +494,7 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 2
-    counts, conflicts = merge(Path(argv[0]), Path(argv[1]), tolerance)
+    counts, conflicts = locked_merge(Path(argv[0]), Path(argv[1]), tolerance)
     print(" ".join(f"{key} {value}" for key, value in counts.items()))
     for name in conflicts:
         print(name)

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import os
 import queue
+import signal
 import tempfile
 import threading
 import time
@@ -178,6 +179,89 @@ class TestShutdownStopsActiveTask(TestCase):
             "not the user-stop label; "
             f"got {row['result']!r}"
         )
+
+    def test_signal_handler_does_not_block_on_the_registry_lock(self) -> None:
+        """The SIGTERM handler must return while a worker holds ``STATE_LOCK``.
+
+        Lock inversion: the handler runs on the event-loop thread, which
+        can be inside a ``WebPrinter._ws_lock`` section when the signal
+        lands; a task worker that holds ``agent_state.STATE_LOCK`` while
+        broadcasting a status (``AgentServer._broadcast_replay_status``)
+        blocks on that same ``_ws_lock``.  A handler that then takes
+        ``STATE_LOCK`` (the registry snapshot) waits for the worker, the
+        worker waits for the handler's thread, and the daemon never
+        shuts down.  The handler must not block on the registry lock.
+        """
+        remote = _make_remote_server()
+        printer = remote._printer
+        worker_holds_registry = threading.Event()
+        release_worker = threading.Event()
+        handler_returned = threading.Event()
+
+        def worker() -> None:
+            with agent_state.STATE_LOCK:
+                worker_holds_registry.set()
+                release_worker.wait(timeout=30)
+                printer.broadcast({"type": "status", "running": False, "tabId": "t1"})
+
+        def interrupted_loop_thread() -> None:
+            with printer._ws_lock:
+                assert worker_holds_registry.wait(timeout=10)
+                try:
+                    remote._handle_shutdown_signal(int(signal.SIGTERM))
+                except KeyboardInterrupt:
+                    pass  # No loop is running: the documented fallback.
+                handler_returned.set()
+
+        worker_thread = threading.Thread(target=worker, daemon=True)
+        loop_thread = threading.Thread(target=interrupted_loop_thread, daemon=True)
+        self.addCleanup(worker_thread.join, 5)
+        self.addCleanup(loop_thread.join, 5)
+        worker_thread.start()
+        loop_thread.start()
+        assert worker_holds_registry.wait(timeout=10)
+        release_worker.set()  # The worker now blocks on ``_ws_lock``.
+        assert handler_returned.wait(timeout=5), (
+            "regression: the signal handler blocked on STATE_LOCK while the "
+            "worker holding it waited for the handler thread's _ws_lock"
+        )
+        assert remote._shutdown_initiated
+
+    def test_workers_are_signalled_before_the_shutdown_persistence(self) -> None:
+        """The sweep sets the stop events before its pre-emptive persistence.
+
+        That persistence takes the history write lock and a ``BEGIN
+        IMMEDIATE`` transaction, so behind another writer it waits out
+        the in-process lock and SQLite's 30 s busy timeout; a cooperative
+        worker must already be stopping during that wait, not running on
+        unsignalled until the write goes through.
+        """
+        remote = _make_remote_server()
+        stop_event = threading.Event()
+        state = AgentState(
+            "signalled-before-persist",
+            agent=ChatSorcarAgent("Sorcar"),
+            tab_id="tab-signalled-before-persist",
+            server_owned=True,
+            stop_event=stop_event,
+        )
+        worker = threading.Thread(target=stop_event.wait, args=(30,), daemon=True)
+        state.task_thread = worker
+        agent_state.register(state)
+        self.addCleanup(agent_state.agent_states.clear)
+        worker.start()
+        sweep = threading.Thread(
+            target=remote._stop_active_agent_tasks, kwargs={"timeout": 2.0}, daemon=True,
+        )
+        with _persistence._rw_lock.write_lock():  # another history-DB writer
+            sweep.start()
+            assert stop_event.wait(timeout=5), (
+                "regression: the shutdown sweep waited for the history DB "
+                "before signalling the in-flight worker to stop"
+            )
+        sweep.join(timeout=30)
+        worker.join(timeout=5)
+        assert not sweep.is_alive() and not worker.is_alive()
 
     def test_stop_active_agent_tasks_is_noop_without_active_tasks(self) -> None:
         """With no active worker the shutdown helper must be a safe no-op."""

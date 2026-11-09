@@ -323,7 +323,57 @@ const STATUS_CHIP_SESSIONS = [
   makeRow({id: 'chatS', task_id: 3, title: 'succeeded task'}),
 ];
 
+/** The running spinner or waiting-for-answer mark of a history row. */
+function statusMark(row) {
+  return row.querySelector('.sidebar-item-running');
+}
+
+/** A finished row, of the registered `machine` when one is given. */
+function machineSession(id, title, machine) {
+  return finishedSession(
+    id,
+    title,
+    machine ? {machine, machine_url: 'https://' + machine + ':8787'} : {},
+  );
+}
+
+/** All history row titles in DOM order, including filtered-out rows. */
+function rowTitles(win) {
+  return Array.from(
+    win.document.querySelectorAll('#history-list .sidebar-item-text'),
+  ).map(el => el.textContent);
+}
+
+/** Open chat tabs, excluding sub-agent and content tabs. */
+function chatTabs(win) {
+  return win._testApi
+    .openTabs()
+    .filter(t => !t.isSubagentTab && !t.isContentTab);
+}
+
+/** The first history row, or null when the list is empty. */
+function historyRow(win) {
+  return win.document.querySelector('#history-list .sidebar-item');
+}
+
+/** The workspace metadata span of a history row. */
+function workspaceSpan(row) {
+  return row.querySelector('.running-item-workspace');
+}
+
+/** The metrics span of a history row. */
+function metricsSpan(row) {
+  return row.querySelector('.running-item-metrics');
+}
+
 module.exports = {
+  statusMark,
+  machineSession,
+  rowTitles,
+  chatTabs,
+  historyRow,
+  workspaceSpan,
+  metricsSpan,
   historyRows,
   visibleTitles,
   rowByTitle,

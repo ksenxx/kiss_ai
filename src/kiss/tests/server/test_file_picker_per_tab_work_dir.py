@@ -34,6 +34,7 @@ import pytest
 
 from kiss.server.file_index import FileIndexRegistry
 from kiss.server.server import AgentServer
+from kiss.tests.server.conftest import local_view
 
 _Picker = tuple[str, str, AgentServer, list[dict[str, Any]]]
 
@@ -164,8 +165,8 @@ def test_get_files_per_tab_indexes_are_independent(
 
     registry = server._file_index
     assert set(registry._indexes) == {a, b}
-    view_a = registry.view_for(a)
-    view_b = registry.view_for(b)
+    view_a = local_view(registry, a)
+    view_b = local_view(registry, b)
     assert view_a is not None and view_b is not None
     assert "alpha.txt" in view_a and "beta.txt" not in view_a
     assert "beta.txt" in view_b and "alpha.txt" not in view_b
@@ -180,6 +181,37 @@ def test_get_files_per_tab_indexes_are_independent(
     assert not any(e.get("loading") for e in events), (
         f"a warm index must answer synchronously; got {events}"
     )
+
+
+def test_every_files_reply_echoes_the_work_dir_it_was_asked_for(
+    picker: _Picker,
+) -> None:
+    """The placeholder and the cold-index reply both carry the directory asked for.
+
+    A16-3: the page keeps only a reply stamped with the directory its
+    tab browses *now*.  Without the stamp a surface that adopted another
+    surface's workspace pick while its ``@`` query was still building
+    the old workspace's index rendered the old workspace's files under
+    the new one (the reply matched on tab, machine and prefix alone).
+    A request for the daemon-wide directory (``""``) gets that
+    directory back as ``configData`` spells it, which is what the page
+    compares against once the config arrived (a page that typed ``@``
+    before it sent ``""``).
+    """
+    _a, b, server, events = picker
+
+    server._handle_command(
+        {"type": "getFiles", "prefix": "", "workDir": b, "connId": "c1", "tabId": "t1"},
+    )
+    _wait_for_files_event(events)
+    replies = [e for e in events if e.get("type") == "files"]
+    assert [bool(e.get("loading")) for e in replies] == [True, False], replies
+    assert [e.get("workDir") for e in replies] == [b, b], replies
+
+    del events[:]
+    server._handle_command({"type": "getFiles", "prefix": "", "workDir": ""})
+    populated = _wait_for_files_event(events)
+    assert populated["workDir"] == server.work_dir != ""
 
 
 def test_get_files_falls_back_to_daemon_work_dir_when_workdir_missing(
@@ -224,4 +256,4 @@ def test_get_files_empty_string_workdir_falls_back_to_daemon_work_dir(
         f"empty workDir must NOT index folder B; got {files}"
     )
     assert b not in server._file_index._indexes
-    assert server._file_index.view_for(b) is None
+    assert local_view(server._file_index, b) is None

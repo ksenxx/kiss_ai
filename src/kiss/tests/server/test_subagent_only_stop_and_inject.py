@@ -114,10 +114,14 @@ class TestViewerTabResolvesToSubagent:
         assert parent.pending_user_messages == [], (
             "the prompt must not be queued into the parent task"
         )
+        # The echo is routed by the sub-agent's task: the printer stamps
+        # one copy per tab subscribed to it (the viewer tab here), never
+        # by the typing tab's id, which may have been rebound meanwhile.
         echo = [
             e for e in events
-            if e.get("type") == "prompt" and e.get("tabId") == "viewer-tab"
+            if e.get("type") == "prompt" and e.get("taskId") == "77"
         ]
         assert echo and echo[0].get("text") == "add more tests", (
-            "the queued prompt must be echoed back on the viewer tab"
+            "the queued prompt must be echoed back under the sub-agent's task"
         )
+        assert "tabId" not in echo[0]

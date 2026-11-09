@@ -20,6 +20,17 @@ mocked, patched or doubled.
   by its ``atexit`` hook — which does not run when the daemon is
   killed.  Every shutdown that was not a clean interpreter exit
   orphaned them.
+
+* **L2-2** — only the synchronous ``start()`` finalizer stopped the
+  ``@``-picker's file-index worker thread; ``stop_async`` ran
+  ``_shutdown_children`` without it, so an embedder that stops the
+  daemon through the async API kept a worker blocked on its queue for
+  the life of the process, with the server graph it retains.
+
+* **L2-1** — the ghost-text autocomplete worker had no stop at all:
+  neither shutdown API joined it, so every daemon that served one
+  ``complete`` command left a thread blocked on its queue, retaining the
+  server graph and still answering requests queued behind it.
 """
 
 from __future__ import annotations
@@ -31,6 +42,7 @@ import shutil
 import socket
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -42,13 +54,15 @@ from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
 from kiss.core import config as config_module
 from kiss.core import user_config
 from kiss.core.processes import pid_alive
-from kiss.server import agent_state
+from kiss.server import agent_state, autocomplete
+from kiss.server.server import AgentServer
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
 from kiss.tests.local_ws import open_local_connection
-from kiss.tests.server.conftest import find_free_port
+from kiss.tests.server._memory_printer import MemoryPrinter
+from kiss.tests.server.conftest import EntryGate, find_free_port
 
 #: A real MCP server: it records its pid, then serves the stdio
 #: transport for real.  Used to prove the daemon reaps its children.
@@ -257,6 +271,123 @@ class TestShutdownReapsMcpChildren(_DaemonHarness):
             "ever disconnected the MCP manager, so its children were "
             "left to an atexit hook that a killed daemon never runs",
         )
+
+
+class TestShutdownStopsFileIndexWorker(_DaemonHarness):
+    """L2-2: ``stop_async`` stops the file-index worker like ``start()`` does."""
+
+    config: dict[str, Any] = {}
+
+    async def test_stop_async_stops_the_file_index_worker(self) -> None:
+        """The worker thread a picker request started is joined by stop_async."""
+        await self.server.start_async()
+        registry = self.server._agent_server._file_index
+        ready = threading.Event()
+        self.assertTrue(registry.ensure(str(self.work_dir), ready.set))
+        self.assertTrue(ready.wait(30.0), "the file-index build never called back")
+        worker = registry._worker
+        assert worker is not None
+        self.assertTrue(worker.is_alive())
+
+        await self._stop()
+
+        worker.join(timeout=5.0)
+        self.assertFalse(
+            worker.is_alive(),
+            "stop_async left the file-index worker blocked on its queue: only "
+            "start()'s finalizer stopped it, _shutdown_children never did",
+        )
+        self.assertFalse(
+            registry.ensure(str(self.work_dir), None),
+            "a stopped daemon's index registry must refuse new builds",
+        )
+
+
+class TestShutdownStopsAutocompleteWorker(_DaemonHarness):
+    """L2-1: ``stop_async`` stops the ghost-text autocomplete worker."""
+
+    config: dict[str, Any] = {}
+
+    async def test_stop_async_stops_the_autocomplete_worker(self) -> None:
+        """The worker a ``complete`` command started is joined; none starts after."""
+        await self.server.start_async()
+        agent = self.server._agent_server
+        agent._cmd_complete(
+            {"type": "complete", "query": "he", "connId": "c1", "tabId": "t1"},
+        )
+        worker = agent._complete_worker
+        assert worker is not None
+        self.assertTrue(worker.is_alive())
+
+        await self._stop()
+
+        worker.join(timeout=5.0)
+        self.assertFalse(
+            worker.is_alive(),
+            "stop_async left the autocomplete worker blocked on its queue: "
+            "_shutdown_children never stopped it",
+        )
+        agent._cmd_complete(
+            {"type": "complete", "query": "hel", "connId": "c1", "tabId": "t1"},
+        )
+        self.assertIs(
+            agent._complete_worker, worker,
+            "a stopped daemon must not start a new autocomplete worker",
+        )
+        assert agent._complete_queue is not None
+        self.assertTrue(agent._complete_queue.empty(), "a stopped daemon queues no request")
+
+
+class TestAutocompleteWorkerStop(unittest.TestCase):
+    """L2-1: the stop drops queued requests and silences a late completion."""
+
+    def tearDown(self) -> None:
+        threading.setprofile(None)
+
+    def test_stop_drops_the_queue_and_a_late_completion_publishes_nothing(self) -> None:
+        """A completion computing at the stop publishes nothing; the queue is dropped."""
+        printer = MemoryPrinter()
+        server = AgentServer(printer=printer)
+        # Hold the worker between computing the completions of the first
+        # request and publishing them (``_ghost_suffix`` is the first
+        # call after ``_complete_many``).
+        gate = EntryGate(autocomplete._ghost_suffix.__code__)
+        gate.start(
+            server._cmd_complete,
+            {"type": "complete", "query": "hel", "connId": "c1", "tabId": "t1"},
+        ).join(10)
+        self.assertTrue(gate.reached.wait(10), "the worker never computed a completion")
+        worker = server._complete_worker
+        assert worker is not None
+        # Queued behind the held request.
+        server._cmd_complete(
+            {"type": "complete", "query": "hello", "connId": "c2", "tabId": "t2"},
+        )
+
+        stopper = threading.Thread(target=server._stop_complete_worker, daemon=True)
+        stopper.start()
+        deadline = time.monotonic() + 10
+        while not server._complete_stopped and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(server._complete_stopped, "the stop never marked the worker")
+        gate.release.set()
+        stopper.join(10)
+        self.assertFalse(stopper.is_alive(), "the stop did not return")
+        worker.join(5)
+        self.assertFalse(worker.is_alive(), "the worker outlived the stop")
+
+        published = [
+            e for e in printer.emitted if e.get("type") in ("ghost", "completions")
+        ]
+        self.assertEqual(published, [], "a completion finishing after the stop published")
+        # After the stop: no new worker, nothing queued, a second stop is a no-op.
+        server._cmd_complete(
+            {"type": "complete", "query": "help", "connId": "c3", "tabId": "t3"},
+        )
+        self.assertIs(server._complete_worker, worker)
+        assert server._complete_queue is not None
+        self.assertTrue(server._complete_queue.empty())
+        server._stop_complete_worker()
 
 
 class TestBrowserTabHandoffRegistration(_DaemonHarness):

@@ -53,7 +53,6 @@ function makeFakeModel(state) {
       this.handlers[event] = cb;
     }
     acceptWaveform() {}
-    retrieveFinalResult() {}
     remove() {
       this.removed = true;
       model.recognizers.delete(this.id);
@@ -296,15 +295,31 @@ function lastProcessor(page) {
   return page.state.processors[page.state.processors.length - 1];
 }
 
-/** The recognizer the current pipeline built last. */
-function lastRecognizer(page) {
-  return page.state.recognizers[page.state.recognizers.length - 1];
+/** The newest recognizer whose grammar is (or is not) set. */
+function newestRecognizer(page, withGrammar) {
+  const recs = page.state.recognizers.filter(r => !!r.grammar === withGrammar);
+  return recs[recs.length - 1];
 }
 
-/** Fire the wake word through the pipeline's own result handler. */
-function fireWake(page) {
+/** The wake-word (grammar) recognizer the current pipeline built last. */
+function lastRecognizer(page) {
+  return newestRecognizer(page, true);
+}
+
+/** The grammar-free recognizer the current pipeline built last. */
+function lastFreeRecognizer(page) {
+  return newestRecognizer(page, false);
+}
+
+/**
+ * Fire the wake word through the pipeline's own result handlers: the
+ * grammar recognizer's final `text`, then the grammar-free one's, which
+ * must agree before the page wakes.
+ */
+function fireWake(page, text = 'abracadabra') {
   page.clock.now += 3000; // clear the 2 s wake cooldown
-  lastRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
+  lastRecognizer(page).handlers.result({result: {text}});
+  lastFreeRecognizer(page).handlers.result({result: {text: 'abracadabra'}});
 }
 
 /**
@@ -337,9 +352,12 @@ function speak(page) {
 
 /** Fire the page's one pending safety timer of `ms` milliseconds. */
 function fireTimer(page, ms) {
-  const live = page.timers.filter(t => !t.cleared && t.ms === ms);
+  const live = page.timers.filter(
+    t => !t.cleared && !t.fired && t.ms === ms,
+  );
   assert.strictEqual(live.length, 1, `one live ${ms} ms timer is armed`);
   page.win.clearTimeout(live[0].id);
+  live[0].fired = true;
   live[0].cb();
 }
 
@@ -402,6 +420,7 @@ module.exports = {
   feed,
   lastProcessor,
   lastRecognizer,
+  lastFreeRecognizer,
   fireWake,
   wake,
   speak,

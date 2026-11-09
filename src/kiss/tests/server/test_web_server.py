@@ -181,7 +181,7 @@ class TestWebPrinter(unittest.TestCase):
         printer._thread_local.task_id = "t1"
         printer.start_recording()
         printer.broadcast({"type": "text_delta", "text": "hello"})
-        events = printer.peek_recording()
+        events = printer.peek_recording_for_task(printer.thread_binding())
         self.assertTrue(any(e.get("text") == "hello" for e in events))
 
     def test_broadcast_injects_task_id(self) -> None:

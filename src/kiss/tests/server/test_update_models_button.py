@@ -34,6 +34,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.conftest import find_free_port
+from kiss.tests.server.pause import Pause
 
 SUCCEEDING_UPDATER = """
 import sys
@@ -231,6 +232,12 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         self.assertIn(
             "Failed to start the model catalog update", str(err.get("text", ""))
         )
+        # The spawn thread reports the failure before its ``finally``
+        # releases the single-flight guard, so the error can be read
+        # first.  Commands on one connection are dispatched
+        # sequentially: a probe round-trip proves _handle_update_models
+        # has finished.
+        self.assertEqual(await self._banners_before_probe(reader_a, writer_a), [])
         self.assertIsNone(self.server._update_models_watch_task)
         self.assertFalse(self.server._update_models_starting)
 
@@ -244,6 +251,35 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         self.assertTrue(task.cancelled())
         self.assertIsNone(self.server._update_models_watch_task)
+
+    async def test_stop_during_the_spawn_installs_no_watcher(self) -> None:
+        """A spawn still in flight when ``stop_async`` returns installs no watcher.
+
+        The handler is awaited inline by the connection task, which the
+        listener close does not cancel, so the spawn completes after the
+        stop; a watcher created then would poll the detached updater on
+        the stopped server's loop for the updater's whole lifetime.
+        """
+        self._updater_stub(HELD_UPDATER.format(release=str(self.release)))
+        reader_a, writer_a = await self._connect()
+        with Pause(
+            RemoteAccessServer._spawn_detached.__code__,
+            lambda loc: loc["self"] is self.server,
+        ) as pause:
+            await self._send(writer_a, {"type": "updateModels"})
+            await self._drain_until(reader_a, _has_type("notice"))
+            self.assertTrue(await asyncio.to_thread(pause.paused.wait, 30))
+            await self.server.stop_async()
+            pause.release()
+        for _ in range(80):
+            await asyncio.sleep(0.025)
+            if self.server._update_models_watch_task is not None:
+                break
+        self.assertIsNotNone(self.server._update_models_proc, "the released spawn never ran")
+        self.assertIsNone(
+            self.server._update_models_watch_task,
+            "regression: a watcher was installed after stop_async returned",
+        )
 
     async def test_default_argv_targets_the_user_catalog(self) -> None:
         """The production argv runs update_models against $KISS_HOME."""

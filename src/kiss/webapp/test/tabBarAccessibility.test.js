@@ -26,10 +26,14 @@ const {send, snapshotEntry} = harness;
 const {tabEl} = require('./subagent_tab_helpers');
 const {makeRunner} = require('./ui_antipattern_harness');
 
+const openWindows = [];
+
 // The web server injects class="remote-chat" into the body before any
 // script runs (BODY_CLASS_ATTR in web_server.py): the served page.
 function makePage() {
-  return harness.makePage({bodyClass: 'remote-chat'});
+  const page = harness.makePage({bodyClass: 'remote-chat'});
+  openWindows.push(page.win);
+  return page;
 }
 
 // The ids on the group strip, in order: the chat on screen and its
@@ -168,10 +172,7 @@ function testAddTabControlIsAccessibleButton() {
     added[0],
     'the new chat is the one on screen',
   );
-  assert.ok(
-    after.indexOf(left) === -1,
-    'the idle chat left behind is retired',
-  );
+  assert.ok(after.indexOf(left) === -1, 'the idle chat left behind is retired');
 }
 
 function testSettingsControlIsAccessibleButton() {
@@ -317,9 +318,7 @@ function testRovingTabindexFollowsActiveTab() {
   openGroup(win, ['sub-1', 'sub-2']);
 
   const stops = () =>
-    tabEls(win).map(
-      el => `${el.dataset.tabId}:${el.getAttribute('tabindex')}`,
-    );
+    tabEls(win).map(el => `${el.dataset.tabId}:${el.getAttribute('tabindex')}`);
   assert.deepStrictEqual(
     stops(),
     ['parent:0', 'sub-1:-1', 'sub-2:-1'],
@@ -358,7 +357,7 @@ function testArrowKeysMoveFocusBetweenTabs() {
     return el && el.dataset ? el.dataset.tabId || null : null;
   };
 
-  let el = tabEl(win, 'sub-1');
+  const el = tabEl(win, 'sub-1');
   let ev = pressKey(win, el, 'ArrowRight');
   assert.strictEqual(
     focusedTab(),
@@ -403,6 +402,56 @@ function testArrowKeysMoveFocusBetweenTabs() {
     '0',
     'the focused tab must become the Tab stop',
   );
+}
+
+function testRoutineRepaintKeepsTheKeyboardFocus() {
+  // A routine status update (a running indicator flip, the selected
+  // tab unchanged) rebuilds the strip.  A keyboard user focused on a
+  // tab must stay on that tab, Tab stop included, instead of falling to
+  // the document body and having to find the strip again.
+  const {win} = makePage();
+  openGroup(win, ['sub-1', 'sub-2']);
+  win._testApi.endLaunch();
+  const focusedTab = () => {
+    const el = win.document.activeElement;
+    return el && el.dataset ? el.dataset.tabId || null : null;
+  };
+  // Focus a tab that is not the active one (manual activation).
+  pressKey(win, tabEl(win, 'parent'), 'ArrowRight');
+  assert.strictEqual(focusedTab(), 'sub-1');
+
+  send(win, {type: 'status', tabId: 'parent', running: true, attached: true});
+
+  assert.notStrictEqual(
+    win.document.activeElement,
+    win.document.body,
+    'BUG - the status repaint dropped the keyboard focus to the body',
+  );
+  assert.strictEqual(focusedTab(), 'sub-1', 'the focus stays on the tab');
+  assert.strictEqual(
+    win.document.activeElement.getAttribute('tabindex'),
+    '0',
+    'the focused tab is still the Tab stop',
+  );
+  assert.strictEqual(activeTabId(win), 'parent', 'nothing was activated');
+  // The arrow keys keep working from there.
+  pressKey(win, win.document.activeElement, 'ArrowRight');
+  assert.strictEqual(focusedTab(), 'sub-2');
+
+  // A focused close control is put back too.
+  tabEl(win, 'sub-2').querySelector('.chat-tab-close').focus();
+  send(win, {type: 'status', tabId: 'parent', running: false});
+  assert.strictEqual(
+    win.document.activeElement,
+    tabEl(win, 'sub-2').querySelector('.chat-tab-close'),
+    'the focus stays on the close control',
+  );
+
+  // Focus outside the strip is left where it is.
+  const inp = win.document.getElementById('task-input');
+  inp.focus();
+  send(win, {type: 'status', tabId: 'parent', running: true, attached: true});
+  assert.strictEqual(win.document.activeElement, inp);
 }
 
 function testCloseControlIsAccessibleAndDoesNotSwitchTabs() {
@@ -496,7 +545,10 @@ function testTabListExposesTabSemantics() {
       'every tab must declare aria-controls pointing at its panel',
     );
     const panelEl = win.document.getElementById(controls);
-    assert.ok(panelEl, `aria-controls="${controls}" must resolve to an element`);
+    assert.ok(
+      panelEl,
+      `aria-controls="${controls}" must resolve to an element`,
+    );
     assert.strictEqual(
       panelEl.getAttribute('role'),
       'tabpanel',
@@ -590,21 +642,35 @@ function testRemoteControlOrderAndThemeAccessibility() {
   );
 }
 
-const {test, report} = makeRunner();
-for (const t of [
-  testAddTabControlIsAccessibleButton,
-  testSettingsControlIsAccessibleButton,
-  testChatTabIsKeyboardActivatable,
-  testRovingTabindexFollowsActiveTab,
-  testArrowKeysMoveFocusBetweenTabs,
-  testCloseControlIsAccessibleAndDoesNotSwitchTabs,
-  testTabListExposesTabSemantics,
-  testRenamedTabKeepsAccessibleNameInSync,
-  testRemoteControlOrderAndThemeAccessibility,
-]) {
-  test(t.name, t);
+const runner = makeRunner();
+const report = runner.report;
+
+/** Run one test through the shared runner, then close its windows. */
+async function test(name, fn) {
+  await runner.test(name, fn);
+  while (openWindows.length) openWindows.pop().close();
 }
-report('tabBarAccessibility');
-// The page leaves reconnect timers behind in JSDOM;
-// exit explicitly like the other suites so the process never hangs.
-process.exit(0);
+
+/** Run the accessibility scenarios in order. */
+async function main() {
+  for (const t of [
+    testAddTabControlIsAccessibleButton,
+    testSettingsControlIsAccessibleButton,
+    testChatTabIsKeyboardActivatable,
+    testRovingTabindexFollowsActiveTab,
+    testArrowKeysMoveFocusBetweenTabs,
+    testRoutineRepaintKeepsTheKeyboardFocus,
+    testCloseControlIsAccessibleAndDoesNotSwitchTabs,
+    testTabListExposesTabSemantics,
+    testRenamedTabKeepsAccessibleNameInSync,
+    testRemoteControlOrderAndThemeAccessibility,
+  ]) {
+    await test(t.name, t);
+  }
+  report('tabBarAccessibility');
+}
+
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});

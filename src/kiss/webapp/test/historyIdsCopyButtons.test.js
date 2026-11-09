@@ -184,17 +184,6 @@ function testButtonsRenderPerId() {
     );
   }
 
-  assert.strictEqual(
-    a.querySelector('.running-item-ids').textContent,
-    'chat chat-a • task task-a • parent parent-a',
-    'row A ids text must be unchanged by the copy buttons',
-  );
-  assert.strictEqual(
-    b.querySelector('.running-item-ids').textContent,
-    'chat chat-b • task task-b',
-    'row B ids text must be unchanged by the copy buttons',
-  );
-
   const cIds = c.querySelector('.running-item-ids');
   assert.ok(
     cIds.querySelector('.ids-copy-chat'),

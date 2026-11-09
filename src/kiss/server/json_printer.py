@@ -34,9 +34,9 @@ from functools import partial
 from pathlib import Path
 from typing import Any, TypeVar
 
-from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.persistence import _queue_chat_event
 from kiss.core import stop_signal
+from kiss.core.locked import locked_call
 from kiss.core.models.model import Attachment
 from kiss.core.printer import (
     Printer,
@@ -98,16 +98,18 @@ _DISPLAY_EVENT_TYPES = frozenset(
         # run by ``ChatSorcarAgent.run``.
         "task_settings",
         # The framework's own records (``RECORD_EVENT_TYPES``): what a
-        # compaction removed, what each finish-gate stage found and cost,
-        # what a hand-off dropped.  Persisted so the event log answers
-        # cost and gate questions without the agent's trajectory file.
+        # compaction removed, what the provider cleared from the context
+        # before a call, what each finish-gate stage found and cost, what
+        # a hand-off dropped.  Persisted so the event log answers cost and
+        # gate questions without the agent's trajectory file.
         "compaction",
+        "context_edits",
         "gate_stage",
         "handoff",
     }
 )
 
-RECORD_EVENT_TYPES = frozenset({"compaction", "gate_stage", "handoff"})
+RECORD_EVENT_TYPES = frozenset({"compaction", "context_edits", "gate_stage", "handoff"})
 """Event types whose keyword fields are broadcast and persisted as they are."""
 
 
@@ -129,10 +131,13 @@ def _jsonable(value: Any) -> Any:
 #: tabId-stamped event is a transient targeted broadcast.  These are the
 #: events a task's transcript must keep although they are emitted from
 #: outside the task's own thread: the ``/ask`` prompt echo
-#: (``commands._echo_injected_prompt``), its ``ask_answer`` reply
-#: (``commands._broadcast_ask_answer``) and tab-targeted ``result``
-#: events (``task_runner._broadcast_failure_result``).
-TAB_STAMPED_TASK_EVENT_TYPES = frozenset({"prompt", "result", "ask_answer"})
+#: (``commands._echo_injected_prompt``) and tab-targeted ``result``
+#: events (``task_runner._broadcast_failure_result``).  The ``/ask``
+#: reply (``commands._broadcast_ask_answer``) is not one of them: it
+#: carries a ``taskId`` (routed by that task's viewers and filed by
+#: :meth:`JsonPrinter._persistence_task_id`) or, without an owner task,
+#: a ``tabId`` alone, never both.
+TAB_STAMPED_TASK_EVENT_TYPES = frozenset({"prompt", "result"})
 
 #: Image formats the chat page renders inline in a tool's event
 #: panel (as ``data:`` URIs, so replays keep working after the file —
@@ -748,6 +753,10 @@ class JsonPrinter(Printer):
 
     def __init__(self) -> None:
         self._thread_local = _PrinterThreadLocal()
+        # The daemon's working directory, kept current by
+        # ``_CommandsMixin._apply_new_work_dir``; the web printer fills
+        # a ``configData`` without one from it.
+        self.work_dir = ""
         # Every printer lock is an RLock taken through ``locked_call``:
         # the runner's Stop injects KeyboardInterrupt into task threads,
         # and a plain ``with lock:`` leaks the lock when it lands right
@@ -797,6 +806,10 @@ class JsonPrinter(Printer):
         # before they stop recording and are never kept.
         self._retired_recordings: dict[str, list[dict[str, Any]]] = {}
         self._subscribers: dict[str, set[str]] = {}
+        # Standalone recording printers have no viewer registry. Once
+        # this printer has managed viewers, an explicit origin is not
+        # permission to bypass their retirement (even with no viewers left).
+        self._subscriptions_managed = False
         self._subscriber_expiry: dict[str, float] = {}
         # Subscribed tabs no surface shows any more: a tab closed in
         # every web app while its task ran, kept subscribed because a
@@ -952,6 +965,7 @@ class JsonPrinter(Printer):
         otherwise sit on the wrong label until the task ended.
         """
         self._sweep_expired_subscribers()
+        self._subscriptions_managed = True
         viewers = self._subscribers.get(key)
         if viewers is None:
             viewers = set()
@@ -1227,9 +1241,9 @@ class JsonPrinter(Printer):
         All tabs are treated uniformly — the tab a task was launched
         from is subscribed like any viewer (see
         :meth:`subscribe_tab`), so no owner/viewer distinction
-        exists.  *tab_id* is simply one more uniform target, for
-        callers whose printer never saw a subscription (plain
-        recording printers in tests).
+        exists. *tab_id* is a fallback only for unkeyed launch notices
+        and printers that never managed subscriptions. Once viewers
+        are managed, an explicit origin cannot bypass their retirement.
 
         Args:
             task_id: Explicit task id used when the calling thread
@@ -1249,7 +1263,7 @@ class JsonPrinter(Printer):
         """
         task_key = self._task_key() or self._coerce_task_id(task_id)
         targets = {t for t in self._fanout_targets(task_key) if t}
-        if tab_id:
+        if tab_id and (not task_key or not self._subscriptions_managed):
             targets.add(tab_id)
         return task_key, sorted(targets)
 
@@ -1271,11 +1285,9 @@ class JsonPrinter(Printer):
         ``tabId``) and never record or persist them, so replaying a
         finished conversation cannot resurrect them.
 
-        When no watching tab is resolvable at all, ONE copy stamped
-        with *tab_id* (possibly ``""``) is still broadcast: the stamp
-        preserves the transient no-record semantics, and printers
-        that render events locally regardless of the stamp still
-        show it.
+        Unkeyed launch notices and standalone printers retain one
+        fallback copy stamped with *tab_id* (possibly ``""``). A keyed
+        event on a managed printer with no viewers sends no live copy.
 
         Resolving the watching tabs and broadcasting their copies form
         one step under :attr:`delivery_lock`, which :meth:`cleanup_tab`
@@ -1288,9 +1300,8 @@ class JsonPrinter(Printer):
             task_id: Explicit task id used when the calling thread
                 has no thread-local ``task_id`` bound (off-thread
                 calls, task teardown).
-            tab_id: Extra tab id treated exactly like every resolved
-                watcher, and the sole (possibly empty) stamp of the
-                fallback copy when nothing is resolvable.
+            tab_id: Fallback tab for unkeyed launch notices and printers
+                that have never managed subscriptions.
         """
         locked_call(self.delivery_lock, self._broadcast_transient_copies, event, task_id, tab_id)
 
@@ -1298,8 +1309,10 @@ class JsonPrinter(Printer):
         self, event: dict[str, Any], task_id: Any, tab_id: str,
     ) -> None:
         """Under ``delivery_lock``: the resolution and sends of :meth:`broadcast_transient`."""
-        _task_key, targets = self._transient_targets(task_id, tab_id)
-        for target in targets or [tab_id]:
+        task_key, targets = self._transient_targets(task_id, tab_id)
+        if not targets and (not task_key or not self._subscriptions_managed):
+            targets = [tab_id]
+        for target in targets:
             self.broadcast({**event, "tabId": target})
 
     def broadcast_launch_phase(self, text: str, tab_id: str = "") -> None:
@@ -1503,15 +1516,12 @@ class JsonPrinter(Printer):
 
         *record* and *encoded* come from :meth:`_tab_stamped_task_record`.
         The record is appended to that task's in-memory recording and
-        queued for persistence under the event's OWN ``taskId`` — the emitters of these events
-        (``commands._echo_injected_prompt``,
-        ``commands._broadcast_ask_answer``,
+        queued for persistence under the event's OWN ``taskId`` — the
+        emitters of these events (``commands._echo_injected_prompt``,
         ``task_runner._broadcast_failure_result``) always stamp the
-        persisted ``task_history`` row id.  Filing by that id rather than
-        through :meth:`_persist_event` (which resolves the task's LIVE
-        agent) matters for the ``/ask`` answer: it may well arrive after
-        the task it answers has finished and its agent was cleared, and
-        it must still survive a history reopen.
+        persisted ``task_history`` row id, so the event is filed by that
+        id rather than through :meth:`_persist_event`, which resolves
+        the task's LIVE agent (retired once the task finished).
 
         Args:
             record: The tabId-stripped event.
@@ -1528,7 +1538,12 @@ class JsonPrinter(Printer):
         ``last_task_id`` through the property, which takes the same
         lock the publishing assignment takes; it answers ``""`` for an
         agent that has not run yet, so an event is never filed under an
-        empty id.  Must not be called under :attr:`delivery_lock`.
+        empty id.  An ``ask_answer`` is filed under its own stamp
+        instead: ``commands._broadcast_ask_answer`` stamps it with the
+        OWNER task's persisted row id, and the answer may well land
+        after that task finished and its agent was cleared — it must
+        still survive a history reopen.  Must not be called under
+        :attr:`delivery_lock`.
 
         Args:
             event: The event dictionary (must already have ``taskId``
@@ -1543,6 +1558,8 @@ class JsonPrinter(Printer):
         key = self._coerce_task_id(event.get("taskId"))
         if not key:
             return ""
+        if event.get("type") == "ask_answer":
+            return key
         state = agent_state.get(key)
         agent = state.agent if state is not None else None
         task_id = getattr(agent, "last_task_id", "")
@@ -2145,24 +2162,11 @@ class JsonPrinter(Printer):
             rec = self._retired_recordings.get(key)
         return rec
 
-    def peek_recording(self) -> list[dict[str, Any]]:
-        """Return a snapshot of the current task's recording.
-
-        Used for periodic crash-recovery flushes: the caller can
-        persist a snapshot of events to the database while recording
-        continues.
-
-        Returns:
-            List of display-relevant events with consecutive deltas
-            merged.  Empty when no recording is active.
-        """
-        return self.peek_recording_for_task(self._task_key())
-
     def peek_recording_for_task(self, task_id: Any) -> list[dict[str, Any]]:
         """Return a snapshot of *task_id*'s in-memory recording.
 
-        Like :meth:`peek_recording` but keyed explicitly instead of by
-        the calling thread's task binding.  Used by the server when a
+        Keyed explicitly instead of by the calling thread's task
+        binding. Used by the server when a
         tab opens a STILL-RUNNING task (e.g. a freshly spawned
         ``run_parallel`` sub-agent): the task's events reach the
         database through an asynchronous writer, so a replay loaded
@@ -2449,6 +2453,11 @@ class JsonPrinter(Printer):
                 "total_tokens": total_tokens,
                 "cost": total_cost,
                 "total_steps": total_steps,
+                # The offsets added above, exactly as published (the task's
+                # banked totals, one coherent triple): the orphan recovery of
+                # the task's row reads from them which remote charges the
+                # event's totals hold (``_charges_held_by_usage_event``).
+                "banked": [budget_offset, tokens_offset, steps_offset],
             }
             if exact_cost is not None:
                 event["cost_usd"] = exact_cost

@@ -364,13 +364,13 @@ async function main() {
     assert.ok(!win.document.body.classList.contains('meta-hidden'));
     assert.strictEqual(ofType(posted, 'gitStatus').length, 1);
     // Section headers collapse their lists.
-    click(win, byId(win, 'scm-graph-toggle'));
-    assert.ok(byId(win, 'scm-graph').hidden);
-    assert.strictEqual(
-      byId(win, 'scm-graph-toggle').getAttribute('aria-expanded'),
-      'false',
+    const graphToggle = win.document.querySelector(
+      '.scm-section-hdr[aria-controls="scm-graph"]',
     );
-    click(win, byId(win, 'scm-graph-toggle'));
+    click(win, graphToggle);
+    assert.ok(byId(win, 'scm-graph').hidden);
+    assert.strictEqual(graphToggle.getAttribute('aria-expanded'), 'false');
+    click(win, graphToggle);
     assert.ok(!byId(win, 'scm-graph').hidden);
     // Task news re-reads git once (debounced) for the visible view.
     const nSt = ofType(posted, 'gitStatus').length;

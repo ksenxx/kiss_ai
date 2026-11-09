@@ -96,14 +96,69 @@ async function testOpenTooltipClosesWhenItsAnchorIsReRendered() {
   console.log('  ok - an open tooltip closes when its anchor is re-rendered');
 }
 
+// A26_claude-1: `mouseout` fires on an element when the pointer moves
+// onto one of its OWN children (relatedTarget = the child), followed by
+// a `mouseover` on the child.  An open tooltip must not blink at every
+// child boundary of its anchor (a header button's svg icon, the spans
+// and buttons of a Schedule or Machines row): a crossing inside the
+// anchor is not a new hover, and leaving it for a child of ANOTHER
+// tooltip element is.
+function testCrossingAChildOfTheAnchorKeepsTheTooltip() {
+  const win = makePage();
+  const btn = win.document.getElementById('new-chat-btn');
+  const icon = btn.querySelector('svg');
+  assert.ok(btn.dataset.tooltip && icon, 'the header button carries a tooltip and an icon');
+  const tip = win.document.getElementById('custom-tooltip');
+  const cross = (from, to) => {
+    from.dispatchEvent(
+      new win.MouseEvent('mouseout', {bubbles: true, relatedTarget: to}),
+    );
+    to.dispatchEvent(
+      new win.MouseEvent('mouseover', {bubbles: true, relatedTarget: from}),
+    );
+  };
+  cross(win.document.body, btn);
+  harness.fireTimers(win.hoverTimers);
+  assert.ok(tip.classList.contains('visible'), 'hovering the button opens it');
+  const armed = () => win.hoverTimers.filter(t => !t.cleared && !t.fired).length;
+
+  cross(btn, icon);
+  assert.ok(
+    tip.classList.contains('visible'),
+    'BUG - moving onto the button\'s own icon hid the tooltip',
+  );
+  assert.strictEqual(armed(), 0, 'no fresh 400 ms delay for the same anchor');
+  cross(icon, btn);
+  assert.ok(tip.classList.contains('visible'), 'and back off the icon');
+  assert.strictEqual(armed(), 0);
+
+  // Leaving for another tooltip element (through its child) closes
+  // this one and arms that one.
+  const other = win.document.createElement('button');
+  other.dataset.tooltip = 'Other';
+  other.appendChild(win.document.createElement('span'));
+  win.document.body.appendChild(other);
+  cross(btn, other.firstChild);
+  assert.ok(!tip.classList.contains('visible'), 'leaving the button hides it');
+  assert.strictEqual(armed(), 1, 'the other element\'s delay is armed');
+  harness.fireTimers(win.hoverTimers);
+  assert.strictEqual(tip.textContent, 'Other');
+  // Leaving for a plain element hides it too.
+  cross(other.firstChild, win.document.body);
+  assert.ok(!tip.classList.contains('visible'));
+  win.close();
+  console.log('  ok - crossing a child of the anchor keeps the tooltip');
+}
+
 async function runTests() {
   testRemovedTargetShowsNoTooltip();
   await testOpenTooltipClosesWhenItsAnchorIsReRendered();
+  testCrossingAChildOfTheAnchorKeepsTheTooltip();
 }
 
 runTests().then(
   () => {
-    console.log('\n2 passed, 0 failed');
+    console.log('\n3 passed, 0 failed');
     process.exit(0);
   },
   err => {

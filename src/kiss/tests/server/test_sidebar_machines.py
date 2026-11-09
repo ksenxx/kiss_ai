@@ -311,18 +311,29 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
         paused = await act(action="pause")
         self.assertEqual((paused["action"], paused["error"]), ("pause", ""))
         self.assertEqual(paused["jobs"][0]["enabled"], False)
+        # A command without a generation is answered with 0 (the page
+        # then matches the reply to its save by action and job).
+        self.assertEqual(paused["generation"], 0)
         resumed = await act(action="resume")
         self.assertEqual(resumed["jobs"][0]["enabled"], True)
+        # The page stamps each save with a generation and matches the
+        # reply on it: the reply echoes the one it was asked with,
+        # whether the save went through or was refused.
         updated = await act(
             action="update", name="Morning", schedule="every 2h", what="echo morning",
+            generation=7,
         )
         self.assertEqual(updated["error"], "")
+        self.assertEqual(updated["generation"], 7)
         row = updated["jobs"][0]
         self.assertEqual(
             (row["name"], row["schedule"], row["what"]), ("Morning", "every 2h", "echo morning"),
         )
-        refused = await act(action="update", name="Morning", schedule="whenever", what="x")
+        refused = await act(
+            action="update", name="Morning", schedule="whenever", what="x", generation=8,
+        )
         self.assertTrue(refused["error"].startswith("Unsupported schedule 'whenever':"))
+        self.assertEqual(refused["generation"], 8)
         self.assertEqual(refused["jobs"][0]["schedule"], "every 2h")
         ran = await act(action="run_now")
         self.assertEqual(ran["error"], "")
@@ -341,9 +352,10 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
         # kind; the reply lists the new job (an error leaves the list).
         created = await act(
             action="create", jobId="", name="Night", schedule="every 1d",
-            what="echo night", kind="command",
+            what="echo night", kind="command", generation=9,
         )
         self.assertEqual(created["error"], "")
+        self.assertEqual(created["generation"], 9)
         (row,) = created["jobs"]
         self.assertEqual(
             (row["name"], row["schedule"], row["kind"], row["what"]),

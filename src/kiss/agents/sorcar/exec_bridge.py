@@ -26,14 +26,15 @@ Wire protocol, one JSON object per request and response::
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import http.client
 import json
 import shlex
+import socket
 import threading
 import time
-import urllib.error
-import urllib.request
+import urllib.parse
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -45,9 +46,12 @@ from kiss.agents.sorcar.docker_manager import (
     STOPPED_MESSAGE,
     PendingAppend,
     _refuse_or_lift,
+    _run_until,
     _timeout_message,
     _with_exit_code,
     fetched_bytes,
+    probe_command,
+    until_refusal,
 )
 from kiss.agents.sorcar.useful_tools import (
     _MAX_BINARY_READ_BYTES,
@@ -62,24 +66,98 @@ from kiss.core.kiss_error import KISSError
 #: ``docker_image`` prefix that selects the bridge instead of a Docker container.
 BRIDGE_PREFIX = "exec:"
 
-#: What ``urlopen`` + ``read`` + ``json.loads`` raise for an unreachable bridge
-#: or a malformed reply.  ``http.client.HTTPException`` (``BadStatusLine``,
-#: ``IncompleteRead`` when the bridge dies mid-reply) derives from
-#: ``Exception``, not ``OSError``, and ``urlopen`` does not wrap it.
-_BRIDGE_ERRORS = (urllib.error.URLError, OSError, ValueError, http.client.HTTPException)
+#: What ``http.client`` + ``read`` + ``json.loads`` raise for an unreachable
+#: bridge or a malformed reply.  ``http.client.HTTPException``
+#: (``BadStatusLine``, ``IncompleteRead`` when the bridge dies mid-reply)
+#: derives from ``Exception``, not ``OSError``.
+_BRIDGE_ERRORS = (OSError, ValueError, http.client.HTTPException)
+
+#: Seconds a ``GET /ping`` gets, as a whole.
+_PING_TIMEOUT_S = 10.0
+
+#: Seconds past a command's deadline the bridge gets to deliver its reply
+#: (the server reports an overrun after ``timeout + 30`` at the latest, see
+#: :func:`~kiss.benchmarks.terminal_bench.exec_bridge_server.exec_once`, then
+#: sweeps the command).  It is the request's socket timeout, which bounds an
+#: idle read, and the margin of :func:`bridge_exec`'s overall deadline, which
+#: bounds the whole wait: a reply that trickles in without ever completing
+#: keeps the idle timeout from firing.
+_REPLY_MARGIN_S = 60.0
 
 
-def _post(url: str, path: str, body: dict[str, Any], timeout: float) -> dict[str, Any]:
-    """POST *body* as JSON to *url* + *path* and return the decoded reply dict."""
-    request = urllib.request.Request(
-        url.rstrip("/") + path, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-    )
+class _Connection(http.client.HTTPConnection):
+    """An HTTP connection that keeps its socket where its deadline's timer finds it.
+
+    ``getresponse`` sets ``sock`` to ``None`` once it has handed the
+    socket to a reply that ends the connection (every reply of the
+    bridge: the request says ``Connection: close``), so
+    :func:`_shut_down` reads ``watched``, set at the connect and kept
+    until the close.
+    """
+
+    watched: socket.socket | None = None
+
+    def connect(self) -> None:
+        """Connect, then remember the socket for :func:`_shut_down`."""
+        super().connect()
+        self.watched = self.sock
+
+
+def _shut_down(connection: _Connection, expired: threading.Event) -> None:
+    """Mark the request on *connection* *expired* and shut its socket down (its deadline's timer).
+
+    ``shutdown`` makes a read blocked on the socket return end of stream
+    at once, wherever the request is (the status line, the headers, a
+    chunk's size line, the body); a ``close`` would not wake it.  The
+    socket is not there yet while the connect is in progress: that one
+    is bounded by the socket's own timeout, and :func:`_request` checks
+    the flag once the request is sent.
+    """
+    expired.set()
+    sock = connection.watched
+    if sock is not None:
+        with contextlib.suppress(OSError):  # closed already
+            sock.shutdown(socket.SHUT_RDWR)
+
+
+def _request(url: str, path: str, body: dict[str, Any] | None, timeout: float) -> dict[str, Any]:
+    """Request *url* + *path* (POST *body* as JSON, GET without) and return the reply dict.
+
+    *timeout* bounds the request as a whole.  The socket's timeout
+    bounds the connect and one idle read, which a peer that trickles a
+    byte at a time never lets fire, so a timer shuts the socket down at
+    the deadline (:func:`_shut_down`) wherever the request is then, and
+    the failure past the deadline is that timeout.  The connection is
+    closed before this returns, whatever happened.
+
+    Raises:
+        KISSError: When the bridge cannot be reached, the reply did not
+            complete in time, or the reply is no JSON object.
+    """
+    target = urllib.parse.urlsplit(url.rstrip("/") + path)
+    connection = _Connection(target.hostname or "", target.port, timeout=timeout)
+    expired = threading.Event()
+    watchdog = threading.Timer(timeout, _shut_down, (connection, expired))
+    watchdog.daemon = True
+    watchdog.start()
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        connection.request(
+            "GET" if body is None else "POST", target.path or "/",
+            body=None if body is None else json.dumps(body).encode(),
+            headers={"Content-Type": "application/json", "Connection": "close"},
+        )
+        if expired.is_set():  # the deadline passed during the connect
+            raise TimeoutError
+        with connection.getresponse() as response:
             reply = json.loads(response.read().decode("utf-8", errors="replace"))
+        if expired.is_set():  # a body read to its end as the deadline passed
+            raise TimeoutError
     except _BRIDGE_ERRORS as error:
-        raise KISSError(f"Exec bridge {url} unreachable: {error}") from error
+        reason = "the reply did not complete within the deadline" if expired.is_set() else error
+        raise KISSError(f"Exec bridge {url} unreachable: {reason}") from error
+    finally:
+        watchdog.cancel()
+        connection.close()
     if not isinstance(reply, dict):
         raise KISSError(f"Exec bridge {url} returned an invalid reply: {reply!r}")
     return reply
@@ -88,7 +166,7 @@ def _post(url: str, path: str, body: dict[str, Any], timeout: float) -> dict[str
 def _kill_quietly(url: str, token: str) -> None:
     """POST ``/kill`` for *token*, swallowing an unreachable bridge (helper-thread body)."""
     try:
-        _post(url, "/kill", {"token": token}, 120)
+        _request(url, "/kill", {"token": token}, 120)
     except KISSError:
         pass
 
@@ -123,7 +201,18 @@ def bridge_exec(
     ``DockerManager`` does (:func:`_kill_bounded`).  An exception thrown
     into this thread's wait (a ``KeyboardInterrupt``, the runner's Stop
     injected as one) posts the same kill before it propagates, so the
-    command never outlives the call.
+    command never outlives the call; so does a request the bridge failed
+    after it may have started the command (the reply connection dropped,
+    an invalid reply), before the error propagates.  The wait as a whole
+    ends :data:`_REPLY_MARGIN_S` past the command's deadline: a bridge
+    that has not delivered the reply by then (stalled, or trickling a
+    body that never completes) gets the same kill and the command is
+    reported as timed out; the request thread's request ends at the same
+    deadline (:func:`_request`'s timer), so it does not outlive the call, and
+    its failure past the deadline is that timeout, whichever of the two
+    notices first.  A Stop set before the call posts nothing; one
+    landing as the reply completes wins over it, as it does for a
+    Docker exec.
 
     Args:
         url: The bridge's base URL (``http://127.0.0.1:<port>``).
@@ -134,8 +223,9 @@ def bridge_exec(
 
     Returns:
         ``(exit code, combined output)``; the exit code is ``None`` when the
-        command was still running at the deadline and ``-1`` when it was
-        stopped (the output then ends with :data:`STOPPED_MESSAGE`).
+        command was still running at the deadline (or the bridge delivered
+        no reply within the margin past it) and ``-1`` when it was stopped
+        (the output then ends with :data:`STOPPED_MESSAGE`).
 
     Raises:
         KISSError: When the bridge cannot be reached or answers garbage.
@@ -146,39 +236,57 @@ def bridge_exec(
 
     def fetch() -> None:
         try:
-            outcome.append(_post(url, "/exec", body, timeout + 60))
+            outcome.append(_request(url, "/exec", body, timeout + _REPLY_MARGIN_S))
         except KISSError as error:
             outcome.append(error)
 
+    if _stop_requested(cancel):
+        return -1, STOPPED_MESSAGE
     worker = threading.Thread(target=fetch, name=f"exec-bridge-{token[:8]}", daemon=True)
+    deadline = time.monotonic() + timeout + _REPLY_MARGIN_S
     try:
         worker.start()
         while worker.is_alive():
             if _stop_requested(cancel):
                 _kill_bounded(url, token)
                 return -1, STOPPED_MESSAGE
+            if time.monotonic() >= deadline:
+                _kill_bounded(url, token)
+                return None, ""
             worker.join(0.2)
+        if _stop_requested(cancel):
+            _kill_bounded(url, token)
+            return -1, STOPPED_MESSAGE
+        reply = outcome[0]
+        if isinstance(reply, KISSError):
+            if time.monotonic() >= deadline:
+                _kill_bounded(url, token)
+                return None, ""
+            raise reply
+        code = reply.get("exit_code")
+        if "output" not in reply or not (code is None or isinstance(code, int)):
+            raise KISSError(f"Exec bridge {url} returned an invalid reply: {reply!r}")
     except BaseException:
         # The wait was unwound from outside (an injected Stop, a
-        # KeyboardInterrupt): the request thread and the command on the
-        # environment must not go on without anyone waiting for them.
+        # KeyboardInterrupt) or the request failed after the bridge may
+        # have started the command: the request thread and the command
+        # on the environment must not go on without anyone waiting for
+        # them.
         _kill_bounded(url, token)
         raise
-    reply = outcome[0]
-    if isinstance(reply, KISSError):
-        raise reply
-    if "output" not in reply:
-        raise KISSError(f"Exec bridge {url} returned an invalid reply: {reply!r}")
-    code = reply.get("exit_code")
-    return (int(code) if code is not None else None), str(reply["output"])
+    return code, str(reply["output"])
 
 
 def bridge_alive(url: str) -> bool:
-    """Whether the bridge at *url* answers ``GET /ping``."""
+    """Whether the bridge at *url* answers ``GET /ping`` with ``{"ok": true}``.
+
+    The ping as a whole is bounded by :data:`_PING_TIMEOUT_S`: a reply
+    that never completes, like a bridge that does not answer or answers
+    with no JSON object, means it is not alive.
+    """
     try:
-        with urllib.request.urlopen(url.rstrip("/") + "/ping", timeout=10) as response:
-            return bool(json.loads(response.read()).get("ok"))
-    except _BRIDGE_ERRORS:
+        return bool(_request(url, "/ping", None, _PING_TIMEOUT_S).get("ok"))
+    except KISSError:
         return False
 
 
@@ -231,6 +339,8 @@ class ExecBridge:
         description: str,
         timeout_seconds: int = 30,
         max_output_chars: int = MAX_OUTPUT_CHARS,
+        until: str = "",
+        poll_seconds: float = 5.0,
     ) -> str:
         """Run one shell command on the remote environment and return its output.
 
@@ -239,6 +349,15 @@ class ExecBridge:
             description: A short description of the command in natural language.
             timeout_seconds: Maximum time to wait before treating the command as hung.
             max_output_chars: Characters of output kept (head and tail).
+            until: A regular expression: when given, the command (a cheap
+                read-only check such as ``grep DONE build.log; tail -3
+                build.log``) is re-run every ``poll_seconds`` until its
+                output matches or ``timeout_seconds`` elapse, in this one
+                call, so a wait for a file, a port or a log line costs one
+                turn however long it takes.  The result is the last run's
+                output plus one line saying whether it matched and after
+                how many runs and seconds.
+            poll_seconds: Seconds between two runs with ``until`` (at least 1).
 
         Returns:
             The output of the command, with ``[exit code: N]`` appended when
@@ -250,17 +369,28 @@ class ExecBridge:
             command, self.workdir, timeout_seconds, probe, self.read_bytes,
             description, max_output_chars, functools.partial(probe, test="-d"),
             functools.partial(setattr, self, "pending_append"),
+            functools.partial(probe, test="link"),
         )
         if guard is not None:
             return guard
-        exit_code, output = bridge_exec(self.url, command, deadline, self.stop_event)
+        run = functools.partial(bridge_exec, self.url, command, cancel=self.stop_event)
+        verdict = ""
+        if until:
+            refusal = until_refusal(until, poll_seconds)
+            if refusal is not None:
+                return refusal
+            (exit_code, output), verdict = _run_until(
+                run, until, poll_seconds, deadline, self.stop_event)
+            verdict = "\n" + verdict
+        else:
+            exit_code, output = run(deadline)
         # A tool-panel Stop ended the wait (the command is already
         # killed): surface it as the interrupted result.
         tool_interrupt.raise_if_interrupted()
         budget = _output_budget(max_output_chars)
         if exit_code is None:
-            return _truncate_output(_timeout_message(deadline, output), budget)
-        return _truncate_output(_with_exit_code(output, exit_code), budget)
+            return _truncate_output(_timeout_message(deadline, output), budget) + verdict
+        return _truncate_output(_with_exit_code(output, exit_code), budget) + verdict
 
     def run_commands_parallel(
         self,
@@ -283,6 +413,9 @@ class ExecBridge:
             The tally line and one section per command, as the Docker tool returns.
         """
         del description
+        # The pending append of a redirected ``>>`` copy belongs to the
+        # Write made right after it: like any other call, this one drops it.
+        self.pending_append = None
         run_one = functools.partial(self._timed_exec, timeout_seconds=timeout_seconds)
         return run_commands_pool(commands, run_one, max_workers, self.stop_event, max_output_chars)
 
@@ -300,7 +433,9 @@ class ExecBridge:
                 return -1, guard, 0.0
             exit_code, output = bridge_exec(self.url, command, timeout_seconds, cancel)
         except KISSError as error:
-            exit_code, output = 1, str(error)
+            # Not run (the bridge unreachable, its reply invalid): ``-1``
+            # and an ``Error:`` output, as the Docker and host tools report it.
+            exit_code, output = -1, f"Error: {error}"
         return exit_code, output, time.monotonic() - started
 
     def _path_test(
@@ -310,16 +445,16 @@ class ExecBridge:
 
         ``-e`` (the default) asks whether the path exists, the
         here-document guard's question; ``-d`` whether it is a
-        directory, the question about a ``cd``.  Bounded like the
-        command (its deadline and a Stop).  A probe that gave no answer
-        (timed out or stopped) fails closed either way, as the Docker
-        manager's does: it counts as existing (a copy is refused rather
-        than run on a target nobody checked) and as no directory (a
-        ``cd`` nobody checked authorizes no rewrite after it).
+        directory, the question about a ``cd``; ``link`` whether a
+        ``sed -i`` on it would cut a link (:func:`probe_command`).
+        Bounded like the command (its deadline and a Stop).  A probe
+        that gave no answer (timed out or stopped) fails closed either
+        way, as the Docker manager's does: it counts as existing (a copy
+        is refused rather than run on a target nobody checked), as no
+        directory (a ``cd`` nobody checked authorizes no rewrite after
+        it) and as a link (no Edit stands for a sed nobody checked).
         """
-        exit_code, _ = bridge_exec(
-            self.url, f"test {test} {shlex.quote(path)}", timeout_seconds, cancel,
-        )
+        exit_code, _ = bridge_exec(self.url, probe_command(path, test), timeout_seconds, cancel)
         return exit_code == 0 if test == "-d" else exit_code != 1
 
     def read_bytes(

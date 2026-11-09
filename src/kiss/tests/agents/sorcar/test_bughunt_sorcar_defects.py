@@ -44,6 +44,11 @@ class TestInterruptedResultClassification:
         assert _is_failed_result("Agent Failed Abruptly")
         assert _is_failed_result("Task terminated unexpectedly (process killed)")
         assert _is_failed_result("Task stopped by user")
+        # The in-process errors ``ChatSorcarAgent`` persists as the result
+        # (one classifier for the history sidebar and the recall evaluation).
+        assert _is_failed_result("KISS Error: Codex CLI failed: usage limit")
+        assert _is_failed_result("<p>Task failed: budget exhausted</p>")
+        assert _is_failed_result("ModelRefusalError: no")
         assert not _is_failed_result("All done; wrote the report.")
         assert not _is_failed_result("")
 

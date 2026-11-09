@@ -71,6 +71,35 @@ def test_arguments_too_deep_to_serialize_do_not_raise() -> None:
         assert [c["name"] for c in _parse_text_based_tool_calls(content)] in ([], ["Write"])
 
 
+_HUGE_INT_OBJECT = '{"n": ' + "9" * 4301 + "}"
+"""An object the decoder refuses with a plain ``ValueError`` (the integer digit limit)."""
+
+
+def test_an_undecodable_object_before_a_call_does_not_abort_the_parse() -> None:
+    """A decoder ``ValueError`` that is not a ``JSONDecodeError`` is a skipped candidate.
+
+    Python's decoder raises a plain ``ValueError`` for an integer beyond
+    its digit limit; model text is arbitrary, so such an object before a
+    valid ``tool_calls`` block must not end the parse, the stream filter,
+    the arguments fallback or the CLI event stream.
+    """
+    from kiss.core.models.model import _iter_jsonl, parse_tool_arguments
+
+    call = '{"tool_calls": [{"name": "Read", "arguments": {}}]}'
+    text = "Note " + _HUGE_INT_OBJECT + " then " + call
+    assert [c["name"] for c in _parse_text_based_tool_calls(text)] == ["Read"]
+    tokens: list[str] = []
+    model = ClaudeCodeModel("cc/opus", token_callback=tokens.append)
+    with _ToolCallFilteredStream(model):
+        feed = model.token_callback
+        assert feed is not None
+        feed(text)
+    assert "tool_calls" not in "".join(tokens)
+    assert "".join(tokens).startswith("Note " + _HUGE_INT_OBJECT)
+    assert parse_tool_arguments(_HUGE_INT_OBJECT) == {}
+    assert list(_iter_jsonl([_HUGE_INT_OBJECT, '{"type": "ok"}'])) == [{"type": "ok"}]
+
+
 def test_the_stream_filter_hides_a_deeply_wrapped_call() -> None:
     tokens: list[str] = []
     model = ClaudeCodeModel("cc/opus", token_callback=tokens.append)

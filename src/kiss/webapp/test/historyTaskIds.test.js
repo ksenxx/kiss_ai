@@ -13,7 +13,7 @@ const {
   rowsByTitle,
   loadMainCss,
 } = require('./simplify2_harness');
-const {makeRow} = require('./history_helpers');
+const {makeRow, workspaceSpan, metricsSpan} = require('./history_helpers');
 
 const WS = '/Users/koushik/work/repo';
 
@@ -55,14 +55,6 @@ const SESSIONS_FIXTURE = [
 
 function idsSpan(row) {
   return row.querySelector('.running-item-ids');
-}
-
-function workspaceSpan(row) {
-  return row.querySelector('.running-item-workspace');
-}
-
-function metricsSpan(row) {
-  return row.querySelector('.running-item-metrics');
 }
 
 function infoBlock(row) {

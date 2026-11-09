@@ -164,6 +164,17 @@ class TestSleepGuard:
         assert "$ echo quick\nquick" in out
         assert not (tmp_path / "ran").exists()
 
+    def test_too_deep_command_refused_per_command_others_run(self, tmp_path: Path) -> None:
+        """A command nested past what the guards read is refused on its own line."""
+        tools = UsefulTools(work_dir=str(tmp_path))
+        too_deep = "( " * 101 + "touch ran" + " )" * 101
+        out = tools.run_commands_parallel(f'["{too_deep}", "echo quick"]', timeout_seconds=5)
+        assert out.startswith("2 commands: 1 succeeded, 1 failed, 0 timed out.")
+        assert "[1/2] exit -1" in out
+        assert "REFUSED: the command did not run: it nests groups or expansions" in out
+        assert "$ echo quick\nquick" in out
+        assert not (tmp_path / "ran").exists()
+
 
 class TestStop:
     """The task's Stop and the tool panel's Stop both kill every running command."""

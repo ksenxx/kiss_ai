@@ -25,6 +25,7 @@ from kiss.core.models.model import (
     strip_system_cache_break,
 )
 from kiss.core.printer import Printer
+from kiss.core.utils import finish
 from kiss.tests.agents.sorcar import local_model_server as openai_server
 from kiss.tests.core import local_anthropic_server as anthropic_server
 
@@ -158,7 +159,7 @@ def test_openai_compatible_adapter_strips_the_marker() -> None:
             model_name=openai_server.MODEL,
             prompt_template="Finish now.",
             system_prompt=SYSTEM_WITH_BREAK,
-            tools=[],
+            tools=[finish],  # the structured finish ``finish_body`` scripts
             max_steps=3,
             max_budget=50.0,
             verbose=False,

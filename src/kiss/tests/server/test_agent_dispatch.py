@@ -22,6 +22,7 @@ import pytest
 
 from kiss.agents.seas.base.base_sea import channel_work_dir
 from kiss.agents.sorcar import cron_agent
+from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT
 from kiss.agents.sorcar.sea_apply import (
     CHANNEL_PREAMBLE,
     NO_TOOLS_PROFILE,
@@ -500,6 +501,62 @@ class Sea(BaseSea):
     cmd = {"seaPath": str(script), "useMemory": True}
     assert apply_sea(cmd) == set()
     assert cmd["useMemory"] is True
+
+
+def test_compaction_setting_is_a_bool_key_with_its_own_wire_field(tmp_path: Path) -> None:
+    """``compaction`` is a ``settings()`` key: a bool overrides the run command's field.
+
+    The wire field is the key itself (one word, so no camelCase), an
+    explicit field of the caller beats the SEA's value, ``None`` is no
+    override and a non-bool is a broken SEA.
+    """
+    assert SETTING_FIELDS["compaction"] == "compaction"
+    script = tmp_path / "no_compaction_agent.py"
+    script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'compaction': False}
+""")
+    cmd: dict[str, Any] = {"seaPath": str(script), "compaction": None}
+    assert apply_sea(cmd) == {"compaction"}
+    assert cmd["compaction"] is False
+    # An explicit caller value (``run_agent(options='{"compaction": true}')``)
+    # ranks above the SEA's.
+    cmd = {
+        "seaPath": str(script),
+        "compaction": True,
+        "provenance": {"compaction": PROVENANCE_EXPLICIT},
+    }
+    assert apply_sea(cmd) == set()
+    assert cmd["compaction"] is True
+    none_script = tmp_path / "none_compaction_agent.py"
+    none_script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'compaction': None}
+""")
+    cmd = {"seaPath": str(none_script), "compaction": None}
+    assert apply_sea(cmd) == set()
+    assert cmd["compaction"] is None
+    assert "compaction" in cmd["_runConfig"]["defaulted"]
+    bad_script = tmp_path / "bad_compaction_agent.py"
+    bad_script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'compaction': 'off'}
+""")
+    cmd = {"seaPath": str(bad_script), "compaction": None}
+    with pytest.raises(
+        SeaError, match=r"settings\(\)\['compaction'\] must be bool, got str",
+    ):
+        apply_sea(cmd)
+    assert cmd["compaction"] is None, "a broken setting must not override"
 
 
 def test_use_memory_setting_rejects_non_bool(tmp_path: Path) -> None:

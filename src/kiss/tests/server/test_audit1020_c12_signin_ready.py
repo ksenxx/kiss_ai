@@ -43,22 +43,26 @@ class TestSigninReadyTail(SigninHookCase):
         self,
     ) -> None:
         """C1-F1 / C4-F2: the hook's process runs beside the ready, not inside it."""
+        # A reply that waited for the hook comes at least ``hook_sleep`` s after the
+        # ready, so that is the bound: a tighter wall-clock margin failed on a loaded
+        # box, where the ready alone took over 2 s (2026-11-08).
+        hook_sleep = 5.0
         self._install_hook()
-        (self.home / "status-sleep").write_text("2\n")
+        (self.home / "status-sleep").write_text(f"{hook_sleep}\n")
         reader = await self._connect()
         started = time.monotonic()
         await self._send_ready(self._readers_writers[reader], "tab-1")
         events = await self._read_until(reader, "tabs_state")
-        self.assertLess(time.monotonic() - started, 1.5, "tabs_state waited for the hook")
+        self.assertLess(time.monotonic() - started, hook_sleep, "tabs_state waited for the hook")
         self.assertNotIn("signin", [ev.get("type") for ev in events])
         # The page's next command is answered while the hook still runs...
         await self._send(reader, {"type": "ping"})
         await self._read_until(reader, "pong")
-        self.assertLess(time.monotonic() - started, 1.5, "the ping waited for the hook")
+        self.assertLess(time.monotonic() - started, hook_sleep, "the ping waited for the hook")
         # ...and the window still arrives, once the hook has answered.
-        event = await self._wait_for_event(reader, "signin")
+        event = await self._wait_for_event(reader, "signin", timeout=hook_sleep + 10)
         self.assertEqual(event["providers"], NOT_LOGGED_IN["providers"])
-        self.assertGreaterEqual(time.monotonic() - started, 2.0)
+        self.assertGreaterEqual(time.monotonic() - started, hook_sleep)
 
 
 class TestStatusCache(SigninHookCase):

@@ -37,8 +37,8 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import sea_commands, sea_settings
-from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.sea_settings import SeaError, execute_python_file
+from kiss.core.locked import locked_call
 from kiss.core.stop_signal import set_thread_stop_event
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,

@@ -23,6 +23,7 @@
 
 const assert = require('assert');
 const {makePage, send, clickTab} = require('./simplify2_harness');
+const {clickClose} = require('./subagent_tab_helpers');
 
 function outputBars(win) {
   return Array.from(win.document.querySelectorAll('#output .followup-bar'));
@@ -153,13 +154,37 @@ test('a late bar for a closed tab is dropped without error', () => {
   const {win} = makePage();
   const api = win._testApi;
   const taskTab = api.getActiveTabId();
+  runTaskWithReport(win, taskTab, 'task-QX04');
   api.createNewTab();
   const survivor = api.getActiveTabId();
-  send(win, {type: 'clear', chat_id: 'chat-QX04', tabId: survivor});
+  send(win, {type: 'clear', chat_id: 'chat-survivor-QX04', tabId: survivor});
 
-  lateFollowup(win, 'tab-that-was-closed-QX04', 'orphan_QX04');
-  assert.strictEqual(outputBars(win).length, 0, 'no tab owns the bar');
+  // The user closes the task's own tab through its strip entry (only the
+  // chat on screen has one), then goes on reading in the survivor.
   clickTab(win, taskTab);
+  clickClose(win, taskTab);
+  assert.ok(
+    !api.openTabs().some(t => t.id === taskTab),
+    'the task tab is closed',
+  );
+  clickTab(win, survivor);
+  const open = api.openTabs().map(t => t.id);
+
+  lateFollowup(win, taskTab, 'orphan_QX04');
+  assert.strictEqual(outputBars(win).length, 0, 'no tab owns the bar');
+  assert.deepStrictEqual(
+    api.openTabs().map(t => t.id),
+    open,
+    'the closed tab is not resurrected for its late bar',
+  );
+  assert.strictEqual(api.getActiveTabId(), survivor, 'the user stays put');
+  assert.ok(
+    !win.document.getElementById('output').textContent.includes('orphan_QX04'),
+    'the bar text never reaches the survivor',
+  );
+
+  // An id no tab ever had is dropped the same way.
+  lateFollowup(win, 'tab-that-never-was-QX04', 'unknown_QX04');
   assert.strictEqual(outputBars(win).length, 0, 'no tab owns the bar');
   win.close();
 });

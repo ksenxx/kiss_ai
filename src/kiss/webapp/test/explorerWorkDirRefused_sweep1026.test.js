@@ -23,7 +23,8 @@ const {
   fakeMatchMedia,
   ofType,
 } = require('./simplify2_harness');
-const {all, showSection} = require('./ui_antipattern_harness');
+const {showSection} = require('./ui_antipattern_harness');
+const {rootRows, answerWorkDirCheck} = require('./workdir_helpers');
 
 const WD = '/ws/repo';
 const OTHER = '/data/other';
@@ -50,10 +51,6 @@ function savedRoots(win) {
   return JSON.parse(win.localStorage.getItem(ROOTS_KEY) || '[]');
 }
 
-function rootRows(win) {
-  return all(win, '#explorer-tree > .explorer-row.is-root');
-}
-
 /** Answer the last listDir for *p* with an empty listing. */
 function answerListing(win, posted, p) {
   const reqs = ofType(posted, 'listDir').filter(m => m.path === p);
@@ -66,26 +63,6 @@ function answerListing(win, posted, p) {
     root: req.workDir,
     entries: [],
   });
-}
-
-/** Answer the Explorer's pending 'workdir:' check for *dir*. */
-function answerWorkDirCheck(win, posted, dir, error) {
-  const checks = ofType(posted, 'listDir').filter(
-    m => String(m.token).startsWith('workdir:') && m.path === dir,
-  );
-  const req = checks[checks.length - 1];
-  assert.ok(req, 'a workdir: listDir check for ' + dir + ' was sent');
-  if (error) {
-    send(win, {type: 'dirListing', token: req.token, path: dir, error});
-  } else {
-    send(win, {
-      type: 'dirListing',
-      token: req.token,
-      path: dir,
-      root: dir,
-      entries: [],
-    });
-  }
 }
 
 function clickSetWorkDir(win) {
@@ -107,6 +84,15 @@ function testRefusedPickKeepsRootsUnchanged() {
     savedRoots(win),
     [OTHER],
     'the old working directory must not be persisted before the daemon confirms',
+  );
+  const pending = ofType(posted, 'listDir').find(
+    m => String(m.token).startsWith('workdir:') && m.path === OTHER,
+  );
+  assert.ok(pending, 'the real Explorer pick requested a workdir check');
+  assert.throws(
+    () => answerWorkDirCheck(win, [{...pending, workDir: WD}], OTHER),
+    /the check is scoped to the folder/,
+    'a matching path must not hide a check scoped to the wrong workDir',
   );
   answerWorkDirCheck(win, posted, OTHER, 'Not a directory: ' + OTHER);
   assert.deepStrictEqual(

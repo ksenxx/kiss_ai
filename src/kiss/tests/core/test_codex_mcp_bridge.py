@@ -34,18 +34,25 @@ import yaml
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from kiss.core import config as config_module
 from kiss.core import stop_signal
 from kiss.core.base import collecting_trajectories
 from kiss.core.kiss_agent import NATIVE_TOOLS_CONTINUE_MSG, KISSAgent
 from kiss.core.kiss_error import BudgetExceededError, ContextWindowExceededError, KISSError
 from kiss.core.llm_reply import LLMReply
-from kiss.core.models.codex_mcp_bridge import ServedCall, ToolBridge, toml_value
+from kiss.core.models.codex_mcp_bridge import (
+    ServedCall,
+    ToolBridge,
+    _read_request_line,
+    toml_value,
+)
 from kiss.core.models.codex_model import (
     CODEX_INSTRUCTIONS_PREAMBLE,
     CODEX_MCP_TOOL_TIMEOUT_SECONDS,
     CODEX_MCP_TOOLS_NOTE,
 )
 from kiss.core.models.model import encode_binary_attachment
+from kiss.core.models.model_info import _NATIVE_PROVIDERS, OPENAI_COMPATIBLE_PROVIDERS
 from kiss.core.printer import Printer
 from kiss.core.tool_verdict import Verdict, end_run, refuse
 from kiss.core.utils import finish as structured_finish
@@ -123,6 +130,39 @@ def test_bridge_port_is_closed_after_the_block() -> None:
             pass
     with pytest.raises(OSError):
         socket.create_connection(("127.0.0.1", port), timeout=1)
+
+
+@pytest.mark.parametrize(
+    ("cap", "size", "accepted"),
+    [
+        (1024, 1000, True),  # below the cap
+        (1024, 1024, True),  # a newline-terminated line exactly at the cap
+        (1024, 1131, False),  # over the cap within one receive
+        (100_000, 110_000, False),  # over the cap in the last of several receives
+    ],
+)
+def test_request_line_cap_holds_whatever_the_last_receive_brings(
+    monkeypatch: pytest.MonkeyPatch, cap: int, size: int, accepted: bool
+) -> None:
+    """A request longer than the cap is dropped even when one receive crosses the cap (audit C2/F3).
+
+    The cap used to be checked only before each receive, so a line that
+    crossed it inside the final chunk came back whole, up to 64 KiB over.
+    """
+    monkeypatch.setattr("kiss.core.models.codex_mcp_bridge._MAX_REQUEST_BYTES", cap)
+    body = json.dumps({"op": "tools", "padding": "x" * size}).encode()
+    payload = body[: size - 1] + b"\n"
+    assert len(payload) == size
+    reader, writer = socket.socketpair()
+    with reader, writer:
+        reader.settimeout(2)
+        # From a thread: a payload larger than the socket's buffer blocks the sender.
+        sender = threading.Thread(target=writer.sendall, args=(payload,))
+        sender.start()
+        line = _read_request_line(reader, time.monotonic() + 2)
+        assert reader.gettimeout() == 2  # the reply's write keeps the socket's own bound
+        sender.join(timeout=5)
+    assert line == (payload if accepted else b"")
 
 
 def test_leaving_the_block_waits_for_a_call_still_executing() -> None:
@@ -793,7 +833,14 @@ def test_binary_tool_results_are_lifted_out_for_codex(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A screenshot a tool returns is not fed to Codex as base64, neither in the
-    MCP reply nor in the next turn's transcript; both say it was not shown."""
+    MCP reply nor in the next turn's transcript: the result takes the path every
+    tool result takes (the bytes lifted out, the picture handed to the vision
+    bridge), and with no vision model configured both say it could not be described."""
+    for provider in OPENAI_COMPATIBLE_PROVIDERS:
+        monkeypatch.setattr(config_module.DEFAULT_CONFIG, provider.api_key_name, "")
+    for _prefix, _label, api_key_name in _NATIVE_PROVIDERS:
+        if api_key_name is not None:
+            monkeypatch.setattr(config_module.DEFAULT_CONFIG, api_key_name, "")
     printer = _RecordingPrinter()
     turns: list[dict[str, Any]] = [
         {"mcp_calls": [["snapshot", {}]], "text": "got={result}"},
@@ -805,11 +852,17 @@ def test_binary_tool_results_are_lifted_out_for_codex(
     assert payload["success"] is True
     transcript = calls[1]["prompt"]
     assert "iVBOR" not in transcript and "base64" not in transcript  # no PNG bytes
+    not_described = (
+        "[image/png attachment 1 could not be described: no vision model is configured; "
+        "the model you run on (codex/gpt-5.5) cannot see images, use a vision model or "
+        "an OCR tool]"
+    )
+    lifted = "captured [attached image/png, 12 bytes]\n\n" + not_described
     # What Codex got back from the call, echoed in its answer ...
-    assert "[Assistant]: got=captured" in transcript
-    assert "1 attachment(s) in this tool result could not be shown" in transcript
-    # ... and the replayed tool result.
-    assert "[Tool Result]: captured" in transcript
+    assert f"[Assistant]: got={lifted}" in transcript
+    # ... and the replayed tool result, recorded as it was served.
+    assert f"[Tool Result]: {lifted}" in transcript
+    assert transcript.count(not_described) == 2
 
 
 def test_tools_that_run_between_turns_stay_on_the_text_protocol(

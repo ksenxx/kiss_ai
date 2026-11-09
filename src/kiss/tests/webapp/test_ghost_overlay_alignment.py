@@ -106,12 +106,23 @@ _TYPE_AND_MEASURE_JS = """
   mirror.remove();
   const at = ghost.getClientRects()[0];
   const ghostStyle = getComputedStyle(ghost.parentElement);
+  // The right edge of the box the textarea lays its text in, and what
+  // a click on the last pixels of its first line hits.
+  const textRight = box.right - parseFloat(cs.paddingRight)
+    - parseFloat(cs.borderRightWidth);
+  const lineMiddle = box.top + parseFloat(cs.borderTopWidth)
+    + parseFloat(cs.paddingTop) + parseFloat(cs.lineHeight) / 2;
+  const hit = document.elementFromPoint(textRight - 1, lineMiddle);
+  const clear = document.getElementById('input-clear-btn').getBoundingClientRect();
   return {
     ghost: {left: at.left, top: at.top},
     caret: {left: caret.left, top: caret.top},
     lines: Math.round((caret.top - firstTop) / parseFloat(cs.lineHeight)) + 1,
     differing: MIRRORED.filter(
       p => ghostStyle.getPropertyValue(p) !== cs.getPropertyValue(p)),
+    textRight,
+    clearLeft: clear.width ? clear.left : null,
+    hitAtLineEnd: hit && hit.id,
   };
 }
 """
@@ -162,3 +173,10 @@ def test_ghost_suggestion_starts_where_the_typed_text_ends(tmp_path: Path) -> No
     for measured in (desktop, phone):
         assert abs(measured["ghost"]["left"] - measured["caret"]["left"]) <= 0.5, measured
         assert abs(measured["ghost"]["top"] - measured["caret"]["top"]) <= 0.5, measured
+        # The clear button (shown while there is text) sits over the
+        # textarea's right end: the text is laid out short of it, so a
+        # click on the last characters of a full first line moves the
+        # caret there instead of clearing the draft (A24).
+        assert measured["clearLeft"] is not None, measured
+        assert measured["textRight"] <= measured["clearLeft"], measured
+        assert measured["hitAtLineEnd"] == "task-input", measured

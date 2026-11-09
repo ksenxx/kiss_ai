@@ -14,6 +14,7 @@
 
 const assert = require('assert');
 const {makePage, send, snapshotEntry} = require('./simplify2_harness');
+const {runTests} = require('./workdir_helpers');
 
 function tabBarIds(win) {
   // Every open tab, in tab order.  Chat tabs have no row of their own
@@ -134,19 +135,4 @@ const tests = [
   testHistoryDisplacementSnapshotMovesChat,
 ];
 
-let failures = 0;
-for (const t of tests) {
-  try {
-    t();
-    console.log('PASS', t.name);
-  } catch (err) {
-    failures += 1;
-    console.error('FAIL', t.name);
-    console.error(err && err.stack ? err.stack : err);
-  }
-}
-if (failures > 0) {
-  console.error(`${failures} test(s) failed`);
-  process.exit(1);
-}
-console.log(`All ${tests.length} tabChatUniqueness tests passed`);
+runTests(tests.map(fn => [fn.name, fn]));

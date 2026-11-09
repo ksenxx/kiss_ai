@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import gc
 import importlib.util
 import json
 import os
@@ -629,6 +630,25 @@ def test_unattended_browser_has_no_webauthn(tool, server):
     )
 
 
+def _open_fds() -> set[tuple[str, str]]:
+    """The process's open descriptors as ``(number, target)`` pairs.
+
+    The target (``pipe:[inode]``, ``socket:[inode]``, a path) tells a
+    leaked pipe from an unrelated descriptor that was closed meanwhile
+    and whose number it took.  ``os.listdir`` names its own directory
+    handle too, the lowest free number at the time; it is closed again
+    by the time the names are read, so it (and anything else closed by
+    then) is left out.
+    """
+    fds: set[tuple[str, str]] = set()
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            fds.add((fd, os.readlink(f"/proc/self/fd/{fd}")))
+        except OSError:
+            pass
+    return fds
+
+
 def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, server):
     """Stopping the display kills Xvfb; without the binary the tool goes headless."""
     assert web_stealth.virtual_display() is not None
@@ -646,12 +666,17 @@ def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, s
     assert web_stealth._XVFB_PROC is None
     web_stealth.stop_virtual_display()  # idempotent when nothing runs
     # Restart cycles neither leak descriptors nor pile up atexit callbacks.
-    fds_before = len(os.listdir("/proc/self/fd"))
+    # A leak is a descriptor that is open afterwards and was not before;
+    # the count alone also drops when the cyclic collector closes an
+    # earlier test's unreachable socket meanwhile (full-suite load,
+    # 2026-11-05), so collect first and compare the sets.
+    gc.collect()
+    fds_before = _open_fds()
     callbacks_before = atexit._ncallbacks()
     for _ in range(2):
         assert web_stealth.virtual_display() is not None
         web_stealth.stop_virtual_display()
-    assert len(os.listdir("/proc/self/fd")) == fds_before
+    assert not _open_fds() - fds_before
     assert atexit._ncallbacks() == callbacks_before
     # Descriptor exhaustion: with two descriptors of headroom the pipe
     # still fits but Popen's own pipe does not; with none, not even the
@@ -675,7 +700,7 @@ def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, s
             resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
             for fd in plugs:
                 os.close(fd)
-        assert len(os.listdir("/proc/self/fd")) == fds_before
+        assert not _open_fds() - fds_before
 
     # No Xvfb binary on PATH -> no display -> the launch falls back to
     # real headless mode (with its headed user agent, see
@@ -787,6 +812,80 @@ def test_stop_during_xvfb_startup_leaves_no_wrapper_behind(tool, tmp_path):
             with contextlib.suppress(ProcessLookupError):
                 os.kill(xvfb_pid, signal.SIGTERM)
     # The lock was released and a real display comes up afterwards.
+    assert web_stealth.virtual_display() is not None
+
+
+def test_stop_after_xvfb_reported_its_display_leaves_it_owned_or_dead(tool, tmp_path):
+    """A14-4 (astra): a Stop landing once the display number was read must not orphan Xvfb.
+
+    The display number read, the ``finally`` no longer terminated the
+    wrapper, but the owner (``_XVFB_PROC``) was published only
+    afterwards: a Stop in between left the wrapper and its Xvfb running
+    with no owner, so ``stop_virtual_display`` could not reap them and
+    the next launch started a second display.  The Stop is raised, on
+    the task thread, at the statement that follows the ``try`` /
+    ``finally`` of ``virtual_display`` (the auditor's injection point).
+    """
+    tool.close()
+    web_stealth.stop_virtual_display()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    pid_file = tmp_path / "xvfb.pid"
+    # Reports its pid and a display number on the displayfd (reopened
+    # through /proc: a shell redirection takes one-digit fd numbers only),
+    # then lives on.
+    fake = fake_bin / "Xvfb"
+    fake.write_text(
+        f'#!/bin/sh\necho $$ > {pid_file}\necho 42 > "/proc/self/fd/$2"\nexec sleep 300\n'
+    )
+    fake.chmod(0o755)
+    source = Path(web_stealth.__file__).read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(source) if line.startswith("def virtual_display("))
+    target = 1 + next(  # 1-based
+        i for i, line in enumerate(source) if i > start and line == "    if display is None:"
+    )
+    outcome: list[object] = []
+
+    def stop_at_target(frame, event, arg):  # noqa: ANN001, ANN202
+        if frame.f_code.co_name != "virtual_display":
+            return None
+        if event == "line" and frame.f_lineno == target:
+            raise KeyboardInterrupt
+        return stop_at_target
+
+    def start_display() -> None:
+        sys.settrace(stop_at_target)
+        try:
+            outcome.append(web_stealth.virtual_display())
+        except KeyboardInterrupt:
+            outcome.append(KeyboardInterrupt)
+        finally:
+            sys.settrace(None)
+
+    saved_path = os.environ["PATH"]
+    os.environ["PATH"] = f"{fake_bin}:{saved_path}"
+    xvfb_pid = -1
+    try:
+        thread = threading.Thread(target=start_display, daemon=True)
+        thread.start()
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+        assert outcome == [KeyboardInterrupt]
+        xvfb_pid = int(pid_file.read_text())
+        # The display number was read (the fake did not die early), so the
+        # Stop landed after the start-up guard: owned (then reaped here)
+        # or already dead, never a running orphan.
+        assert os.path.exists(f"/proc/{xvfb_pid}")
+        web_stealth.stop_virtual_display()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and os.path.exists(f"/proc/{xvfb_pid}"):
+            time.sleep(0.1)
+        assert not os.path.exists(f"/proc/{xvfb_pid}"), "fake Xvfb leaked past the Stop"
+    finally:
+        os.environ["PATH"] = saved_path
+        if xvfb_pid > 0:  # on failure: do not leave the fake behind for real
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(xvfb_pid, signal.SIGTERM)
     assert web_stealth.virtual_display() is not None
 
 
@@ -1146,7 +1245,7 @@ def test_turnstile_is_not_ticked_when_the_widget_shows_no_box(tool, server):
     finally:
         tool._context.unroute("https://challenges.cloudflare.com/**")
     assert tree.splitlines()[0].startswith("Note:") and "(Cloudflare challenge)" in tree
-    assert tool._turnstile_checkbox() is None
+    assert tool._frame_checkbox("challenges.cloudflare.com") is None
 
 
 def test_press_and_hold_bar_is_held_like_a_person(tool, server):

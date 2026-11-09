@@ -53,9 +53,13 @@ function testAnswerClearsSiblingTabsWithSameBackendChatId() {
   assert.ok(secondTab && secondTab !== firstTab, 'second tab must be active');
   send(win, {type: 'clear', chat_id: 'shared-chai-id', tabId: secondTab});
 
+  // Both tabs show the same chat asking the same question (the daemon's
+  // question id tells it apart from another ask of the same words):
+  // answering it in one tab answers it in the other.
   send(win, {
     type: 'askUser',
     question: 'Question from the shared chat?',
+    questionId: 'q-shared',
     tabId: firstTab,
   });
   assert.strictEqual(
@@ -75,7 +79,8 @@ function testAnswerClearsSiblingTabsWithSameBackendChatId() {
 
   send(win, {
     type: 'askUser',
-    question: 'Same shared chat question in sibling tab?',
+    question: 'Question from the shared chat?',
+    questionId: 'q-shared',
     tabId: secondTab,
   });
   assert.strictEqual(
@@ -166,14 +171,63 @@ function testAnswerKeepsDifferentBackendChatIdPromptOpen() {
   );
 }
 
+// Audit 2026-11-08 (W7 F3): two sub-agents of one task share its chat
+// id but ask their own questions, each waiting on its own answer: the
+// answer to one (given here, or on another surface: askUserDone names
+// its tab) leaves the other asking.
+function testAnswerKeepsSiblingsAskingTheirOwnQuestions() {
+  const {win, posted} = makePage({beforeScripts: stubRaf});
+  const api = win._testApi;
+  const childA = api.getActiveTabId();
+  send(win, {type: 'clear', chat_id: 'shared-chat', tabId: childA});
+  api.createNewTab();
+  const childB = api.getActiveTabId();
+  send(win, {type: 'clear', chat_id: 'shared-chat', tabId: childB});
+  askQuestionCall(win, 'Deploy A?', childA);
+  send(win, {type: 'askUser', question: 'Deploy A?', questionId: 'q-a', tabId: childA});
+  askQuestionCall(win, 'Deploy B?', childB);
+  send(win, {type: 'askUser', question: 'Deploy B?', questionId: 'q-b', tabId: childB});
+  const askPending = id => !!api.openTabs().find(t => t.id === id).askPending;
+  assert.ok(askPending(childA) && askPending(childB), 'both children ask');
+
+  // Another surface answered A: only A's question is done.
+  send(win, {type: 'askUserDone', tabId: childA});
+  assert.ok(!askPending(childA), 'A is answered');
+  assert.ok(
+    askPending(childB),
+    'BUG - answering one sub-agent retired its sibling\'s own question',
+  );
+  clickTab(win, childB);
+  assert.ok(answering(win), 'B is still being answered');
+  assert.ok(visibleAskText(win).includes('Deploy B?'));
+
+  // A asks again; answering B here leaves A asking.
+  askQuestionCall(win, 'Deploy A again?', childA);
+  send(win, {type: 'askUser', question: 'Deploy A again?', questionId: 'q-a2', tabId: childA});
+  clickTab(win, childB);
+  submitAnswer(win, 'yes for B');
+  assert.ok(
+    posted.some(m => m.type === 'userAnswer' && m.tabId === childB && m.questionId === 'q-b'),
+    'the answer names B\'s question',
+  );
+  assert.ok(!answering(win), 'B leaves answer mode');
+  assert.ok(askPending(childA), 'A still asks');
+  clickTab(win, childA);
+  assert.ok(answering(win) && visibleAskText(win).includes('Deploy A again?'));
+
+  win.close();
+  console.log('  ok - an answer leaves siblings asking their own questions');
+}
+
 function runTests() {
   testAnswerClearsSiblingTabsWithSameBackendChatId();
   testAnswerKeepsDifferentBackendChatIdPromptOpen();
+  testAnswerKeepsSiblingsAskingTheirOwnQuestions();
 }
 
 try {
   runTests();
-  console.log('\n2 passed, 0 failed');
+  console.log('\n3 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.message ? err.message : err);

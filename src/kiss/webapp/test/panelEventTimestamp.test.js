@@ -325,6 +325,12 @@ async function run() {
           is_error: false,
           ts: oldTs + 2500,
         },
+        // Durations that round up to a whole minute at one decimal:
+        // the label must carry into the minutes, never read "60.0s".
+        {type: 'tool_call', name: 'Bash', command: 'sleep', ts: oldTs},
+        {type: 'tool_result', content: 'ok', is_error: false, ts: oldTs + 59999},
+        {type: 'tool_call', name: 'Bash', command: 'sleep', ts: oldTs},
+        {type: 'tool_result', content: 'ok', is_error: false, ts: oldTs + 119999},
         {
           type: 'result',
           summary: 'done long ago',
@@ -372,6 +378,14 @@ async function run() {
       tcReplayElapsed[0].textContent,
       '2.5s',
       'tool_call duration is the gap to its tool_result',
+    );
+    const minuteLabels = Array.from(output.querySelectorAll('.ev.tc'))
+      .slice(1)
+      .map(el => el.querySelector('.panel-elapsed').textContent);
+    assert.deepStrictEqual(
+      minuteLabels,
+      ['1m 0.0s', '2m 0.0s'],
+      'a duration rounding up to a whole minute carries into the minutes',
     );
     assert.strictEqual(
       promptPanel.querySelectorAll('.panel-elapsed').length,

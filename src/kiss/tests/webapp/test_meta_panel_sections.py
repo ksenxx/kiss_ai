@@ -53,6 +53,7 @@ from typing import Any, cast
 
 import pytest
 from playwright.sync_api import Browser, Locator, Page, sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from kiss.server.web_server import MEDIA_DIR, _build_html
 from kiss.tests.conftest import (
@@ -852,6 +853,7 @@ _SPEND_GEOMETRY_JS = """
   const dated = graph.querySelectorAll('.spend-cell[data-spend-date]');
   return {
     graphWidth: graph.clientWidth,
+    viewportWidth: viewport.clientWidth,
     cellWidth: cellRect.width,
     cellHeight: cellRect.height,
     columns: cols.length,
@@ -1034,6 +1036,132 @@ def test_spend_heatmap_fills_the_panel_pinned_to_the_latest_week(
         # A fresh reply redraws where the user left off (the oldest week).
         _deliver(page, report)
         assert page.evaluate("() => document.querySelector('.spend-viewport').scrollLeft") == 0
+    finally:
+        page.close()
+
+
+def test_spend_heatmap_draws_only_the_columns_the_viewport_fits(
+    browser: Browser, remote_url: str
+) -> None:
+    """A history no longer than the panel is wide draws exactly the week
+    columns the heatmap's viewport fits: the graph's own padding is no
+    room for a column (review 2026-11-08, W2), so nothing scrolls and no
+    pager shows.  The panel is one the user widened on an earlier visit
+    so that the fitting columns outnumber the 98-day minimum, and its
+    viewport is 4 px short of one more column: measured on the padded
+    graph instead, that column is drawn and sticks out."""
+    page = _open_page(
+        browser,
+        remote_url,
+        1200,
+        height=900,
+        global_sections=True,
+        storage={"kiss-meta-w": "254"},
+    )
+    try:
+        page.wait_for_selector("body.remote-desktop", state="attached")
+        _deliver(page, {"type": "cronJobs", "jobs": []})
+        _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": 1})
+        report = _spend_report()
+        report["days"] = [d for d in report["days"] if d["date"] == _day_key(0)]
+        report["daysByModel"] = {_day_key(0): report["daysByModel"][_day_key(0)]}
+        _deliver(page, report)
+        geo = page.evaluate(_SPEND_GEOMETRY_JS)
+        fits = (geo["viewportWidth"] + 3) // 14
+        assert fits >= 15, ("setup: the widened panel fits more than the minimum", geo)
+        assert geo["columns"] == fits, geo
+        assert geo["scrollMax"] == 0, ("the drawn weeks stick out of the viewport", geo)
+        assert geo["left"]["hidden"] and geo["right"]["hidden"], geo
+        assert geo["lastDay"] == _day_key(0), geo
+    finally:
+        page.close()
+
+
+# The element that has the keyboard focus: its class, whether it is in
+# the Spend section, and its computed opacity.
+_ACTIVE_ELEMENT_JS = """
+() => {
+  const a = document.activeElement;
+  return {
+    cls: a.className,
+    inSpend: document.getElementById('meta-spend').contains(a),
+    opacity: getComputedStyle(a).opacity,
+  };
+}
+"""
+
+
+def _spend_tab_order(page: Page) -> list[dict[str, Any]]:
+    """Tab from the Spend header's refresh button until the focus leaves
+    the section; the elements focused on the way.  A pager's opacity is
+    read once its reveal transition has had time to settle."""
+    page.focus("#meta-spend-refresh")
+    order: list[dict[str, Any]] = []
+    for _ in range(8):
+        page.keyboard.press("Tab")
+        active = page.evaluate(_ACTIVE_ELEMENT_JS)
+        if not active["inSpend"]:
+            break
+        if "spend-nav" in active["cls"]:
+            try:
+                page.wait_for_function(
+                    "() => getComputedStyle(document.activeElement).opacity === '1'",
+                    timeout=2000,
+                )
+            except PlaywrightTimeoutError:
+                pass
+            active = page.evaluate(_ACTIVE_ELEMENT_JS)
+        order.append(active)
+    return order
+
+
+def _spend_navs(order: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """The pagers in a Tab order, each with its opacity when focused."""
+    return [(o["cls"], o["opacity"]) for o in order if "spend-nav" in o["cls"]]
+
+
+def test_spend_pagers_are_keyboard_reachable_only_when_available(
+    browser: Browser, remote_url: str
+) -> None:
+    """With the pointer away from the graph, Tab reaches the pager that
+    can still scroll and shows it (a focused control the user cannot
+    see is no control), and skips the pager at the end the heatmap has
+    reached, as the mouse does.  Both ends, and a heatmap that fits
+    without scrolling (the panel is resized to 250px so the columns
+    drawn to fit the graph's width also fit its 4px-narrower viewport)."""
+    page = _open_page(
+        browser,
+        remote_url,
+        1200,
+        height=900,
+        global_sections=True,
+        storage={"kiss-meta-w": "250"},
+    )
+    try:
+        page.wait_for_selector("body.remote-desktop", state="attached")
+        _deliver(page, {"type": "cronJobs", "jobs": []})
+        _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": 1})
+        report = _spend_report()
+        _deliver(page, report)
+        page.mouse.move(1, 1)
+        # Pinned to the latest week: Earlier is available, Later is not.
+        order = _spend_tab_order(page)
+        assert _spend_navs(order) == [("spend-nav left", "1")], order
+        # Scrolled back to the oldest week: the other way round.
+        page.evaluate("() => { document.querySelector('.spend-viewport').scrollLeft = 0; }")
+        page.wait_for_function(
+            "() => document.querySelector('.spend-nav.left').classList.contains('nav-hidden')"
+        )
+        order = _spend_tab_order(page)
+        assert _spend_navs(order) == [("spend-nav right", "1")], order
+        # Today alone fits the panel: nothing to scroll, no pager to tab to.
+        today = _day_key(0)
+        report["days"] = [d for d in report["days"] if d["date"] == today]
+        report["daysByModel"] = {today: report["daysByModel"][today]}
+        _deliver(page, report)
+        assert page.evaluate("() => document.querySelectorAll('.spend-nav.nav-hidden').length") == 2
+        order = _spend_tab_order(page)
+        assert _spend_navs(order) == [], order
     finally:
         page.close()
 

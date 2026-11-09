@@ -200,6 +200,7 @@ class RemoteViewStream(MachineStream):
         self.flows: dict[str, FrameFlow[str]] = {}
         self.seen: set[str] | None = set()
         self.send_lock = threading.Lock()
+        self._registration_done = threading.Event()
         super().__init__(machine, owner, f"remote-views-{machine.name}")
 
     def request_pages(self) -> None:
@@ -214,7 +215,8 @@ class RemoteViewStream(MachineStream):
             self.send({"type": _PAGES_REQUEST})
 
     def _relay_frame(self, msg: dict[str, Any], text: str) -> None:
-        """Deliver one decoded frame when it is a terminal or browser event."""
+        """Deliver one decoded frame once registration has accepted or retired this candidate."""
+        self._registration_done.wait()
         kind = str(msg.get("type") or "")
         if kind in TERMINAL_EVENTS:
             self._relay_terminal(msg)
@@ -615,14 +617,18 @@ class RemoteViews:
             raise MachineError(f"{machine_name} is not a registered machine")
         stream = RemoteViewStream(machine, self)
         lost = False
-        with self._lock:
+        with self._lock, stream.lock:
             winner = self._streams.get(machine_name)
             closing = self._closing
             if winner is None and not closing:
-                with stream.lock:
-                    lost = stream.retired  # dropped before it could be registered
+                lost = stream.retired  # dropped before it could be registered
                 if not lost:
                     self._streams[machine_name] = stream
+            else:
+                stream.retired = True
+            # Buffered events belong only to the winner, even if closing a
+            # rejected candidate's socket takes time. Never wait under a lock.
+            stream._registration_done.set()
         if winner is not None:
             stream.close()
             return winner
@@ -769,7 +775,11 @@ class RemoteViews:
                 lost and registered and not self._closing and name in self._bound.values()
             )
             stream.retired = True
-            if lost:
+            # Only the registered stream's loss ends anything here: a
+            # candidate that lost the registration (``_stream_for``)
+            # relayed the same machine's pages, whose ids are the
+            # machine's, so its loss must not close the winner's pages.
+            if lost and registered:
                 logger.warning(
                     "%s: %d page(s) and %d terminal(s) shown from it close here",
                     text, len(stream.browser_tabs), len(stream.terminals),

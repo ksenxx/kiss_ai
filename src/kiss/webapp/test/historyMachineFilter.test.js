@@ -17,7 +17,11 @@
 // managed from this webapp.
 
 const assert = require('assert');
-const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  ofType,
+} = require('./simplify2_harness');
 const {
   historyRows,
   visibleTitles,
@@ -136,9 +140,24 @@ function testRowsCarryTheirMachineAndChip() {
     machine: 'box',
     chip: 'box',
     tag: 'SPAN',
-    favourite: false,
+    favourite: true,
     copy: true,
   });
+  // The star of a remote row is toggled on its machine; a local
+  // row's names no machine.
+  historyRows(win).forEach(r => {
+    const fav = r.querySelector('.sidebar-item-favorite');
+    if (fav) fav.click();
+  });
+  const favs = ofType(posted, 'setFavorite');
+  assert.deepStrictEqual(
+    favs.map(f => f.machine),
+    historyRows(win).map(r => r.dataset.machine || undefined),
+  );
+  assert.ok(
+    historyRows(win).every(r => r.dataset.favorite === '1'),
+    'every star is on at once',
+  );
   assert.deepStrictEqual(seen['box task two'].machine, 'box');
   assert.deepStrictEqual(seen['lab task'].chip, 'lab');
   assert.strictEqual(

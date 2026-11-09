@@ -33,10 +33,12 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
 import kiss.server.agent_state as agent_state
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter
 from kiss.tests.server.test_update_available_check import _UpdateCheckTestBase
 
@@ -190,3 +192,67 @@ class TestStaleWatcherLeavesBarrierToNextInstaller(_UpdateCheckTestBase):
         assert installer_b is not None
         self.assertIsNotNone(installer_b.poll())
         await self._run_and_expect(reader, writer, "started after update B", admitted=True)
+
+
+class TestSpawnLandingAfterShutdown(_UpdateCheckTestBase):
+    """A22-3 (audit 2026-11-07): a spawn that completes after ``stop_async`` starts no watcher.
+
+    ``stop_async`` cancels the exit watcher that exists when it runs;
+    an installer spawn still in the executor completed afterwards and
+    its done-callback (``_update_spawned``) created a new
+    ``_watch_update_exit`` task on the stopped server's loop, which
+    polled the detached installer and broadcast through the stopped
+    printer.  The executor thread is held at the entry of the real
+    ``_spawn_update_script`` by a trace hook until ``stop_async`` has
+    returned; nothing is replaced.
+    """
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.install_root = Path(self.tmpdir) / "kiss_ai"
+        self.install_root.mkdir()
+        self.server._install_root = self.install_root
+        self.server._update_log_path = Path(self.tmpdir) / "update.log"
+        script = self.install_root / "install.sh"
+        script.write_text("#!/bin/bash\nexit 0\n")
+        script.chmod(0o755)
+        self.held = threading.Event()
+        self.release = threading.Event()
+        spawn_code = RemoteAccessServer._spawn_update_script.__code__
+
+        def _hold_spawn(frame: Any, event: str, arg: Any) -> Any:
+            if event == "call" and frame.f_code is spawn_code:
+                self.held.set()
+                self.release.wait(10)
+            return None
+
+        threading.settrace_all_threads(_hold_spawn)
+
+    async def asyncTearDown(self) -> None:
+        threading.settrace_all_threads(None)  # type: ignore[arg-type]
+        self.release.set()
+        proc = self.server._update_proc
+        if proc is not None:
+            await asyncio.to_thread(proc.wait, 5)
+        await super().asyncTearDown()
+
+    async def test_spawn_completing_after_stop_starts_no_watcher(self) -> None:
+        handler = asyncio.ensure_future(self.server._handle_run_update(""))
+        await asyncio.wait_for(asyncio.to_thread(self.held.wait, 5), 6)
+        self.assertTrue(self.server._update_starting)
+        await self.server.stop_async()
+        self.assertTrue(self.server._update_starting, "the spawn completed before the stop")
+        self.release.set()
+        try:
+            await asyncio.wait_for(handler, 10)
+            watcher = self.server._update_watch_task
+            self.assertIsNotNone(self.server._update_proc, "the detached installer is kept")
+            self.assertFalse(self.server._update_starting)
+            self.assertIsNone(watcher, "an exit watcher was started on the stopped server")
+            with agent_state.STATE_LOCK:
+                self.assertFalse(self.server._agent_server._update_installing)
+        finally:
+            leaked = self.server._update_watch_task
+            if leaked is not None:
+                leaked.cancel()
+                await asyncio.gather(leaked, return_exceptions=True)

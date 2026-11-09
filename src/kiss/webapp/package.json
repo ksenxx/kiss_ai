@@ -25,6 +25,7 @@
     "gts": "^7.0.0",
     "htmlhint": "^1.9.2",
     "jsdom": "^29.1.1",
+    "postcss-value-parser": "^4.2.0",
     "stylelint": "^17.8.0",
     "stylelint-config-standard": "^40.0.0"
   }

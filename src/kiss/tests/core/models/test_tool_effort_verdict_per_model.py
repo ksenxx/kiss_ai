@@ -32,13 +32,16 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Generator
+from types import FrameType
 from typing import Any
 
 import pytest
 
+from kiss.core import stop_signal
 from kiss.core.models.openai_compatible_model import (
     _ADAPTIVE_TOOL_EFFORT_VERDICTS,
     OpenAICompatibleModel,
+    _rejects_effort_value,
 )
 from kiss.tests.core.models.openai_sse_harness import (
     Reply,
@@ -275,3 +278,108 @@ class TestConcurrentProbesDoNotClobber:
         assert [
             ("reasoning_effort" in r.body) for r in follow_up
         ] == [True], json.dumps([r.body for r in follow_up])
+
+
+def _unsupported_value_policy(request: Request) -> Reply:
+    """Reject the ``xhigh`` effort level as an invalid value; accept every other request."""
+    if request.body.get("reasoning_effort") == "xhigh":
+        error = {
+            "error": {
+                "message": (
+                    "Invalid value: 'xhigh'. Supported values are: 'low', 'medium', and 'high'."
+                ),
+                "type": "invalid_request_error",
+                "param": "reasoning_effort",
+                "code": "invalid_value",
+            }
+        }
+        return Reply(status=400, json_body=error)
+    return Reply(json_body=_ok_body(str(request.body.get("model", ""))))
+
+
+@pytest.mark.usefixtures("clean_verdicts")
+def test_an_unsupported_effort_value_is_no_verdict_on_the_combination() -> None:
+    """A 400 for the effort's *value* must not disable every effort value of the pair.
+
+    The endpoint accepts ``tools`` + ``reasoning_effort`` and merely
+    refuses ``xhigh``: the turn still recovers (retried without the
+    effort, the value named in the log), but the endpoint/model pair is
+    left unprobed, so a later model asking for ``high`` sends it.
+    """
+    with ScriptedOpenAIServer(_unsupported_value_policy) as server:
+        too_high = OpenAICompatibleModel(
+            _ACCEPTING_MODEL,
+            base_url=server.base_url,
+            api_key="test-key",
+            model_config={"reasoning_effort": "xhigh"},
+        )
+        too_high.initialize("Do the thing.")
+        _run(too_high)
+        assert (server.base_url, _ACCEPTING_MODEL) not in _ADAPTIVE_TOOL_EFFORT_VERDICTS
+        _run(_make_model(server.base_url, _ACCEPTING_MODEL))
+        efforts = [r.body.get("reasoning_effort") for r in server.requests]
+    assert efforts == ["xhigh", None, "high"], efforts
+
+
+@pytest.mark.usefixtures("clean_verdicts")
+def test_a_stopped_turn_records_its_verdict_under_the_endpoint_it_was_sent_to() -> None:
+    """A rejection handled after the model moved on is a verdict on the old endpoint.
+
+    The callback-less turn runs on a worker thread.  It is held (a
+    profile hook on the worker) right after the old endpoint's rejection
+    arrived; the user stops the turn, the next turn moves the model to a
+    new endpoint that accepts the combination, and only then does the
+    held worker record its verdict.  Read from the model at that moment,
+    the key would be the new endpoint's, and its ``True`` would be
+    overwritten by a ``False`` it never earned (A04-1a / A04-1f).
+    """
+    held = threading.Event()
+    resume = threading.Event()
+
+    def hold_the_verdict(frame: FrameType, event: str, _arg: object) -> None:
+        if event == "call" and frame.f_code is _rejects_effort_value.__code__:
+            held.set()
+            resume.wait(_DEADLINE)
+
+    def accept_everything(request: Request) -> Reply:
+        return Reply(json_body=_ok_body(str(request.body.get("model", ""))))
+
+    stop = threading.Event()
+    outcome: dict[str, BaseException] = {}
+
+    with (
+        ScriptedOpenAIServer(_PerModelPolicy()) as old,
+        ScriptedOpenAIServer(accept_everything) as new,
+    ):
+        model = _make_model(old.base_url, _REJECTING_MODEL)
+
+        def stopped_turn() -> None:
+            stop_signal.set_thread_stop_event(stop)
+            try:
+                _run(model)
+            except BaseException as exc:  # noqa: BLE001 - reported to the test
+                outcome["error"] = exc
+
+        threading.setprofile(hold_the_verdict)
+        try:
+            turn = threading.Thread(target=stopped_turn, daemon=True)
+            turn.start()
+            assert held.wait(_DEADLINE), "the old endpoint's rejection never reached the worker"
+            stop.set()
+            turn.join(_DEADLINE)
+        finally:
+            threading.setprofile(None)
+        assert not turn.is_alive(), "the Stop did not end the turn"
+        assert isinstance(outcome.get("error"), KeyboardInterrupt), f"got {outcome!r}"
+
+        model.base_url = new.base_url
+        _run(model)
+        assert _ADAPTIVE_TOOL_EFFORT_VERDICTS.get((new.base_url, _REJECTING_MODEL)) is True
+
+        resume.set()
+        for worker in threading.enumerate():
+            if worker.name == "model-blocking-request":
+                worker.join(_DEADLINE)
+        assert _ADAPTIVE_TOOL_EFFORT_VERDICTS.get((old.base_url, _REJECTING_MODEL)) is False
+        assert _ADAPTIVE_TOOL_EFFORT_VERDICTS.get((new.base_url, _REJECTING_MODEL)) is True
+        assert _efforts_by_model(new) == [(_REJECTING_MODEL, True)]

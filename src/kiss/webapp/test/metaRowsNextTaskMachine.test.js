@@ -32,6 +32,7 @@ const {
   fakeMatchMedia,
   readyTabId,
   pickMachine,
+  rowText,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 
@@ -64,10 +65,6 @@ function makePage(opts) {
   const TAB = readyTabId(posted);
   posted.length = 0;
   return {win, posted, TAB};
-}
-
-function rowText(win, id) {
-  return win.document.getElementById(id).textContent;
 }
 
 function rows(win) {

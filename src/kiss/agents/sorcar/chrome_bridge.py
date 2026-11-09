@@ -67,7 +67,7 @@ from websockets.sync.server import Server, ServerConnection, serve
 from kiss.core.brand import BRAND, PRODUCT_NAME, render_brand
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
-from kiss.core.locked import LockTimeoutError, locked_call
+from kiss.core.locked import ACQUIRE_SLICE_SECONDS, LockTimeoutError, locked_call
 from kiss.core.user_config import load_config
 from kiss.core.utils import atomic_write_text
 
@@ -81,6 +81,7 @@ _EXTENSION_FILES = ("manifest.json", "background.js")
 _PROBE_TIMEOUT_SECS = 1.0
 _CONFIG_LOCK_TIMEOUT_SECS = 5.0
 _REPLY_MARGIN_SECS = 1.0  # the extension's deadline runs at most this much short of ours
+_PONG_TIMEOUT_SECS = 5.0  # a pong not written by then: the extension stopped reading
 
 
 def extension_dir() -> Path:
@@ -125,9 +126,10 @@ def install_extension() -> Path:
     """Copy the bundled extension files into :func:`extension_dir`.
 
     Files that already match the bundled copy are left untouched; a
-    changed ``background.js`` is overwritten in place, which Chrome picks
-    up at the next service-worker start (a reload from
-    ``chrome://extensions`` picks up a manifest change).
+    changed ``background.js`` is replaced (atomically: Chrome loads the
+    file at every service-worker start and must never see a truncated
+    copy), which Chrome picks up at the next service-worker start (a
+    reload from ``chrome://extensions`` picks up a manifest change).
 
     Returns:
         The extension directory.
@@ -138,7 +140,7 @@ def install_extension() -> Path:
         data = bundled_extension_file(name)
         dest = target / name
         if not dest.exists() or dest.read_bytes() != data:
-            dest.write_bytes(data)
+            atomic_write_text(dest, data.decode("utf-8"), create_mode=0o644)
     return target
 
 
@@ -224,9 +226,18 @@ class ChromeBridge:
     def _instance_locked(cls, takeover: bool) -> ChromeBridge:
         if cls._instance is None:
             bridge = cls()
-            bridge.start(takeover=takeover)
-            atexit.register(bridge.stop)
-            cls._instance = bridge
+            try:
+                bridge.start(takeover=takeover)
+                atexit.register(bridge.stop)
+                cls._instance = bridge
+            except BaseException:
+                # A Stop (an injected KeyboardInterrupt) landing anywhere before
+                # the installation: a live server nobody owns would make every
+                # later start defer to it as "another KISS process".  stop()
+                # is idempotent: a failed start() has already run it.
+                cls._instance = None
+                bridge.stop()
+                raise
         return cls._instance
 
     @classmethod
@@ -311,11 +322,15 @@ class ChromeBridge:
                 self._publish(server, takeover)
             else:
                 _serve(server)
-        except ChromeBridgeError:
-            server.shutdown()  # the socket nobody would serve; nothing was published
-            self._server = None
+            logger.info("chrome bridge listening on 127.0.0.1:%d", self._port)
+        except BaseException:
+            # A ChromeBridgeError (the socket nobody would serve; nothing was
+            # published), or a Stop (an injected KeyboardInterrupt) landing
+            # anywhere in here, after the server thread started and the config
+            # was written included: a bridge its caller never got would
+            # otherwise keep serving and own the file.
+            self.stop()
             raise
-        logger.info("chrome bridge listening on 127.0.0.1:%d", self._port)
 
     def _publish(self, server: Server, takeover: bool) -> None:
         """Serve *server* and write bridge-config.json, unless a live bridge owns the file.
@@ -366,16 +381,27 @@ class ChromeBridge:
         """
         if self._server is not None:
             self._server.shutdown()
-            self._server = None
+            # Forgotten under _conn_lock: a handshake still in flight (the
+            # listener's close does not end it) checks there, before
+            # publishing its connection, that this bridge still runs.
+            locked_call(self._conn_lock, self._forget_server)
         conn = self._conn  # one read: the handler thread may drop it meanwhile
         if conn is not None:
             self._drop_connection(conn, "bridge server stopped")
+            # Shut down before the close, as call()'s timeout path does: a
+            # close alone waits up to websockets' close_timeout (10 s) on a
+            # peer that stopped reading, and blocks behind a sender stuck
+            # in sendall(), which holds the protocol mutex.
+            _shutdown_socket(conn.ws.socket)
             try:
                 conn.ws.close()  # half-dead handlers keep the extension pinging otherwise
             except Exception:  # noqa: BLE001 - already gone
                 logger.debug("Exception caught", exc_info=True)
         if self._write_config:
             _remove_config_if_owned(extension_dir() / CONFIG_FILE_NAME, self._token)
+
+    def _forget_server(self) -> None:
+        self._server = None
 
     def wait_for_extension(self, timeout: float) -> bool:
         """Block until an extension is connected or *timeout* seconds pass.
@@ -440,7 +466,7 @@ class ChromeBridge:
                     f"'{cmd}' was not sent"
                 ) from None
             try:
-                return fut.result(max(deadline - time.monotonic(), 0.0))
+                return _result_before(fut, deadline)
             except TimeoutError:
                 # A peer that stops answering would wedge every later command
                 # behind its stuck socket; drop it so the extension reconnects
@@ -473,15 +499,6 @@ class ChromeBridge:
         while we still wait, instead of our timeout dropping the connection
         and every other command in flight.
 
-        The socket write has no deadline of its own: once a peer that
-        stopped draining its socket has filled the buffers, ``sendall``
-        blocks for good.  A watchdog shuts the socket down when the
-        deadline passes mid-write (``shutdown`` takes none of websockets'
-        mutexes and fails the blocked write), and the connection is then
-        dropped like any other failed send.  The watchdog is bound to
-        *conn*'s socket and cancelled once the write returned, so it never
-        cuts a later, healthy connection.
-
         Raises:
             ChromeBridgeError: the frame could not be written; the
                 connection is dropped.
@@ -489,6 +506,24 @@ class ChromeBridge:
         budget = max(deadline - time.monotonic(), 0.0)
         timeout_ms = round((budget - min(budget / 10, _REPLY_MARGIN_SECS)) * 1000)
         frame = json.dumps({"id": msg_id, "cmd": cmd, "args": args or {}, "timeout_ms": timeout_ms})
+        self._write(conn, frame, budget, f"'{cmd}'")
+
+    def _write(self, conn: _Connection, frame: str, budget: float, what: str) -> None:
+        """Write *frame* to *conn* (its send lock held) within *budget* seconds.
+
+        The socket write has no deadline of its own: once a peer that
+        stopped draining its socket has filled the buffers, ``sendall``
+        blocks for good.  A watchdog shuts the socket down when the
+        budget passes mid-write (``shutdown`` takes none of websockets'
+        mutexes and fails the blocked write), and the connection is then
+        dropped like any other failed send.  The watchdog is bound to
+        *conn*'s socket and cancelled once the write returned, so it never
+        cuts a later, healthy connection.
+
+        Raises:
+            ChromeBridgeError: the frame could not be written (*what*
+                names it); the connection is dropped.
+        """
         cut = threading.Event()
         watchdog = threading.Timer(budget, _cut_socket, (conn.ws.socket, cut))
         try:
@@ -499,7 +534,7 @@ class ChromeBridge:
                 self._drop_connection(conn, "send failed")
             if cut.is_set():
                 raise ChromeBridgeError(
-                    f"the extension stopped reading; '{cmd}' could not be sent within "
+                    f"the extension stopped reading; {what} could not be sent within "
                     f"the {budget:.0f}s left of its timeout"
                 ) from None
             raise ChromeBridgeError(f"lost the extension connection: {e}") from e
@@ -530,6 +565,8 @@ class ChromeBridge:
                 return
             ws.send(json.dumps({"type": "hello_ok", "proof": _proof(nonce, self._token)}))
             with self._conn_lock:
+                if self._server is None:  # stopped while this handshake was in flight
+                    return  # closed on return: the extension looks for a live bridge
                 old, self._conn = self._conn, conn
                 self._connected.set()
             if old is not None:  # a second Chrome profile connected: keep the newest
@@ -549,8 +586,11 @@ class ChromeBridge:
 
     def _on_message(self, conn: _Connection, msg: dict[str, Any]) -> None:
         if msg.get("type") == "ping":
+            # Bounded like a command's write: unbounded, a pong to a peer
+            # that stopped reading held the send lock for good, so every
+            # command failed as busy while the peer still counted as live.
             with conn.lock:
-                conn.ws.send(json.dumps({"type": "pong"}))
+                self._write(conn, json.dumps({"type": "pong"}), _PONG_TIMEOUT_SECS, "the pong")
             return
         msg_id = msg.get("id")
         if not isinstance(msg_id, int):
@@ -581,6 +621,26 @@ class ChromeBridge:
         for fut in locked_call(conn.pending_lock, take_pending):
             if not fut.done():
                 fut.set_exception(ChromeBridgeError(reason))
+
+
+def _result_before(fut: Future, deadline: float) -> Any:
+    """Return *fut*'s result, waiting until *deadline* in short slices.
+
+    ``Future.result(timeout)`` blocks in one C-level lock wait, where an
+    injected ``KeyboardInterrupt`` (a task Stop) is not delivered: a Stop
+    would wait out the whole command timeout.  Sliced like the lock
+    acquisitions of :func:`~kiss.core.locked.locked_call`, the Stop lands
+    within :data:`~kiss.core.locked.ACQUIRE_SLICE_SECONDS`.
+
+    Raises:
+        TimeoutError: *deadline* passed before the future completed.
+    """
+    while True:
+        try:
+            return fut.result(min(max(deadline - time.monotonic(), 0.0), ACQUIRE_SLICE_SECONDS))
+        except TimeoutError:
+            if time.monotonic() >= deadline:
+                raise
 
 
 def _close_replaced(ws: ServerConnection) -> None:

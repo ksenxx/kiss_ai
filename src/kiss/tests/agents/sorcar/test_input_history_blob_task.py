@@ -6,7 +6,7 @@
 
 SQLite's dynamic typing lets a hand-edited or third-party ``history.db``
 hold a BLOB in the TEXT ``task`` column (the case ``_safe_str`` was
-added for).  The three readers behind the composer — ``_load_input_history``
+added for).  The three readers behind the composer — ``_load_input_texts``
 (ArrowUp), ``_prefix_match_tasks`` (ghost completion) and
 ``_load_slash_command_usage`` (``/`` popup order) — handed the raw
 ``bytes`` on, so ``json.dumps`` of the ``inputHistory`` reply raised in
@@ -30,6 +30,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.tests.agents.sorcar.test_steer_inputs import (
+    _input_history,
     _redirect,
     _restore,
     _set_task_timestamp,
@@ -61,7 +62,7 @@ class TestBlobTaskTexts:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_arrow_up_history_decodes_the_blob(self) -> None:
-        history = th._load_input_history()
+        history = _input_history()
         assert all(isinstance(text, str) for text in history)
         assert history[0] == "fix the typo"
         assert history[1:] == [

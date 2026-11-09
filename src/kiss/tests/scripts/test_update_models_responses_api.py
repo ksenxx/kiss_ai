@@ -23,7 +23,14 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import socket
+import subprocess
 import sys
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -329,6 +336,361 @@ class TestInconclusiveVerdicts:
         mod.main()
 
         assert _read(target)["gpt-7"]["use_responses_api"] is True
+
+    def test_main_test_existing_keeps_capabilities_through_endpoint_trouble(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A vendor 5xx, a refused connection or a missing key changes nothing in the catalog.
+
+        ``gpt-7`` is routed to a local endpoint that answers 503 to every
+        request; ``claude-7`` to a local port nobody listens on, so the
+        Anthropic SDK's own connection error (not a builtin one) is what
+        the probe catches; ``glm-7`` has no ``ZAI_API_KEY``.  None of the
+        failures says anything about the models, so ``fc``, ``thinking``,
+        the v2 flag and every generated effort alias must survive the run.
+        """
+        import dataclasses
+
+        import kiss.scripts.update_models as mod
+        from kiss.core import config as config_module
+        from kiss.core.models import model_info
+
+        target = tmp_path / "MODEL_INFO.json"
+        target.write_text("{}\n")
+        monkeypatch.setattr(mod, "MODEL_INFO_PATH", target)
+        monkeypatch.setattr(mod, "README_PATH", tmp_path / "README.md")
+        mod.apply_updates_to_file(
+            [],
+            [
+                _new_model("gpt-7", True, thinking="xhigh"),
+                _new_model("claude-7", False, thinking="high"),
+                _new_model("glm-7", True),
+            ],
+            [],
+            {},
+        )
+        before = _read(target)
+        assert {"gpt-7", "gpt-7-low", "gpt-7-xhigh", "claude-7", "claude-7-low", "glm-7"} <= set(
+            before
+        )
+
+        for fetcher in (
+            "fetch_openrouter",
+            "fetch_together",
+            "fetch_anthropic",
+            "fetch_gemini",
+            "fetch_openai",
+            "fetch_bedrock",
+        ):
+            monkeypatch.setattr(mod, fetcher, lambda verbose=False: {})
+        monkeypatch.setattr(
+            mod, "fetch_codex_supported_slugs", lambda verbose=False: set()
+        )
+        monkeypatch.setattr(mod, "get_current_model_info", lambda: dict(before))
+        monkeypatch.setattr(mod.time, "sleep", lambda seconds: None)
+        monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENAI_API_KEY", "sk-test")
+        monkeypatch.setattr(config_module.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(config_module.DEFAULT_CONFIG, "ZAI_API_KEY", "")
+        monkeypatch.setattr(sys, "argv", ["update_models.py", "--test-existing"])
+
+        with _http_status_server(503) as endpoint, _refused_port() as refused:
+            providers = tuple(
+                dataclasses.replace(p, base_url=f"{endpoint}/v1") if p.name == "openai" else p
+                for p in model_info.OPENAI_COMPATIBLE_PROVIDERS
+            )
+            monkeypatch.setattr(model_info, "OPENAI_COMPATIBLE_PROVIDERS", providers)
+            monkeypatch.setenv("ANTHROPIC_BASE_URL", refused)
+            mod.main()
+
+        assert _read(target) == before
+        out = capsys.readouterr().out
+        assert "changed" not in out
+        assert "gpt-7: probe inconclusive" in out
+        assert "claude-7: probe inconclusive" in out
+        assert "glm-7: probe inconclusive" in out
+
+
+class _StatusOnlyHandler(BaseHTTPRequestHandler):
+    """Answer every request with one fixed HTTP status (a vendor outage stand-in)."""
+
+    status = 503
+
+    def do_POST(self) -> None:  # noqa: N802
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        self.send_response(self.status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"error": {"message": "overloaded"}}')
+
+    do_GET = do_POST  # noqa: N815 — BaseHTTPRequestHandler API
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        return
+
+
+@contextmanager
+def _refused_port() -> Iterator[str]:
+    """Hold a loopback TCP port nobody listens on; yield its URL.
+
+    The socket stays bound (so no other process can take the port) but
+    never listens, so every connection to it is refused at once -- the
+    endpoint of a vendor that is down, with the real SDK transport.
+    """
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    try:
+        yield f"http://127.0.0.1:{sock.getsockname()[1]}"
+    finally:
+        sock.close()
+
+
+@contextmanager
+def _http_status_server(status: int) -> Iterator[str]:
+    """Serve ``status`` for every request on a loopback port; yield the base URL."""
+    handler = type("Handler", (_StatusOnlyHandler,), {"status": status})
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _probe_everything_as_supported(
+    monkeypatch: pytest.MonkeyPatch, catalog: Path, during_probe: Callable[[], None]
+) -> None:
+    """Route the batch's live probe to a stub that runs ``during_probe`` and passes.
+
+    ``probe_responses_support`` is the module's single network entry point;
+    the scan loads the catalog before the pool starts, so ``during_probe``
+    runs between the scan's read and its publish.
+    """
+    import kiss.scripts.update_responses_api_support as scan
+
+    def probe(name: str, fc: bool = True) -> scan.ProbeResult:
+        during_probe()
+        return scan.ProbeResult(name=name, supported=True, detail="ok")
+
+    monkeypatch.setattr(scan, "probe_responses_support", probe)
+    monkeypatch.setattr(sys, "argv", ["responses", "--model-info", str(catalog), "--workers", "1"])
+
+
+def test_responses_scan_keeps_an_update_committed_during_its_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A price change and a new model committed mid-scan survive the scan's publish."""
+    import kiss.scripts.update_models as mod
+    import kiss.scripts.update_responses_api_support as scan
+
+    catalog = tmp_path / "MODEL_INFO.json"
+    catalog.write_text(json.dumps({"gpt-7": _entry()}, indent=2) + "\n")
+    monkeypatch.setattr(mod, "MODEL_INFO_PATH", catalog)
+    monkeypatch.setattr(mod, "README_PATH", tmp_path / "README.md")
+
+    def ordinary_update() -> None:
+        mod.apply_updates_to_file(
+            [{"name": "gpt-7", "changes": {"input_price_per_1M": 9.0}, "source": "openai"}],
+            [_new_model("gpt-8", use_responses_api=False)],
+            [],
+            {"gpt-7": _entry()},
+        )
+
+    _probe_everything_as_supported(monkeypatch, catalog, ordinary_update)
+    scan.main()
+
+    written = _read(catalog)
+    assert written["gpt-7"]["input_price_per_1M"] == 9.0
+    assert written["gpt-7"]["use_responses_api"] is True
+    assert "gpt-8" in written and "use_responses_api" not in written["gpt-8"]
+
+
+_STUCK_BATCH_CHILD = """
+import signal, sys, threading
+from kiss.scripts import update_responses_api_support as scan
+
+mode, target = sys.argv[1:3]
+# A test run started in the background of a non-interactive shell
+# inherits SIGINT ignored, and Python then installs no handler for it;
+# the Ctrl-C under test needs the one an interactive run has.
+signal.signal(signal.SIGINT, signal.default_int_handler)
+
+def interrupt_per_stdin_line():
+    # Windows: the test cannot send SIGINT (Popen.send_signal refuses it,
+    # and a console Ctrl-C event reaches every process of the console),
+    # so each line it writes here raises the SIGINT from a thread, which
+    # lands in the main thread as a console Ctrl-C does.
+    for _line in sys.stdin:
+        signal.raise_signal(signal.SIGINT)
+
+if sys.platform == "win32":
+    threading.Thread(target=interrupt_per_stdin_line, daemon=True).start()
+
+def stuck(name, fc=True):
+    print("PROBE_STARTED", flush=True)
+    threading.Event().wait()
+
+def interrupt_at_shutdown(frame, event, arg):
+    # A real SIGINT the moment main() enters _shutdown_pool, i.e. after
+    # the batch was published and before the stuck worker is dealt with.
+    if frame.f_code is scan._shutdown_pool.__code__:
+        sys.settrace(None)
+        signal.raise_signal(signal.SIGINT)
+    return None
+
+class Candidates(list):
+    # Yields its one name, then never ends: main() is still inside its
+    # submission loop, the first probe already running, when the
+    # interrupt lands.
+    def __iter__(self):
+        yield from list.__iter__(self)
+        threading.Event().wait()
+
+candidates = Candidates(["gpt-7"]) if mode == "interrupt-submit" else ["gpt-7"]
+scan.probe_responses_support = stuck
+scan._candidate_names = lambda data, only: (candidates, [])
+scan._BATCH_WALL_CLOCK_SECONDS = 3600.0 if mode.startswith("interrupt") else 0.05
+sys.argv = ["responses", "--model-info", target, "--workers", "1"]
+if mode == "write-error":
+    sys.argv += ["--results-json", target + "-no-such-dir/results.json"]
+if mode == "shutdown-interrupt":
+    sys.settrace(interrupt_at_shutdown)
+scan.main()
+"""
+
+
+class TestStuckBatchTerminates:
+    """A worker stuck in a vendor stream must never keep the process alive.
+
+    The pool's workers are non-daemon threads, so interpreter shutdown
+    would join a stuck one forever; every exit path, not just the happy
+    one, has to bypass that join.  Each scenario runs the real ``main`` in
+    a subprocess with a probe that blocks forever.
+    """
+
+    def _run(self, tmp_path: Path, mode: str) -> tuple[int, str, str]:
+        catalog = tmp_path / f"{mode}.json"
+        catalog.write_text(json.dumps({"gpt-7": _entry()}) + "\n")
+        env = {**os.environ, "KISS_HOME": str(tmp_path / "home")}
+        # The child's stdin, written by hand: a line on it is the Ctrl-C on
+        # Windows (see the script), and ``communicate`` would close a
+        # ``stdin=PIPE`` on its first call, before a second line is due.
+        trigger_read, trigger_write = os.pipe()
+        # No -u: stdout is a block-buffered pipe, as in a real piped run;
+        # what the test reads is flushed explicitly or by the hard exits.
+        child = subprocess.Popen(
+            [sys.executable, "-c", _STUCK_BATCH_CHILD, mode, str(catalog)],
+            stdin=trigger_read,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        os.close(trigger_read)
+        try:
+            assert child.stdout is not None
+            while True:
+                line = child.stdout.readline()
+                assert line, "child exited before its probe started"
+                if "PROBE_STARTED" in line:
+                    break
+            if mode == "broken-pipe":
+                child.stdout.close()
+                # ``communicate`` reads the pipes left: its Windows reader
+                # thread would fail on the closed one.
+                child.stdout = None
+            # CPython acts on a signal only when the main thread next runs
+            # bytecode; one that lands in the moment between its last
+            # bytecode and the futex wait of the batch deadline is noticed
+            # when that wait returns (observed in about 4% of runs under
+            # load).  So a Ctrl-C the child did not act on within a second
+            # is sent again, as a user would press it again.  On Windows
+            # the child raises it per line on its stdin (see the script).
+            interrupt = mode.startswith("interrupt")
+            for _ in range(20 if interrupt else 1):
+                if interrupt and sys.platform == "win32":
+                    os.write(trigger_write, b"\n")
+                elif interrupt:
+                    child.send_signal(signal.SIGINT)
+                try:
+                    out, err = child.communicate(timeout=1 if interrupt else 20)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            else:
+                child.kill()
+                out, err = child.communicate(timeout=10)
+                pytest.fail(f"{mode}: process still alive with a stuck worker\n{out}\n{err}")
+        finally:
+            os.close(trigger_write)
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=10)
+        return child.returncode, out, err
+
+    def test_deadline_exits_partial(self, tmp_path: Path) -> None:
+        """Deadline reached, publish fine: status 2 and the catalog written."""
+        code, out, _err = self._run(tmp_path, "control")
+        assert code == 2
+        assert "probe timed out (inconclusive)" in out
+        assert "Written to" in out
+
+    def test_publication_failure_after_deadline_exits(self, tmp_path: Path) -> None:
+        """A failed --results-json write after the deadline still exits, traceback included."""
+        code, out, err = self._run(tmp_path, "write-error")
+        assert code == 1
+        assert "FileNotFoundError" in err
+        assert "Written to" not in out
+
+    def test_interrupt_during_stuck_probe_exits(self, tmp_path: Path) -> None:
+        """Ctrl-C while a probe is stuck ends the process with the interrupt visible."""
+        code, _out, err = self._run(tmp_path, "interrupt")
+        assert code == 1
+        assert "KeyboardInterrupt" in err
+
+    def test_interrupt_during_submission_exits(self, tmp_path: Path) -> None:
+        """Ctrl-C while probes are still being submitted, the first already stuck, ends too.
+
+        Submission starts workers before the batch is waited on, so an
+        interrupt that lands there has a running worker to abandon as
+        well.
+        """
+        code, _out, err = self._run(tmp_path, "interrupt-submit")
+        assert code == 1
+        assert "KeyboardInterrupt" in err
+
+    def test_interrupt_after_publication_exits(self, tmp_path: Path) -> None:
+        """Ctrl-C after the batch was published, as the pool is shut down, ends too.
+
+        The child raises the SIGINT itself the moment ``_shutdown_pool`` is
+        entered, so it lands deterministically after publication and
+        before the stuck worker is abandoned.
+        """
+        code, out, err = self._run(tmp_path, "shutdown-interrupt")
+        assert code == 1
+        assert "KeyboardInterrupt" in err
+        assert "Written to" in out
+
+    def test_broken_stdout_pipe_still_exits(self, tmp_path: Path) -> None:
+        """A stdout reader that went away must not keep the process alive.
+
+        The publication print fails with ``BrokenPipeError`` (on Windows
+        the C runtime reports the dead pipe as ``EINVAL``); the failed
+        flush keeps the buffered bytes, so the error path's own
+        ``sys.stdout.flush()`` raises again and must not get in the way
+        of the hard exit.
+        """
+        code, _out, err = self._run(tmp_path, "broken-pipe")
+        assert code == 1
+        dead_pipe = "BrokenPipeError"
+        if sys.platform == "win32":
+            dead_pipe = "OSError: [Errno 22] Invalid argument"
+        assert dead_pipe in err, err
 
 
 class TestResponsesApiProbe:

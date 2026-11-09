@@ -39,6 +39,7 @@ from kiss.core import browser_handoff, config
 from kiss.core.base import Base
 from kiss.core.memoryfield.index import VectorIndex, hashed_embedding
 from kiss.core.memoryfield.pages import MemoryDir
+from kiss.core.models import codex_model
 from kiss.core.models import openai_compatible_model as oai
 from kiss.core.models.stream_abort import StreamAbortWatchdog
 from kiss.core.user_config import _config_lock, save_config
@@ -65,6 +66,13 @@ def _tool_effort_verdicts() -> None:
     oai._record_tool_effort_verdict(("http://audit1013", "m"), True)
     oai._record_tool_effort_verdict(("http://audit1013", "m"), False)
     assert oai._tool_effort_verdict(("http://audit1013", "m")) is False
+
+
+def _codex_default_model_answers() -> None:
+    """Cache a resolved ``codex/default`` answer, then a failure that must not replace it."""
+    key = ("/audit1013/codex", "")
+    assert codex_model._record_default_model(key, "gpt-audit1013") == "gpt-audit1013"
+    assert codex_model._record_default_model(key, None) == "gpt-audit1013"
 
 
 class _BrowserHandoffClaim:
@@ -132,6 +140,9 @@ def run_hammer(name: str) -> None:
     elif name == "verdict":
         lock = oai._ADAPTIVE_TOOL_EFFORT_LOCK
         _hammer(_tool_effort_verdicts, {"_ADAPTIVE_TOOL_EFFORT_LOCK": lock})
+    elif name == "codex_default":
+        lock = codex_model._default_model_lock
+        _hammer(_codex_default_model_answers, {"_default_model_lock": lock}, contend=lock)
     elif name == "handoff":
         _hammer(_BrowserHandoffClaim(), {"browser_handoff._lock": browser_handoff._lock})
     elif name == "config":
@@ -155,7 +166,9 @@ def test_core_lock_paths(tmp_path: Path) -> None:
     wait 10 s for a write it took to be in flight.
     """
     env = {**os.environ, "KISS_HOME": str(tmp_path)}
-    for name in ("base", "artifact_dir", "verdict", "handoff", "config", "stream", "query"):
+    for name in (
+        "base", "artifact_dir", "verdict", "codex_default", "handoff", "config", "stream", "query",
+    ):
         proc = subprocess.run(
             [sys.executable, "-c", f"import {__name__} as m; m.run_hammer({name!r})"],
             capture_output=True, text=True, timeout=120, check=False, env=env,

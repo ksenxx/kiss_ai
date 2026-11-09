@@ -42,7 +42,7 @@ import os
 import threading
 import time
 
-from kiss.agents.sorcar._concurrency import locked_call
+from kiss.core.locked import locked_call
 
 logger = logging.getLogger(__name__)
 
@@ -159,13 +159,21 @@ def exit_workspace(workspace: str) -> None:
 
 def _exit_workspace_locked(workspace: str) -> None:
     """Body of :func:`exit_workspace`; the caller holds ``_WORKSPACE_COND``."""
-    if getattr(_HELD, "workspace", "") == workspace:
-        _HELD.workspace = ""
     count = _ACTIVE_WORKSPACES.get(workspace, 0) - 1
+    held = getattr(_HELD, "workspace", "") == workspace
+    if count <= 0 and not _conflicting(workspace):  # the last active launch
+        os.environ.pop(WORKSPACE_ENV_VAR, None)
+    # The count and the thread's record change in adjacent stores with no
+    # call between them (as :func:`_enter_workspace_locked` takes them):
+    # a Stop landing before them leaves both for the task runner's final
+    # cleanup to release, one landing after them leaves it nothing to
+    # release.  Clearing the record first and decrementing after leaked
+    # the count to a Stop in between, and every later launch of another
+    # workspace waited out its whole timeout.
     if count > 0:
         _ACTIVE_WORKSPACES[workspace] = count
-    else:
-        _ACTIVE_WORKSPACES.pop(workspace, None)
-    if not _ACTIVE_WORKSPACES:
-        os.environ.pop(WORKSPACE_ENV_VAR, None)
+    elif workspace in _ACTIVE_WORKSPACES:
+        del _ACTIVE_WORKSPACES[workspace]
+    if held:
+        _HELD.workspace = ""
     _WORKSPACE_COND.notify_all()

@@ -25,39 +25,50 @@ const {
   send,
   stubRaf,
   readyTabId,
+  pickMachine,
 } = require('./simplify2_harness');
 
 const {makeRunner} = require('./ui_antipattern_harness');
-const {click, shareWithTasks, makeSharePage} = require('./share_helpers');
+const {
+  click,
+  shareWithTasks,
+  makeSharePage: makeShareWindow,
+} = require('./share_helpers');
 
-const {test, report} = makeRunner();
+const runner = makeRunner();
+const report = runner.report;
+const openWindows = [];
+
+/** Run one test through the shared runner, then close its windows. */
+async function test(name, fn) {
+  await runner.test(name, fn);
+  while (openWindows.length) openWindows.pop().close();
+}
 
 function makePage(opts) {
-  return makeChatPage({
+  const wv = makeChatPage({
     beforeScripts: stubRaf,
     // The REAL production renderers, so the deferred-highlight test
     // exercises the same hljs/marked paths the page runs.
     extraScripts:
       opts && opts.highlight ? ['highlight.min.js', 'marked.min.js'] : [],
     sourceUrl: 'share-main.js',
-    mainSource: opts && opts.mainSource,
   });
+  openWindows.push(wv.win);
+  return wv;
 }
 
-// The export size limit main.js enforces (56 MiB, the transport frame
-// limit) and the one the oversized-transcript test lowers it to, so that
-// test need not build and serialize a 57-MiB panel.
-const SHARE_LIMIT_DECL = 'const SHARE_MAX_HTML_JSON_BYTES = 56 * 1024 * 1024;';
-const SMALL_SHARE_LIMIT = 64 * 1024;
-
-/** main.js with SHARE_MAX_HTML_JSON_BYTES lowered to SMALL_SHARE_LIMIT. */
-function lowerShareLimit(src) {
-  assert.ok(src.includes(SHARE_LIMIT_DECL), 'the share limit declaration');
-  return src.replace(
-    SHARE_LIMIT_DECL,
-    `const SHARE_MAX_HTML_JSON_BYTES = ${SMALL_SHARE_LIMIT};`,
-  );
+/** Open an exported page and track it for per-test teardown. */
+function makeSharePage(bodyHtml) {
+  const win = makeShareWindow(bodyHtml);
+  openWindows.push(win);
+  return win;
 }
+
+// The export size limit main.js enforces (SHARE_MAX_HTML_JSON_BYTES: 56
+// MiB, the transport frame limit).  The oversized-transcript test drives
+// the real limit with a 57-MiB panel (about two seconds, 350 MB).
+const SHARE_LIMIT = 56 * 1024 * 1024;
 
 /**
  * Drive one small task through the page so #task-panel and #output
@@ -378,6 +389,52 @@ async function run() {
     const again = wv.posted.filter(m => m.type === 'shareChatTasks').pop();
     assert.notStrictEqual(again, req, 'Share works again');
     assert.strictEqual(again.chatId, 'new-chat-B');
+    // Audit 2026-11-08 (W7 F1): the chat is bound to remote-host, whose
+    // history holds its persisted tasks: the daemon is asked to fetch
+    // them THERE, whatever machine the user has picked for the next
+    // task; a reply that did not come from there (this daemon's own
+    // empty history) exports nothing, visibly.
+    assert.strictEqual(
+      again.machine,
+      'remote-host',
+      'BUG - the bound chat\'s history is asked of this daemon',
+    );
+    send(win, {
+      type: 'share_tasks',
+      tabId: TAB,
+      chatId: 'new-chat-B',
+      tasks: [],
+      truncated: false,
+    });
+    assert.ok(!wv.posted.some(m => m.type === 'shareChat'), 'not exported');
+    const toasts = Array.from(
+      win.document.querySelectorAll('.kiss-notification'),
+      el => el.textContent,
+    );
+    assert.ok(
+      toasts.some(t => /Share failed: .*remote-host/.test(t)),
+      'the failure is reported; got toasts: ' + JSON.stringify(toasts),
+    );
+    const select = win.document.getElementById('chat-machine');
+    const option = win.document.createElement('option');
+    option.value = option.textContent = 'other-host';
+    select.appendChild(option);
+    pickMachine(win, 'other-host');
+    click(win.document.getElementById('share-btn'));
+    const picked = wv.posted.filter(m => m.type === 'shareChatTasks').pop();
+    assert.notStrictEqual(picked, again, 'Share works again');
+    assert.strictEqual(picked.machine, 'remote-host', 'the binding, not the pick');
+    send(win, {
+      type: 'share_tasks',
+      tabId: TAB,
+      chatId: 'new-chat-B',
+      machine: 'remote-host',
+      tasks: [{task: 'older remote task', task_id: 'old-task-B', events: []}],
+      truncated: false,
+    });
+    const exported = wv.posted.filter(m => m.type === 'shareChat').pop();
+    assert.ok(exported, 'the machine\'s reply exports');
+    assert.ok(exported.html.includes('older remote task'), 'with its history');
   });
 
   await test('2026-11-04 W5 F2: a queued follow-up echo does not split the task in two', () => {
@@ -732,17 +789,40 @@ async function run() {
       win.document.querySelector('#output code.needs-hl'),
       'precondition: the replay left a deferred-highlight code block',
     );
+    // A27_claude-1: the export's highlight pass re-linkifies every
+    // code block; the paths it finds belong to a page already
+    // serialized, so none is registered or asked about (the guard
+    // stays up for that pass too).
+    const checksBefore = wv.posted.filter(m => m.type === 'checkPaths').length;
+    const spansBefore = win._testApi.pendingFileLinkCounts().spans;
     const msg = shareWithTasks(wv, [
       {
         task: 'earlier task',
         task_id: 'task-hl1',
         events: [
-          {type: 'prompt', text: 'more code\n```py\nvalue = 1\n```'},
+          {
+            type: 'prompt',
+            text: 'more code\n```py\nopen("src/kiss/core/agent.py")\n```',
+          },
           {type: 'result', text: 'done', success: true},
         ],
       },
       {task: 'replayed task', task_id: 'task-hl2', events: []},
     ]);
+    assert.strictEqual(
+      wv.posted.filter(m => m.type === 'checkPaths').length,
+      checksBefore,
+      'BUG - the export asked the daemon about paths of a serialized page',
+    );
+    assert.strictEqual(
+      win._testApi.pendingFileLinkCounts().spans,
+      spansBefore,
+      'no detached span of the export is registered',
+    );
+    assert.ok(
+      !/data-path-(wd|tab|machine)=/.test(msg.html),
+      'the export carries no file-link bookkeeping stamps',
+    );
     assert.ok(
       !msg.html.includes('needs-hl'),
       'no code block may stay unhighlighted in the export — neither ' +
@@ -841,19 +921,29 @@ async function run() {
   await test('a share_tasks error reply is shown and nothing is sent', () => {
     const wv = makePage();
     runSmallTask(wv, 'chat-dberr', 'task-dberr');
-    click(wv.win.document.getElementById('share-btn'));
-    const req = wv.posted.filter(m => m.type === 'shareChatTasks').pop();
+    // A share that succeeded earlier on this page must not be mistaken
+    // for the failed one's export.
+    const first = shareWithTasks(wv, []);
+    assert.ok(first, 'the first share exports');
     send(wv.win, {
-      type: 'share_tasks',
-      tabId: req.tabId,
-      chatId: req.chatId,
-      tasks: [],
-      truncated: false,
+      type: 'share_done',
+      ok: true,
+      path: '/tmp/first.html',
+      tabId: first.tabId,
+    });
+    const exportsBefore = wv.posted.filter(m => m.type === 'shareChat').length;
+    const failed = shareWithTasks(wv, [], {
       error: 'Failed to load the chat history: disk exploded',
     });
-    assert.ok(
-      !wv.posted.some(m => m.type === 'shareChat'),
+    assert.strictEqual(
+      failed,
+      undefined,
       'a failed task listing must not produce a partial export',
+    );
+    assert.strictEqual(
+      wv.posted.filter(m => m.type === 'shareChat').length,
+      exportsBefore,
+      'no new export was sent',
     );
     const banners = wv.win.document.querySelectorAll('#output .ev.err');
     const texts = Array.from(banners, b => b.textContent);
@@ -1016,6 +1106,18 @@ async function run() {
     );
     assert.ok(subTab, 'the sub-agent gets its own tab');
     click(subTab);
+    // Audit 2026-11-08 (W7 F2): the daemon's replay of the sub-agent's
+    // transcript names the chat it belongs to (chat_id), which is the
+    // PARENT chat's persistent id, not the sub-agent tab's -- the
+    // export still goes under the tab's own name.
+    send(win, {
+      type: 'task_events',
+      tabId: 'tab-sub',
+      task: 'help out',
+      task_id: 'sub-1',
+      chat_id: 'chat-parent',
+      events: [],
+    });
     send(win, {
       type: 'tool_call',
       name: 'Bash',
@@ -1078,7 +1180,7 @@ async function run() {
   });
 
   await test('an oversized transcript is refused with a visible error', () => {
-    const wv = makePage({mainSource: lowerShareLimit});
+    const wv = makePage();
     const win = wv.win;
     const TAB = runSmallTask(wv, 'chat-huge', 'task-huge');
     // Bigger than SHARE_MAX_HTML_JSON_BYTES on its own: the panel is
@@ -1086,7 +1188,7 @@ async function run() {
     // collapsed panel repeats it in the collapse preview).
     send(win, {
       type: 'tool_result',
-      content: 'x'.repeat(SMALL_SHARE_LIMIT + 1024),
+      content: 'x'.repeat(SHARE_LIMIT + 1024 * 1024),
       tool_name: 'Bash',
       tabId: TAB,
       taskId: 'task-huge',
@@ -1110,9 +1212,6 @@ async function run() {
   });
 
   report('shareChat');
-  // The pages leave live timers behind (the running-task clock,
-  // the button flash), so exit explicitly instead of draining them.
-  process.exit(0);
 }
 
 run().catch(err => {

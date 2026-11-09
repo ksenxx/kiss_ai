@@ -61,10 +61,6 @@ def server() -> Iterator[RecordingServer]:
         yield srv
 
 
-def _paths(server: RecordingServer, method: str | None = None) -> list[str]:
-    return [r["path"] for r in server.requests if method is None or r["method"] == method]
-
-
 class TestTwitchBackendBugs:
     """Twitch Helix endpoint corruption, missing sender_id, silent HTTP errors."""
 
@@ -89,7 +85,7 @@ class TestTwitchBackendBugs:
     def test_search_hits_search_channels_endpoint(self) -> None:
         """Channel search must call GET /search/channels."""
         result = json.loads(self.backend.search_channels("streamer"))
-        paths = _paths(self.server, "GET")
+        paths = self.server.paths("GET")
         assert "/search/channels" in paths, f"expected GET /search/channels, saw {paths}"
         assert not any("third_party_agents" in p for p in paths), paths
         assert result["ok"] is True

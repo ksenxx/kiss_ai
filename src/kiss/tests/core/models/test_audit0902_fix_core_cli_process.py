@@ -41,6 +41,7 @@ from pathlib import Path
 import pytest
 
 from kiss.core import stop_signal
+from kiss.core.kiss_error import KISSError
 from kiss.core.models import claude_code_model as cc_module
 from kiss.core.models.claude_code_model import ClaudeCodeModel, _find_claude_cli
 from kiss.core.models.model import _CLIProcess
@@ -486,3 +487,53 @@ class TestNonBlockingWriterDeliversThePrompt:
                 assert "attached to its pipe" not in caplog.text
         finally:
             _kill(pid_file)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a Popen handle keeps a Windows pid reserved")
+@pytest.mark.parametrize(
+    ("ending", "status"),
+    [
+        ("sys.exit(0)", 0),
+        ("os.kill(os.getpid(), signal.SIGTERM)", -signal.SIGTERM),
+    ],
+    ids=["clean-exit", "killed-by-signal"],
+)
+def test_child_is_reaped_only_after_close_signalled_its_group(
+    tmp_path: Path, ending: str, status: int
+) -> None:
+    """The exit status is read without reaping; ``close()``'s group kill comes first.
+
+    ``close()`` signals the child's process group (SIGTERM, then SIGKILL
+    for grandchildren that ignored it) by the child's pid, which the
+    kernel keeps reserved as the group id only while the child is a
+    zombie or a member lives: a child reaped by ``wait_for_exit`` (or by
+    the prompt writer's poll) leaves a group id that any later session
+    leader may inherit, and the SIGKILL would hit that stranger's group.
+    So the status is observed with ``waitid(WNOWAIT)`` and the one reap
+    happens in ``close()`` after the last signal.
+    """
+    script = tmp_path / "child.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            import os, signal, sys
+            print('{{"type": "result", "result": "DONE"}}', flush=True)
+            {ending}
+            """
+        )
+    )
+    with _CLIProcess([sys.executable, str(script)], "probe", _TURN_TIMEOUT) as proc:
+        proc.send_prompt("hi")
+        assert any('"DONE"' in line for line in proc.lines())
+        assert proc.wait_for_exit() == status
+        pid = proc._proc.pid
+        zombie = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        assert zombie is not None and zombie.si_pid == pid, "the child was reaped before close()"
+        if status == 0:
+            proc.raise_for_exit()
+        else:
+            with pytest.raises(KISSError, match=f"exit {status}"):
+                proc.raise_for_exit()
+    assert proc._proc.returncode == status
+    with pytest.raises(ChildProcessError):  # reaped: no child of that pid is left
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)

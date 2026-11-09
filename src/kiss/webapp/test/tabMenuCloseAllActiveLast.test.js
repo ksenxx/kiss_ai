@@ -14,7 +14,7 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
-const {tabEl} = require('./subagent_tab_helpers');
+const {tabEl, deferChatTranscripts} = require('./subagent_tab_helpers');
 
 const {test, report} = h.makeRunner();
 
@@ -40,15 +40,7 @@ function pageWithDeferredTabs() {
       {tabId: 'tab-c', chatId: 'c-c', title: 'C', workDir: ''},
     ],
   });
-  for (const id of ['tab-b', 'tab-c']) {
-    h.send(win, {type: 'status', running: false, tabId: id});
-    h.send(win, {
-      type: 'replay_deferred',
-      tabId: id,
-      chatId: id === 'tab-b' ? 'c-b' : 'c-c',
-      taskId: '',
-    });
-  }
+  deferChatTranscripts(win);
   h.send(win, {
     type: 'openSubagentTab',
     tab_id: 'sub-a',
@@ -181,8 +173,16 @@ async function main() {
     h.send(win, {type: 'status', running: true, tabId: 'sub-a'});
     pickMenuItem(win, 'sub-a', 'Close Others');
     const ids = win._testApi.openTabs().map(t => t.id);
-    assert.strictEqual(ids.join(','), tabA + ',sub-a', 'only tab-b and tab-c close');
-    assert.strictEqual(win._testApi.getActiveTabId(), 'sub-a', 'still on screen');
+    assert.strictEqual(
+      ids.join(','),
+      tabA + ',sub-a',
+      'only tab-b and tab-c close',
+    );
+    assert.strictEqual(
+      win._testApi.getActiveTabId(),
+      'sub-a',
+      'still on screen',
+    );
     win.close();
   });
 
@@ -191,7 +191,11 @@ async function main() {
     win._testApi.switchToTab('tab-b');
     pickMenuItem(win, 'tab-b', 'Close Others');
     const ids = win._testApi.openTabs().map(t => t.id);
-    assert.strictEqual(ids.join(','), 'tab-b', `${tabA}, sub-a and tab-c close`);
+    assert.strictEqual(
+      ids.join(','),
+      'tab-b',
+      `${tabA}, sub-a and tab-c close`,
+    );
     assert.strictEqual(win._testApi.getActiveTabId(), 'tab-b');
     win.close();
   });

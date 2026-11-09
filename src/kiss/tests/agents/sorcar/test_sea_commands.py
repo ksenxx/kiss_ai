@@ -874,6 +874,81 @@ def test_circular_sea_imports_across_threads_fail_instead_of_deadlocking(
     assert all("failed to import" in message for message in errors.values()), errors
 
 
+def test_a_sea_load_and_an_ordinary_import_closing_one_cycle_fail_instead_of_deadlocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cycle split between Python's import lock and a SEA's execution slot is refused.
+
+    Thread B imports the plain module ``helper`` (Python's lock of that
+    module held), whose body derives a class from SEA ``a`` through
+    ``sea_class``; thread A loads ``a`` (its execution slot held), whose
+    body imports ``helper``.  A waits for B's import lock, B for A's
+    execution slot: a cycle that neither Python's deadlock detection nor
+    a cycle check following only the execution-slot waits can see.  The
+    thread closing the cycle (B, which re-checks every second) is refused
+    with the circular-import error, so both threads finish.
+    """
+    helper = f"helper_{os.getpid()}_{tmp_path.name}".replace("-", "_")
+    sea_a = tmp_path / "a_sea.py"
+    started_a, started_b = tmp_path / "a_started", tmp_path / "b_started"
+    (tmp_path / f"{helper}.py").write_text(
+        "import os\n"
+        "import time\n"
+        "from pathlib import Path\n\n"
+        f"Path({str(started_b)!r}).touch()\n"
+        "for _ in range(1000):  # until thread A owns a_sea.py's execution slot\n"
+        f"    if os.path.exists({str(started_a)!r}):\n"
+        "        break\n"
+        "    time.sleep(0.01)\n"
+        "from kiss.agents.sorcar.sea_commands import sea_class\n\n\n"
+        f"class Helper(sea_class({str(sea_a)!r})):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    sea_a.write_text(
+        "from pathlib import Path\n\n"
+        f"Path({str(started_a)!r}).touch()\n"
+        f"from {helper} import Helper\n\n\n"
+        "class Sea(Helper):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, helper, raising=False)
+    errors: dict[str, str] = {}
+
+    def _import_helper() -> None:
+        try:
+            __import__(helper)
+        except sea_commands.SeaError as exc:
+            errors["b"] = str(exc)
+        else:
+            errors["b"] = "no error"
+
+    def _load_a() -> None:
+        try:
+            sea_commands.load_sea(sea_a)
+        except sea_commands.SeaError as exc:
+            errors["a"] = str(exc)
+        else:
+            errors["a"] = "no error"
+
+    thread_b = threading.Thread(target=_import_helper, name="ordinary-import", daemon=True)
+    thread_a = threading.Thread(target=_load_a, name="sea-load", daemon=True)
+    thread_b.start()
+    deadline = time.monotonic() + 10
+    while not started_b.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert started_b.exists(), "the ordinary import never started"
+    thread_a.start()
+    thread_a.join(timeout=30)
+    thread_b.join(timeout=30)
+    assert not thread_a.is_alive() and not thread_b.is_alive(), "the mixed cycle deadlocked"
+    assert errors.keys() == {"a", "b"}, errors
+    assert "circular SEA imports" in errors["b"], errors
+    assert "failed to import" in errors["a"], errors
+
+
 _DESCRIBED_SEA = '''\
 """SEA with the mandatory description() getter."""
 

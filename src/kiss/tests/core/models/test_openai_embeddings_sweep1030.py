@@ -19,6 +19,17 @@
   The endpoint is a real listening socket whose accept queue is full, so
   the kernel drops further SYNs; the interrupt is the runner's own
   mechanism (``tool_interrupt.inject_async_exception``).
+* **One request's abort is its own.**  The abort watchdog shuts down
+  every socket of the pool it watches, and that pool
+  (``AbortableNetworkBackend``) then shuts down every later connection
+  the moment it is up.  With one client shared by every embeddings call
+  of a model instance, a timed-out or stopped request cut the
+  concurrent requests of the same instance and left the retained
+  instance (the memory tools keep theirs) unable to embed anything ever
+  again.  Each call now sends through a client of its own.
+* **``timeout: None``.**  A valid SDK override (no SDK timeout; the
+  watchdog still bounds the request) that used to be dereferenced for
+  its ``read`` attribute before the request was sent.
 """
 
 from __future__ import annotations
@@ -27,11 +38,14 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 import pytest
 
+from kiss.core import stop_signal
+from kiss.core.kiss_error import KISSError
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.core.models.stream_abort import CONNECT_TIMEOUT
 from kiss.core.tool_interrupt import inject_async_exception
@@ -76,14 +90,148 @@ def test_openrouter_embeddings_send_the_providers_own_id() -> None:
     ]
 
 
-def test_a_configured_timeout_object_is_sent_as_is() -> None:
-    """Only a plain number gets the connect cap; an ``httpx.Timeout`` is the caller's own."""
+def _embeddings_with_indices(indices: list[int]) -> Callable[[Request], Reply]:
+    """A responder whose rows carry *indices*, each row's vector ``[row position]``."""
+
+    def respond(request: Request) -> Reply:
+        return Reply(
+            json_body={
+                "object": "list",
+                "model": request.body["model"],
+                "data": [
+                    {"object": "embedding", "index": index, "embedding": [float(row)]}
+                    for row, index in enumerate(indices)
+                ],
+                "usage": {"prompt_tokens": 2, "total_tokens": 2},
+            }
+        )
+
+    return respond
+
+
+@pytest.mark.parametrize("indices", [[0, 0], [0, 2], [1, 1]])
+def test_embeddings_whose_indices_are_not_the_inputs_are_rejected(indices: list[int]) -> None:
+    """Rows with a duplicate, missing or out-of-range index are a malformed
+    reply, not vectors to hand out positionally for the wrong inputs."""
+    with ScriptedOpenAIServer(_embeddings_with_indices(indices)) as server:
+        model = OpenAICompatibleModel(
+            "text-embedding-3-small", base_url=server.base_url, api_key="sk-test"
+        )
+        with pytest.raises(KISSError, match="Embedding generation failed.*indices"):
+            model.get_embeddings(["a", "b"])
+    with ScriptedOpenAIServer(_embeddings_with_indices([1, 0])) as server:
+        model = OpenAICompatibleModel(
+            "text-embedding-3-small", base_url=server.base_url, api_key="sk-test"
+        )
+        assert model.get_embeddings(["a", "b"]) == [[1.0], [0.0]], "rows reordered by index"
+
+
+def test_a_trickling_embeddings_body_is_cut_at_the_timeout() -> None:
+    """The timeout bounds the whole request, not only the silence between two reads.
+
+    A peer that keeps sending a byte before each read timeout would
+    otherwise hold the thread (a memory search worker, joined at process
+    exit) for as long as it trickles.  The cut request is the only
+    casualty: the next request of the same model instance reaches the
+    endpoint and succeeds (the memory tools keep their instance for the
+    whole daemon).
+    """
+    hold = threading.Event()
+
+    def respond(request: Request) -> Reply:
+        if request.body["input"] == "x":
+            return Reply(sse_chunks=[b"{"], hold=hold)
+        return _embeddings_reply(request)
+
+    with ScriptedOpenAIServer(respond) as server:
+        model = OpenAICompatibleModel(
+            "text-embedding-3-small",
+            base_url=server.base_url,
+            api_key="sk-test",
+            model_config={"timeout": 0.5},
+        )
+        outcome: dict[str, Any] = {}
+        thread = threading.Thread(target=_embed_into, args=(model, outcome), daemon=True)
+        started = time.monotonic()
+        thread.start()
+        thread.join(5.0)
+        try:
+            assert not thread.is_alive(), "the trickling reply held the request past its timeout"
+            assert time.monotonic() - started >= 0.5
+            assert isinstance(outcome.get("error"), KISSError), outcome
+        finally:
+            hold.set()
+        assert model.get_embedding("after the timeout") == [0.5, 0.0]
+        assert [request.body["input"] for request in server.requests] == ["x", "after the timeout"]
+
+
+def test_a_stopped_request_leaves_its_concurrent_peer_and_the_next_request_alone() -> None:
+    """A Stop cuts the stopped request only.
+
+    Memory search embeds the query while the index sync embeds the
+    changed pages, through the same model instance: A (stopped, its
+    reply trickling) and B (unstopped, its reply pending) are in flight
+    together, A's Stop lands, B still completes, and so does a later
+    request of the same instance.
+    """
+    release_a, release_b = threading.Event(), threading.Event()
+    arrived_a, arrived_b = threading.Event(), threading.Event()
+
+    def respond(request: Request) -> Reply:
+        if request.body["input"] == "A":
+            arrived_a.set()
+            return Reply(json_body=_embeddings_reply(request).json_body, trickle=release_a)
+        if request.body["input"] == "B":
+            arrived_b.set()
+            return Reply(json_body=_embeddings_reply(request).json_body, headers_gate=release_b)
+        return _embeddings_reply(request)
+
+    with ScriptedOpenAIServer(respond) as server:
+        model = OpenAICompatibleModel(
+            "text-embedding-3-small",
+            base_url=server.base_url,
+            api_key="sk-test",
+            model_config={"timeout": 20.0},
+        )
+        stop_a, stop_b = threading.Event(), threading.Event()
+        outcome_a: dict[str, Any] = {}
+        outcome_b: dict[str, Any] = {}
+        thread_a = threading.Thread(
+            target=_embed_into, args=(model, outcome_a, "A", stop_a), daemon=True
+        )
+        thread_b = threading.Thread(
+            target=_embed_into, args=(model, outcome_b, "B", stop_b), daemon=True
+        )
+        try:
+            thread_a.start()
+            assert arrived_a.wait(5.0), "A never reached the endpoint"
+            thread_b.start()
+            assert arrived_b.wait(5.0), "B never reached the endpoint"
+            stop_a.set()
+            thread_a.join(5.0)
+            assert not thread_a.is_alive(), "the Stop did not cut A"
+            assert isinstance(outcome_a.get("error"), KeyboardInterrupt), outcome_a
+            release_b.set()
+            thread_b.join(5.0)
+            assert not thread_b.is_alive(), "A's Stop held B"
+            assert not stop_b.is_set()
+            assert outcome_b == {"vector": [0.5, 0.0]}, "A's Stop cut B's request"
+        finally:
+            release_a.set()
+            release_b.set()
+        assert model.get_embedding("C") == [0.5, 0.0]
+        assert sorted(request.body["input"] for request in server.requests) == ["A", "B", "C"]
+
+
+@pytest.mark.parametrize("timeout", [httpx.Timeout(5.0, connect=2.0), None])
+def test_a_configured_timeout_object_is_sent_as_is(timeout: httpx.Timeout | None) -> None:
+    """Only a plain number gets the connect cap; an ``httpx.Timeout`` or ``None`` goes as is."""
     with ScriptedOpenAIServer(_embeddings_reply) as server:
         model = OpenAICompatibleModel(
             "text-embedding-3-small",
             base_url=server.base_url,
             api_key="sk-test",
-            model_config={"timeout": httpx.Timeout(5.0, connect=2.0)},
+            model_config={"timeout": timeout},
         )
         assert model.get_embedding("x") == [0.5, 0.0]
 
@@ -126,12 +274,28 @@ def _syn_dropping_listener() -> tuple[socket.socket, list[socket.socket]]:
     raise AssertionError("the listener's accept queue never filled up")
 
 
-def _embed_into(model: OpenAICompatibleModel, outcome: dict[str, Any]) -> None:
-    """Thread body: embed one text and store the vector or the error in *outcome*."""
+def _embed_into(
+    model: OpenAICompatibleModel,
+    outcome: dict[str, Any],
+    text: str = "x",
+    stop: threading.Event | None = None,
+) -> None:
+    """Thread body: embed *text* and store the vector or the error in *outcome*.
+
+    Args:
+        model: The model under test.
+        outcome: Receives ``"vector"`` or ``"error"``.
+        text: The text to embed.
+        stop: When given, bound as this thread's stop event, as the
+            runner binds a task thread's.
+    """
+    stop_signal.set_thread_stop_event(stop)
     try:
-        outcome["vector"] = model.get_embedding("x")
+        outcome["vector"] = model.get_embedding(text)
     except BaseException as error:  # noqa: BLE001 - the error is the result
         outcome["error"] = error
+    finally:
+        stop_signal.set_thread_stop_event(None)
 
 
 def _wait_until_connecting(thread: threading.Thread) -> None:

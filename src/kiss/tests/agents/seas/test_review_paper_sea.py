@@ -151,6 +151,16 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert "`read_paper`" in prompt and "`check_review`" in prompt
     assert "Judge the novelty" in prompt and "at least 20 distinct sources" in prompt
     assert "Em dashes: zero" in prompt
+    # The ICLR 2027 alignment: the one-sentence statement and the causal evidence come
+    # first and cap the rating; the appendix and artifact are checked; the venue's
+    # 2027 form and the observed ratings calibrate the scores.
+    assert "1. State the paper in one sentence" in prompt
+    assert "2. Check the causal evidence for the central claim" in prompt
+    assert "caps the rating at reject" in prompt and "## Calibration (ICLR 2027)" in prompt
+    assert "Rating 1 Clear rejection, 2 Weak rejection, 3 Weak acceptance" in prompt
+    assert "5. Read the appendix and the artifact" in prompt
+    assert "Caps: no controlled comparison for the" in prompt
+    assert "numbered questions" in prompt
     # The paperreview.ai process: a sanity check, API-backed related-work queries from
     # three perspectives, and the seven dimension scores under a Scores heading.
     assert "1. Sanity check: `read_paper` page 1." in prompt
@@ -264,6 +274,12 @@ def test_check_review_flags_the_sloppy_review(tmp_path: Path) -> None:
     assert "    Clarity of the writing\n" not in report
     assert gate(report, "years named").startswith("years named: 0 ")
     assert "CHECK; name the closest prior work with its year" in report
+    # "more baselines" is boilerplate under its own gate, but it and "no spread" are
+    # evidence words.
+    assert gate(report, "evidence words") == (
+        "evidence words: 2 (a rough proxy for the causal-evidence check) PASS; baselines, "
+        "spread"
+    )
     assert gate(report, "em dashes").startswith("em dashes: 1 (limit 0) FAIL")
     assert "    L2: ..." in report
     assert gate(report, "antithesis").startswith("antithesis: 1 (limit 5) PASS")
@@ -298,6 +314,10 @@ def test_check_review_passes_a_clean_review_and_reports_structure_faults(tmp_pat
     assert gate(report, "years named") == (
         "years named: 2 (a rough proxy for named prior work) PASS; 2024, 2025"
     )
+    assert gate(report, "evidence words") == (
+        "evidence words: 3 (a rough proxy for the causal-evidence check) PASS; agreement, "
+        "confidence intervals, spread"
+    )
     words = len(_CLEAN_REVIEW.split())
     assert gate(report, "words") == f"words: {words} (under 700) PASS"
     report = review_paper_sea.check_review(str(path), word_limit=words)
@@ -313,6 +333,12 @@ def test_check_review_passes_a_clean_review_and_reports_structure_faults(tmp_pat
     report = review_paper_sea.check_review(str(path))
     assert gate(report, "headings missing") == "headings missing: 2 (limit 0) FAIL"
     assert "    Summary\n    Scores\n" in report
+    # A review that never says whether the claim has a baseline, an ablation or spread
+    # is told to, as a CHECK (the proxy cannot know the paper).
+    assert gate(report, "evidence words") == (
+        "evidence words: 0 (a rough proxy for the causal-evidence check) CHECK; say whether "
+        "the central claim has a controlled comparison, an ablation and spread"
+    )
     assert "headings out of order: Strengths L4, Weaknesses L1, Detailed review L7 FAIL" in report
     assert "summary sentences" not in report and "dimensions unscored" not in report
     assert gate(report, "strengths bullets") == "strengths bullets: 1 (at least 1) PASS"

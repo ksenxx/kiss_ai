@@ -167,14 +167,19 @@ def test_run_child_is_bounded(tmp_path: Path) -> None:
     same deadline instead of blocking the parent until the line completes.
     """
     partial = "import sys, time; sys.stdout.write('sta'); sys.stdout.flush(); time.sleep(1000)"
+    # The scripts import nothing from the shim, so an empty directory
+    # does; it keeps the child's stderr file (``shim.parent``) in
+    # *tmp_path* rather than in pytest's shared base temp directory.
+    shim = tmp_path / "shim"
+    shim.mkdir()
     with recording_server(_AuthHandler, _AuthServer) as server:
         with pytest.raises(AssertionError, match="did not print 'started' within 1 s"):
-            _run_child(tmp_path, server, script="import time; time.sleep(1000)", start_timeout=1)
+            _run_child(shim, server, script="import time; time.sleep(1000)", start_timeout=1)
         with pytest.raises(AssertionError, match="boom"):
-            _run_child(tmp_path, server, script="import sys; sys.exit('boom')")
+            _run_child(shim, server, script="import sys; sys.exit('boom')")
         t0 = time.monotonic()
         with pytest.raises(AssertionError, match="did not print 'started' within 0.5 s"):
-            _run_child(tmp_path, server, script=partial, start_timeout=0.5)
+            _run_child(shim, server, script=partial, start_timeout=0.5)
         assert time.monotonic() - t0 < 5, "a partial line stalled the parent past the deadline"
 
 

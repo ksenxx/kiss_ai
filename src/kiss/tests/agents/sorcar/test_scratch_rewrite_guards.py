@@ -75,6 +75,9 @@ def _created(tmp_path: Path, command: str) -> set[str]:
     # substitution of an array value ends with the substitution
     ("T=tmp/x; T=other cat /dev/null; mkdir -p $T; cat > $T/f " + _BODY, "tmp/x/f"),
     ("T=tmp/x; Y=($(T=other; echo $T)); mkdir -p $T; cat > $T/f " + _BODY, "tmp/x/f"),
+    # an assigning expansion of another variable, and a quoted value under a set IFS
+    ("T=tmp/x; : ${U:=y}; mkdir -p $T; cat > $T/f " + _BODY, "tmp/x/f"),
+    ('IFS=/; T=tmp/x; mkdir -p "$T"; cat > "$T"/f ' + _BODY, "tmp/x/f"),
 ])
 def test_assigned_variables_resolve_to_the_file_bash_writes(
     tmp_path: Path, command: str, expected: str,
@@ -139,6 +142,19 @@ def target_cwd(command: str) -> str | None:
     # unquoted, a value with a blank or a pattern is several words to bash
     'T="tmp/x notes.md"; cat > $T/f ' + _BODY,
     "T=tmp/*; cat > $T/f " + _BODY,
+    # audit 2026-11-07 A13_astra-4 / A13_fable-1: an expansion that assigns (``${T=x}``,
+    # ``${T:=x}``, nested too) gives the variable a value only the shell knows
+    "T=tmp/x; : ${T=notes.md}; cat > $T/f " + _BODY,
+    'T=; : "${T:=notes.md}"; cat > "$T"/f ' + _BODY,
+    "T=tmp/x; echo ${X:-${T:=notes.md}}; cat > $T/f " + _BODY,
+    "T=tmp/x; : $(( ${T:=1} + 1 )); cat > $T/f " + _BODY,
+    # A13_astra-5: a name reference stays one: a later assignment to either name may be
+    # the other's
+    "declare -n R=T; T=tmp/x; R=notes.md; cat > $T/f " + _BODY,
+    "declare -n R=T; T=tmp/x; R=notes.md; echo `cat > $T/f " + _BODY + "`",
+    # A13_astra-8: unquoted, a value is split on IFS once the command sets it
+    "IFS=/; T=tmp/x; cat > $T/f " + _BODY,
+    "T=tmp/x; IFS=$'/'; cat > $T/f " + _BODY,
 ])
 def test_values_only_the_shell_knows_stay_unresolved(command: str) -> None:
     assert heredoc_guard(command, "/w", lambda path: True) == (

@@ -21,9 +21,19 @@ fakes.
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from typing import Any
+
+import pytest
 from google.genai import types
 
+from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.kiss_agent import KISSAgent
+from kiss.core.kiss_error import OutputCapError
 from kiss.core.models.gemini_model import GeminiModel
+from kiss.core.models.model_info import MODEL_INFO
+from kiss.scripts import update_models
+from kiss.tests.core.models.gemini_sse_harness import GeminiScript, chunk, serve, text_part
 
 
 class TestGeminiStreamPartsThinkingCallback:
@@ -145,3 +155,125 @@ class TestGeminiStreamPartsThinkingCallback:
         assert thinking_events == [], (
             f"thinking_callback fired unexpectedly: {thinking_events}"
         )
+
+
+@pytest.fixture
+def gemini_endpoint(monkeypatch: pytest.MonkeyPatch) -> Generator[GeminiScript]:
+    """A real local Gemini endpoint that streams one thought and one answer."""
+    for base_url, script in serve():
+        monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", base_url)
+        script.play(
+            [
+                chunk([text_part("Weighing the options.", thought=True)]),
+                chunk([text_part("Hello.")], finish_reason="STOP"),
+            ]
+        )
+        yield script
+
+
+def _sent_thinking_config(
+    script: GeminiScript, model_name: str, model_config: dict[str, Any] | None = None
+) -> tuple[dict[str, Any], list[str], list[bool]]:
+    """Run one streamed turn of *model_name*; return the wire thinkingConfig, tokens, events."""
+    tokens: list[str] = []
+    events: list[bool] = []
+    m = GeminiModel(
+        model_name,
+        api_key="test-key",
+        model_config=model_config,
+        token_callback=tokens.append,
+        thinking_callback=events.append,
+    )
+    m.initialize("Say hello.")
+    m.generate()
+    return script.requests[-1]["generationConfig"]["thinkingConfig"], tokens, events
+
+
+class TestGeminiThinkingLevel:
+    """The thinking level reaches the request with thought summaries kept on."""
+
+    def test_high_alias_sends_base_model_at_high_with_thoughts(
+        self, gemini_endpoint: GeminiScript
+    ) -> None:
+        sent, tokens, events = _sent_thinking_config(gemini_endpoint, "gemini-4-argon-high")
+        assert sent == {"include_thoughts": True, "thinking_level": "HIGH"}
+        assert "/models/gemini-4-argon:streamGenerateContent" in gemini_endpoint.paths[-1]
+        assert tokens == ["Weighing the options.", "Hello."]
+        assert events == [True, False]
+
+    def test_model_without_catalog_level_only_asks_for_thoughts(
+        self, gemini_endpoint: GeminiScript
+    ) -> None:
+        sent, _, _ = _sent_thinking_config(gemini_endpoint, "gemini-2.5-flash")
+        assert sent == {"include_thoughts": True}
+
+    def test_configured_level_keeps_thoughts_on(self, gemini_endpoint: GeminiScript) -> None:
+        sent, _, _ = _sent_thinking_config(
+            gemini_endpoint, "gemini-4-argon", {"thinking_config": {"thinking_level": "medium"}}
+        )
+        assert sent == {"include_thoughts": True, "thinking_level": "MEDIUM"}
+        sent, _, _ = _sent_thinking_config(
+            gemini_endpoint,
+            "gemini-4-argon",
+            {"thinking_config": types.ThinkingConfig(include_thoughts=False)},
+        )
+        assert sent == {"include_thoughts": False, "thinking_level": "HIGH"}
+
+    def test_reasoning_effort_overrides_level_and_budget(
+        self, gemini_endpoint: GeminiScript
+    ) -> None:
+        sent, _, _ = _sent_thinking_config(
+            gemini_endpoint,
+            "gemini-4-argon-high",
+            {"reasoning_effort": "low", "thinking_config": {"thinking_budget": 512}},
+        )
+        assert sent == {"include_thoughts": True, "thinking_level": "LOW"}
+        for effort in ("xhigh", "max"):
+            sent, _, _ = _sent_thinking_config(
+                gemini_endpoint, "gemini-4-argon", {"reasoning_effort": effort}
+            )
+            assert sent == {"include_thoughts": True, "thinking_level": "HIGH"}
+
+    @pytest.mark.parametrize(
+        ("thinking_config", "retries"),
+        [
+            ({"thinking_level": "low"}, False),
+            (types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW), False),
+            ({"thinking_budget": 512}, True),
+            (None, True),
+        ],
+    )
+    def test_low_effort_retry_only_when_it_lowers_the_level(
+        self, thinking_config: Any, retries: bool
+    ) -> None:
+        agent = KISSAgent("gemini-retry-under-test")
+        agent.printer = None
+        agent._low_effort_retried = False
+        agent.model = GeminiModel(
+            "gemini-4-argon", api_key="test-key", model_config={"thinking_config": thinking_config}
+        )
+        assert agent._retry_at_low_effort(OutputCapError("cut", "MAX_TOKENS")) is retries
+
+    def test_configured_budget_is_not_mixed_with_catalog_level(
+        self, gemini_endpoint: GeminiScript
+    ) -> None:
+        sent, _, _ = _sent_thinking_config(
+            gemini_endpoint, "gemini-4-argon-high", {"thinking_config": {"thinking_budget": 512}}
+        )
+        assert sent == {"include_thoughts": True, "thinking_budget": 512}
+
+    def test_catalog_ships_gemini_level_aliases(self) -> None:
+        for level in ("low", "medium", "high"):
+            info = MODEL_INFO[f"gemini-4-argon-{level}"]
+            assert (info.alias_of, info.thinking) == ("gemini-4-argon", level)
+        assert MODEL_INFO["gemini-4-argon"].thinking == "high"
+        assert MODEL_INFO["gemini-2.5-flash"].thinking is None
+
+    def test_update_models_probes_gemini_on_its_own_ladder(
+        self, gemini_endpoint: GeminiScript, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(DEFAULT_CONFIG, "GEMINI_API_KEY", "test-key")
+        assert update_models._thinking_scale_for("gemini-4-argon") == ("low", "medium", "high")
+        assert update_models.detect_thinking_level("gemini-4-argon") == "high"
+        sent = gemini_endpoint.requests[-1]["generationConfig"]["thinkingConfig"]
+        assert sent == {"include_thoughts": True, "thinking_level": "HIGH"}

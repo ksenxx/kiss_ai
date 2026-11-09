@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -34,7 +35,7 @@ from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     recording_server,
 )
-from kiss.tests.conftest import IS_WINDOWS
+from kiss.tests.conftest import IS_WINDOWS, posix_only
 
 
 class _ChatHandler(RecordingHandler):
@@ -212,14 +213,26 @@ def test_malformed_stored_key_is_not_authenticated() -> None:
     # Valid JSON that is not a service-account key fails the same way.
     path.write_text(json.dumps({"type": "service_account", "client_email": "x"}))
     assert GoogleChatAgent()._is_authenticated() is False
-    # ... and so does a key file that cannot be read at all.
-    path.write_text(json.dumps({"type": "service_account"}))
-    if not IS_WINDOWS:
-        path.chmod(0)
-        try:
-            assert GoogleChatAgent()._is_authenticated() is False
-        finally:
-            path.chmod(0o600)
+
+
+@posix_only("file modes")
+def test_unreadable_stored_key_is_not_authenticated() -> None:
+    """A usable key file the process cannot read leaves the agent unauthenticated.
+
+    The key is a valid one, so only the failed read can make the check
+    false (a malformed key would be refused for its content alone).
+    """
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root ignores file modes, so an unreadable key cannot be simulated")
+    path = _service_account_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_service_account_key(path)
+    assert GoogleChatAgent()._is_authenticated() is True
+    path.chmod(0)
+    try:
+        assert GoogleChatAgent()._is_authenticated() is False
+    finally:
+        path.chmod(0o600)
 
 
 def test_service_account_tool_rejects_missing_or_bad_keys(tmp_path: Path) -> None:

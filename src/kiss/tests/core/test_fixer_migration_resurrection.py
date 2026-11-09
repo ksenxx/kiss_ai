@@ -19,7 +19,7 @@ canonical store, resurrecting the key the user just deleted.
 Reproduction (all real, no mocks): two subprocesses share an isolated
 ``HOME``/``KISS_HOME``.  The ``.bashrc`` assembles the key indirectly
 (``export GEMINI_API_KEY="${V}-value"``) so the textual scan must skip
-it (``_shell_would_expand``) and the migration falls into the
+it (``_shell_words``) and the migration falls into the
 RC-*sourcing* path, whose duration is the real race window; a ``sleep``
 inside the RC widens it deterministically.  The RC also touches a
 sentinel file before sleeping, proving process A has committed to its

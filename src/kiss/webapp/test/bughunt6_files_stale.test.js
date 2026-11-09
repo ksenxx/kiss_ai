@@ -3,6 +3,7 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
+/* global require, console, process */
 'use strict';
 
 const assert = require('assert');
@@ -79,11 +80,99 @@ function testPrefixlessFilesEventStillRendersWithAtContext() {
   );
 }
 
+// A16-3: the daemon's global workspace moved (a pick on another surface)
+// while this surface's ``@`` query was still building the old
+// workspace's index.  The reply echoes the workDir it was asked for: one
+// for a directory the tab no longer browses is dropped, and adopting the
+// new workspace asks again for it, so the picker never lists the old
+// workspace's files under the new one.
+function testFilesReplyForTheOldWorkspaceIsDroppedAndTheQueryReissued() {
+  const {win, posted} = makePage({beforeScripts: stubRaf});
+  send(win, {type: 'workDirChanged', workDir: '/old-project'});
+  const inp = setInput(win, '@ut');
+  inp.dispatchEvent(new win.Event('input', {bubbles: true}));
+  const asked = posted.filter(m => m.type === 'getFiles');
+  assert.strictEqual(asked.length, 1, 'the mention asks for the files');
+  assert.strictEqual(asked[0].workDir, '/old-project');
+
+  send(win, {type: 'workDirChanged', workDir: '/new-project'});
+  const reasked = posted.filter(m => m.type === 'getFiles');
+  assert.strictEqual(
+    reasked.length,
+    2,
+    'BUG - adopting the new workspace did not ask again for the mention',
+  );
+  assert.strictEqual(reasked[1].workDir, '/new-project');
+  assert.strictEqual(reasked[1].prefix, 'ut');
+
+  // The old workspace's reply, emitted before the new request landed.
+  send(win, {
+    type: 'files',
+    prefix: 'ut',
+    workDir: '/old-project',
+    files: [{type: 'file', text: './old-project-only.py'}],
+  });
+  assert.notStrictEqual(
+    pickerDisplay(win),
+    'block',
+    "BUG - the old workspace's file list was rendered under the new one",
+  );
+  send(win, {
+    type: 'files',
+    prefix: 'ut',
+    workDir: '/new-project',
+    files: FILES,
+  });
+  assert.strictEqual(pickerDisplay(win), 'block', 'the new reply renders');
+  const text = win.document.getElementById('autocomplete').textContent;
+  assert.ok(text.includes('util.py'), "with the new workspace's files");
+  assert.ok(!text.includes('old-project-only'), 'and none of the old one');
+}
+
+// A mention typed before the daemon's configData arrived asked with no
+// directory; the reply is stamped with the directory the daemon
+// resolved it to.  The config then names that directory: the picker
+// asks again (the reply of the first request may have been dropped as
+// one for a directory the tab does not browse), and renders the reply
+// stamped with the directory it browses now.
+function testMentionTypedBeforeTheConfigArrivedIsAskedAgain() {
+  const {win, posted} = makePage({beforeScripts: stubRaf});
+  const inp = setInput(win, '@ut');
+  inp.dispatchEvent(new win.Event('input', {bubbles: true}));
+  const asked = posted.filter(m => m.type === 'getFiles');
+  assert.strictEqual(asked.length, 1, 'the mention asks for the files');
+  assert.strictEqual(asked[0].workDir, '', 'no directory known yet');
+
+  send(win, {type: 'configData', config: {work_dir: '/the-project'}});
+  const reasked = posted.filter(m => m.type === 'getFiles');
+  assert.strictEqual(
+    reasked.length,
+    2,
+    'BUG - the config naming the directory did not ask again for the mention',
+  );
+  assert.strictEqual(reasked[1].workDir, '/the-project');
+  send(win, {type: 'files', prefix: 'ut', workDir: '/the-project', files: FILES});
+  assert.strictEqual(pickerDisplay(win), 'block', 'the stamped reply renders');
+}
+
+// A reply without a workDir stamp (a machine running an older daemon)
+// still renders, as a prefix-less one does.
+function testUnstampedFilesReplyStillRenders() {
+  const {win} = makePage({beforeScripts: stubRaf});
+  send(win, {type: 'workDirChanged', workDir: '/new-project'});
+  setInput(win, '@ut');
+  send(win, {type: 'files', prefix: 'ut', files: FILES});
+  assert.strictEqual(pickerDisplay(win), 'block');
+}
+
 const tests = [
   testLateFilesEventWithoutAtContextStaysHidden,
   testStalePrefixFilesEventIgnored,
   testMatchingPrefixFilesEventRenders,
   testPrefixlessFilesEventStillRendersWithAtContext,
+  testFilesReplyForTheOldWorkspaceIsDroppedAndTheQueryReissued,
+  testMentionTypedBeforeTheConfigArrivedIsAskedAgain,
+  testUnstampedFilesReplyStillRenders,
 ];
 
 let failed = 0;

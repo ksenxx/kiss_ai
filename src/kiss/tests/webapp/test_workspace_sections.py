@@ -505,15 +505,28 @@ def test_commit_click_lists_modified_files_and_opens_them(browser, harness):
             "    <= window.innerWidth + 1",
             timeout=5000,
         )
-        # A deleted file in the Changes list is not openable.
-        n_open = len(opened)
-        page.locator("#scm-changes .scm-row.is-deleted").click()
-        page.wait_for_timeout(300)
-        assert len(_sent(frames, "openFile")) == n_open
         # Collapse again.
         second.click()
         assert second.get_attribute("aria-expanded") == "false"
         assert files.first.is_hidden()
+        # A deleted file in the Changes list opens its diff (HEAD vs the
+        # missing working-tree file), never the file itself.
+        tabs_before = page.evaluate(_OPEN_TAB_COUNT_JS)
+        page.locator("#scm-changes .scm-row.is-deleted").click()
+        page.wait_for_function(
+            f"{_OPEN_TAB_COUNT_JS} === {tabs_before + 1}",
+            timeout=15000,
+        )
+        assert not _sent(frames, "openFile")
+        shows = _sent(frames, "gitShow")
+        assert shows[-1]["mode"] == "diff"
+        assert shows[-1]["sha"] == ""
+        assert shows[-1]["path"] == "b.txt"
+        page.wait_for_function(
+            "Array.from(document.querySelectorAll('.chat-tab'))"
+            ".some(t => t.textContent.includes('b.txt (Working Tree)'))",
+            timeout=15000,
+        )
     finally:
         context.close()
 

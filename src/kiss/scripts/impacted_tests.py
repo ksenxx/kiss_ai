@@ -31,7 +31,6 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC = PROJECT_ROOT / "src"
-TESTS = SRC / "kiss" / "tests"
 _SKIP_DIRS = frozenset({"__pycache__", "node_modules", ".git", "tmp"})
 
 

@@ -18,6 +18,7 @@ import logging
 import os
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -25,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.decisions_model import (
     OPENROUTER_DECISIONS_BASE_URL,
@@ -71,14 +73,20 @@ class _DecisionsHandler(BaseHTTPRequestHandler):
     envelope, ``"unauthorized"`` → 401, ``"html-error"`` → 502 with a
     non-JSON body, ``"weird-status"`` → 599 (no HTTP reason phrase),
     ``"not-json"`` → 200 with a non-JSON body, ``"no-answers"`` → 200
-    without an ``answers`` object, anything else → the recorded live
-    answers.  Every request body is appended to ``requests`` for
-    assertions.
+    without an ``answers`` object, ``"trickle"`` → 200 whose body is a
+    space every 15 ms (legal JSON whitespace, each one resetting a read
+    timeout) until ``trickle_release`` is set or the client hangs up
+    (``trickle_ended`` is set either way), then the live answers,
+    anything else → the recorded live answers.  Every request body is
+    appended to ``requests`` for assertions.
     """
 
     requests: list[dict[str, Any]] = []
     auth_headers: list[str] = []
     headers_seen: list[dict[str, str]] = []
+    trickle_started = threading.Event()
+    trickle_release = threading.Event()
+    trickle_ended = threading.Event()
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, D102
         return
@@ -107,6 +115,20 @@ class _DecisionsHandler(BaseHTTPRequestHandler):
                 "model": "typesafe/jev-1.13-20260917",
                 "usage": {"input_tokens": 123, "output_tokens": 0, "cost": 0.0123},
             })
+        elif state == "trickle":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()  # no Content-Length: the body ends with the connection
+            _DecisionsHandler.trickle_started.set()
+            try:
+                while not _DecisionsHandler.trickle_release.wait(0.015):
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                self.wfile.write(json.dumps({"model": "t", "answers": LIVE_ANSWERS}).encode())
+            except OSError:  # the client hung up: its request was aborted
+                return
+            finally:
+                _DecisionsHandler.trickle_ended.set()
         else:
             self._send(
                 200,
@@ -139,9 +161,13 @@ def _decisions_server() -> Iterator[str]:
     _DecisionsHandler.requests = []
     _DecisionsHandler.auth_headers = []
     _DecisionsHandler.headers_seen = []
+    _DecisionsHandler.trickle_started = threading.Event()
+    _DecisionsHandler.trickle_release = threading.Event()
+    _DecisionsHandler.trickle_ended = threading.Event()
     try:
         yield f"http://127.0.0.1:{server.server_port}/api"
     finally:
+        _DecisionsHandler.trickle_release.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
@@ -273,11 +299,92 @@ def test_decide_rejects_malformed_success_bodies() -> None:
 
 
 def test_decide_wraps_connection_failures() -> None:
-    """An unreachable endpoint surfaces as a KISSError naming the URL."""
+    """An unreachable endpoint surfaces as a KISSError naming the URL.
+
+    The timeout outlasts the refusal: Windows retries a loopback connect
+    to a closed port for about 2 s before it fails, and a refusal landing
+    at the deadline would read as the request exceeding its timeout.
+    """
     root = f"http://127.0.0.1:{_free_closed_port()}"
-    m = DecisionsModel(JEV, base_url=root, api_key="k", model_config={"timeout": 2})
+    m = DecisionsModel(JEV, base_url=root, api_key="k", model_config={"timeout": 8})
     with pytest.raises(KISSError, match=f"Decisions request to {root}/alpha/decisions failed"):
         m.decide("x", QUESTIONS)
+
+
+def _decide_on_a_thread(
+    model: DecisionsModel, stop: threading.Event | None
+) -> tuple[threading.Thread, dict[str, Any]]:
+    """Run ``model.decide("trickle", QUESTIONS)`` on a thread bound to *stop*, collecting it."""
+    outcome: dict[str, Any] = {}
+
+    def call() -> None:
+        stop_signal.set_thread_stop_event(stop)
+        try:
+            outcome["answer"] = model.decide("trickle", QUESTIONS)
+        except BaseException as exc:  # noqa: BLE001 - the test asserts on it
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    assert _DecisionsHandler.trickle_started.wait(5), "the request never reached the server"
+    return worker, outcome
+
+
+def test_decide_honours_a_stop_while_the_endpoint_trickles_the_body() -> None:
+    """A Stop pressed during the POST is honoured even though the peer never finishes.
+
+    The read timeout bounds inactivity only: a peer that keeps sending
+    legal JSON whitespace resets it for ever, so the request has to be
+    watched from outside the blocking call.  The stopped request is cut,
+    not abandoned: the peer sees the connection end while it is still
+    trickling, so no reader, socket or buffer outlives the call.
+    """
+    stop = threading.Event()
+    with _decisions_server() as root:
+        m = DecisionsModel(JEV, base_url=root, api_key="k", model_config={"timeout": 0.5})
+        worker, outcome = _decide_on_a_thread(m, stop)
+        stop.set()
+        worker.join(3)
+        assert not worker.is_alive(), "decide() sat in the POST past the Stop"
+        assert isinstance(outcome["error"], KeyboardInterrupt)
+        assert _DecisionsHandler.trickle_ended.wait(2), "the stopped request kept reading"
+        assert not _DecisionsHandler.trickle_release.is_set()
+
+
+def test_decide_raises_a_request_building_error_as_is() -> None:
+    """An error raised before any transport work (unserialisable state) is no transport failure."""
+    with _decisions_server() as root:
+        m = DecisionsModel(JEV, base_url=root, api_key="k")
+        with pytest.raises(TypeError, match="not JSON serializable"):
+            m.decide({"state": object()}, QUESTIONS)
+
+
+def test_decide_gives_up_on_a_trickling_endpoint_at_its_timeout() -> None:
+    """``timeout`` is a whole-request deadline, not only a read-inactivity bound."""
+    with _decisions_server() as root:
+        m = DecisionsModel(JEV, base_url=root, api_key="k", model_config={"timeout": 0.3})
+        started = time.monotonic()
+        worker, outcome = _decide_on_a_thread(m, None)
+        worker.join(3)
+        assert not worker.is_alive(), "decide() outlived its timeout on a trickling body"
+        assert time.monotonic() - started < 3
+        error = outcome["error"]
+        assert isinstance(error, KISSError)
+        assert f"Decisions request to {root}/alpha/decisions exceeded 0.3s" in str(error)
+        assert _DecisionsHandler.trickle_ended.wait(2), "the timed-out request kept reading"
+        assert not _DecisionsHandler.trickle_release.is_set()
+        # The same adapter serves the next request once the endpoint answers
+        # (audit C5/F1: the deadline's abort used to leave its pooled client
+        # refusing every later connection; only a fresh adapter got through).
+        _DecisionsHandler.trickle_release.set()
+        assert m.decide("The package arrived crushed.", QUESTIONS)["answers"] == LIVE_ANSWERS
+        fresh = DecisionsModel(JEV, base_url=root, api_key="k")
+        assert fresh.decide("The package arrived crushed.", QUESTIONS)["answers"] == LIVE_ANSWERS
+        assert [r["body"]["state"] for r in _DecisionsHandler.requests] == [
+            "trickle",
+            "The package arrived crushed.",
+            "The package arrived crushed.",
+        ]
 
 
 def test_generate_answers_configured_questions(caplog: pytest.LogCaptureFixture) -> None:

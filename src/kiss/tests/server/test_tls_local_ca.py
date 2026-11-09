@@ -43,6 +43,7 @@ import ipaddress
 import json
 import os
 import plistlib
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -100,8 +101,10 @@ def _san_ips(cert: x509.Certificate) -> set[str]:
 
 def _write_cert_with_validity(
     path: Path, key_path: Path, subject: x509.Name, days: int, *, ca: bool,
+    starts_in_days: int = -1,
 ) -> None:
-    """Re-sign a self-signed cert for the key at *key_path* with *days* validity."""
+    """Re-sign a self-signed cert for the key at *key_path* with *days* validity,
+    valid from *starts_in_days* days from now (yesterday by default)."""
     key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
     now = datetime.datetime.now(datetime.UTC)
     builder = (
@@ -110,7 +113,7 @@ def _write_cert_with_validity(
         .issuer_name(subject)
         .public_key(key.public_key())  # type: ignore[arg-type]
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_before(now + datetime.timedelta(days=starts_in_days))
         .not_valid_after(now + datetime.timedelta(days=days))
         .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
     )
@@ -242,6 +245,27 @@ class TestTlsCerts(TestCase):
         _write_cert_with_validity(self.cert, self.key, x509.Name([]), days=10, ca=False)
         self.assertTrue(tls_certs._expiring(_load(self.cert)))
         self.assertFalse(self._current())
+
+    def test_a_pair_whose_validity_has_not_started_is_reissued(self) -> None:
+        """A certificate created while the clock ran ahead is not current once
+        the clock is right (clients reject it as not yet valid): the leaf and
+        the CA alike are re-issued, with a validity that has started."""
+        tls_certs.ensure_local_tls_pair(self.tls_dir, [])
+        _write_cert_with_validity(
+            self.cert, self.key, _load(self.cert).subject, days=800, ca=False, starts_in_days=2,
+        )
+        self.assertIsNone(tls_certs._current_pair(self.cert, self.key))
+        _write_cert_with_validity(
+            self.ca, self.ca_key, _load(self.ca).subject, days=800, ca=True, starts_in_days=2,
+        )
+        self.assertIsNone(tls_certs._current_pair(self.ca, self.ca_key))
+        with self.assertLogs("kiss.core.tls_certs", level="WARNING"):
+            tls_certs.ensure_local_tls_pair(self.tls_dir, [])
+        self.assertIsNotNone(tls_certs._current_pair(self.ca, self.ca_key))
+        self.assertTrue(self._current())
+        now = datetime.datetime.now(datetime.UTC)
+        for path in (self.ca, self.cert):
+            self.assertLessEqual(_load(path).not_valid_before_utc, now)
 
     def test_unusable_ca_is_regenerated_with_a_warning(self) -> None:
         tls_certs.ensure_local_tls_pair(self.tls_dir, [])
@@ -666,6 +690,20 @@ class TestTrustLocalCa(TestCase):
         self.assertIn("No Chromium/Firefox NSS certificate database found", text)
         self.assertIn("update-ca-certificates", text)
         self.assertIn("/ca.crt", text)
+        # The printed ``sudo cp`` commands must survive a shell with a
+        # CA path holding a space (a home such as ``/home/test user``):
+        # the shell must read the path as ONE argument.
+        spaced = self.tmp / "test user" / "ca.pem"
+        spaced.parent.mkdir()
+        shutil.copyfile(self.ca, spaced)
+        hints = [
+            line.strip() for line in tls_trust.linux_system_store_hint(spaced)
+            if line.strip().startswith("sudo cp ")
+        ]
+        self.assertEqual(len(hints), 2, hints)
+        for hint in hints:
+            argv = shlex.split(hint.split(" && ")[0])
+            self.assertEqual(argv[:3], ["sudo", "cp", str(spaced)], hint)
 
         self._nss_dir(".pki/nssdb")
         # Hide certutil from PATH *and* from the Homebrew keg probe (this

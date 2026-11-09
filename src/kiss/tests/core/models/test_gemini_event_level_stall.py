@@ -44,6 +44,7 @@ from collections.abc import Generator
 
 import pytest
 
+from kiss.core import stop_signal
 from kiss.core.models.gemini_model import GeminiModel
 from kiss.tests.core.models.gemini_sse_harness import (
     GeminiScript,
@@ -140,6 +141,97 @@ class TestKeepAliveOnlyStreamStallsOut:
         error, elapsed = _run_bounded(model)
 
         assert isinstance(error, TimeoutError), f"got {error!r}"
+        assert elapsed < _DEADLINE / 2, f"the stall took {elapsed:.1f}s to surface"
+
+    def test_headers_that_never_complete_stall_out(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        gemini_endpoint: tuple[str, GeminiScript],
+    ) -> None:
+        """A peer trickling header bytes is cut by a deadline the read clock cannot provide.
+
+        No response exists before the headers are complete, so the event
+        watchdog has nothing to half-close, and every byte resets the
+        byte-level deadline.
+        """
+        base_url, script = gemini_endpoint
+        script.play([], headers="drip")
+        model = _make_model(monkeypatch, base_url)
+
+        error, _elapsed = _run_bounded(model)
+
+        assert isinstance(error, TimeoutError), f"got {error!r}"
+        assert "stall" in str(error).lower()
+
+    def test_a_stop_while_headers_trickle_in_ends_the_turn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        gemini_endpoint: tuple[str, GeminiScript],
+    ) -> None:
+        """A Stop pressed before the headers are complete is honoured within seconds."""
+        base_url, script = gemini_endpoint
+        script.play([], headers="drip")
+        model = _make_model(monkeypatch, base_url)
+        stop = threading.Event()
+        outcome: dict[str, BaseException] = {}
+
+        def generate_under_stop() -> None:
+            stop_signal.set_thread_stop_event(stop)
+            try:
+                model.generate()
+            except BaseException as exc:  # noqa: BLE001 — reported to the test
+                outcome["error"] = exc
+            finally:
+                stop_signal.set_thread_stop_event(None)
+
+        worker = threading.Thread(target=generate_under_stop, daemon=True)
+        worker.start()
+        assert script.serving.wait(10), "the endpoint never started its headers"
+        stop.set()
+        worker.join(5.0)
+        assert not worker.is_alive(), "the Stop did not end the pre-header wait"
+        assert isinstance(outcome.get("error"), KeyboardInterrupt), f"got {outcome!r}"
+
+    def test_a_stall_during_an_sdk_retry_is_still_cut(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        gemini_endpoint: tuple[str, GeminiScript],
+    ) -> None:
+        """The watchdog must not settle on the error reply of an attempt the SDK retries.
+
+        The first attempt is refused with a 503 the SDK finishes with and
+        retries after a delay longer than the stall timeout; the retry
+        then streams keep-alives only.  A watchdog that adopted the 503
+        as "this stream's response" would abort a dead reply and leave
+        the retry to run for good.
+        """
+        base_url, script = gemini_endpoint
+        script.refusals = 1
+        script.play([], after="keepalive")
+        monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", base_url)
+        model = GeminiModel(
+            _MODEL,
+            api_key="test-key",
+            model_config={
+                "stream_stall_timeout": 0.5,
+                "http_options": {
+                    "retry_options": {
+                        "attempts": 2,
+                        "initial_delay": 1.0,
+                        "max_delay": 1.0,
+                        "jitter": 0.001,
+                    }
+                },
+            },
+            token_callback=lambda _t: None,
+        )
+        model.initialize("Explain event-level stalls.")
+
+        error, elapsed = _run_bounded(model)
+
+        assert len(script.requests) == 2, "the SDK did not retry the refused attempt"
+        assert isinstance(error, TimeoutError), f"got {error!r}"
+        assert "stall" in str(error).lower()
         assert elapsed < _DEADLINE / 2, f"the stall took {elapsed:.1f}s to surface"
 
     def test_healthy_stream_is_unaffected(

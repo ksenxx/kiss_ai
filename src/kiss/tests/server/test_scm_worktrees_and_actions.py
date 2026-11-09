@@ -832,6 +832,17 @@ class TestFsAction:
         assert fs_action("frobnicate", str(harness.plain_dir))["error"].startswith(
             "Unknown file action"
         )
+        # A NUL byte passes pathlib's exists() (it answers False) and
+        # raises ValueError from touch()/mkdir(): the contract is a
+        # reply, never an exception.
+        for action, name in (("newFile", "a\0b"), ("newFolder", "c\0d")):
+            assert fs_action(action, str(harness.plain_dir), name=name)["error"].startswith(
+                "Not a valid name"
+            )
+        assert fs_action(
+            "rename", str(harness.plain_dir / "only.txt"), dest=str(harness.plain_dir / "x\0y")
+        )["error"].startswith("rename failed")
+        assert (harness.plain_dir / "only.txt").exists()
         # An OSError inside an action becomes an error reply.
         ro = harness.plain_dir / "ro"
         ro.mkdir(exist_ok=True)
@@ -1331,6 +1342,15 @@ class TestReviewRegressions:
             )
             assert created["error"].startswith("Not inside the workspace")
             assert not (outside / "escaped.txt").exists()
+            # A nested *name* must not walk through the link either:
+            # the parent is confined, the entry it creates must stay
+            # under that parent.
+            for action, name in (("newFile", "portal/escaped.txt"),
+                                 ("newFolder", "portal/sub/dir")):
+                nested = _fs(harness, action=action, path=str(root), name=name, workDir=wd)
+                assert nested["error"].startswith("Not inside"), nested
+            assert not (outside / "escaped.txt").exists()
+            assert not (outside / "sub").exists()
             pasted = _fs(
                 harness, action="copy", path=str(root / "only.txt"), dest=str(portal),
                 workDir=wd,

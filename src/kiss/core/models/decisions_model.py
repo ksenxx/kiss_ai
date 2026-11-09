@@ -37,11 +37,12 @@ follow the OpenRouter SDK reference
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from http import HTTPStatus
 from typing import Any
 
-import requests
+import httpx
 
 from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
@@ -52,7 +53,12 @@ from kiss.core.models.model import (
     TokenCallback,
     flatten_content_to_text,
 )
-from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stop_error
+from kiss.core.models.stream_abort import (
+    CONNECT_TIMEOUT,
+    RequestAbortWatchdog,
+    make_pool_abortable,
+    stop_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -115,24 +121,6 @@ def score(instructions: str, criteria: list[str]) -> dict[str, Any]:
     return {"type": "score", "instructions": instructions, "criteria": list(criteria)}
 
 
-def reported_cost(response: Any) -> float | None:
-    """Return the ``usage.cost`` (USD) OpenRouter attached to a decisions response.
-
-    Args:
-        response: The parsed JSON body of a ``/decisions`` call.
-
-    Returns:
-        The reported cost, or ``None`` when the body has no numeric
-        ``usage.cost``.
-    """
-    if not isinstance(response, dict) or not isinstance(response.get("usage"), dict):
-        return None
-    cost = response["usage"].get("cost")
-    if isinstance(cost, bool) or not isinstance(cost, int | float):
-        return None
-    return float(cost)
-
-
 def api_model_id(model_name: str) -> str:
     """Return the id OpenRouter expects for a catalog name.
 
@@ -183,12 +171,18 @@ class DecisionsModel(Model):
         super().__init__(model_name, model_config, token_callback, thinking_callback)
         self.endpoint_url = base_url.rstrip("/") + DECISIONS_PATH
         self.api_key = api_key
+        # Both the read timeout and the whole request's deadline: the
+        # read timeout alone bounds inactivity, which a peer that keeps
+        # sending a byte of JSON whitespace resets for ever.
         self.timeout = float(self.model_config.get("timeout", DEFAULT_TIMEOUT_SECONDS))
         # One pooled connection per adapter: the ``decide`` tool keeps a
         # single adapter for the agent's lifetime and calls it for every
         # routing decision, so a fresh TCP+TLS handshake per call would
-        # dominate a request the endpoint answers in milliseconds.
-        self._session = requests.Session()
+        # dominate a request the endpoint answers in milliseconds.  The
+        # pool is abortable so a Stop or the deadline cuts a request
+        # still setting up its connection too (see :meth:`decide`).
+        self._client = httpx.Client(timeout=httpx.Timeout(self.timeout, connect=CONNECT_TIMEOUT))
+        make_pool_abortable(self._client)
 
     def decide(
         self,
@@ -210,15 +204,21 @@ class DecisionsModel(Model):
             "cost"}, ...}``.  Answer shapes are documented on the three
             question builders.
 
+        The POST is watched by a :class:`RequestAbortWatchdog`: a thread
+        parked inside the request can notice neither the thread's stop
+        event nor the deadline, so the watchdog shuts the request's
+        socket down at either, which fails the request at once instead
+        of leaving it reading until the peer stops sending.
+
         Raises:
             KISSError: On an unknown question type, a non-2xx response, an
-                unreachable endpoint, or a response without ``answers``.
+                unreachable endpoint, a request that outlived ``timeout``,
+                or a response without ``answers``.
             KeyboardInterrupt: The user pressed Stop before the request
-                was sent.  A Stop that lands during the POST (a plain
-                blocking call with no abort watchdog) is left to the
-                caller: the completed answer and its paid usage are
-                returned as usual, and the agent loop honours the Stop
-                at its next tool call.
+                was sent or while it was in flight.  A reply landing at
+                the Stop itself is taken: the completed answer and its
+                paid usage are returned as usual, and the agent loop
+                honours the Stop at its next tool call.
         """
         if stop_signal.stop_requested():
             raise stop_error()
@@ -236,21 +236,22 @@ class DecisionsModel(Model):
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        deadline = time.monotonic() + self.timeout
         try:
-            response = self._session.post(
-                self.endpoint_url,
-                json=body,
-                headers=headers,
-                timeout=(CONNECT_TIMEOUT, self.timeout),
-            )
-        except requests.RequestException as e:
-            raise KISSError(f"Decisions request to {self.endpoint_url} failed: {e}") from e
+            with RequestAbortWatchdog(self._client, self.timeout, "decisions-abort-watchdog"):
+                response = self._client.post(self.endpoint_url, json=body, headers=headers)
+        except httpx.HTTPError as error:
+            raise self._cut_error(deadline) or KISSError(
+                f"Decisions request to {self.endpoint_url} failed: {error}"
+            ) from error
         if response.status_code >= 400:
             raise KISSError(_http_error_message(response))
         try:
             parsed = response.json()
         except ValueError as e:
-            raise KISSError(
+            # A body the watchdog cut short reads as a complete one
+            # when its length was to be the connection's end.
+            raise self._cut_error(deadline) or KISSError(
                 f"Decisions endpoint returned non-JSON body: {response.text[:200]!r}"
             ) from e
         if not isinstance(parsed, dict) or not isinstance(parsed.get("answers"), dict):
@@ -355,7 +356,31 @@ class DecisionsModel(Model):
             The reported cost, or ``None`` when the response lacks a numeric
             ``usage.cost`` (the caller then prices the tokens from the catalog).
         """
-        return reported_cost(response)
+        if not isinstance(response, dict) or not isinstance(response.get("usage"), dict):
+            return None
+        cost = response["usage"].get("cost")
+        if isinstance(cost, bool) or not isinstance(cost, int | float):
+            return None
+        return float(cost)
+
+    def _cut_error(self, deadline: float) -> BaseException | None:
+        """The error of a request the watchdog cut at a Stop or at *deadline*, else ``None``.
+
+        Args:
+            deadline: The ``time.monotonic()`` by which the request had to finish.
+
+        Returns:
+            The Stop's ``KeyboardInterrupt`` once the thread's stop is
+            requested, the ``KISSError`` naming the exceeded timeout once
+            *deadline* has passed, ``None`` while neither holds.
+        """
+        if stop_signal.stop_requested():
+            return stop_error()
+        if time.monotonic() >= deadline:
+            return KISSError(
+                f"Decisions request to {self.endpoint_url} exceeded {self.timeout:g}s"
+            )
+        return None
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Decisions models do not produce embeddings.
@@ -366,7 +391,7 @@ class DecisionsModel(Model):
         raise KISSError(f"{self.model_name} is a decisions model and cannot embed text.")
 
 
-def _http_error_message(response: requests.Response) -> str:
+def _http_error_message(response: httpx.Response) -> str:
     """Format a non-2xx decisions response as one line.
 
     The HTTP reason phrase is included because OpenRouter's own message

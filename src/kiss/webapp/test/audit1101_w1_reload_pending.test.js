@@ -252,6 +252,78 @@ async function testTheReplyOfAClosedTabsReloadIsDropped() {
   }
 }
 
+async function testTheLateReplyOfAClosedPlainOpenIsDropped() {
+  // A transcript link clicked repeatedly while the daemon is slow
+  // sends one plain open per click.  The first reply opens the
+  // editor, the user closes it, and a later reply of an open sent
+  // before the close must not resurrect it; a click after the close
+  // is a new open and opens it again -- and the replies of the opens
+  // sent before the close stay rejected after that reopen too (their
+  // old contents or their error must not land on the new editor).
+  const ctx = makePage();
+  const {win, posted, created} = ctx;
+  try {
+    setUp(ctx);
+    const link = win.document.createElement('span');
+    link.className = 'kiss-filelink';
+    link.dataset.path = FILE;
+    win.document.getElementById('output').appendChild(link);
+    for (let i = 0; i < 4; i++) click(win, link);
+    const opens = posted.filter(m => m.type === 'openFile');
+    assert.strictEqual(opens.length, 4, 'four plain opens');
+    assert.strictEqual(
+      new Set(opens.map(o => o.token)).size,
+      4,
+      'each open has its own token',
+    );
+    reply(win, {token: opens[0].token});
+    await sleep(0);
+    assert.strictEqual(contentTabs(win).length, 1, 'the first reply opens');
+    const content = contentTabs(win)[0];
+    const row = Array.from(
+      win.document.querySelectorAll('.chat-tab.content-tab'),
+    ).find(el => el.dataset.tabId === content.id);
+    click(win, row.querySelector('.chat-tab-close'));
+    assert.strictEqual(contentTabs(win).length, 0, 'the file is closed');
+    reply(win, {token: opens[1].token});
+    await sleep(0);
+    assert.strictEqual(
+      contentTabs(win).length,
+      0,
+      'BUG - the late reply of an open sent before the close reopens it',
+    );
+    assert.strictEqual(created.length, 1, 'no new editor');
+    click(win, link);
+    const again = lastOpenFile(posted);
+    assert.notStrictEqual(again.token, opens[1].token);
+    reply(win, {token: again.token, content: 'disk v2', version: 'v2'});
+    await sleep(0);
+    assert.strictEqual(contentTabs(win).length, 1, 'a new open opens it');
+    assert.strictEqual(created[1].editor.getModel().getValue(), 'disk v2');
+    // The replies of the opens sent before the close arrive after the
+    // reopen: still rejected.
+    reply(win, {token: opens[2].token, content: 'old delayed data'});
+    await sleep(0);
+    assert.strictEqual(
+      created[created.length - 1].editor.getModel().getValue(),
+      'disk v2',
+      'BUG - an old reply arriving after the reopen replaced the file',
+    );
+    assert.strictEqual(created.length, 2, 'no editor rebuilt');
+    assert.strictEqual(contentTabs(win).length, 1);
+    reply(win, {token: opens[3].token, error: 'notes.txt: gone'});
+    await sleep(0);
+    assert.strictEqual(
+      toast(win, 'file-open-error'),
+      null,
+      'an old error reply arriving after the reopen toasts nothing',
+    );
+    assert.strictEqual(created[1].editor.getModel().getValue(), 'disk v2');
+  } finally {
+    win.close();
+  }
+}
+
 (async () => {
   await testReloadIsATokenedOpenFile();
   console.log('  ok - a reload is a tokened openFile, each with its own token');
@@ -265,6 +337,8 @@ async function testTheReplyOfAClosedTabsReloadIsDropped() {
   console.log(
     "  ok - a closed tab's reload reply is dropped, a later open opens",
   );
+  await testTheLateReplyOfAClosedPlainOpenIsDropped();
+  console.log("  ok - a closed editor's late plain-open reply is dropped");
 })().catch(e => {
   console.error(e);
   process.exit(1);

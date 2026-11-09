@@ -22,9 +22,11 @@ kernel) and the Windows read path.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -40,6 +42,7 @@ from kiss.core.processes import (
     pid_alive,
     popen_process_group,
     run_capped,
+    run_process_group,
 )
 from kiss.tests.conftest import posix_only
 
@@ -156,6 +159,81 @@ def test_cwd_and_env_reach_the_child(tmp_path: Path) -> None:
 def test_a_command_that_cannot_start_raises() -> None:
     with pytest.raises(OSError):
         run_capped(["kiss-sweep1026-no-such-command"], limit=10, timeout=10)
+
+
+@posix_only("on Windows communicate's reader threads own the pipes and close them at EOF")
+def test_a_timed_out_run_process_group_closes_the_pipes_it_opened() -> None:
+    """The pipes of a killed child are closed with it, not left to the garbage collector.
+
+    ``run_process_group`` killed and reaped a child that outlived its
+    timeout but closed neither of its pipes, so the two descriptors
+    stayed open for as long as the ``Popen`` lived: the ``TimeoutExpired``
+    it raises keeps the frame (and the ``Popen``) alive through its
+    traceback, and a caller that stores the error (a future, an error
+    list) kept both descriptors with it, one pair per failed probe.
+    """
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        run_process_group(_py("import time; time.sleep(60)"), timeout=0.2)
+    frame = raised.value.__traceback__
+    while frame is not None and frame.tb_frame.f_code.co_name != "run_process_group":
+        frame = frame.tb_next
+    assert frame is not None
+    proc = frame.tb_frame.f_locals["proc"]
+    assert proc.returncode is not None, "the child was not reaped"
+    assert proc.stdout.closed and proc.stderr.closed, "the child's pipes were left open"
+
+
+# A child interpreter in which no thread can be started: a tebibyte of
+# stack per thread under a 64 GiB address-space limit makes
+# ``pthread_create`` fail.  Both settings are process-wide, hence the
+# child.  It reports the state of the child ``run_capped`` had spawned,
+# read from the raised error's traceback (which keeps the ``Popen`` and
+# so any open pipe alive, exactly as a caller storing the error would).
+_NO_THREADS = """
+import json, resource, sys, threading
+from kiss.core.processes import run_capped
+soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+cap = 1 << 36 if hard == resource.RLIM_INFINITY else min(1 << 36, hard)
+resource.setrlimit(resource.RLIMIT_AS, (cap, hard))
+threading.stack_size(1 << 40)
+try:
+    run_capped(
+        [sys.executable, "-I", "-S", "-c", "import time; time.sleep(60)"],
+        limit=100, timeout=60, keep_stderr=100,
+    )
+except RuntimeError as exc:
+    tb = exc.__traceback__
+    while tb.tb_frame.f_code.co_name != "run_capped":
+        tb = tb.tb_next
+    proc = tb.tb_frame.f_locals["proc"]
+    print(json.dumps({
+        "error": str(exc), "reaped": proc.returncode is not None,
+        "stdout_closed": proc.stdout.closed, "stderr_closed": proc.stderr.closed,
+    }))
+"""
+
+
+@posix_only("RLIMIT_AS")
+@pytest.mark.skipif(
+    sys.platform == "darwin", reason="macOS refuses to lower RLIMIT_AS from unlimited"
+)
+def test_a_drain_thread_that_cannot_start_leaves_no_pipe_open() -> None:
+    """``run_capped`` closes the child's stderr itself when its drain thread cannot be started.
+
+    The handler of ``run_capped`` left every non-null stderr pipe to its
+    drain thread, which closes it at EOF or on the stop event; a
+    ``Thread.start`` that raised (no thread to be had, or a Stop landing
+    before the thread ran) left no drain, so the child was killed and
+    reaped but its stderr pipe stayed open for as long as the error
+    lived.  The pipe is the caller's until the drain has taken it.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", _NO_THREADS], capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert "can't start new thread" in report.pop("error")
+    assert report == {"reaped": True, "stdout_closed": True, "stderr_closed": True}
 
 
 def test_timeout_fired_after_the_result_is_decided_is_ignored() -> None:
@@ -343,9 +421,14 @@ def test_stderr_read_before_a_stray_holder_stalls_the_drain_is_kept(tmp_path: Pa
     the timeout; only its stderr pipe stays open, in a descendant that
     escaped the group.  The caller stops waiting for the drain thread
     after ``PIPE_GIVE_UP_SECONDS`` and must still report the stderr
-    read so far, not an empty string.
+    read so far, not an empty string.  The drain thread is told to stop
+    at that point: left to its own deadline (the command's timeout plus
+    the give-up), it would keep the pipe and the returned result for
+    another 25 s and overwrite ``stderr`` with whatever the stray wrote
+    meanwhile.
     """
     pid_file = tmp_path / "stderr-holder.pid"
+    threads_before = set(threading.enumerate())
     started = time.monotonic()
     try:
         out = run_capped(
@@ -362,6 +445,11 @@ def test_stderr_read_before_a_stray_holder_stalls_the_drain_is_kept(tmp_path: Pa
     assert out.returncode == 0
     assert out.timed_out is False
     assert out.truncated is False
+    for thread in threading.enumerate():
+        if isinstance(thread, threading.Timer):
+            thread.join(5)  # the cancelled watchdog is on its way out
+    stray = [t for t in threading.enumerate() if t not in threads_before and t.is_alive()]
+    assert stray == [], "the stderr drain thread outlived the call"
 
 
 @posix_only("a descendant in its own session survives the group kill")

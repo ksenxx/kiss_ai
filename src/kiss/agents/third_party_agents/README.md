@@ -343,7 +343,9 @@ rejected one leaves the previous
 enrollment, `config.json` and the live client untouched), and the accepted credential
 is then stored together with its non-secret `config.json` metadata (server URL,
 login, client id, `auth_mode`) as one enrollment under the connector's config lock
-(`enroll_credential`, also used by the Twitch and Discord user sign-ins): a failed
+(`enroll_credential`, also used by the Twitch and Discord user sign-ins, and by
+`authenticate_firecrawl`, which enrolls the pasted API key together with its
+self-hosted `base_url` so the key and the host it is bound to never disagree): a failed
 metadata write leaves the vault untouched, and a store that did not land puts the
 previous file back — the daemon's `generation` op (protocol v8; every store issues a
 new nonce, a token refresh keeps it) tells whether it landed even when the reply
@@ -397,7 +399,7 @@ helpers noted below, such as `finish_<service>_auth` and the browser-setup tools
 | Mattermost | `mattermost` | yes | server URL + personal access token, `mattermost/config.json` | `list_teams`, `list_channels`, `get_channel`, `list_channel_posts`, `create_post`, `delete_post`, `get_user`, `list_users`, `create_direct_message_channel`, `add_reaction` |
 | Microsoft Teams | `msteams` | yes | browser sign-in via the Entra device code flow through the KISS multi-tenant app (`authenticate_msteams()`, optional `tenant_id`; `finish_msteams_auth`; delegated token refreshed by the Muse daemon, so Muse-auth must be enabled), `msteams/config.json` | `list_teams`, `get_team`, `list_channels`, `list_channel_messages`, `post_channel_message`, `reply_to_message`, `list_chats`, `post_chat_message`, `list_team_members` |
 | Nextcloud Talk | `nextcloud` | yes | browser sign-in via Login Flow v2 (`authenticate_nextcloud(url)`, `finish_nextcloud_auth`; app password issued by the server) or username + app password, `nextcloud/config.json` | `list_rooms`, `get_room`, `create_room`, `list_participants`, `list_messages`, `post_message`, `set_room_name`, `delete_message`, `revoke_app_password` |
-| Nostr | `nostr` | no | private key, optional relays (default `wss://relay.damus.io`; pynostr), `nostr/config.json` | `publish_note`, `publish_reply`, `send_dm`, `get_profile`, `set_profile`, `list_relays`, `add_relay`, `remove_relay` |
+| Nostr | `nostr` | no | private key, optional relays (default `wss://relay.damus.io`; an explicitly empty relay list is refused, and publishing with none configured fails; pynostr), `nostr/config.json` | `publish_note`, `publish_reply`, `send_dm`, `get_profile`, `set_profile`, `list_relays`, `add_relay`, `remove_relay` |
 | ntfy pub-sub | `ntfy` | yes | `topic` (+ optional `server`, `token`), `ntfy/config.json` | `publish_notification`, `poll_topic` |
 | Phone control (Android companion app) | `phone` | yes | device IP + optional port/API key of the companion REST app, `phone/config.json` | `send_sms`, `make_call`, `end_call`, `list_sms_conversations`, `get_sms_messages`, `get_call_log`, `get_device_info`, `list_notifications`, `dismiss_notification`, `send_notification_reply` |
 | QQ bot platform | `qq` | yes | app id/secret (Ed25519 webhook), `qq/config.json` | `send_group_message`, `send_c2c_message` |
@@ -423,7 +425,15 @@ real people. The webhook
 agent verifies GitHub (`X-Hub-Signature-256`) or generic timestamped HMAC signatures,
 caps bodies at 1 MB, suppresses duplicate deliveries, rate-limits to 60 events per
 route per minute, and can either queue events as agent tasks or push them straight
-through another channel's backend (`deliver_module` routes).
+through another channel's backend (`deliver_module` routes). Synology Chat's webhook
+token moves from the webhook URL into the Muse vault on first use and is scrubbed from
+`synology/config.json`, which keeps a `muse` marker; a marked config whose vault entry
+has since gone (after `muse_auth clear synology`) does not fall back to sending without
+the token: the first request fails with "Synology webhook token missing from the Muse
+vault; reauthentication required (authenticate_synology with the webhook URL including
+its token)." until you run `authenticate_synology` again with the full webhook URL.
+Microsoft Teams' `list_*` tools report a Graph error as `{"ok": false, "error": ...}`
+instead of an empty list.
 
 ### Service APIs (10)
 
@@ -444,8 +454,14 @@ All ten are outbound-only (no gateway mode). PostgreSQL defaults to **read-only
 enforced server-side**: connections open with `default_transaction_read_only=on` and
 `pg_query` uses the extended query protocol so multi-statement strings are rejected;
 read paths run under a 60 s server-side `statement_timeout` while `pg_execute` (write
-mode only) has none. GitHub's `read_only: "true"` config key blocks every mutating
-`gh_*` tool.
+mode only) has none. `pg_query` always returns one complete JSON document: at most
+`max_rows` rows, each text cell (strings, and the `str` rendering of values JSON has no
+type for: bytes, decimals, timestamps, UUIDs) cut at 2,000 characters while `NULL`,
+booleans, numbers, arrays and JSON/record cells pass through uncut, and `truncated` is
+true when either limit cut something (results are no longer clipped at 8,000
+characters, so the JSON never ends mid-row; the `pg_list_*`, `pg_describe_table` and
+`pg_explain` results are not clipped either). GitHub's `read_only: "true"` config key
+blocks every mutating `gh_*` tool.
 
 ### Infrastructure: two extra surfaces
 
@@ -706,7 +722,8 @@ Pacific, `America/Los_Angeles`, unless a timestamp carries its own offset; the j
 listing shows next-run times in Pacific too); the
 kiss-web daemon ticks the scheduler automatically, and a job's result can be delivered to any
 gateway-capable channel (25 of the 32 messaging channels; a `[SILENT]` or `NO_REPLY`
-result suppresses delivery). Jobs due at the same time run concurrently, each in its
+result of a run that succeeded suppresses delivery, while a run that failed with such a
+result, or with none, is delivered as the error `Task failed`). Jobs due at the same time run concurrently, each in its
 own scratch directory (`~/.kiss/cron/runs/<job_id>-<random>`, removed when the run
 ends, whatever the outcome, except for a prompt job whose task may still be running —
 the connection to the daemon was lost while the task ran, or the run timed out and the
@@ -760,10 +777,11 @@ What a prompt job's run is given, and what the scheduler does around it
   job (`Every morning run /slack ...`) gets the same block in front of its argument.
 - *Window start and the `covered_until` watermark.* Each job stores `covered_until`,
   the moment up to which its runs have covered: set to the job's creation time when it
-  is created and moved to the run's start time after every run that ended silent
-  (`[SILENT]`, `NO_REPLY` or an empty result) or whose result every delivery target
-  received (a run that ended ok but
-  whose delivery to a target failed covers nothing, so the retry reports the same
+  is created and moved to the run's start time after every run that succeeded and ended
+  silent (`[SILENT]`, `NO_REPLY` or an empty result) or whose result every delivery
+  target received (a run that failed covers nothing however quiet its result, which is
+  recorded as the error `Task failed`, and neither does a run that ended ok but
+  whose delivery to a target failed, so the retry reports the same
   news again rather than only what is newer). The window start is that watermark, so
   a run after a failed, missed or undelivered one covers everything since the last
   successful one, not just one interval; a job
@@ -900,7 +918,17 @@ refuses (HTTP 400 other than a rate limit) is dropped, for one full sync, while 
 sync that fails for any other reason (a 429, a proxy's 408, a 401/403, a 5xx) keeps
 the token and serves nothing that tick; a reply the homeserver refuses, a 429 included
 (matrix-nio's own retrying is turned off, so a rate-limited send fails at once
-instead of blocking the tick), stays in the ledger for redelivery.
+instead of blocking the tick), or attempted before the client is connected, stays in
+the ledger for redelivery. WhatsApp polls the bridge's message store with the
+`timestamp|id` pair of the last row it delivered as its cursor and, once it has one,
+reads the rows past it oldest-first, so messages that share one timestamp are not
+skipped and a burst larger than the per-tick limit is delivered across ticks rather
+than dropped. The first, uncursored poll seeds from the newest rows instead
+(`ORDER BY timestamp DESC, id LIMIT ...`, then reversed): among the equal-timestamp
+rows of that limited batch it delivers the selected ids highest-first and leaves the
+cursor on the smallest selected id, so the next poll redelivers the already-seen
+larger ids of that batch and delivers for the first time any larger ids the first
+limit had excluded.
 
 **20. What you can send *into* a gateway.** Once the gateway runs, the channel is a
 full chat surface: any prompt in this document works there, replies land in the same

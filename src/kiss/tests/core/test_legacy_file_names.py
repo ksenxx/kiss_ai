@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -187,6 +188,198 @@ def test_sidecars_move_before_the_main_file_and_keep_their_bytes(tmp_path: Path)
     assert not (tmp_path / "new.db-shm").exists()
     assert_old_name_left_behind(tmp_path / "old.db", "new.db")
     assert not (tmp_path / "old.db-wal").exists()
+
+
+_FILE_OPS = frozenset({"replace", "link", "symlink", "unlink", "rename"})
+
+
+class _PauseAfterEveryFileOperation:
+    """A profile hook for the adopter's thread: after each file operation of
+    :mod:`os` returns, hand the turn to the test and wait for it to be given back."""
+
+    def __init__(self) -> None:
+        self.paused = threading.Event()
+        self.resume = threading.Event()
+        self.operations: list[str] = []
+
+    def __call__(self, frame: object, event: str, arg: object) -> None:
+        if event != "c_return" or getattr(arg, "__module__", None) not in ("posix", "nt", "os"):
+            return
+        name = getattr(arg, "__name__", "")
+        if name not in _FILE_OPS:
+            return
+        self.operations.append(name)
+        self.resume.clear()
+        self.paused.set()
+        assert self.resume.wait(30), "the test never gave the turn back"
+
+
+class _Adopter(threading.Thread):
+    """Run the adoption with the pausing hook installed on this thread only."""
+
+    def __init__(self, new: Path, hook: _PauseAfterEveryFileOperation) -> None:
+        super().__init__(daemon=True)
+        self.new = new
+        self.hook = hook
+        self.done = threading.Event()
+        self.error: BaseException | None = None
+
+    def run(self) -> None:
+        sys.setprofile(self.hook)
+        try:
+            config.adopt_legacy_file(self.new, "old.db", ("-wal", "-shm", ""))
+        except BaseException as e:  # noqa: BLE001 — reported by the test
+            self.error = e
+        finally:
+            sys.setprofile(None)
+            self.done.set()
+            self.hook.paused.set()
+
+
+def _rows_through(path: Path) -> list[str]:
+    """What a connection opened on *path* right now reads, without creating a file."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return [row[0] for row in conn.execute("SELECT task FROM task_history")]
+    finally:
+        conn.close()
+
+
+@posix_only("the old name stays usable for an old-version process only where it becomes a link")
+def test_the_old_name_opens_a_consistent_database_at_every_step_of_the_adoption(
+    tmp_path: Path,
+) -> None:
+    """An old-version process opens ``old.db`` at any moment of the adoption (the
+    persistence layer opens a connection per operation).  At every file-operation
+    boundary the old name must open a consistent database with its WAL pages, never
+    a main file parted from its WAL (``disk I/O error``) or no file at all (which a
+    writer would recreate empty, and the symlink could then not be left behind)."""
+    old = tmp_path / "old.db"
+    writer = sqlite3.connect(old)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE task_history (task TEXT)")
+    writer.execute("INSERT INTO task_history VALUES ('in the wal')")
+    writer.commit()  # stays in old.db-wal: the writer is open, nothing checkpoints
+    assert (tmp_path / "old.db-wal").stat().st_size > 0
+    hook = _PauseAfterEveryFileOperation()
+    adopter = _Adopter(tmp_path / "new.db", hook)
+    adopter.start()
+    seen: list[tuple[str, list[str] | str]] = []
+    while True:
+        assert hook.paused.wait(30), "the adopter neither paused nor finished"
+        if adopter.done.is_set():
+            break
+        hook.paused.clear()
+        try:
+            seen.append((hook.operations[-1], _rows_through(old)))
+        except sqlite3.Error as e:
+            seen.append((hook.operations[-1], f"{type(e).__name__}: {e}"))
+        hook.resume.set()
+    adopter.join(30)
+    writer.close()
+    assert adopter.error is None, adopter.error
+    assert seen, "no file operation was observed"
+    assert all(rows == ["in the wal"] for _, rows in seen), seen
+    assert_old_name_left_behind(old, "new.db")
+    assert _rows_through(tmp_path / "new.db") == ["in the wal"]
+    assert not (tmp_path / "old.db-wal").exists() and not (tmp_path / "old.db-shm").exists()
+
+
+@posix_only("the old name stays usable for an old-version process only where it becomes a link")
+def test_a_connection_rollover_at_any_step_of_the_adoption_loses_nothing(tmp_path: Path) -> None:
+    """The old-version process closes its connection after every operation and opens
+    the old name for the next.  At every file-operation boundary of the adoption its
+    last connection closes -- which checkpoints the WAL and deletes the sidecars when
+    nothing else holds them -- and a fresh one commits a row through the old name.
+    The adopted database must hold every committed row and pass an integrity check:
+    linking the WAL, the SHM and the main file one by one, with nothing keeping the
+    sidecars in place, let such a rollover between two links start a fresh WAL under
+    the old name, and the new name ended up with the old WAL beside the fresh SHM
+    (``database disk image is malformed``), or with rows that only the unlinked WAL
+    held."""
+    old = tmp_path / "old.db"
+    writer = sqlite3.connect(old)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE task_history (task TEXT)")
+    writer.execute("INSERT INTO task_history VALUES ('before')")
+    writer.commit()
+    committed = ["before"]
+    hook = _PauseAfterEveryFileOperation()
+    adopter = _Adopter(tmp_path / "new.db", hook)
+    adopter.start()
+    while True:
+        assert hook.paused.wait(30), "the adopter neither paused nor finished"
+        if adopter.done.is_set():
+            break
+        hook.paused.clear()
+        writer.close()  # the old version's last connection: a checkpoint, and the sidecars go
+        writer = sqlite3.connect(old)
+        row = f"after {hook.operations[-1]} {len(committed)}"
+        writer.execute("INSERT INTO task_history VALUES (?)", (row,))
+        writer.commit()
+        committed.append(row)
+        hook.resume.set()
+    adopter.join(30)
+    writer.close()
+    assert adopter.error is None, adopter.error
+    assert len(committed) > 3, hook.operations
+    assert_old_name_left_behind(old, "new.db")
+    reader = sqlite3.connect(f"file:{tmp_path / 'new.db'}?mode=ro", uri=True)
+    try:
+        assert reader.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert [row[0] for row in reader.execute("SELECT task FROM task_history")] == committed
+    finally:
+        reader.close()
+    assert _rows_through(old) == committed
+    assert not (tmp_path / "old.db-wal").exists() and not (tmp_path / "old.db-shm").exists()
+
+
+@posix_only("the old name stays usable for an old-version process only where it becomes a link")
+def test_a_database_whose_wal_cannot_be_kept_in_place_is_adopted_later(tmp_path: Path) -> None:
+    """The old-version process holds the database locked (``locking_mode=EXCLUSIVE``),
+    so the connection that would keep its WAL in place cannot read it.  Linking on
+    regardless, as if the file were no database, let the rollover of the previous
+    test lose rows again.  The adoption must instead touch nothing and raise, so
+    that the caller creates no empty database under the new name, and the next call,
+    once the lock is gone, adopts the database with every committed row."""
+    old = tmp_path / "old.db"
+    writer = sqlite3.connect(old)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA locking_mode=EXCLUSIVE")
+    writer.execute("CREATE TABLE task_history (task TEXT)")
+    writer.execute("INSERT INTO task_history VALUES ('before')")
+    writer.commit()
+    committed = ["before"]
+    hook = _PauseAfterEveryFileOperation()
+    adopter = _Adopter(tmp_path / "new.db", hook)
+    adopter.start()
+    while True:
+        assert hook.paused.wait(30), "the adopter neither paused nor finished"
+        if adopter.done.is_set():
+            break
+        hook.paused.clear()
+        writer.close()  # the lock holder's last connection: a checkpoint, and the sidecars go
+        writer = sqlite3.connect(old)
+        row = f"after {hook.operations[-1]} {len(committed)}"
+        writer.execute("INSERT INTO task_history VALUES (?)", (row,))
+        writer.commit()
+        committed.append(row)
+        hook.resume.set()
+    adopter.join(30)
+    writer.close()  # the lock is gone: the next call adopts
+    config.adopt_legacy_file(tmp_path / "new.db", "old.db", ("-wal", "-shm", ""))
+    assert_old_name_left_behind(old, "new.db")
+    reader = sqlite3.connect(f"file:{tmp_path / 'new.db'}?mode=ro", uri=True)
+    try:
+        assert reader.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert [row[0] for row in reader.execute("SELECT task FROM task_history")] == committed
+    finally:
+        reader.close()
+    assert _rows_through(old) == committed
+    assert not (tmp_path / "old.db-wal").exists() and not (tmp_path / "old.db-shm").exists()
+    # The locked database was left as it was, and the caller was told so.
+    assert hook.operations == [], hook.operations
+    assert isinstance(adopter.error, sqlite3.OperationalError), adopter.error
 
 
 def test_nothing_happens_without_a_legacy_file_or_with_both(tmp_path: Path) -> None:

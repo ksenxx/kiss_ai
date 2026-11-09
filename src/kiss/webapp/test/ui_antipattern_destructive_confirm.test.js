@@ -15,6 +15,7 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
+const {plain} = require('./simplify2_harness');
 
 const {test, report} = h.makeRunner();
 
@@ -26,14 +27,9 @@ function labels(btns) {
   return btns.map(b => b.textContent);
 }
 
-/** Posted messages are jsdom-realm objects: compare them as plain JSON. */
-function plain(msgs) {
-  return JSON.parse(JSON.stringify(msgs));
-}
-
-function barButton(win, text) {
-  const btn = barButtons(win).find(b => b.textContent === text);
-  assert.ok(btn, `the bar must have a "${text}" button`);
+function discardButton(win) {
+  const btn = barButtons(win).find(b => b.textContent === 'Discard');
+  assert.ok(btn, 'the bar must have a "Discard" button');
   return btn;
 }
 
@@ -62,7 +58,7 @@ async function main() {
       'Do nothing',
       'Discard',
     ]);
-    h.click(win, barButton(win, 'Discard'));
+    h.click(win, discardButton(win));
     assert.strictEqual(
       h.ofType(posted, 'worktreeAction').length,
       0,
@@ -86,7 +82,7 @@ async function main() {
     assert.ok(!win.document.querySelector('.wt-bar .wt-btns').hidden);
     assert.strictEqual(h.ofType(posted, 'worktreeAction').length, 0);
 
-    h.click(win, barButton(win, 'Discard'));
+    h.click(win, discardButton(win));
     h.click(win, ask.querySelector('.wt-confirm-yes'));
     assert.deepStrictEqual(plain(h.ofType(posted, 'worktreeAction')), [
       {type: 'worktreeAction', action: 'discard', tabId},

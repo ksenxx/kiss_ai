@@ -25,10 +25,20 @@ already out.  The replay runs on the test thread (the lock is
 re-entrant), exactly as a reconnecting client's would, and the viewer
 connection records what the daemon broadcast.  Only the LLM boundary
 is stubbed.
+
+Audit finding A20-1 (second test): the same window existed for every
+INTERMEDIATE row of a multi-``<task>`` child, whose ``subagentDone``
+went out before the row was persisted and while the registry still
+reported the row live (the state is re-keyed only when the NEXT row is
+allocated).  A parent replay in that window reopened the finished row
+as a live sub-agent tab that nothing closed afterwards: the end-of-run
+signal names the last row only.  The child's thread is held at the
+exact statement by a trace hook the stub installs on it.
 """
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from typing import Any
@@ -190,3 +200,140 @@ class SubagentDoneOrderTest(DaemonLocalHarness):
                 f"{[(e.get('type'), e.get('tab_id'), e.get('isDone')) for e in list(received)]}"
             )
             time.sleep(0.02)
+
+    def test_replay_between_subtasks_closes_the_finished_intermediate_row(self) -> None:
+        """A parent replay between two ``<task>`` blocks never keeps the first row's tab open."""
+        first_marker = "first child subtask a20-1"
+        second_marker = "second child subtask a20-1"
+        held = threading.Event()
+        release = threading.Event()
+        second_release = threading.Event()
+
+        def hold_at_first_row_persistence(frame: Any, event: str, _arg: Any) -> None:
+            # Holds the child's thread on entry to the first
+            # ``_persist_subtask_row`` call (the intermediate row's),
+            # i.e. in the inter-subtask bookkeeping, before the next
+            # row is allocated and the state re-keyed to it.
+            if event == "call" and frame.f_code.co_name == "_persist_subtask_row":
+                sys.settrace(None)
+                held.set()
+                release.wait(timeout=30)
+            return None
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            prompt = str(kwargs.get("prompt_template", ""))
+            if first_marker in prompt:
+                sys.settrace(hold_at_first_row_persistence)
+            elif second_marker in prompt:
+                second_release.wait(timeout=30)
+            self_agent.total_tokens_used = 5
+            self_agent.budget_used = 0.001
+            self_agent.total_steps = 1
+            raw = "success: true\nis_continue: false\nsummary: done\n"
+            printer = kwargs.get("printer") or getattr(self_agent, "printer", None)
+            if printer is not None:  # pragma: no branch
+                printer.print(raw, type="result", step_count=1, total_tokens=5, cost="$0.0010")
+            return raw
+
+        self._parent_class.run = stub_run
+        received = self._open_viewer()
+        parent = daemon_client.run(
+            "parent seed task",
+            work_dir=self.repo,
+            endpoint_file=self.endpoint_file,
+            timeout=60,
+        )
+        assert parent.success is True and parent.task_id
+        child_out: dict[str, Any] = {}
+
+        def dispatch_child() -> None:
+            child_out["result"] = daemon_client.run(
+                f"<task>{first_marker}</task>\n<task>{second_marker}</task>",
+                work_dir=self.repo,
+                parent_task_id=parent.task_id,
+                parent_tab_id=PARENT_TAB_ID,
+                endpoint_file=self.endpoint_file,
+                timeout=60,
+            )
+
+        def new_tab_rows() -> list[str]:
+            return [
+                str(e["task_id"])
+                for e in list(received)
+                if e.get("type") == "new_tab" and e.get("parent_tab_id") == PARENT_TAB_ID
+            ]
+
+        def announcement_after(start: int, sub_tab_id: str) -> dict[str, Any] | None:
+            return next(
+                (
+                    e
+                    for e in list(received)[start:]
+                    if e.get("type") == "openSubagentTab" and e.get("tab_id") == sub_tab_id
+                ),
+                None,
+            )
+
+        dispatcher = threading.Thread(target=dispatch_child, daemon=True)
+        dispatcher.start()
+        agent_server = self.server._agent_server
+        try:
+            assert held.wait(timeout=30), "the child never reached its first row's persistence"
+            first_row = new_tab_rows()[0]
+            first_sub_tab = _viewer_sub_tab_id(first_row)
+            # A client replaying the parent now (a reconnect, a history
+            # click) announces the first row's tab from the state it sees.
+            announced_from = len(received)
+            agent_server._open_persisted_subagent_tabs(
+                parent_task_id=parent.task_id,
+                parent_tab_id=PARENT_TAB_ID,
+            )
+            announcement = self._wait_for(
+                lambda: announcement_after(announced_from, first_sub_tab),
+                what="the replay's announcement of the first row",
+            )
+            release.set()
+            # The second subtask runs on the same state, re-keyed to its
+            # own row: the first row is history now, the second is live.
+            second_row = self._wait_for(
+                lambda: next((r for r in new_tab_rows() if r != first_row), None),
+                what="the second row's new_tab",
+            )
+            assert _subagent_is_done(first_row)
+            assert not _subagent_is_done(second_row)
+            replayed_from = len(received)
+            agent_server._open_persisted_subagent_tabs(
+                parent_task_id=parent.task_id,
+                parent_tab_id=PARENT_TAB_ID,
+            )
+            first_again = self._wait_for(
+                lambda: announcement_after(replayed_from, first_sub_tab),
+                what="the second replay's announcement of the first row",
+            )
+            assert first_again["isDone"] is True
+            second_live = self._wait_for(
+                lambda: announcement_after(replayed_from, _viewer_sub_tab_id(second_row)),
+                what="the second replay's announcement of the second row",
+            )
+            assert second_live["isDone"] is False
+        finally:
+            release.set()
+            second_release.set()
+        dispatcher.join(timeout=60)
+        assert not dispatcher.is_alive(), "child dispatch never returned"
+        assert child_out["result"].success is True
+        self._wait_for(
+            lambda: _subagent_is_done(second_row),
+            what="the child's thread slot release",
+        )
+        if announcement["isDone"] is False:
+            # Announced live: its ``subagentDone`` must follow the
+            # announcement, as for the last row.
+            events = list(received)
+            after = events[events.index(announcement, announced_from) + 1 :]
+            assert any(
+                e.get("type") == "subagentDone" and e.get("tab_id") == first_sub_tab
+                for e in after
+            ), (
+                "the first row's tab was announced live and never closed; events: "
+                f"{[(e.get('type'), e.get('tab_id'), e.get('isDone')) for e in after]}"
+            )

@@ -46,6 +46,7 @@ from kiss.tests.agents.third_party_agents.recording_daemon import (
     RecordingDaemon,
     serve_recording_daemon,
 )
+from kiss.tests.server.pause import Pause
 
 
 class HoldingDaemon(RecordingDaemon):
@@ -211,6 +212,104 @@ def test_an_explicit_budget_is_reserved_from_registration(
         assert "$1.0000 of its remainder is reserved" in starved_job.result, starved_job.result
         agent_dispatch.wait_until_started(greedy_job)
         assert _budgets(daemon) == pytest.approx([1.0])
+    finally:
+        _settle(parent, daemon)
+
+
+def test_concurrent_explicit_budget_calls_do_not_refuse_each_other(
+    tmp_path: Path,
+    daemon: HoldingDaemon,
+) -> None:
+    """Audit 2026-11-08 S1/F3: two concurrent explicit-budget calls are admitted in order.
+
+    Two ``run_agent`` calls of a $10 parent each ask for the whole $10
+    and both register before either job thread resolves its cap (two
+    tool calls on two threads).  An explicit budget was published as a
+    reservation at registration but admitted only on the job's thread,
+    so each thread found the other's $10 held and both failed with the
+    exhaustion error while the parent's $10 sat unspent.  A request is
+    now admitted in the registration's critical section (lowered to the
+    unreserved remainder, or refused): the first call runs with the
+    $10, the second is refused at once and holds nothing.
+    """
+    parent = _parent(10.0)
+    plans = [_plan(parent, tmp_path, task, max_budget="10") for task in ("first", "second")]
+    first, second = [agent_dispatch.new_agent_job(plan["name"], plan, parent) for plan in plans]
+    try:
+        # Both registered before either job thread can take the registry lock.
+        with agent_dispatch._AGENT_JOBS_LOCK:
+            agent_dispatch.launch_agent_job(first)
+            agent_dispatch.launch_agent_job(second)
+            assert first.budget == pytest.approx(10.0) and not first.finished
+            assert second.finished, "the second request was not refused at registration"
+            assert second.result.startswith("Error: the sorcar agent task could not run: ")
+            assert "reserve-parent has no remaining budget" in second.result, second.result
+            assert "$10.0000 of its remainder is reserved" in second.result, second.result
+            assert live_agent_jobs(parent) == [first]
+        agent_dispatch.wait_until_started(first)
+        assert not first.finished, first.result
+        assert _budgets(daemon) == pytest.approx([10.0])
+    finally:
+        _settle(parent, daemon)
+
+    # A request that fits partly is admitted for what is left, at
+    # registration: a call registered meanwhile sees $4 + $6 held, not
+    # $4 + $10, and the daemon is sent each job's bound ($4 and $6).
+    daemon.gate.clear()
+    small = _plan(parent, tmp_path, "small", max_budget="4")
+    large = _plan(parent, tmp_path, "large", max_budget="10")
+    try:
+        with agent_dispatch._AGENT_JOBS_LOCK:
+            jobs = [agent_dispatch.start_agent_job(plan["name"], plan, parent)
+                    for plan in (small, large)]
+            assert [job.budget for job in jobs] == pytest.approx([4.0, 6.0])
+        for job in jobs:
+            agent_dispatch.wait_until_started(job)
+            assert not job.finished, job.result
+        sent = sorted((c["maxBudget"], c["budgetCap"]) for c in daemon.run_commands[-2:])
+        assert sent == pytest.approx([(4.0, 4.0), (10.0, 6.0)]), daemon.run_commands
+    finally:
+        _settle(parent, daemon)
+
+    # Review R8: the admitted bound holds when the remainder grows before
+    # the dispatch.  A $10 request admitted for the $6 beside a live $4
+    # job is dispatched only after that job finished at no cost: the $10
+    # is unspent again, but the bound sent is still the $6, since a $4
+    # call registered meanwhile was granted against the $6 reservation
+    # (the dispatch used to send the grown remainder: $10 + $4 of a $10
+    # parent).  The second job's thread is held before its dispatch by
+    # an instrumentation of the real code path; nothing is replaced.
+    daemon.gate.clear()
+    first = agent_dispatch.start_agent_job(
+        "sorcar", _plan(parent, tmp_path, "first", max_budget="4"), parent,
+    )
+    agent_dispatch.wait_until_started(first)
+    assert not first.finished, first.result
+    second = agent_dispatch.new_agent_job(
+        "sorcar", _plan(parent, tmp_path, "second", max_budget="10"), parent,
+    )
+    try:
+        with Pause(
+            agent_dispatch._finish_agent_job.__code__, lambda loc: loc["job"] is second,
+        ) as held:
+            agent_dispatch.launch_agent_job(second)
+            assert held.paused.wait(30.0)
+            assert second.budget == pytest.approx(6.0)
+            daemon.release()
+            assert agent_dispatch.join_agent_job(first, 30.0), first.result
+            assert parent._live_budget_used() == pytest.approx(0.0)
+            daemon.gate.clear()
+            held.release()
+            agent_dispatch.wait_until_started(second)
+            assert not second.finished, second.result
+            third = agent_dispatch.start_agent_job(
+                "sorcar", _plan(parent, tmp_path, "third", max_budget="4"), parent,
+            )
+            agent_dispatch.wait_until_started(third)
+            assert not third.finished, third.result
+        sent = [(c["maxBudget"], c["budgetCap"]) for c in daemon.run_commands[-2:]]
+        assert sent == pytest.approx([(10.0, 6.0), (4.0, 4.0)]), daemon.run_commands
+        assert [second.budget, third.budget] == pytest.approx([6.0, 4.0])
     finally:
         _settle(parent, daemon)
 

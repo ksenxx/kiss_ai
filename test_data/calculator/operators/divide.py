@@ -9,7 +9,7 @@ precedence = 2
 
 
 def eval(a: float, b: float) -> float:
-    """Evaluate a / b, raising ValueError on division by zero."""
+    """Evaluate a / b, rejecting division by zero."""
     if b == 0:
         raise ValueError("division by zero")
     return a / b

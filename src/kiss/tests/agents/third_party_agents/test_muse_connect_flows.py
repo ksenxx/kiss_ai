@@ -2133,6 +2133,9 @@ def test_concurrent_redemptions_of_a_one_use_refresh_token(auth_server: _AuthSer
             return None
         if "scope" not in frame.f_locals:
             return park_after_lookup
+        # Returning None does not clear an installed local trace (CPython
+        # keeps ``f_trace``), so stop tracing explicitly: one rendezvous.
+        frame.f_trace = None
         looked_up.wait()
         return None
 
@@ -2141,6 +2144,7 @@ def test_concurrent_redemptions_of_a_one_use_refresh_token(auth_server: _AuthSer
         threading.Thread(target=_redeem_one_use_token, args=(auth_server.base_url, answers))
         for _ in range(2)
     ]
+    before = set(threading.enumerate())
     previous = threading.gettrace()
     threading.settrace(park_after_lookup)
     try:
@@ -2157,3 +2161,10 @@ def test_concurrent_redemptions_of_a_one_use_refresh_token(auth_server: _AuthSer
         (400, {"error": "invalid_grant"}),
     ]
     assert list(auth_server.refresh_tokens) == ["refresh-1"]
+    # Both handlers are done once they have answered: a hook that kept
+    # tracing past its one rendezvous used to park the loser at a second
+    # barrier wait until the barrier broke, ten seconds after the test.
+    handlers = [thread for thread in threading.enumerate() if thread not in before]
+    for handler in handlers:
+        handler.join(timeout=5)
+    assert not any(handler.is_alive() for handler in handlers), "a handler is still parked"

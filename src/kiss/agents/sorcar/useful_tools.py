@@ -4,10 +4,13 @@
 # add your name here
 """Useful tools for agents: file editing and bash execution."""
 
+import codecs
 import collections
+import contextlib
 import difflib
 import functools
 import hashlib
+import io
 import json
 import logging
 import math
@@ -17,13 +20,15 @@ import queue
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +52,12 @@ from kiss.agents.sorcar.edit_guards import (
     rewrite_guard,
     shell_view_target,
 )
+from kiss.agents.sorcar.edit_matching import (
+    nearest_region,
+    reindent,
+    split_lines,
+    tolerant_matches,
+)
 from kiss.agents.sorcar.fanout_guard import parse_tasks_json
 from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SLUG_PREFIX,
@@ -56,6 +67,7 @@ from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.shell_scan import (
     UV_VALUED_OPTIONS,
     SimpleCommand,
+    TooDeepError,
     Word,
     bash_path,
     host_path,
@@ -63,6 +75,7 @@ from kiss.agents.sorcar.shell_scan import (
 )
 from kiss.core import tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
+from kiss.core.locked import locked_call
 from kiss.core.models.model import (
     READ_TOOL_BINARY_MIME_TYPES,
     encode_binary_attachment,
@@ -732,17 +745,18 @@ def _outline(file_path: str, lines: list[str], size: int) -> str | None:
     )
 
 
-_WINDOWS_BASH: str | None = find_bash() if sys.platform == "win32" else None
+_BASH: str | None = find_bash()
 
 
 def _popen_kwargs(command: str) -> dict[str, Any]:
     """Return Popen kwargs appropriate for the current platform.
 
-    On Unix, uses ``shell=True``; on Windows with Git bash available,
-    invokes bash directly; on Windows without bash, falls back to
-    PowerShell.  Spawn with :func:`popen_process_group` so
-    :func:`kill_process_group` can stop the child together with
-    everything it spawned.
+    Invokes bash directly wherever it is found (the tool is ``Bash``:
+    ``shell=True`` runs ``/bin/sh``, dash on Debian, which expands no
+    braces and has no arrays); on Unix without bash, falls back to the
+    platform shell, on Windows without Git bash to PowerShell.  Spawn
+    with :func:`popen_process_group` so :func:`kill_process_group` can
+    stop the child together with everything it spawned.
 
     Args:
         command: The command string to execute.
@@ -750,10 +764,10 @@ def _popen_kwargs(command: str) -> dict[str, Any]:
     Returns:
         Dict of keyword arguments for ``subprocess.Popen``.
     """
-    if sys.platform != "win32":
+    if _BASH:
+        return {"args": [_BASH, "-c", command]}
+    if sys.platform != "win32":  # pragma: no cover — a host without bash
         return {"args": command, "shell": True}
-    if _WINDOWS_BASH:  # pragma: no cover — Windows only
-        return {"args": [_WINDOWS_BASH, "-c", command]}
     ps = shutil.which("pwsh") or shutil.which("powershell") or "powershell"  # pragma: no cover
     return {"args": [ps, "-NoProfile", "-Command", command]}
 
@@ -979,6 +993,18 @@ def _edit_pairs(edits: str) -> list[tuple[str, str, bool]] | str:
     return pairs
 
 
+def _crlf_edit(old: str, new: str, crlf: bool) -> tuple[str, str]:
+    """Return *old* and *new* with CRLF line ends when the file has them (*crlf*), *old* none.
+
+    ``Read`` shows a CRLF file with LF line ends, so an edit written from
+    its output is matched (and its new text written) as if it had been
+    written with CRLF.  Other edits are returned unchanged.
+    """
+    if crlf and "\r\n" not in old:
+        return old.replace("\n", "\r\n"), new.replace("\r\n", "\n").replace("\n", "\r\n")
+    return old, new
+
+
 def _moved_by_later_edit(
     placed: list[tuple[int, int, str]], starts: list[int], old_len: int, new: str,
 ) -> list[tuple[int, int, str]]:
@@ -1001,6 +1027,24 @@ def _moved_by_later_edit(
     return moved
 
 
+def _nearest(content: str, old: str) -> str:
+    """Name the region of *content* closest to a not-found *old* string, numbered; ``""`` for none.
+
+    Appended to the Edit's not-found error (:func:`nearest_region`), so
+    the next Edit can quote the region verbatim without a Read.
+    """
+    region = nearest_region(content, old)
+    if region is None:
+        return ""
+    first, last, text = region
+    lines = [line.rstrip("\r\n") for line in split_lines(text)]
+    numbered = "\n".join(f"{number:5d} | {line}" for number, line in enumerate(lines, first))
+    return (
+        f" The closest region is lines {first}-{last}:\n{numbered}\n"
+        "Re-issue the Edit with the exact text of those lines as old_string."
+    )
+
+
 _LOG_SCAN_BYTES = 8_000_000
 """The most of a job log ``bash_job(until=...)`` searches (its end, when the log is longer)."""
 
@@ -1008,9 +1052,13 @@ _LOG_SCAN_BYTES = 8_000_000
 def _read_end(path: Path, max_bytes: int) -> str:
     """Return the text of the last *max_bytes* of *path*, from the first line start in them.
 
-    When the read starts mid-file the partial first line is dropped.
-    Invalid UTF-8 is replaced.  Bytes appended after the size was taken
-    (a job log grows) are not read.
+    When the read starts mid-file the partial first line is dropped: a
+    line starts after ``\\n``, ``\\r\\n`` or a lone ``\\r`` (a progress
+    bar rewrites one line for a whole run).  A window holding no line
+    start at all is the end of one line and is kept as such, so a log
+    of one long line is not reported as empty.  Invalid UTF-8 is
+    replaced.  Bytes appended after the size was taken (a job log
+    grows) are not read.
 
     Raises:
         OSError: When the file cannot be read.
@@ -1019,11 +1067,12 @@ def _read_end(path: Path, max_bytes: int) -> str:
         size = f.seek(0, os.SEEK_END)
         start = max(0, size - max_bytes)
         # One byte before the window tells whether the window starts
-        # on a line boundary (that byte is "\n") or mid-line.
+        # on a line boundary (that byte is a line break) or mid-line.
         f.seek(max(0, start - 1))
         data = f.read(size - max(0, start - 1))
     if start > 0:
-        data = data.partition(b"\n")[2]
+        line_break = re.search(rb"\r\n|[\r\n]", data)
+        data = data[line_break.end():] if line_break else data[1:]
     return data.decode("utf-8", errors="replace")
 
 
@@ -1079,15 +1128,28 @@ sys.exit(worker.wait())
 """
 
 
-def _start_log_matcher(log_path: Path, until: re.Pattern[str]) -> subprocess.Popen:
+# The one-shot search worker of an ``until`` poll (:meth:`UsefulTools._searched`): exits 0
+# when the file its first argument names matches the pattern its second names, 1 when not.
+# No kiss import: it starts once per run of the poll.
+_SEARCH_FILE_ONCE = (
+    "import re, sys; sys.exit(0 if re.search(sys.argv[2], open(sys.argv[1], encoding='utf-8', "
+    "errors='surrogatepass').read()) else 1)"
+)
+
+
+def _start_log_matcher(
+    log_path: Path, until: re.Pattern[str], once: bool = False,
+) -> subprocess.Popen:
     """Start the matcher: a child that exits 0 once the job log at *log_path* matches *until*.
 
     The child is the supervisor (:data:`_SUPERVISE_LOG_MATCHER`) of the
-    worker that searches (:func:`_match_log_until`), in one process
-    group with it, so :func:`kill_process_tree` ends both; its stdin is
-    a pipe from this process, whose death ends both as well.
+    worker that searches (:func:`_match_log_until`; with *once*,
+    :data:`_SEARCH_FILE_ONCE`, which searches the file as it is and
+    exits 1 when it does not match), in one process group with it, so
+    :func:`kill_process_tree` ends both; its stdin is a pipe from this
+    process, whose death ends both as well.
     """
-    search = (
+    search = _SEARCH_FILE_ONCE if once else (
         "import sys; from kiss.agents.sorcar.useful_tools import _match_log_until; "
         "_match_log_until(*sys.argv[1:])"
     )
@@ -1101,14 +1163,14 @@ def _start_log_matcher(log_path: Path, until: re.Pattern[str]) -> subprocess.Pop
 
 
 def _run_log_matcher(
-    log_path: Path,
-    until: re.Pattern[str],
+    start: Callable[[], subprocess.Popen],
     done: threading.Event,
     stops: list[threading.Event],
     deadline: float,
     matched: threading.Event,
+    failed: list[str],
 ) -> None:
-    """Own the matcher child of one wait: start it, set *matched* if it exits 0, end it in time.
+    """Own the matcher child of one wait: *start* it, set *matched* if it exits 0, end it in time.
 
     Runs on a daemon thread per wait.  The waiting task thread cannot
     own the child itself: the runner's Stop lands at any check point of
@@ -1124,18 +1186,68 @@ def _run_log_matcher(
     thread) or *deadline* (``time.monotonic``, the wait's own) passes.
     The child is killed while still unreaped (:func:`kill_process_group`
     documents the pid-reuse hazard of signalling a reaped leader) and
-    reaped here.
+    reaped here.  A launch that fails (the daemon at its process or
+    descriptor limit) is reported through *failed*, so the wait ends
+    with an error instead of running to its deadline with no search.
+    The child's exit is seen as it happens (``wait`` in 0.2 s slices,
+    between which *done*, *stops* and *deadline* are checked): an
+    ``until`` poll searches once per run, and a run that waited out a
+    0.2 s tick for its verdict added that much to every poll.
     """
-    process = _start_log_matcher(log_path, until)
     try:
-        while process.poll() is None and time.monotonic() < deadline and not done.wait(0.2):
+        process = start()
+    except OSError as e:
+        failed.append(str(e))
+        return
+    try:
+        while process.poll() is None and time.monotonic() < deadline and not done.is_set():
             if any(stop.is_set() for stop in stops):
                 break
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(0.2)
     finally:
         if process.poll() is None:
             kill_process_tree(process)
         if process.wait() == 0:
             matched.set()
+
+
+def _search_output(
+    output: str,
+    regex: re.Pattern[str],
+    done: threading.Event,
+    stops: list[threading.Event],
+    deadline: float,
+    matched: threading.Event,
+) -> None:
+    """Search *output* for *regex* in a matcher child, owning the spool file it reads.
+
+    The helper thread of :meth:`UsefulTools._searched`: the output is
+    spooled to a temporary file, the one-shot matcher
+    (:func:`_start_log_matcher` with ``once``) is run on it as
+    :func:`_run_log_matcher` runs a wait's, and the file is removed
+    here, on a thread no Stop injection reaches, so a Stop landing
+    anywhere in the task thread's frame leaves no file behind.
+
+    Args:
+        output: The text to search.
+        regex: The pattern.
+        done: Set by the task thread when it stops waiting.
+        stops: The events that end the search early.
+        deadline: ``time.monotonic`` time at which the search is ended.
+        matched: Set when the child found a match.
+    """
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", errors="surrogatepass", suffix=".txt", delete=False,
+    ) as spool:
+        spool.write(output)
+    path = Path(spool.name)
+    start = functools.partial(_start_log_matcher, path, regex, True)
+    try:
+        # A matcher that could not be launched is a search that found nothing.
+        _run_log_matcher(start, done, stops, deadline, matched, [])
+    finally:
+        path.unlink(missing_ok=True)
 
 
 FOREGROUND_SLEEP_MAX_SECONDS = 30
@@ -1202,25 +1314,19 @@ def _in_loop(simple: SimpleCommand) -> bool:
     return False
 
 
-def sleep_guard(
-    command: str, limit: float = FOREGROUND_SLEEP_MAX_SECONDS, job_id: str = "",
-) -> str | None:
-    """Refuse a ``sleep`` longer than *limit* seconds (:func:`long_sleep`).
+def sleep_guard(command: str) -> str | None:
+    """Refuse a ``sleep`` longer than :data:`FOREGROUND_SLEEP_MAX_SECONDS` (:func:`long_sleep`).
 
     A long sleep is a polling turn: the model pays a full step to wait.
     The wait belongs in ``bash_job(action="wait", until=<regex>,
     timeout_seconds=N)``, which blocks server-side at no step cost; the
-    refusal names that call with *job_id* (the running job to wait on,
-    when there is one) and the sleep's own length.
+    refusal names that call and the sleep's own length.
 
     Args:
         command: The shell command text.
-        limit: Seconds a foreground sleep may take; the default is the
-            parallel runner's.
-        job_id: The id of a running background job to name, or ``""``.
     """
-    sleep = long_sleep(command, limit)
-    return None if sleep is None else sleep_refusal(sleep[0], job_id)
+    sleep = long_sleep(command, FOREGROUND_SLEEP_MAX_SECONDS)
+    return None if sleep is None else sleep_refusal(sleep[0])
 
 
 def sleep_refusal(seconds: float, job_id: str = "") -> str:
@@ -1295,7 +1401,10 @@ def wait_instead_of_sleep(
     ``tail log``): refusing it only made the model poll with shorter
     sleeps, each a turn.  With no running job, or when the sleep paces
     a loop (taking it out would spin the loop), the sleep runs as
-    written.
+    written; with no running job the note names what to do instead
+    (:func:`sleep_alternative`): ``Bash(until=...)`` polls a condition
+    inside one call, and a process a call leaves running is adopted as
+    a job to ``bash_job(<id>, "wait")`` on.
 
     Args:
         command: The shell command text.
@@ -1307,8 +1416,9 @@ def wait_instead_of_sleep(
 
     Returns:
         ``(refusal, note, command)``: the refusal (``None`` when the
-        command may run), the line telling what was waited on (``""``
-        when nothing) and the command to run.
+        command may run), the line telling what was waited on, or what
+        to wait with instead when the sleep ran with no job known
+        (``""`` otherwise), and the command to run.
     """
     sleep = long_sleep(command, FOREGROUND_SLEEP_MAX_SECONDS)
     if sleep is None:
@@ -1317,12 +1427,32 @@ def wait_instead_of_sleep(
     job_id = running_job()
     if seconds > timeout_seconds:
         return sleep_refusal(seconds, job_id or ""), "", command
-    rest = None if job_id is None or looped else _without_sleep(command, operands)
-    if job_id is None or rest is None:
+    if job_id is None:
+        return None, sleep_alternative(seconds), command
+    rest = None if looped else _without_sleep(command, operands)
+    if rest is None:
         return None, "", command
     status = wait(job_id, seconds)
     note = f"Waited on job {job_id} for up to {seconds:.10g} s instead of sleeping ({status}).\n"
     return None, note, rest
+
+
+def sleep_alternative(seconds: float) -> str:
+    """Return the note after a long foreground sleep that ran as written, naming the alternatives.
+
+    No background job of the task was running to spend the sleep on,
+    so the sleep was a polling turn; the next wait fits in one call.
+
+    Args:
+        seconds: The sleep's length.
+    """
+    return (
+        f"\n[note: the sleep of {seconds:.10g} s ran as written: no background job of this "
+        "task is running. Wait in one call instead: Bash(command, until=\"<regex>\", "
+        "poll_seconds=N, timeout_seconds=M) re-runs the command until the regex matches "
+        "its output; a process a Bash call leaves running is adopted as a job (the result "
+        "names its id): bash_job(<id>, \"wait\") returns when it exits.]\n"
+    )
 
 
 BATCHING_HINT = (
@@ -1367,17 +1497,25 @@ def _is_read_only(command: str) -> bool:
 def edit_args(path: str, edits: list[tuple[str, str, bool]]) -> dict[str, Any]:
     """Return the ``Edit`` arguments making *edits* of *path*: a pair inline, several as ``edits``.
 
+    The call stands for a shell rewrite (a ``sed -i``, a python
+    ``.replace``), which matches verbatim: it is ``exact``, so that the
+    ``Edit``, made once the agent gets to it, retries nothing the
+    rewrite would not have matched in the text the file holds by then.
+
     Args:
         path: The file to edit.
         edits: ``(old, new, replace_all)`` per replacement, in order.
     """
     if len(edits) == 1:
         old, new, every = edits[0]
-        return {"file_path": path, "old_string": old, "new_string": new, "replace_all": every}
+        return {
+            "file_path": path, "old_string": old, "new_string": new, "replace_all": every,
+            "exact": True,
+        }
     pairs = [
         {"old_string": old, "new_string": new, "replace_all": every} for old, new, every in edits
     ]
-    return {"file_path": path, "edits": json.dumps(pairs)}
+    return {"file_path": path, "edits": json.dumps(pairs), "exact": True}
 
 
 def _applied(call: str, result: str, appended: bool = False) -> str:
@@ -1558,6 +1696,23 @@ def _format_bash_timeout(
     return _truncate_output(msg, max_output_chars, spilled_to, dropped)
 
 
+def _common_guards(
+    command: str, work_dir: str | None, timeout_seconds: float, on_host: bool,
+) -> tuple[str | None, str, str, float]:
+    """Apply the guards every launch path runs first; see :func:`_refuse_or_lift` for the shape.
+
+    The refusals and the timeout lift of :func:`refuse_or_lift`, the
+    parent-repository guard, and, when the command runs *on_host*
+    (not on another machine), the ``uv`` rewrite of a worktree command
+    (:func:`uv_in_worktree`).
+    """
+    guard, timeout_seconds = refuse_or_lift(command, work_dir, timeout_seconds)
+    refusal, note = _bash_parent_repo_guard(command, work_dir), ""
+    if refusal is None and on_host:
+        refusal, note, command = uv_in_worktree(command, work_dir)
+    return refusal or guard, note, command, timeout_seconds
+
+
 def _refuse_or_lift(
     command: str,
     work_dir: str | None,
@@ -1567,9 +1722,9 @@ def _refuse_or_lift(
     """Apply the shell guards to *command* and lift its timeout for installs.
 
     The guard chain of :func:`_run_one_command`; :meth:`UsefulTools.Bash`
-    runs the same guards but applies a mechanical rewrite through
-    ``Write``/``Edit`` instead of refusing it
-    (:meth:`UsefulTools._rewrite_instead`).
+    runs the same first guards (:func:`_common_guards`) but applies a
+    mechanical rewrite through ``Write``/``Edit`` instead of refusing
+    it (:meth:`UsefulTools._rewrite_instead`).
 
     Args:
         command: The shell command the model wants to run.
@@ -1587,11 +1742,8 @@ def _refuse_or_lift(
         is rewritten, :func:`uv_in_worktree`), and the possibly lifted
         deadline.
     """
-    guard, timeout_seconds = refuse_or_lift(command, work_dir, timeout_seconds)
-    refusal, note = _bash_parent_repo_guard(command, work_dir), ""
-    if refusal is None and cwd is not None:
-        refusal, note, command = uv_in_worktree(command, work_dir)
-    refusal = refusal or guard
+    refusal, note, command, timeout_seconds = _common_guards(
+        command, work_dir, timeout_seconds, cwd is not None)
     if refusal is None and cwd is None:
         refusal = rewrite_guard(command)  # another machine's files: no scratch exemption
     elif refusal is None and cwd is not None:
@@ -1675,21 +1827,28 @@ def _run_one_command(
 
     Returns:
         ``(returncode, output, seconds)``: the exit code (``None`` on
-        timeout, ``-1`` when the command was refused or failed to
-        launch), the combined output, and the wall time spent.
+        timeout, ``-1`` when the command was refused, not started because
+        *cancel* was set, or failed to launch), the combined output, and
+        the wall time spent.
     """
     # Stream-less: printers attribute output by thread-local task id, so
     # a callback from this worker thread would detach the output from
     # the task.
     runner = UsefulTools(stop_event=cancel, work_dir=work_dir)
     cwd = runner._resolve_cwd()
-    guard, note, command, timeout_seconds = _refuse_or_lift(
-        command, work_dir, timeout_seconds, cwd or os.getcwd())
+    try:
+        guard, note, command, timeout_seconds = _refuse_or_lift(
+            command, work_dir, timeout_seconds, cwd or os.getcwd())
+    except TooDeepError as e:
+        return -1, str(e), 0.0  # this command's verdict, not the whole fan-out's failure
     # Every command of the fan-out is a foreground wait for the caller,
     # so a long sleep is refused as in a foreground ``Bash`` call.
     guard = guard or sleep_guard(command)
     if guard is not None:
         return -1, guard, 0.0
+    if cancel.is_set():
+        # A stop before the launch: the shell is not started at all.
+        return -1, NOT_STARTED, 0.0
     started = time.monotonic()
     capture = _Capture()
     try:
@@ -1778,6 +1937,11 @@ def run_commands_pool(
     cancel = threading.Event()
     pool = ThreadPoolExecutor(max_workers=max_workers or len(command_list))
     try:
+        if _stop_requested(stop_event):
+            # Stopped before the pool: the workers see the cancel at once
+            # (``_run_one_command`` starts no shell) instead of after the
+            # first slice of the wait below, when they would already run.
+            cancel.set()
         futures = [pool.submit(run_one, command, cancel) for command in command_list]
         while not all(f.done() for f in futures):
             if _stop_requested(stop_event):
@@ -1950,19 +2114,34 @@ class BackgroundJob:
         return f"exited with code {returncode}"
 
 
-def _tail_lines(path: Path, lines: int, max_bytes: int) -> str:
-    """Return the last *lines* lines of *path*, reading at most *max_bytes* from its end.
+def _tail_lines(path: Path, lines: int, max_chars: int) -> str:
+    """Return the last *lines* lines of *path* that fit *max_chars* characters, whole lines only.
 
-    A build or training log can be gigabytes long, so only the tail is
-    read (:func:`_read_end`).
+    A build or training log can be gigabytes long, so only its end is
+    read (:func:`_read_end`): four bytes per character of the budget,
+    the most UTF-8 needs, so a line that fits the budget is never lost
+    to its byte count.  A last line longer than the budget is left out;
+    the end of a log that is one line without any line break (a
+    minified blob, a progress bar still being rewritten) is cut to the
+    budget instead, so the log is not reported as empty.
     """
-    if lines <= 0 or max_bytes <= 0:
+    if lines <= 0 or max_chars <= 0:
         return ""
     try:
-        text = _read_end(path, max_bytes)
+        text = _read_end(path, 4 * max_chars)
     except OSError as e:
         return f"(log unreadable: {e})"
-    return "".join(text.splitlines(keepends=True)[-lines:])
+    pieces = text.splitlines(keepends=True)[-lines:]
+    if pieces == [text] and not text.endswith(("\n", "\r")):
+        return text[-max_chars:]
+    kept: list[str] = []
+    size = 0
+    for line in reversed(pieces):
+        size += len(line)
+        if size > max_chars:
+            break
+        kept.append(line)
+    return "".join(reversed(kept))
 
 
 def _format_job_report(job: BackgroundJob, tail_lines: int, max_output_chars: int) -> str:
@@ -2000,19 +2179,65 @@ def _kill_job_group(process: subprocess.Popen) -> None:
             kill_process_group(process.pid, SIGKILL)
 
 
-def _watch_job(stop_event: threading.Event | None, process: subprocess.Popen) -> None:
-    """Reap the background job *process* when it exits; kill its group if *stop_event* fires.
+def _job_group_alive(process: subprocess.Popen) -> bool:
+    """Return whether the group of the reaped job shell *process* still has members.
 
-    Runs on a daemon thread per job.  Reaping promptly (rather than at
-    the next ``bash_job`` call) keeps a finished job from lingering as a
-    zombie; the kill mirrors what a task Stop does to a foreground command.
+    The orphans of an exited shell (``sh -c "server &"``) keep its pid
+    reserved as their group id, so ``killpg(pid, 0)`` names that group
+    and nothing else; a ``ProcessLookupError`` means every member is
+    gone.  So does the pid being alive again: the kernel hands it out
+    only once the last member is gone, and a group of that id is then a
+    stranger's (the same guard as :func:`_kill_job_group`).  Windows has
+    no process groups to probe: there the watch ends with the shell.
     """
+    if sys.platform == "win32":  # pragma: no cover — Windows-only branch
+        return False
+    if pid_alive(process.pid):  # pragma: no cover — needs the pid recycled
+        return False
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover — needs a setuid descendant
+        pass  # a member we may not signal still exists
+    return True
+
+
+def _watch_job(
+    stop_event: threading.Event | None,
+    process: subprocess.Popen,
+    settled: threading.Event,
+    registered: threading.Event,
+) -> None:
+    """Own the background job *process*: reap it when it exits, kill its group on a Stop.
+
+    Runs on the daemon thread that spawned the job (:func:`_spawn_owned`).
+    Until *settled* is set (the launch left its cleanup region) the
+    shell is killed on *stop_event*; then it is killed unless
+    *registered* is set (the launch bound and registered the job),
+    so a Stop or a failure that unwound the launch between the fork
+    and the registration leaves no shell running with no watcher and
+    no job id anyone could kill it by.  Reaping promptly (rather than
+    at the next ``bash_job`` call) keeps a finished job from lingering
+    as a zombie; the kill mirrors what a task Stop does to a foreground
+    command.  The watch goes on after the shell exited while its group
+    still has members (:func:`_job_group_alive`), so the Stop reaches a
+    ``server &`` the shell left behind, as ``bash_job(action="kill")``
+    does (:func:`_kill_job_group`).
+    """
+    while not settled.wait(timeout=0.2):
+        if stop_event is not None and stop_event.is_set():
+            _kill_job_group(process)
+            return
+    if not registered.is_set():
+        _kill_job_group(process)
+        return
     if stop_event is None:
         process.wait()
         return
-    while process.poll() is None:
+    while process.poll() is None or _job_group_alive(process):
         if stop_event.wait(timeout=0.5):
-            _kill_process_group(process)
+            _kill_job_group(process)
             return
 
 
@@ -2021,18 +2246,319 @@ def _stop_monitor(
     process: subprocess.Popen,
     done: threading.Event,
 ) -> None:
-    """Wait for any of *stop_events* to fire, then kill *process* group.
+    """Own the foreground shell *process*: kill its group once a stop fires or *done* is set.
 
-    Exits when *done* is set (process finished normally) or one of the
-    events fires: the task's stop event (the agent was stopped) or the
-    running tool call's interrupt event (the user pressed the tool
-    panel's Stop button).
+    Runs on the daemon thread that spawned the shell
+    (:func:`_spawn_owned`).  The events are the task's stop event (the
+    agent was stopped) and the running tool call's interrupt event (the
+    user pressed the tool panel's Stop button); *done* is set by the
+    wait's ``finally`` once it is over.  The kill after *done* is a
+    no-op for a shell the wait saw exit (:func:`_kill_process_group`
+    declines a reaped pid, so the descendants a ``nohup job &`` left
+    behind are untouched) and ends a shell the wait left running,
+    which only a Stop or a failure unwinding the wait before it bound
+    the handle or killed the shell can leave.
     """
     while not done.wait(timeout=0.2):
-        for event in stop_events:
-            if event.is_set():
-                _kill_process_group(process)
-                return
+        if any(event.is_set() for event in stop_events):
+            break
+    _kill_process_group(process)
+
+
+def _own_child(
+    spawn: Callable[[], subprocess.Popen],
+    own: Callable[[subprocess.Popen], None],
+    handoff: Future[subprocess.Popen],
+) -> None:
+    """Body of the owner thread of :func:`_spawn_owned`: spawn, hand off, then own."""
+    try:
+        process = spawn()
+    except BaseException as e:  # a failed launch is the caller's to report
+        handoff.set_exception(e)
+        return
+    handoff.set_result(process)
+    own(process)
+
+
+def _spawn_owned(
+    spawn: Callable[[], subprocess.Popen],
+    own: Callable[[subprocess.Popen], None],
+) -> subprocess.Popen:
+    """Spawn a child on a daemon thread that then owns it, and return it.
+
+    The calling task thread cannot own the child from its creation: the
+    server's Stop (``KeyboardInterrupt``, or the tool panel's
+    :class:`~kiss.core.tool_interrupt.ToolCallInterrupted`) is injected
+    at any check point of its bytecode, inside ``Popen`` after the fork
+    or right after *spawn* returned, before a handle a ``finally``
+    could kill is bound (the ownership :func:`_run_log_matcher` gives
+    the matcher child).  The owner thread receives no injection: it
+    runs *spawn*, hands the child over, then runs *own* on it, which
+    watches the caller's events and kills the child when the caller
+    left without taking it over.  Call it inside the cleanup region
+    whose ``finally`` signals *own*.
+
+    Args:
+        spawn: Starts the child; its exception is raised here.
+        own: Runs on the owner thread for as long as the child needs
+            watching (:func:`_stop_monitor`, :func:`_watch_job`).
+
+    Returns:
+        The started child.
+
+    Raises:
+        ToolCallInterrupted: When the running tool call was interrupted
+            while waiting for the child; the owner then kills it.
+    """
+    handoff: Future[subprocess.Popen] = Future()
+    threading.Thread(target=_own_child, args=(spawn, own, handoff), daemon=True).start()
+    return tool_interrupt.result_interruptible(handoff)
+
+
+def _spawn_job(popen_kwargs: dict[str, Any], log_path: Path, cwd: str | None) -> subprocess.Popen:
+    """Start a background job's shell: stdout and stderr on *log_path*, stdin ``/dev/null``."""
+    with open(log_path, "wb") as log_file:
+        return popen_process_group(
+            **popen_kwargs,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            env=_clean_env(cwd),
+            cwd=cwd,
+        )
+
+
+# Held by ``Edit`` for its read-modify-write of a file and by ``Write`` for
+# its overwrite or append: the tool instances of a task and its sub-agents
+# (threads of one process editing the same tree) would otherwise undo each
+# other's changes, both calls reporting success, when one's write landed
+# between another's read and write of the same file.  Taken through
+# :func:`locked_call` (an ``RLock`` for its owner check): a task thread
+# parked in an untimed ``acquire`` while another task's write holds the
+# lock reaches no check point, so its Stop would wait for that write.
+_FILE_WRITE_LOCK = threading.RLock()
+
+
+def _open_regular(resolved: Path, flags: int) -> int | None:
+    """Open *resolved* with the ``os.open`` *flags*: its descriptor, ``None`` when not regular.
+
+    The type check and the open are one step, on the descriptor: a
+    path checked with ``is_file`` and then opened may have been swapped
+    for a FIFO meanwhile, and ``open`` of a FIFO with no writer (no
+    reader, for a write) blocks in C for good, where no Stop lands
+    (under :data:`_FILE_WRITE_LOCK` it would hold every Write and Edit
+    of the daemon).  The open is non-blocking where the flag exists, so
+    a FIFO is seen by ``fstat`` instead of waited for (one opened for
+    writing with no reader fails at once), and closed again.
+
+    Args:
+        resolved: The path to open.
+        flags: ``os.O_RDONLY``, or ``os.O_WRONLY | os.O_CREAT`` with
+            ``os.O_TRUNC`` or ``os.O_APPEND``; a file created gets the
+            mode ``open`` gives.
+
+    Raises:
+        OSError: When the file cannot be opened (``FileNotFoundError``
+            when it does not exist and *flags* do not create it).
+    """
+    fd = os.open(resolved, flags | getattr(os, "O_NONBLOCK", 0), 0o666)
+    if stat.S_ISREG(os.fstat(fd).st_mode):
+        return fd
+    os.close(fd)
+    return None
+
+
+def _read_regular(resolved: Path, newline: str | None = None) -> str | None:
+    """Return the UTF-8 text of the regular file *resolved*, ``None`` when it is not one.
+
+    Args:
+        resolved: The path to read (:func:`_open_regular`).
+        newline: As for ``open``; ``None`` translates line endings.
+
+    Raises:
+        OSError: When the file cannot be opened (``FileNotFoundError``
+            when it does not exist).
+        UnicodeDecodeError: When it is not UTF-8 text.
+    """
+    fd = _open_regular(resolved, os.O_RDONLY)
+    if fd is None:
+        return None
+    with open(fd, encoding="utf-8", newline=newline) as f:
+        return f.read()
+
+
+def _read_regular_bytes(resolved: Path, limit: int) -> bytes | None:
+    """Return the first *limit* bytes of the regular file *resolved*, ``None`` when it is not one.
+
+    Args:
+        resolved: The path to read (:func:`_open_regular`).
+        limit: The most bytes to read.
+
+    Raises:
+        OSError: When the file cannot be opened.
+    """
+    fd = _open_regular(resolved, os.O_RDONLY)
+    if fd is None:
+        return None
+    with open(fd, "rb") as f:
+        return f.read(limit)
+
+
+def _write_regular(resolved: Path, content: str, flags: int) -> None:
+    """Write *content* into the regular file *resolved* in place, as UTF-8, line endings as given.
+
+    The file is created when missing; *flags* say where the text goes
+    (``os.O_TRUNC`` replaces the file's text, ``os.O_APPEND`` follows
+    it).
+
+    Raises:
+        OSError: When the file cannot be opened, or is not a regular
+            file (:func:`_open_regular`): a write into a FIFO or a
+            device could block for good.
+    """
+    fd = _open_regular(resolved, os.O_WRONLY | os.O_CREAT | flags)
+    if fd is None:
+        raise OSError(
+            f"{resolved} is not a regular file (FIFO/device/socket); refusing to write to it"
+        )
+    with open(fd, "w", encoding="utf-8", newline="") as f:
+        f.write(content)
+
+
+def _not_regular_error(file_path: str) -> str:
+    """Return the error of a ``Read`` of *file_path* that is not a regular file."""
+    return (
+        f"Error: {file_path} is not a regular file "
+        f"(FIFO/device/socket); reading it could block forever. "
+        f"Use Bash (which has a timeout) if you really need its "
+        f"contents."
+    )
+
+
+def _write_file(resolved: Path, content: str) -> None:
+    """Replace the content of *resolved* with *content*, as UTF-8 with its line endings as given.
+
+    The text goes to a sibling temporary file renamed over *resolved*
+    (``os.replace``, atomic), with the mode of the file it replaces: a
+    Stop injected between the truncating open and the write of an
+    in-place ``write_text`` left the file empty for good, and another
+    agent's Read meanwhile returned ``(file is empty)``; a reader now
+    sees the old text or the new.  A file with other hard links is
+    written in place, through the link, as :func:`_sed_replaces_link`
+    promises (the rename would cut it from its other names); so is a
+    file whose directory refuses the temporary file.
+    """
+    try:
+        st: os.stat_result | None = resolved.stat()
+    except FileNotFoundError:
+        st = None
+    if st is not None and st.st_nlink > 1:
+        _write_regular(resolved, content, os.O_TRUNC)
+        return
+    tmp = resolved.with_name(f".{resolved.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmp, "x", encoding="utf-8", newline="") as f:
+            f.write(content)
+        if st is not None:
+            os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        os.replace(tmp, resolved)
+    except PermissionError:
+        _write_regular(resolved, content, os.O_TRUNC)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _write_or_append(
+    resolved: Path, content: str, pending: tuple[Path, str, str] | None,
+) -> None:
+    """The critical section of :meth:`UsefulTools.Write`: overwrite *resolved*, or append to it."""
+    if pending is not None and (resolved, content) == (pending[0], pending[1] + pending[2]):
+        # The Write stands for an append (``_pending_append``): the body
+        # goes after what the file holds as the Write lands, the file
+        # opened for appending as the shell's ``>>`` opens it, so what
+        # another writer appended since the file was read for the
+        # call, or appends now, is kept.
+        _write_regular(resolved, pending[2], os.O_APPEND)
+    else:
+        _write_file(resolved, content)
+
+
+def _edit_locked(
+    file_path: str, resolved: Path, pairs: list[tuple[str, str, bool]], exact: bool = False,
+) -> str | tuple[str, list[tuple[int, int, str]]]:
+    """The critical section of :meth:`UsefulTools.Edit`: apply *pairs* to *resolved*.
+
+    An *exact* edit matches each ``old`` verbatim: neither the CRLF
+    retry nor the whitespace-tolerant one is made.
+
+    Returns:
+        The new content and ``(position, occurrences, new text)`` per
+        edit, or the error naming what went wrong (nothing written).
+    """
+    content = _read_regular(resolved, newline="")
+    if content is None:
+        return f"Error: File not found: {file_path}"
+    crlf = "\r\n" in content
+    # (position in the final content, occurrences, new text) per edit.
+    placed: list[tuple[int, int, str]] = []
+    for index, (old, new, every) in enumerate(pairs, 1):
+        label = f"edit {index}: " if len(pairs) > 1 else ""
+        if old == new:
+            return f"Error: {label}new_string must be different from old_string"
+        if old == "":
+            return (
+                f"Error: {label}old_string must not be empty. "
+                "Use the Write tool to create or overwrite a file."
+            )
+        count = content.count(old)
+        if count == 0 and not exact:
+            old, new = _crlf_edit(old, new, crlf)
+            count = content.count(old)
+        position = content.find(old)
+        if count == 0 and not every and not exact:
+            matches = tolerant_matches(content, old)
+            if len(matches) > 1:
+                return (
+                    f"Error: {label}String not found verbatim; ignoring "
+                    f"whitespace it matches {len(matches)} places (not unique). "
+                    "Include more surrounding lines in old_string."
+                )
+            if matches:
+                match = matches[0]
+                position, count = match.start, 1
+                old, new = content[match.start:match.end], reindent(new, match.indent)
+        if count == 0:
+            return f"Error: {label}String not found in file.{_nearest(content, old)}"
+        if not every and count > 1:
+            return (
+                f"Error: {label}String appears {count} times (not unique). "
+                f"Use replace_all=True to replace all occurrences."
+            )
+        starts = (
+            [m.start() for m in re.finditer(re.escape(old), content)]
+            if every else [position]
+        )
+        placed = _moved_by_later_edit(placed, starts, len(old), new)
+        placed.append((position, count if every else 1, new))
+        content = (
+            content.replace(old, new) if every
+            else content[:position] + new + content[position + len(old):]
+        )
+    _write_file(resolved, content)
+    return content, placed
+
+
+class _StreamCallbackError(Exception):
+    """The caller's ``stream_callback`` raised *error* (:meth:`UsefulTools._stream`).
+
+    Tells :meth:`UsefulTools._run_foreground` the callback's exception,
+    which propagates out of ``Bash``, from an internal failure of the
+    command's launch or wait, which is an ``Error:`` result.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(error)
+        self.error = error
 
 
 class UsefulTools:
@@ -2069,9 +2595,14 @@ class UsefulTools:
         self.work_dir = work_dir
         # Background jobs started by ``Bash(background=True)``, by job id.
         self._jobs: dict[str, BackgroundJob] = {} if jobs is None else jobs
-        # Read dedupe: (path, start_line, max_lines) -> sha of the file text
-        # the model was last shown for that window (see :meth:`Read`).
-        self._reads_shown: dict[tuple[str, int, int], str] = {}
+        # Read dedupe: sha256 of a window's text the model was shown ->
+        # (step, path, lines) of the Read that showed it (see :meth:`Read`).
+        self._reads_shown: dict[str, tuple[int, str, str]] = {}
+        # Returns the agent's current step number, for the Read dedupe note;
+        # set by the agent that registers these tools.  Without one the
+        # note numbers this instance's Read calls.
+        self.current_step: Callable[[], int] | None = None
+        self._read_calls = 0
         # Outputs spilled to tmp/tool-out/ by this instance (see _spill);
         # the tag keeps instances sharing a work dir (a parent and its
         # reviewer, parallel siblings) from overwriting each other's files.
@@ -2113,12 +2644,17 @@ class UsefulTools:
         """Forget which file windows the model has already been shown.
 
         Called by the agent when earlier tool outputs left the model's
-        context (compaction, a new session), so the next ``Read`` of an
-        unchanged file returns its content instead of the dedupe stub.
-        The read set is kept: the model has still seen the file once in
-        this task, so Edit and Write stay permitted on it.
+        context (compaction, a new session: its ``context_reset_hook``),
+        so the next ``Read`` of an unchanged file returns its content
+        instead of the dedupe stub.  The read set is kept: the model has
+        still seen the file once in this task, so Edit and Write stay
+        permitted on it.
         """
         self._reads_shown.clear()
+
+    def _step(self) -> int:
+        """Return the step number the Read dedupe note cites (:attr:`current_step`)."""
+        return self.current_step() if self.current_step is not None else self._read_calls
 
     def _unread_error(self, file_path: str, verb: str) -> str:
         """Return the error text for modifying a file the model has not read."""
@@ -2136,8 +2672,10 @@ class UsefulTools:
         rule stays a rule.
         """
         try:
-            content = resolved.read_text(encoding="utf-8", newline="")
+            content = _read_regular(resolved, newline="")
         except (OSError, UnicodeDecodeError):
+            content = None
+        if content is None:
             return self._unread_error(file_path, "editing")
         self._mark_read(resolved)
         return (
@@ -2261,40 +2799,36 @@ class UsefulTools:
                     "background job can only be started on an SSH machine."
                 )
             popen_kwargs = {"args": ssh_command(found.ssh, command=command)}
+        # The shell is spawned by the watcher thread that owns it
+        # (:func:`_spawn_owned`): a Stop injected anywhere in this
+        # region, inside ``Popen`` after the fork included, or a failure
+        # before the job is registered, ends with the shell killed
+        # (:func:`_watch_job`) instead of running on with no watcher and
+        # no job id anyone could kill it by.
+        settled, registered = threading.Event(), threading.Event()
         try:
-            _make_dirs_under(root, JOB_LOG_DIR)
-            with open(log_path, "wb") as log_file:
-                process = popen_process_group(
-                    **popen_kwargs,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL,
-                    env=_clean_env(cwd),
-                    cwd=cwd,
+            try:
+                _make_dirs_under(root, JOB_LOG_DIR)
+                process = _spawn_owned(
+                    functools.partial(_spawn_job, popen_kwargs, log_path, cwd),
+                    functools.partial(
+                        _watch_job, self.stop_event, settled=settled, registered=registered,
+                    ),
                 )
-        except OSError as e:
-            logger.debug("Exception caught", exc_info=True)
-            return None, f"Error: could not start background job: {e}"
-        try:
-            threading.Thread(
-                target=_watch_job,
-                args=(self.stop_event, process),
-                daemon=True,
-            ).start()
-        except BaseException:
-            # Thread exhaustion or a stop injected inside ``Thread.start``:
-            # the shell is already running and would otherwise be left
-            # behind with no watcher and no job id anyone could kill it by.
-            _kill_job_group(process)
-            raise
-        job = BackgroundJob(
-            job_id,
-            f"[{machine}] {command}" if machine else command,
-            log_path,
-            process,
-            time.monotonic(),
-        )
-        self._jobs[job_id] = job
+            except OSError as e:
+                logger.debug("Exception caught", exc_info=True)
+                return None, f"Error: could not start background job: {e}"
+            job = BackgroundJob(
+                job_id,
+                f"[{machine}] {command}" if machine else command,
+                log_path,
+                process,
+                time.monotonic(),
+            )
+            self._jobs[job_id] = job
+            registered.set()
+        finally:
+            settled.set()
         where = f" on {machine}" if machine else ""
         return job, (
             f"Started background job {job_id}{where} (pid {process.pid}).\n"
@@ -2306,7 +2840,7 @@ class UsefulTools:
 
     def _wait_for_job(
         self, job: BackgroundJob, timeout_seconds: float, until: re.Pattern[str] | None = None,
-    ) -> None:
+    ) -> str | None:
         """Block until *job* exits, *timeout_seconds* pass, the log matches *until* or a stop lands.
 
         Polls in 0.2 s slices so the task Stop event and the tool
@@ -2321,9 +2855,14 @@ class UsefulTools:
         started inside the cleanup region and ends the child on its own
         at the deadline or either Stop, so a Stop landing anywhere in
         this frame, the launch and the cleanup included, still ends it.
+
+        Returns:
+            ``None``, or the ``Error:`` text of a matcher that could not
+            be started (the wait ends at once then).
         """
         deadline = time.monotonic() + timeout_seconds
         done, matched = threading.Event(), threading.Event()
+        failed: list[str] = []
         matcher = None
         if until is not None:
             stops = [
@@ -2333,7 +2872,10 @@ class UsefulTools:
             ]
             matcher = threading.Thread(
                 target=_run_log_matcher,
-                args=(job.log_path, until, done, stops, deadline, matched),
+                args=(
+                    functools.partial(_start_log_matcher, job.log_path, until),
+                    done, stops, deadline, matched, failed,
+                ),
                 daemon=True,
             )
         try:
@@ -2343,7 +2885,7 @@ class UsefulTools:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or _stop_requested(self.stop_event):
                     break
-                if matched.is_set():
+                if matched.is_set() or failed:
                     break
                 time.sleep(min(remaining, 0.2))
         finally:
@@ -2351,36 +2893,11 @@ class UsefulTools:
             if matcher is not None and matcher.is_alive():
                 matcher.join(timeout=5)
         tool_interrupt.raise_if_interrupted()
-
-    def _start_stop_monitor(
-        self,
-        process: subprocess.Popen,
-        done: threading.Event,
-    ) -> None:
-        """Start a daemon thread that kills *process* on a stop or interrupt.
-
-        Watches this instance's ``stop_event`` and the interrupt event of
-        the tool call running on the calling thread
-        (:func:`kiss.core.tool_interrupt.current_tool_interrupt_event`),
-        so both the task's Stop button and the tool panel's own Stop
-        button kill the shell.  No-op when neither exists.  The monitor
-        exits when *done* is set (process finished normally).
-
-        Args:
-            process: The running subprocess to watch.
-            done: Event the caller sets once the process has finished.
-        """
-        events = [
-            event
-            for event in (self.stop_event, tool_interrupt.current_tool_interrupt_event())
-            if event is not None
-        ]
-        if events:
-            threading.Thread(
-                target=_stop_monitor,
-                args=(events, process, done),
-                daemon=True,
-            ).start()
+        if failed and until is not None:
+            return (
+                f"Error: could not start the log matcher for until={until.pattern!r}: {failed[0]}"
+            )
+        return None
 
     def Read(  # noqa: N802
         self,
@@ -2400,14 +2917,16 @@ class UsefulTools:
                 less than 1 are rejected; values beyond EOF return an
                 explicit sentinel rather than empty content so the
                 model is not misled into thinking the file is empty.
-            force: Re-send a window that is unchanged since an earlier
-                Read in this task (by default such a Read returns a
-                one-line "unchanged" note instead of the content).
+            force: Re-send a window whose text an earlier Read of this
+                session already returned, from any file or range (by
+                default such a Read returns a one-line "unchanged" note
+                naming that Read instead of the content).
         """
         if start_line < 1:
             return f"Error: start_line must be >= 1 (got {start_line}); the parameter is 1-indexed."
         if max_lines < 1:
             return f"Error: max_lines must be >= 1 (got {max_lines})."
+        self._read_calls += 1
         try:
             self._pending_append = None
             resolved = resolve_tool_path(file_path, self.work_dir, Path.exists)
@@ -2416,15 +2935,17 @@ class UsefulTools:
                 return self._read_directory_listing(file_path, resolved)
 
             if resolved.exists() and not resolved.is_file():
-                return (
-                    f"Error: {file_path} is not a regular file "
-                    f"(FIFO/device/socket); reading it could block forever. "
-                    f"Use Bash (which has a timeout) if you really need its "
-                    f"contents."
-                )
+                return _not_regular_error(file_path)
 
+            mime_type, _ = mimetypes.guess_type(str(resolved))
             try:
-                text = resolved.read_text(encoding="utf-8")
+                if (
+                    mime_type in READ_TOOL_BINARY_MIME_TYPES
+                    and resolved.stat().st_size > _MAX_BINARY_READ_BYTES
+                ):
+                    # Refused by size before the text attempt reads it whole.
+                    return self._read_binary(file_path, resolved)
+                text = _read_regular(resolved)
             except UnicodeDecodeError:
                 logger.debug("Binary file detected", exc_info=True)
                 shown = self._read_binary(file_path, resolved)
@@ -2434,6 +2955,8 @@ class UsefulTools:
             except FileNotFoundError:
                 suggestion = _suggest_close_path(resolved)
                 return f"Error: File not found: {file_path}.{suggestion}"
+            if text is None:
+                return _not_regular_error(file_path)
 
             self._mark_read(resolved)
             if text == "":
@@ -2463,24 +2986,25 @@ class UsefulTools:
             remaining = total - last
             if outline is not None:
                 content, shown = outline, "outline"
-                key = (str(resolved), 0, 0)
             else:
-                content = "".join(window)
-                if remaining > 0:
-                    content += (
-                        f"\n[truncated: {remaining} more lines; "
-                        f"Read(file_path, start_line={last + 1}, max_lines=N) continues]"
-                    )
-                shown = f"lines {start_line}-{last} of {total}"
-                key = (str(resolved), start_line, max_lines)
-            digest = hashlib.sha1(text.encode("utf-8", "surrogatepass")).hexdigest()
-            if DEFAULT_CONFIG.read_dedupe and not force and self._reads_shown.get(key) == digest:
+                content, shown = "".join(window), f"lines {start_line}-{last}"
+            # The window's text, before the continuation note, is what is
+            # matched against every window shown so far, from any file.
+            digest = hashlib.sha256(content.encode("utf-8", "surrogatepass")).hexdigest()
+            earlier = self._reads_shown.get(digest)
+            if DEFAULT_CONFIG.read_dedupe and not force and earlier is not None:
+                step, path, where = earlier
                 return (
-                    f"Unchanged since your earlier Read of {file_path} ({shown}): the "
-                    f"content is already in your context above. Pass force=True to "
+                    f"Unchanged since your earlier Read at step {step} ({where} of {path}): "
+                    f"the content is already in your context above. Pass force=True to "
                     f"re-read it."
                 )
-            self._reads_shown[key] = digest
+            self._reads_shown.setdefault(digest, (self._step(), file_path, shown))
+            if outline is None and remaining > 0:
+                content += (
+                    f"\n[truncated: {remaining} more lines; "
+                    f"Read(file_path, start_line={last + 1}, max_lines=N) continues]"
+                )
             return content
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
@@ -2518,7 +3042,9 @@ class UsefulTools:
                     f"ffmpeg/ImageMagick to downscale, or split the file) "
                     f"to produce a smaller artifact first."
                 )
-            data = resolved.read_bytes()
+            data = _read_regular_bytes(resolved, _MAX_BINARY_READ_BYTES)
+            if data is None:
+                return _not_regular_error(file_path)
             header = (
                 f"Read binary file {file_path} as {mime_type} "
                 f"({len(data)} bytes); content attached below.\n"
@@ -2559,16 +3085,7 @@ class UsefulTools:
             ):
                 return self._unread_error(file_path, "overwriting")
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            if pending is not None and (resolved, content) == (pending[0], pending[1] + pending[2]):
-                # The Write stands for an append (``_pending_append``): the body
-                # goes after what the file holds as the Write lands, the file
-                # opened for appending as the shell's ``>>`` opens it, so what
-                # another writer appended since the file was read for the
-                # call, or appends now, is kept.
-                with resolved.open("a", encoding="utf-8", newline="") as appended:
-                    appended.write(pending[2])
-            else:
-                resolved.write_text(content, encoding="utf-8", newline="")
+            locked_call(_FILE_WRITE_LOCK, _write_or_append, resolved, content, pending)
             self._mark_read(resolved)
             self.written_files.add(resolved)
             return f"Successfully wrote {len(content)} characters to {file_path}"
@@ -2583,18 +3100,32 @@ class UsefulTools:
         new_string: str = "",
         replace_all: bool = False,
         edits: str = "",
+        exact: bool = False,
     ) -> str:
         """Performs precise string replacements in files with exact matching.
+
+        An ``old_string`` not in the file verbatim is matched line by
+        line with runs of blanks collapsed and trailing whitespace
+        ignored (:func:`~kiss.agents.sorcar.edit_matching.tolerant_matches`);
+        a unique match is replaced in place of its original lines, the
+        replacement indented as the file's lines are when they only differ
+        from ``old_string`` by a uniform indentation.  When nothing matches
+        that way either, the error names the region of the file closest to
+        ``old_string`` with its line numbers, so the next Edit needs no Read.
 
         Args:
             file_path: Absolute path to the file to modify.
             old_string: Exact text to find and replace.
             new_string: Replacement text, must differ from old_string.
-            replace_all: If True, replace all occurrences.
+            replace_all: If True, replace all occurrences (of the exact
+                text only).
             edits: Several replacements in one call, as a JSON list of
                 ``{"old_string": ..., "new_string": ..., "replace_all": bool}``
                 objects applied in order (all or none); ``old_string`` /
                 ``new_string`` are then ignored.
+            exact: If True, match verbatim only: no retry ignoring
+                whitespace or line endings.  Set on the Edit a shell
+                rewrite (a ``sed -i``, a python ``.replace``) is applied as.
 
         Returns:
             The lines around each replacement after the edit (so no
@@ -2612,40 +3143,12 @@ class UsefulTools:
                 # a scratch file (a note of an earlier session, say) is edited unread,
                 # as Write overwrites one: the result shows the region changed
                 return self._unread_edit_refusal(file_path, resolved, pairs[0][0])
-            content = resolved.read_text(encoding="utf-8", newline="")
-            crlf = "\r\n" in content
-            # (position in the final content, occurrences, new text) per edit.
-            placed: list[tuple[int, int, str]] = []
-            for index, (old, new, every) in enumerate(pairs, 1):
-                label = f"edit {index}: " if len(pairs) > 1 else ""
-                if old == new:
-                    return f"Error: {label}new_string must be different from old_string"
-                if old == "":
-                    return (
-                        f"Error: {label}old_string must not be empty. "
-                        "Use the Write tool to create or overwrite a file."
-                    )
-                count = content.count(old)
-                if count == 0 and crlf and "\r\n" not in old:
-                    old = old.replace("\n", "\r\n")
-                    new = new.replace("\r\n", "\n").replace("\n", "\r\n")
-                    count = content.count(old)
-                if count == 0:
-                    return f"Error: {label}String not found in file"
-                if not every and count > 1:
-                    return (
-                        f"Error: {label}String appears {count} times (not unique). "
-                        f"Use replace_all=True to replace all occurrences."
-                    )
-                position = content.find(old)
-                starts = (
-                    [m.start() for m in re.finditer(re.escape(old), content)]
-                    if every else [position]
-                )
-                placed = _moved_by_later_edit(placed, starts, len(old), new)
-                placed.append((position, count if every else 1, new))
-                content = content.replace(old, new) if every else content.replace(old, new, 1)
-            resolved.write_text(content, encoding="utf-8", newline="")
+            applied = locked_call(
+                _FILE_WRITE_LOCK, _edit_locked, file_path, resolved, pairs, exact,
+            )
+            if isinstance(applied, str):
+                return applied
+            content, placed = applied
             self.written_files.add(resolved)
             reports: list[str] = []
             for index, (position, replaced, new) in enumerate(placed, 1):
@@ -2672,6 +3175,7 @@ class UsefulTools:
         description: str,
         timeout_seconds: float,
         max_output_chars: int,
+        until: str = "",
         **options: Any,
     ) -> str | None:
         """Apply the ``Write``/``Edit`` a shell rewrite of a file stands for, or refuse the rewrite.
@@ -2695,6 +3199,8 @@ class UsefulTools:
             description: The call's description, for the follow-up.
             timeout_seconds: The call's deadline, for the follow-up.
             max_output_chars: The call's output budget, for the follow-up.
+            until: The call's ``until`` regex: a rewrite it would poll
+                is refused instead of applied (:meth:`_apply`).
             **options: The call's ``background`` and ``on_timeout``, for
                 the follow-up (:func:`followup_call`).
 
@@ -2716,7 +3222,7 @@ class UsefulTools:
                 copy.cwd, copy.remainder, description, timeout_seconds, max_output_chars,
                 **options,
             )
-            return self._write_instead(copy, host_path(copy.path), followup)
+            return self._write_instead(copy, host_path(copy.path), followup, until)
         edit = mechanical_edit(command, bash_cwd)
         if edit is not None and edit.path is not None:
             refusal = cd_refusal(edit.cwd, _host_isdir)
@@ -2726,7 +3232,7 @@ class UsefulTools:
                 edit.cwd, edit.remainder, description, timeout_seconds, max_output_chars,
                 **options,
             )
-            applied = self._edit_instead(edit, host_path(edit.path), followup)
+            applied = self._edit_instead(edit, host_path(edit.path), followup, until)
             if applied is not None:
                 return applied
         guarded = functools.partial(_host_guarded, self.work_dir)
@@ -2734,7 +3240,11 @@ class UsefulTools:
             command, bash_cwd, guarded)
 
     def _write_instead(
-        self, copy: HeredocCopy, path: str, followup: tuple[str, dict[str, Any]] | None,
+        self,
+        copy: HeredocCopy,
+        path: str,
+        followup: tuple[str, dict[str, Any]] | None,
+        until: str = "",
     ) -> str:
         """Write the here-document *copy* into the existing file *path* through :meth:`Write`.
 
@@ -2747,7 +3257,8 @@ class UsefulTools:
         text by then; one into a file that is not regular is refused
         unread.
         *followup* is the ``Bash`` call running the rest of the command
-        after the ``Write`` (:func:`followup_call`), if any.
+        after the ``Write`` (:func:`followup_call`), if any; *until* the
+        command's poll regex, which refuses the ``Write`` (:meth:`_apply`).
         """
         resolved = resolve_tool_path(path, self.work_dir)
         shown = json.dumps(path)
@@ -2765,16 +3276,17 @@ class UsefulTools:
         content = copy.body
         old = ""
         if copy.append and resolved.exists():
-            if not resolved.is_file():
-                # Not read before the Write refuses it: reading a FIFO blocks.
+            try:
+                text = _read_regular(resolved, newline="")
+            except (OSError, UnicodeDecodeError) as e:
+                return f"Error: cannot append to {path}: {e}"
+            if text is None:
+                # Seen on the descriptor, not read: reading a FIFO blocks.
                 return (
                     f"Error: {path} exists and is not a regular file "
                     f"(directory/FIFO/device/socket); refusing to append to it."
                 )
-            try:
-                old = resolved.read_text(encoding="utf-8", newline="")
-            except (OSError, UnicodeDecodeError) as e:
-                return f"Error: cannot append to {path}: {e}"
+            old = text
             content = old + content
         if copy.append:
             # Remembered for a file gone since the command was checked too:
@@ -2783,10 +3295,14 @@ class UsefulTools:
             self._pending_append = (resolved, old, copy.body)
         call = f"Write(file_path={shown}, content={preview(content)})"
         args = {"file_path": path, "content": content}
-        return self._apply(call, "Write", args, copy.append, followup)
+        return self._apply(call, "Write", args, copy.append, followup, until)
 
     def _edit_instead(
-        self, edit: MechanicalEdit, path: str, followup: tuple[str, dict[str, Any]] | None,
+        self,
+        edit: MechanicalEdit,
+        path: str,
+        followup: tuple[str, dict[str, Any]] | None,
+        until: str = "",
     ) -> str | None:
         """Apply the *edit* a python heredoc or ``sed -i`` stands for to *path* via :meth:`Edit`.
 
@@ -2799,24 +3315,25 @@ class UsefulTools:
         file then counts as read (as after an ``Edit`` of an unread
         file), so the re-issued call goes through.  *followup* is the
         ``Bash`` call running the rest of the command after the ``Edit``
-        (:func:`followup_call`), if any.  A ``sed -i`` on a link is
-        not converted (:func:`_sed_replaces_link`): the guards decide.
+        (:func:`followup_call`), if any; *until* the command's poll
+        regex, which refuses the ``Edit`` (:meth:`_apply`).  A ``sed -i``
+        on a link is not converted (:func:`_sed_replaces_link`): the
+        guards decide.
         """
         if edit.what != "python heredoc" and _sed_replaces_link(path):
             return None
         resolved = resolve_tool_path(path, self.work_dir, Path.is_file)
         content: str | None = None
         if resolved.is_file():
-            try:
-                content = resolved.read_text(encoding="utf-8", newline="")
-            except (OSError, UnicodeDecodeError):
-                if not self._is_read(resolved):
-                    call = edit_call(path, edit.edits)
-                    return (
-                        f"REFUSED: the {edit.what} did NOT run: it rewrites {path}, which was "
-                        f"not shown in this session. Read(file_path={json.dumps(path)}) first, "
-                        f"then {call}."
-                    )
+            with suppress(OSError, UnicodeDecodeError):
+                content = _read_regular(resolved, newline="")
+            if content is None and not self._is_read(resolved):
+                call = edit_call(path, edit.edits)
+                return (
+                    f"REFUSED: the {edit.what} did NOT run: it rewrites {path}, which was "
+                    f"not shown in this session. Read(file_path={json.dumps(path)}) first, "
+                    f"then {call}."
+                )
         edits = edit.edits if content is None else edit.edits_for(content)
         if edits is None:
             return None
@@ -2832,7 +3349,7 @@ class UsefulTools:
                     "counts as read, so that call (or the same command, applied as that Edit) "
                     "goes through.\n" + region_around_string(content, edits[0][0])
                 )
-        return self._apply(call, "Edit", edit_args(path, edits), followup=followup)
+        return self._apply(call, "Edit", edit_args(path, edits), followup=followup, until=until)
 
     def _apply(
         self,
@@ -2841,6 +3358,7 @@ class UsefulTools:
         args: dict[str, Any],
         appended: bool = False,
         followup: tuple[str, dict[str, Any]] | None = None,
+        until: str = "",
     ) -> str:
         """Make the ``Write``/``Edit`` *call* (*name* with *args*) a shell rewrite stands for.
 
@@ -2848,7 +3366,9 @@ class UsefulTools:
         :class:`ToolRedirect` for the agent to make through its own tool
         path, so its hook, guard and events see the ``Write``/``Edit``
         as if the model had issued it, and the *followup* after it;
-        without one both are made here.
+        without one both are made here.  A command polled with *until*
+        is refused instead, before any edit: ``until`` re-runs a
+        command as written, and the call stands for a change made once.
 
         Args:
             call: The call as the result names it (:func:`edit_call`).
@@ -2857,14 +3377,25 @@ class UsefulTools:
             appended: Whether the rewrite appended (a ``>>`` copy).
             followup: The ``Bash`` call running the rest of the command
                 (:func:`followup_call`), made once the call went through.
+            until: The ``until`` regex of the ``Bash`` call, if any.
 
         Returns:
             The call's result, prefixed with what it was applied as, then
-            the follow-up's (:func:`followup_result`).
+            the follow-up's (:func:`followup_result`); or the refusal of
+            a polled rewrite, naming the call to make and the rest to poll.
 
         Raises:
             ToolRedirect: Under an agent, naming the calls to make.
         """
+        if until:
+            rest = "" if followup is None else (
+                f", then poll {json.dumps(followup[1]['command'])} with until= in a Bash call "
+                "of its own"
+            )
+            return (
+                f"Error: until= re-runs a command as written, but this one is applied as {call} "
+                f"instead of running: make that call{rest}."
+            )
         if self.redirect:
             raise rewrite_redirect(name, args, call, appended, followup)
         result = self.Write(**args) if name == "Write" else self.Edit(**args)
@@ -2941,6 +3472,8 @@ class UsefulTools:
         background: bool = False,
         machine: str = "",
         on_timeout: str = "kill",
+        until: str = "",
+        poll_seconds: float = 5.0,
     ) -> str:
         """Runs a bash command and returns its output.
 
@@ -2954,7 +3487,11 @@ class UsefulTools:
         job: the result gives its job id, its output so far and the
         ``bash_job`` wait to make.  A foreground ``sleep N`` longer than
         ``timeout_seconds`` is refused; while a background job of this
-        task is running, a long sleep waits on that job instead.
+        task is running, a long sleep waits on that job instead.  To wait
+        for a condition (a line in a log, a file, a port) pass ``until``:
+        the command is re-run every ``poll_seconds`` inside this one call
+        until the regex matches its output or ``timeout_seconds`` pass,
+        instead of one call per poll.
 
         Args:
             command: The bash command to run.
@@ -2977,6 +3514,15 @@ class UsefulTools:
                 waits ``timeout_seconds`` for it, so a command that
                 outlives the deadline keeps running and is followed with
                 ``bash_job``.
+            until: A regular expression; when given, the command is run
+                again every ``poll_seconds`` until the regex matches its
+                combined output or ``timeout_seconds`` elapse, and the
+                result is the last run's output plus a line saying whether
+                the regex matched and after how many runs and seconds.
+                Not for ``background=True`` (follow a job's log with
+                ``bash_job(id, "wait", until=...)`` instead).
+            poll_seconds: Seconds between two runs of an ``until`` poll
+                (at least 1).
 
         Returns:
             The output of the command, or for a background job its job
@@ -2985,13 +3531,21 @@ class UsefulTools:
         max_output_chars = _output_budget(max_output_chars)
         started = time.monotonic()
         self._pending_append = None
+        # The poll's arguments are checked before anything runs: a shell
+        # rewrite below is applied as the Edit it stands for.
+        if until and background:
+            return (
+                "Error: until= polls a foreground command; with background=True follow the "
+                "job's log with bash_job(id, \"wait\", until=<regex>) instead."
+            )
+        try:
+            regex = re.compile(until) if until else None
+        except re.error as e:
+            return f"Error: until is not a valid regular expression: {e}"
 
         cwd = self._resolve_cwd()
-        guard, timeout_seconds = refuse_or_lift(command, self.work_dir, timeout_seconds)
-        refusal, note = _bash_parent_repo_guard(command, self.work_dir), ""
-        if refusal is None and not machine:
-            refusal, note, command = uv_in_worktree(command, self.work_dir)
-        guard = refusal or guard
+        guard, note, command, timeout_seconds = _common_guards(
+            command, self.work_dir, timeout_seconds, not machine)
         if guard is None:
             # A shell rewrite of a file is applied as the Write/Edit it stands
             # for, or refused naming it; a machine's files this host cannot see.
@@ -2999,7 +3553,7 @@ class UsefulTools:
                 rewrite_guard(command) if machine
                 else self._rewrite_instead(
                     command, cwd or os.getcwd(), description, timeout_seconds, max_output_chars,
-                    background=background, on_timeout=on_timeout,
+                    until, background=background, on_timeout=on_timeout,
                 )
             )
         if guard is not None:
@@ -3016,7 +3570,12 @@ class UsefulTools:
         note += waited
         grace = DEFAULT_CONFIG.bash_detach_seconds
         result = None
-        if on_timeout == "background":
+        if regex is not None:
+            # The wait a long sleep was spent on counts against the call's deadline.
+            result = self._poll_until(
+                command, regex, poll_seconds, started + timeout_seconds, max_output_chars, cwd,
+            )
+        elif on_timeout == "background":
             result = self._run_then_detach(command, timeout_seconds, max_output_chars, cwd)
         elif 0 < grace < timeout_seconds:
             result = self._run_then_detach(command, timeout_seconds, max_output_chars, cwd, grace)
@@ -3036,29 +3595,139 @@ class UsefulTools:
         launched, gives a result starting with ``Error:``; a finished one
         counts as a view of the file it showed (:meth:`_note_shell_view`).
         """
+        return self._run_once(command, timeout_seconds, max_output_chars, cwd)[0]
+
+    def _run_once(
+        self, command: str, timeout_seconds: float, max_output_chars: int, cwd: str | None,
+    ) -> tuple[str, str | None, int]:
+        """Run *command* once in the foreground: its formatted result, its output, what was dropped.
+
+        The output (stdout and stderr combined, as captured) is ``None``
+        when the command could not be launched or was killed at the
+        deadline, the cases that end an ``until`` poll
+        (:meth:`_poll_until`); the dropped count is the characters of
+        output the capture left out between its head and its tail
+        (:class:`_Capture`); the result is as :meth:`_run_foreground`
+        returns it.
+        """
         capture = _Capture(max_output_chars, self._new_spill)
         try:
             returncode, output = self._bash_streaming(command, timeout_seconds, cwd, capture)
-        except Exception as e:
+        except _StreamCallbackError as failed:
             # Contract (see test_bash_background_pipe_hang): an exception
             # raised by the caller-supplied stream callback must PROPAGATE
             # out of Bash (after the process group is killed), not be
             # swallowed into an "Error:" string like internal failures
-            # (a launch in a vanished worktree) are.
-            if self.stream_callback:
-                raise
+            # (a launch in a directory that cannot be entered) are.
+            raise failed.error from failed.error.__cause__
+        except Exception as e:
             logger.debug("Exception caught", exc_info=True)
-            return f"Error: {e}"
+            return f"Error: {e}", None, 0
         finally:
             capture.close()
         if returncode is None:
             return _format_bash_timeout(
                 output, timeout_seconds, max_output_chars, capture.spilled_to, capture.dropped,
-            )
+            ), None, capture.dropped
         self._note_shell_view(command, returncode, output)
         return _format_bash_result(
             returncode, output, max_output_chars, capture.spilled_to, capture.dropped,
+        ), output, capture.dropped
+
+    def _poll_until(
+        self,
+        command: str,
+        regex: re.Pattern[str],
+        poll_seconds: float,
+        deadline: float,
+        max_output_chars: int,
+        cwd: str | None,
+    ) -> str:
+        """Re-run *command* every *poll_seconds* until *regex* matches its output or *deadline*.
+
+        One tool call however long the wait: the run that matches ends
+        the poll, as does the deadline (the last run is killed at it), a
+        command that cannot be launched, the stop event, or an output
+        too long to be searched whole (the capture keeps a head and a
+        tail: a match across or inside the gap would be wrong).  Each
+        run is a foreground run (:meth:`_run_once`), so its output
+        streams and counts as a view of the file it shows.
+
+        Args:
+            command: The shell command to repeat.
+            regex: Ends the poll when it matches a run's combined output.
+            poll_seconds: Seconds between two runs, at least 1.
+            deadline: The call's deadline, as :func:`time.monotonic` time.
+            max_output_chars: The result's output budget.
+            cwd: The directory the command runs in.
+
+        Returns:
+            The last run's result and a line saying whether the regex
+            matched, after how many runs and seconds.
+        """
+        pause = max(poll_seconds, 1.0)
+        stop = self.stop_event or threading.Event()
+        started = time.monotonic()
+        runs = 0
+        while True:
+            runs += 1
+            # The time left, to the hundredth: the timeout a killed run reports.
+            result, output, dropped = self._run_once(
+                command, round(max(deadline - time.monotonic(), 0.0), 2), max_output_chars, cwd,
+            )
+            matched = output is not None and not dropped and self._searched(regex, output, deadline)
+            left = deadline - time.monotonic()
+            if matched or output is None or dropped or left <= 0:
+                break
+            if tool_interrupt.wait_interruptible(stop, min(pause, left)):
+                break
+            if time.monotonic() >= deadline:
+                break
+        verdict, why = "did not match", ""
+        if dropped:
+            verdict = "was not searched"
+            why = (
+                f": the output is too long to keep whole ({dropped:,} characters dropped); "
+                "poll with a command that prints less (grep, tail)"
+            )
+        elif matched:
+            verdict = "matched"
+        elif time.monotonic() >= deadline:
+            why = ": the call's deadline (timeout_seconds) passed"
+        return (
+            f"{result}\n[until {regex.pattern!r} {verdict} after {runs} run(s) and "
+            f"{time.monotonic() - started:.1f} s{why}]"
         )
+
+    def _searched(self, regex: re.Pattern[str], output: str, deadline: float) -> bool:
+        """Return whether *regex* matches *output*: a child's search, ended at *deadline* or a Stop.
+
+        A pattern that backtracks for minutes holds the GIL of whichever
+        process searches (:func:`_match_log_until`), so the search runs
+        in the matcher child of ``bash_job``'s wait (one-shot: the output
+        goes to a file the worker reads once), owned by a helper thread
+        (:func:`_search_output`) that ends it at the deadline or a Stop;
+        a search ended that way counts as no match, the poll ends there
+        anyway.
+        """
+        done, matched = threading.Event(), threading.Event()
+        stops = [
+            event
+            for event in (self.stop_event, tool_interrupt.current_tool_interrupt_event())
+            if event is not None
+        ]
+        owner = threading.Thread(
+            target=_search_output,
+            args=(output, regex, done, stops, deadline, matched),
+            daemon=True,
+        )
+        try:
+            owner.start()
+            while owner.is_alive():
+                owner.join(0.2)
+        finally:
+            done.set()
+        return matched.is_set()
 
     def _note_shell_view(self, command: str, returncode: int | None, output: str) -> None:
         """Count a ``cat`` / ``sed -n`` / ``grep -n`` of one file as a read of it for Edit/Write.
@@ -3192,10 +3861,20 @@ class UsefulTools:
             its log may still grow.
         """
         deadline = time.monotonic() + seconds
-        with open(job.log_path, encoding="utf-8", errors="replace") as log:
+        # Decoded incrementally: a text-mode read of a log still being
+        # written flushes a character's lead bytes as U+FFFD as soon as it
+        # catches up with the writer, before the rest of the character lands.
+        # Line endings are translated as the foreground path's text-mode
+        # pipe does, so a Windows command's CRLF output reads the same.
+        decoder = io.IncrementalNewlineDecoder(
+            codecs.getincrementaldecoder("utf-8")(errors="replace"), translate=True
+        )
+        with open(job.log_path, "rb") as log:
             while True:
                 exited = job.process.poll() is not None
-                piece = log.read(_READ_CHARS)
+                piece = decoder.decode(log.read(_READ_CHARS))
+                if not piece and exited:
+                    piece = decoder.decode(b"", final=True)  # a cut-off last character
                 if piece:
                     capture.append(piece)
                     if self.stream_callback is not None:
@@ -3260,7 +3939,9 @@ class UsefulTools:
                     pattern = re.compile(until)
                 except re.error as e:
                     return f"Error: until is not a valid regular expression: {e}"
-            self._wait_for_job(job, timeout_seconds, pattern)
+            error = self._wait_for_job(job, timeout_seconds, pattern)
+            if error is not None:
+                return error
         elif action == "kill":
             _kill_job_group(job.process)
         elif action != "tail":
@@ -3433,8 +4114,21 @@ class UsefulTools:
             if line is None:
                 return True
             capture.append(line)
-            if self.stream_callback is not None:
-                self.stream_callback(line)
+            self._stream(line)
+
+    def _stream(self, piece: str) -> None:
+        """Hand *piece* to ``stream_callback`` (if set).
+
+        Its exception is raised as :class:`_StreamCallbackError`, which
+        :meth:`_run_foreground` tells from an internal failure.
+        """
+        callback = self.stream_callback
+        if callback is None:
+            return
+        try:
+            callback(piece)
+        except Exception as e:
+            raise _StreamCallbackError(e) from e
 
     def _bash_streaming(
         self,
@@ -3472,24 +4166,33 @@ class UsefulTools:
         """
         if capture is None:
             capture = _Capture()
-        process = self._spawn(command, cwd)
         done = threading.Event()
         abandoned = threading.Event()
         out_queue: queue.Queue[str | None] = queue.Queue(_QUEUED_PIECES)
         timed_out = False
         eof = False
+        process: subprocess.Popen | None = None
+        # Both the task's Stop button and the tool panel's own Stop
+        # button kill the shell: its owner thread watches this
+        # instance's ``stop_event`` and the interrupt event of the tool
+        # call running on this thread.
+        interrupt = tool_interrupt.current_tool_interrupt_event()
+        stops = [event for event in (self.stop_event, interrupt) if event is not None]
         try:
-            # The helper threads start INSIDE the kill/cleanup region:
-            # a ``Thread.start()`` that raises (thread exhaustion) or a
-            # stop injected here must still kill the shell just spawned
-            # and set ``done`` — otherwise the command runs on unowned
-            # and an already-started monitor polls forever.
-            reader = threading.Thread(
-                target=_drain_stdout, args=(process.stdout, out_queue, abandoned), daemon=True,
+            # The shell is spawned INSIDE the kill/cleanup region, by the
+            # thread that owns it until it exits (:func:`_spawn_owned`,
+            # :func:`_stop_monitor`), and so is the reader started: a
+            # stop injected anywhere here, or a ``Thread.start()`` that
+            # raises (thread exhaustion), must still end with the shell
+            # killed and ``done`` set — otherwise the command runs on
+            # unowned and an already-started monitor polls forever.
+            process = _spawn_owned(
+                functools.partial(self._spawn, command, cwd),
+                functools.partial(_stop_monitor, stops, done=done),
             )
-            self._start_stop_monitor(process, done)
-            reader.start()
-            interrupt = tool_interrupt.current_tool_interrupt_event()
+            threading.Thread(
+                target=_drain_stdout, args=(process.stdout, out_queue, abandoned), daemon=True,
+            ).start()
             deadline = time.monotonic() + timeout_seconds
             eof = self._consume_stream(out_queue, capture, deadline, until_stop=True)
             if not eof:
@@ -3534,7 +4237,8 @@ class UsefulTools:
             # The reader thread outlives this frame: in discard mode it
             # closes the pipe itself once the child lets go of it.
             abandoned.set()
-            _kill_process_group(process)
+            if process is not None:
+                _kill_process_group(process)
             raise
         finally:
             done.set()

@@ -17,13 +17,29 @@
    with its process group: a child it started (a poller, a browser
    opener) used to live on after the hook was killed alone.
 
+And of the 2026-11-05 audit (A13):
+
+4. A cancel or retry that lands once the relay thread has reaped the
+   hook (it exited on its own) signals nothing: the group's pid may
+   already be a stranger's, and a helper the hook left behind (the
+   user's browser) is left alone as after any natural exit.
+5. A login whose relay thread cannot start (thread exhaustion) is
+   ended and reported as a ``signinError``; it used to live on with
+   its pipes open and nobody reading them.
+6. A cancel whose end thread cannot start still sees the hook out,
+   bounded, and leaves nothing unstarted for ``shutdown`` to join; a
+   SIGTERM-ignoring hook used to be forgotten alive and ``shutdown``
+   raised on the never-started thread.
+
 The hooks are real executables under a temporary ``KISS_HOME``.
 """
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -34,9 +50,10 @@ from typing import Any
 
 import pytest
 
+from kiss.core.processes import exited_unreaped, terminate_process_group
 from kiss.server import signin
 from kiss.server.signin import SIGNIN_HOOK, SigninLogin, send_signin
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import nproc_limit_lowered_to_one, posix_only, thread_start_can_be_starved
 from kiss.tests.server.test_signin_window import forget_status
 
 pytestmark = posix_only("the stub hooks are scripts with a shebang")
@@ -80,6 +97,81 @@ if sys.argv[1:2] == ["status"]:
     time.sleep(60)
 print('{{"logged_in": false}}')
 """
+
+
+# ``login`` prints its URL, starts a helper in its own group (the hook
+# itself, re-run as ``helper``: it notes a SIGTERM in a file and leaves),
+# records the helper's pid, and exits 0 with its success line once the
+# test creates ``finish``.
+_EXITING_WITH_HELPER_HOOK = f"""#!{sys.executable}
+import os, signal, subprocess, sys, time
+home = os.environ["KISS_HOME"]
+if sys.argv[1:2] == ["helper"]:
+    def noted(signum, frame):
+        open(os.path.join(home, "helper-signalled"), "w").close()
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, noted)
+    while True:
+        time.sleep(0.05)
+if sys.argv[1:2] == ["login"]:
+    print('{{"url": "http://127.0.0.1:1/login"}}', flush=True)
+    helper = subprocess.Popen([sys.executable, sys.argv[0], "helper"])
+    with open(os.path.join(home, "helper.pid"), "w") as fh:
+        fh.write(str(helper.pid))
+    while not os.path.exists(os.path.join(home, "finish")):
+        time.sleep(0.02)
+    print('{{"logged_in": true, "email": "me@example.com"}}', flush=True)
+    sys.exit(0)
+print('{{"logged_in": false}}')
+"""
+
+# ``login`` prints its URL and waits for a paste like a real hook.
+_WAITING_HOOK = """#!/bin/sh
+case "$1" in
+  login) echo '{"url": "http://127.0.0.1:1/login"}'; read -r line; exit 0 ;;
+esac
+echo '{"logged_in": false}'
+"""
+
+# ``login`` prints its URL, then ignores SIGTERM for a minute.
+_STUBBORN_HOOK = """#!/bin/sh
+case "$1" in
+  login) echo '{"url": "http://127.0.0.1:1/login"}'; trap "" TERM; exec sleep 60 ;;
+esac
+echo '{"logged_in": false}'
+"""
+
+
+@contextlib.contextmanager
+def _thread_stacks_too_large_to_map() -> Iterator[None]:
+    """Make ``Thread.start`` fail for real while ``subprocess.Popen`` keeps working.
+
+    ``RLIMIT_NPROC`` cannot tell the two apart (a fork counts against it
+    like a thread); a 256 TiB stack is beyond any address space, so
+    ``pthread_create`` cannot map it and ``Thread.start`` raises
+    ``RuntimeError`` exactly as under thread exhaustion.
+    """
+    previous = threading.stack_size()
+    threading.stack_size(2**48)
+    try:
+        yield
+    finally:
+        threading.stack_size(previous)
+
+
+def _huge_stack_starves_threads() -> bool:
+    """Whether :func:`_thread_stacks_too_large_to_map` makes ``Thread.start`` fail here."""
+    try:
+        with _thread_stacks_too_large_to_map():
+            probe = threading.Thread(target=lambda: None)
+            try:
+                probe.start()
+            except RuntimeError:
+                return True
+            probe.join()
+    except (ValueError, OverflowError):
+        pass
+    return False
 
 
 def _install_hook(home: Path, body: str) -> Path:
@@ -190,6 +282,162 @@ def test_hook_output_that_is_not_utf8_ends_the_login_with_an_error(home: Path) -
         assert proc.stdout is not None and proc.stdout.closed
     finally:
         login.shutdown()
+
+
+def test_an_end_after_the_hooks_exit_signals_its_group_nothing(home: Path) -> None:
+    """A cancel landing once the relay reaped the hook leaves its helper alone (item 4)."""
+    _install_hook(home, _EXITING_WITH_HELPER_HOOK)
+    events: list[Event] = []
+    url_seen = threading.Event()
+
+    def reply(event: Event, broadcast: bool) -> None:
+        events.append(event)
+        if event["type"] == "signinUrl":
+            url_seen.set()
+
+    login = SigninLogin()
+    pid_file = home / "helper.pid"
+    try:
+        login.start("test", reply)
+        assert url_seen.wait(10), events
+        assert _wait_until(lambda: pid_file.exists() and pid_file.read_text() != "")
+        helper_pid = int(pid_file.read_text())
+        proc = login._proc
+        assert proc is not None
+        with login._lock:  # once it has seen the hook exit, the relay parks on this lock to reap it
+            (home / "finish").touch()
+            assert _wait_until(lambda: exited_unreaped(proc)), "the hook did not exit"
+            assert login._proc is proc
+            login._end_locked()  # what cancel() and a retry's start() do under the lock
+            assert login._ending == [], "an end thread was started for a reaped hook"
+        assert _wait_until(lambda: not _relay_threads() and not login._ending)
+        assert proc.returncode == 0
+        assert login._proc is None
+        assert not (home / "helper-signalled").exists(), "the reaped hook's group was signalled"
+        assert _alive(helper_pid), "the hook's helper did not survive the end"
+    finally:
+        with contextlib.suppress(OSError, ValueError):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+        login.shutdown()
+    assert [e["type"] for e in events] == ["signinUrl"], events
+    assert proc.stdin is not None and proc.stdin.closed
+    assert proc.stdout is not None and proc.stdout.closed
+
+
+def test_a_cancelled_hook_is_reaped_by_the_thread_that_signals_its_group_alone(
+    home: Path,
+) -> None:
+    """The end thread's group signal never names a pid the relay freed by reaping the hook.
+
+    The hook dies on the SIGTERM of ``cancel``; the end thread is held
+    (a profile hook on its first statement) until the relay thread is
+    gone, which is when a relay that reaps the exited hook has done so,
+    and then signals the group: the pid must still be the end thread's
+    to reap, else a stranger could own it by then.
+    """
+    _install_hook(home, _WAITING_HOOK)
+    events: list[Event] = []
+    url_seen = threading.Event()
+    reaped_before_signal: list[int | None] = []
+
+    def reply(event: Event, broadcast: bool) -> None:
+        events.append(event)
+        if event["type"] == "signinUrl":
+            url_seen.set()
+
+    def hold_end_until_the_relay_is_gone(frame: Any, event: str, arg: Any) -> None:
+        if (
+            event == "call"
+            and threading.current_thread().name == "signin-end"
+            and frame.f_code is terminate_process_group.__code__
+        ):
+            for relay in _relay_threads():
+                relay.join(10)
+            reaped_before_signal.append(frame.f_locals["proc"].returncode)
+
+    login = SigninLogin()
+    threading.setprofile(hold_end_until_the_relay_is_gone)
+    try:
+        login.start("test", reply)
+        assert url_seen.wait(10), events
+        proc = login._proc
+        assert proc is not None
+        login.cancel()
+        assert _wait_until(lambda: not login._ending and not _relay_threads())
+    finally:
+        threading.setprofile(None)
+        login.shutdown()
+    assert reaped_before_signal == [None], (
+        "the relay reaped the hook before its group was signalled"
+    )
+    assert proc.returncode == -signal.SIGTERM
+    assert [e["type"] for e in events] == ["signinUrl"], events
+    assert proc.stdin is not None and proc.stdin.closed
+    assert proc.stdout is not None and proc.stdout.closed
+
+
+@pytest.mark.skipif(
+    not _huge_stack_starves_threads(), reason="an unmappable stack does not starve threads here"
+)
+def test_a_login_whose_relay_cannot_start_is_ended_and_reported(home: Path) -> None:
+    """No relay thread: the hook is ended, its pipes closed, the window told (item 5)."""
+    hook = _install_hook(home, _WAITING_HOOK)
+    events: list[Event] = []
+    login = SigninLogin()
+    try:
+        with _thread_stacks_too_large_to_map():
+            login.start("test", lambda event, broadcast: events.append(event))
+        assert [(e["type"], e["error"]) for e in events] == [
+            ("signinError", "can't start new thread")
+        ]
+        assert login._proc is None
+        assert login._ending == []
+        assert not _relay_threads()
+        (proc,) = _hook_processes(hook)
+        assert proc.returncode == -signal.SIGTERM
+        assert proc.stdin is not None and proc.stdin.closed
+        assert proc.stdout is not None and proc.stdout.closed
+    finally:
+        login.shutdown()
+
+
+@pytest.mark.skipif(
+    not thread_start_can_be_starved(), reason="RLIMIT_NPROC cannot starve Thread.start on this host"
+)
+def test_a_cancel_whose_end_thread_cannot_start_still_ends_the_hook(home: Path) -> None:
+    """The SIGTERM-ignoring hook is killed, bounded; ``shutdown`` has nothing unstarted (item 6)."""
+    _install_hook(home, _STUBBORN_HOOK)
+    events: list[Event] = []
+    url_seen = threading.Event()
+
+    def reply(event: Event, broadcast: bool) -> None:
+        events.append(event)
+        if event["type"] == "signinUrl":
+            url_seen.set()
+
+    login = SigninLogin()
+    login.start("test", reply)
+    proc = login._proc
+    assert proc is not None
+    try:
+        assert url_seen.wait(10), events
+        started = time.monotonic()
+        with nproc_limit_lowered_to_one():
+            login.cancel()
+        assert time.monotonic() - started < 2 * signin.HOOK_END_TIMEOUT + 5.0
+        assert proc.returncode == -signal.SIGKILL
+        assert login._ending == []
+        assert login._proc is None
+        login.shutdown()
+        assert _wait_until(lambda: not _relay_threads())
+    finally:
+        if proc.poll() is None:  # forgotten alive (the bug): not left to run out its minute
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+        login.shutdown()
+    assert [e["type"] for e in events] == ["signinUrl"], events
+    assert proc.stdin is not None and proc.stdin.closed
+    assert proc.stdout is not None and proc.stdout.closed
 
 
 def test_status_hook_timeout_ends_the_hooks_descendants(

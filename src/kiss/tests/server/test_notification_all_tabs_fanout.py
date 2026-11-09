@@ -163,6 +163,7 @@ class TestModelPickReachesAllTabs:
 
     def test_explicit_task_id_fallback_reaches_viewers(self) -> None:
         printer = _CapturePrinter()
+        printer.subscribe_tab("7777", "tab-launch")
         printer.subscribe_tab("7777", "tab-viewer-a")
         printer.subscribe_tab("7777", "tab-viewer-b")
         assert printer._task_key() == ""  # thread-local unset
@@ -191,6 +192,7 @@ class TestModelPickReachesAllTabs:
 
     def test_show_model_in_picker_end_to_end(self) -> None:
         printer = _CapturePrinter()
+        printer.subscribe_tab("8888", "tab-launch")
         printer.subscribe_tab("8888", "tab-viewer")
 
         agent = ChatSorcarAgent("picker-test")
@@ -202,6 +204,24 @@ class TestModelPickReachesAllTabs:
 
         picks = printer.of_type("modelPick")
         assert {e["tabId"] for e in picks} == {"tab-launch", "tab-viewer"}
+
+
+def test_retired_origin_never_receives_the_old_tasks_transients() -> None:
+    printer = _CapturePrinter()
+    printer.subscribe_tab("old", "reused")
+    printer.cleanup_tab("reused")
+    printer.subscribe_tab("new", "reused")
+    for viewers in ((), ("still-watching-old",)):
+        for tab in viewers:
+            printer.subscribe_tab("old", tab)
+        printer.events.clear()
+        printer.broadcast_transient(
+            {"type": "followup_suggestion", "text": "old instruction"},
+            task_id="old", tab_id="reused",
+        )
+        printer.broadcast_agent_model_pick("old-model", "reused", "old")
+        assert {e["tabId"] for e in printer.events} == set(viewers)
+        assert printer.tasks_for_tab("reused") == ["new"]
 
 
 class TestBroadcastTransientPrimitive:
@@ -248,10 +268,10 @@ class TestBroadcastTransientPrimitive:
         printer.broadcast_transient(
             {"type": "notification", "id": "n2", "message": "yo"},
             task_id="5252",
-            tab_id="tab-new",  # unknown to the registry: still reached
+            tab_id="tab-new",  # not subscribed: must not bypass the registry
         )
         second = [e for e in printer.of_type("notification") if e["id"] == "n2"]
-        assert {e["tabId"] for e in second} == {"tab-a", "tab-new"}
+        assert {e["tabId"] for e in second} == {"tab-a"}
 
     def test_thread_local_task_id_takes_precedence(self) -> None:
         printer = _CapturePrinter()

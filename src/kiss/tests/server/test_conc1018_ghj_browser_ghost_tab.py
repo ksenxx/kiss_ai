@@ -45,6 +45,7 @@ from playwright.async_api import Page
 from kiss.agents.sorcar import web_stealth
 from kiss.server.browser_tab import BrowserTabService
 from kiss.tests.server._memory_printer import MemoryPrinter
+from kiss.tests.server.conftest import ensure_loop
 
 _PLAYWRIGHT_CACHE = Path.home() / ".cache" / "ms-playwright"
 _MAX_ROUNDS = 10
@@ -126,7 +127,7 @@ def _open_opener(svc: BrowserTabService) -> tuple[Any, asyncio.AbstractEventLoop
     which actually happens on a single CPU.  Awaiting ``_open`` itself
     keeps the real announcements and waits for the committed navigation.
     """
-    loop = svc._ensure_loop()
+    loop = ensure_loop(svc)
     asyncio.run_coroutine_threadsafe(svc._open("about:blank", "c1"), loop).result(60)
     with svc._lock:
         (opener_rec,) = svc._pages.values()

@@ -246,14 +246,17 @@ def hung_server() -> Iterator[_HungHTTPServer]:
         srv.close()
 
 
-def test_active_is_not_blocked_while_start_waits_for_the_previous_session(
+def test_start_replaces_a_stuck_predecessor_at_once_and_active_never_waits(
     hung_server: _HungHTTPServer, home: Path
 ) -> None:
-    """``active()`` answers at once while ``start`` waits for a stuck predecessor.
+    """``start`` replaces a predecessor stuck in a network call without waiting for it.
 
-    Pre-fix ``start`` held the class lock across the five-second wait
-    for the previous session, so ``active()`` (and every tool answer
-    built from it) blocked for as long.
+    ``cancel`` cancels the predecessor's flow on its own loop, so a
+    login sitting in a request the server never answers unwinds at
+    once: the replacement's ``start`` no longer spends the five-second
+    predecessor wait, and ``active()`` (and every tool answer built
+    from it), which ``start`` used to block behind the class lock for
+    as long, answers at once meanwhile.
     """
     cfg = MCPServerConfig(name="hung", transport="http", url=hung_server.url)
     first = MCPLoginSession.start(cfg, wait_seconds=0.5)
@@ -265,16 +268,17 @@ def test_active_is_not_blocked_while_start_waits_for_the_previous_session(
 
     starter = threading.Thread(target=start_second, daemon=True)
     try:
-        starter.start()
-        time.sleep(0.5)
-        assert starter.is_alive(), "start() should still be waiting for the first session"
         began = time.monotonic()
+        starter.start()
         active = MCPLoginSession.active("hung")
         elapsed = time.monotonic() - began
         assert elapsed < 2.0, f"active() blocked for {elapsed:.1f}s behind start()"
-        assert active is first
+        assert active is not None
         starter.join(timeout=30)
         assert not starter.is_alive()
+        elapsed = time.monotonic() - began
+        assert elapsed < 4.0, f"start() waited {elapsed:.1f}s behind the cancelled predecessor"
+        assert first.wait(5) and first.error == "sign-in cancelled"
         assert MCPLoginSession.active("hung") is second[0]
     finally:
         hung_server.close()  # the hung requests fail at once; both threads exit

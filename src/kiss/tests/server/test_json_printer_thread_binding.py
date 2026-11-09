@@ -12,7 +12,7 @@ thread's binding or its events reach no tab.
 
 import threading
 
-from kiss.agents.sorcar._concurrency import locked_call
+from kiss.core.locked import locked_call
 from kiss.server.json_printer import JsonPrinter
 
 

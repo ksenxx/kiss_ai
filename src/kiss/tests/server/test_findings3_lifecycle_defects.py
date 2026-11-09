@@ -291,6 +291,10 @@ class TestFollowupSinglePersistence(unittest.TestCase):
             is_task_active=True,
         )
         agent_state.register(state)
+        # The launching tab is subscribed like any viewer (the runner
+        # does it once the row is allocated); a transient reaches the
+        # task's current subscribers only, never an unsubscribed origin.
+        self.printer.subscribe_tab(self.task_id, "s308-launch-tab")
         self.printer.subscribe_tab(self.task_id, "s308-viewer-tab")
 
     def tearDown(self) -> None:

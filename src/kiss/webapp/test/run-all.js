@@ -57,12 +57,17 @@ const MAX_JOBS = 32;
 // of them fails, so a suite a gate runs is run through the gate only.  A
 // gate names each suite it runs in a quoted '*.test.js' string (its
 // `testFile`, or an entry of its SUITES list), which is how they are
-// found here.
+// found here.  Comments are stripped first: a suite a gate merely
+// mentions in a comment is not run by it, and must not be dropped from
+// the run on that account.
 function testFiles() {
   const files = fs.readdirSync(TEST_DIR);
   const gated = new Set();
   for (const gate of files.filter(f => f.endsWith('.coverage.js'))) {
-    const src = fs.readFileSync(path.join(TEST_DIR, gate), 'utf-8');
+    const src = fs
+      .readFileSync(path.join(TEST_DIR, gate), 'utf-8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:\\])\/\/.*$/gm, '$1');
     for (const m of src.matchAll(/['"]([\w.-]+\.test\.js)['"]/g)) {
       gated.add(m[1]);
     }

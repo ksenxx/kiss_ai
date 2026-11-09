@@ -90,6 +90,86 @@ class TestDetachTunnelLeavesProcessAlive(unittest.TestCase):
                 proc.kill()
                 proc.wait()
 
+    @posix_only("the SIGPIPE drain shim is a detached cat")
+    def test_spawn_in_flight_during_detach_is_handed_off_not_owned(self) -> None:
+        """A cloudflared published after ``_detach_tunnel`` ran is handed to the
+        next daemon (pidfile + drain shim), never owned by the detached server.
+
+        The SIGTERM thread detaches first, while ``_start_tunnel`` is still
+        inside its spawn on an executor thread; the spawn's publish must
+        then observe the detach instead of installing a live child whose
+        stderr pipe dies with this process.  The test holds the publish
+        lock so the detach provably precedes the publish.
+        """
+        tmp = Path(tempfile.mkdtemp(prefix="kiss-detach-spawn-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        orig_pidfile = ws_mod._CLOUDFLARED_PIDFILE
+        ws_mod._CLOUDFLARED_PIDFILE = tmp / "cloudflared.pid"
+        self.addCleanup(setattr, ws_mod, "_CLOUDFLARED_PIDFILE", orig_pidfile)
+        drained = tmp / "drained"
+        # Stand-in for cloudflared: floods stderr well past the pipe
+        # buffer, then records that the writes went through — only a
+        # reader on the pipe (the drain shim) lets them complete.
+        fake = [
+            sys.executable, "-u", "-c",
+            "import sys, time\n"
+            "sys.stderr.write('x' * (1 << 18))\n"
+            "sys.stderr.flush()\n"
+            f"open({str(drained)!r}, 'w').close()\n"
+            "time.sleep(120)\n",
+        ]
+        server = RemoteAccessServer(use_tunnel=False)
+        self.addCleanup(self._kill_recorded_tunnel, server)
+
+        def spawn() -> None:
+            with contextlib.suppress(RuntimeError):
+                server._spawn_cloudflared(["--url", "http://127.0.0.1:1"], launch_prefix=fake)
+
+        spawner = threading.Thread(target=spawn, daemon=True)
+        detacher = threading.Thread(target=server._detach_tunnel, daemon=True)
+        with server._tunnel_lock:  # the in-flight spawn cannot publish yet
+            spawner.start()
+            detacher.start()
+            # Released while the spawn is still inside its fail-fast
+            # wait, so a detach that waits for the lock gets it first.
+            detacher.join(ws_mod._SPAWN_FAILFAST_WINDOW / 2)
+        spawner.join(30)
+        detacher.join(30)
+        self.assertFalse(spawner.is_alive() or detacher.is_alive())
+
+        self.assertIsNone(
+            server._tunnel_proc,
+            "regression: the spawn published its cloudflared into the detached server",
+        )
+        pidfile = ws_mod._load_cloudflared_pidfile()
+        assert pidfile is not None, "the next daemon has no pidfile to adopt the tunnel from"
+        self.assertTrue(pid_alive(pidfile["pid"]), "the handed-off cloudflared was killed")
+        self.assertIsInstance(
+            pidfile.get("metrics_port"), int,
+            "the pidfile must record the metrics port the next daemon probes",
+        )
+        deadline = time.monotonic() + 10
+        while not drained.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(drained.exists(), "no drain shim reads the handed-off stderr pipe")
+
+    @staticmethod
+    def _kill_recorded_tunnel(server: RemoteAccessServer) -> None:
+        """Kill the stand-in cloudflared, whether published or only recorded."""
+        pids = set()
+        proc = server._tunnel_proc
+        if proc is not None:
+            pids.add(proc.pid)
+        pidfile = ws_mod._load_cloudflared_pidfile()
+        if pidfile is not None:
+            pids.add(int(pidfile["pid"]))
+        for pid in pids:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=5)
+
     def test_adopted_pid_keeps_running(self) -> None:
         """An adopted cloudflared survives ``_detach_tunnel``."""
         server = RemoteAccessServer(use_tunnel=False)

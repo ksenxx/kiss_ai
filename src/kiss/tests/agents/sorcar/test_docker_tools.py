@@ -4,11 +4,23 @@
 # add your name here
 """Tests for DockerTools — Read, Write, Edit inside Docker containers."""
 
+import functools
 import unittest
 
 from kiss.agents.sorcar.docker_manager import DockerManager
 from kiss.agents.sorcar.docker_tools import DockerTools
+from kiss.core.config import DEFAULT_CONFIG
 from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
+
+
+class _Steps:
+    """The agent's step counter a test sets: what ``DockerTools(step_count=...)`` cites."""
+
+    def __init__(self) -> None:
+        self.step = 0
+
+    def __call__(self) -> int:
+        return self.step
 
 
 @unittest.skipUnless(is_docker_available(), "Docker daemon is not running")
@@ -28,6 +40,144 @@ class TestDockerTools(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.env.close()
 
+    def _session(self, step_count: _Steps | None = None) -> DockerTools:
+        """A fresh DockerTools with the file fetch: one session of the Read dedupe."""
+        return DockerTools(self.env.Bash, self.env.read_bytes, step_count)
+
+    def test_read_returns_the_unchanged_note_for_lines_already_returned(self) -> None:
+        """A Read whose lines an earlier Read returned (any range, any path) is the note."""
+        tools = self._session()
+        tools.Write("/tmp/dedupe/a.txt", "x\ny\nx\ny\nz\n")
+        tools.Write("/tmp/dedupe/b.txt", "x\ny\nx\ny\nz\n")
+        first = tools.Read("/tmp/dedupe/a.txt", max_lines=2)
+        self.assertEqual(first, "x\ny\n[truncated: 3 more lines]\n")
+        # Another range of the same file with the same lines (the truncation note aside).
+        self.assertEqual(
+            tools.Read("/tmp/dedupe/a.txt", max_lines=2, start_line=3),
+            "Unchanged since your earlier Read at step 1 (lines 1-2 of /tmp/dedupe/a.txt)",
+        )
+        # The whole file; then a sub-range of that request whose window is the same
+        # text; then another path with the same content.
+        self.assertEqual(tools.Read("/tmp/dedupe/a.txt"), "x\ny\nx\ny\nz\n")
+        self.assertEqual(
+            tools.Read("/tmp/dedupe/a.txt", max_lines=5, start_line=1),
+            "Unchanged since your earlier Read at step 3 (lines 1-5 of /tmp/dedupe/a.txt)",
+        )
+        self.assertEqual(
+            tools.Read("/tmp/dedupe/b.txt"),
+            "Unchanged since your earlier Read at step 3 (lines 1-5 of /tmp/dedupe/a.txt)",
+        )
+        # A changed file is read again; force=True re-sends an unchanged window and
+        # becomes the showing the next note cites.
+        self.assertIn("Successfully", tools.Edit("/tmp/dedupe/a.txt", "z", "w"))
+        self.assertEqual(tools.Read("/tmp/dedupe/a.txt"), "x\ny\nx\ny\nw\n")
+        self.assertEqual(tools.Read("/tmp/dedupe/b.txt", force=True), "x\ny\nx\ny\nz\n")
+        self.assertEqual(
+            tools.Read("/tmp/dedupe/b.txt"),
+            "Unchanged since your earlier Read at step 7 (lines 1-5 of /tmp/dedupe/b.txt)",
+        )
+        # The reset of a context hand-off: the content is sent again.
+        tools.reset_reads()
+        self.assertEqual(tools.Read("/tmp/dedupe/b.txt"), "x\ny\nx\ny\nz\n")
+        self.assertEqual(
+            tools.Read("/tmp/dedupe/b.txt"),
+            "Unchanged since your earlier Read at step 9 (lines 1-5 of /tmp/dedupe/b.txt)",
+        )
+
+    def test_read_note_cites_the_harness_step_and_errors_are_never_deduped(self) -> None:
+        """The note cites the agent's step; errors, sentinels and failed reads come back whole."""
+        steps = _Steps()
+        tools = self._session(steps)
+        tools.Write("/tmp/dedupe/steps.txt", "one\n")
+        tools.Write("/tmp/dedupe/empty.txt", "")
+        steps.step = 12
+        self.assertEqual(tools.Read("/tmp/dedupe/steps.txt"), "one\n")
+        steps.step = 15
+        self.assertEqual(
+            tools.Read("/tmp/dedupe/steps.txt"),
+            "Unchanged since your earlier Read at step 12 (lines 1-1 of /tmp/dedupe/steps.txt)",
+        )
+        for _ in range(2):
+            self.assertTrue(tools.Read("/tmp/dedupe/empty.txt").startswith("(file is empty)"))
+            self.assertTrue(tools.Read("/tmp/dedupe/none.txt").startswith("Error: File not found"))
+            past = tools.Read("/tmp/dedupe/steps.txt", start_line=5)
+            self.assertTrue(past.startswith("Error: start_line=5 is past EOF"), past)
+            # A file that exists but cannot be read fails the command (no window to record).
+            failed = tools.Read("/proc/self/mem", max_lines=2)
+            self.assertIn("Error: cannot read /proc/self/mem", failed)
+            self.assertTrue(failed.rstrip().endswith("[exit code: 1]"), failed)
+        # KISS_READ_DEDUPE=0 turns the note off.
+        enabled = DEFAULT_CONFIG.read_dedupe
+        DEFAULT_CONFIG.read_dedupe = False
+        try:
+            self.assertEqual(tools.Read("/tmp/dedupe/steps.txt"), "one\n")
+        finally:
+            DEFAULT_CONFIG.read_dedupe = enabled
+
+    def test_edit_tolerates_whitespace_and_keeps_the_file_indentation(self) -> None:
+        """An old_string off only by blanks edits the original lines; an exact match stays exact."""
+        tools = self._session()
+        tools.Write(
+            "/tmp/tolerant/f.py",
+            "def f(x):\n    if x:\n        return foo(a,  b)   \n    return 0\n",
+        )
+        # Less indentation, one blank for two, no trailing blanks: the matched
+        # lines keep their indentation, the new text gets it too.
+        result = tools.Edit(
+            "/tmp/tolerant/f.py",
+            "  if x:\n      return foo(a, b)",
+            "  if x:\n      return bar(a, b)\n  else:\n      pass",
+        )
+        self.assertIn("Successfully replaced 1 occurrence(s)", result)
+        self.assertEqual(
+            tools.Read("/tmp/tolerant/f.py"),
+            "def f(x):\n    if x:\n        return bar(a, b)\n    else:\n        pass\n"
+            "    return 0\n",
+        )
+        # An exact match takes the exact path even where the tolerant match is ambiguous.
+        tools.Write("/tmp/tolerant/g.txt", "a = 1\na =  1\n")
+        self.assertIn("Successfully", tools.Edit("/tmp/tolerant/g.txt", "a = 1", "a = 2"))
+        self.assertEqual(tools.Read("/tmp/tolerant/g.txt"), "a = 2\na =  1\n")
+        # A CRLF file gets the new text with its line endings.
+        tools.Write("/tmp/tolerant/h.txt", "one\r\ntwo  =  2\r\nthree\r\n")
+        result = tools.Edit("/tmp/tolerant/h.txt", "one\ntwo = 2", "uno\ndos = 2")
+        self.assertIn("Successfully", result)
+        self.assertEqual(self.env.read_bytes("/tmp/tolerant/h.txt"), b"uno\r\ndos = 2\r\nthree\r\n")
+
+    def test_edit_names_the_ambiguity_or_the_closest_region_when_nothing_matches(self) -> None:
+        """Several tolerant matches: their count; none: the closest lines, usable as old_string."""
+        tools = self._session()
+        path = "/tmp/tolerant/n.py"
+        tools.Write(path, "import os\n\ndef main():\n    run(1)\n    run(2)\n    run(1)\n")
+        # replace_all keeps the exact semantics: no tolerant substitution, the region named.
+        self.assertEqual(
+            tools.Edit(path, "run(  2)", "stop()", replace_all=True),
+            "Error: String not found in file. The closest region is lines 5-5 of "
+            f"{path}; pass its text verbatim as old_string:\n    run(2)",
+        )
+        self.assertEqual(
+            tools.Edit(path, " run(1)   ", "x"),
+            "Error: String not found in file; ignoring runs of blanks and trailing "
+            "whitespace it matches 2 places, so add surrounding lines to old_string "
+            "to make it unique",
+        )
+        region = "def main():\n    run(1)\n    run(2)"
+        self.assertEqual(
+            tools.Edit(path, "def main():\n    run(3)\n    run(2)", "x"),
+            "Error: String not found in file. The closest region is lines 3-5 of "
+            f"{path}; pass its text verbatim as old_string:\n{region}",
+        )
+        self.assertIn("Successfully", tools.Edit(path, region, "def main():\n    pass"))
+        self.assertEqual(tools.Read(path), "import os\n\ndef main():\n    pass\n    run(1)\n")
+        # Without the file's text (no fetch, a fetch over its cap, an empty file) the
+        # exact error stands.
+        bare = "Error: String not found in file"
+        self.assertTrue(DockerTools(self.env.Bash).Edit(path, "nope", "x").startswith(bare))
+        capped = DockerTools(self.env.Bash, functools.partial(self.env.read_bytes, max_bytes=4))
+        self.assertTrue(capped.Edit(path, "nope", "x").startswith(bare))
+        tools.Write("/tmp/tolerant/empty.txt", "")
+        empty = tools.Edit("/tmp/tolerant/empty.txt", "nope", "x")
+        self.assertEqual(empty.split(), f"{bare}\n[exit code: 1]".split())
 
     def test_write_error(self) -> None:
         result = self.tools.Write("/dev/null/impossible/test.txt", "fail")

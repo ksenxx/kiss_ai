@@ -94,11 +94,30 @@ def _is_boundary(char: str) -> bool:
     return category == "Zs" or category.startswith(("P", "S"))
 
 
+def list_start(attrs: list[tuple[str, str | None]]) -> int:
+    """Return the number an ``<ol>`` with *attrs* counts from: its ``start``, else 1.
+
+    ``ensure_html`` turns a Markdown list beginning at ``5.`` into
+    ``<ol start="5">``; a renderer that counted every list from 1
+    renumbered the steps a summary referred to.  A ``start`` that is
+    no integer counts as absent, as browsers treat it.
+
+    Args:
+        attrs: The tag's attributes as :class:`~html.parser.HTMLParser`
+            hands them to ``handle_starttag``.
+    """
+    try:
+        return int(dict(attrs).get("start") or 1)
+    except ValueError:
+        return 1
+
+
 class _ListState:
     """Rendering state of one open ``<ul>``/``<ol>``."""
 
-    def __init__(self, ordered: bool, indent: str) -> None:
-        self.counter = 1 if ordered else 0
+    def __init__(self, ordered: bool, indent: str, start: int = 1) -> None:
+        self.ordered = ordered
+        self.counter = start
         self.indent = indent
         self.child_indent = indent
 
@@ -311,7 +330,7 @@ class _HtmlToMarkdownParser(SkippingHTMLParser):
             self._inline.append((tag, len(self.text), None))
         elif tag in ("ul", "ol"):
             self._newline(1 if self._lists else 2)
-            self._lists.append(_ListState(tag == "ol", self._indent()))
+            self._lists.append(_ListState(tag == "ol", self._indent(), list_start(attrs)))
         elif tag == "li":
             self._start_list_item()
         elif tag in _TABLE_TAGS:
@@ -328,8 +347,8 @@ class _HtmlToMarkdownParser(SkippingHTMLParser):
         if not self._lists:
             self._lists.append(_ListState(False, ""))
         state = self._lists[-1]
-        marker = f"{state.counter}. " if state.counter else "- "
-        if state.counter:
+        marker = f"{state.counter}. " if state.ordered else "- "
+        if state.ordered:
             state.counter += 1
         state.child_indent = state.indent + " " * len(marker)
         self.drop_empty_marker()

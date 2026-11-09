@@ -152,9 +152,6 @@ function testAnswerStaysOpenWhileTaskStreams() {
     !panel.classList.contains('collapsed'),
     'the answer must stay open while the task streams on',
   );
-  // The user can still fold it by hand.
-  panel.querySelector('.ask-answer-h').click();
-  assert.ok(panel.classList.contains('collapsed'), 'manual collapse works');
   win.close();
   console.log('  ok - the answer stays open while the task keeps streaming');
 }

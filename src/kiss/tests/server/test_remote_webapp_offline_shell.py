@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import http.client
 import json
+import os
 import re
 import ssl
 import threading
@@ -194,12 +195,23 @@ def live_server(tmp_path: Path) -> Iterator[_LiveServer]:
 
 @pytest.mark.timeout(120)
 def test_sw_script_precaches_exactly_the_page_assets(
-    live_server: _LiveServer,
+    live_server: _LiveServer, tmp_path: Path,
 ) -> None:
     """``/sw.js`` is served as JavaScript with a manifest that lists the
     page (``/``) and exactly the cache-busted ``/media`` URLs the rendered
-    page references — so the worker can serve every asset the app loads."""
-    status, headers, body = live_server.get("/sw.js")
+    page references — so the worker can serve every asset the app loads.
+    Rendering it spawns no ``git rev-parse``: the version label the page
+    shows is not part of the shell, and the browser re-fetches the worker
+    on every navigation (A21-2)."""
+    git_trace = tmp_path / "git-trace.log"
+    os.environ["GIT_TRACE"] = str(git_trace)
+    try:
+        status, headers, body = live_server.get("/sw.js")
+    finally:
+        del os.environ["GIT_TRACE"]
+    assert not git_trace.exists(), (
+        "rendering /sw.js spawned git:\n" + git_trace.read_text(encoding="utf-8")
+    )
     assert status == 200
     assert headers["content-type"].startswith("text/javascript")
     script = body.decode("utf-8")
