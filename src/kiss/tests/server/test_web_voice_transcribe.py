@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for remote-webapp voice transcription.
 
-Bug being reproduced — the remote webapp recognized the "Abracadabra" wake
+Bug being reproduced — the remote webapp recognized the "Hey Sorcar" wake
 word but never transcribed the speech that followed.  The daemon's
 local listener captures and translates post-wake speech on the
 daemon's own microphone; in the browser nothing did: the page's
@@ -320,7 +320,7 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
         (empty text).
         """
         ws = await self._connect_ok()
-        wake_pcm = _tts_pcm(Path(self.tmpdir), "wake", "Abracadabra")
+        wake_pcm = _tts_pcm(Path(self.tmpdir), "wake", "Hey Sorcar")
         gap = b"\x00" * (2 * 16000)
         command_pcm = _tts_pcm(
             Path(self.tmpdir), "command", "open the readme file",
@@ -335,7 +335,7 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
         )
         text = msg["text"].lower()
         self.assertIn("readme", text)
-        self.assertNotIn("abracadabra", text)
+        self.assertNotIn("sorcar", text)
         self.assertEqual(msg["language"], "en")
 
         unprefixed = base64.b64encode(

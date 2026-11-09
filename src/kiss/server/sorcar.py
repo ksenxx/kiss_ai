@@ -2498,7 +2498,7 @@ class ServerApi:
     ) -> None:
         """Transcribe a browser's post-wake utterance.
 
-        The chat page heard the "Abracadabra" wake word and captured the
+        The chat page heard the "Hey Sorcar" wake word and captured the
         utterance that followed.  The audio is translated by gpt-audio
         (:func:`kiss.server.speech.transcribe_pcm`) and answered with
         the ``voiceSpeech`` message ``voice.js`` handles.  The

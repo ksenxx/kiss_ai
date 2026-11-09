@@ -50,7 +50,7 @@ plain-language prompts work everywhere**:
    password from the Settings panel and open it on any phone, tablet, or browser.
 2. **Voice.** Switch on the mic button (the voice trigger: the page then listens
    locally for the wake word, and the setting survives reloads) and speak, prefixed
-   with the wake word: *"Abracadabra, tell the eng Slack channel that the deploy is
+   with the wake word: *"Hey Sorcar, tell the eng Slack channel that the deploy is
    done."* You can also steer a running task by voice; Sorcar replies aloud in the
    language you spoke.
 3. **Your existing messaging apps.** Once a channel gateway is running (see
@@ -598,7 +598,7 @@ directly:
 
 ## Example prompts
 
-Everything below is a prompt you can type — or speak, with the wake word "Abracadabra, …" —
+Everything below is a prompt you can type — or speak, with the wake word "Hey Sorcar, …" —
 into any Sorcar chat surface (web/mobile app, a channel gateway, an
 OpenAI-compatible client).
 
@@ -634,7 +634,7 @@ polite request.
 
 **5. Speak it.** Press the mic button on any chat surface:
 
-> Abracadabra, send "dinner at 7" to my family Telegram chat.
+> Hey Sorcar, send "dinner at 7" to my family Telegram chat.
 
 ### Cross-service pipelines
 

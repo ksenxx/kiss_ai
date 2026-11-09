@@ -26,9 +26,9 @@ from kiss.tests.server.voice_tts import HAVE_MAC_TTS, _make_sorcar_wav, _say_wav
 
 @unittest.skipUnless(HAVE_MAC_TTS, "requires macOS `say` and `afconvert`")
 class TestVoiceWakeWordMicBrowser(unittest.TestCase):
-    """Speaking 'Abracadabra' into the (fake-device) microphone of a real
+    """Speaking 'Hey Sorcar' into the (fake-device) microphone of a real
     Chromium visiting the real web app fires the wake indicator and
-    never types the literal word 'abracadabra' into the input."""
+    never types the literal wake phrase into the input."""
 
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp())
@@ -100,25 +100,72 @@ class TestVoiceWakeWordMicBrowser(unittest.TestCase):
             finally:
                 browser.close()
 
+    def test_wake_after_30_seconds_of_listening(self) -> None:
+        """Chrome swaps an audio sink that has played 30 s of exact
+        silence for a fake one that ran the page's audio processor at
+        under half speed, so the recognizers got chopped audio and a
+        wake phrase said after the first 30 s of listening was missed.
+        The phrase here first plays 35 s after the mic opens."""
+        from playwright.sync_api import sync_playwright
+
+        wav = _say_wav(
+            self.tmpdir,
+            "late",
+            "[[slnc 35000]] "
+            + " [[slnc 1200]] ".join(["Hey Sorcar"] * 3)
+            + " [[slnc 1200]]",
+        )
+        with sync_playwright() as pw:
+            browser = _launch_chromium_with_mic(pw, wav)
+            try:
+                context = browser.new_context(ignore_https_errors=True)
+                context.add_init_script(
+                    "localStorage.setItem('kissVoiceEnabled', '1');"
+                )
+                page = context.new_page()
+                goto_retrying_network_change(
+                    page,
+                    f"https://127.0.0.1:{self.port}/",
+                    wait_until="load",
+                    timeout=60_000,
+                )
+                page.wait_for_function(
+                    "document.getElementById('voice-btn')"
+                    ".classList.contains('voice-listening')",
+                    timeout=120_000,
+                )
+                started = page.evaluate("performance.now()")
+                page.wait_for_function(
+                    "document.getElementById('voice-btn')"
+                    ".classList.contains('voice-triggered')",
+                    timeout=70_000,
+                )
+                woke_after = (page.evaluate("performance.now()") - started) / 1000
+                self.assertGreater(woke_after, 30)
+            finally:
+                browser.close()
+
     def test_everyday_speech_does_not_wake(self) -> None:
-        """The reason "Hey Sorcar" was replaced: its grammar words were
-        everyday words, so Vosk force-fitted "hey soccer", "sorry car"
-        and "hey so the car" onto the wake phrase at confidence 1.0.
-        Those same phrases, plus speech that shares syllables with
-        "abracadabra", at the most permissive sensitivity (100), must
-        leave the "Abracadabra" listener asleep."""
+        """Everyday speech that shares the wake grammar's words must
+        leave the listener asleep at the most permissive sensitivity
+        (100): "sorry car" lacks the "hey", and a sentence that goes on
+        after "hey so, the car" ends its grammar final in [unk].  (A
+        paused "Hey, so the car." or "hey soccer" does wake the browser;
+        the daemon's transcript check rejects the first, see
+        test_voice_dual_check.py, and the second sounds the same as the
+        wake phrase.)"""
         from playwright.sync_api import sync_playwright
 
         wav = _say_wav(
             self.tmpdir,
             "everyday",
             " [[slnc 1200]] ".join([
-                "hey soccer",
                 "sorry car",
                 "hey so the car is ready",
-                "abstract algebra",
-                "I bought a candelabra",
-                "Abby ran a cab for Barbara",
+                "hey so, the car broke down again",
+                "hey sir, the car is here",
+                "hey sarah can you call me",
+                "I play soccer every Saturday",
             ]) + " [[slnc 1200]]",
         )
         with sync_playwright() as pw:
