@@ -464,9 +464,11 @@ class TestBashUntil:
             rf"after [23] run\(s\) and {self.SECONDS}: the call's deadline \(timeout_seconds\) "
             r"passed\]", out, re.DOTALL,
         ), out
-        # A run killed at the deadline is the last one, its partial output kept.
+        # A run killed at the deadline is the last one, its partial output kept.  Its
+        # timeout is the time left, to the hundredth (1.49 s once the run starts late).
         out = ut.Bash("echo part; sleep 10", "slow", until="never", timeout_seconds=1.5)
-        assert out.startswith("Error: Command execution timeout after 1.5s. Output before")
+        killed = re.match(r"Error: Command execution timeout after ([\d.]+)s\. Output before", out)
+        assert killed is not None and 1.0 <= float(killed.group(1)) <= 1.5, out
         assert re.search(
             rf"after 1 run\(s\) and {self.SECONDS}: the call's deadline \(timeout_seconds\) "
             r"passed\]$", out,
@@ -495,7 +497,7 @@ class TestBashUntil:
         out = ut.Bash(f"printf '%s' {'a' * 60}!", "regex", until=r"(a+)+$", timeout_seconds=1)
         assert time.monotonic() - before < 4
         assert re.search(
-            r"did not match after 1 run\(s\) and 1\.\d s: the call's deadline", out,
+            rf"did not match after 1 run\(s\) and {self.SECONDS}: the call's deadline", out,
         ), out
 
     def test_until_does_not_search_an_output_too_long_to_keep_whole(self, temp_test_dir):

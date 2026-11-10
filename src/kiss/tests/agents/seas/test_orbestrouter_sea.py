@@ -32,11 +32,11 @@ _SEA_PATH = Path(orbestrouter_sea.__file__).resolve()
 
 
 def test_both_models_are_openrouter_twins_of_the_bestrouter_models() -> None:
-    """Fable 5.1 works, Astra reviews, both as priced ``openrouter/`` catalog entries."""
+    """Fable 5.2 works, Astra reviews, both as priced ``openrouter/`` catalog entries."""
     assert orbestrouter_sea.SIMPLE_MODEL == "openrouter/anthropic/claude-opus-5.5-medium"
-    assert orbestrouter_sea.PRIMARY_MODEL == "openrouter/anthropic/claude-fable-5.1-max"
+    assert orbestrouter_sea.PRIMARY_MODEL == "openrouter/anthropic/claude-fable-5.2-max"
     assert orbestrouter_sea.REVIEW_MODEL == "openrouter/openai/gpt-6-astra"
-    assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-1-max"
+    assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-2-max"
     assert bestrouter_sea.REVIEW_MODEL == "gpt-6-astra"
     for model in (
         orbestrouter_sea.SIMPLE_MODEL,
@@ -66,8 +66,8 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     flat = " ".join(protocol.split())
     for phrase in (
         "Use 'openrouter/anthropic/claude-opus-5.5-medium' for simple questions and queries.",
-        "Use 'openrouter/anthropic/claude-fable-5.1-max' model for all other tasks, including "
-        "software development.",
+        "Use 'openrouter/anthropic/claude-fable-5.2-max' model for all other tasks, including "
+        "software development and analysis and writing.",
         "Use openrouter/openai/gpt-6-astra (not codex) through "
         "`run_agent(model=\"openrouter/openai/gpt-6-astra\", tool_profile=\"review\", "
         "wait=\"false\")` for a thorough read-only review and debugging of the other model's "

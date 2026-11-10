@@ -3119,6 +3119,43 @@ def _mark_remote_charge_banked(charge: int, cost: float, tokens: int, steps: int
         )
 
 
+def _pending_remote_charges(task_id: str) -> list[tuple[int, float, int, int, bool]]:
+    """Return the remote charges owed to the unfinished row *task_id* that its totals do not hold.
+
+    A charge recorded while the row ran with no live agent to bank it
+    on (a bridge-owned run already unregistered before its final save,
+    a run in a process other than the daemon's) is neither banked nor
+    settled.  The run's final save banks these on its ledger before its
+    snapshot (``ChatSorcarAgent._save_final_usage``), so the totals its
+    caller folds hold them too, not only the row.  The charges already
+    marked banked are returned as well: the ledger counts a charge's
+    key once, so re-banking one the live agent took adds nothing, and
+    one whose mark committed before a Stop cut its bank is banked by
+    the retried save.
+
+    Args:
+        task_id: The row the charges are owed to.
+
+    Returns:
+        ``(id, cost, tokens, steps, marked)`` of each such charge,
+        oldest first; *marked* is whether it is marked banked.
+    """
+    db = _get_db()
+    with _rw_lock.read_lock():
+        rows = db.execute(
+            "SELECT id, cost, tokens, steps, banked FROM remote_charges "
+            "WHERE parent_task_id = ? AND settled = 0 ORDER BY id",
+            (task_id,),
+        ).fetchall()
+    return [
+        (
+            int(r["id"]), _safe_float(r["cost"]), _safe_int(r["tokens"]),
+            _safe_int(r["steps"]), bool(r["banked"]),
+        )
+        for r in rows
+    ]
+
+
 def _settle_remote_charges(db: sqlite3.Connection, task_id: str) -> None:
     """Add to the finished row *task_id* the remote charges its totals do not hold yet.
 
@@ -3825,6 +3862,16 @@ def _backfill_orphan_progress(
                 # the event held; the finalization below adds the others.
                 if adopted and "cost" in progress:
                     _hold_remote_charges(db, str(row["id"]), held)
+            # The split of the task's own spend by model, from its
+            # persisted llm_call and charge records, as a final save
+            # writes it (_save_task_extra_locked): without it the Spend
+            # panel files all of a recovered task's own spend under its
+            # launch model, whatever set_model switched to.
+            db.execute(
+                "UPDATE task_history SET model_costs = ? "
+                "WHERE rowid = ? AND COALESCE(model_costs, '') = ''",
+                (_own_model_costs(db, str(row["id"])), rid),
+            )
             # The row's result is terminal (just rewritten, or committed
             # before the process died) and its ``end_ts`` recovered above
             # when an event dates it: derive its tags (``failed`` included)

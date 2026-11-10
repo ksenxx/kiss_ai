@@ -37,6 +37,7 @@ from typing import Any
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.autorouter.autorouter_sea import orchestrator_model
 from kiss.agents.seas.bestrouter import bestrouter_sea
+from kiss.agents.seas.ccxbestrouter import ccxbestrouter_sea
 from kiss.agents.seas.orautorouter import orautorouter_sea
 from kiss.agents.seas.orbestrouter import orbestrouter_sea
 from kiss.agents.seas.sh import sh_sea
@@ -79,12 +80,13 @@ def test_orchestrator_model_is_runnable_whenever_the_picker_offers_autorouter() 
 
 
 def test_bundled_routers_are_the_model_picker_seas() -> None:
-    """The four bundled routers register; no other bundled or third-party SEA does."""
+    """The five bundled routers register; no other bundled or third-party SEA does."""
     sea_commands._reset_for_tests()
     seas = sea_commands.model_seas()
     assert seas == {
         AUTOROUTER: Path(autorouter_sea.__file__).resolve(),
         BESTROUTER: Path(bestrouter_sea.__file__).resolve(),
+        "ccxbestrouter": Path(ccxbestrouter_sea.__file__).resolve(),
         "orautorouter": Path(orautorouter_sea.__file__).resolve(),
         "orbestrouter": Path(orbestrouter_sea.__file__).resolve(),
     }
@@ -105,14 +107,15 @@ def test_bestrouter_protocol_names_its_models_literally() -> None:
         "tool_profile": "shell", "model": bestrouter_sea.SIMPLE_MODEL,
     }
     assert bestrouter_sea.SIMPLE_MODEL == "claude-opus-5-5-medium"
-    assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-1-max"
+    assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-2-max"
     protocol = bestrouter_sea.SYSTEM_PROMPT
     assert sea.system_prompt("BASE") == "BASE\n\n" + protocol
     assert protocol.startswith(BESTROUTER_MARKER)
     flat = " ".join(protocol.split())
     for phrase in (
         "Use 'claude-opus-5-5-medium' for simple questions and queries.",
-        "Use 'claude-fable-5-1-max' model for all other tasks, including software development.",
+        "Use 'claude-fable-5-2-max' model for all other tasks, including software development "
+        "and analysis and writing.",
         "Use gpt-6-astra (not codex) through `run_agent(model=\"gpt-6-astra\", "
         "tool_profile=\"review\", wait=\"false\")` for a thorough read-only review and "
         "debugging of the other model's work,",
@@ -231,12 +234,14 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         sea_commands.refresh_registry()
 
     def test_picker_lists_the_routers_first_with_a_cost_label(self) -> None:
-        """The four entries head the list, in one vendor group, with a label not a price."""
+        """The five entries head the list, in one vendor group, with a label not a price."""
         event = self._models_event()
         assert event["models"], "precondition: at least one runnable model"
         names = [m["name"] for m in event["models"]]
-        assert names[:4] == [AUTOROUTER, BESTROUTER, "orautorouter", "orbestrouter"], names[:6]
-        for entry in event["models"][:4]:
+        assert names[:5] == [
+            AUTOROUTER, BESTROUTER, "ccxbestrouter", "orautorouter", "orbestrouter",
+        ], names[:7]
+        for entry in event["models"][:5]:
             assert entry["vendor"] == "Router"
             assert entry["inp"] == 0 and entry["out"] == 0
             assert isinstance(entry["cost_label"], str) and entry["cost_label"]

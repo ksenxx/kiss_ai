@@ -508,6 +508,29 @@ def test_the_review_runs_once_and_its_findings_buy_one_round(tmp_path: Path) -> 
         # ... until the next change
         own.observe("Bash", {"command": "cp hello.py hello2.py"})
         assert not own.reviewed_by_agent and own.review_wanted()
+        # a wait_any result is read job by job: the finished reviewer among the jobs
+        # it lists counts, a job of another run or a failed one does not
+        _turn(own, "run_agent", {**review, "wait": "false"},
+              "Started the sorcar agent task as job agent-2b3c; its tab is open.")
+        _turn(own, "run_agent", {**review, "wait": "false"},
+              "Started the sorcar agent task as job agent-3c4d; its tab is open.")
+        _turn(own, "agent_job", {"job_id": "", "action": "wait_any"},
+              "Finished: agent-9, agent-3c4d; running: agent-2b3c.\n\n"
+              "Job agent-9 (sorcar agent task) finished:\n"
+              "ran: sorcar tools=review\nsuccess: true\nsummary: ok\n\n"
+              "Job agent-3c4d (sorcar agent task) finished:\n"
+              "ran: sorcar tools=review\nsuccess: false\nsummary: 'Task failed with error: x'\n")
+        assert not own.reviewed_by_agent and own.review_wanted()
+        _turn(own, "agent_job", {"job_id": "", "action": "wait_any"},
+              "None of agent-2b3c finished within 5s; they are still running.")
+        assert not own.reviewed_by_agent
+        _turn(own, "agent_job", {"job_id": "agent-2b3c", "action": "wait_any"},
+              "Finished: agent-2b3c; running: none.\n\n"
+              "Job agent-2b3c (sorcar agent task) finished:\n"
+              "ran: sorcar tools=review\nsuccess: true\nsummary: ok\n")
+        assert own.reviewed_by_agent and not own.review_wanted()
+        own.observe("Bash", {"command": "cp hello.py hello2.py"})
+        assert not own.reviewed_by_agent and own.review_wanted()
         # a fan-out of reviewers counts when one succeeded; a sub-task that is not a
         # review (it may change files) is a change instead when the work's fingerprint moved
         _turn(own, "run_parallel", {"tasks": '["Review hello.py", "Review hello2.py"]'},

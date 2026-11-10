@@ -1498,13 +1498,26 @@ MODEL_INFO: dict[str, ModelInfo] = _load_model_info()
 _ANTHROPIC_OPENROUTER_PREFIXES = ("openrouter/anthropic/", "openrouter/~anthropic/")
 _ANTHROPIC_CACHE_PREFIXES = ("claude-", "bedrock/") + _ANTHROPIC_OPENROUTER_PREFIXES
 # Anthropic bills cache hits at 0.1x the base input price, except on the
-# families below: Fable 5.1 / Mythos 5.1 read at 0.025x ($0.25/MTok on a
-# $10 base), Opus 5.5 at 0.05x ($0.20/MTok on a $4 base) and Sonnet 5.5
+# families below: Fable 5.2 / Mythos 5.2 read at 0.025x ($0.20/MTok on an
+# $8 base), Fable 5.1 / Mythos 5.1 at 0.025x ($0.25/MTok on a $10 base),
+# Opus 5.5 at 0.05x ($0.20/MTok on a $4 base) and Sonnet 5.5
 # at 0.05x ($0.10/MTok on a $2 base).  Fable 5 / Opus 5 / Sonnet 5
 # (without the .5 or .1) are plain 0.1x models, so the prefixes carry the
 # minor version: https://platform.claude.com/docs/en/about-claude/pricing
 _ANTHROPIC_CACHE_READ_MULTIPLIERS = (
-    (("claude-fable-5-1", "claude-fable-5.1", "claude-mythos-5-1", "claude-mythos-5.1"), 0.025),
+    (
+        (
+            "claude-fable-5-1",
+            "claude-fable-5.1",
+            "claude-mythos-5-1",
+            "claude-mythos-5.1",
+            "claude-fable-5-2",
+            "claude-fable-5.2",
+            "claude-mythos-5-2",
+            "claude-mythos-5.2",
+        ),
+        0.025,
+    ),
     (("claude-opus-5-5", "claude-opus-5.5", "claude-sonnet-5-5", "claude-sonnet-5.5"), 0.05),
 )
 # Claude Haiku 5.5 is priced by prompt length: prompts over 100K tokens
