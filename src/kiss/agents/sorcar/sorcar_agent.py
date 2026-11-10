@@ -1853,6 +1853,7 @@ class SorcarAgent(RelentlessAgent):
             # perform_task turns this off for a run without those tools.
             useful_tools.redirect = True
             useful_tools.current_step = self._executor_step
+            useful_tools.task_id = functools.partial(_persisted_task_id, self)
             self._useful_tools = useful_tools
             tools = [
                 useful_tools.Bash, useful_tools.bash_job,

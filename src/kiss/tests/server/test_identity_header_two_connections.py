@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import tempfile
 import threading
 from pathlib import Path
@@ -38,6 +39,7 @@ from websockets.asyncio.client import connect
 
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.useful_tools import TASK_ID_ENV, UsefulTools
 from kiss.core import config as config_module
 from kiss.core import user_config
 from kiss.core.models.model_info import get_available_models
@@ -56,6 +58,7 @@ ALICE = "alice@example.com"
 BOB = "bob@example.com"
 MALLORY = "mallory@example.com"
 HELD_MARK = "held run q4x"
+SHELL_MARK = "shell run k7p"
 
 
 class _Client:
@@ -128,6 +131,12 @@ class IdentityHeaderTwoConnectionsTest(IsolatedAsyncioTestCase):
         await self.server.start_async()
         self.clients: list[_Client] = []
         self.release = threading.Event()
+        # Task id -> what its foreground Bash, background job and
+        # run_commands_parallel printed.
+        self.shell: dict[str, tuple[str, str, str]] = {}
+        # A daemon started from some task's shell inherits that task's id.
+        self._saved_task_id = os.environ.get(TASK_ID_ENV)
+        os.environ[TASK_ID_ENV] = "stale-task"
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
         self._parent_class.run = self._stub_run()
@@ -135,6 +144,10 @@ class IdentityHeaderTwoConnectionsTest(IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         self.release.set()
         self._parent_class.run = self._original_run
+        if self._saved_task_id is None:
+            os.environ.pop(TASK_ID_ENV, None)
+        else:
+            os.environ[TASK_ID_ENV] = self._saved_task_id
         if self._saved_key is None:
             os.environ.pop("OPENROUTER_API_KEY", None)
         else:
@@ -150,11 +163,11 @@ class IdentityHeaderTwoConnectionsTest(IsolatedAsyncioTestCase):
             os.environ[IDENTITY_HEADER_ENV] = self._saved_env
         saved_dir, saved_path = self._saved_config
         if saved_dir is None:
-            vars(user_config).pop("CONFIG_DIR", None)
+            user_config.__dict__.pop("CONFIG_DIR", None)
         else:
             user_config.CONFIG_DIR = saved_dir
         if saved_path is None:
-            vars(user_config).pop("CONFIG_PATH", None)
+            user_config.__dict__.pop("CONFIG_PATH", None)
         else:
             user_config.CONFIG_PATH = saved_path
         restore_persistence(self._saved_persistence)
@@ -162,11 +175,24 @@ class IdentityHeaderTwoConnectionsTest(IsolatedAsyncioTestCase):
     def _stub_run(self) -> Any:
         """The model loop: a ``HELD_MARK`` run waits for :attr:`release`, then finishes."""
         release = self.release
+        shell = self.shell
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
             printer = kwargs.get("printer") or getattr(self_agent, "printer", None)
             assert printer is not None, "a daemon run always has a printer"
             self_agent.printer = printer
+            if SHELL_MARK in str(kwargs.get("prompt_template", "")):
+                # The toolset the model loop would get, built by the agent.
+                tools = {tool.__name__: tool for tool in self_agent._get_tools()}
+                command = 'echo "task=$KISS_TASK_ID"'
+                started = tools["Bash"](command, "task id", background=True)
+                job_id = re.search(r"\bj[0-9a-f]{8}\b", started)
+                assert job_id is not None, started
+                shell[self_agent.last_task_id] = (
+                    tools["Bash"](command, "task id"),
+                    tools["bash_job"](job_id[0], "wait", timeout_seconds=20),
+                    tools["run_commands_parallel"](json.dumps([command])),
+                )
             if HELD_MARK in str(kwargs.get("prompt_template", "")):
                 release.wait(timeout=30)
             self_agent.total_tokens_used = 5
@@ -229,11 +255,31 @@ class IdentityHeaderTwoConnectionsTest(IsolatedAsyncioTestCase):
         alice = await self._connect("alice", **{HEADER: ALICE})
         bob = await self._connect("bob", **{HEADER: BOB})
 
-        # 1. Alice starts a task: the run's settings say she did.
-        await self._submit(alice, HELD_MARK, alice.tab_id)
+        # 1. Alice starts a task: the run's settings say she did, and all
+        #    its shells get the task's own id.
+        await self._submit(alice, f"{HELD_MARK} {SHELL_MARK}", alice.tab_id)
         settings = await self._settings_of(alice, alice.tab_id)
         self.assertEqual(settings.get("identity"), ALICE, settings)
         task_id = str(settings["task_id"])
+        shells = await self._wait(lambda: self.shell.get(task_id), "alice: the task's shells")
+        for output in shells:
+            self.assertRegex(output, rf"task={task_id}(\n|$)")
+
+        # 1b. A run_agent sub-task arrives over a connection that forwards
+        #     no one; it records the person its caller works for, and its
+        #     shells get the sub-task's id, not the caller's.
+        relay = await self._connect("relay")
+        await relay.send({
+            "type": "run", "prompt": f"child {SHELL_MARK}", "tabId": relay.tab_id,
+            "model": self.model, "workDir": self.repo, "parentTaskId": task_id,
+        })
+        child = await self._settings_of(relay, relay.tab_id)
+        self.assertEqual(child.get("identity"), ALICE, child)
+        child_id = str(child["task_id"])
+        self.assertNotEqual(child_id, task_id)
+        shells = await self._wait(lambda: self.shell.get(child_id), "child shells")
+        for output in shells:
+            self.assertRegex(output, rf"task={child_id}(\n|$)")
 
         # 2. Bob types into the running task from his own browser: the
         #    echo every viewer gets names him, not her.
@@ -271,3 +317,7 @@ class IdentityHeaderTwoConnectionsTest(IsolatedAsyncioTestCase):
         settings = await self._settings_of(quiet, quiet.tab_id)
         self.assertNotIn("identity", settings, settings)
         await self._finished(quiet, quiet.tab_id)
+
+        # 6. Tools that no task runs export no id, not the daemon's stale one.
+        output = UsefulTools(work_dir=self.repo).Bash('echo "task=$KISS_TASK_ID"', "no task")
+        self.assertIn("task=\n", output)

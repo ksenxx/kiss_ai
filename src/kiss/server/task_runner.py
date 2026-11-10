@@ -573,6 +573,27 @@ def _parent_extra_tools(parent_task_id: str) -> list[Callable[..., Any]]:
     return [tool for tool in parent_tools if callable(tool)]
 
 
+def _parent_identity(parent_task_id: str) -> str:
+    """Return the forwarded identity recorded for the running task *parent_task_id*.
+
+    The ``identity`` of the calling task's ``run_config`` (see
+    ``KISS_IDENTITY_HEADER``), so a ``run_agent`` sub-task records the
+    person its caller works for; its own command comes over the
+    daemon's local link, which forwards no one.
+
+    Args:
+        parent_task_id: The calling task's id (wire field
+            ``parentTaskId``); empty or unknown yields ``""``.
+
+    Returns:
+        The identity, or ``""`` when the caller has none.
+    """
+    parent_state = agent_state.get(parent_task_id)
+    run_config = getattr(getattr(parent_state, "agent", None), "run_config", None)
+    identity = run_config.get("identity") if isinstance(run_config, dict) else None
+    return identity if isinstance(identity, str) else ""
+
+
 def _parent_isolated_repos(parent_task_id: str) -> dict[Path, Path]:
     """Repository root -> worktree directory of the calling task's worktrees.
 
@@ -2251,9 +2272,12 @@ class _TaskRunnerMixin:
                 "inherited": inherited_keys(cmd.get("provenance")),
             }
             # The person who started the run, when a proxy forwarded one
-            # (``KISS_IDENTITY_HEADER``; ``dispatch`` stamped the command).
+            # (``KISS_IDENTITY_HEADER``; ``dispatch`` stamped the command),
+            # else the calling task's: a sub-task works for the same person.
             _identity = cmd.get("identity")
-            if isinstance(_identity, str) and _identity:
+            if not isinstance(_identity, str) or not _identity:
+                _identity = _parent_identity(parent_task_id)
+            if _identity:
                 agent.run_config["identity"] = _identity
             # Docker image (or ``container:<id>``) the run's shell and
             # file tools execute in; absent or malformed means the host.
