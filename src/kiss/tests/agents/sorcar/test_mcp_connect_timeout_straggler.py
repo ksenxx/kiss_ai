@@ -128,9 +128,13 @@ def test_stopped_connect_waiter_leaves_the_handshake_its_deadline(
     Stop injected into that thread took the only deadline with it, and
     the silent child sat in the pool for ever, unready and so never
     evicted, its task never cancelled.  The handshake now carries its
-    own deadline on the manager loop.
+    own deadline on the manager loop.  The deadline leaves the Stop time
+    to land while ``connect()`` still waits: under load the child can take
+    over a second to write its pid, and a waiter that timed out first
+    returns without the Stop.
     """
-    monkeypatch.setattr(mcp_servers, "CONNECT_TIMEOUT", 1.0)
+    timeout = 5.0
+    monkeypatch.setattr(mcp_servers, "CONNECT_TIMEOUT", timeout)
     pidfile = tmp_path / "child.pid"
     config = _spawn_silent_config(pidfile, "silent-stopped-waiter")
     manager = MCPManager(max_connections=1)
@@ -147,7 +151,7 @@ def test_stopped_connect_waiter_leaves_the_handshake_its_deadline(
         waiter.join(10)
         assert not waiter.is_alive() and isinstance(errors[0], KeyboardInterrupt), errors
         grace = mcp_servers._CONNECT_STRAGGLER_GRACE_S
-        assert _wait_pid_dead(child_pid, 1.0 + grace + 15.0), (
+        assert _wait_pid_dead(child_pid, timeout + grace + 15.0), (
             "silent MCP child survived its stopped connect() waiter — the "
             "handshake had no deadline of its own"
         )

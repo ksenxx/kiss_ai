@@ -31,6 +31,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     make_run_agent_tool,
     make_run_parallel_tool,
     task_model_pinned,
+    unread_results_note,
 )
 from kiss.agents.sorcar.coding_gate import CodingGate, gate_reviewer, run_on_host
 from kiss.agents.sorcar.commit_message import fallback_commit_message
@@ -1853,6 +1854,10 @@ class SorcarAgent(RelentlessAgent):
             # perform_task turns this off for a run without those tools.
             useful_tools.redirect = True
             useful_tools.current_step = self._executor_step
+            # A Bash(until=) poll or a bash_job wait ends early once every
+            # sub-agent job of this agent has finished with its result
+            # unread: what it waits for can only be a child's leftovers.
+            useful_tools.idle_children = functools.partial(unread_results_note, self)
             self._useful_tools = useful_tools
             tools = [
                 useful_tools.Bash, useful_tools.bash_job,

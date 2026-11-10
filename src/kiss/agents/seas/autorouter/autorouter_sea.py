@@ -84,7 +84,7 @@ RSI7D_JOB_SCHEDULE = "0 1 * * 6"
 """Saturday 01:00 America/Los_Angeles (cron expressions are Pacific-evaluated), a day
 before the hand-scheduled full ``/rsi7d all`` sweep so the two never share the checkout."""
 
-RSI7D_JOB_MODEL = "claude-fable-5-1-max"
+RSI7D_JOB_MODEL = "claude-fable-5-2-max"
 """Model of the job and of the rsi7d run when runnable, else :func:`orchestrator_model`."""
 
 ROUTER_MODEL = "claude-opus-5-5-medium"
@@ -198,7 +198,7 @@ TIERS: Tiers = {
         ),
         (
             "openrouter/moonshotai/kimi-k3.1-pro",
-            "Moonshot, 1M context. Best cheaper alternative to claude-fable-5.1. Go-to model "
+            "Moonshot, 1M context. Best cheaper alternative to claude-fable-5.2-max. Go-to model "
             "for security analysis and hardening.",
         ),
     ),
@@ -212,11 +212,11 @@ TIERS: Tiers = {
             "OpenAI frontier; priciest per step measured, reliable reviewer",
         ),
         (
-            "claude-fable-5-1-max",
+            "claude-fable-5-2-max",
             "Anthropic top model; longest, hardest tasks only; measured stalls",
         ),
         (
-            "openrouter/anthropic/claude-fable-5.1-max",
+            "openrouter/anthropic/claude-fable-5.2-max",
             "Anthropic top model; longest, hardest tasks only; measured stalls",
         ),
         (

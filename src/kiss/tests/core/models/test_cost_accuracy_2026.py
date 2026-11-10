@@ -451,6 +451,20 @@ class TestAnthropicCacheReadFamilies:
         info = MODEL_INFO["claude-fable-5-1"]
         assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.025)
 
+    def test_fable_52_max_matches_published_prices(self):
+        # https://platform.claude.com/docs/en/models/fable-5-2/overview
+        for name in ("claude-fable-5-2", "claude-fable-5-2-max"):
+            info = MODEL_INFO[name]
+            assert info.input_price_per_1M == pytest.approx(8.0)
+            assert info.output_price_per_1M == pytest.approx(40.0)
+            assert info.cache_read_price_per_1M == pytest.approx(0.20)
+            assert info.cache_write_price_per_1M == pytest.approx(10.0)
+            assert info.cache_write_1h_price_per_1M == pytest.approx(16.0)
+        cost = calculate_cost("claude-fable-5-2-max", 10_000, 1_000, 1_000_000, 100_000)
+        assert cost == pytest.approx(
+            (10_000 * 8.0 + 1_000 * 40.0 + 1_000_000 * 0.20 + 100_000 * 10.0) / 1e6
+        )
+
     def test_fable_5_and_older_opus_keep_ten_percent(self):
         for name in ("claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"):
             info = MODEL_INFO[name]

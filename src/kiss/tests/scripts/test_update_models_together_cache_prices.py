@@ -57,11 +57,12 @@ LISTING: list[dict[str, Any]] = [
         "pricing": {"input": 2.0, "output": 6.0, "cached_input": 0.25},
     },
     {
-        # Catalogued embedding whose rates moved: priced like every other model.
+        # Catalogued embedding whose input rate moved; the listing echoes the
+        # input rate as ``output``, but an embedding has no output tokens.
         "id": "BAAI/bge-large-en-v1.5",
         "type": "embedding",
         "context_length": 512,
-        "pricing": {"input": 0.03, "output": 0.0},
+        "pricing": {"input": 0.03, "output": 0.03},
     },
 ]
 
@@ -149,7 +150,8 @@ def test_compute_and_apply_write_together_cache_prices(
             "emb": False,
             "gen": True,
         },
-        # Embedding priced from an old listing: both rates follow the provider.
+        # Embedding priced from an old listing: input follows the provider,
+        # output is pinned to 0.
         "BAAI/bge-large-en-v1.5": {
             "context_length": 512,
             "input_price_per_1M": 0.01,

@@ -134,8 +134,10 @@ the sub-task: every ``run_agent`` dispatch runs as an :class:`AgentJob`
 on its own thread, the call joins that thread for the bound, and when
 the bound expires the call returns the job's still-running notice (see
 :func:`job_notice`) while the sub-task keeps running.  The caller then
-collects or stops it with ``agent_job(id, "wait" | "kill")``; a job it
-never resolves is killed when the calling run ends
+collects or stops it with ``agent_job(id, "wait" | "kill")``, or collects
+whichever of several finishes first with ``agent_job(ids, "wait_any")``
+(:func:`wait_any_agent_job`); a job it never resolves is killed when the
+calling run ends
 (:func:`kill_jobs_of`), so no sub-task outlives its caller.
 """
 
@@ -2351,6 +2353,14 @@ class AgentJob:
             connection: the task this id names may still be running);
             ``""`` before, or when the run ended before the daemon named
             one.
+        reported: Whether the owner's ``agent_job`` tool has returned
+            *result* (any action): ``wait_any`` skips such a job, and a
+            finished job that is not reported ends the owner's
+            ``Bash(until=)`` polls and ``bash_job`` waits early once no
+            job is live (:func:`unread_results_note`).
+        nudged: Whether such a wait was already ended over this job's
+            unread result: the note names each job once, so a later wait
+            the owner starts without reading it runs its course.
     """
 
     job_id: str
@@ -2368,6 +2378,8 @@ class AgentJob:
     outcome: TaskResult | str | None = None
     result: str = ""
     task_id: str = ""
+    reported: bool = False
+    nudged: bool = False
 
     @property
     def finished(self) -> bool:
@@ -2582,9 +2594,11 @@ def job_notice(job: AgentJob, waited: float | None) -> str:
         )
     return (
         f"{lead} agent_job({job.job_id!r}, 'wait') blocks until it finishes and "
-        f"returns its result, 'tail' reports its status, 'kill' stops it. Wait for "
-        f"or kill it before finishing; a job still running when this task ends is "
-        f"killed."
+        f"returns its result, 'tail' reports its status, 'kill' stops it; "
+        f"agent_job('', 'wait_any') returns the result of whichever of your jobs "
+        f"finishes first, so start each follow-up (a reviewer, a re-fix) as soon as "
+        f"its job returns. Wait for or kill it before finishing; a job still running "
+        f"when this task ends is killed."
     )
 
 
@@ -2654,6 +2668,38 @@ def agent_jobs_of(owner: Any) -> dict[str, AgentJob]:
 def live_agent_jobs(owner: Any) -> list[AgentJob]:
     """Return *owner*'s jobs whose sub-task is still running (:attr:`AgentJob.finished` unset)."""
     return [job for job in agent_jobs_of(owner).values() if not job.finished]
+
+
+def unread_results_note(owner: Any) -> str:
+    """Say when every job of *owner* has finished and a result is still unread, else ``""``.
+
+    The condition under which a wait of the owner on something else (a
+    ``Bash(until=)`` poll of a folder, a ``bash_job`` wait) can only be
+    waiting for work a sub-agent was to leave behind: no job of the
+    owner is live and at least one finished job has a result its
+    ``agent_job`` tool never returned (:attr:`AgentJob.reported`).  The
+    2026-11-08 sweep spent 2.4 hours in three such polls, each counting
+    a folder of review reports after every reviewer had finished.  A
+    task whose jobs were all read, or that has none, gets ``""``: its
+    waits are its own.  So does one that was already told
+    (:attr:`AgentJob.nudged`): each unread result ends one wait, and a
+    wait the owner then starts without reading it (a readiness poll of
+    its own) runs its course.
+
+    Returns:
+        The note the wait ends with, or ``""`` to keep waiting.
+    """
+    jobs = list(agent_jobs_of(owner).values())
+    unread = [job for job in jobs if not job.reported]
+    if not unread or any(not job.finished for job in jobs) or all(job.nudged for job in unread):
+        return ""
+    for job in unread:
+        job.nudged = True
+    ids = ", ".join(job.job_id for job in unread)
+    return (
+        f"every sub-agent job of this task has finished and the result of {ids} "
+        f"has not been read yet: agent_job('', 'wait_any') returns it"
+    )
 
 
 def reserved_budget(jobs: Sequence[AgentJob]) -> float:
@@ -2736,14 +2782,22 @@ def make_agent_job_tool(owner: Any = None) -> Callable[..., str]:
         kept running.
 
         Args:
-            job_id: The id ``run_agent`` returned (``agent-1a2b3c4d``).
+            job_id: The id ``run_agent`` returned (``agent-1a2b3c4d``);
+                for ``"wait_any"``, several ids separated by commas or
+                spaces, or empty for every job of this task.
             action: ``"tail"`` (default) reports whether the task is
                 still running and, once it has finished, its result;
                 ``"wait"`` blocks until it finishes (at most
-                ``timeout_seconds``) and returns its result; ``"kill"``
-                stops it.
-            timeout_seconds: How long ``"wait"`` blocks at most, as a
-                number string; empty waits until the task finishes.
+                ``timeout_seconds``) and returns its result;
+                ``"wait_any"`` blocks until any of the named jobs whose
+                result you have not read yet finishes and returns the
+                results of all that have, naming the ones still running,
+                so a follow-up (a reviewer, a re-fix) starts as soon as
+                its job returns instead of after the slowest of a wave;
+                ``"kill"`` stops it.
+            timeout_seconds: How long ``"wait"`` and ``"wait_any"``
+                block at most, as a number string; empty waits until a
+                task finishes.
 
         Returns:
             The job's status, or the sub-task's YAML result ("success"
@@ -2751,6 +2805,8 @@ def make_agent_job_tool(owner: Any = None) -> Callable[..., str]:
             message.
         """
         jobs = agent_jobs_of(owner)
+        if action == "wait_any":
+            return wait_any_agent_job(jobs, job_id, timeout_seconds)
         job = jobs.get(job_id.strip())
         if job is None:
             known = ", ".join(sorted(jobs)) or "none"
@@ -2761,14 +2817,96 @@ def make_agent_job_tool(owner: Any = None) -> Callable[..., str]:
                 return seconds
             join_agent_job(job, seconds)
         elif action == "kill":
-            return kill_agent_job(job)
+            kill_agent_job(job)
         elif action != "tail":
-            return f"Error: action must be tail, wait or kill, got {action!r}."
+            return f"Error: action must be tail, wait, wait_any or kill, got {action!r}."
         if not job.finished:
             return f"Job {job_id} ({job.name} agent task) is still running."
+        job.reported = True
         return job.result
 
     return agent_job
+
+
+WAIT_ANY_SECTION = re.compile(r"^Job (agent-\w+) \((.*?) agent task\) finished:$", re.MULTILINE)
+"""The line that opens one job's result in a ``wait_any`` text (:func:`wait_any_results`)."""
+
+
+def wait_any_agent_job(jobs: dict[str, AgentJob], ids: str, timeout_seconds: str) -> str:
+    """The ``wait_any`` action of ``agent_job``: the results of the first of *ids* to finish.
+
+    Waits until any of the named jobs that is not yet
+    :attr:`AgentJob.reported` has finished, or *timeout_seconds* pass,
+    polled in :data:`_JOB_WAKE_SECONDS` slices like :func:`join_agent_job`
+    so a Stop lands.  Every finished unreported job is returned at once
+    (a lead line naming the finished and the running ids, then one
+    section per job opened by a :data:`WAIT_ANY_SECTION` line) and
+    marked reported, so no result is returned twice.
+
+    Args:
+        jobs: The caller's jobs, by id (:func:`agent_jobs_of`).
+        ids: Job ids separated by commas or spaces; empty for all of *jobs*.
+        timeout_seconds: As ``agent_job``'s; empty waits without bound.
+
+    Returns:
+        The finished jobs' results and the still-running ids, a notice
+        that none finished in time or that every named job was already
+        returned, or an ``Error:`` for an unknown id or a bad timeout.
+    """
+    from kiss.core import tool_interrupt
+
+    seconds = parse_wait_seconds(timeout_seconds)
+    if isinstance(seconds, str):
+        return seconds
+    names = [name for name in re.split(r"[\s,]+", ids.strip()) if name]
+    unknown = [name for name in names if name not in jobs]
+    if unknown:
+        known = ", ".join(sorted(jobs)) or "none"
+        return f"Error: unknown agent job(s) {', '.join(unknown)}; this task's jobs: {known}."
+    chosen = [jobs[name] for name in names] if names else list(jobs.values())
+    if not chosen:
+        return "Error: this task has no agent jobs; run_agent(..., wait='false') starts one."
+    pending = [job for job in chosen if not job.reported]
+    listed = ", ".join(job.job_id for job in chosen)
+    if not pending:
+        return f"Every listed job has finished and its result was already returned: {listed}."
+    deadline = None if seconds is None else time.monotonic() + seconds
+    while not any(job.finished for job in pending):
+        tool_interrupt.raise_if_interrupted()
+        left = None if deadline is None else deadline - time.monotonic()
+        if left is not None and left <= 0:
+            break
+        time.sleep(_JOB_WAKE_SECONDS if left is None else min(_JOB_WAKE_SECONDS, left))
+    done = [job for job in pending if job.finished]
+    running = ", ".join(job.job_id for job in pending if not job.finished)
+    if not done:
+        return (
+            f"None of {running} finished within {seconds:g}s; they are still running. "
+            f"agent_job('', 'wait_any') waits again."
+        )
+    lead = f"Finished: {', '.join(job.job_id for job in done)}; running: {running or 'none'}."
+    sections = [f"Job {job.job_id} ({job.name} agent task) finished:\n{job.result}" for job in done]
+    text = "\n\n".join([lead, *sections])
+    # Marked last: a result is reported only once its text exists to be
+    # returned (an interrupt before this point leaves it for the next call).
+    for job in done:
+        job.reported = True
+    return text
+
+
+def wait_any_results(text: str) -> dict[str, str]:
+    """Split a ``wait_any`` result *text* into each finished job's result, by job id.
+
+    Returns:
+        ``{job_id: result}`` for every :data:`WAIT_ANY_SECTION` in
+        *text*; empty for any other text (a notice, an error).
+    """
+    heads = list(WAIT_ANY_SECTION.finditer(text))
+    return {
+        head.group(1): text[head.end():(heads[i + 1].start() if i + 1 < len(heads) else len(text))]
+        .strip()
+        for i, head in enumerate(heads)
+    }
 
 
 def parse_wait_seconds(timeout_seconds: str) -> float | None | str:
