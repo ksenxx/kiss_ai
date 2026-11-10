@@ -825,7 +825,9 @@ class ServerApi:
         4. Stamps the connection's ``conn_id`` as ``connId`` —
            overwriting any client-supplied value so it cannot be
            spoofed — which keys the backend's per-connection
-           autocomplete state.
+           autocomplete state; likewise the connection's forwarded
+           ``identity`` (``KISS_IDENTITY_HEADER``), dropped from the
+           command when the connection has none.
         5. Blanks a ``workDir`` naming a filesystem root (``/``,
            ``C:\\`` — see :func:`kiss.core.utils.is_root_dir`) so it is
            treated exactly like an absent one: a client whose cwd
@@ -884,6 +886,11 @@ class ServerApi:
         if tab_id:
             self._record_tab(tab_id, ctx)
         cmd["connId"] = ctx.conn_state["conn_id"]
+        identity = ctx.conn_state.get("identity", "")
+        if identity:
+            cmd["identity"] = identity
+        else:
+            cmd.pop("identity", None)
         raw_wd = cmd.get("workDir")
         if isinstance(raw_wd, str) and is_root_dir(raw_wd):
             # A filesystem root is never a real workspace: it arrives

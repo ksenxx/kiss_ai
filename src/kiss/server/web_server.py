@@ -895,6 +895,39 @@ def _forwarded_client_ip(websocket: ServerConnection) -> str:
     return xff.split(",", maxsplit=1)[0].strip()
 
 
+IDENTITY_HEADER_ENV = "KISS_IDENTITY_HEADER"
+"""Environment variable naming the upgrade-request header that carries the signed-in person.
+
+A daemon behind an authenticating proxy (oauth2-proxy sets
+``X-Forwarded-Email``) serves several people under one OS user.  When
+this variable names the header the proxy sets, each WebSocket
+connection remembers that header's value as its ``identity``, and the
+daemon stamps it on every ``prompt`` event the connection sends and on
+the ``task_settings`` event of every task it starts, so a shared
+workspace's transcript says who typed what.  Unset (the default) or a
+missing header records nothing.  The value is a record, never a
+credential: the proxy in front is what admitted the connection.
+"""
+
+
+def _forwarded_identity(websocket: ServerConnection) -> str:
+    """Return the person the proxy forwarded on *websocket*'s upgrade request, or ``""``.
+
+    Reads the header :data:`IDENTITY_HEADER_ENV` names; ``""`` when
+    the variable is unset or the request has no such header.
+
+    Args:
+        websocket: The server connection whose upgrade request headers
+            are inspected.
+    """
+    header = os.environ.get(IDENTITY_HEADER_ENV, "").strip()
+    request = getattr(websocket, "request", None)
+    headers = getattr(request, "headers", None)
+    if not header or headers is None:
+        return ""
+    return str(headers.get(header) or "").strip()
+
+
 def _basic_auth_password(request: Request) -> str:
     """Return the password of *request*'s ``Authorization: Basic`` header, ``""`` when none.
 
@@ -6048,6 +6081,11 @@ class RemoteAccessServer:
         # ``link``: a daemon-link peer, told only global events and the
         # replies to its own requests (see ``WebPrinter.add_client``).
         conn_state: dict[str, Any] = {"conn_id": uuid.uuid4().hex, "link": auth.link}
+        # The signed-in person a proxy forwarded (``KISS_IDENTITY_HEADER``),
+        # stamped on this connection's commands by ``dispatch``.
+        identity = _forwarded_identity(websocket)
+        if identity:
+            conn_state["identity"] = identity
         # Every command of the connection, from a remote browser or a
         # local client alike, goes to the code API's ``dispatch`` with
         # this one context: the API layer validates it against the
@@ -9231,6 +9269,11 @@ class RemoteAccessServer:
             "compaction": cmd.get("compaction"),
             "_notice": notice,
         }
+        # The connection's forwarded identity (``KISS_IDENTITY_HEADER``),
+        # stamped by ``dispatch``: recorded on the run's events.
+        identity = self._cmd_str(cmd, "identity")
+        if identity:
+            run_cmd["identity"] = identity
         await self._run_cmd(run_cmd)
 
     def _spawn_cloudflared(

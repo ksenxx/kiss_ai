@@ -14585,10 +14585,15 @@
    *
    * @param {string} text The message text.
    * @param {*} ts The event's timestamp, for the panel's time badge.
+   * @param {string} [identity] The person a proxy forwarded for the
+   *   sending connection (the daemon's KISS_IDENTITY_HEADER, an email
+   *   behind oauth2-proxy): a shared workspace shows it in the header
+   *   so the transcript says who typed what; empty keeps "Message".
    * @returns {HTMLElement} The `.ev.user-msg` element.
    */
-  function createUserMessagePanel(text, ts) {
-    return createUserTextPanel('user-msg', 'Message', text, ts);
+  function createUserMessagePanel(text, ts, identity) {
+    const label = identity ? 'Message from ' + String(identity) : 'Message';
+    return createUserTextPanel('user-msg', label, text, ts);
   }
 
   function createUserTextPanel(cls, label, text, ts) {
@@ -14684,6 +14689,9 @@
     if (s && s.parent_task_id) {
       rows.push(['Parent task', metaText(s.parent_task_id)]);
     }
+    // The person who started the task, when the daemon runs behind an
+    // authenticating proxy (settings.identity, KISS_IDENTITY_HEADER).
+    if (s && s.identity) rows.push(['By', metaText(s.identity)]);
     const agent = metaAgentText(s);
     if (agent !== '\u2014') rows.push(['Agent', agent]);
     return rows
@@ -19066,7 +19074,7 @@
       case 'system_prompt':
       case 'prompt': {
         if (ev.steer) {
-          target.appendChild(createUserMessagePanel(ev.text || '', ev.ts));
+          target.appendChild(createUserMessagePanel(ev.text || '', ev.ts, ev.identity));
           break;
         }
         const cls = t === 'system_prompt' ? 'system-prompt' : 'prompt';

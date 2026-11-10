@@ -156,6 +156,17 @@ def sea_commands_event(commands: list[str]) -> dict[str, Any]:
 _ASK_TIMEOUT_SECONDS = 600.0
 
 
+def _cmd_identity(cmd: dict[str, Any]) -> str:
+    """Return the forwarded identity ``dispatch`` stamped on *cmd*, ``""`` when none.
+
+    The value of the connection's ``KISS_IDENTITY_HEADER`` header (see
+    ``kiss.server.web_server.IDENTITY_HEADER_ENV``); never
+    client-supplied, since ``dispatch`` overwrites or drops the field.
+    """
+    identity = cmd.get("identity", "")
+    return identity if isinstance(identity, str) else ""
+
+
 @dataclass(frozen=True)
 class _Steer:
     """A message admitted on a running task, and what its delivery after the lock needs.
@@ -776,6 +787,7 @@ class _CommandsMixin:
             if inject_prompt is not None:
                 self._echo_injected_prompt(
                     tab_id, inject_prompt, inject_task, inject_publication, remember,
+                    identity=_cmd_identity(cmd),
                 )
                 self._broadcast_run_notice(cmd, tab_id)
             return
@@ -1598,7 +1610,7 @@ class _CommandsMixin:
 
     def _echo_injected_prompt(
         self, tab_id: str, prompt: str, owner_task: str, publication: int,
-        remember: bool = True,
+        remember: bool = True, identity: str = "",
     ) -> None:
         """Broadcast a queued follow-up prompt back to the tab's viewers.
 
@@ -1638,6 +1650,10 @@ class _CommandsMixin:
             publication: The tab publication captured at admission, for
                 fencing a pre-allocation echo that has no task id yet.
             remember: Whether to save *prompt* for autocomplete.
+            identity: The sending connection's forwarded identity
+                (``KISS_IDENTITY_HEADER``), carried on the echo so a
+                shared workspace's transcript says who typed it; ``""``
+                adds nothing.
         """
         if remember:
             try:
@@ -1653,6 +1669,8 @@ class _CommandsMixin:
             "tabId": tab_id,
             "steer": True,
         }
+        if identity:
+            echo["identity"] = identity
         if owner_task:
             # Task routing records the echo and only delivers it to
             # viewers still subscribed after any concurrent rebind.
@@ -2040,12 +2058,16 @@ class _CommandsMixin:
             prompt: The user's message, as typed.
             tab_id: Frontend tab id the message was typed into.
         """
+        identity = _cmd_identity(cmd)
         if steer.ask_question is None:
             self._echo_injected_prompt(
                 tab_id, prompt, steer.owner_task, steer.publication, steer.remember,
+                identity=identity,
             )
             return
-        self._echo_injected_prompt(tab_id, prompt, steer.owner_task, steer.publication)
+        self._echo_injected_prompt(
+            tab_id, prompt, steer.owner_task, steer.publication, identity=identity,
+        )
         if steer.ask_question.lower() in RESERVED_SUBCOMMANDS:
             # ``/ask help`` is the SEA's ``description()`` and
             # ``/ask check`` its dry-run report, like every

@@ -2250,6 +2250,11 @@ class _TaskRunnerMixin:
                 "timeout": _raw_timeout if isinstance(_raw_timeout, int | float) else None,
                 "inherited": inherited_keys(cmd.get("provenance")),
             }
+            # The person who started the run, when a proxy forwarded one
+            # (``KISS_IDENTITY_HEADER``; ``dispatch`` stamped the command).
+            _identity = cmd.get("identity")
+            if isinstance(_identity, str) and _identity:
+                agent.run_config["identity"] = _identity
             # Docker image (or ``container:<id>``) the run's shell and
             # file tools execute in; absent or malformed means the host.
             _raw_docker = cmd.get("dockerImage")
