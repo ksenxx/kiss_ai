@@ -315,11 +315,17 @@ class MCPLoginSession:
             # stall behind that wait.
             previous.cancel()
             previous.wait(5.0)
-            # Published before the bind below: should it fail, no
-            # caller must find the cancelled session still active.
-            cls._set_active(None)
         session = cls(cfg)
-        session._server = _RedirectServer()
+        try:
+            session._server = _RedirectServer()
+        except BaseException:
+            # The previous session stays published until the new one
+            # replaces it, so ``active()`` never answers ``None`` in the
+            # middle of a replacement; should the bind fail, no caller
+            # must find the cancelled session still active.
+            if previous is not None and cls._get_active() is previous:
+                cls._set_active(None)
+            raise
         try:
             cls._set_active(session)
             session._thread.start()

@@ -448,6 +448,10 @@ def fetch_together(verbose: bool = False) -> dict[str, dict]:
         if model_type not in ("chat", "embedding", "language"):  # pragma: no branch
             continue
         is_emb = model_type == "embedding"
+        if is_emb:
+            # An embedding produces no output tokens; Together's listing has
+            # started echoing the input rate as ``output`` for them.
+            out = 0.0
         # Together reports ``prompt_tokens_details.cached_tokens`` and bills
         # them at ``pricing.cached_input`` (per 1M, e.g. Kimi-K3 $0.30 on a
         # $3.00 input); without the catalog price ``calculate_cost`` would

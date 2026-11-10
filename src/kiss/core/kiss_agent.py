@@ -339,10 +339,11 @@ def is_routine_turn(name: str, args: dict[str, Any], result: str, refused: bool)
     """
     if refused or name in ROUTINE_TOOLS:
         return True
-    if name in WAIT_TOOLS and str(args.get("action", "")) == "wait":
+    if name in WAIT_TOOLS and str(args.get("action", "")) in ("wait", "wait_any"):
         # Both tools open with the job's status line (``Job <id>: running
-        # (pid …)``, ``The … task is still running after …``); the log
-        # tail after it may say anything.
+        # (pid …)``, ``The … task is still running after …``, ``None of …
+        # finished within …; they are still running``); the log tail
+        # after it may say anything.
         status_line = result.lstrip().split("\n", 1)[0]
         return "running (pid" in status_line or "still running" in status_line
     return name == "Read" and "already in your context" in result

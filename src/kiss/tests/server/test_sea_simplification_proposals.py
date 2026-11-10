@@ -711,7 +711,7 @@ def test_agent_job_validates_its_arguments_and_sees_only_its_owners_jobs() -> No
             )
         assert agent_job("agent-test0001", "wait", "1") == "done"
         assert agent_job("agent-test0001", "pause") == (
-            "Error: action must be tail, wait or kill, got 'pause'."
+            "Error: action must be tail, wait, wait_any or kill, got 'pause'."
         )
         # Another agent's tool neither sees nor lists the job.
         assert agent_dispatch.make_agent_job_tool(stranger)("agent-test0001") == (

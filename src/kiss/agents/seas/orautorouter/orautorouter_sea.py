@@ -92,7 +92,7 @@ TIERS: Tiers = {
         ),
         (
             "openrouter/moonshotai/kimi-k3.1-pro",
-            "Moonshot, 1M context. Best cheaper alternative to claude-fable-5.1. Go-to model "
+            "Moonshot, 1M context. Best cheaper alternative to claude-fable-5.2. Go-to model "
             "for security analysis and hardening.",
         ),
     ),
@@ -102,7 +102,7 @@ TIERS: Tiers = {
             "OpenAI frontier; priciest per step measured, reliable reviewer",
         ),
         (
-            "openrouter/anthropic/claude-fable-5.1-max",
+            "openrouter/anthropic/claude-fable-5.2-max",
             "Anthropic top model; longest, hardest tasks only; measured stalls",
         ),
         (

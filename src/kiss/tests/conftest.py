@@ -1369,3 +1369,33 @@ def pytest_configure(config: pytest.Config) -> None:
     if inherited:
         ceilings.append(inherited)
     os.environ["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(ceilings)
+
+
+_test_file_seconds: dict[str, float] = {}
+"""Seconds this session spent per test file (setup, call and teardown), by rootdir-relative path."""
+
+_DURATIONS_FILE = os.environ.get("KISS_TEST_DURATIONS", "")
+"""``$KISS_TEST_DURATIONS`` as the session started (a test's own setting is not the session's)."""
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Add *report*'s phase duration to its file's total (:func:`pytest_sessionfinish` records)."""
+    path = Path(report.location[0]).as_posix()
+    _test_file_seconds[path] = _test_file_seconds.get(path, 0.0) + report.duration
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Record the session's per-file durations for ``impacted-tests --splits`` to balance by.
+
+    Merged under its lock into :func:`~kiss.scripts.durations.durations_path`
+    (``$KISS_TEST_DURATIONS`` as the session started, else
+    ``tmp/test-durations.json`` of the main checkout) with what earlier
+    sessions recorded, so every split run feeds the next balance.  A
+    session that ran no test (collection only) records nothing; a file
+    the recorder cannot write is no failure of the tests.
+    """
+    from kiss.scripts.durations import durations_path, record_durations
+
+    path = Path(_DURATIONS_FILE) if _DURATIONS_FILE else durations_path()
+    with contextlib.suppress(OSError):
+        record_durations(path, _test_file_seconds)

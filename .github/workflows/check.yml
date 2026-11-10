@@ -20,4 +20,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - run: uv run check --clean
+      # check cleans build artefacts first by default, then runs the checks.
+      # Do not pass --clean: argparse expands it to --clean-only, which exits
+      # after cleaning without running any check.
+      - run: uv run check

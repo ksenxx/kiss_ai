@@ -24,6 +24,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -630,6 +631,22 @@ class TestRegistry:
         tool_interrupt._INJECT_LOCK.release()
 
 
+def _hold_without_share_delete(path: Path, seconds: float) -> None:
+    """Keep *path* open for *seconds* as a dying process or a virus scanner does on Windows.
+
+    The handle allows reading and writing by others but not deletion, so
+    ``DeleteFile`` on *path* fails with a sharing violation meanwhile.
+    """
+    if sys.platform == "win32":
+        import _winapi
+
+        handle = _winapi.CreateFile(
+            str(path), _winapi.GENERIC_READ, 1 | 2, 0, _winapi.OPEN_EXISTING, 0, 0,
+        )
+        time.sleep(seconds)
+        _winapi.CloseHandle(handle)
+
+
 class TestBashMonitor:
     """The Bash tool's process-group monitor observes the tool's event."""
 
@@ -660,6 +677,43 @@ class TestBashMonitor:
         assert not thread.is_alive()
         assert time.monotonic() - t0 < 10
         assert results["out"] == USER_INTERRUPTED_MESSAGE
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="POSIX unlinks a file others hold open")
+    def test_the_interrupt_wins_over_a_holder_of_the_job_log(self) -> None:
+        """A job log held open for a moment after the kill is removed once let go.
+
+        On Windows a process of the killed tree, or a virus scanner, can
+        hold the log past ``taskkill``; removing it then failed with
+        ``PermissionError``, which replaced the interrupt.
+        """
+        tools = UsefulTools()
+        results: dict[str, object] = {}
+
+        def target() -> None:
+            token = new_tool_call("Bash")
+            register_tool_call(token)
+            try:
+                results["out"] = tools.Bash("sleep 30; echo late", description="sleep")
+            except BaseException as e:
+                results["out"] = e
+            finally:
+                unregister_tool_call(token)
+
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        time.sleep(0.5)
+        (job,) = tools._jobs.values()
+        holder = threading.Thread(
+            target=_hold_without_share_delete, args=(job.log_path, 1.0), daemon=True,
+        )
+        holder.start()
+        time.sleep(0.1)
+        assert thread.ident is not None
+        assert interrupt_tool_call(thread.ident, "Bash") is True
+        thread.join(15)
+        holder.join(5)
+        assert isinstance(results["out"], ToolCallInterrupted), results["out"]
+        assert not job.log_path.exists()
 
     def test_bash_with_both_events_still_honours_the_task_stop(self) -> None:
         stop = threading.Event()

@@ -2,13 +2,13 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""OpenRouter bestrouter — the ``/bestrouter`` protocol on OpenRouter's Fable 5.1 and Astra.
+"""OpenRouter bestrouter — the ``/bestrouter`` protocol on OpenRouter's Fable 5.2 and Astra.
 
 Same protocol as :mod:`kiss.agents.seas.bestrouter.bestrouter_sea` (one
 frontier model does the work, a second one reviews it read-only through
 a non-blocking ``run_agent`` on at most 75% of the budget), with every model taken from
 the OpenRouter vendor: :data:`SIMPLE_MODEL` is Claude Opus 5.5 (medium effort) for
-simple questions, :data:`PRIMARY_MODEL` is Claude Fable 5.1 (max effort) and
+simple questions, :data:`PRIMARY_MODEL` is Claude Fable 5.2 (max effort) and
 :data:`REVIEW_MODEL` is GPT-6 Astra, all as ``openrouter/...`` catalog
 entries, so one OpenRouter key runs the whole session.
 
@@ -32,8 +32,8 @@ from kiss.agents.seas.bestrouter.bestrouter_sea import routing_prompt
 SIMPLE_MODEL = "openrouter/anthropic/claude-opus-5.5-medium"
 """The model a tab starts on: Claude Opus 5.5 at medium effort via OpenRouter."""
 
-PRIMARY_MODEL = "openrouter/anthropic/claude-fable-5.1-max"
-"""The model for every other task: Claude Fable 5.1 at max effort via OpenRouter."""
+PRIMARY_MODEL = "openrouter/anthropic/claude-fable-5.2-max"
+"""The model for every other task: Claude Fable 5.2 at max effort via OpenRouter."""
 
 REVIEW_MODEL = "openrouter/openai/gpt-6-astra"
 """The model that reviews and debugs the primary model's work: GPT-6 Astra via OpenRouter."""
