@@ -6,7 +6,8 @@
 
 The routing protocol (:data:`SYSTEM_PROMPT`) fixes the models by name:
 :data:`SIMPLE_MODEL` answers simple questions and queries (the tab starts on it),
-:data:`PRIMARY_MODEL` runs every other task, including software development, and
+:data:`PRIMARY_MODEL` runs every other task, including software development, analysis
+and writing, and
 :data:`REVIEW_MODEL` is dispatched through a non-blocking ``run_agent`` for a read-only
 review and debugging pass over the primary model's work, on at most 75% of
 the task budget.
@@ -33,7 +34,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 SIMPLE_MODEL = "claude-opus-5-5-medium"
 """The model a tab starts on; it answers simple questions and queries itself."""
 
-PRIMARY_MODEL = "claude-fable-5-1-max"
+PRIMARY_MODEL = "claude-fable-5-2-max"
 """The model that does every task but simple questions and queries."""
 
 REVIEW_MODEL = "gpt-6-astra"
@@ -43,7 +44,8 @@ SYSTEM_PROMPT = f"""\
 ## Model routing protocol (bestrouter)
 
 Use '{SIMPLE_MODEL}' for simple questions and queries.
-Use '{PRIMARY_MODEL}' model for all other tasks, including software development. Use
+Use '{PRIMARY_MODEL}' model for all other tasks, including software development and analysis
+and writing. Use
 {REVIEW_MODEL} (not codex) through `run_agent(model="{REVIEW_MODEL}", tool_profile="review",
 wait="false")` for a thorough read-only review and debugging of the other model's work,
 keep working while it runs and collect it with `agent_job(job_id, "wait")`. Check

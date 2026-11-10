@@ -290,12 +290,10 @@ class TestCachePricing:
         assert cost == pytest.approx(
             (1_000 * 10.0 + 500 * 50.0 + 400_000 * 0.25 + 2_000 * 12.5) / 1e6
         )
-        for name in (
-            "openrouter/anthropic/claude-fable-5.1",
-            "openrouter/~anthropic/claude-fable-latest",
-        ):
-            assert MODEL_INFO[name].cache_read_price_per_1M == pytest.approx(0.25), name
-            assert MODEL_INFO[name].cache_write_price_per_1M == pytest.approx(12.5), name
+        # openrouter/~anthropic/claude-fable-latest moved to Fable 5.2 on 2026-11-09.
+        name = "openrouter/anthropic/claude-fable-5.1"
+        assert MODEL_INFO[name].cache_read_price_per_1M == pytest.approx(0.25)
+        assert MODEL_INFO[name].cache_write_price_per_1M == pytest.approx(12.5)
 
     def test_openai_model_has_cache_read_pricing(self):
         info = MODEL_INFO["gpt-4.1-mini"]

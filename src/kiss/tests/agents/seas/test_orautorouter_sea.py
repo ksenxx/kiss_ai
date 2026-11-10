@@ -103,7 +103,7 @@ def test_every_tier_candidate_is_a_distinct_openrouter_catalog_model() -> None:
     frontier = {model for model, _ in orautorouter_sea.TIERS["frontier"]}
     assert frontier == {
         "openrouter/openai/gpt-6-astra",
-        "openrouter/anthropic/claude-fable-5.1-max",
+        "openrouter/anthropic/claude-fable-5.2-max",
         "openrouter/anthropic/claude-opus-5.5-max",
     }
 

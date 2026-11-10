@@ -503,6 +503,7 @@ class ChatSorcarAgent(SorcarAgent):
         """
         if unless_finished and task_end_ms(task_id) > 0:
             return
+        owed_remote = self._bank_pending_remote_charges(task_id)
         # One coherent triple (see usage_snapshot): three property reads
         # could tear across a concurrent abandoned-subagent reclaim.
         final_cost, final_tokens, final_steps = self.usage_snapshot()
@@ -519,7 +520,72 @@ class ChatSorcarAgent(SorcarAgent):
             task_id, prompt, parsed, result_summary,
             usage=(final_cost, final_tokens, final_steps),
         )
+        if owed_remote:
+            # The bank above may have grown the totals past the run's
+            # last usage event: persist the final ones as the task's
+            # latest, as a late charge of a finished row does, so its
+            # replayed header shows what its row holds.  Before the row
+            # is finished, so a save a Stop cuts persists it on retry (a
+            # repeat of the same totals is harmless).
+            _append_chat_event({
+                "type": "usage_info",
+                "text": "",
+                "taskId": task_id,
+                "total_tokens": final_tokens,
+                "cost": f"${final_cost:.4f}",
+                "cost_usd": final_cost,
+                "total_steps": final_steps,
+                "ts": int(time.time() * 1000),
+            }, task_id=task_id)
         _save_task_extra(extra_payload, task_id=task_id)
+
+    def _bank_pending_remote_charges(self, task_id: str) -> bool:
+        """Bank on this run's ledger the remote charges its row got while no live agent held it.
+
+        A remote sub-agent's late spend reported while the row runs is
+        banked on the live agent the registry finds
+        (``task_update._bank_remote_charge``); one reported when the
+        registry has none (a bridge-owned run is unregistered before its
+        final save, a run outside the daemon is never registered) is left
+        on the row unbanked, and the row's finalization alone would add
+        it, past the ledger whose totals the run's caller folds.  Banked
+        here exactly as the live path does, with ``TASK_USAGE_LOCK`` held
+        (so no charge this process records falls between this and the
+        snapshot after it): the mark first, with the ledger totals it is
+        banked over, then the record, under the offsets' publish lock.
+        A charge already marked is not marked again and its record is
+        appended again: the ledger counts its key once, so one the live
+        agent banked adds nothing, and one whose bank a Stop cut after
+        its mark is banked by the retried save.  The snapshot then holds
+        each and the final save marks them settled, so each counts once.
+
+        Args:
+            task_id: The finishing run's row.
+
+        Returns:
+            Whether the row is owed any charge its totals do not hold
+            yet (banked here or by the live agent).
+        """
+        from kiss.agents.sorcar.persistence import (
+            _mark_remote_charge_banked,
+            _pending_remote_charges,
+        )
+        from kiss.agents.sorcar.relentless_agent import _OFFSET_PUBLISH_LOCK
+        from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
+
+        owed = False
+        try:
+            for charge, cost, tokens, steps, marked in _pending_remote_charges(task_id):
+                owed = True
+                with _OFFSET_PUBLISH_LOCK:
+                    if not marked:
+                        _mark_remote_charge_banked(charge, *self.usage_snapshot())
+                    _attribute_sub_usage(self, cost, tokens, steps, key=f"remote:{charge}")
+        except Exception:
+            # Never fails the final save: an unbanked charge is still
+            # settled into the row by its finalization.
+            logger.warning("pending remote charges of %s not banked", task_id, exc_info=True)
+        return owed
 
     def _build_extra_payload(
         self,

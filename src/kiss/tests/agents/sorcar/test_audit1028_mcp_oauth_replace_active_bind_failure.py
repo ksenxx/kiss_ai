@@ -5,7 +5,9 @@ binding the redirect listener for the new one.  When that bind failed,
 ``_active`` still named the cancelled session, so ``active(name)``
 returned it and ``finish_mcp_server_connect`` reported "sign-in
 cancelled" for a sign-in that never started instead of "no sign-in in
-progress".  The cancelled session is now unpublished before the bind.
+progress".  The cancelled session is now unpublished when the bind fails
+(it stays published until then, so ``active()`` never answers ``None``
+in the middle of a replacement).
 """
 
 from __future__ import annotations

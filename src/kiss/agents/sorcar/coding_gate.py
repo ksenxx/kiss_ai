@@ -1568,7 +1568,9 @@ class CodingGate:
         counts the work as reviewed once a sub-task of it succeeded
         (:func:`dispatch_successes`) and no file changed since its
         dispatch; one left running (a job id in the result) is read when
-        ``agent_job`` reports it finished.  Any other sub-task may have
+        ``agent_job`` reports it finished (a ``wait_any`` result is read
+        job by job, :func:`~kiss.agents.sorcar.agent_dispatch.wait_any_results`).
+        Any other sub-task may have
         changed files: when the work's :meth:`fingerprint` differs from
         the one taken at its dispatch (or none could be taken) it is a
         change (:meth:`changed`), unchecked until a shell command runs,
@@ -1581,20 +1583,40 @@ class CodingGate:
             args: The call's arguments.
             text: Its result.
         """
-        successes = dispatch_successes(text)
         if name == "agent_job":
-            job = self.jobs.get(str(args.get("job_id", "")).strip())
-            if job is None or not successes:  # not a job of this run, or still running
-                return
-            review, changes, fingerprint = job
-        else:
-            if str(args.get("machine", "")).strip():
-                return
-            review, changes = dispatches_review(args), self.changes
-            fingerprint = self.dispatch_fingerprint
-            started = STARTED_AGENT_JOB.search(text)
-            if started:
-                self.jobs[started.group(1)] = (review, changes, fingerprint)
+            from kiss.agents.sorcar.agent_dispatch import wait_any_results
+
+            if str(args.get("action", "")) == "wait_any":
+                results = wait_any_results(text)
+            else:
+                results = {str(args.get("job_id", "")).strip(): text}
+            for job_id, result in results.items():
+                job, successes = self.jobs.get(job_id), dispatch_successes(result)
+                if job is not None and successes:  # a job of this run, finished
+                    self.subtask_done(*job, successes)
+            return
+        if str(args.get("machine", "")).strip():
+            return
+        review, changes = dispatches_review(args), self.changes
+        fingerprint = self.dispatch_fingerprint
+        started = STARTED_AGENT_JOB.search(text)
+        if started:
+            self.jobs[started.group(1)] = (review, changes, fingerprint)
+        self.subtask_done(review, changes, fingerprint, dispatch_successes(text))
+
+    def subtask_done(
+        self, review: bool, changes: int, fingerprint: str | None, successes: list[bool],
+    ) -> None:
+        """Record one finished sub-task (:meth:`subtask`): a review, or a possible change.
+
+        Args:
+            review: Whether the sub-task was a read-only review.
+            changes: The gate's :attr:`changes` count at its dispatch.
+            fingerprint: The work's :meth:`fingerprint` at its dispatch,
+                ``None`` when none could be taken.
+            successes: The ``success`` flags of its results
+                (:func:`dispatch_successes`); empty while it runs.
+        """
         if review:
             if any(successes) and changes == self.changes:
                 self.reviewed_by_agent = True

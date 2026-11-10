@@ -9,13 +9,23 @@ module under ``src/kiss/tests`` that imports, directly or through other
 ``kiss`` modules, a changed source file (``git diff --name-only HEAD``
 plus untracked files, or the paths given on the command line).  A
 changed test file is impacted by itself.  ``--splits N`` prints instead
-the JSON list of ``N`` balanced ``uv run pytest`` commands for
-``run_commands_parallel``.
+the JSON list of ``N`` ``uv run pytest`` commands for
+``run_commands_parallel``, each with a per-test timeout
+(:data:`DEFAULT_TEST_TIMEOUT_SECONDS`) and balanced by the durations
+earlier runs recorded (:mod:`kiss.scripts.durations`; the test suite's
+conftest writes them at every session's end), by file size where none
+is known.
+``--owned <paths>`` lists instead the tests that are the given files or
+are named for them (``test_<module>*.py``), no import hops: what a
+sub-agent fixing a few files in a tree shared with siblings runs.
 
 The 2026-10-24 trajectory audit found mid-task test runs selected by
 directory globs (one of them 58 CPU-minutes for a one-module change)
 and by guesswork; the import graph names the tests that can actually
-see a change.
+see a change.  The 2026-11-08 sweep then ran the suite about five times
+over (every fixer re-running the closure of its siblings' files too) and
+lost a round to one 74-minute split, which ``--owned``, the timeout and
+the duration balance address.
 """
 
 from __future__ import annotations
@@ -24,10 +34,13 @@ import argparse
 import ast
 import json
 import os
+import statistics
 import subprocess
 import sys
 from collections import defaultdict, deque
 from pathlib import Path
+
+from kiss.scripts.durations import durations_path, load_durations
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC = PROJECT_ROOT / "src"
@@ -137,6 +150,44 @@ def impacted_tests(changed: list[Path], src: Path = SRC, depth: int = DEFAULT_DE
     )
 
 
+def owned_tests(changed: list[Path], src: Path = SRC) -> list[Path]:
+    """Return the test files among *changed* and those named for the modules in *changed*.
+
+    No import hops: a changed ``src/kiss/a/b.py`` selects every
+    ``test_b.py`` and ``test_b_*.py`` under ``src/kiss/tests``, a changed
+    test file selects itself, and a module with no test named for it
+    selects none (named on stderr, so the change can get one).  The
+    tests a sub-agent runs on the files it changed in a tree it shares
+    with siblings: the depth-1 closure of a core module is already
+    hundreds of files, most of them the siblings' concern.
+
+    Args:
+        changed: The files the caller changed (absolute, or relative to
+            the repo root); files outside *src* or not ``.py`` are ignored.
+        src: The source root (default: the repository's ``src/``).
+    """
+    tests_dir = src / "kiss" / "tests"
+    all_tests = [f for f in source_files(tests_dir) if f.name.startswith("test_")]
+    by_resolved = {f.resolve(): f for f in all_tests}
+    owned: set[Path] = set()
+    for path in changed:
+        resolved = path.resolve() if path.is_absolute() else (src.parent / path).resolve()
+        if resolved.suffix != ".py" or not resolved.is_relative_to(src):
+            continue
+        if resolved.is_relative_to(tests_dir):
+            if resolved in by_resolved:
+                owned.add(by_resolved[resolved])
+            continue
+        stem = resolved.parent.name if resolved.name == "__init__.py" else resolved.stem
+        named = [
+            t for t in all_tests if t.stem == f"test_{stem}" or t.stem.startswith(f"test_{stem}_")
+        ]
+        if not named:
+            print(f"no test module named for {path} (test_{stem}*.py)", file=sys.stderr)
+        owned.update(named)
+    return sorted(owned)
+
+
 def changed_files() -> list[Path]:
     """Return the files changed against ``HEAD`` plus the untracked ones (``[]`` outside git)."""
     try:
@@ -153,20 +204,49 @@ def changed_files() -> list[Path]:
     return [PROJECT_ROOT / line for line in (diff + untracked).splitlines() if line.strip()]
 
 
-def split_commands(tests: list[Path], splits: int, root: Path = PROJECT_ROOT) -> list[str]:
-    """Return at most *splits* ``uv run pytest`` commands over *tests*, balanced by file size.
+DEFAULT_TEST_TIMEOUT_SECONDS = 600
+"""The ``--timeout`` (pytest-timeout) every split command carries: a test
+still running after it fails there instead of holding its split, and
+the round waiting on the split, open.  ``pyproject.toml`` keeps
+``timeout = 0`` for a plain ``uv run pytest``."""
 
-    Paths are in POSIX form: the commands run through the Bash tool,
-    which is bash on Windows too, where a backslash would be eaten.
+
+def split_commands(
+    tests: list[Path], splits: int, root: Path = PROJECT_ROOT,
+    durations: dict[str, float] | None = None, timeout: int = DEFAULT_TEST_TIMEOUT_SECONDS,
+) -> list[str]:
+    """Return at most *splits* ``uv run pytest`` commands over *tests*, balanced by duration.
+
+    A test file weighs the seconds *durations* records for it; one with
+    no record weighs its size times the median seconds per byte of the
+    recorded files (its size alone when nothing is recorded, as the
+    balance was before durations were kept).  The longest-weighing files
+    are placed first, each into the lightest split so far.  Paths are in
+    POSIX form: the commands run through the Bash tool, which is bash on
+    Windows too, where a backslash would be eaten.
+
+    Args:
+        tests: The test files to run.
+        splits: The most commands to return (fewer when there are fewer tests).
+        root: The repo root the paths are printed relative to.
+        durations: Seconds by path relative to *root*
+            (:func:`~kiss.scripts.durations.load_durations`).
+        timeout: The per-test ``--timeout`` of every command; ``0`` leaves it out.
     """
+    known = durations or {}
+    seconds = {t: known.get(t.relative_to(root).as_posix()) for t in tests}
+    rates = [s / t.stat().st_size for t, s in seconds.items() if s is not None and t.stat().st_size]
+    rate = statistics.median(rates) if rates else 1.0
+    weights = {t: s if s is not None else t.stat().st_size * rate for t, s in seconds.items()}
     buckets: list[list[Path]] = [[] for _ in range(max(1, min(splits, len(tests))))]
-    sizes = [0] * len(buckets)
-    for test in sorted(tests, key=lambda t: (-t.stat().st_size, t)):
-        index = sizes.index(min(sizes))
+    loads = [0.0] * len(buckets)
+    for test in sorted(tests, key=lambda t: (-weights[t], t)):
+        index = loads.index(min(loads))
         buckets[index].append(test)
-        sizes[index] += test.stat().st_size
+        loads[index] += weights[test]
+    flag = f"--timeout={timeout} " if timeout > 0 else ""
     return [
-        "uv run pytest -q -p no:cacheprovider "
+        f"uv run pytest -q -p no:cacheprovider {flag}"
         + " ".join(t.relative_to(root).as_posix() for t in sorted(bucket))
         for bucket in buckets
         if bucket
@@ -184,11 +264,26 @@ def main(argv: list[str] | None = None) -> int:
         "--depth", type=int, default=DEFAULT_DEPTH,
         help=f"import hops from a change to a test (default {DEFAULT_DEPTH}; 0 = unbounded)",
     )
+    parser.add_argument(
+        "--owned", action="store_true",
+        help="only the given test files and the tests named for the given modules "
+             "(test_<module>*.py), no import hops; needs paths",
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=DEFAULT_TEST_TIMEOUT_SECONDS,
+        help=f"per-test timeout of each split (default {DEFAULT_TEST_TIMEOUT_SECONDS} s; 0 = none)",
+    )
     args = parser.parse_args(argv)
+    if args.owned and not args.paths:
+        parser.error("--owned needs the files you changed: in a tree shared with siblings, "
+                     "git diff holds their edits too")
     changed = [Path(p) for p in args.paths] or changed_files()
-    tests = impacted_tests(changed, depth=args.depth)
+    tests = owned_tests(changed) if args.owned else impacted_tests(changed, depth=args.depth)
     if args.splits:
-        print(json.dumps(split_commands(tests, args.splits)))
+        commands = split_commands(
+            tests, args.splits, durations=load_durations(durations_path()), timeout=args.timeout,
+        )
+        print(json.dumps(commands))
     else:
         for test in tests:
             print(test.relative_to(PROJECT_ROOT))

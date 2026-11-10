@@ -51,8 +51,17 @@ plain-language prompts work everywhere**:
 2. **Voice.** Switch on the mic button (the voice trigger: the page then listens
    locally for the wake word, and the setting survives reloads) and speak, prefixed
    with the wake word: *"Hey Sorcar, tell the eng Slack channel that the deploy is
-   done."* You can also steer a running task by voice; Sorcar replies aloud in the
-   language you spoke.
+   done."* A wake counts only when the page's two local recognizers both hear it
+   within 2.5 s of each other: one knowing just the phrase (spelled as the speech
+   model hears the name, "hey sore car", "hey sir car", "hey sar car"), one with
+   the full vocabulary, which settles for the word "hey" or a last few words
+   spelling something close to "heysorcar". The daemon then re-checks that the
+   name starts at one of the first eight words of the transcript — "sorcar", a
+   spelling it is heard as ("sorkar", "sarkar", "soccer", "sir car", ...) or any
+   single word one edit away from it — and cuts everything up to and including
+   it before running the rest, so background talk and sound-alikes are dropped. You
+   can also steer a running task by voice; Sorcar replies aloud in the language you
+   spoke.
 3. **Your existing messaging apps.** Once a channel gateway is running (see
    [Always-on gateways](#always-on-gateways) below), any message you send to the bot
    in Telegram, Slack, Discord, email, WhatsApp, ... *is* a prompt: it becomes a
@@ -250,7 +259,13 @@ turns that fallback off.
   <name>`) runs the MCP authorization flow directly against the server: the client
   registers itself (CIMD or dynamic registration), you sign in and click Allow, and
   the tokens land in `~/.kiss/mcp_auth/<server>.<digest>.json` (one file per server
-  name and URL, the file naming its URL), where later runs refresh them.
+  name and URL, the file naming its URL), where later runs refresh them. The flow
+  waits up to ten minutes for you to click Allow (`_LOGIN_TIMEOUT`; the whole
+  flow, handshake included, is bounded by that plus the minute of
+  `CONNECT_TIMEOUT`) and then fails with `sign-in was not completed`; a flow that
+  times out, is cancelled or fails closes its loopback callback server at once, so
+  a browser connection still hanging on the port cannot hold the result back until
+  its own socket timeout runs out.
   Zoom's authorization server accepts only pre-registered apps: set
   `KISS_MCP_ZOOM_CLIENT_ID` / `KISS_MCP_ZOOM_CLIENT_SECRET` from an app that lists
   `http://localhost:53683/callback` as redirect URI.
@@ -518,7 +533,9 @@ not interrupt the running agent:
 the answering session shows as a nested sub-agent tab under the running task's tab only
 while it works (the tab closes when it finishes and does not reappear on reload), and the
 reply lands in that task's transcript as a persisted "Answer" panel that quotes the
-question. Files attached to the `/ask` message travel with the question to the
+question, in whichever tab shows that task when the answer arrives (the tab you typed
+into may have been closed and the task reopened in another), and it is kept with the
+task even when the answer lands after the task has finished. Files attached to the `/ask` message travel with the question to the
 answering run (the side channel passes them as the `attachments` of its
 `daemon_client.run` call), and the answering session's spend is charged to the task you
 asked about. The task-info panel's refresh button (`src/kiss/server/task_update.py`)

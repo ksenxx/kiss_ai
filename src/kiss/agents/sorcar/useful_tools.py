@@ -89,6 +89,7 @@ from kiss.core.processes import (
     popen_process_group,
 )
 from kiss.core.tool_verdict import ToolRedirect, followup_result
+from kiss.core.utils import unlink_waiting_for_holders
 
 logger = logging.getLogger(__name__)
 
@@ -2602,6 +2603,13 @@ class UsefulTools:
         # set by the agent that registers these tools.  Without one the
         # note numbers this instance's Read calls.
         self.current_step: Callable[[], int] | None = None
+        # Set by the agent that registers these tools: says when every
+        # sub-agent job of the task has finished and a result of one is
+        # still unread (agent_dispatch.unread_results_note), else "".  A
+        # ``Bash(until=)`` poll and a ``bash_job`` wait end early on it:
+        # what they wait for can then only be something a child was to
+        # leave behind, and its result says what it did instead.
+        self.idle_children: Callable[[], str] | None = None
         self._read_calls = 0
         # Outputs spilled to tmp/tool-out/ by this instance (see _spill);
         # the tag keeps instances sharing a work dir (a parent and its
@@ -2840,7 +2848,7 @@ class UsefulTools:
 
     def _wait_for_job(
         self, job: BackgroundJob, timeout_seconds: float, until: re.Pattern[str] | None = None,
-    ) -> str | None:
+    ) -> str:
         """Block until *job* exits, *timeout_seconds* pass, the log matches *until* or a stop lands.
 
         Polls in 0.2 s slices so the task Stop event and the tool
@@ -2857,13 +2865,16 @@ class UsefulTools:
         this frame, the launch and the cleanup included, still ends it.
 
         Returns:
-            ``None``, or the ``Error:`` text of a matcher that could not
-            be started (the wait ends at once then).
+            ``""`` when the wait ran to the job's exit, the deadline, a
+            match or a Stop; the ``Error:`` text of a matcher that could
+            not be started (the wait ends at once then); or the note of
+            :attr:`idle_children` when the wait ended early on it.
         """
         deadline = time.monotonic() + timeout_seconds
         done, matched = threading.Event(), threading.Event()
         failed: list[str] = []
         matcher = None
+        idle = ""
         if until is not None:
             stops = [
                 event
@@ -2887,6 +2898,9 @@ class UsefulTools:
                     break
                 if matched.is_set() or failed:
                     break
+                idle = self._idle_children_note()
+                if idle:
+                    break
                 time.sleep(min(remaining, 0.2))
         finally:
             done.set()
@@ -2897,7 +2911,11 @@ class UsefulTools:
             return (
                 f"Error: could not start the log matcher for until={until.pattern!r}: {failed[0]}"
             )
-        return None
+        return idle
+
+    def _idle_children_note(self) -> str:
+        """Return :attr:`idle_children`'s note (every sub-agent done, a result unread) or ``""``."""
+        return self.idle_children() if self.idle_children is not None else ""
 
     def Read(  # noqa: N802
         self,
@@ -3419,10 +3437,16 @@ class UsefulTools:
         return None if job is None else job.job_id
 
     def _wait_on_job(self, job_id: str, seconds: float) -> str:
-        """Wait up to *seconds* for the job *job_id* to exit and return its status line."""
+        """Wait up to *seconds* for the job *job_id* to exit and return its status line.
+
+        The status carries the :attr:`idle_children` note when the wait
+        ended on it, as ``bash_job``'s report does, so the sleep that
+        became this wait (:func:`wait_instead_of_sleep`) says why it
+        returned early and what to read.
+        """
         job = self._jobs[job_id]
-        self._wait_for_job(job, seconds)
-        return job.status()
+        ended = self._wait_for_job(job, seconds)
+        return f"{job.status()}; the wait ended early: {ended}" if ended else job.status()
 
     def _wait_instead_of_sleep(
         self, command: str, timeout_seconds: float,
@@ -3519,6 +3543,9 @@ class UsefulTools:
                 combined output or ``timeout_seconds`` elapse, and the
                 result is the last run's output plus a line saying whether
                 the regex matched and after how many runs and seconds.
+                The poll also ends once every sub-agent job of this task
+                has finished with a result you have not read (the line
+                says so: read it with ``agent_job('', 'wait_any')``).
                 Not for ``background=True`` (follow a job's log with
                 ``bash_job(id, "wait", until=...)`` instead).
             poll_seconds: Seconds between two runs of an ``until`` poll
@@ -3647,11 +3674,14 @@ class UsefulTools:
 
         One tool call however long the wait: the run that matches ends
         the poll, as does the deadline (the last run is killed at it), a
-        command that cannot be launched, the stop event, or an output
-        too long to be searched whole (the capture keeps a head and a
-        tail: a match across or inside the gap would be wrong).  Each
-        run is a foreground run (:meth:`_run_once`), so its output
-        streams and counts as a view of the file it shows.
+        command that cannot be launched, the stop event, an output too
+        long to be searched whole (the capture keeps a head and a tail:
+        a match across or inside the gap would be wrong), or
+        :attr:`idle_children` saying that every sub-agent job of the
+        task has finished with a result unread (a poll for what a child
+        was to produce can then only time out).  Each run is a
+        foreground run (:meth:`_run_once`), so its output streams and
+        counts as a view of the file it shows.
 
         Args:
             command: The shell command to repeat.
@@ -3669,6 +3699,7 @@ class UsefulTools:
         stop = self.stop_event or threading.Event()
         started = time.monotonic()
         runs = 0
+        idle = ""
         while True:
             runs += 1
             # The time left, to the hundredth: the timeout a killed run reports.
@@ -3678,6 +3709,9 @@ class UsefulTools:
             matched = output is not None and not dropped and self._searched(regex, output, deadline)
             left = deadline - time.monotonic()
             if matched or output is None or dropped or left <= 0:
+                break
+            idle = self._idle_children_note()
+            if idle:
                 break
             if tool_interrupt.wait_interruptible(stop, min(pause, left)):
                 break
@@ -3692,6 +3726,8 @@ class UsefulTools:
             )
         elif matched:
             verdict = "matched"
+        elif idle:
+            why = f"; the poll ended early: {idle}"
         elif time.monotonic() >= deadline:
             why = ": the call's deadline (timeout_seconds) passed"
         return (
@@ -3812,10 +3848,12 @@ class UsefulTools:
             if grace_seconds:
                 # The model asked for a foreground command: the tool panel's
                 # Stop kills it, as it kills a foreground shell, and the job
-                # the model never saw leaves neither an entry nor a log.
+                # the model never saw leaves neither an entry nor a log.  On
+                # Windows a process of the killed tree may still hold the log
+                # for a moment, which would replace the Stop by PermissionError.
                 _kill_job_group(job.process)
                 self._jobs.pop(job.job_id, None)
-                job.log_path.unlink(missing_ok=True)
+                unlink_waiting_for_holders(job.log_path)
             raise
         finally:
             capture.close()
@@ -3836,7 +3874,7 @@ class UsefulTools:
         # Finished in time, this is a foreground result: the model never saw
         # the job id, so neither the registry entry nor the log lingers.
         self._jobs.pop(job.job_id, None)
-        job.log_path.unlink(missing_ok=True)
+        unlink_waiting_for_holders(job.log_path)
         self._note_shell_view(command, returncode, output)
         return _format_bash_result(
             returncode, output, max_output_chars, capture.spilled_to, capture.dropped,
@@ -3916,7 +3954,10 @@ class UsefulTools:
                 ``"kill"`` kills the job's whole process group, then reports.
             timeout_seconds: How long ``"wait"`` blocks at most.  Prefer
                 one long wait over many short polls; the wait ends early
-                on the task's Stop button.
+                on the task's Stop button, and once every sub-agent job
+                of this task has finished with a result you have not
+                read (the report then says so: read it with
+                ``agent_job('', 'wait_any')``).
             tail_lines: Number of trailing log lines to include.
             max_output_chars: Maximum characters in the report before truncation.
             until: With ``"wait"``, a regular expression: the wait also
@@ -3932,6 +3973,7 @@ class UsefulTools:
         if job is None:
             known = ", ".join(self._jobs) or "none"
             return f"Error: unknown job id {job_id!r}. Known jobs: {known}."
+        note = ""
         if action == "wait":
             pattern: re.Pattern[str] | None = None
             if until:
@@ -3939,14 +3981,16 @@ class UsefulTools:
                     pattern = re.compile(until)
                 except re.error as e:
                     return f"Error: until is not a valid regular expression: {e}"
-            error = self._wait_for_job(job, timeout_seconds, pattern)
-            if error is not None:
-                return error
+            ended = self._wait_for_job(job, timeout_seconds, pattern)
+            if ended.startswith("Error:"):
+                return ended
+            if ended:
+                note = f"\n[wait ended early: {ended}]"
         elif action == "kill":
             _kill_job_group(job.process)
         elif action != "tail":
             return f"Error: action must be one of wait, tail, kill; got {action!r}."
-        return _format_job_report(job, tail_lines, max_output_chars)
+        return _format_job_report(job, tail_lines, max_output_chars) + note
 
     def checkpoint(self, name: str) -> str:
         """Save the files of the work dir's git working tree as checkpoint *name*.

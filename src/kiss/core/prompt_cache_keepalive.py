@@ -96,14 +96,14 @@ def is_long_running_call(name: str, args: dict[str, Any]) -> bool:
     Returns:
         ``True`` for fan-out tools, for the tools that wait on a person
         (:data:`WAITING_TOOLS`, whatever their timeout), for a
-        ``bash_job`` or ``agent_job`` wait (whatever its timeout: the
-        job is another process or agent), and for calls whose
+        ``bash_job`` or ``agent_job`` wait or ``wait_any`` (whatever its
+        timeout: the job is another process or agent), and for calls whose
         ``timeout`` or ``timeout_seconds`` argument is at least
         :data:`LONG_TOOL_TIMEOUT_SECONDS`.
     """
     if name in FAN_OUT_TOOLS or name in WAITING_TOOLS:
         return True
-    if name in ("bash_job", "agent_job") and args.get("action") == "wait":
+    if name in ("bash_job", "agent_job") and args.get("action") in ("wait", "wait_any"):
         return True
     for key in ("timeout_seconds", "timeout"):
         try:
