@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
+from kiss.agents.sorcar.resume_state import is_resumable
 from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.html_to_markdown import html_to_markdown
 from kiss.core.kiss_error import KISSError
@@ -1062,13 +1063,15 @@ class GitWorktreeOps:
         return branch
 
     @staticmethod
-    def create(repo: Path, branch: str, wt_dir: Path) -> bool:
+    def create(repo: Path, branch: str, wt_dir: Path, task_id: str = "") -> bool:
         """Create a new worktree with a new branch.
 
         Args:
             repo: Git repo root path.
             branch: New branch name to create.
             wt_dir: Directory for the new worktree.
+            task_id: The owning task's ``task_history`` row id, when it
+                has one (see :meth:`save_owner_pid`).
 
         The new worktree is registered with ``git worktree add`` and
         stamped with this process's pid (:meth:`save_owner_pid`) under
@@ -1106,7 +1109,7 @@ class GitWorktreeOps:
         # so callers already holding it are unaffected.
         return locked_call(
             repo_lock(repo), GitWorktreeOps._add_worktree_locked,
-            repo, branch, wt_dir, ("-b", branch, str(wt_dir)), True,
+            repo, branch, wt_dir, ("-b", branch, str(wt_dir)), True, task_id,
         )
 
     @staticmethod
@@ -1116,6 +1119,7 @@ class GitWorktreeOps:
         wt_dir: Path,
         add_args: tuple[str, ...],
         new_branch: bool,
+        task_id: str = "",
     ) -> bool:
         """``git worktree add`` + owner stamp under the reclaim lock.
 
@@ -1129,7 +1133,7 @@ class GitWorktreeOps:
             if result.returncode != 0:
                 logger.warning("Failed to add worktree: %s", result.stderr.strip())
                 return False
-            if not GitWorktreeOps.save_owner_pid(repo, branch):
+            if not GitWorktreeOps.save_owner_pid(repo, branch, task_id):
                 logger.warning(
                     "Removing freshly added worktree %s: its owner pid "
                     "could not be recorded, so another process's reclaim "
@@ -1143,7 +1147,7 @@ class GitWorktreeOps:
         return True
 
     @staticmethod
-    def reattach(repo: Path, branch: str, wt_dir: Path) -> bool:
+    def reattach(repo: Path, branch: str, wt_dir: Path, task_id: str = "") -> bool:
         """Check the existing *branch* out again as the worktree *wt_dir*.
 
         Used after a merge failed once the worktree directory was
@@ -1156,6 +1160,7 @@ class GitWorktreeOps:
             repo: Git repo root path.
             branch: The existing ``kiss/wt-*`` branch.
             wt_dir: Directory for the worktree.
+            task_id: The owning task's row id, when it has one.
 
         Returns:
             True when the worktree exists and is stamped, False
@@ -1163,7 +1168,7 @@ class GitWorktreeOps:
         """
         return locked_call(
             repo_lock(repo), GitWorktreeOps._add_worktree_locked,
-            repo, branch, wt_dir, (str(wt_dir), branch), False,
+            repo, branch, wt_dir, (str(wt_dir), branch), False, task_id,
         )
 
     @staticmethod
@@ -2286,8 +2291,8 @@ class GitWorktreeOps:
                     marker.unlink()
 
     @staticmethod
-    def save_owner_pid(repo: Path, branch: str) -> bool:
-        """Record this process as the live owner of *branch*'s worktree.
+    def save_owner_pid(repo: Path, branch: str, task_id: str = "") -> bool:
+        """Record this process (and its task) as the live owner of *branch*'s worktree.
 
         ``repo_lock`` and the reclaim exclusion sets are process-local,
         so a SECOND Sorcar process (kiss-web daemon vs. a ``kiss`` CLI
@@ -2303,13 +2308,27 @@ class GitWorktreeOps:
         :func:`process_identity` (start time + executable) is stored
         beside it when available and :meth:`_live_peer_owner` compares both.
 
+        The owning TASK is stamped too (``kiss-owner-task``) when the
+        caller knows it: a task whose process died but whose resume
+        state is on disk comes back under the same id after the restart
+        (see :mod:`kiss.agents.sorcar.resume_state`), so
+        :meth:`reclaim_orphaned_worktrees` must leave its worktree
+        alone instead of merging it behind the task's back, and the
+        resumed task finds its worktree again by that stamp.
+
         Args:
             repo: Git repo root path.
             branch: The worktree branch name.
+            task_id: The owning task's ``task_history`` row id; ``""``
+                stamps the process only.
 
         Returns:
             True if the config was saved successfully.
         """
+        if task_id and not GitWorktreeOps._save_branch_config(
+            repo, branch, "kiss-owner-task", task_id, "owner task",
+        ):
+            return False
         identity = process_identity(os.getpid())
         if identity is not None and not GitWorktreeOps._save_branch_config(
             repo, branch, "kiss-owner-identity", f"{os.getpid()}:{identity}",
@@ -2336,6 +2355,29 @@ class GitWorktreeOps:
             return int(raw)
         except ValueError:
             return None
+
+    @staticmethod
+    def load_owner_task(repo: Path, branch: str) -> str:
+        """Return the task id stamped on *branch* by :meth:`save_owner_pid`, or ``""``."""
+        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-owner-task") or ""
+
+    @staticmethod
+    def _resumable_owner_task(repo: Path, branch: str) -> str:
+        """Return the id of *branch*'s owning task while that task can still resume.
+
+        A top-level daemon task's launch record exists from its first
+        step until the task ends for good; a dead process leaves it
+        behind, and the daemon starts the task again from it at boot.
+        The worktree of such a task is not an orphan.  A CLI run or a
+        sub-agent has no launch record and is never restarted, so its
+        worktree is reclaimed as before.
+
+        Returns:
+            The task id, or ``""`` when there is no task stamp or the
+            task is over.
+        """
+        task_id = GitWorktreeOps.load_owner_task(repo, branch)
+        return task_id if is_resumable(task_id) else ""
 
     @staticmethod
     def _live_peer_owner(repo: Path, branch: str) -> int | None:
@@ -4093,6 +4135,18 @@ class GitWorktreeOps:
                         "Skipping orphan-worktree reclaim of %s: "
                         "owning process %d is still alive",
                         wt_dir, owner_pid,
+                    )
+                    continue
+                owner_task = GitWorktreeOps._resumable_owner_task(repo, branch)
+                if owner_task:
+                    # The owning process died, but the task comes back
+                    # under the same id after the restart and continues
+                    # in this worktree.  Merging it now would race the
+                    # resumed task.
+                    logger.info(
+                        "Skipping orphan-worktree reclaim of %s: "
+                        "owning task %s is waiting to be resumed",
+                        wt_dir, owner_task,
                     )
                     continue
                 if GitWorktreeOps.load_spare_marker(repo, branch):

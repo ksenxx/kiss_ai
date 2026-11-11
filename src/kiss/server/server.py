@@ -59,6 +59,17 @@ from kiss.agents.sorcar.persistence import (
     _load_model_usage,
     _load_subagent_rows_by_parent_task_id,
     _recover_orphaned_tasks,
+    _resume_row_status,
+    _save_task_result,
+)
+from kiss.agents.sorcar.resume_state import (
+    MAX_RESUMES,
+    RESUME_STAGGER_S,
+    clear_resume_state,
+    pending_task_ids,
+    read_launch,
+    resume_refusal,
+    write_launch,
 )
 from kiss.agents.sorcar.sorcar_agent import _subagent_done_event
 from kiss.core.locked import _race_delay, locked_call
@@ -565,6 +576,9 @@ class AgentServer(
 
     def __init__(self, printer: JsonPrinter | None = None) -> None:
         self.printer: JsonPrinter = printer or JsonPrinter()
+        # Set once this constructor returns: the orphan sweep thread
+        # waits for it before it relaunches an interrupted task.
+        self._init_done = threading.Event()
         boot_ts = time.time()
         still_running: set[str] = set()
         # ``agent_states`` is process-global, so this constructor must
@@ -693,6 +707,7 @@ class AgentServer(
         self._files_latest_request: dict[str, object] = {}
         self._last_active_file: dict[str, str] = {}
         self._last_active_content: dict[str, str] = {}
+        self._init_done.set()
 
     def use_private_tab_registry(self, path: Path) -> None:
         """Own a private tab registry at *path* instead of the canonical one.
@@ -720,8 +735,7 @@ class AgentServer(
         self.tab_registry = TabRegistry(path)
         self._tab_chat_views = dict(self.tab_registry.bindings())
 
-    @staticmethod
-    def _run_orphan_sweep(still_running: set[str], boot_ts: float) -> None:
+    def _run_orphan_sweep(self, still_running: set[str], boot_ts: float) -> None:
         """Run the orphan-task recovery sweep (background thread body).
 
         Rewrites the ``"Agent Failed Abruptly"`` sentinel on
@@ -765,8 +779,16 @@ class AgentServer(
         """
         from kiss.agents.sorcar.persistence import _close_thread_db
 
+        # A task whose process died with its resume state on disk is not
+        # an orphan to close: its row keeps the sentinel and the task is
+        # started again below, under the same id.
         try:
-            _recover_orphaned_tasks(still_running, created_before=boot_ts)
+            resumable = self._resumable_task_ids(still_running)
+        except Exception:  # pragma: no cover, best-effort sweep
+            logger.exception("resume-state scan failed; resuming no task")
+            resumable = []
+        try:
+            _recover_orphaned_tasks(still_running | set(resumable), created_before=boot_ts)
         except Exception:  # pragma: no cover — best-effort sweep
             logger.exception(
                 "orphan-task recovery sweep failed; continuing startup",
@@ -782,6 +804,88 @@ class AgentServer(
             logger.warning("could not stamp legacy task-update rows", exc_info=True)
         finally:
             _close_thread_db()
+        if resumable:
+            # ``_cmd_run`` needs the whole server: this thread was started
+            # halfway through ``__init__``.
+            self._init_done.wait(timeout=60)
+            self._resume_pending_tasks(resumable)
+
+    def _resumable_task_ids(self, still_running: set[str]) -> list[str]:
+        """Decide which interrupted tasks come back, closing the rows of those that do not.
+
+        A task comes back when its resume directory holds a launch
+        record, its row is a dead process's sentinel row, the
+        ``resume_on_restart`` setting is on, and none of the guards in
+        :func:`~kiss.agents.sorcar.resume_state.resume_refusal` (the
+        restart cap, the age limit) applies.  A refused row is closed
+        with the reason and its resume state removed; a closed or
+        missing row only loses its stale resume state; a row a live
+        process owns is left alone.
+
+        Args:
+            still_running: Task ids live in this process (never touched).
+
+        Returns:
+            The ids to resume, oldest launch first.
+        """
+        from kiss.core.user_config import load_config
+
+        resume_on = load_config().get("resume_on_restart", True) is not False
+        now = time.time()
+        resumable: list[str] = []
+        for task_id in pending_task_ids():
+            if task_id in still_running:
+                continue
+            status = _resume_row_status(task_id)
+            if status == "live":
+                continue
+            if status != "dead":
+                clear_resume_state(task_id)
+                continue
+            launch = read_launch(task_id)
+            if launch is None:
+                reason = "its launch record is unreadable"
+            elif not resume_on:
+                reason = "the resume_on_restart setting is off"
+            else:
+                reason = resume_refusal(task_id, launch, now)
+            if reason:
+                logger.warning("Not resuming task %s: %s", task_id, reason)
+                _save_task_result(f"Not resumed after a restart: {reason}", task_id=task_id)
+                clear_resume_state(task_id)
+                continue
+            resumable.append(task_id)
+        return resumable
+
+    def _resume_pending_tasks(self, task_ids: list[str]) -> None:
+        """Start the interrupted tasks *task_ids* again, under their old ids.
+
+        Each relaunch is the task's submitted ``run`` command plus
+        ``resumeTaskId`` (the worker reopens the row and the agent
+        continues from its checkpoint), on a tab of its own so it can
+        never be queued behind a task a reconnecting tab started
+        meanwhile; viewers of the chat attach as to any running task.
+        The launches are spaced out so several tasks do not hit the
+        model endpoint and the disk in the same second.
+
+        Args:
+            task_ids: The tasks to resume, in launch order.
+        """
+        for index, task_id in enumerate(task_ids):
+            if index:
+                time.sleep(RESUME_STAGGER_S)
+            launch = read_launch(task_id)
+            if launch is None:  # pragma: no cover, removed since the scan
+                continue
+            count = int(launch.get("resume_count", 0)) + 1
+            write_launch(task_id, launch["cmd"], resume_count=count)
+            cmd = dict(launch["cmd"])
+            cmd["resumeTaskId"] = task_id
+            cmd["tabId"] = f"resume-{task_id}"
+            logger.warning(
+                "Resuming task %s after a restart (%d of %d)", task_id, count, MAX_RESUMES,
+            )
+            self._cmd_run(cmd)
 
     def drop_connection_state(self, conn_id: str) -> None:
         """Discard per-connection autocomplete state for a closed connection.

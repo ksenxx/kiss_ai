@@ -75,6 +75,10 @@ _DISPLAY_EVENT_TYPES = frozenset(
         "task_error",
         "task_stopped",
         "task_interrupted",
+        # A task started again after the daemon's process died
+        # (``task_runner._announce_resume``): marks where the transcript
+        # continues under a new process.
+        "task_resumed",
         "followup_suggestion",
         # The finished ``/ask`` side-channel answer, delivered into
         # the OWNER task's transcript (``commands._broadcast_ask_answer``).

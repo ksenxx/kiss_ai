@@ -35,6 +35,7 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_context,
     _load_task_chain_context,
     _record_frequent_task,
+    _reopen_task,
     _save_task_extra,
     _save_task_result,
     _task_has_transcript_events,
@@ -42,6 +43,7 @@ from kiss.agents.sorcar.persistence import (
     task_end_ms,
 )
 from kiss.agents.sorcar.relentless_agent import DEFAULT_MAX_BUDGET
+from kiss.agents.sorcar.resume_state import is_resumable, resume_dir
 from kiss.agents.sorcar.sea_commands import named_commands_help
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
@@ -839,6 +841,7 @@ class ChatSorcarAgent(SorcarAgent):
         _open_bare_path: bool = True,
         _start_ms: int = 0,
         compaction: bool = True,
+        resume_task_id: str = "",
     ) -> str:
         """Run the agent with chat-session context management.
 
@@ -922,9 +925,20 @@ class ChatSorcarAgent(SorcarAgent):
                 :meth:`SorcarAgent.run`): False never compacts, True (the
                 default) compacts while the global Compaction setting is
                 on.
+            resume_task_id: The row of a task whose process died, to
+                continue under the same id: the row is reopened
+                (:func:`~kiss.agents.sorcar.persistence._reopen_task`)
+                instead of a new one being inserted, and the run picks
+                up the checkpoint in the task's resume directory
+                (:mod:`kiss.agents.sorcar.resume_state`).  Every run
+                writes that checkpoint; only a resume reads one.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
+
+        Raises:
+            RuntimeError: *resume_task_id* names a row that cannot be
+                reopened (finished, or owned by a live process).
         """
         # A caller (currently the slash-command dispatch in
         # ``TaskRunner._run_task_inner``) can supply the raw user text
@@ -1081,9 +1095,15 @@ class ChatSorcarAgent(SorcarAgent):
         # thread rewrote the offset.
         previous_task_id = ""
         broadcast = getattr(run_printer, "broadcast", None)
-        task_id, self._chat_id = _add_task(
-            history_prompt, chat_id=self._chat_id, extra=early_extra,
-        )
+        if resume_task_id:
+            reopened_chat_id = _reopen_task(resume_task_id)
+            if reopened_chat_id is None:
+                raise RuntimeError(f"task {resume_task_id} cannot be resumed: its row is closed")
+            task_id, self._chat_id = resume_task_id, reopened_chat_id
+        else:
+            task_id, self._chat_id = _add_task(
+                history_prompt, chat_id=self._chat_id, extra=early_extra,
+            )
         # No call between the assignment and the try: a Stop is delivered
         # at a call's return, and one landing here would leave the row
         # committed, unpublished and never finalised.
@@ -1094,6 +1114,7 @@ class ChatSorcarAgent(SorcarAgent):
             # skip the whole cleanup, and the runner (which finds the
             # row through ``last_task_id``) never learnt the id either.
             locked_call(self._task_id_lock, setattr, self, "_last_task_id", task_id)
+            self.resume_dir = None
             if run_printer is not None:
                 tl = getattr(run_printer, "_thread_local", None)
                 if tl is not None:
@@ -1120,6 +1141,14 @@ class ChatSorcarAgent(SorcarAgent):
                     logger.warning(
                         "on_task_id_allocated(%r) raised", task_id, exc_info=True,
                     )
+            # The daemon's callback wrote the task's launch record when a
+            # restart would start this task again (a top-level task);
+            # only then does the run checkpoint its conversation, where
+            # the resume reads it (see ``RelentlessAgent.resume_dir``).
+            # A CLI run or a sub-agent is never restarted and keeps no
+            # state.
+            if is_resumable(task_id):
+                self.resume_dir = str(resume_dir(task_id))
             # A fan-out parent reads the child's settings back from the
             # broadcast event for the ``ran:`` line of its result.
             task_settings = self._task_settings_payload(

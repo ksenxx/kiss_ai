@@ -68,6 +68,7 @@ from kiss.agents.sorcar.relentless_agent import (
     publish_usage_offsets,
     resolve_work_dir,
 )
+from kiss.agents.sorcar.resume_state import read_worktrees, write_worktrees
 from kiss.agents.sorcar.sea_commands import model_sea
 from kiss.agents.sorcar.sea_settings import (
     SeaError,
@@ -2219,7 +2220,80 @@ class SorcarAgent(RelentlessAgent):
         # model are final; the guard shows it every call and the result
         # hook every result.
         self._coding_gate = self._new_coding_gate(with_reviewer="Edit" in self._run_tool_names)
+        if not self._wts:
+            self._reattach_resumed_worktrees()
         return super().perform_task(all_tools, attachments=attachments)
+
+    def _record_worktrees(self) -> None:
+        """Write the worktrees this task holds to its resume state.
+
+        A run of this task after a restart takes them back
+        (:meth:`_reattach_resumed_worktrees`).  Nothing is written for a
+        run without a resume directory (no persisted task).
+        """
+        task_id = _persisted_task_id(self)
+        if not self.resume_dir or not task_id:
+            return
+        write_worktrees(task_id, [
+            {
+                "repo_root": str(wt.repo_root),
+                "branch": wt.branch,
+                "original_branch": wt.original_branch,
+                "wt_dir": str(wt.wt_dir),
+                "baseline_commit": wt.baseline_commit,
+                "work_dir": str(wt.work_dir) if wt.work_dir else None,
+                "entered": self._work_dir_inside(wt),
+            }
+            for wt in self._wts.values()
+        ])
+
+    def _work_dir_inside(self, wt: GitWorktree) -> bool:
+        """Whether the task's work dir is inside *wt*."""
+        try:
+            Path(self.work_dir).resolve().relative_to(wt.wt_dir.resolve())
+        except ValueError:
+            return False
+        return True
+
+    def _reattach_resumed_worktrees(self) -> None:
+        """Take back the worktrees a killed run of this task left behind.
+
+        Reads the record :meth:`create_worktree` wrote
+        (:func:`~kiss.agents.sorcar.resume_state.write_worktrees`) and
+        keeps every worktree git still lists under this task's owner
+        stamp; one merged or discarded before the kill is gone and is
+        skipped.  Each kept worktree is stamped with this process's pid
+        (the reclaim's liveness check), and the work dir re-enters the
+        worktree it was in.
+        """
+        task_id = _persisted_task_id(self)
+        if not task_id:
+            return
+        for entry in read_worktrees(task_id):
+            repo, wt_dir, branch = Path(entry["repo_root"]), Path(entry["wt_dir"]), entry["branch"]
+            if repo.resolve() in self._wts or not wt_dir.is_dir():
+                continue
+            registered = {
+                (d.resolve(), b) for d, b in GitWorktreeOps.registered_worktrees(repo)
+            }
+            if (wt_dir.resolve(), branch) not in registered:
+                continue
+            if GitWorktreeOps.load_owner_task(repo, branch) != task_id:
+                continue
+            GitWorktreeOps.save_owner_pid(repo, branch, task_id)
+            wt = GitWorktree(
+                repo_root=repo,
+                branch=branch,
+                original_branch=entry.get("original_branch"),
+                wt_dir=wt_dir,
+                baseline_commit=entry.get("baseline_commit"),
+                work_dir=Path(entry["work_dir"]) if entry.get("work_dir") else None,
+            )
+            self._wts[repo.resolve()] = wt
+            self._worktree_finish_gate_used = False
+            if entry.get("entered"):
+                self._enter_work_dir(str(self._wt_work_dir_of(wt)))
+            logger.info("Resumed task %s took its worktree %s back", task_id, wt_dir)
 
     def _reset(
         self,
@@ -3338,6 +3412,7 @@ class SorcarAgent(RelentlessAgent):
         if moves_work_dir:
             self._enter_work_dir(str(wt_work_dir), into_worktree=True)
         self._worktree_finish_gate_used = False
+        self._record_worktrees()
         event: dict[str, object] = {
             "type": "worktree_created",
             "worktreeDir": str(wt.wt_dir),
@@ -3438,7 +3513,9 @@ class SorcarAgent(RelentlessAgent):
             Text telling the agent where to continue, to append to the
             merge message.
         """
-        if not GitWorktreeOps.reattach(wt.repo_root, wt.branch, wt.wt_dir):
+        if not GitWorktreeOps.reattach(
+            wt.repo_root, wt.branch, wt.wt_dir, _persisted_task_id(self),
+        ):
             return (
                 f"\n\nThe worktree could not be checked out again; the work is "
                 f"on branch '{wt.branch}' for the user to merge or discard. Make no "
@@ -3709,7 +3786,7 @@ class SorcarAgent(RelentlessAgent):
                 logger.warning("Orphan-worktree maintenance failed", exc_info=True)
             branch = GitWorktreeOps.new_task_branch(repo)
             wt_dir = repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
-            if not GitWorktreeOps.create(repo, branch, wt_dir):
+            if not GitWorktreeOps.create(repo, branch, wt_dir, _persisted_task_id(self)):
                 # pragma: no cover — git worktree add failure
                 GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
                 return None

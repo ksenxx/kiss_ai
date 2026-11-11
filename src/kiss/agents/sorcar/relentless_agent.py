@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import getpass
 import html
+import json
 import logging
 import os
 import platform
 import re
+import shutil
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -25,7 +27,7 @@ from kiss.agents.sorcar.handoff_digest import handoff_digest
 from kiss.agents.sorcar.useful_tools import remap_vanished_worktree
 from kiss.core import config as config_module
 from kiss.core.base import Base
-from kiss.core.kiss_agent import KISSAgent
+from kiss.core.kiss_agent import KISSAgent, load_checkpoint
 from kiss.core.kiss_error import (
     BudgetExceededError,
     ContextWindowExceededError,
@@ -786,6 +788,10 @@ class RelentlessAgent(Base):
     """Base agent with auto-continuation for long tasks."""
 
     work_dir: str = ""
+    # A directory the run keeps its resume state in (session.json and the
+    # live session's checkpoint.json); a run that finds state there
+    # continues it.  Removed when the task ends.
+    resume_dir: str | None = None
 
     # The current usage-ledger epoch (see _UsageLedger).  Annotation
     # only: every access goes through _usage_ledger_object, which
@@ -1396,6 +1402,95 @@ class RelentlessAgent(Base):
         config.setdefault("work_dir", self.work_dir)
         return config
 
+    def _load_resume_state(self) -> dict[str, Any]:
+        """Read the resume state a killed run left in ``resume_dir``.
+
+        Returns:
+            ``{"session", "summaries", "banked", "checkpoint"}`` (checkpoint
+            None when the session never reached its first step), or {}
+            with no state.
+        """
+        if not self.resume_dir:
+            return {}
+        session_path = os.path.join(self.resume_dir, "session.json")
+        if not os.path.exists(session_path):
+            return {}
+        with open(session_path) as f:
+            state: dict[str, Any] = json.load(f)
+        checkpoint_path = os.path.join(self.resume_dir, f"checkpoint-{state['session']}.json")
+        state["checkpoint"] = None
+        if os.path.exists(checkpoint_path):
+            state["checkpoint"] = load_checkpoint(checkpoint_path)
+        return state
+
+    def _save_session_state(self, session: int, summaries: list[str]) -> str:
+        """Record the session a run is starting and what came before it.
+
+        Args:
+            session: The session index.
+            summaries: The earlier sessions' summaries.
+
+        Returns:
+            The path the session's executor checkpoints to.
+        """
+        assert self.resume_dir
+        os.makedirs(self.resume_dir, exist_ok=True)
+        state = {
+            "session": session,
+            "summaries": summaries,
+            # The spend banked before this session (the earlier sessions'
+            # and the seed of an earlier resume), restored on resume.
+            "banked": list(_ledger_totals(self._usage_ledger_object())),
+        }
+        tmp = os.path.join(self.resume_dir, "session.json.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, os.path.join(self.resume_dir, "session.json"))
+        return os.path.join(self.resume_dir, f"checkpoint-{session}.json")
+
+    def _seed_banked_usage(self, banked: list[float]) -> None:
+        """Count the spend a killed run had banked before its last session.
+
+        Args:
+            banked: Its ``(budget, tokens, steps)`` from ``session.json``.
+        """
+        budget, tokens, steps = banked
+        if budget or tokens or steps:
+            self._commit_usage_event(
+                self._usage_ledger_object(),
+                _UsageEvent(None, 0, float(budget), int(tokens), int(steps)),
+            )
+
+    def _perform_resumable(
+        self, tools: list[Callable[..., Any]], attachments: list[Attachment] | None
+    ) -> str:
+        """Run :meth:`perform_task` and drop the resume state once it returns.
+
+        A run that dies (a kill, an interrupt) keeps its state for the
+        next process to resume.
+
+        Args:
+            tools: The task's tools.
+            attachments: The task's attachments.
+
+        Returns:
+            The task result.
+        """
+        try:
+            result = self.perform_task(tools, attachments=attachments)
+        except Exception:
+            # The task failed for good; only a kill or a stop keeps the state.
+            self._clear_resume_state()
+            raise
+        self._clear_resume_state()
+        return result
+
+    def _clear_resume_state(self) -> None:
+        """Remove ``resume_dir`` once the task has ended."""
+        if self.resume_dir:
+            shutil.rmtree(self.resume_dir, ignore_errors=True)
+
     def perform_task(
         self,
         tools: list[Callable[..., Any]],
@@ -1437,6 +1532,17 @@ class RelentlessAgent(Base):
 
         progress_section = ""
         summaries: list[str] = []
+        resume = self._load_resume_state()
+        first_session = resume.get("session", 0)
+        if resume.get("banked"):
+            self._seed_banked_usage(resume["banked"])
+        if resume.get("summaries"):
+            summaries = resume["summaries"]
+            progress_section = CONTINUATION_PROMPT.format(
+                progress_text=_capped_progress_text(summaries),
+                state_text=self._continuation_state(),
+                continuation_number=first_session,
+            )
         previous_summary: str | None = None  # the last continuation's, even if empty
         zero_progress_streak = 0
         system_prompt = self.system_prompt
@@ -1446,7 +1552,7 @@ class RelentlessAgent(Base):
         # :func:`kiss.core.models.model.plain_io`).
         if not plain_io(self.model_config):
             system_prompt += self._framework_instructions()
-        for session in range(self.max_sub_sessions):
+        for session in range(first_session, self.max_sub_sessions):
             # One coherent snapshot for the whole session prologue: a
             # server-thread reclaim can publish between two separate
             # property reads and tear the triple (see usage_snapshot).
@@ -1475,6 +1581,13 @@ class RelentlessAgent(Base):
             executor.tool_call_guard = self.tool_call_guard
             executor.tool_result_hook = self.tool_result_hook
             executor.helper_charge_hook = self.helper_charge_hook
+            session_model = self.model_name
+            if self.resume_dir:
+                executor.checkpoint_path = self._save_session_state(session, summaries)
+                if session == first_session and resume.get("checkpoint"):
+                    executor.resume_state = resume["checkpoint"]
+                    # The conversation is in the format of the model that wrote it.
+                    session_model = resume["checkpoint"]["model_name"]
             executor.context_reset_hook = self.context_reset_hook
             if session > 0 and self.context_reset_hook is not None:
                 # A new session starts from an empty context: nothing
@@ -1499,7 +1612,7 @@ class RelentlessAgent(Base):
             try:
                 try:
                     result = executor.run(
-                        model_name=self.model_name,
+                        model_name=session_model,
                         prompt_template=TASK_PROMPT,
                         arguments={
                             "task_description": self.task_description,
@@ -2059,7 +2172,7 @@ class RelentlessAgent(Base):
 
                     docker_mgr.stream_callback = _docker_stream
                 try:
-                    return self.perform_task(tools or [], attachments=attachments)
+                    return self._perform_resumable(tools or [], attachments)
                 finally:
                     self.docker_manager = None
-        return self.perform_task(tools or [], attachments=attachments)
+        return self._perform_resumable(tools or [], attachments)

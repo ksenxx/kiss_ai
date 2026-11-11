@@ -40,6 +40,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _git,
 )
+from kiss.agents.sorcar.resume_state import resume_dir, write_launch
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
@@ -351,6 +352,51 @@ class TestReclaimSafetyGuards:
         )
         assert reclaimed == 0
         assert wt_dir.exists()
+
+    def test_skips_worktree_of_a_task_waiting_to_be_resumed(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The owning process died (the pid stamp is this process, which
+        # the reclaim treats as gone), but the task's resume state is on
+        # disk: the daemon restarts the task under the same id and it
+        # continues in this worktree, so the sweep must leave it alone.
+        monkeypatch.setenv("KISS_HOME", str(Path(self.tmpdir) / "home"))
+        branch = "kiss/wt-1000-resumable"
+        wt_dir = _plant_orphan_worktree(self.repo, branch, dirty_kind="staged")
+        assert GitWorktreeOps.save_owner_pid(self.repo, branch, "task-resumable")
+        assert GitWorktreeOps.load_owner_task(self.repo, branch) == "task-resumable"
+        state = resume_dir("task-resumable")
+        write_launch("task-resumable", {"type": "run", "prompt": "edit the repo"})
+
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+        assert wt_dir.exists()
+        assert (wt_dir / "staged_file.txt").exists()
+        assert not (self.repo / "staged_file.txt").exists()
+
+        # Once the task ended for good (its resume state was cleared),
+        # the same worktree is an orphan like any other and is merged.
+        shutil.rmtree(state)
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
+        assert not wt_dir.exists()
+        assert (self.repo / "staged_file.txt").read_text() == "staged content\n"
+
+    def test_owner_task_stamp_alone_does_not_block_the_reclaim(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A stamp pointing at a task that never had a launch record (a
+        # task that finished and was cleaned up, or a run nothing
+        # restarts: a CLI run, a sub-agent) is not a reason to keep the
+        # worktree, even when checkpoint files of that run were left.
+        monkeypatch.setenv("KISS_HOME", str(Path(self.tmpdir) / "home"))
+        branch = "kiss/wt-1000-finished"
+        wt_dir = _plant_orphan_worktree(self.repo, branch, dirty_kind="staged")
+        assert GitWorktreeOps.save_owner_pid(self.repo, branch, "task-finished")
+        leftovers = resume_dir("task-finished")
+        leftovers.mkdir(parents=True)
+        (leftovers / "checkpoint-0.json").write_text("{}")
+
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
+        assert not wt_dir.exists()
 
     def test_ignores_non_kiss_worktree_entries(self) -> None:
         # Create a non-kiss worktree; reclaim must not touch it.

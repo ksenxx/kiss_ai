@@ -69,6 +69,9 @@ class TestDisplayEventTypes(unittest.TestCase):
             "text_delta", "text_end", "tool_call", "tool_result",
             "system_output", "result", "system_prompt", "prompt",
             "task_done", "task_error", "task_stopped", "task_interrupted",
+            # A task started again after a restart records the restart in
+            # its transcript (see resume_state).
+            "task_resumed",
             "followup_suggestion", "ask_answer", "autocommit_done",
             "warning", "usage_info", "llm_call", "task_settings",
             # Proposal 10 records: a compaction, a context hand-off and a

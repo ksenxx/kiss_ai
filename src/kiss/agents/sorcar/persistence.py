@@ -2499,6 +2499,80 @@ def _add_task(
     return task_id, chat_id
 
 
+SHUTDOWN_INTERRUPTED_RESULT = "Task interrupted by server restart/shutdown"
+"""The result the daemon's shutdown writes on every task it stopped."""
+
+_RESUMABLE_RESULTS = frozenset({"Agent Failed Abruptly", SHUTDOWN_INTERRUPTED_RESULT})
+"""Row results a task may be resumed from: the crash sentinel and the shutdown label."""
+
+
+def _reopen_task(task_id: str) -> str | None:
+    """Take over the row of a task whose process died, so the same task continues.
+
+    The row keeps its id, chat, prompt and the events written so far;
+    this process becomes its owner and the row is open again (no
+    ``end_ts``, the ``"Agent Failed Abruptly"`` sentinel of a running
+    row).  Only a row whose owner is dead and whose result is that
+    sentinel (the process was killed) or the shutdown label (the daemon
+    stopped it on its way down) can be taken: anything else (a finished
+    task, a task another process is running) is left alone.
+
+    Args:
+        task_id: The row to reopen.
+
+    Returns:
+        The row's chat id, or ``None`` when the row was not reopened.
+    """
+    db = _get_db()
+    with _rw_lock.read_lock():
+        row = db.execute(
+            "SELECT owner, result, chat_id FROM task_history WHERE id = ?", (task_id,),
+        ).fetchone()
+    if row is None or str(row["result"] or "") not in _RESUMABLE_RESULTS:
+        return None
+    old_owner = str(row["owner"] or "")
+    if _owner_is_alive(old_owner):
+        return None
+    owner = _process_owner_token()
+    with _rw_lock.write_lock(), _immediate_txn(db):
+        cursor = db.execute(
+            "UPDATE task_history SET owner = ?, end_ts = 0, result = ? "
+            "WHERE id = ? AND result = ? AND COALESCE(owner, '') = ?",
+            (owner, "Agent Failed Abruptly", task_id, str(row["result"]), old_owner),
+        )
+        if not cursor.rowcount:
+            return None
+    chat_id = str(row["chat_id"] or "")
+    _invalidate_chat_context_cache(chat_id)
+    return chat_id
+
+
+def _resume_row_status(task_id: str) -> str:
+    """Classify *task_id*'s row for the resume sweep.
+
+    Args:
+        task_id: A task whose resume directory survived a restart.
+
+    Returns:
+        ``"dead"`` when the row's owner process is gone and the row
+        carries the ``"Agent Failed Abruptly"`` sentinel or the shutdown
+        label (the task can be resumed), ``"live"`` when a process
+        still owns the row (leave it alone), ``"closed"`` when the row
+        has any other result, and ``"missing"`` when there is no such
+        row.
+    """
+    db = _get_db()
+    with _rw_lock.read_lock():
+        row = db.execute(
+            "SELECT owner, result FROM task_history WHERE id = ?", (task_id,),
+        ).fetchone()
+    if row is None:
+        return "missing"
+    if _owner_is_alive(str(row["owner"] or "")):
+        return "live"
+    return "dead" if str(row["result"] or "") in _RESUMABLE_RESULTS else "closed"
+
+
 def _allocate_chat_id() -> str:
     """Pre-allocate a chat session id without keeping a task row.
 

@@ -47,6 +47,12 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
+from kiss.agents.sorcar.resume_state import (
+    MAX_RESUMES,
+    clear_resume_state,
+    read_launch,
+    write_launch,
+)
 from kiss.agents.sorcar.run_config import inherited_keys
 from kiss.agents.sorcar.sea_apply import (
     NO_TOOLS_PROFILE,
@@ -1185,6 +1191,9 @@ class _TaskRunnerMixin:
         # re-dispatch at the end must restart from what the USER sent,
         # not from the SEA run this turned into.
         submitted_cmd = dict(cmd)
+        # What a resume after a restart relaunches (see resume_state):
+        # the command as submitted, not the SEA run it turns into.
+        cmd["_launch"] = submitted_cmd
         state: AgentState | None = None
         # The client's run token is a client field the scripts never
         # rewrite.
@@ -1424,7 +1433,11 @@ class _TaskRunnerMixin:
             reruns: ``(prompt, attachments)`` pairs from
                 :meth:`_release_run_state`, oldest first.
         """
-        base = {k: v for k, v in cmd.items() if k not in ("taskId", "_state_key")}
+        # ``resumeTaskId`` belonged to the finished run alone: a follow-up
+        # is a new task, and the reopened row is closed by now.
+        base = {
+            k: v for k, v in cmd.items() if k not in ("taskId", "_state_key", "resumeTaskId")
+        }
         for prompt, files in reruns:
             followup = dict(base)
             followup["prompt"] = prompt
@@ -1834,6 +1847,7 @@ class _TaskRunnerMixin:
         client_task_id: str = "",
         is_subagent: bool = False,
         previous_task_id: str | None = None,
+        launch: dict[str, Any] | None = None,
     ) -> None:
         """Wire a freshly allocated task id to its launching UI tab.
 
@@ -1861,6 +1875,11 @@ class _TaskRunnerMixin:
             is_subagent: Whether the run was submitted with a
                 ``parentTaskId`` (a ``run_agent`` child).
             previous_task_id: See :meth:`_subscribe_chat_viewers`.
+            launch: The ``run`` command as submitted, for a top-level
+                task's first block: recorded in the task's resume
+                directory so a daemon that restarts can start the task
+                again (``resumeTaskId`` in it means this run IS that
+                restart, which the transcript is told).
         """
         locked_call(
             self._state_lock,
@@ -1870,6 +1889,19 @@ class _TaskRunnerMixin:
         )
         if is_subagent:
             return
+        if launch is not None:
+            if launch.get("resumeTaskId"):
+                self._announce_resume(task_id)
+            else:
+                try:
+                    write_launch(task_id, launch)
+                except OSError:
+                    # The task runs as before, only without a restart
+                    # behind it; the viewers below still get their task.
+                    logger.warning(
+                        "could not record the launch of task %s; it will not "
+                        "be resumed after a restart", task_id, exc_info=True,
+                    )
         self._subscribe_chat_viewers(
             task_id,
             chat_id,
@@ -1878,6 +1910,32 @@ class _TaskRunnerMixin:
             client_task_id=client_task_id,
             previous_task_id=previous_task_id,
         )
+
+    def _announce_resume(self, task_id: str) -> None:
+        """Tell the transcript (and its readers) that *task_id* resumed after a restart.
+
+        Both events go out without a ``tabId``: the printer files them
+        under the worker thread's task, so they are persisted with the
+        task's transcript (a tab-addressed event is transient).  The
+        ``task_resumed`` marker is for readers of the event log; the
+        ``warning`` banner is what the transcript shows, now and on
+        every replay.
+
+        Args:
+            task_id: The reopened task.
+        """
+        launch = read_launch(task_id) or {}
+        count = int(launch.get("resume_count", 1))
+        self.printer.broadcast({"type": "task_resumed", "resume_count": count})
+        self.printer.broadcast({
+            "type": "warning",
+            "message": (
+                f"Resumed after a restart ({count} of {MAX_RESUMES}). The task continues "
+                "from its last checkpoint; the call that was running is reported to it "
+                "as interrupted, and background processes it had started were not "
+                "carried over."
+            ),
+        })
 
     def _subscribe_launching_tab_locked(self, task_id: str, tab_id: str) -> None:
         """Under ``_state_lock``: subscribe the launching *tab_id* to *task_id*'s stream.
@@ -2274,6 +2332,14 @@ class _TaskRunnerMixin:
                 client_task_id=_client_task_id_of(cmd),
                 is_subagent=bool(parent_task_id),
             )
+            # A restart continues the task under its old row (wire field
+            # ``resumeTaskId``, set by ``AgentServer._resume_pending_tasks``
+            # from the task's launch record); the resumed block is the
+            # first, the rest run as new rows as they would have.
+            _raw_resume = cmd.get("resumeTaskId")
+            resume_task_id = _raw_resume.strip() if isinstance(_raw_resume, str) else ""
+            _raw_launch = cmd.get("_launch")
+            launch = _raw_launch if isinstance(_raw_launch, dict) else None
 
             # The SEA's ``system_prompt`` and ``tools`` methods, staged
             # as callables the same way; the run applies them where it
@@ -2371,7 +2437,9 @@ class _TaskRunnerMixin:
                         _on_task_id_allocated=partial(
                             on_task_id_allocated,
                             previous_task_id=state.task_id if subtask_index else None,
+                            launch=launch if subtask_index == 0 else None,
                         ),
+                        resume_task_id=resume_task_id if subtask_index == 0 else "",
                         # Persist the raw ``/xxx text`` (not the SEA's
                         # task text) in the task-history row,
                         # frequent-tasks table and the chat's
@@ -2927,6 +2995,13 @@ class _TaskRunnerMixin:
                 task_id=task_id,
                 success=verdict if isinstance(verdict, bool) else None,
             )
+            # The row has its result: the task is over, nothing resumes
+            # it.  Except after a shutdown: the daemon stopped the task on
+            # its way down, and the next daemon's boot sweep starts it
+            # again from its checkpoint (``_reopen_task`` accepts the
+            # shutdown label), so its resume state stays.
+            if end_event.get("type") != "task_interrupted":
+                clear_resume_state(task_id)
             # Read and saved under TASK_USAGE_LOCK, so a sub-task's late
             # charge either lands on the ledger before this read or
             # finds the finished row and adds to it

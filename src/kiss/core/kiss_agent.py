@@ -7,12 +7,14 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import contextvars
 import functools
 import inspect
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -485,6 +487,49 @@ if TYPE_CHECKING:  # pragma: no cover
     from kiss.core.printer import Printer
 
 
+INTERRUPTED_CALL_RESULT = (
+    "Interrupted: the process running this task restarted while this call ran. "
+    "Its outcome is unknown: it may or may not have taken effect. Check its "
+    "effect before running it again."
+)
+NOT_STARTED_CALL_RESULT = "Not run: the process restarted before this call started."
+RESTART_NOTE = (
+    "The process running this task restarted and the task resumed from its "
+    "last checkpoint. Processes it had started (background jobs, browsers, "
+    "servers) were not carried over: a background job is gone when the "
+    "machine or container restarted, and otherwise may still be running on "
+    "its own, so check before starting it again."
+)
+
+
+def _encode_attachment(value: Any) -> dict[str, str]:
+    """JSON-encode an :class:`Attachment` held in a conversation (``json.dump`` default)."""
+    if not isinstance(value, Attachment):
+        raise TypeError(f"cannot checkpoint {type(value).__name__}")
+    return {"attachment_b64": base64.b64encode(value.data).decode(), "mime_type": value.mime_type}
+
+
+def _decode_attachment(obj: dict[str, Any]) -> Any:
+    """Turn an object written by :func:`_encode_attachment` back into an Attachment."""
+    if "attachment_b64" in obj:
+        return Attachment(data=base64.b64decode(obj["attachment_b64"]), mime_type=obj["mime_type"])
+    return obj
+
+
+def load_checkpoint(path: str) -> dict[str, Any]:
+    """Read a checkpoint written by :meth:`KISSAgent._write_checkpoint`.
+
+    Args:
+        path: The checkpoint file.
+
+    Returns:
+        The checkpoint, attachments restored.
+    """
+    with open(path) as f:
+        state: dict[str, Any] = json.load(f, object_hook=_decode_attachment)
+    return state
+
+
 class KISSAgent(Base):
     """A KISS agent using native function calling."""
 
@@ -493,6 +538,11 @@ class KISSAgent(Base):
     # publishes an instance-level replacement snapshot in one
     # ``STORE_ATTR``).
     _usage_totals: _UsageTotals = _ZERO_USAGE
+    # Resume after a restart: the run writes its conversation to
+    # ``checkpoint_path`` before every model call and every tool call,
+    # and a run given ``resume_state`` (a loaded checkpoint) continues it.
+    checkpoint_path: str | None = None
+    resume_state: dict[str, Any] | None = None
 
     @property
     def budget_used(self) -> float:
@@ -908,6 +958,8 @@ class KISSAgent(Base):
             if system_prompt and self.printer and self.print_prompts:
                 self.printer.print(strip_system_cache_break(system_prompt), type="system_prompt")
             self._set_prompt(prompt_template, arguments, attachments=attachments)
+            if self.resume_state is not None:
+                self._restore_checkpoint(self.resume_state)
 
             if not self.is_agentic:
                 return self._run_non_agentic()
@@ -1253,6 +1305,77 @@ class KISSAgent(Base):
 
         raise StepLimitExceededError(f"Agent {self.name} exceeded {self.max_steps} steps.")
 
+    def _write_checkpoint(
+        self,
+        step_count: int,
+        calls: list[dict[str, Any]],
+        done: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """Atomically save the conversation so a restarted process can resume it.
+
+        Args:
+            step_count: The step count a resumed run starts from.
+            calls: The current turn's tool calls, as ``{"name", "arguments"}``.
+            done: The results of the first ``len(done)`` of them; the next
+                call is the one about to run.
+        """
+        if self.checkpoint_path is None:
+            return
+        state = {
+            "model_name": self.model_name,
+            "conversation": self.model.conversation,
+            "messages": self.messages,
+            "step_count": step_count,
+            # The session's spend so far, so the resumed run keeps counting
+            # from it instead of from zero.
+            "usage": [self.budget_used, self.total_tokens_used],
+            "calls": calls,
+            "done": done,
+        }
+        tmp = f"{self.checkpoint_path}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f, default=_encode_attachment)
+        os.replace(tmp, self.checkpoint_path)
+
+    def _restore_checkpoint(self, state: dict[str, Any]) -> None:
+        """Continue the conversation saved by :meth:`_write_checkpoint`.
+
+        The calls that never returned get a result saying their outcome is
+        unknown, and a note tells the model the process restarted.
+
+        Args:
+            state: A loaded checkpoint.
+        """
+        self.model.conversation = state["conversation"]
+        self.messages = state["messages"]
+        self.step_count = state["step_count"]
+        self.budget_used, self.total_tokens_used = state["usage"]
+        calls = state["calls"]
+        results = [(name, result) for name, result in state["done"]]
+        pending = calls[len(results):]
+        results += [(call["name"], {"result": INTERRUPTED_CALL_RESULT}) for call in pending[:1]]
+        results += [(call["name"], {"result": NOT_STARTED_CALL_RESULT}) for call in pending[1:]]
+        if results:
+            self.model.add_function_results_to_conversation_and_return(results)
+        note = RESTART_NOTE
+        for call in pending[:1]:
+            note += (
+                f" The call {call['name']}({json.dumps(call['arguments'])}) was running "
+                "when it restarted. Its outcome is unknown: it may or may not have "
+                "taken effect. Check its effect before running it again."
+            )
+        self.model.add_message_to_conversation("user", note)
+        # The cut-off turn is not in ``messages`` yet: record it there too, so a
+        # hand-off summary built from them still sees the call in flight.
+        if calls:
+            reprs = [render_tool_call(call["name"], call["arguments"]) for call in calls]
+            self._add_message("model", "\n".join(reprs))
+            self._add_message(
+                "user", "\n\n".join(f"[{name}]: {result['result']}" for name, result in results)
+            )
+        self._add_message("user", note)
+
     def _execute_step(self) -> str | None:
         """Execute a single step in the ReAct loop.
 
@@ -1286,6 +1409,7 @@ class KISSAgent(Base):
         if self.pre_step_hook is not None:
             self.pre_step_hook(self.model)
         self._maybe_compact_conversation()
+        self._write_checkpoint(self.step_count - 1, [], [])
         if self.llm_call_hook is not None:
             hook_start = self._llm_hook_conversation_index
             modified_messages = self.llm_call_hook(list(self.model.conversation[hook_start:]))
@@ -1463,7 +1587,9 @@ class KISSAgent(Base):
         # built from the trajectory must not omit the last step.
         limit_error: KISSError | None = None
 
+        turn_calls = [{"name": fc["name"], "arguments": _call_args(fc)} for fc in function_calls]
         for fc in function_calls:
+            self._write_checkpoint(self.step_count, turn_calls, function_results)
             try:
                 name, response_str, blocked = self._guarded_execute_tool(fc)
             except BudgetExceededError as e:
