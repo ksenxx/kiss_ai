@@ -111,7 +111,7 @@ function testTagFiltersLoadedRowsAndRefetches() {
   const before = ofType(posted, 'getHistory').length;
   selectTag(win, 'work');
   assert.deepStrictEqual(
-    visibleTitles(win).sort(),
+    visibleTitles(win),
     ['fix the parser bug', 'write the paper'],
     'rows without the tag hide before the daemon answers',
   );

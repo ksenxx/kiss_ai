@@ -37,16 +37,17 @@ class ContextWindowExceededError(KISSError):
 
     Raised in two places in ``KISSAgent``:
 
-    * proactively by ``_check_limits`` when the live conversation size
-      (``context_tokens_used``) reaches ``CONTEXT_LIMIT_FRACTION`` of the
-      model's maximum context length, and
-    * reactively by ``_run_agentic_loop`` when the provider rejects a
+    * proactively by ``_check_limits`` (``_check_context``) when the live
+      conversation size (``context_tokens_used``) reaches
+      ``CONTEXT_LIMIT_FRACTION`` of the model's maximum context length, and
+    * reactively by ``_billed_model_call`` when the provider rejects a
       request with a context-overflow error (e.g. Anthropic's "Your input
       exceeds the context window of this model" or OpenAI's
       ``context_length_exceeded``).  Retrying such a request is pointless —
       the retry handler would append yet another message, growing the
-      conversation further — so the loop converts it to this typed error
-      immediately instead of burning ``MAX_CONSECUTIVE_ERRORS`` retries.
+      conversation further — so the failed call is converted to this typed
+      error at once, which the agentic loop re-raises instead of burning
+      ``MAX_CONSECUTIVE_ERRORS`` retries.
 
     A distinct type lets ``RelentlessAgent`` route the failure to its
     trajectory-summarizer/continuation path (starting a fresh session with a
@@ -71,6 +72,9 @@ class ModelRefusalError(KISSError):
     stop_reason = "refusal"
     """The provider's stop reason, named by the agent's fail-over warning."""
 
+    text = ""
+    """The text the refused response held: none (a filtered one may hold some)."""
+
 
 class ContentFilterError(ModelRefusalError):
     """Raised when the provider's content filter stopped the response.
@@ -85,7 +89,7 @@ class ContentFilterError(ModelRefusalError):
     same way with ``stop_reason="content_policy"``.
     """
 
-    def __init__(self, message: str, stop_reason: str = "content_filter") -> None:
+    def __init__(self, message: str, stop_reason: str = "content_filter", text: str = "") -> None:
         """Create the error.
 
         Args:
@@ -93,9 +97,12 @@ class ContentFilterError(ModelRefusalError):
             stop_reason: ``content_filter`` for a filtered response,
                 ``content_policy`` for a refused request; named by the
                 fail-over warning.
+            text: The text the response held when the filter stopped it,
+                for a caller that can use an incomplete answer.
         """
         super().__init__(message)
         self.stop_reason = stop_reason
+        self.text = text
 
 
 class OutputCapError(KISSError):
@@ -110,13 +117,16 @@ class OutputCapError(KISSError):
     another family.
     """
 
-    def __init__(self, message: str, stop_reason: str = "max_tokens") -> None:
+    def __init__(self, message: str, stop_reason: str = "max_tokens", text: str = "") -> None:
         """Create the error.
 
         Args:
             message: What was cut short; it names the stop reason.
             stop_reason: The provider's stop reason (``max_output_tokens``,
                 ``length`` or ``max_tokens``), named by the fail-over warning.
+            text: The text the response held when the cap cut it, for a
+                caller that can use an incomplete answer.
         """
         super().__init__(message)
         self.stop_reason = stop_reason
+        self.text = text

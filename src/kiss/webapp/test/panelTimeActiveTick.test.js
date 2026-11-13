@@ -18,6 +18,7 @@ const {
   send,
   fakeIntervals,
   parsePanelTimeMs,
+  readyTabId,
 } = require('./simplify2_harness');
 
 const clock = {now: 1_700_000_000_000};
@@ -44,9 +45,7 @@ function panelTimeMs(panel) {
 
 function runTests() {
   const {win, posted} = makePage({beforeScripts: seedClock});
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const TAB = ready.tabId;
+  const TAB = readyTabId(posted);
 
   send(win, {type: 'clear', chat_id: 'chat-active-tick', tabId: TAB});
   send(win, {type: 'status', running: true, tabId: TAB, startTs: clock.now});
@@ -137,7 +136,6 @@ function runTests() {
 try {
   runTests();
   console.log('\nAll tests passed');
-  process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.message ? err.message : err);
   process.exit(1);

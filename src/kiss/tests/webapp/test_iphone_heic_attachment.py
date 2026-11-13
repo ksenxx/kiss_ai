@@ -47,6 +47,10 @@ from kiss.tests.conftest import goto_retrying_network_change
 MAX_EDGE = 1568
 PHOTO_WIDTH = 2000
 PHOTO_HEIGHT = 1200
+# main.js re-encodes a supported image above this size (ATTACH_MAX_BYTES).
+REENCODE_ABOVE_BYTES = 1500 * 1024
+# 4 * 720 * 720 bytes stored: over that size.
+DRAWING_EDGE = 720
 
 _MOBILE_VIEWPORT = ViewportSize(width=390, height=844)
 
@@ -64,31 +68,66 @@ test skips and names it.
 """
 
 
-def _write_gradient_png(path: Path, width: int, height: int) -> None:
-    """Write a smooth RGB gradient PNG, encoder-free.
+def _write_png(
+    path: Path, width: int, height: int, color_type: int, rows: bytes, level: int
+) -> None:
+    """Write an 8-bit PNG from its unfiltered scanlines, encoder-free.
 
     Args:
         path: Destination file.
         width: Image width in pixels.
         height: Image height in pixels.
+        color_type: The PNG colour type (2: RGB, 6: RGBA).
+        rows: The scanlines, each led by its filter byte (0: none).
+        level: The zlib level of the image data (0 stores it as is).
     """
 
     def chunk(kind: bytes, payload: bytes) -> bytes:
         crc = zlib.crc32(kind + payload) & 0xFFFFFFFF
         return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
 
+    header = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows, level))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _write_gradient_png(path: Path, width: int, height: int) -> None:
+    """Write a smooth RGB gradient PNG.
+
+    Args:
+        path: Destination file.
+        width: Image width in pixels.
+        height: Image height in pixels.
+    """
     rows = bytearray()
     for y in range(height):
         rows.append(0)  # filter type: none
         for x in range(width):
             rows += bytes((x * 255 // width, y * 255 // height, 128))
-    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-    path.write_bytes(
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", header)
-        + chunk(b"IDAT", zlib.compress(bytes(rows), 9))
-        + chunk(b"IEND", b"")
-    )
+    _write_png(path, width, height, 2, bytes(rows), 9)
+
+
+def _write_transparent_drawing_png(path: Path, edge: int) -> None:
+    """Write a square RGBA PNG: an opaque black square on full transparency.
+
+    The square fills the middle third.  The image data is stored
+    uncompressed, so the file weighs about ``4 * edge * edge`` bytes.
+
+    Args:
+        path: Destination file.
+        edge: Width and height in pixels.
+    """
+    clear = bytes(4)
+    black = bytes((0, 0, 0, 255))
+    third = edge // 3
+    blank_row = b"\x00" + clear * edge
+    drawn_row = b"\x00" + clear * third + black * third + clear * (edge - 2 * third)
+    rows = blank_row * third + drawn_row * third + blank_row * (edge - 2 * third)
+    _write_png(path, edge, edge, 6, rows, 0)
 
 
 def _make_heic(tmp_path: Path) -> Path:
@@ -117,10 +156,8 @@ def _serve(
     state: dict[str, object],
 ) -> None:
     """Run the production RemoteAccessServer until *done* is set."""
-    from kiss.server.web_server import (
-        RemoteAccessServer,
-        _generate_self_signed_cert,
-    )
+    from kiss.server.web_server import RemoteAccessServer
+    from kiss.tests.local_ws import _generate_self_signed_cert
 
     certfile = tmp_path / "cert.pem"
     keyfile = tmp_path / "key.pem"
@@ -211,6 +248,22 @@ async () => {
     out.height = probe.naturalHeight;
   }
   return out;
+}
+"""
+
+
+_READ_PIXELS_JS = """
+async (src) => {
+  const probe = new Image();
+  probe.src = src;
+  await probe.decode();
+  const canvas = document.createElement('canvas');
+  canvas.width = probe.naturalWidth;
+  canvas.height = probe.naturalHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(probe, 0, 0);
+  const rgb = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data).slice(0, 3);
+  return {corner: rgb(8, 8), middle: rgb(canvas.width >> 1, canvas.height >> 1)};
 }
 """
 
@@ -311,3 +364,36 @@ def test_chromium_reports_a_heic_it_cannot_decode(
     assert "IMG_0001.HEIC" in chip["text"]
     assert chip_count == 1, "the undecodable photo was also attached"
     assert not send_disabled, "the failed conversion left the composer blocked"
+
+
+@pytest.mark.timeout(300)
+def test_chromium_converts_a_transparent_drawing_onto_white(
+    tmp_path: Path, remote_port: int
+) -> None:
+    """A see-through PNG too big to send as is becomes a JPEG on white.
+
+    JPEG has no transparency.  Laid over the black of an opaque canvas,
+    a black drawing on a transparent background came out as one black
+    rectangle (audit 2026-11-12, W3).
+    """
+    drawing = tmp_path / "drawing.png"
+    _write_transparent_drawing_png(drawing, DRAWING_EDGE)
+    assert drawing.stat().st_size > REENCODE_ABOVE_BYTES
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--ignore-certificate-errors"])
+        try:
+            page = _open_mobile_page(browser, remote_port)
+            _attach(page, drawing)
+            page.wait_for_selector(
+                "#file-chips .file-chip:not(.pending)", state="visible"
+            )
+            chip = page.evaluate(_READ_CHIP_JS)
+            pixels = page.evaluate(_READ_PIXELS_JS, chip["src"])
+        finally:
+            browser.close()
+
+    assert chip["src"].startswith("data:image/jpeg;base64,"), chip["text"]
+    assert min(pixels["corner"]) >= 250, (
+        f"the transparent background was encoded as {pixels['corner']}"
+    )
+    assert max(pixels["middle"]) <= 5, f"the black drawing was encoded as {pixels['middle']}"

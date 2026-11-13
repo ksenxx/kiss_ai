@@ -354,6 +354,12 @@ def test_stray_keywords_get_the_tools_own_hint(tmp_path: Path) -> None:
         "'use_web_tools'?",
         "zzz is neither an argument nor an options key.",
     ], out
+    # A long setting does not come back whole, in the echoed call or in the hint: the
+    # result of a failed call is cut to its first and last 1,500 characters.
+    long_setting = {"task": "hi", "add_to_prompt": "x" * 100_000}
+    _, out = agent._execute_tool({"name": "run_agent", "arguments": long_setting})
+    assert "pass it in the `options` JSON object: options='{\"add_to_prompt\": \"xxx" in out
+    assert out.endswith("xxx\"}'.\n") and len(out) < 3100
     # ``run_parallel`` carries the same hint; a tool without one keeps the generic text.
     tools = _bare_agent(tmp_path)._get_tools()
     run_parallel = next(t for t in tools if t.__name__ == "run_parallel")

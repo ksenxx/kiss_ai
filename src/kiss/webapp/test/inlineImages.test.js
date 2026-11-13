@@ -20,7 +20,13 @@
 //     directory and the frame renders once they are all in;
 //  7. a Markdown preview and a report do the same; a picture that
 //     fails keeps its src; the safety timer renders a stalled preview;
-//  8. a src that is only a query or fragment (`?v=1`) resolves to no
+//  8. a preview is parsed, not searched as text: `<img` inside a script
+//     is left alone, an unquoted src and an attribute holding `>` are
+//     real images;
+//  9. a dropped connection settles every pending picture;
+// 10. the task-update info panel loads its pictures as the polled
+//     task's files;
+// 11. a src that is only a query or fragment (`?v=1`) resolves to no
 //     file: it is settled at once (the daemon never answers an empty
 //     path), so a preview holding one renders without the safety timer.
 
@@ -34,6 +40,7 @@ const {
   stubRaf,
   captureTimers,
   fakeMatchMedia,
+  htmlFrames,
 } = require('./simplify2_harness.js');
 const {contentTabs} = require('./subagent_tab_helpers');
 
@@ -286,9 +293,7 @@ function testOtherPanels() {
 }
 
 function frameOf(win) {
-  const frames = Array.from(
-    win.document.querySelectorAll('.content-html-frame'),
-  ).filter(f => f.closest('.content-tab-view').style.display !== 'none');
+  const frames = htmlFrames(win);
   assert.strictEqual(frames.length, 1, 'one html frame on screen');
   return frames[0];
 }

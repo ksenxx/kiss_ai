@@ -428,6 +428,7 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
     with registered(agent, "rsi7d-scope-run", tab_id="scope_run_tab"):
         parsed, agentic = run_sea(
             run, script, checkout, agent=agent, max_steps=6, is_parallel=False,
+            use_memory=False,  # its recall asks OpenAI for an embedding when a key is exported
             ask_user_question_callback=ask,
         )
     assert parsed["success"] is True

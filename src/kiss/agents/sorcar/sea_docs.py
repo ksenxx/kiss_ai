@@ -50,6 +50,7 @@ from kiss.agents.sorcar.sea_settings import (
     wire_field,
 )
 from kiss.core.config import kiss_home
+from kiss.core.utils import atomic_write_text
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 """The checkout that holds the generated pages (``src/kiss/agents/sorcar`` is four levels down)."""
@@ -232,13 +233,15 @@ def update_file(path: Path, check: bool, tables: dict[str, str]) -> bool:
 
     Args:
         path: A Markdown page with ``sea-docs`` blocks.
-        check: ``True`` only compares, ``False`` writes the page.
+        check: ``True`` only compares, ``False`` writes the page, swapped
+            in whole (:func:`kiss.core.utils.atomic_write_text`): a write
+            cut short leaves the page as it was, not truncated.
         tables: The rendered-table memo shared across pages (:func:`render`).
     """
     old = path.read_text(encoding="utf-8")
     new = render(old, tables)
     if new != old and not check:
-        path.write_text(new, encoding="utf-8")
+        atomic_write_text(path, new)
     return new != old
 
 

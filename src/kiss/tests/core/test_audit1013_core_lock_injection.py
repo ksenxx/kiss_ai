@@ -35,7 +35,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from kiss.core import browser_handoff, config
+from kiss.core import browser_handoff, config, secret_redaction
 from kiss.core.base import Base
 from kiss.core.memoryfield.index import VectorIndex, hashed_embedding
 from kiss.core.memoryfield.pages import MemoryDir
@@ -96,6 +96,16 @@ class _BrowserHandoffClaim:
         browser_handoff._release(url)
 
 
+def _redact_tool_output() -> None:
+    """``redact_secrets`` (run on every tool result) under ``secret_redaction._reading``.
+
+    The children's ``KISS_HOME`` holds no key store, so every call takes the lock.
+    A plain ``with`` on that lock leaks it on CPython 3.14, whose ``with`` has a
+    check point right after ``__enter__`` for a C lock too (3.13 has none there).
+    """
+    assert secret_redaction.redact_secrets("tool output") == "tool output"
+
+
 def _save_last_model() -> None:
     """``save_config`` (the model picker's write) under ``_config_lock`` and its flock."""
     save_config({"last_model": "audit1013"})
@@ -147,6 +157,9 @@ def run_hammer(name: str) -> None:
         _hammer(_BrowserHandoffClaim(), {"browser_handoff._lock": browser_handoff._lock})
     elif name == "config":
         _hammer(_save_last_model, {"_config_lock": _config_lock})
+    elif name == "secrets":
+        lock = secret_redaction._reading
+        _hammer(_redact_tool_output, {"secret_redaction._reading": lock}, contend=lock)
     elif name == "stream":
         call = _StreamWatchdog()
         _hammer(call, {})
@@ -167,7 +180,8 @@ def test_core_lock_paths(tmp_path: Path) -> None:
     """
     env = {**os.environ, "KISS_HOME": str(tmp_path)}
     for name in (
-        "base", "artifact_dir", "verdict", "codex_default", "handoff", "config", "stream", "query",
+        "base", "artifact_dir", "verdict", "codex_default", "handoff", "config", "secrets",
+        "stream", "query",
     ):
         proc = subprocess.run(
             [sys.executable, "-c", f"import {__name__} as m; m.run_hammer({name!r})"],

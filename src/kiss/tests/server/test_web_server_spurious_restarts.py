@@ -41,11 +41,14 @@ restart, even after the IP-watchdog debounce was hardened:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import socket
 import subprocess
 import sys
+import threading
 import time
 import unittest
+from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.server.web_server as ws_mod
@@ -60,6 +63,7 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _get_local_ips,
 )
+from kiss.tests.server.pause import Pause
 
 
 def _config_with_password() -> str | None:
@@ -286,6 +290,43 @@ class TestLinkLocalAndMappedIpsFiltered(unittest.TestCase):
         setattr(socket, "getaddrinfo", fake_getaddrinfo)  # noqa: B010
         ips = _get_local_ips()
         self.assertEqual(ips, frozenset())
+
+
+def _resolves_own_name(frame_locals: dict[str, Any]) -> bool:
+    """Whether a ``socket.getaddrinfo`` frame looks up this host's own name."""
+    return bool(frame_locals.get("host") == socket.gethostname())
+
+
+class TestStalledResolverDoesNotHoldTheCaller(unittest.TestCase):
+    """``_get_local_ips`` waits a bounded time for the host name's lookup.
+
+    ``getaddrinfo`` takes no timeout: a resolver that never answers
+    used to keep the daemon's start (before any listener was bound)
+    and every watchdog tick for good.
+    """
+
+    def test_callers_return_and_share_one_lookup(self) -> None:
+        known = _get_local_ips()
+        # The real lookup is held inside ``socket.getaddrinfo`` (the
+        # stdlib's Python wrapper), as by a resolver that never answers.
+        with (
+            Pause(socket.getaddrinfo.__code__, _resolves_own_name) as pause,
+            concurrent.futures.ThreadPoolExecutor(2) as pool,
+        ):
+            calls = [pool.submit(_get_local_ips) for _ in range(2)]
+            try:
+                results = [call.result(timeout=10) for call in calls]
+            finally:
+                lookups = [t for t in threading.enumerate() if t.name == "hostname-lookup"]
+                pause.release()
+        for lookup in lookups:
+            lookup.join(10)
+        self.assertTrue(pause.paused.is_set())
+        # Both callers got the addresses of the last lookup that
+        # finished, and the second waited for the first's lookup rather
+        # than start its own: a dead resolver holds one thread.
+        self.assertEqual(results, [known, known])
+        self.assertEqual(len(lookups), 1)
 
 
 class TestIpDebounceTickConstant(unittest.TestCase):

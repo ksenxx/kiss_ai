@@ -19,7 +19,11 @@ fails on a stream the relay thread has not yet seen die
 remote browser failing to launch (a ``browserError`` without a tab),
 a frame that is not JSON, a ``browserState`` for a page never
 announced, the ``retired`` checks of the commands that follow an open
-(an open meeting a stream closed as idle just too late is covered), and
+(an open meeting a stream closed as idle just too late is covered), the
+machine answering two opens in reverse order (it runs a connection's
+commands in order, and nothing real holds one page's attach while
+another's completes), a machine older than the ``openId`` echo (the
+oldest-opener fallback of ``_take_opener``), and
 an SSH-registered machine (no password on the frames).  The pages a
 chat tab's binding brings here (the stream's ``browserList``) are
 covered by :mod:`kiss.tests.server.test_remote_bound_tab_browser_pages`.
@@ -27,6 +31,7 @@ covered by :mod:`kiss.tests.server.test_remote_bound_tab_browser_pages`.
 
 from __future__ import annotations
 
+import asyncio
 import http.server
 import os
 import shutil
@@ -41,7 +46,11 @@ from typing import Any
 
 from kiss.agents.sorcar import machines as mach
 from kiss.agents.sorcar import web_stealth
+from kiss.core.user_config import save_config
+from kiss.server.browser_tab import BrowserTabService
 from kiss.server.remote_views import RemoteViews, RemoteViewStream, namespaced, split_tab_id
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import find_free_port
 from kiss.tests.remote_daemon import start_remote_daemon
 from kiss.tests.server.pause import Pause, Pauses
 from kiss.tests.server.test_terminal_tab_service import session_count
@@ -74,8 +83,12 @@ class RemoteViewsTest(TwoClientHarness):
         self.remote_dir = tempfile.mkdtemp(prefix="remote_views_")
         self.remote_work = Path(self.remote_dir) / "work"
         self.remote_work.mkdir()
+        remote_home = Path(self.remote_dir) / "home"
         self.remote = start_remote_daemon(
-            Path(self.remote_dir) / "home", password="pw-remote",
+            remote_home,
+            password="pw-remote",
+            # Keep the real user's login-shell startup files out of the fixture.
+            env={"HOME": str(remote_home)},
         )
         self.a = self.open_client("a")
         self.b = self.open_client("b")
@@ -153,15 +166,15 @@ class RemoteViewsTest(TwoClientHarness):
         opened = self._open_terminal(a, "term-1", work_dir=str(self.remote_work))
         self.assertEqual(opened["machine"], "box")
         self.assertFalse(opened["attached"])
-        # The shell runs in the folder named on the machine.
-        self.assertEqual(opened["cwd"], str(self.remote_work))
 
         a.send({
             "type": "terminalInput", "tab_id": "term-1",
-            "data": "echo marker-$((40+2)); stty size\n",
+            "data": 'echo marker-$((40+2)) "in=[$(pwd -P)]"; stty size\n',
         })
+        # The shell runs in the folder named on the machine.
+        marker = f"marker-42 in=[{os.path.realpath(self.remote_work)}]"
         self.wait_for(
-            lambda: "marker-42" in self._output(a, "term-1")
+            lambda: marker in self._output(a, "term-1")
             and "30 100" in self._output(a, "term-1"),
             timeout=60, what="the remote shell's echo",
         )
@@ -380,21 +393,24 @@ class RemoteViewsTest(TwoClientHarness):
         self.wait_for(lambda: not self._views()._streams, timeout=30, what="idle stream closed")
 
     def test_losing_the_machine_fails_a_pending_browser_open(self) -> None:
-        """A ``browserOpen`` the machine never answered gets a ``browserError``."""
-        a, b = self.a, self.b
+        """Every ``browserOpen`` the machine never answered gets one ``browserError``."""
+        a, b, c = self.a, self.b, self.open_client("c")
         self._open_terminal(a, "term-keep")  # keeps the stream open
         stream = self._views()._streams["box"]
-        # The machine's daemon stops reading: b's open stays pending.
+        # The machine's daemon stops reading: the opens of b and c stay pending.
         os.kill(self.remote.pid, signal.SIGSTOP)
         try:
-            b.send({"type": "browserOpen", "url": "", "machine": "box"})
-            self.wait_for(lambda: stream.openers, what="b's open pending")
+            for client in (b, c):
+                client.send({"type": "browserOpen", "url": "", "machine": "box"})
+            self.wait_for(lambda: len(stream.openers) == 2, what="both opens pending")
         finally:
             self.remote.stop()
         self.wait_event(a, "terminalError", timeout=60, tab_id="term-keep")
-        err = self.wait_event(b, "browserError", timeout=60, tab_id="")
-        self.assertIn("lost the connection to box", err["text"])
-        self.assertEqual(err["machine"], "box")
+        for client in (b, c):
+            err = self.wait_event(client, "browserError", timeout=60, tab_id="")
+            self.assertIn("lost the connection to box", err["text"])
+            self.assertEqual(err["machine"], "box")
+            self.assertEqual(len(client.of_type("browserError")), 1)
         self.assertEqual(a.of_type("browserError"), [])
         self.assertEqual(self._views()._streams, {})
 
@@ -444,12 +460,15 @@ class RemoteViewsTest(TwoClientHarness):
         self.assertEqual(split_tab_id("browser__3@box"), ("browser__3", "box"))
         self.assertEqual(split_tab_id("browser__3"), ("browser__3", ""))
 
-    def _with_headless_remote(self, check: Callable[[str], None]) -> None:
+    def _with_headless_remote(self, check: Callable[[str], None], here: bool = False) -> None:
         """Run *check(base_url)* against ``box`` restarted with a headless browser.
 
         A small HTTP server (titles ``Remote Home`` and the path) is the
         remote browser's home page; the remote daemon inherits the
         environment that makes its browser headless, so it is restarted.
+        With *here*, ``box`` is a second daemon of this process instead
+        (``self.box``, sharing this daemon's home): its browser service
+        can then be held (:class:`Pause`) and called as its agents call it.
         """
         if not _PLAYWRIGHT_CACHE.is_dir():
             self.skipTest("Playwright browsers are not installed")
@@ -460,17 +479,29 @@ class RemoteViewsTest(TwoClientHarness):
         os.environ["KISS_HEADLESS"] = "1"
         os.environ["KISS_BROWSER_HOME"] = base + "/"
         self.remote.stop()
-        self.remote = start_remote_daemon(
-            Path(self.remote_dir) / "home2", password="pw-remote",
-        )
+        if here:
+            save_config({"remote_password": "pw-remote"})
+            self.box = RemoteAccessServer(
+                host="127.0.0.1", port=find_free_port(), work_dir=str(self.remote_work),
+                use_tunnel=False, local_endpoint_file=Path(self.remote_dir) / "box.json",
+            )
+            asyncio.run_coroutine_threadsafe(self.box.start_async(), self.loop).result(60)
+            address = f"https://127.0.0.1:{self.box.port}"
+        else:
+            self.remote = start_remote_daemon(
+                Path(self.remote_dir) / "home2", password="pw-remote",
+            )
+            address = self.remote.url
         self.a.send({
             "type": "machineAction", "action": "add", "name": "box",
-            "address": self.remote.url, "machinePassword": "pw-remote",
+            "address": address, "machinePassword": "pw-remote",
         })
         self.wait_for(lambda: len(self.a.of_type("machines")) >= 2, what="box re-added")
         try:
             check(base)
         finally:
+            if here:
+                asyncio.run_coroutine_threadsafe(self.box.stop_async(), self.loop).result(60)
             web_stealth.stop_virtual_display()
             httpd.shutdown()
             httpd.server_close()
@@ -549,6 +580,7 @@ class RemoteViewsTest(TwoClientHarness):
             pause.release()
         # The focused reply precedes the page's navigation: the page each
         # reply names is told by the state that follows.
+        opened: dict[str, str] = {}
         for client, page in ((a, "/pageA"), (b, "/pageB")):
             focused = self.wait_for(
                 lambda: [
@@ -559,8 +591,63 @@ class RemoteViewsTest(TwoClientHarness):
             )
             self.assertEqual(len(focused), 1)
             self.assertEqual(focused[0]["machine"], "box")
+            opened[page] = focused[0]["tab_id"]
             self.wait_event(
-                client, "browserState", timeout=60, tab_id=focused[0]["tab_id"], url=base + page,
+                client, "browserState", timeout=60, tab_id=opened[page], url=base + page,
+            )
+
+        # The first page closes while b shows it.  b's page then hides the
+        # gone tab as it drops its view, and a show still on its way lands
+        # behind the close: neither is booked for a page the stream (kept
+        # open by the other two) no longer has.
+        a.send({"type": "browserClose", "tab_id": tab_id})
+        self.wait_event(b, "closeBrowserTab", timeout=60, tab_id=tab_id)
+        self._hide(b, tab_id)
+        self._show(b, tab_id)
+        self._show(b, opened["/pageB"])  # b's commands are handled in order
+        self.wait_for(
+            lambda: len(self._viewers(opened["/pageB"])) == 1, timeout=15,
+            what="b's later show booked",
+        )
+        stream = self._views()._streams["box"]
+        with stream.lock:
+            self.assertNotIn(split_tab_id(tab_id)[0], stream.viewers)
+
+    def test_an_agent_s_page_on_the_machine_takes_no_waiting_open_s_reply(self) -> None:
+        self._with_headless_remote(self._check_replies, here=True)
+
+    def _check_replies(self, base: str) -> None:
+        """A ``browserOpen`` gets its own reply, whatever the machine announces meanwhile.
+
+        a's open is held inside the machine, before its browser is
+        asked, and b's waits behind it.  Meanwhile an agent of the
+        machine calls for attention: every page here switches to its
+        tab, and neither waiting open is spent on it.  Released, each
+        open switches the page that asked, alone, to what it asked for.
+        """
+        a, b = self.a, self.b
+        with Pause(
+            BrowserTabService.open.__code__,
+            lambda local: str(local.get("url", "")).endswith("/pageA"),
+        ) as held:
+            a.send({"type": "browserOpen", "url": base + "/pageA", "machine": "box"})
+            self.assertTrue(held.paused.wait(60), "a's open reached the machine")
+            b.send({"type": "browserOpen", "url": base + "/pageB", "machine": "box"})
+            self.wait_for(
+                lambda: len(self._views()._streams["box"].openers) == 2, what="both opens waiting",
+            )
+            self.assertTrue(self.box._agent_server.browser_tabs.open_for_user(base + "/agent"))
+            agent_tab = self.wait_event(b, "openBrowserTab", focus=True)["tab_id"]
+            self.wait_event(a, "openBrowserTab", focus=True, tab_id=agent_tab)
+        for client, page in ((a, "/pageA"), (b, "/pageB")):
+            self.wait_for(
+                lambda: len(client.of_type("openBrowserTab", focus=True)) == 2, timeout=120,
+                what=f"{client.name} switched to its own page",
+            )
+            agent, own = client.of_type("openBrowserTab", focus=True)
+            self.assertEqual(agent["tab_id"], agent_tab)
+            self.wait_event(
+                client, "browserState", timeout=60, tab_id=own["tab_id"], url=base + page,
             )
 
     def test_a_losing_candidate_stream_dropped_before_its_close_keeps_the_winners_pages(
@@ -729,6 +816,13 @@ class RemoteViewsTest(TwoClientHarness):
         self.assertEqual(frame["machine"], "box")
         self.assertEqual(a.of_type("browserFrame"), [])
         self.assertEqual(c.of_type("browserFrame"), [])
+        # So does the machine's answer about a finger put down on the page.
+        b.send({
+            "type": "browserInput", "tab_id": tab_id,
+            "event": {"kind": "touch", "id": "finger-1", "x": 10, "y": 10},
+        })
+        touched = self.wait_event(b, "browserTouch", timeout=60, tab_id=tab_id, id="finger-1")
+        self.assertEqual((touched["machine"], touched["scrollsLeft"]), ("box", False))
 
         # Navigation is forwarded; the new title comes back to everyone.
         a.send({
@@ -736,6 +830,7 @@ class RemoteViewsTest(TwoClientHarness):
         })
         self.wait_event(a, "browserState", timeout=60, tab_id=tab_id, title="/second")
         self.wait_event(c, "browserState", timeout=60, tab_id=tab_id, title="/second")
+        self.assertEqual(a.of_type("browserTouch") + c.of_type("browserTouch"), [])
 
         # A second viewer: hiding the tab on one keeps the frames flowing
         # to the other (the machine is told nothing until nobody looks),
@@ -778,6 +873,20 @@ class RemoteViewsTest(TwoClientHarness):
         time.sleep(1.0)
         self.assertEqual(len(b.of_type("browserFrame", tab_id=tab_id)), seen)
 
+        # A viewport means here what it means on the machine, whose
+        # daemon reads it as this one reads a local page's: without
+        # ``visible`` it shows the page, with a size that is no number
+        # it hides it.
+        b.send({"type": "browserViewport", "tab_id": tab_id, "width": 400, "height": 300})
+        self.wait_for(
+            lambda: len(b.of_type("browserFrame", tab_id=tab_id)) > seen, timeout=60,
+            what="frames for a viewport without `visible`",
+        )
+        b.send({
+            "type": "browserViewport", "tab_id": tab_id, "width": "wide", "height": 300,
+            "visible": True,
+        })
+        self.wait_for(lambda: not self._viewers(tab_id), what="hidden by a size that is no number")
 
         # Closing from one page closes it on every page, and the idle stream goes.
         c.send({"type": "browserClose", "tab_id": tab_id})

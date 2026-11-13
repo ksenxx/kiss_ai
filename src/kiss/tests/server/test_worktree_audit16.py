@@ -18,23 +18,6 @@ BUG-68: post-task pending-worktree cleanup silently left a pending
     about, and no meaningless merge/discard prompt.  See
     ``test_worktree_leak_when_main_tree_busy.py``.
 
-BUG-70: ``_conflict_of`` only checks the unstaged and staged
-    files of the main repo (historically via the since-removed
-    ``unstaged_files``/``staged_files`` helpers) but not **untracked**
-    files.
-    When an agent creates a file in the worktree with the same path
-    as an untracked file in the main repo, the auto-merge flow will
-    fail:
-
-    1. ``stash_if_dirty`` stashes the untracked file
-       (``--include-untracked``) — main now has the file gone.
-    2. Squash-merge applies the worktree's version of the file.
-    3. ``stash_pop`` tries to restore the untracked file but it
-       already exists — pop fails with a conflict.
-
-    The user had no warning.  ``_conflict_of`` should report
-    the overlap so the user can resolve before merging.
-
 RED-10: The post-task pending-worktree handling blocks in
     ``_run_task_inner`` and ``_emit_pending_worktree`` duplicated the
     same "auto-discard or emit worktree_done" logic with subtle
@@ -57,7 +40,6 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
 from kiss.tests.conftest import seed_worktree
-from kiss.tests.server.worktree_helpers import merge_conflict, worktree_changed_files
 
 
 @pytest.fixture(autouse=True)
@@ -215,98 +197,6 @@ class TestBug68PresentPendingNoBroadcastOnEmptyNonWtBusy:
         assert agent._wt is None, (
             "Regression: empty worktree was not auto-discarded when "
             "no other task was running."
-        )
-
-
-class TestBug70UntrackedFileConflict:
-    """``_conflict_of`` must detect untracked files in the
-    main repo that overlap with worktree changes.
-
-    Scenario:
-    - Main has an untracked file ``foo.py``.
-    - Agent creates ``foo.py`` (different content) in the worktree.
-    - Auto-merge's ``stash --include-untracked`` + squash + ``stash
-      pop`` fails because the file exists after squash.
-    - ``_conflict_of`` should report True so the user is
-      warned before clicking merge.
-    """
-
-    def test_untracked_main_overlap_reports_conflict(
-        self, tmp_path: Path,
-    ) -> None:
-        repo = _make_repo(tmp_path / "repo")
-
-        server = AgentServer()
-        server.work_dir = str(repo)
-        printer = _RecordingPrinter()
-        server.printer = cast(Any, printer)
-
-        tab_id = "tab-bug70"
-        state = _register_wt_tab("task-bug70", tab_id)
-
-        agent = cast(ChatSorcarAgent, state.agent)
-        branch = "kiss/wt-bug70-1"
-        wt = _create_wt(repo, branch, agent)
-
-        agent_file = wt.wt_dir / "foo.py"
-        agent_file.write_text("agent content\n")
-        subprocess.run(
-            ["git", "-C", str(wt.wt_dir), "add", "foo.py"],
-            capture_output=True, check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(wt.wt_dir), "commit", "-m", "agent adds foo"],
-            capture_output=True, check=True,
-        )
-
-        (repo / "foo.py").write_text("user untracked content\n")
-
-        changed = worktree_changed_files(server, tab_id)
-        assert "foo.py" in changed, (
-            f"Precondition failed: worktree change not detected: {changed}"
-        )
-
-        has_conflict = merge_conflict(server, tab_id)
-        assert has_conflict, (
-            "BUG-70: _conflict_of returned False when an "
-            "untracked file in main overlapped with a worktree change. "
-            "The auto-merge will fail at stash-pop with an overwrite "
-            "conflict, and the user had no warning."
-        )
-
-    def test_non_overlapping_untracked_no_conflict(
-        self, tmp_path: Path,
-    ) -> None:
-        """Regression: untracked file in main that does NOT overlap
-        with worktree changes must NOT report conflict."""
-        repo = _make_repo(tmp_path / "repo")
-
-        server = AgentServer()
-        server.work_dir = str(repo)
-        printer = _RecordingPrinter()
-        server.printer = cast(Any, printer)
-
-        tab_id = "tab-bug70b"
-        state = _register_wt_tab("task-bug70b", tab_id)
-
-        agent = cast(ChatSorcarAgent, state.agent)
-        wt = _create_wt(repo, "kiss/wt-bug70-2", agent)
-
-        (wt.wt_dir / "foo.py").write_text("agent content\n")
-        subprocess.run(
-            ["git", "-C", str(wt.wt_dir), "add", "foo.py"],
-            capture_output=True, check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(wt.wt_dir), "commit", "-m", "agent adds foo"],
-            capture_output=True, check=True,
-        )
-
-        (repo / "bar.py").write_text("unrelated\n")
-
-        assert not merge_conflict(server, tab_id), (
-            "Regression: non-overlapping untracked file in main "
-            "triggered a false-positive conflict."
         )
 
 

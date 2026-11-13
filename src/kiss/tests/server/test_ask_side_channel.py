@@ -58,6 +58,7 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
 from kiss.server.web_server import Payload, WebPrinter
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 from kiss.tests.server.conftest import (
     clear_agent_states,
     redirect_persistence,
@@ -114,10 +115,10 @@ def _register_running_task(
 @pytest.fixture(autouse=True)
 def _reset() -> Iterator[None]:
     clear_agent_states()
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
     yield
     clear_agent_states()
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +373,7 @@ def test_run_on_a_busy_tab_admits_the_message_in_the_lock_hold_that_found_the_ta
         while worker.is_alive() and not held.paused.is_set():
             worker.join(0.01)
         with server._state_lock:
-            reruns, redispatch, _ = server._release_run_state(original, {}, "tab-busy", "")
+            reruns, redispatch, _ = server._release_run_state(original, {}, "tab-busy", "", "")
             if successor_chat:
                 agent_state.unregister(original.task_id, original)
                 successor = _register_running_task("task-succ", "tab-busy", chat_id=successor_chat)
@@ -720,6 +721,7 @@ def test_side_channel_broadcasts_answer_into_owner_task(
     """
     server, events = _make_server()
     _install_daemon_run_capture(monkeypatch)
+    _register_running_task("task-abc", "tab-1")
 
     server._dispatch_ask_side_channel(
         tab_id="tab-1",
@@ -750,57 +752,73 @@ class _WireCapturingWebPrinter(WebPrinter):
         self._wire_lock = threading.Lock()
 
     def _send_to_ws_clients(self, data: Payload, tab_id: str = "") -> None:
-        assert isinstance(data, str)
-        with self._wire_lock:
-            self.wire.append((tab_id, json.loads(data)))
+        if isinstance(data, str):  # else a replay's reserved transcript slot
+            with self._wire_lock:
+                self.wire.append((tab_id, json.loads(data)))
 
 
 def test_ask_answer_reaches_the_tabs_showing_the_owner_now(tmp_path: Path) -> None:
     """The answer goes to the tabs showing the OWNER now, once, and is persisted once.
 
-    The answer lands minutes after the question.  By then the asking
-    tab may be closed and the owner task reopened in another tab
-    (session replay subscribes it); stamping the answer with the
-    asking tab's historical id would deliver it to nobody.  Routed by
-    the owner task instead, it reaches the current viewer, is recorded
-    once under the owner (a viewer attaching later replays it) and --
-    the owner finished and its agent state retired -- is still
-    persisted once under the owner's own row.
+    The answer lands minutes after the question.  By then the owner
+    has finished, the asking tab may be closed and the task reopened
+    from the history in another tab, which subscribes to nothing (a
+    replay subscribes a tab to a running task only); stamping the
+    answer with the asking tab's historical id would deliver it to
+    nobody.  A first answer reaches the tab the task was launched in
+    (still subscribed and still bound to the chat: one copy, not two),
+    a second one the tab that reopened the task since; each is
+    recorded once under the owner and -- the owner finished and its
+    agent state retired -- still persisted once under the owner's own
+    row.
     """
     saved = redirect_persistence(tmp_path)
     printer = _WireCapturingWebPrinter()
     server = AgentServer(printer=printer)
+    server.use_private_tab_registry(tmp_path / "tabs.json")
     try:
-        owner_id, _ = th._add_task("owner of the /ask", "")
+        owner_id, chat_id = th._add_task("owner of the /ask", "")
         owner = str(owner_id)
         assert agent_state.get(owner) is None, "the owner's agent state is retired"
         printer.ensure_recording_for_task(owner)
         printer.subscribe_tab(owner, "old-tab")
         printer.cleanup_tab("old-tab")
-        printer.subscribe_tab(owner, "new-tab")
-        assert printer.viewer_tab_ids(owner) == ["new-tab"]
-
+        other_id, other_chat = th._add_task("another conversation", "")
+        server._replay_session(other_chat, "other-tab", task_id=str(other_id))
+        server._replay_session(chat_id, "launch-tab")
+        printer.subscribe_tab(owner, "launch-tab")
+        assert printer.viewer_tab_ids(owner) == ["launch-tab"]
         server._broadcast_ask_answer(
-            tab_id="old-tab", owner_task_id=owner,
-            question="why?", text="the answer", success=True,
+            tab_id="old-tab", owner_task_id=owner, chat_id=chat_id,
+            question="why?", text="first answer", success=True,
+        )
+        # One tab per chat: the reopen takes the chat from ``launch-tab``.
+        server._replay_session(chat_id, "new-tab", task_id=owner)
+        assert printer.viewer_tab_ids(owner) == []
+        server._broadcast_ask_answer(
+            tab_id="old-tab", owner_task_id=owner, chat_id=chat_id,
+            question="and then?", text="second answer", success=True,
         )
 
         sent = [(tab, ev) for tab, ev in printer.wire if ev["type"] == "ask_answer"]
-        assert [tab for tab, _ in sent] == ["new-tab"], f"answer routed to {sent!r}"
-        assert sent[0][1]["tabId"] == "new-tab" and sent[0][1]["taskId"] == owner
+        assert [(tab, ev["text"]) for tab, ev in sent] == [
+            ("launch-tab", "first answer"), ("new-tab", "second answer"),
+        ], f"answers routed to {sent!r}"
+        assert all(ev["tabId"] == tab and ev["taskId"] == owner for tab, ev in sent)
+        answers = ["first answer", "second answer"]
         with printer._lock:
             recorded = [
                 e for e in printer._recordings.get(owner, [])
                 if e.get("type") == "ask_answer"
             ]
-        assert len(recorded) == 1, f"recorded {len(recorded)} times"
-        assert "tabId" not in recorded[0]
+        assert [e["text"] for e in recorded] == answers, "each recorded once"
+        assert not [e for e in recorded if "tabId" in e]
         th._flush_chat_events()
         row = th._load_chat_events_by_task_id(owner)
         assert row is not None and isinstance(row["events"], list)
         persisted = [e for e in row["events"] if e.get("type") == "ask_answer"]
-        assert len(persisted) == 1, f"persisted {len(persisted)} times"
-        assert persisted[0]["text"] == "the answer" and "tabId" not in persisted[0]
+        assert [e["text"] for e in persisted] == answers, "each persisted once"
+        assert not [e for e in persisted if "tabId" in e]
     finally:
         server._file_index.stop()
         restore_persistence(saved)
@@ -817,6 +835,7 @@ def test_broadcast_ask_answer_without_owner_task_omits_task_id() -> None:
     server._broadcast_ask_answer(
         tab_id="tab-9",
         owner_task_id="",
+        chat_id="chat-9",
         question="q",
         text="a",
         success=True,

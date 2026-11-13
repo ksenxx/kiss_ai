@@ -29,14 +29,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {send, clickTab} = harness;
-
-function makePage() {
-  const page = harness.makePage();
-  page.win._testApi.endLaunch();
-  page.win._testApi.hideWelcome();
-  return page;
-}
+const {send, clickTab, makeLaunchedPage: makePage} = harness;
 
 const TS = 1767225600000;
 

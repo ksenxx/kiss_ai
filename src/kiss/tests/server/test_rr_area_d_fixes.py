@@ -109,12 +109,8 @@ class TestDRC2OpenTabTriState:
         reg = TabRegistry(tmp_path / "tabs.json")
         opened = reg.open_tab("t1", "one")
         assert opened is OpenTabOutcome.OPENED
-        assert bool(opened) is True, (
-            "OPENED must stay truthy for legacy boolean callers"
-        )
         exists = reg.open_tab("t1", "one again")
         assert exists is OpenTabOutcome.EXISTS
-        assert bool(exists) is False
         assert reg.open_tab("") is OpenTabOutcome.EXISTS, (
             "a blank id opens nothing but must not be reported as FULL"
         )
@@ -122,7 +118,6 @@ class TestDRC2OpenTabTriState:
             assert reg.open_tab(f"fill-{i}") is OpenTabOutcome.OPENED
         full = reg.open_tab("overflow")
         assert full is OpenTabOutcome.FULL
-        assert bool(full) is False
         # The registry really is unchanged by the refusal.
         assert not reg.has_tab("overflow")
 
@@ -132,7 +127,7 @@ class TestDRC2OpenTabTriState:
         server = AgentServer(printer=printer)
         server.tab_registry = TabRegistry(tmp_path / "tabs.json")
         for i in range(_MAX_TABS):
-            assert server.tab_registry.open_tab(f"pre-{i}")
+            assert server.tab_registry.open_tab(f"pre-{i}") is OpenTabOutcome.OPENED
         printer.emitted.clear()
         server._cmd_open_tab({"tabId": "brand-new", "connId": "c1"})
         rejected = [
@@ -153,8 +148,8 @@ class TestDRC2OpenTabTriState:
         server = AgentServer(printer=printer)
         server.tab_registry = TabRegistry(tmp_path / "tabs.json")
         for i in range(_MAX_TABS - 1):
-            assert server.tab_registry.open_tab(f"cap-{i}")
-        assert server.tab_registry.open_tab("racy-tab")
+            assert server.tab_registry.open_tab(f"cap-{i}") is OpenTabOutcome.OPENED
+        assert server.tab_registry.open_tab("racy-tab") is OpenTabOutcome.OPENED
 
         for _ in range(30):
             printer.emitted.clear()
@@ -175,7 +170,7 @@ class TestDRC2OpenTabTriState:
             # Re-arm: make sure the tab is registered again for the
             # next round (the open may have raced ahead of the close).
             server.tab_registry.close_tab("racy-tab")
-            assert server.tab_registry.open_tab("racy-tab")
+            assert server.tab_registry.open_tab("racy-tab") is OpenTabOutcome.OPENED
 
 
 def _wait_for(predicate: Callable[[], bool], timeout: float = 10.0) -> None:

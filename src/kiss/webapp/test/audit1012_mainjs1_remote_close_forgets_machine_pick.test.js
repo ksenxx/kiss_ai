@@ -20,6 +20,7 @@ const {
   pickMachine: pick,
 } = require('./simplify2_harness');
 const {MACHINES} = require('./settings_helpers');
+const {typeAndSend} = require('./attachment_helpers');
 
 function testRemotelyClosedTabForgetsItsPick() {
   const {win, state} = makePage();
@@ -30,8 +31,7 @@ function testRemotelyClosedTabForgetsItsPick() {
   api.createNewTab();
   const second = api.getActiveTabId();
   // The second chat ran a task here; gpu-box is picked for its next.
-  win.document.getElementById('task-input').value = 'two';
-  win.document.getElementById('send-btn').click();
+  typeAndSend(win, 'two');
   send(win, {type: 'status', running: false, tabId: second});
   pick(win, 'gpu-box');
   // The registry lists both tabs: both are now mirrored tabs.
@@ -55,9 +55,30 @@ function testRemotelyClosedTabForgetsItsPick() {
   console.log('  ok - a tab closed on another surface forgets its pick');
 }
 
+// W1 audit 2026-11-12: the same for a tab that closed while this page
+// was away.  Its pick comes back with the saved state, and no tab of
+// this page will ever close to forget it.
+function testAPickSavedForATabClosedMeanwhileIsForgotten() {
+  const {win, state} = makePage({
+    tabMachinePicks: {'gone-tab': 'gpu-box', 'kept-tab': 'gpu-box'},
+  });
+  send(win, {type: 'configData', config: {}, machine: 'laptop'});
+  send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
+  send(win, {type: 'tabs_state', tabs: [{tabId: 'kept-tab', title: 'kept'}]});
+  assert.ok(win._testApi.openTabs().some(t => t.id === 'kept-tab'));
+  assert.deepStrictEqual(
+    persistedPicks(state),
+    {'kept-tab': 'gpu-box'},
+    'BUG - the pick of a tab the registry no longer lists is persisted again',
+  );
+  win.close();
+  console.log('  ok - a pick saved for a tab closed meanwhile is forgotten');
+}
+
 try {
   testRemotelyClosedTabForgetsItsPick();
-  console.log('\n1 passed, 0 failed');
+  testAPickSavedForATabClosedMeanwhileIsForgotten();
+  console.log('\n2 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

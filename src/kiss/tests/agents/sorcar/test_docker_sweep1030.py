@@ -64,6 +64,12 @@ def env() -> Iterator[DockerManager]:
         manager.close()
 
 
+def _listed_execs(env: DockerManager) -> set[str]:
+    """The execs the daemon lists for the container: created or running, dropped at their exit."""
+    assert env.container is not None and env.container.id is not None
+    return set(env.client.api.inspect_container(env.container.id)["ExecIDs"] or ())
+
+
 def test_a_traceback_failure_stops_the_edit_batch(env: DockerManager) -> None:
     """A non-UTF-8 file makes edit 1 raise; the batch reports it and edit 2 never runs."""
     env.Bash("printf 'one\\377\\ntwo\\n' > /tmp/latin1.txt", "seed")
@@ -170,9 +176,10 @@ def test_a_heredoc_over_an_existing_file_is_the_hooks_to_refuse(env: DockerManag
 
 
 def test_a_stopped_task_writes_nothing(env: DockerManager) -> None:
-    """With the Stop set, the redirected Write is killed: the stopped result, no file."""
+    """With the Stop set, the redirected Write starts nothing: stopped result, no exec, no file."""
     h = _Harness(env)
     env.Bash("rm -f /tmp/probe_stopped.txt", "clean")
+    execs = _listed_execs(env)
     env.stop_event = threading.Event()
     env.stop_event.set()
     try:
@@ -187,6 +194,9 @@ def test_a_stopped_task_writes_nothing(env: DockerManager) -> None:
     ), result
     assert h.tool_calls() == ["Bash", "Write"]
     assert env.Bash("test -e /tmp/probe_stopped.txt; echo $?", "check").startswith("1")
+    # An exec made for the stopped Write would still be listed: whether it then
+    # started was a race between its worker and the cancellation.
+    assert not _listed_execs(env) - execs
 
 
 def test_run_commands_parallel_probes_each_heredoc(env: DockerManager) -> None:

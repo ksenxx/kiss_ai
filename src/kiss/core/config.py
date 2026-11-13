@@ -5,6 +5,7 @@
 
 """Configuration Pydantic models for KISS agent settings."""
 
+import json
 import math
 import os
 import random
@@ -13,6 +14,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -91,21 +93,24 @@ _artifact_dir: str | None = None
 _artifact_dir_lock = threading.RLock()
 
 
-def _artifact_root() -> Path:
-    """Return the root directory for generated KISS artifacts."""
-    return _PROJECT_DIR.resolve() / _ARTIFACTS_DIR_NAME
-
-
 def _generate_artifact_dir() -> str:
-    """Generate a unique artifact job directory under the project root.
+    """Create an artifact job directory of this process's own under the project root.
+
+    The directory is made exclusively: a name another process took in
+    the same second (the same random number) is drawn again, so two
+    processes never save their trajectories into one directory.
 
     Returns:
         The absolute path to the newly created artifact directory.
     """
-    artifact_subdir_name = f"{time.strftime('job_%Y_%m_%d_%H_%M_%S')}_{random.randint(0, 1000000)}"
-    artifact_path = _artifact_root() / "jobs" / artifact_subdir_name
-    artifact_path.mkdir(parents=True, exist_ok=True)
-    return str(artifact_path)
+    while True:
+        name = f"{time.strftime('job_%Y_%m_%d_%H_%M_%S')}_{random.randint(0, 1000000)}"
+        artifact_path = get_jobs_root() / name
+        try:
+            artifact_path.mkdir(parents=True)
+        except FileExistsError:
+            continue
+        return str(artifact_path)
 
 
 def get_jobs_root() -> Path:
@@ -119,7 +124,7 @@ def get_jobs_root() -> Path:
     Returns:
         The absolute path to the ``jobs`` directory.
     """
-    return _artifact_root() / "jobs"
+    return _PROJECT_DIR / _ARTIFACTS_DIR_NAME / "jobs"
 
 
 def kiss_home() -> Path:
@@ -133,6 +138,31 @@ def kiss_home() -> Path:
     """
     env = os.environ.get("KISS_HOME")
     return Path(env) if env else Path.home() / HOME_DIR
+
+
+def remote_url_file() -> Path:
+    """Return the file the kiss-web daemon publishes its URLs in: ``$KISS_HOME/remote-url.json``."""
+    return kiss_home() / "remote-url.json"
+
+
+def read_remote_urls(url_file: Path) -> dict[str, Any]:
+    """Return the URLs the kiss-web daemon published in *url_file* (:func:`remote_url_file`).
+
+    The daemon writes one JSON object there: ``local`` and, when it has
+    them, ``tunnel``, ``loopback``, ``lan`` (a list) and ``localCa``.
+
+    Args:
+        url_file: The file to read.
+
+    Returns:
+        That object, or ``{}`` when the file is missing, unreadable or
+        not a JSON object.
+    """
+    try:
+        data = json.loads(url_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 ADOPTION_LOCK_TIMEOUT = 30.0
@@ -555,7 +585,8 @@ class Config(BaseModel):
         default_factory=lambda: _env_flag("KISS_TOOL_OUTPUT_COMPACTION", True),
         description=(
             "Replace old, large tool outputs in the model conversation with "
-            "short stubs once the context grows past compaction_start_tokens "
+            "short stubs once the context grows past compaction_start_tokens, or "
+            "past context_edit_trigger_tokens for a Claude model on the Anthropic API "
             "(KISS_TOOL_OUTPUT_COMPACTION=0 disables).  The global Compaction "
             "setting of the daemon (config.json key ``compaction``, the settings "
             "panel's checkbox) is mirrored here by user_config.apply_config_to_env; "
@@ -613,31 +644,43 @@ class Config(BaseModel):
         ),
     )
     context_edit_trigger_tokens: int = Field(
-        default_factory=lambda: _env_int("KISS_CONTEXT_EDIT_TRIGGER_TOKENS", 200_000),
+        default_factory=lambda: _env_int("KISS_CONTEXT_EDIT_TRIGGER_TOKENS", 250_000),
         description=(
-            "Input tokens past which Anthropic's server-side tool-result clearing "
-            "(clear_tool_uses) clears the inputs and results of the tool calls before "
-            "the last context_edit_keep_tool_uses ones; 0 sends no tool-result clearing. "
-            "A clearing rewrites the cached prefix (one call at full input price), so it "
-            "must be rare and bulk: at 200k with context_edit_clear_at_least 100k it "
-            "happens once per few dozen calls and pays back within about twenty "
+            "Context tokens past which the agent clears, in its own conversation, the "
+            "inputs and results of a Claude model's tool calls on the Anthropic API, all "
+            "but the last context_edit_keep_tool_uses, and its old reasoning; 0 leaves "
+            "such a model to the thresholds of the Compaction settings. "
+            "A clearing rewrites the cached prefix at the cache-write price, so it must "
+            "be rare and bulk.  The value holds for a model whose cache write costs fifty "
+            "cache reads (Claude Fable 5.2: replayed on its 19,174 calls of 2026-11-11, "
+            "250k with context_edit_clear_at_least 50k clears once per 78 calls, 176k "
+            "tokens at a time, and 3 sessions reach the hand-off limit, each on over 300k "
+            "tokens of results in its newest calls, against 23 when reasoning is left out "
+            "of the 100k minimum of a 200k trigger).  For another model both values are "
+            "multiplied by the square root of "
+            "its own ratio over fifty (177k at 25 reads a write, 125k at 12.5), and the "
+            "trigger is at most 80% of the hand-off limit.  The agent clears rather than "
+            "the provider (its clear_tool_uses edit), whose boundary moved between "
+            "requests and rewrote the cache without freeing anything "
             "(KISS_CONTEXT_EDIT_TRIGGER_TOKENS)."
         ),
     )
     context_edit_keep_tool_uses: int = Field(
         default_factory=lambda: _env_int("KISS_CONTEXT_EDIT_KEEP_TOOL_USES", 20),
         description=(
-            "Tool calls (inputs and results) the server-side clearing keeps "
+            "Tool calls (inputs and results) that clearing keeps "
             "(KISS_CONTEXT_EDIT_KEEP_TOOL_USES)."
         ),
     )
     context_edit_clear_at_least: int = Field(
-        default_factory=lambda: _env_int("KISS_CONTEXT_EDIT_CLEAR_AT_LEAST", 100_000),
+        default_factory=lambda: _env_int("KISS_CONTEXT_EDIT_CLEAR_AT_LEAST", 50_000),
         description=(
-            "Input tokens a server-side clearing must remove to be applied, so each "
-            "one pays for the prompt-cache write it causes: a cache miss costs about "
-            "twelve cache reads of the whole context, a cleared token saves a tenth of a "
-            "token on every later call (KISS_CONTEXT_EDIT_CLEAR_AT_LEAST)."
+            "Tokens that clearing must remove to be applied, so each one pays for the "
+            "prompt-cache write it causes: the stubbed inputs and results (four "
+            "characters a token) and the reasoning that goes with them (the output "
+            "tokens of the replies less their visible text).  Scaled to the model's cache "
+            "prices like context_edit_trigger_tokens.  0 sets no minimum; clearings are "
+            "then ten steps apart (KISS_CONTEXT_EDIT_CLEAR_AT_LEAST)."
         ),
     )
     routine_turn_effort: str = Field(

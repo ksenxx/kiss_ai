@@ -171,8 +171,12 @@ class TaskUpdateSubagentTabClosesTest(DaemonLocalHarness):
             ],
             what="the parent's replayed transcript",
         )
+        # Only the replay is judged: a viewer that attached while the child
+        # still ran was rightly told to open its tab (``isDone`` false) and
+        # then to close it, which a child that ends a few milliseconds
+        # later (the clean-up of a sub-agent's processes) makes common.
         assert self._events_for_tab(
-            received, "openSubagentTab", parent_sub_tab,
+            received[before:], "openSubagentTab", parent_sub_tab,
         ) == [], "a finished task-update child must not be re-opened"
 
     def test_finished_update_child_stays_closed_on_replay(self) -> None:

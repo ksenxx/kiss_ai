@@ -11,7 +11,9 @@ Covers audit findings:
   so the real outcome could never be recorded afterwards.
 * **R2** — multi-statement read-modify-write sequences ran as
   independent autocommit statements guarded only by an in-process lock,
-  so the ``frequent_tasks`` cap could be exceeded permanently.
+  so the cap of a capped table could be exceeded permanently (shown on
+  ``steer_inputs``; the ``frequent_tasks`` writer it was found in is
+  gone).
 * **R3** — permanently-unwritable events were journalled to a
   write-only sidecar and then acknowledged as flushed, so the real
   transcript was lost.
@@ -19,7 +21,7 @@ Covers audit findings:
   defaults to True, and the migration mapped a MISSING key to 0.
 * **I4** — ``_update_task_columns`` interpolates the column names into
   SQL but accepted any string.
-* **D2** — the process-global ``_db_conn`` invalidated every OTHER
+* **D2** — one thread's ``_close_thread_db`` invalidated every OTHER
   thread's per-thread connection.
 * **D3** — ``_flush_chat_events`` busy-spun at 500 Hz and waited for
   every task's events, not just the caller's.
@@ -35,6 +37,7 @@ import multiprocessing
 import os
 import shutil
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -44,26 +47,26 @@ from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
 from kiss.tests.conftest import posix_only
+from kiss.tests.persistence_helpers import close_db
 
 _RACE_DELAY_ENV = "KISS_RACE_DELAY"
 
 
 def _redirect(tmpdir: Path) -> tuple:
     """Point the persistence module at a private KISS home."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR, th._owner_state)
+    saved = (th._DB_PATH, th._KISS_DIR, th._owner_state)
     kiss_dir = tmpdir / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     th._owner_state = None
     return saved
 
 
 def _restore(saved: tuple) -> None:
     """Undo :func:`_redirect`."""
-    th._close_db()
-    (th._DB_PATH, th._db_conn, th._KISS_DIR, th._owner_state) = saved
+    close_db()
+    (th._DB_PATH, th._KISS_DIR, th._owner_state) = saved
 
 
 def _live_task_worker(kiss_dir: str, out_queue) -> None:
@@ -77,7 +80,6 @@ def _live_task_worker(kiss_dir: str, out_queue) -> None:
 
     child_th._KISS_DIR = Path(kiss_dir)
     child_th._DB_PATH = child_th._KISS_DIR / "history.db"
-    child_th._db_conn = None
     child_th._owner_state = None
     task_id, _chat = child_th._add_task("live task in another process")
     out_queue.put(task_id)
@@ -95,21 +97,19 @@ def _clean_exit_owner_worker(kiss_dir: str, out_queue) -> None:
 
     child_th._KISS_DIR = Path(kiss_dir)
     child_th._DB_PATH = child_th._KISS_DIR / "history.db"
-    child_th._db_conn = None
     child_th._owner_state = None
     out_queue.put(child_th._process_owner_token())
 
 
-def _frequent_task_worker(kiss_dir: str, task: str, barrier) -> None:
-    """Child process: record one brand-new frequent task at the barrier."""
+def _steer_input_worker(kiss_dir: str, text: str, barrier) -> None:
+    """Child process: record one brand-new steer input at the barrier."""
     import kiss.agents.sorcar.persistence as child_th
 
     child_th._KISS_DIR = Path(kiss_dir)
     child_th._DB_PATH = child_th._KISS_DIR / "history.db"
-    child_th._db_conn = None
     child_th._owner_state = None
     barrier.wait()
-    child_th._record_frequent_task(task)
+    child_th._record_steer_input(text)
 
 
 class _PersistenceTestCase(unittest.TestCase):
@@ -118,7 +118,7 @@ class _PersistenceTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss_e_db_"))
         self.saved = _redirect(self.tmp)
-        th._close_db()
+        close_db()
 
     def tearDown(self) -> None:
         _restore(self.saved)
@@ -221,36 +221,29 @@ class OrphanSweepLivenessTest(_PersistenceTestCase):
         self.assertEqual(self._result_of(self.task_id), "Agent Failed Abruptly")
 
 
-class FrequentTaskCapTest(_PersistenceTestCase):
-    """R2: the frequent-task cap must hold across processes."""
+class SteerInputCapTest(_PersistenceTestCase):
+    """R2: the cap of a capped table (``steer_inputs``) must hold across processes."""
 
     def _seed(self, count: int) -> None:
-        """Insert *count* distinct frequent-task rows, oldest first.
+        """Insert *count* distinct steer-input rows, oldest first.
 
-        Every row gets ``count = 1`` and a strictly increasing
-        timestamp, so eviction (lowest count, then oldest timestamp)
+        The timestamps increase strictly, so eviction (oldest first)
         always targets ``seed-0`` and never a row the test just added.
         """
-        db = th._get_db()
         now = time.time()
-        for i in range(count):
-            db.execute(
-                "INSERT INTO frequent_tasks (task, count, timestamp) "
-                "VALUES (?, 1, ?)",
-                (f"seed-{i}", now - count + i),
-            )
+        th._get_db().executemany(
+            "INSERT INTO steer_inputs (text, timestamp) VALUES (?, ?)",
+            [(f"seed-{i}", now - count + i) for i in range(count)],
+        )
 
-    def _count(self) -> int:
-        """Return the number of rows in ``frequent_tasks``."""
-        row = th._get_db().execute(
-            "SELECT COUNT(*) AS n FROM frequent_tasks"
-        ).fetchone()
-        return int(row["n"])
+    def _texts(self) -> set[str]:
+        """Return the texts in ``steer_inputs``."""
+        return {r["text"] for r in th._get_db().execute("SELECT text FROM steer_inputs")}
 
     def test_two_processes_cannot_exceed_the_cap(self) -> None:
         """Concurrent inserts at the cap boundary stay within the cap."""
-        self._seed(th._MAX_FREQUENT_TASKS - 1)
-        th._close_db()
+        self._seed(th._MAX_STEER_INPUTS - 1)
+        close_db()
         saved_delay = os.environ.get(_RACE_DELAY_ENV)
         os.environ[_RACE_DELAY_ENV] = "0.05"
         try:
@@ -258,7 +251,7 @@ class FrequentTaskCapTest(_PersistenceTestCase):
             barrier = ctx.Barrier(2)
             procs = [
                 ctx.Process(
-                    target=_frequent_task_worker,
+                    target=_steer_input_worker,
                     args=(str(self.kiss_dir), f"racer-{i}", barrier),
                 )
                 for i in range(2)
@@ -274,38 +267,24 @@ class FrequentTaskCapTest(_PersistenceTestCase):
             else:
                 os.environ[_RACE_DELAY_ENV] = saved_delay
 
-        self.assertLessEqual(self._count(), th._MAX_FREQUENT_TASKS)
-        tasks = {r["task"] for r in th._get_db().execute(
-            "SELECT task FROM frequent_tasks"
-        ).fetchall()}
-        self.assertIn("racer-0", tasks)
-        self.assertIn("racer-1", tasks)
+        texts = self._texts()
+        self.assertLessEqual(len(texts), th._MAX_STEER_INPUTS)
+        self.assertLessEqual({"racer-0", "racer-1"}, texts)
 
-    def test_serial_inserts_evict_the_least_used_row(self) -> None:
-        """Eviction keeps the table at the cap and drops the coldest row."""
-        self._seed(th._MAX_FREQUENT_TASKS)
-        th._record_frequent_task("brand new")
-        self.assertEqual(self._count(), th._MAX_FREQUENT_TASKS)
-        tasks = {r["task"] for r in th._get_db().execute(
-            "SELECT task FROM frequent_tasks"
-        ).fetchall()}
-        self.assertIn("brand new", tasks)
-        self.assertNotIn("seed-0", tasks)
-
-    def test_repeat_of_an_existing_task_never_evicts(self) -> None:
-        """An upsert of a known task does not touch the cap logic."""
-        self._seed(th._MAX_FREQUENT_TASKS)
-        th._record_frequent_task("seed-3")
-        self.assertEqual(self._count(), th._MAX_FREQUENT_TASKS)
-        row = th._get_db().execute(
-            "SELECT count FROM frequent_tasks WHERE task = 'seed-3'"
-        ).fetchone()
-        self.assertEqual(int(row["count"]), 2)
-
-    def test_empty_task_is_ignored(self) -> None:
-        """An empty task string is not recorded."""
-        th._record_frequent_task("")
-        self.assertEqual(self._count(), 0)
+    def test_serial_inserts_evict_the_oldest_row(self) -> None:
+        """Eviction keeps the table at the cap and drops the oldest row; a repeat evicts none."""
+        self._seed(th._MAX_STEER_INPUTS)
+        th._record_steer_input("seed-3")
+        texts = self._texts()
+        self.assertEqual(len(texts), th._MAX_STEER_INPUTS)
+        self.assertIn("seed-0", texts)
+        th._record_steer_input("brand new")
+        th._record_steer_input("  ")
+        texts = self._texts()
+        self.assertEqual(len(texts), th._MAX_STEER_INPUTS)
+        self.assertIn("brand new", texts)
+        self.assertNotIn("seed-0", texts)
+        self.assertNotIn("  ", texts)
 
 
 class FailedEventReplayTest(_PersistenceTestCase):
@@ -396,22 +375,37 @@ class FailedEventReplayTest(_PersistenceTestCase):
         )
 
     def test_malformed_journal_lines_are_skipped(self) -> None:
-        """A corrupt journal never blocks recovery of the good lines."""
+        """A corrupt journal never blocks recovery of the good lines.
+
+        Nor does a damaged block that is not even UTF-8, or a line
+        nested deeper than the JSON parser recurses: the replay raised
+        on them from every flush, and the event writer died on them
+        with its batch still queued, so a flush never returned.
+        """
         task_id, _chat = th._add_task("partial journal")
         sidecar = Path(th._failed_events_path(th._current_db_path()))
-        sidecar.write_text(
-            "not json\n"
+        too_deep = b"[" * 100_000 + b"\n"
+        sidecar.write_bytes(
+            b"not json\n\xff not text either\n" + too_deep
             + json.dumps({
                 "task_id": task_id,
                 "event_json": json.dumps({"type": "result"}),
                 "timestamp": time.time(),
                 "origin_db_path": th._current_db_path(),
-            }) + "\n"
+            }).encode() + b"\n"
         )
 
         th._flush_chat_events()
 
         self.assertEqual(self._event_count(task_id), 1)
+        self.assertFalse(sidecar.exists())
+
+        # The event writer replays the journal ahead of its own batch.
+        sidecar.write_bytes(too_deep)
+        th._queue_chat_event({"type": "text"}, task_id)
+        th._flush_chat_events(task_id)
+
+        self.assertEqual(self._event_count(task_id), 2)
         self.assertFalse(sidecar.exists())
 
     @posix_only("renaming a SQLite file another connection holds open")
@@ -454,7 +448,7 @@ class SchemaDefaultsTest(_PersistenceTestCase):
 
     def test_migration_keeps_unrecorded_toggles_enabled(self) -> None:
         """A legacy row that never recorded the toggles is not inverted."""
-        th._close_db()
+        close_db()
         db_path = self.kiss_dir / "history.db"
         conn = sqlite3.connect(str(db_path), isolation_level=None)
         conn.executescript("""
@@ -484,7 +478,7 @@ class SchemaDefaultsTest(_PersistenceTestCase):
 
     def test_migration_preserves_explicitly_disabled_toggles(self) -> None:
         """An explicit ``false`` is still migrated as disabled."""
-        th._close_db()
+        close_db()
         db_path = self.kiss_dir / "history.db"
         conn = sqlite3.connect(str(db_path), isolation_level=None)
         conn.executescript("""
@@ -576,9 +570,9 @@ class ThreadConnectionCacheTest(_PersistenceTestCase):
         for w in workers:
             w.start()
 
-        # Connect LAST so this thread's handle is the one the global
-        # ``_db_conn`` names — that is the case ``_close_thread_db``
-        # used to propagate to every other thread.
+        # Connect LAST so this thread's handle is the process's newest
+        # one — that is the case ``_close_thread_db`` used to propagate
+        # to every other thread.
         ready.wait(timeout=30)
         th._get_db()
         th._close_thread_db()
@@ -722,6 +716,28 @@ class ModuleInternalsTest(_PersistenceTestCase):
             "unlink, so it accumulates one file per redirect",
         )
 
+    def test_a_stop_before_the_token_is_kept_leaves_no_marker(self) -> None:
+        """A Stop landing once the marker is written, before its token is kept, deletes it.
+
+        No row names such a token, so no sweep would ever find the file.
+        """
+        def stop_after_flush(frame, event, arg):  # type: ignore[no-untyped-def]
+            if (
+                event == "c_return" and getattr(arg, "__name__", "") == "flush"
+                and frame.f_code.co_name == "_process_owner_token"
+            ):
+                raise KeyboardInterrupt
+
+        sys.setprofile(stop_after_flush)
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                th._process_owner_token()
+        finally:
+            sys.setprofile(None)
+        self.assertEqual(list(th._owner_dir().iterdir()), [])
+        token = th._process_owner_token()
+        self.assertEqual([p.name for p in th._owner_dir().iterdir()], [f"{token}.lock"])
+
     def test_marker_is_removed_when_its_owner_exits_normally(self) -> None:
         """A process that simply finishes leaves no marker behind.
 
@@ -775,7 +791,7 @@ class ModuleInternalsTest(_PersistenceTestCase):
 
     def test_owner_column_is_added_to_an_older_database(self) -> None:
         """A database created before owner tracking is upgraded in place."""
-        th._close_db()
+        close_db()
         conn = sqlite3.connect(str(self.kiss_dir / "history.db"))
         conn.execute(
             "CREATE TABLE task_history ("
@@ -830,13 +846,20 @@ class ModuleInternalsTest(_PersistenceTestCase):
         sidecar.rmdir()
 
     def test_a_journal_of_only_garbage_is_discarded(self) -> None:
-        """An unparsable journal is dropped instead of retried forever."""
+        """An unparsable journal is dropped instead of retried forever.
+
+        So is a snapshot whose name holds digits ``int`` refuses where
+        its claim key goes: the replay raised on it from every flush.
+        """
         sidecar = Path(th._failed_events_path(th._current_db_path()))
         sidecar.write_text("garbage\nmore garbage\n")
+        snapshot = sidecar.with_name(sidecar.name + ".consumed-" + "\u00b2" * 20 + "-1-x")
+        snapshot.write_text("garbage\n")
 
         th._replay_failed_events()
 
         self.assertFalse(sidecar.exists())
+        self.assertFalse(snapshot.exists())
 
 
 if __name__ == "__main__":  # pragma: no cover

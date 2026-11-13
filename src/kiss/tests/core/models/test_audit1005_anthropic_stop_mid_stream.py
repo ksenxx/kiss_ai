@@ -15,23 +15,37 @@ yielding), so the agent thread is parked in ``recv()``.  A Stop pressed
 before the stall timeout, with the thinking bracket closed and the
 partial usage kept for billing.
 
+The other end of a request is pinned too: a Stop, or the deadline on the
+headers, while the endpoint's address is still being looked up, when the
+request has no socket yet.
+
 A real ``ThreadingHTTPServer`` speaks genuine Anthropic SSE to the real
 ``anthropic`` SDK; no mocks or patches.
 """
 
 from __future__ import annotations
 
+import functools
+import socket
 import threading
 import time
 from collections.abc import Generator
+from concurrent import futures
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
 from kiss.core import stop_signal
 from kiss.core.models.anthropic_model import AnthropicModel
-from kiss.tests.core.models.anthropic_sse_harness import sse
+from kiss.core.models.stream_abort import is_stall_error
+from kiss.tests.core.models.anthropic_sse_harness import (
+    ScriptedAnthropicServer,
+    sse,
+    text_message_stream,
+)
+from kiss.tests.server.pause import Pause
 
 _MODEL = "claude-stop-mid-stream-under-test"
 # Long enough that a stop reported only by the stall clock fails the test.
@@ -175,3 +189,65 @@ def test_stop_after_first_token_aborts_the_parked_stream(
     assert partial is not None
     assert model.extract_input_output_token_counts_from_response(partial)[0] == 3
     assert model.take_partial_usage_response() is None
+
+
+def _looking_up(port: int | None, frame_locals: dict[str, Any]) -> bool:
+    """A :class:`Pause` matcher for ``socket.getaddrinfo``: the lookup of a connect to *port*."""
+    return frame_locals.get("port") == port
+
+
+def ended_during_its_lookup(
+    model: AnthropicModel, base_url: str, stopped: bool
+) -> BaseException | None:
+    """Return what ends ``model.generate()`` while the lookup of *base_url*'s host is held.
+
+    The lookup is held at its entry, as a resolver that does not answer
+    holds it.  With *stopped* the task's Stop is pressed then; without,
+    the request is left to the deadline on its headers.
+    """
+    stop = threading.Event()
+    looking_up = functools.partial(_looking_up, urlsplit(base_url).port)
+    with (
+        futures.ThreadPoolExecutor(
+            1, initializer=stop_signal.set_thread_stop_event, initargs=(stop,)
+        ) as task,  # bound to the Stop the way the runner binds a task thread
+        Pause(socket.getaddrinfo.__code__, looking_up) as held,
+    ):
+        turn = task.submit(model.generate)
+        assert held.paused.wait(10), "the request never reached its address lookup"
+        if stopped:
+            stop.set()
+        futures.wait([turn], _DEADLINE)
+        assert turn.done(), "generate() still waits for the address lookup"
+        return turn.exception()
+
+
+@pytest.mark.parametrize("stopped", [True, False], ids=["stop", "deadline"])
+def test_a_request_ends_while_its_endpoint_is_still_being_looked_up(
+    stopped: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Stop and the header deadline end a request whose endpoint's address is not known yet.
+
+    This client's pool was the one never made abortable: until the lookup
+    returned its header watchdog had no socket to shut down, so
+    ``generate`` waited for as long as the resolver did and then sent the
+    request it had been told to stop.  The deadline is twice the stall
+    timeout plus the SDK's longest backoff, 8 s.
+    """
+    config = {} if stopped else {"stream_stall_timeout": 0.05}
+    with ScriptedAnthropicServer(text_message_stream("hello")) as server:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", server.base_url)
+        model = AnthropicModel(_MODEL, api_key="test-key", model_config=config)
+        model.initialize("hi")
+        try:
+            error = ended_during_its_lookup(model, server.base_url, stopped)
+            if stopped:
+                assert isinstance(error, KeyboardInterrupt), repr(error)
+            else:
+                assert error is not None and is_stall_error(error), repr(error)
+            assert server.requests == [], "the request was sent after it was cut"
+            if stopped:  # the cut pool connects again: the same client serves the next turn
+                assert model.generate()[0] == "hello"
+                assert len(server.requests) == 1
+        finally:
+            model.client.close()

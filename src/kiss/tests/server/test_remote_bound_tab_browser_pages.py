@@ -346,26 +346,35 @@ class RemoteBoundTabBrowserPagesTest(TwoClientHarness):
         self.assertEqual(views._streams, {})
 
     def test_a_ready_s_replay_never_lands_after_a_later_unbind(self) -> None:
-        """A reconnecting page is not told a binding the registry moved past meanwhile.
+        """A reconnecting page is told the bindings and a later unbind in the order they happened.
 
-        The replay is held between copying the bindings and sending
-        one; the tab is closed meanwhile (every page told).  Released,
-        the replay must not put the reconnecting page back on ``box``.
+        The replay is held as it delivers the bindings (``tabMachines``),
+        under the lock a binding changes under: the tab's close, sent
+        meanwhile, waits for it.  Released, the unbinding follows the
+        replay on the reconnecting page, whose last word is no machine.
         """
         a, b = self.a, self.b
         self._submit("tab-7")
         self.wait_event(a, "tabMachine", tabId="tab-7", machine="box")
         c = self.open_client("c")
         c.tab_id = "tab-7"  # the reloading page shows the tab (its frames reach the page)
-        with Pause(RemoteTabs._replay_binding.__code__, lambda local: True) as held:
+        with Pause(
+            RemoteTabs.deliver_to.__code__, lambda local: '"tabMachines"' in local["text"],
+        ) as held:
             c.ready()
-            self.assertTrue(held.paused.wait(60), "the replay about to tell the binding")
+            self.assertTrue(held.paused.wait(60), "the replay about to tell the bindings")
             b.send({"type": "closeTab", "tabId": "tab-7"})
-            self.wait_event(b, "tabMachine", tabId="tab-7", machine="")
-            self.wait_event(c, "tabMachine", tabId="tab-7", machine="")
-        time.sleep(1.0)
+            time.sleep(1.0)
+            self.assertEqual(b.of_type("tabMachine", tabId="tab-7", machine=""), [])
+        self.wait_event(c, "tabMachine", tabId="tab-7", machine="")
         self.assertEqual(
-            [e["machine"] for e in c.of_type("tabMachine", tabId="tab-7")], [""],
+            [
+                e["machines"].get("tab-7", "") if e["type"] == "tabMachines" else e["machine"]
+                for e in list(c.events)
+                if e.get("type") == "tabMachines"
+                or (e.get("type") == "tabMachine" and e.get("tabId") == "tab-7")
+            ],
+            ["box", ""],
         )
         self.assertEqual(self._views()._bound, {})
 

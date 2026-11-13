@@ -196,6 +196,7 @@ def task_origins(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     it is not a :data:`COLUMN_BACKFILLS` entry, which runs inside the
     migration's write transaction, and the caller runs it on a thread of
     its own.  A row whose events name no host, or this host, is left out.
+    An event a foreign writer stored as a BLOB is read as its text.
 
     Args:
         conn: Connection to the database; only read.
@@ -205,9 +206,10 @@ def task_origins(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     """
     here = host_name().lower()
     origins: dict[str, str] = {}
+    event = "CAST(e.event_json AS TEXT)"
+    after_marker = f"substr({event}, nullif(instr({event}, ?), 0) + ?, 120)"
     for task_id, settings_host, info_host in conn.execute(
-        f"SELECT t.id, substr(e.event_json, nullif(instr(e.event_json, ?), 0) + ?, 120),"
-        " substr(e.event_json, nullif(instr(e.event_json, ?), 0) + ?, 120)"
+        f"SELECT t.id, {after_marker}, {after_marker}"
         f" FROM {TASK_TABLE} t JOIN events e ON e.task_id = t.id AND e.seq <= 1"
         " WHERE COALESCE(t.machine, '') = ''",
         (SETTINGS_HOST_MARKER, len(SETTINGS_HOST_MARKER),

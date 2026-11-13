@@ -16,21 +16,11 @@ const assert = require('assert');
 const {settle} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {makeVoicePage, micBtn, startMic} = require('./voice_page_helpers');
-const runner = makeRunner();
-const report = runner.report;
 
-// Every page a test opened is closed afterwards, pass or fail.
-async function test(name, fn) {
-  try {
-    await runner.test(name, fn);
-  } finally {
-    while (windows.length) windows.pop().close();
-  }
-}
-
-// Every page a test builds; closed after the test so no voice or toast
-// timer keeps node alive.
+// Every page a test builds; the runner closes them when the test has
+// ended, pass or fail, so no voice or toast timer keeps node alive.
 const windows = [];
+const {test, report} = makeRunner({windows});
 
 // The chat page over voice_page_helpers' scriptable microphone, with the
 // mic remembered OFF: a test turns it on with a click.

@@ -45,14 +45,16 @@ Branch-coverage notes for ``main()``:
   yield a non-dict.  Documented here instead of mocked, per the no-test-
   doubles policy.
 * The ``verbose = sys.stdout.isatty()`` True branch (interactive
-  console printer, no raw-YAML reprint) would need a full agent run on
-  a pty; the piped branch covers the exit-code and output contract that
-  scripts rely on.
+  console printer, no raw-YAML reprint) is run on a pty by
+  ``TestFailureOnATerminal``, with a run that fails before its first
+  step and so needs no model; the piped branch covers the exit-code and
+  output contract that scripts rely on.
 """
 
 from __future__ import annotations
 
 import os
+import select
 import sqlite3
 import subprocess
 import sys
@@ -279,6 +281,7 @@ class TestAskUserInTerminal:
         assert "reply=''" in proc.stdout
 
 
+@pytest.mark.live_api
 @pytest.mark.skipif(not _HAS_OPENAI_KEY, reason="needs OPENAI_API_KEY")
 class TestRealAgentRuns:
     """Full CLI-to-agent runs with the cheap stand-in model."""
@@ -424,3 +427,51 @@ class TestRealAgentRuns:
         finally:
             db.close()
         assert {"prompt", "result"} <= kinds, kinds
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="needs a pseudo-terminal")
+class TestFailureOnATerminal:
+    """A run that fails before its first step, with stdout on a terminal."""
+
+    def test_the_reason_is_shown(self, tmp_path: Path) -> None:
+        # On a terminal ``main`` prints no raw YAML: the console printer
+        # shows each result.  A work dir under a plain file fails the
+        # run before the agent loop, whose ``finish`` is what prints
+        # one; the terminal must show the failure all the same.
+        import pty  # POSIX only
+
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("")
+        env = _base_env(tmp_path)
+        env["COLUMNS"] = "200"  # the reason on one line, whatever the pty's size
+        master, slave = pty.openpty()
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _BOOTSTRAP, "-m", "gpt-4o-mini",
+             "--work-dir", str(blocker / "work"), "-t", "say hi"],
+            env=env,
+            cwd=str(tmp_path),
+            stdin=subprocess.DEVNULL,
+            stdout=slave,
+            stderr=subprocess.DEVNULL,
+        )
+        os.close(slave)
+        shown = b""
+        try:
+            # Until the child closes the terminal: EIO on Linux, EOF elsewhere.
+            while select.select([master], [], [], 120)[0]:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                shown += chunk
+            status = proc.wait(timeout=120)
+        finally:
+            os.close(master)
+            proc.kill()
+            proc.wait()
+        text = shown.decode(errors="replace")
+        assert status == 1, text
+        assert "Status: FAILED" in text, text
+        assert "Task failed with error:" in text and "not-a-dir" in text, text

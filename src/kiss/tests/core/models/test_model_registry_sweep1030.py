@@ -12,7 +12,13 @@ are merged when :mod:`kiss.core.models.model_info` is imported.
   price is a string, ``null`` or a boolean used to pass the schema check
   and then raise ``TypeError`` in the import-time cache-pricing loop,
   failing every KISS process until the file was fixed by hand; one added
-  after start raised the same error out of every cost lookup.
+  after start raised the same error out of every cost lookup.  So did a
+  ``-{level}`` entry whose ``alias_of`` is not a string (``AttributeError``
+  in the same loop, which reads it as a model name).
+* An entry whose ``fallback`` or ``thinking`` is not a string was loaded:
+  the fallback switch then asked the factory for the model ``123``
+  (``AttributeError``), and the Anthropic adapter's lookup of the effort
+  level ``["high"]`` raised ``TypeError`` on every request.
 * :func:`model` stripped ``openai/`` / ``anthropic/`` / ``google/`` from a
   registered custom model's own name, so the endpoint received another id
   and every cost lookup for the renamed model failed.
@@ -26,6 +32,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 _GOOD = {"context_length": 8192, "input_price_per_1M": 1.5, "output_price_per_1M": 3}
 _ENDPOINT = "http://127.0.0.1:9/v1"
@@ -70,6 +78,13 @@ _BAD_PRICES = {
         "context_length": "8192", "input_price_per_1M": 1, "output_price_per_1M": 2
     },
     "claude-my-cache": {**_GOOD, "cache_read_price_per_1M": "0.1"},
+    "gpt-my-alias-int-high": {**_GOOD, "alias_of": 123},
+    "gpt-my-alias-list-high": {**_GOOD, "alias_of": ["gpt-4"]},
+    "gpt-my-alias-dict-high": {**_GOOD, "alias_of": {"base": "gpt-4"}},
+    "my-fallback-int": {**_GOOD, "fallback": 123},
+    "my-fallback-list": {**_GOOD, "fallback": ["gpt-4"]},
+    "claude-my-thinking-bool": {**_GOOD, "thinking": True},
+    "claude-my-thinking-list": {**_GOOD, "thinking": ["high"]},
 }
 
 _LOOKUPS = """
@@ -110,18 +125,27 @@ def test_entries_added_after_start_with_bad_prices_are_unknown(tmp_path: Path) -
     assert result == {name: [False, "unknown"] for name in _BAD_PRICES}
 
 
+@pytest.mark.parametrize(
+    ("name", "bad"),
+    [
+        ("claude-only-here", {"input_price_per_1M": "3"}),
+        ("gpt-only-here-high", {"alias_of": 123}),
+        ("gpt-only-here-high", {"alias_of": ["gpt-4"]}),
+        ("gpt-only-here-high", {"alias_of": {"base": "gpt-4"}}),
+        ("claude-only-here", {"fallback": 123}),
+        ("claude-only-here", {"thinking": ["high"]}),
+    ],
+)
 def test_a_user_catalog_with_a_string_price_falls_back_to_the_bundled_one(
-    tmp_path: Path,
+    tmp_path: Path, name: str, bad: dict[str, Any]
 ) -> None:
     home = _home_with_registry(tmp_path, {})
     catalog = tmp_path / "MODEL_INFO.json"
-    catalog.write_text(
-        json.dumps({"claude-only-here": {**_GOOD, "input_price_per_1M": "3"}}), encoding="utf-8"
-    )
+    catalog.write_text(json.dumps({name: {**_GOOD, **bad}}), encoding="utf-8")
     code = (
         "import json\n"
         "from kiss.core.models import model_info as mi\n"
-        "print(json.dumps(['claude-only-here' in mi.MODEL_INFO, len(mi.MODEL_INFO) > 100]))\n"
+        f"print(json.dumps([{name!r} in mi.MODEL_INFO, len(mi.MODEL_INFO) > 100]))\n"
     )
     assert _run(code, home, {"KISS_MODEL_INFO_PATH": str(catalog)}) == [False, True]
 

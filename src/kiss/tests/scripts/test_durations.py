@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +29,15 @@ def test_record_durations_merges_under_the_lock_and_load_tolerates_junk(tmp_path
     assert durations.load_durations(path) == {}
     path.write_text("{not json")
     assert durations.load_durations(path) == {}
+    # Audit SC1: a value that is no duration was raised (TypeError, ValueError)
+    # instead of dropped, out of every later record and every --splits.
+    path.write_text(
+        '{"a.py": 2, "b.py": null, "c.py": "slow", "d.py": {"seconds": 1}, "e.py": true,'
+        ' "f.py": NaN, "g.py": -1, "h.py": 1e999, "i.py": 1' + "0" * 400 + "}"
+    )
+    assert durations.load_durations(path) == {"a.py": 2.0}
+    durations.record_durations(path, {"z.py": 0.5})
+    assert durations.load_durations(path) == {"a.py": 2.0, "z.py": 0.5}
 
 
 def test_durations_path_prefers_the_env_then_the_main_checkout(
@@ -50,6 +60,8 @@ def test_durations_path_prefers_the_env_then_the_main_checkout(
 def test_the_suite_records_its_file_durations_for_the_next_split(tmp_path: Path) -> None:
     """A pytest session of this repository writes each file's seconds to the durations file."""
     store = tmp_path / "durations.json"
+    # What another writer left in the machine's store is no failure of this session.
+    store.write_text('{"src/kiss/tests/test_stale.py": null}')
     me = Path(__file__).relative_to(durations.PROJECT_ROOT).as_posix()
     env = {**os.environ, "KISS_TEST_DURATIONS": str(store)}
     run = subprocess.run(
@@ -58,6 +70,10 @@ def test_the_suite_records_its_file_durations_for_the_next_split(tmp_path: Path)
         cwd=durations.PROJECT_ROOT, env=env, capture_output=True, text=True, timeout=300,
     )
     assert run.returncode == 0, run.stdout + run.stderr
+    # The run begins with the interpreter it ran on (the root conftest), though -q drops
+    # pytest's own header; only the conftest's file-descriptor notice may precede it.
+    interpreter = f"interpreter: {sys.executable} (Python {platform.python_version()})"
+    assert interpreter in run.stdout.splitlines()[:2], run.stdout
     recorded = durations.load_durations(store)
     assert list(recorded) == [me] and recorded[me] > 0, recorded
     # The next --splits of that file is balanced by what was recorded.

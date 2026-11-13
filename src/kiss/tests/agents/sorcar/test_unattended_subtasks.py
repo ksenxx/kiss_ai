@@ -49,6 +49,7 @@ from kiss.agents.sorcar.cron_agent import (
     UNATTENDED_CHILD_PREAMBLE,
     UNATTENDED_MARKER,
     is_unattended,
+    is_unattended_text,
     unattended_child_suffix,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
@@ -195,6 +196,10 @@ def test_unattended_helpers() -> None:
     assert suffix.endswith(UNATTENDED_CHILD_PREAMBLE)
     assert unattended_child_suffix(suffix) == suffix
     assert unattended_child_suffix("extra").startswith("extra")
+    # A suffix the writer keeps as already marked (white space after the
+    # preamble) is one the daemon's reader recognises.
+    assert unattended_child_suffix(suffix + "\n") == suffix + "\n"
+    assert is_unattended_text("child" + suffix + "\n")
 
 
 def test_is_unattended_positions() -> None:

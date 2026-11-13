@@ -53,15 +53,14 @@ from kiss.server.web_server import WebPrinter
 @pytest.fixture()
 def isolated_db(tmp_path: Path):
     """Redirect the persistence DB to a temp dir for the test."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    saved = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = tmp_path / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     yield
     agent_state.agent_states.clear()
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+    th._DB_PATH, th._KISS_DIR = saved
 
 
 class _Harness:
@@ -594,6 +593,7 @@ class TestAskAnswerEvent:
         h.server._broadcast_ask_answer(
             tab_id="tab-parent",
             owner_task_id=h.parent_task_id,
+            chat_id=h.parent_state.chat_id,
             question="why did step 3 fail?",
             text="<p>The file was missing.</p>",
             success=True,
@@ -644,6 +644,7 @@ class TestAskAnswerEvent:
         h.server._broadcast_ask_answer(
             tab_id="tab-parent",
             owner_task_id=h.parent_task_id,
+            chat_id=h.parent_state.chat_id,
             question="what did the run change?",
             text="<p>Two files under src/.</p>",
             success=True,
@@ -668,6 +669,7 @@ class TestAskAnswerEvent:
         h.server._broadcast_ask_answer(
             tab_id="tab-parent",
             owner_task_id="",
+            chat_id=h.parent_state.chat_id,
             question="q",
             text="a",
             success=False,

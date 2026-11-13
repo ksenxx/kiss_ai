@@ -42,8 +42,17 @@ class SelectModelOutsideStateLockTest(TwoClientHarness):
         b = self.open_client("b")
         a.ready()
         b.ready()
-        self.wait_event(a, "models")
-        self.wait_event(b, "models")
+        # Both ``ready`` fan-outs are over before the reader takes the
+        # lock.  ``models`` is only their first reply: ``getInputHistory``
+        # and ``getSeaCommands`` then read the database, and such a read
+        # arriving behind the pick's pending write waits for the reader,
+        # with b's ``newChat`` queued behind b's ``ready``.  A connection's
+        # frames are handled in order, so its ``pong`` comes once the
+        # ``ready`` sent before the ``ping`` is done.
+        a.send({"type": "ping"})
+        b.send({"type": "ping"})
+        self.wait_event(a, "pong")
+        self.wait_event(b, "pong")
 
         release = threading.Event()
         held = threading.Event()
@@ -117,13 +126,13 @@ class SelectModelOutsideStateLockTest(TwoClientHarness):
             what="the pick persisted once the reader left",
         )
 
-    def test_an_older_pick_whose_write_finishes_last_does_not_revert_a_newer_one(self) -> None:
-        """Two overlapping picks: the file ends with the newest whichever write lands last.
+    def test_an_older_pick_held_at_its_write_does_not_revert_a_newer_one(self) -> None:
+        """Two overlapping picks: the file ends with the newest, however late the older writes.
 
         Client A's pick is held just before its file write; client B's
-        pick lands and is persisted meanwhile; A's write is released.
-        The old write must not leave the file (and the next refresh)
-        on A's model.
+        pick lands meanwhile (the default is B's at once) and is saved
+        after A's, once A's write is released.  The old write must not
+        leave the file (and the next refresh) on A's model.
         """
         agent_server = self.server._agent_server
         a = self.open_client("a")
@@ -140,10 +149,9 @@ class SelectModelOutsideStateLockTest(TwoClientHarness):
             self.assertTrue(pause.paused.wait(5.0), "the first pick reached its file write")
             b.send({"type": "selectModel", "tabId": b.tab_id, "model": "gpt-4o-mini"})
             self.wait_for(
-                lambda: persistence._load_last_model() == "gpt-4o-mini",
-                what="the second pick persisted",
+                lambda: agent_server._default_model == "gpt-4o-mini",
+                what="the second pick landed",
             )
-            self.assertEqual(agent_server._default_model, "gpt-4o-mini")
             pause.release()
             self.wait_for(
                 lambda: agent_server._model_picks_pending == 0, what="both picks finished",

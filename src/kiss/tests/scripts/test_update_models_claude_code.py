@@ -162,6 +162,27 @@ def test_cc_undated_alias_kept_while_a_snapshot_exists() -> None:
     assert {d["name"] for d in deprecated} == {"cc/claude-opus-4-5"}
 
 
+def test_only_an_eight_digit_date_names_an_anthropic_snapshot() -> None:
+    """Audit SC1: Anthropic dates a snapshot ``YYYYMMDD``; ``YYYY-MM-DD`` is OpenAI's other form.
+
+    Read by OpenAI's rule, an ISO-dated Anthropic listing entry kept the alias before it
+    alive, and an ISO-dated name was a snapshot instead of an alias that has none.
+    """
+    current = _cc_current(
+        "cc/claude-opus-4-6", "claude-opus-4-6", "claude-opus-4-6-2026-01-01",
+        "gpt-5", "gpt-5.5-2026-04-23",
+    )
+    anthropic = {"claude-opus-4-6-2026-01-02": {"source": "anthropic"}}
+    openai = {"gpt-5-2025-08-07": {"source": "openai"}}
+    deprecated = find_deprecated_models(current, {}, anthropic, {}, openai)
+    assert {d["name"]: d["reason"] for d in deprecated} == {
+        "cc/claude-opus-4-6": "alias with no snapshot in Anthropic API",
+        "claude-opus-4-6": "alias with no snapshot in Anthropic API",
+        "claude-opus-4-6-2026-01-01": "alias with no snapshot in Anthropic API",
+        "gpt-5.5-2026-04-23": "not in OpenAI API",
+    }
+
+
 def test_cc_short_aliases_are_never_deprecated() -> None:
     """haiku/opus/sonnet aliases stay even though the API never lists them."""
     current = _cc_current("cc/haiku", "cc/opus", "cc/sonnet")

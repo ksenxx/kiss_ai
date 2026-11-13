@@ -25,10 +25,9 @@ import pytest
 
 from kiss.agents.sorcar.sea_docs import TABLES
 from kiss.tests.agents.third_party_agents.muse_test_utils import muse_daemons_of
+from kiss.tests.conftest import posix_only
 
-skip_on_windows = pytest.mark.skipif(
-    sys.platform == "win32", reason="the Muse daemon only runs on Unix"
-)
+pytestmark = posix_only("the Muse daemon only runs on Unix")
 
 
 @pytest.fixture
@@ -90,13 +89,11 @@ def assert_ran_without_muse(home: Path, argv: tuple[str, ...], stdout: str) -> N
     assert re.fullmatch(stdout, result.stdout.strip()), output
 
 
-@skip_on_windows
 def test_sea_lint_starts_no_muse_daemon(fresh_home: Path) -> None:
     """``sea lint`` with Muse-auth at its default leaves no daemon and no vault state."""
     assert_ran_without_muse(fresh_home, ("lint",), r"sea lint: \d+ finding\(s\)")
 
 
-@skip_on_windows
 def test_sea_docs_starts_no_muse_daemon(fresh_home: Path, tmp_path: Path) -> None:
     """``sea docs`` with Muse-auth at its default leaves no daemon and no vault state.
 

@@ -142,6 +142,13 @@ class TestDoubleMergeClick(unittest.TestCase):
             f"second click reported {results['second']!r} instead of a "
             "busy refusal"
         )
+        # The refusal is broadcast to every page, and a page drops its
+        # Merge / Discard bar on a result that is not ``retryable``: the
+        # in-flight merge may still end with the worktree pending, and
+        # the bar is then the only way to retry or discard.
+        assert results["second"].get("retryable") is True, (
+            f"busy refusal {results['second']!r} would strip the bar"
+        )
 
     def test_merge_click_during_hunk_review_is_refused(self) -> None:
         """While ``is_merging`` is held by a merge review session, a

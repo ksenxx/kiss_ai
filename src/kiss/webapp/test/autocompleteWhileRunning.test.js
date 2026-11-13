@@ -15,7 +15,13 @@
 // pin down the whole running-state contract of the composer in one place.
 
 const assert = require('assert');
-const {makePage, send, stubRaf, recordTimers} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  stubRaf,
+  recordTimers,
+  ghostText,
+} = require('./simplify2_harness');
 
 const pages = [];
 
@@ -64,13 +70,6 @@ function picker(win) {
 
 function pickerVisible(win) {
   return picker(win).style.display === 'block';
-}
-
-function ghostText(win) {
-  const el = win.document
-    .getElementById('ghost-overlay')
-    .querySelector('.ghost-text');
-  return el ? el.textContent : '';
 }
 
 // Mark the visible tab's task as running the way the daemon does: a

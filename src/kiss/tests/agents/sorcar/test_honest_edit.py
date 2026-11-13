@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -62,6 +64,31 @@ def test_edit_reports_three_lines_of_context_around_the_replacement(work: Path) 
     assert "   15 |" not in out
 
 
+def test_edit_report_names_only_the_lines_the_file_has(work: Path) -> None:
+    """The report's header ends at the file's last line; an emptied file has none to name.
+
+    Review 2026-11-11 S4r3: the header named three lines after the replacement
+    whether the file had them or not (``lines 1-4`` over the one line of a
+    one-line file).
+    """
+    tools = UsefulTools(work_dir=str(work))
+    path = work / "short.txt"
+    path.write_text("1\n2\n3\n4\n5\nlast = 1\n")
+    tools.Read(str(path))
+    done = f"Successfully replaced 1 occurrence(s) in {path}\n"
+    assert tools.Edit(str(path), "last = 1", "last = 2") == (
+        done + "lines 3-6 after the edit:\n    3 | 3\n    4 | 4\n    5 | 5\n    6 | last = 2"
+    )
+    # The last line deleted: the lines before where it was.
+    assert tools.Edit(str(path), "last = 2\n", "") == (
+        done + "lines 3-5 after the edit:\n    3 | 3\n    4 | 4\n    5 | 5"
+    )
+    one_line = done + "lines 1-1 after the edit:\n    1 | 5"
+    assert tools.Edit(str(path), "1\n2\n3\n4\n", "") == one_line
+    assert tools.Edit(str(path), "5\n", "") == done + "The file is empty after the edit."
+    assert path.read_text() == ""
+
+
 def test_edit_applies_several_pairs_in_order_or_none(work: Path) -> None:
     tools = UsefulTools(work_dir=str(work))
     tools.Read(str(work / "a.py"))
@@ -84,11 +111,21 @@ def test_edit_applies_several_pairs_in_order_or_none(work: Path) -> None:
     out = tools.Edit(str(work / "a.py"), edits=bad)
     assert out.startswith("Error: edit 2: String not found in file. The closest region is lines ")
     assert (work / "a.py").read_text() == before
-    assert tools.Edit(str(work / "a.py"), edits="[").startswith("Error: edits must be a JSON list")
+    # "[" * 100_000 is nested past the decoder's depth: a RecursionError, no ValueError.
+    for undecodable in ("[", "[" * 100_000):
+        out = tools.Edit(str(work / "a.py"), edits=undecodable)
+        assert out.startswith("Error: edits must be a JSON list"), out
     assert tools.Edit(str(work / "a.py"), edits="[]").startswith("Error: edits must be a non-empty")
     assert tools.Edit(str(work / "a.py"), edits='[{"old_string": 1}]').startswith(
         "Error: edit 1 must be an object"
     )
+    # A replace_all that is no JSON boolean is refused, not read by its truth ("false" is truthy).
+    for value in ("false", 0, None, ""):
+        quoted = json.dumps([{"old_string": "two", "new_string": "2", "replace_all": value}])
+        assert tools.Edit(str(work / "a.py"), edits=quoted) == (
+            "Error: edit 1: replace_all must be true or false"
+        ), value
+    assert (work / "a.py").read_text() == before
 
 
 CODE = "def f():\n    x = 1\n    y = 2\n    return x + y\n"
@@ -135,6 +172,38 @@ def test_edit_with_an_ambiguous_whitespace_match_names_the_count(work: Path) -> 
     assert (work / "c.py").read_text() == "a\n  b\nc\nA\nd\n"
 
 
+def test_edit_not_found_in_a_long_file_names_the_nearest_region_at_once(work: Path) -> None:
+    """A 60-line old_string not found in a 20,000-line file is answered in seconds.
+
+    Every window of the file was compared with the old string character
+    by character (110 s for this file), inside the lock that every Write
+    and Edit of the daemon takes.
+    """
+    lines = [f"value_{i} = compute({i}, offset={i * 7})\n" for i in range(1, 20001)]
+    (work / "long.py").write_text("".join(lines))
+    tools = UsefulTools(work_dir=str(work))
+    tools.Read(str(work / "long.py"), max_lines=1)
+    old = "".join(lines[15000:15060]).replace("offset=105210)", "offset=0)")
+    started = time.monotonic()
+    out = tools.Edit(str(work / "long.py"), old, "pass\n")
+    assert time.monotonic() - started < 15
+    assert out.startswith(
+        "Error: String not found in file. The closest region is lines 15001-15060:\n"
+        "15001 | value_15001 = compute(15001, offset=105007)\n"
+    )
+    # Review 2026-11-11 S4-1: an old string longer than a file of 20,000 equal lines hung in
+    # the search for the windows sharing a line with it (400 million pairs of equal lines).
+    braces = "}\n" * 20_000
+    (work / "braces.txt").write_text(braces)
+    tools.Read(str(work / "braces.txt"), max_lines=1)
+    started = time.monotonic()
+    out = tools.Edit(str(work / "braces.txt"), braces + "changed\n", "pass\n")
+    assert time.monotonic() - started < 15
+    assert out.startswith(
+        "Error: String not found in file. The closest region is lines 1-20000:\n    1 | }\n"
+    )
+
+
 def test_edit_not_found_names_the_nearest_region_for_a_read_free_retry(work: Path) -> None:
     tools = UsefulTools(work_dir=str(work))
     (work / "c.py").write_text(CODE)
@@ -162,6 +231,17 @@ def test_edit_not_found_names_the_nearest_region_for_a_read_free_retry(work: Pat
     assert out == (
         "Error: String not found in file. The closest region is lines 2-2:\n"
         "    2 | TARGET = 1\n"
+        "Re-issue the Edit with the exact text of those lines as old_string."
+    )
+    # Only the ``\r`` of a ``\r\n`` goes with the line's end, as in what Read shows
+    # (review 2026-11-11 S4r3: every trailing ``\r`` was stripped).
+    (work / "g.py").write_text("TARGET = 1\r\r\nlast\r", newline="")
+    assert tools.Read(str(work / "g.py")).startswith("TARGET = 1\r\nlast\r")
+    out = tools.Edit(str(work / "g.py"), "TARGET = 2\nlost", "x")
+    assert out == (
+        "Error: String not found in file. The closest region is lines 1-2:\n"
+        "    1 | TARGET = 1\r\n"
+        "    2 | last\r\n"
         "Re-issue the Edit with the exact text of those lines as old_string."
     )
 
@@ -308,3 +388,44 @@ def test_region_around_string_falls_back_to_the_first_line_or_the_head() -> None
     assert "   30 | l30" in partial
     head = region_around_string(text, "zzz", context=2)
     assert head.splitlines()[0] == "    1 | l1" and len(head.splitlines()) == 4
+
+
+def _sed_numbered(path: Path, first: int, last: int) -> str:
+    """Return lines *first*..*last* of *path* as ``sed -n`` ends them, numbered as a report is."""
+    lines = path.read_bytes().decode().split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    listing = "".join(f"{line}\n" for line in lines[first - 1:last])
+    listing = listing.replace("\r\n", "\n").removesuffix("\n")
+    return "\n".join(f"{n:5d} | {line}" for n, line in enumerate(listing.split("\n"), first))
+
+
+def test_a_numbered_report_ends_a_line_at_a_newline_only(work: Path) -> None:
+    """The line numbers of an Edit report or refusal are those of ``sed -n`` and of Read.
+
+    ``str.splitlines`` also ends a line at a form feed, a lone ``\\r`` and seven more
+    characters: every line after one of them was numbered too high, against the
+    "lines X-Y" header above it, and the old string's own lines were counted so too.
+    """
+    path = work / "odd.txt"
+    odd = "".join(f"a{c}b\n" for c in "\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029\r")
+    path.write_text(odd + "TARGET = 1\r\n" + SOURCE + "end", encoding="utf-8", newline="")
+    tools = UsefulTools(work_dir=str(work))
+    # Unread, and the two-line old string is not there: ten lines each side of where its
+    # first line is, line 9.
+    refused = tools.Edit(str(path), "a\rb\nmissing", "x")
+    assert refused.endswith("exact current text.\n" + _sed_numbered(path, 1, 20))
+    applied = tools.Edit(str(path), "a\rb\nTARGET = 1", "a\rb\nTARGET = 2")
+    assert applied.endswith("\nlines 6-13 after the edit:\n" + _sed_numbered(path, 6, 13))
+    assert tools.Read(str(path), start_line=10, max_lines=1).startswith("TARGET = 2\n")
+    rewrite_command = (
+        "sed -i '' 's/TARGET = 2/X/' odd.txt"
+        if sys.platform == "darwin" else "sed -i 's/TARGET = 2/X/' odd.txt"
+    )
+    rewrite = UsefulTools(work_dir=str(work)).Bash(rewrite_command, "rewrite")
+    assert rewrite.startswith("REFUSED:")
+    assert rewrite.endswith("goes through.\n" + _sed_numbered(path, 1, 20))
+    # The last line, line 41, is shown without a final newline, and no line 42 after one.
+    for old, new in (("end", "END"), ("END", "end\n")):
+        ended = tools.Edit(str(path), old, new)
+        assert ended.endswith("\nlines 38-41 after the edit:\n" + _sed_numbered(path, 38, 41))

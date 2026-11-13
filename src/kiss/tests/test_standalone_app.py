@@ -26,6 +26,7 @@ import plistlib
 import shlex
 import shutil
 import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -78,6 +79,14 @@ def _write_stub_browser(
         f"[ -z '{stderr}' ] || echo '{stderr}' >&2\nsleep {sleep}\nexit {exit_code}\n",
         encoding="utf-8",
     )
+    path.chmod(0o755)
+    return path
+
+
+def _write_unrunnable(path: Path) -> Path:
+    """An executable file that cannot be executed: its ``#!`` line names a missing interpreter."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/nonexistent/interpreter\n", encoding="utf-8")
     path.chmod(0o755)
     return path
 
@@ -279,6 +288,39 @@ def test_daemon_answers_with_any_http_status(tmp_path: Path) -> None:
         assert standalone_app.daemon_answers(f"http://127.0.0.1:{not_found.server_port}/")
     finally:
         not_found.shutdown()
+
+
+def test_an_answer_that_is_not_http_or_is_cut_short_is_no_crash() -> None:
+    """Another server on the daemon's port, or a daemon going down mid-answer, is "cannot tell".
+
+    The URL file outlives the daemon, so something that does not speak
+    HTTP (a TLS or raw TCP server) may hold its port; ``kiss-app`` then
+    shows the start page instead of dying with a traceback.
+    """
+
+    class _Canned(socketserver.BaseRequestHandler):
+        answer = b""
+
+        def handle(self) -> None:
+            self.request.recv(4096)
+            self.request.sendall(self.answer)
+
+    class _NotHttp(_Canned):
+        answer = b"\x15\x03\x01\x00\x02\x02\x16 not http\r\n\r\n"
+
+    class _CutShort(_Canned):
+        answer = b'HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n{"open": tr'
+
+    for handler, answers in ((_NotHttp, False), (_CutShort, True)):
+        server = socketserver.TCPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        url = f"http://127.0.0.1:{server.server_address[1]}/"
+        try:
+            assert standalone_app.daemon_answers(url) is answers
+            assert standalone_app.ask_app_window_open(url) is None
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 def test_a_closed_site_answers_nothing_on_a_connection_it_accepted() -> None:
@@ -580,6 +622,37 @@ def test_browser_dying_at_once_is_a_failure_with_its_stderr(tmp_path: Path) -> N
     assert f"The browser exited at once ({stub}); its stderr is in {app_log}:" in proc.stderr
     assert "    Missing X server or $DISPLAY" in proc.stderr
     assert app_log.read_text(encoding="utf-8") == "Missing X server or $DISPLAY\n"
+
+
+def test_a_launch_that_cannot_happen_is_one_line_not_a_traceback(tmp_path: Path) -> None:
+    """An ``OSError`` of the launch itself (the browser, its log) is a diagnostic and exit 1."""
+    broken = _write_unrunnable(tmp_path / "bin" / "chrome")
+    env = _env(tmp_path, KISS_APP_BROWSER=str(broken))
+    for mode in ([], ["--foreground"]):
+        proc = _run([*mode, "--url", _LOOPBACK, "--wait", "0"], env)
+        assert proc.returncode == 1
+        assert proc.stderr.startswith(f"Could not start {broken}: "), proc.stderr
+        assert len(proc.stderr.splitlines()) == 1, proc.stderr
+    # A log that cannot be written (a directory in its place): the browser is not started.
+    calls = tmp_path / "browser.log"
+    stub = _write_stub_browser(tmp_path / "bin" / "dies", calls, exit_code=3)
+    app_log = tmp_path / "other-home" / "kiss-app.log"
+    app_log.mkdir(parents=True)
+    env = _env(tmp_path, KISS_APP_BROWSER=str(stub), KISS_HOME=str(app_log.parent))
+    proc = _run(["--url", _LOOPBACK, "--wait", "0"], env)
+    assert proc.returncode == 1
+    assert proc.stderr.startswith(f"Could not start {stub}: "), proc.stderr
+    assert str(app_log) in proc.stderr and len(proc.stderr.splitlines()) == 1, proc.stderr
+    assert not calls.exists()
+    # Nor is a log the dead browser's last words cannot be read back from (root reads any file).
+    if os.geteuid() != 0:
+        app_log.rmdir()
+        app_log.touch(mode=0o200)
+        proc = _run(["--url", _LOOPBACK, "--wait", "0"], env)
+        assert proc.returncode == 1
+        assert proc.stderr.startswith(f"Could not start {stub}: "), proc.stderr
+        assert str(app_log) in proc.stderr and len(proc.stderr.splitlines()) == 1, proc.stderr
+        assert calls.exists()
 
 
 def test_browser_handing_off_to_a_running_instance_is_a_success(tmp_path: Path) -> None:
@@ -1368,6 +1441,16 @@ def test_launcher_command_line(tmp_path: Path) -> None:
     assert not entry.exists()
     proc = _run(["--uninstall-launcher"], env)
     assert proc.stdout.strip() == "No launcher to remove."
+    # A launcher that cannot be written is one line on stderr, like a failed removal.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("")
+    proc = _run(
+        ["--install-launcher"],
+        _env(tmp_path, HOME=str(blocker / "home"), XDG_DATA_HOME=str(blocker / "xdg")),
+    )
+    assert proc.returncode == 1
+    assert "Could not install the launcher: " in proc.stderr
+    assert "Traceback" not in proc.stderr
 
 
 def _stub_file_managers(tmp_path: Path) -> tuple[Path, Path]:
@@ -1418,6 +1501,13 @@ def test_reveal_launcher_shows_its_folder(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     assert standalone_app.reveal_launcher(BRAND, home=home, system="Linux") is None
     assert not log.exists()
+
+    # Nor is an opener that cannot be executed one: xdg-open's interpreter
+    # is gone, and this PATH has no ``open`` at all.
+    unrunnable = _write_unrunnable(tmp_path / "unrunnable" / "xdg-open")
+    monkeypatch.setenv("PATH", str(unrunnable.parent))
+    assert standalone_app.reveal_launcher(BRAND, home=home, system="Linux") is None
+    assert standalone_app.reveal_launcher(BRAND, home=home, system="Darwin") is None
 
 
 def test_reveal_launcher_command_line(tmp_path: Path) -> None:
@@ -1573,6 +1663,13 @@ def test_main_in_process(
     entry = tmp_path / "xdg" / "applications" / f"{standalone_app.brand_slug()}.desktop"
     assert capsys.readouterr().out.strip() == f"Installed {entry}"
     assert _stub_calls(udd_log) == [str(entry.parent)]
+    if os.geteuid():  # root unlinks from a read-only directory too
+        entry.parent.chmod(0o500)
+        try:
+            assert standalone_app.main(["--uninstall-launcher"]) == 1
+        finally:
+            entry.parent.chmod(0o700)
+        assert "Could not remove the launcher" in capsys.readouterr().err
     assert standalone_app.main(["--uninstall-launcher"]) == 0
     assert capsys.readouterr().out.strip() == f"Removed {entry}"
     assert standalone_app.main(["--uninstall-launcher"]) == 0
@@ -1872,13 +1969,12 @@ def test_macos_app_page_opens_the_webapp_as_a_popup_of_its_origin() -> None:
 
 @pytest.mark.skipif(not _MACOS, reason="`open -a` is macOS' Launch Services")
 def test_macos_activate_running_needs_a_window_open_can_reach(tmp_path: Path) -> None:
-    """Nothing running from the bundle, or a bundle ``open`` cannot launch: False.
+    """A bundle ``open`` cannot launch: False.
 
     (The real-browser test above covers the window being brought to
     the front.)
     """
     bundle = tmp_path / "Applications" / f"{BRAND['product_name']}.app"
-    assert not standalone_app.macos_activate_running(bundle)
     # A "window" running from what is not an application bundle (no
     # Info.plist, no launcher): ``open -a`` refuses it.
     exe = bundle / "Contents" / "MacOS" / "Chromium"
@@ -1992,12 +2088,20 @@ def test_macos_launch_goes_through_the_bundle_and_repairs_a_stale_one(
     newer = _fake_browser_app(tmp_path / "apps2", version="141.0.7400.1")
     assert standalone_app.macos_launch_browser(newer, home=tmp_path) == exe_copy
     assert _bundle_plist(bundle)["CFBundleShortVersionString"] == "141.0.7400.1"
-    # A clone whose plist was cut short (an interrupted write) is stale
-    # too, and rebuilt rather than tripping over.
-    (bundle / "Contents" / "Info.plist").write_bytes(b'<?xml version="1.0"?><plist><dict>')
-    assert standalone_app.macos_bundle_browser(bundle, newer) is None
-    assert standalone_app.macos_launch_browser(newer, home=tmp_path) == exe_copy
-    assert _bundle_plist(bundle)["CFBundleShortVersionString"] == "141.0.7400.1"
+    # A clone whose plist was cut short (an interrupted write), holds a
+    # value that is none or is no dictionary is stale too, and rebuilt
+    # rather than tripping over.
+    for damaged in (
+        b'<?xml version="1.0"?><plist><dict>',
+        b"<plist><dict><key>CFBundleVersion</key><integer>one</integer></dict></plist>",
+        b"<plist><dict><key>CFBundleVersion</key></dict></plist>",
+        b"<plist><dict><key>Built</key><date>yesterday</date></dict></plist>",
+        b"<plist><array><string>141.0.7400.1</string></array></plist>",
+    ):
+        (bundle / "Contents" / "Info.plist").write_bytes(damaged)
+        assert standalone_app.macos_bundle_browser(bundle, newer) is None, damaged
+        assert standalone_app.macos_launch_browser(newer, home=tmp_path) == exe_copy
+        assert _bundle_plist(bundle)["CFBundleShortVersionString"] == "141.0.7400.1"
     # A bare binary is launched directly.
     bare = _write_stub_browser(tmp_path / "bin" / "chrome", tmp_path / "log")
     assert standalone_app.macos_launch_browser(bare, home=tmp_path) == bare

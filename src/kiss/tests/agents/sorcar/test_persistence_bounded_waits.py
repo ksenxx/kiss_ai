@@ -60,6 +60,7 @@ from kiss.agents.sorcar.history_columns import (
     missing_columns,
 )
 from kiss.agents.sorcar.task_metadata import backfill_task_metadata
+from kiss.tests.persistence_helpers import close_db
 
 _HOLD_LOCK_SCRIPT = """
 import sys, time
@@ -80,7 +81,7 @@ def kiss_home(tmp_path: Path) -> Iterator[Path]:
     try:
         yield tmp_path
     finally:
-        persistence._close_db()
+        close_db()
         persistence._KISS_DIR, persistence._DB_PATH = saved
 
 
@@ -208,6 +209,7 @@ _PAUSED_REPLAY_SCRIPT = """
 import os, sys, time
 from pathlib import Path
 from kiss.agents.sorcar import persistence
+from kiss.tests.persistence_helpers import close_db
 home, paused, go = sys.argv[1], sys.argv[2], sys.argv[3]
 persistence._KISS_DIR = Path(home)
 persistence._DB_PATH = Path(home) / "history.db"
@@ -219,7 +221,7 @@ def hook(frame, event, arg):
             time.sleep(0.02)
 sys.setprofile(hook)
 persistence._replay_failed_events()
-persistence._close_db()
+close_db()
 """
 
 

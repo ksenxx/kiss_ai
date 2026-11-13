@@ -331,6 +331,13 @@ def test_a_stop_during_the_description_of_a_codex_native_result_is_reported(
     }
 
 
+class _Credited(dict[str, tuple[float, int]]):
+    """The (cost, tokens) the bridge credited, by call key: a retried credit counts once."""
+
+    def credit(self, cost: float, tokens: int, key: str, model: str) -> None:
+        self.setdefault(key, (cost, tokens))
+
+
 def test_no_vision_model_configured_says_so(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -341,9 +348,12 @@ def test_no_vision_model_configured_says_so(
         Attachment(_write_png(tmp_path / "shot.png"), "image/png"),
         Attachment(_write_pdf(tmp_path / "scan.pdf"), "application/pdf"),
     ]
-    described = describe_attachments(attachments, TEXT_ONLY_MODEL, "Read shot.png")
-    assert (described.cost, described.tokens, described.calls) == (0.0, 0, 0)
-    assert described.text.split("\n\n") == [
+    credited = _Credited()
+    described = describe_attachments(
+        attachments, TEXT_ONLY_MODEL, "Read shot.png", credit=credited.credit
+    )
+    assert credited == {}  # no call was made, so none is billed
+    assert described.split("\n\n") == [
         f"[{mime} attachment {index} could not be described: no vision model is "
         f"configured; the model you run on ({TEXT_ONLY_MODEL}) cannot see images, "
         "use a vision model or an OCR tool]"
@@ -356,15 +366,17 @@ def test_a_pdf_is_described_too(tmp_path: Path) -> None:
     if vision_model() is None:
         pytest.skip("no vision model is configured")
     pdf_bytes = _write_pdf(tmp_path / "scan.pdf")
-    described = describe_attachments([Attachment(pdf_bytes, "application/pdf")], TEXT_ONLY_MODEL)
-    text = described.text
+    credited = _Credited()
+    text = describe_attachments(
+        [Attachment(pdf_bytes, "application/pdf")], TEXT_ONLY_MODEL, credit=credited.credit
+    )
     assert text.startswith(f"[Description of application/pdf attachment 1 by {vision_model()}; ")
     assert "INVOICE" in text.upper()
     assert "7781" in text
     assert "could not be described" not in text
-    assert described.calls == 1
-    assert described.cost > 0
-    assert described.tokens > 0
+    ((cost, tokens),) = credited.values()  # one call
+    assert cost > 0
+    assert tokens > 0
 
 
 def test_a_failed_vision_call_becomes_a_failure_line(
@@ -379,10 +391,10 @@ def test_a_failed_vision_call_becomes_a_failure_line(
     monkeypatch.setattr(config_module.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "sk-ant-not-a-key")
     assert vision_model() == "claude-sonnet-5-5"
     png_path = tmp_path / "shot.png"
-    described = describe_attachments(
-        [Attachment(_write_png(png_path), "image/png")], TEXT_ONLY_MODEL
+    credited = _Credited()
+    text = describe_attachments(
+        [Attachment(_write_png(png_path), "image/png")], TEXT_ONLY_MODEL, credit=credited.credit
     )
-    text = described.text
     assert text.startswith(
         "[image/png attachment 1 could not be described: claude-sonnet-5-5 failed: "
     )
@@ -391,7 +403,7 @@ def test_a_failed_vision_call_becomes_a_failure_line(
         "use a vision model or an OCR tool]"
     )
     # The call was made (and counted); a rejected request is billed nothing.
-    assert (described.cost, described.tokens, described.calls) == (0.0, 0, 1)
+    assert list(credited.values()) == [(0.0, 0)]
 
 
 def test_a_text_only_adapter_routes_attachments_through_the_bridge(

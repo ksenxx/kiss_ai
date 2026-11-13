@@ -31,7 +31,7 @@ const {
   byId,
   click,
 } = require('./simplify2_harness');
-const {typeInto, MACHINES} = require('./settings_helpers');
+const {openSettings, typeInto, MACHINES} = require('./settings_helpers');
 
 const LAPTOP_CONFIG = {
   type: 'configData',
@@ -99,7 +99,7 @@ function errorToast(win) {
 function testRemoteSheetStartsBlankAndErrorKeepsItBlank() {
   const {win, posted} = pageWithLaptopValues();
   pickMachine(win, 'gpu-box');
-  click(win, byId(win, 'settings-btn'));
+  openSettings(win);
   assert.strictEqual(
     byId(win, 'settings-machine').textContent,
     'Settings of gpu-box',
@@ -159,7 +159,7 @@ function testRemoteSheetStartsBlankAndErrorKeepsItBlank() {
 function testTypedValueIsTheOnlySave() {
   const {win, posted} = pageWithLaptopValues();
   pickMachine(win, 'gpu-box');
-  click(win, byId(win, 'settings-btn'));
+  openSettings(win);
   typeInto(win, 'cfg-remote-password', 'typed-pw');
   send(win, {
     type: 'configData',
@@ -194,7 +194,7 @@ function testTypedValueIsTheOnlySave() {
 function testReopenForThisDaemonDoesNotShowTheRemoteValues() {
   const {win} = pageWithLaptopValues();
   pickMachine(win, 'gpu-box');
-  click(win, byId(win, 'settings-btn'));
+  openSettings(win);
   send(win, GPU_CONFIG);
   assert.deepStrictEqual(formValues(win), GPU);
   click(win, byId(win, 'settings-overlay'));
@@ -203,7 +203,7 @@ function testReopenForThisDaemonDoesNotShowTheRemoteValues() {
   // before laptop's configData came back.
   pickMachine(win, '');
   assert.strictEqual(byId(win, 'chat-machine').selectedIndex, 0);
-  click(win, byId(win, 'settings-btn'));
+  openSettings(win);
   assert.strictEqual(byId(win, 'settings-machine').hidden, true);
   assert.deepStrictEqual(
     formValues(win),
@@ -219,7 +219,7 @@ function testReopenForThisDaemonDoesNotShowTheRemoteValues() {
   click(win, byId(win, 'settings-overlay'));
 
   // Reopened for the same machine: its values stay on show.
-  click(win, byId(win, 'settings-btn'));
+  openSettings(win);
   assert.deepStrictEqual(
     formValues(win),
     LAPTOP,
@@ -232,7 +232,7 @@ function testReopenForThisDaemonDoesNotShowTheRemoteValues() {
 function testCancelledModelEditRestoresBlankBoxes() {
   const {win} = pageWithLaptopValues();
   pickMachine(win, 'gpu-box');
-  click(win, byId(win, 'settings-btn'));
+  openSettings(win);
   // gpu-box's model list arrived, its config did not (yet).
   send(win, {
     type: 'myModelsData',

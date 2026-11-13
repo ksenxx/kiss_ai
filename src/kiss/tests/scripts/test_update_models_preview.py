@@ -18,13 +18,16 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 import kiss.scripts.update_models as mod
+from kiss.core.config import DEFAULT_CONFIG
 from kiss.scripts.update_models import (
     _add_codex_candidates,
     _assume_untested_capabilities,
     apply_updates_to_file,
     compute_changes,
     fetch_anthropic,
+    fetch_bedrock,
     fetch_gemini,
+    fetch_openai,
     find_deprecated_models,
 )
 
@@ -301,6 +304,8 @@ def _gemini_model(model_id: str, *methods: str) -> dict[str, Any]:
 class _PagedListingHandler(BaseHTTPRequestHandler):
     """Serve two-page Gemini (``/gemini``) and Anthropic (``/anthropic``) listings.
 
+    ``/openai`` is OpenAI's one-page listing of ids.
+
     Page two of each vendor is only reachable through the cursor page one
     returned (Gemini's ``nextPageToken`` as ``pageToken``, Anthropic's
     ``last_id`` as ``after_id``) and answers HTTP 500 when
@@ -335,6 +340,9 @@ class _PagedListingHandler(BaseHTTPRequestHandler):
                     ],
                     "nextPageToken": "page two/tok+en",
                 }
+        elif self.path.startswith("/openai"):
+            second = False
+            listing = {"data": [{"id": "gpt-7"}, {"id": "text-embedding-4-large"}]}
         else:
             cls.anthropic_keys.append(self.headers.get("x-api-key"))
             if "after_id" in query:
@@ -358,6 +366,29 @@ class _PagedListingHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
+def _listing_server(
+    monkeypatch: pytest.MonkeyPatch, handler: type[BaseHTTPRequestHandler]
+) -> Iterator[str]:
+    """Serve *handler* on loopback as the vendors' id listings; yield its base URL."""
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    monkeypatch.setattr(mod, "GEMINI_MODELS_URL", f"{base}/gemini")
+    monkeypatch.setattr(mod, "ANTHROPIC_MODELS_URL", f"{base}/anthropic")
+    monkeypatch.setattr(mod, "OPENAI_MODELS_URL", f"{base}/openai")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    try:
+        yield base
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@contextmanager
 def _paged_listings(
     monkeypatch: pytest.MonkeyPatch, fail_second_page: bool = False
 ) -> Iterator[type[_PagedListingHandler]]:
@@ -365,20 +396,8 @@ def _paged_listings(
     _PagedListingHandler.fail_second_page = fail_second_page
     _PagedListingHandler.requests = []
     _PagedListingHandler.anthropic_keys = []
-    server = HTTPServer(("127.0.0.1", 0), _PagedListingHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base = f"http://127.0.0.1:{server.server_port}"
-    monkeypatch.setattr(mod, "GEMINI_MODELS_URL", f"{base}/gemini")
-    monkeypatch.setattr(mod, "ANTHROPIC_MODELS_URL", f"{base}/anthropic")
-    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
-    try:
+    with _listing_server(monkeypatch, _PagedListingHandler):
         yield _PagedListingHandler
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
 
 
 def _later_page_entries() -> dict[str, dict]:
@@ -427,13 +446,17 @@ def test_gemini_and_anthropic_listings_follow_every_page(
 def test_skip_test_records_gemini_embedding_as_embedder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A Gemini ``embedContent``-only model is catalogued as an embedder, not a tool caller."""
+    """A Gemini ``embedContent``-only model is catalogued as an embedder, not a tool caller.
+
+    So is an OpenAI ``text-embedding-*`` id, which the listing of ids left unmarked.
+    """
     catalog = tmp_path / "MODEL_INFO.json"
     catalog.write_text("{}\n")
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", catalog)
     with _paged_listings(monkeypatch):
         gemini = fetch_gemini()
-    _, candidates = compute_changes({}, {}, {}, gemini, {}, {})
+        openai = fetch_openai()
+    _, candidates = compute_changes({}, {}, {}, gemini, {}, openai)
     by_name = {c["name"]: c for c in candidates}
     assert by_name["gemini-embedding-001"]["is_embedding"] is True
     assert by_name["gemini-embedding-001"]["is_generation"] is False
@@ -452,6 +475,8 @@ def test_skip_test_records_gemini_embedding_as_embedder(
         written["gemini-3.8-flash"]["emb"],
         written["gemini-3.8-flash"]["fc"],
     ) == (True, False, True)
+    flags = {name: tuple(written[name][flag] for flag in ("gen", "emb", "fc")) for name in openai}
+    assert flags == {"gpt-7": (True, False, True), "text-embedding-4-large": (False, True, False)}
 
 
 def test_failed_later_page_publishes_no_partial_listing(
@@ -467,3 +492,121 @@ def test_failed_later_page_publishes_no_partial_listing(
     # Nothing was returned, so nothing can be handed to find_deprecated_models;
     # an empty listing retires no one.
     assert find_deprecated_models(_later_page_entries(), {}, {}, {}, {}) == []
+
+
+class _EndlessListingHandler(BaseHTTPRequestHandler):
+    """Serve the pages of a Gemini, Anthropic or Bedrock listing that goes on.
+
+    One body holds every vendor's fields.  Page *n* of a vendor (``pages``
+    counts them by the first path segment) names ``cursors[n]`` as the
+    cursor of the next page; past the end of ``cursors`` the listing is
+    over, so a fetcher that follows whatever it is handed returns (and
+    fails its test) instead of hanging.  Each answer waits ``delay`` seconds.
+    """
+
+    cursors: list[str | None] = []
+    delay = 0.0
+    pages: dict[str, int] = {}
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, D102
+        return
+
+    def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
+        cls = _EndlessListingHandler
+        vendor = urlsplit(self.path).path.split("/")[1]
+        page = cls.pages.get(vendor, 0)
+        cls.pages[vendor] = page + 1
+        more = page < len(cls.cursors)
+        cursor = cls.cursors[page] if more else None
+        time.sleep(cls.delay)
+        profile = {"inferenceProfileId": "us.anthropic.claude-opus-4-6-v1"}
+        listing = {
+            "models": [_gemini_model("gemini-3.8-flash", "generateContent")],
+            "nextPageToken": cursor,
+            "data": [{"id": "claude-opus-4-6"}],
+            "has_more": more,
+            "last_id": cursor,
+            "modelSummaries": [],
+            "inferenceProfileSummaries": [profile],
+            "nextToken": cursor,
+        }
+        payload = json.dumps(listing).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+
+@contextmanager
+def _endless_listings(
+    monkeypatch: pytest.MonkeyPatch, cursors: list[str | None], delay: float = 0.0
+) -> Iterator[type[_EndlessListingHandler]]:
+    """Point the Gemini, Anthropic and Bedrock listings at a local server handing out *cursors*."""
+    _EndlessListingHandler.cursors = cursors
+    _EndlessListingHandler.delay = delay
+    _EndlessListingHandler.pages = {}
+    with _listing_server(monkeypatch, _EndlessListingHandler) as base:
+        monkeypatch.setenv("AWS_ENDPOINT_URL_BEDROCK", base)
+        key_pair = {
+            "AWS_BEARER_TOKEN_BEDROCK": "",
+            "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
+            "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "AWS_SESSION_TOKEN": "",
+            "AWS_REGION": "us-east-1",
+        }
+        for field, value in key_pair.items():
+            monkeypatch.setattr(DEFAULT_CONFIG, field, value)
+        yield _EndlessListingHandler
+
+
+def test_a_listing_that_repeats_its_cursor_is_abandoned(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Audit SC1: a vendor that answered a cursor with that cursor was asked for the page forever.
+
+    Each fetcher asks for the repeated page once and gives up with nothing returned (Bedrock's
+    with its warning): a partial listing would retire the models on the pages not read.
+    """
+    with _endless_listings(monkeypatch, ["again"] * 8) as handler:
+        for fetch in (fetch_gemini, fetch_anthropic):
+            with pytest.raises(RuntimeError, match="repeats its page cursor 'again'"):
+                fetch()
+        assert fetch_bedrock() == {}
+    warning = "Bedrock listing failed (the listing repeats its page cursor 'again')"
+    assert warning in capsys.readouterr().out
+    assert [handler.pages[v] for v in ("gemini", "anthropic", "inference-profiles")] == [2, 2, 2]
+
+
+def test_a_listing_that_never_ends_meets_its_deadline(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Audit SC1: fresh cursors without end kept the updater reading; the whole listing is timed.
+
+    So is Bedrock's, whose SDK calls were waited for however long one answer took: the listing
+    is given up at the deadline and retires nothing.
+    """
+    monkeypatch.setattr(mod, "_PAGED_LISTING_DEADLINE_SECONDS", 0.2)
+    with _endless_listings(monkeypatch, [str(n) for n in range(40)], delay=0.05) as handler:
+        with pytest.raises(TimeoutError, match="still has pages at its deadline"):
+            fetch_gemini()
+    assert handler.pages["gemini"] < 40
+    with _endless_listings(monkeypatch, [], delay=1.0) as handler:
+        assert fetch_bedrock() == {}
+        # The call left behind still reads: the server stays until it has asked for its last page.
+        patience = time.monotonic() + 60
+        while "inference-profiles" not in handler.pages and time.monotonic() < patience:
+            time.sleep(0.01)
+    assert handler.pages == {"foundation-models": 1, "inference-profiles": 1}
+    assert "Bedrock listing failed (_bedrock_listings did not finish within 0.2s)" in (
+        capsys.readouterr().out
+    )
+
+
+def test_anthropic_listing_with_more_pages_and_no_cursor_is_abandoned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``has_more`` without a ``last_id`` ended the listing at the pages read: a partial one."""
+    with _endless_listings(monkeypatch, [None]):
+        with pytest.raises(RuntimeError, match="names no cursor"):
+            fetch_anthropic()

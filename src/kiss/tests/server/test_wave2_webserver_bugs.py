@@ -67,7 +67,7 @@ from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import posix_only
-from kiss.tests.server.conftest import redirect_persistence, restore_persistence
+from kiss.tests.server.conftest import environ, redirect_persistence, restore_persistence
 
 
 def _task_result(task_id: str) -> str:
@@ -145,11 +145,9 @@ class _SlowHandler(http.server.BaseHTTPRequestHandler):
 
 _F3_CHILD_SCRIPT = """\
 import hashlib, sys
-from pathlib import Path
 import kiss.server.web_server as ws
 from kiss.core.utils import read_bytes_waiting_for_writer
 ws.VOICE_MODEL_URL = sys.argv[1]
-ws.VOICE_MODEL_CACHE = Path(sys.argv[2])
 p = ws._ensure_voice_model()
 if p is None:
     print("NONE")
@@ -177,19 +175,20 @@ class TestF3VoiceModelCrossProcessRace(unittest.TestCase):
         server_thread.start()
         self.addCleanup(httpd.shutdown)
         url = f"http://127.0.0.1:{httpd.server_address[1]}/model.tar.gz"
-        cache = Path(tmpdir) / "models" / "model.tar.gz"
         script = Path(tmpdir) / "child.py"
         script.write_text(_F3_CHILD_SCRIPT)
-        procs = [
-            subprocess.Popen(
-                [sys.executable, str(script), url, str(cache)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                cwd=os.getcwd(),
-            )
-            for _ in range(2)
-        ]
+        with environ(KISS_HOME=tmpdir):  # the home the two children inherit
+            cache = ws_mod._voice_model_cache_path()
+            procs = [
+                subprocess.Popen(
+                    [sys.executable, str(script), url],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=os.getcwd(),
+                )
+                for _ in range(2)
+            ]
         results = [p.communicate(timeout=120) for p in procs]
         outs = [out.strip() for out, _err in results]
         self.assertEqual(
@@ -386,9 +385,7 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_f5_voice_model_unavailable_returns_502(self) -> None:
-        saved_cache = ws_mod.VOICE_MODEL_CACHE
         saved_url = ws_mod.VOICE_MODEL_URL
-        ws_mod.VOICE_MODEL_CACHE = Path(self.tmpdir) / "none" / "m.tar.gz"
         ws_mod.VOICE_MODEL_URL = "http://127.0.0.1:1/model.tar.gz"
         try:
             req = Request("/voice-model.tar.gz", Headers())
@@ -396,11 +393,11 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
             # while the remote password is empty, so present a loopback
             # peer to exercise the 502 branch rather than the 403 gate.
             conn = cast(Any, SimpleNamespace(remote_address=("127.0.0.1", 0)))
-            resp = await self.server._process_request(conn, req)
+            with environ(KISS_HOME=str(Path(self.tmpdir) / "none")):  # a home with no archive
+                resp = await self.server._process_request(conn, req)
             assert resp is not None
             self.assertEqual(resp.status_code, 502)
         finally:
-            ws_mod.VOICE_MODEL_CACHE = saved_cache
             ws_mod.VOICE_MODEL_URL = saved_url
 
     async def test_f10_stop_async_stops_in_flight_worker(self) -> None:

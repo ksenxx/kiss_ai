@@ -101,9 +101,9 @@ class _RunStateCycle:
         state = self.runner._resolve_run_state(cmd)
         assert state.task_thread is threading.current_thread()
         locked_call(
-            self.runner._state_lock, self.runner._release_run_state, state, {}, "tab-run", "",
+            self.runner._state_lock, self.runner._release_run_state, state, {}, "tab-run", "", "",
         )
-        self.runner._broadcast_status_end_to_viewers("audit1013-run", "tab-run")
+        self.runner._broadcast_status_end_to_viewers("audit1013-run", "tab-run", "")
 
 
 _DRIVERS: dict[str, type] = {

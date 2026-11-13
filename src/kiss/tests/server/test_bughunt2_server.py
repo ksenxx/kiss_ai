@@ -45,12 +45,11 @@ class _ReplayNoRowBase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt2-noresult-")
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
 
         self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
@@ -64,10 +63,8 @@ class _ReplayNoRowBase(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved  # type: ignore[assignment]
+        th._close_thread_db()
+        th._DB_PATH, th._KISS_DIR = self.saved  # type: ignore[assignment]
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

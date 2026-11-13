@@ -13,8 +13,9 @@
 //   to the cap that keeps the chat column usable.
 // * A persisted width is restored, sanitised, and springs back once a
 //   window grown wide enough holds it.
-// * Arrow keys step the width by 16px (and stop at the floor), a
-//   double-click resets it, a narrower window shrinks the panel.
+// * Arrow keys step the width by 16px, at first from the default width
+//   (and stop at the floor), a double-click resets it, a narrower window
+//   shrinks the panel.
 // * On a narrow (mobile) window drag and keys are inert, and a
 //   pointercancel ends a drag like pointerup.
 //
@@ -172,6 +173,18 @@ function testKeyboardResize(panel) {
   console.log(`PASS arrow keys resize the ${panel.label} by 16px steps`);
 }
 
+function testKeyboardBaselineIsTheDefaultWidth(panel) {
+  const {win} = makePage({desktopMatches: true});
+  key(win, resizerOf(win, panel), panel.growKey);
+  assert.strictEqual(
+    widthOf(win, panel),
+    `${DEFAULT_W + 16}px`,
+    'the first keyboard step must grow from the default width',
+  );
+  win.close();
+  console.log(`PASS ${panel.label} keyboard resize starts from the default width`);
+}
+
 function testDoubleClickResets(panel) {
   const {win} = makePage({desktopMatches: true});
   const resizer = resizerOf(win, panel);
@@ -285,6 +298,7 @@ function runPanelResizeTests(panel) {
   testWidthPersistsAndRestores(panel);
   testPersistedGarbageSanitized(panel);
   testKeyboardResize(panel);
+  testKeyboardBaselineIsTheDefaultWidth(panel);
   testDoubleClickResets(panel);
   testShrinkingWindowNarrowsThePanel(panel);
   testWidePreferenceSurvivesNarrowWindow(panel);

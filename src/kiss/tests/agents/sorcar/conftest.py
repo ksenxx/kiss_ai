@@ -9,9 +9,9 @@ Orphan-sweep join hook
 
 Every :class:`kiss.server.server.AgentServer` constructor
 starts a daemon thread named ``orphan-task-sweep`` that runs SQL on a
-per-thread SQLite connection aliased into ``persistence._db_conn``.
+per-thread SQLite connection.
 Many tests in this folder construct a ``AgentServer``, then in
-``teardown_method`` close ``th._db_conn``, restore the redirected DB
+``teardown_method`` close the database, restore the redirected DB
 globals, and ``rmtree`` the temp KISS_HOME — WITHOUT joining the sweep
 thread.  If the sweep is still executing when the connection is closed
 / the DB file is deleted, the C-level ``pysqlite_connection_execute``
@@ -54,15 +54,16 @@ from contextlib import contextmanager
 
 import pytest
 
-from kiss.agents.sorcar import persistence, sea_commands
+from kiss.agents.sorcar import sea_commands
 from kiss.core.config import kiss_home
+from kiss.tests.persistence_helpers import close_db
 
 
 @pytest.fixture(autouse=True)
 def _reset_persistence_connection_cache() -> Iterator[None]:
     """Reset the persistence layer's cached sqlite connections before each test.
 
-    ``persistence._close_db()`` stops and drains the background event
+    ``close_db()`` stops and drains the background event
     writer, clears the sequence/HasEvents caches, bumps the global
     connection generation counter (lazily invalidating EVERY thread's
     cached connection, not just this thread's), and closes the current
@@ -71,8 +72,22 @@ def _reset_persistence_connection_cache() -> Iterator[None]:
     re-creates the schema, eliminating the test-order-dependent
     ``task_history`` failures described in the module docstring.
     """
-    persistence._close_db()
+    close_db()
     yield
+
+
+def reset_sea_registry() -> None:
+    """Drop the SEA registry's in-memory state: registry, subscribers, verdict cache, watcher.
+
+    Fixtures call it to isolate SEA-command behaviour across tests, so a
+    subscriber left by one test cannot fire on a later, unrelated rescan.
+    """
+    sea_commands.stop_registry_watcher()
+    with sea_commands._lock:
+        sea_commands._registry.clear()
+        sea_commands._subscribers.clear()
+        sea_commands._model_sea_cache.clear()
+        sea_commands._last_broadcast = ()
 
 
 @contextmanager
@@ -83,11 +98,11 @@ def isolated_sea_registry() -> Iterator[None]:
     isolated_sea_registry(): yield``): a ``SEAS.md`` left in the session-wide
     ``$KISS_HOME`` would redirect bundled commands for later tests.
     """
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
     try:
         yield
     finally:
-        sea_commands._reset_for_tests()
+        reset_sea_registry()
         (kiss_home() / "SEAS.md").unlink(missing_ok=True)
 
 

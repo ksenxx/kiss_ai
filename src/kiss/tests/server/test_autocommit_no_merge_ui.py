@@ -61,14 +61,12 @@ class _Base(unittest.TestCase):
 
         self._saved_db = (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         )
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         _persistence._KISS_DIR = kiss_dir
         _persistence._DB_PATH = kiss_dir / "history.db"
-        _persistence._db_conn = None
 
         # A hooks dir whose pre-commit always fails, so a test can make
         # `git commit` be refused exactly as a real rejecting hook does.
@@ -104,11 +102,9 @@ class _Base(unittest.TestCase):
                 except Exception:  # pragma: no cover — cleanup best-effort
                     pass
         agent_state.agent_states.clear()
-        if _persistence._db_conn is not None:
-            _persistence._db_conn.close()
+        _persistence._close_thread_db()
         (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved_db
         shutil.rmtree(self.tmpdir, ignore_errors=True)

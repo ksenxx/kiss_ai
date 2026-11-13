@@ -272,17 +272,27 @@ def _net_totals(event: dict[str, Any], charged: dict[str, Any]) -> dict[str, Any
     waiting caller must not fold that delta a second time, in this
     event or in any later one (a merge agent's totals include it too),
     so each delta is added to *charged* and subtracted from every
-    totals event from then on.
+    totals event from then on.  A delta under a ``charge_key`` is
+    added once: a retried keyed charge publishes its event again
+    (``task_update._charge_locked``).
 
     Args:
         event: A ``result`` or ``usage_info`` event carrying ``cost``.
         charged: Running ``{"cost", "tokens", "steps"}`` sums of the
-            deltas already charged elsewhere; updated in place.
+            deltas already charged elsewhere, and under ``"keys"`` the
+            ``(taskId, charge_key)`` pairs added; updated in place.
 
     Returns:
         A totals dict with ``cost`` / ``total_tokens`` / ``step_count``.
     """
     delta = event.get("ancestor_charged")
+    key = event.get("charge_key")
+    if isinstance(delta, dict) and isinstance(key, str) and key:
+        keys: set[tuple[Any, str]] = charged.setdefault("keys", set())
+        if (event.get("taskId"), key) in keys:
+            delta = None
+        else:
+            keys.add((event.get("taskId"), key))
     if isinstance(delta, dict):
         charged["cost"] += event_cost(delta) or 0.0
         charged["tokens"] += int(delta.get("tokens", 0) or 0)
@@ -354,20 +364,29 @@ class _Observed:
             the run's ``clear`` event names.
         task_id: The persisted ``task_history`` row id the stream
             named, or ``""``.
+        run_token: The client-minted token the ``run`` carries as
+            ``taskId``: the one name the daemon knows the run by before
+            its history row exists (``client_run_token``).  The daemon
+            echoes it on the run's status events and on the ``result``
+            of a run that never started; it is no row id.
         result: The last ``result`` event for the task's tab, or ``None``.
         settings: The ``settings`` payload of the run's
             ``task_settings`` event, or ``None``.
         totals: The latest spend totals (:func:`_net_totals`), or ``None``.
         reconnects: How many times the run's connection was lost and
             re-established (:meth:`_Inbox.reconnect`).
+        ended: Whether :func:`run` accepted a terminal status as the
+            task's end: its thread exited on the daemon.
     """
 
     chat_id: str = ""
     task_id: str = ""
+    run_token: str = ""
     result: dict[str, Any] | None = None
     settings: dict[str, Any] | None = None
     totals: dict[str, Any] | None = None
     reconnects: int = 0
+    ended: bool = False
 
     def task_result(self) -> TaskResult:
         """Return the :class:`TaskResult` of what was observed (:func:`_to_task_result`)."""
@@ -392,7 +411,7 @@ class _Observed:
         etype = event.get("type")
         if etype == "clear":
             self.chat_id = str(event.get("chat_id", "") or "") or self.chat_id
-        elif etype != "status" and event.get("taskId"):
+        elif etype != "status" and event.get("taskId") and event["taskId"] != self.run_token:
             self.task_id = str(event["taskId"])
         if etype in ("result", "usage_info") and "cost" in event:
             self.totals = _net_totals(event, charged)
@@ -553,29 +572,36 @@ def _pump_frames(
 
 def _connect_and_resume(
     endpoint_file: Path | None, resume: dict[str, Any], open_timeout: float,
-) -> ClientConnection:
-    """Open a new daemon connection and send the *resume* command on it.
+) -> tuple[ClientConnection, queue.SimpleQueue[str | bytes | BaseException]]:
+    """Open a new daemon connection, send the *resume* command on it and start reading it.
 
     Args:
         endpoint_file: The endpoint file to read (``None`` for the default).
         resume: The ``resumeSession`` command re-attaching the run's tab.
         open_timeout: Seconds allowed for the connection handshake.
 
+    Returns:
+        The connection and the queue of its frames (:func:`_read_frames`).
+
     Raises:
         ConnectionError: When the connection could not be opened, or
             closed before *resume* was written.
+        RuntimeError: When the process is out of threads: the dial, the
+            write and the reader each need one.
 
-    The connection is closed again whatever ends the send: a closed
-    daemon side (``ConnectionClosed``, translated), a write timeout,
-    or the ``KeyboardInterrupt`` a Stop injects (re-raised as is).
-    Until it is returned, nobody else holds the connection — a
-    leaked one keeps its socket and reader thread alive for good.
+    The connection is closed again whatever ends the send or keeps the
+    reader from starting: a closed daemon side (``ConnectionClosed``,
+    translated), a write timeout, or the ``KeyboardInterrupt`` a Stop
+    injects (re-raised as is).  Until it is returned, nobody else holds
+    the connection — a leaked one keeps its socket and reader thread
+    alive for good.
     """
     ws = local_endpoint.connect(
         endpoint_file, open_timeout=open_timeout, max_size=_MAX_LINE_BYTES, parts=True,
     )
     try:
         local_endpoint.send(ws, json.dumps(resume))
+        frames = _read_frames(ws)
     except ConnectionClosed as exc:
         _close_quietly(ws)
         raise ConnectionError(
@@ -584,7 +610,7 @@ def _connect_and_resume(
     except BaseException:
         _close_quietly(ws)
         raise
-    return ws
+    return ws, frames
 
 
 class _Inbox:
@@ -625,9 +651,7 @@ class _Inbox:
             received while a replay was due, or ``None``.
     """
 
-    def __init__(
-        self, ws: ClientConnection, endpoint_file: Path | None, tab_id: str, run_token: str = "",
-    ) -> None:
+    def __init__(self, ws: ClientConnection, endpoint_file: Path | None, tab_id: str) -> None:
         """Start reading *ws*; the reader ends when the connection closes.
 
         Args:
@@ -635,9 +659,6 @@ class _Inbox:
             endpoint_file: The endpoint file a reconnect reads (``None``
                 for the default).
             tab_id: The run's synthetic tab id (the tab a reconnect resumes).
-            run_token: The client-minted token the ``run`` carries as
-                ``taskId``: the one name the daemon knows the run by
-                before its history row exists (``client_run_token``).
         """
         self.ws = ws
         self.replay_id = ""
@@ -645,7 +666,6 @@ class _Inbox:
         self.pending_end: dict[str, Any] | None = None
         self._endpoint_file = endpoint_file
         self._tab_id = tab_id
-        self._run_token = run_token
         self._frames = _read_frames(ws)
         # A big frame of the daemon's comes as parts (``local_endpoint.frame_parts``).
         self._joiner = local_endpoint.FrameJoiner()
@@ -698,10 +718,12 @@ class _Inbox:
         (:meth:`replay_done`).  Within it the client connects again at
         once, then after :data:`_RECONNECT_FIRST_BACKOFF_SECONDS`,
         twice that, ... up to :data:`_RECONNECT_MAX_BACKOFF_SECONDS`
-        between attempts (each logged at INFO).  A connection that was
-        established but died before the daemon replayed the run is one
-        more failed attempt of the same window: the next one waits its
-        turn, so a daemon that accepts and drops at once is not
+        between attempts (each logged at INFO).  An attempt that finds
+        no thread to dial, write or read on (the process is out of
+        threads) failed like one that finds no daemon.  A connection that
+        was established but died before the daemon replayed the run is
+        one more failed attempt of the same window: the next one waits
+        its turn, so a daemon that accepts and drops at once is not
         hammered, and the window is not restarted.  The new connection
         is sent a ``resumeSession`` for the run's tab and its chat and
         task (see :func:`_resumable`), scoped to this connection and
@@ -772,7 +794,7 @@ class _Inbox:
             "type": "resumeSession",
             "tabId": self._tab_id,
             "chatId": seen.chat_id,
-            "taskId": seen.task_id or self._run_token,
+            "taskId": seen.task_id or seen.run_token,
             "scoped": True,
             "recovery": True,
             "replayId": replay_id,
@@ -795,12 +817,14 @@ class _Inbox:
             if deadline is not None:
                 open_timeout = min(open_timeout, max(deadline - time.monotonic(), 0.0))
             try:
-                ws = _connect_and_resume(self._endpoint_file, resume, open_timeout=open_timeout)
+                ws, frames = _connect_and_resume(
+                    self._endpoint_file, resume, open_timeout=open_timeout,
+                )
                 break
-            except ConnectionError as exc:
+            except (ConnectionError, RuntimeError) as exc:  # RuntimeError: out of threads
                 self._pause_or_give_up(give_up_at, str(exc), deadline, cancel)
         self.ws = ws
-        self._frames = _read_frames(ws)
+        self._frames = frames
         self._joiner = local_endpoint.FrameJoiner()
         self.replay_id = replay_id
         self.alive = False
@@ -894,7 +918,7 @@ class _Inbox:
         """
         if not self.replay_id or frame.get("replayId") != self.replay_id:
             return
-        charged.update(cost=0.0, tokens=0, steps=0)
+        charged.update(cost=0.0, tokens=0, steps=0, keys=set())
         for event in frame.get("events") or []:
             if isinstance(event, dict):
                 seen.absorb(event, charged)
@@ -945,12 +969,13 @@ def _send(ws: ClientConnection, cmd: dict[str, Any]) -> None:
 
     Raises:
         OSError: When the frame could not be written within
-            :func:`local_endpoint.send`'s deadline or the connection is
-            gone.
+            :func:`local_endpoint.send`'s deadline, the connection is
+            gone, or no thread could be started to write it (the
+            process is out of threads; the connection is closed then).
     """
     try:
         local_endpoint.send(ws, json.dumps(cmd))
-    except ConnectionClosed as exc:
+    except (ConnectionClosed, RuntimeError) as exc:  # RuntimeError: out of threads
         raise OSError(str(exc)) from exc
 
 
@@ -1026,7 +1051,7 @@ def _stop_and_await_confirmation(
         try:
             inbox.reconnect(reconnect_seconds, seen)
             _send_stop(inbox.ws, tab_id, run_token)
-        except (OSError, ConnectionLostError) as again:
+        except OSError as again:  # a reconnect given up is one too (ConnectionLostError)
             raise ConnectionLostError(
                 "The sorcar daemon connection failed while "
                 f"stopping the {what} task: {again}"
@@ -1039,28 +1064,19 @@ def _stop_and_await_confirmation(
 def _run_ended(aborted: BaseException | None, seen: _Observed) -> bool:
     """Whether :func:`run` exits knowing its task is over on the daemon.
 
-    True on a normal return, once the task's terminal ``result``
-    arrived, on a confirmed stop and on a refused run (nothing ran).
-    Any other exit (a plain timeout, an unconfirmed stop, a lost
-    connection or machine, an abort whose cascaded ``stop`` is
-    unconfirmed) may leave the task running.  A session handoff's
-    ``result`` — ``finish(success=False, is_continue=True)``, which
-    the executor answers with the next session (the task goes on) —
-    is not terminal: only a successful or non-continuing one is, as
-    ``relentless_agent.perform_task`` reads them.
+    True once the task's terminal status was accepted (every normal
+    return and confirmed stop follows one) and on a refused run
+    (nothing ran).  Any other exit (a plain timeout, an unconfirmed
+    stop, a lost connection or machine, an abort whose cascaded
+    ``stop`` is unconfirmed) may leave the task running, even after
+    its ``result``: the daemon broadcasts that before the task thread
+    persists and cleans up.
 
     Args:
         aborted: The exception :func:`run` exits with, or ``None``.
         seen: What the run's event stream reported.
     """
-    if aborted is None:
-        return True
-    result = seen.result
-    if result is not None and (result.get("success") or not result.get("is_continue")):
-        return True
-    if isinstance(aborted, CancelledError):
-        return aborted.confirmed
-    return isinstance(aborted, (StoppedOnTimeoutError, RunRefusedError))
+    return seen.ended or isinstance(aborted, RunRefusedError)
 
 
 def run_command(
@@ -1103,7 +1119,7 @@ def run_command(
     """Encode a run's arguments as the ``run`` command :func:`run` sends the daemon.
 
     One wire field per argument; the setting arguments land in the
-    fields :data:`~kiss.agents.sorcar.sea_settings.SETTING_FIELDS`
+    fields :data:`~kiss.agents.sorcar.sea_apply.SETTING_FIELDS`
     names, and *provenance* marks which of them the caller passed
     explicitly.  Pure: :func:`run` sends what this returns.  The
     arguments not listed below are those of :func:`run`.
@@ -1706,10 +1722,10 @@ def run(
     charge it.
 
     Before disconnecting, the client asks the daemon to close the run's
-    tab (``closeTab``) once the task is known to be over: it returned,
-    its terminal ``result`` arrived (a session handoff's ``is_continue``
-    result is not one), its stop was confirmed or the run was
-    refused.  A task that may still be running keeps its tab on every
+    tab (``closeTab``) once the task is known to be over: its terminal
+    status arrived (the run returned or its stop was confirmed; a
+    ``result`` alone is no proof) or the run was refused.  A task
+    that may still be running keeps its tab on every
     surface until a user closes it.  A sub-agent run's tab is closed on
     every exit: no surface shows it (they show the parent's nested tab).
     """
@@ -1724,22 +1740,20 @@ def run(
     run_token = uuid.uuid4().hex
     deadline = None if timeout is None else time.monotonic() + timeout
     inbox: _Inbox | None = None
+    ws: ClientConnection | None = None
     aborted: BaseException | None = None
-    seen = _Observed(chat_id=chat_id)
+    seen = _Observed(chat_id=chat_id, run_token=run_token)
     charged = {"cost": 0.0, "tokens": 0, "steps": 0}  # see _net_totals
     endpoint_path = Path(endpoint_file) if endpoint_file else None
     try:
-        inbox = _Inbox(
-            local_endpoint.connect(
-                endpoint_path,
-                open_timeout=10.0 if timeout is None else min(timeout, 10.0),
-                max_size=_MAX_LINE_BYTES,
-                parts=True,
-            ),
+        # Held here too: an abort while the inbox is built still closes it.
+        ws = local_endpoint.connect(
             endpoint_path,
-            tab_id,
-            run_token,
+            open_timeout=10.0 if timeout is None else min(timeout, 10.0),
+            max_size=_MAX_LINE_BYTES,
+            parts=True,
         )
+        inbox = _Inbox(ws, endpoint_path, tab_id)
         cmd = run_command(
             prompt,
             tab_id=tab_id,
@@ -1908,6 +1922,17 @@ def run(
             if etype == "replayDone":
                 if event.get("replayId") != inbox.replay_id:
                     continue
+                if event.get("error"):
+                    # The daemon could not replay the run (its history
+                    # cannot be read, say), which says nothing of the
+                    # task.  As good as a connection that died before
+                    # its replay: it is dropped, and the receive above
+                    # takes it from there.
+                    logger.info(
+                        "the sorcar daemon could not replay the run (%s)", event["error"],
+                    )
+                    _close_quietly(inbox.ws)
+                    continue
                 # The replay a reconnect asked for is complete: act on
                 # the terminal status it settled, if any.
                 ended = inbox.replay_done(seen, stopping)
@@ -1950,6 +1975,7 @@ def run(
                     if running is not None:
                         running.set()
                 elif stopping:
+                    seen.ended = True
                     if seen.result is not None and seen.result.get("success"):
                         # The task finished ON ITS OWN while the client
                         # was declaring the timeout: its successful
@@ -1993,6 +2019,7 @@ def run(
                     # in this condition that terminal status would be
                     # ignored and the loop would wait out the whole
                     # timeout (forever with ``timeout=None``).
+                    seen.ended = True
                     return seen.task_result()
     except BaseException as exc:
         aborted = exc
@@ -2004,37 +2031,41 @@ def run(
             exc.task_result = seen.task_result()  # type: ignore[attr-defined]
         raise
     finally:
-        # Nothing to cascade or close when the connect itself failed:
-        # there is no task and no tab on the daemon's side.
-        ws = None if inbox is None else inbox.ws
-        if ws is not None and aborted is not None and not isinstance(aborted, _NO_STOP_CASCADE):
-            # The wait was aborted — typically by the KeyboardInterrupt
-            # injected when the CALLING task is stopped while blocked
-            # here.  Cascade the stop to the dispatched task: without
-            # it the orphan keeps running invisibly (the exclusions are
-            # explained at ``_NO_STOP_CASCADE``).  Best-effort, like the
-            # closeTab below.
-            # ``taskId`` carries this run's token so the daemon
-            # rejects the stop if the tab was already reused by a
-            # newer run (see ``_stop_task``'s run_token guard).
-            try:
-                _send_stop(ws, tab_id, run_token)
-            except OSError:
-                pass
-        # The synthetic tab is this client's alone, and a disconnect no
-        # longer tears tabs down (tabs are global state shared by every
-        # client), so ask the daemon to close it once the run is over.
-        # A task that may still be running keeps its tab until a user
-        # closes it: closing it would remove a running task's tab from
-        # every surface.  A sub-agent dispatch's tab is on no surface
-        # (they show the parent's ``__sub_`` tab, which the task's own
-        # done signal closes), so its close only lets the daemon
-        # dispose of the state when the task ends, and is always sent.
-        # Best-effort: the daemon may be gone.
-        if ws is not None:
-            if parent_task_id or _run_ended(aborted, seen):
-                try:
-                    _send(ws, {"type": "closeTab", "tabId": tab_id})
-                except OSError:
-                    pass
-            _close_quietly(ws)
+        # Nothing to cascade when the connect or the inbox failed: there
+        # is no task and no tab on the daemon's side.  The connection is
+        # closed whatever ends the sends below (a second Stop too).
+        try:
+            if inbox is not None:
+                ws = inbox.ws  # the one a reconnect left
+                if aborted is not None and not isinstance(aborted, _NO_STOP_CASCADE):
+                    # The wait was aborted — typically by the KeyboardInterrupt
+                    # injected when the CALLING task is stopped while blocked
+                    # here.  Cascade the stop to the dispatched task: without
+                    # it the orphan keeps running invisibly (the exclusions are
+                    # explained at ``_NO_STOP_CASCADE``).  Best-effort, like the
+                    # closeTab below.
+                    # ``taskId`` carries this run's token so the daemon
+                    # rejects the stop if the tab was already reused by a
+                    # newer run (see ``_stop_task``'s run_token guard).
+                    try:
+                        _send_stop(ws, tab_id, run_token)
+                    except OSError:
+                        pass
+                # The synthetic tab is this client's alone, and a disconnect no
+                # longer tears tabs down (tabs are global state shared by every
+                # client), so ask the daemon to close it once the run is over.
+                # A task that may still be running keeps its tab until a user
+                # closes it: closing it would remove a running task's tab from
+                # every surface.  A sub-agent dispatch's tab is on no surface
+                # (they show the parent's ``__sub_`` tab, which the task's own
+                # done signal closes), so its close only lets the daemon
+                # dispose of the state when the task ends, and is always sent.
+                # Best-effort: the daemon may be gone.
+                if parent_task_id or _run_ended(aborted, seen):
+                    try:
+                        _send(ws, {"type": "closeTab", "tabId": tab_id})
+                    except OSError:
+                        pass
+        finally:
+            if ws is not None:
+                _close_quietly(ws)

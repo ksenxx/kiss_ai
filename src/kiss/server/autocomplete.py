@@ -109,7 +109,7 @@ def read_active_file_head(path: str) -> str:
     """
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
-    except OSError:
+    except (OSError, ValueError):  # ValueError: a NUL byte in the path
         return ""
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -316,7 +316,7 @@ class _AutocompleteMixin:
     def _complete(
         self,
         query: str,
-        seq: int = -1,
+        seq: int,
         snapshot_file: str = "",
         snapshot_content: str | None = None,
         chat_id: str = "",
@@ -345,10 +345,9 @@ class _AutocompleteMixin:
                 tell whether the suggestion still belongs to the
                 conversation on screen.
         """
-        if seq >= 0:
-            with self._state_lock:
-                if seq != self._complete_seq_latest.get(conn_id, -1):
-                    return
+        with self._state_lock:
+            if seq != self._complete_seq_latest.get(conn_id, -1):
+                return
         # A query under two characters has no completions; its empty
         # replies are published below like any other, under the lock.
         completions: list[dict[str, str]] = []
@@ -364,27 +363,23 @@ class _AutocompleteMixin:
         # can be identical across the two requests).
         fast = _ghost_suffix(query, completions)
         fast = clip_autocomplete_suggestion(query, fast)
-        if seq >= 0:
-            # Publish while still holding the lock: invalidators
-            # (``setWorkDir``, disconnect) also take ``_state_lock``,
-            # so once they return no stale event can be broadcast —
-            # a check-then-emit outside the lock would leave a window
-            # in which an already-checked stale result still escapes.
-            # Nothing in the broadcast path acquires ``_state_lock``
-            # (an RLock in any case), so this cannot deadlock.  A
-            # completion that finishes after the worker was stopped
-            # (daemon shutdown) is dropped the same way.
-            with self._state_lock:
-                if (
-                    self._complete_stopped
-                    or seq != self._complete_seq_latest.get(conn_id, -1)
-                ):
-                    return
-                self._emit_ghost(fast, query, conn_id, tab_id)
-                self._emit_completions(completions, query, conn_id, tab_id)
-            return
-        self._emit_ghost(fast, query, conn_id, tab_id)
-        self._emit_completions(completions, query, conn_id, tab_id)
+        # Publish while still holding the lock: invalidators
+        # (``setWorkDir``, disconnect) also take ``_state_lock``,
+        # so once they return no stale event can be broadcast —
+        # a check-then-emit outside the lock would leave a window
+        # in which an already-checked stale result still escapes.
+        # Nothing in the broadcast path acquires ``_state_lock``
+        # (an RLock in any case), so this cannot deadlock.  A
+        # completion that finishes after the worker was stopped
+        # (daemon shutdown) is dropped the same way.
+        with self._state_lock:
+            if (
+                self._complete_stopped
+                or seq != self._complete_seq_latest.get(conn_id, -1)
+            ):
+                return
+            self._emit_ghost(fast, query, conn_id, tab_id)
+            self._emit_completions(completions, query, conn_id, tab_id)
 
     def _complete_many(
         self,
@@ -474,11 +469,13 @@ class _AutocompleteMixin:
             conn_id: Requesting connection id (``""`` for direct callers).
             tab_id: Requesting chat tab (``""`` for direct callers).
         """
-        event: dict[str, Any] = {
-            "type": "completions",
-            "completions": completions,
-            "query": query,
-        }
+        self._emit_scoped(
+            {"type": "completions", "completions": completions, "query": query},
+            conn_id, tab_id,
+        )
+
+    def _emit_scoped(self, event: dict[str, Any], conn_id: str, tab_id: str) -> None:
+        """Broadcast *event*, stamped with the *conn_id* and *tab_id* that are non-empty."""
         if conn_id:
             event["connId"] = conn_id
         if tab_id:
@@ -505,14 +502,9 @@ class _AutocompleteMixin:
             conn_id: Requesting connection id (``""`` for direct callers).
             tab_id: Requesting chat tab (``""`` for direct callers).
         """
-        event: dict[str, Any] = {
-            "type": "ghost", "suggestion": suggestion, "query": query,
-        }
-        if conn_id:
-            event["connId"] = conn_id
-        if tab_id:
-            event["tabId"] = tab_id
-        self.printer.broadcast(event)
+        self._emit_scoped(
+            {"type": "ghost", "suggestion": suggestion, "query": query}, conn_id, tab_id,
+        )
 
     def _ensure_complete_worker(self) -> None:
         """Lazily start the autocomplete worker thread on first use.
@@ -641,11 +633,7 @@ class _AutocompleteMixin:
         }
         if loading:
             event["loading"] = True
-        if conn_id:
-            event["connId"] = conn_id
-        if tab_id:
-            event["tabId"] = tab_id
-        self.printer.broadcast(event)
+        self._emit_scoped(event, conn_id, tab_id)
 
     def _get_files(
         self,

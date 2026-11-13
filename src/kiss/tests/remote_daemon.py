@@ -34,6 +34,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -62,13 +63,20 @@ class RemoteDaemon:
         return f"https://127.0.0.1:{self.port}"
 
     def stop(self) -> None:
-        """Kill the child and wait for it."""
-        if self.process.poll() is None:
-            self.process.kill()
-        try:
-            self.process.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            pass
+        """Kill the child, wait for it and close its pipe."""
+        _kill(self.process)
+
+
+def _kill(process: subprocess.Popen[str]) -> None:
+    """Kill *process*, wait for it and close the pipe its seed line came through."""
+    if process.poll() is None:
+        process.kill()
+    try:
+        process.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        pass
+    assert process.stdout is not None
+    process.stdout.close()
 
 
 def start_remote_daemon(
@@ -88,7 +96,8 @@ def start_remote_daemon(
         password: Its remote password (stored hashed); empty means loopback-only.
         seed: Rows for its ``task_history``: dicts with ``chat_id``,
             ``task`` and optionally ``task_id`` (forced), ``timestamp``
-            (forced) and ``result``.
+            (forced), ``result`` and ``running`` (true: the daemon holds
+            the task as running, for as long as it lives).
         certfile: Serve this certificate instead of a generated local CA.
         keyfile: The key of *certfile*.
         timeout: Seconds to wait for the child to publish its endpoint.
@@ -131,25 +140,53 @@ def start_remote_daemon(
         text=True,
     )
     assert process.stdout is not None
-    line = process.stdout.readline()
-    if not line:
-        raise RuntimeError(f"remote daemon exited with {process.poll()} before seeding")
-    seeded = json.loads(line)
-    task_ids, pid = seeded["tasks"], seeded["pid"]
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise RuntimeError(f"remote daemon exited with {process.returncode}")
-        # A stale file from an earlier daemon of the same home names
-        # another pid: wait for this child's record.
-        endpoint = local_endpoint.read_endpoint(endpoint_file)
-        if endpoint is not None and endpoint.pid == pid:
-            bound = urlsplit(endpoint.url).port
-            assert bound is not None, endpoint.url
-            return RemoteDaemon(process, home, bound, password, task_ids, pid)
-        time.sleep(0.1)
-    process.kill()
-    raise RuntimeError(f"remote daemon did not publish {endpoint_file} within {timeout}s")
+    try:
+        line = process.stdout.readline()
+        if not line:
+            raise RuntimeError(f"remote daemon exited with {process.poll()} before seeding")
+        seeded = json.loads(line)
+        task_ids, pid = seeded["tasks"], seeded["pid"]
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError(f"remote daemon exited with {process.returncode}")
+            # A stale file from an earlier daemon of the same home names
+            # another pid: wait for this child's record.
+            endpoint = local_endpoint.read_endpoint(endpoint_file)
+            if endpoint is not None and endpoint.pid == pid:
+                bound = urlsplit(endpoint.url).port
+                assert bound is not None, endpoint.url
+                return RemoteDaemon(process, home, bound, password, task_ids, pid)
+            time.sleep(0.1)
+        raise RuntimeError(f"remote daemon did not publish {endpoint_file} within {timeout}s")
+    except BaseException:
+        # The caller gets no handle to stop: a child that did not start,
+        # or whose start was interrupted, ends here.
+        _kill(process)
+        raise
+
+
+def _watch_database_redirect(home: Path, original: Path) -> None:
+    """Apply a test-requested database path and publish an acknowledgement."""
+    from kiss.agents.sorcar import persistence as th
+
+    control = home / "history-db-redirect"
+    status = home / "history-db-redirect.status"
+    current: Path | None = None
+    while True:
+        try:
+            requested = control.read_text().strip() if control.exists() else ""
+        except OSError:
+            requested = ""
+        desired = Path(requested) if requested else original
+        if desired != current:
+            th._DB_PATH = desired
+            try:
+                status.write_text(str(desired))
+            except OSError:
+                pass
+            current = desired
+        time.sleep(0.05)
 
 
 def main() -> None:
@@ -167,6 +204,7 @@ def main() -> None:
     from kiss.agents.sorcar import persistence as th
     from kiss.core.config import kiss_home
     from kiss.core.user_config import save_config
+    from kiss.server import agent_state
     from kiss.server.web_server import RemoteAccessServer
 
     home = kiss_home()
@@ -189,7 +227,19 @@ def main() -> None:
             db.commit()
         if row.get("result"):
             th._save_task_result(row["result"], task_id=task_id)
+        if row.get("running"):
+            # What a run registers: its state, a parked thread as its worker.
+            worker = threading.Thread(target=threading.Event().wait, daemon=True)
+            worker.start()
+            agent_state.register(agent_state.AgentState(
+                task_id, tab_id="seeded-" + task_id, chat_id=chat_id, server_owned=True,
+                task_thread=worker, is_task_active=True,
+            ))
         task_ids[f"{chat_id}/{row['task']}"] = task_id
+    th._close_thread_db()
+    threading.Thread(
+        target=_watch_database_redirect, args=(home, Path(th._DB_PATH)), daemon=True,
+    ).start()
     print(json.dumps({"tasks": task_ids, "pid": os.getpid()}), flush=True)
     server = RemoteAccessServer(
         host=args.host, port=args.port, certfile=args.certfile, keyfile=args.keyfile,

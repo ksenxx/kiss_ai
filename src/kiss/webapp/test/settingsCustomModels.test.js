@@ -426,6 +426,84 @@ function testCloseMidEditFlushesUserValues() {
   console.log('  ok - closing mid-edit saves the user values, not the edit');
 }
 
+// Audit 2026-11-11 (W1): a save whose answer an outage swallowed went
+// on "awaiting its answer": the refusal of the NEXT save was taken for
+// its own -- the form got the old draft back and the save actually
+// refused waited for good.  The outage now ends the wait: the list
+// that follows the reconnect tells whether the save landed, and hands
+// its draft back when it did not.
+function testOutageEndsThePendingSaves() {
+  const open = () => {
+    const page = makePage();
+    send(page.win, {type: 'daemonStatus', connected: true});
+    openSettings(page.win);
+    send(page.win, {type: 'myModelsData', models: []});
+    return page;
+  };
+  const add = (win, name, endpoint) => {
+    typeInto(win, 'cfg-custom-model-name', name);
+    typeInto(win, 'cfg-custom-endpoint', endpoint);
+    click(win, win.document.getElementById('custom-model-add-btn'));
+  };
+  const outage = win => {
+    send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
+    send(win, {type: 'daemonStatus', connected: true});
+  };
+  const saves = posted => posted.filter(m => m.type === 'saveMyModel');
+
+  // The next save's refusal is its own.
+  let {win, posted} = open();
+  add(win, 'first-model', 'https://first.example/v1');
+  outage(win);
+  send(win, {type: 'myModelsData', models: []});
+  add(win, 'second-model', 'https://second.example/v1');
+  assert.strictEqual(saves(posted).length, 2, 'setup: both saves were sent');
+  send(win, {
+    type: 'error',
+    command: 'saveMyModel',
+    text: 'second-model could not be written',
+  });
+  assert.strictEqual(
+    boxValues(win).name,
+    'second-model',
+    "BUG - the second save's refusal restored the first save's draft",
+  );
+  assert.strictEqual(boxValues(win).endpoint, 'https://second.example/v1');
+  win.close();
+
+  // The list after the reconnect tells: a save that did not land gets
+  // its draft back, one that landed leaves none.
+  for (const landed of [false, true]) {
+    ({win, posted} = open());
+    add(win, 'first-model', 'https://first.example/v1');
+    assert.strictEqual(boxValues(win).name, '', 'setup: Add empties the name');
+    const sent = saves(posted).pop();
+    outage(win);
+    assert.strictEqual(boxValues(win).name, '', 'nothing moves before the list');
+    send(win, {
+      type: 'myModelsData',
+      models: landed
+        ? [
+            {
+              name: sent.name,
+              endpoint: sent.endpoint,
+              api_key: sent.apiKey,
+              headers: sent.headers,
+            },
+          ]
+        : [],
+    });
+    assert.strictEqual(
+      boxValues(win).name,
+      landed ? '' : 'first-model',
+      landed
+        ? 'a save that landed leaves no draft'
+        : 'BUG - the unsaved model was dropped with the connection',
+    );
+    win.close();
+  }
+}
+
 function main() {
   testSubpanelsCollapsedByDefaultAndToggle();
   testSettingsPanelIsCenteredNotSlidIn();
@@ -435,6 +513,7 @@ function main() {
   testCollisionAndReservedNamesAreRejectedLocally();
   testCancelRestoresAuthoritativeConfigValues();
   testCloseMidEditFlushesUserValues();
+  testOutageEndsThePendingSaves();
   console.log('settingsCustomModels: all tests passed');
 }
 

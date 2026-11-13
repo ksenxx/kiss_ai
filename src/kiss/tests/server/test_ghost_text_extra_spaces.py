@@ -35,13 +35,12 @@ class TestGhostTextNoExtraSpaces:
         self._tmpdir = tempfile.mkdtemp()
         kiss_dir = Path(self._tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved = (th._DB_PATH, th._KISS_DIR)
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         th._KISS_DIR = kiss_dir
 
     def teardown_method(self) -> None:
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved
+        th._DB_PATH, th._KISS_DIR = self._saved
 
     def test_repro_extra_space_when_query_ends_in_space(self) -> None:
         """User types 'fix ' (one trailing space); history has 'fix  the bug'
@@ -70,7 +69,8 @@ class TestGhostTextNoExtraSpaces:
         th._add_task("fix  the bug now")
         events: list[dict] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
-        server._complete("fix ")
+        server._complete_seq_latest[""] = 1
+        server._complete("fix ", 1)
         ghost = [e for e in events if e.get("type") == "ghost"]
         assert len(ghost) == 1
         suggestion = ghost[0]["suggestion"]
@@ -162,7 +162,8 @@ class TestGhostTextNoExtraSpaces:
         th._add_task("parse  arguments now")
         events: list[dict] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
-        server._complete("parse")
+        server._complete_seq_latest[""] = 1
+        server._complete("parse", 1)
         ghost = [e for e in events if e.get("type") == "ghost"]
         assert len(ghost) == 1
         suggestion = ghost[0]["suggestion"]

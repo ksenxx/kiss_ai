@@ -130,7 +130,7 @@ function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   clickTab(win, 'bg-tab');
   assert.strictEqual(
     statusOf(win),
-    'Done (3m 21s)',
+    '3m 21s',
     'a tab whose task finished in the background must show ' +
       'endTs - startTs once focused',
   );
@@ -150,7 +150,7 @@ function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   clickTab(win, 'bg-tab');
   assert.strictEqual(
     statusOf(win),
-    'Done (3m 21s)',
+    '3m 21s',
     'the done duration must re-render when switching back',
   );
   win.close();
@@ -176,7 +176,7 @@ function testDoneLabelSurvivesTabSwitches() {
     endTs,
   });
   send(win, {type: 'status', running: false, tabId: activeId});
-  assert.strictEqual(statusOf(win), 'Done (45s)');
+  assert.strictEqual(statusOf(win), '45s');
 
   send(win, {
     type: 'openSubagentTab',
@@ -188,7 +188,7 @@ function testDoneLabelSurvivesTabSwitches() {
   clickTab(win, activeId);
   assert.strictEqual(
     statusOf(win),
-    'Done (45s)',
+    '45s',
     'the done duration must survive switching away and back',
   );
   win.close();
@@ -215,21 +215,25 @@ function testBackgroundReplayWithExtraTimestamps() {
   clickTab(win, 'hist-tab');
   assert.strictEqual(
     statusOf(win),
-    'Done (1m 23s)',
+    '1m 23s',
     'a background tab replaying a finished task must show ' +
       'endTs - startTs after switching to it',
   );
   win.close();
-  console.log('  ok - background replay with extra timestamps shows Done(…)');
+  console.log('  ok - background replay with extra timestamps shows the time taken');
 }
 
+const TESTS = [
+  testForeignNewerRunDoesNotClobberActiveTimer,
+  testBackgroundTaskDoneShowsDurationAfterSwitch,
+  testDoneLabelSurvivesTabSwitches,
+  testBackgroundReplayWithExtraTimestamps,
+];
+
 try {
-  testForeignNewerRunDoesNotClobberActiveTimer();
-  testBackgroundTaskDoneShowsDurationAfterSwitch();
-  testDoneLabelSurvivesTabSwitches();
-  testBackgroundReplayWithExtraTimestamps();
-  console.log('\n4 passed, 0 failed');
+  for (const t of TESTS) t();
+  console.log(`\n${TESTS.length} passed, 0 failed`);
 } catch (err) {
-  console.error('FAIL:', err && err.message ? err.message : err);
+  console.error('FAIL:', err && err.stack ? err.stack : err);
   process.exit(1);
 }

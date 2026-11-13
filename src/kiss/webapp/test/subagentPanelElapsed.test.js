@@ -26,8 +26,6 @@
 // nothing, and an adjacent-task replay never ticks even while its
 // owner tab is running.
 
-/* global require, console, process */
-
 'use strict';
 
 const assert = require('assert');
@@ -83,7 +81,11 @@ function bootSubagent() {
 // own event's start -- then freezes when its live tool_result lands.
 function testReplayedSubagentPanelsShowDurations() {
   const {win, taskId, subTabId} = bootSubagent();
-  const t0 = Date.now() - 60000;
+  // The page's clock stops here, so the open panel's age below is exact
+  // however long the process pauses on the way.
+  const now = Date.now();
+  win.Date.now = () => now;
+  const t0 = now - 60000;
   send(win, {
     type: 'task_events',
     tabId: subTabId,
@@ -126,16 +128,15 @@ function testReplayedSubagentPanelsShowDurations() {
   );
 
   // The trailing tool_call has not reported back: it must be TICKING
-  // from its own event's wall-clock start (~51s ago), not from the
+  // from its own event's wall-clock start (51s ago), not from the
   // moment the replay rendered it.
   const openTc = tcs[1];
   const openLabel = elapsedLabel(openTc);
   assert.ok(openLabel, 'the open tool_call shows a live elapsed');
-  const openMs = parsePanelTimeMs(openLabel.textContent);
-  assert.ok(
-    openMs >= 50000 && openMs < 70000,
-    'the open tool_call counts from its event start (~51s), got ' +
-      openLabel.textContent,
+  assert.strictEqual(
+    openLabel.textContent,
+    '51.0s',
+    'the open tool_call counts from its event start, 51s before now',
   );
   assert.ok(openTc.dataset.startMs, 'the open tool_call joined the live tick');
   assert.ok(!openTc.dataset.timeDone, 'the open tool_call is not frozen yet');

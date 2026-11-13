@@ -27,21 +27,24 @@ not takes root.  On a case-sensitive file system two names that differ
 only in case are two entries, even two hard links of one file, and a
 rename of one onto the other stays a replace.
 
-Not covered: ``_rename_case`` putting the entry back when its second
-rename fails; a rename that fails right after another succeeded on the
-same entry takes fault injection (a test double).
+The last test runs on either kind.  It calls ``fs_action`` on its own
+thread, where a profile hook plays the editor that saves the entry's
+name between the two steps of the case-only rename.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from kiss.server.fs_actions import fs_action
 from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
     _request,
@@ -135,3 +138,49 @@ def test_hard_links_differing_only_in_case_are_two_entries(harness, folder: Path
     assert replaced.get("ok") is True, replaced
     assert os.listdir(folder) == ["A.txt"]
     assert (folder / "A.txt").read_text() == "linked\n"
+
+
+@pytest.mark.parametrize("occupied", [False, True])
+def test_case_only_rename_keeps_what_an_editor_saves_meanwhile(
+    folder: Path, occupied: bool,
+) -> None:
+    """Neither step of the rename replaces an entry saved after the first.
+
+    Once the entry is put aside an editor saves the new name and, when
+    *occupied*, the old one (one save does both on a case-insensitive
+    file system): the entry then stays at its temporary name, which the
+    error gives, or goes back to the old name still free.  A
+    case-sensitive file system gets there with the names as hard links
+    of one file, the new one removed between the same-entry check's two
+    looks at it.
+    """
+    src, target = folder / "a.txt", folder / "A.txt"
+    src.write_text("SOURCE")
+    insensitive = _case_insensitive(folder)
+    if not insensitive:
+        os.link(src, target)
+    saved = False
+
+    def editor(frame: Any, event: str, arg: Any) -> None:
+        nonlocal saved
+        if not insensitive and event == "c_call" and arg is os.listdir:
+            target.unlink(missing_ok=True)
+        elif not saved and not os.path.lexists(src):
+            saved = True
+            target.write_text("EDITOR")
+            if occupied:
+                src.write_text("EDITOR")
+
+    sys.setprofile(editor)
+    try:
+        result = fs_action("rename", str(src), dest=str(target))
+    finally:
+        sys.setprofile(None)
+    assert saved and "error" in result, result
+    assert target.read_text() == "EDITOR"
+    aside = list(folder.glob(".a.txt.renaming-*"))
+    if occupied or insensitive:
+        assert src.read_text() == "EDITOR" and [p.read_text() for p in aside] == ["SOURCE"]
+        assert str(aside[0]) in result["error"]
+    else:
+        assert src.read_text() == "SOURCE" and not aside and result["exists"] is True

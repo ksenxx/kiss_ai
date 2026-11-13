@@ -24,7 +24,7 @@ a ``locked`` key) the call is refused before anything runs
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 PROVENANCE_EXPLICIT = "explicit"
@@ -156,8 +156,9 @@ def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
     defaults, :func:`defaulted_keys`) is persisted but not rendered.
 
     Args:
-        settings: A ``task_settings`` payload; missing keys render as
-            unknown / none.
+        settings: A ``task_settings`` payload; missing keys, and an
+            ``inherited`` or ``pinned`` record of another shape (a
+            payload of another version), render as unknown / none.
         alias: The registered command name of a SEA the call reached
             by path, appended as ``(also agent="name")`` so the caller
             learns the shorter spelling; empty for none.
@@ -177,6 +178,8 @@ def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
     timeout = settings.get("timeout")
     timeout_text = f"{timeout:g}s" if isinstance(timeout, int | float) else "none"
     inherited = settings.get("inherited")
+    if isinstance(inherited, str) or not isinstance(inherited, Iterable):
+        inherited = None
     inherited_text = ",".join(str(k) for k in inherited) if inherited else "none"
     line = (
         f"{sea} model={model} tools={tools} budget={budget_text} "
@@ -187,11 +190,16 @@ def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
 
 
 def _changes_text(changes: Any) -> str:
-    """Render a ``{key: [before, after]}`` record as ``key(before->after),...``, ``""`` if empty."""
+    """Render a ``{key: [before, after]}`` record as ``key(before->after),...``, ``""`` if empty.
+
+    An entry that is not a two-item list is left out.
+    """
     if not isinstance(changes, Mapping) or not changes:
         return ""
     return ",".join(
-        f"{key}({_short(before)}->{_short(value)})" for key, (before, value) in changes.items()
+        f"{key}({_short(change[0])}->{_short(change[1])})"
+        for key, change in changes.items()
+        if isinstance(change, list | tuple) and len(change) == 2
     )
 
 

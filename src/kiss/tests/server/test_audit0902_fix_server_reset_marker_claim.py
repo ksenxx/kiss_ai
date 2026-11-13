@@ -32,9 +32,9 @@ from unittest import IsolatedAsyncioTestCase, skipIf
 
 import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as web_server_mod
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import is_root, posix_only
-from kiss.tests.local_ws import LocalWriter, open_local_connection
+from kiss.tests.local_ws import LocalWriter, _generate_self_signed_cert, open_local_connection
 from kiss.tests.server.conftest import find_free_port
 
 _VALID_MARKER = json.dumps({"requested_at": 0.0, "conn_id": ""})
@@ -47,10 +47,9 @@ class TestResetMarkerClaim(IsolatedAsyncioTestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-reset-claim-")
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir()
-        self._saved_th = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved_th = (th._DB_PATH, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         self._saved_delay = web_server_mod._SERVER_RESET_COMPLETE_DELAY
         web_server_mod._SERVER_RESET_COMPLETE_DELAY = 0.1
         self.url_dir = Path(self.tmpdir) / "url"
@@ -73,9 +72,8 @@ class TestResetMarkerClaim(IsolatedAsyncioTestCase):
                 pass
         if self.server is not None:
             await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_th
+        th._close_thread_db()
+        th._DB_PATH, th._KISS_DIR = self._saved_th
         os.chmod(self.url_dir, stat.S_IRWXU)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

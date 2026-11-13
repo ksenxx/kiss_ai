@@ -6,67 +6,84 @@
 'use strict';
 
 const assert = require('assert');
-const {installSpeech, assertNoSpeech} = require('./speech_helpers');
+const {
+  installSpeech,
+  assertNoSpeech,
+  installAudio,
+} = require('./speech_helpers');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {send: sendHostMessage, settle} = require('./simplify2_harness');
-const {makeBareVoiceWindow} = require('./voice_page_helpers');
+const {settle} = require('./simplify2_harness');
+const {
+  makeBareVoicePage,
+  startPipeline,
+  dictate,
+} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
 
-function makeWindow(cfg, {withAudio = true} = {}) {
-  const record = {audioUrls: [], audioPlays: 0, posts: [], spoken: null};
-  const win = makeBareVoiceWindow(cfg, w => {
+// Every page built; closed after the run so node exits on its own.
+const windows = [];
+
+/** What a browser's autoplay policy answers a play() it refuses. */
+function refusedPlay() {
+  return Promise.reject(new Error('NotAllowedError: autoplay'));
+}
+
+// A bare voice page with the pipeline live (a transcript is typed only
+// for a round the page posted), its Audio players recorded (every play()
+// refused) or the Audio API absent.
+async function makePage(cfg, {withAudio = true} = {}) {
+  const record = {players: [], spoken: null};
+  const page = makeBareVoicePage(cfg, w => {
     record.spoken = installSpeech(w);
-    if (withAudio) {
-      w.Audio = function Audio(url) {
-        record.audioUrls.push(String(url));
-        this.play = () => {
-          record.audioPlays++;
-          return Promise.reject(new Error('NotAllowedError: autoplay'));
-        };
-      };
-    } else {
-      w.Audio = undefined;
-    }
-    w.addEventListener('kiss-voice-post', event => {
-      record.posts.push(event.detail);
-    });
+    if (withAudio) record.players = installAudio(w, refusedPlay);
+    else w.Audio = undefined;
   });
-  return {win, record};
+  windows.push(page.win);
+  await startPipeline(page);
+  return {page, record};
 }
 
 async function main() {
   await test('a dictated task plays the synthesized clip; rejected play() stays silent', async () => {
-    const {win, record} = makeWindow({
+    const {page, record} = await makePage({
       ackAudioUrl: 'https://localhost/media/working-on-it.mp3',
     });
-    sendHostMessage(win, {type: 'voiceSpeech', text: 'Deploy it', speaker: 1});
+    dictate(page, 'Deploy it', {speaker: 1});
     await settle();
     assert.deepStrictEqual(
-      record.audioUrls,
+      record.players.map(p => p.src),
       ['https://localhost/media/working-on-it.mp3'],
       'the page must try the synthesized ack clip',
     );
-    assert.strictEqual(record.audioPlays, 1, 'clip play() must be attempted');
+    assert.strictEqual(
+      record.players[0].playCalls,
+      1,
+      'clip play() must be attempted',
+    );
     assertNoSpeech(record.spoken, 'rejected play() must degrade to silence');
     assert.deepStrictEqual(
-      record.posts,
-      [],
-      'the ack is played in the page, nothing is posted for it',
+      page.posted.map(m => m.type),
+      ['voiceTranscribe'],
+      "the ack is played in the page: only the round's audio is posted",
     );
   });
 
   await test('without an Audio API: silent, no robotic fallback, no crash', async () => {
-    const {win, record} = makeWindow(
+    const {page, record} = await makePage(
       {ackAudioUrl: 'https://localhost/media/working-on-it.mp3'},
       {withAudio: false},
     );
-    sendHostMessage(win, {type: 'voiceSpeech', text: 'Ship it', speaker: 3});
+    dictate(page, 'Ship it', {speaker: 3});
     await settle();
     assertNoSpeech(record.spoken, 'missing Audio API');
-    assert.deepStrictEqual(record.audioUrls, [], 'no Audio constructor to call');
-    assert.deepStrictEqual(record.posts, [], 'nothing is posted for the ack');
+    assert.deepStrictEqual(
+      page.posted.map(m => m.type),
+      ['voiceTranscribe'],
+      "nothing but the round's audio is posted",
+    );
   });
 
+  windows.forEach(win => win.close());
   report('voiceAckNoRoboticFallback');
 }
 

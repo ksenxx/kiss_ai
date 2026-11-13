@@ -16,6 +16,7 @@ const {
   installFakeWebSocket,
   frames,
   settle,
+  unlock,
   ok,
   fail,
 } = require('./transport_page_helpers');
@@ -74,9 +75,7 @@ async function run() {
     ]);
     cached.sockets[0].fireMessage({type: 'auth_required'});
     await settle();
-    cached.window.document.getElementById('auth-modal-input').value = 'right';
-    cached.window.document.getElementById('auth-modal-ok').click();
-    await settle();
+    await unlock(cached.window.document, 'right');
     assert.deepStrictEqual(frames(cached.sockets[0]).at(-1), {
       type: 'auth',
       password: 'right',
@@ -120,7 +119,6 @@ async function run() {
     fail('reloaded page asked for the password again', err);
   }
   reloaded.window.close();
-  process.exit(0);
 }
 
 run().catch(err => fail('unexpected error', err));

@@ -25,6 +25,7 @@ from kiss.agents.sorcar import local_endpoint, persistence, sea_commands
 from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import sorcar
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 
@@ -59,7 +60,7 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         home = kiss_home()
         home.mkdir(parents=True, exist_ok=True)
         (home / "SEAS.md").write_text(str(folder) + "\n", encoding="utf-8")
-        self.addCleanup(sea_commands._reset_for_tests)
+        self.addCleanup(reset_sea_registry)
         self.addCleanup((home / "SEAS.md").unlink)
         sea_commands.refresh_registry()
         assert sea_commands.get_command(name) == sea.resolve()
@@ -98,6 +99,11 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         extra = json.loads(str(row["extra"] or "{}"))
         assert extra.get("tokens") == 0 and extra.get("steps") == 0
         assert extra.get("endTs", 0) >= extra.get("startTs", 1)
+        # A finished row like any other: its tags are derived and its
+        # chat has the summary the CHATS panel lists it by.
+        assert extra.get("tags"), extra
+        summary = persistence._chat_summaries([result.chat_id])[result.chat_id]
+        assert summary["summary"] and summary["last_finished"] == extra["endTs"], summary
 
     def test_help_is_case_insensitive_and_needs_the_bare_word(self) -> None:
         """``/echo HELP`` is help; ``/echo help me`` runs the echo SEA directly on ``help me``."""
@@ -170,6 +176,11 @@ class Sea(BaseSea):
         assert row is not None
         types = [e.get("type") for e in cast(list[dict[str, Any]], row["events"])]
         assert types[-1] == "task_error", types
+        # The history panel's ``failed`` filter lists the row, and its
+        # chat has its CHATS-panel summary.
+        failed = [str(e["id"]) for e in persistence._load_history(tag="failed")]
+        assert failed == [result.task_id], failed
+        assert result.chat_id in persistence._chat_summaries([result.chat_id])
 
     def test_a_viewer_attached_during_help_receives_the_answer(self) -> None:
         """A tab that resumes the chat while ``description()`` runs gets the help result too."""

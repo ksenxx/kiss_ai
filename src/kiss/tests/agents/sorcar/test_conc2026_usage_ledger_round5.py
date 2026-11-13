@@ -436,15 +436,15 @@ def test_keyless_records_fold_exactly_once() -> None:
     agent = RelentlessAgent("keyless")
     ledger = agent._usage_ledger_object()
     agent._attribute_usage(1.0, 10, 1)
-    agent._attribute_usage(0.5, 100, 1, key="reclaim:x", seq=0)
+    agent._attribute_usage(0.5, 100, 1, key="reclaim:x")
     agent._maybe_compact(ledger)
     agent._maybe_compact(ledger)
     assert agent.usage_snapshot() == (1.5, 110, 2)
     # Compaction never touches the append-only records list; the whole
     # prefix is covered by the published view, and one-shot records
-    # leave no residue in the folded seen map.
+    # leave no residue in the folded sources.
     assert ledger.view.fold_index == len(ledger.records)
-    assert ledger.view.seen.get("reclaim:x") == 0
+    assert ledger.view.seen.levels == ({"reclaim:x"},)
 
 
 # ---------------------------------------------------------------------------

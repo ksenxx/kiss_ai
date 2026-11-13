@@ -345,6 +345,23 @@ def test_sea_settings_pin_model_and_work_dir(
     _assert_run_seen("pinned run", "sea-model", pinned)
 
 
+def test_a_relative_work_dir_setting_is_relative_to_the_work_dir_flag(
+    fake_openai: str, kiss_home: Path, tmp_path: Path
+) -> None:
+    """A SEA's relative ``work_dir`` names a directory of the caller's, not of the process cwd."""
+    flagged = tmp_path / "flagged"
+    (flagged / "sub").mkdir(parents=True)
+    (tmp_path / "sub").mkdir()  # the directory the process cwd would make of it
+    sea = _write_sea(tmp_path / "seas", "relative", work_dir="sub")
+    proc = _run(
+        [str(sea), "relative run", "-m", "fake-model", "--work-dir", str(flagged)],
+        _env(kiss_home, fake_openai),
+        tmp_path,
+    )
+    assert proc.returncode == 0, proc.stderr
+    _assert_run_seen("relative run", "fake-model", flagged / "sub")
+
+
 def test_finish_with_wrong_arguments_is_corrected_exit_0(
     fake_openai: str, kiss_home: Path, tmp_path: Path
 ) -> None:

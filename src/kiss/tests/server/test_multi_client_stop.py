@@ -174,6 +174,18 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         assert len(status_false_events) >= 1, (
             "Expected status running=False broadcast"
         )
+        # The viewer shows the task under its own tab id: its own copy
+        # of the end, marked ``viewer``, labels its tab Stopped and
+        # retires a question the task left open there, before the
+        # status that ends its spinner.
+        with lock:
+            viewer_end = [
+                e for e in events
+                if e.get("tabId") == viewer_tab_id and e.get("type") in ("task_stopped", "status")
+            ]
+        assert [e["type"] for e in viewer_end] == ["task_stopped", "status"], viewer_end
+        launcher_end = next(e for e in stopped_events if e.get("tabId") == source_tab_id)
+        assert viewer_end[0] == {**launcher_end, "tabId": viewer_tab_id, "viewer": True}
 
     def test_stop_from_viewer_shows_result_panel_tokens_and_cost(self) -> None:
         """The result event emitted after a viewer-tab stop must include

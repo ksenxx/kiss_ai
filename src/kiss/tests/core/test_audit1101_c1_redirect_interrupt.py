@@ -177,7 +177,6 @@ def _dispatch(printer: _Recorder, chain: _Chain | _DeepChain, hook: Any = None) 
     with collecting_trajectories(save=False):
         agent = KISSAgent("redirect interrupt")
         agent.printer = printer
-        agent.verbose = False
         agent.tool_call_hook = hook
         agent.function_map = chain.tools()
         _, result, blocked = agent._guarded_execute_tool({"name": "outer", "arguments": {}})

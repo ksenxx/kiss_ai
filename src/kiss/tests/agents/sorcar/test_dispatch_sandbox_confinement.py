@@ -39,7 +39,7 @@ class _Caller:
     model_name = "trial-model"
     work_dir = ""
     # The caller's task asks for sub-agents, so a child on its own model
-    # family passes ``fanout_guard.same_family_conflict`` (the confinement
+    # family passes ``fanout_guard.same_model_conflict`` (the confinement
     # checks under test come first anyway).
     task_description = "probe the sandbox with sub-agents"
 

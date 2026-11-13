@@ -139,6 +139,9 @@ class TestRunParallelToolArguments:
         run_parallel = _run_parallel_tool(SorcarAgent("guard-bare"))
         result = run_parallel("hello world")
         assert result.startswith("Error: tasks must be a JSON array")
+        # Nested past the JSON decoder's depth (a RecursionError, no ValueError): refused alike.
+        result = run_parallel("[" * 100_000)
+        assert result.startswith("Error: tasks must be a JSON array of strings, got '[[[")
 
     def test_reviewer_subagent_has_no_run_parallel_tool(self) -> None:
         """With tool profiles on, a reviewer's toolset has no fan-out at all."""

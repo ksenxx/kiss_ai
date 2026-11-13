@@ -17,6 +17,6 @@ gateRegions({
   label: 'panel-timestamp',
   targets: [
     {file: 'panelCopy.js', sourceUrl: 'panelts-panelCopy.js'},
-    {file: 'main.js', sourceUrl: 'panelts-main.js'},
+    {file: 'main.js', sourceUrl: 'panelts-main.js', minRegions: 2},
   ],
 });

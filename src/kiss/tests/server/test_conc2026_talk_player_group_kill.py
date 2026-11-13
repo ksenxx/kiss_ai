@@ -35,7 +35,9 @@ import base64
 import os
 import shlex
 import stat
+import subprocess
 import sys
+import threading
 import time
 import unittest
 import uuid
@@ -208,6 +210,98 @@ class TalkPlayerGroupKillTest(_EnvMixin):
         )
 
 
+@unittest.skipUnless(os.name == "posix", "process groups are POSIX-only")
+class TalkPlayerShutdownTest(_EnvMixin):
+    """A shutdown takes the playing wrapper, its grandchild and the temp clip with it.
+
+    The worker is a daemon thread and each player runs in a session of
+    its own, so a daemon that stopped or exited while a clip played left
+    the player running with nobody to time it out (audit 2026-11-10
+    B/V7-F6).
+    """
+
+    def _hung_wrapper(self, tmp: Path) -> Path:
+        """Make the player a wrapper that hangs on a grandchild; return its record file.
+
+        Each run adds one line: the wrapper's pid, the grandchild's and the clip's path.
+        """
+        record = tmp / "runs"
+        script = tmp / "hanging_player.sh"
+        _write_script(
+            script, f'sleep 300 &\necho "$$ $! $1" >> {shlex.quote(str(record))}\nwait\n'
+        )
+        os.environ["KISS_SORCAR_PLAY_CMD"] = shlex.quote(str(script))
+        os.environ.pop("KISS_SORCAR_PLAY_TIMEOUT", None)
+        return record
+
+    def _assert_nothing_left(self, record: Path) -> None:
+        """The wrapper ran once, and neither process nor the clip is left of that run."""
+        (line,) = record.read_text().splitlines()
+        wrapper, grandchild, clip = line.split(" ", 2)
+        self._stray_pids += [int(wrapper), int(grandchild)]
+        self.addCleanup(Path(clip).unlink, missing_ok=True)
+        self.assertFalse(_pid_alive(int(wrapper)), "the playing wrapper outlived its player")
+        self.assertTrue(
+            _wait_for(lambda: not _pid_alive(int(grandchild)), 15.0),
+            "the wrapper's grandchild outlived its player",
+        )
+        self.assertFalse(os.path.exists(clip), "the temp clip outlived its player")
+
+    def test_shutdown_ends_the_playing_group_and_drops_the_queue(self) -> None:
+        """The daemon's shutdown; the next server of the process gets a fresh player."""
+        tmp = Path(self.enterContext(_tempdir()))
+        record = self._hung_wrapper(tmp)
+        talk_player.shutdown()  # an earlier test's shared player, if any
+        self.addCleanup(talk_player.shutdown)
+        player = talk_player.shared_player()
+        for _ in range(2):  # the second clip waits in the queue behind the hung one
+            player.play({"talkId": uuid.uuid4().hex, "text": "", "audioB64": MP3_B64})
+        self.assertTrue(
+            _wait_for(lambda: record.exists() and record.read_text().endswith("\n"), 10.0),
+            "wrapper never started",
+        )
+        worker = player._worker
+        assert worker is not None
+
+        talk_player.shutdown()
+
+        self.assertFalse(worker.is_alive())
+        self._assert_nothing_left(record)
+        # The shut-down player admits nothing more; the process's next talk
+        # goes to a fresh one.
+        played = tmp / "played"
+        os.environ["KISS_SORCAR_PLAY_CMD"] = _python_player(
+            tmp / "player.py", f"open({str(played)!r}, 'a').write('run\\n')\n"
+        )
+        event = {"talkId": uuid.uuid4().hex, "text": "", "audioB64": MP3_B64}
+        self.assertTrue(player.play(event))
+        self.assertIs(player._worker, worker)
+        fresh = talk_player.shared_player()
+        self.assertIsNot(fresh, player)
+        fresh.play(event)
+        self.assertTrue(_wait_for(played.exists, 10.0), "the fresh shared player never played")
+        time.sleep(0.3)  # a clip the shut-down player had still admitted would play here too
+        self.assertEqual(played.read_text(), "run\n")
+
+    def test_interpreter_exit_ends_the_playing_group(self) -> None:
+        """A process that exits while its shared player plays leaves nothing of the clip."""
+        tmp = Path(self.enterContext(_tempdir()))
+        record = self._hung_wrapper(tmp)
+        code = (
+            "import os, sys, time\n"
+            "from kiss.server.talk_player import shared_player\n"
+            "shared_player().play({'talkId': 't', 'audioB64': sys.argv[2]})\n"
+            "deadline = time.monotonic() + 60\n"
+            "while time.monotonic() < deadline and not (\n"
+            "    os.path.exists(sys.argv[1]) and open(sys.argv[1]).read().endswith('\\n')\n"
+            "):\n"
+            "    time.sleep(0.05)\n"
+        )
+        done = subprocess.run([sys.executable, "-c", code, str(record), MP3_B64], timeout=120)
+        self.assertEqual(done.returncode, 0)
+        self._assert_nothing_left(record)
+
+
 class PlayerResolvedOncePerEventTest(_EnvMixin):
     """``play`` resolves the machine's player once, when the event is queued."""
 
@@ -301,7 +395,7 @@ class PlaybackTimeoutEnvTest(_EnvMixin):
 
     def test_run_playback_oserror(self) -> None:
         """A missing player binary is skipped cleanly (OSError branch)."""
-        talk_player._run_playback(["/nonexistent/sorcar-player-xyz"])
+        talk_player._run_playback(["/nonexistent/sorcar-player-xyz"], threading.Event())
 
 
 def _tempdir():

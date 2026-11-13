@@ -78,7 +78,7 @@ def _seed_subagent_row(parent_task_id: str, chat_id: str, text: str) -> str:
     th._save_task_extra(
         {"subagent": {"parent_task_id": parent_task_id}}, task_id=task_id,
     )
-    th._save_task_result(task_id, "success: sub done")
+    th._save_task_result("success: sub done", task_id)
     return task_id
 
 
@@ -190,6 +190,8 @@ class TestReadyReplayConnScoped(TabMirroringBase):
         self.assertEqual(deferred[0].get("tabId"), "tab-1")
         self.assertEqual(deferred[0].get("chatId"), chat_1)
         self.assertEqual(deferred[0].get("taskId"), "")
+        # Unpinned, the offer stands for the chat's latest task.
+        self.assertEqual(deferred[0].get("latestTaskId"), task_1)
         self.assertNotIn("connId", deferred[0])
         # The deferred tab's state is settled for the client: it is
         # idle, so the page's statusKnown rule may retire it.
@@ -266,6 +268,7 @@ class TestReadyReplayConnScoped(TabMirroringBase):
         self.assertIsNotNone(offer)
         assert offer is not None
         self.assertEqual(offer.get("taskId"), old_task)
+        self.assertNotIn("latestTaskId", offer, "a pinned offer names its pin alone")
         await self._send(ws_b, {
             "type": "resumeSession", "chatId": offer["chatId"],
             "taskId": offer["taskId"], "tabId": "tab-pin", "scoped": True,
@@ -330,9 +333,10 @@ class TestReadyReplayConnScoped(TabMirroringBase):
         ws_a = await self._connect_ok()
         await self._ready(ws_a)
         await self._bind_tab(ws_a, "tab-p", chat_id)
-        # A's history click (broadcast) opened the child tab on A.
+        # A's history click (broadcast) opened the child tab on A and
+        # offered its transcript instead of sending it.
         self.assertIsNotNone(await self._wait_for_event(
-            ws_a, "task_events", pred=lambda ev: ev.get("tabId") == sub_tab,
+            ws_a, "replay_deferred", pred=lambda ev: ev.get("tabId") == sub_tab,
         ))
 
         ws_b = await self._connect_ok()
@@ -405,9 +409,14 @@ class TestReadyReplayConnScoped(TabMirroringBase):
             [ev.get("tabId") for ev in got_b if ev.get("type") == "task_events"],
             [],
         )
+        # Each child with the task that started it: a page tells by it
+        # which of its sub-agent tabs this answer names.
         self.assertEqual(
-            [ev.get("tab_id") for ev in got_b if ev.get("type") == "openSubagentTab"],
-            [sub_tab],
+            [
+                (ev.get("tab_id"), ev.get("parent_task_id")) for ev in got_b
+                if ev.get("type") == "openSubagentTab"
+            ],
+            [(sub_tab, parent_id)],
         )
         self.assertEqual(
             sorted(
@@ -416,6 +425,48 @@ class TestReadyReplayConnScoped(TabMirroringBase):
             ),
             sorted(["tab-p", sub_tab]),
         )
+
+    async def test_deferred_offer_names_the_task_whose_subagents_it_announces(
+        self,
+    ) -> None:
+        """The child of a task the chat replaced is not announced; asked by name, it is done.
+
+        A page away while the chat moved on still shows the replaced
+        task, its child's tab running.  The offer names the task it
+        stands for, so the page can tell it is another one and ask
+        about the child, where it used to keep the spinner until the
+        user opened the chat.
+        """
+        old_task, chat_id = self._seed_chat("Parent task", [
+            {"type": "prompt", "text": "fan out"},
+        ])
+        sub_id = _seed_subagent_row(old_task, chat_id, "child transcript")
+        sub_tab = f"tab-p__sub_{sub_id}"
+        new_task, _ = th._add_task("Follow-up task", chat_id=chat_id)
+        ws_a = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._bind_tab(ws_a, "tab-p", chat_id)
+
+        ws_b = await self._connect_ok()
+        await self._ready(ws_b, tab_id="elsewhere")
+        got_b = await self._collect(
+            ws_b, {"task_events", "openSubagentTab", "replay_deferred"},
+        )
+        self.assertEqual(
+            [(ev.get("type"), ev.get("tabId"), ev.get("latestTaskId")) for ev in got_b],
+            [("replay_deferred", "tab-p", new_task)],
+            "the offer must name the follow-up, which fanned out nothing",
+        )
+        await self._send(ws_b, {
+            "type": "resumeSession", "taskId": sub_id, "tabId": sub_tab,
+            "scoped": True,
+        })
+        answer = await self._wait_for_event(
+            ws_b, "openSubagentTab", pred=lambda ev: ev.get("tab_id") == sub_tab,
+        )
+        assert answer is not None, "the child asked about by name was not answered"
+        self.assertIs(answer.get("isDone"), True)
+        self.assertEqual(answer.get("parent_task_id"), old_task)
 
     async def test_legacy_seeding_ready_broadcasts_the_replays(
         self,

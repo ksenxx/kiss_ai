@@ -16,35 +16,32 @@
 /* global require, console, process */
 
 const assert = require('assert');
-const {makePage, send, nextFrames} = require('./simplify2_harness');
-const {clickClose} = require('./subagent_tab_helpers');
+const {
+  makePage,
+  send,
+  nextFrames,
+  queueRaf,
+  readyTabId,
+} = require('./simplify2_harness');
+const {
+  clickClose,
+  announceRetaggedSubagent: announce,
+} = require('./subagent_tab_helpers');
 
 const REL = 'reports/out.html';
 
 /**
- * Boot a page with a running parent task and a running sub-agent tab
- * `sa-1` for task `t1`.
+ * Boot a page (`pageOpts` are makePage's) with a running parent task and
+ * a running sub-agent tab `sa-1` for task `t1`.
  */
-function bootSubagent() {
-  const {win, posted} = makePage();
-  const parentId = posted.find(m => m.type === 'ready').tabId;
+function bootSubagent(pageOpts) {
+  const {win, posted} = makePage(pageOpts);
+  const parentId = readyTabId(posted);
   win._testApi.hideWelcome();
   send(win, {type: 'status', running: true, tabId: parentId, startTs: 1});
   announce(win, parentId, 'sa-1');
   send(win, {type: 'status', running: true, tabId: 'sa-1', startTs: 1});
   return {win, posted, parentId};
-}
-
-function announce(win, parentId, tabId) {
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: tabId,
-    parent_tab_id: parentId,
-    description: 'sub 1',
-    task_id: 't1',
-    isSubagentTab: true,
-    isDone: false,
-  });
 }
 
 function checkPathsFor(posted, tabId) {
@@ -211,7 +208,67 @@ async function testPendingSweepFollowsActiveTabRetag() {
   console.log('  ok - a pending tail sweep follows the active tab retag');
 }
 
+// Audit 2026-11-11 (W1): Bash output still waiting for its animation
+// frame when the tab is renamed belongs to the renamed tab.  The frame
+// held the id its event came for, so the links it made after the rename
+// were stamped, and checked, under the retired id: no worktree_result,
+// reconnect or close of the surviving tab ever found them.  A hidden
+// page runs no frames, so the window is as long as the page is hidden.
+function testPendingBashOutputFollowsTheRetag(onScreen) {
+  const FILE = '/ws/repo/file.txt';
+  let raf;
+  const {win, posted, parentId} = bootSubagent({
+    beforeScripts: w => {
+      raf = queueRaf(w);
+    },
+  });
+  if (onScreen) win._testApi.switchToTab('sa-1');
+  send(win, {
+    type: 'tool_call',
+    tabId: 'sa-1',
+    name: 'Bash',
+    command: 'echo ' + FILE,
+    callId: 1,
+  });
+  send(win, {type: 'system_output', tabId: 'sa-1', text: FILE});
+  assert.ok(raf.frames.length > 0, 'setup: the output waits for a frame');
+  announce(win, parentId, 'sa-2');
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === 'sa-2') &&
+      !win._testApi.openTabs().some(t => t.id === 'sa-1'),
+    'setup: the tab is now sa-2',
+  );
+  const renamed = posted.length;
+  raf.run();
+  assert.strictEqual(
+    checkPathsFor(posted.slice(renamed), 'sa-1').length,
+    0,
+    'BUG: the pending output was checked under the retired id',
+  );
+  win._testApi.switchToTab('sa-2');
+  const stamps = Array.from(
+    win.document.querySelectorAll('#output [data-path-tab]'),
+  ).map(el => el.getAttribute('data-path-tab'));
+  assert.ok(stamps.length > 0, 'setup: the output made a file link');
+  assert.ok(
+    stamps.every(id => id === 'sa-2'),
+    'BUG: a link of the renamed tab names the retired id: ' + stamps,
+  );
+  assert.ok(
+    checkPathsFor(posted, 'sa-2').some(m => m.paths.includes(FILE)),
+    'the link is checked under the new id',
+  );
+  win.close();
+  console.log(
+    '  ok - pending Bash output follows the retag (' +
+      (onScreen ? 'tab on screen' : 'background tab') +
+      ')',
+  );
+}
+
 async function main() {
+  testPendingBashOutputFollowsTheRetag(false);
+  testPendingBashOutputFollowsTheRetag(true);
   testRetagReissuesTheOutstandingCheck();
   testWorktreeResultRechecksUnderNewId();
   testReconnectReissuesUnderNewId();

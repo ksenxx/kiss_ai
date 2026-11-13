@@ -35,9 +35,9 @@ from kiss.server.web_server import (
     _DIR_LISTING_MAX_CHARS,
     _DIR_LISTING_MAX_ENTRIES,
     RemoteAccessServer,
-    _generate_self_signed_cert,
 )
 from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.local_ws import _generate_self_signed_cert
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 

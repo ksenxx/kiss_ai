@@ -151,19 +151,16 @@ class TestTaskHistoryBranches:
 
     def _fresh_db(self, tmp_path):
         """Switch to a fresh DB in tmp_path, return cleanup callback."""
-        saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = tmp_path / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         return saved
 
     def _restore_db(self, saved):
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+        th._close_thread_db()
+        th._DB_PATH, th._KISS_DIR = saved
 
     def test_load_chat_context_empty_id(self):
         assert th._load_chat_context("") == []
@@ -256,8 +253,11 @@ try:
 finally:
     tool.close()
 """)
+            # This interpreter, not ``uv run python``: uv refuses a tree whose
+            # ``.venv`` is not a directory (an agent worktree shares the main
+            # checkout's environment), and would sync the environment first.
             result = subprocess.run(
-                ["uv", "run", "python", str(script)],
+                [sys.executable, str(script)],
                 capture_output=True,
                 text=True,
                 timeout=180,
@@ -269,12 +269,14 @@ finally:
 class TestWebUseToolResolveLocatorBranches:
     """Test _resolve_locator branches for multiple/no elements."""
 
-    def test_resolve_locator_refreshes_snapshot(self, http_server, browser_tool):
-        """When elements list is empty, re-snapshot is attempted."""
+    def test_an_id_of_a_tree_that_is_gone_is_refused(self, http_server, browser_tool):
+        """With no numbered tree left the id is refused, not numbered against a new snapshot."""
         browser_tool.go_to_url(http_server + "/")
+        url = browser_tool._page.url
         browser_tool._elements = []
         result = browser_tool.click(1)
-        assert isinstance(result, str)
+        assert result.startswith("Error clicking element 1: Element with ID 1 not found."), result
+        assert browser_tool._page.url == url
 
     def test_press_key_error(self, browser_tool):
         """Press invalid key combination."""

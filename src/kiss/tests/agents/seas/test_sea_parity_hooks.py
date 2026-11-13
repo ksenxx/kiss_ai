@@ -33,6 +33,7 @@ from kiss.core import config as config_module
 from kiss.tests.agents.seas.sea_contract import system_message, tool_results
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
+    finish_body,
     serve,
     text_body,
     tool_call_body,
@@ -40,6 +41,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
 
 URL_ENV = "PARITY_SEA_URL"
 MODE_ENV = "PARITY_SEA_MODE"
+PROFILE_ENV = "PARITY_SEA_PROFILE"
 TOKEN_CAP = 150
 
 REPORT_SCHEMA: dict[str, Any] = {
@@ -110,6 +112,26 @@ class ParitySea(WorkerSea):
             cap = f"<p>Token cap: {{self.output_tokens}} output tokens.</p>"
             return end_run(cap, success=False)
         return ALLOW
+'''
+
+
+PROFILE_SEA_SOURCE = f'''\
+import os
+from typing import Any
+
+from kiss.agents.seas.base.base_sea import WorkerSea
+
+
+class ProfileSea(WorkerSea):
+    """Fixture SEA: the tool profile of the environment, the classifier asked for."""
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        return settings | {{
+            "model": {MODEL!r},
+            "tool_profile": os.environ[{PROFILE_ENV!r}],
+            "auto_classify": True,
+            "model_config": {{"base_url": os.environ[{URL_ENV!r}], "api_key": "local"}},
+        }}
 '''
 
 
@@ -197,12 +219,8 @@ class TestTabPath:
         ]
         assert "Report accepted: the episode is over." in result
         assert "success: true" in result
-        # R5a: every call went to the SEA's endpoint.
-        assert len(requests) >= 2
 
-    def test_default_run_keeps_task_settings_and_usage_line(
-        self, env: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_default_run_keeps_task_settings_and_usage_line(self, tmp_path: Path) -> None:
         """Without ``plain_io`` the model still reads both additions."""
         run = evaluate_sea([BaseSea()], "Say hello.")
         script = [
@@ -299,6 +317,31 @@ class TestHeadlessPath:
         assert outcome.error.startswith("SeaError: tools() of SEA ")
         assert "must return a list of tool callables" in outcome.error
         assert requests == [], "The run failed before its first model call"
+
+    @pytest.mark.parametrize("profile", ["none", "bash"])
+    def test_a_profile_without_edit_tools_runs_as_in_a_tab(
+        self, profile: str, env: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Its prompt is fixed, so no classifier call; ``none`` has no built-in toolset to note."""
+        home = tmp_path / "home"
+        home.mkdir()
+        # The LLM classifier (on the SEA's model: the local server) is the only one.
+        (home / "config.json").write_text(json.dumps({"classify_with_decisions": False}))
+        env.setenv("KISS_HOME", str(home))
+        env.delenv("KISS_DISABLE_TASK_CLASSIFIER", raising=False)
+        env.setenv(PROFILE_ENV, profile)
+        path = tmp_path / "profile" / "profile_sea.py"
+        path.parent.mkdir()
+        path.write_text(PROFILE_SEA_SOURCE, encoding="utf-8")
+        with serve([finish_body("<p>done</p>")]) as (url, requests):
+            env.setenv(URL_ENV, url)
+            outcome = run_sea(
+                path, "Fix the bug in parser.py.", work_dir=str(tmp_path), save_trajectories=False
+            )
+        assert outcome.error == "" and outcome.success, outcome
+        assert len(requests) == 1, "the run's own call, no classifier call ahead of it"
+        noted = "# Restricted tool profile" in system_message(requests[0])
+        assert noted == (profile == "bash")
 
     def test_unknown_sea_name_lists_the_known_ones(self) -> None:
         with pytest.raises(SeaError, match=r"unknown SEA 'no-such-sea'; known names: .*sh"):

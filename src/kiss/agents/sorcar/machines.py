@@ -23,11 +23,12 @@ port-forward afterwards with a client certificate (mutual TLS).
 whatever the remote's brand) and prints back the remote's endpoint
 file (its daemon port) and its own CA.  The machine is then registered
 at ``https://host:port`` (what the user sees) with that CA pinned.
-Every connection goes through one ``ssh -N -L`` forward per login
-(:class:`SshTunnel`, kept for the daemon's lifetime and reopened when
-it dies) from a local loopback port to ``127.0.0.1:port`` on the
-machine, so its daemon port need not be reachable from here (cloud
-firewalls rarely open it; the ssh port is), and presents this daemon's
+Every connection goes through one ``ssh -N -L`` forward per login and
+daemon port (:class:`SshTunnel`, kept while a machine is registered
+there and reopened when it dies) from a local loopback port to
+``127.0.0.1:port`` on the machine, so its daemon port need not be
+reachable from here (cloud firewalls rarely open it; the ssh port is),
+and presents this daemon's
 client certificate (``$KISS_HOME/tls/client.pem``, issued by its CA,
 see :func:`client_cert_pair`), which the remote daemon admits like its
 own local token whatever its remote password: the daemon sniffs the
@@ -60,6 +61,7 @@ edit the registry through :func:`add_machine` and :func:`remove_machine`.
 from __future__ import annotations
 
 import atexit
+import http.client
 import ipaddress
 import json
 import logging
@@ -72,9 +74,8 @@ import ssl
 import subprocess
 import threading
 import time
-import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Buffer, Callable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict, dataclass, field
@@ -83,7 +84,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus, InvalidURI
+from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as _ws_connect
 
@@ -91,6 +92,9 @@ from kiss.agents.sorcar.history_columns import host_name
 from kiss.agents.sorcar.local_endpoint import (
     LOCAL_ENDPOINT_FILE,
     FrameJoiner,
+    call_off_thread,
+    dial_off_thread,
+    hang_up,
     recv_auth_reply,
     send,
 )
@@ -118,6 +122,19 @@ LOCAL_MACHINE = "__local__"
 """``getHistory``'s ``machine`` value asking for the daemon's own rows only."""
 REQUEST_TIMEOUT = 8.0
 """Seconds one remote request may take before the machine counts as down."""
+DIAL_GRACE = 5.0
+"""Seconds past its handshake's deadline a link's dial may take to report.
+
+Every step of the handshake ends by that deadline, and closing a socket
+the daemon refused takes 2 more at most.  A dial silent after that is
+where no timeout runs, in the lookup of the host's name above all, and
+is given up on (:meth:`MachineLink._dial`)."""
+DNS_TIMEOUT = 2.0
+"""Seconds :func:`is_local_machine` waits for a lookup of this host's own name."""
+PIN_TIMEOUT = 30.0
+"""Seconds :func:`pin_certificate` may take in all, the lookup of the host's name included."""
+CERT_MAX_BYTES = 1 << 20
+"""The most bytes of ``/ca.crt`` :func:`pin_certificate` accepts (a CA is a few thousand)."""
 CORRELATED_REPLIES = frozenset({"models", "history", "myModelsData", "machines", "historyDeleted"})
 """The reply types the daemon answers with the request's ``generation`` echoed.
 
@@ -183,19 +200,24 @@ TLS_LOCK_TIMEOUT = 10.0
 _TRUSTED = f"tls/{tls_certs.TRUSTED_CLIENTS_DIR}"
 ENROLL_COMMAND = (
     "sh -c '"
+    "for s in 1 0; do "
     f'for d in "$KISS_HOME" "$HOME/{HOME_DIR}" "$HOME"/.*; do '
     'case "$d" in ""|*/.|*/..) continue;; esac; '
     f'if [ -f "$d/{LOCAL_ENDPOINT_FILE}" ]; then '
     f'p=$(sed -n "s/^ *\\"pid\\": *\\([0-9]*\\),*$/\\1/p" "$d/{LOCAL_ENDPOINT_FILE}"); '
     '[ -n "$p" ] && kill -0 "$p" 2>/dev/null || continue; '
+    '[ $s = 1 ] && m=$(ps -p "$p" -o etime= 2>/dev/null | awk -F"[-:]" "{ '
+    'm = \\$(NF-1) + 1; if (NF > 2) m += 60 * \\$(NF-2); if (NF > 3) m += 1440 * \\$(NF-3); '
+    'print m }" 2>/dev/null) && [ -n "$m" ] && '
+    f'[ -n "$(find "$d/{LOCAL_ENDPOINT_FILE}" -mmin "+$m" 2>/dev/null)" ] && continue; '
     f'[ -d "$d/{_TRUSTED}" ] || {{ '
     'echo "its daemon predates certificate enrollment: upgrade it" >&2; exit 3; }; '
-    f'cat > "$d/{_TRUSTED}/.NAME.$$.tmp" && mv -f "$d/{_TRUSTED}/.NAME.$$.tmp" '
-    f'"$d/{_TRUSTED}/NAME.pem" || exit 2; '
+    f't=$(mktemp -u "$d/{_TRUSTED}/.NAME.XXXXXXXXXX") && (set -C; cat > "$t") && '
+    f'mv -f "$t" "$d/{_TRUSTED}/NAME.pem" || exit 2; '
     f'cat "$d/{LOCAL_ENDPOINT_FILE}"; echo; '
     f'c=$(sed -n "s/^ *\\"ca\\": *\\"\\(.*\\)\\",*$/\\1/p" "$d/{LOCAL_ENDPOINT_FILE}"); '
     f'cat "${{c:-$d/tls/{tls_certs.CA_CERT_FILE}}}"; exit 0; '
-    "fi; done; "
+    "fi; done; done; "
     f'echo "no $HOME/.*/{LOCAL_ENDPOINT_FILE}" >&2; exit 1\''
 )
 """Remote command enrolling the CA on stdin as ``trusted-clients/NAME.pem``.
@@ -209,19 +231,32 @@ A stopped daemon removes its endpoint file, but one that crashed or
 was killed leaves it behind, and so does the brand home of an earlier
 install (``~/.kiss`` beside a live ``~/.s10s``): an endpoint file
 whose ``pid`` is not alive (or missing: no daemon wrote it) is passed
-over, so the home found is the running daemon's and a stale home is
-never enrolled into.  A daemon without a ``trusted-clients`` directory
-predates enrollment (exit 3).  The CA is staged under the shell's pid and renamed so the
-daemon never reads a half-written file and two enrollments at once do
-not share a staging file.  Then the endpoint file (the daemon port)
-and the certificate to pin are printed, separated by a newline: the
+over.  A live pid alone proves little: that of a daemon killed with
+its machine is another process's after the reboot.  So the homes are
+searched twice, and the first search also passes over an endpoint
+file written before the process that has its pid was born, which
+therefore did not write it (``ps``'s ``etime`` in whole minutes,
+rounded up, against ``find -mmin``; a machine where the two give no
+answer passes nothing over).  The second search, made when the first
+found no home, takes the live pid alone: a wall clock stepped forward
+since a daemon started (a resumed virtual machine, a board without a
+clock) makes its own file look older than it.  A daemon without a
+``trusted-clients`` directory
+predates enrollment (exit 3).  The CA is staged and renamed so the
+daemon never reads a half-written file, under a random name the
+shell must create (``mktemp -u`` names it, the noclobber ``>`` opens
+it with ``O_EXCL``): two enrollments at once do not share a staging
+file, and nothing waiting at a name one could compute (the shell's
+pid; a symlink there was written through) is written.  Then the
+endpoint file (the daemon port) and the certificate to pin are
+printed, separated by a newline: the
 file named by the endpoint's ``ca`` (the daemon's local CA, or the
 certificate it was started with), else ``tls/ca.pem``.  The login
 shell only sees a single-quoted string, so the command avoids ``!``
 (csh expands history even in quotes); ``.`` and ``..`` are skipped by
 the ``case``."""
 
-_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
 
 
 class MachineError(Exception):
@@ -288,8 +323,9 @@ def load_machines() -> list[Machine]:
         raw = json.loads(machines_file().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
+    listed = raw.get("machines") if isinstance(raw, dict) else None
     machines: list[Machine] = []
-    for item in raw.get("machines", []) if isinstance(raw, dict) else []:
+    for item in listed if isinstance(listed, list) else ():
         if not isinstance(item, dict) or not item.get("name"):
             continue
         if not item.get("url") and not item.get("ssh"):
@@ -335,6 +371,13 @@ def is_local_machine(name_or_host: str) -> bool:
     loopback address, or an address of one of this host's interfaces
     (whatever DNS says: a VPN or container bridge address counts).
     Case-insensitive; IPv6 brackets and spelling are normalised.
+
+    The fully qualified name and a link-local IPv6 address are known
+    through a lookup of this host's name, which a resolver may never
+    answer: each lookup is waited for :data:`DNS_TIMEOUT` seconds
+    (:func:`~kiss.agents.sorcar.local_endpoint.call_off_thread`), and
+    one that has not answered by then, or had no thread to run on,
+    matches nothing.
     """
     text = name_or_host.strip().strip("[]").lower()
     if not text:
@@ -346,10 +389,10 @@ def is_local_machine(name_or_host: str) -> bool:
         address = ipaddress.ip_address(text)
     except ValueError:
         # A host name that is not the short name: only now pay for the
-        # reverse lookup (untimed; a slow resolver stalls it for seconds).
+        # reverse lookup.
         try:
-            return text == socket.getfqdn().lower()
-        except OSError:
+            return text == call_off_thread(socket.getfqdn, DNS_TIMEOUT).lower()
+        except (OSError, RuntimeError):  # no answer in time; out of threads
             return False
     if address.is_loopback:
         return True
@@ -366,8 +409,10 @@ def is_local_machine(name_or_host: str) -> bool:
     # (`fe80::1%en0`); the host's own name still resolves to it, scope
     # and all, so ask DNS last.
     try:
-        resolved = socket.getaddrinfo(socket.gethostname(), None)
-    except OSError:
+        resolved = call_off_thread(
+            partial(socket.getaddrinfo, socket.gethostname(), None), DNS_TIMEOUT,
+        )
+    except (OSError, RuntimeError):
         return False
     bare = ipaddress.ip_address(str(address).split("%")[0])
     return any(
@@ -429,13 +474,13 @@ def normalize_url(url: str) -> str:
     ``wss://host[:port][/ws]``; the port defaults to ``8787``.
 
     Raises:
-        MachineError: When *url* names no host or has a malformed port.
+        MachineError: When *url* is malformed (a port, a bracket) or names no host.
     """
     text = url.strip()
     if "://" not in text:
         text = "https://" + text
-    parts = urlsplit(text)
     try:
+        parts = urlsplit(text)
         host, port = parts.hostname, parts.port
     except ValueError as exc:
         raise MachineError(f"'{url}' is not a machine address: {exc}") from exc
@@ -461,18 +506,21 @@ def normalize_ssh(address: str) -> str:
     Accepts ``user@host``, ``user@host:port`` and ``ssh://[user@]host[:port]``.
 
     Raises:
-        MachineError: When *address* names no host.
+        MachineError: When *address* is malformed or names no host.
     """
     text = address.strip()
-    parts = urlsplit(text if text.startswith("ssh://") else "ssh://" + text)
     try:
+        parts = urlsplit(text if text.startswith("ssh://") else "ssh://" + text)
         host, port = parts.hostname, parts.port
     except ValueError as exc:
         raise MachineError(f"'{address}' is not an SSH address: {exc}") from exc
     if parts.scheme != "ssh" or not host or parts.path not in ("", "/"):
         raise MachineError(f"'{address}' is not an SSH address; expected user@host[:port]")
     login = f"{parts.username}@{_bracketed(host)}" if parts.username else _bracketed(host)
-    return f"{login}:{port}" if port else login
+    ssh = f"{login}:{port}" if port else login
+    if not _hostname("ssh://" + ssh):  # as ssh_command and ssh_host read it back
+        raise MachineError(f"'{address}' is not an SSH address; expected user@host[:port]")
+    return ssh
 
 
 def default_name(address: str) -> str:
@@ -480,8 +528,7 @@ def default_name(address: str) -> str:
     text = address.strip()
     if "://" not in text:
         text = ("ssh://" if is_ssh_address(text) else "https://") + text
-    host = urlsplit(text).hostname or "machine"
-    return re.sub(r"[^A-Za-z0-9._-]+", "-", host).strip("._-") or "machine"
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", _hostname(text)).strip("._-") or "machine"
 
 
 def ssh_command(ssh: str, *options: str, command: str = "") -> list[str]:
@@ -512,27 +559,83 @@ def ssh_command(ssh: str, *options: str, command: str = "") -> list[str]:
     return cmd + [command] if command else cmd
 
 
+class _BudgetedSocket(ssl.SSLSocket):
+    """A TLS socket whose reads take :data:`REQUEST_TIMEOUT` seconds in all.
+
+    A socket's timeout bounds each read, and ``http.client`` makes as
+    many as the peer has pieces to send: one that kept sending a few
+    bytes of status line, headers or body held :func:`pin_certificate`
+    for as long as it liked.
+    """
+
+    _read_by = 0.0  # the monotonic time every read ends by, set at the first
+
+    def recv_into(self, buffer: Buffer, nbytes: int | None = None, flags: int = 0) -> int:
+        """Read as ``ssl.SSLSocket.recv_into`` does, in what is left of the budget.
+
+        Args:
+            buffer: Where the bytes go.
+            nbytes: How many to read at most (None: as many as *buffer* holds).
+            flags: The ``recv`` flags; a TLS socket takes none.
+
+        Returns:
+            The number of bytes read.
+
+        Raises:
+            TimeoutError: When the reads have used the budget up.
+        """
+        now = time.monotonic()
+        self._read_by = self._read_by or now + REQUEST_TIMEOUT
+        if now >= self._read_by:
+            raise TimeoutError("timed out")
+        self.settimeout(self._read_by - now)
+        return super().recv_into(buffer, nbytes, flags)
+
+
 def pin_certificate(url: str) -> str:
     """Fetch and return the PEM to trust for the daemon at *url*.
 
     Prefers the daemon's local CA (``GET /ca.crt``) so the leaf
     certificate may be renewed later; when the daemon serves no CA (it
     was started with an explicit ``--certfile``), pins the leaf itself.
+    The answer to ``/ca.crt`` may take :data:`REQUEST_TIMEOUT` seconds
+    and :data:`CERT_MAX_BYTES` bytes at most, whatever sends it, and a
+    redirect is not followed: its target could answer on a socket with
+    no such budget, and is not the daemon.  The whole fetch has
+    :data:`PIN_TIMEOUT` seconds: the lookup of the host's name (or the
+    proxy's) comes before any socket and takes no timeout, so the fetch
+    runs on a thread this call waits for that long
+    (:func:`~kiss.agents.sorcar.local_endpoint.call_off_thread`).
 
     Raises:
-        MachineError: When the daemon cannot be reached.
+        MachineError: When the daemon cannot be reached, or what answers
+            in its place sends no certificate within those bounds.
     """
+    try:
+        return call_off_thread(partial(_fetch_certificate, url), PIN_TIMEOUT)
+    except (TimeoutError, RuntimeError) as exc:  # RuntimeError: out of threads
+        raise MachineError(f"Cannot reach {url}: {exc}") from exc
+
+
+def _fetch_certificate(url: str) -> str:
+    """Fetch the PEM for *url*: :func:`pin_certificate`'s work; it tells the bounds and errors."""
     insecure = ssl.create_default_context()
     insecure.check_hostname = False
     insecure.verify_mode = ssl.CERT_NONE
+    insecure.sslsocket_class = _BudgetedSocket
+    opener = urllib.request.OpenerDirector()  # the environment's proxy and TLS, nothing more
+    opener.add_handler(urllib.request.ProxyHandler())
+    opener.add_handler(urllib.request.HTTPSHandler(context=insecure))
     try:
-        with urllib.request.urlopen(
-            url + "/ca.crt", timeout=REQUEST_TIMEOUT, context=insecure,
-        ) as resp:
-            return str(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError:
-        pass
-    except (OSError, ValueError) as exc:
+        with opener.open(url + "/ca.crt", timeout=REQUEST_TIMEOUT) as resp:
+            if 200 <= resp.status < 300:
+                pem = resp.read(CERT_MAX_BYTES + 1)
+                if len(pem) > CERT_MAX_BYTES:
+                    raise MachineError(
+                        f"Cannot pin {url}: its /ca.crt is larger than {CERT_MAX_BYTES} bytes",
+                    )
+                return str(pem.decode("utf-8"))
+    except (OSError, ValueError, http.client.HTTPException) as exc:
         raise MachineError(f"Cannot reach {url}: {exc}") from exc
     parts = urlsplit(url)
     assert parts.hostname is not None
@@ -573,7 +676,7 @@ def add_machine(name: str, address: str, password: str = "") -> Machine:
             a failed enrollment or a rejected password.
     """
     name = name or default_name(address)
-    if not _NAME_RE.match(name):
+    if not _NAME_RE.fullmatch(name):
         raise MachineError(
             f"'{name}' is not a valid machine name: letters, digits, '.', '_' and '-' only"
         )
@@ -598,7 +701,9 @@ def add_machine(name: str, address: str, password: str = "") -> Machine:
             machines = [m for m in load_machines() if m.name != name]
             machines.append(machine)
             try:
-                previous: str | None = cert.read_text(encoding="utf-8")
+                # Whatever bytes the pin holds: a broken one (no text at
+                # all) is mended by registering the machine again.
+                previous: str | None = cert.read_text(encoding="utf-8", errors="surrogateescape")
             except FileNotFoundError:
                 previous = None
             try:
@@ -613,7 +718,7 @@ def add_machine(name: str, address: str, password: str = "") -> Machine:
                     if previous is None:
                         cert.unlink(missing_ok=True)
                     else:
-                        atomic_write_text(cert, previous)
+                        atomic_write_text(cert, previous, errors="surrogateescape")
                 raise
     finally:
         staged.unlink(missing_ok=True)  # gone already once published
@@ -655,7 +760,7 @@ def _first_handshake(machine: Machine, cert_file: Path, deadline: float) -> None
     has passed.
 
     An SSH machine is pinged through a forward of these handshakes'
-    own, closed on return: the login's shared forward
+    own, closed on return: the shared forward to its daemon
     (:func:`tunnel_port`) may carry the links and streams of a machine
     already registered there, which a failed registration must leave
     as they are.
@@ -663,10 +768,7 @@ def _first_handshake(machine: Machine, cert_file: Path, deadline: float) -> None
     Raises:
         MachineError: The last attempt's error.
     """
-    tunnel = (
-        SshTunnel(machine.ssh, urlsplit(machine.url).port or DEFAULT_PORT)
-        if machine.ssh else None
-    )
+    tunnel = SshTunnel(*_endpoint(machine)) if machine.ssh else None
     try:
         while True:
             link = MachineLink(machine, cert_file=cert_file, tunnel=tunnel)
@@ -701,7 +803,7 @@ def client_cert_pair() -> tuple[Path, Path]:
     try:
         with exclusive_file_lock(tls_dir / tls_certs.TLS_LOCK_FILE, timeout=TLS_LOCK_TIMEOUT):
             return tls_certs.ensure_local_client_pair(tls_dir)
-    except (TimeoutError, OSError) as exc:
+    except OSError as exc:  # the lock's ``TimeoutError`` is one
         raise MachineError(f"cannot issue the client certificate in {tls_dir}: {exc}") from exc
 
 
@@ -760,8 +862,8 @@ def enroll_over_ssh(ssh: str, timeout: float = SSH_TIMEOUT) -> tuple[str, str]:
             ssh_command(ssh, command=command), stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
-    except FileNotFoundError as exc:
-        raise MachineError("ssh is not installed on this machine") from exc
+    except OSError as exc:  # no ssh, or one that cannot be run
+        raise MachineError(f"ssh is not installed on this machine: {exc}") from exc
     try:
         stdout, stderr = proc.communicate(ca_cert_path.read_bytes(), timeout=timeout)
     except BaseException as exc:
@@ -807,7 +909,7 @@ class SshTunnel:
     the local port is bound; :meth:`alive` says whether the ssh process
     still runs and the port still answers; :meth:`close` ends the
     process.  :func:`tunnel_port` keeps one tunnel per ``ssh`` login
-    and re-opens a dead one on the next connection.
+    and daemon port and re-opens a dead one on the next connection.
     """
 
     def __init__(self, ssh: str, remote_port: int) -> None:
@@ -842,7 +944,8 @@ class SshTunnel:
         """Start the forward when it is not alive; return the local port.
 
         Raises:
-            MachineError: When ``ssh`` is missing, exits (its last
+            MachineError: When ``ssh`` is missing, no thread can be
+                started to read its output, it exits (its last
                 output line is quoted), cannot bind any of
                 :data:`FORWARD_ATTEMPTS` local ports or does not open
                 the forward within *timeout* seconds.
@@ -900,7 +1003,11 @@ class SshTunnel:
             args=(self.process, f"bind [127.0.0.1]:{self.local_port}:", self._up, taken),
             daemon=True, name=f"ssh-tunnel-output {self.ssh}",
         )
-        self._reader.start()
+        try:
+            self._reader.start()
+        except RuntimeError as exc:  # out of threads: nothing would read ssh's output
+            self._kill()
+            raise MachineError(f"ssh {self.ssh}: the port forward could not start: {exc}") from exc
         while not self._up.wait(0.05):
             if taken.is_set() or _exited(self.process):
                 # Windows' ssh stays up after a failed bind: a moment to
@@ -1024,55 +1131,54 @@ def _port_accepts(port: int) -> bool:
         return False
 
 
-_tunnels: dict[str, SshTunnel] = {}
+_Endpoint = tuple[str, int]
+"""What an ssh forward leads to: the ssh login and the daemon port on that machine."""
+
+
+def _endpoint(machine: Machine) -> _Endpoint:
+    """Return the :data:`_Endpoint` the SSH *machine* is reached through."""
+    return machine.ssh, urlsplit(machine.url).port or DEFAULT_PORT
+
+
+_tunnels: dict[_Endpoint, SshTunnel] = {}
 _tunnels_lock = threading.RLock()
 
 
-def _cached_tunnel(ssh: str, remote_port: int) -> tuple[SshTunnel, SshTunnel | None] | None:
-    """Return *ssh*'s cached tunnel and the one it replaced (under the lock).
+def _cached_tunnel(ssh: str, remote_port: int) -> SshTunnel | None:
+    """Return the cached tunnel to *remote_port* on *ssh*, made on first use (under the lock).
 
-    A fresh tunnel replaces the cached one when its remote port changed;
-    the replaced tunnel is returned for the caller to close outside the
-    lock, as :func:`_evict_tunnels` leaves closing to :func:`close_tunnels`:
-    its ``close`` waits for a forward that may be mid-login.  ``None``
-    when the registry does not hold *ssh* at *remote_port*: read under
-    the lock, before anything is replaced, so a dial of a registration
-    the registry has moved past (a stream handshake still in flight on
-    the link a re-registration retired, asking for the old daemon port)
-    neither closes the live forward the new registration opened nor
-    opens a stale one.
+    ``None`` when the registry does not hold *ssh* at *remote_port*:
+    read under the lock, so a dial of a registration the registry has
+    moved past (a stream handshake still in flight on the link a
+    re-registration retired, asking for the old daemon port) caches
+    and opens no forward that :func:`close_tunnels` has already swept.
     """
-    if not any(
-        m.ssh == ssh and (urlsplit(m.url).port or DEFAULT_PORT) == remote_port
-        for m in load_machines()
-    ):
+    endpoint = (ssh, remote_port)
+    if not any(m.ssh and _endpoint(m) == endpoint for m in load_machines()):
         return None
-    tunnel = _tunnels.get(ssh)
-    if tunnel is not None and tunnel.remote_port == remote_port:
-        return tunnel, None
-    fresh = _tunnels[ssh] = SshTunnel(ssh, remote_port)
-    return fresh, tunnel
+    tunnel = _tunnels.get(endpoint)
+    if tunnel is None:
+        tunnel = _tunnels[endpoint] = SshTunnel(ssh, remote_port)
+    return tunnel
 
 
-def _evict_tunnels(kept: set[str]) -> list[SshTunnel]:
-    """Forget and return the tunnels of every ssh login not in *kept* (under the lock)."""
-    gone = [ssh for ssh in _tunnels if ssh not in kept]
-    return [_tunnels.pop(ssh) for ssh in gone]
-
-
-def _drop_tunnel(ssh: str, tunnel: SshTunnel) -> None:
-    """Forget *tunnel* if it is still *ssh*'s cached one (under the lock)."""
-    if _tunnels.get(ssh) is tunnel:
-        del _tunnels[ssh]
+def _evict_tunnels(kept: set[_Endpoint]) -> list[SshTunnel]:
+    """Forget and return the tunnels of every endpoint not in *kept* (under the lock)."""
+    gone = [endpoint for endpoint in _tunnels if endpoint not in kept]
+    return [_tunnels.pop(endpoint) for endpoint in gone]
 
 
 def tunnel_port(ssh: str, remote_port: int) -> int:
     """Return the local port forwarding to ``127.0.0.1:remote_port`` on *ssh*.
 
-    One :class:`SshTunnel` per login is kept for the daemon's lifetime:
-    it is reused while alive and opened again (on a fresh local port)
-    once its ssh process died or its remote port changed (the machine
-    was registered again after its daemon moved).
+    One :class:`SshTunnel` per login and daemon port is kept while the
+    registry holds a machine there: it is reused while alive and opened
+    again (on a fresh local port) once its ssh process died.  Two
+    daemons of one login (two registered ports) have a forward each:
+    the dial of one never closes the forward under the other's streams.
+    A machine registered again after its daemon moved gets the forward
+    to the new port, and the old one is closed with its registration
+    (:func:`close_tunnels`).
 
     The forward is opened outside ``_tunnels_lock`` (an ``ssh`` login
     takes seconds and must not hold up the other machines' tunnels), so
@@ -1085,11 +1191,10 @@ def tunnel_port(ssh: str, remote_port: int) -> int:
     refused before anything is cached or opened: a :class:`Machine`
     read before a ``/machine remove`` (a status check, a stream's dial)
     would otherwise cache and open its forward after the removal's
-    :func:`close_tunnels` swept, and nothing would close it; one read
-    before a re-registration would replace the forward the new
-    registration opened.  The registry is read under the cache's lock
-    and the sweep runs after the registry is written, so a removal
-    either shows in that read or sweeps the tunnel.
+    :func:`close_tunnels` swept, and nothing would close it.  The
+    registry is read under the cache's lock and the sweep runs after
+    the registry is written, so a removal either shows in that read or
+    sweeps the tunnel.
 
     Raises:
         MachineError: When the forward cannot be opened (see
@@ -1097,28 +1202,28 @@ def tunnel_port(ssh: str, remote_port: int) -> int:
             at *remote_port*, or the registry changed while it was
             opening.
     """
-    cached = locked_call(_tunnels_lock, _cached_tunnel, ssh, remote_port)
-    if cached is not None:
-        tunnel, stale = cached
-        if stale is not None:
-            stale.close()
+    tunnel = locked_call(_tunnels_lock, _cached_tunnel, ssh, remote_port)
+    if tunnel is not None:
         # Test hook (no-op in production): widens the window between the
         # lookup and the open so the close_tunnels race is deterministic
         # under KISS_RACE_DELAY.
         _race_delay()
         port = tunnel.open()
-        if locked_call(_tunnels_lock, _tunnels.get, ssh) is tunnel:
+        if locked_call(_tunnels_lock, _tunnels.get, (ssh, remote_port)) is tunnel:
             return port
-        locked_call(_tunnels_lock, _drop_tunnel, ssh, tunnel)
         tunnel.close()
     raise MachineError(f"ssh {ssh}: the machine registry changed, try again")
 
 
-def close_tunnels(keep: Iterable[str] = ()) -> None:
-    """Close and forget the ssh port-forward of every login not in *keep*.
+def close_tunnels(keep: Iterable[_Endpoint] = ()) -> None:
+    """Close and forget the ssh port-forward to every endpoint not in *keep*.
 
-    Called with the logins of the registry just written (a forward to
-    a machine still registered stays up) and with none at exit.
+    Called with the endpoints (:func:`_endpoint`) of the registry just
+    written (a forward to a daemon still registered stays up, whatever
+    else changed for its login) and with none at exit.  The forwards
+    are closed outside the cache's lock: a ``close`` waits for a
+    forward that is mid-login, which must not hold up the other
+    machines' dials.
     """
     tunnels: list[SshTunnel] = locked_call(_tunnels_lock, _evict_tunnels, set(keep))
     for tunnel in tunnels:
@@ -1162,7 +1267,7 @@ class MachineLink:
         """A link to *machine*, pinned to *cert_file* (its registered pin by default).
 
         *tunnel*, for an SSH machine, is a forward of the caller's own
-        to dial instead of the login's shared one (:func:`tunnel_port`);
+        to dial instead of the shared one (:func:`tunnel_port`);
         the caller opens nothing and closes it when done.  *health* is
         the back-off record to share with the machine's other lanes
         (:func:`link_for`); a link of its own by default.
@@ -1177,11 +1282,11 @@ class MachineLink:
         self._health = health if health is not None else LinkHealth()
         self._retired = False
         self._abandoned: ClientConnection | None = None  # the socket :meth:`abandon` shut down
-        # Stream handshakes in flight (:meth:`open_connection`), which
-        # run outside the lock; :meth:`retire` waits for them.  Counted
-        # under a lock of their own: the request lock is held for a
-        # whole exchange, which a stream must not wait behind.
-        self._dialing = 0
+        # Stream handshakes in flight (:meth:`open_connection`), one
+        # token each, which run outside the lock; :meth:`retire` waits
+        # for them.  Kept under a lock of their own: the request lock is
+        # held for a whole exchange, which a stream must not wait behind.
+        self._dialing: set[object] = set()
         self._idle = threading.Condition(threading.RLock())
 
     def _check_available(self) -> None:
@@ -1245,24 +1350,22 @@ class MachineLink:
         ws = self._ws
         if ws is not None:
             self._abandoned = ws
-            with suppress(OSError):
-                ws.socket.shutdown(socket.SHUT_RDWR)
+            hang_up(ws)
         self._health.failures = 0
         self._health.retry_at = 0.0
 
-    def _connect(self, timeout: float) -> ClientConnection:
-        """Open and authenticate the shared request socket (under the lock); see :meth:`_dial`.
+    def _connect(self, timeout: float) -> None:
+        """Open, authenticate and keep the request socket (under the lock); see :meth:`_dial`.
 
-        A :meth:`retire` that ran during the handshake could not close
-        a socket not yet published: the socket is closed here instead,
+        A :meth:`retire` that ran during the handshake could not reach
+        a socket not yet kept: the socket is dropped here instead,
         and the request fails without going out.
         """
         self._check_available()
-        ws = self._dial(timeout, stream=False)
+        self._dial(timeout, stream=False)
         if self._retired:
-            ws.close()
+            self._drop()
             raise self._retired_error()
-        return ws
 
     def _dial(self, timeout: float, stream: bool) -> ClientConnection:
         """Open and authenticate a socket; the handshake has *timeout* seconds.
@@ -1274,9 +1377,30 @@ class MachineLink:
         What is shared, the machine's :class:`LinkHealth`, is written
         as :meth:`_fail` describes.
 
+        The socket is opened and authenticated on a thread of its own
+        (:meth:`_handshake`, through
+        :func:`~kiss.agents.sorcar.local_endpoint.dial_off_thread`,
+        which tells what a Stop raised inside those calls used to
+        do): a Stop of the calling task ends the wait at once, and the
+        dial it gave up on closes its socket and records nothing.
+        So does a dial that has not reported :data:`DIAL_GRACE` seconds
+        after the handshake's deadline: the lookup of the machine's
+        name (or the proxy's) takes no timeout, and held the request,
+        and the link's lock with it, for as long as the resolver tried.
+        The outcome is recorded here, on the caller's thread.
+
+        The new socket has an owner at every instant.  The dialling
+        thread hands it over in a local variable of this thread, and a
+        Stop raised before the link kept it left it open with nobody
+        to close it, its threads answering the daemon's pings.  So
+        whatever cuts this method short hangs up the socket the dial
+        reported (:func:`hang_up`), and the request socket (*stream*
+        false) is kept as the link's here, not by the caller.  A
+        stream's socket is its caller's once this method returns.
+
         The socket is TLS with the machine's pinned certificate as the
         only trust anchor.  An SSH machine is dialled at the local end
-        of its ssh port-forward (the login's shared one,
+        of its ssh port-forward (the shared one to its daemon,
         :func:`tunnel_port`, or the *tunnel* given to the constructor;
         opened here when it is not up, with the ssh login's own
         :data:`SSH_TIMEOUT`;
@@ -1330,15 +1454,15 @@ class MachineLink:
             raise self._fail(f"{where} was registered before certificate enrollment{enroll_again}")
         try:
             ctx = ssl.create_default_context(cafile=str(self._cert_file))
-        except (OSError, ssl.SSLError) as exc:
+        except OSError as exc:  # ssl.SSLError included
             raise self._fail(f"{where} has no usable pinned certificate: {exc}") from exc
         url, forward_refused = machine.url, ""
         if machine.ssh:
             try:
                 ctx.load_cert_chain(*map(str, client_cert_pair()))
-            except (OSError, ssl.SSLError, MachineError) as exc:
+            except (OSError, MachineError) as exc:
                 raise self._fail(f"{where}: no usable client certificate: {exc}") from exc
-            remote_port = urlsplit(machine.url).port or DEFAULT_PORT
+            remote_port = _endpoint(machine)[1]
             try:
                 port = (
                     self._tunnel.open() if self._tunnel is not None
@@ -1359,51 +1483,97 @@ class MachineLink:
         # ``local_endpoint.frame_parts``.
         auth = {"type": "auth", "link": not stream, "parts": True, "password": machine.password}
         deadline = time.monotonic() + timeout
+        # No proxy for the local end of an ssh forward: the client's
+        # default sends 127.0.0.1 to ``$https_proxy`` unless
+        # ``no_proxy`` lists it, and the proxy has no such forward.
+        connect = partial(
+            _ws_connect, ws_url(url), ssl=ctx, open_timeout=_remaining(deadline),
+            close_timeout=2.0, compression="deflate", max_size=None,
+            max_queue=16 if stream else None,
+            ping_interval=LINK_PING_INTERVAL, ping_timeout=LINK_PING_TIMEOUT,
+            proxy=None if machine.ssh else True,
+        )
+        handed: list[tuple[ClientConnection, object]] = []
         try:
-            ws = _ws_connect(
-                ws_url(url), ssl=ctx, open_timeout=_remaining(deadline),
-                close_timeout=2.0, compression="deflate", max_size=None,
-                max_queue=16 if stream else None,
-                ping_interval=LINK_PING_INTERVAL, ping_timeout=LINK_PING_TIMEOUT,
-            )
-        except ssl.SSLError as exc:
-            if forward_refused and isinstance(exc, ssl.SSLEOFError):
-                raise self._fail(forward_refused) from exc
-            raise self._fail(f"{where} refused the TLS handshake: {exc}{enroll_again}") from exc
-        except InvalidStatus as exc:  # 403: no password set there and no trusted certificate
-            raise self._fail(f"{where} refused the connection: {exc}{enroll_again}") from exc
-        except (OSError, InvalidHandshake, InvalidURI) as exc:
-            if forward_refused and isinstance(exc, ConnectionResetError):
-                raise self._fail(forward_refused) from exc
-            raise self._fail(f"{where} is unreachable: {exc}") from exc
-        try:
-            send(ws, json.dumps(auth), timeout=_remaining(deadline))
-            reply = recv_auth_reply(ws, timeout=_remaining(deadline))
-            if isinstance(reply, dict) and reply.get("type") == "auth_ok":
-                self._echoes = reply.get("echoesGeneration") is True
+            try:
+                ws = dial_off_thread(
+                    partial(self._handshake, connect, json.dumps(auth), deadline, handed),
+                    timeout + DIAL_GRACE,
+                )
+            except ssl.SSLError as exc:
+                if forward_refused and isinstance(exc, ssl.SSLEOFError):
+                    raise self._fail(forward_refused) from exc
+                raise self._fail(
+                    f"{where} refused the TLS handshake: {exc}{enroll_again}"
+                ) from exc
+            except InvalidStatus as exc:  # 403: no password set there and no trusted certificate
+                raise self._fail(f"{where} refused the connection: {exc}{enroll_again}") from exc
+            except (OSError, WebSocketException, ImportError) as exc:
+                # WebSocketException: a failed handshake, or a URL or ``$https_proxy``
+                # the client cannot use; ImportError: a SOCKS proxy without python-socks.
+                if forward_refused and isinstance(exc, ConnectionResetError):
+                    raise self._fail(forward_refused) from exc
+                raise self._fail(f"{where} is unreachable: {exc}") from exc
+            except RuntimeError as exc:  # out of threads: the dial's did not start, or the client's
+                raise self._fail(f"{where}: the connection could not start: {exc}") from exc
+            answer = handed[0][1]
+            if isinstance(answer, Exception):
+                raise self._fail(f"{where} did not complete the handshake: {answer}") from answer
+            if isinstance(answer, dict) and answer.get("type") == "auth_ok":
+                self._echoes = answer.get("echoesGeneration") is True
                 # The machine answered: the ladder starts over, and the
                 # back-off a handshake beside this one (a stream's)
                 # may have left goes with it.
                 self._health.failures = 0
                 self._health.retry_at = 0.0
+                if not stream:
+                    self._ws = ws
                 return ws
-        except (ConnectionClosed, OSError, ValueError) as exc:
-            ws.close()
-            raise self._fail(f"{where} did not complete the handshake: {exc}") from exc
+            if machine.ssh:
+                raise self._fail(f"{where} does not trust this daemon's certificate{enroll_again}")
+            if isinstance(answer, dict) and answer.get("type") == "auth_required":
+                raise self._fail(f"{where} rejected the password", DOWN_BACKOFF)
+            raise self._fail(f"{where} refused the connection: {answer!r}")
         except BaseException:
-            # A Stop's KeyboardInterrupt (the handshake runs on the task
-            # thread): the socket is nobody's until it is returned, so
-            # nothing else would close it, and its threads would keep
-            # answering the daemon's pings.  No machine failure, no
-            # back-off.
-            ws.close()
+            # Cut short with the socket open, by a Stop of the calling
+            # task above all (a refusal's socket is closed already).
+            for opened, _ in handed:
+                hang_up(opened)
             raise
-        ws.close()
-        if machine.ssh:
-            raise self._fail(f"{where} does not trust this daemon's certificate{enroll_again}")
-        if isinstance(reply, dict) and reply.get("type") == "auth_required":
-            raise self._fail(f"{where} rejected the password", DOWN_BACKOFF)
-        raise self._fail(f"{where} refused the connection: {reply!r}")
+
+    @staticmethod
+    def _handshake(
+        connect: Callable[[], ClientConnection], auth: str, deadline: float,
+        handed: list[tuple[ClientConnection, object]],
+    ) -> ClientConnection:
+        """Open a socket with *connect* and send it the *auth* frame: :meth:`_dial`'s blocking part.
+
+        Runs on the dialling thread
+        (:func:`~kiss.agents.sorcar.local_endpoint.dial_off_thread`)
+        and touches nothing of the link, so a dial its requester gave
+        up on leaves no trace.  The socket is appended to *handed*
+        with the daemon's answer to the frame, awaited until the
+        monotonic *deadline*, or with the error the exchange ended
+        with.  The socket is returned open for an ``auth_ok`` answer
+        only and closed otherwise (here, not on the requester's
+        thread, where a Stop could land in the close).
+
+        Raises:
+            Exception: What *connect* raised: the socket did not open.
+        """
+        ws = connect()
+        answer: object = None
+        try:
+            send(ws, auth, timeout=_remaining(deadline))
+            answer = recv_auth_reply(ws, timeout=_remaining(deadline))
+        except (ConnectionClosed, OSError, ValueError, RuntimeError) as exc:
+            # RuntimeError: out of threads, ``send`` could not start its writer.
+            answer = exc
+        finally:
+            if not (isinstance(answer, dict) and answer.get("type") == "auth_ok"):
+                ws.close()
+        handed.append((ws, answer))
+        return ws
 
     def request(
         self, cmd: dict[str, Any], reply_type: str, timeout: float = REQUEST_TIMEOUT,
@@ -1484,6 +1654,25 @@ class MachineLink:
         host that drops packets makes a reachable daemon's handshake
         no longer, and the long budget of a slow exchange must not keep
         the request's thread in a dial that will not succeed.
+
+        An exchange that ends in anything but its answer leaves the
+        link no socket.  The errors handled here and in
+        :meth:`_exchange` have dropped it.  Anything else is an
+        exchange cut short, by a Stop of the calling task above all
+        (``KeyboardInterrupt`` raised asynchronously in its thread),
+        and its socket cannot be used again: the answer may still
+        arrive and pass for the next request's, and a Stop raised
+        inside the socket's own receive leaves it unusable (CPython
+        3.14 raises it with the frame assembler's mutex held, where
+        the next request waited for good; 3.13 with the mark of a
+        receive in progress set, where the next request failed and
+        backed the machine off).  The socket is forgotten and its
+        connection shut down (:meth:`_discard`); no failure is
+        recorded, the machine did nothing wrong.  The handler is
+        around the calls of :meth:`_exchange`, not in it: the back
+        edge of a loop is not always inside the exception table of a
+        ``try`` around the loop (see ``local_endpoint._await``), and
+        an exception raised there reaches a caller's handler only.
         """
         # A dial runs the sleep check itself (``_check_available``)
         # and opens the forward again; only a kept socket needs
@@ -1492,29 +1681,33 @@ class MachineLink:
             self._drop()
         kept = self._ws is not None
         if self._ws is None:
-            self._ws = self._connect(min(timeout, REQUEST_TIMEOUT))
+            self._connect(min(timeout, REQUEST_TIMEOUT))
         deadline = time.monotonic() + timeout
         try:
-            return self._exchange(cmd, reply_type, deadline, timeout, errors)
-        except ConnectionClosed as exc:
-            if not kept:
-                self._drop()
-                raise self._fail(
-                    f"{self.machine.name} ({self.machine.address()}) did not answer: {exc}"
-                ) from exc
-            logger.info("%s: the link's socket had closed, reconnecting", self.machine.name)
-            self._drop()
-            self._ws = self._connect(min(_remaining(deadline), REQUEST_TIMEOUT))
             try:
                 return self._exchange(cmd, reply_type, deadline, timeout, errors)
-            except ConnectionClosed as again:
+            except ConnectionClosed as exc:
+                if not kept:
+                    self._drop()
+                    raise self._fail(
+                        f"{self.machine.name} ({self.machine.address()}) did not answer: {exc}"
+                    ) from exc
+                logger.info("%s: the link's socket had closed, reconnecting", self.machine.name)
                 self._drop()
-                raise self._fail(
-                    f"{self.machine.name} ({self.machine.address()}) did not answer: {again}"
-                ) from again
+                self._connect(min(_remaining(deadline), REQUEST_TIMEOUT))
+                try:
+                    return self._exchange(cmd, reply_type, deadline, timeout, errors)
+                except ConnectionClosed as again:
+                    self._drop()
+                    raise self._fail(
+                        f"{self.machine.name} ({self.machine.address()}) did not answer: {again}"
+                    ) from again
+        except BaseException:
+            self._discard()
+            raise
 
     def _forward_gone(self) -> bool:
-        """Return whether the kept socket's ssh forward is no longer the login's live one.
+        """Return whether the kept socket's ssh forward is no longer the machine's live one.
 
         Under the lock.  The forward's ssh process exiting closes the
         local port the socket is connected to, but the socket learns
@@ -1531,7 +1724,7 @@ class MachineLink:
             return False
         tunnel = self._tunnel
         if tunnel is None:
-            tunnel = locked_call(_tunnels_lock, _tunnels.get, self.machine.ssh)
+            tunnel = locked_call(_tunnels_lock, _tunnels.get, _endpoint(self.machine))
         if tunnel is None:
             return True
         # One read: a close on another thread sets the process to None
@@ -1606,7 +1799,11 @@ class MachineLink:
             while True:
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f"no {reply_type} within {timeout:g}s")
-                whole = joiner.feed(json.loads(self._ws.recv(timeout=_remaining(deadline))))
+                try:
+                    text = self._ws.recv(timeout=min(_READ_SLICE, _remaining(deadline)))
+                except TimeoutError:
+                    continue  # the end of a slice, or of the budget (reported above)
+                whole = joiner.feed(json.loads(text))
                 if whole is None:
                     deadline = time.monotonic() + timeout
                     continue
@@ -1647,8 +1844,10 @@ class MachineLink:
                 # count the machine as down.
                 if errors:
                     return {"type": reply_type, "error": str(msg.get("text") or "error")}
-        except (ConnectionClosed, TimeoutError, ValueError, OSError) as exc:
-            if self._retired:  # retire() closed the socket under the request
+        except (ConnectionClosed, ValueError, OSError, RuntimeError) as exc:
+            # OSError: a reply not read in time (``TimeoutError``) among others.
+            # RuntimeError: out of threads, ``send`` could not start its writer.
+            if self._retired:  # retire() shut the socket down under the request
                 self._drop()
                 raise self._retired_error() from exc
             # A close before the command went out is the caller's to retry
@@ -1688,13 +1887,33 @@ class MachineLink:
                 return
 
     def _drop(self) -> None:
-        """Close and forget the socket (no error is recorded)."""
+        """Close and forget the socket (no error is recorded).
+
+        Forgotten whatever ends the close (:meth:`_discard`): a Stop
+        raised in the closing handshake left the link a socket that
+        was still open, and on CPython 3.14 one with its protocol
+        mutex held, where the link's next request waited for good.
+        """
         if self._ws is not None:
             try:
                 self._ws.close()
             except Exception:
                 logger.debug("closing link to %s failed", self.machine.name, exc_info=True)
-            self._ws = None
+            finally:
+                self._discard()
+
+    def _discard(self) -> None:
+        """Forget the socket and shut its connection down, under the lock (no error is recorded).
+
+        For a socket in a state nobody knows (:meth:`_request_locked`
+        tells how a Stop leaves one), where :meth:`_drop`'s closing
+        handshake would take locks of the socket that may be held
+        for good; :func:`hang_up` takes none.  Nothing is left to
+        shut down after a close that completed.
+        """
+        ws, self._ws = self._ws, None
+        if ws is not None:
+            hang_up(ws)
 
     def open_connection(self, timeout: float = REQUEST_TIMEOUT) -> ClientConnection:
         """Open a fresh authenticated socket to the daemon for a long-lived stream.
@@ -1715,19 +1934,26 @@ class MachineLink:
         stream, opened together by a bind) connect at the same time
         instead of one after the other.
 
+        The handshake is counted in inside the ``try`` that counts it
+        out, as a token of its own: a Stop of the calling task is
+        raised where the dial lock is released, and with the count
+        taken ahead of the ``try`` it stayed, for :meth:`retire` to
+        wait its whole bound on.
+
         Raises:
             MachineError: When the daemon is unreachable or rejects the
                 password (the link backs off as after a failed request).
         """
         self._check_available()
-        locked_call(self._idle, self._start_dial)
+        dial = object()
         try:
+            locked_call(self._idle, self._start_dial, dial)
             return self._dial(timeout, stream=True)
         finally:
-            locked_call(self._idle, self._end_dial)
+            locked_call(self._idle, self._end_dial, dial)
 
-    def _start_dial(self) -> None:
-        """Count a stream handshake in, unless the link is retired (under the dial lock).
+    def _start_dial(self, dial: object) -> None:
+        """Count the stream handshake *dial* in, unless the link is retired (under the dial lock).
 
         The check is under the lock :meth:`retire` waits under, after
         the one :meth:`_check_available` made without it: a handshake
@@ -1736,11 +1962,11 @@ class MachineLink:
         """
         if self._retired:
             raise self._retired_error()
-        self._dialing += 1
+        self._dialing.add(dial)
 
-    def _end_dial(self) -> None:
-        """Count a stream handshake out and wake a waiting :meth:`retire` (under the dial lock)."""
-        self._dialing -= 1
+    def _end_dial(self, dial: object) -> None:
+        """Count *dial* out, counted in or not; wake a waiting :meth:`retire` (dial lock held)."""
+        self._dialing.discard(dial)
         self._idle.notify_all()
 
     def close(self) -> None:
@@ -1753,11 +1979,16 @@ class MachineLink:
         Used when the link leaves the daemon-wide cache, so a caller
         that fetched it just before cannot re-open a socket nothing
         closes any more.  Does not wait for a request in flight: the
-        socket is closed first, outside the lock, which wakes the
-        request's read with ``ConnectionClosed`` (the request then fails
-        with the registry-changed error, sent or not, and never
-        re-connects), and only then the lock is taken to forget the
-        socket.  A request still in its handshake, which the close
+        socket's connection is shut down first, outside the lock, which
+        wakes the request's read with ``ConnectionClosed`` (the request
+        then fails with the registry-changed error, sent or not, and
+        never re-connects), and only then the lock is taken to close
+        and forget the socket.  The shutdown is :func:`hang_up`'s,
+        not the socket's own close: a registry change runs on a task's
+        thread, and a Stop raised in a close outside the lock left the
+        retired link its socket, open, and on CPython 3.14 with the
+        protocol mutex held, where a request still on the link never
+        ended.  A request still in its handshake, which the shutdown
         cannot reach, is waited for (:data:`REQUEST_TIMEOUT` at most:
         it fails at the end of the handshake, :meth:`_connect`, and
         never sends its command), and so is a stream handshake
@@ -1769,8 +2000,7 @@ class MachineLink:
         self._retired = True
         ws = self._ws
         if ws is not None:
-            with suppress(Exception):
-                ws.close()
+            hang_up(ws)
         locked_call(self._lock, self._drop)
         locked_call(
             self._idle, self._idle.wait_for, self._dials_done, SSH_TIMEOUT + REQUEST_TIMEOUT,
@@ -1778,7 +2008,7 @@ class MachineLink:
 
     def _dials_done(self) -> bool:
         """Whether no stream handshake is in flight (under the dial lock)."""
-        return self._dialing == 0
+        return not self._dialing
 
 
 def _remaining(deadline: float) -> float:
@@ -1799,6 +2029,12 @@ def _remaining(deadline: float) -> float:
 #: own budget, which :meth:`MachineLink._dial` promises.
 _SEND_FLOOR = 1.0
 
+#: The longest a request blocks in one read of its answer.  A Stop of
+#: the calling task is raised when a blocking read returns, not while
+#: it waits: read to the end of its budget in one piece, a request
+#: the daemon did not answer kept a stopped task for the whole budget.
+_READ_SLICE = 0.2
+
 
 def _send_budget(deadline: float) -> float:
     """Seconds a command's write gets: the time to *deadline*, :data:`_SEND_FLOOR` at least.
@@ -1807,6 +2043,18 @@ def _send_budget(deadline: float) -> float:
         deadline: The request's monotonic deadline.
     """
     return max(_SEND_FLOOR, deadline - time.monotonic())
+
+
+_Registration = tuple[str, str, str, str]
+"""A machine as registered (name, URL, password, ssh login): what a link
+(with its lane), a fetch and a remembered page are keyed by, so a name
+registered again for another daemon or with other credentials shares
+none of them with the previous registration."""
+
+
+def _registration(machine: Machine) -> _Registration:
+    """Return *machine*'s :data:`_Registration`."""
+    return (machine.name, machine.url, machine.password, machine.ssh)
 
 
 _links: dict[tuple[str, str, str, str, str], MachineLink] = {}
@@ -1821,7 +2069,7 @@ def _cached_link(machine: Machine, lane: str) -> MachineLink | None:
     dialled again by each of the others.  ``None`` when the registry
     no longer holds *machine* as given (see :func:`link_for`).
     """
-    key = (machine.name, machine.url, machine.password, machine.ssh, lane)
+    key = (*_registration(machine), lane)
     link = _links.get(key)
     if link is None:
         if machine not in load_machines():
@@ -1866,7 +2114,7 @@ def link_for(machine: Machine, lane: str = "") -> MachineLink:
     return link
 
 
-def _evict_links(kept: set[tuple[str, str, str, str]]) -> list[MachineLink]:
+def _evict_links(kept: set[_Registration]) -> list[MachineLink]:
     """Forget and return the cached links of every machine not in *kept* (under the lock)."""
     gone = [key for key in _links if key[:4] not in kept]
     return [_links.pop(key) for key in gone]
@@ -1879,14 +2127,18 @@ def close_links(keep: Iterable[Machine] = ()) -> None:
     machine whose entry changed or vanished loses its links (an open
     stream to any other machine survives the change); the ``atexit``
     call keeps nothing.  A machine registered again gets a fresh link
-    and tunnel (its password or daemon port may have changed), a
-    removed one leaves no ssh process behind.
+    (its password may have changed) and, at another login or daemon
+    port, a fresh tunnel (:func:`close_tunnels`); a removed one leaves
+    no ssh process behind.  The history pages remembered for the
+    registrations not kept go too: they were kept for the daemon's
+    lifetime, one set per password or address a machine ever had.
     """
-    kept = {(m.name, m.url, m.password, m.ssh) for m in keep}
+    kept = {_registration(m) for m in keep}
     links: list[MachineLink] = locked_call(_links_lock, _evict_links, kept)
     for link in links:
         link.retire()
-    close_tunnels({m.ssh for m in keep if m.ssh})
+    close_tunnels({_endpoint(m) for m in keep if m.ssh})
+    locked_call(_last_pages_lock, _forget_pages, kept)
 
 
 atexit.register(close_links)
@@ -2113,27 +2365,24 @@ def _float_or_none(value: Any) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
-_Registration = tuple[str, str, str, str]
-"""A machine as registered (name, URL, password, ssh login): what a fetch
-and a remembered page are keyed by, like a link (:func:`_cached_link`),
-so a name registered again for another daemon or with other credentials
-shares neither with the previous registration."""
-
-
-def _registration(machine: Machine) -> _Registration:
-    """Return *machine*'s :data:`_Registration`."""
-    return (machine.name, machine.url, machine.password, machine.ssh)
-
-
 # The history page each registration of a machine last answered a view
 # with ((registration, query, tag) -> the page), shown while the
 # machine does not answer; of a registration's filtered views only the
-# latest answered is kept (see _fetch_quietly).  Read and written under
-# _last_pages_lock: the fan-out workers store their pages at once, and
-# one pruning the dict while another inserts into it would raise
-# RuntimeError (dictionary changed size during iteration).
+# latest answered is kept (see _fetch_quietly), and a registration's
+# pages go when it leaves the registry (close_links).  Read and written
+# under _last_pages_lock: the fan-out workers store their pages at
+# once, and one pruning the dict while another inserts into it would
+# raise RuntimeError (dictionary changed size during iteration).
+# Reentrant for locked_call: close_links runs on task threads too.
 _last_pages: dict[tuple[str, str, str, str, str, str], HistoryPage] = {}
-_last_pages_lock = threading.Lock()
+_last_pages_lock = threading.RLock()
+
+
+def _forget_pages(kept: set[_Registration]) -> None:
+    """Forget the pages remembered for every registration not in *kept* (under the lock)."""
+    for key in [key for key in _last_pages if key[:4] not in kept]:
+        del _last_pages[key]
+
 
 HISTORY_FANOUT_WAIT = 2.0
 """Seconds a history reply waits for the registered machines' pages.
@@ -2187,6 +2436,14 @@ def _fetch_quietly(machine: Machine, query: str, tag: str, limit: int) -> Histor
     fallback and fetch afresh, without end.  Only the latest filtered
     view answered is kept per registration (a page per query typed
     would grow without bound), beside the unfiltered one.
+
+    The page of a registration that left the registry while it was on
+    its way is returned but not remembered: the sweep of that
+    registration's pages (:func:`close_links`) has run, and nothing
+    would drop the page, or its key with the registration's password,
+    for the daemon's life.  The registry is read under the cache's
+    lock, under which the sweep runs after the registry is written, so
+    a change either shows in that read or sweeps the page.
     """
     try:
         page = fetch_history(machine, query, tag, limit)
@@ -2195,6 +2452,8 @@ def _fetch_quietly(machine: Machine, query: str, tag: str, limit: int) -> Histor
         return _last_page(machine, query, tag, limit)
     key = (*_registration(machine), query, tag)
     with _last_pages_lock:
+        if machine not in load_machines():
+            return page
         if query or tag:
             kept = (("", ""), key[4:])
             for other in [k for k in _last_pages if k[:4] == key[:4] and k[4:] not in kept]:
@@ -2250,7 +2509,10 @@ def merged_history(
     widened by the remote histories'.  Rows are ordered running first,
     then newest first, like the local list; rows that tie keep their
     source's order, local before remote, earlier machine first.  Of
-    several copies of one task id the one that sorts first is kept.
+    several copies of one task id the one that sorts first is kept; it
+    is of a running chat (``chat_running``) when any copy says so, as
+    the copy a history sync left here is stamped by this daemon, where
+    the chat does not run.
     Because every source is itself ordered that way and the ranking of
     a copy never depends on what else is loaded, the page is the same
     whichever pages were loaded before it: a task never shows twice or
@@ -2275,12 +2537,20 @@ def merged_history(
         if late is not None:
             future.add_done_callback(partial(_landed_late, served, late))
     best: dict[str, tuple[tuple[bool, float, int, int], dict[str, Any]]] = {}
+    of_running_chat: set[str] = set()
     for source, page in enumerate(pages):
         for rank, session in enumerate(page.rows):
             key = str(session.get("task_id") or session.get("id") or id(session))
+            if session.get("chat_running"):
+                of_running_chat.add(key)
             order = (*_history_order(session), -source, -rank)
             if key not in best or order > best[key][0]:
                 best[key] = (order, session)
+    for key in of_running_chat:
+        order, session = best[key]
+        if not session.get("chat_running"):
+            # A row of its own: the pages are kept and served again.
+            best[key] = (order, {**session, "chat_running": True})
     ranked = sorted(best.values(), key=operator.itemgetter(0), reverse=True)
     mins = [p.date_min for p in pages if p.date_min is not None]
     maxs = [p.date_max for p in pages if p.date_max is not None]

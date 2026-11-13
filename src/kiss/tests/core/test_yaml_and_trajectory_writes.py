@@ -21,7 +21,11 @@ mocks, patches, fakes or test doubles, and no LLM calls.
 
 from __future__ import annotations
 
+import functools
+import gc
+import itertools
 import json
+import os
 import shutil
 import stat
 import subprocess
@@ -43,8 +47,10 @@ from kiss.core.utils import (
     finish,
     read_bytes_waiting_for_writer,
     rmtree_force,
+    seed_file_atomically,
 )
 from kiss.tests.conftest import HOT_READER_PAUSE, IS_WINDOWS, is_root, posix_only
+from kiss.tests.lock_injection import hammer
 
 # The alphabetically last top-level key of a trajectory document: a
 # reader that cannot see it is looking at a truncated file.
@@ -144,6 +150,58 @@ def test_a_failed_write_leaves_the_previous_file_and_no_debris(
         atomic_write_text(target, "lone surrogate: \ud800\n")
 
     assert target.read_text(encoding="utf-8") == "first: complete\n"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def _write_and_seed(folder: Path, seeds: Iterator[int]) -> None:
+    """One atomic write of ``doc.txt`` and one first seed of a new file in *folder*."""
+    atomic_write_text(folder / "doc.txt", "x" * 100)
+    seed_file_atomically(folder / f"seed{next(seeds)}", "x" * 100)
+
+
+@posix_only("open descriptors are counted through /dev/fd")
+def test_a_stop_during_a_write_leaks_no_descriptor_and_no_staging_file(tmp_path: Path) -> None:
+    """A task's Stop landing as the staging file is created leaves nothing behind.
+
+    The Stop is a ``KeyboardInterrupt`` raised in the task thread as the
+    blocking call it interrupted returns.  The staging file was created
+    by a bare ``os.open`` outside every ``try``, so a Stop landing on
+    that call lost the descriptor for the life of the daemon and left
+    the ``.<name>-<hex>`` file next to the target: about one in seven of
+    the Stops injected here.
+    """
+    # An earlier test's model client that waits for the collector would close its
+    # sockets between the two counts (after ``test_model_config_forwarding_parity.py``,
+    # ``assert 14 == 17``); a descriptor this code loses is no object and stays lost.
+    gc.collect()
+    descriptors = len(os.listdir("/dev/fd"))
+
+    hammer(functools.partial(_write_and_seed, tmp_path, itertools.count()), {})
+
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+    assert len(os.listdir("/dev/fd")) == descriptors
+
+
+@posix_only("a 255-character name under a temp dir exceeds Windows' MAX_PATH")
+@pytest.mark.parametrize("name", ["n" * 251 + ".txt", "é" * 125 + ".txt"])
+def test_a_file_name_of_the_full_length_is_written_and_seeded(tmp_path: Path, name: str) -> None:
+    """A target whose name is as long as the file system allows is staged like any other.
+
+    The staging file carried the target's whole name plus 34
+    characters, so a name over 221 bytes answered ``File name too
+    long`` although the file itself is legal (a memory page name has
+    no length limit of its own).  The second name is cut inside a
+    two-byte character.
+    """
+    target = tmp_path / name
+
+    atomic_write_text(target, "first")
+    atomic_write_text(target, "second")
+    assert target.read_text(encoding="utf-8") == "second"
+    target.unlink()
+    seed_file_atomically(target, "seed")
+
+    assert target.read_text(encoding="utf-8") == "seed"
     assert list(tmp_path.iterdir()) == [target]
 
 

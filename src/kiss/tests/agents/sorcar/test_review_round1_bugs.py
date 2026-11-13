@@ -18,6 +18,7 @@ from typing import Any, cast
 import pytest
 
 from kiss.agents.sorcar import persistence
+from kiss.tests.persistence_helpers import close_db
 
 
 @pytest.fixture
@@ -27,9 +28,9 @@ def temp_db(
     """Point persistence at a temp DB and reset per-thread connection cache."""
     db_path = tmp_path / "history.db"
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
-    persistence._close_db()
+    close_db()
     yield db_path
-    persistence._close_db()
+    close_db()
 
 
 def _make_legacy_db(path: Path) -> None:
@@ -87,7 +88,7 @@ def test_persist_bug1_migration_rolls_back_on_failure(
     with pytest.raises(RuntimeError, match="simulated"):
         persistence._get_db()
     monkeypatch.undo()
-    persistence._close_db()
+    close_db()
 
     conn = sqlite3.connect(str(temp_db), isolation_level=None)
     cols = {

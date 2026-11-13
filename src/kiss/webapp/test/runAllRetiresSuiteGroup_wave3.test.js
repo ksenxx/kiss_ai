@@ -36,7 +36,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const {spawnSync} = require('child_process');
+const {spawn, spawnSync} = require('child_process');
 
 // The gate's cap on its hung suite; nothing has to happen within it (the
 // gate records its worker's pid before arming it), so it is just short.
@@ -57,17 +57,25 @@ if (process.platform !== 'linux') {
 // A runner that outlives the deadline (an optional 4th argument, 60 s by
 // default) is SIGTERMed, which lets run-all.js's killAllAndExit SIGKILL
 // its suites' groups, then SIGKILLed if it stays, and reported with
-// status "timeout".  The suites a killed runner left (each in a process
-// group of its own, which no kill of the runner reaches) are adopted by
-// the helper, which kills their groups; the workers on record are then
-// waited for and killed, and whatever else was adopted is killed and
-// reaped, so a regression of the cleanup under test never leaks a suite
-// or a worker past the suite.  The runner gets a session of its own, so
-// no group the helper kills is the helper's.
+// status "timeout".  The deadline starts once the pid files an optional
+// 5th argument names (comma-separated) are all there, so that a host slow
+// to start node cannot use it up before the processes the test asks about
+// exist.  A runner that ends first, or does not get that far within the
+// 6th argument (20 s by default), goes the way of one past its deadline
+// and is reported with status "not ready: <the names missing>".  The
+// suites a killed runner left (each in a process group of its own, which
+// no kill of the runner reaches) are adopted by the helper, which kills
+// their groups; the workers on record are then waited for and killed, and
+// whatever else was adopted is killed and reaped, so a regression of the
+// cleanup under test never leaks a suite or a worker past the suite.  The
+// runner gets a session of its own, so no group the helper kills is the
+// helper's.
 const SUBREAPER_HELPER = `
 import ctypes, json, os, signal, subprocess, sys, time
 node, runner, pid_dir = sys.argv[1:4]
 deadline = float(sys.argv[4]) if len(sys.argv) > 4 else 60
+ready = sys.argv[5].split(",") if len(sys.argv) > 5 else []
+startup = float(sys.argv[6]) if len(sys.argv) > 6 else 20
 ctypes.CDLL(None).prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
 
 def adopted():
@@ -112,13 +120,21 @@ def fate(pid):
     os.waitpid(pid, 0)
     return "alive"
 
+def missing():
+    """The names in ready whose pid file is not there (yet)."""
+    return [n for n in ready if not os.path.exists(os.path.join(pid_dir, n))]
+
 status = "timeout"
 proc = subprocess.Popen(
     [node, runner], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     start_new_session=True,
 )
+ready_by = time.monotonic() + startup
+while missing() and proc.poll() is None and time.monotonic() < ready_by:
+    time.sleep(0.02)
+not_ready = missing()
 try:
-    out, err = proc.communicate(timeout=deadline)
+    out, err = proc.communicate(timeout=0 if not_ready else deadline)
     status = proc.returncode
 except subprocess.TimeoutExpired:
     proc.terminate()
@@ -131,9 +147,11 @@ except subprocess.TimeoutExpired:
             kill_group(pid)
         out, err = proc.communicate()
 sys.stderr.write(out + err)
+if not_ready:
+    status = "not ready: " + ",".join(not_ready)
 fates = {
     name: fate(int(open(os.path.join(pid_dir, name)).read()))
-    for name in sorted(os.listdir(pid_dir))
+    for name in sorted(os.listdir(pid_dir)) if not name.endswith(".tmp")
 }
 for pid in adopted():
     kill_group(pid)
@@ -156,16 +174,24 @@ function killRecordedWorkers(pidDir) {
   }
 }
 
-/** A suite that starts a `sleep` worker with stdio 'ignore' (left in the
- * suite's process group), records the worker's pid in `pidFile`, then
- * runs the statement `then`. */
-function suiteSource(pidFile, then) {
+/** A suite that, `startDelayMs` after node started it, starts a `sleep`
+ * worker with stdio 'ignore' (left in the suite's process group), records
+ * the worker's pid in `pidFile`, then runs the statement `then`.  A pid
+ * file appears whole, by a rename (`record`, which `then` may use too):
+ * the helper takes its being there for the process being on record. */
+function suiteSource(pidFile, then, startDelayMs = 0) {
   return [
     "'use strict';",
     "const {spawn} = require('child_process');",
     "const fs = require('fs');",
+    'function record(file, pid) {',
+    "  fs.writeFileSync(file + '.tmp', String(pid));",
+    "  fs.renameSync(file + '.tmp', file);",
+    '}',
+    'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ' +
+      `${startDelayMs});`,
     "const worker = spawn('sleep', ['300'], {stdio: 'ignore'});",
-    `fs.writeFileSync(${JSON.stringify(pidFile)}, String(worker.pid));`,
+    `record(${JSON.stringify(pidFile)}, worker.pid);`,
     then,
     '',
   ].join('\n');
@@ -245,14 +271,30 @@ function testAHungRunnerStillGetsItsWorkersCleanedUp() {
   const pidDir = path.join(dir, 'pids');
   fs.mkdirSync(pidDir);
   try {
-    // A "runner" that starts a worker, records it, and never exits.
+    // A "runner" that starts a worker, records it, and never exits.  It
+    // starts the worker 1.5 s late, as a loaded host would: the 1 s
+    // deadline, armed when the runner was spawned, then ended a runner
+    // with no worker to report, which failed the test for no fault of the
+    // cleanup.  The deadline now starts once the worker is on record.
     fs.writeFileSync(
       path.join(dir, 'run-all.js'),
-      suiteSource(path.join(pidDir, 'stuck'), 'setInterval(() => {}, 1000);'),
+      suiteSource(
+        path.join(pidDir, 'stuck'),
+        'setInterval(() => {}, 1000);',
+        1500,
+      ),
     );
     const res = spawnSync(
       'python3',
-      ['-c', SUBREAPER_HELPER, process.execPath, path.join(dir, 'run-all.js'), pidDir, '1'],
+      [
+        '-c',
+        SUBREAPER_HELPER,
+        process.execPath,
+        path.join(dir, 'run-all.js'),
+        pidDir,
+        '1',
+        'stuck',
+      ],
       {encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL'},
     );
     const out = `${res.stdout || ''}${res.stderr || ''}`;
@@ -268,6 +310,42 @@ function testAHungRunnerStillGetsItsWorkersCleanedUp() {
     );
   } finally {
     killRecordedWorkers(pidDir);
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+}
+
+// A runner that never records what the helper waits for does not hold it
+// for ever, whether it hangs (the wait is bounded, 1 s here) or has
+// ended: it goes the way of one past its deadline, and the failure is
+// reported as the setup's.
+function testARunnerThatNeverGetsReadyIsReportedAsSuch(runnerSource) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runall-wave3-never-'));
+  const pidDir = path.join(dir, 'pids');
+  fs.mkdirSync(pidDir);
+  try {
+    fs.writeFileSync(path.join(dir, 'run-all.js'), runnerSource);
+    const res = spawnSync(
+      'python3',
+      [
+        '-c',
+        SUBREAPER_HELPER,
+        process.execPath,
+        path.join(dir, 'run-all.js'),
+        pidDir,
+        '1',
+        'stuck',
+        '1',
+      ],
+      {encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL'},
+    );
+    const out = `${res.stdout || ''}${res.stderr || ''}`;
+    assert.strictEqual(res.status, 0, `the helper finished\n${out}`);
+    assert.deepStrictEqual(
+      JSON.parse(res.stdout.trim().split('\n').pop()),
+      {status: 'not ready: stuck', fates: {}},
+      out,
+    );
+  } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
 }
@@ -293,12 +371,12 @@ function testAHungRunnersSuiteTreeIsRetired(runnerSource, fates, why) {
       path.join(dir, 'hang.test.js'),
       suiteSource(
         path.join(pidDir, 'worker'),
-        `fs.writeFileSync(${JSON.stringify(path.join(pidDir, 'suite'))}, ` +
-          'String(process.pid));\nsetInterval(() => {}, 1000);',
+        `record(${JSON.stringify(path.join(pidDir, 'suite'))}, ` +
+          'process.pid);\nsetInterval(() => {}, 1000);',
       ),
     );
-    // The deadline leaves a loaded host time to start the runner and the
-    // suite, which records both pids as soon as it runs.
+    // The deadline starts once the suite has recorded both pids, however
+    // long a loaded host takes to start the runner and the suite.
     const res = spawnSync(
       'python3',
       [
@@ -307,7 +385,8 @@ function testAHungRunnersSuiteTreeIsRetired(runnerSource, fates, why) {
         process.execPath,
         path.join(dir, 'run-all.js'),
         pidDir,
-        '5',
+        '1',
+        'suite,worker',
       ],
       {encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL'},
     );
@@ -350,8 +429,58 @@ const STUBBORN_RUNNER = [
   '',
 ].join('\n');
 
+// How a failing run ends: with status 1 and its whole report.  CAP_SUITE,
+// run first (--serial), sets its parent's RLIMIT_NOFILE to 0 (once sure the
+// parent is that runner: an orphan's is someone else), so the next spawns
+// fail with EMFILE and leave a child no stdout or stderr: the runner used
+// to die there of a TypeError, status 143.  It also used to end with
+// process.exit(1), which drops what a pipe has not accepted yet: stdout is
+// left unread here until the runner's last write, the FAILED SUITES list,
+// is on stderr.  Not reachable without a test double: spawn() throwing
+// while such a child awaits its 'error' (why runSuite checks child.pid).
+const CAP_SUITE = `
+console.log('x'.repeat(2e6));
+const runner = process.ppid;
+const cmdline = require('fs').readFileSync('/proc/' + runner + '/cmdline');
+if (!cmdline.includes(require('path').basename(__dirname))) process.exit(1);
+require('child_process').execFileSync('python3', [
+  '-c',
+  'import resource as r; r.prlimit(' + runner + ', r.RLIMIT_NOFILE, (0, 0))',
+]);
+`;
+
+function testAFailingRunReportsInFull(done) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runall-wave3-end-'));
+  process.once('exit', () => fs.rmSync(dir, {recursive: true, force: true}));
+  const runner = path.join(dir, 'run-all.js');
+  fs.copyFileSync(path.join(__dirname, 'run-all.js'), runner);
+  const opts = {timeout: 60000, killSignal: 'SIGKILL'};
+  const {status, stdout, stderr} = spawnSync(process.execPath, [runner], opts);
+  assert.match(`${status}:${stdout}${stderr}`, /^1:no test files found in /);
+  fs.writeFileSync(path.join(dir, 'a.test.js'), CAP_SUITE);
+  for (const s of ['b', 'c']) fs.writeFileSync(`${dir}/${s}.test.js`, '');
+  const child = spawn(process.execPath, [runner, '--serial'], opts);
+  let out = '';
+  let err = '';
+  child.stdout.pause().on('data', chunk => (out += chunk));
+  child.stderr.on('data', chunk => {
+    err += chunk;
+    if (err.includes('\n  c.test.js\n')) child.stdout.resume();
+  });
+  child.on('close', code => {
+    assert.strictEqual(code, 1, `two suites fail, not the runner\n${err}`);
+    assert.match(err, /b\.test\.js: Error: spawn .+ EMFILE\nc\.test\.js: /);
+    assert.ok(out.endsWith('\n1/3 suites passed\n'), 'the summary arrived');
+    done();
+  });
+}
+
 testReportedSuitesTakeTheirWorkersWithThem();
 testAHungRunnerStillGetsItsWorkersCleanedUp();
+testARunnerThatNeverGetsReadyIsReportedAsSuch(
+  'setInterval(() => {}, 1000);\n',
+);
+testARunnerThatNeverGetsReadyIsReportedAsSuch('process.exit(3);\n');
 testAHungRunnersSuiteTreeIsRetired(
   fs.readFileSync(path.join(__dirname, 'run-all.js'), 'utf8'),
   {suite: 'not-ours', worker: 'signal 9'},
@@ -362,4 +491,6 @@ testAHungRunnersSuiteTreeIsRetired(
   {suite: 'signal 9', worker: 'signal 9'},
   'the helper retires the suite of a runner that ignores SIGTERM',
 );
-console.log('runAllRetiresSuiteGroup_wave3: all tests passed');
+testAFailingRunReportsInFull(() =>
+  console.log('runAllRetiresSuiteGroup_wave3: all tests passed'),
+);

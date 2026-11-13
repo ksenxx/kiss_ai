@@ -29,6 +29,7 @@ from kiss.agents.sorcar import cron_agent, local_endpoint
 from kiss.agents.sorcar import persistence as th
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server.server import AgentServer
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 
@@ -38,7 +39,7 @@ class TestHistoryCronFlag(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.mkdtemp()
         self._orig_db_path = th._DB_PATH
-        th._close_db()
+        close_db()
         th._DB_PATH = Path(self._tmp) / "history.db"
         self.server = AgentServer()
         self.server.work_dir = self._tmp
@@ -54,7 +55,7 @@ class TestHistoryCronFlag(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        th._close_db()
+        close_db()
         th._DB_PATH = self._orig_db_path
         shutil.rmtree(self._tmp, ignore_errors=True)
 
@@ -88,9 +89,9 @@ class TestHistoryCronFlag(unittest.TestCase):
         launch left recognisable traces on are stamped: a task text
         that starts with the prompt-job preamble, or a run directory
         under ``cron/runs``.  Anything else stays a plain row."""
-        th._close_db()
+        close_db()
         th._get_db()  # create the schema, then recreate the table without the column
-        th._close_db()
+        close_db()
         conn = sqlite3.connect(str(th._DB_PATH))
         # Not ``ALTER TABLE ... DROP COLUMN``: SQLite rewrites the stored
         # DDL textually, and with the comment lines that precede the
@@ -149,7 +150,7 @@ class TestHistoryCronFlag(unittest.TestCase):
         self.assertEqual(flags, {"child": 1, "grandchild": 1, "plainchild": 0})
         # Re-opening the database leaves the stamps alone (no second
         # backfill, no column error).
-        th._close_db()
+        close_db()
         by_task = self._sessions()
         self.assertTrue(by_task["/good_morning now"]["is_cron"])
         self.assertFalse(by_task["a plain task"]["is_cron"])

@@ -22,11 +22,11 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.persistence import (
-    _close_db,
     _load_last_model,
     _load_model_usage,
     _record_model_usage,
 )
+from kiss.tests.persistence_helpers import close_db
 
 
 @pytest.fixture(autouse=True)
@@ -35,7 +35,7 @@ def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     import kiss.agents.sorcar.persistence as pm
     import kiss.core.user_config as vc
 
-    _close_db()
+    close_db()
     tmpdir = tempfile.mkdtemp()
     monkeypatch.setattr(pm, "_KISS_DIR", type(pm._KISS_DIR)(tmpdir))
     monkeypatch.setattr(pm, "_DB_PATH", type(pm._DB_PATH)(os.path.join(tmpdir, "history.db")))
@@ -43,7 +43,7 @@ def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     monkeypatch.setitem(vars(vc), "CONFIG_DIR", Path(tmpdir))
     monkeypatch.setitem(vars(vc), "CONFIG_PATH", Path(cfg_path))
     yield
-    _close_db()
+    close_db()
 
 
 

@@ -22,6 +22,7 @@ and restore it when the refusal is sent.
 from __future__ import annotations
 
 import contextlib
+import logging
 import shutil
 import sys
 import tempfile
@@ -38,6 +39,7 @@ from kiss.server.remote_views import RemoteViews
 from kiss.tests.conftest import nproc_limit_lowered_to_one, thread_start_can_be_starved
 from kiss.tests.remote_daemon import start_remote_daemon
 from kiss.tests.server.pause import Pause, Pauses
+from kiss.tests.server.remote_tabs_probe import machine_of
 from kiss.tests.server.two_client_harness import TwoClientHarness
 
 
@@ -113,3 +115,165 @@ class MachineStreamStartFailureTest(TwoClientHarness):
         opened = self.wait_event(self.a, "terminalOpened", timeout=60, tab_id="term-y")
         self.assertEqual(opened["machine"], "box")
         self.a.send({"type": "terminalClose", "tab_id": "term-y"})
+
+    def test_a_bind_whose_warm_up_cannot_start_is_refused_and_keeps_no_bookkeeping(self) -> None:
+        """The view stream's warm-up thread is starved: the run is refused, the next bind works."""
+        tabs = self.server._server_api.remote_tabs
+        starved = contextlib.ExitStack()
+        self.addCleanup(starved.close)
+
+        def starve_the_warm_up(frame_locals: dict[str, Any]) -> bool:
+            if frame_locals.get("name") == "remote-views-warm-box":
+                starved.enter_context(nproc_limit_lowered_to_one())
+            return False
+
+        def restore_at_the_next_warning(_frame_locals: dict[str, Any]) -> bool:
+            starved.close()  # the failed start is logged (so is an error that escapes)
+            return False
+
+        resume = {"type": "resumeSession", "tabId": "chat", "machine": "box"}
+        with Pauses(
+            Pause(threading.Thread.__init__.__code__, starve_the_warm_up),
+            Pause(logging.Logger.warning.__code__, restore_at_the_next_warning),
+        ):
+            self.a.send(resume)
+            refused = self.wait_event(self.a, "error", tabId="chat")
+        self.assertIn("box: the stream could not start", refused["text"])
+        self.a.send(resume)
+        self.wait_event(self.a, "tabMachine", tabId="chat", machine="box")
+        self.a.send({"type": "closeTab", "tabId": "chat"})
+        self.wait_for(
+            lambda: not (machine_of(tabs, "chat") or tabs._connecting or tabs._unbinds),
+            what="the tab to unbind with no bind bookkeeping left",
+        )
+
+    def test_a_close_whose_send_thread_cannot_start_still_ends_the_stream(self) -> None:
+        """The helper thread of a bound tab's forwarded ``closeTab`` is starved: the unbind ends."""
+        api = self.server._server_api
+        self.a.send({"type": "resumeSession", "tabId": "chat", "machine": "box"})
+        self.wait_event(self.a, "tabMachine", tabId="chat", machine="box")
+        self.wait_for(lambda: api.remote_views._streams, what="the machine's view stream")
+        with api.remote_tabs._lock:
+            stream = api.remote_tabs._tabs["chat"]
+        starved = contextlib.ExitStack()
+        self.addCleanup(starved.close)
+        sender: list[int] = []  # the thread forwarding the closeTab
+
+        def note_the_sender(frame_locals: dict[str, Any]) -> bool:
+            if frame_locals["cmd"].get("type") == "closeTab":
+                sender.append(threading.get_ident())
+            return False
+
+        def starve_its_helper(frame_locals: dict[str, Any]) -> bool:
+            helper = frame_locals.get("name") == "sorcar-local-send"
+            if helper and sender == [threading.get_ident()]:
+                starved.enter_context(nproc_limit_lowered_to_one())
+            return False
+
+        def restore(frame_locals: dict[str, Any]) -> bool:
+            # The send closes the socket on its own thread; an error that escapes it is logged.
+            escaped = "Error handling" in str(frame_locals.get("msg"))
+            if escaped or sender == [threading.get_ident()]:
+                starved.close()
+            return False
+
+        with Pauses(
+            Pause(MachineStream.send.__code__, note_the_sender),
+            Pause(threading.Thread.__init__.__code__, starve_its_helper),
+            Pause(MachineStream._close_socket.__code__, restore),
+            Pause(logging.Logger.warning.__code__, restore),
+        ):
+            self.a.send({"type": "closeTab", "tabId": "chat"})
+            # The unbind goes on past the failed send: the tab's stream is closed and
+            # the machine's view stream, kept open for the binding, is released.
+            self.wait_for(lambda: not api.remote_views._streams, what="the view stream to close")
+        self.assertIs(stream._ws.protocol.state, State.CLOSED)
+
+    def test_a_dropped_page_whose_grace_timer_cannot_start_has_its_shell_hung_up_at_once(
+        self,
+    ) -> None:
+        """The grace timer of a dropped page's remote shell is starved: the shell ends now.
+
+        Detached with no timer, nothing would ever hang the shell up, and
+        the stream would stay open for a terminal no page owns.
+        """
+        if sys.platform == "win32":
+            self.skipTest("terminal tabs need a pty")
+        views = self.server._server_api.remote_views
+        self.a.send({
+            "type": "terminalOpen", "tab_id": "term-g", "cols": 80, "rows": 24,
+            "workDir": "", "machine": "box",
+        })
+        self.wait_event(self.a, "terminalOpened", timeout=60, tab_id="term-g")
+        starved = contextlib.ExitStack()
+        self.addCleanup(starved.close)
+
+        def starve_the_grace_timer(frame_locals: dict[str, Any]) -> bool:
+            if frame_locals.get("function") == views._hang_up_detached:
+                starved.enter_context(nproc_limit_lowered_to_one())
+            return False
+
+        def restore_at_the_hang_up(_frame_locals: dict[str, Any]) -> bool:
+            starved.close()
+            return False
+
+        try:
+            with Pauses(
+                Pause(threading.Timer.__init__.__code__, starve_the_grace_timer),
+                Pause(RemoteViews._hang_up_detached.__code__, restore_at_the_hang_up),
+            ):
+                self.a.close()
+                self.wait_for(
+                    lambda: not views._streams, timeout=20,
+                    what="the shell hung up and its stream closed (the grace is 60 s)",
+                )
+        finally:
+            starved.close()
+
+    def test_a_dropped_page_whose_clean_up_thread_cannot_start_is_still_cleaned_up(self) -> None:
+        """The thread of a dropped page's clean-up is starved: the clean-up is done all the same.
+
+        Left undone (the failed start was only logged), the page stayed
+        the owner of its remote shell for good: no grace period ever
+        ran and the stream never closed.  Still starved, the grace
+        timer cannot start either, so the shell ends at once (the test
+        above).
+        """
+        if sys.platform == "win32":
+            self.skipTest("terminal tabs need a pty")
+        views = self.server._server_api.remote_views
+        self.a.send({
+            "type": "terminalOpen", "tab_id": "term-g", "cols": 80, "rows": 24,
+            "workDir": "", "machine": "box",
+        })
+        self.wait_event(self.a, "terminalOpened", timeout=60, tab_id="term-g")
+        starved = contextlib.ExitStack()
+        self.addCleanup(starved.close)
+
+        def starve_the_clean_up(frame_locals: dict[str, Any]) -> bool:
+            if str(frame_locals.get("name")).startswith("remote-views-gone-"):
+                starved.enter_context(nproc_limit_lowered_to_one())
+            return False
+
+        def restore_at_the_hang_up(_frame_locals: dict[str, Any]) -> bool:
+            starved.close()
+            return False
+
+        def restore_at_a_clean_up_left_undone(frame_locals: dict[str, Any]) -> bool:
+            if "teardown step" in str(frame_locals.get("msg")):
+                starved.close()
+            return False
+
+        try:
+            with Pauses(
+                Pause(threading.Thread.__init__.__code__, starve_the_clean_up),
+                Pause(RemoteViews._hang_up_detached.__code__, restore_at_the_hang_up),
+                Pause(logging.Logger.warning.__code__, restore_at_a_clean_up_left_undone),
+            ):
+                self.a.close()
+                self.wait_for(
+                    lambda: not views._streams, timeout=20,
+                    what="the dropped page's shell hung up and its stream closed",
+                )
+        finally:
+            starved.close()

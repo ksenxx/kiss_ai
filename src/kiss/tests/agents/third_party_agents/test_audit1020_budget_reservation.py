@@ -163,6 +163,13 @@ def _plan(parent: SorcarAgent, work_dir: Path, task: str, max_budget: str = "") 
     return plan
 
 
+def _start(plan: dict[str, Any], parent: SorcarAgent) -> agent_dispatch.AgentJob:
+    """Build the job of *plan* and launch it, as ``run_agent`` does."""
+    job = agent_dispatch.new_agent_job(plan["name"], plan, parent)
+    agent_dispatch.launch_agent_job(job)
+    return job
+
+
 def test_calls_planned_concurrently_still_see_each_others_reservation(
     tmp_path: Path,
     daemon: HoldingDaemon,
@@ -180,7 +187,7 @@ def test_calls_planned_concurrently_still_see_each_others_reservation(
     parent = _parent(10.0)
     plans = [_plan(parent, tmp_path, task) for task in ("first", "second")]
     try:
-        jobs = [agent_dispatch.start_agent_job(plan["name"], plan, parent) for plan in plans]
+        jobs = [_start(plan, parent) for plan in plans]
         for job in jobs:
             agent_dispatch.wait_until_started(job)
             assert not job.finished, job.result
@@ -204,9 +211,9 @@ def test_an_explicit_budget_is_reserved_from_registration(
     greedy = _plan(parent, tmp_path, "greedy", max_budget="1")
     starved = _plan(parent, tmp_path, "starved")
     try:
-        greedy_job = agent_dispatch.start_agent_job(greedy["name"], greedy, parent)
+        greedy_job = _start(greedy, parent)
         assert greedy_job.budget == pytest.approx(1.0)
-        starved_job = agent_dispatch.start_agent_job(starved["name"], starved, parent)
+        starved_job = _start(starved, parent)
         assert agent_dispatch.join_agent_job(starved_job, 30.0)
         assert "reserve-parent has no remaining budget" in starved_job.result, starved_job.result
         assert "$1.0000 of its remainder is reserved" in starved_job.result, starved_job.result
@@ -260,8 +267,7 @@ def test_concurrent_explicit_budget_calls_do_not_refuse_each_other(
     large = _plan(parent, tmp_path, "large", max_budget="10")
     try:
         with agent_dispatch._AGENT_JOBS_LOCK:
-            jobs = [agent_dispatch.start_agent_job(plan["name"], plan, parent)
-                    for plan in (small, large)]
+            jobs = [_start(plan, parent) for plan in (small, large)]
             assert [job.budget for job in jobs] == pytest.approx([4.0, 6.0])
         for job in jobs:
             agent_dispatch.wait_until_started(job)
@@ -280,9 +286,7 @@ def test_concurrent_explicit_budget_calls_do_not_refuse_each_other(
     # parent).  The second job's thread is held before its dispatch by
     # an instrumentation of the real code path; nothing is replaced.
     daemon.gate.clear()
-    first = agent_dispatch.start_agent_job(
-        "sorcar", _plan(parent, tmp_path, "first", max_budget="4"), parent,
-    )
+    first = _start(_plan(parent, tmp_path, "first", max_budget="4"), parent)
     agent_dispatch.wait_until_started(first)
     assert not first.finished, first.result
     second = agent_dispatch.new_agent_job(
@@ -302,9 +306,7 @@ def test_concurrent_explicit_budget_calls_do_not_refuse_each_other(
             held.release()
             agent_dispatch.wait_until_started(second)
             assert not second.finished, second.result
-            third = agent_dispatch.start_agent_job(
-                "sorcar", _plan(parent, tmp_path, "third", max_budget="4"), parent,
-            )
+            third = _start(_plan(parent, tmp_path, "third", max_budget="4"), parent)
             agent_dispatch.wait_until_started(third)
             assert not third.finished, third.result
         sent = [(c["maxBudget"], c["budgetCap"]) for c in daemon.run_commands[-2:]]
@@ -341,7 +343,7 @@ def test_a_child_that_finished_between_planning_and_dispatch_is_not_charged_twic
     assert parent._live_budget_used() == pytest.approx(5.0)
     assert all(job.finished for job in first)
     daemon.gate.clear()
-    job = agent_dispatch.start_agent_job(plan["name"], plan, parent)
+    job = _start(plan, parent)
     try:
         agent_dispatch.wait_until_started(job)
         assert not job.finished, job.result
@@ -401,7 +403,7 @@ def test_a_child_settling_between_the_ledger_and_reservation_reads_is_counted(
         assert [job.budget for job in first] == pytest.approx([5.0])
         plan = _plan(parent, tmp_path, "second")
         parent.pause = True
-        second = agent_dispatch.start_agent_job(plan["name"], plan, parent)
+        second = _start(plan, parent)
         assert parent.ledger_read.wait(30.0)
         daemon.release()
         # The first child's spend waits for the resolution in progress.

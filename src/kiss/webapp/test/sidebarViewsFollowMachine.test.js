@@ -20,7 +20,7 @@
 //   the machine, and the views keep browsing the machine while that
 //   content tab is shown.
 
-/* global require, console, process */
+/* global require */
 
 'use strict';
 
@@ -35,6 +35,7 @@ const {
   stubMonaco,
   fakeMatchMedia,
   pickMachine,
+  ofType: msgs,
 } = require('./simplify2_harness');
 const {
   all,
@@ -42,8 +43,16 @@ const {
   menuItem,
   rightClick,
   toast: toastById,
+  toastButton,
+  overwriteId,
+  makeRunner,
 } = require('./ui_antipattern_harness');
-const {trackWindow, closeWindows, answerListing} = require('./workdir_helpers');
+const {
+  trackWindow,
+  closeWindows,
+  answerListing,
+  rootRows,
+} = require('./workdir_helpers');
 
 // `created` is the harness's recording Monaco's list of the editors in
 // creation order (`created[i].editor`: a suite types into them and reads
@@ -66,14 +75,6 @@ function makePage() {
   });
   trackWindow(win);
   return {win, posted, created};
-}
-
-function msgs(posted, type) {
-  return posted.filter(m => m && m.type === type);
-}
-
-function rootRows(win) {
-  return all(win, '#explorer-tree > .explorer-row.is-root');
 }
 
 function rootPaths(win) {
@@ -156,7 +157,7 @@ function saveButton(win) {
   return view.querySelector('.content-save-btn');
 }
 
-async function testTheExplorerShowsTheMachinesFolder() {
+function testTheExplorerShowsTheMachinesFolder() {
   const {win, posted} = boot();
   pickMachine(win, 'gpu-box');
   // Until the machine's directories arrive there is nothing to show;
@@ -364,12 +365,7 @@ async function testAFileOfTheMachineIsSavedAndReloadedThere() {
     '[data-notification-id^="file-save-conflict-"]',
   );
   assert.ok(toast, 'the conflict toast');
-  click(
-    win,
-    Array.from(toast.querySelectorAll('.kiss-notification-action')).find(
-      b => b.textContent.trim() === 'Reload from disk',
-    ),
-  );
+  click(win, toastButton(toast, 'Reload from disk'));
   const reloads = msgs(posted, 'openFile');
   assert.strictEqual(reloads.length, 1);
   assert.strictEqual(reloads[0].machine, 'gpu-box');
@@ -470,7 +466,7 @@ async function testTheSamePathOnTwoMachinesIsTwoFiles() {
   assert.strictEqual(msgs(posted, 'saveFile')[0].machine, undefined);
 }
 
-async function testAnActionKeepsTheMachineItWasPickedOn() {
+function testAnActionKeepsTheMachineItWasPickedOn() {
   const {win, posted} = boot();
   goToBox(win);
   answerListing(win, posted, '/srv/proj', 'gpu-box', [DIR, FILE]);
@@ -485,12 +481,7 @@ async function testAnActionKeepsTheMachineItWasPickedOn() {
   const toast = win.document.querySelector(
     '[data-notification-id="fs-delete"]',
   );
-  click(
-    win,
-    Array.from(toast.querySelectorAll('.kiss-notification-action')).find(
-      b => b.textContent.trim() === 'Delete',
-    ),
-  );
+  click(win, toastButton(toast, 'Delete'));
   const deletes = msgs(posted, 'fsAction');
   assert.strictEqual(deletes.length, 1);
   assert.strictEqual(
@@ -540,15 +531,10 @@ async function testAnActionKeepsTheMachineItWasPickedOn() {
   // another file, with a question of its own.
   const clash = toastById(
     win,
-    'fs-overwrite:' + JSON.stringify(['gpu-box', '/srv/proj/pkg', 'main.py']),
+    overwriteId('gpu-box', '/srv/proj/pkg', 'main.py'),
   );
   assert.ok(clash, 'the overwrite question is up');
-  click(
-    win,
-    Array.from(clash.querySelectorAll('.kiss-notification-action')).find(
-      b => b.textContent.trim() === 'Replace',
-    ),
-  );
+  click(win, toastButton(clash, 'Replace'));
   const retries = msgs(posted, 'fsAction');
   assert.strictEqual(retries.length, 1, 'Replace retries the move');
   assert.strictEqual(retries[0].action, 'move');
@@ -594,20 +580,12 @@ const tests = [
   ['a home chat sends nothing stamped', testAHomeChatSendsNothingStamped],
 ];
 
+const {test, report} = makeRunner();
+
 (async () => {
-  let failed = 0;
   for (const [name, fn] of tests) {
-    try {
-      await fn();
-      console.log('ok - ' + name);
-    } catch (e) {
-      failed += 1;
-      console.log('not ok - ' + name);
-      console.log(e && e.stack ? e.stack : String(e));
-    } finally {
-      closeWindows();
-    }
+    await test(name, fn);
+    closeWindows();
   }
-  console.log(`\n${tests.length - failed} passed, ${failed} failed`);
-  process.exit(failed ? 1 : 0);
+  report('sidebarViewsFollowMachine');
 })();

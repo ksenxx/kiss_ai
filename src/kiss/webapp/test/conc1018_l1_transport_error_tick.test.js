@@ -12,6 +12,12 @@
 // trying to reach the KISS Sorcar server (N s) ..." and put the
 // "Retry now" button back, so the user never saw the real reason for
 // longer than a second.
+//
+// The server's answer also ends what the PREVIOUS answer left for the
+// close that was to follow it (the refusal flag, the lockout delay): a
+// close that never consumed them used to hand them to the next
+// session, whose first drop was then taken for the refusal's or the
+// lockout's.
 
 'use strict';
 
@@ -42,6 +48,15 @@ function overlayText(window) {
 
 function retryButton(window) {
   return window.document.getElementById('kiss-server-loading-action');
+}
+
+// The daemonStatus messages the shim dispatches to the app from now on.
+function watchStatuses(window) {
+  const statuses = [];
+  window.addEventListener('message', ev => {
+    if (ev.data && ev.data.type === 'daemonStatus') statuses.push(ev.data);
+  });
+  return statuses;
 }
 
 // Run every armed, not yet cleared overlay tick once.
@@ -133,6 +148,54 @@ function main() {
       'no overlay tick is left running after the server answered',
     );
     assert.strictEqual(retryButton(window), null, 'no Retry now button');
+  }
+  {
+    // Remote access is turned off while the user sits at the password
+    // dialog: the refusal's close keeps the dialog (and never consumes
+    // the refusal flag).  Once a session is up, its first drop must be
+    // reported like any other.
+    const {window, sockets, timers} = page();
+    const statuses = watchStatuses(window);
+    sockets[0].fireOpen();
+    sockets[0].fireMessage({type: 'auth_required'});
+    window.document.getElementById('auth-modal-input').value = 'pw';
+    window.document.getElementById('auth-modal-ok').click();
+    sockets[0].fireMessage({
+      type: 'error',
+      text: 'Remote access is turned off.',
+    });
+    sockets[0].fireClose();
+    const s1 = openNextSocket(sockets, timers, 0);
+    s1.fireOpen();
+    s1.fireMessage({type: 'auth_ok'});
+    statuses.length = 0;
+    s1.fireClose();
+    assert.deepStrictEqual(
+      statuses.map(s => [s.connected, s.reconnecting]),
+      [[false, true]],
+      'the drop of the session that followed a refusal is reported',
+    );
+  }
+  {
+    // auth_locked, then a wake-up listener replaces the socket before
+    // its onclose runs.  The new socket is admitted: its drop is an
+    // ordinary reconnect, not the lockout's.
+    const {window, sockets} = page();
+    const statuses = watchStatuses(window);
+    sockets[0].fireOpen();
+    sockets[0].fireMessage({type: 'auth_locked', retry_after: 120});
+    sockets[0].readyState = window.WebSocket.CLOSED;
+    window.dispatchEvent(new window.Event('online'));
+    assert.strictEqual(sockets.length, 2, 'the wake-up opened a new socket');
+    sockets[1].fireOpen();
+    sockets[1].fireMessage({type: 'auth_ok'});
+    statuses.length = 0;
+    sockets[1].fireClose();
+    assert.deepStrictEqual(
+      statuses.map(s => [s.connected, s.reconnecting]),
+      [[false, true]],
+      'the drop is a reconnect, not a lockout',
+    );
   }
   console.log('conc1018_l1_transport_error_tick: ok');
 }

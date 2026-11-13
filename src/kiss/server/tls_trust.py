@@ -21,7 +21,7 @@ current user:
 Nothing here needs root: the Linux system store is only useful for
 non-browser clients (curl, python) and the command for it is printed
 rather than run.  Only the CA *certificate* is installed; the CA key never
-leaves ``~/.kiss/tls/``.
+leaves ``$KISS_HOME/tls/``.
 """
 
 from __future__ import annotations
@@ -49,10 +49,16 @@ def ca_nickname(ca_cert_path: Path) -> str:
 
 
 def _run(argv: list[str]) -> tuple[int, str]:
-    """Run *argv*, returning ``(returncode, combined output)``; never raises."""
+    """Run *argv*, returning ``(returncode, combined output)``; never raises.
+
+    Output in another encoding than the locale's (a localized Windows
+    ``certutil`` writes the OEM code page) is decoded with replacement
+    characters instead of raising ``UnicodeDecodeError``.
+    """
     try:
         proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=_CMD_TIMEOUT_S, check=False,
+            argv, capture_output=True, text=True, errors="replace",
+            timeout=_CMD_TIMEOUT_S, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, str(exc)
@@ -70,12 +76,13 @@ def nss_databases(home: Path) -> list[str]:
         home / ".local" / "share" / "pki" / "nssdb",
         home / "snap" / "chromium" / "current" / ".pki" / "nssdb",
     ]
-    for pattern in (
-        home / ".mozilla" / "firefox" / "*",
-        home / "snap" / "firefox" / "common" / ".mozilla" / "firefox" / "*",
-        home / "Library" / "Application Support" / "Firefox" / "Profiles" / "*",
+    for profiles in (
+        home / ".mozilla" / "firefox",
+        home / "snap" / "firefox" / "common" / ".mozilla" / "firefox",
+        home / "Library" / "Application Support" / "Firefox" / "Profiles",
     ):
-        candidates.extend(Path(p) for p in sorted(glob.glob(str(pattern))))
+        # Only the profile names are a pattern: *home* is taken as it is spelled.
+        candidates.extend(profiles / name for name in sorted(glob.glob("*", root_dir=profiles)))
     specs: list[str] = []
     for directory in candidates:
         if (directory / "cert9.db").is_file():
@@ -169,7 +176,7 @@ def trust_local_ca(
     """Install the CA certificate into every trust store of the current user.
 
     Args:
-        ca_cert_path: The PEM CA certificate (``~/.kiss/tls/ca.pem``).
+        ca_cert_path: The PEM CA certificate (``$KISS_HOME/tls/ca.pem``).
         home: Home directory to scan (defaults to the current user's).
         platform: ``sys.platform`` override for tests.
 

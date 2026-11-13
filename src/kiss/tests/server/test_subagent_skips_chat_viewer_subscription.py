@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import threading
 import unittest
+import uuid
 from typing import Any
 
+import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
@@ -78,5 +80,35 @@ class TestSubagentSkipsChatViewerSubscription(unittest.TestCase):
             "top-task", CHAT_ID, source_tab_id="launcher-tab", start_ms=123,
         )
         assert VIEWER_TAB in self._subscribers("top-task")
+        assert "launcher-tab" in self._subscribers("top-task")
         types = [e.get("type") for e in self._viewer_events()]
         assert types == ["clear", "status"], types
+
+    def test_launcher_moved_to_another_chat_is_not_resubscribed(self) -> None:
+        """A row allocated after a replay bound the launching tab to another chat stays out of it.
+
+        The replay's commit drops the tab's subscription to its own run;
+        the run's next row (its first one when the replay landed in the
+        run's setup, a later subtask's otherwise) used to subscribe the
+        tab again, and the run streamed into the other chat's transcript.
+        """
+        launcher = f"launcher-{uuid.uuid4().hex}"
+        self.addCleanup(self.server._close_tab, launcher)
+        _other_task, other_chat = th._add_task("Task of another chat")
+        # What ``_cmd_run`` leaves for a run in its setup: the tab views
+        # the run's chat and owns its state, which has no row yet.
+        with self.server._state_lock:
+            self.server._tab_chat_views[launcher] = CHAT_ID
+        agent_state.register(
+            AgentState(
+                "rowless-key", chat_id=CHAT_ID, tab_id=launcher,
+                server_owned=True, is_task_active=True,
+            ),
+        )
+        self.server._cmd_resume_session({"chatId": other_chat, "tabId": launcher})
+        self.server._on_run_task_id_allocated(
+            "late-task", CHAT_ID, source_tab_id=launcher, start_ms=123,
+        )
+        assert launcher not in self._subscribers("late-task")
+        # The chat's own viewers still follow the run.
+        assert VIEWER_TAB in self._subscribers("late-task")

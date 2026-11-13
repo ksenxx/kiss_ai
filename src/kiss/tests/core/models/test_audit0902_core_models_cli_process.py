@@ -135,9 +135,9 @@ def _writer_threads() -> list[threading.Thread]:
     return [t for t in threading.enumerate() if t.name == "cli-stdin-write"]
 
 
-def _open_fds() -> int:
-    """Number of descriptors this process holds (Linux ``/proc``; else 0)."""
-    return len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else 0
+def _open_fds() -> set[str]:
+    """The descriptors this process holds (Linux ``/proc``; else none)."""
+    return set(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else set()
 
 _CLAUDE_GRANDCHILD_HOLDS_STDIN = _SPAWN_GRANDCHILD + """
     import json
@@ -224,7 +224,8 @@ class TestWriterThreadDoesNotHoldTheTurnHostage:
         assert not _writer_threads(), (
             "generate() returned with the stdin writer still parked in write(2)"
         )
-        assert _open_fds() == fds_before, "the turn leaked a descriptor"
+        # New ones only: one of an earlier test may be closed while this turn runs.
+        assert not _open_fds() - fds_before, "the turn leaked a descriptor"
 
     def test_claude_reply_is_returned_while_a_grandchild_holds_stdin(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -259,6 +260,40 @@ class TestCloseBeforeAnyPromptWasSent:
         assert proc._proc.stdin is not None and proc._proc.stdin.closed
         assert proc._proc.stdout is not None and proc._proc.stdout.closed
         assert proc._proc.stderr is not None and proc._proc.stderr.closed
+
+
+class TestOutputThatArrivedIsNotSilence:
+    """The timeout bounds the child's silence, not the time the reader takes over a line."""
+
+    def test_a_reader_slower_than_the_timeout_gets_the_queued_lines(self) -> None:
+        child = "import sys; sys.stdin.read(); print('a\\nb\\nc')"
+        received: list[str] = []
+        with _CLIProcess([sys.executable, "-c", child], "probe", 3.0) as proc:
+            proc.send_prompt("go")
+            for line in proc.lines():
+                received.append(line.strip())
+                if len(received) == 1:
+                    time.sleep(3.3)  # past the timeout; "b", "c" and the end are queued
+        assert received == ["a", "b", "c"]
+
+
+class TestACommandLineThatCannotBeSpawned:
+    """Whatever ``Popen`` raises for the command line, the turn reports a start failure.
+
+    ``Popen`` raises ``ValueError`` for arguments it cannot pass on (a NUL
+    byte); only ``OSError`` was caught, so the constructor found no child
+    and raised ``IndexError`` while the spawn thread's traceback went to
+    stderr.
+    """
+
+    @pytest.mark.parametrize(
+        "args",
+        [["kiss-no-such-cli"], [sys.executable, "-c", "pass", "nul\0byte"]],
+        ids=["missing-executable", "nul-in-argv"],
+    )
+    def test_the_failure_is_a_kiss_error_naming_the_cli(self, args: list[str]) -> None:
+        with pytest.raises(KISSError, match="Failed to start probe"):
+            _CLIProcess(args, "probe", 5.0)
 
 
 @posix_only("death by signal is reported as a negative exit status")

@@ -21,6 +21,7 @@ import shlex
 import shutil
 import sqlite3
 import stat
+import subprocess
 import tarfile
 import threading
 import time
@@ -89,8 +90,10 @@ shift
 case "$host" in
     dead) echo "ssh: connect to host dead: Connection refused" >&2; exit 255 ;;
     flaky*)
-        count=$(cat "$REMOTE_ROOT/$host.count" 2>/dev/null || echo 0)
-        echo $((count + 1)) > "$REMOTE_ROOT/$host.count"
+        # One byte appended per call, never a rewrite: calls made at once are each counted.
+        # A call is refused once the count, its own byte included, is past the limit.
+        printf x >> "$REMOTE_ROOT/$host.count"
+        count=$(( $(wc -c < "$REMOTE_ROOT/$host.count") - 1 ))
         limit_var="FLAKY_AFTER_$host"
         if [ "$count" -ge "${!limit_var:-99}" ]; then
             echo "ssh: connection to $host closed" >&2; exit 255
@@ -124,6 +127,9 @@ class Sandbox:
         monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
         monkeypatch.setenv("REMOTE_ROOT", str(root / "remotes"))
         monkeypatch.setenv("KISS_HOME", str(self.home))
+        # The host names a sync learns are also kept in this process-wide map: a name
+        # an earlier test learnt would not be saved to this home, nor ours forgotten.
+        monkeypatch.setattr(machine_registry, "_hosts", {})
         self.hosts = hosts
         for host in hosts:
             (root / "remotes" / host / ".kiss").mkdir(parents=True)
@@ -144,9 +150,9 @@ class Sandbox:
         """The memory of *host*, or the local one."""
         return MemoryDir(self.kiss_dir(host) / "memories")
 
-    def run(self, *hosts: str, dry_run: bool = False) -> list[peer_sync.PeerReport]:
-        """Sync the local home with the given hosts (all by default) and return the reports."""
-        return PeerSync(self.machines(*hosts), dry_run=dry_run, home=self.home).run()
+    def run(self, dry_run: bool = False) -> list[peer_sync.PeerReport]:
+        """Sync the local home with every host and return the reports."""
+        return PeerSync(self.machines(), dry_run=dry_run, home=self.home).run()
 
 
 def make_db(path: Path, tasks: dict[str, dict[str, Any]]) -> None:
@@ -155,7 +161,7 @@ def make_db(path: Path, tasks: dict[str, dict[str, Any]]) -> None:
     Each task maps its id to options: ``events`` (count, default 3),
     ``result`` (default ``"done"``), ``end_ts`` (default 2.0),
     ``timestamp`` (start, default 1.0), ``event_ts`` (the events' time,
-    default the start), ``chat_id``.
+    default the start).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
@@ -165,8 +171,8 @@ def make_db(path: Path, tasks: dict[str, dict[str, Any]]) -> None:
         events = int(options.get("events", 3))
         event_ts = float(options.get("event_ts", start))
         conn.execute(
-            "INSERT INTO task_history(id, timestamp, task, result, end_ts, has_events, chat_id)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO task_history(id, timestamp, task, result, end_ts, has_events)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
             (
                 task_id,
                 start,
@@ -174,7 +180,6 @@ def make_db(path: Path, tasks: dict[str, dict[str, Any]]) -> None:
                 options.get("result", "done"),
                 options.get("end_ts", 2.0),
                 int(events > 0),
-                options.get("chat_id", ""),
             ),
         )
         for seq in range(events):
@@ -308,6 +313,7 @@ def test_every_machine_ends_up_with_the_union(
 
     # A second run has nothing to carry.
     again = box.run()
+    assert [report.name for report in again] == ["alpha", "beta"]
     for report in again:
         assert report.pulled["events_inserted"] == 0 and report.pushed["events_inserted"] == 0
         assert report.memory_pulled == {"entries": 0} and report.memory_pushed == {"entries": 0}
@@ -735,6 +741,27 @@ def test_a_machine_that_cannot_be_reached_does_not_stop_the_others(
     assert not sync.control_dir.exists()
 
 
+def test_the_stand_in_ssh_refuses_every_call_past_a_flaky_machines_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Calls made at once are each counted: none past the limit gets through.
+
+    The pull wave calls a machine twice at once (the manifest beside the
+    extract).  A count that was read, incremented and written back could be
+    reset by two such calls, and flaky2 above, dead by then, was pulled from.
+    """
+    Sandbox(tmp_path, monkeypatch, "flaky3")
+    monkeypatch.setenv("FLAKY_AFTER_flaky3", "2")
+    call = ["ssh", "me@flaky3", "echo through"]
+    for _ in range(2):
+        assert subprocess.run(call, capture_output=True, timeout=60).stdout == b"through\n"
+    burst = ["bash", "-c", "for i in {1..32}; do ssh me@flaky3 echo through & done; wait"]
+    # Ten bursts: on a saturated machine one burst caught the old count only 6 times in 10.
+    for _ in range(10):
+        refused = subprocess.run(burst, capture_output=True, timeout=60)
+        assert refused.stdout == b"" and refused.stderr.count(b"flaky3 closed") == 32
+
+
 def test_dry_run_changes_nothing_and_counts_what_would_travel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -831,15 +858,18 @@ def test_machines_busy_writing_during_the_sync_lose_nothing(
     # daemon: a thread that never ends fails the assertions below, not pytest's exit
     threads = [threading.Thread(target=hammer, args=(host,), daemon=True) for host in writes]
     threads.append(threading.Thread(target=lift_gate, daemon=True))
-    for thread in threads:
-        thread.start()
+    # Started inside the try, so that a start that fails (the runner out of threads) leaves
+    # no writer running.  No test: failing a later start alone takes a test double.
     try:
+        for thread in threads:
+            thread.start()
         reports = box.run()
     finally:
         stop.set()
         deadline = time.monotonic() + 30
         for thread in threads:
-            thread.join(max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():  # one that never started cannot be joined
+                thread.join(max(0.0, deadline - time.monotonic()))
 
     assert errors == []
     assert [thread.is_alive() for thread in threads] == [False] * 4
@@ -857,14 +887,76 @@ def test_machines_busy_writing_during_the_sync_lose_nothing(
         assert report.held_back_there == [f"{report.name}-live"] and report.held_back_here == [
             "local-live"
         ]
-    # Every page everywhere is a whole page: "first" or some "rewrite N" its writer
-    # completed, never a torn one.
+    # Every writer's page is on every machine, and each is a whole page: "first" or some
+    # "rewrite N" its writer completed, never a torn one.
     for host in ("", "alpha", "beta"):
-        for page in box.memory(host).root.glob("*.md"):
-            body = page_text(box.memory(host), page.stem)
-            writer = page.stem.removesuffix("-page").replace("local", "")
+        pages = sorted(page.stem for page in box.memory(host).root.glob("*.md"))
+        assert pages == ["alpha-page", "beta-page", "local-page"], host
+        for stem in pages:
+            body = page_text(box.memory(host), stem)
+            writer = stem.removesuffix("-page").replace("local", "")
             whole = {"first\n", *(f"rewrite {i}\n" for i in range(writes[writer]))}
-            assert body in whole, (host, page, body)
+            assert body in whole, (host, stem, body)
+
+
+def test_pages_deleted_and_written_again_during_the_sync_fail_no_machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agents deleting a page and writing it again everywhere during the sync: no error.
+
+    A deletion writes the tombstone and removes the page; writing the page
+    again publishes it and removes the tombstone.  The sync lists and reads
+    the memories unlocked, and an entry it had listed, gone before it was
+    read, used to fail that machine's sync with "No such file or
+    directory".  Here every machine's agent flips one page between deleted
+    and live as fast as it can while the whole sync runs six times.
+    """
+    hosts = ("", "alpha", "beta")
+    box = Sandbox(tmp_path, monkeypatch, "alpha", "beta")
+    for host in hosts:
+        make_db(box.db(host), {f"{host or 'local'}-0": {"events": 2}})
+        box.memory(host).write(f"{host or 'local'}-steady", "kept\n")
+        box.memory(host).write(f"{host or 'local'}-flip", "body\n")
+    stop = threading.Event()
+    errors: list[BaseException] = []
+    flips = {host: 0 for host in hosts}  # rounds each agent completed
+
+    def agent(host: str) -> None:
+        memory, name = box.memory(host), f"{host or 'local'}-flip"
+        try:
+            while not stop.is_set():
+                memory.delete(name)
+                memory.write(name, "body\n")
+                flips[host] += 1
+        except BaseException as exc:  # noqa: BLE001 — reported by the test, not lost on the thread
+            errors.append(exc)
+
+    # daemon: a thread that never ends fails the assertions below, not pytest's exit
+    threads = [threading.Thread(target=agent, args=(host,), daemon=True) for host in hosts]
+    try:
+        for thread in threads:
+            thread.start()
+        reports = [report for _ in range(6) for report in box.run()]
+    finally:
+        stop.set()
+        deadline = time.monotonic() + 30
+        for thread in threads:
+            if thread.is_alive():  # one that never started cannot be joined
+                thread.join(max(0.0, deadline - time.monotonic()))
+
+    assert errors == []
+    assert [thread.is_alive() for thread in threads] == [False] * 3
+    # Every agent kept flipping its page while the twelve peer syncs ran.
+    assert min(flips.values()) >= len(reports) == 12, flips
+    assert [report.error for report in reports] == [""] * 12
+    for host in hosts:
+        memory = box.memory(host)
+        # The page nobody touches reached every machine, and no page anywhere is torn.
+        steady = {page.stem for page in memory.root.glob("*-steady.md")}
+        assert steady == {"alpha-steady", "beta-steady", "local-steady"}, host
+        for page in memory.root.glob("*.md"):
+            assert page_text(memory, page.stem) in ("kept\n", "body\n"), (host, page)
+        assert not list(memory.root.glob("*.incoming"))
 
 
 def test_a_hostile_stream_cannot_write_outside_the_memory(tmp_path: Path) -> None:
@@ -913,14 +1005,23 @@ def test_a_hostile_stream_cannot_write_outside_the_memory(tmp_path: Path) -> Non
 
 
 def test_pack_skips_what_is_not_a_page_or_vanished(tmp_path: Path) -> None:
-    """pack leaves out invalid names, symlinks and files gone since the fingerprints were taken."""
+    """pack leaves out invalid names, symlinks, directories and files that are not there.
+
+    A file is not there when it is gone since the fingerprints were taken
+    (``gone.md``), or when it lies under what is a file here and a domain
+    memory on the other machine (``blocked/page.md``).
+    """
     memory = tmp_path / "memories"
     memory.mkdir()
     (memory / "real.md").write_text("---\nupdated: 2026-01-01T00:00:00Z\n---\nx\n")
     (memory / "link.md").symlink_to(memory / "real.md")
+    (memory / "folder.md").mkdir()
+    (memory / "blocked").write_text("a file where the other machine has a domain memory\n")
     stream = io.BytesIO()
     written = memory_delta.pack(
-        memory, ["real.md", "link.md", "gone.md", "../up.md", "real.md"], stream
+        memory,
+        ["real.md", "link.md", "gone.md", "folder.md", "blocked/page.md", "../up.md", "real.md"],
+        stream,
     )
     assert written == 1
     stream.seek(0)
@@ -933,9 +1034,132 @@ def test_pack_skips_what_is_not_a_page_or_vanished(tmp_path: Path) -> None:
     }
 
 
+def test_pack_sends_whole_entries_while_an_agent_rewrites_and_deletes_them(
+    tmp_path: Path,
+) -> None:
+    """An entry replaced or deleted while pack reads it travels whole or not at all.
+
+    An agent publishes a page by an atomic rename at any moment of a pack.
+    pack used to take an entry's size from its path and to open the file
+    afterwards (``TarFile.add``): a page replaced in between by a longer one
+    arrived cut short, a shorter one aborted the stream ("unexpected end of
+    data"), and an entry deleted in between raised.  Here an agent rewrites
+    a page with bodies of two lengths, deleting it every fifth round, while
+    pack and unpack run a thousand times, and until both bodies have
+    travelled: the page did change under pack.
+    """
+    memory = MemoryDir(tmp_path / "memories")
+    bodies = ("short\n", "a much longer body\n" * 40)
+    memory.write("page", bodies[0])
+    received = tmp_path / "received"
+    page, tombstone = received / "page.md", received / ".tombstones" / "page"
+    entries = ["page.md", ".tombstones/page"]
+
+    # A quiet memory first: the page travels with its bytes and its modification time.
+    stream = io.BytesIO()
+    assert memory_delta.pack(memory.root, entries, stream) == 1
+    stream.seek(0)
+    assert memory_delta.unpack(stream, received) == 1
+    source = memory.root / "page.md"
+    assert page.read_bytes() == source.read_bytes()
+    assert page.stat().st_mtime == pytest.approx(source.stat().st_mtime, abs=1e-3)
+    page.unlink()
+
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def agent() -> None:
+        turn = 0
+        try:
+            while not stop.is_set():
+                turn += 1
+                if turn % 5 == 0:
+                    memory.delete("page")
+                memory.write("page", bodies[turn % 2])
+        except BaseException as exc:  # noqa: BLE001 — reported by the test, not lost on the thread
+            errors.append(exc)
+
+    # daemon: a thread that never ends fails the assertions below, not pytest's exit
+    thread = threading.Thread(target=agent, daemon=True)
+    thread.start()
+    travelled: set[str] = set()
+    packs = 0
+    deadline = time.monotonic() + 60
+    try:
+        while (packs < 1000 or len(travelled) < 2) and time.monotonic() < deadline:
+            packs += 1
+            stream = io.BytesIO()
+            written = memory_delta.pack(memory.root, entries, stream)
+            stream.seek(0)
+            assert memory_delta.unpack(stream, received) == written
+            if page.is_file():
+                body = page.read_text().split("---\n", 2)[-1]
+                assert body in bodies, body
+                travelled.add(body)
+                page.unlink()
+            if tombstone.is_file():
+                # The whole deletion stamp: strptime rejects a cut or an empty one.
+                time.strptime(tombstone.read_text(), "%Y-%m-%dT%H:%M:%SZ\n")
+                tombstone.unlink()
+    finally:
+        stop.set()
+        thread.join(30)
+    assert errors == [] and not thread.is_alive()
+    assert packs >= 1000 and travelled == set(bodies)
+
+
+def test_fingerprints_list_a_memory_whose_page_is_deleted_and_written_again_meanwhile(
+    tmp_path: Path,
+) -> None:
+    """Listing a memory does not fail when an entry is removed between its listing and its reading.
+
+    fingerprints reads the memory unlocked.  A page deleted, or a tombstone
+    removed because its page was written again, after it was listed used to
+    raise FileNotFoundError: out of the page's or the tombstone's digest,
+    or out of ``tombstones`` reading the deletion stamp.  Here an agent
+    deletes a page and writes it again as fast as it can while the memory
+    is listed three hundred times, and until the page has been listed both
+    live and deleted: the memory did change under the listing.
+    """
+    memory = MemoryDir(tmp_path / "memories")
+    memory.write("steady", "kept\n")
+    memory.write("page", "body\n")
+    steady = memory_delta.fingerprints(memory.root)["steady.md"]
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def agent() -> None:
+        try:
+            while not stop.is_set():
+                memory.delete("page")
+                memory.write("page", "body\n")
+        except BaseException as exc:  # noqa: BLE001 — reported by the test, not lost on the thread
+            errors.append(exc)
+
+    # daemon: a thread that never ends fails the assertions below, not pytest's exit
+    thread = threading.Thread(target=agent, daemon=True)
+    thread.start()
+    seen: set[str] = set()
+    listings = 0
+    deadline = time.monotonic() + 60
+    try:
+        while (listings < 300 or len(seen) < 2) and time.monotonic() < deadline:
+            listings += 1
+            found = memory_delta.fingerprints(memory.root)
+            # The page nobody touches is always listed, whole.
+            assert found.pop("steady.md") == steady
+            # The other is listed live, deleted, or (caught between the two) not at all.
+            assert set(found) in ({"page.md"}, {".tombstones/page"}, set()), found
+            seen.update(found)
+    finally:
+        stop.set()
+        thread.join(30)
+    assert errors == [] and not thread.is_alive()
+    assert listings >= 300 and seen == {"page.md", ".tombstones/page"}
+
+
 def test_memory_delta_script_modes_run_with_a_bare_python(tmp_path: Path) -> None:
     """The shipped script's three modes work from the command line as the remote half runs them."""
-    import subprocess
     import sys
 
     memory = tmp_path / "memories"
@@ -973,7 +1197,7 @@ def test_memory_delta_script_modes_run_with_a_bare_python(tmp_path: Path) -> Non
 
 
 def test_memory_delta_runs_as_shipped_text_with_its_helper_inline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Exec'd from text with SHIPPED_SOURCES bound, as the ssh bootstrap does, every mode works."""
     namespace: dict[str, object] = {
@@ -990,9 +1214,12 @@ def test_memory_delta_runs_as_shipped_text_with_its_helper_inline(
 
     def run(argv: list[str], stdin: bytes = b"") -> tuple[int, bytes]:
         out = io.TextIOWrapper(io.BytesIO())
-        monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(stdin)))
-        monkeypatch.setattr("sys.stdout", out)
-        status = main(argv)  # type: ignore[operator]
+        # Put back as the call returns: an undo left to the test's teardown runs after
+        # ``capsys`` has closed its capture file and makes that closed file ``sys.stdout``.
+        with pytest.MonkeyPatch.context() as streams:
+            streams.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(stdin)))
+            streams.setattr("sys.stdout", out)
+            status = main(argv)  # type: ignore[operator]
         out.flush()
         return status, out.buffer.getvalue()  # type: ignore[attr-defined]
 
@@ -1039,8 +1266,15 @@ def test_ssh_peer_commands_ride_the_master_connection() -> None:
 
 
 @pytest.mark.skipif(shutil.which("ssh") is None, reason="no ssh client on this host")
-def test_ssh_peer_reports_a_refused_master_connection() -> None:
+def test_ssh_peer_reports_a_refused_master_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``open()`` runs the real ``ssh``; a host that refuses is a ``PeerError``, not a hang."""
+    # An empty configuration of the test's own: the developer's ``~/.ssh/config`` (a
+    # proxy for every host, say) must not decide what this login dials.
+    config = tmp_path / "ssh_config"
+    config.write_text("")
+    monkeypatch.setenv(machine_registry.SSH_CONFIG_ENV, str(config))
     control = control_directory()
     try:
         with pytest.raises(PeerError, match="cannot connect"):

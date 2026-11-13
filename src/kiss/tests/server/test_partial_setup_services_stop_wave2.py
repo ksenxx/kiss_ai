@@ -33,12 +33,15 @@ import asyncio
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
+from kiss.server import agent_state, web_server
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import posix_only
 from kiss.tests.server.conftest import find_free_port
@@ -151,17 +154,59 @@ class _FlagClaimFailingServer(RemoteAccessServer):
 
 
 class TestLateSetupFailureRollsBackTheLoops(unittest.IsolatedAsyncioTestCase):
-    """A setup failing after its loops are armed cancels them and unsubscribes."""
+    """A setup failing after its loops are armed cancels them and unsubscribes.
+
+    It also stops the agent tasks: the listeners take commands from the
+    moment the endpoint file is written, long before the setup ends, and
+    a task started meanwhile used to keep running on a server that is
+    done for (a failed ``start_async`` cannot be started again).
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="kiss-late-setup-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        # A registered agent task that runs until it is told to stop.
+        self.stop = threading.Event()
+        state = agent_state.AgentState(
+            "late-setup-task", chat_id="late-setup-chat", tab_id="late-setup-tab",
+            server_owned=True, stop_event=self.stop, is_task_active=True,
+        )
+        state.task_thread = self.worker = threading.Thread(target=self.stop.wait, daemon=True)
+        agent_state.register(state)
+        self.addCleanup(agent_state.unregister, "late-setup-task", state)
+        self.addCleanup(self.stop.set)
+        self.worker.start()
+
+    def _server(self, cls: type[RemoteAccessServer], port: int) -> RemoteAccessServer:
+        return cls(
+            host="127.0.0.1", port=port, work_dir=str(self.tmp),
+            url_file=self.tmp / "remote-url.json",
+            local_endpoint_file=self.tmp / "sorcar-local.json",
+        )
+
+    async def test_start_that_never_listened_leaves_the_tasks_alone(self) -> None:
+        # The task registry is the process's: a server whose port is taken
+        # admitted no task, and those in it are the serving server's.
+        busy = socket.socket()
+        self.addCleanup(busy.close)
+        busy.bind(("127.0.0.1", 0))
+        busy.listen(1)
+        self.addCleanup(
+            setattr, web_server, "_BIND_RETRY_ATTEMPTS", web_server._BIND_RETRY_ATTEMPTS,
+        )
+        web_server._BIND_RETRY_ATTEMPTS = 1
+        server = self._server(RemoteAccessServer, busy.getsockname()[1])
+        with self.assertRaises(SystemExit):
+            await server.start_async()
+        self.assertFalse(self.stop.is_set(), "a server that never listened stopped a task")
 
     async def test_failed_startup_leaves_no_loop_or_subscriber_behind(self) -> None:
-        tmp = Path(tempfile.mkdtemp(prefix="kiss-late-setup-"))
-        self.addCleanup(shutil.rmtree, tmp, True)
-        server = _FlagClaimFailingServer(
-            host="127.0.0.1", port=find_free_port(), work_dir=str(tmp),
-            url_file=tmp / "remote-url.json", local_endpoint_file=tmp / "sorcar-local.json",
-        )
+        server = self._server(_FlagClaimFailingServer, find_free_port())
         with self.assertRaises(PermissionError):
             await server.start_async()
+        self.assertTrue(self.stop.is_set(), "the failed start left an agent task running")
+        self.worker.join(5)
+        self.assertFalse(self.worker.is_alive())
         await asyncio.sleep(0.1)
         self.assertIsNone(server._ws_server)
         self.assertEqual(

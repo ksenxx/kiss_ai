@@ -32,6 +32,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from kiss.core.config import read_remote_urls
+from kiss.server.standalone_app import read_loopback_url
 from kiss.server.web_server import _read_url_from_file
 
 
@@ -63,3 +65,16 @@ class TestReadUrlFromFileNonDictJson:
 
     def test_missing_file_returns_none(self, tmp_path: Path) -> None:
         assert _read_url_from_file(tmp_path / "nope.json") is None
+
+    def test_json_nested_past_the_recursion_limit_names_no_url(self, tmp_path: Path) -> None:
+        """The readers of the file share one guard, ``config.read_remote_urls``.
+
+        ``json.loads`` answers such a file with ``RecursionError``, which is
+        not a ``ValueError``: the app launcher's reader crashed on it while
+        this module's did not.
+        """
+        url_file = tmp_path / "remote-url.json"
+        url_file.write_text("[" * 200_000)
+        assert read_remote_urls(url_file) == {}
+        assert _read_url_from_file(url_file) is None
+        assert read_loopback_url(url_file) is None

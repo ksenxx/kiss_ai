@@ -122,9 +122,9 @@ body.remote-chat {
 
   /*
    * Settings drawer width on desktop — wide enough for the Tips,
-   * Git Commit, Update, Reset Server, and Update Models actions to
-   * stay on one line across font metrics, while remaining a narrow
-   * drawer instead of the 90vw mobile sheet.
+   * Update, Reset Server, and Update Models actions to stay on one
+   * line across font metrics, while remaining a narrow drawer instead
+   * of the 90vw mobile sheet.
    */
   --settings-panel-w: 620px;
 
@@ -386,14 +386,13 @@ body.remote-chat #send-btn {
   height: 36px;
 }
 
-body.remote-chat #send-btn:hover {
+body.remote-chat #send-btn:hover,
+body.remote-chat #stop-btn:hover {
   background: var(--send-hover-bg);
-  color: var(--send-fg);
 }
 
 body.remote-chat #send-btn:disabled {
   background: var(--send-disabled-bg);
-  color: var(--send-fg);
   opacity: 1;
 }
 
@@ -440,29 +439,12 @@ body.remote-chat .sidebar-item:hover {
   background: var(--hover);
 }
 
-body.remote-chat .search-wrap input {
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  color: var(--fg);
-}
+/* The model list's search field: round ends on its bottom rule and
+   its focus outline. */
+body.remote-chat #model-search { border-radius: var(--radius-pill); }
 
-/* The flat-list switch beside the search box: a pill like the box. */
-body.remote-chat #history-view-toggle {
-  background: var(--surface2);
-  border-radius: var(--radius-pill);
-}
-
-body.remote-chat .config-label input[type="text"],
-body.remote-chat .config-label input[type="password"],
-body.remote-chat .config-label input[type="number"],
-body.remote-chat .config-label select,
-body.remote-chat .config-label textarea {
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  color: var(--fg);
-}
+/* The flat-list switch beside the History search box: round like it. */
+body.remote-chat #history-view-toggle { border-radius: var(--radius-pill); }
 
 body.remote-chat .config-update-btn {
   border-radius: var(--radius-pill);
@@ -490,7 +472,7 @@ body.remote-chat .sidebar-confirm-no {
   border-color: var(--border-input);
 }
 
-body.remote-chat .sidebar-confirm-yes:hover,
+body.remote-chat .sidebar-confirm-yes:hover:not(:disabled),
 body.remote-chat .sidebar-confirm-no:hover {
   background: var(--hover);
 }
@@ -722,7 +704,6 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
   body.remote-chat.remote-desktop #sidebar.open {
     transform: none;
     width: var(--sidebar-w, var(--sidebar-default-w));
-    border-right: 1px solid var(--border-soft);
 
     /* The panel may be dragged as narrow as --sidebar-min-w (10px).
        With box-sizing:border-box the fixed 2 x 16px padding of
@@ -1037,7 +1018,6 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
 
   body.remote-chat.remote-desktop #content-tab-area {
     grid-area: content;
-    min-height: 0;
     min-width: 0;
     border-left: 1px solid var(--border);
   }

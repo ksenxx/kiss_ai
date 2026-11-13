@@ -20,9 +20,6 @@ from types import SimpleNamespace
 import pytest
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.openai_compatible_model import (
-    OpenAICompatibleModel,
-)
 from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 from kiss.tests.core.models.test_simplify_models_regr_oai import (  # noqa: F401
     API_KEY,
@@ -33,15 +30,6 @@ from kiss.tests.core.models.test_simplify_models_regr_oai import (  # noqa: F401
     _fco,
     make_v2,
 )
-
-
-def test_finalize_stream_response() -> None:
-    usage_chunk = SimpleNamespace(usage=object())
-    last = SimpleNamespace(usage=None)
-    assert OpenAICompatibleModel._finalize_stream_response(usage_chunk, last) is usage_chunk
-    assert OpenAICompatibleModel._finalize_stream_response(None, last) is last
-    with pytest.raises(KISSError):
-        OpenAICompatibleModel._finalize_stream_response(None, None)
 
 
 def test_shape_responses_kwargs() -> None:

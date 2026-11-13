@@ -70,12 +70,9 @@ kiss_dir = tmp / ".kiss"
 kiss_dir.mkdir(parents=True, exist_ok=True)
 th._KISS_DIR = kiss_dir
 th._DB_PATH = kiss_dir / "history.db"
-th._db_conn = None
 
-from kiss.server.web_server import (
-    RemoteAccessServer,
-    _generate_self_signed_cert,
-)
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.local_ws import _generate_self_signed_cert
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 certfile = tmp / "cert.pem"

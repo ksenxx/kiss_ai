@@ -381,12 +381,19 @@ def test_parse_non_streaming_dict_response() -> None:
                 "arguments": "{}",
                 "id": "i1",
             },
+            {"type": "function_call", "call_id": "c2", "name": "g", "id": "i2"},
+            {"type": "function_call", "call_id": "c3", "name": "h", "id": "i3", "arguments": None},
+            {"type": "function_call", "call_id": "c4", "name": "k", "id": "i4", "arguments": ""},
         ]
     )
     content, tcs = OpenAICompatibleModel2._parse_non_streaming(resp)
     assert content == "hellono"
+    # No (or null) arguments stay absent, so a streamed call keeps its own.
     assert tcs == [
-        {"id": "c1", "name": "f", "arguments": "{}", "item_id": "i1", "output_index": "1"}
+        {"id": "c1", "name": "f", "arguments": "{}", "item_id": "i1", "output_index": "1"},
+        {"id": "c2", "name": "g", "item_id": "i2", "output_index": "2"},
+        {"id": "c3", "name": "h", "item_id": "i3", "output_index": "3"},
+        {"id": "c4", "name": "k", "arguments": "", "item_id": "i4", "output_index": "4"},
     ]
 
 

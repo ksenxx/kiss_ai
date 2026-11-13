@@ -43,7 +43,7 @@ class TestCodexModelStuckBug:
 
         saved_path = os.environ.get("PATH", "")
         saved_candidates = codex_module._UI_CANDIDATE_PATHS
-        old_db = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        old_db = (th._DB_PATH, th._KISS_DIR)
         tmpdir = tempfile.mkdtemp()
         try:
             codex_module._UI_CANDIDATE_PATHS = ()
@@ -57,7 +57,6 @@ class TestCodexModelStuckBug:
             kiss_dir.mkdir(parents=True, exist_ok=True)
             th._KISS_DIR = kiss_dir
             th._DB_PATH = kiss_dir / "history.db"
-            th._db_conn = None
 
             os.environ.setdefault("KISS_WORKDIR", tmpdir)
             server = AgentServer()
@@ -122,8 +121,6 @@ class TestCodexModelStuckBug:
             os.environ["PATH"] = saved_path
             codex_module._UI_CANDIDATE_PATHS = saved_candidates
             agent_state.agent_states.clear()
-            if th._db_conn is not None:
-                th._db_conn.close()
-                th._db_conn = None
-            (th._DB_PATH, th._db_conn, th._KISS_DIR) = old_db
+            th._close_thread_db()
+            (th._DB_PATH, th._KISS_DIR) = old_db
             shutil.rmtree(tmpdir, ignore_errors=True)

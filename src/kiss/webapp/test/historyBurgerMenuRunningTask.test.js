@@ -17,6 +17,7 @@ const {
   rowByTitle,
   lastGetHistory,
   sendHistory,
+  openChatsPanel,
   statusMark: findDot,
 } = require('./history_helpers');
 
@@ -26,12 +27,6 @@ function makePage() {
   return makeSharedPage({
     beforeScripts: win => freezeClockAndStyle(win, FROZEN_NOW_MS),
   });
-}
-
-function clickBurgerMenu(win) {
-  const btn = win.document.getElementById('menu-btn');
-  assert.ok(btn, 'burger menu button (#menu-btn) must exist');
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
 function findCompletedDot(row) {
@@ -63,11 +58,7 @@ function testRunningTaskAppearsWhenBurgerOpened() {
   );
 
   posted.length = 0;
-  clickBurgerMenu(win);
-  assert.ok(
-    sidebar.classList.contains('open'),
-    'burger click must open the sidebar',
-  );
+  openChatsPanel(win);
   assert.ok(
     lastGetHistory(posted),
     'burger click must post a getHistory command so the History ' +

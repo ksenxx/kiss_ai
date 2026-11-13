@@ -19,15 +19,18 @@ so another process holding that lock (an interactive OAuth login) stalled
 every other MCP tool call in this process for up to the 305 s call timeout.
 
 Real stdio MCP servers (real FastMCP subprocesses over the real protocol),
-real signals, real file locks held by a real second process.  No mocks.
+a real FastMCP server over SSE under uvicorn on a loopback port, real
+signals, real file locks held by a real second process.  No mocks.
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import functools
 import gc
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -39,6 +42,9 @@ from types import FrameType
 from typing import Any
 
 import pytest
+import uvicorn
+from mcp.server.fastmcp import FastMCP
+from starlette.responses import JSONResponse
 
 from kiss.agents.sorcar import mcp_servers
 from kiss.agents.sorcar.mcp_servers import (
@@ -548,6 +554,190 @@ def test_call_tool_reconnects_after_the_server_dies(
     assert len(manager._connections) == 1
 
 
+def test_a_closed_transport_retires_the_connection_before_any_health_ping(
+    server_script: Path, tmp_path: Path, real_stdin: None,
+) -> None:
+    """A dead server is rebuilt by the call after the ones that found it dead.
+
+    No health ping is due (ten minutes): the calls' own closed-transport
+    error must take the connection out of the pool, and once only,
+    though two calls were leased on it (the loop is held until both
+    are).  A server that dies under a call fails that call alone.
+    """
+    manager = MCPManager(health_interval_s=600)
+    blocked = threading.Event()
+    started = tmp_path / "started"
+    try:
+        pid_file = tmp_path / "closed_pid"
+        config = _config(server_script, pid_file)
+        key = _connection_key(config)
+        conn = manager.connect(config)
+        assert conn.session is not None, conn.error
+        pid = _wait_for_pid_file(pid_file)
+        pid_file.unlink()
+        os.kill(pid, 9)
+        assert _wait_until_dead(pid)
+        manager._loop.call_soon_threadsafe(blocked.wait, 60)
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            calls = [
+                pool.submit(manager.call_tool, key, "add", {"a": 1, "b": 2}) for _ in range(2)
+            ]
+            deadline = time.time() + 30
+            while time.time() < deadline and conn.in_flight < 2:
+                time.sleep(0.02)
+            blocked.set()
+            found_dead = [call.result(60) for call in calls]
+            assert manager.call_tool(key, "add", {"a": 2, "b": 3}) == "5", found_dead
+            dying = pool.submit(
+                manager.call_tool, key, "block_until",
+                {"started": str(started), "release": str(tmp_path / "never")},
+            )
+            deadline = time.time() + 30
+            while time.time() < deadline and not started.exists():
+                time.sleep(0.02)
+            rebuilt = _wait_for_pid_file(pid_file)
+            pid_file.unlink()
+            os.kill(rebuilt, 9)
+            found_dead.append(dying.result(60))
+        assert all(a.startswith("Error: MCP tool call failed: ") for a in found_dead), found_dead
+        assert manager.call_tool(key, "add", {"a": 2, "b": 3}) == "5"
+        assert _wait_for_pid_file(pid_file) not in (pid, rebuilt)
+        deadline = time.time() + 20
+        while time.time() < deadline and manager._orphans:
+            time.sleep(0.02)
+        assert manager._orphans == [] and conn.finished.is_set() and conn.in_flight == 0
+        assert len(manager._connections) == 1
+    finally:
+        blocked.set()
+        manager.shutdown()
+
+
+def test_a_call_in_flight_ends_with_its_connection(
+    server_script: Path, tmp_path: Path, real_stdin: None,
+) -> None:
+    """A tool call still running when its connection is closed is failed with it.
+
+    ``disconnect_all`` unwinds the session under the call.  The SDK
+    answers its pending requests only when the server closes the
+    transport, so the call waited out its 300 s read timeout for an
+    answer from a session that no longer existed.
+    """
+    manager = MCPManager(health_interval_s=600)
+    started = tmp_path / "started"
+    answer: list[str] = []
+    try:
+        config = _config(server_script, tmp_path / "ending_pid")
+        key = _connection_key(config)
+        assert manager.connect(config).session is not None
+        caller = threading.Thread(
+            target=lambda: answer.append(
+                manager.call_tool(
+                    key, "block_until",
+                    {"started": str(started), "release": str(tmp_path / "never")},
+                )
+            ),
+            name="mcp-ending-caller",
+            daemon=True,
+        )
+        caller.start()
+        deadline = time.time() + 30
+        while time.time() < deadline and not started.exists():
+            time.sleep(0.02)
+        assert started.exists(), "the tool call never reached the server"
+        manager.disconnect_all()
+        caller.join(timeout=60)
+        assert answer == ["Error: MCP tool call failed: connection closed"], answer
+    finally:
+        manager.shutdown()
+
+
+class _SSEServer:
+    """A real FastMCP server over SSE, under uvicorn on a loopback port, that can refuse POSTs.
+
+    While ``outage`` is set every POST (a message of the client) is
+    answered 503 and counted in ``refused``.  ``ran`` names the tools
+    whose bodies ran.
+    """
+
+    def __init__(self) -> None:
+        self.outage = threading.Event()
+        self.holding = threading.Event()
+        self.refused = 0
+        self.ran: list[str] = []
+        mcp = FastMCP("ssesrv")
+        mcp.add_tool(self.echo)
+        mcp.add_tool(self.hold)
+        self._app = mcp.sse_app()
+        listener = socket.create_server(("127.0.0.1", 0))
+        url = f"http://127.0.0.1:{listener.getsockname()[1]}/sse"
+        self.config = MCPServerConfig(name="ssesrv", transport="sse", url=url)
+        self._server = uvicorn.Server(uvicorn.Config(self, log_level="error"))
+        self._thread = threading.Thread(target=self._server.run, args=([listener],), daemon=True)
+        self._thread.start()
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        """Serve one ASGI request: a POST during the outage is refused, the rest is FastMCP's."""
+        if self.outage.is_set() and scope.get("method") == "POST":
+            self.refused += 1
+            await JSONResponse({"error": "outage"}, 503)(scope, receive, send)
+        else:
+            await self._app(scope, receive, send)
+
+    def echo(self, text: str) -> str:
+        """Return *text*."""
+        self.ran.append("echo")
+        return text
+
+    async def hold(self) -> str:
+        """Announce the call, then keep it in flight until the server stops."""
+        self.ran.append("hold")
+        self.holding.set()
+        while not self._server.should_exit:
+            await asyncio.sleep(0.02)
+        return "stopped"
+
+    def stop(self) -> None:
+        """Stop the server and wait for its thread."""
+        self._server.should_exit = True
+        self._thread.join(timeout=10)
+
+
+def test_a_refused_post_ends_an_sse_connection_and_its_calls_at_once() -> None:
+    """A POST an SSE server refuses ends the connection with that refusal, and its calls with it.
+
+    The SDK's SSE writer logged a failed POST and stopped, its reader
+    left running: the connection looked alive and could send nothing more.
+    The refused tool call waited out its 300 s read timeout for the
+    answer to a request the server never got, a refused handshake the
+    60 s connect deadline.  No call is sent again (the server saw one
+    refused POST and ran no ``echo``): the next one starts over on a new
+    connection, whose handshake fails as fast while the outage lasts.
+    """
+    server, manager = _SSEServer(), MCPManager(health_interval_s=600)
+    pool = concurrent.futures.ThreadPoolExecutor(2)
+    try:
+        key = _connection_key(server.config)
+        conn = manager.connect(server.config)
+        assert conn.session is not None, conn.error
+        held = pool.submit(manager.call_tool, key, "hold", {})
+        assert server.holding.wait(30), "the tool call never reached the server"
+        server.outage.set()
+        refused = pool.submit(manager.call_tool, key, "echo", {"text": "hi"})
+        answers = [refused.result(30), held.result(30)]
+        assert conn.finished.wait(10) and "503 Service Unavailable" in conn.error, conn.error
+        assert answers == [f"Error: MCP tool call failed: {conn.error}"] * 2, answers
+        assert (server.refused, server.ran) == (1, ["hold"]), "the refused call was sent again"
+        started = time.monotonic()
+        answer = manager.call_tool(key, "echo", {"text": "hi"})
+        assert "503 Service Unavailable" in answer and time.monotonic() - started < 30, answer
+        server.outage.clear()
+        assert manager.call_tool(key, "echo", {"text": "hi"}) == "hi"
+    finally:
+        pool.shutdown(wait=False)
+        manager.shutdown()
+        server.stop()
+
+
 def test_health_ping_does_not_tear_down_a_busy_connection(
     manager: MCPManager, server_script: Path, tmp_path: Path, real_stdin: None,
 ) -> None:
@@ -597,6 +787,57 @@ def test_health_ping_does_not_tear_down_a_busy_connection(
     assert _alive(pid), "the busy server was killed"
     # The connection is idle again: it must still answer and keep pinging fine.
     assert manager.call_tool(key, "add", {"a": 1, "b": 2}) == "3"
+
+
+#: A stdio server written against the wire protocol alone, as servers outside
+#: the SDKs are: it answers what a tool call needs and "Method not found" to
+#: everything else, ``ping`` included.
+_NO_PING_SERVER_SCRIPT = '''
+import json, os, sys
+
+open(sys.argv[1], "w").write(str(os.getpid()))
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue  # a notification
+    reply = {"jsonrpc": "2.0", "id": msg["id"]}
+    if msg["method"] == "initialize":
+        reply["result"] = {
+            "protocolVersion": msg["params"]["protocolVersion"],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "noping", "version": "1"},
+        }
+    elif msg["method"] == "tools/list":
+        reply["result"] = {"tools": [{"name": "pid", "inputSchema": {"type": "object"}}]}
+    elif msg["method"] == "tools/call":
+        reply["result"] = {"content": [{"type": "text", "text": str(os.getpid())}]}
+    else:
+        reply["error"] = {"code": -32601, "message": "Method not found"}
+    print(json.dumps(reply), flush=True)
+'''
+
+
+def test_a_server_without_ping_keeps_its_idle_connection(
+    manager: MCPManager, tmp_path: Path, real_stdin: None,
+) -> None:
+    """A "Method not found" answer to the idle health ping proves the server alive.
+
+    Only the SDKs' servers are sure to implement ``ping``.  The error
+    answer unwound the connection every health interval: the child was
+    killed and spawned again for the next call, and whatever state it
+    kept (a browser page, a login) went with it.
+    """
+    script = tmp_path / "noping.py"
+    script.write_text(_NO_PING_SERVER_SCRIPT, encoding="utf-8")
+    pid_file = tmp_path / "noping_pid"
+    config = _config(script, pid_file)
+    key = _connection_key(config)
+    conn = manager.connect(config)
+    assert conn.session is not None, conn.error
+    pid = _wait_for_pid_file(pid_file)
+    time.sleep(1.6)  # three health intervals, idle
+    assert (conn.error, conn.session is not None) == ("", True), "the ping's answer tore it down"
+    assert manager.call_tool(key, "pid", {}) == str(pid)
 
 
 def test_shutdown_right_after_construction_stops_the_loop_thread() -> None:

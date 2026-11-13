@@ -14,7 +14,12 @@ option key must be named in the text the model reads.
 
 from __future__ import annotations
 
+import json
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -131,6 +136,32 @@ def test_render_rewrites_only_marked_blocks(
         render("<!-- sea-docs: nonsense -->\n<!-- /sea-docs -->")
 
 
+def test_a_write_cut_short_leaves_the_page_as_it_was(tmp_path: Path) -> None:
+    """``sea docs`` swaps the regenerated page in whole.
+
+    Written in place, a write that did not finish (an interrupt, a full
+    disk) left a truncated page.  Here the process may write 4 KiB to a
+    file, less than the page, so the write fails midway.
+    """
+    pytest.importorskip("resource")  # POSIX: the limit that cuts the write short
+    page = tmp_path / "page.md"
+    old = "<!-- sea-docs: channel -->\nold\n<!-- /sea-docs -->\n" + "tail\n" * 4000
+    page.write_text(old, encoding="utf-8")
+    script = (
+        "import resource, sys\n"
+        "from kiss.agents.sorcar.sea_cli import main\n"
+        "hard = resource.getrlimit(resource.RLIMIT_FSIZE)[1]\n"
+        "resource.setrlimit(resource.RLIMIT_FSIZE, (4096, hard))\n"
+        "main(['docs', sys.argv[1]])\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", script, str(page)], capture_output=True, text=True, timeout=120
+    )
+    assert done.returncode == 1 and "File too large" in done.stderr, done.stderr
+    assert page.read_text(encoding="utf-8") == old
+    assert list(tmp_path.iterdir()) == [page], "the staged copy was left behind"
+
+
 def test_bundled_pages_are_current() -> None:
     """The gate ``uv run check`` runs: the committed tables match the code."""
     for rel in GENERATED_FILES:
@@ -138,6 +169,31 @@ def test_bundled_pages_are_current() -> None:
         assert "<!-- sea-docs: precedence -->" in text
         assert render(text) == text, f"{rel} is stale: run `uv run sea docs`"
         assert text.count(PRECEDENCE_RULE) == 1, f"{rel} must state the rule once, generated"
+
+
+def test_readme_example_tool_that_fails_on_a_locked_database_leaves_it_usable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SQLite example of the server README, run as written against a real lock."""
+    text = (REPO_ROOT / "src/kiss/server/README.md").read_text(encoding="utf-8")
+    start = text.index("# task_manager/task_manager_sea.py\n")
+    example: dict[str, Any] = {}
+    monkeypatch.setenv("KISS_HOME", str(tmp_path))  # where the example keeps its database
+    exec(text[start : text.index("\n```", start)], example)
+    assert json.loads(example["list_tasks"]()) == {"tasks": [], "count": 0}
+    reader = sqlite3.connect(tmp_path / "task_manager.db")
+    reader.execute("BEGIN")
+    reader.execute("SELECT * FROM tasks").fetchall()  # a read lock: no commit gets through
+    # The error stays referenced, as a caller that reports it keeps it.
+    with pytest.raises(sqlite3.OperationalError, match="locked") as locked:
+        example["add_task"]("first")
+    reader.close()
+    assert json.loads(example["add_task"]("second"))["added"]["title"] == "second"
+    assert json.loads(example["complete_task"](1)) == {"completed": 1}
+    assert [task["title"] for task in json.loads(example["list_tasks"](True))["tasks"]] == [
+        "second",
+    ]
+    assert locked.type is sqlite3.OperationalError
 
 
 def test_run_agent_description_names_every_option(tmp_path: Path) -> None:

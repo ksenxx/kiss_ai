@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.persistence_helpers import close_db
 
 
 @pytest.fixture
@@ -36,14 +37,13 @@ def kiss_dir(monkeypatch: pytest.MonkeyPatch):
     home = Path(tmp) / ".kiss"
     home.mkdir()
     monkeypatch.setenv("KISS_HOME", str(home))
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    saved = (th._DB_PATH, th._KISS_DIR)
     th._KISS_DIR = home
-    th._db_conn = None
     try:
         yield home
     finally:
-        th._close_db()
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+        close_db()
+        (th._DB_PATH, th._KISS_DIR) = saved
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -65,7 +65,7 @@ def test_adoption_write_failure_neither_leaks_nor_withholds_the_connection(
         "INSERT INTO replayed_journals (snapshot, timestamp) VALUES (?, 2.0)",
         (legacy,),
     )
-    th._close_db()
+    close_db()
     (kiss_dir / legacy).write_text(
         json.dumps(
             {
@@ -95,7 +95,7 @@ def test_adoption_write_failure_neither_leaks_nor_withholds_the_connection(
     assert (kiss_dir / legacy).exists()
 
     # Once the write succeeds again, the next NEW connection adopts it.
-    th._close_db()
+    close_db()
     blocker = sqlite3.connect(str(db_path))
     blocker.execute("DROP TRIGGER audit_block")
     blocker.commit()

@@ -6,7 +6,13 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, parsePanelTimeMs} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  parsePanelTimeMs,
+  readyTabId,
+  flushMicrotasks,
+} = require('./simplify2_harness');
 
 // The page measures a panel's time with Date.now(), so it runs on a
 // clock the test advances by hand: the labels are exact and no
@@ -20,9 +26,7 @@ function seedClock(win) {
 async function runTests() {
   const wv = makePage({beforeScripts: seedClock});
   const win = wv.win;
-  const ready = wv.posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const TAB = ready.tabId;
+  const TAB = readyTabId(wv.posted);
 
   send(win, {type: 'clear', chat_id: 'chat-time', tabId: TAB});
   send(win, {
@@ -137,7 +141,7 @@ async function runTests() {
   );
 
   // The footer re-anchors itself below streamed text in a microtask.
-  await new Promise(resolve => setImmediate(resolve));
+  await flushMicrotasks();
   for (const p of [llmPanels[0], llmPanels[1], tc]) {
     const last = p.lastElementChild;
     assert.ok(
@@ -152,10 +156,7 @@ async function runTests() {
 }
 
 runTests().then(
-  () => {
-    console.log('\nAll tests passed');
-    process.exit(0);
-  },
+  () => console.log('\nAll tests passed'),
   err => {
     console.error('FAIL:', err && err.message ? err.message : err);
     process.exit(1);

@@ -19,7 +19,14 @@ BEFORE the ``task_events`` of a finished task
 transcript; a tab that meanwhile owns a live run of its own gets its
 ``running:true`` re-asserted instead.
 
-The first two tests drive a real :class:`RemoteAccessServer` over real
+A ``ready`` settles the tabs that have no replay too: its answer tells
+the connecting client the run state of every tab on no chat
+(``RemoteTabs.replay_bindings``).  That status is decided in the
+``_state_lock`` section that reads the registry, so it never follows
+the ``running:true`` of a history click that made the tab a viewer of
+a running chat meanwhile.
+
+The first class drives a real :class:`RemoteAccessServer` over real
 ``wss://`` connections (the harness of ``test_web_server_tab_mirroring``);
 the last drives :class:`AgentServer` in-process with a real registered
 :class:`AgentState`, the only way to hold a tab busy without an LLM.
@@ -34,6 +41,8 @@ import tempfile
 import threading
 import time
 import unittest
+from functools import partial
+from types import CodeType, FrameType
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection
@@ -52,8 +61,31 @@ from kiss.tests.server.test_web_server_tab_mirroring import TabMirroringBase
 _TAB = "tab-a"
 
 
+class _Gate:
+    """Where the first thread to call *func* waits to be released, *seconds* at most."""
+
+    def __init__(self, func: Any, seconds: float) -> None:
+        self.code: CodeType = func.__code__
+        self.seconds = seconds
+        self.reached = threading.Event()
+        self.release = threading.Event()
+
+
+def _hold_at(gates: tuple[_Gate, ...], frame: FrameType, event: str, _arg: object) -> None:
+    """Trace function (``threading.settrace_all_threads``): hold threads at *gates*."""
+    if event != "call":
+        return
+    for gate in gates:
+        if frame.f_code is gate.code and not gate.reached.is_set():
+            gate.reached.set()
+            gate.release.wait(gate.seconds)
+
+
 class TestReplayFinishedTaskSettlesStatus(TabMirroringBase):
-    """``status running:false`` precedes a finished task's transcript."""
+    """``status running:false`` precedes a finished task's transcript.
+
+    And the idle status of a ``ready`` never follows a replay's ``running:true``.
+    """
 
     async def _frames_until_replay(
         self, ws: ClientConnection, timeout: float = 8.0,
@@ -91,6 +123,19 @@ class TestReplayFinishedTaskSettlesStatus(TabMirroringBase):
         self.assertIs(frames[0]["running"], False, label + ": the status is idle")
         self.assertEqual(str(frames[1]["task_id"]), task_id, label + ": wrong task")
 
+    async def _ready_answered(self, ws: ClientConnection) -> None:
+        """Send *ws*'s ``ready`` and wait until the daemon has answered it.
+
+        The answer tells the client the run state of every tab on no
+        chat (``RemoteTabs.replay_bindings``): a tab opened while the
+        handshake is under way gets a ``status`` of its own from it,
+        next to a replay's.  A connection's commands are handled one
+        after another, so the ``pong`` follows the whole answer.
+        """
+        await self._ready(ws)
+        await self._send(ws, {"type": "ping"})
+        self.assertIsNotNone(await self._wait_for_event(ws, "pong", timeout=30.0))
+
     async def _open_tab(self, ws: ClientConnection) -> None:
         """Open the tab on *ws* and wait for its registry snapshot."""
         await self._send(ws, {"type": "openTab", "tabId": _TAB, "title": "new chat"})
@@ -104,8 +149,8 @@ class TestReplayFinishedTaskSettlesStatus(TabMirroringBase):
         ])
         ws_a = await self._connect_ok()
         ws_b = await self._connect_ok()
-        await self._ready(ws_a)
-        await self._ready(ws_b)
+        await self._ready_answered(ws_a)
+        await self._ready_answered(ws_b)
         await self._open_tab(ws_a)
         self.assertIsNotNone(await self._wait_for_snapshot_with(ws_b, present={_TAB}))
         await self._send(ws_a, {"type": "resumeSession", "chatId": chat_id, "tabId": _TAB})
@@ -138,6 +183,52 @@ class TestReplayFinishedTaskSettlesStatus(TabMirroringBase):
         leaked = await self._frames_until_replay(ws_a, timeout=1.5)
         self.assertEqual(leaked, [], "a conn-scoped replay reached another window")
 
+    async def test_ready_idle_status_never_follows_a_replays_running_true(self) -> None:
+        """A connecting window is not told a tab is idle after a click made it a viewer.
+
+        While window B's ``ready`` decides the status of a tab on no
+        chat, window A's history click binds the tab to a RUNNING chat.
+        The idle status, read from the registry before the click, used
+        to follow the click's ``running:true``: window B showed the
+        running chat with no spinner and no Stop button.  The click is
+        held at the start of its replay until the ``ready`` is about to
+        send the status, which is held in turn while the click replays
+        (for a second at most: the click now waits for the ``ready``).
+        """
+        task_id, chat_id = th._add_task("Running task")
+        live = AgentState(task_id, chat_id=chat_id, tab_id="tab-owner", server_owned=True)
+        live.is_task_active = True
+        agent_state.register(live)
+        ws_a = await self._connect_ok()
+        await self._ready_answered(ws_a)
+        await self._open_tab(ws_a)
+        ws_b = await self._connect_ok()
+        click = _Gate(AgentServer._replay_session, 30)
+        status = _Gate(AgentServer._broadcast_replay_status, 1)
+        threading.settrace_all_threads(partial(_hold_at, (click, status)))
+        self.addCleanup(threading.settrace_all_threads, None)
+        self.addCleanup(click.release.set)
+        self.addCleanup(status.release.set)
+        await self._send(ws_a, {"type": "resumeSession", "chatId": chat_id, "tabId": _TAB})
+        self.assertTrue(await asyncio.to_thread(click.reached.wait, 30), "the click never replayed")
+        await self._ready(ws_b)
+        await self._send(ws_b, {"type": "ping"})
+        self.assertTrue(await asyncio.to_thread(status.reached.wait, 30), "the ready told nothing")
+        threading.settrace_all_threads(None)
+        click.release.set()
+        statuses: list[bool] = []
+        pending = {"pong", "task_events"}  # the end of the ready's answer, and of the click's
+        while pending:
+            ev = json.loads(await asyncio.wait_for(ws_b.recv(), timeout=30))
+            if ev.get("type") == "pong":
+                pending.discard("pong")
+            elif ev.get("tabId") == _TAB and ev.get("type") == "status":
+                statuses.append(ev["running"])
+            elif ev.get("tabId") == _TAB and ev.get("type") == "task_events":
+                pending.discard("task_events")
+                status.release.set()
+        self.assertIs(statuses[-1], True, f"window B ends on a stale idle status: {statuses}")
+
 
 class TestReplayIdleStatusSuppressedForBusyTab(unittest.TestCase):
     """A tab that owns a live run keeps its spinner through a replay.
@@ -161,7 +252,7 @@ class TestReplayIdleStatusSuppressedForBusyTab(unittest.TestCase):
         """The replay delivers the transcript; the status re-asserts the live run."""
         task_id, chat_id = th._add_task("Finished task")
         th._append_chat_event({"type": "text", "text": "the answer"}, task_id=task_id)
-        th._save_task_result(task_id, "success: done")
+        th._save_task_result("success: done", task_id)
         server = AgentServer()
         events: list[dict[str, Any]] = []
         lock = threading.Lock()

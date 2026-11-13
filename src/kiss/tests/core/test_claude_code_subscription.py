@@ -35,9 +35,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
+from types import CodeType
 from typing import Any
 
 import pytest
@@ -54,9 +56,11 @@ from kiss.core.models.claude_code_model import (
     claude_auth_status,
     claude_subscription_env,
 )
+from kiss.core.models.model import _CLIProcess, environ_without
 from kiss.core.user_config import DEFAULTS, apply_config_to_env
 from kiss.server.commands import _CommandsMixin
 from kiss.tests.conftest import install_cli_script, posix_only
+from kiss.tests.server.pause import Pause
 
 pytestmark = posix_only("the fake claude is a POSIX script")
 
@@ -213,6 +217,7 @@ def test_login_failure_names_the_cause_and_the_fix(
     assert "exit 1" in message
     assert _LOGIN_FAILURE in message
     assert SUBSCRIPTION_HINT in message
+    assert message.count("KISS Error:") == 1
 
 
 def test_login_failure_with_the_switch_off_has_no_hint(
@@ -257,6 +262,34 @@ def test_hint_follows_the_switch_the_turn_was_launched_with(
     assert len(errors) == 1 and isinstance(errors[0], KISSError)
     assert _LOGIN_FAILURE in str(errors[0])
     assert SUBSCRIPTION_HINT in str(errors[0])
+
+
+def _flip_the_api_key(_frame_locals: dict[str, Any]) -> bool:
+    """A ``Pause`` hook that never pauses: the panel deletes the API key, or saves one."""
+    if os.environ.pop("ANTHROPIC_API_KEY", None) is None:
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-saved-mid-launch"
+    return False
+
+
+@pytest.mark.parametrize(
+    ("model_name", "change_at"),
+    [("cc/claude-opus-5-5", environ_without.__code__), ("cc/opus", _CLIProcess.__init__.__code__)],
+)
+def test_billing_follows_the_credentials_the_cli_was_launched_with(
+    monkeypatch: pytest.MonkeyPatch, model_name: str, change_at: CodeType
+) -> None:
+    """Switch off, and the panel deletes, then saves, the API key during a launch (as its
+    environment is copied, or just before the spawn): only a child given the key is API spend.
+    The child is this interpreter, launched as a turn's CLI is, saying whether it holds the key."""
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    model = ClaudeCodeModel(model_name, {"timeout": 120})
+    child = [sys.executable, "-c", "import os; print(int('ANTHROPIC_API_KEY' in os.environ))"]
+    for change in ("deleted", "saved"):
+        with Pause(change_at, _flip_the_api_key), model._cli_turn(child, "key probe") as proc:
+            has_key = bool(int("".join(proc.lines())))
+        assert model._stamp_billing({})["api_billed"] is has_key, f"key {change} mid-launch"
 
 
 def test_failure_without_a_result_text_keeps_the_exit_error(

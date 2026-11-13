@@ -62,14 +62,12 @@ class _Base(unittest.TestCase):
 
         self._saved_db = (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         )
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         _persistence._KISS_DIR = kiss_dir
         _persistence._DB_PATH = kiss_dir / "history.db"
-        _persistence._db_conn = None
 
         self._original_parent_run = _PARENT_CLASS.run
 
@@ -81,14 +79,9 @@ class _Base(unittest.TestCase):
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
 
-        if _persistence._db_conn is not None:
-            try:
-                _persistence._db_conn.close()
-            except Exception:  # pragma: no cover — cleanup best-effort
-                pass
+        _persistence._close_thread_db()
         (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved_db
         shutil.rmtree(self.tmpdir, ignore_errors=True)

@@ -45,17 +45,16 @@ _PRODUCER_THREADS = 5
 
 
 def _redirect(tmpdir: str) -> tuple:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    saved = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return saved
 
 
 def _restore(saved: tuple) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+    th._DB_PATH, th._KISS_DIR = saved
 
 
 class TestEventWriterThreadRace:
@@ -68,9 +67,7 @@ class TestEventWriterThreadRace:
 
     def teardown_method(self) -> None:
         th._stop_event_writer()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

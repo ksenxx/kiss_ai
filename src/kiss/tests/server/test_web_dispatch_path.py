@@ -36,8 +36,13 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as th
 from kiss.core.brand import PRODUCT_NAME
 from kiss.core.config import kiss_home
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.local_ws import (
+    LocalReader,
+    LocalWriter,
+    _generate_self_signed_cert,
+    open_local_connection,
+)
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
@@ -46,16 +51,14 @@ def _join_task_threads() -> None:
 
     The ``submit`` tests stub ``agent.run`` to return at once, but
     ``_run_task`` keeps working on its SQLite connection afterwards
-    (``_persist_subtask_row`` → ``_save_task_result``).  That connection
-    is usually the one ``persistence._db_conn`` names — the last one
-    opened by ANY thread — so ``asyncTearDown``'s ``_db_conn.close()``
-    would close it while the worker is inside ``COMMIT`` and crash the
-    interpreter (SIGSEGV in ``_sqlite3``).  ``stop_async`` would join the
+    (``_persist_subtask_row`` → ``_save_task_result``), and
+    ``asyncTearDown`` would restore the database globals and delete the
+    temporary home under it.  ``stop_async`` would join the
     worker itself, but only while the state is still registered, and the
     tests clear the registry first; so join here, before that clear.
     The join is unbounded on purpose: the stubbed ``agent.run`` returns
-    at once, and returning early (a timed-out join) would re-create the
-    crash — SQLite's busy timeout alone is 30 s.
+    at once, and returning early (a timed-out join) would leave the
+    worker to that teardown — SQLite's busy timeout alone is 30 s.
     """
     from kiss.server import agent_state
 
@@ -95,8 +98,7 @@ class TestDispatchPath(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

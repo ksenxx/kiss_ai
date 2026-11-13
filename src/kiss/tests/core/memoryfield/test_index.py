@@ -201,7 +201,7 @@ def test_old_input_format_rows_are_reembedded(tmp_path: Path) -> None:
         healed, fmt = conn.execute(
             "SELECT embedding, input_format FROM pages WHERE filename='dvv.md'"
         ).fetchone()
-    assert bytes(healed) == bytes(good) and fmt == "2"
+    assert bytes(healed) == bytes(good) and fmt == "3"
     assert index.sync().unchanged == 2  # healing converges: no rebuild loop
     assert index.search("Finnish DVV", k=1)[0].name == "dvv"
 
@@ -238,6 +238,25 @@ def test_pre_column_index_schema_is_migrated_and_reembedded(tmp_path: Path) -> N
     with closing(sqlite3.connect(index.path)) as conn:  # a no-op sync does not burn revisions
         assert conn.execute("SELECT value FROM meta WHERE key = 'revision'").fetchone()[0] == "4"
     assert index.search("Finnish DVV", k=1)[0].name == "dvv"
+
+
+def test_empty_pages_from_format_two_are_reembedded(tmp_path: Path) -> None:
+    """An unchanged blank file's old zero vector must acquire the filename fallback."""
+    memory = MemoryDir(tmp_path)
+    (tmp_path / "postgres-auth-flow.md").write_bytes(b"")
+    index = VectorIndex(memory, embed=hashed_embedding)
+    assert index.sync().added == 1
+    with closing(sqlite3.connect(index.path)) as conn, conn:
+        conn.execute(
+            "UPDATE pages SET embedding = ?, input_format = '2'",
+            (serialize_float32(hashed_embedding("")),),
+        )
+    # A new process must heal persisted rows, even when digest and stat match.
+    index = VectorIndex(memory, embed=hashed_embedding)
+    assert index.search("postgres auth flow") == []
+    assert index.sync().updated == 1
+    assert [hit.name for hit in index.search("postgres auth flow")] == ["postgres-auth-flow"]
+    assert index.sync().unchanged == 1
 
 
 def test_index_embedding_input_truncates_to_page_limit(tmp_path: Path) -> None:
@@ -365,6 +384,16 @@ def test_index_handles_undecodable_bytes(tmp_path: Path) -> None:
     assert index.search("raw bytes")[0].title == "B"
 
 
+def test_a_page_with_nothing_to_embed_is_indexed_by_its_name(tmp_path: Path) -> None:
+    """An embeddings API rejects an empty input and, with it, the whole batch
+    (the live test below): such a page is embedded as its name, its title."""
+    (tmp_path / "postgres-auth-flow.md").write_bytes(b"")
+    (tmp_path / "blank.md").write_text("---\nuuid: x\n---\n \n")
+    index = VectorIndex(MemoryDir(tmp_path), embed=hashed_embedding)
+    assert index.sync().added == 2
+    assert [hit.name for hit in index.search("postgres auth flow")] == ["postgres-auth-flow"]
+
+
 @live_api
 @requires_openai
 def test_model_embedder_live_search(tmp_path: Path) -> None:
@@ -379,10 +408,13 @@ def test_model_embedder_live_search(tmp_path: Path) -> None:
         "carbon-tax",
         "The carbon tax on fibre-optic cable imports was raised; heat pumps are exempt.",
     )
+    # An empty page file (a `touch`, an editor's new file): the API answers a
+    # batch holding an empty input with 400, which failed every sync.
+    (tmp_path / "empty-note.md").write_bytes(b"")
     embedder = ModelEmbedder()
     index = VectorIndex(memory, embed=embedder)
     assert index.path.name == "text-embedding-3-small.sqlite3"
-    assert index.sync().added == 2
+    assert index.sync().added == 3
     hits = index.search("how should I look after a new wok made of carbon fiber?", k=2)
     assert hits[0].name == "cookware"
     assert len(embedder("hello")) == 1536

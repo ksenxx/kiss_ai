@@ -48,6 +48,7 @@ from kiss.tests.agents.sorcar.test_rr_area_e_persistence import (
     _redirect,
     _restore,
 )
+from kiss.tests.persistence_helpers import close_db
 
 
 def _plant_legacy_duplicates(db_path: Path, task_id: str, dups: int) -> None:
@@ -143,12 +144,12 @@ class _MigrationRaceBase(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss_rr_review_mig_"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.saved = _redirect(self.tmp)
-        th._close_db()
+        close_db()
         self.task_id, _chat = th._add_task("legacy race task")
         for i in range(4):
             th._queue_chat_event({"type": "ev", "i": i}, self.task_id)
         th._flush_chat_events(self.task_id)
-        th._close_db()
+        close_db()
         _plant_legacy_duplicates(th._DB_PATH, self.task_id, dups=3)
 
     def tearDown(self) -> None:

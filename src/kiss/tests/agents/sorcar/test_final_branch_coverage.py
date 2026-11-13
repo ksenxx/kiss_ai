@@ -15,28 +15,26 @@ No mocks, patches, fakes, or test doubles.
 from __future__ import annotations
 
 import shutil
-import sqlite3
 import tempfile
 from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
 
-_SavedState = tuple[Path, "sqlite3.Connection | None", Path]
+_SavedState = tuple[Path, Path]
 
 
 def _redirect(tmpdir: str) -> _SavedState:
     """Redirect persistence to temp dir and return saved state."""
-    old: _SavedState = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old: _SavedState = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore(saved: _SavedState) -> None:
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    (th._DB_PATH, th._KISS_DIR) = saved
 
 
 class TestGetDbWithExistingFile:
@@ -47,9 +45,7 @@ class TestGetDbWithExistingFile:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -57,8 +53,7 @@ class TestGetDbWithExistingFile:
         """_get_db skips stale WAL cleanup when DB file already exists."""
         th._get_db()
         assert th._DB_PATH.exists()
-        th._db_conn.close()  # type: ignore[union-attr]
-        th._db_conn = None
+        th._close_thread_db()
         db = th._get_db()
         assert db is not None
 
@@ -71,9 +66,7 @@ class TestAppendChatEventNoTask:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

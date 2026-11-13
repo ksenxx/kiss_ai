@@ -101,7 +101,9 @@ from __future__ import annotations
 
 import argparse
 import functools
+import http.client
 import json
+import math
 import os
 import platform
 import plistlib
@@ -122,7 +124,7 @@ from typing import IO
 from xml.parsers.expat import ExpatError
 
 from kiss.core.brand import BRAND
-from kiss.core.config import kiss_home
+from kiss.core.config import kiss_home, read_remote_urls, remote_url_file
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import run_process_group
 from kiss.core.utils import atomic_write_text
@@ -181,16 +183,11 @@ def read_loopback_url(url_file: Path) -> str | None:
     (``http://localhost:PORT``), whose host is rewritten to 127.0.0.1.
     None when the file is missing, unreadable or has neither URL.
     """
-    try:
-        data = json.loads(url_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    loopback = data.get("loopback")
+    urls = read_remote_urls(url_file)
+    loopback = urls.get("loopback")
     if isinstance(loopback, str) and loopback:
         return loopback
-    local = data.get("local")
+    local = urls.get("local")
     if isinstance(local, str) and local:
         return local.replace("localhost", "127.0.0.1", 1)
     return None
@@ -205,14 +202,17 @@ reach this machine's loopback, and the daemon would never seem to answer.
 """
 
 
-def daemon_answers(url: str, timeout: float = 2.0) -> bool:
-    """Whether an HTTP server answers at *url* (with any status: a 404 is an answer too)."""
+def daemon_answers(url: str) -> bool:
+    """Whether an HTTP server answers at *url* (with any status: a 404 is an answer too).
+
+    Another server on the port that does not speak HTTP is no answer.
+    """
     try:
-        with _DIRECT_OPENER.open(urllib.parse.urljoin(url, APP_WINDOW_API), timeout=timeout):
+        with _DIRECT_OPENER.open(urllib.parse.urljoin(url, APP_WINDOW_API), timeout=2.0):
             return True
     except urllib.error.HTTPError:
         return True
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
         return False
 
 
@@ -305,11 +305,12 @@ def playwright_chromium() -> Path | None:
 def find_browser(system: str = platform.system()) -> Path | None:
     """Return the Chromium-family browser to run the app in, or None.
 
-    ``$KISS_APP_BROWSER`` (a path or a command name) wins when it
-    resolves to an executable; then the system browsers of *system*
-    (``Linux``, ``Darwin`` or ``Windows``) in the order of
-    ``_LINUX_BROWSERS`` / ``_MACOS_BROWSERS`` / ``_WINDOWS_BROWSERS``;
-    last the Playwright Chromium.
+    ``$KISS_APP_BROWSER`` (a path or a command name), when set, is the
+    only candidate: None when it resolves to no executable.  Without it
+    the system browsers of *system* (``Linux``, ``Darwin`` or
+    ``Windows``) in the order of ``_LINUX_BROWSERS`` /
+    ``_MACOS_BROWSERS`` / ``_WINDOWS_BROWSERS``; last the Playwright
+    Chromium.
     """
     override = os.environ.get("KISS_APP_BROWSER", "").strip()
     if override:
@@ -461,7 +462,8 @@ def launch(command: list[str], log: Path, *, foreground: bool) -> bool:
     or exited 0 within them (Chromium hands the URL to an instance that
     already runs this profile and exits at once); False when it died
     with an error (no display, say), its last words in *log*.  In the
-    foreground this call does not return.
+    foreground this call does not return.  ``OSError`` when *command*
+    cannot be executed or *log* cannot be written: the caller reports it.
     """
     if foreground:
         os.execv(command[0], command)
@@ -709,13 +711,20 @@ def macos_bundle_plist(
 
 
 def read_plist(path: Path) -> dict[str, object] | None:
-    """Return the property list at *path*; None when it is missing, not a plist or cut short."""
+    """Return the dictionary of the property list at *path*.
+
+    None when the file is missing, cut short, not a property list, or
+    one that is damaged: ``plistlib`` raises ``ValueError`` for a value
+    or a key it cannot place and ``AttributeError`` for a date it
+    cannot read, and loads a list or a string root as readily as a
+    dictionary.
+    """
     try:
         with path.open("rb") as f:
-            info: dict[str, object] = plistlib.load(f)
-    except (OSError, plistlib.InvalidFileException, ExpatError):
+            info = plistlib.load(f)
+    except (OSError, ValueError, AttributeError, ExpatError):
         return None
-    return info
+    return info if isinstance(info, dict) else None
 
 
 def plist_version(info: dict[str, object]) -> tuple[object, object]:
@@ -868,10 +877,12 @@ _app_windows = 0
 """How many WebSocket connections of the daemon come from the popup (0: no popup, or none yet)."""
 
 _quit_armings = 0
-"""How many quit timers :func:`app_window_event` armed; only the latest one may act."""
+"""Quit timers :func:`app_window_event` armed plus popups connected; only the latest timer acts,
+and the sweeps count their strikes under one value of it (:func:`sweep_windowless_app`)."""
 
-_windowless: tuple[int | None, int] = (None, 0)
-"""The browser pid the last sweep found without popup and window, and how many sweeps in a row."""
+_windowless: tuple[int | None, int, int] = (None, 0, 0)
+"""The browser pid the last sweep found without popup and window, :data:`_quit_armings` as it
+began to look, and how many sweeps in a row found the two so."""
 
 
 def app_window_state() -> dict[str, bool]:
@@ -884,12 +895,13 @@ def app_window_event(event: str) -> bool:
 
     The events are the popup's WebSocket connections: ``open`` when one
     opens, ``closing`` when one closes because its page went away (the
-    window closed, or reloaded: the browser's close code was
-    :data:`APP_WINDOW_GONE_CLOSE_CODE`), ``dropped`` when one closes
-    any other way (the daemon's keepalive timed out, say) while the
-    page lives on and will connect again.  The ``closing`` that leaves
-    none arranges :func:`quit_closed_app` for the brand bundle
-    (:func:`macos_bundle_path`, as of now) after
+    window closed, or reloaded: the browser started the close, with
+    code :data:`APP_WINDOW_GONE_CLOSE_CODE`), ``dropped`` when one
+    closes any other way (the daemon's keepalive timed out, or the
+    daemon started the close and the page answered with that code)
+    while the page lives on and will connect again.  The ``closing``
+    that leaves none arranges :func:`quit_closed_app` for the brand
+    bundle (:func:`macos_bundle_path`, as of now) after
     :data:`APP_WINDOW_QUIT_GRACE_SECS`, by when a reload has connected
     again; a ``dropped`` one does not, as the page is still there (the
     window may be minimized, which the quit check cannot tell from
@@ -898,11 +910,14 @@ def app_window_event(event: str) -> bool:
     its last window closes.  Each arming counts (:data:`_quit_armings`):
     the timer of a ``closing`` acts only while it is the latest, so a
     reload's timer cannot cut short the grace period of a later reload.
+    Each ``open`` counts too: a timer armed before the popup connected
+    again quits nothing when that connection is ``dropped``.
     """
     global _app_windows, _quit_armings
     with _app_lock:
         if event == "open":
             _app_windows += 1
+            _quit_armings += 1
         elif event in ("closing", "dropped"):
             _app_windows -= 1
             if event == "closing" and _app_windows == 0:
@@ -955,15 +970,16 @@ def quit_closed_app(bundle: Path, armed: int | None = None) -> bool:
     return pid is not None and _quit_if_still_windowless(pid, armed)
 
 
-def _quit_if_still_windowless(pid: int, armed: int | None = None) -> bool:
+def _quit_if_still_windowless(pid: int, armed: int | None) -> bool:
     """SIGTERM *pid*, found without popup and window, unless the popup connected since.
 
     Decided under :data:`_app_lock`, the one :func:`app_window_event`
     counts the popup's connections under: a popup that connected
     between the (slow) look at the processes and windows and this
-    signal must not lose its browser.  With *armed*, the quit timer's
-    arming, a timer that a later ``closing`` superseded quits nothing
-    either (:func:`app_window_event`).
+    signal must not lose its browser.  With *armed*,
+    :data:`_quit_armings` as the quit timer was armed or as the sweep
+    began to look, a ``closing`` or ``open`` since then leaves nothing
+    to quit either (:func:`app_window_event`).
     """
     with _app_lock:
         if _app_windows > 0 or (armed is not None and armed != _quit_armings):
@@ -990,32 +1006,38 @@ def sweep_windowless_app(bundle: Path) -> bool:
     window.  A browser is quit only after :data:`APP_WINDOW_SWEEP_STRIKES`
     sweeps of the same pid found it so, which spans the longest the
     popup takes to connect again after a daemon restart: a minimized
-    popup between connections is off screen like a closed one.  True
-    when the browser was quit.
+    popup between connections is off screen like a closed one.  The
+    sweeps count from the popup's last connection
+    (:data:`_quit_armings`): one that connected between two sweeps, or
+    while one looked, is there, and has the whole span again once its
+    connection drops.  True when the browser was quit.
     """
     global _windowless
-    if platform.system() != "Darwin":
-        return False
+    armed = _quit_armings  # before the (slow) look: a popup connecting from here on voids it
     pid = windowless_app_pid(bundle)
     if pid is None:
-        _windowless = (None, 0)
+        _windowless = (None, 0, 0)
         return False
-    strikes = _windowless[1] + 1 if pid == _windowless[0] else 1
+    strikes = _windowless[2] + 1 if _windowless[:2] == (pid, armed) else 1
     if strikes < APP_WINDOW_SWEEP_STRIKES:
-        _windowless = (pid, strikes)
+        _windowless = (pid, armed, strikes)
         return False
-    _windowless = (None, 0)
-    return _quit_if_still_windowless(pid)
+    _windowless = (None, 0, 0)
+    return _quit_if_still_windowless(pid, armed)
 
 
 def ask_app_window_open(url: str, timeout: float = 2.0) -> bool | None:
-    """Ask the daemon at *url* whether the app window is open; None when it does not answer."""
+    """Ask the daemon at *url* whether the app window is open.
+
+    None when it does not answer, or answers anything but the state
+    (no HTTP, a body cut short as the daemon goes down).
+    """
     try:
         api = urllib.parse.urljoin(url, APP_WINDOW_API)
         with _DIRECT_OPENER.open(api, timeout=timeout) as answer:
             state = json.loads(answer.read())
         return bool(state["open"])
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
         return None
 
 
@@ -1023,7 +1045,7 @@ APP_WINDOW_SETTLE_SECS = 12.0
 """How long kiss-app gives a popup the daemon reports as not connected to connect."""
 
 
-def app_window_closed(url: str, bundle: Path, settle: float = APP_WINDOW_SETTLE_SECS) -> bool:
+def app_window_closed(url: str, bundle: Path) -> bool:
     """Whether the browser running from *bundle* has no popup window, so a reopen would open none.
 
     The daemon at *url* knows (:func:`ask_app_window_open`): the popup
@@ -1031,13 +1053,14 @@ def app_window_closed(url: str, bundle: Path, settle: float = APP_WINDOW_SETTLE_
     popup between connections (the daemon just restarted, and the
     popup connects again within seconds, minimized or not; the app is
     still starting and the popup not open yet), not a closed one, so
-    the daemon is asked again for up to *settle* seconds.  Still not
-    connected afterwards, or the daemon not answering at all, a window
-    on screen is taken for the popup, and none for it closed (a
-    minimized one, which the window server cannot tell from a closed
-    one, is connected by then whenever the daemon runs).
+    the daemon is asked again for up to :data:`APP_WINDOW_SETTLE_SECS`
+    seconds.  Still not connected afterwards, or the daemon not
+    answering at all, a window on screen is taken for the popup, and
+    none for it closed (a minimized one, which the window server
+    cannot tell from a closed one, is connected by then whenever the
+    daemon runs).
     """
-    deadline = time.monotonic() + settle
+    deadline = time.monotonic() + APP_WINDOW_SETTLE_SECS
     while True:
         open_ = ask_app_window_open(url)
         if open_:
@@ -1141,7 +1164,8 @@ def write_macos_launcher(
     taken under it, so a writer whose own listing predates the clone
     another just built, and the window that started from it, finds
     that clone current, or in use when it clones a different browser,
-    instead of deleting it.
+    instead of deleting it.  A launch holds the lock too, shared, while
+    its window starts (:func:`launch_app`): none starts in between.
 
     Returns:
         The clone's main executable, kept or just written; None when
@@ -1203,7 +1227,6 @@ def install_launcher(
     system: str = platform.system(),
     state_dir: Path | None = None,
     browser: Path | None = None,
-    in_use: bool | None = None,
 ) -> Path | None:
     """Register the app with the desktop; return the launcher's path.
 
@@ -1214,9 +1237,7 @@ def install_launcher(
     ``kiss-app`` command to launch, by default this very script;
     *state_dir* the ``KISS_HOME`` it runs for, by default this one;
     *browser* the engine the launcher is written for (its Wayland app
-    id, its macOS bundle), by default :func:`find_browser`; *in_use*
-    whether a window runs from the macOS bundle, when known (see
-    :func:`write_macos_launcher`).
+    id, its macOS bundle), by default :func:`find_browser`.
     """
     exe = exe or Path(sys.argv[0]).resolve()
     home = home or Path.home()
@@ -1229,12 +1250,12 @@ def install_launcher(
         if refresh:
             try:
                 run_process_group([refresh, str(entry.parent)], SETUP_TIMEOUT_SECS)
-            except subprocess.TimeoutExpired:
+            except (OSError, subprocess.TimeoutExpired):  # it cannot start, or never returns
                 pass  # the refresh is optional: the menus pick the entry up later
         return entry
     if system == "Darwin":
         bundle = macos_bundle_path(home, brand)
-        write_macos_launcher(bundle.parent, brand, icon, exe, state_dir, browser, in_use)
+        write_macos_launcher(bundle.parent, brand, icon, exe, state_dir, browser)
         return bundle
     return None
 
@@ -1266,12 +1287,27 @@ def uninstall_launcher(
     home: Path | None = None,
     system: str = platform.system(),
 ) -> Path | None:
-    """Remove the launcher :func:`install_launcher` wrote; return its path if it existed."""
+    """Remove the launcher :func:`install_launcher` wrote; return its path if it existed.
+
+    The macOS bundle goes as a writer replaces it
+    (:func:`write_macos_launcher`): under the bundle's lock, so that no
+    launch starts its clone meanwhile, and not from under a window.
+
+    Raises:
+        OSError: The bundle is in use, or may be (``ps`` does not
+            answer); its lock is still held after
+            :data:`SETUP_TIMEOUT_SECS`; the launcher cannot be deleted.
+    """
     path = launcher_path(brand, home, system)
     if path is None or not path.exists():
         return None
     if path.is_dir():
-        shutil.rmtree(path)
+        with exclusive_file_lock(path.parent / f".{path.name}.lock", timeout=SETUP_TIMEOUT_SECS):
+            if not path.exists():  # another uninstall removed it while this one waited
+                return None
+            if macos_bundle_in_use(path) is not False:
+                raise OSError(f"{path} may be in use; quit {brand['product_name']} first")
+            shutil.rmtree(path)
     else:
         path.unlink()
     return path
@@ -1290,7 +1326,8 @@ def reveal_launcher(
     detached, like the browser, so it outlives the caller.  None, and
     nothing shown, when there is no launcher to show (a platform
     without one, one not installed yet), no file manager opener, or
-    one that failed at once (no desktop to open a window on).
+    one that cannot be executed or failed at once (no desktop to open
+    a window on).
     """
     path = launcher_path(brand, home, system)
     if path is None or not path.exists():
@@ -1302,7 +1339,10 @@ def reveal_launcher(
         if opener is None:
             return None
         command = [opener, str(path.parent)]
-    return path if start_detached(command, subprocess.DEVNULL) else None
+    try:
+        return path if start_detached(command, subprocess.DEVNULL) else None
+    except OSError:  # the opener cannot be executed
+        return None
 
 
 def macos_launch_browser(
@@ -1339,21 +1379,97 @@ def macos_launch_browser(
     return clone or browser
 
 
-def macos_activate_running(
-    bundle: Path, in_use: bool | None = None, timeout: float = PROBE_TIMEOUT_SECS
-) -> bool:
+def _lock_shared(path: Path) -> int | None:
+    """Open the lock file *path* read-only, locked shared until closed; None: no lock to be had.
+
+    Launches hold the lock of a bundle's writers together, never with a
+    writer, which locks the file (created when missing) exclusively.
+    None when the file cannot be opened or the system refuses to lock
+    it: the launch then goes ahead unlocked, as every launch once did.
+    TimeoutError when a writer holds it past :data:`SETUP_TIMEOUT_SECS`.
+    """
+    import fcntl  # POSIX only, like the macOS launch this is for
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CREAT, 0o600)
+    except OSError:
+        # No writer can open the file then either; one that already had it open is not kept out.
+        return None
+    deadline = time.monotonic() + SETUP_TIMEOUT_SECS
+    locked = False
+    try:
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                locked = True
+                return descriptor
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
+            except OSError:  # refused, not contended (a file system without locks)
+                return None
+    finally:  # also when the wait is interrupted
+        if not locked:
+            os.close(descriptor)
+    raise TimeoutError(f"{path} still locked by a writer after {SETUP_TIMEOUT_SECS:g}s")
+
+
+def launch_app(
+    command: list[str], log: Path, browser: Path, *, foreground: bool, home: Path | None = None
+) -> bool | None:
+    """:func:`launch` *command*, the choice of :func:`macos_launch_browser` for *browser*.
+
+    Returns what :func:`launch` returns; None, the reason on stderr,
+    when nothing was started.  A file of the brand bundle (the clone,
+    by its path, also when ``$KISS_APP_BROWSER`` names it) is started
+    under the bundle's lock, held shared, so that no writer deletes it
+    under the new window (:func:`write_macos_launcher`), and only while
+    it still is the choice for *browser*.  One that is not (a writer
+    replaced the clone meanwhile, by another browser's at the same path
+    too; the browser was updated) is chosen again, no lock held, three
+    attempts in all; *browser* itself is not started in its place, nor
+    anything while a writer holds the lock at the deadline.  ``exec``
+    in the foreground releases the lock: its descriptor is not inherited.
+    """
+    bundle = macos_bundle_path(home)
+    if not Path(command[0]).resolve().is_relative_to(bundle.resolve()):
+        return launch(command, log, foreground=foreground)
+    reason = f"no longer a copy of {browser}"
+    for attempt in range(3):
+        if attempt:  # no longer the choice: choose again, as ``main()`` chose it
+            chosen = macos_launch_browser(browser, home)
+            if not chosen.resolve().is_relative_to(bundle.resolve()):
+                break  # the browser itself: not started in the clone's place
+            command = [str(chosen), *command[1:]]
+        try:
+            lock = _lock_shared(bundle.parent / f".{bundle.name}.lock")
+        except TimeoutError as exc:
+            reason = str(exc)
+            break
+        try:
+            # Still a file, and the one chosen for *browser*: not another browser's clone there.
+            if Path(command[0]).is_file() and command[0] == str(
+                macos_bundle_browser(bundle, browser) or browser
+            ):
+                return launch(command, log, foreground=foreground)
+        finally:
+            if lock is not None:
+                os.close(lock)
+    print(f"Could not start {command[0]}: {reason}; try again.", file=sys.stderr)
+    return None
+
+
+def macos_activate_running(bundle: Path, timeout: float = PROBE_TIMEOUT_SECS) -> bool:
     """Bring the window of the app running from *bundle* to the front; whether there was one.
 
     ``open -a`` on a bundle that is running does what a click on its
     icon does: Launch Services sends the running app a reopen event,
     which focuses the window (see the module doc), so nothing else is
-    started.  False when nothing runs from *bundle* (*in_use* when the
-    caller already listed the processes, else
-    :func:`macos_bundle_in_use`) or ``open`` failed or did not return
+    started.  The caller has found the app running: ``open -a`` starts
+    one that is not.  False when ``open`` failed or did not return
     within *timeout* seconds.
     """
-    if not (macos_bundle_in_use(bundle) if in_use is None else in_use):
-        return False
     result = _probe(["open", "-a", str(bundle)], timeout)
     return result is not None and result.returncode == 0
 
@@ -1390,9 +1506,15 @@ def main(argv: list[str] | None = None) -> int:
         help="show the desktop launcher's folder in the file manager and exit",
     )
     args = parser.parse_args(argv)
+    if not math.isfinite(args.wait):  # NaN, infinity: a deadline that never comes
+        parser.error("argument --wait: SECS must be a finite number")
 
     if args.install_launcher:
-        path = install_launcher()
+        try:
+            path = install_launcher()
+        except OSError as exc:  # an unwritable folder, or the macOS bundle's lock stays held
+            print(f"Could not install the launcher: {exc}", file=sys.stderr)
+            return 1
         print(
             f"Installed {path}"
             if path
@@ -1400,7 +1522,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.uninstall_launcher:
-        path = uninstall_launcher()
+        try:
+            path = uninstall_launcher()
+        except OSError as exc:  # the macOS bundle is in use, or its lock stays held
+            print(f"Could not remove the launcher: {exc}", file=sys.stderr)
+            return 1
         print(f"Removed {path}" if path else "No launcher to remove.")
         return 0
     if args.reveal_launcher:
@@ -1414,7 +1540,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Showing {path.name} in {path.parent}")
         return 0
 
-    url_file = kiss_home() / "remote-url.json"
+    url_file = remote_url_file()
     # --print-command only shows the command: it does not wait for the URL file.
     if args.print_command:
         url = args.url or read_loopback_url(url_file)
@@ -1442,6 +1568,7 @@ def main(argv: list[str] | None = None) -> int:
     # rewrite asks again and the check treats it as not running).
     running = macos_bundle_in_use(macos_bundle_path()) if macos else False
     daemon_url = url
+    engine = browser
     if macos:
         browser = macos_launch_browser(browser, in_use=running)
         url = app_window_url(url)
@@ -1465,14 +1592,26 @@ def main(argv: list[str] | None = None) -> int:
     if (
         running
         and not app_window_closed(daemon_url, macos_bundle_path())
-        and macos_activate_running(macos_bundle_path(), in_use=True)
+        and macos_activate_running(macos_bundle_path())
     ):
         print(f"{BRAND['product_name']} is already open; its window was brought to the front.")
         return 0
     log = kiss_home() / "kiss-app.log"
-    if launch(command, log, foreground=args.foreground):
-        return 0
-    last_words = log.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-5:]
+    try:
+        # macOS starts the clone under its bundle's lock; None: nothing started, the reason printed.
+        started = (
+            launch_app(command, log, engine, foreground=args.foreground)
+            if macos
+            else launch(command, log, foreground=args.foreground)
+        )
+        if started:
+            return 0
+        if started is None:
+            return 1
+        last_words = log.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-5:]
+    except OSError as exc:  # the browser cannot be executed, or its log not written or read
+        print(f"Could not start {browser}: {exc}", file=sys.stderr)
+        return 1
     print(
         f"The browser exited at once ({browser}); its stderr is in {log}:",
         *(f"    {line}" for line in last_words),

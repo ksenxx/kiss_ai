@@ -17,9 +17,12 @@ injection a Ctrl+C amounts to) against a real bridge.
 
 import json
 import socket
+import socketserver
 import threading
 import time
 from typing import Any
+
+import pytest
 
 from kiss.core import stop_signal
 from kiss.core.models.codex_mcp_bridge import BRIDGE_TOKEN_ENV, STOP_WAIT_SECONDS, ToolBridge
@@ -90,6 +93,8 @@ class _TaskThread(threading.Thread):
 
     ``interrupted_at`` records when the forced Stop's ``KeyboardInterrupt``
     left the block; ``done`` is set once the thread stops owning the run.
+    ``body_stop``, when set, is the Stop the block's body ends with, and
+    ``listener_closed`` whether the listener was closed when the Stop left.
     """
 
     def __init__(self, tool: _SlowTool, request_stop: bool) -> None:
@@ -100,6 +105,8 @@ class _TaskThread(threading.Thread):
         self.done = threading.Event()
         self.interrupted_at: float | None = None
         self.bridge: ToolBridge | None = None
+        self.body_stop: BaseException | None = None
+        self.listener_closed = False
 
     def run(self) -> None:
         stop = threading.Event()
@@ -116,8 +123,12 @@ class _TaskThread(threading.Thread):
                 if self.request_stop:
                     stop.set()
                 self.in_block.set()
-        except KeyboardInterrupt:
+                if self.body_stop is not None:
+                    raise self.body_stop
+        except (KeyboardInterrupt, ToolCallInterrupted):
             self.interrupted_at = time.monotonic()
+            closed = self.bridge is not None and self.bridge._server.socket.fileno() == -1
+            self.listener_closed = closed
         finally:
             self.done.set()
             stop_signal.set_thread_stop_event(None)
@@ -214,3 +225,41 @@ def test_a_keyboard_interrupt_at_the_entry_of_the_wait_still_bounds_the_wait() -
     assert task.bridge is not None and task.bridge.calls_in_flight == 0, "the call was left"
     assert tool.ended_at and tool.ended_at[0] <= task.interrupted_at, "the tool kept working"
     assert task.interrupted_at - injected_at < STOP_WAIT_SECONDS + 1, "the wait was open-ended"
+
+
+@pytest.mark.parametrize(
+    ("stop", "step"),
+    [
+        (ToolCallInterrupted, None),
+        (KeyboardInterrupt, None),
+        (ToolCallInterrupted, ToolBridge._refuse_new_calls),
+        (ToolCallInterrupted, ToolBridge._stop_listener),
+        (ToolCallInterrupted, socketserver.ThreadingMixIn.server_close),
+        (ToolCallInterrupted, ToolBridge._wait_for_calls),
+    ],
+)
+def test_a_stop_ending_the_block_or_landing_in_its_exit_bounds_the_wait(
+    stop: type[BaseException], step: Any
+) -> None:
+    """A per-panel Stop (``ToolCallInterrupted``) or a Ctrl+C without a stop event, ending
+    the block's body (*step* is None) or landing in a step of its exit, interrupts the running
+    tool and leaves once it ended with the listener closed: not once the tool would have ended
+    by itself (the body's Stop was dropped), and not at once with the rest of the exit skipped."""
+    tool = _PatientTool()
+    task = _TaskThread(tool, request_stop=False)
+    if step is None:
+        task.body_stop = stop()
+    with Pause((step or ToolBridge._close).__code__, lambda loc: True) as held:
+        task.start()
+        assert task.in_block.wait(10)
+        assert held.paused.wait(10), "the block's exit never got there"
+        stopped_at = time.monotonic()
+        if step is not None:
+            assert inject_async_exception(task.ident or 0, stop) == 1
+        held.release()
+        task.join(STOP_WAIT_SECONDS + 10)
+
+    assert task.interrupted_at is not None, "the Stop must still surface"
+    assert tool.ended_at and tool.ended_at[0] <= task.interrupted_at, "the tool kept working"
+    assert task.interrupted_at - stopped_at < STOP_WAIT_SECONDS + 1, "the wait was open-ended"
+    assert task.listener_closed, "the listener outlived the block"

@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import persistence
+from kiss.tests.persistence_helpers import close_db
 
 
 @pytest.fixture
@@ -30,9 +31,9 @@ def temp_db(
 ) -> Generator[Path]:
     db_path = tmp_path / "history.db"
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
-    persistence._close_db()
+    close_db()
     yield db_path
-    persistence._close_db()
+    close_db()
 
 
 def test_save_task_extra_top_level_parent_task_id_garbage_does_not_clear(
@@ -79,7 +80,7 @@ def test_migration_handles_non_finite_extra_cost(
 
     db_path = tmp_path / "history.db"
     monkeypatch.setattr(P, "_DB_PATH", db_path)
-    P._close_db()
+    close_db()
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         "CREATE TABLE task_history (id INTEGER PRIMARY KEY, "

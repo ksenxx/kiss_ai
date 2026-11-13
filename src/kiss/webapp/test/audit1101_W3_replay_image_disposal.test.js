@@ -24,7 +24,14 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, stubRaf, ofType} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  stubRaf,
+  ofType,
+  readyTabId,
+  settle,
+} = require('./simplify2_harness');
 const {
   bootParallelRun,
   clickClose,
@@ -68,23 +75,41 @@ function pageWithObserver() {
   return Object.assign(page, {observer});
 }
 
+/** The two events of a screenshot whose picture is lazy picture *index* of *task*. */
+function screenshotEvents(task, path, index) {
+  return [
+    {type: 'tool_call', name: 'screenshot'},
+    {
+      type: 'tool_result',
+      tool_name: 'screenshot',
+      content: 'image',
+      images: [{mime: 'image/png', path, lazy: {taskId: task, index}}],
+    },
+  ];
+}
+
 function replay(win, tab, task) {
   send(win, {
     type: 'task_events',
     tabId: tab,
     task_id: task,
     task: 'images',
-    events: [
-      {type: 'tool_call', name: 'screenshot'},
-      {
-        type: 'tool_result',
-        tool_name: 'screenshot',
-        content: 'image',
-        images: [
-          {mime: 'image/png', path: 'shot.png', lazy: {taskId: task, index: 0}},
-        ],
-      },
-    ],
+    events: screenshotEvents(task, 'shot.png', 0),
+  });
+}
+
+/**
+ * Replay a corrupted transcript of `parent-task` into *tab*: a null
+ * event after picture 1 makes the replay throw half way (the page logs
+ * the TypeError).
+ */
+function replayCorrupted(win, tab) {
+  send(win, {
+    type: 'task_events',
+    tabId: tab,
+    task_id: 'parent-task',
+    task: 'images',
+    events: [...screenshotEvents('parent-task', 'x.png', 1), null],
   });
 }
 
@@ -125,14 +150,20 @@ async function main() {
   await test("a closed sub-agent tab's picture is neither observed, asked for nor changed", () => {
     const page = pageWithObserver();
     const {win, posted, observer} = page;
-    const {subTabIds} = bootParallelRun(1, page);
+    const {subTabIds} = bootParallelRun(2, page);
     replay(win, subTabIds[0], 'sub-task-1');
     const [img] = lazyImages(observer, subTabIds[0]);
     assert.ok(img, "the child's picture is observed while its tab is open");
-    send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
+    // The second child asks for its picture while its tab is open.
+    replay(win, subTabIds[1], 'sub-task-2');
+    const [awaited] = lazyImages(observer, subTabIds[1]);
+    observer.callback([{target: awaited, isIntersecting: true}]);
+    const req = ofType(posted, 'getReplayImage').pop();
+    assert.strictEqual(req.tabId, subTabIds[1], 'the open child asks');
+    for (const id of subTabIds) send(win, {type: 'subagentDone', tab_id: id});
     assert.ok(
-      !win._testApi.openTabs().some(t => t.id === subTabIds[0]),
-      'the child tab closed',
+      !win._testApi.openTabs().some(t => subTabIds.includes(t.id)),
+      'the child tabs closed',
     );
     assert.ok(
       !observer.targets.has(img),
@@ -141,15 +172,26 @@ async function main() {
     // A sighting queued before the close delivers now.
     const before = posted.length;
     observer.callback([{target: img, isIntersecting: true}]);
-    const asked = posted.slice(before).filter(m => m.type === 'getReplayImage');
+    const asked = ofType(posted.slice(before), 'getReplayImage');
     assert.strictEqual(
       asked.length,
       0,
       'BUG: a closed tab asked for its picture',
     );
-    // A reply to a request made before the close changes nothing either.
     assert.strictEqual(img.getAttribute('src'), null);
-    assert.ok(img.classList.contains('tr-img-lazy'));
+    // A reply to a request made before the close changes nothing either.
+    send(win, {
+      type: 'replayImage',
+      token: req.token,
+      mime: 'image/png',
+      b64: 'AAAA',
+    });
+    assert.strictEqual(
+      awaited.getAttribute('src'),
+      null,
+      'BUG: a closed tab took its late reply',
+    );
+    assert.ok(awaited.classList.contains('tr-img-lazy'));
   });
 
   await test('a picture asked for before its transcript was cleared ignores the late reply', () => {
@@ -227,8 +269,8 @@ async function main() {
     });
     assert.strictEqual(img.getAttribute('src'), 'data:image/png;base64,AAAA');
     assert.ok(!img.classList.contains('tr-img-lazy'));
-    // Closing the tab now has nothing left to drop; the other tab's
-    // transcript is untouched.
+    // Clearing the transcript now has nothing left to drop; the other
+    // tab's transcript is untouched.
     send(win, {type: 'clear', tabId: parentId});
     assert.strictEqual(observer.targets.size, 0);
   });
@@ -236,7 +278,7 @@ async function main() {
   await test("a retagged sub-agent tab's pictures are dropped under its new id", () => {
     const page = pageWithObserver();
     const {win, posted, observer} = page;
-    const parentId = posted.find(m => m.type === 'ready').tabId;
+    const parentId = readyTabId(posted);
     win._testApi.hideWelcome();
     send(win, {type: 'status', running: true, tabId: parentId, startTs: 1});
     announceRetaggedSubagent(win, parentId, 'sa-1');
@@ -274,32 +316,10 @@ async function main() {
     replay(win, parentId, 'parent-task');
     const [kept] = lazyImages(observer, parentId);
     assert.ok(kept, 'the hidden tab has its picture');
-    // A corrupted transcript (a null event) makes the replay throw
-    // half way (the page logs the TypeError): the tab gets its old
+    // The corrupted replay throws half way: the tab gets its old
     // transcript back, with its picture watched again, and the failed
     // replay's picture (index 1) is dropped.
-    send(win, {
-      type: 'task_events',
-      tabId: parentId,
-      task_id: 'parent-task',
-      task: 'images',
-      events: [
-        {type: 'tool_call', name: 'screenshot'},
-        {
-          type: 'tool_result',
-          tool_name: 'screenshot',
-          content: 'image',
-          images: [
-            {
-              mime: 'image/png',
-              path: 'x.png',
-              lazy: {taskId: 'parent-task', index: 1},
-            },
-          ],
-        },
-        null,
-      ],
-    });
+    replayCorrupted(win, parentId);
     const imgs = lazyImages(observer, parentId);
     assert.strictEqual(imgs.length, 1, 'one picture is watched for the tab');
     assert.strictEqual(
@@ -330,28 +350,7 @@ async function main() {
     );
     assert.strictEqual(kept, null, 'the hidden transcript is detached');
     const before = posted.length;
-    send(win, {
-      type: 'task_events',
-      tabId: parentId,
-      task_id: 'parent-task',
-      task: 'images',
-      events: [
-        {type: 'tool_call', name: 'screenshot'},
-        {
-          type: 'tool_result',
-          tool_name: 'screenshot',
-          content: 'image',
-          images: [
-            {
-              mime: 'image/png',
-              path: 'x.png',
-              lazy: {taskId: 'parent-task', index: 1},
-            },
-          ],
-        },
-        null,
-      ],
-    });
+    replayCorrupted(win, parentId);
     // The failed replay asked for its own picture (index 1) before it
     // threw; the restored transcript's picture is asked for afresh.
     const asked = ofType(posted.slice(before), 'getReplayImage');
@@ -431,7 +430,7 @@ async function main() {
   });
 
   report('audit1101_W3_replay_image_disposal');
-  await new Promise(r => setTimeout(r, 0));
+  await settle();
   for (const win of pages) win.close();
 }
 

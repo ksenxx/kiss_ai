@@ -37,7 +37,7 @@ const STORED = {remote_password: 'Old-Password-1', max_budget: 5};
 
 // That the box is an editable, masked input whose untouched value is
 // saved back is pinned by settingsPanelStaleConfig.test.js; here: the eye
-// toggle and the absence of a daemon-side Rotate button.
+// toggle.
 function testEyeToggleRevealsAndHides() {
   const wv = makePreloadedPage(TAB_ID);
   openSettingsWith(wv, STORED);

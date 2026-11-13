@@ -29,6 +29,7 @@ import os
 import shutil
 import socket
 import ssl
+import subprocess
 import tempfile
 import threading
 import time
@@ -40,6 +41,7 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
+from kiss import __version__
 from kiss.agents.sorcar import machines as mach
 from kiss.core.brand import PRODUCT_NAME
 from kiss.core.user_config import CONFIG_PATH, save_config
@@ -47,13 +49,14 @@ from kiss.server.web_server import (
     _MAX_LINE_BYTES,
     _SHARE_TASKS_MAX_REPLY_BYTES,
     RemoteAccessServer,
-    _generate_self_signed_cert,
     _share_subagent_entries,
 )
 from kiss.tests.conftest import find_free_port
-from kiss.tests.local_ws import open_local_connection
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.remote_daemon import start_remote_daemon
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
+from kiss.tests.server.pause import Pause
 
 _PASSWORD = "share-chat-test-password"
 
@@ -176,6 +179,22 @@ class TestShareChatOverLocal(_LocalServerTestCase):
         # script only, never in this test's transcript body.
         self.assertIn(".closest('.collapse-header')", page)
         self.assertNotIn("{{", page.split("</title>")[0])
+        # The page records the code that wrote it, after the chat: the
+        # version and the commit of this checkout, as git names it.
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        self.assertIn(
+            '\n</div>\n<footer id="share-version">'
+            f"Saved by {PRODUCT_NAME} version {__version__}, commit {commit}"
+            "</footer>\n",
+            page,
+        )
+        self.assertIn("#share-version {", page)  # _SHARE_PAGE_CSS
 
     def test_share_page_carries_a_working_light_dark_toggle(self) -> None:
         """The written page ships the light/dark mode toggle: the
@@ -279,6 +298,11 @@ class TestShareChatOverLocal(_LocalServerTestCase):
         # A FILE named "reports" makes mkdir(parents=True) raise.
         (Path(self.work_dir) / "reports").write_text("in the way")
         event = self._share(chatId="c2", html=self.BODY)
+        self.assertFalse(event["ok"])
+        self.assertIn("Failed to write the chat page", event["error"])
+        # A failure that is not an OSError is answered too: a NUL byte
+        # in the folder raises ValueError.
+        event = self._share(chatId="c2", html=self.BODY, workDir="nul\x00byte")
         self.assertFalse(event["ok"])
         self.assertIn("Failed to write the chat page", event["error"])
 
@@ -628,13 +652,33 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
     def test_database_failure_reports_an_error(self) -> None:
         # A DIRECTORY at the database path makes sqlite3 unable to open
         # it — a real filesystem failure mode, not a simulated one.
-        th._close_db()
+        close_db()
         th._DB_PATH = Path(self.tmp.name) / "db-in-the-way"
         th._DB_PATH.mkdir()
         event = self._tasks(chatId="chat-x", tabId="tab-x")
         self.assertIn("Failed to load the chat history", event["error"])
         self.assertEqual(event["tasks"], [])
         self.assertEqual(event["tabId"], "tab-x")
+
+    def test_database_failure_during_the_subagent_walk_reports_an_error(self) -> None:
+        # The chat's rows are read, then the database goes away (the
+        # same directory in its place) before the task's sub-agents are
+        # looked up: the share click must still get its reply.
+        self._seed("chat-w", "parent task", "ls")
+        with (
+            Pause(_share_subagent_entries.__code__, lambda frame_locals: True) as pause,
+            concurrent.futures.ThreadPoolExecutor(1) as pool,
+        ):
+            pending = pool.submit(self._tasks, chatId="chat-w", tabId="tab-w")
+            self.assertTrue(pause.paused.wait(10))
+            close_db()
+            th._DB_PATH = Path(self.tmp.name) / "db-in-the-way"
+            th._DB_PATH.mkdir()
+            pause.release()
+            event = pending.result(timeout=15)
+        self.assertIn("Failed to load the chat history", event["error"])
+        self.assertEqual(event["tasks"], [])
+        self.assertEqual(event["tabId"], "tab-w")
 
     def test_oldest_tasks_are_dropped_when_the_reply_would_overflow(
         self,
@@ -791,9 +835,14 @@ class TestShareChatTasksOfAMachine(IsolatedAsyncioTestCase):
     """
 
     async def asyncSetUp(self) -> None:
+        # Cleanups, each registered as its resource starts, not asyncTearDown:
+        # unittest skips the tear-down when the set-up fails.
         self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         self.saved_db = redirect_persistence(self.tmpdir)
+        self.addCleanup(restore_persistence, self.saved_db)
         mach.save_machines([])
+        self.addCleanup(mach.save_machines, [])
         th._add_task("this daemon's task", chat_id="chat-shared")
         self.remote = await asyncio.to_thread(
             start_remote_daemon, Path(self.tmpdir) / "remote-home", password="pw-remote",
@@ -804,6 +853,7 @@ class TestShareChatTasksOfAMachine(IsolatedAsyncioTestCase):
                  "timestamp": 1_700_000_001.0},
             ],
         )
+        self.addCleanup(self.remote.stop)
         await asyncio.to_thread(mach.add_machine, "box", self.remote.url, "pw-remote")
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
@@ -813,18 +863,13 @@ class TestShareChatTasksOfAMachine(IsolatedAsyncioTestCase):
             keyfile=str(keyfile), url_file=Path(self.tmpdir) / "remote-url.json",
             local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
+        # Registered before the start: one that fails part-way is stopped too.
+        self.addAsyncCleanup(self.server.stop_async)
         await self.server.start_async()
         self.reader, self.writer = await open_local_connection(
             self.server, limit=_MAX_LINE_BYTES,
         )
-
-    async def asyncTearDown(self) -> None:
-        self.writer.close()
-        await self.server.stop_async()
-        self.remote.stop()
-        mach.save_machines([])
-        restore_persistence(self.saved_db)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        self.addCleanup(self.writer.close)
 
     async def _send(self, cmd: dict[str, Any]) -> None:
         self.writer.write(json.dumps(cmd).encode("utf-8") + b"\n")

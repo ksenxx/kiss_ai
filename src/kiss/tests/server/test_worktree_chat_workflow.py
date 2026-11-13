@@ -128,7 +128,7 @@ class TestServerWorktreeWorkflow:
 
 
     def test_worktree_done_event_fields(self) -> None:
-        """worktree_done broadcast has branch, worktreeDir, originalBranch."""
+        """worktree_done broadcast has branch and worktreeDir."""
         server, events = _make_server(self.repo)
         branch = self._setup_pending_worktree(server)
 
@@ -137,19 +137,13 @@ class TestServerWorktreeWorkflow:
         changed = worktree_changed_files(server, "0")
         assert len(changed) > 0
 
-        server.printer.broadcast({
-            "type": "worktree_done",
-            "branch": _agent(server)._wt_branch,
-            "worktreeDir": str(_agent(server)._wt_dir),
-            "originalBranch": _agent(server)._original_branch,
-        })
+        assert server._present_pending_worktree("0", discard_if_empty=False) is True
 
         wt_events = [e for e in events if e["type"] == "worktree_done"]
         assert len(wt_events) == 1
         ev = wt_events[0]
         assert ev["branch"] == branch
-        assert ev["originalBranch"] is not None
-        assert "worktreeDir" in ev
+        assert ev["worktreeDir"] == str(_agent(server)._wt_dir)
 
         _agent(server).discard()
 
@@ -307,7 +301,7 @@ class TestServerWorktreeWorkflow:
         (wt_dir / "agent_file.txt").write_text("agent wrote this")
 
         branch = _agent(server)._wt_branch
-        original = _agent(server)._original_branch
+        original = _agent(server).worktrees[0].original_branch
         assert branch is not None and original is not None
         r = subprocess.run(
             ["git", "-C", str(self.repo), "rev-list", "--count",
@@ -396,7 +390,7 @@ class TestServerWorktreeWorkflow:
         assert len(changed) > 0
 
         branch = _agent(server)._wt_branch
-        original = _agent(server)._original_branch
+        original = _agent(server).worktrees[0].original_branch
         r = subprocess.run(
             ["git", "-C", str(self.repo), "rev-list", "--count",
              f"{original}..{branch}"],
@@ -497,7 +491,7 @@ class TestServerWorktreeWorkflow:
 
         wt_done = [e for e in events if e["type"] == "worktree_done"]
         assert len(wt_done) == 1
-        assert len(wt_done[0].get("changedFiles", [])) > 0
+        assert "agent_output.txt" in worktree_changed_files(server, "0")
         assert _agent(server)._wt_pending
 
         agent = _agent(server)
@@ -534,7 +528,7 @@ class TestServerWorktreeWorkflow:
 
         wt_done = [e for e in events if e["type"] == "worktree_done"]
         assert len(wt_done) == 1
-        assert len(wt_done[0].get("changedFiles", [])) > 0
+        assert len(worktree_changed_files(server, "0")) > 0
         stopped = [e for e in events if e["type"] == "task_stopped"]
         assert len(stopped) == 1
 

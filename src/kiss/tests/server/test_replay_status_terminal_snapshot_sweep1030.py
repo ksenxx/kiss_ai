@@ -166,6 +166,7 @@ class TestNoRowReplayStatusAsksTheTabOwner(_ServerCase):
         reconnecting connection, never ``running:false``.
         """
         chat_id = "chat-sweep-norow"
+        self.server._registry_update_tab(_TAB, chat_id=chat_id, create=True)
         parker = self._parker("_race_delay")
         parker.start(chat_id, _TAB, "conn-sweep")
         self.assertTrue(parker.parked_at("_race_delay"))
@@ -190,6 +191,7 @@ class TestNoRowReplayStatusAsksTheTabOwner(_ServerCase):
 
     def test_idle_tab_is_still_told_it_is_idle(self) -> None:
         """Nothing owned and nothing live: the page still learns the tab is idle."""
+        self.server._registry_update_tab(_TAB, chat_id="chat-sweep-idle", create=True)
         self.server._replay_session("chat-sweep-idle", _TAB, conn_id="conn-idle")
         statuses = self._frames(_TAB, "status")
         self.assertEqual([e["running"] for e in statuses], [False])
@@ -330,6 +332,56 @@ class TestTerminalSnapshotIsBuiltLikeTheReplay(_ServerCase):
             [("status", True), ("task_events", None)],
             "a correction decided before the viewer's run started was sent after it",
         )
+
+
+class TestRunThatGetsItsRowInsideTheAttachWindow(_ServerCase):
+    """A replay attached to a run without a row keeps what the run says once it has one.
+
+    The replay parks right after its attach, under the run's provisional
+    key; the run then gets its history row, as a worker does.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.chat_id = "chat-sweep-late-row"
+        self.source = _live_state("sweep-provisional", self.chat_id, _LAUNCHER)
+        self.parker = self._parker("_race_delay")
+        self.parker.start(self.chat_id, _VIEWER)
+        self.assertTrue(self.parker.parked_at("_race_delay"))
+
+    def _shown_to_viewer(self) -> list[Any]:
+        """The texts the viewer shows: its last transcript and what followed it."""
+        frames = self._frames(_VIEWER, "task_events", "result", "text_delta")
+        last = max(i for i, ev in enumerate(frames) if ev["type"] == "task_events")
+        return [ev.get("text") for ev in [*frames[last]["events"], *frames[last + 1:]]]
+
+    def test_help_answer_survives_the_replay(self) -> None:
+        """A ``/xxx help`` run ends in the window: the stale transcript must not erase it."""
+        self.server._finish_sea_help_task(
+            self.source, prompt="/example help", text="THE HELP ANSWER", success=True,
+            tab_id=_LAUNCHER, model="", work_dir=".", start_ms=1,
+        )
+        with agent_state.STATE_LOCK:
+            self.source.is_task_active = False
+        self.assertTrue(self.parker.finish())
+        self.assertIn("THE HELP ANSWER", self._shown_to_viewer())
+        self.assertEqual(
+            [ev["running"] for ev in self._frames(_VIEWER, "status")][-1], False,
+        )
+
+    def test_events_of_the_new_row_survive_the_replay(self) -> None:
+        """An agent's row: what it recorded before the snapshot belongs to the transcript."""
+        task_id, _ = th._add_task("a late row", self.chat_id)
+        agent_state.rekey(self.source, str(task_id))
+        self.server._on_run_task_id_allocated(
+            str(task_id), self.chat_id, source_tab_id=_LAUNCHER, start_ms=1,
+            previous_task_id="sweep-provisional",
+        )
+        self.printer.adopt_thread_binding(task_id)
+        self.printer.start_recording()
+        self.printer.broadcast({"type": "text_delta", "text": "first words"})
+        self.assertTrue(self.parker.finish())
+        self.assertIn("first words", self._shown_to_viewer())
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ whose commands run with ``sh`` in a temporary directory; no mocks.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -31,6 +32,7 @@ import pytest
 
 from kiss.agents.sorcar.edit_guards import HEREDOC_UNRESOLVED_VERDICT, HEREDOC_VERDICT
 from kiss.agents.sorcar.exec_bridge import ExecBridge
+from kiss.agents.sorcar.shell_guards import DESTRUCTIVE_VERDICT
 from kiss.agents.sorcar.useful_tools import CD_VERDICT
 from kiss.benchmarks.terminal_bench.exec_bridge_server import ExecBridgeServer
 from kiss.core.tool_verdict import ToolRedirect
@@ -38,13 +40,29 @@ from kiss.tests.agents.seas.test_coding_sea_evidence_gate import (
     LocalEnvironment,
     _Loop,
     _no_reaper_thread,
-    _wait_until,
 )
 from kiss.tests.agents.sorcar.test_exec_bridge_stop_and_guards import _bridge
-from kiss.tests.conftest import host_sed_is_gnu, posix_only
+from kiss.tests.conftest import host_sed_is_gnu, posix_only, wait_for
 
 local_shell = posix_only("the bridged local environment runs sh commands")
 needs_gnu_sed = pytest.mark.skipif(not host_sed_is_gnu(), reason="needs GNU sed as the oracle")
+
+
+@contextlib.contextmanager
+def _bridge_in(workdir: Path) -> Iterator[ExecBridge]:
+    """An entered bridge to a local environment working in *workdir*."""
+    loop = _Loop()
+    server = ExecBridgeServer(LocalEnvironment(str(workdir)), loop.loop)
+    try:
+        # ``workdir`` is the host-side directory the agent passes; the
+        # environment's own working directory is another one.
+        with ExecBridge(f"exec:{server.url}", workdir="/host/side", volumes={}) as bridge:
+            yield bridge
+    finally:
+        server.environment.kill_all()
+        assert wait_for(_no_reaper_thread, 10)
+        server.close()
+        loop.close()
 
 
 @pytest.fixture
@@ -53,18 +71,8 @@ def bridged(tmp_path: Path) -> Iterator[tuple[Path, ExecBridge]]:
     workdir = tmp_path / "app"
     workdir.mkdir()
     (workdir / "data.txt").write_text("v1\n")
-    loop = _Loop()
-    server = ExecBridgeServer(LocalEnvironment(str(workdir)), loop.loop)
-    try:
-        # ``workdir`` is the host-side directory the agent passes; the
-        # environment's own working directory is another one.
-        with ExecBridge(f"exec:{server.url}", workdir="/host/side", volumes={}) as bridge:
-            yield workdir, bridge
-    finally:
-        server.environment.kill_all()
-        assert _wait_until(_no_reaper_thread)
-        server.close()
-        loop.close()
+    with _bridge_in(workdir) as bridge:
+        yield workdir, bridge
 
 
 @local_shell
@@ -206,6 +214,65 @@ def test_run_commands_parallel_refuses_them_too(bridged: tuple[Path, ExecBridge]
     assert report.startswith("2 commands: 1 succeeded, 1 failed, 0 timed out."), report
     assert HEREDOC_VERDICT.format(path=str(workdir / "data.txt")) in report
     assert (workdir / "data.txt").read_text() == "v1\n"
+    # Where a ``cd`` through a link leads is asked of the environment, as ``Bash`` asks it.
+    # Unasked, the copy was judged beside the link (no such file: a new one) and ran, onto
+    # the existing file the link leads to under bash (audit 2026-11-12, B4).
+    (workdir / "other" / "sub").mkdir(parents=True)
+    (workdir / "other" / "deep").mkdir()
+    (workdir / "link").symlink_to("other/sub")
+    victim = workdir / "other" / "deep" / "victim"
+    victim.write_text("ORIGINAL\n")
+    report = bridge.run_commands_parallel(
+        json.dumps([f"cd {workdir}/link/../deep; cat > victim <<'EOF'\nowned\nEOF"]),
+    )
+    assert report.startswith("1 commands: 0 succeeded, 1 failed, 0 timed out."), report
+    assert "REFUSED: the command did not run: it writes " in report
+    assert victim.read_text() == "ORIGINAL\n" and not (workdir / "victim").exists()
+    # So is where the ``cd`` of a delete lands (round 2, B5): a link back to the work
+    # directory is the work directory, to ``Bash`` and to the fan-out alike.
+    (workdir / "alias").symlink_to(workdir, target_is_directory=True)
+    assert bridge.Bash("cd alias && rm -rf *", "wipe") == DESTRUCTIVE_VERDICT
+    assert DESTRUCTIVE_VERDICT in bridge.run_commands_parallel('["cd alias && rm -rf ./*"]')
+    assert bridge.Bash("cd other/sub && rm -rf * && echo emptied", "ok").strip() == "emptied"
+    assert victim.read_text() == "ORIGINAL\n" and (workdir / "data.txt").read_text() == "v1\n"
+    # The environment's answer keeps a newline a directory's name ends with (the review's
+    # finding): without it the directory above the work directory read as another one.
+    odd = workdir.parent / "odd\n" / "work"
+    odd.mkdir(parents=True)
+    (odd / "up").symlink_to("..")
+    with _bridge_in(odd) as inner:
+        assert inner.Bash("cd up && rm -rf *", "wipe") == DESTRUCTIVE_VERDICT
+    assert odd.is_dir()
+
+
+@local_shell
+def test_a_python_rewrite_importing_a_module_of_the_environment_is_no_edit(
+    bridged: tuple[Path, ExecBridge],
+) -> None:
+    """A python rewrite is its Edit only while its imports are the library's where it runs.
+
+    With a ``json.py`` beside it, python imports that one: bash fails on it and leaves the
+    file alone, while the Edit made in its place changed the file.  The bridge asks the
+    environment, as Docker asks its container (audit 2026-11-12, B4).
+    """
+    workdir, bridge = bridged
+    target = workdir / "a.py"
+    target.write_text("x = 1\n")
+    program = (f"import json\ns = open('{target}').read()\ns = s.replace('x', 'y')\n"
+               f"open('{target}', 'w').write(s)\n")
+    command = f"cd {workdir} && python3 - <<'EOF'\n{program}EOF"
+    with pytest.raises(ToolRedirect) as edit:
+        bridge.Bash(command, "rewrite")
+    assert (edit.value.name, edit.value.arguments["file_path"]) == ("Edit", str(target))
+    (workdir / "json.py").write_text("raise RuntimeError('shadowed')\n")
+    refused = bridge.Bash(command, "rewrite")
+    assert refused.startswith("REFUSED: "), refused
+    assert target.read_text() == "x = 1\n"
+    # Nor is a rewrite an Edit when the environment's shell does not find its program: as
+    # written it fails with status 127 and leaves the file alone.  The bridge asked nobody
+    # and made the Edit (audit 2026-11-12 round 2, B4 #5); the Docker manager asks its container.
+    sed = bridge.run_bash(f"/nowhere/sed -i 's/v1/v2/' {workdir / 'data.txt'}", "sed")
+    assert sed.code == "127" and (workdir / "data.txt").read_text() == "v1\n", sed
 
 
 def test_an_environment_without_a_usable_working_directory_refuses_relative_targets() -> None:

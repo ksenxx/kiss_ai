@@ -12,7 +12,9 @@
 // * closing a file on the stacked (phone) layout lands on the chat that
 //   opened it, not on whichever chat sits next to it in the tab list;
 // * widening the window while a file whose chat is gone is on screen
-//   puts another open chat in the chat pane instead of a new chat.
+//   puts another open chat in the chat pane instead of a new chat;
+// * closing a sub-agent's tab that sits behind its own sub-agent's on
+//   the strip lands on their chat instead of a new chat.
 'use strict';
 
 const assert = require('assert');
@@ -69,31 +71,22 @@ function openFile(win, owner) {
   return file.id;
 }
 
-/** The open tabs' ids, as an array of this realm (deepStrictEqual
- *  compares prototypes). */
-function openIds(win) {
-  return win._testApi.openTabs().map(t => String(t.id));
-}
-
-function scopedFetches(posted, ids) {
-  return h
-    .ofType(posted, 'resumeSession')
-    .filter(m => m.scoped === true && ids.includes(m.tabId));
-}
-
-function pickTabMenuItem(win, tabNode, label) {
-  h.rightClick(win, tabNode);
-  const item = h
-    .all(win, '#tab-context-menu .tab-ctx-item')
-    .find(el => el.textContent === label);
-  assert.ok(item, `the "${label}" item exists`);
-  h.click(win, item);
-}
-
 function closeWithX(win, tabId) {
   const el = tabEl(win, tabId);
   assert.ok(el, `tab ${tabId} is on the strip`);
   h.click(win, el.querySelector('.chat-tab-close'));
+}
+
+/** The daemon announces sub-agent tab *tabId* below tab *parentId*. */
+function announceSubagent(win, tabId, parentId, extra) {
+  h.send(win, {
+    type: 'openSubagentTab',
+    tab_id: tabId,
+    parent_tab_id: parentId,
+    description: tabId,
+    task_id: 'task-' + tabId,
+    ...extra,
+  });
 }
 
 async function main() {
@@ -112,9 +105,9 @@ async function main() {
     h.send(win, {type: 'status', running: false, tabId: tabA});
     const subA = win._testApi.openTabs().find(t => t.id === 'sub-a');
     assert.ok(subA.isRunning, 'precondition: the sub-agent runs');
-    pickTabMenuItem(win, tabEl(win, tabA), 'Close Inactive');
+    h.pickTabMenuItem(win, tabEl(win, tabA), 'Close Inactive');
     assert.deepStrictEqual(
-      [...openIds(win)],
+      harness.tabIds(win),
       [tabA, 'sub-a'],
       'B and C close, A stays',
     );
@@ -131,13 +124,13 @@ async function main() {
       '#content-tab-list .chat-tab[data-tab-id="' + file + '"]',
     );
     assert.ok(fileTab, 'the file is on the content pane strip');
-    pickTabMenuItem(win, fileTab, 'Close Others');
+    h.pickTabMenuItem(win, fileTab, 'Close Others');
     const tabs = win._testApi.openTabs();
     assert.strictEqual(tabs.length, 2, 'the file and one fresh chat');
     assert.strictEqual(tabs[0].id, file);
     assert.ok(!tabs[1].isContentTab && tabs[1].id !== tabA);
     assert.deepStrictEqual(
-      [...scopedFetches(posted, ['tab-b', 'tab-c'])],
+      [...h.scopedFetches(posted, ['tab-b', 'tab-c'])],
       [],
       'no chat closed by the same action was restored and fetched',
     );
@@ -186,7 +179,43 @@ async function main() {
       'no new chat is opened while chat B is there',
     );
     assert.strictEqual(win._testApi.getActiveTabId(), 'tab-b');
-    assert.deepStrictEqual([...openIds(win)], ['tab-b', file]);
+    assert.deepStrictEqual(harness.tabIds(win), ['tab-b', file]);
+    win.close();
+  });
+
+  await test("closing a sub-agent behind its own sub-agent's tab lands on their chat", () => {
+    const {win, posted, tabA} = page(true);
+    // sub-c dispatched sub-g and finished first: its tab closed, sub-g's
+    // stayed.  sub-c's history was then reopened (behind sub-g on the
+    // strip) and the daemon announced the running sub-g below it again.
+    announceSubagent(win, 'sub-c', tabA);
+    announceSubagent(win, 'sub-g', 'sub-c');
+    h.send(win, {type: 'subagentDone', tab_id: 'sub-c'});
+    announceSubagent(win, 'sub-c', tabA, {isDone: true, reopened: true});
+    announceSubagent(win, 'sub-g', 'sub-c');
+    assert.deepStrictEqual(
+      harness.tabIds(win),
+      [tabA, 'sub-g', 'sub-c'],
+      'precondition: the reopened sub-agent sits behind its own sub-agent',
+    );
+    win._testApi.switchToTab('sub-c');
+    const before = h.ofType(posted, 'newChat').length;
+    closeWithX(win, 'sub-c');
+    assert.deepStrictEqual(
+      harness.tabIds(win),
+      [tabA],
+      'the user closed the sub-agent and, with it, its own sub-agent',
+    );
+    assert.strictEqual(
+      win._testApi.getActiveTabId(),
+      tabA,
+      'their chat, still open, comes on screen',
+    );
+    assert.strictEqual(
+      h.ofType(posted, 'newChat').length,
+      before,
+      'no new chat is opened',
+    );
     win.close();
   });
 

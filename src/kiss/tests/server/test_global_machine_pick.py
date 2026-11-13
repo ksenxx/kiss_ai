@@ -34,6 +34,7 @@ import kiss.core.user_config as vc
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
+from kiss.tests.server.pause import Pause
 
 
 class TestGlobalMachinePick(IsolatedAsyncioTestCase):
@@ -44,7 +45,7 @@ class TestGlobalMachinePick(IsolatedAsyncioTestCase):
         self.saved = redirect_persistence(self.tmpdir)
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.server.web_server import _generate_self_signed_cert
+        from kiss.tests.local_ws import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -65,8 +66,7 @@ class TestGlobalMachinePick(IsolatedAsyncioTestCase):
             except Exception:
                 pass
         await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         vc.save_config({"last_machine": ""})
@@ -194,6 +194,41 @@ class TestGlobalMachinePick(IsolatedAsyncioTestCase):
             seen.append(str(ev["machine"]))
         self.assertTrue(seen, "at least one pick was broadcast")
         self.assertEqual(seen[-1], persisted, "the last broadcast names the persisted pick")
+
+    async def _next_selection(self, reader: LocalReader) -> str:
+        """The machine the next ``machineChanged`` or ``configData`` puts a surface on."""
+        ev = await self._drain_until(
+            reader,
+            lambda m: m.get("type") == "machineChanged"
+            or (m.get("type") == "configData" and not m.get("forwarded")),
+        )
+        picked = ev["type"] == "machineChanged"
+        return str(ev["machine"] if picked else ev["config"]["last_machine"])
+
+    async def test_config_reply_in_flight_does_not_undo_a_newer_pick(self) -> None:
+        """A ``getConfig`` reply in flight does not put its surface back on an older machine.
+
+        The reply is held (a :class:`Pause` hook) once it has read
+        ``config.json``, and another surface picks a machine.  The
+        requesting surface adopts ``machineChanged`` and ``configData``
+        ``last_machine`` alike: the last one it receives must name the
+        persisted pick, as on the other surface.
+        """
+        reader_a, writer_a = await self._connect()
+        reader_b, writer_b = await self._connect()
+        picked = self._machine_changed("gpu-box")
+        with Pause(vc.get_current_api_keys.__code__, lambda _locals: True) as reply:
+            await self._send(writer_a, {"type": "getConfig"})
+            self.assertTrue(await asyncio.to_thread(reply.paused.wait, 10))
+            await self._send(writer_b, {"type": "setMachine", "machine": "gpu-box"})
+            try:  # the pick lands inside the window (the defect) or waits for the reply
+                await self._drain_until(reader_b, picked, timeout=1.0)
+            except TimeoutError:
+                reply.release()
+                await self._drain_until(reader_b, picked)
+        adopted = [await self._next_selection(reader_a) for _ in range(2)]
+        self.assertEqual(adopted[-1], "gpu-box", f"surface A ends on a superseded pick: {adopted}")
+        self.assertEqual(vc.load_config().get("last_machine"), "gpu-box")
 
     async def test_settings_save_keeps_the_pick(self) -> None:
         """The settings sheet's ``saveConfig`` (which never carries the

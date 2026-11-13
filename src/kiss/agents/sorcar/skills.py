@@ -45,8 +45,7 @@ import fnmatch
 import logging
 import os
 import re
-import stat
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -54,54 +53,36 @@ from xml.sax.saxutils import escape as xml_escape
 
 import yaml
 
+from kiss.agents.sorcar.useful_tools import _open_regular, _unstopped
 from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
 _FRONTMATTER_RE = re.compile(r"\A---[^\S\n]*\n((?:.*\n)*?)---[^\S\n]*\n?")
 
-# Non-blocking, so a FIFO named SKILL.md cannot park the opener (see
-# ``_read_regular_file``); binary on Windows, where the CRT would
-# otherwise translate the bytes before the text layer does.
-_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
 
-
+@_unstopped
 def _read_regular_file(path: Path) -> str:
     """Return the UTF-8 text of *path*, which must be a regular file.
 
     ``Path.read_text`` on a FIFO (or a device) named ``SKILL.md``
     blocks in ``open`` with no deadline and no bytecode boundary where
     the runner's Stop could land, and every agent's tool setup runs
-    discovery.  The type is checked on the open descriptor, so a
-    symlink to a regular file still reads while one to a FIFO is
-    refused.
+    discovery.  The type is checked on the descriptor, opened without
+    blocking (:func:`~kiss.agents.sorcar.useful_tools._open_regular`),
+    so a symlink to a regular file still reads while one to a FIFO is
+    refused; the descriptor is held where no Stop can part it from its
+    close (:func:`~kiss.agents.sorcar.useful_tools._unstopped`).
 
     Raises:
         OSError: *path* is missing, unreadable or not a regular file.
         UnicodeDecodeError: The content is not UTF-8.
     """
-    fd = os.open(path, _OPEN_FLAGS)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(errno.EINVAL, "not a regular file", str(path))
-    except BaseException:
-        os.close(fd)
-        raise
+    fd = _open_regular(path, os.O_RDONLY)
+    if fd is None:
+        raise OSError(errno.EINVAL, "not a regular file", str(path))
     with open(fd, encoding="utf-8-sig") as file:
         return file.read()
-
-
-def claude_config_dir() -> Path:
-    """Return Claude Code's config directory (``~/.claude``).
-
-    Honours the ``CLAUDE_CONFIG_DIR`` environment variable, the same
-    override Claude Code itself uses for its ``~/.claude`` directory.
-
-    Returns:
-        The resolved config directory path.
-    """
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    return Path(config_dir) if config_dir else Path.home() / ".claude"
 
 
 def parse_frontmatter(path: Path) -> tuple[dict[str, Any], str] | None:
@@ -153,6 +134,7 @@ def collapse_whitespace(value: object) -> str:
     """
     return " ".join(str(value or "").split())
 
+
 _MAX_RESOURCE_LISTING = 50
 
 _RESOURCE_SKIP_DIRS = {".git", "node_modules", "__pycache__"}
@@ -199,10 +181,11 @@ def bundled_skills_dir() -> Path:
 def claude_user_skills_dir() -> Path:
     """Return Claude Code's user skills directory (``~/.claude/skills``).
 
-    Honours the ``CLAUDE_CONFIG_DIR`` environment variable via
-    :func:`claude_config_dir`.
+    Honours the ``CLAUDE_CONFIG_DIR`` environment variable, the same
+    override Claude Code itself uses for its ``~/.claude`` directory.
     """
-    return claude_config_dir() / "skills"
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    return (Path(config_dir) if config_dir else Path.home() / ".claude") / "skills"
 
 
 def agents_user_skills_dir() -> Path:
@@ -237,7 +220,15 @@ def _parse_skill_file(path: Path, name: str, source: str) -> Skill | None:
     if parsed is None:
         return None
     meta, body = parsed
-    description = collapse_whitespace(meta.get("description", ""))
+    # A scalar only: an alias tree (lists sharing lists) is a few hundred
+    # bytes of YAML and gigabytes as text.  A scalar with no text counts
+    # as none too: YAML loads a ``0x...`` integer of any length, and
+    # ``str`` refuses one past the interpreter's digit limit (ValueError).
+    raw = meta.get("description")
+    try:
+        description = "" if isinstance(raw, (list, dict, set)) else collapse_whitespace(raw)
+    except ValueError:
+        description = ""
     if not description:
         first_paragraph = body.strip().split("\n\n", 1)[0]
         description = collapse_whitespace(first_paragraph)
@@ -402,8 +393,8 @@ def _catalog_xml(skills: dict[str, Skill]) -> str:
     return "\n".join(lines)
 
 
-def _walk_resources(root: Path, directory: Path, resources: list[str]) -> bool:
-    """Append the resource files under *directory* to *resources*; return whether the cap cut one.
+def _walk_resources(root: Path, resources: list[str]) -> bool:
+    """Append the resource files under *root* to *resources*; return whether the cap cut one.
 
     Files are listed — never read — so the agent can load specific
     resources on demand with its file tools.  ``SKILL.md`` itself and
@@ -419,19 +410,18 @@ def _walk_resources(root: Path, directory: Path, resources: list[str]) -> bool:
     file), ``SKILL.md`` and symlinked directories; an unreadable
     directory contributes nothing, and an entry that cannot be
     examined (a looping symlink) is skipped so the rest still lists.
+    The directories being read are a stack, not a recursion: a tree may
+    be deeper than the interpreter's recursion limit.
     """
-    try:
-        with os.scandir(directory) as entries:
-            found = sorted(entries, key=_entry_name)
-    except OSError:
-        logger.debug("could not list resources in %s", directory, exc_info=True)
-        return False
-    for entry in found:
-        if entry.name in _RESOURCE_SKIP_DIRS:
+    pending = [_sorted_entries(root)]
+    while pending:
+        entry = next(pending[-1], None)
+        if entry is None:
+            pending.pop()
+        elif entry.name in _RESOURCE_SKIP_DIRS:
             continue
-        if entry.is_dir(follow_symlinks=False):
-            if _walk_resources(root, Path(entry.path), resources):
-                return True
+        elif entry.is_dir(follow_symlinks=False):
+            pending.append(_sorted_entries(Path(entry.path)))
         elif entry.name != "SKILL.md" and _is_resource_file(entry):
             if len(resources) >= _MAX_RESOURCE_LISTING:
                 return True
@@ -439,8 +429,18 @@ def _walk_resources(root: Path, directory: Path, resources: list[str]) -> bool:
     return False
 
 
+def _sorted_entries(directory: Path) -> Iterator[os.DirEntry[str]]:
+    """Return the entries of *directory* in name order; none when it cannot be read."""
+    try:
+        with os.scandir(directory) as entries:
+            return iter(sorted(entries, key=_entry_name))
+    except OSError:
+        logger.debug("could not list resources in %s", directory, exc_info=True)
+        return iter(())
+
+
 def _entry_name(entry: os.DirEntry[str]) -> str:
-    """Return the name of a directory entry (the sort key of :func:`_walk_resources`)."""
+    """Return the name of a directory entry (the sort key of :func:`_sorted_entries`)."""
     return entry.name
 
 
@@ -486,10 +486,10 @@ def load_skill_content(skill: Skill) -> str:
         "Relative paths in this skill are relative to the skill directory."
     )
     resources: list[str] = []
-    truncated = _walk_resources(skill_dir, skill_dir, resources)
+    truncated = _walk_resources(skill_dir, resources)
     if resources:
         parts.append("<skill_resources>")
-        parts.extend(f"<file>{r}</file>" for r in resources)
+        parts.extend(f"<file>{xml_escape(r)}</file>" for r in resources)
         if truncated:
             parts.append("<note>listing truncated</note>")
         parts.append("</skill_resources>")
@@ -527,7 +527,7 @@ def make_skill_tool(work_dir: str, agent: Any = None) -> Callable[[str], str] | 
         return None
 
     def skill(name: str) -> str:
-        live = getattr(agent, "work_dir", None) if agent is not None else None
+        live = getattr(agent, "work_dir", None)
         current = discover_skills(str(live) if live else work_dir)
         found = current.get(name)
         if found is None:
@@ -538,7 +538,6 @@ def make_skill_tool(work_dir: str, agent: Any = None) -> Callable[[str], str] | 
             )
         return load_skill_content(found)
 
-    skill.__name__ = "skill"
     skill.__doc__ = (
         "Load a skill's full instructions into the conversation.\n\n"
         "Skills provide specialized instructions for specific tasks. "

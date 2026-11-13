@@ -95,7 +95,7 @@ def accepts_gzip(accept_encoding: str) -> bool:
         coding = coding.strip()
         if coding not in ("gzip", "*"):
             continue
-        weight = params.replace(" ", "").removeprefix("q=")
+        weight = params.replace(" ", "").replace("\t", "").removeprefix("q=")
         try:
             admits = float(weight or "1") > 0
         except ValueError:

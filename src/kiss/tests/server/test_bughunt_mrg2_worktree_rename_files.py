@@ -10,10 +10,7 @@ so when the agent renamed a tracked file inside its worktree
 (``git mv old.txt new.txt`` plus an edit), git's rename detection
 collapsed the change into a single entry for the NEW path.  The OLD
 path — which merging the worktree branch will DELETE from the user's
-main tree — was silently missing from ``changedFiles`` (the list shown
-to the user on the ``worktree_done`` prompt) and from the file-overlap
-sets used by ``_conflict_of``, which could therefore miss a
-conflict with dirty main-tree edits to the old path.
+main tree — was silently missing from the changed-file listing.
 
 No mocks, patches, fakes, or test doubles. Real git repository, real
 ``ChatSorcarAgent`` worktree, real server mixin methods.
@@ -30,7 +27,7 @@ from pathlib import Path
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
-from kiss.tests.server.worktree_helpers import merge_conflict, worktree_changed_files
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -42,7 +39,7 @@ def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 class TestWorktreeRenameChangedFiles(unittest.TestCase):
-    """Renamed files must appear (old and new path) in changedFiles."""
+    """Renamed files must appear (old and new path) in the changed-file listing."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-wt-rename-")
@@ -100,27 +97,8 @@ class TestWorktreeRenameChangedFiles(unittest.TestCase):
         )
         self.assertIn(
             "old.txt", changed,
-            "rename hid the old path's deletion from changedFiles: "
+            "rename hid the old path's deletion from the changed files: "
             f"{changed}",
-        )
-
-    def test_conflict_check_sees_dirty_main_edit_to_renamed_path(self) -> None:
-        """A dirty main-tree edit of the old path must flag a conflict."""
-        _git(self.wt_dir, "mv", "old.txt", "new.txt")
-        new_path = Path(self.wt_dir, "new.txt")
-        new_path.write_text(
-            new_path.read_text().replace("line5\n", "line5-agent\n"),
-        )
-        main_old = Path(self.repo, "old.txt")
-        main_old.write_text(
-            main_old.read_text().replace("line9\n", "line9-user\n"),
-        )
-
-        self.assertTrue(
-            merge_conflict(self.server, self.tab_id),
-            "conflict check missed the overlap between the worktree "
-            "rename (deletes old.txt) and the user's dirty edit of "
-            "old.txt on the main tree",
         )
 
 

@@ -66,6 +66,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-recall5", type=float, default=0.0)
     args = parser.parse_args(argv)
     questions_file = args.questions or args.dir / "eval" / "questions.yaml"
+    # Before the index: syncing it creates the directory and embeds every page.
+    try:
+        questions = yaml.safe_load(questions_file.read_text(encoding="utf-8"))
+    except OSError as exc:
+        print(f"Cannot read the questions: {exc}")
+        return 1
+    if not questions:
+        print(f"No questions in {questions_file}")
+        return 1
 
     memory = MemoryDir(args.dir)
     if args.hashed:
@@ -73,7 +82,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         index = VectorIndex(memory)
     index.sync()
-    questions = yaml.safe_load(questions_file.read_text())
     unknown = sorted({g for q in questions for g in q["gold"]} - set(memory.page_names()))
     if unknown:
         print(f"Gold pages missing from {memory.root}: {', '.join(unknown)}")

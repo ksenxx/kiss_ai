@@ -181,6 +181,14 @@ test('a sub-agent nobody closed still gets its tab from a live spawn', () => {
     'a new sub-agent opens its tab: ' + JSON.stringify(openSubTabIds(win)),
   );
   assert.ok(openSubTabIds(win).includes(subTabIds[0]));
+  // The live announcement the tests above expect to open nothing does
+  // open the tab of a sub-agent nobody closed.
+  const liveId = parentId + '__sub_sub-task-live';
+  announceLive(win, parentId, 'sub-task-live', liveId);
+  assert.ok(
+    openSubTabIds(win).includes(liveId),
+    'a live announcement opens its tab: ' + JSON.stringify(openSubTabIds(win)),
+  );
   win.close();
 });
 

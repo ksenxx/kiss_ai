@@ -81,7 +81,7 @@ class _ScriptedSea:
 
     def __init__(self) -> None:
         self.calls: list[tuple[Any, str]] = []
-        self.outcomes: list[tuple[str, float] | Exception] = []
+        self.outcomes: list[tuple[str, float] | BaseException] = []
         self._gate = threading.Event()
 
     def __call__(self, parent_agent: Any, task_id: str) -> tuple[str, float]:
@@ -89,11 +89,11 @@ class _ScriptedSea:
         self._gate.wait(10)
         self._gate.clear()
         outcome = self.outcomes.pop(0)
-        if isinstance(outcome, Exception):
+        if isinstance(outcome, BaseException):
             raise outcome
         return outcome
 
-    def release(self, outcome: tuple[str, float] | Exception) -> None:
+    def release(self, outcome: tuple[str, float] | BaseException) -> None:
         """Let the blocked call finish with *outcome*."""
         self.outcomes.append(outcome)
         self._gate.set()
@@ -240,6 +240,16 @@ class TestTaskUpdateRunner(unittest.TestCase):
         self.assertEqual(failed.cost, 0.0)
         self.assertFalse(failed.payload()["running"])
         self.assertTrue(failed.payload()["exists"])
+
+        # A ``BaseException`` that is not the stop's interrupt (a
+        # cancelled asyncio call) is a failure too, not an empty success.
+        runner.poll(task_b, parent, force=True)
+        _wait_until(lambda: len(sea.calls) == 3)
+        sea.release(asyncio.CancelledError("cancelled"))
+        _wait_until(lambda: not runner.poll(task_b, parent).running)
+        cancelled = runner.poll(task_b, parent)
+        self.assertEqual(cancelled.text, "first report")
+        self.assertEqual(cancelled.error, "CancelledError: cancelled")
 
     def test_interval_elapsed_reruns_and_idle_reports_are_pruned(self) -> None:
         sea = _ScriptedSea()

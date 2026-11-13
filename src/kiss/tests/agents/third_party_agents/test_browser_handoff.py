@@ -17,7 +17,8 @@ API, so nothing is mocked: the launcher really forks the browser
 process, the consent sessions really start, the Composio Connect Link
 really comes from a local Composio API emulator.  The daemon's own
 opener (a real streamed browser) is exercised in
-``tests/server/test_browser_tab_service.py``.
+``tests/server/test_browser_tab_service.py`` and, for a Stop landing
+as a page is claimed, here.
 
 Not covered here, and why:
 
@@ -41,6 +42,7 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar import web_stealth
 from kiss.agents.third_party_agents._device_auth import (
     ConsentSession,
     consent_instructions,
@@ -65,10 +67,13 @@ from kiss.core.browser_handoff import (
     portal_handoff,
     set_browser_tab_opener,
 )
+from kiss.core.tool_interrupt import inject_async_exception
+from kiss.server.browser_tab import BrowserTabService
 from kiss.tests.agents.third_party_agents.conftest import FAKE_SIGNAL_LINK_CLI
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools, wait_until
 from kiss.tests.conftest import IS_WINDOWS, install_cli_script
 from kiss.tests.conftest import read_browser_launches as _opened
+from kiss.tests.server._memory_printer import MemoryPrinter
 
 _FAKE_BROWSER = """#!/usr/bin/env python3
 # Scripted stand-in for the user's browser: records the URLs it is asked
@@ -480,6 +485,111 @@ def test_concurrent_callers_share_the_final_outcome(fake_browser: Path) -> None:
         thread.join(15)
         assert not thread.is_alive(), "open_for_user() did not return"
     assert results == [BROWSER_TAB, BROWSER_TAB] and slow.urls.count(other) == 1
+
+
+def _open_until_stopped(url: str, stopped: threading.Event) -> None:
+    """Thread body: ``open_for_user(url)``; sets *stopped* when a Stop ends the call."""
+    try:
+        open_for_user(url)
+    except KeyboardInterrupt:
+        stopped.set()
+
+
+@pytest.mark.usefixtures("browser_tab")  # its teardown unregisters the held opener
+def test_stop_reaches_a_caller_waiting_for_another_callers_launch() -> None:
+    """A caller parked behind another task's launch slept in one ``Condition.wait`` of up to
+    ``_SETTLE_TIMEOUT``, where an injected Stop is not raised: it stopped only once the
+    other task's opener had returned."""
+    entered, gate, stopped = threading.Event(), threading.Event(), threading.Event()
+
+    def held_launch(url: str) -> bool:
+        entered.set()
+        return gate.wait(60)
+
+    set_browser_tab_opener(held_launch)
+    url = _unique_url("stop-waiter")
+    owner = threading.Thread(target=open_for_user, args=(url,))
+    waiter = threading.Thread(target=_open_until_stopped, args=(url, stopped))
+    try:
+        owner.start()
+        assert entered.wait(10), "the launch did not start"
+        waiter.start()
+        assert wait_until(
+            lambda: len(_browser_handoff._lock._waiters) == 1,  # type: ignore[attr-defined]
+            timeout=10.0,
+        ), "the second caller did not join the launch"
+        assert waiter.ident is not None
+        assert inject_async_exception(waiter.ident, KeyboardInterrupt) == 1
+        assert stopped.wait(20), "the Stop did not reach the waiting caller"
+        assert owner.is_alive(), "the launch in flight must not be affected"
+    finally:
+        gate.set()
+        owner.join(15)
+        waiter.join(15)
+    assert not owner.is_alive() and not waiter.is_alive()
+
+
+def _stop_this_thread(code: object, offset: int, retval: object) -> None:
+    """``sys.monitoring`` PY_RETURN callback: the runner's Stop, injected into the caller."""
+    inject_async_exception(threading.get_ident(), KeyboardInterrupt)
+
+
+@contextlib.contextmanager
+def _stop_as_the_claim_returns() -> Iterator[None]:
+    """Inject a Stop into the calling thread as its ``_claim`` returns.
+
+    A ``sys.monitoring`` hook on the real ``_claim`` (nothing is replaced):
+    the Stop lands once the page is on record and before the caller holds
+    the claim's result.
+    """
+    monitoring, claim = sys.monitoring, _browser_handoff._claim.__code__
+    tool = next(i for i in range(6) if monitoring.get_tool(i) is None)
+    monitoring.use_tool_id(tool, "kiss.tests stop as a hand-off is claimed")
+    monitoring.register_callback(tool, monitoring.events.PY_RETURN, _stop_this_thread)
+    monitoring.set_local_events(tool, claim, monitoring.events.PY_RETURN)
+    try:
+        yield
+    finally:
+        monitoring.set_local_events(tool, claim, 0)
+        monitoring.register_callback(tool, monitoring.events.PY_RETURN, None)
+        monitoring.free_tool_id(tool)
+
+
+@pytest.mark.skipif(
+    not (Path.home() / ".cache" / "ms-playwright").is_dir(),
+    reason="Playwright browsers not installed",
+)
+def test_stop_as_the_claim_returns_leaves_no_pending_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Stop landing as the page is claimed releases the claim: the next attempt opens at once.
+
+    The claim was taken outside ``_open_on``'s cleanup, so the Stop left it
+    unsettled and the next attempt waited out ``_SETTLE_TIMEOUT`` (two
+    minutes) for a launch nobody ran.  A re-check stopped the same way
+    keeps the record of the page this thread has already opened.  The
+    opener is the daemon's own, registered as the daemon registers it:
+    the pages counted are the ones its real browser holds.
+    """
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    page = tmp_path / "signin.html"
+    page.write_text("<title>Sign in</title>")
+    url = page.as_uri()
+    service = BrowserTabService(MemoryPrinter(), tmp_path / "profile")
+    set_browser_tab_opener(service.open_for_user)
+    try:
+        with _stop_as_the_claim_returns(), pytest.raises(KeyboardInterrupt):
+            open_for_user(url)
+        assert not service._pages and url not in _browser_handoff._recent
+        assert open_for_user(url) == BROWSER_TAB
+        with _stop_as_the_claim_returns(), pytest.raises(KeyboardInterrupt):
+            open_for_user(url)
+        assert open_for_user(url) == BROWSER_TAB
+        assert [record.page.url for record in service._pages.values()] == [url]
+    finally:
+        set_browser_tab_opener(None)
+        service.shutdown()
+        web_stealth.stop_virtual_display()
 
 
 def test_handoff_notes_match_where_the_page_went() -> None:

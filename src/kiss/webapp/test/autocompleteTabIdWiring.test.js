@@ -17,7 +17,14 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, waitFor, recordTimers, fireTimers} = require('./simplify2_harness.js');
+const {
+  makePage,
+  send,
+  waitFor,
+  recordTimers,
+  fireTimers,
+  ghostText,
+} = require('./simplify2_harness.js');
 
 // requestGhost()'s 300 ms debounce is recorded and fired by hand.
 function prepare(win) {
@@ -35,13 +42,6 @@ function typeInto(win, text) {
 
 function pickerVisible(win) {
   return win.document.getElementById('autocomplete').style.display === 'block';
-}
-
-function ghostText(win) {
-  const el = win.document
-    .getElementById('ghost-overlay')
-    .querySelector('.ghost-text');
-  return el ? el.textContent : '';
 }
 
 async function main() {

@@ -33,15 +33,16 @@ from kiss.agents.sorcar import sea_commands, sea_lint, sea_settings
 from kiss.core.config import kiss_home
 from kiss.core.stop_signal import set_thread_stop_event
 from kiss.core.tool_interrupt import ToolCallInterrupted
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 
 
 @pytest.fixture(autouse=True)
 def _reset_sea_commands() -> Iterator[None]:
     """Drop the registry state before and after each test, and the test ``SEAS.md``."""
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
     set_thread_stop_event(None)
     yield
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
     set_thread_stop_event(None)
     (kiss_home() / "SEAS.md").unlink(missing_ok=True)
 
@@ -113,7 +114,7 @@ def test_stop_in_register_as_model_is_not_memoised_as_a_verdict(tmp_path: Path) 
     stop.set()
     set_thread_stop_event(stop)
     with pytest.raises(KeyboardInterrupt):
-        sea_commands.model_seas()
+        sea_commands.model_sea("picker")  # decided on this thread; a listing uses its own
     set_thread_stop_event(None)
     # The same revision, asked again once the method can answer: the
     # stopped call must not have been recorded as "not a model".

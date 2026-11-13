@@ -264,11 +264,18 @@ class TestCachePricing:
         for name, info in MODEL_INFO.items():
             if not name.startswith("claude-"):
                 continue
-            # platform.claude.com pricing: Fable/Mythos 5.1 $0.25 on $10 (0.025x),
-            # Opus 5.5 $0.20 on $4 and Sonnet 5.5 $0.10 on $2 (0.05x), every
-            # other Claude 0.1x.
+            # platform.claude.com pricing: Fable/Mythos 5.2 $0.20 on $8 and
+            # Fable/Mythos 5.1 $0.25 on $10 (0.025x), Opus 5.5 $0.20 on $4 and
+            # Sonnet 5.5 $0.10 on $2 (0.05x), every other Claude 0.1x.
             read_mult = 0.1
-            if name.startswith(("claude-fable-5-1", "claude-mythos-5-1")):
+            if name.startswith(
+                (
+                    "claude-fable-5-1",
+                    "claude-mythos-5-1",
+                    "claude-fable-5-2",
+                    "claude-mythos-5-2",
+                )
+            ):
                 read_mult = 0.025
             elif name.startswith(("claude-opus-5-5", "claude-sonnet-5-5")):
                 read_mult = 0.05

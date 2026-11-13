@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from pathlib import Path
 
 TASK_TABLE = "task_history"
 
@@ -73,11 +74,16 @@ def relocate_database(database: str, from_dir: str, to_dir: str) -> int:
 
     Returns:
         The number of task rows whose work directory moved.
+
+    Raises:
+        sqlite3.Error: If the database is not there (it is opened by a
+            ``mode=rw`` URI, which creates nothing) or cannot be rewritten.
     """
     from_dir, to_dir = from_dir.rstrip("/"), to_dir.rstrip("/")
     if not from_dir or not to_dir or from_dir == to_dir:
         return 0  # "/" is not a project directory, and a no-op is a no-op
-    con = sqlite3.connect(database, timeout=60.0)
+    uri = f"{Path(database).absolute().as_uri()}?mode=rw"
+    con = sqlite3.connect(uri, uri=True, timeout=60.0)
     try:
         columns = {row[1] for row in con.execute(f"PRAGMA table_info({TASK_TABLE})")}
         if "work_dir" in columns:

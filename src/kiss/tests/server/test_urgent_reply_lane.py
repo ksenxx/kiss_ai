@@ -31,11 +31,13 @@ import json
 import os
 import shutil
 import socket
+import ssl
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from typing import cast
 
 from websockets.sync.client import connect as sync_connect
 
@@ -48,6 +50,8 @@ from kiss.server.web_server import (
     _unsent_bytes,
 )
 from kiss.tests.conftest import posix_only
+from kiss.tests.local_ws import _generate_self_signed_cert
+from kiss.tests.server.conftest import no_verify_ssl
 from kiss.tests.server.test_send_parts_slow_reader import (
     _FRAME_CHARS,
     _READ_RATE,
@@ -328,6 +332,48 @@ class TestSenderKeepsPaceWithThePeer(_SlowReaderCase):
         self.assertGreater(
             max(unsent), _PART_ROOM_BYTES + 2 * PART_CHARS,
             "the sender was paced for a loopback peer",
+        )
+
+
+class TestUnsentBytesUnderTls(unittest.IsolatedAsyncioTestCase):
+    """Under TLS the encrypted bytes the raw transport still holds are unsent too."""
+
+    async def _accept(self, _reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.accepted.put_nowait(writer)
+
+    @posix_only("_unsent_bytes counts the kernel's send queue on Linux and macOS only")
+    async def test_the_count_holds_the_backlog_and_shrinks_as_the_peer_reads(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        _generate_self_signed_cert(tmp / "cert.pem", tmp / "key.pem")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(tmp / "cert.pem", tmp / "key.pem")
+        self.accepted: asyncio.Queue[asyncio.StreamWriter] = asyncio.Queue()
+        server = await asyncio.start_server(self._accept, "127.0.0.1", 0, ssl=context)
+        self.addAsyncCleanup(server.wait_closed)
+        self.addCleanup(server.close)
+        port = server.sockets[0].getsockname()[1]
+        reader, client = await asyncio.open_connection("127.0.0.1", port, ssl=no_verify_ssl())
+        self.addCleanup(client.transport.abort)
+        # The writer stays referenced: one that is collected closes its transport.
+        writer = await asyncio.wait_for(self.accepted.get(), 10)
+        transport = writer.transport
+        self.addCleanup(transport.abort)
+        # A peer that reads nothing, and a small kernel send buffer: all
+        # but a sliver of what is written waits in the raw transport.
+        # (A stream writer's transport reads too; its annotation is write-only.)
+        receiving = cast(asyncio.Transport, client.transport)
+        receiving.pause_reading()
+        transport.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8192)
+        size = 4 * 1024 * 1024
+        self.assertFalse(transport.is_closing())
+        transport.write(b"x" * size)
+        backlog = _unsent_bytes(transport)
+        self.assertGreater(backlog, size // 2, "the raw transport's share is not counted")
+        receiving.resume_reading()
+        await asyncio.wait_for(reader.readexactly(size // 4), 30)
+        self.assertLess(
+            _unsent_bytes(transport), backlog - size // 8, "the peer's reading did not show",
         )
 
 

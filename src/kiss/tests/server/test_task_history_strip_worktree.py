@@ -43,12 +43,7 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
         self.saved = _redirect(self.tmpdir)
 
     def tearDown(self) -> None:
-        if th._db_conn is not None:
-            try:
-                th._db_conn.close()
-            except Exception:
-                pass
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

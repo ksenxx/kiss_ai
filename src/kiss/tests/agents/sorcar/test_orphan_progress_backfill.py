@@ -30,16 +30,16 @@ from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.json_printer import JsonPrinter
+from kiss.tests.persistence_helpers import close_db
 
 
 def _redirect(tmpdir: Path) -> tuple:
     """Point the persistence module at a private KISS home."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR, th._owner_state)
+    saved = (th._DB_PATH, th._KISS_DIR, th._owner_state)
     kiss_dir = tmpdir / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     th._owner_state = None
     return saved
 
@@ -47,8 +47,8 @@ def _redirect(tmpdir: Path) -> tuple:
 def _restore(saved: tuple) -> None:
     """Undo :func:`_redirect`, closing the liveness marker minted in the private home."""
     th._release_owner_marker()
-    th._close_db()
-    (th._DB_PATH, th._db_conn, th._KISS_DIR, th._owner_state) = saved
+    close_db()
+    (th._DB_PATH, th._KISS_DIR, th._owner_state) = saved
 
 
 class _BackfillTestCase(unittest.TestCase):
@@ -57,7 +57,7 @@ class _BackfillTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss_backfill_"))
         self.saved = _redirect(self.tmp)
-        th._close_db()
+        close_db()
 
     def tearDown(self) -> None:
         _restore(self.saved)
@@ -190,6 +190,21 @@ class OrphanProgressBackfillTest(_BackfillTestCase):
         self.assertEqual(row["end_ts"], 123456)
         self.assertEqual(row["steps"], 0)
         self.assertEqual(row["tokens"], 0)
+
+    def test_an_event_time_past_the_date_range_dates_nothing(self) -> None:
+        """No reader accepts such an ``end_ts`` and SQLite refuses the largest: none is written."""
+        usage = {"type": "usage_info",
+                 "text": "Steps: 3/100, Total tokens: 1,000, Budget: $0.10/$5.00, "}
+        task_ids = [self._insert_orphan_row() for _ in range(2)]
+        for task_id, seconds in zip(task_ids, (1e300, 8.64e12 + 1)):
+            self._insert_event(task_id, 1, usage, seconds)
+
+        self.assertEqual(th._recover_orphaned_tasks(set(), time.time()), 2)
+
+        rows = [self._row(task_id) for task_id in task_ids]
+        self.assertEqual([(row["end_ts"], row["steps"]) for row in rows], [(0, 3), (0, 3)])
+        # Finalized all the same, so the next sweep leaves both alone.
+        self.assertEqual(th._recover_orphaned_tasks(set(), time.time()), 0)
 
     def test_existing_nonzero_columns_are_not_overwritten(self) -> None:
         """A partially-persisted cleanup beats the reconstruction."""
@@ -527,6 +542,175 @@ class ContinuationTotalsBackfillTest(_BackfillTestCase):
         self.assertEqual(row["steps"], 4)
         self.assertEqual(row["tokens"], 4000)
         self.assertAlmostEqual(row["cost"], 0.4)
+
+
+class OrphanCostFloorTest(_BackfillTestCase):
+    """A recovered row's cost is at least its own records plus its sub-agents' spend."""
+
+    def _insert_child(self, parent: str, cost: float, *, dead: bool = False) -> str:
+        """Insert a sub-agent row of *parent*: finished, or dead when *dead*."""
+        task_id = uuid.uuid4().hex
+        th._get_db().execute(
+            "INSERT INTO task_history (id, timestamp, task, result, owner, cost,"
+            " end_ts, tags, parent_task_id) VALUES (?, ?, ?, ?, '', ?, ?, ?, ?)",
+            (task_id, time.time() - 30, "sub-agent",
+             "Agent Failed Abruptly" if dead else "done", cost,
+             0 if dead else 1789130360000, "" if dead else "work", parent),
+        )
+        return task_id
+
+    def _llm_call(self, task_id: str, seq: int, model: str, cost: float) -> None:
+        self._insert_event(
+            task_id, seq,
+            {"type": "llm_call", "model": model, "cost": cost,
+             "input_tokens": 100, "output_tokens": 10},
+            1789130300.0 + seq,
+        )
+
+    def _usage(self, task_id: str, seq: int, cost: float) -> None:
+        self._insert_event(
+            task_id, seq,
+            {"type": "usage_info",
+             "text": f"Steps: 3/100, Total tokens: 1,000, Budget: ${cost:.4f}/$500.00, ",
+             "total_steps": 3, "total_tokens": 1000, "cost": f"{cost:.4f}",
+             "cost_usd": cost},
+            1789130300.0 + seq,
+        )
+
+    def test_terminal_run_without_usage_events_keeps_its_records(self) -> None:
+        """The 8f05ebc0 shape: llm_calls, a charge and a finished sub-agent; no usage_info."""
+        task_id = self._insert_orphan_row()
+        self._llm_call(task_id, 1, "gpt-6-astra", 0.4262975)
+        self._insert_event(
+            task_id, 2,
+            {"type": "gate_stage", "stage": "charge", "model": "claude-sonnet-5-5",
+             "cost_usd": 0.0398705, "tokens": 14479},
+            1789130310.0,
+        )
+        self._insert_child(task_id, 1.046220858)
+
+        th._recover_orphaned_tasks(set(), time.time())
+
+        self.assertAlmostEqual(
+            self._row(task_id)["cost"], 0.4262975 + 0.0398705 + 1.046220858, places=9,
+        )
+
+    def test_sub_agents_that_died_with_the_parent_are_counted(self) -> None:
+        """The 3bb386ba shape: the parent's last event predates its sub-agents' spend."""
+        parent = self._insert_orphan_row()
+        self._llm_call(parent, 1, "claude-opus-5-5", 3.5)
+        self._usage(parent, 2, 4.0)  # held a gate charge or an early fold
+        dead = self._insert_child(parent, 0.0, dead=True)
+        self._llm_call(dead, 1, "claude-opus-5-5", 150.0)
+        self._usage(dead, 2, 200.0)  # its own sub-agents' folds included
+        self._insert_child(parent, 20.0)  # finished, but folded after the last event
+
+        th._recover_orphaned_tasks(set(), time.time())
+
+        self.assertAlmostEqual(self._row(dead)["cost"], 200.0)
+        self.assertAlmostEqual(self._row(parent)["cost"], 3.5 + 200.0 + 20.0)
+
+    def test_the_floor_never_lowers_a_recovered_cost(self) -> None:
+        """A last event above the records (spend that left no record here) wins."""
+        task_id = self._insert_orphan_row()
+        self._llm_call(task_id, 1, "claude-opus-5-5", 1.0)
+        self._usage(task_id, 2, 5.0)
+        self._insert_child(task_id, 2.0)
+
+        th._recover_orphaned_tasks(set(), time.time())
+
+        self.assertAlmostEqual(self._row(task_id)["cost"], 5.0)
+
+    def test_a_remote_sub_agent_counts_its_folded_record(self) -> None:
+        """A remote sub-agent's mirror row may be ahead of what was folded: the record counts."""
+        parent = self._insert_orphan_row()
+        self._llm_call(parent, 1, "claude-opus-5-5", 1.0)
+        mirror = self._insert_child(parent, 3.0)
+        th._get_db().execute(
+            "INSERT INTO remote_subtasks (task_id, parent_task_id, machine, cost, tokens,"
+            " steps, timestamp) VALUES (?, ?, 'gpu-box', ?, 0, 0, ?)",
+            (mirror, parent, 2.0, time.time()),
+        )
+
+        th._recover_orphaned_tasks(set(), time.time())
+
+        self.assertAlmostEqual(self._row(parent)["cost"], 3.0)
+
+    def test_records_replayed_from_the_journal_after_the_sweep_reach_the_floor(self) -> None:
+        """A killed sub-agent's record journalled before the kill lands after the sweep."""
+        parent = self._insert_orphan_row()
+        self._llm_call(parent, 1, "claude-opus-5-5", 1.0)
+        child = self._insert_child(parent, 0.0, dead=True)
+        self._llm_call(child, 1, "claude-opus-5-5", 0.5)
+        th._recover_orphaned_tasks(set(), time.time())
+        self.assertAlmostEqual(self._row(child)["cost"], 0.5)
+        self.assertAlmostEqual(self._row(parent)["cost"], 1.5)
+        th._journal_failed_events(
+            [(child,
+              json.dumps({"type": "llm_call", "model": "claude-opus-5-5", "cost": 2.0,
+                          "input_tokens": 100, "output_tokens": 10}),
+              1789130400.0, str(th._DB_PATH))],
+            1,
+        )
+
+        th._replay_failed_events()
+
+        self.assertAlmostEqual(self._row(child)["cost"], 2.5)
+        self.assertAlmostEqual(self._row(parent)["cost"], 3.5)
+        self.assertEqual(th._recover_orphaned_tasks(set(), time.time()), 0)
+        self.assertAlmostEqual(self._row(parent)["cost"], 3.5)  # nothing counted twice
+
+    def test_the_reopened_chat_shows_the_floored_cost(self) -> None:
+        """Replay appends the row's totals after a last usage event the floor passed."""
+        from kiss.agents.sorcar.persistence import _load_chat_events_by_task_id
+        from kiss.server.json_printer import with_synthesized_events
+
+        parent = self._insert_orphan_row()
+        self._llm_call(parent, 1, "claude-opus-5-5", 3.5)
+        self._usage(parent, 2, 4.0)
+        self._insert_child(parent, 220.0)
+        th._recover_orphaned_tasks(set(), time.time())
+        session = _load_chat_events_by_task_id(parent)
+        assert session is not None
+        stored = session["events"]
+        assert isinstance(stored, list)
+
+        events = with_synthesized_events(list(stored), session)
+
+        usage = [ev for ev in events if ev.get("type") == "usage_info"]
+        self.assertEqual(len(usage), 2)
+        self.assertAlmostEqual(usage[-1]["cost_usd"], 223.5)
+        self.assertEqual(usage[-1]["cost"], "$223.5000")
+        # A replay whose last usage event shows the row's cost gets nothing more.
+        synced = [*stored, usage[-1]]
+        replayed = with_synthesized_events(synced, session)
+        self.assertEqual(replayed[-1], usage[-1])
+        self.assertEqual(sum(ev.get("type") == "usage_info" for ev in replayed), 2)
+
+    def test_the_reopened_chat_shows_the_floored_cost_after_a_text_only_usage(self) -> None:
+        """An older usage event with its cost only in its text is compared by that text."""
+        from kiss.agents.sorcar.persistence import _load_chat_events_by_task_id
+        from kiss.server.json_printer import with_synthesized_events
+
+        parent = self._insert_orphan_row()
+        self._llm_call(parent, 1, "claude-opus-5-5", 3.5)
+        self._insert_event(
+            parent, 2,
+            {"type": "usage_info",
+             "text": "Steps: 3/100, Total tokens: 1,000, Budget: $4.0000/$500.00, "},
+            1789130302.0,
+        )
+        self._insert_child(parent, 220.0)
+        th._recover_orphaned_tasks(set(), time.time())
+        session = _load_chat_events_by_task_id(parent)
+        assert session is not None
+        stored = session["events"]
+        assert isinstance(stored, list)
+
+        events = with_synthesized_events(list(stored), session)
+
+        self.assertEqual(events[-1]["type"], "usage_info")
+        self.assertAlmostEqual(events[-1]["cost_usd"], 223.5)
 
 
 if __name__ == "__main__":

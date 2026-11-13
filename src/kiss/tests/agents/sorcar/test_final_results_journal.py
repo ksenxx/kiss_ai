@@ -54,18 +54,15 @@ class TestFinalResultsJournal:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self.saved
+        th._close_thread_db()
+        (th._DB_PATH, th._KISS_DIR) = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _sidecar(self) -> str:
@@ -206,10 +203,14 @@ class TestFinalResultsJournal:
         assert self._row_result(task_id) == "<p>second</p>"
 
     def test_load_skips_corrupt_and_mistyped_lines(self) -> None:
-        """Torn writes and mistyped entries never break the load."""
+        """Torn writes, mistyped entries, bytes that are not UTF-8 and a line
+        nested deeper than the JSON parser recurses never break the load."""
         sidecar = self._sidecar()
-        with open(sidecar, "w", encoding="utf-8") as stream:
+        with open(sidecar, "wb") as stream:
+            stream.write(b"\xff a damaged block\n")
+        with open(sidecar, "a", encoding="utf-8") as stream:
             stream.write("{torn json\n")
+            stream.write("[" * 100_000 + "\n")
             stream.write(json.dumps(["not", "a", "dict"]) + "\n")
             stream.write(json.dumps({"task_id": 7, "result": "x"}) + "\n")
             stream.write(json.dumps({"task_id": "a"}) + "\n")
@@ -245,14 +246,20 @@ class TestFinalResultsJournal:
         assert self._row_result(task_id) == "<p>still saved</p>"
 
     def test_sweep_prunes_stale_journal_entries(self) -> None:
-        """Entries older than the cap (and corrupt lines) are pruned;
-        fresh entries are kept."""
+        """Entries older than the cap (and corrupt lines: not JSON, nested
+        too deep to parse, a time no float holds) are pruned; fresh
+        entries are kept."""
         sidecar = self._sidecar()
         stale_ts = time.time() - th._FINAL_RESULTS_MAX_AGE_S - 60
-        with open(sidecar, "w", encoding="utf-8") as stream:
+        with open(sidecar, "wb") as stream:
+            stream.write(b"\xff a damaged block\n")
+        with open(sidecar, "a", encoding="utf-8") as stream:
             stream.write(json.dumps(
                 {"task_id": "old", "result": "x", "ts": stale_ts}) + "\n")
             stream.write("{torn json\n")
+            stream.write("[" * 100_000 + "\n")
+            stream.write(json.dumps(
+                {"task_id": "huge", "result": "z", "ts": 10 ** 400}) + "\n")
             stream.write(json.dumps(
                 {"task_id": "new", "result": "y", "ts": time.time()}) + "\n")
         th._recover_orphaned_tasks(set())

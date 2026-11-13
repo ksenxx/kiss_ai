@@ -142,6 +142,27 @@ def test_start_line_does_not_double_truncate_footer(temp_dir: Path) -> None:
     assert "[truncated: 41 more lines;" in out
 
 
+def test_start_line_counts_the_lines_grep_and_sed_count(temp_dir: Path) -> None:
+    """Only ``\\n`` ends a line: ``start_line`` is the number ``grep -n`` and an Edit report give.
+
+    ``str.splitlines`` also split at a form feed (a page break in a
+    source file) and at U+2028, which moved every later line a number down.
+    """
+    p = temp_dir / "f.py"
+    p.write_text("a = 1\x0cb = 2\nc = '\u2028'\nd = 4\n", encoding="utf-8")
+    tools = UsefulTools()
+
+    assert tools.Read(str(p), start_line=2, max_lines=1).startswith("c = '\u2028'\n")
+    assert tools.Read(str(p), start_line=3) == "d = 4\n"
+    assert "past EOF (file has 3 lines)" in tools.Read(str(p), start_line=4)
+    # Review 2026-11-11 S4-5: a lone carriage return ended a line too (the file was decoded
+    # with universal newlines); it stays in its line, and ``\r\n`` is shown as ``\n``.
+    p.write_bytes(b"a\rb\nc\r\nd\n")
+    assert tools.Read(str(p)) == "a\rb\nc\nd\n"
+    assert tools.Read(str(p), start_line=2, max_lines=1).startswith("c\n")
+    assert "past EOF (file has 3 lines)" in tools.Read(str(p), start_line=4)
+
+
 def test_start_line_preserves_trailing_newline_handling(temp_dir: Path) -> None:
     """A windowed read into a file without trailing newline keeps the last line."""
     p = temp_dir / "f.txt"

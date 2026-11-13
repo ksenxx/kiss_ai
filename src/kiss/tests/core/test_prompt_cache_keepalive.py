@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 import kiss.core.prompt_cache_keepalive as keepalive
 from kiss.core.config import DEFAULT_CONFIG
@@ -111,6 +112,18 @@ def _script(timeout_seconds: int) -> list[dict[str, Any]]:
     ]
 
 
+def _ping_cost() -> float:
+    """What one ping of the scripted server costs."""
+    usage = anthropic_server.PING_USAGE
+    return calculate_cost(
+        anthropic_server.MODEL,
+        usage["input_tokens"],
+        usage["output_tokens"],
+        usage["cache_read_input_tokens"],
+        usage["cache_creation_input_tokens"],
+    )
+
+
 def test_long_tool_call_pings_the_cache_and_pays_for_it(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(keepalive, "KEEP_ALIVE_INTERVAL_SECONDS", 0.3)
     script = _script(600)
@@ -153,21 +166,13 @@ def test_long_tool_call_pings_the_cache_and_pays_for_it(monkeypatch: pytest.Monk
     assert KEEP_ALIVE_TEXT not in str(final_messages)
     assert KEEP_ALIVE_TEXT not in str(agent.model.conversation)
     # Every ping is billed: the budget holds the two steps plus the pings.
-    usage = anthropic_server.PING_USAGE
-    ping_cost = calculate_cost(
-        anthropic_server.MODEL,
-        usage["input_tokens"],
-        usage["output_tokens"],
-        usage["cache_read_input_tokens"],
-        usage["cache_creation_input_tokens"],
-    )
     step_cost = sum(
         calculate_cost(anthropic_server.MODEL, turn["prompt_tokens"], 30) for turn in script
     )
-    assert agent.budget_used == pytest.approx(step_cost + len(pings) * ping_cost)
+    assert agent.budget_used == pytest.approx(step_cost + len(pings) * _ping_cost())
     assert agent.total_tokens_used == sum(t["prompt_tokens"] + 30 for t in script) + len(
         pings
-    ) * sum(usage.values())
+    ) * sum(anthropic_server.PING_USAGE.values())
 
 
 def test_step_footer_reports_the_generation_cost_not_the_last_pings(
@@ -179,14 +184,7 @@ def test_step_footer_reports_the_generation_cost_not_the_last_pings(
     with anthropic_server.serve(script) as (url, requests):
         _run_anthropic_agent(monkeypatch, url, len(script))
     assert [r for r in requests if not r.get("stream")], "the slow tool must be pinged"
-    usage = anthropic_server.PING_USAGE
-    ping_cost = calculate_cost(
-        anthropic_server.MODEL,
-        usage["input_tokens"],
-        usage["output_tokens"],
-        usage["cache_read_input_tokens"],
-        usage["cache_creation_input_tokens"],
-    )
+    ping_cost = _ping_cost()
     step_one_cost = calculate_cost(anthropic_server.MODEL, script[0]["prompt_tokens"], 30)
     assert f"{ping_cost:.4f}" != f"{step_one_cost:.4f}"
     tool_results = str([r for r in requests if r.get("stream")][1]["messages"][-1])
@@ -233,6 +231,36 @@ def test_no_ping_when_prompt_caching_is_disabled(monkeypatch: pytest.MonkeyPatch
     assert all("cache_control" not in r for r in requests)
 
 
+class _Verdict(BaseModel):
+    """A structured-output type, as ``model_config["output_format"]`` carries one."""
+
+    answer: str
+
+
+def test_output_format_reaches_the_ping_as_the_same_output_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``output_format`` is a parameter of the SDK's ``messages.stream`` only
+    # (it becomes ``output_config.format`` on the wire); the ping goes through
+    # ``messages.create``, which must send that same ``output_config``.
+    monkeypatch.setattr(keepalive, "KEEP_ALIVE_INTERVAL_SECONDS", 0.3)
+    script = _script(600)
+    with anthropic_server.serve(script) as (url, requests):
+        _run_anthropic_agent(
+            monkeypatch,
+            url,
+            len(script),
+            model_config={"output_format": _Verdict, "output_config": {"effort": "low"}},
+        )
+    steps = [r for r in requests if r.get("stream")]
+    pings = [r for r in requests if not r.get("stream")]
+    assert steps[0]["output_config"]["format"]["type"] == "json_schema"
+    assert steps[0]["output_config"]["effort"] == "low"
+    assert pings, "the ping raised instead of being sent"
+    for ping in pings:
+        assert ping["output_config"] == steps[0]["output_config"]
+
+
 def test_pings_are_billed_when_the_tool_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(keepalive, "KEEP_ALIVE_INTERVAL_SECONDS", 0.3)
     script = [
@@ -255,17 +283,73 @@ def test_pings_are_billed_when_the_tool_raises(monkeypatch: pytest.MonkeyPatch) 
             )
     pings = [r for r in requests if not r.get("stream")]
     assert len(pings) >= 1
-    usage = anthropic_server.PING_USAGE
-    ping_cost = calculate_cost(
-        anthropic_server.MODEL,
-        usage["input_tokens"],
-        usage["output_tokens"],
-        usage["cache_read_input_tokens"],
-        usage["cache_creation_input_tokens"],
-    )
     step_cost = calculate_cost(anthropic_server.MODEL, 20_000, 30)
     # The pings completed before the tool raised are still in the budget.
-    assert agent.budget_used == pytest.approx(step_cost + len(pings) * ping_cost)
+    assert agent.budget_used == pytest.approx(step_cost + len(pings) * _ping_cost())
+
+
+class _SharedBudget:
+    """A task's budget of *cap*, shared with agents that spend *others* once the tool runs."""
+
+    def __init__(self, agent: KISSAgent, cap: float, others: float) -> None:
+        self.agent = agent
+        self.cap = cap
+        self.others = others
+
+    def status(self) -> tuple[float, float]:
+        """A ``budget_status_hook``: the task's spend and its cap."""
+        others = self.others if self.agent.tool_calls_made else 0.0
+        return self.agent.budget_used + others, self.cap
+
+    def check(self) -> None:
+        """A ``budget_check_hook``."""
+        spent, cap = self.status()
+        if spent >= cap:
+            raise BudgetExceededError("the task's budget is spent")
+
+
+@pytest.mark.parametrize(
+    ("hooks", "others_pings", "sent"),
+    [((), 0, 2), (("status", "check"), 1, 1), (("check",), 1, 1), (("check",), 2, 0)],
+)
+def test_no_ping_is_sent_once_the_budget_is_spent(
+    monkeypatch: pytest.MonkeyPatch, hooks: tuple[str, ...], others_pings: int, sent: int
+) -> None:
+    """A ping is a paid request, billed when the tool returns: the keep-alive counts its
+    unbilled pings against the agent's budget and the task's, and asks the
+    ``budget_check_hook``, before each.
+
+    The cap leaves room for a ping and a half after the step: the second ping crosses it
+    (the overshoot any one request may cause) and no third follows, though the tool runs
+    on and ten are allowed.  Of a task's budget that other agents took one ping's worth of
+    meanwhile, one ping is left, also when only the check hook is installed (it cannot be
+    shown an unbilled ping, so none follows one); of one they spent, none."""
+    monkeypatch.setattr(keepalive, "KEEP_ALIVE_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setitem(globals(), "_SLOW_TOOL_SECONDS", 2.0)
+    script = _script(600)
+    step_cost = calculate_cost(anthropic_server.MODEL, script[0]["prompt_tokens"], 30)
+    cap = step_cost + 1.5 * _ping_cost()
+    with anthropic_server.serve(script) as (url, requests):
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", url)
+        monkeypatch.setattr(DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "local")
+        agent = KISSAgent("keepalive-budget")
+        shared = _SharedBudget(agent, cap, others_pings * _ping_cost())
+        if "status" in hooks:
+            agent.budget_status_hook = shared.status
+        if "check" in hooks:
+            agent.budget_check_hook = shared.check
+        with pytest.raises(BudgetExceededError):
+            agent.run(
+                model_name=anthropic_server.MODEL,
+                prompt_template="Call slow_tool once, then finish.",
+                tools=[slow_tool],
+                max_steps=4,
+                max_budget=cap,
+                verbose=False,
+            )
+    pings = [r for r in requests if not r.get("stream")]
+    assert len(pings) == sent
+    assert agent.budget_used == pytest.approx(step_cost + sent * _ping_cost())
 
 
 def test_openai_compatible_model_sends_no_ping(monkeypatch: pytest.MonkeyPatch) -> None:

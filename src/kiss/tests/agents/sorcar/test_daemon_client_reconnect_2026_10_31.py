@@ -694,6 +694,43 @@ class ReconnectTest(ReconnectHarness):
         )
         self.assertIn("reconnected to the sorcar daemon on attempt 2", joined)
 
+    def test_a_replay_the_daemon_fails_to_read_is_one_more_attempt(self) -> None:
+        """The daemon cannot open its history when the client is back: the client asks again.
+
+        A directory stands where ``history.db`` was when the reconnect's
+        ``resumeSession`` arrives, so the replay's first read raises.
+        The daemon sent no ``replayDone`` then, and the client waited
+        out its whole window on a connection the task's events never
+        reached.  The failed replay now ends with the failure, which
+        the client takes for one more failed attempt of the window.
+        """
+        db_file = Path(persistence._DB_PATH)
+        blocked = db_file.with_name("history.db.blocked")
+        blocked.mkdir()
+        with self.assertLogs(daemon_client.logger, level="INFO") as logs:
+            worker, out = self._start_run(reconnect_seconds=60.0)
+            self._await_blocked_task()
+            persistence._close_thread_db()
+            persistence._DB_PATH = blocked
+            try:
+                self.relay.cut()
+                self.assertTrue(
+                    wait_for(lambda: self.relay.accepted >= 3, timeout=30),
+                    "the client did not ask for the replay a second time",
+                )
+            finally:
+                persistence._close_thread_db()
+                persistence._DB_PATH = db_file
+                blocked.rmdir()
+            self.release.set()
+            result = self._collect(worker, out)
+        self.assertIsInstance(result, daemon_client.TaskResult, result)
+        self.assertTrue(result.success, result)
+        self.assertIn(SUMMARY, result.text)
+        self.assertGreaterEqual(result.reconnects, 2)
+        self.assertEqual(result.tokens, 2 * TOKENS_PER_CALL)
+        self.assertIn("the sorcar daemon could not replay the run", "\n".join(logs.output))
+
     def test_a_reconnection_the_daemon_never_replays_gives_up_at_the_window_end(
         self,
     ) -> None:

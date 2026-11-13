@@ -16,7 +16,9 @@ it keeps failing, and stops them all at shutdown (:meth:`Services.stop`:
 own process group with ``KISS_HOME`` set and its working directory there; its
 output is appended to ``$KISS_HOME/logs/services/<name>.log``.  A service
 stays in the foreground: when it exits, whatever it left running in its
-process group is stopped the same way before it is started again.
+process group is stopped the same way before it is started again.  A daemon
+that dies without stopping its services (``SIGKILL``, a crash) still takes
+them along (:data:`TIED`; not on Windows, which has no ``sh``).
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -41,6 +44,18 @@ STABLE_SECONDS = 60.0
 STOP_GRACE_SECONDS = 5.0
 EXIT_POLL_SECONDS = 0.1
 """How often a supervising thread checks whether its service exited."""
+TIED = (
+    'exec 3<&0; (read -r eof <&3; trap "" TERM; kill -TERM 0; '
+    f'sleep {STOP_GRACE_SECONDS:g}; kill -KILL 0) & exec "$1" </dev/null 3<&-'
+)
+"""The ``sh`` script that becomes service ``$1``, tied to the life of the daemon.
+
+Its standard input is a pipe whose write end only the daemon holds.  A
+subshell left in the service's process group reads it: the end of the file
+means the daemon is gone, however it died, and the subshell stops the group
+as :meth:`Services.stop` would.  The ``exec`` keeps the service the leader
+of that group, reading ``/dev/null``.
+"""
 
 
 def service_paths(home: Path) -> list[Path]:
@@ -112,6 +127,8 @@ class Services:
                 # service's: stop the service (when stopping) and whatever it
                 # left running, then reap it.
                 terminate_process_group(proc, STOP_GRACE_SECONDS)
+                if proc.stdin is not None:  # the tie, once nothing is left for it to stop
+                    proc.stdin.close()
                 if not self.stopping.is_set():
                     logger.warning(
                         "Service %s exited with status %s", path.name, proc.returncode
@@ -125,6 +142,9 @@ class Services:
     def _spawn(self, path: Path, home: Path) -> subprocess.Popen[bytes] | None:
         """Start *path* in its own process group; ``None`` when stopping or it cannot start."""
         log_dir = home / "logs" / "services"
+        # Windows has no ``sh``.  PID 1 needs no tie (its death ends its PID namespace)
+        # and reaps no orphan: each watcher would stay a zombie in its service's group.
+        tied = sys.platform != "win32" and os.getpid() != 1
         with self.lock:
             if self.stopping.is_set():
                 return None
@@ -132,8 +152,8 @@ class Services:
                 log_dir.mkdir(parents=True, exist_ok=True)
                 with open(log_dir / f"{path.name}.log", "ab") as log:
                     proc: subprocess.Popen[bytes] = popen_process_group(
-                        [str(path)],
-                        stdin=subprocess.DEVNULL,
+                        ["sh", "-c", TIED, "service", str(path)] if tied else [str(path)],
+                        stdin=subprocess.PIPE if tied else subprocess.DEVNULL,
                         stdout=log,
                         stderr=subprocess.STDOUT,
                         cwd=str(home),

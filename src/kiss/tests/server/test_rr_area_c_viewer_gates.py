@@ -152,7 +152,7 @@ class TestStatusEndViewerGate(_ViewerGateTestBase):
         self._register_idle_state("idle-key-2", "some-chat", idle_tab)
 
         self.server._broadcast_status_end_to_viewers(
-            finished_task, "launcher-tab",
+            finished_task, "launcher-tab", "",
         )
 
         starting_events = self._events_for_tab(starting_tab)
@@ -188,7 +188,7 @@ class TestStatusEndViewerGate(_ViewerGateTestBase):
         state.is_task_active = True
 
         self.server._broadcast_status_end_to_viewers(
-            ending_task, "launcher-tab",
+            ending_task, "launcher-tab", "",
         )
         status = [
             e

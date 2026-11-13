@@ -24,6 +24,7 @@ both entry points through the real OpenAI SDK.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 import pytest
@@ -239,6 +240,121 @@ def test_tool_call_deltas_are_accumulated_across_chunks() -> None:
     assert function_calls == [
         {"id": "call_split", "name": "echo", "arguments": {"text": "hi"}}
     ]
+
+
+def _call_delta(
+    arguments: str, call_id: str | None = None, index: int | None = None
+) -> dict[str, Any]:
+    """Return a ``tool_calls`` delta; *call_id* opens a new call, *index* is sent when given."""
+    call: dict[str, Any] = {"function": {"arguments": arguments}}
+    if call_id is not None:
+        call.update(id=call_id, type="function")
+        call["function"]["name"] = "echo"
+    if index is not None:
+        call["index"] = index
+    return {"tool_calls": [call]}
+
+
+# Two parallel calls whose deltas do not all carry an index.
+_ANONYMOUS_DELTA_STREAMS = [
+    # A server that omits ``index``: each call's id comes once, on its
+    # first delta.  Both calls merged into one slot.
+    [
+        _call_delta('{"text": "a"}', "call_a"),
+        _call_delta("", "call_b"),
+        _call_delta('{"text": "b"}'),
+    ],
+    # A server that omits ``index`` and names the call on every delta:
+    # a later fragment joins the slot holding its id.
+    [
+        _call_delta('{"text":', "call_a"),
+        _call_delta("", "call_b"),
+        _call_delta(' "a"}', "call_a"),
+        _call_delta('{"text": "b"}', "call_b"),
+    ],
+    # Indexed calls announced out of order: the delta belongs to the call
+    # announced last (index 0), not to the one with the greatest index.
+    [
+        _call_delta("", "call_b", 1),
+        _call_delta("", "call_a", 0),
+        _call_delta('{"text": "a"}'),
+        _call_delta('{"text": "b"}', index=1),
+    ],
+]
+
+
+def _tool_call_deltas_stream(deltas: list[dict[str, Any]], request: Request) -> Reply:
+    """Stream *deltas* one per chunk, the last one finishing the turn."""
+    chunks = [_delta_chunk(delta) for delta in deltas[:-1]]
+    chunks.append(_delta_chunk(deltas[-1], finish_reason="tool_calls"))
+    return Reply(sse_chunks=[*chunks, b"data: [DONE]\n\n"])
+
+
+@pytest.mark.parametrize(
+    "deltas", _ANONYMOUS_DELTA_STREAMS, ids=["no-index", "repeated-id", "out-of-order"]
+)
+def test_tool_calls_streamed_without_an_index_stay_separate(deltas: list[dict[str, Any]]) -> None:
+    """A delta without ``index`` reaches its own call: one was lost, or got another's arguments."""
+    with ScriptedOpenAIServer(partial(_tool_call_deltas_stream, deltas)) as server:
+        model = _make_model(server.base_url, _Printer())
+        function_calls, _content, _response = (
+            model.generate_and_process_with_tools({}, tools_schema=_TOOLS)
+        )
+    assert function_calls == [
+        {"id": "call_a", "name": "echo", "arguments": {"text": "a"}},
+        {"id": "call_b", "name": "echo", "arguments": {"text": "b"}},
+    ]
+
+
+_REFUSAL = "I cannot help with that request."
+
+
+def _refusal_reply(request: Request) -> Reply:
+    """Answer with a refusal and null ``content``, streamed when the request streams."""
+    if request.body.get("stream"):
+        return Reply(
+            sse_chunks=[
+                _delta_chunk({"role": "assistant", "content": None, "refusal": _REFUSAL[:9]}),
+                _delta_chunk({"refusal": _REFUSAL[9:]}, finish_reason="stop"),
+                b"data: [DONE]\n\n",
+            ]
+        )
+    message = {"role": "assistant", "content": None, "refusal": _REFUSAL}
+    return Reply(
+        json_body={
+            "id": "chatcmpl-parity",
+            "object": "chat.completion",
+            "created": 0,
+            "model": _MODEL,
+            "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 7, "total_tokens": 10},
+        }
+    )
+
+
+@pytest.mark.parametrize("with_tools", [False, True], ids=["text", "tools"])
+@pytest.mark.parametrize("streamed", [False, True], ids=["non-streamed", "streamed"])
+def test_refusal_is_the_text_of_the_turn(streamed: bool, with_tools: bool) -> None:
+    """A refusal was dropped by all four paths: the turn read as an empty answer."""
+    printer = _Printer()
+    with ScriptedOpenAIServer(_refusal_reply) as server:
+        model = OpenAICompatibleModel(
+            _MODEL,
+            base_url=server.base_url,
+            api_key="test-key",
+            token_callback=printer.token if streamed else None,
+        )
+        model.initialize("Say hello.")
+        if with_tools:
+            function_calls, content, _response = (
+                model.generate_and_process_with_tools({}, tools_schema=_TOOLS)
+            )
+            assert function_calls == []
+        else:
+            content, _response = model.generate()
+    assert content == _REFUSAL
+    assert "".join(printer.tokens) == (_REFUSAL if streamed else "")
+    assert model.conversation[-1] == {"role": "assistant", "content": _REFUSAL}
 
 
 def _usage_reply(usage: dict[str, Any]) -> Any:

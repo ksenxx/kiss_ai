@@ -36,6 +36,7 @@ import unittest
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.persistence_helpers import close_db
 
 _PARENT_ID = "a" * 32
 _OTHER_ID = "b" * 32
@@ -43,12 +44,11 @@ _OTHER_ID = "b" * 32
 
 def _redirect(tmpdir: Path) -> tuple:
     """Point the persistence module at a private KISS home."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR, th._owner_state)
+    saved = (th._DB_PATH, th._KISS_DIR, th._owner_state)
     kiss_dir = tmpdir / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     th._owner_state = None
     return saved
 
@@ -56,8 +56,8 @@ def _redirect(tmpdir: Path) -> tuple:
 def _restore(saved: tuple) -> None:
     """Undo :func:`_redirect`, closing the liveness marker minted in the private home."""
     th._release_owner_marker()
-    th._close_db()
-    (th._DB_PATH, th._db_conn, th._KISS_DIR, th._owner_state) = saved
+    close_db()
+    (th._DB_PATH, th._KISS_DIR, th._owner_state) = saved
 
 
 def _event_seq_writer(kiss_dir: str, task_id: str, count: int) -> None:
@@ -71,12 +71,11 @@ def _event_seq_writer(kiss_dir: str, task_id: str, count: int) -> None:
 
     child_th._KISS_DIR = Path(kiss_dir)
     child_th._DB_PATH = child_th._KISS_DIR / "history.db"
-    child_th._db_conn = None
     child_th._owner_state = None
     for i in range(count):
         child_th._queue_chat_event({"type": "child", "i": i}, task_id)
     child_th._flush_chat_events(task_id)
-    child_th._close_db()
+    close_db()
 
 
 class _PersistenceTestCase(unittest.TestCase):
@@ -85,7 +84,7 @@ class _PersistenceTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss_rr_e_db_"))
         self.saved = _redirect(self.tmp)
-        th._close_db()
+        close_db()
 
     def tearDown(self) -> None:
         _restore(self.saved)
@@ -294,7 +293,7 @@ class TestUniqueEventSeq(_PersistenceTestCase):
         th._queue_chat_event({"type": "ev", "i": 0}, task_id)
         th._queue_chat_event({"type": "ev", "i": 1}, task_id)
         th._flush_chat_events(task_id)
-        th._close_db()
+        close_db()
 
         raw = sqlite3.connect(th._DB_PATH)
         try:

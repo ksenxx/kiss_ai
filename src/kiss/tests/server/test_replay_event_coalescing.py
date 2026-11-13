@@ -117,9 +117,7 @@ class TestReplayCoalescing:
         self.saved = redirect_persistence(self.tmpdir)
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -140,6 +138,8 @@ class TestReplayCoalescing:
         chat_id = "chat-coalesce-2"
         first_id, _ = th._add_task("first task", chat_id=chat_id)
         _persist_stream(first_id, _RAW_STREAM)
+        span = {"startTs": 1_790_000_000_000, "endTs": 1_790_000_125_000}
+        th._save_task_extra(dict(span, model="m"), first_id)
         time.sleep(0.01)
         second_id, _ = th._add_task("second task", chat_id=chat_id)
         th._append_chat_event(
@@ -154,6 +154,11 @@ class TestReplayCoalescing:
         assert adj[0]["tabId"] == "tab-2"
         assert adj[0]["task_id"] == first_id
         _assert_coalesced(adj[0]["events"])
+        # The row's span rides along (the Task Info panel's Time row of
+        # the neighbour), stripped of the global settings like a replay's.
+        extra = json.loads(adj[0]["extra"])
+        assert {k: extra[k] for k in span} == span
+        assert "model" not in extra
 
     def test_adjacent_task_without_result_sends_empty_events(self) -> None:
         server, events = _make_server()
@@ -164,6 +169,7 @@ class TestReplayCoalescing:
         assert adj[0]["events"] == []
         assert adj[0]["task"] == ""
         assert adj[0]["task_id"] is None
+        assert adj[0]["extra"] == ""
 
     def test_adjacent_task_with_empty_trajectory_keeps_task_id(self) -> None:
         """A real adjacent row whose trajectory recorded NO events must
@@ -209,6 +215,12 @@ class TestReplayCoalescing:
         server, events = _make_server()
         server._open_persisted_subagent_tabs(
             parent_task_id=parent_id, parent_tab_id="tab-parent",
+        )
+        # The announcement only offers the transcript; the tab's own
+        # fetch delivers it.
+        offer = next(e for e in events if e.get("type") == "replay_deferred")
+        server._replay_session(
+            chat_id=offer["chatId"], tab_id=offer["tabId"], task_id=offer["taskId"],
         )
 
         sub_replays = [e for e in events if e.get("type") == "task_events"]

@@ -15,6 +15,7 @@ are now scanned; what is not a substitution stays arithmetic.
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -90,6 +91,23 @@ def test_arithmetic_without_substitutions_holds_no_commands() -> None:
     # its commands are scanned once, not again for the expression it is not.
     commands = simple_commands("x=$(( $(sleep 60) ) )", None)
     assert [c.program() for c in commands].count("sleep") == 1
+
+
+@posix_only("bash is the oracle")
+def test_an_arithmetic_assignment_to_an_element_makes_the_variable_unknown() -> None:
+    """Audit 2026-11-10 S10-F5: ``((T[0]=1))`` makes ``T`` an array whose ``$T`` is its first
+    element, as ``T[0]++`` and ``++T[0]`` do; the scanner knew scalar targets only (``T=1``,
+    ``T++``) and kept the value assigned before.  An expression that only reads ``T``, or
+    assigns another variable, leaves it known."""
+    for arithmetic, value in (
+        ("((T[0]=1))", "1"), ("((T[0]++))", "1"), ("((++T[1-1]))", "1"),
+        (": $((T[0] += 2))", "2"), ("((T=1))", "1"), ("((T++))", "1"),
+        ("((U=1))", "scratch"), ("((U = T + 1, V[0] = T))", "scratch"),
+    ):
+        command = f'T=scratch; {arithmetic}; echo "$T"'
+        printed = subprocess.run(["bash", "-c", command], capture_output=True, text=True).stdout
+        assert printed == f"{value}\n", command
+        assert simple_commands(command, None)[-1].words[-1].literal == (value == "scratch"), command
 
 
 def test_nested_expressions_that_do_not_close_are_each_tried_once() -> None:

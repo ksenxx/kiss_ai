@@ -37,12 +37,13 @@ from __future__ import annotations
 
 import os
 import re
-import threading
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TypedDict
 
 from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.utils import atomic_write_text, seed_file_atomically
 
 _SENTENCE_BOUNDARY = re.compile(r"[.!?]\s+")
@@ -55,10 +56,13 @@ _MARKDOWN_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>|~\"'$%&,/:;=?@^])")
 _MARKDOWN_ESCAPABLE_BACKSLASH = re.compile(
     r"\\(?=[\\`*_{}\[\]()#+\-.!<>|~\"'$%&,/:;=?@^])"
 )
-# Serialises the read-check-append of the Add button: the daemon runs
-# client commands on a thread pool, so two browser tabs adding at once must
-# not both pass the duplicate check.
-_APPEND_LOCK = threading.Lock()
+# The most seconds an add, edit or delete waits for the lock on the
+# sidecar ``MY_INJECTION.lock`` that serialises their read-check-rewrite.
+# The daemon runs client commands on a thread pool and every process
+# sharing the brand home (a second daemon) rewrites the same file: two
+# that read the same text would both pass the duplicate check, and the
+# later rewrite would drop the earlier one's change.
+_LOCK_TIMEOUT_S = 5.0
 
 MY_INJECTION_DEFAULT_BODY = (
     "Write end-to-end 100% coverage tests for the feature first."
@@ -105,6 +109,18 @@ def _parse_trick_sections(text: str) -> list[str]:
         if body:
             tricks.append(body)
     return tricks
+
+
+def _canonical_body(text: str) -> str:
+    """Return *text* as the body :func:`_parse_trick_sections` lists once it is stored.
+
+    Trimmed, with every line break the reader turns into LF spelled LF:
+    CRLF, a lone CR (the file is read with universal newlines) and the
+    other breaks of ``str.splitlines`` (form feed, U+2028, ...).  What a
+    client sent then equals what the panel shows, and a ``##`` line
+    behind any of them is one :func:`_reject_new_body` sees.
+    """
+    return "\n".join(text.splitlines()).strip()
 
 
 def _ensure_my_injection() -> Path | None:
@@ -202,18 +218,26 @@ class _TrickError(Exception):
     """User-facing refusal of a ``MY_INJECTION.md`` edit; ``str(e)`` is the message."""
 
 
-def _read_my_injection(verb: str) -> tuple[Path, str]:
+def _read_my_injection(verb: str, held: ExitStack | None = None) -> tuple[Path, str]:
     """Seed ``$KISS_HOME/MY_INJECTION.md`` if missing and return ``(path, text)``.
 
-    The shared prologue of the add/delete/edit helpers, called under
-    :data:`_APPEND_LOCK`.  Raises :class:`_TrickError` when the brand
-    home is not writable (the message says the caller could not *verb*
-    the file), when the file cannot be read, or when it is not UTF-8
-    text.
+    The shared prologue of the reader and of the add/delete/edit
+    helpers.  The helpers pass *held*: the lock (see
+    :data:`_LOCK_TIMEOUT_S`) is taken after the seed, which is atomic
+    by itself, and stays in *held* until the caller's rewrite is done.
+    Raises :class:`_TrickError` when the brand home is not writable
+    (the message says the caller could not *verb* the file), when the
+    file cannot be read, or when it is not UTF-8 text, and
+    ``TimeoutError`` (an ``OSError``, as from a failed write) when
+    another process kept the lock.
     """
     user_path = _ensure_my_injection()
     if user_path is None:
         raise _TrickError(f"Could not {verb} ~/{HOME_DIR}/MY_INJECTION.md")
+    if held is not None:
+        held.enter_context(
+            exclusive_file_lock(user_path.with_suffix(".lock"), timeout=_LOCK_TIMEOUT_S)
+        )
     try:
         return user_path, user_path.read_text(encoding="utf-8")
     except OSError:
@@ -233,13 +257,14 @@ def delete_my_injection_trick(text: str) -> str | None:
     newline (an empty file when nothing is left, so the starter
     promptlet is not re-seeded behind the user's back); the rewrite
     goes through text mode, so CRLF line endings come out as LF.  The
-    file is rewritten in place under the same process-wide lock as
+    file is rewritten in place under the same cross-process lock as
     :func:`append_my_injection_trick`, so a concurrent add from another
     window is never lost.
 
     Args:
         text: The promptlet body as shown in the panel.  Surrounding
-            whitespace is trimmed and CRLF line breaks are read as LF.
+            whitespace is trimmed and every line break is read as LF
+            (:func:`_canonical_body`).
 
     Returns:
         ``None`` on success, else a user-facing error message: an
@@ -248,10 +273,10 @@ def delete_my_injection_trick(text: str) -> str | None:
         window, or a bundled promptlet).  ``OSError`` from the write
         propagates to the caller.
     """
-    body = text.replace("\r\n", "\n").strip()
-    with _APPEND_LOCK:
+    body = _canonical_body(text)
+    with ExitStack() as held:
         try:
-            user_path, existing = _read_my_injection("read")
+            user_path, existing = _read_my_injection("read", held)
         except _TrickError as e:
             return str(e)
         preamble, sections = _split_sections(existing)
@@ -314,13 +339,12 @@ def edit_my_injection_trick(text: str, new_text: str) -> str | None:
     through text mode, so CRLF line endings come out as LF.  The new
     body is stored Markdown-escaped like :func:`append_my_injection_trick`
     stores an added one.  The read-check-write runs under the same
-    process-wide lock as the add and delete helpers.
+    cross-process lock as the add and delete helpers.
 
     Args:
-        text: The promptlet body as shown in the panel (trimmed, CRLF
-            read as LF, like :func:`delete_my_injection_trick`).
-        new_text: The replacement body.  Surrounding whitespace is
-            trimmed.
+        text: The promptlet body as shown in the panel (trimmed, line
+            breaks read as LF, like :func:`delete_my_injection_trick`).
+        new_text: The replacement body, trimmed and read the same way.
 
     Returns:
         ``None`` on success (also when *new_text* equals *text*, which
@@ -331,13 +355,13 @@ def edit_my_injection_trick(text: str, new_text: str) -> str | None:
         text, or a body that is not in the file.  ``OSError`` from the
         write propagates to the caller.
     """
-    body = text.replace("\r\n", "\n").strip()
-    new_body = new_text.replace("\r\n", "\n").strip()
+    body = _canonical_body(text)
+    new_body = _canonical_body(new_text)
     if (error := _reject_new_body(new_body)) is not None:
         return error
-    with _APPEND_LOCK:
+    with ExitStack() as held:
         try:
-            user_path, existing = _read_my_injection("read")
+            user_path, existing = _read_my_injection("read", held)
         except _TrickError as e:
             return str(e)
         preamble, sections = _split_sections(existing)
@@ -369,11 +393,12 @@ def append_my_injection_trick(text: str) -> str | None:
     The body is stored Markdown-escaped (backslashes that the reader
     would strip are doubled), so the panel shows exactly what the user
     typed after the reload.  The whole read-check-append runs under a
-    process-wide lock: commands from different windows execute
-    concurrently on the daemon's thread pool.
+    cross-process lock: commands from different windows execute
+    concurrently on the daemon's thread pool, and so do other daemons.
 
     Args:
-        text: The promptlet body.  Surrounding whitespace is trimmed.
+        text: The promptlet body.  Surrounding whitespace is trimmed
+            and every line break is stored as LF (:func:`_canonical_body`).
 
     Returns:
         ``None`` on success, else a user-facing error message: an
@@ -383,12 +408,12 @@ def append_my_injection_trick(text: str) -> str | None:
         file that cannot be read or is not UTF-8 text.  ``OSError``
         from the write propagates to the caller.
     """
-    body = text.replace("\r\n", "\n").strip()
+    body = _canonical_body(text)
     if (error := _reject_new_body(body)) is not None:
         return error
-    with _APPEND_LOCK:
+    with ExitStack() as held:
         try:
-            user_path, existing = _read_my_injection("write")
+            user_path, existing = _read_my_injection("write", held)
         except _TrickError as e:
             return str(e)
         if body in _parse_trick_sections(existing):
@@ -471,12 +496,8 @@ def prefix_match_tricks(query: str) -> list[str]:
     # pop suggestions.
     if len(partial) < 2:
         return []
-    seen: set[str] = set()
-    out: list[str] = []
-    for trick in read_tricks_data()["tricks"]:
-        if trick in seen:
-            continue
-        if trick.startswith(partial) and len(trick) > len(partial):
-            seen.add(trick)
-            out.append(trick)
-    return out
+    return [
+        trick
+        for trick in dict.fromkeys(read_tricks_data()["tricks"])
+        if trick.startswith(partial) and len(trick) > len(partial)
+    ]

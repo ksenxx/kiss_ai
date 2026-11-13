@@ -114,16 +114,23 @@ class TestOpenAIGpt56LongContextPricing:
         """OpenRouter passthrough scales its OWN listed prices, not OpenAI's.
 
         The long-context tier is 2x input / 1.5x output / 2x cache of
-        whatever openrouter.ai lists for the model (the catalog refresh
-        of 2026-10-15 moved openrouter/openai/gpt-5.6-sol from $2/$10 to
-        $4/$20 with $0.40/$5 cache prices), never hard-coded OpenAI
-        dollar rates.
+        whatever openrouter.ai lists for the model (each catalog refresh
+        may move those prices: $2/$10, then $4/$20 on 2026-10-15, then
+        $4.40/$22 on 2026-11-12), never hard-coded OpenAI dollar rates.
         """
         info = MODEL_INFO["openrouter/openai/gpt-5.6-sol"]
-        assert (info.input_price_per_1M, info.output_price_per_1M) == (4.0, 20.0)
-        assert (info.cache_read_price_per_1M, info.cache_write_price_per_1M) == (0.4, 5.0)
+        listed = (
+            info.input_price_per_1M,
+            info.output_price_per_1M,
+            info.cache_read_price_per_1M,
+            info.cache_write_price_per_1M,
+        )
+        assert None not in listed
+        inp, out, read, write = (float(price or 0) for price in listed)
         cost = calculate_cost("openrouter/openai/gpt-5.6-sol", 300_000, 10_000, 50_000, 40_000)
-        expected = (300_000 * 8.0 + 10_000 * 30.0 + 50_000 * 0.80 + 40_000 * 10.0) / 1e6
+        expected = (
+            300_000 * 2 * inp + 10_000 * 1.5 * out + 50_000 * 2 * read + 40_000 * 2 * write
+        ) / 1e6
         assert cost == pytest.approx(expected)
 
     def test_gpt55_long_context_cache_writes_stay_free(self):
@@ -769,7 +776,10 @@ class TestDirectGpt56AndGpt6RulesMatchOpenRouterTwins:
 
     def test_pairs_exist(self):
         names = {n for n, _ in self._pairs()}
-        assert {"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-5.6-sol"} <= names
+        # gpt-5.6-sol left the set on 2026-11-12: openrouter.ai's API now
+        # lists its twin at $4.40/$22 (the in-region endpoints) against
+        # OpenAI's $4/$20, so the two no longer agree on base prices.
+        assert {"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra"} <= names
 
     def test_cache_read_and_write_rates_match(self):
         for name, twin_name in self._pairs():

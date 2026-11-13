@@ -7,7 +7,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
+const {JSDOM, VirtualConsole} = require('jsdom');
 const {installTokenisedCss} = require('./designTokens');
 
 const MEDIA = path.join(__dirname, '..', 'media');
@@ -271,7 +271,8 @@ function byId(win, id) {
  * Each `editor.create` is recorded as `{holder, editor, value, language,
  * opts, revealed}` (`revealed` lists the line numbers `setPosition` was
  * asked for); `editor._type(text)` edits the model and fires its content
- * listeners.
+ * listeners, and `editor._undo()` takes the last edit back: the text and,
+ * as in Monaco, the model's alternative version id are the earlier ones.
  *
  * @param {boolean} [install=true] `false` builds the stub without
  *   setting `win.monaco` (the CDN loader path runs); the returned array's
@@ -289,6 +290,8 @@ function stubMonaco(win, install = true) {
       create: (holder, opts) => {
         let value = String(opts.value === undefined ? '' : opts.value);
         let version = 1;
+        let edits = 1;
+        const undone = [];
         const listeners = [];
         const revealed = [];
         const model = {
@@ -306,8 +309,13 @@ function stubMonaco(win, install = true) {
           layout: () => {},
           focus: () => {},
           _type: text => {
+            undone.push({value, version});
             value = String(text);
-            version += 1;
+            version = ++edits;
+            listeners.slice().forEach(cb => cb());
+          },
+          _undo: () => {
+            ({value, version} = undone.pop());
             listeners.slice().forEach(cb => cb());
           },
         };
@@ -566,16 +574,29 @@ function fakeIntervals(win) {
 
 /**
  * Poll `predicate` every 20 ms until it returns a truthy value (returned)
- * or `timeoutMs` pass (throws `message`).
+ * or `timeoutMs` pass (throws `message`).  The predicate is tested before
+ * the deadline: a poll that resumes late still returns a met condition.
  */
 async function waitFor(predicate, message, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  for (;;) {
     const value = predicate();
     if (value) return value;
-    await sleep(20);
+    if (Date.now() < deadline) await sleep(20);
+    else throw new Error(message || 'waitFor timed out');
   }
-  throw new Error(message || 'waitFor timed out');
+}
+
+/**
+ * A runner's `test(name, fn)` followed by `teardown()` once the test has
+ * settled (e.g. workdir_helpers' closeWindows).  Await every call: the
+ * teardown of a call that is not awaited runs under the tests after it.
+ */
+function withTeardown(test, teardown) {
+  return async function testThenTeardown(name, fn) {
+    await test(name, fn);
+    teardown();
+  };
 }
 
 /** The messages of `type` the page posted. */
@@ -636,9 +657,14 @@ function readyTabId(posted) {
   return ready.tabId;
 }
 
+/** Send the configData that makes `dir` the global working directory. */
+function sendWorkDir(win, dir) {
+  send(win, {type: 'configData', config: {work_dir: dir}, apiKeys: {}});
+}
+
 /** Send the configData of a chat with no working directory. */
 function sendEmptyWorkDir(win) {
-  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
+  sendWorkDir(win, '');
 }
 
 /** The transcript element. */
@@ -670,11 +696,12 @@ function pickMachine(win, value) {
 }
 
 /**
- * Open a chat on `task` the way the daemon does when the user submits a
- * prompt: an empty `task_events` for the chat, `status running`, then the
- * prompt echo.  `posted` is the page's ledger (for its ready tabId).
+ * Open a chat on a running `task` the way the daemon does when the user
+ * submits a prompt, up to the prompt echo: an empty `task_events` for the
+ * chat, then `status running`.  `posted` is the page's ledger (for its
+ * ready tabId).
  */
-function startTask(win, posted, task) {
+function openRunningTask(win, posted, task) {
   send(win, {
     type: 'task_events',
     events: [],
@@ -683,7 +710,24 @@ function startTask(win, posted, task) {
     chat_id: 'chat-' + task.replace(/\W+/g, '-'),
   });
   send(win, {type: 'status', running: true});
+}
+
+/** openRunningTask, then the daemon's prompt echo. */
+function startTask(win, posted, task) {
+  openRunningTask(win, posted, task);
   send(win, {type: 'prompt', text: task});
+}
+
+/**
+ * Mirror one registry chat (tab `a1`, chat `chat-1`, in `/ws`) and replay
+ * its empty transcript: a page showing one idle chat.
+ */
+function openChat(win) {
+  send(win, {
+    type: 'tabs_state',
+    tabs: [{tabId: 'a1', chatId: 'chat-1', title: 'a1', workDir: '/ws'}],
+  });
+  send(win, {type: 'task_events', tabId: 'a1', task: 'the task', events: []});
 }
 
 /**
@@ -972,6 +1016,48 @@ function getAdjacent(posted) {
 }
 
 /**
+ * Show the finished history task '42' ("My old task") on the page's ready
+ * tab, with #output's geometry faked (3000 tall, 500 visible) so that an
+ * edge overscroll can fire.
+ *
+ * @returns {{tabId: string, O: Element}} The tab and its #output.
+ */
+function showHistoryTask(win, posted) {
+  const tabId = readyTabId(posted);
+  const O = win.document.getElementById('output');
+  fakeGeometry(O, {sh: 3000, ch: 500});
+  send(win, {
+    type: 'task_events',
+    tabId,
+    chat_id: 'chat-abc',
+    task_id: '42',
+    task: 'My old task',
+    events: [{type: 'system_output', text: 'hello\n'}],
+  });
+  return {tabId, O};
+}
+
+/** A page past the welcome screen showing showHistoryTask's task. */
+function historyTaskPage() {
+  const {win, posted} = makePage();
+  win._testApi.hideWelcome();
+  return {win, posted, ...showHistoryTask(win, posted)};
+}
+
+/**
+ * A jsdom VirtualConsole that counts the page's reloads into *reloads*:
+ * jsdom cannot navigate, so every `window.location.reload()` surfaces
+ * there as a "Not implemented: navigation" jsdomError.
+ */
+function reloadCountingConsole(reloads) {
+  const virtualConsole = new VirtualConsole();
+  virtualConsole.on('jsdomError', err => {
+    if (/navigation/.test(String(err && err.message))) reloads.push(1);
+  });
+  return virtualConsole;
+}
+
+/**
  * Replace `win.navigator.clipboard` with a recorder whose `writeText`
  * resolves at once.  Usable from `beforeScripts`.
  *
@@ -1130,12 +1216,6 @@ function stackOutputLayout(win, heightOf, viewH) {
       return isOutput(this) ? viewH : 0;
     },
   });
-  Object.defineProperty(proto, 'clientWidth', {
-    configurable: true,
-    get() {
-      return isOutput(this) ? 400 : 0;
-    },
-  });
   proto.getBoundingClientRect = function () {
     if (isOutput(this)) return rect(0, viewH);
     const O = this.parentElement;
@@ -1159,6 +1239,18 @@ function tabIds(win) {
   return Array.from(win._testApi.openTabs(), t => t.id);
 }
 
+/** The open tab `tabId`'s record, or null when no such tab is open. */
+function tabRecord(win, tabId) {
+  return win._testApi.openTabs().find(t => t.id === tabId) || null;
+}
+
+/** The ids on the tab strip (`#tab-list .chat-tab`), in strip order. */
+function stripIds(win) {
+  return Array.from(win.document.querySelectorAll('#tab-list .chat-tab'))
+    .filter(el => !!el.dataset.tabId)
+    .map(el => el.dataset.tabId);
+}
+
 /** The untrimmed text of the element with `id`. */
 function rowText(win, id) {
   return win.document.getElementById(id).textContent;
@@ -1179,10 +1271,64 @@ function promptletRows(doc) {
   return Array.from(doc.getElementById('tricks-list').children);
 }
 
+/** makePage(opts), past the launch state and the welcome screen. */
+function makeLaunchedPage(opts) {
+  const page = makePage(opts);
+  page.win._testApi.endLaunch();
+  page.win._testApi.hideWelcome();
+  return page;
+}
+
+/** Every key and value of the page's localStorage, as a plain object. */
+function storageSnapshot(win) {
+  const items = {};
+  for (let i = 0; i < win.localStorage.length; i++) {
+    const k = win.localStorage.key(i);
+    items[k] = win.localStorage.getItem(k);
+  }
+  return items;
+}
+
+/** The inline ghost suggestion's text, '' when none is painted. */
+function ghostText(win) {
+  const el = win.document
+    .getElementById('ghost-overlay')
+    .querySelector('.ghost-text');
+  return el ? el.textContent : '';
+}
+
+/** The section labels of the completions picker, top to bottom. */
+function pickerSections(win) {
+  return Array.from(
+    win.document.querySelectorAll('#autocomplete .ac-section'),
+    e => e.textContent,
+  );
+}
+
+/** The three texts of the status row. */
+function statusMetrics(win) {
+  const doc = win.document;
+  return {
+    tokens: doc.getElementById('status-tokens').textContent,
+    budget: doc.getElementById('status-budget').textContent,
+    steps: doc.getElementById('status-steps').textContent,
+  };
+}
+
 module.exports = {
   plain,
   promptletRows,
   tabIds,
+  tabRecord,
+  stripIds,
+  makeLaunchedPage,
+  storageSnapshot,
+  ghostText,
+  pickerSections,
+  statusMetrics,
+  showHistoryTask,
+  historyTaskPage,
+  reloadCountingConsole,
   rowText,
   flushMicrotasks,
   queueRaf,
@@ -1208,8 +1354,10 @@ module.exports = {
   fakeMatchMedia,
   fakeIntervals,
   waitFor,
+  withTeardown,
   ofType,
   readyTabId,
+  sendWorkDir,
   sendEmptyWorkDir,
   output,
   rowsByTitle,
@@ -1219,7 +1367,9 @@ module.exports = {
   snapshotEntry,
   nextFrames,
   isDisplayed,
+  openRunningTask,
   startTask,
+  openChat,
   headerText,
   collapsedHeaderText,
   shareTranscript,

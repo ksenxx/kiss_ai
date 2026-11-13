@@ -17,8 +17,15 @@ Event shapes below match real ``claude --print --output-format stream-json
 """
 
 import json
+from pathlib import Path
 
+import pytest
+
+from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.kiss_error import KISSError
 from kiss.core.models.claude_code_model import ClaudeCodeModel
+from kiss.core.models.model_info import calculate_cost
+from kiss.tests.core.models.test_cli_subprocess_lifecycle import install_cli
 
 
 class _Recorder:
@@ -177,3 +184,94 @@ class TestPerMessageUsageAccounting:
             assert m.extract_input_output_token_counts_from_response(result_json) == (
                 100, 42, 400, 1000, 0,
             ), tail
+
+
+# Streams one complete message, then the line in KISS_TEST_RESULT_LINE.
+_CLAUDE_STREAMS_ONE_MESSAGE = """
+    import json
+    import os
+    import sys
+
+    sys.stdin.read()
+    for event in (
+        {"type": "message_start", "message": {"model": "claude-haiku-4-5", "usage": {
+            "input_tokens": 11, "cache_read_input_tokens": 400,
+            "cache_creation_input_tokens": 30,
+            "cache_creation": {"ephemeral_5m_input_tokens": 10, "ephemeral_1h_input_tokens": 20},
+            "output_tokens": 1}}},
+        {"type": "content_block_start", "index": 0},
+        {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "hello"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+         "usage": {"output_tokens": 7}},
+        {"type": "message_stop"},
+    ):
+        print(json.dumps({"type": "stream_event", "event": event}), flush=True)
+    print(os.environ["KISS_TEST_RESULT_LINE"], flush=True)
+"""
+
+
+def _one_message_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result_line: str
+) -> ClaudeCodeModel:
+    """A ``cc/haiku`` model whose CLI streams one message, then *result_line*."""
+    install_cli(tmp_path, monkeypatch, "claude", _CLAUDE_STREAMS_ONE_MESSAGE)
+    monkeypatch.setenv("KISS_TEST_RESULT_LINE", result_line)
+    # An API key pays, so the turn has a price to get wrong.
+    monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "local-only")
+    model = ClaudeCodeModel("cc/haiku")
+    model.initialize("hi")
+    return model
+
+
+@pytest.mark.parametrize(
+    ("result_line", "output_tokens"),
+    [
+        ('{"type": "result", "result": "hello"}', 7),
+        ('{"type": "result", "result": "hello", "usage": null}', 7),
+        ('{"type": "result", "result": "hello", "usage": {}}', 7),
+        ('{"type": "result", "result": "hello", "usage": {"output_tokens": 9}}', 9),
+        (
+            '{"type": "result", "result": "hello", "usage": {"output_tokens": 9, '
+            '"input_tokens": null, "cache_creation": {"ephemeral_5m_input_tokens": 10}}}',
+            9,
+        ),
+    ],
+)
+def test_turn_keeps_the_usage_its_result_does_not_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result_line: str, output_tokens: int
+) -> None:
+    """The CLI reported each message's usage as it streamed.  A turn whose
+    terminal ``result`` has a ``usage`` that is missing, empty or partial is
+    still billed what the stream reported: field by field, the result's own
+    fields first, and once."""
+    model = _one_message_model(tmp_path, monkeypatch, result_line)
+
+    content, response = model.generate()
+
+    counts = (11, output_tokens, 400, 10, 20)
+    assert content == "hello"
+    assert model.extract_input_output_token_counts_from_response(response) == counts
+    assert model.extract_cost_from_response(response) == calculate_cost("claude-haiku-4-5", *counts)
+    assert model.take_partial_usage_response() is None
+
+
+def test_a_turn_without_its_result_is_refused_and_still_billed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A CLI that exits 0 with no terminal ``result`` (or one whose line did
+    not decode) has not finished its turn, as a stream of an API model
+    without its terminal event has not.  What the stream reported is billed
+    all the same, once."""
+    model = _one_message_model(tmp_path, monkeypatch, "")
+
+    with pytest.raises(KISSError, match="ended without a result event"):
+        model.generate()
+
+    response = model.take_partial_usage_response()
+    counts = (11, 7, 400, 10, 20)
+    assert [message["role"] for message in model.conversation] == ["user"]
+    assert model.extract_input_output_token_counts_from_response(response) == counts
+    assert model.extract_cost_from_response(response) == calculate_cost("claude-haiku-4-5", *counts)
+    assert model.take_partial_usage_response() is None

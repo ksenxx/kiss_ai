@@ -6,15 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send, readyTabId} = require('./simplify2_harness');
-
-// The state the previous page persisted, carried into the next page as
-// a reload of the same surface would.
-let persistedState;
-
-function makePage() {
-  return makeChatPage({initialState: persistedState});
-}
+const {makePage, send, readyTabId} = require('./simplify2_harness');
 
 function typeAndSend(win, text) {
   const inp = win.document.getElementById('task-input');
@@ -45,11 +37,13 @@ async function runTests() {
     wv1.posted.some(m => m.type === 'appendUserMessage'),
     'sanity: the launching tab sends appendUserMessage while running',
   );
-  persistedState = wv1.getState();
+  // The state the page persisted is carried into the next page, as a
+  // reload of the same surface would.
+  const persistedState = wv1.getState();
   assert.ok(persistedState, 'tab state must have been persisted');
   wv1.win.close();
 
-  const wv2 = makePage();
+  const wv2 = makePage({initialState: persistedState});
   const ready2 = wv2.posted.find(m => m.type === 'ready');
   assert.ok(ready2, 're-opened page must post ready');
   assert.strictEqual(

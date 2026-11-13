@@ -21,7 +21,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-import time
 from collections.abc import Coroutine
 from datetime import datetime
 from pathlib import Path
@@ -39,12 +38,10 @@ from kiss.server.explorer import (
     parse_git_log,
     parse_porcelain_status,
 )
-from kiss.server.web_server import (
-    _PYPI_FETCH_TIMEOUT,
-    RemoteAccessServer,
-    _generate_self_signed_cert,
-)
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.local_ws import _generate_self_signed_cert
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
@@ -150,12 +147,11 @@ class ExplorerHarness:
         # the paths tests compare differ from the ones they created.
         self.tmpdir = os.path.realpath(tempfile.mkdtemp(prefix="kiss-explorer-scm-"))
         tmp = Path(self.tmpdir)
-        self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved_persistence = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = tmp / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         self._saved_cfg = (vc.CONFIG_DIR, vc.CONFIG_PATH)
         vc.CONFIG_DIR = tmp / "config"
         vc.CONFIG_PATH = vc.CONFIG_DIR / "config.json"
@@ -197,18 +193,6 @@ class ExplorerHarness:
         asyncio.run_coroutine_threadsafe(
             self.server.start_async(), self.loop,
         ).result(60)
-        # Let the daemon's startup PyPI check cache the latest release
-        # before any client connects, so Playwright tests can tell from
-        # ``server._latest_version`` whether an update toast is due on
-        # every page they open (it then arrives in the connection's
-        # welcome sequence, right behind the config reply).  Bounded by
-        # the fetch timeout; with PyPI unreachable no toast ever comes.
-        deadline = time.monotonic() + _PYPI_FETCH_TIMEOUT + 1
-        while (
-            self.server._latest_version is None
-            and time.monotonic() < deadline
-        ):
-            time.sleep(0.05)
 
     def run(self, coro: Coroutine[Any, Any, Any]) -> Any:
         """Run *coro* on the server loop and return its result."""
@@ -224,8 +208,8 @@ class ExplorerHarness:
             self.loop.call_soon_threadsafe(self.loop.stop)
             self._thread.join(timeout=30)
             self.loop.close()
-            th._close_db()
-            th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
+            close_db()
+            th._DB_PATH, th._KISS_DIR = self._saved_persistence
             vc.CONFIG_DIR, vc.CONFIG_PATH = self._saved_cfg
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -614,6 +598,29 @@ class TestGitLog:
         )
         assert len(reply["commits"]) == GIT_LOG_DEFAULT_LIMIT + 3
 
+    def test_worktree_heads_the_limit_cut_come_children_first(self, harness) -> None:
+        """The heads the limit cut off are fetched in ``git worktree list``
+        order, here a parent (A) before its children (B and D); listed that
+        way the graph draws a lane down to a commit it has already drawn."""
+        repo = Path(harness.tmpdir) / "heads-repo"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main")
+        for subject in ("root", "A", "B"):
+            _git(repo, "commit", "-q", "--allow-empty", "-m", subject)
+        # Listed by path after the main worktree: A's, B's, then D's.
+        _git(repo, "worktree", "add", "-q", "--detach", f"{repo}-1", "HEAD^")
+        _git(repo, "worktree", "add", "-q", "--detach", f"{repo}-2", "HEAD")
+        _git(repo, "worktree", "add", "-q", "-b", "side", f"{repo}-3", "HEAD^")
+        _git(Path(f"{repo}-3"), "commit", "-q", "--allow-empty", "-m", "D")
+        _git(repo, "merge", "-q", "--no-ff", "-m", "C", "side")
+        reply = _request(
+            harness, {"type": "gitLog", "workDir": str(repo), "limit": 1}, "gitLog",
+        )
+        assert [w["name"] for w in reply["worktrees"]] == [
+            "heads-repo", "heads-repo-1", "heads-repo-2", "heads-repo-3",
+        ]
+        assert [c["subject"] for c in reply["commits"]] == ["C", "B", "D", "A"]
+
     @posix_only("the old-git shim is a shell script")
     def test_legacy_merge_diff_path_matches_first_parent_output(
         self, harness, monkeypatch,
@@ -622,9 +629,21 @@ class TestGitLog:
         ``PATH`` that refuses the option and hands everything else to
         the installed git) yields the same ``gitLog`` rows and the same
         ``gitShow`` patch as a modern one: one row per commit, the merge
-        listing its first-parent files."""
+        listing its first-parent files (none when it kept that parent's
+        tree, whatever the other parent changed)."""
         from kiss.server.explorer import git_log, git_show
 
+        ours = Path(harness.tmpdir) / "ours-repo"
+        ours.mkdir()
+        _git(ours, "init", "-q", "-b", "main")
+        for branch, text in (("main", "base"), ("side", "side")):
+            _git(ours, "checkout", "-q", "-B", branch)
+            (ours / "a.txt").write_text(text)
+            _git(ours, "add", "-A")
+            _git(ours, "commit", "-q", "-m", text)
+        _git(ours, "checkout", "-q", "main")
+        _git(ours, "merge", "-q", "--no-ff", "-s", "ours", "-m", "ours", "side")
+        modern_ours = git_log(str(ours), 20)
         modern = git_log(str(harness.work_dir), 20)
         modern_show = git_show(str(harness.work_dir), harness.shas["merge"])
         real_git = shutil.which("git")
@@ -657,6 +676,12 @@ class TestGitLog:
         merge = next(c for c in legacy["commits"] if c["sha"] == harness.shas["merge"])
         assert merge["files"] == [{"status": "A", "path": "feature.txt"}]
         assert git_show(str(harness.work_dir), harness.shas["merge"]) == modern_show
+        assert git_log(str(ours), 20) == modern_ours
+        assert [(c["subject"], c["files"]) for c in modern_ours["commits"]] == [
+            ("ours", []),
+            ("side", [{"status": "M", "path": "a.txt"}]),
+            ("base", [{"status": "A", "path": "a.txt"}]),
+        ]
 
     @posix_only("a tab is not a valid NTFS file-name character")
     def test_unusual_names_come_through_verbatim(self, harness) -> None:

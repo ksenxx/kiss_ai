@@ -16,8 +16,8 @@ F2  ``begin_conflicted_merge`` takes the caller's ``before`` snapshot
 F4  A nested ``_reclaim_process_lock`` take re-enters without spawning
     ``git rev-parse --git-common-dir``; aliases of the repo path and a
     second checkout of the same ``--git-common-dir`` still re-enter.
-F5  ``inside_kiss_worktree`` and ``kiss_worktree_root`` share one path
-    scanner, so they agree on backslash-separated paths.
+F5  ``inside_kiss_worktree`` reads backslash-separated paths too (the
+    path scanner it shares with ``strip_worktree_suffix``).
 F8  The cross-process lock timeout names a busy peer, not a hung one.
 
 Real git repositories, a real hook, a real ``.git/config.lock``, a real
@@ -37,13 +37,13 @@ from pathlib import Path
 
 import pytest
 
+from kiss.agents.sorcar import git_worktree
 from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SUBDIR,
     GitWorktreeOps,
     _git_common_dir,
     _reclaim_process_lock,
     inside_kiss_worktree,
-    kiss_worktree_root,
 )
 from kiss.core.kiss_error import KISSError
 from kiss.tests.conftest import posix_only
@@ -105,14 +105,14 @@ def test_reattach_failed_stamp_removes_a_locked_worktree(repo: Path) -> None:
 # --- F2 -----------------------------------------------------------------
 
 
-def test_begin_conflicted_merge_restores_against_the_callers_snapshot(repo: Path) -> None:
+def test_begin_conflicted_merge_failure_keeps_untracked_files(repo: Path) -> None:
     """The failure path keeps files that were untracked before the call."""
     (repo / "notes.txt").write_text("mine\n")
     before = GitWorktreeOps.status_porcelain(repo)
     assert before == "?? notes.txt"
     head = _git(repo, "rev-parse", "HEAD").strip()
 
-    assert GitWorktreeOps.begin_conflicted_merge(repo, "no-such", head, before) is None
+    assert GitWorktreeOps.begin_conflicted_merge(repo, "no-such", head) is None
 
     assert (repo / "notes.txt").read_text() == "mine\n"
     assert GitWorktreeOps.status_porcelain(repo) == before
@@ -138,8 +138,12 @@ def _common_dir_spawns(log: Path) -> int:
 
 
 @posix_only("the git shim is a sh script")
-def test_nested_reclaim_lock_does_not_spawn_git(repo: Path) -> None:
+def test_nested_reclaim_lock_does_not_spawn_git(
+    repo: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Re-entry is decided from the repo path before ``git rev-parse`` runs."""
+    # A nested take that did not re-enter would wait for its own hold: fail soon.
+    monkeypatch.setattr(git_worktree, "PROCESS_LOCK_TIMEOUT_SECONDS", 5.0)
     log = repo.parent / "git.log"
     alias = repo.parent / "alias"
     alias.symlink_to(repo)
@@ -159,13 +163,13 @@ def test_nested_reclaim_lock_does_not_spawn_git(repo: Path) -> None:
             # A second checkout of the same --git-common-dir cannot be
             # recognised by path; it still re-enters through the lock
             # path instead of self-deadlocking on a fresh descriptor.
-            with _reclaim_process_lock(other, timeout=5.0):
+            with _reclaim_process_lock(other):
                 pass
             assert _common_dir_spawns(log) == spawns + 1
     finally:
         os.environ["PATH"] = path_before
     # The hold is withdrawn: a fresh take spawns again and succeeds.
-    with _reclaim_process_lock(repo, timeout=5.0):
+    with _reclaim_process_lock(repo):
         pass
 
 
@@ -173,15 +177,9 @@ def test_nested_reclaim_lock_does_not_spawn_git(repo: Path) -> None:
 
 
 def test_worktree_path_helpers_agree_on_backslash_paths() -> None:
-    """One scanner: both helpers see the worktree in a Windows-style path."""
+    """The path scanner sees the worktree in a Windows-style path."""
     path = "C:\\r\\.kiss-worktrees\\kiss_wt-x\\src"
     assert inside_kiss_worktree(path)
-    assert kiss_worktree_root(path) == Path("C:/r/.kiss-worktrees/kiss_wt-x")
-    posix = "/u/r/.kiss-worktrees/kiss_wt-x/src"
-    assert kiss_worktree_root(posix) == Path("/u/r/.kiss-worktrees/kiss_wt-x")
-    assert kiss_worktree_root(Path(posix)) == Path("/u/r/.kiss-worktrees/kiss_wt-x")
-    assert kiss_worktree_root("/.kiss-worktrees/kiss_wt-x") == Path("/.kiss-worktrees/kiss_wt-x")
-    assert kiss_worktree_root("/u/r/.kiss-worktrees/other") is None
     assert not inside_kiss_worktree("/u/r/.kiss-worktrees/other")
     assert not inside_kiss_worktree("")
 
@@ -190,10 +188,11 @@ def test_worktree_path_helpers_agree_on_backslash_paths() -> None:
 
 
 @posix_only("the peer holds a fcntl.flock")
-def test_lock_timeout_names_a_busy_peer(repo: Path) -> None:
+def test_lock_timeout_names_a_busy_peer(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A peer holding the flock past the bound reads as busy, not hung."""
     import fcntl
 
+    monkeypatch.setattr(git_worktree, "PROCESS_LOCK_TIMEOUT_SECONDS", 0.5)
     git_common = _git_common_dir(repo)
     assert git_common is not None
     lock_path = git_common / "kiss-reclaim.lock"
@@ -216,7 +215,7 @@ def test_lock_timeout_names_a_busy_peer(repo: Path) -> None:
     try:
         assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
         with pytest.raises(KISSError, match="still using this repository.*retry later"):
-            with _reclaim_process_lock(repo, timeout=0.5):
+            with _reclaim_process_lock(repo):
                 pass
     finally:
         assert holder.stdin is not None

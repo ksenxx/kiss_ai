@@ -61,6 +61,29 @@ function setPageVisibility(win, state) {
   win.document.dispatchEvent(new win.Event('visibilitychange'));
 }
 
+/**
+ * Make the page's audio contexts start suspended, as a browser does
+ * before a user gesture.  Returns them as they are created, each with the
+ * `resolve` / `reject` of its pending resume().
+ */
+function suspendAudio(win) {
+  const Base = win.AudioContext;
+  const contexts = [];
+  win.AudioContext = class extends Base {
+    constructor() {
+      super();
+      this.state = 'suspended';
+      contexts.push(this);
+    }
+    resume() {
+      return new Promise((resolve, reject) =>
+        Object.assign(this, {resolve, reject}),
+      );
+    }
+  };
+  return contexts;
+}
+
 async function main() {
   await test('the mic button injects the vosk bundle and starts the pipeline directly', async () => {
     const {win, mic, model} = makePage({noVosk: true});
@@ -288,6 +311,81 @@ async function main() {
       micBtn(win).classList.contains('voice-listening'),
       `the re-enabled pipeline must end live: ${micBtn(win).className}`,
     );
+  });
+
+  await test('B/W11-F4: a suspended audio context that never resumes times out into the error state; a refused resume fails at once', async () => {
+    const page = makePage();
+    const {win, mic, log} = page;
+    const contexts = suspendAudio(win);
+    const btn = micBtn(win);
+    btn.click();
+    await settle();
+    mic.calls[0].grant();
+    await settle();
+    assert.ok(
+      !btn.classList.contains('voice-listening'),
+      `a pipeline whose audio is suspended is not listening: ${btn.className}`,
+    );
+    fireTimer(page, 30000); // the browser never resumes the context
+    await settle();
+    assert.ok(btn.classList.contains('voice-error'), btn.className);
+    assert.match(
+      btn.getAttribute('data-tooltip') || '',
+      /kept the audio suspended/,
+    );
+    assert.deepStrictEqual(
+      log,
+      ['ctx-open', 'track-stopped', 'ctx-closed'],
+      'the microphone and the audio graph are released',
+    );
+    assert.strictEqual(win.localStorage.getItem('kissVoiceEnabled'), '0');
+    btn.click(); // the retry's resume is refused
+    await settle();
+    mic.calls[1].grant();
+    await settle();
+    contexts[1].reject(new Error('resume refused'));
+    await settle();
+    assert.ok(btn.classList.contains('voice-error'), btn.className);
+    assert.match(btn.getAttribute('data-tooltip') || '', /resume refused/);
+    assert.strictEqual(
+      page.timers.filter(t => t.ms === 30000 && !t.cleared && !t.fired).length,
+      0,
+      'the refused resume disarms its deadline',
+    );
+  });
+
+  await test('B/W11-F4: OFF during a suspended start releases the microphone at once; the old resume, arriving late, starts nothing', async () => {
+    const page = makePage();
+    const {win, mic, log, state} = page;
+    const contexts = suspendAudio(win);
+    const btn = micBtn(win);
+    btn.click();
+    await settle();
+    mic.calls[0].grant();
+    await settle(); // start 1 waits for its context to resume
+    btn.click(); // off
+    assert.deepStrictEqual(
+      log,
+      ['ctx-open', 'track-stopped', 'ctx-closed'],
+      'off releases the microphone at once, not when the start settles',
+    );
+    btn.click(); // on again: deferred to the start still in flight
+    await settle();
+    assert.strictEqual(mic.calls.length, 1, 'the new start waits its turn');
+    contexts[0].resolve(); // the superseded start's resume arrives late
+    await settle();
+    assert.strictEqual(
+      state.recognizers.length,
+      0,
+      'the superseded start builds nothing on its closed context',
+    );
+    assert.strictEqual(mic.calls.length, 2, 'the new start asks for the mic');
+    mic.calls[1].grant();
+    await settle();
+    contexts[1].resolve();
+    await settle();
+    assert.ok(btn.classList.contains('voice-listening'), btn.className);
+    assert.strictEqual(state.recognizers.length, 2, 'exactly one pipeline');
   });
 
   await test('OFF then ON during an in-flight start restarts the pipeline exactly once', async () => {

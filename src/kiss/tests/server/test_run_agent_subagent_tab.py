@@ -43,6 +43,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import user_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import make_test_tls, open_local_connection
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.conftest import init_repo
 
 PARENT_TAB_ID = "webtab-parent-1"
@@ -74,12 +75,10 @@ class DaemonLocalHarness(unittest.TestCase):
         kiss_dir.mkdir(parents=True, exist_ok=True)
         self._saved_persistence = (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         )
         _persistence._KISS_DIR = kiss_dir
         _persistence._DB_PATH = kiss_dir / "history.db"
-        _persistence._db_conn = None
         self._saved_config_override = (
             vars(user_config).get("CONFIG_DIR"),
             vars(user_config).get("CONFIG_PATH"),
@@ -138,10 +137,9 @@ class DaemonLocalHarness(unittest.TestCase):
         self.loop_thread.join(timeout=5)
         self.loop.close()
 
-        _persistence._close_db()
+        close_db()
         (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved_persistence
         saved_dir, saved_path = self._saved_config_override
@@ -588,7 +586,7 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
                     recorded[marker] = {
                         "info": dict(self_agent._subagent_info or {}),
                         "is_reviewer": self_agent._is_reviewer_subagent(),
-                        "profile": self_agent._tool_profile(),
+                        "profile": self_agent._run_profile,
                         "tool_names": {
                             getattr(t, "__name__", "")
                             for t in self_agent._get_tools()

@@ -49,8 +49,6 @@ NOTES: list[tuple[float, float, float, float]] = [
 PEAK = 0.6
 
 HARMONICS = 8
-VIBRATO_HZ = 5.5
-VIBRATO_DEPTH = 0.004
 
 
 def envelope(t: float, length: float) -> float:
@@ -71,22 +69,16 @@ def envelope(t: float, length: float) -> float:
     return attack * settle * release
 
 
-def tone(freq: float, t: float, length: float) -> float:
+def tone(freq: float, t: float) -> float:
     """Return one sample of a brass-like tone at *freq*, *t* seconds in.
 
-    Eight harmonics rolling off as ``1/n^1.3`` (a softened sawtooth),
-    with a gentle vibrato that fades in over the first 300 ms of a note
-    longer than 200 ms.
+    Eight harmonics rolling off as ``1/n^1.3`` (a softened sawtooth).
 
     Args:
         freq: The fundamental in Hz.
         t: Seconds since the note started.
-        length: The note's sounding length in seconds.
     """
-    depth = VIBRATO_DEPTH * min(1.0, t / 0.3) if length > 0.2 else 0.0
-    phase = 2 * math.pi * freq * t + (freq * depth / VIBRATO_HZ) * (
-        1 - math.cos(2 * math.pi * VIBRATO_HZ * t)
-    )
+    phase = 2 * math.pi * freq * t
     return sum(math.sin(n * phase) / math.pow(n, 1.3) for n in range(1, HARMONICS + 1))
 
 
@@ -100,7 +92,7 @@ def render() -> list[float]:
         last = min(total, int((start + length + tail) * RATE))
         for i in range(first, last):
             t = (i - first) / RATE
-            dry[i] += level * envelope(t, length) * tone(freq, t, length)
+            dry[i] += level * envelope(t, length) * tone(freq, t)
     # A touch of room: two early reflections and one feedback comb.
     comb = int(0.053 * RATE)
     early = [(int(0.031 * RATE), 0.5), (int(0.047 * RATE), 0.35)]

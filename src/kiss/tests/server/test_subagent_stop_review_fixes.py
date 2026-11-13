@@ -61,18 +61,15 @@ class _DbRedirectBase:
         self.tmpdir = tempfile.mkdtemp()
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         clear_agent_states()
 
     def teardown_method(self) -> None:
         clear_agent_states()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        th._close_thread_db()
+        th._DB_PATH, th._KISS_DIR = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 

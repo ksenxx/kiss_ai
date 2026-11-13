@@ -68,6 +68,7 @@ from kiss.tests.core.models.test_multihop_model_switching import (
     _run_tool_turn,
     reveal_secret,
 )
+from kiss.tests.persistence_helpers import close_db
 
 
 def _expected_transport_class(name: str) -> type[OpenAICompatibleBase]:
@@ -117,9 +118,9 @@ def _isolate_sorcar_db(tmp_path: Path) -> Any:
     test_dir.mkdir()
     sorcar_persistence._KISS_DIR = test_dir
     sorcar_persistence._DB_PATH = test_dir / "history.db"
-    sorcar_persistence._close_db()
+    close_db()
     yield
-    sorcar_persistence._close_db()
+    close_db()
     sorcar_persistence._KISS_DIR = orig_kiss_dir
     sorcar_persistence._DB_PATH = orig_db_path
 

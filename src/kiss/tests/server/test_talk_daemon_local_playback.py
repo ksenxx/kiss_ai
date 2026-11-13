@@ -32,6 +32,7 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
+from kiss.core.processes import pid_alive
 from kiss.server import talk_player
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
@@ -80,7 +81,7 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         _reset_shared_player()
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.server.web_server import _generate_self_signed_cert
+        from kiss.tests.local_ws import _generate_self_signed_cert
 
         _generate_self_signed_cert(certfile, keyfile)
         self.server = RemoteAccessServer(
@@ -101,8 +102,7 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         else:
             os.environ["KISS_SORCAR_PLAY_CMD"] = self.saved_play_cmd
         _reset_shared_player()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -249,3 +249,41 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
             "play the clip on its own speakers",
         )
         writer.close()
+
+    async def test_stopping_the_server_ends_the_playing_clip(self) -> None:
+        """A clip still playing when the daemon stops is ended with it.
+
+        The player runs in a session of its own, so nothing else ends
+        it: an embedder's process lives on after ``stop_async``, and the
+        daemon's SIGTERM failsafe leaves through ``os._exit``, which
+        skips the interpreter's exit hooks.
+        """
+        record = Path(self.tmpdir) / "playing"
+        player = Path(self.tmpdir) / "hung_player.py"
+        player.write_text(
+            "import os, sys, time\n"
+            f"open({str(record)!r}, 'w').write(f'{{os.getpid()}} {{sys.argv[-1]}}\\n')\n"
+            "time.sleep(60)\n"
+        )
+        os.environ["KISS_SORCAR_PLAY_CMD"] = (
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(player))}"
+        )
+        cli_tab = "cli-" + uuid.uuid4().hex[:8]
+        _reader, writer = await self._connect(cli_tab)
+        self.server._printer.subscribe_tab(self.task_id, cli_tab)
+        self.server._printer.broadcast(
+            _talk_event(self.task_id, "talk-daemon-6", with_clip=True)
+        )
+        # A failing run must not leave the hung player behind.
+        self.addCleanup(talk_player.shared_player().shutdown)
+        deadline = time.monotonic() + 10.0
+        while not (record.exists() and record.read_text().endswith("\n")):
+            self.assertLess(time.monotonic(), deadline, "the daemon never started the player")
+            await asyncio.sleep(0.02)
+        pid, clip = record.read_text().strip().split(" ", 1)
+        writer.close()
+
+        await self.server.stop_async()
+
+        self.assertFalse(pid_alive(int(pid)), "the player outlived the daemon")
+        self.assertFalse(os.path.exists(clip), "the temp clip outlived the daemon")

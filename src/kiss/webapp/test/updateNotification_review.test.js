@@ -6,7 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, waitFor} = require('./simplify2_harness');
+const {makePage, send, click} = require('./simplify2_harness');
 
 function makeDomPage() {
   // Timers are recorded, never armed: a test fires the one it wants.
@@ -36,12 +36,6 @@ function makeDomPage() {
   };
 }
 
-function click(el) {
-  el.dispatchEvent(
-    new el.ownerDocument.defaultView.MouseEvent('click', {bubbles: true}),
-  );
-}
-
 function timerDelays(wv) {
   return wv.scheduledTimeouts.filter(t => !t.cleared).map(t => t.delay);
 }
@@ -54,7 +48,7 @@ function latestTimer(wv, delay) {
   return null;
 }
 
-async function testStickyStateRefreshesAfterReusingNotificationId() {
+function testStickyStateRefreshesAfterReusingNotificationId() {
   const wv = makeDomPage();
   try {
     send(wv.win, {
@@ -64,10 +58,8 @@ async function testStickyStateRefreshesAfterReusingNotificationId() {
       message: 'Originally sticky',
       sticky: true,
     });
-    const toast = await waitFor(
-      () => wv.win.document.querySelector('.kiss-notification'),
-      'first notification must render',
-    );
+    const toast = wv.win.document.querySelector('.kiss-notification');
+    assert.ok(toast, 'first notification must render');
     assert.strictEqual(
       toast.getAttribute('data-notification-sticky'),
       'true',
@@ -113,7 +105,7 @@ async function testStickyStateRefreshesAfterReusingNotificationId() {
   }
 }
 
-async function testUpdateToastCloseDoesNotPostNotificationAction() {
+function testUpdateToastCloseDoesNotPostNotificationAction() {
   const wv = makeDomPage();
   try {
     send(wv.win, {
@@ -122,12 +114,12 @@ async function testUpdateToastCloseDoesNotPostNotificationAction() {
       latest: '9999.0.0',
       current: '2026.6.29',
     });
-    const closeButton = await waitFor(
-      () => wv.win.document.querySelector('.kiss-notification-close'),
-      'update toast close button must render',
+    const closeButton = wv.win.document.querySelector(
+      '.kiss-notification-close',
     );
+    assert.ok(closeButton, 'update toast close button must render');
 
-    click(closeButton);
+    click(wv.win, closeButton);
     assert.ok(
       !wv.win.document.querySelector('.kiss-notification'),
       'X button must dismiss the update toast locally',
@@ -142,7 +134,7 @@ async function testUpdateToastCloseDoesNotPostNotificationAction() {
   }
 }
 
-async function testUpdateRebroadcastRefreshesMessageAndAriaLabel() {
+function testUpdateRebroadcastRefreshesMessageAndAriaLabel() {
   const wv = makeDomPage();
   try {
     send(wv.win, {
@@ -151,10 +143,8 @@ async function testUpdateRebroadcastRefreshesMessageAndAriaLabel() {
       latest: '9999.0.0',
       current: '2026.6.29',
     });
-    const toast = await waitFor(
-      () => wv.win.document.querySelector('.kiss-notification'),
-      'initial update toast must render',
-    );
+    const toast = wv.win.document.querySelector('.kiss-notification');
+    assert.ok(toast, 'initial update toast must render');
     const firstButton = toast.querySelector('.kiss-notification-action');
     assert.ok(firstButton, 'initial update toast must include an action');
     assert.ok(
@@ -200,7 +190,7 @@ async function testUpdateRebroadcastRefreshesMessageAndAriaLabel() {
 // A repaint of a transient toast (same id) while the pointer is on it
 // must not re-arm the auto-dismiss that the hover cleared; the timer
 // comes back when the pointer leaves.
-async function testRepaintUnderPointerKeepsDismissCleared() {
+function testRepaintUnderPointerKeepsDismissCleared() {
   const wv = makeDomPage();
   try {
     const ev = {
@@ -211,10 +201,8 @@ async function testRepaintUnderPointerKeepsDismissCleared() {
       sticky: false,
     };
     send(wv.win, ev);
-    const toast = await waitFor(
-      () => wv.win.document.querySelector('.kiss-notification'),
-      'notification must render',
-    );
+    const toast = wv.win.document.querySelector('.kiss-notification');
+    assert.ok(toast, 'notification must render');
     toast.dispatchEvent(new wv.win.MouseEvent('mouseenter', {bubbles: true}));
     assert.ok(!timerDelays(wv).includes(5000), 'hover clears the timer');
 
@@ -243,7 +231,7 @@ async function testRepaintUnderPointerKeepsDismissCleared() {
 // repainted as a sticky error.  That repaint must cancel the transient
 // timer: the error stays.  The timers are recorded, so the cancel is
 // checked directly instead of sleeping past the 5 s dismiss.
-async function testStickyErrorRepaintCancelsTransientDismiss() {
+function testStickyErrorRepaintCancelsTransientDismiss() {
   const wv = makeDomPage();
   const {win} = wv;
   try {
@@ -254,10 +242,8 @@ async function testStickyErrorRepaintCancelsTransientDismiss() {
       message: 'initial',
       sticky: false,
     });
-    const toast = await waitFor(
-      () => win.document.querySelector('.kiss-notification'),
-      'notification must render',
-    );
+    const toast = win.document.querySelector('.kiss-notification');
+    assert.ok(toast, 'notification must render');
     const transientDismiss = latestTimer(wv, 5000);
     assert.ok(transientDismiss, 'the transient toast armed its 5 s dismiss');
 
@@ -292,21 +278,18 @@ async function testStickyErrorRepaintCancelsTransientDismiss() {
   }
 }
 
-async function runTests() {
-  await testStickyStateRefreshesAfterReusingNotificationId();
-  await testRepaintUnderPointerKeepsDismissCleared();
-  await testStickyErrorRepaintCancelsTransientDismiss();
-  await testUpdateToastCloseDoesNotPostNotificationAction();
-  await testUpdateRebroadcastRefreshesMessageAndAriaLabel();
+function runTests() {
+  testStickyStateRefreshesAfterReusingNotificationId();
+  testRepaintUnderPointerKeepsDismissCleared();
+  testStickyErrorRepaintCancelsTransientDismiss();
+  testUpdateToastCloseDoesNotPostNotificationAction();
+  testUpdateRebroadcastRefreshesMessageAndAriaLabel();
 }
 
-runTests().then(
-  () => {
-    console.log('\nAll review-driven update notification tests passed');
-    process.exit(0);
-  },
-  err => {
-    console.error('FAIL:', err && err.stack ? err.stack : err);
-    process.exit(1);
-  },
-);
+try {
+  runTests();
+  console.log('\nAll review-driven update notification tests passed');
+} catch (err) {
+  console.error('FAIL:', err && err.stack ? err.stack : err);
+  process.exit(1);
+}

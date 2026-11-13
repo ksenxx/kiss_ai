@@ -4,10 +4,12 @@
 # add your name here
 """Tests for CodexModel — Codex CLI backend."""
 
+import json
 import os
 import shutil
 import stat
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -18,10 +20,12 @@ from kiss.core.models.codex_model import (
     _find_in_candidate_paths,
     find_codex_executable,
 )
+from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import MODEL_INFO, model
 from kiss.scripts.update_models import SUBSCRIPTION_INCOMPATIBLE_CODEX_SLUGS
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 from kiss.tests.conftest import IS_WINDOWS, posix_only
+from kiss.tests.core.models.test_cli_subprocess_lifecycle import install_cli
 
 _has_codex = shutil.which("codex") is not None
 
@@ -415,6 +419,127 @@ class TestModelRouting:
         assert m._cli_model == "gpt-5-codex"
 
 
+_CODEX_RECORDS_ITS_ARGUMENTS = """
+    import json
+    import os
+    import pathlib
+    import sys
+
+    sys.stdin.read()
+    pathlib.Path(os.environ["KISS_TEST_ARGV_FILE"]).write_text(json.dumps(sys.argv[1:]))
+    print(json.dumps({"type": "item.completed",
+                      "item": {"type": "agent_message", "text": "seen"}}), flush=True)
+    print(json.dumps({"type": "turn.completed",
+                      "usage": {"input_tokens": 5, "cached_input_tokens": 0,
+                                "output_tokens": 1}}), flush=True)
+"""
+
+
+@pytest.mark.parametrize(
+    ("name", "config", "cli_model", "effort"),
+    [
+        ("codex/gpt-6-astra-xhigh", None, "gpt-6-astra", "xhigh"),
+        ("codex/gpt-6-astra-xhigh", {"reasoning_effort": "low"}, "gpt-6-astra", "low"),
+        ("codex/gpt-6-astra", None, "gpt-6-astra", None),
+        ("codex/default", {"reasoning_effort": "high"}, None, "high"),
+        # Not an alias: a level suffix the catalog does not mark is the model's own name.
+        ("codex/o3-mini-high", None, "o3-mini-high", None),
+    ],
+)
+def test_an_effort_alias_runs_its_base_model_at_that_effort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    config: dict[str, Any] | None,
+    cli_model: str | None,
+    effort: str | None,
+) -> None:
+    """``codex/gpt-6-astra-xhigh`` is GPT-6 Astra at ``xhigh`` effort, not a model of the CLI's.
+
+    ``-xhigh`` is the alias suffix every lookup of the catalog strips, and
+    the CLI was handed the alias as ``-m gpt-6-astra-xhigh``: a model it
+    does not know, with no effort set.  The alias now runs its base model
+    with ``model_reasoning_effort`` set, and ``reasoning_effort`` in the
+    ``model_config`` (the framework's key) outranks the alias's level.
+    """
+    install_cli(tmp_path, monkeypatch, "codex", _CODEX_RECORDS_ITS_ARGUMENTS)
+    argv_file = tmp_path / "argv.json"
+    monkeypatch.setenv("KISS_TEST_ARGV_FILE", str(argv_file))
+    m = model(name, model_config=config)
+    m.initialize("hi")
+
+    content, _ = m.generate()
+
+    argv = json.loads(argv_file.read_text())
+    assert content == "seen"
+    assert [argv[i + 1] for i, arg in enumerate(argv) if arg == "-m"] == (
+        [cli_model] if cli_model else []
+    )
+    assert [arg for arg in argv if arg.startswith("model_reasoning_effort=")] == (
+        [f'model_reasoning_effort="{effort}"'] if effort else []
+    )
+
+
+_CODEX_RECORDS_ITS_INPUT = """
+    import base64
+    import json
+    import os
+    import sys
+
+    argv = sys.argv[1:]
+    record = {"stdin": sys.stdin.read(), "images": {}}
+    for path in [argv[i + 1] for i, arg in enumerate(argv) if arg == "-i"]:
+        with open(path, "rb") as image:
+            record["images"][path] = base64.b64encode(image.read()).decode()
+    with open(os.environ["KISS_TEST_INPUT_LOG"], "a", encoding="utf-8") as log:
+        log.write(json.dumps(record) + "\\n")
+    print(json.dumps({"type": "item.completed",
+                      "item": {"type": "agent_message", "text": "seen"}}), flush=True)
+    print(json.dumps({"type": "turn.completed",
+                      "usage": {"input_tokens": 5, "cached_input_tokens": 0,
+                                "output_tokens": 1}}), flush=True)
+"""
+
+
+def test_user_images_reach_the_cli_as_image_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Images the user attached are handed to ``codex exec`` with ``-i``.
+
+    ``initialize`` dropped them with a log line and the transcript ignored
+    the ``attachments`` of later user messages, while Sorcar's prompt told
+    the model the files were "included in this message as inline content
+    that you can see directly".  Codex 0.163 sends the N-th ``-i`` file
+    ahead of the prompt as ``[Image #N]``, the label the transcript uses;
+    a file that is no image (``-i`` cannot carry a PDF) is named in the
+    prompt as not shown.  The files live only as long as the turn.
+    """
+    install_cli(tmp_path, monkeypatch, "codex", _CODEX_RECORDS_ITS_INPUT)
+    log = tmp_path / "input.jsonl"
+    monkeypatch.setenv("KISS_TEST_INPUT_LOG", str(log))
+    png = Attachment(b"\x89PNG\r\n\x1a\npng-bytes", "image/png")
+    jpeg = Attachment(b"\xff\xd8\xffjpeg-bytes", "image/jpeg")
+    m = CodexModel("codex/default")
+    m.initialize("describe these", [png, Attachment(b"%PDF-1.4 pdf-bytes", "application/pdf")])
+
+    assert m.generate()[0] == "seen"
+    m.add_message_to_conversation("user", "and this one", attachments=[jpeg])
+    m.generate()
+
+    first, second = (json.loads(line) for line in log.read_text().splitlines())
+    task = (
+        "describe these\n[Image #1]\n[1 attachment(s) of this message could not be shown "
+        "to this model: application/pdf (18 bytes)]"
+    )
+    assert list(first["images"].values()) == [png.to_base64()]
+    assert first["stdin"] == task
+    assert list(second["images"].values()) == [png.to_base64(), jpeg.to_base64()]
+    assert second["stdin"] == (
+        f"[User]: {task}\n\n[Assistant]: seen\n\n[User]: and this one\n[Image #2]"
+    )
+    assert not any(os.path.exists(path) for path in [*first["images"], *second["images"]])
+
+
 class TestModelInfoEntries:
     def test_codex_models_in_model_info(self) -> None:
         for name in _CODEX_MODEL_NAMES:
@@ -432,6 +557,7 @@ class TestModelInfoEntries:
 @requires_codex_cli
 @pytest.mark.slow
 @pytest.mark.live_cli
+@pytest.mark.live_api
 class TestGenerateIntegration:
     """Integration tests that actually call the codex CLI."""
 

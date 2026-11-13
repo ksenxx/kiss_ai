@@ -21,6 +21,7 @@ const {
   stubRaf,
   click,
   ofType,
+  readyTabId,
 } = require('./simplify2_harness');
 
 const URL = 'https://example.com/docs/page';
@@ -50,7 +51,7 @@ function makePage(opts) {
     opened.push({url, target, features});
     return {};
   };
-  const tab = posted.find(m => m.type === 'ready').tabId;
+  const tab = readyTabId(posted);
   send(win, {type: 'daemonStatus', connected: true});
   send(win, {type: 'clear', chat_id: 'chat-l', tabId: tab});
   send(win, {type: 'status', running: true, tabId: tab, startTs: Date.now()});

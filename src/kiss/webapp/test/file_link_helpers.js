@@ -11,7 +11,6 @@
 'use strict';
 
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const harness = require('./simplify2_harness');
 
@@ -76,20 +75,15 @@ function existsOnRealFs(p) {
 }
 
 /**
- * A `checkPaths` answerer (for `answerCheckPaths`) that resolves `~/`
- * and relative paths (against the message's workDir, else `defaultDir`)
- * and consults the real file system, exactly like the web server does.
+ * A `checkPaths` answerer (for `answerCheckPaths`) that resolves
+ * relative paths (against the message's workDir, else `defaultDir`)
+ * and consults the real file system, as the web server does.
  */
 function checkPathsOnRealFs(defaultDir) {
   return function (msg) {
     const results = {};
     for (const p of msg.paths) {
-      let abs = p;
-      if (p.startsWith('~/')) {
-        abs = path.join(os.homedir(), p.slice(2));
-      } else if (!path.isAbsolute(p)) {
-        abs = path.resolve(msg.workDir || defaultDir, p);
-      }
+      const abs = path.resolve(msg.workDir || defaultDir, p);
       results[p] = existsOnRealFs(abs);
     }
     return results;

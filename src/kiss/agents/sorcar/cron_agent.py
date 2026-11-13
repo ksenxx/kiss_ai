@@ -102,7 +102,8 @@ from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.locked import locked_call
-from kiss.core.processes import SIGKILL, kill_process_group, pid_alive, popen_process_group
+from kiss.core.processes import SIGKILL, kill_process_group, start_process_group
+from kiss.core.tool_interrupt import inject_async_exception
 from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
 
 logger = logging.getLogger(__name__)
@@ -119,9 +120,9 @@ Process-local: a tick treats a job whose thread is still alive as not
 due and ``run_now`` refuses it, so a run that outlasts the job's
 interval is never overlapped in the same process.  Another process
 (``kiss-cron --tick`` beside the daemon's scheduler) cannot see these
-threads: it finds the run on the stored job instead, whose
-``running_pid`` every launch records and the run's outcome removes
-(:func:`_running_elsewhere`).
+threads: it finds the run by the job's run lock instead, which every
+run holds from its launch until its outcome is recorded
+(:func:`_job_run_lock`).
 """
 
 _daemon_endpoint_file: str | None = None
@@ -140,7 +141,9 @@ synthetic copy of this module whose own global is never set, and its
 daemon in the same process (an in-process restart, a test) is not sent
 to the dead one's endpoint.
 """
-CRON_SCAN_DAYS = 4 * 366 + 1  # covers the largest gap between leap days
+# Covers the largest gap between leap days: eight years, across a century
+# year that is none (2096 to 2104).
+CRON_SCAN_DAYS = 8 * 366 + 1
 DEFAULT_TICK_INTERVAL_SECONDS = 60.0
 MISSED_RUN_GRACE_SECONDS = 10 * 60.0
 """How late a repeating job may still run; a later occurrence is missed.
@@ -209,6 +212,16 @@ def _runs_dir() -> Path:
     return _cron_dir() / "runs"
 
 
+def _locks_dir() -> Path:
+    """Return the directory holding the per-job run locks (:func:`_job_run_lock`).
+
+    One empty file per job that has run, kept like the job's output
+    log: a lock file is never unlinked (a later take would lock another
+    inode than the run in flight holds).
+    """
+    return _cron_dir() / "locks"
+
+
 _SILENCE_TOKENS = frozenset({"[SILENT]", "NO_REPLY"})
 
 
@@ -250,6 +263,30 @@ def _jobs_lock(blocking: bool) -> Any:
         holds it.
     """
     return exclusive_file_lock(_jobs_path().with_suffix(".lock"), blocking=blocking)
+
+
+def _job_run_lock(job_id: str) -> Any:
+    """Return a context manager taking the lock a run of *job_id* holds while it lasts.
+
+    The lock is how a scheduler in another process over the same store
+    (``kiss-cron --tick`` beside the daemon's) knows the job is running.
+    Every run takes it at its launch and keeps it until its outcome is
+    recorded (:func:`_launch`, ``cron_job("run_now")``).  It is the
+    open lock file's: it ends with the run, or with the process running
+    it however that dies, and with nothing else.  A record on the stored
+    job could be aged by a step of the clock, removed by another run's
+    outcome, or kept alive by a stranger with the dead runner's pid.
+    Every take is made under the store lock, so a probe never collides
+    with a launch.
+
+    Args:
+        job_id: The job's id.
+
+    Returns:
+        A context manager yielding ``True`` while the lock is held, or
+        ``False`` (holding nothing) when a run of the job has it.
+    """
+    return exclusive_file_lock(_locks_dir() / f"{job_id}.lock", blocking=False)
 
 
 def load_jobs(strict: bool = False, path: Path | None = None) -> list[dict[str, Any]]:
@@ -334,17 +371,17 @@ def _parse_cron_field(field: str, low: int, high: int) -> set[int] | None:
         step = 1
         if "/" in item:
             item, _, step_text = item.partition("/")
-            if not step_text.isdigit() or int(step_text) < 1:
+            if not step_text.isdecimal() or int(step_text) < 1:
                 return None
             step = int(step_text)
         if item == "*":
             start, end = low, high
         elif "-" in item:
             a, _, b = item.partition("-")
-            if not (a.isdigit() and b.isdigit()):
+            if not (a.isdecimal() and b.isdecimal()):
                 return None
             start, end = int(a), int(b)
-        elif item.isdigit():
+        elif item.isdecimal():
             start = end = int(item)
         else:
             return None
@@ -446,11 +483,12 @@ def compute_next_run(schedule: str, now: float) -> float | None:
     Returns:
         The next run time in epoch seconds, or ``None`` when a
         one-shot timestamp is already in the past or no cron match
-        exists within the ~4-year scan horizon (which covers the
+        exists within the ~8-year scan horizon (which covers the
         largest gap between leap days).
 
     Raises:
-        ValueError: When *schedule* matches none of the supported forms.
+        ValueError: When *schedule* matches none of the supported forms
+            (an interval or duration whose count no float holds included).
 
     Note:
         Cron times use Pacific wall-clock time: around a DST transition a run
@@ -458,12 +496,17 @@ def compute_next_run(schedule: str, now: float) -> float | None:
         fires an hour late; the repeated fall-back hour fires once).
     """
     text = schedule.strip()
-    m = _INTERVAL_RE.match(text.lower())
+    unsupported = (
+        f"Unsupported schedule {schedule!r}: use 'every N<s|m|h|d>', a "
+        "5-field cron expression, a one-shot duration like '30m', or an "
+        "ISO timestamp like '2026-01-15T14:00'"
+    )
+    m = _INTERVAL_RE.match(text.lower()) or _DURATION_RE.match(text.lower())
     if m:
-        return now + int(m.group(1)) * _UNIT_SECONDS[m.group(2)]
-    m = _DURATION_RE.match(text.lower())
-    if m:
-        return now + int(m.group(1)) * _UNIT_SECONDS[m.group(2)]
+        try:
+            return now + int(m.group(1)) * _UNIT_SECONDS[m.group(2)]
+        except OverflowError:  # a count no float holds
+            raise ValueError(unsupported) from None
     parsed = _parse_cron_expr(text)
     if parsed is not None:
         fields, dom_star, dow_star = parsed
@@ -485,11 +528,7 @@ def compute_next_run(schedule: str, now: float) -> float | None:
     try:
         when = datetime.fromisoformat(text)
     except ValueError:
-        raise ValueError(
-            f"Unsupported schedule {schedule!r}: use 'every N<s|m|h|d>', a "
-            "5-field cron expression, a one-shot duration like '30m', or an "
-            "ISO timestamp like '2026-01-15T14:00'"
-        ) from None
+        raise ValueError(unsupported) from None
     if when.tzinfo is None:
         when = when.replace(tzinfo=SCHEDULE_TZ)
     ts = when.timestamp()
@@ -597,16 +636,17 @@ def failure_backoff_seconds(streak: int) -> float:
 def _same_failure(job: dict[str, Any], text: str | None) -> bool:
     """Return whether *text* repeats the job's previous failed result (same first line).
 
-    A previous failure a target did not get (its delivery note is an
-    error) is no repeat: the user has not read it, so it is delivered
-    again.
+    The first lines are compared as far as the store keeps a result
+    (:data:`MAX_STORED_SUMMARY_CHARS`).  A previous failure a target did
+    not get (its delivery note is an error) is no repeat: the user has
+    not read it, so it is delivered again.
     """
     if job.get("last_status") in (None, "ok", "silent") or not text:
         return False
     if any(str(note).startswith("error") for note in job.get("last_delivery") or []):
         return False
     previous = str(job.get("last_summary") or "")
-    return _first_line(previous) == _first_line(text) != ""
+    return _first_line(previous) == _first_line(text[:MAX_STORED_SUMMARY_CHARS]) != ""
 
 
 def _first_line(text: str) -> str:
@@ -833,9 +873,12 @@ def is_unattended_text(text: str) -> bool:
 
     Args:
         text: A task text as the daemon receives it (the appended
-            per-run suffix included).
+            per-run suffix included; white space after it is ignored,
+            as :func:`unattended_child_suffix` ignores it).
     """
-    return text.startswith(PROMPT_PREAMBLE.strip()) or text.endswith(UNATTENDED_CHILD_PREAMBLE)
+    return text.startswith(PROMPT_PREAMBLE.strip()) or text.rstrip().endswith(
+        UNATTENDED_CHILD_PREAMBLE
+    )
 
 
 def is_cron_run(agent: Any) -> bool:
@@ -915,18 +958,21 @@ def _run_outcome(summary: str, success: bool) -> tuple[str, str | None]:
     return "error", ("Task failed" if silent else summary)
 
 
-def _job_timeout(job: dict[str, Any], default: float) -> float:
+def _job_timeout(job: dict[str, Any]) -> float:
     """Return the per-run timeout of *job* in seconds.
 
     Args:
         job: The job dict (uses the optional ``timeout`` field; ``0`` or
-            missing means *default*).
-        default: :data:`COMMAND_TIMEOUT_SECONDS` or
-            :data:`PROMPT_TIMEOUT_SECONDS`.
+            missing means the default of the job's kind,
+            :data:`COMMAND_TIMEOUT_SECONDS` or
+            :data:`PROMPT_TIMEOUT_SECONDS`).
 
     Returns:
         The timeout in seconds.
     """
+    default = (
+        COMMAND_TIMEOUT_SECONDS if str(job.get("command", "")).strip() else PROMPT_TIMEOUT_SECONDS
+    )
     return float(job.get("timeout") or 0.0) or default
 
 
@@ -981,8 +1027,9 @@ def _run_in_chat_job(
         output file by the caller.
 
     Raises:
-        UnresolvedRunError: When the run timed out but the daemon never
-            confirmed the stop (see :func:`_run_prompt_job`).
+        UnresolvedRunError: When the run timed out or was interrupted
+            and the daemon never confirmed the stop, or lost its
+            connection (see :func:`_run_prompt_job`).
     """
     from kiss.agents.sorcar import daemon_client
 
@@ -1028,6 +1075,18 @@ def _run_in_chat_job(
         ) from exc
     except (OSError, ValueError) as exc:
         return "error", f"Error: {exc}"
+    except BaseException as exc:
+        # The wait was interrupted (a Stop, Ctrl-C under the CLI) after
+        # the run went out: ``run`` sent the task a stop and left without
+        # its confirmation.  One that names no run passes through.
+        interrupted = getattr(exc, "task_result", None)
+        if interrupted is None:
+            raise
+        raise UnresolvedRunError(
+            "in-chat job was interrupted; the stop was not confirmed, so the task MAY "
+            "STILL BE RUNNING (and spending) on the daemon",
+            interrupted.task_id,
+        ) from exc
     return _run_outcome(result_summary(result), result.success)
 
 
@@ -1082,8 +1141,9 @@ def _run_prompt_job(
 
     Raises:
         UnresolvedRunError: When the task may still be running: the run
-            timed out and the daemon never confirmed the stop, or the
-            connection to the daemon failed while the task ran.  The
+            timed out or was interrupted and the daemon never confirmed
+            the stop, or the connection to the daemon failed while the
+            task ran.  The
             caller must keep *scratch_dir*; the message is the complete
             error to record and the error names the task when the
             daemon did.
@@ -1152,10 +1212,21 @@ def _run_prompt_job(
                 )
             if isinstance(run.outcome, str):  # stopped (a finished one falls through)
                 return "error", f"Error: {bound}; {reply.removeprefix('Error: ')}"
-    except BaseException:
-        # The wait or the kill was interrupted: the sub-task is cancelled,
-        # as ``run_agent`` cancels its own.
-        run.cancel.set()
+    except UnresolvedRunError:
+        raise
+    except BaseException as exc:
+        # The wait or the kill was interrupted (a Stop, Ctrl-C under the
+        # CLI, whose exit would abandon the job's thread before it sent
+        # the stop): the sub-task is stopped and its end awaited, bounded,
+        # before the caller removes the scratch directory it runs in.
+        reply = kill_agent_job(run)
+        if run.thread.is_alive() or may_still_run(run.outcome, name):
+            raise UnresolvedRunError(
+                f"prompt job was interrupted; the stop was not confirmed, so the task "
+                f"may still be running in {run_dir} (its scratch directory "
+                f"{scratch_dir} is kept): {reply}",
+                run.task_id,
+            ) from exc
         raise
     finally:
         # Nothing else ever collects an ownerless job from the registry.
@@ -1216,8 +1287,51 @@ def _proc_descendants(root_pid: int) -> set[int]:
     return descendants
 
 
-def _kill_command_tree(proc: subprocess.Popen) -> None:
-    """Best-effort kill of a timed-out command's whole process tree.
+#: The longest :func:`_kill_command_tree` keeps killing the processes that
+#: carry a run's mark: one stuck in the kernel dies later than its signal.
+_MARKED_KILL_SECONDS = 2.0
+
+
+def _kill_marked(mark: str) -> bool:
+    """SIGKILL every process whose environment has the variable *mark*.
+
+    :func:`_run_command_job` gives the variable, under a name of its
+    own, to the command it starts and to nothing else, so the processes
+    found are that command's descendants, whoever their parent is now.
+    Linux only: without ``/proc`` nothing is found.  A zombie has no
+    environment left to read and is not found.  The signal goes to the
+    pid just read: for it to reach another process the kernel would
+    have to wrap its whole pid space between the read and the signal.
+
+    Args:
+        mark: The variable's name.
+
+    Returns:
+        Whether a process with the variable was found.
+    """
+    entry = f"{mark}=1".encode()
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return False
+    found = False
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/environ", "rb") as fp:
+                marked = entry in fp.read().split(b"\0")
+        except OSError:
+            continue  # gone, or another user's: not ours to kill either
+        if marked:
+            found = True
+            with contextlib.suppress(OSError):
+                os.kill(int(name), 9)
+    return found
+
+
+def _kill_command_tree(proc: subprocess.Popen, mark: str) -> None:
+    """Best-effort kill of a timed-out or interrupted command's whole process tree.
 
     POSIX: kills the command's own process group (every ordinary
     foreground/background descendant), then — because a descendant that
@@ -1226,62 +1340,90 @@ def _kill_command_tree(proc: subprocess.Popen) -> None:
     and kills each one's group and pid.  Descendants are snapshotted
     BEFORE the group kill: once the shell dies its orphans re-parent to
     init and the chain is lost (which is also why a second scan would
-    find nothing).  Residual limitation (documented, not guaranteed): a
-    process that detaches into a new group after the snapshot (spawned
-    mid-kill by an escapee), a descendant of a shell that had already
-    exited, or any descendant on a POSIX system without ``/proc``, can
-    still escape.
+    find nothing).  The chain does not lead to the ``setsid`` child of a
+    shell that has already exited (the output pipes it inherited keep
+    the run open until the timeout), nor to a process an escapee starts
+    mid-kill: those are found by the run's mark in their environment
+    (:func:`_kill_marked`), killed until a scan finds none.  Residual
+    limitation (documented, not guaranteed): a descendant that left the
+    group and the chain and dropped the mark (``env -i``), or any
+    descendant that left the group on a POSIX system without ``/proc``
+    (macOS, BSD), can still escape.
+
+    A shell that was reaped is not signalled, and neither is its group
+    or parent chain: its pid may be a stranger's by now (see
+    :func:`kill_process_group`).  ``Popen.communicate`` reaps a shell
+    that has exited as an interrupt passes through it, so what that
+    shell left behind is found by the mark alone.
 
     Windows: :func:`kill_process_group` runs ``taskkill /T /F`` on the
     shell's pid (kills the process tree Windows tracks), then
     ``proc.kill()`` as a fallback; a descendant that detached from the
-    tree is not covered.
+    tree is not covered, and neither is what a reaped shell left behind.
 
     Args:
-        proc: The timed-out command's shell process (session leader on
-            POSIX, direct child on Windows).
+        proc: The command's shell process (session leader on POSIX,
+            direct child on Windows).
+        mark: The variable :func:`_run_command_job` put in the
+            command's environment.
     """
-    if os.name == "nt":  # pragma: no cover — Windows CI is not available here
+    if proc.returncode is None:
+        if os.name == "nt":  # pragma: no cover — Windows CI is not available here
+            with contextlib.suppress(OSError):  # group already gone
+                kill_process_group(proc.pid, SIGKILL)
+            proc.kill()
+            return
+        survivors = _proc_descendants(proc.pid)
         with contextlib.suppress(OSError):  # group already gone
             kill_process_group(proc.pid, SIGKILL)
-        proc.kill()
-        return
-    survivors = _proc_descendants(proc.pid)
-    with contextlib.suppress(OSError):  # group already gone
-        kill_process_group(proc.pid, SIGKILL)
-    for pid in survivors:
-        try:
-            pgid = os.getpgid(pid)
-        except OSError:
-            continue  # already dead
-        if pgid == proc.pid:
-            continue  # covered by the group kill above
-        # Kill the escapee's own group first (a setsid child leads a new
-        # group holding its subtree; the command's session is not ours,
-        # so the group is never our own), then the pid.
-        with contextlib.suppress(OSError):
-            os.killpg(pgid, 9)
-        with contextlib.suppress(OSError):
-            os.kill(pid, 9)
+        for pid in survivors:
+            try:
+                pgid = os.getpgid(pid)
+            except OSError:
+                continue  # already dead
+            if pgid == proc.pid:
+                continue  # covered by the group kill above
+            # Kill the escapee's own group first (a setsid child leads a new
+            # group holding its subtree; the command's session is not ours,
+            # so the group is never our own), then the pid.
+            with contextlib.suppress(OSError):
+                os.killpg(pgid, 9)
+            with contextlib.suppress(OSError):
+                os.kill(pid, 9)
+    deadline = time.monotonic() + _MARKED_KILL_SECONDS
+    while _kill_marked(mark) and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+#: The longest :func:`_reap_killed_command` waits for a killed command.
+_REAP_SECONDS = 5.0
 
 
 def _reap_killed_command(proc: subprocess.Popen) -> None:
-    """Drain and reap *proc* after :func:`_kill_command_tree`, bounded.
+    """Close *proc*'s pipes and reap it after :func:`_kill_command_tree`, bounded.
 
-    The tree is dead, so the pipes close and the drain returns
-    promptly; the bounded retry guards a straggler that survived the
-    best-effort tree kill holding the pipes open, in which case the
-    pipes are abandoned to it and the (killed) shell reaped so the
-    ``Popen`` does not linger as a zombie.
+    The output of a killed command is dropped, so nothing more is read:
+    a straggler that survived the best-effort tree kill may hold the
+    pipes open, and ``communicate`` fails on a ``Popen`` whose first
+    ``communicate`` an interrupt ended as it began (it is marked as
+    communicating before it has set that up).  On Windows
+    ``communicate`` reads each pipe in a thread of its own, which closes
+    it at the end of the output; a close here would wait for that read,
+    and so for the straggler.  Such a pipe is left to its thread, which
+    gets the bound to finish; one that is not alive has finished or,
+    its start cut short by the interrupt, is yet to read.  The shell is
+    killed, so the wait is short and the ``Popen`` does not linger as a
+    zombie; the bound is for a wait that an interrupt left locked.
     """
-    try:
-        proc.communicate(timeout=5)
-    except subprocess.TimeoutExpired:
-        for pipe in (proc.stdout, proc.stderr):
-            if pipe is not None:
-                pipe.close()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=5)
+    deadline = time.monotonic() + _REAP_SECONDS
+    for name in ("stdout", "stderr"):
+        reader: threading.Thread | None = getattr(proc, f"{name}_thread", None)
+        if reader is None:
+            getattr(proc, name).close()
+        elif reader.is_alive():
+            reader.join(max(deadline - time.monotonic(), 0.0))
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=max(deadline - time.monotonic(), 0.0))
 
 
 #: The longest ``_communicate`` leaves the calling thread inside one
@@ -1327,7 +1469,7 @@ def _run_command_job(
     The command runs under the same shell as the agent's ``Bash`` tool
     (``sh`` on POSIX, Git bash on Windows; see
     :func:`~kiss.agents.sorcar.useful_tools._popen_kwargs`) in its own
-    process group, and a timeout — or an interrupt of the calling
+    process group with an empty stdin, and a timeout — or an interrupt of the calling
     thread, which is re-raised — kills the WHOLE process tree, not
     just the shell; see :func:`_kill_command_tree` for the exact
     guarantees and residual limitations per platform.
@@ -1344,33 +1486,55 @@ def _run_command_job(
         succeeds with empty output, ``("ok", stdout)`` on success, and
         ``("error", output)`` on non-zero exit or timeout.
     """
-    # The command sees the state directory this daemon uses (the brand's
-    # default unless KISS_HOME already overrides it), so a script it runs
-    # with another interpreter reads and writes the same files.
-    proc = popen_process_group(
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=str(run_dir),
-        env={**os.environ, "KISS_HOME": str(kiss_home())},
-        **_popen_kwargs(str(job["command"])),
-    )
+    # A variable no other process has: the kill finds by it the
+    # descendants that left the command's process group and parent chain.
+    mark = f"KISS_CRON_RUN_{uuid.uuid4().hex}"
+    # The Popen is held from before the spawn, which runs inside the
+    # ``try``: a Stop raised as the spawning call returns reaches the
+    # handler with the child in hand (see :func:`start_process_group`).
+    proc: subprocess.Popen[str] = object.__new__(subprocess.Popen)
     try:
-        stdout, stderr = _communicate(proc, timeout)
-    except subprocess.TimeoutExpired:
-        _kill_command_tree(proc)
-        _reap_killed_command(proc)
-        return "error", f"command timed out after {timeout:g}s"
+        try:
+            # The command sees the state directory this daemon uses (the
+            # brand's default unless KISS_HOME already overrides it), so a
+            # script it runs with another interpreter reads and writes the
+            # same files.  Its stdin is empty: nobody answers an unattended
+            # command, and the scheduler's own stdin (a terminal, the pipe
+            # of the daemon's launcher) is not the command's to read.
+            start_process_group(
+                proc,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=str(run_dir),
+                env={**os.environ, "KISS_HOME": str(kiss_home()), mark: "1"},
+                **_popen_kwargs(str(job["command"])),
+            )
+            stdout, stderr = _communicate(proc, timeout)
+        except subprocess.TimeoutExpired:
+            _kill_command_tree(proc, mark)
+            _reap_killed_command(proc)
+            return "error", f"command timed out after {timeout:g}s"
     except BaseException:
-        # The waiting thread was interrupted (the daemon's Stop of the
-        # cron agent's task while ``cron_job("run_now")`` runs the job,
-        # Ctrl-C under ``kiss-cron --run``): the command sits in its own
+        # The thread was interrupted (the daemon's Stop of the cron
+        # agent's task while ``cron_job("run_now")`` runs the job,
+        # Ctrl-C under ``kiss-cron --run``, or under ``--tick`` and
+        # ``--daemon`` through :func:`_stop_runs`): the command sits in its own
         # process group, so without this it would run on unattended
         # from a scratch directory ``_execute_job`` is about to remove.
-        _kill_command_tree(proc)
-        _reap_killed_command(proc)
+        # The timeout's handler is inside this one: an interrupt raised
+        # while it kills must not end the kill.  Both ``try`` lines come
+        # before the spawn: no handler covers the line of a ``try``
+        # itself, were one to follow the spawn.  A command that started
+        # is killed even when its shell was reaped: ``communicate``
+        # reaps a shell that has exited as the interrupt passes through
+        # it, and the processes it left behind keep the run's mark.
+        if getattr(proc, "pid", None) is not None:
+            _kill_command_tree(proc, mark)
+            _reap_killed_command(proc)
         raise
     output = stdout.strip()
     if proc.returncode != 0:
@@ -1387,6 +1551,11 @@ def _run_command_job(
 #: a task it left running is: :func:`_claimed_task_id`).
 TASK_KEYS = ("prompt", "command", "schedule")
 
+#: Suffix of the file ``<job id>.running_task_id`` in a kept run directory,
+#: which holds the id of the task that may still be running there: the
+#: job's claim when the run's process exits before the store has it.
+_CLAIM_SUFFIX = ".running_task_id"
+
 
 def _execute_job(job: dict[str, Any]) -> None:
     """Execute one job, deliver its result, and record the outcome.
@@ -1401,9 +1570,9 @@ def _execute_job(job: dict[str, Any]) -> None:
     exception is a prompt job whose task may still be running (a
     timeout whose stop the daemon never confirmed, a daemon connection
     lost while the task ran): the task may still use the directory, so
-    it is kept and its path reported, and the task's row id is kept on
-    the job as ``running_task_id`` so that the job is not launched again
-    while that task runs (:func:`_claimed_task_id`).
+    it is kept and its path reported, and the task's row id is kept in
+    it and on the job as ``running_task_id`` so that the job is not
+    launched again while that task runs (:func:`_claimed_task_id`).
 
     Never raises: failures are recorded in the job's ``last_status`` /
     ``last_summary`` fields (a damaged store is logged and left as it
@@ -1436,9 +1605,7 @@ def _execute_job(job: dict[str, Any]) -> None:
         _runs_dir().mkdir(parents=True, exist_ok=True)
         work_dir = Path(tempfile.mkdtemp(prefix=f"{job['id']}-", dir=_runs_dir()))
         run_dir = _job_work_dir(job, work_dir)
-        timeout = _job_timeout(
-            job, COMMAND_TIMEOUT_SECONDS if is_command else PROMPT_TIMEOUT_SECONDS,
-        )
+        timeout = _job_timeout(job)
         problem = (
             None
             if is_command
@@ -1450,13 +1617,21 @@ def _execute_job(job: dict[str, Any]) -> None:
             status, text = _run_command_job(job, run_dir, timeout)
         else:
             status, text = _run_prompt_job(job, work_dir, run_dir, timeout)
-    except TimeoutError as e:
+    except UnresolvedRunError as e:
         # Raised only by _run_prompt_job when its task may still be
         # running (a confirmed-stop timeout is reported as an ordinary
-        # error): the scratch directory is kept, as the error says.
+        # error, and so is any other ``TimeoutError``, below): the
+        # scratch directory is kept, as the error says.
         keep_work_dir = True
-        running_task_id = getattr(e, "task_id", "")
+        running_task_id = e.task_id
         status, text = "error", str(e)
+        if running_task_id and work_dir is not None:
+            # Durable before the delivery and the wait for the store lock
+            # below, where an exiting ``kiss-cron`` abandons this thread.
+            try:
+                atomic_write_text(work_dir / f"{job['id']}{_CLAIM_SUFFIX}", running_task_id)
+            except (OSError, ValueError) as exc:
+                logger.warning("cron job %r: claim not kept in %s: %s", job["id"], work_dir, exc)
     except Exception as e:
         logger.error("Cron job %s failed: %s", job["id"], e, exc_info=True)
         status, text = "error", f"{type(e).__name__}: {e}"
@@ -1495,9 +1670,6 @@ def _execute_job(job: dict[str, Any]) -> None:
             return
         for stored in jobs:
             if stored["id"] == job["id"]:
-                # The run is over, whatever its outcome: the job is no
-                # longer this process's (:func:`_running_elsewhere`).
-                stored.pop("running_pid", None)
                 # Edited or not, the job is the task's that may still be
                 # running in its directory (:func:`_claimed_task_id`).
                 if running_task_id:
@@ -1541,7 +1713,8 @@ def _claimed_task_id(job: dict[str, Any]) -> str:
 
     A prompt run that ended without its task's terminal status (a stop
     the daemon never confirmed, a daemon connection lost) left the
-    task's row id on the job as ``running_task_id`` (:func:`_execute_job`);
+    task's row id in its kept run directory (:data:`_CLAIM_SUFFIX`) and
+    then on the job as ``running_task_id`` (:func:`_execute_job`);
     the job is not launched again, by a tick or a "run now", while that
     ``task_history`` row is unfinished, so it never overlaps its own
     task.  The claim ends when the row is finished (the task's final
@@ -1550,35 +1723,33 @@ def _claimed_task_id(job: dict[str, Any]) -> str:
     Args:
         job: The stored job record.
     """
-    task_id = str(job.get("running_task_id") or "")
-    if not task_id:
+    task_ids = [str(job.get("running_task_id") or "")]
+    for run_dir in _runs_dir().glob("*"):
+        with contextlib.suppress(OSError, ValueError):  # no claim there, or not text
+            task_ids.append((run_dir / f"{job['id']}{_CLAIM_SUFFIX}").read_text("utf-8"))
+    if not any(task_ids):
         return ""
     # Lazy: the history database is not opened for ``kiss-cron --list``.
     from kiss.agents.sorcar.persistence import task_end_ms, task_start_ms
 
-    return task_id if task_start_ms(task_id) and not task_end_ms(task_id) else ""
+    for task_id in task_ids:
+        if task_id and task_start_ms(task_id) and not task_end_ms(task_id):
+            return task_id
+    return ""
 
 
-def _running_elsewhere(job: dict[str, Any]) -> bool:
-    """Return whether another live process is running *job*.
+def _running_elsewhere(job_id: str) -> bool:
+    """Return whether a run of the job *job_id* is in progress in another process.
 
-    Every launch — a tick's, :func:`start_job`'s, a ``run_now``'s —
-    stores its process id on the job as ``running_pid`` and the run's
-    outcome removes it (:func:`_execute_job`), so a scheduler in
-    another process over the same store leaves the job alone while
-    that process lives.  This process's own record does not count: its
-    registry (:data:`_running`) says whether the run is still on, so a
-    record left behind by an outcome that could not be written never
-    blocks the job.  A dead process's record is stale.
+    Probed by the job's run lock (:func:`_job_run_lock`), which a run in
+    this process holds too: the callers ask about a job that their own
+    registry (:data:`_running`) does not show running.
 
     Args:
-        job: The stored job record.
+        job_id: The job's id.
     """
-    try:
-        pid = int(job.get("running_pid") or 0)
-    except (TypeError, ValueError):
-        return False
-    return pid != os.getpid() and pid_alive(pid)
+    with _job_run_lock(job_id) as free:
+        return not free
 
 
 def running_job_ids() -> set[str]:
@@ -1637,14 +1808,14 @@ def tick(now: float | None = None, wait: bool = True) -> int:
     :data:`_running`) is not due: the tick leaves it untouched (its
     ``next_run_at`` stays in the past) and starts only the other due
     jobs, so it runs again on the first tick after it finishes — within
-    the grace window — instead of overlapping itself.  A job another
-    live process is running, by the ``running_pid`` its launch stored
+    the grace window — instead of overlapping itself.  A due job that
+    another process is running, by the run lock that process holds
     (:func:`_running_elsewhere`), is left untouched the same way; the
-    record of a process that died mid-run is dropped and the job runs
-    (a one-shot it had claimed is not retried: its occurrence was
-    consumed).  So is a job whose last run's daemon task may still be
-    running (:func:`_claimed_task_id`), until that task's row is
-    finished, when the claim is dropped from the store.
+    lock ends with a process that dies mid-run (a one-shot it had
+    claimed is not retried: its occurrence was consumed).  So is a job
+    whose last run's daemon task may still be running
+    (:func:`_claimed_task_id`), until that task's row is finished, when
+    the claim is dropped from the store.
 
     Args:
         now: Current time in epoch seconds; ``None`` uses the clock.
@@ -1671,15 +1842,9 @@ def tick(now: float | None = None, wait: bool = True) -> int:
                 continue
             if job.pop("running_task_id", None):
                 changed = True
-            if _running_elsewhere(job):
-                continue
-            if job.pop("running_pid", None):
-                # Left by a process that died mid-run, or by this one
-                # when the run's outcome could not be recorded.
-                changed = True
             try:
                 overdue = now - float(job["next_run_at"])
-                if overdue < 0:
+                if overdue < 0 or _running_elsewhere(job["id"]):
                     continue
                 next_run = (
                     None
@@ -1706,15 +1871,14 @@ def tick(now: float | None = None, wait: bool = True) -> int:
             job["previous_run_at"] = job.get("last_run_at")
             job["last_run_at"] = now
             job["next_run_at"] = next_run
-            job["running_pid"] = os.getpid()
             if job.get("one_shot"):
                 job["enabled"] = False
             due.append(job)
             changed = True
-        # The claim (advanced ``next_run_at``, disabled one-shot, this
-        # process as the runner) is persisted BEFORE anything runs: a
-        # store that cannot be written launches nothing, so a job never
-        # runs twice for one occurrence.
+        # The claim of the occurrence (advanced ``next_run_at``, disabled
+        # one-shot) is persisted BEFORE anything runs: a store that
+        # cannot be written launches nothing, so a job never runs twice
+        # for one occurrence.
         if changed:
             save_jobs(jobs)
         # Launched while holding the store lock: a job that finishes
@@ -2045,7 +2209,10 @@ def _job_view(job: dict[str, Any]) -> dict[str, Any]:
         job: The stored job dict.
 
     Returns:
-        A dict with the job's key fields and its times in Pacific time.
+        A dict with the job's key fields and its times in Pacific time
+        (as stored when one cannot be rendered — a malformed job's, a
+        next run past the calendar's end — so the listing shows the
+        job instead of failing).
     """
     view = {
         key: job.get(key)
@@ -2063,7 +2230,10 @@ def _job_view(job: dict[str, Any]) -> dict[str, Any]:
             view[key] = job[key]
     for key in ("next_run_at", "last_run_at"):
         if job.get(key):
-            view[key] = format_schedule_time(float(job[key]))
+            try:
+                view[key] = format_schedule_time(float(job[key]))
+            except (TypeError, ValueError, OverflowError, OSError):
+                view[key] = job[key]
     return view
 
 
@@ -2075,14 +2245,32 @@ def _enable(job: dict[str, Any]) -> str:
 
     Returns:
         ``""`` on success, else the error text: a one-shot job that has
-        already run cannot be resumed.
+        already run cannot be resumed, nor a job without a next run
+        whose stored schedule gives none (:func:`_next_run_or_error`).
     """
-    if job.get("one_shot") and job.get("next_run_at") is None:
-        return f"one-shot job {job['id']!r} already ran; create a new job instead"
-    job["enabled"] = True
     if job.get("next_run_at") is None:
-        job["next_run_at"] = compute_next_run(str(job["schedule"]), time.time())
+        if job.get("one_shot"):
+            return f"one-shot job {job['id']!r} already ran; create a new job instead"
+        next_run = _next_run_or_error(str(job.get("schedule") or ""))
+        if isinstance(next_run, str):
+            return next_run
+        job["next_run_at"] = next_run
+    job["enabled"] = True
     return ""
+
+
+def _next_run_or_error(schedule: str) -> float | str:
+    """Return the next run of *schedule* from now, or the text refusing the schedule.
+
+    Refused: a schedule in no supported form and one with no run left.
+    """
+    try:
+        next_run = compute_next_run(schedule, time.time())
+    except ValueError as e:
+        return str(e)
+    if next_run is None:
+        return f"schedule {schedule!r} never fires (in the past?)"
+    return next_run
 
 
 def _update(job: dict[str, Any], name: str, schedule: str, what: str) -> str:
@@ -2106,12 +2294,9 @@ def _update(job: dict[str, Any], name: str, schedule: str, what: str) -> str:
     if not (name and schedule and what):
         return "the name, the schedule and the task must not be empty"
     if schedule != str(job.get("schedule") or ""):
-        try:
-            next_run = compute_next_run(schedule, time.time())
-        except ValueError as e:
-            return str(e)
-        if next_run is None:
-            return f"schedule {schedule!r} never fires (in the past?)"
+        next_run = _next_run_or_error(schedule)
+        if isinstance(next_run, str):
+            return next_run
         job["schedule"] = schedule
         job["one_shot"] = is_one_shot(schedule)
         job["next_run_at"] = next_run
@@ -2135,43 +2320,77 @@ def _release_run(running: dict[str, threading.Thread], job_id: str, me: threadin
         del running[job_id]
 
 
-def _launch(job: dict[str, Any]) -> threading.Thread | None:
-    """Start *job*'s run thread and register it in :data:`_running` (locked).
+def _run_locked(job: dict[str, Any], handoff: dict[str, contextlib.ExitStack]) -> None:
+    """Execute *job* under the run lock taken out of *handoff*, given up when the run is over.
 
-    The caller holds :data:`_running_lock`: a thread only counts as
-    alive once started, so a concurrent :func:`running_job_ids` can
-    never observe, and prune, a registered-but-idle entry.
+    The lock leaves *handoff* in one step, taken by this thread or
+    taken back by its launcher (:func:`_launch`), so it has one owner:
+    a thread that finds it gone was started by a launch that then
+    failed, and runs nothing.
+
+    Args:
+        job: The stored job record to execute.
+        handoff: Holds the job's run lock (:func:`_job_run_lock`) as ``"run_lock"``.
+    """
+    run_lock = handoff.pop("run_lock", None)
+    if run_lock is not None:
+        with run_lock:
+            _execute_job(job)
+
+
+def _launch(job: dict[str, Any]) -> threading.Thread | None:
+    """Start *job*'s run thread, holding the job's run lock and registered in :data:`_running`.
+
+    The caller holds the store lock, under which every run lock is
+    taken (:func:`_job_run_lock`), and :data:`_running_lock`: a thread
+    only counts as alive once started, so a concurrent
+    :func:`running_job_ids` can never observe, and prune, a
+    registered-but-idle entry.  The run lock is the thread's once the
+    thread has taken it, the first thing it does, and is given up when
+    its run is over (:func:`_run_locked`).
 
     Args:
         job: The stored job record to execute.
 
     Returns:
         The started daemon thread, or ``None`` when the job is already
-        running in this process (:func:`_claim_run`).
+        running, in another process (:func:`_job_run_lock`) or in this
+        one (:func:`_claim_run`).
     """
+    run_lock = contextlib.ExitStack()
+    handoff = {"run_lock": run_lock}
     thread = threading.Thread(
-        target=_execute_job, args=(job,),
+        target=_run_locked, args=(job, handoff),
         name=f"kiss-cron-job-{job['id']}", daemon=True,
     )
-    if not _claim_run(_running, job["id"], thread):
-        return None
+    started = False
     try:
-        thread.start()
-    except BaseException:
+        if run_lock.enter_context(_job_run_lock(job["id"])) and _claim_run(
+            _running, job["id"], thread,
+        ):
+            thread.start()
+            started = True
+    finally:
         # A thread the process cannot start (its thread limit) must not
-        # sit in the registry as a job that looks launched.
-        _release_run(_running, job["id"], thread)
-        raise
-    return thread
+        # sit in the registry as a job that looks launched, nor keep the
+        # lock of a run that never was.  ``started`` is unset as well
+        # when a Stop is raised as ``start()`` returns (Ctrl-C under
+        # ``kiss-cron --tick``), with the thread running: the lock is
+        # taken back only from a thread that has not taken it, which
+        # then runs nothing.
+        if not started and handoff.pop("run_lock", None) is not None:
+            _release_run(_running, job["id"], thread)
+            run_lock.close()
+    return thread if started else None
 
 
 def _launch_or_record(job: dict[str, Any]) -> threading.Thread | None:
     """Launch *job* as :func:`_launch` does, recording a start failure on *job*.
 
     The caller holds :data:`_running_lock` and the store lock, and
-    saves the store when this returns ``None``: the job's occurrence
-    was already consumed by the tick (``last_run_at`` set,
-    ``next_run_at`` advanced), so its ``last_status`` /
+    saves the store when this returns ``None``: a tick has already
+    saved the occurrence it consumed (``last_run_at`` set,
+    ``next_run_at`` advanced), so the job's ``last_status`` /
     ``last_summary`` are the only record that it never ran.
 
     Args:
@@ -2179,44 +2398,47 @@ def _launch_or_record(job: dict[str, Any]) -> threading.Thread | None:
 
     Returns:
         The started thread, or ``None`` when it could not start (or the
-        job is already running, which a tick's due list excludes).
+        job is already running, which the callers exclude).
     """
     try:
         return _launch(job)
     except Exception as e:
         logger.error("Cron job %s could not start: %s", job["id"], e, exc_info=True)
-        job.pop("running_pid", None)
         job["last_status"] = "error"
         job["last_summary"] = f"could not start: {type(e).__name__}: {e}"
         return None
 
 
-def start_job(job: dict[str, Any]) -> str:
+def start_job(job: dict[str, Any], jobs: list[dict[str, Any]]) -> str:
     """Run *job* now in its own thread (as a tick does), without waiting.
 
-    The thread is registered in :data:`_running` and this process on
-    *job* as its ``running_pid``, which the caller — holding the store
-    lock — saves: a tick in this or another process skips the job while
-    it runs and a second start is refused, as is a start while the job's
-    last run's task may still be running (:func:`_claimed_task_id`).
+    The caller holds the store lock.  The thread holds the job's run
+    lock and is registered in :data:`_running` (:func:`_launch`), so a
+    tick in this or another process skips the job while it runs.  A
+    second start is refused, as is a start while the job's last run's
+    task may still be running (:func:`_claimed_task_id`), and a thread
+    that cannot start is recorded on the job and saved with the rest of
+    *jobs* (:func:`_launch_or_record`).
 
     Args:
         job: The stored job record to execute.
+        jobs: The stored jobs, *job* among them.
 
     Returns:
         ``""`` when the thread started, else the error text (the job is
-        already running in this or another process, or claimed by its
-        task).
+        already running in this or another process, claimed by its
+        task, or its thread could not start).
     """
     task_id = _claimed_task_id(job)
     if task_id:
         return _claimed_error(job["id"], task_id)
-    if _running_elsewhere(job):
+    if job["id"] in running_job_ids() or _running_elsewhere(job["id"]):
         return f"job {job['id']!r} is already running"
     with _running_lock:
-        job["running_pid"] = os.getpid()
-        if _launch(job) is None:
-            return f"job {job['id']!r} is already running"
+        thread = _launch_or_record(job)
+    if thread is None:
+        save_jobs(jobs)
+        return str(job["last_summary"])
     return ""
 
 
@@ -2280,10 +2502,8 @@ def apply_job_action(
             return f"no job with id {job_id!r}"
         job = match[0]
         if action == "run_now":
-            error = start_job(job)
-            if error:
-                return error
-        elif action == "remove":
+            return start_job(job, jobs)  # which saves a failed start itself
+        if action == "remove":
             jobs = [other for other in jobs if other["id"] != job_id]
         elif action == "pause":
             job["enabled"] = False
@@ -2410,12 +2630,9 @@ def _create_or_ensure(
             f"{_output_dir()}/<job_id>.md)"
         )
         deliver = "none"
-    try:
-        next_run = compute_next_run(schedule, time.time())
-    except ValueError as e:
-        return {"error": str(e)}
-    if next_run is None:
-        return {"error": f"schedule {schedule!r} never fires (in the past?)"}
+    next_run = _next_run_or_error(schedule)
+    if isinstance(next_run, str):
+        return {"error": next_run}
     try:
         budget = _parse_amount("max_budget", max_budget)
         timeout_seconds = _parse_amount("timeout", timeout)
@@ -2423,8 +2640,13 @@ def _create_or_ensure(
         return {"error": str(e)}
     run_dir = ""
     if work_dir.strip():
-        run_dir = str(Path(work_dir.strip()).expanduser().resolve())
-        if not Path(run_dir).is_dir():
+        try:
+            run_dir = str(Path(work_dir.strip()).expanduser().resolve())
+            is_dir = Path(run_dir).is_dir()
+        except (OSError, RuntimeError, ValueError):
+            # No such user's home, a NUL in the name, a name too long.
+            is_dir = False
+        if not is_dir:
             return {"error": f"work_dir {work_dir!r} is not a directory"}
     created_at = time.time()
     job = {
@@ -2537,7 +2759,7 @@ def cron_job(
       ``job_id``.
     - ``run_now``: execute the job named by ``job_id`` immediately and
       deliver its result (the regular schedule is unaffected); refused
-      while a run of that job is in progress in this process.
+      while a run of that job is in progress.
 
     Prefer ``command`` jobs for polls and checks ("is X released yet?",
     "did the build finish?", "is the site up?"): a shell command such as
@@ -2650,7 +2872,9 @@ def cron_job(
         # holds from its running-jobs snapshot through its launches: an
         # edit or removal committed before the lock is taken is what
         # runs (or refuses), a tick skips the job meanwhile and a second
-        # run_now is refused.
+        # run_now is refused.  Like that thread, this one holds the
+        # job's run lock until the run's outcome is recorded, for the
+        # schedulers of other processes (:func:`_job_run_lock`).
         canonical = importlib.import_module("kiss.agents.sorcar.cron_agent")
         me = threading.current_thread()
         # The registration sits inside the ``try`` so a stop injected
@@ -2661,25 +2885,24 @@ def cron_job(
         # on the cron agent's task thread, where the stop injection
         # would leak a plain ``with`` (CPython gh-74174).
         try:
-            with _jobs_lock(blocking=True):
-                jobs = load_jobs()
-                match = [job for job in jobs if job["id"] == job_id]
-                task_id = _claimed_task_id(match[0]) if match else ""
-                claimed = bool(match) and not task_id and not _running_elsewhere(match[0]) and (
-                    locked_call(
-                        canonical._running_lock, _claim_run, canonical._running, job_id, me,
+            with contextlib.ExitStack() as run_lock:
+                with _jobs_lock(blocking=True):
+                    jobs = load_jobs()
+                    match = [job for job in jobs if job["id"] == job_id]
+                    task_id = _claimed_task_id(match[0]) if match else ""
+                    claimed = bool(match) and not task_id and (
+                        run_lock.enter_context(_job_run_lock(job_id))
+                        and locked_call(
+                            canonical._running_lock, _claim_run, canonical._running, job_id, me,
+                        )
                     )
-                )
-                if claimed:
-                    match[0]["running_pid"] = os.getpid()
-                    save_jobs(jobs)
-            if not match:
-                return _dump({"error": f"no job with id {job_id!r}"})
-            if task_id:
-                return _dump({"error": _claimed_error(job_id, task_id)})
-            if not claimed:
-                return _dump({"error": f"job {job_id!r} is already running"})
-            _execute_job(match[0])
+                if not match:
+                    return _dump({"error": f"no job with id {job_id!r}"})
+                if task_id:
+                    return _dump({"error": _claimed_error(job_id, task_id)})
+                if not claimed:
+                    return _dump({"error": f"job {job_id!r} is already running"})
+                _execute_job(match[0])
         finally:
             locked_call(canonical._running_lock, _release_run, canonical._running, job_id, me)
         refreshed = [job for job in load_jobs() if job["id"] == job_id]
@@ -2746,7 +2969,8 @@ def _is_gateway_command(command: str) -> bool:
     """Return whether *command* is a channel CLI's gateway tick.
 
     True when the command's program (its first shell word, bare or with
-    any path prefix — also a ``$(...)`` lookup of the launcher path) is
+    any path prefix — also a ``$(...)`` lookup of the launcher by path
+    or by name, ``$(command -v kiss-slack)``) is
     a ``kiss-<channel>`` launcher and a later word is ``--channel`` or
     ``--channel=...``, i.e. what :func:`gateway_command` builds, with or
     without extra flags such as ``--allow-users``.  A command that
@@ -2770,7 +2994,7 @@ def _is_gateway_command(command: str) -> bool:
             words = shlex.split(command)
     except ValueError:
         return False
-    if not words or not re.search(r"(^|/)kiss-[a-z0-9]+\b", words[0]):
+    if not words or not re.search(r"(^|[/\s])kiss-[a-z0-9]+\b", words[0]):
         return False
     return any(word == "--channel" or word.startswith("--channel=") for word in words[1:])
 
@@ -2961,6 +3185,35 @@ def cron_work_dir() -> str:
     return str(work_dir)
 
 
+#: How long an interrupted ``kiss-cron`` waits for the runs it stopped
+#: (:func:`_stop_runs`) before it exits anyway; a killed command is
+#: reaped within five seconds (:func:`_reap_killed_command`), a
+#: prompt job's task stopped or given up within thirty
+#: (``agent_dispatch.kill_agent_job``), its claim then recorded.
+_STOP_RUNS_GRACE_SECONDS = 40.0
+
+
+def _stop_runs() -> None:
+    """Stop every job this process runs and wait, bounded, for the runs to end.
+
+    For ``kiss-cron --tick`` / ``--daemon`` ended by Ctrl-C: the runs
+    are daemon threads, which the exiting process would abandon, and
+    with them a command job's process tree (in its own process group,
+    out of the terminal's SIGINT) to run on unattended, past the
+    timeout its run enforced.  Each run gets the daemon's Stop, a
+    ``KeyboardInterrupt`` raised in its thread, on which a command's
+    tree is killed and reaped (:func:`_run_command_job`) and a prompt
+    job's task stopped, the stop awaited (:func:`_run_prompt_job`).
+    """
+    with _running_lock:
+        threads = [thread for thread in _running.values() if thread.is_alive()]
+    for thread in threads:
+        inject_async_exception(thread.ident or 0, KeyboardInterrupt)
+    deadline = time.monotonic() + _STOP_RUNS_GRACE_SECONDS
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+
+
 def main() -> None:
     """Run the ``kiss-cron`` CLI: manage jobs or run the scheduler."""
     parser = argparse.ArgumentParser(prog="kiss-cron")
@@ -3000,13 +3253,18 @@ def main() -> None:
         sys.exit(1)
     args = parser.parse_args()
 
-    if args.daemon:
-        logging.basicConfig(level=logging.INFO)
-        print(f"kiss-cron scheduler running (every {args.interval:.0f}s); Ctrl-C to stop")
-        adopt_previous_home_jobs()
-        run_scheduler(threading.Event(), args.interval)
-    elif args.tick:
-        print(f"ran {tick()} job(s)")
+    if args.daemon or args.tick:
+        try:
+            if args.daemon:
+                logging.basicConfig(level=logging.INFO)
+                print(f"kiss-cron scheduler running (every {args.interval:.0f}s); Ctrl-C to stop")
+                adopt_previous_home_jobs()
+                run_scheduler(threading.Event(), args.interval)
+            else:
+                print(f"ran {tick()} job(s)")
+        except KeyboardInterrupt:
+            _stop_runs()
+            raise
     elif args.list:
         print(cron_job("list"), end="")
     elif args.create:

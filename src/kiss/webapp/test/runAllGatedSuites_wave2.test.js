@@ -6,10 +6,9 @@
 // End-to-end test for test/run-all.js's choice of suites: a suite that a
 // *.coverage.js gate runs is run through that gate only, whether it is
 // the gate's own X.test.js or another suite the gate names, as
-// remotePasswordBypass.coverage.js names transportReloadOnNewDaemon,
-// transportAuthBatch_sweep1030 and transportFramePassword.  The runner
-// used to skip only X.test.js, so every other suite of a multi-suite gate
-// ran twice per `npm test`.
+// remotePasswordBypass.coverage.js names the transport* suites of its
+// SUITES list.  The runner used to skip only X.test.js, so every other
+// suite of a multi-suite gate ran twice per `npm test`.
 //
 // The runner is copied into a scratch directory holding a gate,
 // a.coverage.js, that runs a.test.js and b.test.js the way

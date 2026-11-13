@@ -20,8 +20,13 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import sys
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from types import FrameType
+from typing import Any
 
 import pytest
 from websockets.asyncio.server import ServerConnection
@@ -38,8 +43,15 @@ from kiss.agents.sorcar.agent_dispatch import (
 from kiss.agents.sorcar.coding_gate import dispatch_successes
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.kiss_agent import is_routine_turn
+from kiss.core.locked import locked_call
 from kiss.core.prompt_cache_keepalive import is_long_running_call
+from kiss.core.tool_interrupt import (
+    inject_async_exception,
+    raise_if_interrupted,
+    wait_interruptible,
+)
 from kiss.tests.agents.sorcar.test_dispatch_timeout import _LocalDaemon, _send_event
+from kiss.tests.server.pause import Pause, Pauses
 
 
 class _StaggeredFinishDaemon(_LocalDaemon):
@@ -139,6 +151,12 @@ def test_wait_any_returns_the_first_job_to_finish_and_never_twice(
         )
         assert is_routine_turn("agent_job", {"job_id": "", "action": "wait_any"}, timed_out, False)
         assert wait_any_results(timed_out) == {}
+        # A JSON number waits like its text: Bash and bash_job take
+        # timeout_seconds as a number, so models pass one here too.
+        assert tool(f"{fast.job_id}, {slow.job_id}", "wait_any", 0) == timed_out
+        assert tool(slow.job_id, "wait", 0) == (
+            f"Job {slow.job_id} ({slow.name} agent task) is still running."
+        )
         # The other actions mark a result read too: after a kill the
         # job's error result is the one wait_any would have returned.
         assert tool(slow.job_id, "nap") == (
@@ -164,6 +182,124 @@ def test_wait_any_returns_the_first_job_to_finish_and_never_twice(
         daemon.close()
 
 
+def _on_thread(prefix: str, frame_locals: dict[str, Any]) -> bool:
+    return threading.current_thread().name.startswith(prefix)
+
+
+def _wait_any(tool: Callable[..., str], ids: str, replies: list[str]) -> None:
+    replies.append(tool(ids, "wait_any", "120"))
+
+
+def _launch(work_dir: Path) -> agent_dispatch.AgentJob:
+    """Launch a real job as ``run_agent`` does; no daemon is there, so it ends in an error."""
+    job = agent_dispatch.new_agent_job("sorcar", {
+        "name": "sorcar", "prompt": "no daemon runs this", "work_dir": str(work_dir),
+        "sea_path": agent_dispatch.DEFAULT_AGENT_PATH, "model_name": "", "budget": None,
+        "timeout": 5.0, "alias": "",
+    }, None)
+    agent_dispatch.launch_agent_job(job)
+    return job
+
+
+def test_wait_any_returns_a_result_once_to_concurrent_waiters_and_for_repeated_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit 2026-11-10, S1-F3: tools run on helper threads, so two waits can overlap.
+
+    Each waiter chose its unread jobs once, before it slept: two waiters
+    of one job both returned its result, a waiter returned a result a
+    single-job read had returned meanwhile, and an id named twice got
+    two sections.  All three waiters are held at their first poll,
+    after that choice, while the two jobs, held as their threads start,
+    finish one after the other.
+    """
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(tmp_path / "no-daemon.json"))
+    tool = make_agent_job_tool()
+    twice: list[str] = []
+    single: list[str] = []
+    starts = [Pause(agent_dispatch._finish_agent_job.__code__,
+                    functools.partial(_on_thread, "agent-job-")) for _ in range(2)]
+    holds = [Pause(raise_if_interrupted.__code__, functools.partial(_on_thread, "waiter"))
+             for _ in range(3)]
+    with Pauses(*starts, *holds):
+        unread = _launch(tmp_path)
+        assert starts[0].paused.wait(20)
+        read = _launch(tmp_path)
+        assert starts[1].paused.wait(20)
+        waits = [(f"{unread.job_id} {unread.job_id}", twice)] * 2 + [(read.job_id, single)]
+        waiters = [threading.Thread(target=_wait_any, args=(tool, *wait), name="waiter")
+                   for wait in waits]
+        for waiter, hold in zip(waiters, holds):
+            waiter.start()
+            assert hold.paused.wait(20)
+        starts[0].release()
+        unread.thread.join(20)  # finishes; nobody has read it
+        starts[1].release()
+        assert tool(read.job_id, "wait", "20") == read.result  # a single-job read
+    for waiter in waiters:
+        waiter.join(20)
+    returned = "Every listed job has finished and its result was already returned: "
+    assert sorted(twice) == sorted([
+        f"{returned}{unread.job_id}.",
+        f"Finished: {unread.job_id}; running: none.\n\n"
+        f"Job {unread.job_id} ({unread.name} agent task) finished:\n{unread.result}",
+    ])
+    assert single == [f"{returned}{read.job_id}."]
+
+
+class _ClaimReturned:
+    """Profile hook parking its thread as ``wait_any`` gets its claim back, the lock released."""
+
+    def __init__(self) -> None:
+        self.parked = threading.Event()
+        self.resume = threading.Event()
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        if event == "return" and frame.f_code is locked_call.__code__ and (
+                frame.f_locals["fn"] is agent_dispatch._claim_finished):
+            sys.setprofile(None)
+            self.parked.set()
+            self.resume.wait(30)
+
+    def wait_any(self, tool: Callable[..., str], ends: list[object]) -> None:
+        """Run ``wait_any`` over every job on a thread this hook profiles; record how it ends."""
+        sys.setprofile(self)
+        try:
+            ends.append(tool("", "wait_any", "0"))
+        except BaseException as exc:  # noqa: BLE001 — the test records whatever escaped
+            ends.append(exc)
+
+
+def test_an_interrupted_wait_any_leaves_its_results_unread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r1 of B12, R1: a Stop raised after the claim, before ``wait_any`` returned it.
+
+    Both results stayed marked as returned and the next ``wait_any``
+    returned neither.  The one a ``tail`` returns in between stays that
+    read's: it is not returned again.
+    """
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(tmp_path / "no-daemon.json"))
+    tool = make_agent_job_tool()
+    lost, read = _launch(tmp_path), _launch(tmp_path)
+    lost.thread.join(20)
+    read.thread.join(20)
+    hook = _ClaimReturned()
+    ends: list[object] = []
+    waiter = threading.Thread(target=hook.wait_any, args=(tool, ends))
+    waiter.start()
+    assert hook.parked.wait(20) and lost.reported and read.reported and waiter.ident is not None
+    assert tool(read.job_id, "tail") == read.result
+    assert inject_async_exception(waiter.ident, KeyboardInterrupt) == 1
+    hook.resume.set()
+    waiter.join(20)
+    assert [type(end) for end in ends] == [KeyboardInterrupt], ends
+    assert tool("", "wait_any", "0") == (
+        f"Finished: {lost.job_id}; running: none.\n\n"
+        f"Job {lost.job_id} ({lost.name} agent task) finished:\n{lost.result}"
+    )
+
+
 def test_wait_any_refuses_unknown_ids_bad_timeouts_and_an_empty_task() -> None:
     tool = make_agent_job_tool()
     assert tool("", "wait_any") == (
@@ -173,6 +309,9 @@ def test_wait_any_refuses_unknown_ids_bad_timeouts_and_an_empty_task() -> None:
         "Error: unknown agent job(s) agent-nope; this task's jobs: none."
     )
     assert tool("", "wait_any", "soon").startswith("Error: timeout_seconds must be a number")
+    assert tool("", "wait_any", True).startswith("Error: timeout_seconds must be a number")
+    # A JSON number or null is no error of its own: the call gets as far as its jobs.
+    assert tool("", "wait_any", 5) == tool("", "wait_any", None) == tool("", "wait_any")
 
 
 def test_waits_end_early_once_every_job_finished_with_a_result_unread(
@@ -248,6 +387,56 @@ def test_waits_end_early_once_every_job_finished_with_a_result_unread(
         assert "ended early" not in report and "running (pid" not in report.split("\n", 1)[0]
     finally:
         daemon.close()
+
+
+def _poll(tools: UsefulTools, outs: list[str]) -> None:
+    outs.append(
+        tools.Bash("ls | wc -l", "count", until="^99$", poll_seconds=60, timeout_seconds=60))
+
+
+def _look(notes: list[str]) -> str:
+    """Answer the idle-children hook as the agent's does, recording each answer."""
+    notes.append(unread_results_note(None))
+    return notes[-1]
+
+
+def test_a_child_finishing_during_a_polls_pause_ends_the_poll_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit 2026-11-10, S13-F2: a poll looked at its children once per run, before its pause.
+
+    A child finishing during the pause ended the poll after another run,
+    or at the deadline.  The child is held as its thread starts and the
+    poll as it starts to wait, after one run and one look that found the
+    child live; the child then finishes before the poll goes on.
+    """
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(tmp_path / "no-daemon.json"))
+    notes: list[str] = []
+    outs: list[str] = []
+    tools = UsefulTools(work_dir=str(tmp_path))
+    tools.idle_children = functools.partial(_look, notes)
+    start = Pause(agent_dispatch._finish_agent_job.__code__,
+                  functools.partial(_on_thread, "agent-job-"))
+    pause = Pause(wait_interruptible.__code__, functools.partial(_on_thread, "poller"))
+    poller = threading.Thread(target=_poll, args=(tools, outs), name="poller", daemon=True)
+    with Pauses(start, pause):
+        late = _launch(tmp_path)
+        assert start.paused.wait(20)
+        started = time.monotonic()
+        poller.start()
+        assert pause.paused.wait(20) and notes == [""] and not late.finished
+        start.release()
+        late.thread.join(20)  # finishes during the pause; nobody has read it
+        pause.release()
+        poller.join(30)
+    assert outs and time.monotonic() - started < 30, "the poll went on past the child's finish"
+    note = (
+        f"every sub-agent job of this task has finished and the result of {late.job_id} "
+        "has not been read yet: agent_job('', 'wait_any') returns it"
+    )
+    assert notes == ["", note]
+    assert "did not match after 1 run(s)" in outs[0], outs
+    assert f"the poll ended early: {note}" in outs[0], outs
 
 
 def test_a_plain_tool_set_has_no_hook_and_waits_as_before(tmp_path: Path) -> None:

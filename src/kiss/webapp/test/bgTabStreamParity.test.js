@@ -47,7 +47,7 @@ const harness = require('./simplify2_harness');
 const {bootParallelRun} = require('./subagent_tab_helpers');
 const FIXTURE = require('./fixtures/bgTabStreamParity.json');
 
-const {send, clickTab} = harness;
+const {send, clickTab, makeLaunchedPage: makePage} = harness;
 
 /**
  * A fresh copy of what the daemon stored of the requested fixture run.
@@ -61,11 +61,12 @@ function recordAsDaemon(index) {
   return JSON.parse(JSON.stringify(FIXTURE.recorded[index]));
 }
 
-function makePage() {
-  const page = harness.makePage();
-  page.win._testApi.endLaunch();
-  page.win._testApi.hideWelcome();
-  return page;
+/** A page with two chat tabs: `tabA` on screen, `tabB` in the background. */
+function twoTabPage() {
+  const {win} = makePage();
+  const {first: tabA, second: tabB} = harness.twoTabs(win);
+  clickTab(win, tabA);
+  return {win, tabA, tabB};
 }
 
 const TS = 1767225600000;
@@ -125,11 +126,7 @@ function snapshot(win) {
 }
 
 function testHiddenTabRendersLikeAVisibleOne() {
-  const {win} = makePage();
-  const tabA = win._testApi.getActiveTabId();
-  win._testApi.createNewTab();
-  const tabB = win._testApi.getActiveTabId();
-  clickTab(win, tabA);
+  const {win, tabA, tabB} = twoTabPage();
   assert.strictEqual(win._testApi.getActiveTabId(), tabA);
 
   // The same run, once on screen and once hidden.
@@ -198,11 +195,7 @@ function testBothUsageFormsAreReadTheSameWayByBothTranscripts() {
   };
 
   for (const [form, events] of Object.entries(forms)) {
-    const {win} = makePage();
-    const tabA = win._testApi.getActiveTabId();
-    win._testApi.createNewTab();
-    const tabB = win._testApi.getActiveTabId();
-    clickTab(win, tabA);
+    const {win, tabA, tabB} = twoTabPage();
 
     runInto(win, tabA, events);
     const visible = snapshot(win);
@@ -295,11 +288,7 @@ function testReplayAgreesWithTheLiveStream() {
 // must carry on from the daemon's number, not from the renderer's own
 // estimate -- otherwise the header jumps back from 43 to 2.
 function testTheStepCounterNeverRunsBackwards() {
-  const {win} = makePage();
-  const tabA = win._testApi.getActiveTabId();
-  win._testApi.createNewTab();
-  const tabB = win._testApi.getActiveTabId();
-  clickTab(win, tabA);
+  const {win, tabA, tabB} = twoTabPage();
 
   const fanOut = [
     {type: 'thinking_start', ts: TS},
@@ -360,11 +349,7 @@ function testTheStepCounterNeverRunsBackwards() {
 // reloaded web app showed "· Steps: 22" with no tokens and no cost
 // until the task's next live step.
 function testBackgroundReplayKeepsTokensAndCost() {
-  const {win} = makePage();
-  const tabA = win._testApi.getActiveTabId();
-  win._testApi.createNewTab();
-  const tabB = win._testApi.getActiveTabId();
-  clickTab(win, tabA);
+  const {win, tabB} = twoTabPage();
 
   const before = snapshot(win);
   send(win, {
@@ -410,11 +395,7 @@ function testBackgroundReplayKeepsTokensAndCost() {
 // server appends the row's own totals to a transcript that lacks them
 // (json_printer.with_synthesized_events), so nothing is lost.
 function testMetricFreeReplayDoesNotStealTheVisibleTabsNumbers() {
-  const {win} = makePage();
-  const tabA = win._testApi.getActiveTabId();
-  win._testApi.createNewTab();
-  const tabB = win._testApi.getActiveTabId();
-  clickTab(win, tabA);
+  const {win, tabA, tabB} = twoTabPage();
 
   // A runs live with numbers of its own, distinct from B's.
   const aRun = recordedRun().map(ev => {
@@ -497,6 +478,40 @@ function testHiddenReplayThatClosesTheVisibleTabKeepsItsNumbers() {
   );
 }
 
+// A new run REPLACES the tab's transcript (`clear`) on every surface
+// that shows the tab, the ones that did not submit it included. The
+// status row describes the task on screen, so the replaced task's
+// tokens, cost and steps go with its transcript, as they do on a
+// replay: the new run's own usage_info brings its numbers.
+function testANewRunStartsWithNoNumbers() {
+  const {win} = makePage();
+  const hidden = win._testApi.getActiveTabId();
+  win._testApi.createNewTab();
+  const visible = win._testApi.getActiveTabId();
+  runInto(win, visible);
+  runInto(win, hidden);
+  assert.strictEqual(snapshot(win).tokens, 'Tokens: 12.3K');
+
+  for (const tabId of [visible, hidden]) {
+    send(win, {type: 'setTaskText', tabId, text: 'the next task'});
+    send(win, {type: 'clear', tabId});
+    send(win, {type: 'status', running: true, tabId, startTs: TS});
+  }
+  for (const tabId of [visible, hidden]) {
+    clickTab(win, tabId);
+    const shown = snapshot(win);
+    assert.deepStrictEqual(
+      [shown.tokens, shown.budget, shown.steps],
+      ['', '', ''],
+      'a new run in a ' +
+        (tabId === visible ? 'visible' : 'hidden') +
+        ' tab must not start under the replaced task\u2019s numbers',
+    );
+  }
+  win.close();
+  console.log('  ok - a new run starts with no numbers');
+}
+
 function main() {
   testHiddenTabRendersLikeAVisibleOne();
   testBothUsageFormsAreReadTheSameWayByBothTranscripts();
@@ -505,6 +520,7 @@ function main() {
   testBackgroundReplayKeepsTokensAndCost();
   testMetricFreeReplayDoesNotStealTheVisibleTabsNumbers();
   testHiddenReplayThatClosesTheVisibleTabKeepsItsNumbers();
+  testANewRunStartsWithNoNumbers();
   console.log('bgTabStreamParity.test.js: all tests passed');
 }
 

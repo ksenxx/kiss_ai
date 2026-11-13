@@ -9,8 +9,6 @@
 
 'use strict';
 
-/* global require, console, process */
-
 const assert = require('assert');
 const {
   makePage: makeChatPage,

@@ -82,12 +82,22 @@ def test_bash_guard_refuses_innermost_parent_repo_path(nested: tuple[Path, Path]
     assert out.startswith("worktree\n"), out  # (then the batching hint of a first short call)
 
 
+@pytest.mark.parametrize("both", [False, True], ids=["inner-removed", "both-removed"])
 def test_stale_innermost_worktree_falls_back_to_its_own_parent(
-    nested: tuple[Path, Path],
+    nested: tuple[Path, Path], both: bool,
 ) -> None:
     proj, inner_wt = nested
     tools = UsefulTools(work_dir=str(inner_wt))
-    shutil.rmtree(inner_wt)
+    if both:
+        # The outer worktree was merged and removed too: the remembered path is peeled
+        # twice, down to the outer repo's copy, and neither worktree comes back.
+        outer = proj.parents[2]
+        proj = outer / "proj"
+        (proj / "src").mkdir(parents=True)
+        (proj / "src" / "app.py").write_text("main\n")
+        shutil.rmtree(outer / ".kiss-worktrees")
+    else:
+        shutil.rmtree(inner_wt)
     # Read/Edit/Write on the dangling inner-worktree path must fall back to
     # ``proj`` (the inner worktree's parent), not dead-end because the
     # *outer* worktree is still live.
@@ -97,7 +107,7 @@ def test_stale_innermost_worktree_falls_back_to_its_own_parent(
     assert (proj / "src" / "app.py").read_text() == "edited\n"
     assert "Successfully wrote" in tools.Write(str(inner_wt / "new.txt"), "x\n")
     assert (proj / "new.txt").read_text() == "x\n"
-    assert not inner_wt.exists()
+    assert not inner_wt.exists() and (not both or not (proj.parent / ".kiss-worktrees").exists())
     # Bash falls back to running from ``proj``.
     out = tools.Bash(_PWD, "probe")
     assert Path(out.strip()).resolve() == proj.resolve(), out

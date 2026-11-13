@@ -18,13 +18,76 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import subprocess
 import time
+import unittest
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
+
+_WEBAPP_TEST_DIR = Path(__file__).resolve().parents[2] / "webapp" / "test"
+
+# Plays the frames on stdin into a fresh page showing the tab argv[1];
+# prints the sub-agent tabs it has open and the ``closeTab`` commands it
+# sent the daemon (a close is mirrored to every surface).  The tabs are
+# read from the page's tab list, not from its tab strip: the strip lists
+# the group on screen only, and frames can take the page off the tab it
+# started on (a ``tabs_state`` without that tab closes it).  A frame the
+# page throws on fails the script: jsdom only reports the exception, and
+# the page would be read as if it had handled the frame.
+_PAGE_SCRIPT = r"""
+const {makePreloadedPage, send} = require(process.argv[2] + '/simplify2_harness');
+const page = makePreloadedPage(process.argv[1]);
+const thrown = [];
+page.win.addEventListener('error', ev => thrown.push(ev.error));
+for (const ev of JSON.parse(require('fs').readFileSync(0, 'utf8'))) send(page.win, ev);
+if (thrown.length) throw thrown[0];
+process.stdout.write(JSON.stringify({
+  shown: page.win._testApi.openTabs().filter(t => t.isSubagentTab).map(t => t.id),
+  closed: page.posted.filter(m => m.type === 'closeTab'),
+}));
+page.close();
+"""
+
+
+def page_after(tab_id: str, frames: list[dict[str, Any]]) -> dict[str, Any]:
+    """What the real chat page (``media/main.js`` under jsdom) shows after *frames*.
+
+    Args:
+        tab_id: The chat tab the page shows before the first frame.
+        frames: The daemon frames one surface received, in order.
+
+    Returns:
+        ``shown``: the ids of the sub-agent tabs the page has open, in
+        tab order, under every chat tab (whichever one is on screen);
+        ``closed``: the ``closeTab`` commands it sent the daemon, as
+        it sent them.
+
+    Raises:
+        unittest.SkipTest: ``node`` is not on ``PATH``.
+        AssertionError: The page threw on a frame; the message is its stack.
+    """
+    if shutil.which("node") is None:
+        raise unittest.SkipTest("node is not available on PATH")
+    page = subprocess.run(
+        [
+            "node", "--no-maglev", "--no-concurrent-sparkplug",
+            "-e", _PAGE_SCRIPT, tab_id, str(_WEBAPP_TEST_DIR),
+        ],
+        input=json.dumps(frames),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(_WEBAPP_TEST_DIR.parent),
+    )
+    assert page.returncode == 0, page.stderr
+    shown: dict[str, Any] = json.loads(page.stdout)
+    return shown
 
 
 class Client:

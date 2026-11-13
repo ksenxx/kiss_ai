@@ -25,6 +25,7 @@ from kiss.tests.agents.sorcar.test_steer_inputs import (
     _set_steer_timestamp,
     _set_task_timestamp,
 )
+from kiss.tests.persistence_helpers import close_db
 
 
 class TestInputHistoryCap:
@@ -35,7 +36,7 @@ class TestInputHistoryCap:
         self.saved = _redirect(self.tmp)
 
     def teardown_method(self) -> None:
-        th._close_db()
+        close_db()
         _restore(self.saved)
         shutil.rmtree(self.tmp, ignore_errors=True)
 

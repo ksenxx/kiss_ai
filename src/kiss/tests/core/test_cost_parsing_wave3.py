@@ -36,10 +36,17 @@ from kiss.core.printer import cost_fields, event_cost, parse_cost
         ("", None),
         (None, None),
         (True, None),
+        (float("nan"), None),
+        (float("inf"), None),
+        (float("-inf"), None),
+        (10**400, None),
+        ("$" + "9" * 400, None),
     ],
 )
 def test_parse_cost(value: object, expected: float | None) -> None:
-    """A number or a dollar figure parses; anything else is no cost."""
+    """A number or a dollar figure parses; anything else is no cost, and neither is a
+    number no total can hold (``json.loads`` reads ``NaN``, ``Infinity`` and integers of
+    any length from a stored event)."""
     assert parse_cost(value) == expected
 
 
@@ -47,6 +54,9 @@ def test_event_cost_prefers_the_exact_figure() -> None:
     """``cost_usd`` wins unless it is not a number; then the display string counts."""
     assert event_cost({"cost_usd": 0.000012, "cost": "$0.0000"}) == 0.000012
     assert event_cost({"cost_usd": True, "cost": "$0.5000"}) == 0.5
+    assert event_cost({"cost_usd": float("nan"), "cost": "$0.5000"}) == 0.5
+    assert event_cost({"cost_usd": 10**400, "cost": "$0.5000"}) == 0.5
+    assert event_cost({"cost_usd": float("inf")}) is None
     assert event_cost({"cost": "N/A"}) is None
 
 

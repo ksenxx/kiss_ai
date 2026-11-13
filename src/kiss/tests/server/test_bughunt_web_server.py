@@ -54,8 +54,8 @@ import kiss.core.user_config as vc
 from kiss.server.web_server import (
     _AUTH_FAIL_MAX,
     RemoteAccessServer,
-    _generate_self_signed_cert,
 )
+from kiss.tests.local_ws import _generate_self_signed_cert
 from kiss.tests.server.conftest import (
     FORWARDED_VISITOR,
     find_free_port,
@@ -101,8 +101,7 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
             except Exception:
                 pass
         await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         vc.CONFIG_DIR = self._orig_cfg_dir
         vc.CONFIG_PATH = self._orig_cfg_path

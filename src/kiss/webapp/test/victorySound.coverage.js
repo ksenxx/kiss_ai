@@ -8,7 +8,8 @@
 // `// victory-coverage:end`: the Settings checkbox, playVictorySound,
 // isUsersTaskTab and the task_done hook) when running the functional
 // jsdom suite in test/victorySound.test.js.  That suite covers a visible,
-// a background, a sub-agent, an unknown and an unnamed tab, the muted
+// a background, a sub-agent, an unknown and an unnamed tab, the copy of
+// an end sent to a tab viewing the task, the muted
 // and the storage-less page, a missing Audio constructor or clip URL,
 // a play() that rejects, returns nothing or throws, and a player whose
 // clip fails to load once and twice, so full line coverage of the

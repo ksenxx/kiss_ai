@@ -37,8 +37,8 @@ from kiss.tests.agents.seas.test_coding_sea_evidence_gate import (
     LocalEnvironment,
     _close,
     _Loop,
-    _wait_until,
 )
+from kiss.tests.conftest import wait_for
 
 #: Seconds the command waits before touching ``late``: the kill's budget.
 _LATE_AFTER_S = 5
@@ -67,7 +67,7 @@ def test_an_interrupt_in_the_wait_kills_the_remote_command(tmp_path: Path) -> No
     thread = threading.Thread(target=caller)
     try:
         thread.start()
-        assert _wait_until(started.exists)
+        assert wait_for(started.exists, 10)
         assert thread.ident is not None
         injected = ctypes.pythonapi.PyThreadState_SetAsyncExc(
             ctypes.c_ulong(thread.ident), ctypes.py_object(KeyboardInterrupt),
@@ -78,7 +78,7 @@ def test_an_interrupt_in_the_wait_kills_the_remote_command(tmp_path: Path) -> No
         assert not thread.is_alive() and errors == ["KeyboardInterrupt"], errors
         # The command was killed on the environment: its exec ends (the shell
         # is dead) before it reached the ``touch`` of ``late``.
-        assert _wait_until(lambda: not server.pending, timeout=10), server.pending
+        assert wait_for(lambda: not server.pending, timeout=10), server.pending
         assert not late.exists(), "the remote command outlived the call"
         # The bridge is still usable afterwards.
         assert bridge_exec(server.url, "echo still here", 10) == (0, "still here\n")

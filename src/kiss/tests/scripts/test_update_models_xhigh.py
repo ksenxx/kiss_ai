@@ -11,13 +11,14 @@ populated end-to-end by update_models.py:
    level is set, and omits it otherwise.
 2. ``detect_thinking_level`` short-circuits to ``None`` for backends that
    don't accept ``reasoning_effort`` (codex/*, cc/*) and for
-   variants known to reject it (``-pro``, ``-chat-latest``, ``-image``) and
-   for unrelated prefixes (Together, OpenRouter non-OpenAI), so we never
-   waste an API call on them.
+   variants known to reject it (OpenAI's ``-pro``, ``-chat-latest``,
+   ``-image``) and for unrelated prefixes (Together, OpenRouter
+   non-OpenAI), so we never waste an API call on them.
 3. ``get_current_model_info`` surfaces the ``thinking`` level for every
    model in ``MODEL_INFO`` and matches each model's ``thinking`` field.
 """
 
+from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.models.model_info import MODEL_INFO
 from kiss.scripts.update_models import (
     _build_entry,
@@ -25,6 +26,7 @@ from kiss.scripts.update_models import (
     get_current_model_info,
 )
 from kiss.scripts.update_models import detect_thinking_level as _probe
+from kiss.tests.core.models.gemini_sse_harness import chunk, serve, text_part
 
 
 def test_build_entry_emits_thinking_xhigh():
@@ -134,14 +136,27 @@ def test_gemini_probe_creates_thinking_level_aliases(monkeypatch):
         assert alias == {**entry, "thinking": alias_level, "alias_of": "gemini-4-argon"}
 
 
-def test_thinking_probe_skipped_for_gemini_pro_models():
-    """``-pro`` variants, Gemini 2.5 Pro included, are never probed."""
-    assert _probe("gemini-2.5-pro") is None
+def test_thinking_probe_runs_for_gemini_pro_models(monkeypatch):
+    """Audit SC1: ``-pro`` names a model that rejects reasoning effort at OpenAI alone.
+
+    Gemini 3.1 Pro takes the thinking levels low, medium and high, yet no ``-pro`` name of
+    any vendor was probed, so the catalog never got its level or its aliases.  The probe
+    is answered by a local Gemini endpoint: the one request it gets asks for ``high``.
+    """
+    monkeypatch.setattr(DEFAULT_CONFIG, "GEMINI_API_KEY", "test-key")
+    for base_url, script in serve():
+        monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", base_url)
+        script.play([chunk([text_part("Hello.")], finish_reason="STOP")])
+        assert _probe("gemini-3.1-pro-preview") == "high"
+        asked = [sent["generationConfig"]["thinkingConfig"] for sent in script.requests]
+        assert [config["thinking_level"] for config in asked] == ["HIGH"]
+        assert "/models/gemini-3.1-pro-preview:" in script.paths[-1]
 
 
 def test_thinking_probe_skipped_for_pro_variants():
-    """-pro variants reject reasoning_effort outright on OpenAI."""
-    assert _probe("gpt-5.5-pro") is None
+    """-pro variants reject reasoning_effort outright on OpenAI, whoever routes to them."""
+    for name in ("gpt-5.5-pro", "o3-pro-2025-06-10", "openrouter/openai/gpt-5-pro"):
+        assert _probe(name) is None, name
 
 
 def test_thinking_probe_skipped_for_chat_latest_variants():

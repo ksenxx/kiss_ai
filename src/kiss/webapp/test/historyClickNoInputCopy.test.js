@@ -20,7 +20,9 @@ const {
   send,
   fakeMatchMedia,
   sendEmptyWorkDir,
+  readyTabId,
   lastMsg,
+  ofType,
 } = require('./simplify2_harness');
 const {
   gatewaySession,
@@ -59,10 +61,6 @@ function activeTabLabel(win) {
 
 function sidebarOpen(win) {
   return win.document.getElementById('sidebar').classList.contains('open');
-}
-
-function countMessages(posted, type) {
-  return posted.filter(msg => msg && msg.type === type).length;
 }
 
 function clickOnlyRow(win) {
@@ -116,7 +114,7 @@ function testResumeBranchLeavesInputEmpty() {
   assertOpenedInFreshTab(win, tabBefore, 'resuming an unopened chat');
   const resume = lastMsg(posted, 'resumeSession');
   assert.ok(resume, `clicking a resumable row must post resumeSession`);
-  assert.strictEqual(resume.id, 'chat-resume');
+  assert.strictEqual(resume.chatId, 'chat-resume');
   assert.strictEqual(resume.taskId, 7);
   assert.strictEqual(
     resume.tabId,
@@ -138,7 +136,7 @@ function testFallbackBranchLeavesInputEmpty() {
   openSidebar(win);
 
   const tabBefore = win._testApi.getActiveTabId();
-  const resumeBefore = countMessages(posted, 'resumeSession');
+  const resumeBefore = ofType(posted, 'resumeSession').length;
   sendHistory(win, posted, [
     gatewaySession({
       id: 'chat-empty',
@@ -165,7 +163,7 @@ function testFallbackBranchLeavesInputEmpty() {
   );
   assertOpenedInFreshTab(win, tabBefore, 'the fallback branch');
   assert.strictEqual(
-    countMessages(posted, 'resumeSession'),
+    ofType(posted, 'resumeSession').length,
     resumeBefore,
     `an event-less row must not resume anything`,
   );
@@ -180,11 +178,10 @@ function testSwitchBranchLeavesInputEmpty() {
   const {win, posted} = makePage();
   sendEmptyWorkDir(win);
 
-  const ready = posted.find(msg => msg && msg.type === 'ready');
-  assert.ok(ready && ready.tabId, 'main.js must announce the initial tab id');
+  const tabId = readyTabId(posted);
   send(win, {
     type: 'task_events',
-    tabId: ready.tabId,
+    tabId,
     chat_id: 'chat-open',
     task_id: 9,
     task: 'Already open task',
@@ -192,13 +189,13 @@ function testSwitchBranchLeavesInputEmpty() {
   });
   // The chat's task is still running: "+" leaves it open in the
   // background (an idle chat would be retired on leaving it).
-  send(win, {type: 'status', running: true, tabId: ready.tabId});
+  send(win, {type: 'status', running: true, tabId});
   win.document.querySelector('#new-chat-btn').click();
   assert.strictEqual(chatTabs(win).length, 2, 'sanity: two tabs are open');
   assert.strictEqual(activeTabLabel(win), 'new chat', 'sanity: new tab active');
 
   openSidebar(win);
-  const resumeBefore = countMessages(posted, 'resumeSession');
+  const resumeBefore = ofType(posted, 'resumeSession').length;
   sendHistory(win, posted, [
     gatewaySession({
       id: 'chat-open',
@@ -218,7 +215,7 @@ function testSwitchBranchLeavesInputEmpty() {
   );
   assert.strictEqual(
     win._testApi.getActiveTabId(),
-    ready.tabId,
+    tabId,
     `the already-open chat tab must become active`,
   );
   assert.strictEqual(
@@ -232,11 +229,11 @@ function testSwitchBranchLeavesInputEmpty() {
     chatTabs(win)
       .map(t => t.id)
       .join(','),
-    ready.tabId,
+    tabId,
     `switching must not create a duplicate tab`,
   );
   assert.strictEqual(
-    countMessages(posted, 'resumeSession'),
+    ofType(posted, 'resumeSession').length,
     resumeBefore,
     `switching tabs must not resume the session again`,
   );
@@ -334,7 +331,7 @@ function testRunningRowWithoutEventsResumes() {
     `a running row without persisted events must still post ` +
       `resumeSession so the live chat gets reattached`,
   );
-  assert.strictEqual(resume.id, 'chat-running');
+  assert.strictEqual(resume.chatId, 'chat-running');
   assert.strictEqual(resume.taskId, 21);
   assert.strictEqual(
     taskPanelText(win),
@@ -384,7 +381,7 @@ function testRunningRowWithoutEventsPreservesTypedDraft() {
   );
   const resume = lastMsg(posted, 'resumeSession');
   assert.ok(resume, `the running row must still resume`);
-  assert.strictEqual(resume.id, 'chat-running-draft');
+  assert.strictEqual(resume.chatId, 'chat-running-draft');
   assert.strictEqual(resume.taskId, 22);
 
   win.close();

@@ -93,13 +93,14 @@
 
   // tableak-coverage:start
   // The outstanding rounds, oldest first, as `{owner, id}`. `owner` is the
-  // conversation that was on screen when the round began: a transcript
-  // arrives seconds after the words were spoken and the user may have
-  // moved to a different task in the meantime, so submitting it against
-  // whatever tab is visible on arrival would put one task's words into
-  // another task's conversation. `id` is null while the round is still
-  // capturing and becomes the round's tag once its audio is posted (see
-  // finishCapture). Only the newest round can still be capturing.
+  // conversation that was on screen when the round's wake word was heard
+  // (see heardWake): a transcript arrives seconds after the words were
+  // spoken and the user may have moved to a different task in the
+  // meantime, so submitting it against whatever tab is visible on arrival
+  // would put one task's words into another task's conversation. `id` is
+  // null while the round is still capturing and becomes the round's tag
+  // once its audio is posted (see finishCapture). Only the newest round
+  // can still be capturing.
   const rounds = [];
 
   // The tag of the round posted last.
@@ -111,18 +112,15 @@
   // fail closed.
   const UNSCOPED = {unscoped: true};
 
-  // Owner handed back for a round that was cancelled while its audio was
-  // still being transcribed: its late transcript is refused.
+  // Owner handed back for a transcript that answers no outstanding round
+  // (its round was cancelled while the audio was being transcribed, or it
+  // names none): it is refused.
   const CANCELLED = {cancelled: true};
 
-  // Rounds cancelled while their transcript may still be on its way. They
-  // are only counted: an untagged late transcript is charged to them and
-  // fails closed.
-  let cancelledRounds = 0;
-
   /**
-   * The conversation on screen, as `{tabId, taskId}`, or null when the
-   * page has not published one.
+   * The conversation on screen, as main.js publishes it (`{tabId,
+   * taskId, chatId, question, questionId}`, see kissVoiceOwner), or null
+   * when the page has not published one.
    */
   function currentOwner() {
     const read = window.kissVoiceOwner;
@@ -131,9 +129,9 @@
     return owner && owner.tabId ? owner : null;
   }
 
-  /** Record and return a round starting now, owned by the tab on screen. */
-  function markSpeechStart() {
-    const round = {owner: currentOwner() || UNSCOPED, id: null};
+  /** Record and return a round begun while `owner` was on screen. */
+  function markSpeechStart(owner) {
+    const round = {owner: owner, id: null};
     rounds.push(round);
     return round;
   }
@@ -141,11 +139,10 @@
   /**
    * Cancel every outstanding round: the mic was turned off, or the
    * transcribe-flash window ran out.  A cancelled round's transcript may
-   * still be on its way, so the rounds are counted: that is what makes
-   * the late words fail closed.
+   * still be on its way: its tag is outstanding no more, which is what
+   * makes the late words fail closed (see retireRound).
    */
   function cancelSpeechRounds() {
-    cancelledRounds += rounds.length;
     rounds.length = 0;
   }
 
@@ -153,32 +150,16 @@
    * Close the round a transcript answers and hand back the owner it was
    * started with.
    *
-   * The daemon echoes the round tag `id`, which names the round: a tag
-   * no longer outstanding belongs to a round this page cancelled, so its
-   * words are CANCELLED. An untagged transcript (a daemon that does not
-   * echo the tag) can only be paired by position, and fails closed while
-   * a cancelled round may own it: it is CANCELLED while the cancelled
-   * credit lasts, and only then answers the oldest round whose audio was
-   * posted (a round still capturing has no reply on its way). The daemon
-   * answers a connection's dictations in order, so a cancelled round's
-   * late reply comes before a later round's; a reply lost with its
-   * connection costs the next dictation instead of typing it into
-   * another chat. With nothing outstanding at all the result is
-   * undefined: this transcript belongs to no round this page ever saw,
-   * so it was never tied to a moment in time and there is no tab switch
-   * to detect.
+   * The daemon echoes the round tag `id` this page posted with the audio
+   * (see finishCapture), which names the round: a tag no longer
+   * outstanding belongs to a round this page cancelled, so its words are
+   * CANCELLED, and so are those of a transcript that carries no tag (it
+   * names no round, least of all one still capturing, whose `id` is
+   * null).
    */
   function retireRound(id) {
-    if (typeof id === 'number') {
-      const at = rounds.findIndex(r => r.id === id);
-      return at === -1 ? CANCELLED : rounds.splice(at, 1)[0].owner;
-    }
-    if (cancelledRounds > 0) {
-      cancelledRounds--;
-      return CANCELLED;
-    }
-    const at = rounds.findIndex(r => r.id !== null);
-    return at === -1 ? undefined : rounds.splice(at, 1)[0].owner;
+    const at = typeof id === 'number' ? rounds.findIndex(r => r.id === id) : -1;
+    return at === -1 ? CANCELLED : rounds.splice(at, 1)[0].owner;
   }
 
   /**
@@ -191,35 +172,48 @@
    * tabs showing the SAME task are one conversation, which is the single
    * exemption -- it matches isForActiveTab() in main.js.
    *
-   * Two entries are not failures. `undefined` means no round was ever
-   * recorded for this transcript (see retireRound). UNSCOPED means the
-   * round began in a page that has no conversations at all. Neither has
-   * another conversation to leak into.
+   * The same tab is not enough: the daemon can rebind a tab to another
+   * chat while a transcript is on its way (a replay, a run from another
+   * surface), so the tab must still be on the owner's chat (`chatId`).
+   * A chat has no id until its first task names it; until then its tab
+   * alone tells it, and the id the tab gets is that chat's.
+   *
+   * The conversation must also still be waiting on the same thing: the
+   * owner's pending ask_user_question (`question`, null when none, and
+   * `questionId`, which tells two asks of the same words apart) must be
+   * unchanged, so that words spoken as an answer do not answer a later
+   * question, nor words spoken as a task answer one.
+   *
+   * UNSCOPED is not a failure: the round began in a page that has no
+   * conversations at all, so there is no other one to leak into.
    */
   function ownerIsOnScreen(owner) {
-    if (owner === undefined || owner === UNSCOPED) return true;
+    if (owner === UNSCOPED) return true;
     if (owner === CANCELLED) return false;
     const now = currentOwner();
     if (!now) return false;
-    if (owner.tabId === now.tabId) return true;
+    if (owner.question !== now.question) return false;
+    if (owner.questionId !== now.questionId) return false;
+    if (owner.tabId === now.tabId) {
+      return !owner.chatId || owner.chatId === now.chatId;
+    }
     return !!owner.taskId && owner.taskId === now.taskId;
   }
 
   /** The tab an utterance was recorded against, or '' when it had none. */
   function ownerTabId(owner) {
-    return owner && owner.tabId ? owner.tabId : '';
+    return owner.tabId ? owner.tabId : '';
   }
   // tableak-coverage:end
 
   /**
    * Forget `round`, a capture abandoned before its audio was posted
    * (silence timeout, or the pipeline stopping mid-capture): no
-   * transcript will ever answer it. When the rounds were cancelled in
-   * the meantime it is gone already.
+   * transcript will ever answer it. A capture's round is outstanding for
+   * as long as the capture lives: what cancels the rounds ends it too.
    */
   function dropRound(round) {
-    const at = rounds.indexOf(round);
-    if (at !== -1) rounds.splice(at, 1);
+    rounds.splice(rounds.indexOf(round), 1);
   }
 
   let model = null;
@@ -347,7 +341,7 @@
     if (sensitivity >= TRAILING_ALIAS_SENSITIVITY) {
       for (let i = 0; i < WAKE_ALIASES.length; i++) {
         const suffix = ' ' + WAKE_ALIASES[i];
-        if (t.length > suffix.length && t.endsWith(suffix)) return true;
+        if (t.endsWith(suffix)) return true;
       }
     }
     return false;
@@ -381,7 +375,7 @@
     const minConf = sensitivityMinWordConf(sensitivity);
     for (let i = 0; i < words.length; i++) {
       const conf = words[i] && words[i].conf;
-      if (typeof conf === 'number' && conf <= 1.0 && conf < minConf) {
+      if (typeof conf === 'number' && conf < minConf) {
         return false;
       }
     }
@@ -421,6 +415,9 @@
     flashTimer = setTimeout(() => {
       flash(null);
       cancelSpeechRounds();
+      // A capture still open (it ends on the audio clock, which can fall
+      // behind this wall-clock timer) goes with its round.
+      capture = null;
     }, timeoutMs);
   }
 
@@ -429,10 +426,10 @@
   // 4096-sample block (~0.26 s) after the grammar's, and up to ~1.5 s
   // later when a command follows the word without a pause.
   const WAKE_AGREE_MS = 2500;
-  // When each recognizer last heard the wake word (0: not since the
-  // last wake or pipeline start); see heardWake.
-  let grammarHeardAt = 0;
-  let freeHeardAt = 0;
+  // The capture that a wake word heard by one recognizer alone would
+  // begin, kept while the other may still confirm it (null: neither has
+  // heard the word since the last wake or pipeline stop); see heardWake.
+  let candidate = null;
 
   /** Return the Levenshtein edit distance between strings *a* and *b*. */
   function editDistance(a, b) {
@@ -490,20 +487,41 @@
    * so the car.") are rejected by the daemon's transcript check
    * (speech.py).
    *
+   * The first hearing opens the candidate: the capture as it would begin
+   * right then, with the conversation on screen and the ring (it ends
+   * with the word's own audio), to which the audio that follows is added
+   * (feedCandidate).  The confirmed wake adopts it (beginCapture), so a
+   * command spoken before the confirmation is neither lost nor handed to
+   * a conversation selected meanwhile.  When the candidate's conversation
+   * has left the screen it is dropped together with the final that would
+   * have confirmed it: both heard words spoken there.
+   *
    * @param {boolean} fromGrammar true for the grammar recognizer's
    *   final, false for the grammar-free one's.
    * @returns {boolean} true when the wake fired.
    */
   function heardWake(fromGrammar) {
     const now = Date.now();
-    const otherAt = fromGrammar ? freeHeardAt : grammarHeardAt;
-    if (otherAt && now - otherAt <= WAKE_AGREE_MS) {
-      grammarHeardAt = 0;
-      freeHeardAt = 0;
-      return triggerWake();
+    if (
+      candidate &&
+      candidate.fromGrammar !== fromGrammar &&
+      now - candidate.heardAt <= WAKE_AGREE_MS
+    ) {
+      if (ownerIsOnScreen(candidate.owner) && triggerWake()) return true;
+      candidate = null;
+      return false;
     }
-    if (fromGrammar) grammarHeardAt = now;
-    else freeHeardAt = now;
+    candidate = {
+      fromGrammar: fromGrammar,
+      heardAt: now,
+      owner: currentOwner() || UNSCOPED,
+      preamble: preambleChunks.map(entry => entry.chunk),
+      chunks: [],
+      sinceWakeMs: 0,
+      elapsedMs: 0,
+      speechStarted: false,
+      trailingSilenceMs: 0,
+    };
     return false;
   }
 
@@ -527,11 +545,10 @@
   // owner is this round's conversation, already retired by the caller. It is
   // taken as a parameter rather than read here so that the round is closed
   // before anything can return early: an empty transcript still completes a
-  // round, and leaving its owner in the queue would pair the NEXT transcript
-  // with the wrong utterance.
+  // round.
   function insertSpeech(text, keepFlash, speaker, language, owner) {
     if (!keepFlash) flash(null);
-    const spoken = String(typeof text === 'string' ? text : '').trim();
+    const spoken = text.trim();
     if (!spoken) return;
     let translated = spoken;
     if (
@@ -557,6 +574,17 @@
     // instead of typing it into a stranger's conversation.
     if (!ownerIsOnScreen(owner)) return;
     // tableak-coverage:end
+    // The composer read and written below must be this conversation's.
+    // While a file is on screen the composer is hidden, so main.js brings
+    // the chat the file screen stands for (kissVoiceOwner) back first,
+    // with its own draft and its pending question. It cancels the event
+    // when no chat is left to take the words (the file on screen outlived
+    // its chats): they are dropped.
+    const compose = new CustomEvent('kiss-voice-compose', {
+      detail: {tabId: ownerTabId(owner)},
+      cancelable: true,
+    });
+    if (!window.dispatchEvent(compose)) return;
     // Non-auto mode drafts into the input for the user to edit, so insert
     // the exact spoken words: the speaker/language prefix is only useful to
     // the agent, and would just be noise the user has to delete by hand.
@@ -623,24 +651,13 @@
   let capture = null;
 
   // Rolling ring of the most recent pre-wake audio (16kHz Int16Array
-  // chunks). When the wake word fires, the ring ends with the audio of
-  // the wake word itself; it is prepended to the capture so the server
-  // can re-confirm the wake word from the transcript (dual wake check).
+  // chunks). When a recognizer hears the wake word, the ring ends with
+  // the audio of the word itself; the candidate takes it (heardWake) and
+  // it is prepended to the capture so the server can re-confirm the wake
+  // word from the transcript (dual wake check).
   const WAKE_PREAMBLE_MS = 2000;
   let preambleChunks = [];
   let preambleMs = 0;
-
-  /**
-   * How much longer than WAKE_PREAMBLE_MS the ring must reach back: the
-   * time since the grammar recognizer heard the wake word, while that
-   * wake still awaits the grammar-free confirmation (heardWake), so the
-   * confirmed wake still ships the word's own audio.
-   */
-  function preambleHoldMs() {
-    if (!grammarHeardAt) return 0;
-    const waited = Date.now() - grammarHeardAt;
-    return waited <= WAKE_AGREE_MS ? waited : 0;
-  }
 
   function rememberPreamble(samples, sourceRate, blockMs) {
     preambleChunks.push({
@@ -650,10 +667,9 @@
     preambleMs += blockMs;
     // Keep at least one chunk, and never evict below the cap: the wake
     // word must not be trimmed away by a block boundary.
-    const capMs = WAKE_PREAMBLE_MS + preambleHoldMs();
     while (
       preambleChunks.length > 1 &&
-      preambleMs - preambleChunks[0].ms >= capMs
+      preambleMs - preambleChunks[0].ms >= WAKE_PREAMBLE_MS
     ) {
       preambleMs -= preambleChunks[0].ms;
       preambleChunks.shift();
@@ -665,16 +681,15 @@
     preambleMs = 0;
   }
 
+  /**
+   * The wake is confirmed: the candidate becomes the capture, its round
+   * owned by the conversation that was on screen when the word was first
+   * heard.
+   */
   function beginCapture() {
-    capture = {
-      round: markSpeechStart(),
-      preamble: preambleChunks.map(entry => entry.chunk),
-      chunks: [],
-      sinceWakeMs: 0,
-      elapsedMs: 0,
-      speechStarted: false,
-      trailingSilenceMs: 0,
-    };
+    capture = candidate;
+    candidate = null;
+    capture.round = markSpeechStart(capture.owner);
     clearPreamble();
   }
 
@@ -755,41 +770,51 @@
     });
   }
 
-  function feedCapture(samples, rms, blockMs, sourceRate) {
+  /**
+   * Add one audio block to `c`, the capture or the candidate that may
+   * become it; true once it is over: no speech within
+   * CAPTURE_NO_SPEECH_TIMEOUT_MS of the wake word, CAPTURE_END_SILENCE_MS
+   * of silence after speech, or CAPTURE_MAX_MS of speech.
+   */
+  function feedCapture(c, samples, rms, blockMs, sourceRate) {
     const loud = rms >= SPEECH_RMS_THRESHOLD;
-    capture.sinceWakeMs += blockMs;
-    if (!capture.speechStarted) {
-      if (!loud) {
-        if (capture.sinceWakeMs >= CAPTURE_NO_SPEECH_TIMEOUT_MS) {
-          finishCapture();
-        }
-        return;
-      }
-      capture.speechStarted = true;
+    c.sinceWakeMs += blockMs;
+    if (!c.speechStarted) {
+      if (!loud) return c.sinceWakeMs >= CAPTURE_NO_SPEECH_TIMEOUT_MS;
+      c.speechStarted = true;
     }
-    capture.chunks.push(downsampleTo16k(samples, sourceRate));
-    capture.elapsedMs += blockMs;
-    capture.trailingSilenceMs = loud ? 0 : capture.trailingSilenceMs + blockMs;
-    if (
-      capture.trailingSilenceMs >= CAPTURE_END_SILENCE_MS ||
-      capture.elapsedMs >= CAPTURE_MAX_MS
-    ) {
-      finishCapture();
-    }
+    c.chunks.push(downsampleTo16k(samples, sourceRate));
+    c.elapsedMs += blockMs;
+    c.trailingSilenceMs = loud ? 0 : c.trailingSilenceMs + blockMs;
+    return (
+      c.trailingSilenceMs >= CAPTURE_END_SILENCE_MS ||
+      c.elapsedMs >= CAPTURE_MAX_MS
+    );
   }
 
-  // How long the speech engine (vosk.js), a speech-model load or the
-  // microphone request may take before it is declared failed.  The
-  // engine's script tag settles on `load` or `error`, the vendored
-  // createModel when its worker posts 'load' or fires a Worker 'error'
-  // event, and getUserMedia when the browser answers; one that does
-  // none of these (a stalled response, a service worker that never
-  // answers, the model fetch hanging on a dead tunnel, WASM init
-  // stalling, a permission prompt nobody answers) stays pending for
-  // ever, so without a bound `busy` stays true for the page lifetime and
-  // the mic is wedged on 'loading' with every re-enable deferring to
-  // `busy`.  The server never sets `cfg.modelLoadTimeoutMs`; it is a test
-  // override of the 30 s bound.
+  /**
+   * Add one audio block to the candidate, which holds it until the other
+   * recognizer confirms the wake word; past WAKE_AGREE_MS it no longer
+   * can, and the candidate is dropped.
+   */
+  function feedCandidate(samples, rms, blockMs, sourceRate) {
+    if (Date.now() - candidate.heardAt > WAKE_AGREE_MS) candidate = null;
+    else feedCapture(candidate, samples, rms, blockMs, sourceRate);
+  }
+
+  // How long the speech engine (vosk.js), a speech-model load, the
+  // microphone request or the audio context's start may take before it
+  // is declared failed.  The engine's script tag settles on `load` or
+  // `error`, the vendored createModel when its worker posts 'load' or
+  // fires a Worker 'error' event, getUserMedia when the browser answers
+  // and resume() when the context runs; one that does none of these (a
+  // stalled response, a service worker that never answers, the model
+  // fetch hanging on a dead tunnel, WASM init stalling, a permission
+  // prompt nobody answers, a context the browser keeps suspended) stays
+  // pending for ever, so without a bound `busy` stays true for the page
+  // lifetime and the mic is wedged on 'loading' with every re-enable
+  // deferring to `busy`.  The server never sets `cfg.modelLoadTimeoutMs`;
+  // it is a test override of the 30 s bound.
   const MODEL_LOAD_TIMEOUT_MS =
     typeof cfg.modelLoadTimeoutMs === 'number' && cfg.modelLoadTimeoutMs > 0
       ? cfg.modelLoadTimeoutMs
@@ -1010,6 +1035,36 @@
     });
   }
 
+  /**
+   * Start *context* when the browser created it suspended, never
+   * hanging: its resume() stays pending for as long as the browser keeps
+   * the audio suspended and may be refused, and a pipeline built on a
+   * context that does not run would show "listening" and hear nothing.
+   * So the resume is raced against MODEL_LOAD_TIMEOUT_MS like the
+   * microphone request, and either failure settles the attempt into the
+   * ordinary failure path.
+   */
+  function resumeAudio(context) {
+    if (context.state !== 'suspended') return Promise.resolve();
+    const resumed = context.resume();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('the browser kept the audio suspended')),
+        MODEL_LOAD_TIMEOUT_MS,
+      );
+      resumed.then(
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        err => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
+  }
+
   function stopBrowserPipeline() {
     if (capture) {
       // An active capture dies with the pipeline before its audio was
@@ -1018,6 +1073,7 @@
       dropRound(capture.round);
       capture = null;
     }
+    candidate = null;
     clearPreamble();
     if (processorNode) {
       try {
@@ -1062,10 +1118,6 @@
     // continuation below re-checks it and stands down instead of acting
     // on a superseded intent.
     const gen = voiceGen;
-    // Whether the catch below painted the red error state (and turned the
-    // mic off): the settle handler at the end must not repaint it as a
-    // calm "off".
-    let paintedError = false;
     busy = true;
     setUi('loading');
     return loadVosk()
@@ -1073,7 +1125,7 @@
       .then(() => {
         if (gen !== voiceGen || !enabled) {
           // Superseded while the engine/model loaded: never even ask for
-          // the microphone. The settle handler below fixes up the UI.
+          // the microphone.
           return null;
         }
         return requestMicrophone();
@@ -1115,8 +1167,14 @@
         }
         const Ctx = window.AudioContext || window.webkitAudioContext;
         audioContext = new Ctx();
-        if (audioContext.state === 'suspended') {
-          audioContext.resume().catch(() => {});
+        return resumeAudio(audioContext);
+      })
+      .then(() => {
+        if (gen !== voiceGen || !enabled) {
+          // Superseded before the audio ran (an earlier step stood down,
+          // or a toggle or a failure came during the resume): what
+          // superseded this start has released what it held.
+          return;
         }
         const grammar = JSON.stringify(WAKE_ALIASES.concat(['[unk]']));
         recognizer = new model.KaldiRecognizer(
@@ -1138,8 +1196,6 @@
         // about a second after the word ends, with a confidence per
         // word.  Even a final only counts once the grammar-free
         // recognizer below agrees (heardWake).
-        grammarHeardAt = 0;
-        freeHeardAt = 0;
         recognizer.on('result', message => {
           if (message && message.result) {
             debugLog('result', message.result.text);
@@ -1180,7 +1236,6 @@
         processorNode = audioContext.createScriptProcessor(4096, 1, 1);
         let lastRmsAt = 0;
         processorNode.onaudioprocess = event => {
-          if (!recognizer) return;
           // Never output pure silence: after 30 s of zeros Chrome swaps
           // the audio sink for a fake one that ran this callback at
           // under half speed (measured 2026-11-08 in Google Chrome with
@@ -1194,8 +1249,8 @@
             sumSquares += samples[i] * samples[i];
           }
           const rms = Math.sqrt(sumSquares / samples.length);
-          const blockMs =
-            (samples.length / event.inputBuffer.sampleRate) * 1000;
+          const rate = event.inputBuffer.sampleRate;
+          const blockMs = (samples.length / rate) * 1000;
           if (debugEnabled()) {
             const now = Date.now();
             if (now - lastRmsAt > 2000) {
@@ -1204,10 +1259,13 @@
             }
           }
           if (capture) {
-            feedCapture(samples, rms, blockMs, event.inputBuffer.sampleRate);
+            if (feedCapture(capture, samples, rms, blockMs, rate)) {
+              finishCapture();
+            }
             return;
           }
-          rememberPreamble(samples, event.inputBuffer.sampleRate, blockMs);
+          rememberPreamble(samples, rate, blockMs);
+          if (candidate) feedCandidate(samples, rms, blockMs, rate);
           try {
             recognizer.acceptWaveform(event.inputBuffer);
             freeRecognizer.acceptWaveform(event.inputBuffer);
@@ -1222,11 +1280,10 @@
         if (gen === voiceGen && enabled) {
           // The failure belongs to an attempt the user still wants: turn
           // the mic off and show why. A superseded attempt's failure is
-          // nobody's news — the settle handler below paints the state the
-          // newer intent asked for instead of a stale red error.
+          // nobody's news: what superseded it has painted the state that
+          // stands.
           enabled = false;
           persist();
-          paintedError = true;
           setUi('error', err);
         }
       })
@@ -1234,8 +1291,8 @@
         // Settle handler: runs after success, supersession, or failure.
         busy = false;
         if (gen === voiceGen && enabled) {
-          // Still current and still wanted: the stream handler above ran
-          // to completion (every path that could stop it either bumps the
+          // Still current and still wanted: the steps above ran to
+          // completion (every path that could stop them either bumps the
           // generation or clears `enabled`), so the pipeline is live.
           return;
         }
@@ -1244,9 +1301,10 @@
           // A newer toggle-on arrived while this start was in flight (it
           // deferred to `busy`); run it now under its own generation.
           startBrowserPipeline();
-        } else if (!paintedError) {
-          setUi('off');
         }
+        // Otherwise the button keeps what the path that turned the mic off
+        // painted: "off" (setEnabled) or its error (the catch above,
+        // failLivePipeline).
       });
   }
 
@@ -1336,10 +1394,11 @@
     } else {
       // Stopping the pipeline retires a capture still under way (its
       // audio was never posted, so no transcript will answer it); the
-      // rounds whose audio is being transcribed are cancelled. While a
-      // start is in flight nothing has been captured yet and the
-      // superseded start's settle handler releases whatever it acquired.
-      if (!busy) stopBrowserPipeline();
+      // rounds whose audio is being transcribed are cancelled. A start
+      // still in flight loses what it holds at once too (the microphone
+      // and the audio context of one waiting in resumeAudio): the mic is
+      // released when the button says so, not when that start settles.
+      stopBrowserPipeline();
       cancelSpeechRounds();
       flash(null);
       setUi('off');

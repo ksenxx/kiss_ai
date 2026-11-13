@@ -110,7 +110,7 @@ def test_enrolled_client_ca_names_the_issuer_that_is_still_on_disk(tmp_path: Pat
     assert isinstance(ca_key, ec.EllipticCurvePrivateKey)
     ca = x509.load_pem_x509_certificate((alice / "ca.pem").read_bytes())
     now = datetime.datetime.now(datetime.UTC)
-    bare = (
+    leaf = (
         x509.CertificateBuilder()
         .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "bare")]))
         .issuer_name(ca.subject)
@@ -118,11 +118,16 @@ def test_enrolled_client_ca_names_the_issuer_that_is_still_on_disk(tmp_path: Pat
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(minutes=1))
         .not_valid_after(now + datetime.timedelta(days=1))
-        .sign(ca_key, hashes.SHA256())
     )
+    bare = leaf.sign(ca_key, hashes.SHA256())
     assert tls_certs.enrolled_client_ca(bare.public_bytes(serialization.Encoding.DER), trusted) == (
         "alice-1234"
     )
+    # A leaf with an extension that does not parse is refused, not raised into the handshake.
+    odd = leaf.add_extension(
+        x509.UnrecognizedExtension(x509.CertificatePolicies.oid, b"\x02\x01\x01"), critical=False,
+    ).sign(ca_key, hashes.SHA256())
+    assert tls_certs.enrolled_client_ca(odd.public_bytes(serialization.Encoding.DER), trusted) == ""
     # A file the daemon cannot read is skipped.
     (trusted / "secret.pem").write_bytes((alice / "ca.pem").read_bytes())
     (trusted / "secret.pem").chmod(0o000)

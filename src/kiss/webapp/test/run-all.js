@@ -98,7 +98,8 @@ function killGroup(child) {
   try {
     process.kill(-child.pid, 'SIGKILL');
   } catch {
-    // ESRCH: the group exited before the kill.
+    // ESRCH: the group exited before the kill.  Or the child was never
+    // started: process.kill() throws on its missing pid, signalling none.
   }
 }
 
@@ -134,12 +135,15 @@ function runSuite(file, index, total, done) {
       detached: true,
     },
   );
-  children.add(child);
+  // A child that could not be started (no pid) is not a process to kill
+  // or to wait for: it emits 'error', never 'exit'.  It has no pipes
+  // either when it was descriptors that ran out (EMFILE, ENFILE).
+  if (child.pid) children.add(child);
   const output = [];
-  child.stdout.on('data', chunk =>
+  child.stdout?.on('data', chunk =>
     output.push({stream: process.stdout, chunk}),
   );
-  child.stderr.on('data', chunk =>
+  child.stderr?.on('data', chunk =>
     output.push({stream: process.stderr, chunk}),
   );
   let timedOut = false;
@@ -158,8 +162,8 @@ function runSuite(file, index, total, done) {
     clearTimeout(timer);
     children.delete(child);
     killGroup(child);
-    child.stdout.destroy();
-    child.stderr.destroy();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
     console.log(`\n[${index + 1}/${total}] ${file}`);
     for (const {stream, chunk} of output) stream.write(chunk);
     if (timedOut) {
@@ -194,6 +198,9 @@ function runSuite(file, index, total, done) {
  * terminal's Ctrl-C does not reach them) and exit with 128 + signal once
  * every suite process has exited, so that none is handed to our parent
  * as a zombie.  A SIGKILLed child exits promptly, so this is bounded.
+ * The exit is process.exit(), though it drops output a slow reader has
+ * not taken yet: the interrupted run is over, and the timers and pipes
+ * of its unreported suites would keep the process alive.
  */
 function killAllAndExit(signal) {
   stopping = true;
@@ -215,7 +222,10 @@ function main() {
   const files = testFiles();
   if (files.length === 0) {
     console.error('no test files found in ' + TEST_DIR);
-    process.exit(1);
+    // Not process.exit(1): it drops what the reader of a piped stdout or
+    // stderr has not taken yet.  Nothing else keeps the process alive.
+    process.exitCode = 1;
+    return;
   }
   const jobs = poolSize();
   const failed = [];
@@ -244,7 +254,9 @@ function main() {
     if (failed.length > 0) {
       console.error('FAILED SUITES:');
       failed.sort().forEach(f => console.error('  ' + f));
-      process.exit(1);
+      // As above, not process.exit(1): every suite is reported, so only
+      // the output still to be written keeps the process alive.
+      process.exitCode = 1;
     }
   }
 

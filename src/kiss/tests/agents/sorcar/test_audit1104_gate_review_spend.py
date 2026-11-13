@@ -25,6 +25,7 @@ from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.coding_gate import CodingGate, run_on_host
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.file_lock import lock_exclusive
+from kiss.server.json_printer import JsonPrinter
 from kiss.tests.agents.sorcar.test_coding_gate import MODEL, serve, text_body
 from kiss.tests.agents.sorcar.test_cost_audit_20261023 import (
     _by_model,
@@ -143,13 +144,6 @@ def test_a_stopped_review_is_filed_under_the_reviewer_once(
     from kiss.core.kiss_agent import KISSAgent
 
     row = _task(4.0, 4_000, [_llm_call(FABLE, 4.0, 4_000)])
-    charges: list[float] = []
-
-    class _Printer:
-        def charge_task_usage(self, task_agent: Any, task_id: str, budget: float,
-                              tokens: int, steps: int, epoch: Any = None) -> None:
-            charges.append(budget)
-
     real_run = KISSAgent.run
 
     def run(self: KISSAgent, *args: Any, **kwargs: Any) -> str:
@@ -162,7 +156,7 @@ def test_a_stopped_review_is_filed_under_the_reviewer_once(
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     (tmp_path / "hello.py").write_text("print('hello')\n")
     agent = SorcarAgent("audit1104-stopped-review")
-    agent.printer = _Printer()  # type: ignore[assignment]
+    agent.printer = JsonPrinter()  # the daemon's late-charge bridge
     charge = functools.partial(  # what _new_coding_gate binds
         agent._charge_gate_usage, epoch=agent._usage_epoch(), task_id=row, model=MODEL,
     )
@@ -175,10 +169,10 @@ def test_a_stopped_review_is_filed_under_the_reviewer_once(
                           model_config={"base_url": url, "api_key": "local"})
         with pytest.raises(KeyboardInterrupt):
             gate.review_verdict({"success": True, "summary_in_html": "<p>done</p>"}, "hello")
-    assert len(charges) == 1 and charges[0] > 0
     split = json.loads(_model_costs(row))
     assert set(split) == {FABLE, MODEL}
-    assert split[MODEL][0] == pytest.approx(charges[0]) and split[MODEL][1] > 0
+    assert split[MODEL][0] > 0 and split[MODEL][1] > 0
+    assert _row_cost(row) == pytest.approx(4.0 + split[MODEL][0])  # the row took it once
 
 
 @pytest.mark.usefixtures("history_db")
@@ -232,14 +226,15 @@ def _row_cost(task_id: str) -> float:
 
 
 @pytest.mark.usefixtures("history_db")
-def test_gate_charge_keys_do_not_pile_up_over_a_reused_agent(tmp_path: Path) -> None:
-    """A run start keeps the previous run's charge keys and drops the older ones.
+def test_a_gate_charge_key_counts_once_however_long_the_agent_is_reused(tmp_path: Path) -> None:
+    """A finished row keeps the key of each charge it took, the agent none.
 
-    A key counts once because a stop charges an attempt twice, inside
-    the run that made it (or right after it, for a review the stop
-    left charging), so a reused chat agent needs the keys of the last
-    two runs only; before the fix it kept every key it ever charged
-    (audit 2026-11-07, A13_claude-8).
+    A stop charges an attempt twice, so a key counts once.  The agent
+    used to hold the keys it charged (every one, then those of its last
+    two runs: audit 2026-11-07, A13_claude-8) and claimed a key before
+    charging it, which lost a charge a stop cut (audit 2026-11-09, S11
+    F1); the row's retained charge is the receipt now, however many
+    runs the reused agent made since.
     """
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
@@ -256,9 +251,9 @@ def test_gate_charge_keys_do_not_pile_up_over_a_reused_agent(tmp_path: Path) -> 
     agent._charge_gate_usage(0.5, 10, 1, "finish-review:one", task_id=row1)
     assert _row_cost(row1) == pytest.approx(cost + 0.5)
     _run_ok(agent, tmp_path)
-    # Two runs later it is forgotten: the charge goes through.
+    # Two runs later too: the row holds the key.
     agent._charge_gate_usage(0.5, 10, 1, "finish-review:one", task_id=row1)
-    assert _row_cost(row1) == pytest.approx(cost + 1.0)
+    assert _row_cost(row1) == pytest.approx(cost + 0.5)
 
 
 @pytest.mark.usefixtures("history_db")

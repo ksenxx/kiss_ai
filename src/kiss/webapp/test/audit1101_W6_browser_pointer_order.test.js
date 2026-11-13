@@ -23,31 +23,16 @@ const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {MEDIA, queueRaf} = require('./simplify2_harness');
 
 const {test, report} = makeRunner();
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 function makeView() {
   const dom = new JSDOM('<!DOCTYPE html><body></body>', {
     runScripts: 'outside-only',
   });
   const win = dom.window;
-  const frames = [];
-  let nextFrame = 0;
-  win.requestAnimationFrame = cb => {
-    const id = ++nextFrame;
-    frames.push({id, cb});
-    return id;
-  };
-  win.cancelAnimationFrame = id => {
-    const i = frames.findIndex(f => f.id === id);
-    if (i >= 0) frames.splice(i, 1);
-  };
-  /** Run the frames queued so far. */
-  function runFrames() {
-    for (const f of frames.splice(0)) f.cb();
-  }
+  const {frames, run: runFrames} = queueRaf(win);
   win.eval(fs.readFileSync(path.join(MEDIA, 'browserTab.js'), 'utf8'));
   const sent = [];
   const view = win.BrowserTabView.create('tab-1', {
@@ -206,6 +191,9 @@ async function main() {
       // A cancel with nothing pressed (a touch, or after a pointerup)
       // releases nothing.
       pointer(win, screen, 'pointerdown', 20, 20, 1);
+      screen.dispatchEvent(
+        new win.PointerEvent('pointercancel', {pointerType: 'touch'}),
+      );
       pointer(win, screen, 'pointerup', 20, 20, 0);
       screen.dispatchEvent(
         new win.PointerEvent('pointercancel', {
@@ -220,6 +208,90 @@ async function main() {
       ]);
     },
   );
+
+  // A button the remote page has no name for (a pen's eraser, bit 32)
+  // is no press there.  It was counted as one: cancelled before any
+  // other pointer event, the move that ends a press was built from a
+  // pointer that had never been forwarded and threw.
+  await test(
+    'a button the remote page has no name for is not a press there',
+    async () => {
+      const {win, sent, screen, runFrames} = makeView();
+      const errors = [];
+      win.addEventListener('error', e => {
+        errors.push(e.message);
+        e.preventDefault();
+      });
+      screen.dispatchEvent(
+        new win.PointerEvent('pointerdown', {
+          clientX: 10,
+          clientY: 10,
+          button: 5,
+          buttons: 32,
+          pointerType: 'pen',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      screen.dispatchEvent(
+        new win.PointerEvent('pointercancel', {
+          pointerType: 'pen',
+          bubbles: true,
+        }),
+      );
+      assert.deepStrictEqual(errors, []);
+      assert.deepStrictEqual(mouseTrace(sent), [], 'nothing to end');
+      // Moves with it down are still coalesced to one per frame.
+      pointer(win, screen, 'pointermove', 20, 10, 32);
+      pointer(win, screen, 'pointermove', 30, 10, 32);
+      runFrames();
+      assert.deepStrictEqual(mouseTrace(sent), ['mouseMoved@30:32']);
+    },
+  );
+
+  // A button let go in another window or browser tab gets no pointerup
+  // here, only the screen's blur, and the first move back (no buttons)
+  // went out as a release: a click on the control under the press.
+  // That move now ends the press as a cancel does.
+  await test('a press let go elsewhere ends without a release', async () => {
+    const {win, sent, screen, runFrames} = makeView();
+    screen.focus();
+    screen.blur();
+    assert.deepStrictEqual(mouseTrace(sent), [], 'nothing was pressed');
+    pointer(win, screen, 'pointerdown', 10, 10, 1);
+    pointer(win, screen, 'pointermove', 30, 10, 1);
+    screen.blur();
+    pointer(win, screen, 'pointermove', 40, 10, 0);
+    runFrames();
+    assert.deepStrictEqual(mouseTrace(sent), [
+      'mousePressed@10:1',
+      'mouseMoved@30:1',
+      'mouseMoved@30:0',
+      'mouseMoved@40:0',
+    ]);
+  });
+
+  await test('a button still down after a blur keeps its press', async () => {
+    const {win, view, sent, screen} = makeView();
+    pointer(win, screen, 'pointerdown', 100, 10, 1);
+    pointer(win, screen, 'pointermove', 120, 10, 1);
+    view.el.querySelector('.browser-url').focus(); // the focus only moved
+    pointer(win, screen, 'pointerup', 180, 10, 0);
+    assert.deepStrictEqual(mouseTrace(sent.splice(0)), [
+      'mousePressed@100:1',
+      'mouseMoved@120:1',
+      'mouseReleased@180:0',
+    ]);
+    pointer(win, screen, 'pointerdown', 10, 10, 1);
+    screen.blur(); // to another window and back, still holding
+    pointer(win, screen, 'pointermove', 40, 10, 1);
+    pointer(win, screen, 'pointermove', 45, 10, 0); // let go later: a release
+    assert.deepStrictEqual(mouseTrace(sent.splice(0)), [
+      'mousePressed@10:1',
+      'mouseMoved@40:1',
+      'mouseReleased@45:0',
+    ]);
+  });
 
   // Pointer Events fire pointerdown for the first button pressed and
   // pointerup for the last released; a button pressed or released while
@@ -249,6 +321,52 @@ async function main() {
       ]);
     },
   );
+
+  // A view hidden in the middle of a press (the agent opened another
+  // tab) has no box left to map a pointer through, yet its screen
+  // keeps the captured pointer: the moves and the release went out at
+  // window coordinates, a drag ending elsewhere on the remote page.
+  // Hiding ends the press as a cancel does, at the point forwarded
+  // last, and the pointer is ignored until it lets go, also when the
+  // view is back by then; a move waiting for its frame is dropped.
+  await test('a view hidden in the middle of a press ends it', async () => {
+    const {win, view, sent, screen, runFrames} = makeView();
+    // jsdom lays nothing out: the box follows the view's display.
+    screen.getBoundingClientRect = () =>
+      view.el.style.display === 'none'
+        ? {left: 0, top: 0, width: 0, height: 0}
+        : {left: 25, top: 0, width: 800, height: 500};
+    function shown(on) {
+      view.el.style.display = on ? '' : 'none';
+      view.setVisible(on);
+    }
+    shown(true);
+    pointer(win, screen, 'pointerdown', 400, 300, 1);
+    pointer(win, screen, 'pointermove', 410, 300, 1); // waits for its frame
+    shown(false);
+    shown(false); // every tab switch hides the hidden views again
+    pointer(win, screen, 'pointermove', 430, 300, 1); // the captured pointer
+    shown(true);
+    pointer(win, screen, 'pointermove', 440, 300, 1); // back, still down
+    pointer(win, screen, 'pointerup', 440, 300, 0);
+    pointer(win, screen, 'pointermove', 310, 300, 0); // waits for its frame
+    shown(false);
+    runFrames();
+    // The next press, hidden too; its release is never seen.
+    shown(true);
+    pointer(win, screen, 'pointerdown', 300, 300, 1);
+    shown(false);
+    shown(true);
+    pointer(win, screen, 'pointermove', 320, 300, 0);
+    runFrames();
+    assert.deepStrictEqual(mouseTrace(sent), [
+      'mousePressed@375:1',
+      'mouseMoved@375:0',
+      'mousePressed@275:1',
+      'mouseMoved@275:0',
+      'mouseMoved@295:0',
+    ]);
+  });
 
   report('audit1101_W6_browser_pointer_order');
 }

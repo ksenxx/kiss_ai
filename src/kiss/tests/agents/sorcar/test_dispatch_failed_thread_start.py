@@ -4,7 +4,7 @@
 # add your name here
 """A ``run_agent`` job whose thread cannot start must not stay registered.
 
-``agent_dispatch.start_agent_job`` registers the job and then starts
+``agent_dispatch.launch_agent_job`` registers the job and then starts
 its thread under one lock.  Before the fix a ``Thread.start()`` that
 raised (``RuntimeError: can't start new thread`` under thread
 exhaustion) propagated out of the tool call but left the job in the
@@ -16,7 +16,7 @@ could not wait for or kill.
 
 End-to-end: a child interpreter exhausts its own thread quota for real
 (``RLIMIT_NPROC`` lowered to 1, which makes ``pthread_create`` fail with
-``EAGAIN``), calls ``start_agent_job`` and reports the registry.  No
+``EAGAIN``), calls ``launch_agent_job`` and reports the registry.  No
 test double stands in for ``Thread.start``.
 """
 
@@ -53,7 +53,7 @@ except RuntimeError:
     pass
 report = {"limit_enforced": True, "raised": ""}
 try:
-    ad.start_agent_job("x", kwargs, owner)
+    ad.launch_agent_job(ad.new_agent_job("x", kwargs, owner))
 except RuntimeError as exc:
     report["raised"] = str(exc)
 live = ad.live_agent_jobs(owner)
@@ -69,7 +69,7 @@ print(json.dumps(report))
 
 @posix_only("RLIMIT_NPROC is a POSIX resource limit")
 def test_failed_thread_start_leaves_no_registered_job(tmp_path: Path) -> None:
-    """``start_agent_job`` re-raises the thread error and the registry stays empty."""
+    """``launch_agent_job`` re-raises the thread error and the registry stays empty."""
     env = {**os.environ, "KISS_HOME": str(tmp_path / "home")}
     proc = subprocess.run(
         [sys.executable, "-c", _CHILD], capture_output=True, text=True, timeout=120,

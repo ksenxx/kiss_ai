@@ -68,9 +68,8 @@ class TestGhostTextInjectionSuggestions:
         self._saved_kiss_injections = os.environ.get("KISS_INJECTIONS_PATH")
         os.environ["KISS_HOME"] = str(kiss_dir)
         os.environ["KISS_INJECTIONS_PATH"] = str(fake_path)
-        self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved_persistence = (th._DB_PATH, th._KISS_DIR)
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         th._KISS_DIR = kiss_dir
 
     def teardown_method(self) -> None:
@@ -82,13 +81,14 @@ class TestGhostTextInjectionSuggestions:
             os.environ.pop("KISS_INJECTIONS_PATH", None)
         else:
             os.environ["KISS_INJECTIONS_PATH"] = self._saved_kiss_injections
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
+        th._DB_PATH, th._KISS_DIR = self._saved_persistence
 
     def _ghost_for(self, server: AgentServer, query: str) -> str:
         """Run ``_complete(query)`` and return the broadcast ghost suggestion."""
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
-        server._complete(query)
+        server._complete_seq_latest[""] = 1
+        server._complete(query, 1)
         ghost = [e for e in events if e.get("type") == "ghost"]
         assert len(ghost) == 1, (
             f"Expected exactly one ghost event, got {len(ghost)}: {ghost!r}"

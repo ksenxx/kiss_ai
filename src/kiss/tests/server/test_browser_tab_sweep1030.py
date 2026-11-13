@@ -37,10 +37,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from playwright._impl._transport import PipeTransport
 
+from kiss.agents.sorcar.web_use_tool import _Watchdog
 from kiss.core.tool_interrupt import inject_async_exception
-from kiss.server.browser_tab import BrowserTabService, _result_in_slices, normalize_url
+from kiss.server.browser_tab import (
+    _INTERRUPT_PROBE_TIMEOUT,
+    BrowserTabService,
+    _result_in_slices,
+    normalize_url,
+)
 from kiss.tests.server.conftest import ensure_loop
+from kiss.tests.server.pause import Pause
 from kiss.tests.server.test_browser_tab_service import (
     _PLAYWRIGHT_CACHE,
     ConnPrinter,
@@ -228,3 +236,62 @@ def test_an_ip_address_in_the_address_bar_loads_the_page(daemon: Any, page_serve
     )
     state = _wait(lambda: _events(printer, "browserState", tab_id=tab_id, title="Tall"), "page")
     assert state[-1]["url"] == page_server
+
+
+def _next_call_after_a_recovery(
+    service: BrowserTabService, tab_id: str, at: str, secs: float
+) -> Any:
+    """What the next call's script returns when the hung call ends during its recovery.
+
+    The watchdog's recovery runs for real.  The hung call ends, and the
+    next one starts a script that spins for *secs*, at the write of the
+    recovery's request *at* to the driver when the watchdog's lock is
+    free there (the task thread would get through), else after it.
+    """
+    loop, rec = service._loop, service._pages[tab_id]
+    assert loop is not None
+    hung = _Watchdog(3600, service.interrupt, (tab_id,))
+    end = f"const end = Date.now() + {secs * 1000}"
+    script = f"(() => {{ {end}; while (Date.now() < end); return 'ran'; }})()"
+    next_call: list[asyncio.Task[Any]] = []
+
+    def roll_over(local: dict[str, Any]) -> bool:
+        params = local["message"].get("params") or {}
+        named = at in (params.get("method"), params.get("expression"))
+        if named and not next_call and not hung._deciding.locked():
+            hung.end()
+            next_call.append(asyncio.Task(rec.page.evaluate(script), loop=loop, eager_start=True))
+            time.sleep(0.5)  # the script spins by the time the recovery's request is written
+        return False
+
+    async def script_result() -> Any:
+        hung.end()
+        return await (next_call[0] if next_call else rec.page.evaluate(script))
+
+    with Pause(PipeTransport.send.__code__, roll_over):
+        asyncio.run_coroutine_threadsafe(service._interrupt(tab_id, hung.act), loop).result(60)
+    return asyncio.run_coroutine_threadsafe(script_result(), loop).result(60)
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+def test_a_recovery_reaches_neither_the_script_nor_the_page_of_the_next_call(
+    daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The watchdog's leave and the recovery's send are one step (audit L11 F11).
+
+    ``_interrupt`` asked the watchdog, then sent ``Runtime.terminateExecution``:
+    the hung call could end and the next one start in between, and the
+    terminate killed that call's script.  A recovery whose probe then
+    went unanswered (the page was busy with the next call) closed the
+    page under it.
+    """
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    assert service.open_for_user(page_server) is True
+    tab_id = _events(printer, "openBrowserTab")[0]["tab_id"]
+    probe_secs = _INTERRUPT_PROBE_TIMEOUT + 1
+    assert _next_call_after_a_recovery(service, tab_id, "Runtime.terminateExecution", 1.5) == "ran"
+    assert _next_call_after_a_recovery(service, tab_id, "1", probe_secs) == "ran"
+    assert not _events(printer, "closeBrowserTab", tab_id=tab_id)
+    assert service._pages[tab_id].closing is False

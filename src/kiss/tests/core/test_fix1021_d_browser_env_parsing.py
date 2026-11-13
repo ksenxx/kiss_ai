@@ -137,6 +137,11 @@ def test_env_wrapper_is_skipped_for_the_executable(
     _set_browser(monkeypatch, "env MOZ_X=1 firefox %s")
     assert browser_handoff._launch_commands(URL) == [["env", "MOZ_X=1", "firefox", URL]]
     assert _resolved(default_browser.default_browser_executable()) == stand_ins["firefox"]
+    # ``env`` by any path is the wrapper, and its options are not the browser either.
+    for wrapper in ("/usr/bin/env MOZ_X=1", "env -i -u DISPLAY", "env --unset DISPLAY -C /"):
+        _set_browser(monkeypatch, f"{wrapper} firefox %s")
+        found = default_browser.default_browser_executable()
+        assert _resolved(found) == stand_ins["firefox"], wrapper
 
 
 def test_a_bare_browser_name_is_the_one_popen_runs_not_a_file_of_the_cwd(

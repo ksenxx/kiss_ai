@@ -449,12 +449,21 @@
       this._onKeyDown = event => this._handleKeyDown(event);
     }
 
-    /** Move `delta` tips (-1 / +1), clamped to the list. */
+    /**
+     * Move `delta` tips (-1 / +1), clamped to the list.  The paging
+     * button that reached its end is disabled; when it had the focus
+     * the other one takes it: Tab from a disabled element is not held
+     * by the ring (_handleKeyDown) and would land on the page behind.
+     */
     _step(delta) {
       const target = this._index + delta;
       if (target < 0 || target >= this._tips.length) return;
       this._index = target;
       this._update();
+      const focused = this.shadowRoot.activeElement;
+      if (focused && focused.disabled) {
+        (delta < 0 ? this._next : this._prev).focus();
+      }
     }
 
     /**

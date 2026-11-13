@@ -21,7 +21,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import _git
 from kiss.server import agent_state
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
-from kiss.tests.server.worktree_helpers import merge_conflict, worktree_changed_files
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 
 def _attach_worktree_state(
@@ -119,7 +119,7 @@ class TestBug8Fix:
 
         (wt_dir / "fileA.txt").write_text("agent modified A\n")
 
-        original_branch = agent._original_branch
+        original_branch = agent.worktrees[0].original_branch
         assert original_branch is not None
 
         tmp_wt = self.repo / ".kiss-worktrees" / "tmp_advance"
@@ -164,7 +164,7 @@ class TestBug8Fix:
 
 
 class TestBug9Fix:
-    """After fix, _conflict_of does NOT commit worktree changes."""
+    """After fix, presenting a worktree does NOT commit its changes."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -176,43 +176,8 @@ class TestBug9Fix:
         restore_persistence(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_check_conflict_does_not_commit(self) -> None:
-        """_conflict_of must not create any commits."""
-
-        server, events = _make_server(self.repo)
-        agent = ChatSorcarAgent("Sorcar")
-        _attach_worktree_state(agent)
-
-        _create_worktree(agent, self.repo)
-        wt_dir = agent._wt_dir
-        branch = agent._wt_branch
-        original = agent._original_branch
-        assert wt_dir is not None and branch is not None and original is not None
-
-        (wt_dir / "agent_output.txt").write_text("important work\n")
-
-        r = subprocess.run(
-            ["git", "-C", str(self.repo), "rev-list", "--count",
-             f"{original}..{branch}"],
-            capture_output=True, text=True,
-        )
-        assert r.stdout.strip() == "0", "No commits before check"
-
-        merge_conflict(server, "0")
-
-        r = subprocess.run(
-            ["git", "-C", str(self.repo), "rev-list", "--count",
-             f"{original}..{branch}"],
-            capture_output=True, text=True,
-        )
-        assert r.stdout.strip() == "0", (
-            "BUG-9 FIX: _conflict_of must not create commits"
-        )
-
-        agent.discard()
-
     def test_present_pending_worktree_does_not_commit(self) -> None:
-        """_present_pending_worktree must not auto-commit via conflict check."""
+        """_present_pending_worktree must not auto-commit."""
 
         server, events = _make_server(self.repo)
         agent = ChatSorcarAgent("Sorcar")
@@ -221,7 +186,7 @@ class TestBug9Fix:
         _create_worktree(agent, self.repo)
         wt_dir = agent._wt_dir
         branch = agent._wt_branch
-        original = agent._original_branch
+        original = agent.worktrees[0].original_branch
         assert wt_dir is not None and branch is not None and original is not None
 
         (wt_dir / "agent_output.txt").write_text("work\n")
@@ -236,61 +201,5 @@ class TestBug9Fix:
         assert r.stdout.strip() == "0", (
             "BUG-9 FIX: _present_pending_worktree must not auto-commit"
         )
-
-        agent.discard()
-
-    def test_conflict_detected_when_both_sides_modify_same_file(self) -> None:
-        """Conflict is reported when the same file is changed on both sides."""
-
-        server, events = _make_server(self.repo)
-        agent = ChatSorcarAgent("Sorcar")
-        _attach_worktree_state(agent)
-
-        _create_worktree(agent, self.repo)
-        wt_dir = agent._wt_dir
-        original = agent._original_branch
-        assert wt_dir is not None and original is not None
-
-        (wt_dir / "fileA.txt").write_text("agent version\n")
-
-        tmp_wt = self.repo / ".kiss-worktrees" / "tmp_conflict"
-        _git("worktree", "add", "-b", "tmp-conflict", str(tmp_wt), cwd=self.repo)
-        (tmp_wt / "fileA.txt").write_text("main version\n")
-        _git("add", "-A", cwd=tmp_wt)
-        _git("commit", "-m", "conflicting change", cwd=tmp_wt)
-        _git("worktree", "remove", str(tmp_wt), "--force", cwd=self.repo)
-        _git("checkout", original, cwd=self.repo)
-        _git("merge", "--ff-only", "tmp-conflict", cwd=self.repo)
-        _git("branch", "-d", "tmp-conflict", cwd=self.repo)
-
-        assert merge_conflict(server, "0") is True
-
-        agent.discard()
-
-    def test_no_conflict_when_different_files_changed(self) -> None:
-        """No conflict when original and worktree modify different files."""
-
-        server, events = _make_server(self.repo)
-        agent = ChatSorcarAgent("Sorcar")
-        _attach_worktree_state(agent)
-
-        _create_worktree(agent, self.repo)
-        wt_dir = agent._wt_dir
-        original = agent._original_branch
-        assert wt_dir is not None and original is not None
-
-        (wt_dir / "fileA.txt").write_text("agent version\n")
-
-        tmp_wt = self.repo / ".kiss-worktrees" / "tmp_noconflict"
-        _git("worktree", "add", "-b", "tmp-noconflict", str(tmp_wt), cwd=self.repo)
-        (tmp_wt / "other_file.txt").write_text("other content\n")
-        _git("add", "-A", cwd=tmp_wt)
-        _git("commit", "-m", "non-conflicting change", cwd=tmp_wt)
-        _git("worktree", "remove", str(tmp_wt), "--force", cwd=self.repo)
-        _git("checkout", original, cwd=self.repo)
-        _git("merge", "--ff-only", "tmp-noconflict", cwd=self.repo)
-        _git("branch", "-d", "tmp-noconflict", cwd=self.repo)
-
-        assert merge_conflict(server, "0") is False
 
         agent.discard()

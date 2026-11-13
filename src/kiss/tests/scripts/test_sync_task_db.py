@@ -39,6 +39,7 @@ from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
 from kiss.tests.conftest import posix_only
+from kiss.tests.persistence_helpers import close_db
 
 _SCRIPT = Path(__file__).resolve().parents[4] / "scripts" / "sync-task-db.sh"
 
@@ -554,30 +555,28 @@ class SyncTaskDbPushTest(unittest.TestCase):
 
     def test_history_panel_lists_the_shipped_tasks(self) -> None:
         """The shipped database is what the History panel reads."""
-        saved = (th._KISS_DIR, th._DB_PATH, th._db_conn)
+        saved = (th._KISS_DIR, th._DB_PATH)
         try:
             th._KISS_DIR = self.local_home
             th._DB_PATH = self.local_home / "history.db"
-            th._db_conn = None
-            th._close_db()
+            close_db()
             for i in range(25):
                 task_id, _ = th._add_task(f"local task {i}", "", {"model": "m"})
                 # A task that has only started is held back; these have ended.
                 th._save_task_result(f"done {i}", task_id=task_id)
-            th._close_db()
+            close_db()
 
             self.assertEqual(self._push().returncode, 0)
 
             th._KISS_DIR = self.remote_home / ".kiss"
             th._DB_PATH = th._KISS_DIR / "history.db"
-            th._db_conn = None
-            th._close_db()
+            close_db()
             titles = [str(e["task"]) for e in th._load_history()]
             self.assertEqual(len(titles), 25)
             self.assertIn("local task 24", titles)
         finally:
-            th._KISS_DIR, th._DB_PATH, th._db_conn = saved
-            th._close_db()
+            th._KISS_DIR, th._DB_PATH = saved
+            close_db()
 
 
 if __name__ == "__main__":

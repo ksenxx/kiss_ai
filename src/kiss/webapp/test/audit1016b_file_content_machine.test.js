@@ -23,7 +23,7 @@ const H = require('./ui_antipattern_harness');
 const harness = require('./simplify2_harness');
 const {MACHINES} = require('./settings_helpers');
 
-const {makePage, send, sleep, click} = H;
+const {makePage, send, sleep, click, ofType} = H;
 
 function setUp(ctx) {
   const {win} = ctx;
@@ -57,7 +57,7 @@ async function openEditAndSave(ctx, fileEvent) {
   const views = win.document.querySelectorAll('.content-tab-view');
   const view = views[views.length - 1];
   click(win, view.querySelector('.content-save-btn'));
-  const saves = posted.filter(m => m.type === 'saveFile');
+  const saves = ofType(posted, 'saveFile');
   assert.strictEqual(saves.length, 1, 'one saveFile was posted');
   return saves[0];
 }
@@ -121,7 +121,7 @@ function contentTabCount(win) {
   return win._testApi.openTabs().filter(t => t.isContentTab).length;
 }
 
-async function testReportFollowsTheBinding() {
+function testReportFollowsTheBinding() {
   const ctx = makePage();
   const {win} = ctx;
   setUp(ctx);
@@ -169,7 +169,7 @@ async function testReportFollowsTheBinding() {
 (async () => {
   await testUnstampedReplyStaysLocal();
   await testStampedReplyStaysOnItsMachine();
-  await testReportFollowsTheBinding();
+  testReportFollowsTheBinding();
   console.log('audit1016b_file_content_machine: all passed');
   process.exit(0);
 })().catch(e => {

@@ -29,8 +29,9 @@
   // each time the browser is backgrounded.  This flag only picks the
   // wording of the status surface ("Reconnecting" vs "starting").
   let _hadAuthThenClosed = false;
-  // Reconnect backoff attempt count — reset to 0 after a successful
-  // ``auth_ok`` so a fresh disconnect tries again almost immediately.
+  // Reconnect backoff attempt count — reset to 0 once a session has
+  // stayed up ``_STABLE_AFTER_MS``, so a fresh disconnect of a healthy
+  // connection tries again almost immediately.
   let _reconnectAttempt = 0;
   // Pending reconnect timer id, used so visibilitychange / pageshow /
   // online wake-ups can short-circuit the scheduled delay.
@@ -119,10 +120,16 @@
   }
 
   // The server answered: any outage or lockout is over, so the overlay
-  // escalation / lockout countdown stops.
+  // escalation / lockout countdown stops.  So is what the previous
+  // answer left for the close that was to follow it: a close that
+  // never consumed it (the password dialog was open, or a wake-up
+  // replaced the socket before its onclose ran) must not hand it to
+  // this session's own close.
   function _endOutage() {
     _outageSince = 0;
     _lockedUntil = 0;
+    _lockedRetryMs = 0;
+    _preAuthErrorShown = false;
     _stopOverlayTick();
   }
 
@@ -134,8 +141,8 @@
    * with the elapsed seconds and a "Retry now" button, so the user is
    * never left with a bare spinner and no idea whether waiting helps.
    * The tick only runs between ``onclose`` / ``auth_locked`` (which set
-   * ``_outageSince`` / ``_lockedUntil``) and the next ``auth_ok`` /
-   * ``auth_required`` (which clear them and stop it).  A lockout that
+   * ``_outageSince`` / ``_lockedUntil``) and the server's next answer
+   * (``_endOutage`` clears them and stops it).  A lockout that
    * has run out with no server answer hands over to the outage (or
    * cancelled-dialog) wording via ``_endLockout`` instead of counting
    * "0 s" forever.
@@ -164,7 +171,7 @@
   /**
    * The lockout deadline passed without a server answer clearing it.
    *
-   * Only ``auth_ok`` / ``auth_required`` reset ``_lockedUntil``, so an
+   * Only a server answer (``_endOutage``) resets ``_lockedUntil``, so an
    * expired lockout with the socket still down means the reconnect
    * scheduled for its end is failing (server gone, device offline).
    * Stop the countdown and hand the overlay to the state that now
@@ -253,25 +260,53 @@
   // the batch, and never part of a batch a reconnect re-sends.
   let _held = [];
   // The frames a re-sent batch must never carry: the daemon cannot tell
-  // a re-sent one from a new one and would run the user's action again
+  // a re-sent one from a new one.  It would run the user's action again
   // (a prompt, a scheduled job, a device login, a keystroke, an Explorer
-  // paste that names its copy afresh each time).  Posted while the
-  // daemon is unreachable (main.js holds prompts back once it hears of
-  // the drop, but a socket is CLOSING before ``onclose`` says so) such
-  // a frame waits in ``_held``, never in ``_pending``.
+  // paste that names its copy afresh each time, a step Back or Forward
+  // in the browser's history, a new browser page, a daemon restart or
+  // update, a Git, worktree, commit or machine action, a sign-in step,
+  // a paid transcription or forced task update, a file or model usage
+  // count), or refuse the second delivery of the change the first one
+  // made (a promptlet edited or deleted, a custom model added).  Posted
+  // while the daemon is unreachable (main.js holds prompts back once it
+  // hears of the drop, but a socket is CLOSING before ``onclose`` says
+  // so) such a frame waits in ``_held``, never in ``_pending``.  Every
+  // other command of api.js changes nothing when delivered twice;
+  // ``stop`` alone is re-sent although it names no run: held back, it
+  // would wait out the resync of a slow link.
   const _ONCE_ONLY = new Set([
     'submit',
     'appendUserMessage',
     'userAnswer',
     'newChat',
     'cronAction',
+    'machineAction',
     'addTrick',
+    'editTrick',
+    'deleteTrick',
+    'saveMyModel',
+    'selectModel',
+    'recordFileUsage',
+    'getTaskUpdate',
+    'voiceTranscribe',
     'startCodexLogin',
     'openExternal',
     'shareChat',
+    'browserOpen',
+    'browserNavigate',
     'browserInput',
     'terminalInput',
     'fsAction',
+    'serverReset',
+    'runUpdate',
+    'updateWhenIdle',
+    'updateModels',
+    'gitAction',
+    'worktreeAction',
+    'autocommitAction',
+    'signinLogin',
+    'signinPaste',
+    'signinCancel',
   ]);
   try {
     if (_offlineShell) {
@@ -764,6 +799,15 @@
     if (err) err.textContent = text;
   }
 
+  // The dialog's line while the reconnect an Unlock started keeps failing.
+  const _UNREACHABLE = 'Cannot reach the server; retrying ...';
+
+  /** Clear the ``_UNREACHABLE`` line: the server has answered. */
+  function _dropUnreachableNote() {
+    const err = document.getElementById('auth-modal-error');
+    if (err && err.textContent === _UNREACHABLE) err.textContent = '';
+  }
+
   /**
    * Ask for the password (once) and send it on the current socket.
    *
@@ -787,7 +831,7 @@
    */
   function _showPasswordNeeded() {
     _promptDeclined = true;
-    _dispatchToApp({type: 'daemonStatus', connected: false});
+    _dispatchDisconnected(false);
     const msg = document.getElementById('kiss-server-loading-msg');
     if (msg) msg.textContent = 'A password is needed to use this server.';
     _setOverlayAction('Enter password', _reopenPasswordPrompt);
@@ -839,6 +883,43 @@
       unconfirmed: _pending
         .concat(_inflight, _held)
         .map(data => JSON.parse(data)),
+    });
+  }
+
+  // The requests main.js gives up the moment it hears that the daemon is
+  // unreachable: a pending file save ("Save failed: the server connection
+  // dropped"; it starts no other until the daemon is back) and whatever
+  // the Explorer or the Source Control view awaited a reply to ("the
+  // pending Explorer/Git action was not completed. Try again once it
+  // reconnects"; its reply would find no request any more).  One still
+  // waiting here is no longer owed: sent later, it would write the file
+  // the user was told had not been saved (their retry then refused as a
+  // conflict with it), or run the action behind the user, whose retry
+  // would run it a second time.  An action posted under the banner that
+  // follows is held for the ``pong`` of the next connection
+  // (``_ONCE_ONLY``) and is given up likewise if that one drops first.
+  const _GIVEN_UP_AT_DROP = new Set([
+    'saveFile',
+    'fsAction',
+    'gitAction',
+    'gitShow',
+  ]);
+
+  function _stillOwed(data) {
+    return !_GIVEN_UP_AT_DROP.has(JSON.parse(data).type);
+  }
+
+  // Tell main.js the daemon is unreachable; *reconnecting* when the app
+  // was authenticated and on screen in this page, where it stays under
+  // a banner.
+  function _dispatchDisconnected(reconnecting) {
+    _pending = _pending.filter(_stillOwed);
+    _inflight = _inflight.filter(_stillOwed);
+    _held = _held.filter(_stillOwed);
+    _dispatchToApp({
+      type: 'daemonStatus',
+      connected: false,
+      reconnecting: reconnecting,
     });
   }
 
@@ -909,7 +990,7 @@
       // re-sends ``auth_locked`` with a fresher ``retry_after``.
       const lockedDelay = _lockedRetryMs;
       _lockedRetryMs = 0;
-      _dispatchToApp({type: 'daemonStatus', connected: false});
+      _dispatchDisconnected(false);
       _scheduleReconnectIn(lockedDelay);
       return;
     }
@@ -925,7 +1006,7 @@
       // reconnects at once) work while the server is unreachable.
       if (!_authPrompt) {
         _promptForPassword();
-        _setAuthError('Cannot reach the server; retrying ...');
+        _setAuthError(_UNREACHABLE);
       }
       _scheduleReconnect();
       return;
@@ -960,11 +1041,7 @@
     // that sending is on hold (``main.js`` holds prompts back while
     // the daemon is down); on the next ``auth_ok`` main.js sends
     // ``ready`` again and the server resyncs everything in place.
-    _dispatchToApp({
-      type: 'daemonStatus',
-      connected: false,
-      reconnecting: _hadAuthThenClosed,
-    });
+    _dispatchDisconnected(_hadAuthThenClosed);
     _scheduleReconnect();
   }
 
@@ -995,11 +1072,7 @@
       if (_authenticated) {
         _hadAuthThenClosed = true;
         _updateLoadingMsg(true);
-        _dispatchToApp({
-          type: 'daemonStatus',
-          connected: false,
-          reconnecting: true,
-        });
+        _dispatchDisconnected(true);
       }
       _requeueUnconfirmed();
       _dropSocket(_ws);
@@ -1015,11 +1088,15 @@
     const query = window.name === 'kiss-app-window' ? '?appWindow=1' : '';
     _ws = new WebSocket(scheme + location.host + '/ws' + query);
     _authenticated = false;
+    // The typed password this socket's first ``auth`` carried, '' for
+    // the stored-password probe: what an ``auth_required`` rejects.
+    let typedFirst = '';
 
     _ws.onopen = function () {
       // A password typed while the socket was down (still pending,
       // so not stored yet) wins over the stored one.
-      let pwd = _authPassword;
+      typedFirst = _authPassword;
+      let pwd = typedFirst;
       if (!pwd) {
         try {
           pwd = localStorage.getItem(_PASSWORD_KEY) || '';
@@ -1154,7 +1231,9 @@
         return;
       }
       if (msg.type === 'auth_required') {
-        _authPassword = '';
+        // Only this socket's first ``auth`` was judged: a password the
+        // user sent after it (Unlock before this answer) stays pending.
+        if (_authPassword === typedFirst) _authPassword = '';
         // Stored password (if any) was rejected; drop it so a refresh
         // re-prompts instead of silently retrying the bad value.
         _forgetStoredPassword();
@@ -1183,6 +1262,11 @@
         _setOverlayAction(null, null);
         _dispatchConnected();
         _promptForPassword();
+        // The server answers a wrong FIRST ``auth`` with this frame, not
+        // with ``error``: say so when that was a typed password.
+        if (typedFirst)
+          _setAuthError('That password is not correct. Try again.');
+        else _dropUnreachableNote();
         return;
       }
       if (
@@ -1190,12 +1274,13 @@
         msg.code === 'auth_failed' &&
         _authenticated
       ) {
-        // The password was changed (Settings > Remote password on the
-        // daemon's computer, or install.sh on a fresh install) after
-        // this socket authenticated: the server refused a frame and is
-        // closing the socket.  Forget the stale password so the
-        // reconnect probes with the uncounted empty one and gets the
-        // password dialog, not a counted wrong guess.
+        // The password was changed or cleared (Settings > Remote
+        // password, or install.sh on a fresh install) after this
+        // socket authenticated: the server shut the session out, at
+        // its next frame or without one, and is closing the socket.
+        // Forget the stale password so the reconnect probes with the
+        // uncounted empty one and gets the password dialog (or, with
+        // remote access off, the refusal), not a counted wrong guess.
         _forgetStoredPassword();
         _authPassword = '';
         _sessionPassword = '';
@@ -1209,13 +1294,17 @@
         // This page saved a new remote password (Settings > Remote
         // password) and is the one client told it back.  Adopt it
         // before the page sends another frame: the server checks the
-        // password on every frame, so the old one would be refused
-        // and this session shut out.  A page admitted without a
-        // password (loopback) keeps sending bare frames.  An EMPTY
-        // password turns remote access off, this page included: it
-        // is signed out at its next frame, so forget the old
-        // credential now (its grace ended with the save) and let the
-        // reconnect's handshake report that remote access is off.
+        // password on every frame of a page it admitted by password,
+        // so the old one would be refused and this session shut out.
+        // A page that holds no password (the browser on the daemon's
+        // machine, served without one) keeps sending bare frames.
+        // An EMPTY password (remote access turned off) is told only
+        // to a page served without one; it gets here when that page
+        // still holds a password in localStorage (typed before
+        // loopback pages stopped being asked for one, say): forget
+        // it, so that no later frame or page load repeats it.  A
+        // page admitted by password is shut out with ``auth_failed``
+        // (above) instead.
         _sessionPassword = msg.password;
         if (msg.password) {
           _storePassword(msg.password);
@@ -1252,7 +1341,7 @@
         const over = document.getElementById('kiss-server-loading-msg');
         if (over) over.textContent = text;
         _preAuthErrorShown = true;
-        _dispatchToApp({type: 'daemonStatus', connected: false});
+        _dispatchDisconnected(false);
         return;
       }
       if (msg.type === 'auth_locked') {
@@ -1265,6 +1354,9 @@
         // out the lockout instead of reconnecting on the fast backoff
         // — the eventual reconnect gets ``auth_required`` again and
         // the password modal finally appears.
+        // The typed password may be the guess that tripped the lock, and
+        // every wrong one is counted: never send it again unasked.
+        _authPassword = '';
         let secs = Math.ceil(Number(msg.retry_after));
         if (!(secs > 0)) secs = 60;
         _lockedRetryMs = secs * 1000;
@@ -1273,7 +1365,7 @@
         _startOverlayTick();
         // Re-gate the app while we wait (idempotent when the loading
         // overlay is already up, e.g. on a fresh page load).
-        _dispatchToApp({type: 'daemonStatus', connected: false});
+        _dispatchDisconnected(false);
         return;
       }
       // SECURITY — never forward server data frames to the app before
@@ -1299,34 +1391,24 @@
   // backoff timer.  Without them the user would stare at the loading
   // overlay for the remainder of the (paused) backoff after every
   // app-switch round-trip.
-  if (
-    typeof document !== 'undefined' &&
-    typeof document.addEventListener === 'function'
-  ) {
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') {
-        _reconnectNowIfNeeded();
-      }
-    });
-  }
-  if (
-    typeof window !== 'undefined' &&
-    typeof window.addEventListener === 'function'
-  ) {
-    // ``pageshow`` covers Safari's bfcache restore, which does not
-    // fire ``visibilitychange``.
-    window.addEventListener('pageshow', () => {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
       _reconnectNowIfNeeded();
-    });
-    window.addEventListener('online', () => {
-      _reconnectNowIfNeeded();
-    });
-    // ``focus`` is the universal fallback for older mobile browsers
-    // that ignore visibilitychange/pageshow under certain conditions.
-    window.addEventListener('focus', () => {
-      _reconnectNowIfNeeded();
-    });
-  }
+    }
+  });
+  // ``pageshow`` covers Safari's bfcache restore, which does not
+  // fire ``visibilitychange``.
+  window.addEventListener('pageshow', () => {
+    _reconnectNowIfNeeded();
+  });
+  window.addEventListener('online', () => {
+    _reconnectNowIfNeeded();
+  });
+  // ``focus`` is the universal fallback for older mobile browsers
+  // that ignore visibilitychange/pageshow under certain conditions.
+  window.addEventListener('focus', () => {
+    _reconnectNowIfNeeded();
+  });
 
   connect();
 })();

@@ -52,6 +52,9 @@
   // the tab on "Loading…" until the browser's own network timeout,
   // minutes later (terminalTab.js gives xterm.js the same 15 s).
   const LOAD_TIMEOUT_MS = 15000;
+  // How long a closed viewer waits for its worker to free the document
+  // (a message round trip) before stopping the worker regardless.
+  const DESTROY_TIMEOUT_MS = 2000;
 
   let pdfjsPromise = null;
   let pdfjsAttempts = 0;
@@ -642,12 +645,25 @@
     /**
      * Drop pdf.js's handle on the port and stop the viewer's own
      * worker; harmless twice.
+     *
+     * pdf.js takes a document's fonts (document.fonts, a style sheet)
+     * and the SVG of its filters out of the page only when the worker
+     * has answered the document free, which a dead or hung worker never
+     * does.  The loading task keeps its transport until then, so what
+     * is still there is this document's and is removed here; the other
+     * viewers have their own.  (Internals of the pinned pdf.js: check
+     * `_transport`, `fontLoader` and `filterFactory` again when
+     * PDFJS_ROOT names another version.)
      */
     function stopWorker() {
       if (state.pdfWorker) state.pdfWorker.destroy();
       if (state.worker) state.worker.terminate();
       state.pdfWorker = null;
       state.worker = null;
+      const transport = state.loadingTask && state.loadingTask._transport;
+      if (!transport) return;
+      transport.fontLoader.clear();
+      transport.filterFactory.destroy();
     }
 
     /**
@@ -755,12 +771,18 @@
       // handle on the port and stop the viewer's own worker.  A worker
       // with no document to free (getDocument threw, the worker failed,
       // or the document never arrived: pdf.js's destroy waits for an
-      // answer such a worker never gives) is stopped at once.
+      // answer such a worker never gives) is stopped at once.  A worker
+      // that hung after its pages arrived never answers either: it is
+      // stopped DESTROY_TIMEOUT_MS later, not left spinning for good.
       if (state.loadingTask && state.worker && state.pages.length) {
+        const giveUp = setTimeout(stopWorker, DESTROY_TIMEOUT_MS);
         state.loadingTask
           .destroy()
           .catch(() => {})
-          .then(stopWorker);
+          .then(() => {
+            clearTimeout(giveUp);
+            stopWorker();
+          });
       } else {
         stopWorker();
       }

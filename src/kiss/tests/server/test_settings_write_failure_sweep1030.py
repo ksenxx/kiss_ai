@@ -11,6 +11,9 @@
   got neither its notice nor its ``reply`` ``configData``.
 * ``saveConfig`` whose ``save_config`` write failed answered nothing:
   no ``error`` and no ``configData``.
+* ``setMachine`` whose ``save_config`` write failed answered nothing
+  either: the picking page kept showing a machine no other surface and
+  no restart would ever see.
 * ``saveConfig`` started the Chrome bridge before its replies, and a
   start failure other than ``ChromeBridgeError`` (its serving thread
   refused under thread exhaustion) cost the save its ``models`` and
@@ -29,12 +32,14 @@ import sys
 import threading
 import unittest
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 from websockets.sync.server import Server
 
 from kiss.agents.sorcar import chrome_bridge
 from kiss.core import user_config
+from kiss.server.commands import _CommandsMixin
 from kiss.tests.conftest import is_root, nproc_limit_lowered_to_one, thread_start_can_be_starved
 from kiss.tests.server.pause import Pause
 from kiss.tests.server.two_client_harness import Client, TwoClientHarness
@@ -51,6 +56,17 @@ def _lock_is_free(lock: threading.RLock) -> bool:
         return False
     lock.release()
     return True
+
+
+def _unreadable_once_set_machine_reads(_frame_locals: dict[str, Any]) -> bool:
+    """Make ``config.json`` unreadable as ``setMachine`` starts a read of it; holds nobody."""
+    frame: FrameType | None = sys._getframe()
+    while frame is not None:
+        if frame.f_code is _CommandsMixin._cmd_set_machine.__code__:
+            user_config.CONFIG_PATH.chmod(0)
+            break
+        frame = frame.f_back
+    return False
 
 
 @unittest.skipIf(
@@ -120,6 +136,53 @@ class SettingsWriteFailureTest(TwoClientHarness):
         error = self.wait_event(a, "error")
         self.assertIn("Could not save the settings", error["text"])
         self.assertEqual(error["command"], "saveConfig")
+
+    def test_a_machine_pick_the_config_cannot_record_is_answered(self) -> None:
+        """The sender gets an ``error`` and the machine still in force; nobody else is told.
+
+        The unreadable file reads as the defaults, which name this
+        machine: the sender used to be put back on this machine
+        whatever machine was in force, and its pick of this machine
+        passed for the one already picked (no answer at all).  So it
+        was for a file that turned unreadable just as the handler read
+        it, after a look that had found it readable.
+        """
+        a = self._client()
+        b = self.open_client("b")
+        b.ready()
+        self.wait_event(b, "models")
+        self._make_config_unreadable()
+        # The daemon has seen no machine yet: it has none to name.
+        a.send({"type": "setMachine", "machine": "elsewhere"})
+        self.wait_event(a, "error", command="setMachine")
+        user_config.CONFIG_PATH.chmod(0o600)
+        a.send({"type": "setMachine", "machine": "in-force"})
+        self.wait_event(b, "machineChanged", machine="in-force")
+        self.wait_event(a, "machineChanged")
+        self.assertEqual([e["machine"] for e in a.of_type("machineChanged")], ["in-force"])
+
+        for failures, pick in enumerate(("elsewhere", ""), start=2):
+            # Readable when the pick arrives, unreadable from the handler's read on.
+            user_config.CONFIG_PATH.chmod(0o600)
+            with Pause(
+                user_config._read_stored_config.__code__, _unreadable_once_set_machine_reads,
+            ):
+                a.send({"type": "setMachine", "machine": pick})
+                self.wait_for(
+                    lambda: len(a.of_type("error", command="setMachine")) == failures
+                    and len(a.of_type("machineChanged")) == failures,
+                    what=f"the answer to the pick of {pick!r}",
+                )
+            self.assertIn("Could not save the machine", a.of_type("error")[-1]["text"])
+            self.assertEqual(a.of_type("machineChanged")[-1]["machine"], "in-force")
+        self.assertEqual([e["machine"] for e in b.of_type("machineChanged")], ["in-force"])
+        self.assertEqual(b.of_type("error"), [])
+
+        user_config.CONFIG_PATH.chmod(0o600)
+        self.assertEqual(user_config.load_config()["last_machine"], "in-force")
+        a.send({"type": "setMachine", "machine": "elsewhere"})
+        self.wait_event(b, "machineChanged", machine="elsewhere")
+        self.assertEqual(user_config.load_config()["last_machine"], "elsewhere")
 
     @unittest.skipUnless(
         thread_start_can_be_starved(),

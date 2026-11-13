@@ -31,6 +31,7 @@ def _is_mp3(data: bytes) -> bool:
     )
 
 
+@pytest.mark.live_api
 @requires_openai
 def test_synthesize_returns_playable_mp3() -> None:
     """A short utterance synthesizes to non-trivial base64 MP3 audio."""
@@ -47,6 +48,7 @@ def test_synthesize_returns_playable_mp3() -> None:
     assert _is_mp3(data)
 
 
+@pytest.mark.live_api
 @requires_openai
 def test_default_narrator_voice_synthesizes_multi_sentence_take() -> None:
     """The default voice reads a multi-sentence script as one MP3 clip.
@@ -69,6 +71,7 @@ def test_default_narrator_voice_synthesizes_multi_sentence_take() -> None:
     assert _is_mp3(data)
 
 
+@pytest.mark.live_api
 @requires_openai
 def test_synthesis_persists_no_trajectory_files() -> None:
     """A TTS run must not write a trajectory YAML to the artifact dir.
@@ -89,6 +92,7 @@ def test_synthesis_persists_no_trajectory_files() -> None:
     assert after == before
 
 
+@pytest.mark.live_api
 @requires_openai
 def test_text_with_literal_braces_synthesizes() -> None:
     """Text containing literal ``{...}`` braces synthesizes to MP3.

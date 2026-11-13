@@ -49,6 +49,7 @@ const {
 const {
   gatewaySession,
   answerHistory: sendHistory,
+  chatHeader: header,
 } = require('./history_helpers');
 
 function makePage() {
@@ -171,10 +172,6 @@ function collapsed(win, chatId) {
 
 function activeChat(win, chatId) {
   return group(win, chatId).classList.contains('history-active-chat');
-}
-
-function header(win, chatId) {
-  return group(win, chatId).querySelector(':scope > .history-chat-header');
 }
 
 function chevron(win, chatId) {

@@ -20,10 +20,7 @@ const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {send} = require('./simplify2_harness');
 const {
-  VOICE_CFG,
-  voicePageState,
-  stubVoiceSurface,
-  makeBareVoiceWindow,
+  makeBareVoicePage,
   micBtn,
   startPipeline,
   wake,
@@ -38,12 +35,7 @@ const windows = [];
 
 /** A bare voice.js window over the stubbed voice surface. */
 function makeWindow() {
-  const page = voicePageState();
-  page.posted = [];
-  page.win = makeBareVoiceWindow(VOICE_CFG, win => {
-    stubVoiceSurface(win, page);
-    win.addEventListener('kiss-voice-post', e => page.posted.push(e.detail));
-  });
+  const page = makeBareVoicePage();
   windows.push(page.win);
   return page;
 }
@@ -133,15 +125,17 @@ async function main() {
 
     await startPipeline(page);
     speakRound(page);
+    const older = lastRoundTag(page);
     speakRound(page);
+    const newer = lastRoundTag(page);
 
-    send(win, {type: 'voiceSpeech', text: 'first'});
+    send(win, {type: 'voiceSpeech', text: 'first', round: older});
     assert.ok(
       btn.classList.contains('voice-transcribing'),
       'the newer in-flight round still owns the yellow flash',
     );
 
-    send(win, {type: 'voiceSpeech', text: 'second'});
+    send(win, {type: 'voiceSpeech', text: 'second', round: newer});
     assert.ok(!btn.classList.contains('voice-transcribing'));
   });
 

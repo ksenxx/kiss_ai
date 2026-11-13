@@ -409,15 +409,27 @@ _OWNER = autorouter_sea.kiss_checkout(str(_CHECKOUT))
 the main checkout when the tests run inside a linked task worktree."""
 
 
+def _in_a_git_tree(path: Path) -> bool:
+    """Whether *path* or a directory above it holds a ``.git`` entry."""
+    return any((base / ".git").exists() for base in (path, *path.parents))
+
+
 @pytest.fixture
 def foreign_dir() -> Iterator[Path]:
     """An empty directory outside every checkout, removed afterwards.
 
-    In the system temp dir, not under ``tmp_path``: with an in-repo
+    In the session's temp dir, not under ``tmp_path``: with an in-repo
     ``--basetemp`` every ``tmp_path`` is inside the checkout, which
-    :func:`autorouter_sea.kiss_checkout` walks up to.
+    :func:`autorouter_sea.kiss_checkout` walks up to.  With ``TMPDIR``
+    in the checkout the session's temp dir is inside it as well, so the
+    directory is made in ``/tmp`` then; the test is skipped when that is
+    no way out of every git tree either.
     """
-    with tempfile.TemporaryDirectory(prefix="kiss-foreign-") as path:
+    roots = [Path(root).resolve() for root in (tempfile.gettempdir(), "/tmp")]
+    outside = [root for root in roots if root.is_dir() and not _in_a_git_tree(root)]
+    if not outside:
+        pytest.skip("every temp dir is inside a git tree")
+    with tempfile.TemporaryDirectory(prefix="kiss-foreign-", dir=outside[0]) as path:
         yield Path(path).resolve()
 
 
@@ -531,9 +543,9 @@ def test_concurrent_first_picks_schedule_a_single_job(
 ) -> None:
     """Picks racing from a checkout and from a scratch dir create one job, not one each.
 
-    Through the daemon's real hook runner (``run_picked_hook``), which loads
-    the SEA file afresh per call and lets the hooks overlap: the cron
-    store's ``ensure`` is what keeps the job single.
+    Through the daemon's real hook runner (``run_picked_hook``), which runs
+    one hook at a time per directory and lets those of the two directories
+    overlap: the cron store's ``ensure`` is what keeps the job single.
     """
     monkeypatch.setenv("KISS_HOME", str(tmp_path / "home"))
     assert sea_commands.model_sea("autorouter") == _SEA_PATH

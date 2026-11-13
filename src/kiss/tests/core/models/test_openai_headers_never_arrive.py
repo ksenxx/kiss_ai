@@ -28,6 +28,13 @@ reported as the same stall or Stop; the client it cut is retired so the
 next turn of the same model instance sends through a fresh one.  The
 ``_TricklingHeaderServer`` tests below talk to a raw loopback socket
 that never finishes its header.
+
+Audit B/C5 (2026-11-10).  Cutting the pool's sockets wakes a call
+waiting on one, not the SDK asleep before its retry: a 429 whose
+``Retry-After`` the SDK honours (up to a minute) held the turn past
+the Stop and the opening deadline.  The opening call now runs on a
+worker thread the turn leaves behind; a stream that still opens there
+is closed by the worker.
 """
 
 from __future__ import annotations
@@ -39,16 +46,20 @@ from collections.abc import Generator
 from typing import Any
 
 import pytest
+from openai import BadRequestError, OpenAI
 
 from kiss.core import stop_signal
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
+from kiss.core.tool_interrupt import inject_async_exception
 from kiss.tests.core.models.openai_sse_harness import (
     Reply,
     Request,
     ScriptedOpenAIServer,
+    assert_left_during_the_retry_sleep,
     chat_chunk,
     responses_event,
+    retry_later,
 )
 
 _STALL_TIMEOUT = 1.0
@@ -320,6 +331,23 @@ def _generate_then_stop(model: Any) -> None:
         stop_signal.set_thread_stop_event(None)
 
 
+def _generate_under(model: Any, stop: threading.Event, errors: list[BaseException]) -> None:
+    """Thread body: run ``model.generate()`` with *stop* bound as the thread's stop event.
+
+    Args:
+        model: The initialised model under test.
+        stop: The stop event to bind.
+        errors: Receives what the turn raised.
+    """
+    stop_signal.set_thread_stop_event(stop)
+    try:
+        model.generate()
+    except BaseException as error:  # noqa: BLE001 - the error is the result
+        errors.append(error)
+    finally:
+        stop_signal.set_thread_stop_event(None)
+
+
 def _assert_stopped(error: BaseException | None, elapsed: float) -> None:
     """Assert the turn unwound as a user stop, not a retryable stall.
 
@@ -487,3 +515,130 @@ class TestResponsesHeadersNeverArrive:
         )
         model.initialize("Say something.")
         _assert_trickling_header_is_cut_then_the_instance_recovers(model, stop)
+
+
+def _streaming_model(base_url: str, stall_timeout: float) -> OpenAICompatibleModel:
+    """Return an initialised streaming chat model pointed at *base_url*."""
+    model = OpenAICompatibleModel(
+        _MODEL,
+        base_url=base_url,
+        api_key="test-key",
+        model_config={"stream_stall_timeout": stall_timeout},
+        token_callback=lambda _t: None,
+    )
+    model.initialize("Say something.")
+    return model
+
+
+@pytest.mark.parametrize("stop", [False, True], ids=["deadline", "stop"])
+def test_the_sdks_retry_sleep_does_not_hold_the_stream_opening(stop: bool) -> None:
+    """The Stop and the opening deadline end a turn whose SDK sleeps out a ``Retry-After``.
+
+    The request given up is not sent again, and its client is retired.
+    """
+    with ScriptedOpenAIServer(retry_later) as server:
+        model = _streaming_model(server.base_url, _STALL_TIMEOUT / 4)
+        stop_event = threading.Event()
+        errors: list[BaseException] = []
+        turn = threading.Thread(
+            target=_generate_under, args=(model, stop_event, errors), daemon=True
+        )
+        assert_left_during_the_retry_sleep(turn, stop_event if stop else None)
+        assert isinstance(errors[0], KeyboardInterrupt if stop else TimeoutError), errors
+        assert model.client is None, "the client of the request given up was kept"
+        assert len(server.requests) == 1, "the request given up was sent again"
+
+
+def test_a_forced_stop_while_the_stream_opens_leaves_no_request_behind(
+    silent_server: tuple[ScriptedOpenAIServer, _SilentGateway],
+) -> None:
+    """The runner's injected ``KeyboardInterrupt`` ends the turn and its opening call's thread."""
+    server, _gateway = silent_server
+    model = _streaming_model(server.base_url, 10 * _DEADLINE)
+    errors: list[BaseException] = []
+    turn = threading.Thread(
+        target=_generate_under, args=(model, threading.Event(), errors), daemon=True
+    )
+    turn.start()
+    deadline = time.monotonic() + _DEADLINE
+    while not server.requests and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert server.requests, "the request never reached the server"
+    assert inject_async_exception(turn.ident or -1, KeyboardInterrupt) == 1
+    turn.join(_DEADLINE)
+    assert not turn.is_alive() and isinstance(errors[0], KeyboardInterrupt), errors
+    while _opening_threads() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _opening_threads(), "the opening call runs on as an orphan thread"
+
+
+def _opening_threads() -> list[threading.Thread]:
+    """The live worker threads of stream-opening calls."""
+    return [thread for thread in threading.enumerate() if thread.name == "model-stream-open"]
+
+
+def test_a_stream_that_opens_after_the_turn_gave_it_up_is_closed() -> None:
+    """The opening call's worker closes a stream nobody is left to read.
+
+    The call here stands for one the abort could not reach: it answers
+    only after the turn has left with the stall, with a real stream the
+    server holds open, and the server then sees the client hang up.
+    """
+    left, hold = threading.Event(), threading.Event()
+
+    def respond(_request: Request) -> Reply:
+        return Reply(sse_chunks=_chat_stream_chunks(), hold=hold)
+
+    with (
+        ScriptedOpenAIServer(respond) as server,
+        OpenAI(base_url=server.base_url, api_key="test-key") as late_client,
+    ):
+        model = _streaming_model(server.base_url, _STALL_TIMEOUT / 4)
+
+        def open_late(**kwargs: Any) -> Any:
+            assert left.wait(_DEADLINE), "the turn never gave the opening call up"
+            return late_client.chat.completions.create(**kwargs)
+
+        try:
+            with pytest.raises(TimeoutError, match="stream_stall_timeout"):
+                model._stream_request(open_late, dict(_REQUEST), list)
+            left.set()
+            assert server.client_disconnected.wait(_DEADLINE), "the late stream was left open"
+        finally:
+            left.set()
+            hold.set()
+
+
+_REQUEST: dict[str, Any] = {"model": _MODEL, "messages": [{"role": "user", "content": "hi"}]}
+
+
+def _refusal(_request: Request) -> Reply:
+    """Responder: refuse every request with a 400, which the SDK does not retry."""
+    return Reply(status=400, json_body={"error": {"message": "refused"}})
+
+
+def test_a_refusal_that_arrives_with_the_stop_is_raised_as_itself() -> None:
+    """Only a connection error is read as the Stop's own cut; the client is retired either way.
+
+    The Stop is set as the provider's 400 comes back, before the opening
+    call's worker hands it over.
+    """
+    stop = threading.Event()
+    with ScriptedOpenAIServer(_refusal) as server:
+        model = _streaming_model(server.base_url, _STALL_TIMEOUT)
+        model._ensure_client()
+        create = model.client.chat.completions.create
+
+        def refuse_as_the_user_stops(**kwargs: Any) -> Any:
+            try:
+                return create(**kwargs)
+            finally:
+                stop.set()
+
+        stop_signal.set_thread_stop_event(stop)
+        try:
+            with pytest.raises(BadRequestError):
+                model._stream_request(refuse_as_the_user_stops, dict(_REQUEST), list)
+        finally:
+            stop_signal.set_thread_stop_event(None)
+        assert model.client is None, "the stopped turn's client was kept"

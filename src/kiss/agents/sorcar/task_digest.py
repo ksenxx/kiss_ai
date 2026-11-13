@@ -34,12 +34,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from kiss.agents.sorcar.chat_summary import end_ms, launch_ms
+from kiss.agents.sorcar.edit_guards import heredoc_copy
 from kiss.agents.sorcar.edit_matching import reindent, tolerant_matches
 from kiss.agents.sorcar.useful_tools import _crlf_edit, _edit_pairs
 
@@ -81,14 +83,16 @@ _PROGRESS_LOG_CHARS = 8_000
 # scratch dir; ``PROGRESS.md`` / ``PROGRESS_LOG.md`` at the root are
 # older conventions.
 _PROGRESS_LOG_NAMES = frozenset({"PROGRESS.md", "PROGRESS_LOG.md"})
+# What a container's batch ``Edit`` answers when it stopped part-way
+# (:meth:`~kiss.agents.sorcar.docker_tools.DockerTools.Edit` writes edit by
+# edit; the host one writes all or nothing): group 1 counts the edits applied.
+_PARTIAL_BATCH = re.compile(r"Error: edit \d+: edits 1-(\d+) applied; ")
 
 # Events that carry no progress information (UI signalling, streaming
 # markers): the digest drops them without a trace.
 _SKIPPED_EVENT_TYPES = frozenset({
     "system_prompt", "task_settings", "thinking_start", "thinking_end",
-    "text_start", "text_end", "task_done", "new_tab", "tasks_updated",
-    "subagentDone", "status", "model_pick", "agent_model_pick",
-    "followup_suggestion", "llm_call",
+    "text_end", "task_done", "followup_suggestion", "llm_call",
 })
 
 # Tool arguments the printer lifts to the top level of a ``tool_call``
@@ -260,10 +264,13 @@ def _totals_spend(ev: dict[str, Any]) -> str:
 
 
 def _event_ms(ev: dict[str, Any]) -> int:
-    """Return an event's time in epoch milliseconds (``ts`` or the row timestamp), or 0."""
+    """Return an event's time in epoch milliseconds (``ts`` or the row timestamp), or 0.
+
+    0 as well for a value that is no number, or no finite one (a foreign writer's).
+    """
     try:
         return int(float(ev.get("ts") or 0)) or int(float(ev.get("_timestamp") or 0) * 1000)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -273,10 +280,14 @@ def _start_ms(task: dict[str, Any]) -> int:
 
 
 def _fmt_ts(ms: int) -> str:
-    """Return *ms* (epoch milliseconds) as a UTC timestamp, or ``unknown``."""
-    if not ms:
+    """Return *ms* (epoch milliseconds) as a UTC timestamp, or ``unknown``.
+
+    ``unknown`` stands for 0 (no time recorded) and for a number no calendar date holds.
+    """
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(ms / 1000)) if ms else "unknown"
+    except (OverflowError, OSError, ValueError):
         return "unknown"
-    return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(ms / 1000))
 
 
 def _fmt_duration(seconds: int) -> str:
@@ -457,9 +468,16 @@ def _contains_any(entry: Entry, terms: list[str]) -> bool:
 
 
 def _child_line(child: dict[str, Any]) -> str:
-    """Return the two-line overview of a sub-agent task row."""
-    cost = float(child.get("cost") or 0.0)
-    status = "running" if not child.get("end_ts") else (
+    """Return the two-line overview of a sub-agent task row.
+
+    Its ``end_ts`` and ``cost`` are read with the guards the row's own
+    header has (:func:`end_ms`): a column a foreign tool filled with
+    text counts as unset instead of raising out of the parent's overview.
+    """
+    from kiss.agents.sorcar.persistence import _safe_float
+
+    cost = _safe_float(child.get("cost"))
+    status = "running" if not end_ms(child.get("end_ts")) else (
         f"finished: {_one_line(child.get('result'), _CHILD_RESULT_CHARS)}"
     )
     return (
@@ -580,20 +598,29 @@ def _tail(text: str, limit: int, marker: str) -> str:
     return marker + "\n" + tail
 
 
-def _replay(text: str, ev: dict[str, Any]) -> str:
+def _replay(text: str, ev: dict[str, Any], shell: str, applied: int | None = None) -> str:
     """Return the log *text* after the task's successful ``Write`` / ``Edit`` call *ev*.
 
-    A ``Write`` puts its content.  An edit replaces its old text (each
-    occurrence with ``replace_all``) as the tool did, including its CRLF
-    fallback (:func:`_crlf_edit`) and, for a single replacement, its
-    unique whitespace-tolerant match (:func:`tolerant_matches`, the new
-    text re-indented by :func:`reindent`); when the old text is not in
+    A ``Write`` puts its content, unless it stands for the here-document
+    append *shell* (the ``Bash`` command it was made for, ``""``: none):
+    its content then opens with the text the file held, other tasks'
+    included, and only the here-document's body is added.  An edit
+    replaces its old text (each occurrence with ``replace_all``) as the
+    tool did, including its CRLF conversion (:func:`_crlf_edit`, under
+    the tool's condition: old text that is missing or of one line, never
+    for an ``exact`` edit) and, for a single replacement that is not
+    ``exact``, its unique whitespace-tolerant match (:func:`tolerant_matches`,
+    the new text re-indented by :func:`reindent`); when the old text is not in
     *text* either way, the file held text the task did not write there,
     so only the edit's new text is added, at the end.  A malformed
-    ``edits`` list changes nothing.
+    ``edits`` list changes nothing.  Of a batch that stopped part-way
+    only the first *applied* edits are replayed (``None``: all of them).
     """
     args = _tool_call_args(ev)
     if ev.get("name") == "Write":
+        copy = heredoc_copy(shell, None)
+        if copy is not None and copy.append:
+            return text + copy.body
         return str(args.get("content") or "")
     pairs = _edit_pairs(str(args["edits"])) if args.get("edits") else [(
         str(args.get("old_string") or ""), str(args.get("new_string") or ""),
@@ -601,14 +628,14 @@ def _replay(text: str, ev: dict[str, Any]) -> str:
     )]
     if isinstance(pairs, str):
         return text
-    crlf = "\r\n" in text
-    for old, new, every in pairs:
-        if old and old not in text:
-            old, new = _crlf_edit(old, new, crlf)
+    exact = str(args.get("exact")).lower() == "true"
+    for old, new, every in pairs[:applied]:
+        if old and not exact and (old not in text or "\n" not in old):
+            old, new = _crlf_edit(old, new, "\r\n" in text)
         if old and old in text:
             text = text.replace(old, new, -1 if every else 1)
             continue
-        matches = tolerant_matches(text, old) if old and not every else []
+        matches = tolerant_matches(text, old) if old and not every and not exact else []
         if len(matches) == 1:
             match = matches[0]
             text = text[:match.start] + reindent(new, match.indent) + text[match.end:]
@@ -625,13 +652,18 @@ def _progress_log_text(task: dict[str, Any]) -> str:
     paired with the result that follows it: a call whose result is an
     error (raised, or returned as ``Error: ...`` text) or that the user
     stopped (``interrupted``, which says nothing of what it wrote) wrote
-    nothing.  A relative path is taken from the task's work dir; the
-    log is the file of the newest successful call.
+    nothing, except that a container's batch ``Edit`` whose error names
+    the edits it applied before the failed one (:data:`_PARTIAL_BATCH`)
+    wrote those.  A relative path is taken from the task's work dir; the
+    log is the file of the newest successful call.  A call that follows
+    a ``Bash`` call before any result is the ``Write`` / ``Edit`` that
+    command was applied as (a here-document, a ``sed -i``).
     """
     work_dir = str(task.get("work_dir") or "")
     logs: dict[str, str] = {}
     newest = ""
-    pending: tuple[str, dict[str, Any]] | None = None
+    pending: tuple[str, dict[str, Any], str] | None = None
+    shell = ""
     for ev in task.get("events") or []:
         if ev.get("type") == "tool_call":
             path = str(ev.get("path") or "")
@@ -640,16 +672,23 @@ def _progress_log_text(task: dict[str, Any]) -> str:
                 ev.get("name") in ("Write", "Edit")
                 and os.path.basename(path) in _PROGRESS_LOG_NAMES
             ):
-                pending = (os.path.normpath(os.path.join(work_dir, path)), ev)
+                pending = (os.path.normpath(os.path.join(work_dir, path)), ev, shell)
+            shell = str(ev.get("command") or "") if ev.get("name") == "Bash" else ""
         elif ev.get("type") == "tool_result":
+            content = str(ev.get("content") or "")
+            partial = _PARTIAL_BATCH.match(content)
             failed = (
                 ev.get("is_error") or ev.get("interrupted")
-                or str(ev.get("content") or "").startswith("Error")
+                or (content.startswith("Error") and not partial)
             )
             if pending is not None and not failed:
                 newest = pending[0]
-                logs[newest] = _replay(logs.get(newest, ""), pending[1])
+                logs[newest] = _replay(
+                    logs.get(newest, ""), pending[1], pending[2],
+                    int(partial[1]) if partial else None,
+                )
             pending = None
+            shell = ""
     return logs.get(newest, "")
 
 

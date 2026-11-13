@@ -24,6 +24,10 @@ These tests render the REAL page returned by
   prompt toast's field, a strip tab, the Stop button, the folder
   picker's buttons, a history row's ids copy button) render as the
   winning rules say.
+* The states the remote skin restyles still show: the composer's
+  pending question and dragged file, the voice button's recording and
+  transcribing colours, the History flat-list switch's hover and
+  selected fills, the Stop button's hover and a focused settings field.
 
 The static server never answers the websocket, so main.js keeps the
 page in its shipped state (no machine registered).  No mocks, patches
@@ -323,6 +327,15 @@ def test_inline_form_save_takes_the_accent_not_the_delete_red(page: Page, theme:
     delete = page.evaluate(_BUTTON_JS, "#probe-delete")
     assert delete["border"] == fail, delete
     assert save["background"] == delete["background"], (save, delete)
+    # Cancel's hover tints its border the ok colour, and a spent
+    # (disabled) delete does not react to the pointer.
+    page.hover(".sidebar-confirm-no")
+    cancel = page.evaluate(_BUTTON_JS, ".sidebar-confirm-no")
+    assert cancel["border"] == page.evaluate(_PALETTE_JS, "var(--status-ok)"), cancel
+    page.evaluate("() => { document.getElementById('probe-delete').disabled = true; }")
+    spent = page.evaluate(_BUTTON_JS, "#probe-delete")
+    page.hover("#probe-delete", force=True)
+    assert page.evaluate(_BUTTON_JS, "#probe-delete") == spent
 
 
 # Elements whose classes meet in main.js, as computed: a promptlet row
@@ -526,3 +539,149 @@ def test_settings_close_button_stays_over_the_scrolled_password_toggle(
     assert got["hitClose"] and not got["hitEye"], got
     page.mouse.click(got["x"], got["y"])
     assert page.evaluate(_SETTINGS_STATE_JS) == {"open": False, "type": "password"}
+
+
+# The composer box's border colour, ring and background as computed.
+_COMPOSER_JS = """
+() => {
+  const cs = getComputedStyle(document.getElementById('input-container'));
+  return {border: cs.borderTopColor, ring: cs.boxShadow, background: cs.backgroundColor};
+}
+"""
+
+# Add or remove a class of the element `sel` names.
+_SET_CLASS_JS = "([sel, name, on]) => document.querySelector(sel).classList.toggle(name, on)"
+
+
+def _themed(page: Page, theme: str) -> None:
+    """Switch the page to `theme`, state colours settling at once."""
+    if theme == "dark":
+        page.evaluate("() => document.body.classList.remove('light-theme')")
+    page.emulate_media(reduced_motion="reduce")
+
+
+def _colour(page: Page, value: str) -> str:
+    """The colour `value` computes to in the page's palette."""
+    colour: str = page.evaluate(_PALETTE_JS, value)
+    return colour
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_composer_shows_a_pending_question_and_a_dragged_file(page: Page, theme: str) -> None:
+    """While an ask_user question waits for its answer the composer is
+    outlined in red, focused or not (the answer is typed into it); a
+    file dragged over it gives it the accent frame and wash, focused
+    or not."""
+    _themed(page, theme)
+    rest = page.evaluate(_COMPOSER_JS)
+    page.evaluate(_SET_CLASS_JS, ["body", "ask-answering", True])
+    asking = page.evaluate(_COMPOSER_JS)
+    assert asking["border"] == _colour(page, "color-mix(in srgb, var(--red) 60%, transparent)")
+    ring = _colour(page, "color-mix(in srgb, var(--red) 30%, transparent)")
+    assert asking["ring"] == f"{ring} 0px 0px 0px 1px" != rest["ring"], (rest, asking)
+    page.focus("#task-input")
+    assert page.evaluate(_COMPOSER_JS) == asking
+    page.evaluate(_SET_CLASS_JS, ["body", "ask-answering", False])
+    page.evaluate(_SET_CLASS_JS, ["#input-container", "drag-over", True])
+    dragging = page.evaluate(_COMPOSER_JS)
+    assert dragging["border"] == _colour(page, "var(--accent)"), dragging
+    assert dragging["background"] != rest["background"], (rest, dragging)
+    page.evaluate("() => document.activeElement.blur()")
+    blurred = page.evaluate(_COMPOSER_JS)
+    assert blurred["border"] == dragging["border"], blurred
+    assert blurred["background"] == dragging["background"], blurred
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_voice_button_shows_recording_and_transcribing(page: Page, theme: str) -> None:
+    """A listening voice button is filled and reads in the strong
+    foreground; while a round records it turns the theme's red and
+    while it transcribes the warning colour, the fill unchanged."""
+    _themed(page, theme)
+    page.evaluate(_SET_CLASS_JS, ["#voice-btn", "active", True])
+    listening = page.evaluate(_BUTTON_JS, "#voice-btn")
+    assert listening["color"] == _colour(page, "var(--fg-strong)"), listening
+    rounds = (("voice-triggered", "var(--red)"), ("voice-transcribing", "var(--warning)"))
+    for state, colour in rounds:
+        page.evaluate(_SET_CLASS_JS, ["#voice-btn", state, True])
+        got = page.evaluate(_BUTTON_JS, "#voice-btn")
+        assert got["color"] == _colour(page, colour) != listening["color"], (state, got)
+        assert got["background"] == listening["background"], (state, got)
+        # A round outlives the listening it started in (trigger turned off).
+        page.evaluate(_SET_CLASS_JS, ["#voice-btn", "active", False])
+        assert page.evaluate(_BUTTON_JS, "#voice-btn")["color"] == got["color"], state
+        page.evaluate(_SET_CLASS_JS, ["#voice-btn", "active", True])
+        page.evaluate(_SET_CLASS_JS, ["#voice-btn", state, False])
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_history_view_switch_fills_on_hover_and_when_selected(page: Page, theme: str) -> None:
+    """The flat-list switch sits on the field surface; the pointer
+    washes it and the selected (flat list) state fills it with the
+    accent tint, pointer or not."""
+    _themed(page, theme)
+    switch = "#history-view-toggle"
+    assert page.evaluate(_BUTTON_JS, switch)["background"] == _colour(page, "var(--surface2)")
+    page.hover(switch)
+    wash = _colour(page, "color-mix(in srgb, var(--fg) 10%, transparent)")
+    assert page.evaluate(_BUTTON_JS, switch)["background"] == wash
+    page.evaluate(_SET_CLASS_JS, [switch, "active", True])
+    accent = _colour(page, "var(--accent)")
+    tint = _colour(page, "color-mix(in srgb, var(--accent) 15%, transparent)")
+    selected = {"color": accent, "border": accent, "background": tint}
+    assert page.evaluate(_BUTTON_JS, switch) == selected
+    page.mouse.move(0, 0)
+    assert page.evaluate(_BUTTON_JS, switch) == selected
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_stop_button_takes_the_send_hover_fill(page: Page, theme: str) -> None:
+    """The Stop button (shown while a task runs) is the Send button's
+    filled circle, and under the pointer it darkens like Send."""
+    _themed(page, theme)
+    page.evaluate("() => { document.getElementById('stop-btn').style.display = 'flex'; }")
+    rest = page.evaluate(_BUTTON_JS, "#stop-btn")
+    page.hover("#stop-btn")
+    hover = page.evaluate(_BUTTON_JS, "#stop-btn")
+    assert hover["background"] == _colour(page, "var(--send-hover-bg)") != rest["background"]
+    assert hover["color"] == rest["color"], (rest, hover)
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_focused_settings_field_takes_the_accent_border(page: Page, theme: str) -> None:
+    """A settings field is framed by the theme's border; focused, the
+    frame turns the accent like its outline."""
+    _themed(page, theme)
+    page.evaluate(_SET_CLASS_JS, ["#settings-panel", "open", True])
+    page.click("#custom-models-toggle")  # the textarea's section starts folded
+    for field in ("#cfg-max-budget", "#cfg-voice-auto-submit", "#cfg-custom-headers"):
+        assert page.evaluate(_BUTTON_JS, field)["border"] == _colour(page, "var(--border)"), field
+        page.focus(field)
+        assert page.evaluate(_BUTTON_JS, field)["border"] == _colour(page, "var(--accent)"), field
+
+
+# The promptlets panel, open, holding a row and an open in-place editor
+# as main.js builds them.
+_PROMPTLET_ROWS_JS = """
+() => {
+  document.getElementById('tricks-panel').classList.add('open');
+  document.getElementById('tricks-list').innerHTML =
+    '<div id="probe-row" class="sidebar-item tricks-item">' +
+    '<span class="sidebar-item-text">a promptlet</span></div>' +
+    '<div id="probe-editor" class="sidebar-item tricks-item editing">' +
+    '<textarea class="tricks-edit-input"></textarea></div>';
+}
+"""
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_open_promptlet_editor_does_not_wash_under_the_pointer(page: Page, theme: str) -> None:
+    """A promptlet row is washed under the pointer (a click injects it);
+    the row holding its open editor is not."""
+    _themed(page, theme)
+    page.evaluate(_PROMPTLET_ROWS_JS)
+    rest = page.evaluate(_BUTTON_JS, "#probe-editor")["background"]
+    page.hover("#probe-row")
+    assert page.evaluate(_BUTTON_JS, "#probe-row")["background"] == _colour(page, "var(--hover)")
+    page.hover("#probe-editor")
+    assert page.evaluate(_BUTTON_JS, "#probe-editor")["background"] == rest

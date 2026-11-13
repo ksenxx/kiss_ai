@@ -34,6 +34,7 @@ from pathlib import Path
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar import cron_agent
 from kiss.tests.conftest import posix_only
+from kiss.tests.persistence_helpers import close_db
 
 _ROOT = Path(__file__).resolve().parents[4]
 _SCRIPT = _ROOT / "scripts" / "sync-task-db.sh"
@@ -742,33 +743,30 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
 
     def test_the_history_panel_here_lists_the_remotes_tasks(self) -> None:
         """The pulled database is what this machine's History panel reads."""
-        saved = (th._KISS_DIR, th._DB_PATH, th._db_conn)
+        saved = (th._KISS_DIR, th._DB_PATH)
         try:
             th._KISS_DIR = self.remote_kiss
             th._DB_PATH = self.remote_db
-            th._db_conn = None
-            th._close_db()
+            close_db()
             for i in range(7):
                 th._add_task(f"server task {i}", "", {"work_dir": _SERVER})
 
             th._KISS_DIR = self.local_kiss
             th._DB_PATH = self.local_db
-            th._db_conn = None
-            th._close_db()
+            close_db()
             th._add_task("laptop task", "", {"work_dir": _LAPTOP})
-            th._close_db()
+            close_db()
             # A task that has only started is held back; these have ended.
             _finish_tasks(self.remote_db)
             _finish_tasks(self.local_db)
 
             self.assertEqual(self._sync(_LAPTOP, _SERVER).returncode, 0)
 
-            th._db_conn = None
-            th._close_db()
+            close_db()
             listed = {str(e["task"]): str(e["work_dir"]) for e in th._load_history()}
         finally:
-            th._KISS_DIR, th._DB_PATH, th._db_conn = saved
-            th._close_db()
+            th._KISS_DIR, th._DB_PATH = saved
+            close_db()
         self.assertEqual(len(listed), 8)
         self.assertEqual(listed["server task 3"], _LAPTOP)
         self.assertEqual(listed["laptop task"], _LAPTOP)
@@ -1038,6 +1036,12 @@ class RelocateWorkDirTest(unittest.TestCase):
         result = self._run(str(self.db), _SERVER, _LAPTOP)
         self.assertEqual(result.returncode, 1)
         self.assertIn("relocate_work_dir", result.stderr)
+        # Nor is a snapshot that is not there made up as an empty database.
+        self.db.unlink()
+        result = self._run(str(self.db), _SERVER, _LAPTOP)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("relocate_work_dir", result.stderr)
+        self.assertFalse(self.db.exists())
 
     def test_the_wrong_number_of_arguments_is_a_usage_error(self) -> None:
         """The script is called from shell code; misuse must not be quiet."""

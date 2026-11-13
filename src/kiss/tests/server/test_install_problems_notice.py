@@ -25,9 +25,11 @@ The daemon is real (local transport, fake PyPI endpoint, stub
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import time
+import unittest
 from pathlib import Path
 
 from kiss.core.brand import PRODUCT_NAME
@@ -38,6 +40,17 @@ from kiss.tests.server.test_update_available_check import _UpdateCheckTestBase
 HOOK_LINE = "WARNING: post-install hook /home/u/.s10s/post-install.d/brand exited with status 3"
 RESTART_LINE = "WARNING: kiss-web was not restarted; start it with ~/.s10s/s10s/.venv/bin/kiss-web"
 SYNC_LINE = "ERROR: uv sync failed in /home/u/.s10s/s10s"
+
+
+def _unpark(held: int, fifo: Path, parked: Path) -> None:
+    """Let go of the reader parked on *fifo*; with none parked (*held* < 0),
+    move the FIFO out of a later reader's reach, then let go of one that got in."""
+    if held >= 0:
+        os.close(held)
+        return
+    with contextlib.suppress(OSError):
+        os.rename(fifo, parked)
+        os.close(os.open(parked, os.O_WRONLY | os.O_NONBLOCK))
 
 
 class TestInstallProblemsNotice(_UpdateCheckTestBase):
@@ -225,3 +238,51 @@ class TestInstallProblemsNotice(_UpdateCheckTestBase):
                 {"type": "notification", "id": NOTICE_ID, "close": True},
             )
             self.assertEqual([ev for ev in events if ev.get("type") == "error"], [])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "the first watcher is held on a FIFO")
+    async def test_superseded_watcher_leaves_the_newer_runs_notice_alone(self) -> None:
+        # The first installer exits cleanly and leaves a FIFO as its
+        # record, so its watcher parks reading it (a writer can open it
+        # only once that reader waits).  A second installer then records
+        # a failure; the first watcher, let go after that notice went
+        # out, must not close it.
+        parked = self.home / "parked"
+        _, bystander = await self._run_update(f"mkfifo {str(self.problems)!r}\nexit 0\n")
+        first_proc, first_watch = self.server._update_proc, self.server._update_watch_task
+        assert first_watch is not None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 30
+        held = -1
+        try:
+            while held < 0:
+                self.assertLess(loop.time(), deadline, "the first watcher never read the record")
+                try:
+                    held = os.open(self.problems, os.O_WRONLY | os.O_NONBLOCK)
+                except OSError:
+                    await asyncio.sleep(0.02)
+            os.rename(self.problems, parked)
+            (Path(self.tmpdir) / "kiss_ai" / "install.sh").write_text(
+                f"#!/bin/bash\nprintf '%s\\n' {SYNC_LINE!r} > {str(self.problems)!r}\nexit 1\n"
+            )
+            self._writers[-1].write(json.dumps({"type": "runUpdate"}).encode("utf-8") + b"\n")
+            await self._writers[-1].drain()
+            while self.server._update_proc is first_proc:
+                self.assertLess(loop.time(), deadline, "the second installer never ran")
+                await asyncio.sleep(0.02)
+            second_watch = self.server._update_watch_task
+            assert second_watch is not None
+            await asyncio.wait_for(second_watch, 30)
+        finally:
+            _unpark(held, self.problems, parked)
+        await asyncio.wait_for(first_watch, 30)
+        # Broadcasts arrive in order: what either watcher sent precedes this.
+        self.server._printer.broadcast({"type": "notice", "text": "watchers done"})
+        notices: list[dict[str, object]] = []
+        while True:
+            event = json.loads(await asyncio.wait_for(bystander.readline(), 30))
+            if event.get("text") == "watchers done":
+                break
+            if event.get("id") == NOTICE_ID:
+                notices.append(event)
+        self.assertEqual([notice.get("close", False) for notice in notices], [False])
+        self.assertIn(f"\u2022 {SYNC_LINE}", str(notices[0]["message"]))

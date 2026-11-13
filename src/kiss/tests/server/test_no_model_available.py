@@ -7,7 +7,9 @@
 When no API keys are configured (no models available), running a task
 must broadcast a ``result`` event with ``success=False`` and the text
 "No model available.  Set at least one API key in the environment."
-so the frontend displays the error in the rich result panel.
+so the frontend displays the error in the rich result panel.  When
+other models are usable and only the run's own model is not, the text
+names that model instead.
 """
 
 from __future__ import annotations
@@ -16,18 +18,41 @@ import os
 import queue
 import threading
 import unittest
+from pathlib import Path
 from typing import Any
 from unittest import TestCase
 
+import pytest
+
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
+from kiss.tests.conftest import install_cli_script
+from kiss.tests.server._memory_printer import MemoryPrinter
+
+# Every credential ``_configured_providers`` consults, the Bedrock key
+# pair and bearer token included: the autouse conftest fixture hides the
+# ambient AWS chain, but the config object captured the exported
+# variables at import time.
+_CREDENTIALS = (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "TOGETHER_API_KEY",
+    "OPENROUTER_API_KEY",
+    "ZAI_API_KEY",
+    "MOONSHOT_API_KEY",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+)
 
 
-def _make_server() -> Any:
+def _make_server(printer: Any = None) -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
     from kiss.server.server import AgentServer
 
-    return AgentServer()
+    return AgentServer(printer)
 
 
 def _register_tab_state(task_id: str, tab_id: str, agent: ChatSorcarAgent) -> Any:
@@ -60,30 +85,14 @@ class TestNoModelAvailableResultEvent(TestCase):
         broadcast a result event with the no-model error message."""
         from kiss.core import config as config_module
 
-        # Every credential ``_configured_providers`` consults, the Bedrock
-        # key pair and bearer token included: the autouse conftest fixture
-        # hides the ambient AWS chain, but the config object captured the
-        # exported variables at import time.
         keys = config_module.DEFAULT_CONFIG
-        credential_names = (
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "GEMINI_API_KEY",
-            "TOGETHER_API_KEY",
-            "OPENROUTER_API_KEY",
-            "ZAI_API_KEY",
-            "MOONSHOT_API_KEY",
-            "AWS_BEARER_TOKEN_BEDROCK",
-            "AWS_ACCESS_KEY_ID",
-            "AWS_SECRET_ACCESS_KEY",
-        )
-        saved = {name: getattr(keys, name) for name in credential_names}
+        saved = {name: getattr(keys, name) for name in _CREDENTIALS}
         from kiss.core.models import codex_model as codex_module
 
         saved_path = os.environ.get("PATH", "")
         saved_codex_paths = codex_module._UI_CANDIDATE_PATHS
         try:
-            for name in credential_names:
+            for name in _CREDENTIALS:
                 setattr(keys, name, "")
             os.environ["PATH"] = ""
             codex_module._UI_CANDIDATE_PATHS = ()
@@ -216,6 +225,38 @@ class TestNoModelAvailableResultEvent(TestCase):
             )
         finally:
             keys.ANTHROPIC_API_KEY = saved_key
+
+
+def test_unusable_model_is_named_when_other_models_are_usable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With only the ``claude``/``codex`` CLIs present, an API model is refused by name."""
+    from kiss.core import config as config_module
+
+    for name in _CREDENTIALS:
+        monkeypatch.setattr(config_module.DEFAULT_CONFIG, name, "")
+    for cli in ("claude", "codex"):
+        install_cli_script(tmp_path / cli, "#!/bin/sh\n")
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    available = get_available_models()
+    assert available and "claude-opus-4-6" not in available
+
+    printer = MemoryPrinter()
+    tab_id = "unusable-model-test-1"
+    st = _register_tab_state("unusable-model-task-1", tab_id, ChatSorcarAgent("Sorcar"))
+    try:
+        _make_server(printer)._run_task(
+            {"type": "run", "prompt": "do something", "tabId": tab_id, "model": "claude-opus-4-6"}
+        )
+    finally:
+        _unregister_state(st)
+    results = [e for e in printer.emitted if e.get("type") == "result"]
+    assert [(e["tabId"], e["success"], e["text"]) for e in results] == [(
+        tab_id,
+        False,
+        'No model available under the name "claude-opus-4-6".  Pick another model'
+        " or configure its provider (API key or CLI).",
+    )]
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.tests.conftest import posix_only
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.pause import Pause
 
 
@@ -74,18 +75,17 @@ class TestRecoveryWithLiveThreads:
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         th._flush_chat_events()
-        th._close_db()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        close_db()
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
 
     def teardown_method(self) -> None:
         th._flush_chat_events()
-        th._close_db()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        close_db()
+        th._DB_PATH, th._KISS_DIR = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_handle_mid_statement_is_interrupted_not_closed_underneath(self) -> None:

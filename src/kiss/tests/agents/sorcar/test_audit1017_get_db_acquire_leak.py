@@ -25,13 +25,22 @@ worker's acquire blocks and receives the interrupt on return.  It runs
 in a child process (a leaked lock would wedge the pytest session) and
 asserts afterwards that every connection lock is free and that a
 fresh ``_get_db()`` answers at once instead of stalling.
+
+A second case stops a thread between the open of its new connection
+and the caching of it: the connection was registered and never cached,
+so it stayed open for as long as the thread lived.  ``_get_db()`` now
+retires it before the Stop propagates, at every line of the connect
+and as the function that opened it returns.
 """
 
 from __future__ import annotations
 
 import contextlib
+import functools
 import gc
 import os
+import queue
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -39,12 +48,16 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from types import CodeType, FrameType
+from typing import Any
 
 import pytest
 
 from kiss.agents.sorcar import persistence
+from kiss.tests.agents.sorcar.test_persistence_db_deleted_file import park_new_connection_in_setup
 from kiss.tests.conftest import posix_only
 from kiss.tests.lock_injection import INJECTIONS, Hammered, inject, lock_is_free
+from kiss.tests.persistence_helpers import close_db
 
 
 class _Recover:
@@ -124,7 +137,6 @@ def run_hammer() -> None:
     os.environ["KISS_HOME"] = str(home)
     persistence._KISS_DIR = home
     persistence._DB_PATH = home / "history.db"
-    persistence._db_conn = None
     persistence._get_db().execute("SELECT 1").fetchall()
     driver = _Recover(persistence._DB_PATH)
     unexpected = _UnexpectedErrors()
@@ -181,7 +193,7 @@ def run_hammer() -> None:
     ]
     assert not leaked, f"a connection lock stayed held after the interrupts: {leaked}"
     _probe("_get_db", _select_one)
-    _probe("_close_db", persistence._close_db)
+    _probe("close_db", close_db)
 
 
 @posix_only("unlinking WAL sidecars another connection holds open")
@@ -192,6 +204,80 @@ def test_recovery_acquire_survives_stop_injection() -> None:
         capture_output=True, text=True, timeout=240, check=False,
     )
     assert proc.returncode == 0, proc.stderr[-3000:]
+
+
+def _open_until_released(outcome: queue.Queue[str], released: threading.Event) -> None:
+    """Open this thread's connection, record how the call ended, stay alive until *released*."""
+    try:
+        persistence._get_db()
+        outcome.put("opened")
+    except KeyboardInterrupt:
+        outcome.put("stopped")
+    released.wait(60)
+    persistence._close_thread_db()
+
+
+def _stop_at(code: CodeType, at: int | str, frame: FrameType, what: str, _arg: Any) -> Any:
+    """Trace function (*code* and *at* bound): a Stop as line *at* of *code* is reached, or,
+    for ``"return"``, as *code* returns."""
+    if frame.f_code is not code:
+        return None
+    if what == at or what == "line" and frame.f_lineno == at:
+        raise KeyboardInterrupt("injected stop")
+    return functools.partial(_stop_at, code, at)
+
+
+def _connect_stopped_at(code: CodeType, at: int | str) -> None:
+    """Connect the calling thread with a Stop at *at* of *code*; nothing may be left over."""
+    tracer = sys.gettrace()
+    sys.settrace(functools.partial(_stop_at, code, at))
+    try:
+        with contextlib.suppress(KeyboardInterrupt):
+            persistence._get_db()
+    finally:
+        sys.settrace(tracer)
+    me = threading.current_thread()
+    cached = getattr(persistence._thread_local, "conn", None)
+    mine = [c for c, o, _p in list(persistence._open_conns.values()) if o is me]
+    assert mine == ([] if cached is None else [cached]), (code.co_name, at)
+    if cached is not None:  # the Stop came after the setup: the handle is whole
+        cached.execute("SELECT 1").fetchall()
+    persistence._close_thread_db()
+
+
+def test_a_stop_between_the_open_and_the_caching_retires_the_connection() -> None:
+    """A Stop landing after a connection was registered and before its setup is over
+    leaves no connection of that (still living) thread in the registry: a real one while
+    the setup waits, then one at every line of the two functions that connect and as
+    each of them returns."""
+    home = Path(tempfile.mkdtemp(prefix="audit1017-open-stop-"))
+    saved = (persistence._DB_PATH, persistence._KISS_DIR)
+    persistence._KISS_DIR, persistence._DB_PATH = (
+        home, home / "history.db")
+    outcome: queue.Queue[str] = queue.Queue()
+    released = threading.Event()
+    opener = threading.Thread(
+        target=_open_until_released, args=(outcome, released), daemon=True)
+    try:
+        persistence._get_db().execute("SELECT 1").fetchall()
+        persistence._close_thread_db()
+        blocker = park_new_connection_in_setup(opener)
+        assert inject(opener) == 1
+        blocker.rollback()
+        blocker.close()
+        assert outcome.get(timeout=30) == "stopped"
+        assert not [o for _c, o, _p in list(persistence._open_conns.values()) if o is opener]
+        for connect in (persistence._open_db_connection, persistence._connect_thread_db):
+            code = connect.__code__
+            lines: list[int | str] = sorted({line for _s, _e, line in code.co_lines() if line})
+            for at in [*lines, "return"]:
+                _connect_stopped_at(code, at)
+    finally:
+        released.set()
+        opener.join(30)
+        close_db()
+        persistence._DB_PATH, persistence._KISS_DIR = saved
+        shutil.rmtree(home, ignore_errors=True)
 
 
 if __name__ == "__main__":

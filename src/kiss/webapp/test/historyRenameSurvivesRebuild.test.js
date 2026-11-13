@@ -16,6 +16,7 @@ const assert = require('assert');
 const {
   send,
   ofType,
+  plain,
   settle: tick,
   captureTimers,
   fireCapturedTimers,
@@ -23,10 +24,21 @@ const {
 const {
   sendHistory,
   makeRow,
-  openChatsPage: makePage,
+  openChatsPage,
   chatHeader,
+  freezeClock,
 } = require('./history_helpers');
 const {key} = require('./ui_antipattern_harness');
+
+const FROZEN_NOW_MS = 1_700_000_000_000;
+
+// The page's clock stands still: a retyped title is shown for 10 s of
+// it, and its expiry refetches the list (which drops a parked page), so
+// the suite must not read the host's clock
+// (testConcurrentRenameOverlayExpires moves the clock itself).
+function makePage() {
+  return openChatsPage(win => freezeClock(win, FROZEN_NOW_MS));
+}
 
 /** Chat `chatId`'s panel in the Chats list, or null. */
 function group(win, chatId) {
@@ -67,7 +79,7 @@ async function testRenameBoxSurvivesChangedRows() {
 
   key(win, input, 'Enter');
   assert.deepStrictEqual(
-    JSON.parse(JSON.stringify(ofType(posted, 'setChatSummary'))),
+    plain(ofType(posted, 'setChatSummary')),
     [{type: 'setChatSummary', chatId: 'A', summary: 'Login fix'}],
   );
   await tick();
@@ -135,7 +147,7 @@ async function testSameRowsKeepTheBox() {
 // daemon's title (B, then any later one) shows.
 async function testConcurrentRenameOverlayExpires() {
   const {win, posted} = makePage();
-  let now = 1_700_000_000_000;
+  let now = FROZEN_NOW_MS;
   win.Date.now = () => now;
   sendHistory(win, posted, [
     makeRow({id: 'A', task_id: 1, chat_summary: 'Fix the login bug'}),
@@ -149,7 +161,9 @@ async function testConcurrentRenameOverlayExpires() {
   key(win, input, 'Enter');
   await tick();
   assert.strictEqual(title(win, 'A').textContent, 'First surface title');
-  // The other surface's rename won: every refresh carries its title.
+  // The other surface's rename won: every refresh carries its title,
+  // which the overlay still covers 9 s after the rename.
+  now += 9000;
   for (let i = 0; i < 2; i++) {
     send(win, {type: 'tasks_updated'});
     sendHistory(win, posted, [
@@ -162,10 +176,10 @@ async function testConcurrentRenameOverlayExpires() {
     'First surface title',
     'the overlay shields the header while the save is on its way',
   );
-  // Past the bound, the overlay expires and asks for a refresh itself
-  // (the timer it armed fires, its due time having come).
+  // Past the bound (10 s), the overlay expires and asks for a refresh
+  // itself (the timer it armed fires, its due time having come).
   const asked = ofType(posted, 'getHistory').length;
-  now += 11000;
+  now += 2000;
   fireCapturedTimers(win, timers);
   await tick();
   assert.ok(ofType(posted, 'getHistory').length > asked, 'the expiry refreshes');

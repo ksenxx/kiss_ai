@@ -68,7 +68,6 @@ function sendLiveResultEvents(win, summary) {
 
 function assertRenderedSummaryOrdering(win, expectedFinalText) {
   const panels = Array.from(win.document.querySelectorAll('#output > .rc'));
-  assert.ok(panels.length >= 2, 'expected at least Previous Sessions + Result panels');
   const headings = panels.map(panel => text(panel.querySelector('.rc-h h3')));
   assert.deepStrictEqual(
     headings,

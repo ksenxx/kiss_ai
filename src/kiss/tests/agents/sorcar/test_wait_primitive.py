@@ -14,6 +14,7 @@ a registered SSH machine.
 from __future__ import annotations
 
 import ctypes
+import functools
 import inspect
 import os
 import re
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from pathlib import Path
 from types import FrameType
@@ -29,7 +31,14 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.useful_tools import UsefulTools, _log_matches, sleep_guard
+from kiss.agents.sorcar.useful_tools import (
+    _SUPERVISE_LOG_MATCHER,
+    UsefulTools,
+    _log_matches,
+    _run_log_matcher,
+    _start_log_matcher,
+    sleep_guard,
+)
 from kiss.core import tool_interrupt
 from kiss.core.processes import kill_process_tree, popen_process_group
 
@@ -37,6 +46,12 @@ from kiss.core.processes import kill_process_tree, popen_process_group
 def _job_id(started: str) -> str:
     assert started.startswith("Started background job "), started
     return started.split()[3]
+
+
+def _start_noted(log: Path, pattern: str, children: list[subprocess.Popen]) -> subprocess.Popen:
+    """Start the matcher of *log* for *pattern*, noting the child in *children*."""
+    children.append(_start_log_matcher(log, re.compile(pattern)))
+    return children[-1]
 
 
 def test_wait_until_returns_when_the_log_matches(tmp_path: Path) -> None:
@@ -48,9 +63,25 @@ def test_wait_until_returns_when_the_log_matches(tmp_path: Path) -> None:
     report = tools.bash_job(job, action="wait", until=r"READY \w+", timeout_seconds=15)
     assert time.monotonic() - before < 10
     assert "running (pid" in report and "READY now" in report
-    assert tools.bash_job(job, action="wait", until="[", timeout_seconds=1).startswith(
-        "Error: until is not a valid regular expression"
-    )
+    # "[" does not compile; a NUL or a lone surrogate cannot reach the matcher child as a
+    # program argument (the child was never started and the wait ran to its deadline).
+    for bad in ("[", "READY|\x00", "READY|\ud800"):
+        assert tools.bash_job(job, action="wait", until=bad, timeout_seconds=1).startswith(
+            "Error: until is not a valid regular expression"
+        )
+    # A launch the arguments themselves refuse is reported like one the system refuses.
+    failed: list[str] = []
+    start = functools.partial(_start_log_matcher, tmp_path / "x.log", re.compile("\x00"))
+    _run_log_matcher(start, threading.Event(), [], time.monotonic() + 5, threading.Event(), failed)
+    assert len(failed) == 1 and failed[0].startswith("embedded null ")
+    # The owner of a matcher closes the child's stdin pipe (its lifeline) itself: left to the
+    # collector, the daemon kept the pipe open for as long as anything referred to the child.
+    children: list[subprocess.Popen] = []
+    matched = threading.Event()
+    (tmp_path / "x.log").write_text("READY\n")
+    start = functools.partial(_start_noted, tmp_path / "x.log", "READY", children)
+    _run_log_matcher(start, threading.Event(), [], time.monotonic() + 15, matched, [])
+    assert matched.is_set() and children[0].stdin is not None and children[0].stdin.closed
     tools.bash_job(job, action="kill")
 
 
@@ -200,6 +231,80 @@ def test_a_failed_matcher_launch_ends_the_wait_with_an_error(tmp_path: Path) -> 
     assert time.monotonic() - before < 5, "the wait ran on without a matcher"
     assert report.startswith("Error: could not start the log matcher for until='NEVER':"), report
     tools.bash_job(job, action="kill")
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.skipif(sys.platform != "linux", reason="ulimit -v (RLIMIT_AS) is enforced on Linux")
+def test_a_supervisor_that_dies_early_leaves_no_worker_behind(tmp_path: Path) -> None:
+    """The matcher's worker ends with its supervisor, however that one ended (B/S13-F6).
+
+    First a supervisor that cannot start its watcher thread, for real:
+    a 1 GB default thread stack (``ulimit -s``) cannot be mapped in
+    512 MB of address space (``ulimit -v``).  It exited with the worker
+    left running, watched by nothing.  Then the supervisor of a running
+    wait killed from outside: the wait's owner reaped it and left the
+    worker searching for good, and the wait ran on to its deadline
+    with nothing searching the log; it ends with an error now.
+    """
+    log = tmp_path / "alone.log"
+    try:
+        with (tmp_path / "stderr.txt").open("w") as errors:
+            subprocess.run(
+                ["bash", "-c", 'ulimit -s 1048576 && ulimit -v 524288 && exec "$@"', "bash",
+                 sys.executable, "-c", _SUPERVISE_LOG_MATCHER,
+                 sys.executable, "-c", "import time; time.sleep(60)", str(log)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors,
+                timeout=60, check=False,
+            )
+        assert "can't start new thread" in (tmp_path / "stderr.txt").read_text()
+        assert _nothing_names(log), "the worker outlived a supervisor that had no watcher"
+    finally:
+        _kill_naming(log)
+    tools = UsefulTools(work_dir=str(tmp_path))
+    job = _job_id(tools.Bash("sleep 30", "job", background=True))
+    log = tools._jobs[job].log_path
+    pool = ThreadPoolExecutor(1)
+    waiting = pool.submit(tools.bash_job, job, action="wait", until="NEVER", timeout_seconds=30)
+    try:
+        deadline = time.monotonic() + 20
+        while len(_processes_naming(str(log))) < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        supervisors = set(_processes_naming("kill_at_eof")) & set(_processes_naming(str(log)))
+        assert len(supervisors) == 1, supervisors
+        os.kill(supervisors.pop(), signal.SIGKILL)
+        assert _nothing_names(log), "the worker outlived its killed supervisor"
+        assert waiting.result(10).startswith(
+            "Error: could not start the log matcher for until='NEVER': it exited with status -9"
+        )
+    finally:
+        _kill_naming(log)
+        tools.bash_job(job, action="kill")
+        pool.shutdown()
+
+
+# Searches 100 kB with files limited to 1 kB (the limit is the process's, hence a child):
+# the spool cannot be written.  Prints the files left in the temporary directory.
+_SEARCH_ON_A_FULL_DISK = """
+import os, re, resource, sys, tempfile, threading, time
+from kiss.agents.sorcar.useful_tools import _search_output
+tempfile.tempdir = sys.argv[1]
+resource.setrlimit(resource.RLIMIT_FSIZE, (1000, resource.getrlimit(resource.RLIMIT_FSIZE)[1]))
+try:
+    _search_output("x" * 100000, re.compile("x"), threading.Event(), [], time.monotonic() + 5,
+                   threading.Event())
+except OSError:
+    print("left:", os.listdir(sys.argv[1]))
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_FSIZE is POSIX")
+def test_a_spool_that_cannot_be_written_is_removed(tmp_path: Path) -> None:
+    """An ``until`` search whose spool file fails mid-write leaves no file behind (A/S13-F7)."""
+    run = subprocess.run(
+        [sys.executable, "-c", _SEARCH_ON_A_FULL_DISK, str(tmp_path)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert run.stdout.strip() == "left: []", run.stdout + run.stderr
 
 
 @pytest.mark.timeout(60)
@@ -402,9 +507,16 @@ def test_on_timeout_background_keeps_the_command_running(tmp_path: Path) -> None
     assert out.startswith("Still running after 0.5s; left running as background job ")
     job = out.split("background job ")[1].split()[0]
     assert "begun" in out and job in tools._jobs
-    assert tools._jobs[job].process.poll() is None
+    assert tools._jobs[job].returncode() is None
     tools.bash_job(job, action="kill")
     assert tools.Bash("echo x", "bad", on_timeout="later").startswith("Error: on_timeout must be")
+    # Checked before a shell rewrite is applied as its Edit: the file stays as it was.
+    target = tmp_path / "f.txt"
+    target.write_text("old\n")
+    tools.Read(str(target))
+    out = tools.Bash(f"sed -i 's/old/new/' {target}", "bad rewrite", on_timeout="later")
+    assert out.startswith("Error: on_timeout must be"), out
+    assert target.read_text() == "old\n"
 
 
 def test_machine_requires_background_and_a_registered_ssh_machine(

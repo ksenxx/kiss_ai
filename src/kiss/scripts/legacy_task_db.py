@@ -21,22 +21,26 @@ writes, so a ``sorcar.db`` next to it is always the newer database.
 Usage:
     python3 legacy_task_db.py KISS_DIR
         Print the name of the file that holds the history: ``sorcar.db``
-        when it is still under the old name (``history.db`` absent, or
-        such a leftover), ``history.db`` otherwise.
+        when it is still under the old name (``history.db`` absent, such
+        a leftover, or a rename that stopped half-way), ``history.db``
+        otherwise.
     python3 legacy_task_db.py KISS_DIR adopt
         Rename ``sorcar.db`` to ``history.db`` when the first form would
         print ``sorcar.db``: a leftover ``history.db`` is first moved
         out of the way to ``history.db.stale-<UTC time>`` (kept, with
         its ``-wal``/``-shm`` sidecars, never deleted), the sidecars of
-        ``sorcar.db`` are renamed before the file itself, and the old
-        name is left as a symlink to the new one so that a web app still
-        running the previous version keeps writing to the same file.
+        ``sorcar.db`` are given their new names before the file itself,
+        and the old name is swapped for a symlink to the new one, so
+        that a web app still running the previous version finds its
+        database there at every moment and keeps writing to the same file.
         Prints one line per rename; nothing when there was nothing to do.
 
 It is stdlib-only and self-contained so that it can be piped straight
 into a remote ``python3`` over ssh.  The persistence layer
 (``kiss.agents.sorcar.persistence``) does the same adoption, under a
-lock, through ``kiss.core.config.adopt_legacy_file``.
+lock, through ``kiss.core.config.adopt_legacy_file``; both forms above
+take that lock (``history.db.rename.lock``) whenever there is a
+``sorcar.db``, so neither sees a rename half done.
 """
 
 from __future__ import annotations
@@ -45,12 +49,18 @@ import os
 import sqlite3
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 try:
     import fcntl
 except ImportError:  # pragma: no cover — Windows has no fcntl (and gets no symlink either)
     fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt  # type: ignore[import-not-found]
+except ImportError:  # POSIX has no msvcrt
+    msvcrt = None  # type: ignore[assignment]
 
 CURRENT_NAME = "history.db"
 LEGACY_NAME = "sorcar.db"
@@ -93,16 +103,38 @@ def live_db_name(kiss_dir: Path) -> str:
     """Return the name of the file in *kiss_dir* that holds the task history.
 
     ``sorcar.db`` when the database is still under its pre-2026.10.2
-    name -- ``history.db`` is absent, or is a leftover from before
-    2026-04-24 (:func:`is_pre_2026_04_db`) -- and ``history.db``
-    otherwise, including when ``sorcar.db`` is the symlink an earlier
-    adoption left behind.
+    name -- ``history.db`` is absent, is a leftover from before
+    2026-04-24 (:func:`is_pre_2026_04_db`), or is still a hard link of
+    ``sorcar.db`` (an adoption that stopped before it left the symlink
+    behind) -- and ``history.db`` otherwise, including when ``sorcar.db``
+    is the symlink an earlier adoption left behind.
+
+    Decided under the rename lock, as the adoption is: a rename under way
+    moves ``history.db`` aside before ``sorcar.db`` takes its name, and a
+    lookup made in between failed on the missing file or named a file
+    about to change.  A lookup beside a ``sorcar.db`` therefore creates
+    the lock file too.
+
+    Raises:
+        TimeoutError: The lock was not released in time (:func:`_rename_lock`).
+        OSError: The lock file cannot be opened (a directory that cannot
+            be written to).
     """
+    # No ``sorcar.db`` is a final answer, no adoption brings it back: no lock, no lock file.
+    if not (kiss_dir / LEGACY_NAME).exists():
+        return CURRENT_NAME
+    with _rename_lock(kiss_dir):
+        return _live_db_name_locked(kiss_dir)
+
+
+def _live_db_name_locked(kiss_dir: Path) -> str:
+    """The answer of :func:`live_db_name`, with the lock held."""
     current = kiss_dir / CURRENT_NAME
     legacy = kiss_dir / LEGACY_NAME
+    # Gone during the wait for the lock: a Windows adoption leaves nothing under the old name.
     if not legacy.exists():
         return CURRENT_NAME
-    if not current.exists():
+    if not current.exists() or _hard_linked(current, legacy):
         return LEGACY_NAME
     if current.samefile(legacy) or not is_pre_2026_04_db(current):
         return CURRENT_NAME
@@ -121,42 +153,166 @@ def adopt_legacy_db(kiss_dir: Path) -> list[str]:
     Returns:
         One line per rename performed, in order; empty when ``history.db``
         already held the history.
+
+    Raises:
+        sqlite3.Error: ``sorcar.db`` is a database SQLite cannot read now
+            (locked, say); nothing has been renamed.
+        TimeoutError: The lock was not released in time (:func:`_rename_lock`);
+            nothing has been renamed.
     """
     if not (kiss_dir / LEGACY_NAME).exists():
         return []
-    lock_path = kiss_dir / (CURRENT_NAME + ".rename.lock")
-    with open(lock_path, "a+") as lock:
-        if fcntl is not None:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    with _rename_lock(kiss_dir):
         return _adopt_legacy_db_locked(kiss_dir)
 
 
+def _try_lock(fd: int) -> bool:
+    """Probe the rename lock once without waiting; True when this process now holds it.
+
+    With the primitives of ``kiss.core.file_lock``, through which the web app
+    locks the same file: ``flock`` on POSIX, the first byte of the file
+    through ``msvcrt`` on Windows.
+    """
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif msvcrt is not None:  # pragma: no cover — Windows-only branch
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
+    except (BlockingIOError, PermissionError):  # held by another: EAGAIN (flock), EACCES (msvcrt)
+        return False
+    return True
+
+
+@contextmanager
+def _rename_lock(kiss_dir: Path, timeout: float = 30.0) -> Iterator[None]:
+    """Hold ``history.db.rename.lock`` of *kiss_dir*, the lock of the web app's adoption.
+
+    The lock is probed every 50 ms for at most *timeout* seconds (the web
+    app's ``ADOPTION_LOCK_TIMEOUT``): a holder only looks at the files and
+    renames them, so a longer wait means it is wedged, and waiting on
+    would hang the deploy for good.
+
+    Raises:
+        TimeoutError: Another process still held the lock after *timeout* seconds.
+    """
+    lock_path = kiss_dir / (CURRENT_NAME + ".rename.lock")
+    with open(lock_path, "a+") as lock:
+        deadline = time.monotonic() + timeout
+        while not _try_lock(lock.fileno()):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"{lock_path} still locked by another process after {timeout:g}s"
+                )
+            time.sleep(0.05)
+        try:
+            yield
+        finally:  # POSIX drops its flock with the close; Windows wants the byte unlocked first
+            if fcntl is None and msvcrt is not None:  # pragma: no cover — Windows-only branch
+                os.lseek(lock.fileno(), 0, os.SEEK_SET)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def _hard_linked(path: Path, other: Path) -> bool:
+    """Tell whether *path* and *other* are two names of one file, neither a symlink."""
+    try:
+        return not path.is_symlink() and not other.is_symlink() and path.samefile(other)
+    except OSError:
+        return False
+
+
+def _wal_held_open(database: Path) -> sqlite3.Connection | None:
+    """Open *database* read-only and read from it, which keeps its WAL and SHM in place.
+
+    The last connection to close a WAL database checkpoints it and deletes
+    both sidecars; while this one is open no close is the last, so a web
+    app closing a connection between two steps of the rename cannot have
+    its next one start a second WAL under the old name.  Same helper as
+    ``kiss.core.config._wal_held_open``.
+
+    Returns:
+        The connection to close once the rename is done; None for a file
+        that is no SQLite database, or that this user cannot read, and
+        has no WAL to keep.
+
+    Raises:
+        sqlite3.Error: The database cannot be read now (locked, say).
+            Nothing has been renamed yet.
+    """
+    try:
+        with open(database, "rb") as file:
+            if file.read(16) != b"SQLite format 3\x00":
+                return None
+    except OSError:
+        return None
+    connection = sqlite3.connect(f"{Path(os.path.abspath(database)).as_uri()}?mode=ro", uri=True)
+    try:
+        connection.execute("PRAGMA schema_version").fetchone()
+    except sqlite3.Error:
+        connection.close()
+        raise
+    return connection
+
+
+def _link_over(source: Path, target: Path) -> None:
+    """Make *target* a hard link of *source*, replacing whatever *target* was in one step."""
+    staged = target.with_name(target.name + ".link")
+    staged.unlink(missing_ok=True)
+    os.link(source, staged)
+    os.replace(staged, target)
+
+
 def _adopt_legacy_db_locked(kiss_dir: Path) -> list[str]:
-    """The renames of :func:`adopt_legacy_db`, with the lock held."""
-    if live_db_name(kiss_dir) != LEGACY_NAME:
+    """The renames of :func:`adopt_legacy_db`, with the lock held.
+
+    A web app of the previous version opens ``sorcar.db`` at any moment, a
+    connection per operation, so the old name stays usable throughout, as
+    in ``kiss.core.config.adopt_legacy_file``: the files are hard-linked to
+    their new names, the old name is swapped for the symlink in one
+    rename, and only then are the old sidecar names dropped, all under a
+    connection that keeps the WAL in place.  A plain rename left no file
+    under the old name for a moment; a writer recreated it empty, and its
+    rows were stranded there.  Not on Windows, where SQLite does not
+    resolve the link: the files are simply renamed.
+    """
+    if _live_db_name_locked(kiss_dir) != LEGACY_NAME:
         return []
     current = kiss_dir / CURRENT_NAME
     legacy = kiss_dir / LEGACY_NAME
     done: list[str] = []
-    if current.exists():
-        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        set_aside = current.with_name(f"{CURRENT_NAME}.stale-{stamp}")
-        for suffix in SIDECARS:
-            if current.with_name(CURRENT_NAME + suffix).exists():
-                os.replace(
-                    current.with_name(CURRENT_NAME + suffix),
-                    set_aside.with_name(set_aside.name + suffix),
-                )
-        done.append(
-            f"{CURRENT_NAME} is a leftover from before 2026-04-24; kept as {set_aside.name}"
-        )
-    for suffix in SIDECARS:
-        if legacy.with_name(LEGACY_NAME + suffix).exists():
-            os.replace(
-                legacy.with_name(LEGACY_NAME + suffix), current.with_name(CURRENT_NAME + suffix)
+    held = _wal_held_open(legacy) if os.name != "nt" else None
+    try:
+        if current.exists() and not _hard_linked(current, legacy):
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            set_aside = current.with_name(f"{CURRENT_NAME}.stale-{stamp}")
+            for suffix in SIDECARS:
+                if current.with_name(CURRENT_NAME + suffix).exists():
+                    os.replace(
+                        current.with_name(CURRENT_NAME + suffix),
+                        set_aside.with_name(set_aside.name + suffix),
+                    )
+            done.append(
+                f"{CURRENT_NAME} is a leftover from before 2026-04-24; kept as {set_aside.name}"
             )
-    if os.name != "nt":
-        os.symlink(CURRENT_NAME, legacy)
+        for suffix in SIDECARS:
+            source = legacy.with_name(LEGACY_NAME + suffix)
+            target = current.with_name(CURRENT_NAME + suffix)
+            if not source.exists() or _hard_linked(source, target):
+                continue
+            if os.name == "nt":
+                os.replace(source, target)
+            else:
+                _link_over(source, target)
+        if os.name != "nt":
+            link = legacy.with_name(LEGACY_NAME + ".link")
+            link.unlink(missing_ok=True)
+            os.symlink(CURRENT_NAME, link)
+            os.replace(link, legacy)
+            for suffix in filter(None, SIDECARS):
+                legacy.with_name(LEGACY_NAME + suffix).unlink(missing_ok=True)
+    finally:
+        if held is not None:
+            held.close()
     done.append(f"{LEGACY_NAME} renamed to {CURRENT_NAME}")
     return done
 

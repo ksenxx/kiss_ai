@@ -44,9 +44,14 @@ import asyncio
 import contextlib
 import ipaddress
 import json
+import logging
+import os
 import socket
 import ssl
+import struct
 import tempfile
+import time
+import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -61,7 +66,9 @@ from kiss.core.brand import PRODUCT_NAME
 from kiss.core.remote_password import generate_password
 from kiss.core.user_config import CONFIG_PATH, load_config, save_config
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import posix_only
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
+from kiss.tests.server.test_install_problems_notice import _unpark
 
 AUTH_OK = {"type": "auth_ok", "local": False, "echoesGeneration": True}
 """The daemon's ``auth_ok`` to a password or loopback client (``sorcar._auth_ok``)."""
@@ -77,6 +84,14 @@ def _lan_ip() -> str | None:
     except OSError:
         return None
     return None if ipaddress.ip_address(ip).is_loopback else ip
+
+
+def _set_env(name: str, value: str | None) -> None:
+    """Set the environment variable *name* to *value*; ``None`` removes it."""
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
 
 
 class _ServerCase(IsolatedAsyncioTestCase):
@@ -188,6 +203,115 @@ class TestPlainHttpLoopback(_ServerCase):
                         reply += tls.read(65536)
             return reply
 
+    def _note_refusal(self, record: logging.LogRecord) -> bool:
+        """Logging filter of the daemon's logger: sets ``_refused`` at a "Refusing ..." line."""
+        if "Refusing" in record.getMessage():
+            self._refused.set()
+        return True
+
+    @posix_only("the test injects a TCP reset during an in-memory TLS handshake")
+    async def test_a_client_gone_behind_its_request_is_not_logged_as_remote(self) -> None:
+        """A loopback TLS client that reset its connection was logged as a non-localhost peer."""
+        loop = asyncio.get_running_loop()
+        incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+        tls = no_verify_ssl().wrap_bio(incoming, outgoing, server_hostname="127.0.0.1")
+        raw = socket.create_connection(("127.0.0.1", self._port), 10)
+        raw.setblocking(False)
+        while True:
+            try:
+                tls.do_handshake()
+                break
+            except ssl.SSLWantReadError:
+                await loop.sock_sendall(raw, outgoing.read())
+                incoming.write(await loop.sock_recv(raw, 65536) or self.fail("TLS closed"))
+        tls.write(b"GET / HTTP/1.1\r\nHost: kiss\r\n\r\n")
+        logger = logging.getLogger("kiss.server.web_server")
+        self._refused = asyncio.Event()
+        logger.addFilter(self._note_refusal)
+        self.addCleanup(logger.removeFilter, self._note_refusal)
+        with self.assertLogs(logger, "DEBUG") as logs:
+            # One write (Finished + request) and a reset before the server's loop runs.
+            raw.send(outgoing.read())
+            raw.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            raw.close()
+            await asyncio.wait_for(self._refused.wait(), 10)
+        refusals = [r.getMessage() for r in logs.records if "Refusing" in r.getMessage()]
+        self.assertEqual(refusals, ["Refusing a request whose client has gone"])
+
+    def _handlers(self) -> list[Any]:
+        """The connections in their opening handshake or their handler, on both listeners."""
+        servers = (self._server._ws_server, self._server._ws_loopback_server)
+        return [c for s in servers if s is not None for c in s.handlers]
+
+    async def _leave_a_page_load(
+        self, headers: bytes = b"", *, graceful: bool = False, render_first: bool = False,
+    ) -> None:
+        """Ask for the page, leave before it is answered, and check that nothing is logged.
+
+        Finishing the answer made ``websockets`` log two errors: the
+        connection it wrote to was closed already.  The render parks
+        on a FIFO (the bundled tricks: a writer opens once a reader
+        waits); the client then leaves with a FIN (*graceful*) or a
+        reset.  With *render_first* the render is let go first and the
+        loop held while it finishes, so its result is queued ahead of
+        the client's leaving, which then reaches the daemon one step
+        of the handshake later.
+        """
+        fifo = Path(tempfile.mkdtemp()) / "INJECTIONS.md"
+        parked = fifo.with_name("parked")
+        os.mkfifo(fifo)
+        self.addCleanup(_set_env, "KISS_INJECTIONS_PATH", os.environ.get("KISS_INJECTIONS_PATH"))
+        os.environ["KISS_INJECTIONS_PATH"] = str(fifo)
+        loop = asyncio.get_running_loop()
+        raw = socket.create_connection(("127.0.0.1", self._port), 10)
+        self.addCleanup(raw.close)
+        raw.sendall(b"GET / HTTP/1.1\r\nHost: kiss\r\n" + headers + b"\r\n")
+        held, deadline = -1, loop.time() + 30
+        with self.assertNoLogs("websockets.server", "ERROR"):
+            try:
+                while held < 0:
+                    self.assertLess(loop.time(), deadline, "the page was never rendered")
+                    try:
+                        held = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                    except OSError:
+                        await asyncio.sleep(0.02)
+                os.rename(fifo, parked)
+                (connection,) = self._handlers()
+                if render_first:
+                    os.close(held)
+                    held = -1
+                if graceful:
+                    raw.shutdown(socket.SHUT_WR)
+                else:
+                    raw.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    raw.close()
+                if render_first:
+                    time.sleep(1)
+                else:
+                    await asyncio.wait_for(asyncio.shield(connection.connection_lost_waiter), 10)
+            finally:
+                _unpark(held, fifo, parked)
+            while self._handlers():
+                self.assertLess(loop.time(), deadline, "the handshake never ended")
+                await asyncio.sleep(0.02)
+        status, _body = await asyncio.to_thread(self._get, f"http://127.0.0.1:{self._port}/")
+        self.assertEqual(status, 200)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "the hold is a FIFO")
+    async def test_a_client_gone_while_its_page_renders_is_not_answered(self) -> None:
+        """The handshake of a client that reset its connection during the render ends there."""
+        await self._leave_a_page_load()
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "the hold is a FIFO")
+    async def test_a_client_gone_while_its_page_is_compressed_is_not_answered(self) -> None:
+        """The reset reaches the daemon after the render, while the gzip runs in its thread."""
+        await self._leave_a_page_load(b"Accept-Encoding: gzip\r\n", render_first=True)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "the hold is a FIFO")
+    async def test_a_client_that_closed_as_its_page_was_ready_is_not_answered(self) -> None:
+        """A FIN ends it too: ``websockets``' side is closed a loop turn before the loss."""
+        await self._leave_a_page_load(graceful=True, render_first=True)
+
     async def test_plain_http_from_lan_peer_is_refused(self) -> None:
         """A non-loopback peer gets 400 before the app is served in the clear."""
         ip = _lan_ip()
@@ -229,6 +353,31 @@ class TestPlainHttpLoopback(_ServerCase):
             self.assertEqual(await self._recv(ws), AUTH_OK)
             await ws.send(json.dumps({"type": "ping"}))
             self.assertEqual((await self._recv(ws))["type"], "pong")
+
+    async def test_empty_password_page_of_another_site_is_refused(self) -> None:
+        """With no password set, another site's page in this machine's browser is not admitted.
+
+        The same-origin policy does not bind a WebSocket: any page the
+        browser shows may open one to 127.0.0.1, naming its site as
+        ``Origin``.  The local token is a secret no page has, so a
+        client that sends it is admitted whatever its origin.
+        """
+        url = f"ws://127.0.0.1:{self._port}/ws"
+        for origin in ("https://evil.example", f"http://evil.example:{self._port}", "null"):
+            async with connect(url, origin=Origin(origin)) as ws:
+                await ws.send(json.dumps({"type": "auth", "password": ""}))
+                self.assertEqual((await self._recv(ws)).get("code"), "localhost_only", origin)
+            async with connect(url, origin=Origin(origin)) as ws:
+                await ws.send(json.dumps({"type": "auth", "token": self._token()}))
+                self.assertEqual(await self._recv(ws), AUTH_OK_LOCAL, origin)
+        # A page that was asked for the password and waits: clearing the password admits it no more.
+        save_config({"remote_password": "Correct-Horse-Battery-1"})
+        async with connect(url, origin=Origin("https://evil.example")) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            self.assertEqual((await self._recv(ws))["type"], "auth_required")
+            save_config({"remote_password": ""})
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            self.assertEqual((await self._recv(ws)).get("code"), "localhost_only")
 
 
 class TestLoopbackNeedsNoPassword(_ServerCase):
@@ -282,19 +431,34 @@ class TestLoopbackNeedsNoPassword(_ServerCase):
                 self.assertEqual(await self._recv(ws), AUTH_OK, origin)
 
     async def test_forwarded_visitor_on_loopback_still_needs_the_password(self) -> None:
-        """A cloudflared visitor arrives on loopback with a forwarded IP: password required."""
-        for header in ("Cf-Connecting-Ip", "X-Forwarded-For"):
+        """A relayed visitor arrives on loopback with a forwarded IP: password required.
+
+        Whatever the header says.  A proxy appends the visitor's address
+        to the ``X-Forwarded-For`` it is sent, so an earlier hop (and a
+        ``Cf-Connecting-Ip`` no Cloudflare edge wrote) is the visitor's
+        own text; one naming this machine, or left empty, passed him
+        for the browser on it, which needs no password.  Each case is
+        another visitor: one visitor's wrong guesses add up to a lockout.
+        """
+        for headers in (
+            [("Cf-Connecting-Ip", "203.0.113.1")],
+            [("X-Forwarded-For", "203.0.113.2")],
+            [("X-Forwarded-For", "127.0.0.1, 203.0.113.3")],
+            [("X-Forwarded-For", ", 203.0.113.4")],
+            [("Cf-Connecting-Ip", "::1")],
+            [("X-Forwarded-For", "127.0.0.1"), ("X-Forwarded-For", "203.0.113.5")],
+        ):
             async with connect(
                 f"ws://127.0.0.1:{self._port}/ws",
                 origin=self._origin(),
-                additional_headers={header: "203.0.113.9"},
+                additional_headers=headers,
             ) as ws:
                 await ws.send(json.dumps({"type": "auth", "password": ""}))
-                self.assertEqual((await self._recv(ws))["type"], "auth_required", header)
+                self.assertEqual((await self._recv(ws))["type"], "auth_required", headers)
                 await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
                 reply = await self._recv(ws)
-                self.assertEqual(reply["type"], "error", header)
-                self.assertEqual(reply["code"], "auth_failed", header)
+                self.assertEqual(reply["type"], "error", headers)
+                self.assertEqual(reply["code"], "auth_failed", headers)
 
     async def test_lan_peer_still_needs_the_password(self) -> None:
         """A non-loopback peer is not a browser on this machine."""

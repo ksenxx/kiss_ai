@@ -185,7 +185,7 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
                     syncClearBtn();
                     transport.postMessage({
                         type: 'resumeSession',
-                        id: s.id,
+                        chatId: s.id,
                         taskId: s.task_id,
                         tabId: activeTabId,
                     });
@@ -238,7 +238,7 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
 
         resume_msgs = out["resumeMsgs"]
         self.assertEqual(len(resume_msgs), 3)
-        chat_ids = {m["id"] for m in resume_msgs}
+        chat_ids = {m["chatId"] for m in resume_msgs}
         self.assertEqual(chat_ids, {"chat-abc-123"})
         task_ids = {m["taskId"] for m in resume_msgs}
         self.assertEqual(task_ids, {42})

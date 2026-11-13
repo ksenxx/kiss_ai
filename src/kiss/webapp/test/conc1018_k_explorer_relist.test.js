@@ -287,7 +287,43 @@ function testRefreshKeepsABlockedCycleUnlisted() {
   console.log('  ok - Refresh leaves a blocked cycle unlisted; a retarget lists it');
 }
 
+// Audit 2026-11-11 (W1): a successful re-listing that removes the row
+// the keyboard is on (its file was deleted by another process) hands
+// the focus and the tree's tab stop to the folder's own row, as an
+// error re-listing does; they used to fall to <body>, which ended the
+// arrow-key navigation until the user clicked back into the tree.
+function testRelistingWithoutTheFocusedRowKeepsFocusInTheTree() {
+  const {win, posted} = makeExplorerPage();
+  const lst = () => listings(posted);
+  answer(win, lst()[0], [{name: 'gone.txt'}, {name: 'stays.txt'}]);
+  const gone = row(win, WD + '/gone.txt');
+  gone.focus();
+  assert.strictEqual(win.document.activeElement, gone, 'setup: row focused');
+  click(win, win.document.getElementById('explorer-refresh'));
+  answer(win, lst()[1], [{name: 'stays.txt'}]);
+  assert.strictEqual(row(win, WD + '/gone.txt'), null, 'the row is gone');
+  const root = row(win, WD);
+  assert.strictEqual(
+    win.document.activeElement,
+    root,
+    'BUG - the focus fell out of the tree with the removed row',
+  );
+  assert.strictEqual(root.tabIndex, 0, 'the folder row is the tab stop');
+  assert.strictEqual(row(win, WD + '/stays.txt').tabIndex, -1);
+
+  // A row that survives keeps the focus, as before.
+  const stays = row(win, WD + '/stays.txt');
+  stays.focus();
+  click(win, win.document.getElementById('explorer-refresh'));
+  answer(win, lst()[2], [{name: 'new.txt'}, {name: 'stays.txt'}]);
+  assert.strictEqual(win.document.activeElement, stays);
+  assert.strictEqual(stays.tabIndex, 0);
+  win.close();
+  console.log('  ok - a re-listing without the focused row keeps the focus');
+}
+
 testErrorRelistingDropsSubfolders();
+testRelistingWithoutTheFocusedRowKeepsFocusInTheTree();
 testErrorRelistingKeepsEditedFolder();
 testVanishedRenameRowIsCancelled();
 testRelistingUpdatesASymlinkTarget({real: WD + '/real-folder'});

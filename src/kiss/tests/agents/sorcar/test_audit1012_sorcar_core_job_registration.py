@@ -2,10 +2,10 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Audit 2026-10-12 (sorcar-core): a Stop inside ``start_agent_job`` cannot orphan the job.
+"""Audit 2026-10-12 (sorcar-core): a Stop inside a job's launch cannot orphan the job.
 
 A task's Stop is a ``KeyboardInterrupt`` injected into the agent
-thread between two bytecodes.  ``start_agent_job`` used to start the
+thread between two bytecodes.  The launch used to start the
 job thread and only then insert the job into the registry, so a Stop
 landing in between left a running sub-task that ``kill_jobs_of`` could
 not find: it outlived its caller and kept its tab open.
@@ -44,14 +44,21 @@ _START_WAIT_LINE = _START_FIRST_LINE + next(
 """The line of ``Thread.start()`` at which the native thread exists but is not yet alive."""
 
 
+def _start_job(kwargs: dict[str, Any], owner: object) -> agent_dispatch.AgentJob:
+    """Build a job and launch it, as every caller does (``_run_agent``, ``run_agents_parallel``)."""
+    job = agent_dispatch.new_agent_job("sorcar", kwargs, owner)
+    agent_dispatch.launch_agent_job(job)
+    return job
+
+
 def _stop_once_the_thread_runs(frame: FrameType, event: str, arg: Any) -> Any:
     """Trace function: raise KeyboardInterrupt at the first line where ``job.thread`` is alive.
 
-    Only lines of ``start_agent_job``'s own frame count: the registry
+    Only lines of :func:`_start_job`'s own frame count: the registry
     lock is taken and released inside ``locked_call`` (a separate
     frame), so every such line runs with the lock free.
     """
-    if frame.f_code.co_name != "start_agent_job":
+    if frame.f_code is not _start_job.__code__:
         return None
     if event == "line":
         thread = getattr(frame.f_locals.get("job"), "thread", None)
@@ -85,7 +92,7 @@ def _start_job_interrupted_by(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[_StopConfirmingDaemon, object]:
-    """Call ``start_agent_job`` on a worker thread traced by *trace* and return (daemon, owner).
+    """Call :func:`_start_job` on a worker thread traced by *trace* and return (daemon, owner).
 
     The worker must have been interrupted (not returned) for the race
     to count as exercised.
@@ -110,7 +117,7 @@ def _start_job_interrupted_by(
     def call() -> None:
         sys.settrace(trace)
         try:
-            agent_dispatch.start_agent_job("sorcar", kwargs, owner)
+            _start_job(kwargs, owner)
             outcome.append("returned")
         except KeyboardInterrupt:
             outcome.append("interrupted")

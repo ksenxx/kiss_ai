@@ -9,10 +9,12 @@ with real objects.
 """
 
 import io
+import re
 import unittest
 from types import SimpleNamespace
 
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.core.utils import finish
 
 
 def _make() -> tuple[ConsolePrinter, io.StringIO]:
@@ -104,9 +106,11 @@ class TestBashStreamInResultPanel(unittest.TestCase):
         p.print("a\n", type="bash_stream")
         p.print("b\n", type="bash_stream")
         p.print("c\n", type="bash_stream")
+        p.print("", type="bash_stream")  # writes nothing: the cursor stays at the line start
         p.print("a\nb\nc\n", type="tool_result", tool_name="Bash")
 
         out = buf.getvalue()
+        assert "c\n\n" not in out, "a blank line follows the last chunk:\n" + out
         result_idx = out.index("RESULT")
         for line in ("a", "b", "c"):
             assert line in out[result_idx:], (
@@ -125,6 +129,28 @@ class TestBashStreamInResultPanel(unittest.TestCase):
         assert "RESULT" in out
         result_idx = out.index("RESULT")
         assert "file contents here" in out[result_idx:], out
+
+
+def _result_panel(raw: str) -> tuple[bool, set[str]]:
+    """Print *raw* as a ``result`` event; return (says FAILED, SGR codes of the border lines)."""
+    p, _ = _make()
+    p._console.record = True
+    p.print(raw, type="result")
+    out = p._console.export_text(styles=True)
+    return "Status: FAILED" in out, set(re.findall(r"\x1b\[([\d;]+)m[╭│╰─]", out))
+
+
+class TestResultPanelBorder(unittest.TestCase):
+    """The border of the Result panel is red exactly when the panel says ``Status: FAILED``."""
+
+    def test_border_is_red_only_for_a_failed_result(self) -> None:
+        failed, not_failed = (True, {"1;31"}), (False, {"1;32"})  # bold red, bold green
+        assert _result_panel(finish(False, False, "<p>it broke</p>", "retry")) == failed
+        assert _result_panel(finish(True, False, "<p>all good</p>")) == not_failed
+        # "Status: Continue" is no failure, although its ``success`` is false.
+        assert _result_panel(finish(False, True, "<p>more to do</p>")) == not_failed
+        assert _result_panel("plain text carries no status") == not_failed
+        assert _result_panel("") == not_failed
 
 
 if __name__ == "__main__":

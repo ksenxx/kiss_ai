@@ -292,6 +292,24 @@ function runTests() {
       send(win, {type: 'signinDone'});
       assert.strictEqual(modal(win).style.display, 'none');
       assert.strictEqual(tabs.length, 1);
+      // So are the two that answer any click: a failure naming no
+      // provider (a pasted code's) and a second "done".
+      const noteBefore = note(win).textContent;
+      send(win, {type: 'signinError', error: 'late'});
+      assert.strictEqual(
+        note(win).textContent,
+        noteBefore,
+        'a late failure is not shown',
+      );
+      toast.remove();
+      send(win, {type: 'signinDone', email: 'other@example.com'});
+      assert.strictEqual(
+        win.document.querySelector(
+          '.kiss-notification[data-notification-id="signin"]',
+        ),
+        null,
+        'a late signinDone raises no toast',
+      );
     } finally {
       win.close();
     }

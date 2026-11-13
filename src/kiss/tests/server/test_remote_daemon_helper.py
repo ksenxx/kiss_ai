@@ -7,14 +7,17 @@
 The helper starts a real second daemon in a subprocess; these tests
 check that the parent learns the port from the child's own endpoint
 record (not from a stale one left by an earlier daemon of the same
-home) and that a child dying before it seeds the database is reported.
+home), that a child dying before it seeds the database is reported and
+that a child which does not start is reaped by the helper.
 """
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import socket
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -58,3 +61,26 @@ def test_child_that_dies_before_seeding_is_reported(tmp_path: Path) -> None:
     ]
     with pytest.raises(RuntimeError, match="before seeding"):
         start_remote_daemon(home, seed=seed, timeout=60)
+
+
+def test_a_child_that_does_not_start_is_reaped(tmp_path: Path) -> None:
+    """The port is taken: the child exits at its bind and the helper leaves nothing of it.
+
+    The caller gets no handle to stop, so the child was left to the
+    garbage collector, its pipe open.
+    """
+    home = tmp_path / "home"
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        with pytest.raises(RuntimeError, match="remote daemon exited with"):
+            start_remote_daemon(home, port=taken.getsockname()[1], timeout=60)
+    children = [
+        child for child in gc.get_objects()
+        if isinstance(child, subprocess.Popen) and isinstance(child.args, list)
+        and str(home / "seed.json") in child.args
+    ]
+    assert children, "the test no longer finds the child it is about"
+    for child in children:
+        assert child.returncode is not None
+        assert child.stdout is not None and child.stdout.closed

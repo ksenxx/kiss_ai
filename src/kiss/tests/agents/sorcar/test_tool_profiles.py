@@ -187,15 +187,15 @@ class TestToolProfiles:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         agent = _bare_agent(tmp_path, _subagent_info={"reviewer": True})
-        assert agent._tool_profile() == "review"
+        assert agent._tool_profile("Review the diff for bugs") == "review"
         assert "Edit" not in _names(agent._get_tools())
         monkeypatch.setattr(DEFAULT_CONFIG, "tool_profiles", False)
-        assert agent._tool_profile() == "full"
+        assert agent._tool_profile("Review the diff for bugs") == "full"
         assert "Edit" in _names(agent._get_tools())
 
     def test_non_reviewer_subagent_keeps_full(self, tmp_path: Path) -> None:
         agent = _bare_agent(tmp_path, _subagent_info={"reviewer": False})
-        assert agent._tool_profile() == "full"
+        assert agent._tool_profile("Review the diff for bugs") == "full"
 
     def test_run_parallel_rejects_unknown_profile(self, tmp_path: Path) -> None:
         run_parallel = _tool(_bare_agent(tmp_path), "run_parallel")
@@ -205,6 +205,13 @@ class TestToolProfiles:
         out = run_parallel('["do x"]', tool_profile="shell+admin")
         assert out.startswith("Error: tool_profile must be one of")
         assert "'shell+admin'" in out
+
+    def test_run_parallel_refuses_options_nested_past_the_decoder(self, tmp_path: Path) -> None:
+        """The decoder's RecursionError for such ``options`` used to escape the tool."""
+        run_parallel = _tool(_bare_agent(tmp_path), "run_parallel")
+        out = run_parallel('["do x"]', options="[" * 100_000)
+        assert out.startswith(f"Error: options must be a JSON object, got {'[' * 80!r}: ")
+        assert out.endswith(" while decoding a JSON array from a unicode string")
 
 
 class TestComposableProfiles:
@@ -240,7 +247,7 @@ class TestComposableProfiles:
 
     def test_shell_plus_edit_is_the_file_toolset(self, tmp_path: Path) -> None:
         agent = _bare_agent(tmp_path, _tool_profile_name="shell+edit")
-        assert agent._tool_profile() == "shell+edit"
+        assert agent._tool_profile("Review the diff for bugs") == "shell+edit"
         assert _names(agent._get_tools()) == {
             "Bash", "bash_job", "Read", "run_commands_parallel", "Edit", "Write",
             "create_worktree", "commit_and_merge", "checkpoint", "rollback",
@@ -364,7 +371,7 @@ def _parent(env: IsolatedKissHome, model: _FinishingModel, max_budget: float) ->
     agent._chat_id = ""
     agent._last_task_id = uuid.uuid4().hex
     # Asks for sub-agents: children on its own model family are not refused
-    # (``fanout_guard.same_family_conflict``).
+    # (``fanout_guard.same_model_conflict``).
     agent.task_description = "fan out to sub-agents"
     return agent
 
@@ -489,6 +496,9 @@ class TestImplementationTasksKeepFullToolset:
         agent = _bare_agent(tmp_path, _subagent_info={"reviewer": True})
         assert agent._tool_profile("Patch the vulnerability") == "full"
         assert agent._tool_profile("Audit the vulnerability") == "review"
+        # Only the text given is judged, never the prompt an earlier run stored.
+        agent.task_description = "Fix the parser bug"
+        assert agent._tool_profile("") == "review"
 
     def test_daemon_stamps_full_for_implementation_review_words(
         self, env: IsolatedKissHome, daemon: str, model: _FinishingModel,
@@ -518,6 +528,14 @@ def test_env_float_rejects_non_finite(monkeypatch: pytest.MonkeyPatch) -> None:
     assert Config().context_limit_fraction == 0.7
 
 
+def _task_settings(agent: ChatSorcarAgent) -> dict[str, Any]:
+    """Return the settings of the ``task_settings`` event of *agent*'s last run."""
+    session = th._load_chat_events_by_task_id(agent.last_task_id) or {}
+    events: Any = session.get("events")
+    settings: dict[str, Any] = next(e["settings"] for e in events if e["type"] == "task_settings")
+    return settings
+
+
 def test_inferred_profile_is_decided_once_for_note_and_toolset(
     env: IsolatedKissHome, model: _FinishingModel,
 ) -> None:
@@ -544,6 +562,41 @@ def test_inferred_profile_is_decided_once_for_note_and_toolset(
     names = {t["function"]["name"] for t in request["tools"]}
     assert {"Read", "Edit", "Write"} <= names
     assert agent._run_profile == "full"
+    # The settings event reports that verdict, not one read off the raw template.
+    settings = _task_settings(agent)
+    assert settings["tool_profile"] == "full" and "tool_profile_inferred" not in settings
+
+
+def test_inferred_profile_is_judged_on_the_task_not_on_the_chat_history(
+    env: IsolatedKissHome, model: _FinishingModel,
+) -> None:
+    """A reviewer's verdict does not read the chat's earlier tasks.
+
+    The chat's first task asked for a fix; the reviewer dispatched into
+    that chat is asked for a verdict only.  Its prompt starts with that
+    history, and the run is still the read-only one the settings event
+    reports: the note, no ``Edit`` or ``Write``.
+    """
+    task_id, chat_id = th._add_task("Fix the parser bug", chat_id="")
+    th._save_task_result(result="<p>The parser bug is fixed.</p>", task_id=task_id)
+    agent = ChatSorcarAgent("profile-history")
+    agent._subagent_info = {"reviewer": True}
+    agent.resume_chat_by_id(chat_id)
+    agent.run(
+        prompt_template="Review the parser for bugs",
+        model_name=STANDIN_MODEL, work_dir=str(env.repo), max_steps=3, max_budget=1.0,
+        model_config=model.server.model_config,
+        web_tools=False, use_memory=False, verbose=False,
+    )
+    assert len(model.requests) == 1
+    request = model.requests[0]
+    assert "Fix the parser bug" in request["messages"][-1]["content"]
+    assert "# Restricted tool profile: review" in request["messages"][0]["content"]
+    names = {t["function"]["name"] for t in request["tools"]}
+    assert "Read" in names and not names & {"Edit", "Write"}
+    assert agent._run_profile == "review"
+    settings = _task_settings(agent)
+    assert settings["tool_profile"] == "review" and settings["tool_profile_inferred"] is True
 
 
 def _first_request(env: IsolatedKissHome, model: _FinishingModel, profile: str) -> dict[str, Any]:

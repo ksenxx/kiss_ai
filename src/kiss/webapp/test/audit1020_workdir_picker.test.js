@@ -17,6 +17,7 @@ const {
   makePage: makeChatPage,
   stubRaf,
   fakeMatchMedia,
+  typeInto,
 } = require('./simplify2_harness');
 const {
   send,
@@ -41,12 +42,23 @@ function makePage() {
   });
 }
 
+function isPickerListing(m) {
+  return String(m.token).startsWith('picker:');
+}
+
+/** The listings the folder picker asked for. */
+function pickerLists(posted) {
+  return ofType(posted, 'listDir').filter(isPickerListing);
+}
+
+/** The listings the Explorer tree asked for. */
+function explorerLists(posted) {
+  return ofType(posted, 'listDir').filter(m => !isPickerListing(m));
+}
+
 /** Answer the folder picker's latest listing with no sub-folders. */
 function answerPickerListing(win, posted) {
-  const list = ofType(posted, 'listDir').filter(m =>
-    String(m.token).startsWith('picker:'),
-  );
-  const req = list[list.length - 1];
+  const req = pickerLists(posted).pop();
   send(win, {
     type: 'dirListing',
     token: req.token,
@@ -56,8 +68,8 @@ function answerPickerListing(win, posted) {
   });
 }
 
-async function run() {
-  await test("another surface's pick keeps the Add Folder dialog open and lists it", async () => {
+function run() {
+  test("another surface's pick keeps the Add Folder dialog open and lists it", () => {
     const {win, posted} = makePage();
     openExplorer(win, posted, []);
     send(win, {
@@ -91,34 +103,28 @@ async function run() {
     assert.ok(!recent.hidden, 'the Recently opened section is shown');
     assert.deepStrictEqual(offered(), ['/old']);
     // The daemon's directory was adopted all the same.
-    const list = ofType(posted, 'listDir').filter(
-      m => !String(m.token).startsWith('picker:'),
-    );
-    assert.strictEqual(list[list.length - 1].path, '/elsewhere');
+    assert.strictEqual(explorerLists(posted).pop().path, '/elsewhere');
     win.close();
   });
 
-  await test("another surface's pick keeps the Open Folder dialog and its listing", async () => {
+  test("another surface's pick keeps the Open Folder dialog and its listing", () => {
     const {win, posted} = makePage();
     openExplorer(win, posted, []);
     click(win, byId(win, 'explorer-pick-folder'));
     const picker = byId(win, 'folder-picker');
     assert.ok(!picker.hidden, 'the open-folder dialog is open');
-    const before = ofType(posted, 'listDir').filter(m =>
-      String(m.token).startsWith('picker:'),
-    ).length;
+    const before = pickerLists(posted).length;
     send(win, {type: 'workDirChanged', workDir: '/elsewhere'});
     assert.ok(!picker.hidden, 'BUG: the broadcast closed the dialog');
     // The listing the dialog was waiting for still lands in it.
     answerPickerListing(win, posted);
-    assert.ok(
-      picker.querySelector('.folder-picker-note'),
+    assert.strictEqual(
+      picker.querySelector('.folder-picker-list').textContent,
+      '(no subfolders)',
       'the pending listing was rendered into the open dialog',
     );
     assert.strictEqual(
-      ofType(posted, 'listDir').filter(m =>
-        String(m.token).startsWith('picker:'),
-      ).length,
+      pickerLists(posted).length,
       before,
       'the broadcast did not re-list the dialog',
     );
@@ -128,7 +134,7 @@ async function run() {
     win.close();
   });
 
-  await test('a Select on a typed path edited away before its listing lands picks nothing', async () => {
+  test('a Select on a typed path edited away before its listing lands picks nothing', () => {
     // "Add Folder" on a typed path lists it first and adds it when the
     // listing succeeds; a path typed over it meanwhile is the user's
     // newer intent, so the listing only fills the browser.
@@ -137,24 +143,14 @@ async function run() {
     click(win, byId(win, 'explorer-add-folder'));
     const picker = byId(win, 'folder-picker');
     answerPickerListing(win, posted);
-    const pickerLists = () =>
-      ofType(posted, 'listDir').filter(m =>
-        String(m.token).startsWith('picker:'),
-      );
-    const explorerLists = () =>
-      ofType(posted, 'listDir').filter(
-        m => !String(m.token).startsWith('picker:'),
-      ).length;
     const input = picker.querySelector('.folder-picker-input');
-    input.value = '/ws/first';
-    input.dispatchEvent(new win.Event('input', {bubbles: true}));
+    typeInto(win, input, '/ws/first');
     click(win, picker.querySelector('.folder-picker-select'));
-    const pending = pickerLists().pop();
+    const pending = pickerLists(posted).pop();
     assert.strictEqual(pending.path, '/ws/first', 'the typed path is listed');
     assert.ok(!picker.hidden, 'and picked only once listed');
-    input.value = '/ws/second';
-    input.dispatchEvent(new win.Event('input', {bubbles: true}));
-    const added = explorerLists();
+    typeInto(win, input, '/ws/second');
+    const added = explorerLists(posted).length;
     send(win, {
       type: 'dirListing',
       token: pending.token,
@@ -167,10 +163,14 @@ async function run() {
       'BUG: the listing picked the path the user had edited away',
     );
     assert.strictEqual(input.value, '/ws/second', 'the edit stands');
-    assert.strictEqual(explorerLists(), added, 'no folder was added');
+    assert.strictEqual(
+      explorerLists(posted).length,
+      added,
+      'no folder was added',
+    );
     // Select on the edited path lists and then adds that one.
     click(win, picker.querySelector('.folder-picker-select'));
-    const second = pickerLists().pop();
+    const second = pickerLists(posted).pop();
     assert.strictEqual(second.path, '/ws/second');
     send(win, {
       type: 'dirListing',
@@ -180,15 +180,14 @@ async function run() {
       entries: [],
     });
     assert.ok(picker.hidden, 'the listed pick closes the dialog');
-    assert.strictEqual(explorerLists(), added + 1, 'and adds the folder');
+    assert.strictEqual(
+      explorerLists(posted).length,
+      added + 1,
+      'and adds the folder',
+    );
     win.close();
   });
 }
 
-run().then(
-  () => report('audit1020_workdir_picker'),
-  err => {
-    console.error(err);
-    process.exit(1);
-  },
-);
+run();
+report('audit1020_workdir_picker');

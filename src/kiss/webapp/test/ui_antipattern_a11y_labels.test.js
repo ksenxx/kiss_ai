@@ -14,13 +14,10 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {makePage, loadMainCss} = require('./simplify2_harness');
+const {MEDIA, makePage, loadMainCss} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {cssRule} = require('./designTokens');
 const {test, report} = makeRunner();
-
-const MEDIA = path.join(__dirname, '..', 'media');
-
 
 const {win} = makePage({beforeScripts: loadMainCss});
 const doc = win.document;

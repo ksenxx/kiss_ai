@@ -31,19 +31,11 @@ from kiss.agents.sorcar.agent_dispatch import (
     resolve_timeout,
 )
 from kiss.agents.sorcar.sea_settings import resolve_settings
-from kiss.tests.agents.seas.conftest import run_sea
-from kiss.tests.agents.seas.sea_contract import (
-    assert_no_removed_getters,
-    system_message,
-    tool_names,
-    tool_results,
-)
+from kiss.tests.agents.seas.sea_contract import assert_appending_sea_run, assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
 )
-
-_SEA_PATH = Path(sea.__file__).resolve()
 
 _REVIEW_HEAD = """\
 Summary
@@ -103,13 +95,13 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert_no_removed_getters(sea)
     assert "strong accept" in agent.description()
     # The task text names the rounds as sub-agents, so the dispatcher lets the
-    # coordinator run a writer of its own model family (same_family_conflict).
+    # coordinator run a writer of its own model family (same_model_conflict).
     shaped = agent.prompt("  Writing: a paper. Review: strict.  ")
     assert shaped.startswith("Writing: a paper. Review: strict.\n\nRun each writing round as a")
     assert sea.WRITE_PAPER_SEA in shaped and sea.REVIEW_PAPER_SEA in shaped
     assert fanout_guard.asks_for_sub_agents(shaped)
     assert not fanout_guard.asks_for_sub_agents("Writing: a paper. Review: strict.")
-    assert fanout_guard.same_family_conflict(
+    assert fanout_guard.same_model_conflict(
         "claude-opus-5-5", "claude-opus-5-5", ["write the paper"], shaped, review=False) == ""
 
 
@@ -128,9 +120,9 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas() -> None
         assert resolve_timeout(None, sea_commands.sea_settings(path)) == seconds, command
     # ``sorcar`` is hidden (no ``/sorcar`` command): it is reached by path.
     assert sea_commands.get_command("sorcar") is None
-    dummy_settings = sea_commands.sea_settings(Path(DEFAULT_AGENT_PATH))
-    assert "timeout" not in dummy_settings
-    assert resolve_timeout(None, dummy_settings) == DEFAULT_DISPATCH_TIMEOUT_SECONDS == 3600.0
+    sorcar_settings = sea_commands.sea_settings(Path(DEFAULT_AGENT_PATH))
+    assert "timeout" not in sorcar_settings
+    assert resolve_timeout(None, sorcar_settings) == DEFAULT_DISPATCH_TIMEOUT_SECONDS == 3600.0
 
 
 def test_writer_task_first_round_and_revision_rounds() -> None:
@@ -335,45 +327,27 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
     appended, and that both tool results flowed back through the
     tool-result messages.
     """
-    review = _review(tmp_path, "p-round1-review.txt", "Rating: 10\nRecommendation: strong accept\n")
-    script = [
-        tool_call_body(
-            "writer_task",
-            {"instructions": "Write for ICLR 2027 at p.tex.", "round_number": 1},
-            prompt_tokens=500,
-        ),
-        tool_call_body(
-            "loop_status", {"reviews": str(tmp_path / "p-round*-review.txt")}, prompt_tokens=600
-        ),
-        finish_body("<pre>STOP: strong accept after round 1</pre>", prompt_tokens=700),
-    ]
-    run = sea_commands.evaluate_sea(
-        [ReviseAndReviewPaperSea()],
+    _review(tmp_path, "p-round1-review.txt", "Rating: 10\nRecommendation: strong accept\n")
+    results = assert_appending_sea_run(
+        ReviseAndReviewPaperSea(),
         "Writing: Write for ICLR 2027 at p.tex. Review: for ICLR 2027.",
+        [
+            tool_call_body(
+                "writer_task",
+                {"instructions": "Write for ICLR 2027 at p.tex.", "round_number": 1},
+                prompt_tokens=500,
+            ),
+            tool_call_body(
+                "loop_status", {"reviews": str(tmp_path / "p-round*-review.txt")}, prompt_tokens=600
+            ),
+            finish_body("<pre>STOP: strong accept after round 1</pre>", prompt_tokens=700),
+        ],
+        tmp_path,
+        tools={"writer_task", "reviewer_task", "loop_status", "run_agent", "Bash", "finish"},
+        system_prompt=sea.SYSTEM_PROMPT,
+        anchors=("# Revise-and-review loop coordinator", sea.REVIEW_PAPER_SEA),
+        summary="strong accept after round 1",
     )
-    parsed, agentic = run_sea(run, script, tmp_path, max_steps=5)
-    assert parsed["success"] is True
-    assert "strong accept after round 1" in parsed["summary"]
-
-    assert len(agentic) == 3
-    for request in agentic:
-        names = tool_names(request)
-        assert {
-            "writer_task",
-            "reviewer_task",
-            "loop_status",
-            "run_agent",
-            "Bash",
-            "finish",
-        } <= names, names
-        system = system_message(request)
-        assert not system.startswith(sea.SYSTEM_PROMPT)
-        assert "# Revise-and-review loop coordinator" in system
-        assert sea.REVIEW_PAPER_SEA in system
-    results = tool_results(agentic[2])
-    assert len(results) == 2, agentic[2]["messages"]
-    assert results[0].startswith(
-        "You ARE the paper-writing agent. Writing round 1:"
-    )
+    assert len(results) == 2, results
+    assert results[0].startswith("You ARE the paper-writing agent. Writing round 1:")
     assert "round 1: strong accept (rank 6/6); scores: Rating: 10" in results[1]
-    assert review.exists()

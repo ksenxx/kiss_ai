@@ -29,11 +29,9 @@ const {
   assertJsonEqual,
 } = require('./workdir_helpers');
 const {pickMachine, typeInto} = require('./simplify2_harness');
+const {key} = require('./ui_antipattern_harness');
 const {MACHINES, bootOnGpuBox} = require('./picked_machine_helpers');
-
-function tabId(win) {
-  return win._testApi.getActiveTabId();
-}
+const {activeTabId: tabId} = require('./subagent_tab_helpers');
 
 /** The mentions the open picker offers ([] when it is closed). */
 function pickerItems(win) {
@@ -166,9 +164,7 @@ function testALateListDoesNotReopenADismissedPicker() {
   answerFiles(win, 'a', [{type: 'file', text: './alpha.js'}], 'gpu-box');
   assertJsonEqual(pickerItems(win), ['./alpha.js']);
   typeInto(win, inp, '@ab');
-  inp.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}),
-  );
+  key(win, inp, 'Escape');
   assertJsonEqual(pickerItems(win), [], 'Escape closes the picker');
   answerFiles(win, 'ab', [{type: 'file', text: './abc.js'}], 'gpu-box');
   assertJsonEqual(

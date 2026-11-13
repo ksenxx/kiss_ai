@@ -66,10 +66,14 @@
   // response; the race below gives up on it after NAV_TIMEOUT_MS (or on
   // error / 5xx) and serves the cached page.  The worker is kept alive
   // until the network answers so the cached page is refreshed even when
-  // the timeout already answered the navigation.
+  // the timeout already answered the navigation.  The request skips the
+  // browser's HTTP cache (the server forbids storing the page anyway):
+  // Chromium's lets one request per URL through at a time, so the reload
+  // of the cached page would wait behind the request the worker gave up
+  // on, time out as well, and leave the page on its cached copy.
   function networkFirstPage(event) {
     let refresh = null;
-    const network = fetch(event.request).then(response => {
+    const network = fetch(event.request, {cache: 'no-store'}).then(response => {
       if (response.ok) refresh = putInCache(APP_PAGE, response.clone());
       return response;
     });

@@ -1,6 +1,10 @@
 .venv
 .vscode
 .DS_Store
+# macOS AppleDouble metadata files (created when copying to non-HFS volumes or tar)
+._*
+# stray test-file archive committed by a remote /sync
+c3.tar
 __pycache__
 .uv/
 *.egg-info
@@ -25,6 +29,9 @@ tmp/
 # White-label brand overlay copied in by install.sh (see "Brand overlay"
 # there); the checked-in brand stays KISS Sorcar.
 /.brand/
+# Lock sidecar the model updater creates next to the catalog it writes
+# (update_models.catalog_lock); never part of the repository or the wheel.
+.MODEL_INFO.json.lock
 src/kiss/benchmarks/results/
 !src/kiss/benchmarks/results/.gitkeep
 src/kiss/benchmarks/swebench_pro/vendor/

@@ -166,7 +166,7 @@ class TestF422CommittedChangesReachWorktreePrompt:
                 "let callers auto-discard the branch (events: "
                 f"{[e.get('type') for e in printer.emitted]})"
             )
-            assert "committed.txt" in done_events[0]["changedFiles"]
+            assert "committed.txt" in worktree_changed_files(server, "wt-422")
             assert wt_agent._wt_pending, (
                 "presenting must not finalize or discard the branch"
             )

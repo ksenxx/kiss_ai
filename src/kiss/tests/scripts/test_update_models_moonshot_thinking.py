@@ -477,7 +477,7 @@ class TestDetectThinkingLevelMoonshot:
         import kiss.scripts.update_models as mod
 
         _MoonshotHandler.captured_efforts = []
-        for name in ("cc/claude-opus-4-7", "gemini-3.6-pro", "codex/gpt-5.5", "glm-4.6"):
+        for name in ("cc/claude-opus-4-7", "gemini-3-pro-image", "codex/gpt-5.5", "glm-4.6"):
             assert mod.detect_thinking_level(name) is None, name
         assert _MoonshotHandler.captured_efforts == []
 

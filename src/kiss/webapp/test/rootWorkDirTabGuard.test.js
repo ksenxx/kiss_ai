@@ -24,7 +24,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, lastMsg} = require('./simplify2_harness.js');
+const {makePage, send, lastMsg, clickTab} = require('./simplify2_harness.js');
 
 // The work dir the active tab stamps on the file picker's getFiles.
 function pickerWorkDir(win, posted) {
@@ -55,17 +55,6 @@ function replay(win, workDir, tabFields) {
     events: [],
     extra: JSON.stringify({work_dir: workDir}),
   });
-}
-
-// Chat tabs have no row of their own: the Chats panel's pick is
-// switchToTab.
-function activateTab(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    `the ${tabId} tab must be open`,
-  );
-  win._testApi.switchToTab(tabId);
-  assert.strictEqual(win._testApi.getActiveTabId(), tabId);
 }
 
 const BG_TABS = [
@@ -137,7 +126,7 @@ function testBgReplayRootWorkDirNotAdopted() {
   send(win, {type: 'tabs_state', tabs: BG_TABS});
   replay(win, '/proj/bg', BG_FIELDS);
   replay(win, '/', BG_FIELDS);
-  activateTab(win, 'tab-bg');
+  clickTab(win, 'tab-bg');
   assert.strictEqual(
     pickerWorkDir(win, posted),
     '/proj/bg',

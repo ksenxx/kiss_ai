@@ -57,9 +57,9 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     WebPrinter,
     _create_ssl_context,
-    _generate_self_signed_cert,
 )
 from kiss.tests.conftest import posix_only
+from kiss.tests.local_ws import _generate_self_signed_cert
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
@@ -500,6 +500,16 @@ class TestM7RefusesOversizePrompt(IsolatedAsyncioTestCase):
 
 
 
+class _IdleTransport(asyncio.WriteTransport):
+    """An endpoint double's transport: the printer's drain watch finds nothing unsent."""
+
+    def get_write_buffer_size(self) -> int:
+        return 0
+
+    def abort(self) -> None:
+        """Nothing to drop."""
+
+
 class TestM8FuturesTrackedAndCancelled(IsolatedAsyncioTestCase):
     """``WebPrinter`` tracks pending sends and cancels them on remove_client."""
 
@@ -508,6 +518,8 @@ class TestM8FuturesTrackedAndCancelled(IsolatedAsyncioTestCase):
         printer._loop = asyncio.get_running_loop()
 
         class _StuckWs:
+            transport = _IdleTransport()
+
             async def send(self, _data: str) -> None:
                 await asyncio.Event().wait()
 
@@ -542,6 +554,7 @@ class TestM8FuturesTrackedAndCancelled(IsolatedAsyncioTestCase):
         printer._loop = asyncio.get_running_loop()
 
         class _OkWs:
+            transport = _IdleTransport()
             sent: list[str] = []
 
             async def send(self, data: str) -> None:

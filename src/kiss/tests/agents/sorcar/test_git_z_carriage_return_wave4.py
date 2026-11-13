@@ -88,10 +88,6 @@ def test_copy_dirty_state_copies_the_files_named_with_carriage_returns(tmp_path:
 
 def test_name_lists_keep_carriage_returns(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "repo")
-    (repo / ".gitignore").write_text("*.log\n")
-    (repo / "x\ry.log").write_text("ignored\n")
-    assert GitWorktreeOps.list_ignored_files(repo) == ["x\ry.log"]
-
     run_git_checked(repo, "checkout", "-q", "-b", "other")
     (repo / CR).write_text("other side\n")
     run_git_checked(repo, "commit", "-q", "-am", "other side")

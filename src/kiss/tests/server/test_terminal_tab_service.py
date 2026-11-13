@@ -184,8 +184,6 @@ def test_shell_runs_in_the_work_dir_and_streams_to_its_connection_only(
     assert len(opened) == 1
     assert opened[0]["tab_id"] == "tab-a"
     assert opened[0]["attached"] is False
-    assert opened[0]["cwd"] == str(tmp_path)
-    assert opened[0]["shell"] == os.path.basename(default_shell()[0])
 
     svc.input("tab-a", "conn-1", "echo marker-$((40+2)); pwd; stty size\n")
     printer.wait_for(
@@ -233,7 +231,9 @@ def test_dimensions_are_clamped_and_defaulted(service: Any, tmp_path: Path) -> N
 def test_missing_work_dir_falls_back_to_home(service: Any, tmp_path: Path) -> None:
     svc, printer = service
     svc.open("tab-c", "conn-1", str(tmp_path / "gone"), 80, 24)
-    assert printer.of_type("terminalOpened")[0]["cwd"] == os.path.expanduser("~")
+    svc.input("tab-c", "conn-1", 'echo "in=[$(pwd -P)]"\n')
+    home = f"in=[{os.path.realpath(os.path.expanduser('~'))}]"
+    printer.wait_for(lambda: home in printer.output("tab-c"))
 
 
 def test_close_hangs_up_and_kills_a_shell_that_ignores_sighup(
@@ -456,6 +456,37 @@ def test_shutdown_reaps_every_shell(tmp_path: Path) -> None:
     assert session_count(svc) == 0
     assert len(printer.of_type("terminalExit")) == 2
     svc.shutdown()  # nothing left: returns at once
+
+
+def test_shutdown_starts_no_shell_for_an_open_behind_it(tmp_path: Path) -> None:
+    """A ``terminalOpen`` that arrives while the daemon stops gets no shell.
+
+    While ``shutdown`` waited for a shell that ignores the hang-up, a
+    tab whose shell had already left could open a new one (a page
+    reloading): nothing hung that shell up, and ``shutdown`` returned
+    at its deadline with it still running.
+    """
+    printer = ConnPrinter()
+    svc = TerminalService(printer)
+    svc.open("quick", "conn-1", str(tmp_path), 80, 24)
+    svc.open("stubborn", "conn-1", str(tmp_path), 80, 24)
+    svc.input("stubborn", "conn-1", "trap '' HUP; sleep 300\n")
+    printer.wait_for(lambda: len(printer.of_type("terminalOpened")) == 2)
+    time.sleep(0.3)
+    stopping = threading.Thread(target=svc.shutdown)
+    stopping.start()
+    try:
+        # The first shell is gone; the other one keeps ``shutdown`` waiting.
+        printer.wait_for(lambda: printer.of_type("terminalExit"))
+        svc.open("quick", "conn-2", str(tmp_path), 80, 24)
+        stopping.join(10)
+        assert not stopping.is_alive()
+        assert session_count(svc) == 0, "a shell opened during the shutdown outlived it"
+        assert not printer.of_type("terminalOpened", "conn-2")
+        assert not printer.of_type("terminalError", "conn-2")
+    finally:
+        svc.close("quick")  # the shell an unfixed service started
+        _wait_until(lambda: session_count(svc) == 0)
 
 
 def test_close_interrupts_a_full_pty_write(service: Any, tmp_path: Path) -> None:

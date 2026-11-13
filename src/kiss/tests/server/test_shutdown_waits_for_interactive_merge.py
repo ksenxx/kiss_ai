@@ -116,11 +116,10 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
         self._saved_env = os.environ.get("KISS_HOME")
         os.environ["KISS_HOME"] = str(self.home)
         self._saved_db = (
-            persistence._DB_PATH, persistence._db_conn, persistence._KISS_DIR,
+            persistence._DB_PATH, persistence._KISS_DIR,
         )
         persistence._KISS_DIR = self.home
         persistence._DB_PATH = self.home / "history.db"
-        persistence._db_conn = None
         self._saved_cfg = (
             getattr(user_config, "CONFIG_DIR", None),
             getattr(user_config, "CONFIG_PATH", None),
@@ -134,13 +133,9 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
 
     def _leave_isolated_home(self) -> None:
         """Undo :meth:`_enter_isolated_home`."""
-        if persistence._db_conn is not None:
-            try:
-                persistence._db_conn.close()
-            except Exception:  # pragma: no cover — cleanup best-effort
-                pass
+        persistence._close_thread_db()
         (
-            persistence._DB_PATH, persistence._db_conn, persistence._KISS_DIR,
+            persistence._DB_PATH, persistence._KISS_DIR,
         ) = self._saved_db
         for name, value in zip(
             ("CONFIG_DIR", "CONFIG_PATH"), self._saved_cfg, strict=True,

@@ -122,9 +122,29 @@ def _make_repo(root: Path, name: str = "ledger") -> Path:
 
 def _forget(slug: str) -> None:
     """Drop the memory and the URL-spec checkout of repository *slug*: both are keyed by
-    name in the session home, so earlier tests (and earlier runs) share them."""
+    name in the session home, so earlier tests of the process share them."""
     shutil.rmtree(kiss_home() / "memories" / slug, ignore_errors=True)
     shutil.rmtree(kiss_home() / "knowledge" / "checkouts" / slug, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _leave_no_repository_memory_behind() -> Iterator[None]:
+    """Remove the memories and URL-spec checkouts the test created in the session home.
+
+    They are keyed by repository name there, not by the test's temporary
+    directory, and one block store alone holds tens of megabytes (``giant``):
+    left behind, they stayed for every later test of the process.
+    """
+    roots = [kiss_home() / "memories", kiss_home() / "knowledge" / "checkouts"]
+    before = [set(os.listdir(root)) if root.is_dir() else set() for root in roots]
+    yield
+    for root, kept in zip(roots, before):
+        created = set(os.listdir(root)) - kept if root.is_dir() else set()
+        for entry in (root / name for name in created):
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:  # the ``<slug>.lock`` beside a memory
+                entry.unlink(missing_ok=True)
 
 
 @pytest.fixture
@@ -699,12 +719,11 @@ def test_search_tokenizes_queries_filters_kinds_and_paths(repo: Path) -> None:
     assert sea.knowledge_read(str(repo), "tag:v9") == "No block with key 'tag:v9'."
 
 
-def test_pages_are_written_to_the_domain_memory_and_mirrored(
-    repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Curated pages land where every Sorcar run in the repo finds them, plus note blocks."""
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # offline hashed embeddings
+def test_pages_are_written_to_the_domain_memory_and_mirrored(repo: Path) -> None:
+    """Curated pages land where every Sorcar run in the repo finds them, plus note blocks.
+
+    The embeddings are the offline hashed ones (conftest ``_offline_memory_embeddings``).
+    """
     sea.index_repo(str(repo))
     result = sea.write_knowledge_page(
         str(repo),
@@ -1320,6 +1339,20 @@ def test_store_is_replaced_when_another_repository_takes_the_slug(tmp_path: Path
     assert store.get("file:README.md") is None and store.get("file:other.txt") is not None
     # Re-running on the same repository is incremental again.
     assert index.index_repo(second, store).mode == "incremental"
+    # Both daily jobs carry the slug's name; the repository in the prompt tells them
+    # apart, so scheduling one checkout never removes the other's job as outdated.
+    name = sea.JOB_NAME_PREFIX + "twin"
+    try:
+        assert sea.schedule_daily_update(str(first)).startswith("created:")
+        assert sea.schedule_daily_update(str(second)).startswith("created:")
+        assert sea.schedule_daily_update(str(first)).startswith("Already scheduled: job ")
+        prompts = [job["prompt"] for job in load_jobs() if job["name"] == name]
+        assert len(prompts) == 2
+        targets = (sea.canonical_spec(str(first)), sea.canonical_spec(str(second)))
+        markers = (f"= {f'update {target}'!r}\n" for target in targets)
+        assert all(any(marker in prompt for prompt in prompts) for marker in markers)
+    finally:
+        _remove_cron_jobs_named(name)
 
 
 def test_blocks_are_written_children_first() -> None:

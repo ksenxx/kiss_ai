@@ -30,6 +30,9 @@ from types import TracebackType
 from typing import Any
 
 _HOLD_TIMEOUT = 60.0
+# Seconds :func:`retry_later` asks the SDK to wait before its retry: far
+# longer than a Stop or a request deadline takes to unwind.
+_RETRY_AFTER = 4
 
 
 @dataclass
@@ -90,6 +93,7 @@ class Reply:
             every 20 ms until this event fires (bounded) or the client
             hangs up — a peer that keeps every read timeout from firing
             without ever answering.
+        headers: Extra headers of a JSON reply (``Retry-After``).
     """
 
     status: int = 200
@@ -101,6 +105,59 @@ class Reply:
     drop: bool = False
     headers_gate: threading.Event | None = None
     trickle: threading.Event | None = None
+    headers: dict[str, str] = field(default_factory=dict)
+
+
+def retry_later(_request: Request) -> Reply:
+    """Responder: refuse every request with a 429 whose ``Retry-After`` the SDK sleeps out."""
+    return Reply(
+        status=429,
+        json_body={"error": {"message": "retry later", "type": "rate_limit_error"}},
+        headers={"Retry-After": str(_RETRY_AFTER)},
+    )
+
+
+def _thread_sleeping_before_a_retry(earlier: set[threading.Thread]) -> threading.Thread | None:
+    """Return the thread started after *earlier* that sits in the SDK's ``_sleep_for_retry``."""
+    frames = sys._current_frames()
+    for thread in set(threading.enumerate()) - earlier:
+        frame = frames.get(thread.ident or -1)
+        if frame is not None and frame.f_code.co_name == "_sleep_for_retry":
+            return thread
+    return None
+
+
+def assert_left_during_the_retry_sleep(
+    caller: threading.Thread, stop: threading.Event | None
+) -> None:
+    """Start *caller* and check that it ends while the SDK sleeps out a ``Retry-After``.
+
+    Nothing is patched: the sleeping thread is found by its frame, among
+    the threads started from here on (an earlier test's request may
+    still sleep out its own backoff).  It must outlive the caller (they
+    are one thread when the request runs inline, so the caller waited
+    the sleep out) and end once the sleep is over.
+
+    Args:
+        caller: The unstarted thread making the request (against a
+            :func:`retry_later` endpoint).
+        stop: The caller's stop event, set once the SDK sleeps; ``None``
+            when the request's own deadline is to end the call.
+    """
+    earlier = set(threading.enumerate())
+    caller.start()
+    deadline = time.monotonic() + _HOLD_TIMEOUT
+    while (sleeper := _thread_sleeping_before_a_retry(earlier)) is None:
+        assert caller.is_alive(), "the request ended before the SDK slept out a retry"
+        assert time.monotonic() < deadline, "the SDK never slept before a retry"
+        time.sleep(0.01)
+    if stop is not None:
+        stop.set()
+    caller.join(_HOLD_TIMEOUT)
+    assert not caller.is_alive(), "the caller never returned"
+    assert sleeper.is_alive(), "the caller waited out the SDK's Retry-After sleep"
+    sleeper.join(_RETRY_AFTER + _HOLD_TIMEOUT)
+    assert not sleeper.is_alive(), "the request given up never ended"
 
 
 def chat_chunk(payload: dict[str, Any]) -> bytes:
@@ -170,6 +227,8 @@ class _ScriptedHandler(BaseHTTPRequestHandler):
         body = json.dumps(reply.json_body).encode()
         self.send_response(reply.status)
         self.send_header("Content-Type", "application/json")
+        for name, value in reply.headers.items():
+            self.send_header(name, value)
         if reply.trickle is None:
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()

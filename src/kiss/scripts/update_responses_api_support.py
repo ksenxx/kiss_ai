@@ -47,6 +47,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,8 +61,10 @@ from kiss.core.models.model_info import (
 )
 from kiss.scripts.update_models import (
     _alias_base_name,
+    _noop_token_callback,
     _read_model_info_json,
     _write_model_info_json,
+    calculator,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,6 +85,10 @@ _RETRY_DELAYS_SECONDS = (5.0, 15.0)
 # status 2 (partial) after writing everything it learned.
 _BATCH_WALL_CLOCK_SECONDS = 3600.0
 
+# ``thinking`` of a probe that is given no catalog row: the adapter then
+# applies the default effort the runtime catalog has for the model.
+_RUNTIME_DEFAULT: Any = object()
+
 
 def _is_transient_error(exc: Exception) -> bool:
     """Return True for failures that say nothing about Responses support.
@@ -90,7 +97,12 @@ def _is_transient_error(exc: Exception) -> bool:
     endpoint load/health artifacts: a model must not lose (or miss) its
     ``use_responses_api`` flag because the vendor happened to be overloaded
     during the probe.  Definitive 4xx rejections ("not supported with the
-    Responses API", "model_not_found") are NOT transient.
+    Responses API", "model_not_found") are NOT transient.  A
+    ``server_error`` or a rate limit reported inside the stream is the
+    HTTP 5xx / 429 of a request that had already been accepted, and is
+    known by the provider's code on the error: the adapter's ``KISSError``
+    carries it for a ``response.failed`` and for the bare ``error`` event,
+    the SDK's ``APIError`` for a gateway's ``error`` object.
 
     Args:
         exc: The exception raised by a probe attempt.
@@ -110,6 +122,9 @@ def _is_transient_error(exc: Exception) -> bool:
         (APIConnectionError, APITimeoutError, InternalServerError, RateLimitError),
     ):
         return True
+    # The last two of those again, reported inside a stream that had answered 200.
+    if getattr(exc, "code", None) in ("server_error", "rate_limit_exceeded"):
+        return True
     # The adapter's stall watchdog raises a builtin TimeoutError ("Model
     # stream stalled ... it will be retried"), and OpenRouter surfaces
     # upstream provider blips as an in-stream ``response.failed`` with the
@@ -128,8 +143,8 @@ class ProbeResult:
         name: The catalog key that was probed.
         supported: True when every applicable probe passed.
         conclusive: False when the failure says nothing about the model's
-            Responses-API support (exhausted transient errors, missing
-            vendor key, wall-clock cutoff).  Inconclusive verdicts never
+            Responses-API support (exhausted transient errors, missing or
+            rejected vendor key, wall-clock cutoff).  Inconclusive verdicts never
             change an existing catalog flag.
         detail: Human-readable outcome ("ok", "generation failed: ...").
     """
@@ -140,31 +155,14 @@ class ProbeResult:
     conclusive: bool = True
 
 
-def calculator(expression: str = "") -> str:
-    """Compute a math expression.
-
-    The wire tool name is this function's ``__name__`` (the schema builder
-    uses it), so it must stay ``calculator`` — the round-trip probe checks
-    the model called exactly that tool.
-
-    Args:
-        expression: A math expression string like '25*4'.
-    """
-    from kiss.scripts.update_models import safe_arithmetic
-
-    return safe_arithmetic(expression)
-
-
-def _noop_token_callback(_token: str) -> None:
-    """No-op streaming callback so probes exercise the SSE path agents use."""
-
-
-def _build_v2_model(name: str, provider: OpenAICompatibleProvider) -> Any:
+def _build_v2_model(name: str, provider: OpenAICompatibleProvider, thinking: str | None) -> Any:
     """Return a fresh ``OpenAICompatibleModel2`` aimed at *provider*'s endpoint.
 
     Args:
         name: The catalog model name (may carry an ``openrouter/`` prefix).
         provider: The registry entry whose ``base_url`` and API key to use.
+        thinking: The reasoning effort to request (``None``: none), or
+            :data:`_RUNTIME_DEFAULT`.
 
     Returns:
         A v2 adapter ready for ``initialize``/``generate``.
@@ -172,25 +170,29 @@ def _build_v2_model(name: str, provider: OpenAICompatibleProvider) -> Any:
     from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 
     api_key = getattr(config_module.DEFAULT_CONFIG, provider.api_key_name)
+    # A tight stall watchdog plus an output cap keep a single
+    # misbehaving vendor stream (endless slow reasoning tokens) from
+    # hanging the whole batch; a model that cannot finish a trivial
+    # task within these bounds does not usably support the transport.
+    model_config: dict[str, Any] = {"stream_stall_timeout": 120.0, "max_output_tokens": 32000}
+    if thinking is not _RUNTIME_DEFAULT:
+        # Present, even as None, the key keeps the adapter from filling in the
+        # effort the runtime catalog (not the probed one) has for the name.
+        model_config["reasoning_effort"] = thinking
     return OpenAICompatibleModel2(
         name,
         base_url=provider.base_url,
         api_key=api_key,
-        # A tight stall watchdog plus an output cap keep a single
-        # misbehaving vendor stream (endless slow reasoning tokens) from
-        # hanging the whole batch; a model that cannot finish a trivial
-        # task within these bounds does not usably support the transport.
-        model_config={"stream_stall_timeout": 120.0, "max_output_tokens": 32000},
+        model_config=model_config,
         token_callback=_noop_token_callback,
     )
 
 
-def _probe_generation(name: str, provider: OpenAICompatibleProvider) -> str | None:
-    """Run the plain-generation probe for *name* via ``/v1/responses``.
+def _probe_generation(m: Any) -> str | None:
+    """Run the plain-generation probe via ``/v1/responses``.
 
     Args:
-        name: The catalog model name.
-        provider: The vendor endpoint to probe.
+        m: A fresh adapter for the model (:func:`_build_v2_model`).
 
     Returns:
         None on success, otherwise a short failure description.
@@ -198,7 +200,6 @@ def _probe_generation(name: str, provider: OpenAICompatibleProvider) -> str | No
     Raises:
         Exception: Whatever the SDK raised; classified by the caller.
     """
-    m = _build_v2_model(name, provider)
     m.initialize(_GENERATION_PROMPT)
     text, _ = m.generate()
     if not (text and text.strip()):
@@ -206,8 +207,8 @@ def _probe_generation(name: str, provider: OpenAICompatibleProvider) -> str | No
     return None
 
 
-def _probe_tool_round_trip(name: str, provider: OpenAICompatibleProvider) -> str | None:
-    """Run the tool-calling round-trip probe for *name* via ``/v1/responses``.
+def _probe_tool_round_trip(m: Any) -> str | None:
+    """Run the tool-calling round-trip probe via ``/v1/responses``.
 
     The model must (a) emit a ``function_call`` for the calculator tool and
     (b) accept the ``function_call_output`` on the follow-up request and
@@ -215,8 +216,7 @@ def _probe_tool_round_trip(name: str, provider: OpenAICompatibleProvider) -> str
     loop performs on every tool turn.
 
     Args:
-        name: The catalog model name.
-        provider: The vendor endpoint to probe.
+        m: A fresh adapter for the model (:func:`_build_v2_model`).
 
     Returns:
         None on success, otherwise a short failure description.
@@ -224,7 +224,6 @@ def _probe_tool_round_trip(name: str, provider: OpenAICompatibleProvider) -> str
     Raises:
         Exception: Whatever the SDK raised; classified by the caller.
     """
-    m = _build_v2_model(name, provider)
     m.initialize(_TOOL_PROMPT)
     function_map = {"calculator": calculator}
     calls, content, _ = m.generate_and_process_with_tools(function_map)
@@ -250,7 +249,7 @@ def _probe_tool_round_trip(name: str, provider: OpenAICompatibleProvider) -> str
 
 
 def _run_probe_with_retries(
-    probe: Any, label: str, name: str, provider: OpenAICompatibleProvider
+    probe: Any, label: str, name: str, provider: OpenAICompatibleProvider, thinking: str | None
 ) -> tuple[str | None, bool]:
     """Run one probe function, retrying transient endpoint failures.
 
@@ -259,31 +258,37 @@ def _run_probe_with_retries(
         label: Failure-message prefix ("generation" / "tool probe").
         name: The catalog model name.
         provider: The vendor endpoint to probe.
+        thinking: The reasoning effort to request (see :func:`_build_v2_model`).
 
     Returns:
         ``(failure, conclusive)``: ``failure`` is None on success,
         otherwise a short description; ``conclusive`` is False when every
-        attempt died on a transient endpoint error, so the verdict must
-        not overwrite an existing catalog flag.
+        attempt died on a transient endpoint error or the vendor rejected
+        the API key or the account, so the verdict must not overwrite an
+        existing catalog flag.
     """
-    import time
-
     last: str | None = None
     for attempt in range(_PROBE_ATTEMPTS):
         try:
-            return probe(name, provider), True
+            return probe(_build_v2_model(name, provider, thinking)), True
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             last = f"{label} failed: {type(e).__name__}: {e}"
+            if getattr(e, "status_code", None) in (401, 402, 403):
+                # A refused key (401 / 403) or an account out of credits (402): the
+                # answer does not show whether the model would have been served, so
+                # the stored flag is kept and the request is not retried.
+                return last, False
             if not _is_transient_error(e):
                 return last, True
-            if attempt + 1 >= _PROBE_ATTEMPTS:
-                return last, False
-            time.sleep(_RETRY_DELAYS_SECONDS[attempt])
+            if attempt + 1 < _PROBE_ATTEMPTS:
+                time.sleep(_RETRY_DELAYS_SECONDS[attempt])
     return last, False
 
 
-def probe_responses_support(name: str, fc: bool = True) -> ProbeResult:
+def probe_responses_support(
+    name: str, fc: bool = True, thinking: str | None = _RUNTIME_DEFAULT
+) -> ProbeResult:
     """Live-probe whether *name* works over its vendor's ``/v1/responses``.
 
     The single entry point shared by this script's batch mode and by
@@ -295,6 +300,10 @@ def probe_responses_support(name: str, fc: bool = True) -> ProbeResult:
         name: The model name (with any ``openrouter/`` routing prefix).
         fc: Whether the model claims function-calling support (adds the
             tool round-trip requirement).
+        thinking: The default reasoning effort of the catalog row being
+            probed (``None``: the row has none); every probe request asks
+            for exactly that.  Left out, the runtime catalog's default
+            applies (``update_models.py`` probes the catalog it runs on).
 
     Returns:
         The probe outcome; ``supported`` is False when the model has no
@@ -316,11 +325,11 @@ def probe_responses_support(name: str, fc: bool = True) -> ProbeResult:
             conclusive=False,
         )
     failure, conclusive = _run_probe_with_retries(
-        _probe_generation, "generation", name, provider
+        _probe_generation, "generation", name, provider, thinking
     )
     if failure is None and fc:
         failure, conclusive = _run_probe_with_retries(
-            _probe_tool_round_trip, "tool probe", name, provider
+            _probe_tool_round_trip, "tool probe", name, provider, thinking
         )
     if failure is not None:
         return ProbeResult(
@@ -376,7 +385,7 @@ def _apply_results(
     """Write probe verdicts into the catalog mapping, aliases included.
 
     Only conclusive verdicts change the catalog: an inconclusive result
-    (exhausted transient errors, missing key, wall-clock cutoff) says
+    (exhausted transient errors, missing or rejected key, wall-clock cutoff) says
     nothing about Responses support, so the entry's existing flag — set
     by an earlier successful probe — is preserved.
 
@@ -444,12 +453,16 @@ def main() -> None:
         if args.model_info is not None
         else update_models_module.MODEL_INFO_PATH
     )
+    if not catalog_path.exists():
+        # Not parser.error: its status 2 is this script's status for a partial run.
+        sys.exit(f"--model-info {catalog_path} does not exist")
     data = _read_model_info_json(catalog_path)
     candidates, skipped = _candidate_names(data, args.only)
     print(f"Probing {len(candidates)} models ({len(skipped)} skipped) ...")
 
     def run_one(name: str) -> ProbeResult:
-        result = probe_responses_support(name, fc=data[name].get("fc", True))
+        row = data[name]
+        result = probe_responses_support(name, fc=row.get("fc", True), thinking=row.get("thinking"))
         with _PRINT_LOCK:
             status = "PASS" if result.supported else "fail"
             print(f"  [{status}] {name}: {result.detail}", flush=True)
@@ -500,6 +513,10 @@ def _publish_batch(
 ) -> bool:
     """Wait for the probe batch, report it and publish the verdicts.
 
+    The catalog is rewritten only when a verdict changed a flag, and before
+    the ``--results-json`` dump: a dump that cannot be written costs the
+    dump, not the verdicts.
+
     Args:
         args: The parsed command line.
         catalog_path: The catalog the verdicts are written to.
@@ -528,20 +545,8 @@ def _publish_batch(
             print(f"  [fail] {name}: probe timed out (inconclusive)", flush=True)
     results.extend(future.result() for future in done)
 
-    passed = sorted(r.name for r in results if r.supported)
-    failed = sorted(r.name for r in results if not r.supported)
-    print(f"\nResponses API works for {len(passed)}/{len(results)} probed models.")
-
-    if args.results_json:
-        Path(args.results_json).write_text(
-            json.dumps(
-                {r.name: {"supported": r.supported, "detail": r.detail} for r in results},
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+    passed = sum(r.supported for r in results)
+    print(f"\nResponses API works for {passed}/{len(results)} probed models.")
 
     if args.dry_run:
         flagged, unflagged = _apply_results(data, results)
@@ -549,16 +554,35 @@ def _publish_batch(
         with update_models_module.catalog_lock(catalog_path):
             data = _read_model_info_json(catalog_path)
             flagged, unflagged = _apply_results(data, results)
-            _write_model_info_json(catalog_path, data)
+            if flagged or unflagged:
+                _write_model_info_json(catalog_path, data)
+
+    if args.results_json:
+        dump = {
+            r.name: {"supported": r.supported, "conclusive": r.conclusive, "detail": r.detail}
+            for r in results
+        }
+        Path(args.results_json).write_text(
+            json.dumps(dump, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
     print(f"Entries flagged: {flagged}, flags removed: {unflagged} (aliases included).")
     if args.dry_run:
         print("(dry-run, no files modified)")
         return bool(not_done)
-    print(f"Written to {catalog_path}")
-    if failed:
-        print("\nModels staying on Chat Completions (probe failed):")
-        for name in failed:
-            print(f"  - {name}")
+    if flagged or unflagged:
+        print(f"Written to {catalog_path}")
+    # An inconclusive probe changed nothing: its model stays on whichever
+    # transport its flag already named.
+    for heading, conclusive in (
+        ("Models staying on Chat Completions (probe failed):", True),
+        ("Probes inconclusive (flags unchanged):", False),
+    ):
+        names = sorted(r.name for r in results if not r.supported and r.conclusive is conclusive)
+        if names:
+            print(f"\n{heading}")
+            for name in names:
+                print(f"  - {name}")
     return bool(not_done)
 
 

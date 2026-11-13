@@ -13,26 +13,17 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness.js');
+const {makePage, send, pickerSections} = require('./simplify2_harness.js');
+const {setInput} = require('./attachment_helpers');
 
 function picker(win) {
   return win.document.getElementById('autocomplete');
 }
 
-function setInput(win, text) {
-  const inp = win.document.getElementById('task-input');
-  inp.value = text;
-  inp.setSelectionRange(text.length, text.length);
-  return inp;
-}
-
 function checkDropdownStructure(win, expectedSections, expectedItems) {
   const p = picker(win);
   assert.strictEqual(p.style.display, 'block', 'picker opens');
-  const sections = Array.from(p.querySelectorAll('.ac-section')).map(
-    e => e.textContent,
-  );
-  assert.deepStrictEqual(sections, expectedSections);
+  assert.deepStrictEqual(pickerSections(win), expectedSections);
   const items = Array.from(p.querySelectorAll('.ac-item'));
   assert.strictEqual(items.length, expectedItems);
   assert.strictEqual(

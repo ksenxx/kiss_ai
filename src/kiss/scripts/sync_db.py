@@ -102,7 +102,11 @@ ships every row, is filtered against them on arrival); SOURCE's
 deletions TARGET lacks travel in the delta, are recorded in TARGET's
 own tables and carried out there -- the task's row and events are
 deleted, as the web app would have, and a deleted chat's summary row
-goes once none of its tasks is left.  A deletion only ever removes a
+goes once none of its tasks is left.  The web app deletes a chat with
+its tasks and a task with its sub-tasks, but records only the ones the
+machine held, so the merge records the others where it meets them: a
+task older than the deletion of its chat, and a sub-task of a deleted
+task (see ``_spread_deletions``).  A deletion only ever removes a
 row older than itself, never a task still running, and a database
 from a release before the tables existed simply has no deletions to
 report and gains the tables when deletions reach it.
@@ -122,10 +126,10 @@ finishes.  TARGET's rows for chats that received nothing are left as
 they are; a TARGET from before the table existed gets no chat rows.
 
 The remote side runs this very file through ``ssh <host> python3 -c
-...``: the script and the two web-app modules it ships along with
-itself (the chat-summary and the task-column code) are stdlib-only and
-self-contained, so nothing has to be installed on the remote machine
-beyond ``python3``.
+...``: the script and the three files it ships along with itself (the
+web app's chat-summary and task-column code, and the carry-over script)
+are stdlib-only and self-contained, so nothing has to be installed on
+the remote machine beyond ``python3``.
 
 Usage:
     uv run python -m kiss.scripts.sync_db SOURCE TARGET [OPTIONS]
@@ -150,7 +154,8 @@ Options:
                     anything is merged.
     --python PATH   Remote python interpreter (default: python3)
     --port PORT     ssh port
-    -o OPT          Extra ``ssh -o`` option (repeatable)
+    -o OPT          Extra ``ssh -o`` option (repeatable); overrides the same
+                    option among the defaults (``SSH_DEADLINES``)
     --quiet         Only print the final one-line summary
 """
 
@@ -160,6 +165,7 @@ import argparse
 import base64
 import contextlib
 import gzip
+import io
 import json
 import os
 import re
@@ -172,7 +178,8 @@ import sys
 import tempfile
 import time
 import types
-from collections.abc import Callable
+import zlib
+from collections.abc import Callable, Collection, Iterator
 from typing import Any, BinaryIO
 
 TASK_TABLE = "task_history"
@@ -207,15 +214,24 @@ RUNNING_WINDOW = 300.0
 # row into (see ``_stamp_origin``), so the CHATS panel there can say
 # where the task ran.
 ORIGIN_COLUMN = "machine"
-# The web app's own code this script runs on the target: the chat-summary
-# module and the task-column module.  Both are stdlib-only; they are
-# shipped to a remote host with this script (see ``_remote_shell_command``)
-# and read from the checkout here.
+# The code of other files this script runs on the target: the web app's
+# chat-summary module and task-column module, and the carry-over script,
+# whose rule for what a deletion takes with it a merge applies too.  All
+# are stdlib-only; they are shipped to a remote host with this script (see
+# ``_remote_shell_command``) and read from the checkout here.
 SHIPPED_MODULES = {
     "chat_summary": os.path.join("agents", "sorcar", "chat_summary.py"),
     "history_columns": os.path.join("agents", "sorcar", "history_columns.py"),
+    "carry_over_tables": os.path.join("scripts", "carry_over_tables.py"),
 }
 COPY_BUFFER = 1 << 20
+# Given to every ssh after the caller's own ``-o`` options (ssh keeps the
+# first value of an option): a host that does not answer fails the phase
+# within ConnectTimeout seconds, connection and handshake together, and a
+# connection that goes silent later is dropped after ServerAliveCountMax
+# probes ServerAliveInterval seconds apart.  A phase that only takes long is
+# not cut short: sshd answers the probes while the phase runs.
+SSH_DEADLINES = ["ConnectTimeout=10", "ServerAliveInterval=30", "ServerAliveCountMax=3"]
 
 PHASE_MANIFEST = "_manifest"
 PHASE_EXTRACT = "_extract"
@@ -313,25 +329,22 @@ def quote_name(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def open_db(path: str, must_exist: bool = True) -> sqlite3.Connection:
+def open_db(path: str) -> sqlite3.Connection:
     """Open a SQLite database in autocommit mode.
 
     Args:
         path: Filesystem path of the database (``~`` is expanded).
-        must_exist: When True, refuse to create a new empty database.
 
     Returns:
         An open connection with a generous busy timeout.
 
     Raises:
-        SyncError: If ``must_exist`` and the file does not exist.
+        SyncError: If the file does not exist.
     """
     path = os.path.abspath(os.path.expanduser(path))
-    if must_exist and not os.path.isfile(path):
+    if not os.path.isfile(path):
         raise SyncError(f"database not found: {path}")
-    conn = sqlite3.connect(path, isolation_level=None, timeout=60.0)
-    conn.execute("PRAGMA busy_timeout=60000")
-    return conn
+    return sqlite3.connect(path, isolation_level=None, timeout=60.0)
 
 
 def table_columns(conn: sqlite3.Connection, schema: str, table: str) -> list[str]:
@@ -507,6 +520,33 @@ def write_json_gz(payload: dict[str, Any], out: BinaryIO) -> None:
     out.flush()
 
 
+@contextlib.contextmanager
+def _gunzip(inp: BinaryIO) -> Iterator[gzip.GzipFile]:
+    """Open the gzipped stream a phase wrote, for reading.
+
+    Args:
+        inp: Source binary stream.
+
+    Raises:
+        SyncError: If the block reads what is not such a stream, whole:
+            one cut short, or one with other output in front of it (a
+            remote shell whose start-up file prints).
+    """
+    try:
+        with gzip.GzipFile(fileobj=inp, mode="rb") as gz:
+            yield gz
+    except (OSError, EOFError, zlib.error) as exc:
+        # gzip's own complaints are OSErrors without an errno (BadGzipFile,
+        # a name only Python 3.8 and later have); one with an errno is the
+        # file system's, raised by what the block does with the data.
+        if isinstance(exc, OSError) and exc.errno is not None:
+            raise
+        raise SyncError(
+            f"a phase's output is not the gzip stream expected ({exc});"
+            " does the remote shell print when it starts?"
+        ) from exc
+
+
 def read_json_gz(inp: BinaryIO) -> dict[str, Any]:
     """Read a gzipped JSON payload from a binary stream.
 
@@ -515,8 +555,11 @@ def read_json_gz(inp: BinaryIO) -> dict[str, Any]:
 
     Returns:
         The decoded object, or an empty dict when the stream is empty.
+
+    Raises:
+        SyncError: If the stream is not gzip, or is cut short.
     """
-    with gzip.GzipFile(fileobj=inp, mode="rb") as gz:
+    with _gunzip(inp) as gz:
         raw = gz.read()
     return json.loads(raw.decode("utf-8")) if raw else {}
 
@@ -540,8 +583,11 @@ def read_file_gz(inp: BinaryIO, path: str) -> None:
     Args:
         inp: Source binary stream.
         path: File to (over)write.
+
+    Raises:
+        SyncError: If the stream is not gzip, or is cut short.
     """
-    with gzip.GzipFile(fileobj=inp, mode="rb") as gz:
+    with _gunzip(inp) as gz:
         with open(path, "wb") as dst:
             shutil.copyfileobj(gz, dst, COPY_BUFFER)
 
@@ -659,12 +705,11 @@ def phase_extract(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> N
     try:
         conn = sqlite3.connect(delta_path, isolation_level=None, timeout=60.0)
         try:
-            conn.execute("PRAGMA busy_timeout=60000")
             conn.execute("PRAGMA main.journal_mode=OFF")
             conn.execute("PRAGMA main.synchronous=OFF")
             conn.execute("ATTACH DATABASE ? AS src", (source,))
+            conn.execute("BEGIN")  # first: schema and rows are copied from one snapshot
             _create_delta_tables(conn)
-            conn.execute("BEGIN")
             _load_target_tasks(conn, manifest.get("tasks") or {})
             _load_target_deletions(conn, manifest.get("deleted") or {})
             _extract_tasks(conn)
@@ -733,10 +778,9 @@ def _target_deletion_join(alias: str, columns: list[str]) -> str:
         A ``LEFT JOIN`` clause whose alias ``x`` is NULL for a row no
         deletion of the target's applies to.
     """
-    started = f'COALESCE({alias}."timestamp", 0)' if "timestamp" in columns else "0"
     return (
         f' LEFT JOIN temp."_sync_deleted" x ON x.task_id = {alias}."id"'
-        f" AND x.deleted_ts > {started}"
+        f" AND x.deleted_ts > {_started(alias, columns)}"
     )
 
 
@@ -753,7 +797,6 @@ def _extract_deletions(conn: sqlite3.Connection, table: str, known: dict[str, An
         return
     key = quote_name(DELETED_KEY[table])
     quoted = quote_name(table)
-    conn.execute('DROP TABLE IF EXISTS temp."_sync_known"')
     conn.execute('CREATE TEMP TABLE "_sync_known" (deleted_id TEXT PRIMARY KEY, deleted_ts REAL)')
     conn.executemany(
         'INSERT OR REPLACE INTO temp."_sync_known" VALUES (?, ?)',
@@ -879,7 +922,8 @@ def _extract_events(conn: sqlite3.Connection) -> None:
     conn.execute(
         f'{insert} FROM temp."_sync_have" w'
         f' CROSS JOIN src.{table} s ON s."task_id" = w.task_id AND s."seq" > w.high_seq'
-        " WHERE w.high_seq IS NOT NULL"
+        " WHERE w.high_seq IS NOT NULL AND EXISTS"
+        f' (SELECT 1 FROM src.{quote_name(TASK_TABLE)} t WHERE t."id" = w.task_id)'
     )
     _warn_on_duplicate_event_keys(conn)
 
@@ -957,6 +1001,7 @@ def _apply_delta(target_path: str, delta_path: str, commit: bool) -> dict[str, A
                 table: add_missing_columns(conn, table) for table in (TASK_TABLE, EVENT_TABLE)
             }
             deletions_recorded = _record_deletions(conn)
+            _spread_deletions(conn)
             tasks_inserted = _merge_tasks(conn)
             events_inserted = _merge_events(conn)
             columns_completed = _complete_tasks(
@@ -966,7 +1011,8 @@ def _apply_delta(target_path: str, delta_path: str, commit: bool) -> dict[str, A
             chats_refreshed = _merge_chats(conn, emptied_chats)
             conn.execute("COMMIT" if commit else "ROLLBACK")
         except BaseException as exc:
-            conn.execute("ROLLBACK")
+            if conn.in_transaction:  # not after an I/O error: SQLite has rolled back by itself
+                conn.execute("ROLLBACK")
             if isinstance(exc, sqlite3.OperationalError) and "readonly" in str(exc):
                 raise SyncError(
                     f"cannot write to {target_path}: {exc}. Even a dry run needs"
@@ -1021,6 +1067,44 @@ def _record_deletions(conn: sqlite3.Connection) -> int:
     return recorded
 
 
+def _spread_deletions(conn: sqlite3.Connection) -> None:
+    """Record as deleted every task that a recorded deletion takes with it.
+
+    The rule is ``carry_over_tables.spread_deletions``, which a database
+    replaced wholesale goes by as well: a task row of the delta or of
+    the target older than the deletion of its chat, and the sub-tasks of
+    a deleted task, have no record of their own when the deleting
+    machine had never seen them, and get one here.  The merge then keeps
+    such a row out and :func:`_apply_deletions` removes it, like any
+    other deleted task.
+
+    Args:
+        conn: Target connection with the delta attached as ``delta``,
+            the delta's deletions recorded.
+    """
+    columns = {
+        schema: set(table_columns(conn, schema, TASK_TABLE)) for schema in ("delta", "main")
+    }
+    if "parent_task_id" in columns["delta"]:
+        # The delta's table came without the source's indexes; without this
+        # one every level would read all its rows to find a few sub-tasks.
+        conn.execute(
+            'CREATE INDEX IF NOT EXISTS delta."_sync_sub_tasks"'
+            f' ON {quote_name(TASK_TABLE)} ("parent_task_id")'
+        )
+    _shipped_module("carry_over_tables").spread_deletions(conn, columns)
+
+
+def _started(alias: str, columns: Collection[str]) -> str:
+    """Return the SQL for when a task row began: 0 in a table without a ``timestamp``.
+
+    Args:
+        alias: Alias of the task row in the surrounding statement.
+        columns: The columns that row has.
+    """
+    return f'COALESCE({alias}."timestamp", 0)' if "timestamp" in columns else "0"
+
+
 def _deleted_task_filter(alias: str, columns: set[str]) -> str:
     """Return the SQL condition that a task row is one a deletion applies to.
 
@@ -1035,10 +1119,9 @@ def _deleted_task_filter(alias: str, columns: set[str]) -> str:
     Returns:
         A condition in terms of *alias* and ``main.deleted_tasks``.
     """
-    started = f'COALESCE({alias}."timestamp", 0)' if "timestamp" in columns else "0"
     return (
         f"EXISTS (SELECT 1 FROM main.{quote_name(DELETED_TABLE)} d"
-        f' WHERE d."id" = {alias}."id" AND d."deleted_ts" > {started})'
+        f' WHERE d."id" = {alias}."id" AND d."deleted_ts" > {_started(alias, columns)})'
     )
 
 
@@ -1061,8 +1144,9 @@ def _apply_deletions(conn: sqlite3.Connection) -> tuple[int, list[str]]:
         conn: Target connection, its rows and deletions already merged.
 
     Returns:
-        The number of task rows deleted and the ids of the chats those
-        rows belonged to.
+        The number of task rows deleted and the ids of the chats that
+        lost a listable task (a sub-agent's row is no part of what its
+        chat's summary row says, here as in the web app).
     """
     columns = set(table_columns(conn, "main", TASK_TABLE))
     spared = []
@@ -1074,19 +1158,22 @@ def _apply_deletions(conn: sqlite3.Connection) -> tuple[int, list[str]]:
             f"({ended} AND EXISTS (SELECT 1 FROM main.{quote_name(EVENT_TABLE)} e"
             f' WHERE e."task_id" = t."id" AND e."timestamp" > {time.time() - RUNNING_WINDOW!r}))'
         )
-    chat = 't."chat_id"' if "chat_id" in columns else "''"
+    listable = (
+        "(t.\"parent_task_id\" IS NULL OR t.\"parent_task_id\" = '')"
+        if "parent_task_id" in columns
+        else "1"
+    )
+    chat = f'CASE WHEN {listable} THEN t."chat_id" END' if "chat_id" in columns else "NULL"
     tasks = quote_name(TASK_TABLE)
-    conn.execute('DROP TABLE IF EXISTS temp."_sync_doomed"')
     # Driven by the tombstones, not by the task table: the planner would
     # otherwise test "still running here" -- a walk over the task's
     # events -- for every task in the target (tens of seconds on a
     # database of millions of events) before looking at the handful of
     # deletions, which is the selective side of the question.
-    started = 'COALESCE(t."timestamp", 0)' if "timestamp" in columns else "0"
     conn.execute(
         f'CREATE TEMP TABLE "_sync_doomed" AS SELECT t."id" AS id, {chat} AS chat_id'
         f" FROM main.{quote_name(DELETED_TABLE)} d"
-        f' JOIN main.{tasks} t ON t."id" = d."id" WHERE d."deleted_ts" > {started}'
+        f' JOIN main.{tasks} t ON t."id" = d."id" WHERE d."deleted_ts" > {_started("t", columns)}'
         + ("".join(f" AND NOT {condition}" for condition in spared))
     )
     chats = [
@@ -1168,7 +1255,8 @@ def _merge_events(conn: sqlite3.Connection) -> int:
     require_columns(
         columns, ("task_id", "seq"), f"{EVENT_TABLE} in the target database"
     )
-    copied = [c for c in columns if c != rowid_alias_column(conn, "main", EVENT_TABLE)]
+    rowid_alias = rowid_alias_column(conn, "main", EVENT_TABLE)
+    copied = [c for c in columns if c != rowid_alias]
     table = quote_name(EVENT_TABLE)
     # The events of a task the target deleted and does not hold stay out
     # (their row was left out by _merge_tasks); a task the target still
@@ -1198,15 +1286,16 @@ def _merge_chats(conn: sqlite3.Connection, emptied_chats: list[str]) -> int:
     The delta's task rows name the chats whose ``task_history`` just
     gained rows on the target (the few rows the target already had,
     skipped by :func:`_merge_tasks`, cost one harmless recomputation),
-    and *emptied_chats* the chats that just lost rows to a deletion.
-    Each such chat's ``chat_summaries`` row is rebuilt from the target's
-    merged tasks by the web app's own code, so it is exactly what the
-    app would have written had those tasks finished here; chats whose
+    and *emptied_chats* the chats that just lost a listable task to a
+    deletion.  Each such chat's ``chat_summaries`` row is rebuilt from
+    the target's merged tasks by the web app's own code, so it is exactly
+    what the app would have written had those tasks finished here; chats whose
     tasks did not change keep their rows.  A chat the user deleted (in
     ``deleted_chats``) loses its row, as it did on the machine that
     deleted it, once none of its tasks is left -- a chat that merely
-    lost a task keeps its row and, with it, the title the user gave it,
-    and so does a chat started again after its deletion.
+    lost a task keeps its row and, with it, the title the user gave it
+    (what the row said of the tasks it lost goes with them, as in the
+    web app), and so does a chat started again after its deletion.
     Sub-agent rows do not count: the summary is computed from the chat's
     listable tasks only.  A target without the table (or from before
     tasks carried a chat) gets no rows.
@@ -1214,7 +1303,7 @@ def _merge_chats(conn: sqlite3.Connection, emptied_chats: list[str]) -> int:
     Args:
         conn: Target connection with the delta attached as ``delta``.
         emptied_chats: Ids of the chats :func:`_apply_deletions` removed
-            tasks from.
+            listable tasks from.
 
     Returns:
         The number of chat summary rows recomputed or dropped.
@@ -1230,12 +1319,15 @@ def _merge_chats(conn: sqlite3.Connection, emptied_chats: list[str]) -> int:
         table_columns(conn, "main", TASK_TABLE)
     ):
         return 0
+    # The target's merged rows are asked: a source from before ``parent_task_id``
+    # lacks it.  CROSS JOIN pins the loop order: one seek per delta row.
     chat_ids = [
         row[0]
         for row in conn.execute(
-            f'SELECT DISTINCT "chat_id" FROM delta.{quote_name(TASK_TABLE)}'
-            ' WHERE "chat_id" IS NOT NULL AND "chat_id" != \'\''
-            ' AND ("parent_task_id" IS NULL OR "parent_task_id" = \'\')'
+            f'SELECT DISTINCT t."chat_id" FROM delta.{quote_name(TASK_TABLE)} d'
+            f' CROSS JOIN main.{quote_name(TASK_TABLE)} t ON t."id" = d."id"'
+            ' WHERE t."chat_id" IS NOT NULL AND t."chat_id" != \'\''
+            ' AND (t."parent_task_id" IS NULL OR t."parent_task_id" = \'\')'
         )
     ]
     chat_ids += [chat_id for chat_id in emptied_chats if chat_id not in chat_ids]
@@ -1243,22 +1335,32 @@ def _merge_chats(conn: sqlite3.Connection, emptied_chats: list[str]) -> int:
     # daemon adds them when it opens the database.
     columns = _shipped_module("history_columns")
     columns.add_missing_columns(conn, CHAT_TABLE, columns.ADDED_SUMMARY_COLUMNS)
+    chats = quote_name(CHAT_TABLE)
+    # The recomputation leaves a chat with no listable task alone: what its
+    # row says of the tasks it lost is cleared first, as the web app does.
+    conn.executemany(
+        f"UPDATE main.{chats} SET summary = '', last_launched = 0, last_finished = 0"
+        " WHERE chat_id = ?",
+        [(chat_id,) for chat_id in emptied_chats],
+    )
     summaries = _shipped_module("chat_summary")
     for chat_id in chat_ids:
         summaries.upsert_chat_summary(conn, chat_id)
-    # A chat started again after its deletion (its row's newest launch, in
-    # milliseconds, is younger than the deletion) is a new chat with the
-    # old id, and keeps its row even once its tasks are gone again.
-    chats = quote_name(CHAT_TABLE)
-    dropped = conn.execute(
-        f"DELETE FROM main.{chats} WHERE EXISTS"
-        f' (SELECT 1 FROM main.{quote_name(DELETED_CHATS_TABLE)} d'
+    # A chat started again after its deletion (the newest launch its row
+    # records, in milliseconds, is younger than the deletion) is a new chat
+    # with the old id, and keeps its row.
+    deleted = (
+        f"EXISTS (SELECT 1 FROM main.{quote_name(DELETED_CHATS_TABLE)} d"
         f' WHERE d."chat_id" = {chats}."chat_id"'
         f' AND d."deleted_ts" * 1000 > COALESCE({chats}."last_launched", 0))'
-        f' AND NOT EXISTS (SELECT 1 FROM main.{quote_name(TASK_TABLE)} t'
+        f" AND NOT EXISTS (SELECT 1 FROM main.{quote_name(TASK_TABLE)} t"
         f' WHERE t."chat_id" = {chats}."chat_id")'
-    ).rowcount
-    return len(chat_ids) + dropped
+    )
+    dropped = {
+        row[0] for row in conn.execute(f'SELECT "chat_id" FROM main.{chats} WHERE {deleted}')
+    }
+    conn.execute(f"DELETE FROM main.{chats} WHERE {deleted}")
+    return len(dropped.union(chat_ids))
 
 
 def _complete_tasks(
@@ -1298,7 +1400,7 @@ def _complete_tasks(
 
 
 def _shipped_module(name: str) -> Any:
-    """Load one of the web app's modules this script runs (see ``SHIPPED_MODULES``).
+    """Load one of the files whose code this script runs (see ``SHIPPED_MODULES``).
 
     On a remote host the source arrives with this script, bound to the
     ``SHIPPED_SOURCES`` global by the ssh bootstrap; here it is read from
@@ -1403,7 +1505,7 @@ class Runner:
             return
         with open(out, "wb") as out_file:
             if inp is None:
-                PHASES[phase](location.path, args, _EMPTY_STREAM, out_file)
+                PHASES[phase](location.path, args, io.BytesIO(), out_file)
             else:
                 with open(inp, "rb") as in_file:
                     PHASES[phase](location.path, args, in_file, out_file)
@@ -1424,7 +1526,7 @@ class Runner:
             SyncError: If ssh or the remote phase fails.
         """
         command = ["ssh", "-o", "BatchMode=yes"]
-        for option in self.ssh_options:
+        for option in [*self.ssh_options, *SSH_DEADLINES]:
             command += ["-o", option]
         if self.port:
             command += ["-p", self.port]
@@ -1434,13 +1536,16 @@ class Runner:
             in_file: Any = subprocess.DEVNULL
             if inp:
                 in_file = streams.enter_context(open(inp, "rb"))
-            done = subprocess.run(
-                command,
-                stdin=in_file,
-                stdout=out_file,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
+            try:
+                done = subprocess.run(
+                    command,
+                    stdin=in_file,
+                    stdout=out_file,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+            except OSError as exc:
+                raise SyncError(f"cannot run ssh: {exc}") from exc
         stderr = done.stderr.decode("utf-8", "replace").strip()
         if done.returncode != 0:
             raise SyncError(
@@ -1456,8 +1561,8 @@ class Runner:
         """Build the shell command that runs this script on a remote host.
 
         The script's own source and the modules of ``SHIPPED_MODULES``
-        are shipped inline, base64 encoded, so the remote machine needs
-        nothing but a python interpreter.
+        are shipped inline (:func:`_shipped_source`), so the remote machine
+        needs nothing but a python interpreter.
 
         Args:
             location: Remote database the phase operates on.
@@ -1467,14 +1572,12 @@ class Runner:
         Returns:
             A single shell command string for ``ssh``.
         """
-        script = base64.b64encode(_read_source(_script_path())).decode("ascii")
         shipped = ",".join(
-            f"{name!r}:base64.b64decode('{_encoded_source(_shipped_module_path(name))}')"
-            for name in SHIPPED_MODULES
+            f"{name!r}:{_shipped_source(_shipped_module_path(name))}" for name in SHIPPED_MODULES
         )
         bootstrap = (
-            f"import base64;SHIPPED_SOURCES={{{shipped}}};"
-            f"exec(base64.b64decode('{script}'))"
+            f"import base64,zlib;SHIPPED_SOURCES={{{shipped}}};"
+            f"exec({_shipped_source(_script_path())})"
         )
         parts = [self.python, "-c", bootstrap, phase, location.path, *args]
         return " ".join(shlex.quote(p) for p in parts)
@@ -1503,13 +1606,18 @@ def _shipped_module_path(name: str) -> str:
     )
 
 
-def _encoded_source(path: str) -> str:
-    """Read a source file of this checkout as base64 text, for the ssh bootstrap.
+def _shipped_source(path: str) -> str:
+    """Return the python expression that rebuilds a source file of this checkout on a host.
+
+    The ssh bootstrap is one command-line argument, which Linux caps at
+    128 KiB (``MAX_ARG_STRLEN``): base64 of the plain sources had come
+    within 7 KB of the cap, so they travel compressed, a third of the size.
 
     Args:
         path: The file to read.
     """
-    return base64.b64encode(_read_source(path)).decode("ascii")
+    packed = base64.b64encode(zlib.compress(_read_source(path), 9)).decode("ascii")
+    return f"zlib.decompress(base64.b64decode('{packed}'))"
 
 
 def _read_source(path: str) -> bytes:
@@ -1529,25 +1637,6 @@ def _read_source(path: str) -> bytes:
             return handle.read()
     except OSError as exc:
         raise SyncError(f"cannot read {path}: {exc}") from exc
-
-
-class _EmptyStream:
-    """A readable binary stream that is always at end of file."""
-
-    def read(self, size: int = -1) -> bytes:
-        """Return no data.
-
-        Args:
-            size: Ignored.
-
-        Returns:
-            An empty bytes object.
-        """
-        del size
-        return b""
-
-
-_EMPTY_STREAM: Any = _EmptyStream()
 
 
 # --------------------------------------------------------------------------
@@ -1619,6 +1708,8 @@ def synchronize(
             raise SyncError("the merge phase produced no result")
         stats: dict[str, Any] = {"delta_bytes": os.path.getsize(delta_path)}
         stats.update(json.loads(raw.decode("utf-8")))
+    except sqlite3.Error as exc:
+        raise SyncError(str(exc)) from exc
     finally:
         for path in temporary:
             _unlink(path)
@@ -1833,7 +1924,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=options.dry_run,
             delta_edits=options.delta_edits,
         )
-    except (SyncError, sqlite3.Error) as exc:
+    except SyncError as exc:
         print(f"sync_db: {exc}", file=sys.stderr)
         return 1
     print(format_stats(source, target, stats))

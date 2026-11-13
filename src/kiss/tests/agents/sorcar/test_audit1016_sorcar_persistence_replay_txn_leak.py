@@ -36,6 +36,7 @@ from typing import Any
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.persistence_helpers import close_db
 
 _EXECUTEMANY_CODE = th._LockedConnection.executemany.__code__
 
@@ -46,15 +47,14 @@ def db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     home = tmp_path / ".kiss"
     home.mkdir()
     monkeypatch.setenv("KISS_HOME", str(home))
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    saved = (th._DB_PATH, th._KISS_DIR)
     th._KISS_DIR = home
     th._DB_PATH = home / "history.db"
-    th._db_conn = None
     try:
         yield th._DB_PATH
     finally:
-        th._close_db()
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+        close_db()
+        (th._DB_PATH, th._KISS_DIR) = saved
 
 
 def _interrupt_entering_executemany(frame: Any, event: str, arg: Any) -> None:

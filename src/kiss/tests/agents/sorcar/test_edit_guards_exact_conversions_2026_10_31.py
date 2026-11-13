@@ -31,7 +31,10 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -193,6 +196,63 @@ def test_sed_script_the_shell_expands_is_not_converted(tools: UsefulTools, tmp_p
         assert _edited(tools, tmp_path, "a\n", command) == expected, command
 
 
+@needs_gnu_sed
+def test_sed_escaped_metacharacter_delimiter_is_not_converted(tmp_path: Path) -> None:
+    """With a regex metacharacter as its delimiter, sed reads the escaped delimiter of the
+    pattern as the metacharacter (``s.a\\.b.Z.`` replaces ``aXb``), not as the text the
+    conversion took it for: the ``Edit`` changed other text than sed does."""
+    for script, content, expected in (
+        ("s.a\\.b.Z.g", "aXb a.b\n", "Z Z\n"),  # any character
+        ("s*a\\*b*Z*g", "aab a*b ab\n", "Z a*Z Z\n"),  # a repetition
+        ("s^\\^a^Z^g", "^a a\n", "^a a\n"),  # an anchor: the text "^a" stays
+        ("s$a\\$$Z$g", "a$ a\n", "a$ Z\n"),
+    ):
+        assert _sed(tmp_path, content, script) == expected, script
+        assert mechanical_edit(f"sed -i '{script}' f.txt", str(tmp_path)) is None, script
+    # a delimiter that is no metacharacter, escaped, is the text; so is one in the replacement
+    assert _sed(tmp_path, "a|b a.b\n", "s|a\\|b|Z\\||g") == "Z| a.b\n"
+    edit = mechanical_edit("sed -i 's|a\\|b|Z\\||g' f.txt", str(tmp_path))
+    assert edit is not None and edit.edits == [("a|b", "Z|", True)]
+    assert _sed(tmp_path, "a,b aXb\n", "s.a,b.Z\\..g") == "Z. aXb\n"
+    edit = mechanical_edit("sed -i 's.a,b.Z\\..g' f.txt", str(tmp_path))
+    assert edit is not None and edit.edits == [("a,b", "Z.", True)]
+
+
+@needs_gnu_sed
+def test_sed_command_sed_refuses_is_not_converted(tools: UsefulTools, tmp_path: Path) -> None:
+    """A command sed exits 1 on leaves the file: no ``Edit`` stands for it.
+
+    A last ``-e`` / ``--expression`` has no script (it was ignored and the
+    script before it applied: review of 2026-11-11, S8 finding 1); an ``s``
+    command ends at a newline no backslash precedes; its delimiter is one byte.
+    """
+    target = tmp_path / "f.txt"
+    target.write_text("a\n")
+    tools.Read(str(target))  # shown: a command read as an Edit would be applied as it
+    for command in (
+        "sed -i 's/a/b/' f.txt -e",
+        "sed -i 's/a/b/' f.txt --expression",
+        "sed -i -e 's/a/b/' f.txt -e",
+        "sed -i --expression='s/a/b/' f.txt --expression",
+        "sed -i 's/a/b\nc/' f.txt",
+        "sed -i -z 's/a\n/b/' f.txt",
+        "sed -i 's§a§b§' f.txt",
+        "sed -i -z 's→a→b→g' f.txt",
+    ):
+        run = subprocess.run(["bash", "-c", command], cwd=tmp_path, check=False)
+        assert run.returncode == 1 and target.read_text() == "a\n", command
+        assert mechanical_edit(command, str(tmp_path)) is None, command
+        out = tools.Bash(command, "refused by sed")
+        assert out.startswith("Error (exit code 1)") and target.read_text() == "a\n", out
+    # The option with its script, in the same place, is the conversion.
+    for option in ("-e", "--expression"):
+        command = f"sed -i f.txt {option} 's/a/b/'"
+        assert _edited(tools, tmp_path, "a\n", command) == "b\n", command
+        target.write_text("a\n")
+        _bash(command, tmp_path)
+        assert target.read_text() == "b\n", command
+
+
 # --- 3. python replacements after the write ----------------------------------
 
 _READ = "s = open('a.py').read()\n"
@@ -253,35 +313,149 @@ def test_python_no_op_and_empty_replacements_make_no_forbidden_edit(
 
 
 def test_python_import_rebinding_a_name_is_not_converted(
-    tools: UsefulTools, tmp_path: Path,
+    tools: UsefulTools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # An import binding the path or text name, or ``open``, makes python fail
     # before or at the write (audit 2026-11-04 S5 F11): the file never holds the
-    # Edit's text, so no conversion; the path is still named.
+    # Edit's text, so no conversion; the path is still named.  So does a string
+    # read as a ``Path``, an assignment or a ``with`` binding ``open`` or ``Path``,
+    # and a ``Path`` that was never imported (audit S4-F3).
     source = tmp_path / "a.py"
+    source.write_text("x = 1\n")
+    tools.Read(str(source))  # shown: a program read as the pattern would be applied as its Edit
     for program in (
         "p = 'a.py'\nimport os as p\ns = open(p).read()\ns = s.replace('x', 'y')\n"
         "open(p, 'w').write(s)\n",
         _READ + "s = s.replace('x', 'y')\nimport os.path as s\n" + _WRITE,
         "from gzip import open\n" + _READ + "s = s.replace('x', 'y')\n" + _WRITE,
         "from os import *\n" + _READ + "s = s.replace('x', 'y')\n" + _WRITE,
+        "p = 'a.py'\ns = p.read_text()\ns = s.replace('x', 'y')\np.write_text(s)\n",
+        "s = 'a.py'.read_text()\ns = s.replace('x', 'y')\n" + _WRITE,
+        # python fails at an import of a module or a name that is not there, the file unwritten
+        "import no_such_module_b5\n" + _READ + "s = s.replace('x', 'y')\n" + _WRITE,
+        "import re, no_such_module_b5\n" + _READ + "s = s.replace('x', 'y')\n" + _WRITE,
+        "from re import no_such_name_b5\n" + _READ + "s = s.replace('x', 'y')\n" + _WRITE,
+        "p = 'a.py'\nopen = 'a.py'\ns = open(p).read()\ns = s.replace('x', 'y')\n"
+        "open(p, 'w').write(s)\n",
+        "from pathlib import Path\nPath = 'a.py'\np = Path('a.py')\ns = p.read_text()\n"
+        "s = s.replace('x', 'y')\np.write_text(s)\n",
+        "with open('a.py') as open:\n    s = open.read()\ns = s.replace('x', 'y')\n" + _WRITE,
+        "from pathlib import Path\nwith open('a.py') as f:\n    Path = f.read()\n"
+        "s = Path.replace('x', 'y')\nPath('a.py').write_text(s)\n",
+        "s = Path('a.py').read_text()\ns = s.replace('x', 'y')\nPath('a.py').write_text(s)\n",
     ):
         source.write_text("x = 1\n")
+        out = tools.Bash(f"python3 - <<'EOF'\n{program}EOF", "rebound")
+        assert out.startswith("REFUSED: the python heredoc did NOT run") and "a.py" in out, program
+        assert source.read_text() == "x = 1\n", program
         run = subprocess.run(["bash", "-c", f"python3 - <<'EOF'\n{program}EOF"], cwd=tmp_path,
                              check=False, capture_output=True)
         assert run.returncode != 0 and source.read_text() != "y = 1\n", program
         assert python_edit(program) == ("a.py", [], False), program
         assert mechanical_edit(f"python3 - <<'EOF'\n{program}EOF", str(tmp_path)) is None, program
-    tools.Read(str(source))
-    out = tools.Bash("python3 - <<'EOF'\np = 'a.py'\nimport os as p\ns = open(p).read()\n"
-                     "s = s.replace('x', 'y')\nopen(p, 'w').write(s)\nEOF", "rebound")
-    assert out.startswith("REFUSED: the python heredoc did NOT run") and "a.py" in out
-    assert source.read_text() == "x = 1\n"
-    # An import binding another name, ``pathlib``'s ``Path`` included, is part of the pattern.
-    program = ("import re\nfrom pathlib import Path\np = Path('a.py')\ns = p.read_text()\n"
-               "s = s.replace('x', 'y')\np.write_text(s)\n")
+    # A module that acts when imported (``this`` prints) is no part of the pattern either.
+    program = "import this\n" + _READ + "s = s.replace('x', 'y')\n" + _WRITE
+    assert python_edit(program) == ("a.py", [], False)
+    # An import of a module every python has that does nothing, ``pathlib``'s ``Path``
+    # included, is part of the pattern; so is a name assigned a ``Path`` name, a ``Path`` too.
+    program = ("import re, os.path\nimport sys as system\nfrom pathlib import Path\n"
+               "p = Path('a.py')\nq = p\ns = p.read_text()\n"
+               "s = s.replace('x', 'y')\nq.write_text(s)\n")
+    source.write_text("x = 1\n")
     assert python_edit(program) == ("a.py", [("x", "y", True)], True)
     assert _python(tmp_path, program) == "y = 1\n"
+    # Python read from stdin searches its directory first, then those of PYTHONPATH: a module
+    # of that name there is what the import runs (review 2026-11-12 B5), so the program is
+    # not applied as an Edit.
+    program = "import json\n" + _READ + "s = s.replace('x', 'y')\n" + _WRITE
+    command = f"python3 - <<'EOF'\n{program}EOF"
+    broken = "raise RuntimeError('shadowed import')\n"
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(("lib", "lib.zip")))
+    for module in ("json.py", "json/__init__.py", "json/__init__.so", "lib/json.py", "lib.zip"):
+        (tmp_path / module).parent.mkdir(exist_ok=True)
+        if module == "lib.zip":  # python imports from an archive on its path
+            with zipfile.ZipFile(tmp_path / module, "w") as archive:
+                archive.writestr("json.py", broken)
+        else:
+            (tmp_path / module).write_text(broken)
+        source.write_text("x = 1\n")
+        out = tools.Bash(command, "shadowed")
+        assert out.startswith("REFUSED: the python heredoc did NOT run"), module
+        run = subprocess.run(
+            ["bash", "-c", command], cwd=tmp_path, check=False, capture_output=True)
+        assert run.returncode != 0 and source.read_text() == "x = 1\n", module
+        (tmp_path / module).unlink()
+    # What only shares the name is no module: python runs the program, and so it is applied.
+    for other in ("json.txt", "json.backup.py", "json-notes/__init__.py", "json/notes.py"):
+        (tmp_path / other).parent.mkdir(exist_ok=True)
+        (tmp_path / other).write_text(broken)
+    assert _python(tmp_path, program) == "y = 1\n"
+    source.write_text("x = 1\n")
+    assert tools.Bash(command, "not shadowed").startswith("Applied as")
+    assert source.read_text() == "y = 1\n"
+    # The interpreter is asked where it finds the modules (audit 2026-11-12 round 2, cross
+    # findings of B7): a reading of the directory and PYTHONPATH missed an archive named as
+    # python also takes it, an entry python normalises, a directory python's own startup puts
+    # first (a ``sitecustomize``, a ``.pth``) and a module the library's ``json`` itself imports,
+    # be it a submodule of the package that a finder of the startup takes (the review's finding).
+    with zipfile.ZipFile(tmp_path / "lib.zip", "w") as archive:
+        archive.writestr("json.py", broken)
+        archive.writestr("pkg/json.py", broken)
+    finder = ("import importlib.util, sys\nclass Finder:\n    @staticmethod\n"
+              "    def find_spec(name, path, target=None):\n        if name == 'json.decoder':\n"
+              "            return importlib.util.spec_from_file_location(name, 'lib/json.py')\n"
+              "sys.meta_path.insert(0, Finder)\n")
+    startups = {"startup": "import sys\nsys.path.insert(0, 'lib')\n", "finder": finder}
+    for directory, module in (("lib", "json.py"), ("deep", "enum.py"),
+                              ("startup", "sitecustomize.py"), ("finder", "sitecustomize.py")):
+        (tmp_path / directory).mkdir(exist_ok=True)
+        (tmp_path / directory / module).write_text(startups.get(directory, broken))
+    for pythonpath in ("lib.zip/", "lib.zip/pkg", "missing/../lib", "startup", "deep", "finder"):
+        monkeypatch.setenv("PYTHONPATH", pythonpath)
+        source.write_text("x = 1\n")
+        out = tools.Bash(command, "shadowed")
+        assert out.startswith("REFUSED: the python heredoc did NOT run"), pythonpath
+        run = subprocess.run(
+            ["bash", "-c", command], cwd=tmp_path, check=False, capture_output=True)
+        assert run.returncode != 0 and source.read_text() == "x = 1\n", pythonpath
+
+
+def test_a_rewrite_whose_program_bash_does_not_find_is_not_converted(
+    tools: UsefulTools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bash fails with status 127 and leaves the file alone (cross finding of B7, 2026-11-12,
+    # met in a container without the interpreter): no Edit is made in the command's place.
+    source = tmp_path / "a.py"
+    source.write_text("x = 1\n")
+    assert "x = 1" in tools.Read(str(source))  # shown: only the program is in question
+    bash = shutil.which("bash")
+    assert bash is not None
+    body = " - <<'EOF'\n" + _READ + "s = s.replace('x', 'y')\n" + _WRITE + "EOF"
+    monkeypatch.setenv("PATH", str(tmp_path))
+    for command in ("python3" + body, "./python3" + body, "sed -i 's/x/y/' a.py"):
+        assert not tools.Bash(command, "no such program").startswith("Applied as"), command
+        run = subprocess.run([bash, "-c", command], cwd=tmp_path, check=False, capture_output=True)
+        assert run.returncode == 127 and source.read_text() == "x = 1\n", command
+    # Found on PATH or by its path, the program runs: the rewrite is made as its Edit.
+    (tmp_path / "python3").symlink_to(sys.executable)
+    for command in ("python3" + body, "./python3" + body):
+        source.write_text("x = 1\n")
+        assert tools.Bash(command, "found").startswith("Applied as"), command
+        assert source.read_text() == "y = 1\n"
+    # A relative PATH entry names another directory after the command's ``cd``, where bash
+    # looks and this process does not (round 2, cross finding of B7): no Edit either.
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "python3").rename(tmp_path / "bin" / "python3")
+    (tmp_path / "sub").mkdir()
+    inner = tmp_path / "sub" / "a.py"
+    inner.write_text("x = 2\n")
+    assert "x = 2" in tools.Read(str(inner))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", "bin")
+    command = "cd sub && python3" + body
+    assert not tools.Bash(command, "relative PATH").startswith("Applied as")
+    run = subprocess.run([bash, "-c", command], cwd=tmp_path, check=False, capture_output=True)
+    assert run.returncode == 127 and inner.read_text() == "x = 2\n"
 
 
 # --- 4. python I/O keywords ---------------------------------------------------
@@ -343,6 +517,40 @@ def test_python_io_keywords_convert_only_when_edit_matches_them(
         "Path('a.py').write_text(s, newline='')\n",
     ):
         assert python_edit(program) == ("a.py", [], False), program
+
+
+def test_python_name_python_refuses_is_neither_converted_nor_raised(
+    tools: UsefulTools, tmp_path: Path,
+) -> None:
+    """An ``encoding`` or a path holding a null character (a lone surrogate): python raises.
+
+    ``codecs.lookup`` raises ``ValueError`` for such an encoding (``LookupError`` for
+    an unknown one), which left ``python_edit`` and the ``Bash`` tool (review of
+    2026-11-11, S8 finding 2); a path holding a null character was read as the
+    pattern, and its ``Edit`` raised.
+    """
+    source = tmp_path / "a.py"
+    source.write_text("x = 1\n")
+    tools.Read(str(source))  # shown: a program read as the pattern would be applied as its Edit
+    replace = "s = s.replace('x', 'y')\n"
+    refused = "REFUSED: the python heredoc did NOT run"
+    # The path names no file: the heredoc runs as written, to python's own error.
+    program = (_READ + replace + _WRITE).replace("a.py", "a.py\\x00")
+    cases = [(program, "a.py\x00", "Error (exit code 1)")]
+    for encoding in ("utf-8\\x00", "\\x00", "\\ud800"):
+        keyword = f", encoding='{encoding}'"
+        cases += [
+            (_READ.replace("'a.py'", "'a.py'" + keyword) + replace + _WRITE, "a.py", refused),
+            (_READ + replace + _WRITE.replace("'w'", "'w'" + keyword), "a.py", refused),
+        ]
+    for program, path, result in cases:
+        command = f"python3 - <<'EOF'\n{program}EOF"
+        run = subprocess.run(["bash", "-c", command], cwd=tmp_path, check=False)
+        assert run.returncode == 1 and source.read_text() == "x = 1\n", program
+        assert python_edit(program) == (path, [], False), program
+        assert mechanical_edit(command, str(tmp_path)) is None, program
+        out = tools.Bash(command, "refused by python")
+        assert out.startswith(result) and source.read_text() == "x = 1\n", out
 
 
 def test_python_universal_newlines_convert_only_for_a_file_without_cr(
@@ -591,6 +799,36 @@ def test_a_tilde_target_is_resolved_in_the_home_given(tmp_path: Path) -> None:
     assert copy is not None and copy.path is None and copy.target == "~/report.txt"
     copy = heredoc_copy(command, str(tmp_path))  # the daemon's own shell by default
     assert copy is not None and copy.path == os.path.expanduser("~/report.txt")
+
+
+@needs_gnu_sed
+def test_a_target_that_can_only_name_a_directory_is_not_converted(
+    tools: UsefulTools, tmp_path: Path,
+) -> None:
+    """``f.txt/`` and ``f.txt/.`` name no file: sed, python and bash fail and leave ``f.txt``.
+
+    The path the conversions resolve drops such an ending, so the ``Edit`` or
+    ``Write`` landed in the file the command could not open.
+    """
+    target = tmp_path / "f.txt"
+    target.write_text("a\n")
+    tools.Read(str(target))  # shown: a rewrite read as a call would be applied as it
+    program = "s = open({0!r}).read()\ns = s.replace('a', 'b')\nopen({0!r}, 'w').write(s)\n"
+    for name in ("f.txt/", "f.txt/.", "f.txt//"):
+        for command in (
+            f"sed -i 's/a/b/' {name}",
+            f"python3 - <<'EOF'\n{program.format(name)}EOF",
+            f"cat > {name} <<'EOF'\nb\nEOF",
+            f"cat >> {name} <<'EOF'\nb\nEOF",
+            f"tee {name} <<'EOF'\nb\nEOF",
+        ):
+            run = subprocess.run(["bash", "-c", command], cwd=tmp_path, check=False)
+            assert run.returncode != 0 and target.read_text() == "a\n", command
+            assert mechanical_edit(command, str(tmp_path)) is None, command
+            assert heredoc_copy(command, str(tmp_path)) is None, command
+            out = tools.Bash(command, "no file")
+            assert not out.startswith(("Applied", "Appended")), out
+            assert target.read_text() == "a\n", command
 
 
 # --- 5. a here-document followed by another input redirection -----------------

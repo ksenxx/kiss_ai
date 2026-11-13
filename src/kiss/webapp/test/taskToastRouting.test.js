@@ -13,7 +13,7 @@
 //    page does not hold that tab at all;
 //  - the same toast shows once its tab comes on screen;
 //  - an untagged toast always shows;
-//  - a tagged close retires a sticky progress toast even while another
+//  - a tagged close retires a sticky toast even while another
 //    tab is on screen (the close is never gated).
 
 'use strict';
@@ -83,7 +83,7 @@ function main() {
     'an untagged toast is window-level and always shows',
   );
 
-  // A sticky progress toast opened while its tab was on screen must still
+  // A sticky toast opened while its tab was on screen must still
   // close after the user switches tabs: the close is tagged with the
   // (now background) tab and shows nothing, so it is never gated.
   send(win, {
@@ -92,7 +92,6 @@ function main() {
     tabId: first,
     severity: 'info',
     message: 'TOAST_FIRST_PROGRESS',
-    progress: true,
     sticky: true,
   });
   assert.ok(toastText(win).includes('TOAST_FIRST_PROGRESS'));

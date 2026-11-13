@@ -57,10 +57,13 @@ from kiss.core.models.model import Attachment
 from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
+from kiss.server.json_printer import IdentifiedPrompt, name_prompts, prompt_ids_of
 from kiss.server.tab_registry import OpenTabOutcome
 from kiss.server.task_runner import (
     _client_task_id_of,
+    _prompt_of,
     _result_event,
+    _stop_requested,
     contains_task_tags,
     parse_task_tags,
     pending_attachments,
@@ -85,9 +88,10 @@ def _reruns_after_teardown(owner: AgentState) -> bool:
     re-submitted through ``_cmd_run`` as a fresh run on the same tab,
     which echoes the text as its own prompt; the caller therefore
     skips the steering echo (the message would otherwise appear
-    twice).  Sub-agent runs (``parentTaskId``) and tabs the user has
-    closed are not re-run, so their late prompts keep the plain
-    steering echo.
+    twice).  A sub-agent run (``parentTaskId``), a run whose tab the
+    user has closed and a run already stopped are not re-run
+    (``TaskRunner._release_run_state``): a prompt that late is refused
+    instead (:meth:`_CommandsMixin._route_prompt_to_owner`).
 
     MUST be called while holding :data:`agent_state.STATE_LOCK`.
 
@@ -99,6 +103,7 @@ def _reruns_after_teardown(owner: AgentState) -> bool:
         and owner.followup_queue_closed
         and not owner.is_subagent
         and not owner.frontend_closed
+        and not _stop_requested(owner)
     )
 
 
@@ -106,6 +111,11 @@ def _reruns_after_teardown(owner: AgentState) -> bool:
 # first, and the run count from which a command counts as frequent.
 _RECENT_COMMANDS = 3
 _FREQUENT_COMMAND_MIN_RUNS = 2
+
+# How many prompt ids ``_CommandsMixin._prompts_taken`` remembers: a
+# page asks about a prompt once its connection is back, so only the
+# prompts taken during one outage have to fit.
+_PROMPTS_TAKEN_KEPT = 512
 
 
 def sea_commands_event(commands: list[str]) -> dict[str, Any]:
@@ -172,7 +182,10 @@ class _Steer:
     # session joins and is charged to.
     chat_id: str
     owner_agent: Any
-    publication: int
+    # The tab publication that fences an echo without a task id;
+    # ``None`` when the owner has not announced itself yet: its
+    # announcement echoes the message (``_announce_run_locked``).
+    publication: int | None
     # The side channel's question; ``None`` for a queued steering message.
     ask_question: str | None = None
     # Whether the text goes into the composer's autocomplete history.
@@ -239,6 +252,36 @@ def _opt_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def str_field(payload: dict[str, Any], key: str) -> str:
+    """Return ``payload[key]`` when it is a string, else ``""``.
+
+    A client payload is untrusted JSON: a field of another type reads
+    as absent instead of flowing into a path, a lookup or a reply.
+
+    Args:
+        payload: A client command or message.
+        key: The field to read.
+    """
+    value = payload.get(key, "")
+    return value if isinstance(value, str) else ""
+
+
+def _stored_machine() -> str:
+    """Return ``last_machine`` as ``config.json`` holds it (``""``, this machine, when unset).
+
+    Read strictly, as ``save_config`` reads the file it merges into:
+    :func:`~kiss.core.user_config.load_config` takes a file that cannot
+    be read for the defaults, which name this machine.
+
+    Raises:
+        OSError: The file is there but cannot be read.
+    """
+    from kiss.core.user_config import CONFIG_PATH, _read_stored_config, sanitize_config
+
+    stored = sanitize_config(_read_stored_config(CONFIG_PATH, strict=True))
+    return str(stored.get("last_machine", ""))
+
+
 def _open_external_report(url: str) -> dict[str, Any]:
     """Open *url* in the user's default browser; the ``openExternalResult`` fields."""
     return {"opened": open_in_default_browser(url, once=False)}
@@ -296,6 +339,33 @@ def _my_models_event(models: list[dict[str, str]], generation: int) -> dict[str,
     return event
 
 
+# Each held from reading its list off the home directory until the
+# list is handed to the printer, so the lists reach a client in the
+# order they were read: one read earlier and sent later (two edits
+# ending together, a ``get`` answered after an edit's broadcast) would
+# leave a panel showing the older file.
+_MY_MODELS_PUBLISH_LOCK = threading.Lock()
+_TRICKS_PUBLISH_LOCK = threading.Lock()
+
+
+def broadcast_tricks_data(printer: Any, conn_id: str) -> None:
+    """Read the Inject promptlet list and send it as ``tricksData``.
+
+    Read and send are one hold of the promptlet publication lock, so
+    whoever reads the list later also sends it later: call this from a
+    worker thread rather than reading the list there and sending it
+    from the event loop afterwards.
+
+    Args:
+        printer: Any printer exposing ``broadcast(event)``.
+        conn_id: The connection to answer alone (``""`` reaches all).
+    """
+    from kiss.server.tricks import read_tricks_data
+
+    with _TRICKS_PUBLISH_LOCK:
+        broadcast_to_conn(printer, {"type": "tricksData", **read_tricks_data()}, conn_id)
+
+
 def _any_running(task_ids: list[str], chat_id: str = "") -> bool:
     """Whether a live agent state runs one of *task_ids* (or a task of *chat_id*).
 
@@ -332,9 +402,10 @@ class _CommandsMixin:
     # Ordering: taken BEFORE ``_state_lock`` and ``_save_config_lock``,
     # never while holding either.
     _work_dir_lock = threading.Lock()
-    # Serializes a model pick's final ``last_model`` write with every
-    # other pick's (``_cmd_select_model``).  Taken with no other lock
-    # held; takes ``_state_lock`` (briefly) and the config lock inside.
+    # Held by a model pick while it saves itself (``_cmd_select_model``):
+    # picks write ``last_model`` one at a time, each once it has seen
+    # that no newer pick replaced it.  Taken with no other lock held;
+    # takes ``_state_lock`` (briefly) and the config lock inside.
     _last_model_lock = threading.Lock()
 
     # Admission barrier for the self-update: ``True`` from the moment
@@ -364,6 +435,26 @@ class _CommandsMixin:
     # (``AgentServer._get_input_history``).
     _input_history_cut: float = 0.0
 
+    # The default model without the picks not saved yet: the default
+    # when no pick was in flight (the one the file gave or took), then
+    # each pick saved since.  What a pick that could not be saved goes
+    # back to (``_cmd_select_model``; the default it replaced may be a
+    # crossing pick that is not saved either).  Guarded by ``_state_lock``.
+    _saved_model: str = ""
+
+    # ``last_machine`` as ``config.json`` last gave it to, or took it
+    # from, ``_cmd_set_machine``; ``None`` until then.  Stands in for
+    # the file while it cannot be read.  Read and written only under
+    # ``_save_config_lock``.
+    _last_machine: str | None = None
+
+    # The ids of the prompts taken lately, each with the tab it was sent
+    # from, oldest first (``_note_prompts_taken``).  A page that was
+    # away when its prompt was answered learns from them whether the
+    # prompt ran (``_prompts_taken_from``).  Replaced, never mutated,
+    # under ``_state_lock``, so it is read without a lock.
+    _prompts_taken: tuple[tuple[str, str], ...] = ()
+
     if TYPE_CHECKING:
         printer: JsonPrinter
         work_dir: str
@@ -391,6 +482,10 @@ class _CommandsMixin:
 
         def _tab_chat_id_locked(self, tab_id: str) -> str: ...
         def _tab_view_locked(self, tab_id: str) -> tuple[str, str]: ...
+        def _pin_opened_task(self, tab_id: str, task_id: str | None) -> None: ...
+        def _printer_cleanup_tab(
+            self, tab_id: str, keep_task_id: str = "", headless: bool = False,
+        ) -> None: ...
         def _tab_model_locked(self, tab_id: str) -> str: ...
         def _broadcast_tabs_state(self, ack: str = "") -> None: ...
         def _publish_tabs_state(self, ack: str = "") -> None: ...
@@ -441,7 +536,9 @@ class _CommandsMixin:
             conn_id: str,
         ) -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
-        def _close_tab(self, tab_id: str, ack: str = "") -> None: ...
+        def _close_tab(
+            self, tab_id: str, ack: str = "", incarnation: int | None = None,
+        ) -> None: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _registry_update_tab(
             self,
@@ -459,6 +556,7 @@ class _CommandsMixin:
         def _get_adjacent_task(
             self, chat_id: str, task_id: str | None, direction: str,
             tab_id: str = "", *, view: tuple[str, str] | None = None,
+            conn_id: str = "",
         ) -> None: ...
         def _commit_main_tree(
             self, tab_id: str, work_dir: str = "", reply_to: str = "",
@@ -532,7 +630,10 @@ class _CommandsMixin:
             # Every surface's chat-header work-dir drop-down lists the
             # directories selected so far (most recent first); this is the
             # one place every adopted directory passes through.  The
-            # persisted ``work_dir`` rides in the same locked write.
+            # persisted ``work_dir`` rides in the same locked write, and
+            # is written whatever becomes of the folder: one that does
+            # not exist (the first task creates it, or a peer removed
+            # it meanwhile) just gets no row.
             try:
                 with _CommandsMixin._save_config_lock:
                     record_recent_work_dir(new_dir, {"work_dir": new_dir})
@@ -554,16 +655,25 @@ class _CommandsMixin:
                 )
         return True
 
-    def _refuse_run(self, tab_id: str, text: str, lost: str = "") -> None:
+    def _refuse_run(
+        self, tab_id: str, text: str, lost: str = "", cmd: dict[str, Any] | None = None,
+    ) -> None:
         """Turn down a ``run`` on *tab_id* with an ``error`` broadcast.
 
         Both frontends raise the tab's running state optimistically
         the moment the user hits Enter and only a ``status
         running:false`` ever lowers it again, so the refusal MUST
         clear it first or the tab's composer stays disabled forever
-        (F08-1).  The ``error`` carries ``code: "prompt_refused"`` so
-        the page can put the refused draft (text and attachments)
-        back into the composer instead of losing what the user typed.
+        (F08-1).  A tab whose own task is live keeps its running
+        state: the refused line was a follow-up to that task (its
+        thread holds the merge claim while it retires a worktree, or
+        the page had not learned yet that the tab is busy), so a
+        ``running:false`` would show the task finished on every
+        surface; the task's own end lowers the tab.  The check and
+        the status share one ``_state_lock`` hold, as in
+        ``_end_viewer_status``: a run admitted in between would have
+        its spinner killed.  The ``error`` is a prompt refusal
+        (:meth:`_broadcast_prompt_refused`).
 
         Args:
             tab_id: The tab whose submit is refused.
@@ -572,17 +682,109 @@ class _CommandsMixin:
                 tab's task may still be running there; it marks the
                 status (``lost``) so an API client waiting on the run
                 does not take it for the task's own end.
+            cmd: The command turned down, whose prompt the refusal
+                names; ``None`` when no command is (a machine's stream
+                was lost).
         """
-        status: dict[str, Any] = {"type": "status", "running": False, "tabId": tab_id}
-        if lost:
-            status["lost"] = lost
-        self.printer.broadcast(status)
-        self.printer.broadcast({
-            "type": "error",
-            "code": "prompt_refused",
-            "text": text,
-            "tabId": tab_id,
-        })
+        with self._state_lock:
+            owner = agent_state.find_by_tab(tab_id)
+            if owner is None or not owner.running():
+                status: dict[str, Any] = {"type": "status", "running": False, "tabId": tab_id}
+                if lost:
+                    status["lost"] = lost
+                self.printer.broadcast(status)
+        self._broadcast_prompt_refused(tab_id, text, _prompt_of(cmd or {}))
+
+    def _broadcast_prompt_refused(self, tab_id: str, text: str, prompt: object) -> None:
+        """Tell *tab_id* that *prompt* will not run, for the reason *text*.
+
+        The ``error`` carries ``code: "prompt_refused"`` so the page can
+        put the refused draft (text and attachments) back into the
+        composer instead of losing what the user typed, and names the
+        prompt (``promptIds``) so the page puts back that one and not
+        another one waiting in the tab.
+
+        Args:
+            tab_id: The tab the prompt was sent from.
+            text: The user-facing reason.
+            prompt: The refused prompt (``""`` when the caller has none).
+        """
+        self.printer.broadcast(
+            name_prompts(
+                {"type": "error", "code": "prompt_refused", "text": text, "tabId": tab_id},
+                prompt,
+            ),
+        )
+
+    def _note_prompts_taken(self, tab_id: str, prompt: object) -> None:
+        """Under ``_state_lock``: remember that *prompt*, sent from *tab_id*, was taken.
+
+        Taken: a connected page stops waiting for the prompt's answer
+        here, at the echo of a message a running task admitted
+        (:meth:`_echo_injected_prompt`) or at the start of the tab's
+        own run (:meth:`_announce_run_locked`), so a page that was away
+        reaches the same verdict.  Noted there and nowhere else: a
+        prompt that gets no such answer (refused, or kept for a next
+        run that never starts) is never one.  Only a prompt sent under
+        an id is remembered, and only the newest
+        ``_PROMPTS_TAKEN_KEPT``.
+
+        Args:
+            tab_id: The tab the prompt was sent from.
+            prompt: The prompt.
+        """
+        known = set(self._prompts_taken)
+        taken = tuple(
+            (prompt_id, tab_id)
+            for prompt_id in prompt_ids_of(prompt)
+            if (prompt_id, tab_id) not in known
+        )
+        if taken:
+            self._prompts_taken = (self._prompts_taken + taken)[-_PROMPTS_TAKEN_KEPT:]
+
+    def _prompts_taken_from(self, tab_id: str) -> dict[str, list[str]]:
+        """Return the ``task_events`` field naming the prompts taken from *tab_id*.
+
+        A page whose connection died before a prompt was answered asks
+        for the tab's transcript once it is back: ``promptsTaken`` tells
+        it whether that prompt ran, which a transcript holding the same
+        text twice cannot.  The field is left out while no prompt of the
+        tab is remembered (none was sent under an id, or this daemon
+        started since), and the page then judges by the transcript.
+
+        Args:
+            tab_id: The tab the transcript is replayed into.
+
+        Returns:
+            ``{"promptsTaken": [ids, oldest first]}``, or ``{}``.
+        """
+        ids = [prompt_id for prompt_id, tab in self._prompts_taken if tab == tab_id]
+        return {"promptsTaken": ids} if ids else {}
+
+    def _refuse_unanswered_prompts(self, tab_id: str, prompts: list[str]) -> None:
+        """Refuse the messages among *prompts* that never got an answer.
+
+        *prompts* are what a run left undrained and no next run takes
+        (``TaskRunner._run_task``).  A message typed while the agent
+        still ran was echoed into the task and stays in its transcript;
+        one typed after the agent's last step waited for the next run,
+        and its page still waits: it gets the text back.  The two are
+        told apart by the prompts taken (:meth:`_note_prompts_taken`),
+        so only for a message sent under an id.
+
+        Args:
+            tab_id: The run's tab.
+            prompts: The prompts left, joined messages included.
+        """
+        taken = {prompt_id for prompt_id, _tab in self._prompts_taken}
+        unanswered = tuple(
+            prompt_id
+            for prompt in prompts
+            for prompt_id in prompt_ids_of(prompt)
+            if prompt_id not in taken
+        )
+        if unanswered:
+            self._refuse_prompt(tab_id, IdentifiedPrompt("", unanswered))
 
     def _broadcast_run_notice(self, cmd: dict[str, Any], tab_id: str) -> None:
         """Deliver the submit-time notice a ``run`` carries in ``_notice``.
@@ -618,6 +820,7 @@ class _CommandsMixin:
         thread's first broadcast.
         """
         tab_id = cmd.get("tabId", "")
+        prompt = _prompt_of(cmd)
         # Acknowledge + mirror the task-panel text to EVERY client
         # here, in the common run path, so all run origins (a
         # ``submit``, Python clients) behave identically.
@@ -626,11 +829,11 @@ class _CommandsMixin:
         # as the submit acknowledgment: it carries the byte-truncated
         # prompt back to the submitting client even when no task can
         # start (pinned by the prompt-truncation transport tests).
-        self.printer.broadcast({
-            "type": "setTaskText",
-            "text": str(cmd.get("prompt", "") or ""),
-            "tabId": tab_id,
-        })
+        self.printer.broadcast(
+            name_prompts(
+                {"type": "setTaskText", "text": str(prompt or ""), "tabId": tab_id}, prompt,
+            ),
+        )
         if not tab_id:
             logger.debug("Ignoring run command without tabId")
             return
@@ -643,7 +846,7 @@ class _CommandsMixin:
         thread: threading.Thread | None = None
         state: AgentState | None = None
         chat_id = ""
-        prompt = cmd.get("prompt", "")
+        pin = ""
         typed = isinstance(prompt, str) and bool(prompt.strip())
         # Nothing is decoded here: a running owner takes the files as
         # lazily decoded ``PendingAttachment``s (so queueing them under
@@ -677,6 +880,7 @@ class _CommandsMixin:
                     tab_id,
                     "Cannot run a task while a merge is in progress."
                     " Wait for it to finish first.",
+                    cmd=cmd,
                 )
                 return
             if prev is not None and prev.task_thread is not None:
@@ -716,6 +920,7 @@ class _CommandsMixin:
                     tab_id,
                     "An update is being installed; wait for the daemon"
                     " to restart.",
+                    cmd=cmd,
                 )
                 return
             else:
@@ -730,6 +935,9 @@ class _CommandsMixin:
                 else:
                     chat_id = uuid.uuid4().hex
                 self._tab_chat_views[tab_id] = chat_id
+                # The task the tab is pinned on, which the run continues
+                # from (the runner consumes the pin at its start).
+                pin = self._tab_view_locked(tab_id)[1]
                 state_key = uuid.uuid4().hex
                 cmd["_state_key"] = state_key
                 state = AgentState(
@@ -782,6 +990,7 @@ class _CommandsMixin:
         # ``thread`` and ``state`` are created together above, so a
         # non-None thread guarantees the state.
         assert state is not None
+        publish_generation: int | None = None
         try:
             # A sub-agent dispatch (wire field ``parentTaskId``, set by
             # ``run_agent``'s daemon client on behalf of a calling
@@ -794,7 +1003,7 @@ class _CommandsMixin:
             is_subagent_run = bool(str(cmd.get("parentTaskId", "") or ""))
             if not is_subagent_run:
                 # Register + title + bind the tab in the shared registry
-                # BEFORE the ``clear`` broadcast so every client has the
+                # BEFORE the run is announced so every client has the
                 # tab by the time the run's first event reaches it.  A new
                 # run supersedes any historical task the tab was pinned to
                 # (``taskId`` cleared: the tab tracks the chat's latest
@@ -806,11 +1015,11 @@ class _CommandsMixin:
                     work_dir=str(cmd.get("workDir", "") or ""),
                     # A standalone ``sorcar.run`` sub-task (wire field
                     # ``tabScopeWorkDir``) may execute in a channel/cron
-                    # scratch directory but must appear in the CALLING
-                    # workspace's tab bar, so its visibility scope is
-                    # pinned to that workspace here while ``workDir`` stays
-                    # the scratch directory.  Empty for ordinary runs,
-                    # whose scope falls back to ``workDir`` unchanged.
+                    # scratch directory: the workspace it was issued
+                    # from is recorded on the tab's registry entry
+                    # (informational: every client shows every tab)
+                    # while ``workDir`` stays the scratch directory.
+                    # Empty for ordinary runs.
                     scope_work_dir=str(cmd.get("tabScopeWorkDir", "") or ""),
                     task_id="",
                     create=True,
@@ -824,28 +1033,10 @@ class _CommandsMixin:
                             state.stop_event = None
                             state.user_answer_queue = None
                             agent_state.unregister(state.task_id, state)
-                            self._refuse_run(tab_id, "Cannot start task: the tab limit is reached.")
+                            self._refuse_run(
+                                tab_id, "Cannot start task: the tab limit is reached.", cmd=cmd,
+                            )
                             return
-                # The submit-ack ``setTaskText`` at the top of this method
-                # raced ahead of the tab's registration when the run
-                # CREATES its tab — a Python client's synthetic ``api-…``
-                # tab (``sorcar.run``): no
-                # client had adopted the tab yet, so every client dropped
-                # the task text and the tab's transcript opened WITHOUT
-                # its task panel (and the tab had no title).  Re-echo the
-                # text now that the registration's ``tabs_state`` snapshot
-                # has handed every client the tab.  Unconditional on
-                # purpose: gating it on a pre-registration ``has_tab``
-                # probe is a TOCTOU (a concurrent ``closeTab`` between
-                # probe and registration recreates the tab yet suppresses
-                # the echo), and clients apply a repeated ``setTaskText``
-                # idempotently — the daemon already echoes one per queued
-                # follow-up as well.
-                self.printer.broadcast({
-                    "type": "setTaskText",
-                    "text": str(cmd.get("prompt", "") or ""),
-                    "tabId": tab_id,
-                })
                 # A ``closeTab`` dispatched on another connection can
                 # land between this run's state registration and the
                 # ``_registry_update_tab`` above: the close removes
@@ -880,16 +1071,12 @@ class _CommandsMixin:
                     tab_id, publish_generation,
                 ):
                     self._broadcast_tabs_state()
-            self.printer.broadcast({
-                "type": "clear",
-                "chat_id": chat_id,
-                "tabId": tab_id,
-            })
-            self._broadcast_run_notice(cmd, tab_id)
             # Start/cancel handshake (audit0903 F1/F2): a ``stop`` or
             # the graceful-shutdown sweep can land while the registry
-            # write and the ``clear`` broadcast above hold the
-            # pre-start window open.  The decision to start is taken
+            # write above holds the pre-start window open, and so can
+            # a replay of another chat into the tab or a message typed
+            # into it (``_announce_run_locked``).  The decision to
+            # start is taken
             # atomically under ``_state_lock`` — the same lock
             # ``_stop_task`` and ``_stop_active_agent_tasks`` flag
             # under — so a swept or stopped run can never call
@@ -899,6 +1086,7 @@ class _CommandsMixin:
             # watchdog, and an accepted pre-start stop relied on a
             # watchdog that gives up waiting for the start after 30 s.
             with self._state_lock:
+                self._announce_run_locked(state, cmd, publish_generation, pin)
                 if self._shutdown_stopping:
                     state.interrupted_by_shutdown = True
                 pre_cancelled = state.interrupted_by_shutdown or (
@@ -933,6 +1121,81 @@ class _CommandsMixin:
             cmd["_pre_cancelled"] = True
             self._run_task(cmd)
 
+    def _announce_run_locked(
+        self, state: AgentState, cmd: dict[str, Any], publication: int | None, pin: str,
+    ) -> None:
+        """Under ``_state_lock``: tell the launching tab that its run starts.
+
+        Sends the task text, the ``clear`` that empties the tab for the
+        run's chat, the submit-time notice and the echo of every
+        message typed since admission; the task text and the ``clear``
+        name the run's prompt (``promptIds``), which is taken from
+        here on (:meth:`_note_prompts_taken`): no refusal follows.
+        One lock section with the
+        caller's ``thread.start()``: a message is admitted under this
+        lock, so one admitted while the run's thread is unstarted is
+        echoed here, after the ``clear`` that would wipe an earlier
+        echo (:meth:`_admit_steer`).
+
+        A replay of another chat into the tab since admission pins its
+        task under this lock, publishes, then commits its chat view
+        (``_commit_replay_publication``).  One that published before
+        this run did lost the tab to this run's registry row, committed
+        or not: its subscriptions are dropped and the view and pin of
+        admission are restored, so the runner continues from the task
+        this tab was pinned on, not from the other chat's.  One that
+        published after this run did and has committed owns the tab:
+        nothing is sent, and the run goes on unseen in that tab, as
+        when the rebinding lands after its start
+        (``_subscribe_launching_tab_locked``).
+
+        Args:
+            state: The admitted run's state.
+            cmd: The ``run`` command.
+            publication: The generation of the run's registry
+                publication; ``0`` when the tab was closed on every
+                surface meanwhile and ``None`` for a sub-agent run,
+                whose tab is client-local.
+            pin: The task the tab was pinned on at admission (``""``
+                for none).
+        """
+        tab_id, chat_id = state.tab_id, state.chat_id
+        prompt = _prompt_of(cmd)
+        self._note_prompts_taken(tab_id, prompt)
+        view, shown_pin = self._tab_view_locked(tab_id)
+        view = view or chat_id
+        if (view, shown_pin) != (chat_id, pin):
+            if publication and not self.tab_registry.republished_since(tab_id, publication):
+                self._printer_cleanup_tab(tab_id)
+                self._tab_chat_views[tab_id] = chat_id
+                self._pin_opened_task(tab_id, pin)
+            elif view != chat_id:
+                return
+        if publication is not None:
+            # The submit acknowledgement at the top of ``_cmd_run``
+            # preceded the registration of a tab this run CREATES (a
+            # Python client's ``api-…`` tab): no client had the tab yet
+            # and every one dropped the text, so the transcript opened
+            # without its task panel.  Unconditional: a ``has_tab``
+            # check before the registration would race a ``closeTab``,
+            # and clients apply a repeated ``setTaskText`` idempotently.
+            self.printer.broadcast(
+                name_prompts(
+                    {"type": "setTaskText", "text": str(prompt or ""), "tabId": tab_id}, prompt,
+                ),
+            )
+        self.printer.broadcast(
+            name_prompts({"type": "clear", "chat_id": chat_id, "tabId": tab_id}, prompt),
+        )
+        self._broadcast_run_notice(cmd, tab_id)
+        for text in state.unattributed_prompt_echoes:
+            self._note_prompts_taken(tab_id, text)
+            self.printer.broadcast(
+                name_prompts(
+                    {"type": "prompt", "text": str(text), "tabId": tab_id, "steer": True}, text,
+                ),
+            )
+
     def _report_run_start_failure(
         self, tab_id: str, cmd: dict[str, Any], exc: BaseException,
     ) -> None:
@@ -947,7 +1210,7 @@ class _CommandsMixin:
         Args:
             tab_id: The tab whose run failed to start.
             cmd: The run command (its client run token is stamped on
-                the ``status`` event like a normal run end).
+                both events).
             exc: The error raised before the worker thread ran.
         """
         logger.warning(
@@ -991,11 +1254,8 @@ class _CommandsMixin:
         name the call the user clicked, so a click that arrives after
         that call finished cannot hit the next one.
         """
-        tool_name = cmd.get("toolName", "")
-        if not isinstance(tool_name, str):
-            tool_name = ""
         call_id = _parse_int(cmd.get("callId"))
-        self._interrupt_tool_call(cmd.get("tabId", ""), tool_name, call_id)
+        self._interrupt_tool_call(cmd.get("tabId", ""), str_field(cmd, "toolName"), call_id)
 
     def _cmd_get_models(self, cmd: dict[str, Any]) -> None:
         """Send available models list to the requesting connection only.
@@ -1003,8 +1263,7 @@ class _CommandsMixin:
         The reply echoes the command's ``generation``: the model picker
         tells by it a reply asked before the user's latest pick.
         """
-        generation = _parse_int(cmd.get("generation", 0))
-        self._get_models(cmd.get("connId", ""), generation or 0)
+        self._get_models(cmd.get("connId", ""), request_generation(cmd))
 
     def _cmd_select_model(self, cmd: dict[str, Any]) -> None:
         """Update the selected model for a tab.
@@ -1014,11 +1273,17 @@ class _CommandsMixin:
         supplied).  Picking a model-routing SEA (``autorouter``) also
         fires its ``on_picked_as_model(work_dir)`` hook with the tab's
         work directory, without waiting for it.
+
+        A pick ``config.json`` could not record (unreadable, or its
+        lock held too long by another process) is answered to the
+        sender with an ``error``.  The tab keeps the model its picker
+        shows; the daemon's default goes back to the model the file
+        holds (the last pick it did record), unless a newer pick
+        replaced it meanwhile, so new chats do not start on a model a
+        restart would forget.
         """
         tab_id = cmd.get("tabId", "")
-        model = cmd.get("model", "")
-        if not isinstance(model, str):
-            model = ""
+        model = str_field(cmd, "model")
         with self._state_lock:
             if tab_id:
                 if not model:
@@ -1026,34 +1291,52 @@ class _CommandsMixin:
                 self._tab_models[tab_id] = model
             if not model:
                 return
+            if not self._model_picks_pending:
+                self._saved_model = self._default_model
             self._default_model = model
-            self._model_pick = (self._model_pick[0] + 1, model)
+            generation = self._model_pick[0] + 1
+            self._model_pick = (generation, model)
             self._model_picks_pending += 1
-        # Persisted after the lock is released: the write waits for the
+        # Saved after the lock is released: the write waits for the
         # history database's writer turn (behind a long ``getHistory``,
         # say), and ``_state_lock`` is on the path of every other tab's
         # commands.  The pending count and the pick generation keep a
         # concurrent ``_refresh_default_model`` from reverting the pick
-        # with the still-stale file.  Overlapping picks write the file
-        # in no particular order, and a failed usage insert writes
-        # nothing: so after its own write every pick reads the newest
-        # pick and writes it under ``_last_model_lock``.  The last of
-        # those locked writes names the newest pick and nothing writes
-        # after it, so the file cannot end up older than memory.
+        # with the still-stale file.  Every pick is counted (its tab
+        # runs on it); overlapping picks then save themselves one at a
+        # time, each with one write and only while it is still the
+        # newest (a pick replaced before its turn leaves the saving to
+        # the newer one): the file cannot end up older than memory, and
+        # ``_saved_model`` is the newest pick it took.
         try:
             try:
-                _record_model_usage(model)
-            finally:
-                with _CommandsMixin._last_model_lock:
+                _record_model_usage(model, save_last=False)
+            except (OSError, sqlite3.Error):
+                logger.warning("Could not count the pick of model %r", model, exc_info=True)
+            with _CommandsMixin._last_model_lock:
+                with self._state_lock:
+                    newest = self._model_pick[0] == generation
+                if newest:
+                    _save_last_model(model)
                     with self._state_lock:
-                        newest = self._model_pick[1]
-                    _save_last_model(newest)
+                        self._saved_model = model
+        except OSError as e:  # a ``TimeoutError`` on the config lock too
+            logger.warning("Could not save the pick of model %r", model, exc_info=True)
+            # Only this pick's default goes back: a newer pick set its
+            # own and saves itself.
+            with self._state_lock:
+                if self._model_pick[0] == generation:
+                    self._default_model = self._saved_model
+            self._send_error_to_sender(
+                f"Could not save the model pick: {e}", cmd, "selectModel",
+            )
         finally:
             with self._state_lock:
                 self._model_picks_pending -= 1
-        # A real model name runs no hook; the registry look-up that tells
-        # happens on the hook's thread, so a changed SEA's re-import never
-        # stalls the command loop.
+        # A real model name runs no hook.  Only the registry and the bytes of
+        # a registered script are read here: whether a command is a picker
+        # SEA is settled on the hook's thread, so a changed SEA's re-import
+        # never stalls the command loop.
         run_picked_hook(model, self._tab_work_dir(tab_id), wait=False)
 
     def _tab_work_dir(self, tab_id: str) -> str:
@@ -1072,7 +1355,11 @@ class _CommandsMixin:
         work_dir = cmd.get("workDir", "")
         self._get_history(
             query,
-            0 if offset is None else offset,
+            # A JSON integer has no size limit; SQLite's OFFSET and
+            # LIMIT take 64 bits (a negative OFFSET reads as 0).  Half
+            # that range is past any table and leaves room for the page
+            # size ``_get_history`` adds to it.
+            0 if offset is None else max(0, min(offset, 2**62)),
             0 if generation is None else generation,
             cmd.get("connId", ""),
             tag if isinstance(tag, str) else "",
@@ -1095,6 +1382,11 @@ class _CommandsMixin:
         (:data:`~kiss.server.task_update.REMOTE_USAGE_NESTED_INTERVAL_S`):
         in a nested dispatch the late spend of a sub-agent's own remote
         sub-agents reaches the asking daemon's next request.
+
+        A history the read fails on is answered too, with a
+        ``taskUsage`` that carries ``error`` and no ``tasks`` (the asker
+        charges nothing now and asks again later): its link would wait
+        out its timeout for a missing answer, then drop its connection.
         """
         from kiss.agents.sorcar.machines import load_machines
         from kiss.server.task_update import (
@@ -1104,9 +1396,15 @@ class _CommandsMixin:
 
         ids = cmd.get("taskIds")
         task_ids = [i for i in ids if isinstance(i, str)][:500] if isinstance(ids, list) else []
-        self._broadcast_to_conn(
-            {"type": "taskUsage", "tasks": _task_usage(task_ids)}, cmd.get("connId", ""),
-        )
+        try:
+            tasks = _task_usage(task_ids)
+        except (sqlite3.Error, OSError) as e:
+            logger.warning("getTaskUsage failed", exc_info=True)
+            self._broadcast_to_conn(
+                {"type": "taskUsage", "error": str(e)}, cmd.get("connId", ""),
+            )
+            return
+        self._broadcast_to_conn({"type": "taskUsage", "tasks": tasks}, cmd.get("connId", ""))
         start_remote_usage_sync(
             self.printer, load_machines(), min_interval=REMOTE_USAGE_NESTED_INTERVAL_S,
         )
@@ -1157,13 +1455,13 @@ class _CommandsMixin:
             "open-external", url=url,
         )
 
-    def _refuse_delete_while_running(self, cmd: dict[str, Any], what: str) -> str:
-        """Tell the requesting page that *what* cannot be deleted while its task runs.
+    def _refuse_delete(self, cmd: dict[str, Any], what: str, why: str) -> str:
+        """Tell the requesting page that *what* cannot be deleted, and *why*.
 
         Returns:
             The notice's text.
         """
-        text = f"Cannot delete {what}: its task is still running. Stop it first."
+        text = f"Cannot delete {what}: {why}"
         self._broadcast_to_conn(
             {"type": "notice", "text": text, "tabId": str(cmd.get("tabId", "") or "")},
             cmd.get("connId", ""),
@@ -1216,6 +1514,9 @@ class _CommandsMixin:
         which that read may not have named yet (a child that finished
         meanwhile), while ``delete`` removes the tree as it is then.
 
+        A history the read or the delete fails on is a refusal too,
+        worded with the failure: the rows are still there.
+
         A command stamped ``generation`` (sent over a daemon link, see
         :func:`~kiss.server.sidebar_panels.machine_history_write`) is
         answered with a ``historyDeleted`` echoing it, its ``refused``
@@ -1237,10 +1538,20 @@ class _CommandsMixin:
             task_ids = tree(key)
             with self._state_lock:
                 if _any_running(task_ids, chat_id):
-                    refused = self._refuse_delete_while_running(cmd, what)
+                    refused = self._refuse_delete(
+                        cmd, what, "its task is still running. Stop it first.",
+                    )
             if not refused:
                 delete(key)
-                self._input_history_cut = time.time()
+                # Timed and stored in one lock hold, as a maximum: a
+                # delete that read the clock first and stored last would
+                # move the cut back before the later deletion, whose
+                # prompt a page then keeps (its refresh is a delta).
+                with self._state_lock:
+                    self._input_history_cut = max(self._input_history_cut, time.time())
+        except (sqlite3.Error, OSError) as e:
+            logger.warning("Could not delete %s %s", what, key, exc_info=True)
+            refused = self._refuse_delete(cmd, what, str(e))
         finally:
             with self._state_lock:
                 self._history_deletes -= 1
@@ -1270,11 +1581,8 @@ class _CommandsMixin:
         pop only in the chat tab that typed ``@`` — the
         picker element is shared by every tab.
         """
-        prefix = cmd.get("prefix", "")
-        if not isinstance(prefix, str):
-            prefix = ""
         self._get_files(
-            prefix,
+            str_field(cmd, "prefix"),
             cmd.get("workDir", ""),
             cmd.get("connId", ""),
             cmd.get("tabId", ""),
@@ -1392,7 +1700,7 @@ class _CommandsMixin:
         prompt: str,
         tab_id: str,
         attachments: list[Attachment] | None = None,
-    ) -> bool:
+    ) -> bool | None:
         """Queue a mid-run user *prompt* on the right list of *owner*.
 
         A plain message is appended to ``pending_user_messages`` — the
@@ -1432,7 +1740,9 @@ class _CommandsMixin:
         accepted-then-dropped middle ground.  A steering message queued
         after the flag is not lost either: ``TaskRunner._run_task``'s
         cleanup re-submits the leftover ``pending_user_messages`` as the
-        tab's next run (see :func:`_reruns_after_teardown`).
+        tab's next run (see :func:`_reruns_after_teardown`), and where
+        no run will follow the message is refused instead of queued
+        (:meth:`_refuse_prompt`).
 
         MUST be called while holding :data:`agent_state.STATE_LOCK`.
 
@@ -1457,7 +1767,8 @@ class _CommandsMixin:
             autocomplete history; ``False`` when it was consumed as the
             answer to a pending ``ask_user_question`` — an answer is not
             prompt history (the frontend's ``userAnswer`` path never
-            records one either, and it may be a secret).
+            records one either, and it may be a secret); ``None`` when
+            it was refused.
         """
         if (
             owner.server_owned
@@ -1470,9 +1781,12 @@ class _CommandsMixin:
             return True
         if owner.ask_pending() and owner.user_answer_queue is not None:
             self._deliver_user_answer(
-                owner, owner.user_answer_queue, prompt, tab_id,
+                owner, owner.user_answer_queue, str(prompt), tab_id,
             )
             return False
+        if owner.followup_queue_closed and not _reruns_after_teardown(owner):
+            self._refuse_prompt(tab_id, prompt)
+            return None
         owner.pending_user_messages.append(prompt)
         owner.pending_user_attachments.append(list(attachments or []))
         return True
@@ -1518,9 +1832,12 @@ class _CommandsMixin:
             ``(remember, owner_task)`` — the *remember* flag of
             :meth:`_route_prompt_to_owner` and the task id to stamp the
             echo with (``""`` when unknown) — or ``None`` when no echo
-            must be emitted.
+            must be emitted (the next run echoes the prompt, or it was
+            refused).
         """
         remember = self._route_prompt_to_owner(owner, prompt, tab_id, attachments)
+        if remember is None:
+            return None
         if _reruns_after_teardown(owner):
             return None
         owner_task = _persisted_task_id(owner.agent)
@@ -1597,7 +1914,7 @@ class _CommandsMixin:
         return None
 
     def _echo_injected_prompt(
-        self, tab_id: str, prompt: str, owner_task: str, publication: int,
+        self, tab_id: str, prompt: str, owner_task: str, publication: int | None,
         remember: bool = True,
     ) -> None:
         """Broadcast a queued follow-up prompt back to the tab's viewers.
@@ -1636,28 +1953,30 @@ class _CommandsMixin:
                 :meth:`_queue_prompt_on_owner`), or ``""`` when the task row
                 is not allocated yet.
             publication: The tab publication captured at admission, for
-                fencing a pre-allocation echo that has no task id yet.
+                fencing a pre-allocation echo that has no task id yet;
+                ``None`` (which matches none) when the owner's own
+                announcement echoes the message.
             remember: Whether to save *prompt* for autocomplete.
         """
+        text = str(prompt)
         if remember:
             try:
-                _record_steer_input(prompt)
+                _record_steer_input(text)
             except Exception:
                 logger.warning("steer input not recorded", exc_info=True)
         # ``steer`` tells the chat page this is a message the user
         # typed into a RUNNING task (not the task's own prompt), which
         # it shows in a panel like the task's.
-        echo: dict[str, Any] = {
-            "type": "prompt",
-            "text": prompt,
-            "tabId": tab_id,
-            "steer": True,
-        }
+        echo = name_prompts(
+            {"type": "prompt", "text": text, "tabId": tab_id, "steer": True}, prompt,
+        )
         if owner_task:
             # Task routing records the echo and only delivers it to
             # viewers still subscribed after any concurrent rebind.
             echo.pop("tabId")
             echo["taskId"] = owner_task
+            with self._state_lock:
+                self._note_prompts_taken(tab_id, prompt)
             self.printer.broadcast(echo)
         else:
             # No durable write here: the queue's deferred echo will be
@@ -1665,6 +1984,7 @@ class _CommandsMixin:
             # and this transient send atomic with replay's state commit.
             with self._state_lock:
                 if self.tab_registry.generation(tab_id) == publication:
+                    self._note_prompts_taken(tab_id, prompt)
                     self.printer.broadcast(echo)
 
     def _dispatch_ask_side_channel(
@@ -1794,6 +2114,7 @@ class _CommandsMixin:
             self._broadcast_ask_answer(
                 tab_id=tab_id,
                 owner_task_id=owner_task_id,
+                chat_id=chat_id,
                 question=question,
                 text=text,
                 success=success,
@@ -1815,6 +2136,7 @@ class _CommandsMixin:
             self._broadcast_ask_answer(
                 tab_id=tab_id,
                 owner_task_id=owner_task_id,
+                chat_id=chat_id,
                 question=question,
                 text=f"The /ask agent could not be started: {exc}",
                 success=False,
@@ -1825,6 +2147,7 @@ class _CommandsMixin:
         *,
         tab_id: str,
         owner_task_id: str,
+        chat_id: str,
         question: str,
         text: str,
         success: bool,
@@ -1842,7 +2165,10 @@ class _CommandsMixin:
         lands after the owner finished and its agent was cleared still
         survives a history reopen) and fans out to the tabs showing
         the owner NOW — the asking tab may have been closed and the
-        task reopened in another since the question was typed.
+        task reopened in another since the question was typed.  The
+        tabs showing an owner that has finished are not the stream's
+        subscribers alone (:meth:`_finished_task_tabs_locked`): each
+        gets its own copy and the event is recorded once, unsent.
         Without *owner_task_id* there is no row to file it under: the
         event is stamped with the asking *tab_id* instead, a transient
         targeted broadcast — shown once in that tab, not replayed.
@@ -1851,6 +2177,7 @@ class _CommandsMixin:
             tab_id: The frontend tab the ``/ask`` was typed into.
             owner_task_id: The running task's persisted id, or ``""``
                 when its row was not allocated at dispatch time.
+            chat_id: The owner's chat.
             question: The user's question, ``/ask`` prefix stripped.
             text: The answering agent's final summary (HTML from
                 ``finish(summary_in_html=...)``), or the failure text
@@ -1863,11 +2190,37 @@ class _CommandsMixin:
             "text": text,
             "success": success,
         }
-        if owner_task_id:
-            event["taskId"] = owner_task_id
-        else:
+        if not owner_task_id:
             event["tabId"] = tab_id
-        self.printer.broadcast(event)
+            self.printer.broadcast(event)
+            return
+        event["taskId"] = owner_task_id
+        # One lock section: a replay binds a tab to the task, and a run
+        # ends, under this lock.
+        with self._state_lock:
+            owner = agent_state.get(owner_task_id)
+            if owner is None or not owner.running():
+                for shown in self._finished_task_tabs_locked(owner_task_id, chat_id):
+                    self.printer.broadcast({**event, "tabId": shown})
+                event["recordOnly"] = True
+            self.printer.broadcast(event)
+
+    def _finished_task_tabs_locked(self, task_id: str, chat_id: str) -> list[str]:
+        """Under ``_state_lock``: the tabs showing the finished task *task_id* of *chat_id*.
+
+        The stream's subscribers (the tabs that watched the task run,
+        kept for a few minutes after its end) and the registry tabs
+        bound to the chat that are pinned on the task or on none: a
+        history reopen subscribes its tab to nothing, a finished task
+        having no stream.  A tab of the chat that displays another
+        task drops an event stamped with this one (the page's
+        ``isStaleAskAnswer``).
+        """
+        shown = [
+            tab for tab, chat, pin in self.tab_registry.bound_tabs()
+            if chat == chat_id and pin in ("", task_id)
+        ]
+        return list(dict.fromkeys([*self.printer.viewer_tab_ids(task_id), *shown]))
 
     def _cmd_append_user_message(self, cmd: dict[str, Any]) -> None:
         """Queue a user message to be injected into the running agent's context.
@@ -1917,7 +2270,7 @@ class _CommandsMixin:
         user sees their queued message in the chat surface.
         """
         tab_id = cmd.get("tabId", "")
-        prompt = cmd.get("prompt", "")
+        prompt = _prompt_of(cmd)
         if not isinstance(prompt, str) or not prompt.strip():
             return
         # Lazily decoded (see ``PendingAttachment``): the owner is
@@ -1937,20 +2290,24 @@ class _CommandsMixin:
                         owner = candidate
                         break
             if owner is None:
-                # Addressed only: a message that names no tab (an API
-                # client's) has no composer to put the text back into.
-                if tab_id:
-                    self.printer.broadcast({
-                        "type": "error",
-                        "code": "prompt_refused",
-                        "text": "The task finished before your message reached it;"
-                        " it is back in the composer.",
-                        "tabId": tab_id,
-                    })
+                self._refuse_prompt(tab_id, prompt)
                 return
             admitted = self._admit_steer(owner, prompt, tab_id, attachments)
         if admitted is not None:
             self._deliver_steer(admitted, cmd, prompt, tab_id)
+
+    def _refuse_prompt(self, tab_id: str, prompt: object) -> None:
+        """Tell *tab_id* that no task took the message *prompt*, so the page restores the draft.
+
+        Addressed only: a message that names no tab (an API client's)
+        has no composer to put the text back into.
+        """
+        if tab_id:
+            self._broadcast_prompt_refused(
+                tab_id,
+                "The task finished before your message reached it; it is back in the composer.",
+                prompt,
+            )
 
     def _admit_steer(
         self,
@@ -1966,7 +2323,9 @@ class _CommandsMixin:
         a task ending or a successor re-arming the tab meanwhile can
         neither strand nor misroute the message.  Only the decision and
         the queueing happen here; :meth:`_deliver_steer` echoes and
-        dispatches once the lock is released.
+        dispatches once the lock is released, except that a message
+        admitted before *owner* announced itself is echoed by that
+        announcement (:meth:`_announce_run_locked`).
 
         ``/ask <question>`` is a live side-channel Q&A over the running
         task's persisted events: routed to a background ``ask_sea``
@@ -1996,7 +2355,8 @@ class _CommandsMixin:
             already over: nothing drains the queue any more and
             ``_run_task``'s cleanup re-submits the text as the tab's
             next run, which echoes it as its own prompt — a steering
-            echo would show the message twice.
+            echo would show the message twice — or, where no run will
+            follow, the message was refused.
         """
         command = _split_slash_command(prompt)
         question = command[1] if command is not None and command[0] == "ask" else ""
@@ -2011,7 +2371,15 @@ class _CommandsMixin:
         owner_task = _persisted_task_id(owner_agent)
         if owner_task != owner.task_id:
             owner_task = ""
-        publication = self.tab_registry.generation(tab_id)
+        # An owner not active yet whose installed thread is unstarted
+        # has not announced itself (``_announce_run_locked``, under this
+        # lock): its ``clear`` would wipe an echo sent before it, so the
+        # announcement echoes the message.  A run cancelled before its
+        # start stays that way to its end and echoes nothing: its queue
+        # is discarded, or re-run as the tab's next run.
+        thread = owner.task_thread
+        unannounced = not owner.is_task_active and thread is not None and thread.ident is None
+        publication = None if unannounced else self.tab_registry.generation(tab_id)
         if question and owner_task:
             return _Steer(
                 owner_task, owner.chat_id, owner_agent, publication, ask_question=question,
@@ -2040,12 +2408,11 @@ class _CommandsMixin:
             prompt: The user's message, as typed.
             tab_id: Frontend tab id the message was typed into.
         """
+        self._echo_injected_prompt(
+            tab_id, prompt, steer.owner_task, steer.publication, steer.remember,
+        )
         if steer.ask_question is None:
-            self._echo_injected_prompt(
-                tab_id, prompt, steer.owner_task, steer.publication, steer.remember,
-            )
             return
-        self._echo_injected_prompt(tab_id, prompt, steer.owner_task, steer.publication)
         if steer.ask_question.lower() in RESERVED_SUBCOMMANDS:
             # ``/ask help`` is the SEA's ``description()`` and
             # ``/ask check`` its dry-run report, like every
@@ -2059,6 +2426,7 @@ class _CommandsMixin:
                 self._broadcast_ask_answer(
                     tab_id=tab_id,
                     owner_task_id=steer.owner_task,
+                    chat_id=steer.chat_id,
                     question=steer.ask_question,
                     text=help_text,
                     success=help_ok,
@@ -2096,7 +2464,11 @@ class _CommandsMixin:
         of its clients (:mod:`kiss.server.remote_tabs`): every frame
         of the answer echoes it, and a ``replayDone`` to the asking
         connection ends the answer, so that daemon can tell the frames
-        of this replay from the tab's other frames.
+        of this replay from the tab's other frames.  A replay that
+        failed (a history that cannot be read, say) ends the same way,
+        its ``replayDone`` carrying the ``error``: the asker is not
+        left waiting for the marker, and can tell the failure from the
+        end of the task.
 
         ``reopen: true`` marks a sub-agent tab the user asked for again
         (an expanded fan-out panel), see ``_replay_session``.
@@ -2118,19 +2490,24 @@ class _CommandsMixin:
             self._defer_replay(chat_id, cmd.get("tabId", ""), task_id, conn_id)
             return
         replay_id = str(cmd.get("replayId") or "")
-        self._replay_session(
-            chat_id,
-            cmd.get("tabId", ""),
-            task_id=task_id,
-            conn_id=conn_id,
-            replay_id=replay_id,
-            reopen=cmd.get("reopen") is True,
-            recovery=cmd.get("recovery") is True,
-        )
-        if replay_id:
-            self._broadcast_to_conn(
-                {"type": "replayDone", "replayId": replay_id}, str(cmd.get("connId") or ""),
+        done: dict[str, Any] = {"type": "replayDone", "replayId": replay_id}
+        try:
+            self._replay_session(
+                chat_id,
+                cmd.get("tabId", ""),
+                task_id=task_id,
+                conn_id=conn_id,
+                replay_id=replay_id,
+                reopen=cmd.get("reopen") is True,
+                recovery=cmd.get("recovery") is True,
             )
+        except BaseException as e:
+            # Whatever ended the replay, the asker waits for the marker.
+            done["error"] = str(e) or type(e).__name__
+            raise
+        finally:
+            if replay_id:
+                self._broadcast_to_conn(done, str(cmd.get("connId") or ""))
 
     def _cmd_open_tab(self, cmd: dict[str, Any]) -> None:
         """Register a client-opened tab in the shared tab registry.
@@ -2169,14 +2546,10 @@ class _CommandsMixin:
         tab_id = cmd.get("tabId", "")
         if not isinstance(tab_id, str) or not tab_id:
             return
-        title = cmd.get("title", "")
-        if not isinstance(title, str):
-            title = ""
-        work_dir = cmd.get("workDir", "")
-        if not isinstance(work_dir, str):
-            work_dir = ""
         ack = _opt_str(cmd.get("ack")) or ""
-        outcome = self.tab_registry.open_tab(tab_id, title, work_dir, ack)
+        outcome = self.tab_registry.open_tab(
+            tab_id, str_field(cmd, "title"), str_field(cmd, "workDir"), ack,
+        )
         if outcome in (OpenTabOutcome.OPENED, OpenTabOutcome.REPLAYED):
             self._publish_tabs_state(ack)
         elif outcome is OpenTabOutcome.FULL:
@@ -2196,19 +2569,32 @@ class _CommandsMixin:
         """Clean up backend state for a closed frontend tab.
 
         The command's ``ack`` token, when it sends one, rides the
-        snapshot that omits the tab (see :meth:`_cmd_open_tab`).
+        snapshot that omits the tab (see :meth:`_cmd_open_tab`).  Its
+        ``incarnation`` marks a close the page made by itself (see
+        ``_close_tab``).
         """
         tab_id = cmd.get("tabId", "")
         if tab_id:
-            self._close_tab(tab_id, _opt_str(cmd.get("ack")) or "")
+            incarnation = cmd.get("incarnation")
+            self._close_tab(
+                tab_id,
+                _opt_str(cmd.get("ack")) or "",
+                incarnation if isinstance(incarnation, int) else None,
+            )
 
     # -- Browser tab: the daemon machine's browser streamed to every surface.
     # Browser page ids travel as ``tab_id`` (never ``tabId``, which names
     # chat tabs and is canonicalised by the API layer).
 
     def _cmd_browser_open(self, cmd: dict[str, Any]) -> None:
-        """Open a page in the machine's browser and announce it on every surface."""
-        self.browser_tabs.open(str(cmd.get("url") or ""), cmd.get("connId", ""))
+        """Open a page in the machine's browser and announce it on every surface.
+
+        The ``openId`` of a daemon relaying this machine's pages is
+        echoed on the answer.
+        """
+        self.browser_tabs.open(
+            str(cmd.get("url") or ""), cmd.get("connId", ""), str(cmd.get("openId") or ""),
+        )
 
     def _cmd_browser_close(self, cmd: dict[str, Any]) -> None:
         """Close a browser page; every surface drops its tab."""
@@ -2270,9 +2656,7 @@ class _CommandsMixin:
           connection so a tab typing concurrently with another tab
           cannot mark the other tab's pending request stale.
         """
-        query = cmd.get("query", "")
-        if not isinstance(query, str):
-            query = ""
+        query = str_field(cmd, "query")
         active_file = cmd.get("activeFile")
         active_content = cmd.get("activeFileContent")
         if not isinstance(active_file, str):
@@ -2389,6 +2773,7 @@ class _CommandsMixin:
             cmd.get("direction", "prev"),
             tab_id,
             view=view,
+            conn_id=cmd.get("connId", ""),
         )
 
     def _run_autocommit_job(self, tab_id: str, job: Callable[[], None]) -> None:
@@ -2477,7 +2862,14 @@ class _CommandsMixin:
             result = self._handle_worktree_action(action, wt_tab_id)
         except Exception as e:
             logger.debug("Worktree action error", exc_info=True)
-            result = {"success": False, "message": str(e)}
+            # The action died part-way (a git or filesystem error): a
+            # worktree still pending keeps the bar's buttons on the
+            # page for the retry, as a failure the action returns does.
+            with self._state_lock:
+                state = agent_state.find_by_tab(wt_tab_id)
+                agent = state.agent if state is not None else None
+                pending = agent is not None and agent._wt_pending
+            result = {"success": False, "message": str(e), "retryable": pending}
         self.printer.broadcast(
             {"type": "worktree_result", "tabId": wt_tab_id, **result},
         )
@@ -2495,7 +2887,7 @@ class _CommandsMixin:
         self._send_config_data(cmd.get("connId", ""))
 
     def _send_config_data(self, conn_id: str, prev_password: str | None = None) -> None:
-        """Answer *conn_id* with a ``configData`` ordered against directory adoptions.
+        """Answer *conn_id* with a ``configData`` ordered against adoptions and machine picks.
 
         The reply is built AND sent under ``_work_dir_lock``, the lock
         :meth:`_apply_new_work_dir` adopts a directory and broadcasts
@@ -2504,7 +2896,10 @@ class _CommandsMixin:
         would reach the connection last and put that one surface back
         on the superseded directory (its Explorer, its history scope,
         the directory it advertises for the next task) while the daemon
-        and every other surface stay on the new one.  With
+        and every other surface stay on the new one.  ``_save_config_lock``
+        is held inside it for the same reason: :meth:`_cmd_set_machine`
+        persists and broadcasts a pick under it, and a reply holding the
+        superseded ``last_machine`` must not follow ``machineChanged``.  With
         *prev_password* (a ``saveConfig`` reply), a changed
         ``remote_password`` is announced first with a
         ``remotePasswordChanged`` so the connection's transport adopts
@@ -2517,7 +2912,7 @@ class _CommandsMixin:
             prev_password: The stored ``remote_password`` before a save,
                 ``None`` for a plain ``getConfig`` reply.
         """
-        with _CommandsMixin._work_dir_lock:
+        with _CommandsMixin._work_dir_lock, _CommandsMixin._save_config_lock:
             event = self._config_data_event()
             if prev_password is not None:
                 new_password = event["config"].get("remote_password", "")
@@ -2554,6 +2949,11 @@ class _CommandsMixin:
         # (the raw stored list may hold deleted or malformed entries,
         # and the chat header's drop-down shows whatever this carries).
         cfg["recent_work_dirs"] = recent_work_dirs()
+        # Not a setting either: the folder this daemon installs the Chrome
+        # extension into, which the sheet's "Drive my Chrome" label tells
+        # the user to load (``$KISS_HOME`` may be anywhere, and the sheet
+        # of a registered machine names that machine's own).
+        cfg["chrome_extension_dir"] = str(chrome_bridge.extension_dir())
         return {
             "type": "configData", "config": cfg, "apiKeys": get_current_api_keys(),
             # The server machine's short host name, shown centered in the
@@ -2576,8 +2976,10 @@ class _CommandsMixin:
         ``remotePasswordChanged`` event carrying the new password
         BEFORE its ``configData``, so its transport adopts it before it
         sends another frame.  Every other password-authenticated client
-        is shut out at its next command and asked for the new password;
-        local-token and loopback clients are unaffected.
+        is shut out at once and asked for the new password, as is the
+        requesting one when it emptied the password (the transport
+        sends it the shut-out instead of these replies); local-token
+        and loopback clients are unaffected.
 
         The ``save_config`` write and the env re-apply are held under a
         dedicated lock so two concurrent ``saveConfig`` commands (two
@@ -2636,7 +3038,9 @@ class _CommandsMixin:
                 failure = f"Could not save the settings: {e}"
         if failure:
             self._send_error_to_sender(failure, cmd, "saveConfig")
-            self._send_config_data(conn_id)
+            # ``prev_password`` here too: the password is stored before
+            # the API keys, so a failed key write may leave it changed.
+            self._send_config_data(conn_id, prev_password)
             return
 
         # Outside ``_save_config_lock``: ``_apply_new_work_dir`` takes
@@ -2645,7 +3049,7 @@ class _CommandsMixin:
             self._apply_new_work_dir(new_work_dir)
         # Echoes the save's ``generation`` like ``getModels``: the picker
         # keeps a pick made after the save over the list's old default.
-        self._get_models(conn_id, _parse_int(cmd.get("generation", 0)) or 0)
+        self._get_models(conn_id, request_generation(cmd))
 
         self._send_config_data(conn_id, prev_password)
         # A newly ticked "Chrome bridge" box takes effect now, not at the
@@ -2664,10 +3068,11 @@ class _CommandsMixin:
         """
         from kiss.core.models.model_info import list_custom_models
 
-        self._broadcast_to_conn(
-            _my_models_event(list_custom_models(), request_generation(cmd)),
-            cmd.get("connId", ""),
-        )
+        with _MY_MODELS_PUBLISH_LOCK:
+            self._broadcast_to_conn(
+                _my_models_event(list_custom_models(), request_generation(cmd)),
+                cmd.get("connId", ""),
+            )
 
     def _cmd_get_claude_code_status(self, cmd: dict[str, Any]) -> None:
         """Answer the settings panel's Claude Code subpanel.
@@ -2708,15 +3113,12 @@ class _CommandsMixin:
         One login at a time (:func:`codex_device_login`): while the CLI
         of an earlier request is still alive, waiting for its code to
         be entered, a request (another surface's click, a retry) is
-        answered with that same code and starts no second CLI; a
-        request carrying ``fresh: true`` ends that CLI and starts a
-        new one.
+        answered with that same code and starts no second CLI.
         """
         from kiss.core.models.codex_model import codex_device_login
 
         self._reply_from_thread(
-            "codexLogin", functools.partial(codex_device_login, fresh=bool(cmd.get("fresh"))),
-            cmd.get("connId", ""), "codex-login",
+            "codexLogin", codex_device_login, cmd.get("connId", ""), "codex-login",
         )
 
     def _reply_from_thread(
@@ -2781,12 +3183,13 @@ class _CommandsMixin:
         """
         from kiss.core.models.model_info import list_custom_models
 
-        models = list_custom_models()
-        self.printer.broadcast(_my_models_event(models, 0))
-        if generation := request_generation(cmd):
-            self._broadcast_to_conn(
-                _my_models_event(models, generation), cmd.get("connId", ""),
-            )
+        with _MY_MODELS_PUBLISH_LOCK:
+            models = list_custom_models()
+            self.printer.broadcast(_my_models_event(models, 0))
+            if generation := request_generation(cmd):
+                self._broadcast_to_conn(
+                    _my_models_event(models, generation), cmd.get("connId", ""),
+                )
 
     def _cmd_save_my_model(self, cmd: dict[str, Any]) -> None:
         """Add or update one custom model in ``~/.kiss/MY_MODELS.json``.
@@ -2934,20 +3337,17 @@ class _CommandsMixin:
         deleted row (or shows an edited one) before the answer arrives,
         so the list on disk is re-sent to put the row back.
         """
-        from kiss.server.tricks import read_tricks_data
-
         text = cmd.get("text", "")
         try:
             error = edit(text if isinstance(text, str) else "")
         except OSError as e:
             logger.warning("%s failed", name, exc_info=True)
             error = f"Could not write ~/{HOME_DIR}/MY_INJECTION.md: {e}"
-        event: dict[str, Any] = {"type": "tricksData", **read_tricks_data()}
         if error:
             self._send_error_to_sender(error, cmd, name)
         # A failed write repaints only the sender; a successful one
         # repaints every window (the file is shared).
-        self._broadcast_to_conn(event, cmd.get("connId", "") if error else "")
+        broadcast_tricks_data(self.printer, cmd.get("connId", "") if error else "")
 
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
         """Make ``workDir`` the global working directory of every task.
@@ -3019,17 +3419,43 @@ class _CommandsMixin:
         machine already picked, changes nothing.  The broadcast goes
         out under the config lock, so two picks racing on the thread
         pool reach every client in the order they were persisted (the
-        last broadcast names the persisted pick).
+        last broadcast names the persisted pick).  A pick
+        ``config.json`` could not record (unreadable, or its lock held
+        too long by another process) is answered to the sender alone:
+        an ``error``, and a ``machineChanged`` naming the machine still
+        in force, which puts its drop-down (already showing the pick)
+        back.  A file that cannot be read tells no machine (its
+        defaults name this one): the machine in force is then the one
+        the file last gave or took here (``_last_machine``), no pick
+        passes for the machine already picked, and a sender this
+        daemon has no machine to name for gets the ``error`` alone.
         """
         machine = cmd.get("machine", "")
         if not isinstance(machine, str):
             return
-        from kiss.core.user_config import load_config, save_config
+        from kiss.core.user_config import save_config
 
         with _CommandsMixin._save_config_lock:
-            if load_config().get("last_machine", "") == machine:
+            # A file that cannot be read leaves the remembered machine.
+            with contextlib.suppress(OSError):
+                self._last_machine = _stored_machine()
+                if self._last_machine == machine:
+                    return
+            in_force = self._last_machine
+            try:
+                save_config({"last_machine": machine})
+            except OSError as e:  # a ``TimeoutError`` on the config lock too
+                logger.warning("setMachine failed", exc_info=True)
+                self._send_error_to_sender(
+                    f"Could not save the machine pick: {e}", cmd, "setMachine",
+                )
+                if in_force is not None:
+                    self._broadcast_to_conn(
+                        {"type": "machineChanged", "machine": in_force},
+                        cmd.get("connId", ""),
+                    )
                 return
-            save_config({"last_machine": machine})
+            self._last_machine = machine
             self.printer.broadcast({"type": "machineChanged", "machine": machine})
 
     _HANDLERS: dict[str, Any] = {

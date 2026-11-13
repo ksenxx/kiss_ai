@@ -55,7 +55,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase, skipUnless
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 import kiss.agents.sorcar.persistence as th
@@ -64,8 +64,9 @@ from kiss.core.brand import PRODUCT_NAME
 from kiss.core.file_lock import lock_exclusive
 from kiss.server import tls_trust
 from kiss.server import web_server as ws
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import IS_WINDOWS, openssl_cli
+from kiss.tests.local_ws import _generate_self_signed_cert
 
 
 @contextlib.contextmanager
@@ -233,6 +234,16 @@ class TestTlsCerts(TestCase):
         tls_certs.ensure_local_tls_pair(self.tls_dir, [])
         self.assertNotEqual(self.cert.read_bytes(), good_cert)
         self.assertTrue(self._current())
+
+        # A pair that needs no re-issue except that its key is an RSA key
+        # (the shape of the web clip's signer) is not the server's pair.
+        ca_cert, ca_key = tls_certs.ensure_local_ca(self.tls_dir)
+        tls_certs.issue_leaf(
+            self.cert, self.key, ca_cert, ca_key, rsa.generate_private_key(65537, 2048),
+            "localhost", ExtendedKeyUsageOID.SERVER_AUTH, _san(_load(self.cert)),
+        )
+        self.assertIsNotNone(tls_certs.current_cert_and_key(self.cert, self.key, ca_cert))
+        self.assertFalse(self._current())
 
         # Missing key, missing SAN, expiring leaf.
         self.key.unlink()
@@ -454,8 +465,8 @@ class TestLiveServer(IsolatedAsyncioTestCase):
         self.tmp = Path(tempfile.mkdtemp())
         kiss_dir = self.tmp / ".kiss"
         kiss_dir.mkdir()
-        self.saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-        th._KISS_DIR, th._DB_PATH, th._db_conn = kiss_dir, kiss_dir / "history.db", None
+        self.saved_persistence = (th._DB_PATH, th._KISS_DIR)
+        th._KISS_DIR, th._DB_PATH = kiss_dir, kiss_dir / "history.db"
         self.saved_tls_dir = ws._TLS_DIR
         ws._TLS_DIR = kiss_dir / "tls"
         self.server: RemoteAccessServer | None = None
@@ -464,9 +475,8 @@ class TestLiveServer(IsolatedAsyncioTestCase):
         if self.server is not None:
             await self.server.stop_async()
         ws._TLS_DIR = self.saved_tls_dir
-        if th._db_conn is not None:
-            th._db_conn.close()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved_persistence  # type: ignore[assignment]
+        th._close_thread_db()
+        th._DB_PATH, th._KISS_DIR = self.saved_persistence  # type: ignore[assignment]
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     async def _start(self, **kwargs: object) -> int:
@@ -681,6 +691,13 @@ class TestTrustLocalCa(TestCase):
             tls_trust.nss_databases(self.home),
             [f"dbm:{legacy}", f"sql:{chromium}", f"sql:{firefox}"],
         )
+        # A home is searched as it is spelled: ``[1]`` in its name is no
+        # character class, which would find the profiles of ``user1`` instead.
+        self.home = self.tmp / "user1"
+        self._nss_dir(".mozilla/firefox/other.default")
+        self.home = self.tmp / "user[1]"
+        bracketed = self._nss_dir(".mozilla/firefox/abc.default")
+        self.assertEqual(tls_trust.nss_databases(self.home), [f"sql:{bracketed}"])
 
     def test_linux_report_without_databases_or_certutil(self) -> None:
         lines = tls_trust.trust_local_ca(self.ca, home=self.home, platform="linux")
@@ -753,6 +770,13 @@ class TestTrustLocalCa(TestCase):
         # Idempotent.
         lines = tls_trust.trust_local_ca(self.ca, home=self.home, platform="linux")
         self.assertIn(f"Trusted in NSS database sql:{db}", lines)
+
+    def test_tool_output_in_another_encoding_is_reported_not_raised(self) -> None:
+        """A localized Windows ``certutil`` prints in the OEM code page (``ü`` is 0x81 there)."""
+        code = "import sys; sys.stdout.buffer.write(b'hinzugef\\x81gt \\xff'); sys.exit(3)"
+        status, output = tls_trust._run([sys.executable, "-c", code])
+        self.assertEqual(status, 3)
+        self.assertTrue(output.startswith("hinzugef"), output)
 
     def test_macos_and_windows_paths_report_their_tool_result(self) -> None:
         """The macOS/Windows store tools are run for real and their verdict is relayed.

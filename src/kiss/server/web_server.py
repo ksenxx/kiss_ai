@@ -86,7 +86,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, BinaryIO, cast
 from urllib.parse import unquote, urlsplit
 
 import websockets
@@ -101,12 +101,15 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
     _load_subagent_rows_by_parent_task_id,
     _queue_chat_event,
+    _shutdown_persist_in_flight_results,
 )
+from kiss.agents.sorcar.sea_settings import file_stamp
+from kiss.agents.sorcar.useful_tools import remap_vanished_worktree
 from kiss.core import tls_certs, user_config
 from kiss.core.brand import BRAND, HOME_DIR, PRODUCT_NAME
 from kiss.core.browser_handoff import in_docker, set_browser_tab_opener
 from kiss.core.config import get_jobs_root as get_jobs_root
-from kiss.core.config import kiss_home
+from kiss.core.config import kiss_home, read_remote_urls, remote_url_file
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.locked import locked_call
 from kiss.core.processes import find_bash, suppress_error_dialogs
@@ -119,14 +122,19 @@ from kiss.core.user_config import (
     load_config,
 )
 from kiss.core.utils import (
+    atomic_write_text,
     default_route_ip,
     is_root_dir,
     read_bytes_waiting_for_writer,
-    replace_waiting_for_readers,
 )
 from kiss.server import agent_state, deferred_restart, standalone_app
 from kiss.server import sorcar as sorcar_api
-from kiss.server.commands import broadcast_to_conn, sea_commands_event
+from kiss.server.commands import (
+    broadcast_to_conn,
+    broadcast_tricks_data,
+    request_generation,
+    sea_commands_event,
+)
 from kiss.server.helpers import MEDIA_DIR
 from kiss.server.http_speed import speed_up_response
 from kiss.server.install_problems import NOTICE_ID as INSTALL_PROBLEMS_NOTICE_ID
@@ -173,55 +181,14 @@ VOICE_MODEL_URL = (
 
 
 def _voice_model_cache_path() -> Path:
-    """Return the wake-word archive path: override or lazy default.
+    """Return the wake-word archive path under the active KISS home.
 
     Resolved on every call so a ``KISS_HOME`` set after this module
     was imported is honoured — freezing it at import time made the
     browser wake-word pipeline re-download the 40MB archive into an
-    empty test home instead of reusing ``$KISS_HOME/models``.  Assigning
-    ``web_server.VOICE_MODEL_CACHE`` remains a supported test
-    override, matching the lazy ``_URL_FILE`` attribute below.
+    empty test home instead of reusing ``$KISS_HOME/models``.
     """
-    override = globals().get("VOICE_MODEL_CACHE")
-    if isinstance(override, Path):
-        return override
     return default_models_dir() / f"{MODEL_NAME}.tar.gz"
-
-
-def _atomic_publish(target: Path, write_tmp: Callable[[Path], object]) -> None:
-    """Atomically publish *target* via a pid-unique temp + ``Path.replace``.
-
-    Creates the parent directory, calls *write_tmp* with a pid-unique
-    temporary path in the same directory, then atomically renames it
-    onto *target* so a concurrent reader can never observe a torn
-    write.  The pid suffix matters: an in-process lock cannot
-    serialize a SIBLING process (a second kiss-web daemon, a test
-    running next to a live daemon), and a shared fixed temp name would
-    let two processes interleave writes into the same file and then
-    publish the corrupted result — or race ``replace`` so the loser
-    raised ``FileNotFoundError``.  On failure the temp file is removed
-    and the exception propagates to the caller.
-
-    Args:
-        target: Final path to publish.
-        write_tmp: Callable that writes the content to the temp path.
-    """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(
-        f"{target.name}.{os.getpid()}.{threading.get_ident()}."
-        f"{uuid.uuid4().hex[:8]}.tmp",
-    )
-    try:
-        write_tmp(tmp)
-        replace_waiting_for_readers(tmp, target)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
-def _write_text_to(tmp: Path, text: str) -> None:
-    """Write *text* to *tmp* as UTF-8 (writer for :func:`_atomic_publish`)."""
-    tmp.write_text(text, encoding="utf-8")
 
 
 _SAVE_FILE_LOCK = threading.Lock()
@@ -233,6 +200,40 @@ simplicity beats a per-path lock table that would need its own
 housekeeping.  (Sibling daemons are not covered — see
 ``RemoteAccessServer._handle_save_file``.)
 """
+
+
+def _open_regular_file(path: Path) -> BinaryIO:
+    """Open the regular file *path* for reading; never wait on the open.
+
+    ``openFile`` and ``saveFile`` resolve the path first
+    (``RemoteAccessServer._resolve_tab_file``), and the name can be
+    given to something else before the open: a plain ``open`` of a
+    FIFO waits for a writer, holding the executor worker and, for a
+    save, :data:`_SAVE_FILE_LOCK`.  ``O_NONBLOCK`` makes the open
+    return at once and the descriptor's own ``fstat`` then refuses
+    whatever is not a regular file; for a regular file the flag
+    changes nothing.  ``O_NOCTTY``: a terminal the name was given to
+    must not become the daemon's own.
+
+    Raises:
+        OSError: *path* cannot be opened or is not a regular file.
+    """
+    fd = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOCTTY", 0)
+        | getattr(os, "O_BINARY", 0),
+    )
+    try:
+        regular = stat_module.S_ISREG(os.fstat(fd).st_mode)
+    except OSError:
+        os.close(fd)
+        raise
+    if not regular:
+        os.close(fd)
+        raise OSError(errno.EINVAL, "Not a regular file", str(path))
+    return open(fd, "rb")
 
 
 def _file_version(data: bytes) -> str:
@@ -249,31 +250,6 @@ def _file_version(data: bytes) -> str:
     names the bytes the editor showed, whatever the clock did.
     """
     return hashlib.sha256(data).hexdigest()
-
-
-def _write_bytes_with_mode(tmp: Path, data: bytes, st: os.stat_result) -> None:
-    """Write *data* to *tmp* and copy *st*'s permission bits onto it.
-
-    Writer for :func:`_atomic_publish` used by
-    ``RemoteAccessServer._handle_save_file``: ``Path.replace`` swaps
-    the inode, so without this an executable script saved from the
-    web editor would come back non-executable.
-    """
-    tmp.write_bytes(data)
-    os.chmod(tmp, stat_module.S_IMODE(st.st_mode))
-
-
-def _atomic_write_text(target: Path, text: str) -> None:
-    """Atomically write *text* (UTF-8) to *target*.
-
-    Thin text convenience over :func:`_atomic_publish`; see it for the
-    pid-unique-temp + ``Path.replace`` rationale.
-
-    Args:
-        target: Final path to publish.
-        text: Full file content to write.
-    """
-    _atomic_publish(target, partial(_write_text_to, text=text))
 
 
 def _ensure_voice_model() -> Path | None:
@@ -326,21 +302,10 @@ TRAJECTORY_TEMPLATE = (
 TUNNEL_CHECK_INTERVAL: float = 15
 TRUSTED_CLIENTS_POLL = 2.0
 """Seconds between the daemon's looks at the enrolled machine CAs' directory."""
+REMOTE_PASSWORD_POLL = 1.0
+"""Seconds between a password session's looks at the stored remote password."""
 MACHINES_REGISTRY_POLL_SECONDS = 2.0
 """Seconds between the daemon's looks at ``machines.json`` (see ``_machines_registry_watch``)."""
-
-
-def _file_stamp(path: Path) -> tuple[int, int, int] | None:
-    """Return ``(st_mtime_ns, st_size, st_ino)`` of *path*, ``None`` when it is absent.
-
-    Enough to notice a rewrite of a small registry file: an atomic
-    rename-in-place moves the inode, an in-place write the mtime.
-    """
-    try:
-        st = path.stat()
-    except OSError:
-        return None
-    return (st.st_mtime_ns, st.st_size, st.st_ino)
 
 _IP_CHANGE_DEBOUNCE_TICKS = 4
 
@@ -391,7 +356,8 @@ _SO_NWRITE = 0x1024
 def _unsent_bytes(transport: asyncio.WriteTransport) -> int:
     """Return how many bytes written to *transport* its peer has not taken yet.
 
-    The event loop's own write buffer plus, on Linux and macOS, the
+    The event loop's own write buffer (under TLS the SSL layer's and
+    that of the TCP transport below it) plus, on Linux and macOS, the
     kernel's TCP send queue (what is still unsent or unacknowledged:
     ``TIOCOUTQ`` on Linux, ``SO_NWRITE`` on macOS, where that ioctl is
     for terminals only and fails with ``ENXIO`` on a socket); the
@@ -405,6 +371,11 @@ def _unsent_bytes(transport: asyncio.WriteTransport) -> int:
         transport: The peer's connection transport.
     """
     unsent = transport.get_write_buffer_size()
+    # An SSL transport counts its own layer only; what it has encrypted
+    # waits in the TCP transport below it, which asyncio keeps private.
+    raw = getattr(getattr(transport, "_ssl_protocol", None), "_transport", None)
+    if raw is not None:
+        unsent += raw.get_write_buffer_size()
     sock = transport.get_extra_info("socket")
     if sock is None or sys.platform == "win32":
         return unsent
@@ -436,14 +407,24 @@ class _DrainWatch:
             peer is dropped; a quarter of it, at most a second, is
             the tick between two looks.
         loop: The event loop the send runs on.
+        reply: The wait is for the peer's answer (a pong).  The daemon
+            cannot see one while it has itself stopped reading the
+            connection (a full receive queue,
+            :data:`_RECEIVE_QUEUE_FRAMES`), so that time is not held
+            against the peer.
     """
 
     def __init__(
-        self, transport: asyncio.WriteTransport, timeout: float, loop: asyncio.AbstractEventLoop,
+        self,
+        transport: asyncio.Transport,
+        timeout: float,
+        loop: asyncio.AbstractEventLoop,
+        reply: bool = False,
     ) -> None:
         self.transport = transport
         self.timeout = timeout
         self.loop = loop
+        self.reply = reply
         self.tick = min(1.0, timeout / 4)
         self.unsent = -1
         self.shrank_at = loop.time()
@@ -455,7 +436,8 @@ class _DrainWatch:
         # A keepalive ping written meanwhile grows the count; only a
         # shrink is the peer reading.
         now_unsent = _unsent_bytes(self.transport)
-        if now_unsent < self.unsent:
+        unread = self.reply and not (self.transport.is_closing() or self.transport.is_reading())
+        if now_unsent < self.unsent or unread:
             self.shrank_at = self.loop.time()
         elif self.loop.time() - self.shrank_at >= self.timeout:
             self.expired = True
@@ -470,7 +452,7 @@ class _DrainWatch:
 
 
 async def _await_while_draining[T](
-    transport: asyncio.WriteTransport, awaitable: Awaitable[T], timeout: float,
+    transport: asyncio.Transport, awaitable: Awaitable[T], timeout: float, reply: bool = False,
 ) -> T:
     """Await *awaitable*; drop *transport*'s peer once it took nothing for a whole deadline.
 
@@ -489,12 +471,13 @@ async def _await_while_draining[T](
         awaitable: The send, ping or pong wait bound to that transport.
         timeout: Seconds the unsent bytes may stay put before the
             peer is dropped.
+        reply: The wait is for the peer's answer; see :class:`_DrainWatch`.
 
     Raises:
         TimeoutError: When the wait returned although the peer's
             unsent bytes did not shrink for *timeout* seconds.
     """
-    watch = _DrainWatch(transport, timeout, asyncio.get_running_loop())
+    watch = _DrainWatch(transport, timeout, asyncio.get_running_loop(), reply)
     try:
         result = await awaitable
     finally:
@@ -528,7 +511,8 @@ _PART_ROOM_TICK = 0.005
 
 async def _send_when_room(
     transport: asyncio.WriteTransport, endpoint: ServerConnection, text: str,
-) -> None:
+    revoked: Callable[[Any], bool] | None,
+) -> bool:
     """Send *text*, a later part of a big frame, once the peer took the earlier ones.
 
     Waits until the peer's unsent bytes are down to
@@ -542,10 +526,20 @@ async def _send_when_room(
         transport: The peer's connection transport.
         endpoint: The peer's connection.
         text: The part to send.
+        revoked: The sender's ``WebPrinter.revoked``, asked once there
+            is room: the wait lasts as long as the peer takes, and
+            the password of its session may change meanwhile.
+
+    Returns:
+        True when *text* was sent; False for an endpoint revoked by
+        then, which is sent nothing.
     """
     while not transport.is_closing() and _unsent_bytes(transport) > _PART_ROOM_BYTES:
         await asyncio.sleep(_PART_ROOM_TICK)
+    if revoked and revoked(endpoint):
+        return False
     await endpoint.send(text)
+    return True
 
 
 _SEND_TIMEOUT = 30.0
@@ -611,6 +605,39 @@ _SHUTDOWN_EXIT_FAILSAFE = 30.0
 _MAX_PROMPT_BYTES = 1_000_000
 
 _MAX_LINE_BYTES = 64 * 1024 * 1024
+
+_SEND_BACKLOG_MAX_CHARS = 2 * _MAX_LINE_BYTES
+"""The most that may wait to be sent to one client before it is dropped.
+
+:data:`_SEND_TIMEOUT` drops a peer that reads nothing.  One that keeps
+reading, but slower than its tasks print, never runs that deadline out,
+while every broadcast queues another payload and send task for it.
+A peer with more than this many characters queued when another payload
+comes (each send counts as :data:`_SEND_OVERHEAD_CHARS` more, for its
+task) is dropped the same way, and resumes from the replay when it
+reconnects.  A single payload is sent whatever its size.
+
+The text of a replay is not counted, only its send: a peer gets one
+per request it made, a slow link takes a large one in parts over
+minutes, and the page asks again for a replay it lost with its
+connection, so a reader dropped for its replays would be dropped again.
+"""
+
+_SEND_OVERHEAD_CHARS = 1024
+
+_RECEIVE_QUEUE_FRAMES = 1024
+"""The most frames of one connection that wait for its handler.
+
+A connection's frames are handled one at a time
+(:meth:`RemoteAccessServer._ws_handler`), so the frames a client sends
+while a slow command runs wait in the library's receive queue.  Past
+this many the connection is read no further and the rest waits in the
+peer's socket, until a quarter of them are left.  Far above anything a
+surface sends in one go.  While reading is paused the peer's pong waits
+too; the watchdog does not hold that time against the peer
+(:class:`_DrainWatch`; with the library's default of 16 frames it used
+to abort live clients).
+"""
 
 # Byte budget for the JSON tasks of one ``share_tasks`` reply, kept
 # well under the 64 MiB frame limit (``_MAX_LINE_BYTES``) so the reply
@@ -725,10 +752,6 @@ def _share_subagent_entries(
 # wake-word model, which reaches the browser as ERR_EMPTY_RESPONSE.
 _OPEN_TIMEOUT_SECONDS = 300.0
 
-# Upper bound on waiting for a sibling daemon's ``.tls.lock`` (a
-# self-signed cert generation takes well under a second).
-_TLS_LOCK_TIMEOUT_S = 30.0
-
 _MAX_VOICE_AUDIO_B64 = 4 * 1024 * 1024
 
 _TLS_DIR: Path | None = None
@@ -737,39 +760,6 @@ _TLS_DIR: Path | None = None
 def _tls_dir() -> Path:
     """Return the directory holding the self-signed TLS cert/key pair."""
     return _TLS_DIR if _TLS_DIR is not None else kiss_home() / "tls"
-
-
-def _url_file_path() -> Path:
-    """Return the persisted remote-URL path: override or lazy default.
-
-    Assigning ``web_server._URL_FILE`` is a supported test override,
-    matching the lazy ``CONFIG_DIR`` / ``CONFIG_PATH`` attributes in
-    :mod:`kiss.core.user_config`.  The override must be
-    consulted here (rather than only exposed through ``__getattr__``)
-    because production consumers such as :class:`RemoteAccessServer`
-    call this accessor directly.
-    """
-    override = globals().get("_URL_FILE")
-    return override if override is not None else kiss_home() / "remote-url.json"
-
-
-if TYPE_CHECKING:
-    _URL_FILE: Path
-    VOICE_MODEL_CACHE: Path
-
-
-def __getattr__(name: str) -> Path:
-    """Resolve ``_URL_FILE`` / ``VOICE_MODEL_CACHE`` lazily (PEP 562).
-
-    Several test modules import these names by value; resolving them
-    at access time keeps that import surface working while honoring a
-    ``KISS_HOME`` set after this module was first imported.
-    """
-    if name == "_URL_FILE":
-        return _url_file_path()
-    if name == "VOICE_MODEL_CACHE":
-        return _voice_model_cache_path()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _tunnel_backoff_delay(failure_count: int) -> int:
@@ -867,42 +857,105 @@ def _bound_loopback(*ws_servers: Any) -> tuple[str, int]:
     return fallback
 
 
-def _forwarded_client_ip(websocket: ServerConnection) -> str:
-    """Return the real client IP forwarded by cloudflared, or ``""``.
+def _hop_address(hop: str) -> str:
+    """Return the address one forwarded hop names, without the brackets or port a relay may add.
 
-    cloudflared sets ``Cf-Connecting-Ip`` to the origin visitor's IP on
-    the WebSocket upgrade request; ``X-Forwarded-For`` (whose first hop
-    is the original client) is used as a fallback.  The returned value
-    must be treated as trusted **only** for loopback TCP peers (see
-    :meth:`RemoteAccessServer._client_ip`).
+    The forms in use are ``203.0.113.9``, ``203.0.113.9:4711``,
+    ``2001:db8::1``, ``[2001:db8::1]`` and ``[2001:db8::1]:4711``.
+    """
+    hop = hop.strip()
+    if hop.startswith("["):
+        return hop[1:].partition("]")[0]
+    if hop.count(":") == 1:
+        return hop.partition(":")[0]
+    return hop
+
+
+def _forwarded_client_ip(websocket: ServerConnection) -> str:
+    """Return the visitor's address as a relay on this machine reported it, or ``""``.
+
+    The returned value must be treated as trusted **only** for
+    loopback TCP peers (see :meth:`RemoteAccessServer._client_ip`):
+    such a peer is a relay on this machine, cloudflared or a reverse
+    proxy.
+
+    A relay hands on the ``X-Forwarded-For`` it is sent with the
+    address of the peer it accepted appended.  The list therefore
+    reads, left to right, the visitor's own text and then one hop per
+    relay, and the visitor is the last hop that is not a loopback
+    address (a loopback hop is a relay on this machine in front of
+    another one).  On the tunnel Cloudflare's edge writes that hop,
+    the address it also puts in ``Cf-Connecting-Ip``.  An earlier hop
+    is never read: the visitor changes it with every request, and a
+    lockout keyed on it never trips.
+
+    ``Cf-Connecting-Ip`` is read only when the list names no visitor:
+    a proxy that is not Cloudflare passes the visitor's own through.
+
+    A request that carries either header was relayed, whatever the
+    header says.  One whose headers name no address but this
+    machine's reads as ``"?"``, never as no header and never as a
+    loopback address: either would pass the visitor for a client on
+    this machine, which needs no password.  Several lines of one
+    header are read as one comma-separated list.
 
     Args:
         websocket: The server connection whose upgrade request headers
             are inspected.
 
     Returns:
-        The forwarded client IP as a string, or ``""`` when no usable
-        header is present.
+        The forwarded client IP as a string, ``"?"`` when the headers
+        name none that can be believed, or ``""`` when the request
+        carries neither header.
     """
     request = getattr(websocket, "request", None)
     headers = getattr(request, "headers", None)
     if headers is None:
         return ""
-    cf_ip = str(headers.get("Cf-Connecting-Ip") or "").strip()
-    if cf_ip:
-        return cf_ip
-    xff = str(headers.get("X-Forwarded-For") or "")
-    return xff.split(",", maxsplit=1)[0].strip()
+    forwarded_for = headers.get_all("X-Forwarded-For")
+    cloudflare = headers.get_all("Cf-Connecting-Ip")
+    hops = ",".join(forwarded_for).split(",")[::-1] + ",".join(cloudflare).split(",")[:1]
+    for hop in hops:
+        address = _hop_address(hop)
+        if address and not sorcar_api.is_loopback_ip(address):
+            return address
+    return "?" if forwarded_for or cloudflare else ""
+
+
+def _names_this_machine(request: Request) -> bool:
+    """Whether *request* names this machine alone as its ``Host`` and its ``Origin``.
+
+    A browser on this machine also sends the requests of other sites'
+    pages, over loopback and with no forwarded client IP.  A
+    cross-site script's names its site as ``Origin``.  After a DNS
+    rebinding (the site's name re-pointed at 127.0.0.1) the page's
+    requests are same-origin and the browser lets it read the answers:
+    only the ``Host`` they name tells them from those of the web app
+    opened at ``http://127.0.0.1:<port>``.  A header that is absent
+    names nobody: a program on this machine need send neither.
+
+    Returns:
+        True when every ``Host`` and ``Origin`` line of the request
+        names ``localhost`` or a loopback address.
+    """
+    headers = request.headers
+    urls = [f"//{host}" for host in headers.get_all("Host")] + headers.get_all("Origin")
+    try:
+        hosts = [urlsplit(url).hostname or "" for url in urls]
+    except ValueError:  # ``Host: [``
+        return False
+    return all(host == "localhost" or sorcar_api.is_loopback_ip(host) for host in hosts)
 
 
 def _basic_auth_password(request: Request) -> str:
     """Return the password of *request*'s ``Authorization: Basic`` header, ``""`` when none.
 
     The user name before the colon is ignored: the daemon has one
-    password, not accounts.  An unreadable credential reads as no
-    password.
+    password, not accounts.  An unreadable credential, or more than
+    one header line, reads as no password.
     """
-    scheme, _, credential = str(request.headers.get("Authorization") or "").partition(" ")
+    credentials = request.headers.get_all("Authorization")
+    scheme, _, credential = (credentials[0] if len(credentials) == 1 else "").partition(" ")
     if scheme.lower() != "basic":
         return ""
     try:
@@ -1009,6 +1062,11 @@ _MAX_HEAD_LINE_BYTES = 8192
 # ClientHello or an HTTP request line) before the socket is dropped.
 _SNIFF_TIMEOUT_SECONDS = 10.0
 
+_SNIFF_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_EXECUTOR_WORKERS, thread_name_prefix="kiss-web-sniff",
+)
+"""Workers isolated from blocking daemon work for Windows' socket peeks."""
+
 _PLAIN_HTTP_REFUSAL = (
     b"HTTP/1.1 400 Bad Request\r\n"
     b"Content-Type: text/plain; charset=utf-8\r\n"
@@ -1043,7 +1101,8 @@ async def _peek_first_byte(sock: Any) -> bytes:
                 return bytes(peek_sock.recv(1, socket.MSG_PEEK))
             except BlockingIOError:
                 continue
-    return await asyncio.to_thread(_peek_first_byte_blocking, sock)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_SNIFF_EXECUTOR, _peek_first_byte_blocking, sock)
 
 
 def _peek_first_byte_blocking(sock: Any) -> bytes:
@@ -1124,8 +1183,13 @@ class _HeadAwareServerConnection(ServerConnection):
         # Whether ``websockets`` has been given the transport (plain
         # right after the sniff; TLS once the handshake is done).
         self._attached: bool = False
+        # The task running the opening handshake, while it runs.
+        self._handshake_task: asyncio.Task[Any] | None = None
         self._head_buffer: bytes = b""
         self._head_checked: bool = False
+        # Whether the client left a handshake nothing had gone wrong in
+        # (see ``_drop_handshake``).
+        self._client_left: bool = False
 
     def connection_made(self, transport: Any) -> None:
         """Hold a fresh transport back until its first byte says TLS or plain.
@@ -1206,11 +1270,58 @@ class _HeadAwareServerConnection(ServerConnection):
         if not handshake.cancelled():
             handshake.exception()
 
+    async def handshake(self, *args: Any, **kwargs: Any) -> None:
+        """Run the opening handshake; :meth:`_drop_handshake` ends it for a client that left.
+
+        The answer to a request is prepared across awaits (the page
+        render, the certificate check, its compression).  ``websockets``
+        finishes one whose client left meanwhile and logs two errors
+        for the write to a connection that is closed already.
+        """
+        self._handshake_task = asyncio.current_task()
+        try:
+            await super().handshake(*args, **kwargs)
+        finally:
+            self._handshake_task = None
+
+    def _drop_handshake(self) -> None:
+        """Cancel the opening handshake of a client that has left.
+
+        Nobody is left to read an answer, and ``websockets`` would log
+        the lost connection as a failed handshake, with a traceback: a
+        request still being answered, a browser's unused preconnect, a
+        HEAD health check answered here (``websockets`` never sees that
+        request).  Two handshakes stay with ``websockets``, which logs
+        them: one whose request it could not parse, and one whose
+        answer this server failed to prepare.
+
+        Called at the client's EOF and again at the loss, which is what
+        cancels when the EOF came with the TLS handshake's last flight,
+        before the handshake task existed.
+        """
+        failure = self.protocol.handshake_exc
+        if failure is None or (
+            self.request is not None and isinstance(failure, websockets.InvalidHandshake)
+        ):
+            self._client_left = True
+        if self._client_left and self._handshake_task is not None:
+            self._handshake_task.cancel()
+
+    def eof_received(self) -> None:
+        """Drop the handshake under way: a FIN closes ``websockets``' side before the loss."""
+        self._drop_handshake()
+        super().eof_received()
+
     def connection_lost(self, exc: Exception | None) -> None:
-        """Stop a pending sniff; hand the loss to ``websockets`` once it knows the transport."""
+        """Stop a pending sniff; hand the loss to ``websockets`` once it knows the transport.
+
+        A handshake still under way is dropped (:meth:`_drop_handshake`):
+        nobody is left to read an answer.
+        """
         self._sniffing.discard(self._raw_transport)
         if self._sniff_task is not None and not self._sniff_task.done():
             self._sniff_task.cancel()
+        self._drop_handshake()
         if hasattr(self, "transport"):
             super().connection_lost(exc)
 
@@ -1244,10 +1355,8 @@ class _HeadAwareServerConnection(ServerConnection):
         self._head_checked = True
         first_line = self._head_buffer[:idx]
         if first_line.startswith(b"HEAD "):
-            transport = self.transport
-            if transport is not None:
-                transport.write(_head_health_response(self, self._remote_password))
-                transport.close()
+            self.transport.write(_head_health_response(self, self._remote_password))
+            self.transport.close()
             return
         buffered = self._head_buffer
         self._head_buffer = b""
@@ -1611,7 +1720,9 @@ def _save_cloudflared_pidfile(
         with exclusive_file_lock(
             _cloudflared_pidfile_lock(), timeout=_CLOUDFLARED_PIDFILE_LOCK_TIMEOUT_S,
         ):
-            _atomic_write_text(_cloudflared_pidfile(), json.dumps(data) + "\n")
+            atomic_write_text(
+                _cloudflared_pidfile(), json.dumps(data) + "\n", create_mode=0o666,
+            )
     except OSError as exc:
         logger.debug("Failed to write cloudflared pidfile: %s", exc)
 
@@ -1826,24 +1937,30 @@ def _find_cloudflared_forwarding_to(local_port: int) -> list[tuple[int, int]]:
     return found
 
 
-def _cloudflared_origin_port(pid: int) -> int | None:
-    """Return the loopback port the quick tunnel *pid* forwards to.
+def _cloudflared_mismatch(pid: int, local_port: int, tunnel_token: str | None) -> str:
+    """Say why the recorded cloudflared *pid* is not the tunnel this daemon is to run.
 
-    Reads the process's argv (``ps``) and parses its ``--url`` like
-    :func:`_quick_tunnel_argv_ports`.  ``None`` when the origin cannot
-    be told — a named tunnel (``run`` in the argv: its origin is
-    configured in the dashboard), no loopback ``--url``, an argv that
-    does not parse, or no ``ps`` (Windows) — so the caller adopts the
-    process as before.
+    Reads the process's argv (``ps``), which is the one
+    :meth:`RemoteAccessServer._spawn_cloudflared` gave it: ``run
+    --token TOKEN`` for a named tunnel, ``--url ORIGIN`` for a quick
+    one.  With a *tunnel_token* the process must be the named tunnel
+    of that token; without one, a quick tunnel whose ``--url`` port
+    (parsed like :func:`_quick_tunnel_argv_ports`) is *local_port*.
 
     Args:
         pid: The process recorded in the pidfile.
+        local_port: The port this daemon listens on.
+        tunnel_token: The configured named-tunnel token; empty or
+            ``None`` when a quick tunnel is wanted.
 
     Returns:
-        The ``--url`` port, or ``None`` when unknown.
+        The reason, worded for the log, or ``""`` when the process
+        matches or cannot be told — no ``ps`` (Windows), an argv that
+        does not parse, no loopback ``--url`` — so the caller adopts it
+        as before.
     """
     if sys.platform == "win32":  # pragma: no cover — Windows only
-        return None
+        return ""
     try:
         result = subprocess.run(
             ["ps", "-ww", "-p", str(pid), "-o", "args="],
@@ -1853,18 +1970,26 @@ def _cloudflared_origin_port(pid: int) -> int | None:
             timeout=5,
         )
     except Exception:
-        return None
+        return ""
     args = result.stdout.split()[1:]
-    if not args or args[0] != "tunnel" or "run" in args:
-        return None
-    for i, arg in enumerate(args[:-1]):
-        if arg == "--url":
-            try:
-                target = urlsplit(args[i + 1])
-                return target.port if target.hostname in _LOOPBACK_HOSTS else None
-            except ValueError:
-                return None
-    return None
+    if not args or args[0] != "tunnel":
+        return ""
+    values = dict(zip(args, args[1:]))
+    named = "run" in args
+    if tunnel_token:
+        if named and values.get("--token") == tunnel_token:
+            return ""
+        return "is not the configured named tunnel"
+    if named:
+        return "is a named tunnel and none is configured"
+    try:
+        target = urlsplit(values.get("--url", ""))
+        origin = target.port if target.hostname in _LOOPBACK_HOSTS else None
+    except ValueError:
+        return ""
+    if origin in (None, local_port):
+        return ""
+    return f"forwards to local port {origin}, not {local_port}"
 
 
 def _quick_tunnel_argv_ports(args: list[str], local_port: int) -> int | None:
@@ -1951,6 +2076,7 @@ def _terminate_orphan_cloudflared(local_port: int | None = None) -> None:
 
 def _try_adopt_existing_cloudflared(
     local_port: int | None = None,
+    tunnel_token: str | None = None,
 ) -> tuple[int, int, str] | None:
     """Look for a healthy cloudflared started by a previous kiss-web.
 
@@ -1959,14 +2085,19 @@ def _try_adopt_existing_cloudflared(
     and re-discovers the public URL via the ``/quicktunnel`` endpoint
     (falling back to the URL recorded in the pidfile when the metrics
     endpoint doesn't expose one — e.g. named tunnels).  A recorded
-    quick tunnel whose ``--url`` port is not *local_port* (the daemon's
-    port changed) is declined and terminated instead
-    (:func:`_cloudflared_origin_port`): its public URL reaches nothing.
+    tunnel that is not the one this daemon is to run
+    (:func:`_cloudflared_mismatch`) is declined and terminated
+    instead: a quick tunnel to another port than *local_port* (the
+    daemon's port changed; its public URL reaches nothing), or a
+    tunnel of another kind or token than *tunnel_token* asks for (the
+    configuration changed; adopted, the configured tunnel would never
+    start).
 
     When the pidfile yields nothing (missing, malformed, dead pid, or a
-    live process that had to be declined) and *local_port* is given,
-    the process table is scanned for a cloudflared that forwards to
-    that port anyway (:func:`_find_cloudflared_forwarding_to`) — the
+    live process that had to be declined), *local_port* is given and a
+    quick tunnel is wanted, the process table is scanned for a
+    cloudflared that forwards to that port anyway
+    (:func:`_find_cloudflared_forwarding_to`, quick tunnels only) — the
     tunnel of a daemon that lost its pidfile or ran from another home
     directory — and the first healthy one is adopted the same way.
     Without this the public URL rotated on every such restart while the
@@ -2008,19 +2139,14 @@ def _try_adopt_existing_cloudflared(
                     "cloudflared pidfile points to dead pid %d; ignoring",
                     pid,
                 )
-            elif (
-                local_port is not None
-                and (origin := _cloudflared_origin_port(pid)) not in (None, local_port)
+            elif local_port is not None and (
+                mismatch := _cloudflared_mismatch(pid, local_port, tunnel_token)
             ):
-                # The daemon's port changed since the tunnel was
-                # spawned: adopted, its public URL would reach a port
-                # nobody listens on, and the watchdog (which checks
-                # readiness, not the origin) would keep it forever.
-                logger.info(
-                    "cloudflared pid %d forwards to local port %s, not %d; "
-                    "not adopting",
-                    pid, origin, local_port,
-                )
+                # The daemon's port or tunnel configuration changed
+                # since the tunnel was spawned: the watchdog (which
+                # checks readiness, not what the tunnel is) would keep
+                # it forever.
+                logger.info("cloudflared pid %d %s; not adopting", pid, mismatch)
                 _terminate_declined_cloudflared(pid)
             else:
                 adopted = _adopt_cloudflared_candidate(
@@ -2028,7 +2154,7 @@ def _try_adopt_existing_cloudflared(
                 )
                 if adopted is not None:
                     return adopted
-    if local_port is None:
+    if local_port is None or tunnel_token:
         return None
     for pid, metrics_port in _find_cloudflared_forwarding_to(local_port):
         if pid == recorded_pid:
@@ -2454,7 +2580,7 @@ def _save_url_file(
         data["lan"] = list(lan_urls)
     if local_ca:
         data["localCa"] = True
-    _atomic_write_text(url_file, json.dumps(data, indent=2) + "\n")
+    atomic_write_text(url_file, json.dumps(data, indent=2) + "\n", create_mode=0o666)
 
 
 def _remove_url_file(url_file: Path) -> None:
@@ -2471,7 +2597,7 @@ def _url_file_lock_path(url_file: Path) -> Path:
 
 
 def _read_url_from_file(url_file: Path) -> str | None:
-    """Read the active remote URL from ``url_file``.
+    """Read the active remote URL from ``url_file``: the tunnel's, else the local one.
 
     Synchronous helper invoked from
     :meth:`RemoteAccessServer._send_welcome_info` via
@@ -2479,14 +2605,8 @@ def _read_url_from_file(url_file: Path) -> str | None:
     event loop.  Returns ``None`` on missing file, parse error, or
     empty content.
     """
-    try:
-        data = json.loads(url_file.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    url = data.get("tunnel") or data.get("local", "")
-    return url or None
+    urls = read_remote_urls(url_file)
+    return urls.get("tunnel") or urls.get("local") or None
 
 
 def _get_machine_topic() -> str:
@@ -2531,7 +2651,7 @@ def _get_machine_topic() -> str:
         identity = f"{platform.node()}:{uuid.getnode()}:{kiss_home_path}"
     topic = "kiss-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
     try:
-        _atomic_write_text(topic_file, topic + "\n")
+        atomic_write_text(topic_file, topic + "\n", create_mode=0o666)
     except OSError:
         logger.debug("Failed to persist ntfy topic", exc_info=True)
     return topic
@@ -2629,7 +2749,7 @@ def _ntfy_message(url: str) -> str:
 
 def _post_url_to_message_board(
     url: str, base_url: str = _NTFY_BASE_URL,
-) -> None:
+) -> bool:
     """Post the active Cloudflare URL to ntfy.sh as a private message.
 
     Uses the machine-stable topic from :func:`_get_machine_topic` so
@@ -2650,9 +2770,13 @@ def _post_url_to_message_board(
     Args:
         url: The ``https://`` URL to publish.
         base_url: Override the ntfy server URL (used by tests).
+
+    Returns:
+        False when the publication failed (worth another try); True
+        when the topic has the URL or the URL is one never posted.
     """
     if not url or url.startswith(("https://localhost", "http://localhost")):
-        return
+        return True
     try:
         topic = _get_machine_topic()
         message = _ntfy_message(url)
@@ -2665,7 +2789,7 @@ def _post_url_to_message_board(
                     "topic %s already has the same URL "
                     "(posted %.0fs ago)", url, topic, age,
                 )
-                return
+                return True
             logger.info(
                 "Reposting %s to ntfy.sh topic %s; last same-URL "
                 "message is stale (posted %.0fs ago)", url, topic, age,
@@ -2684,8 +2808,10 @@ def _post_url_to_message_board(
         with urllib.request.urlopen(req, timeout=10):
             pass
         logger.info("Posted remote URL to ntfy.sh/%s", topic)
+        return True
     except Exception:
         logger.debug("Failed to post URL to ntfy.sh", exc_info=True)
+        return False
 
 
 def _describe_port_listeners(port: int) -> str:
@@ -2712,13 +2838,64 @@ def _describe_port_listeners(port: int) -> str:
     return ", ".join(names)
 
 
+# The longest :func:`_get_local_ips` waits for the lookup of the host's
+# own name; see :class:`_HostnameLookup`.
+_HOSTNAME_LOOKUP_SECONDS = 2.0
+
+
+class _HostnameLookup:
+    """Resolve the host's own name on a thread of its own, one lookup at a time.
+
+    ``getaddrinfo`` takes no timeout and cannot be interrupted: called
+    inline, a resolver that never answers kept the daemon's start
+    (before any listener was bound) and every watchdog tick for good.
+    So the lookup runs in a daemon thread and a caller waits for it
+    :data:`_HOSTNAME_LOOKUP_SECONDS` at most, then takes the addresses
+    of the latest lookup that finished: a slow answer is used by the
+    next caller instead of being lost, and a resolver that stalls for
+    a while does not look like an address change to the watchdog.  A
+    lookup still running is waited for rather than doubled, so a dead
+    resolver holds one thread, not one per tick.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._ips: frozenset[str] = frozenset()
+
+    def _resolve(self) -> None:
+        """Thread body: record the IPv4 addresses of the host's name (none on failure)."""
+        try:
+            self._ips = frozenset(
+                str(info[4][0])
+                for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+            )
+        except Exception:
+            self._ips = frozenset()
+
+    def ips(self) -> frozenset[str]:
+        """Return the host name's IPv4 addresses, as of the latest finished lookup."""
+        with self._lock:
+            lookup = self._thread
+            if lookup is None or not lookup.is_alive():
+                lookup = self._thread = threading.Thread(
+                    target=self._resolve, name="hostname-lookup", daemon=True,
+                )
+                lookup.start()
+        lookup.join(_HOSTNAME_LOOKUP_SECONDS)
+        return self._ips
+
+
+_HOSTNAME_LOOKUP = _HostnameLookup()
+
+
 def _get_local_ips() -> frozenset[str]:
     """Return the current routable IPv4 addresses of the host machine.
 
     Uses :func:`~kiss.core.utils.default_route_ip` (a UDP connect to
     ``8.8.8.8``; no packet is actually sent) to discover the
-    default-route IP, plus :func:`socket.getaddrinfo` on the hostname
-    for any additional addresses.  The raw discovery is
+    default-route IP, plus the addresses the hostname resolves to
+    (:class:`_HostnameLookup`, a bounded wait).  The raw discovery is
     then filtered to drop addresses that should never trigger a
     server restart:
 
@@ -2734,16 +2911,10 @@ def _get_local_ips() -> frozenset[str]:
         ``frozenset({"192.168.1.42"})``).  Returns an empty set when
         discovery failed or all discovered addresses were filtered.
     """
-    ips: set[str] = set()
+    ips = set(_HOSTNAME_LOOKUP.ips())
     route_ip = default_route_ip()
     if route_ip is not None:
         ips.add(route_ip)
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            addr = str(info[4][0])
-            ips.add(addr)
-    except Exception:
-        pass
     return frozenset(
         addr for addr in ips
         if not addr.startswith(("127.", "169.254."))
@@ -2772,7 +2943,7 @@ def _print_url() -> None:
     Exits with code 1 if the server is not running or the file is
     missing.
     """
-    url = _read_url_from_file(_url_file_path())
+    url = _read_url_from_file(remote_url_file())
     if url:
         print(url)
     else:
@@ -2821,6 +2992,18 @@ def _snapshot_active_tabs() -> list[str]:
                 exc_info=True,
             )
     return active_tabs
+
+
+def _persist_shutdown_results(task_ids: set[str]) -> None:
+    """Mark the history rows of the swept tasks as interrupted (best effort).
+
+    Body of the thread :meth:`RemoteAccessServer._stop_active_agent_tasks`
+    starts beside its joins.
+    """
+    try:
+        _shutdown_persist_in_flight_results(task_ids)
+    except Exception:  # noqa: BLE001 — best-effort, must not block shutdown
+        logger.debug("Pre-emptive shutdown persistence failed", exc_info=True)
 
 
 def _shutdown_state_owns_thread(state: Any, thread: threading.Thread) -> bool:
@@ -2897,38 +3080,15 @@ def _raise_open_file_limit() -> None:
             continue
 
 
-def _generate_self_signed_cert(
-    cert_path: Path,
-    key_path: Path,
-) -> None:
-    """Generate a locally-signed TLS cert/key pair at *cert_path*/*key_path*.
-
-    Creates (or reuses) the machine-local CA beside the certificate
-    (``ca.pem`` / ``ca-key.pem`` in ``cert_path.parent``) and issues a
-    server certificate signed by it covering ``localhost``, the
-    hostname, ``127.0.0.1`` and ``::1`` (see
-    :mod:`kiss.core.tls_certs`).  Kept under its historical name for
-    the test fixtures that build throwaway servers; the daemon itself
-    goes through :func:`_create_ssl_context`, which also adds the LAN IPs.
-
-    Args:
-        cert_path: Where to write the PEM-encoded certificate.
-        key_path: Where to write the PEM-encoded private key.
-    """
-    ca_cert, ca_key = tls_certs.ensure_local_ca(cert_path.parent)
-    tls_certs.issue_server_cert(
-        cert_path, key_path, ca_cert, ca_key, *tls_certs.server_cert_names(),
-    )
-
-
 def _tls_lock_path() -> Path:
     """Return the lock file serialising sibling daemons' access to :func:`_tls_dir`.
 
     Held through :func:`kiss.core.file_lock.exclusive_file_lock` with
-    :data:`_TLS_LOCK_TIMEOUT_S`: the bounded wait polls the non-blocking
-    lock, since a blocking ``flock`` offloaded to the executor cannot be
-    interrupted by cancelling its coroutine, and a sibling that wedged
-    while holding the lock would otherwise stall startup forever.
+    :data:`kiss.core.tls_certs.TLS_LOCK_TIMEOUT_S`: the bounded wait
+    polls the non-blocking lock, since a blocking ``flock`` offloaded to
+    the executor cannot be interrupted by cancelling its coroutine, and
+    a sibling that wedged while holding the lock would otherwise stall
+    startup forever.
     """
     return _tls_dir() / tls_certs.TLS_LOCK_FILE
 
@@ -2982,7 +3142,7 @@ def _tls_pair_locked(lan_ips: Iterable[str]) -> Iterator[tuple[Path, Path]]:
     Args:
         lan_ips: See :func:`_load_local_tls_pair`.
     """
-    with exclusive_file_lock(_tls_lock_path(), timeout=_TLS_LOCK_TIMEOUT_S):
+    with exclusive_file_lock(_tls_lock_path(), timeout=tls_certs.TLS_LOCK_TIMEOUT_S):
         yield tls_certs.ensure_local_tls_pair(_tls_dir(), lan_ips)
 
 
@@ -3233,12 +3393,6 @@ class FifoSendLock:
                     return
         self._locked = False
 
-    async def __aenter__(self) -> None:
-        await self.acquire()
-
-    async def __aexit__(self, *exc: object) -> None:
-        self.release()
-
 
 class WebPrinter(JsonPrinter):
     """Printer that broadcasts JSON events to connected WebSocket clients.
@@ -3279,8 +3433,17 @@ class WebPrinter(JsonPrinter):
         self._loop: asyncio.AbstractEventLoop | None = None
         self.work_dir: str = ""
         self._pending_sends: dict[Any, set[ConcurrentFuture[None]]] = {}
+        # The characters those sends hold for each endpoint, and the
+        # most there may be; see :data:`_SEND_BACKLOG_MAX_CHARS`.
+        self._send_backlog: dict[Any, int] = {}
+        self._max_send_backlog: int = _SEND_BACKLOG_MAX_CHARS
         self._send_locks: dict[Any, FifoSendLock] = {}
         self._send_timeout: float = _SEND_TIMEOUT
+        # Asked on the event loop before each frame is written to an
+        # endpoint (:meth:`_locked_send`): True for one that must be
+        # sent nothing more.  The server sets it to its check of the
+        # password sessions.
+        self.revoked: Callable[[Any], bool] | None = None
         # tabId -> pending worktree dir of that tab's finished (or
         # running) worktree task; see _track_worktree_event().
         self._tab_worktree_dirs: dict[str, str] = {}
@@ -3842,26 +4005,30 @@ class WebPrinter(JsonPrinter):
             self._schedule_send(endpoint, data)
 
     def _reserve_replay_send(
-        self, slot: ConcurrentFuture[str], conn_id: str,
+        self, slot: ConcurrentFuture[str], conn_id: str, tab_id: str,
     ) -> None:
         """Schedule a replay's sends now, with the payload supplied later.
 
         Each recipient's send takes its FIFO place at once and waits
         for *slot* (see :meth:`_locked_send`), so sends scheduled
         afterwards follow the replay while the payload is built
-        outside ``delivery_lock``.  Recipients are those
-        :meth:`broadcast` picks for a ``task_events`` replay: the
-        requesting connection, or every client.  The caller owns
-        *slot* and cancels it if the payload never comes.
+        outside ``delivery_lock``.  Recipients are the requesting
+        connection, or (:meth:`replay_conn_ids`) every remote browser
+        and the local peers that can show *tab_id*: a ``daemon_client``
+        run driving another tab gets no transcript, which with dozens
+        of such runs and a fan-out's sub-agent transcripts kept the
+        event loop busy for most of a minute.  The caller owns *slot*
+        and cancels it if the payload never comes.
 
         Args:
             slot: The future the serialised replay is set on.
             conn_id: Connection the replay is scoped to, or ``""``.
+            tab_id: The tab the replay is stamped with.
         """
         if conn_id:
             self._send_to_conn(conn_id, slot)
         else:
-            self._send_to_ws_clients(slot)
+            self._send_to_ws_clients(slot, tab_id)
 
     def _send_to_conn(self, conn_id: str, data: Payload, ahead: bool = False) -> None:
         """Send a pre-serialised JSON payload to ONE connection.
@@ -3932,6 +4099,11 @@ class WebPrinter(JsonPrinter):
         whole it was one frame of silence to the slow peer's stale
         check for the minutes it took (A21-2).
 
+        Nothing is written to an endpoint that is :attr:`revoked` by
+        the time its turn comes, a later part of a frame included; a
+        part that waited for room is asked about again once it has it
+        (:func:`_send_when_room`).
+
         Args:
             endpoint: The client connection to write to.
             data: The JSON payload (already encoded with ``json.dumps``)
@@ -3975,7 +4147,9 @@ class WebPrinter(JsonPrinter):
                     # handed back meanwhile on, and ``owned`` stays False.
                     await lock.let_ahead()
                     owned = True
-                if not await self._timed_send(endpoint, part, when_room=paced and index > 0):
+                if (self.revoked and self.revoked(endpoint)) or not await self._timed_send(
+                    endpoint, part, when_room=paced and index > 0,
+                ):
                     return
         finally:
             if owned:
@@ -3991,6 +4165,8 @@ class WebPrinter(JsonPrinter):
         client's :class:`ServerConnection`.  The resulting future is
         tracked in ``_pending_sends`` (M8) so a stuck/slow peer's
         pending sends can be cancelled when the client disconnects.
+        A peer with more than :attr:`_max_send_backlog` characters
+        already queued (:data:`_SEND_BACKLOG_MAX_CHARS`) is dropped.
 
         Args:
             endpoint: The client connection to write to.
@@ -4002,6 +4178,8 @@ class WebPrinter(JsonPrinter):
         loop = self._loop
         if loop is None or not loop.is_running():
             return
+        # A replay's text is not counted; see _SEND_BACKLOG_MAX_CHARS.
+        charge = _SEND_OVERHEAD_CHARS + (len(data) if isinstance(data, str) else 0)
         coro = self._locked_send(endpoint, data, ahead)
         try:
             fut = asyncio.run_coroutine_threadsafe(coro, loop)
@@ -4012,12 +4190,22 @@ class WebPrinter(JsonPrinter):
             coro.close()
             logger.debug("Failed to send to client", exc_info=True)
             return
-        if not locked_call(self._ws_lock, self._track_pending_send, endpoint, fut):
+        backlog = locked_call(self._ws_lock, self._track_pending_send, endpoint, fut, charge)
+        if backlog is None:
             fut.cancel()
             return
-        fut.add_done_callback(
-            partial(self._discard_pending_send, endpoint),
-        )
+        if backlog > self._max_send_backlog:
+            logger.warning("Dropping a client that has %d characters queued for it", backlog)
+            # On the loop, like every other removal: this may be a task
+            # thread, where the removal's plain ``with`` on the lock
+            # could leak it to an injected Stop.
+            with contextlib.suppress(RuntimeError):  # the loop closed meanwhile
+                loop.call_soon_threadsafe(self._drop_client, endpoint)
+
+    def _drop_client(self, endpoint: ServerConnection) -> None:
+        """On the event loop: unregister *endpoint* and abort its transport, ending its handler."""
+        self.remove_client(endpoint)
+        endpoint.transport.abort()
 
     async def _timed_send(
         self, endpoint: ServerConnection, data: str, when_room: bool = False,
@@ -4042,22 +4230,19 @@ class WebPrinter(JsonPrinter):
                 (:func:`_send_when_room`): a later part of a big frame.
 
         Returns:
-            True when the peer took it; False when it was dropped.
+            True when the peer took it; False when it was dropped, or
+            :attr:`revoked` by the time there was room (*when_room*).
         """
         try:
-            await self._send_while_draining(endpoint, data, when_room)
+            return await self._send_while_draining(endpoint, data, when_room)
         except Exception:
             logger.debug("Failed to write to client", exc_info=True)
-            self.remove_client(endpoint)
-            transport = getattr(endpoint, "transport", None)
-            if transport is not None:
-                transport.abort()
+            self._drop_client(endpoint)
             return False
-        return True
 
     async def _send_while_draining(
         self, endpoint: ServerConnection, text: str, when_room: bool = False,
-    ) -> None:
+    ) -> bool:
         """Send *text* to *endpoint*; give up once its socket took nothing for a whole deadline.
 
         ``ServerConnection.send`` hands the frame to the transport at
@@ -4082,16 +4267,22 @@ class WebPrinter(JsonPrinter):
             when_room: Send *text* once the peer's unsent bytes are
                 down to about one part (:func:`_send_when_room`).
 
+        Returns:
+            True when *text* was sent; False when the endpoint was
+            :attr:`revoked` by the time there was room (*when_room*).
+
         Raises:
             TimeoutError: When the peer's write buffer did not shrink
                 for :attr:`_send_timeout` seconds.
         """
-        transport = getattr(endpoint, "transport", None)
-        if transport is None:
-            await endpoint.send(text)
-            return
-        send = _send_when_room(transport, endpoint, text) if when_room else endpoint.send(text)
-        await _await_while_draining(transport, send, self._send_timeout)
+        transport = endpoint.transport
+        if when_room:
+            return await _await_while_draining(
+                transport, _send_when_room(transport, endpoint, text, self.revoked),
+                self._send_timeout,
+            )
+        await _await_while_draining(transport, endpoint.send(text), self._send_timeout)
+        return True
 
     def add_client(
         self, ws: ServerConnection, local: bool = False, link: bool = False,
@@ -4143,6 +4334,7 @@ class WebPrinter(JsonPrinter):
             self._link_clients.discard(ws)
             self._parts_clients.discard(ws)
             pending = self._pending_sends.pop(ws, set())
+            self._send_backlog.pop(ws, None)
             self._send_locks.pop(ws, None)
         for fut in pending:
             try:
@@ -4175,32 +4367,51 @@ class WebPrinter(JsonPrinter):
             self._conn_endpoints.pop(conn_id, None)
 
     def _discard_pending_send(
-        self, client: ServerConnection, fut: ConcurrentFuture[None],
+        self, client: ServerConnection, charge: int, fut: ConcurrentFuture[None],
     ) -> None:
         """Remove a completed send future from the per-client pending set.
 
         Called via :meth:`concurrent.futures.Future.add_done_callback`
         once the wrapped coroutine finishes (or errors).  Keeps the
         :attr:`_pending_sends` set bounded so it does not grow without
-        limit on a long-running healthy connection.
+        limit on a long-running healthy connection, and takes the
+        send's *charge* off the client's backlog.
 
         """
-        locked_call(self._ws_lock, self._untrack_pending_send, client, fut)
+        locked_call(self._ws_lock, self._untrack_pending_send, client, charge, fut)
 
-    def _track_pending_send(self, endpoint: Any, fut: ConcurrentFuture[None]) -> bool:
-        """Under ``_ws_lock``: add *fut* to *endpoint*'s pending sends; False once it
-        unregistered."""
+    def _track_pending_send(
+        self, endpoint: Any, fut: ConcurrentFuture[None], charge: int,
+    ) -> int | None:
+        """Under ``_ws_lock``: add *fut* to *endpoint*'s pending sends, *charge* to its backlog.
+
+        The completion callback is registered here, under the lock: a
+        sender held up between the two used to leave a send that had
+        long finished counted against the next ones.  A send that
+        finished already runs the callback at once (the lock is
+        reentrant), so the charge is added after it; an injected Stop
+        between the two leaves the backlog short, never over.
+
+        Returns the backlog that was ahead of this send, or None once
+        the endpoint unregistered.
+        """
         pending = self._pending_sends.get(endpoint)
         if pending is None:
-            return False
+            return None
+        ahead = self._send_backlog.get(endpoint, 0)
         pending.add(fut)
-        return True
+        fut.add_done_callback(partial(self._discard_pending_send, endpoint, charge))
+        self._send_backlog[endpoint] = self._send_backlog.get(endpoint, 0) + charge
+        return ahead
 
-    def _untrack_pending_send(self, client: Any, fut: ConcurrentFuture[None]) -> None:
-        """Under ``_ws_lock``: forget *client*'s completed send *fut*."""
+    def _untrack_pending_send(
+        self, client: Any, charge: int, fut: ConcurrentFuture[None],
+    ) -> None:
+        """Under ``_ws_lock``: forget *client*'s completed send *fut* and its *charge*."""
         pending = self._pending_sends.get(client)
-        if pending is not None:
-            pending.discard(fut)
+        if pending is not None and fut in pending:
+            pending.remove(fut)
+            self._send_backlog[client] = self._send_backlog.get(client, 0) - charge
 
 
 def _media_url(name: str) -> str:
@@ -4632,6 +4843,13 @@ html, body { height: auto; overflow: auto; }
   margin-top: var(--space-3);
   border-top: 1px solid var(--border);
 }
+/* The page's last line: the version and commit that saved it. */
+#share-version {
+  margin: var(--space-3) 0;
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  text-align: center;
+}
 """
 """Layout overrides appended after main.css on a shared chat page."""
 
@@ -4679,6 +4897,12 @@ def _build_share_page(title: str, body_html: str) -> str:
     that opens and closes the sub-agent sections like the live
     chat page's tabs, and the light/dark toggle) are all inlined.
 
+    The page's last line records the code that saved it: the daemon's
+    version and short git commit, the pair the Configuration header
+    shows (:func:`_read_version`, :func:`_read_commit`).  One the
+    daemon cannot determine (an install with neither ``_commit.txt``
+    nor git) is recorded as ``unknown``.
+
     Args:
         title: Page title; falls back to "KISS Sorcar chat".
         body_html: The serialized ``#output`` markup (one
@@ -4698,6 +4922,10 @@ def _build_share_page(title: str, body_html: str) -> str:
     )
     share_js = (MEDIA_DIR / "share.js").read_text(encoding="utf-8")
     page_title = html.escape(title.strip() or f"{PRODUCT_NAME} chat")
+    saved_by = html.escape(
+        f"Saved by {PRODUCT_NAME} version {_read_version() or 'unknown'}, "
+        f"commit {_read_commit() or 'unknown'}"
+    )
     # Both highlight.js themes ship inline; share.js's theme toggle
     # flips which one applies through the style elements' media
     # attribute (dark is the default).
@@ -4723,6 +4951,7 @@ def _build_share_page(title: str, body_html: str) -> str:
         'title="Switch to light mode" '
         'aria-label="Switch to light mode"></button>\n'
         '<div id="app">\n' + body_html + "\n</div>\n"
+        f'<footer id="share-version">{saved_by}</footer>\n'
         "<script>\n" + share_js + "</script>\n"
         "</body>\n"
         "</html>\n"
@@ -4752,14 +4981,21 @@ def _build_html() -> str:
     ``media/assetLoadGuard.js`` is inlined as the first script of
     ``<head>`` so it is installed before any asset can fail to load.
 
+    The page is served before any login, to whoever reaches the port,
+    so of the Inject promptlets it holds only those shipped with the
+    package.  The user's own (``MY_INJECTION.md``, the first
+    ``userCount`` entries of the list) follow the login: the
+    ``tricksData`` answer to the page's ``ready`` carries them.
+
     Returns:
         The complete HTML string.
     """
     version = _read_version()
     tricks_data = read_tricks_data()
+    bundled_tricks = tricks_data["tricks"][tricks_data["userCount"]:]
     subs = _page_subs(version, _read_commit())
-    subs["TRICKS_JSON"] = json.dumps(tricks_data["tricks"]).replace("</", "<\\/")
-    subs["MY_TRICKS_COUNT"] = str(tricks_data["userCount"])
+    subs["TRICKS_JSON"] = json.dumps(bundled_tricks).replace("</", "<\\/")
+    subs["MY_TRICKS_COUNT"] = "0"
     subs["TIPS_JSON"] = json.dumps(tips_data(version)).replace("</", "<\\/")
     tpl = (MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
     return re.sub(r"( ?)\{\{([A-Z_]+)\}\}", partial(_fill_placeholder, subs), tpl)
@@ -5117,7 +5353,11 @@ def _fetch_latest_version() -> str | None:
     Returns the version string on success, ``None`` on any error
     (network failure, malformed JSON, missing key).  Callers must
     treat ``None`` as "no information" — never as "no update".
+    ``KISS_DISABLE_UPDATE_CHECK=1`` in the environment (the kill switch
+    the test suite sets) returns ``None`` without asking PyPI.
     """
+    if os.environ.get("KISS_DISABLE_UPDATE_CHECK", "") == "1":
+        return None
     try:
         req = urllib.request.Request(
             _PYPI_LATEST_URL,
@@ -5189,7 +5429,9 @@ def _record_update_snooze(latest: str) -> None:
         "snoozedLatest": latest,
     }
     try:
-        _atomic_write_text(_update_check_cache_path(), json.dumps(payload))
+        atomic_write_text(
+            _update_check_cache_path(), json.dumps(payload), create_mode=0o666,
+        )
     except Exception:
         logger.debug("Failed to record update snooze", exc_info=True)
 
@@ -5272,7 +5514,8 @@ def _read_media_file(filepath: Path) -> bytes | None:
     Performs the symlink-safe containment check, the ``is_file`` stat and
     the read together so callers can run the whole lot in one worker
     thread.  Any :class:`OSError` (e.g. ``ELOOP`` from a symlink cycle
-    hit by ``resolve()``) is treated as "not found".
+    hit by ``resolve()``) or :class:`ValueError` (a NUL byte in the
+    path) is treated as "not found".
 
     Args:
         filepath: Candidate path beneath :data:`MEDIA_DIR`.
@@ -5288,7 +5531,7 @@ def _read_media_file(filepath: Path) -> bytes | None:
         resolved = filepath.resolve()
         if resolved.is_relative_to(MEDIA_DIR.resolve()) and resolved.is_file():
             return resolved.read_bytes()
-    except OSError:
+    except (OSError, ValueError):
         return None
     return None
 
@@ -5444,7 +5687,7 @@ class RemoteAccessServer:
         self._ssl_certfile: str | None = certfile
         self._ssl_keyfile: str | None = keyfile
         self._ssl_context: ssl.SSLContext | None = None
-        self._url_file: Path = Path(url_file) if url_file else _url_file_path()
+        self._url_file: Path = Path(url_file) if url_file else remote_url_file()
 
         if not work_dir:
             work_dir = cfg.get("work_dir", "") or None
@@ -5498,6 +5741,10 @@ class RemoteAccessServer:
         self._tunnel_detached = False
         self._ntfy_base_url = ntfy_base_url
         self._last_posted_url: str | None = None
+        # Consecutive failed ntfy posts and the earliest time of the
+        # watchdog's next try; see :meth:`_post_url_if_changed`.
+        self._ntfy_failure_count = 0
+        self._ntfy_next_retry = 0.0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
         # Second WSS listener bound to 127.0.0.1:<port> beside the
@@ -5512,6 +5759,11 @@ class RemoteAccessServer:
         # tuple so the two can never come from different reads; see
         # :meth:`_stored_remote_password`.
         self._remote_password_cache: tuple[tuple[int, int, int] | None, str] = (None, "")
+        # The password-authenticated (``"remote"``) connections and
+        # their ``conn_state``: sent nothing more once their password
+        # is no longer the one in force (:meth:`_password_session_stale`).
+        self._password_sessions: dict[Any, dict[str, Any]] = {}
+        self._printer.revoked = self._password_session_stale
         # Where same-machine clients learn this daemon's URL and the
         # per-start secret that marks them as local (see
         # :mod:`kiss.agents.sorcar.local_endpoint`).  Written once the WSS
@@ -5539,14 +5791,15 @@ class RemoteAccessServer:
         self._tunnel_check_task: asyncio.Task[None] | None = None
         self._tls_refresh_task: asyncio.Task[None] | None = None
         self._trusted_clients_task: asyncio.Task[None] | None = None
-        # The enrolled machine-link CAs loaded into ``_ssl_context`` (PEM
-        # bytes) and the mtime of their directory when last scanned.
+        # The enrolled machine-link CAs loaded into ``_ssl_context`` (PEM bytes).
         self._trusted_client_cas: set[bytes] = set()
-        self._trusted_clients_mtime: float = -1.0
         self._latest_version: str | None = None
         self._version_check_task: asyncio.Task[None] | None = None
         self._machines_watch_task: asyncio.Task[None] | None = None
         self._shutdown_initiated = False
+        # True once this instance's listener was bound: from then on it
+        # may have admitted agent tasks; see :meth:`start_async`.
+        self._listened = False
         self._shutdown_future: asyncio.Future[None] | None = None
         self._local_url = f"http://localhost:{self.port}"
         self._active_url: str | None = None
@@ -5568,7 +5821,6 @@ class RemoteAccessServer:
         # PEM of the auto-generated server certificate the live SSL
         # context is serving; see :meth:`_refresh_tls_cert`.
         self._tls_loaded_cert: bytes = b""
-        self._ips_probed = False
         self._pending_ip_change: frozenset[str] | None = None
         self._pending_ip_change_count: int = 0
         self._auth_failures: dict[str, list[float]] = {}
@@ -5648,13 +5900,22 @@ class RemoteAccessServer:
             and not await self._peer_client_ca(connection)
         ):
             addr = getattr(connection, "remote_address", None)
-            logger.warning(
-                "Refusing non-localhost request from %s: "
-                "no remote password is set", addr,
-            )
+            if addr is None:
+                # A lost TLS connection has no peer address any more: its
+                # client is gone, not shown to be remote, and is refused
+                # like every peer that cannot be shown to be local.
+                logger.debug("Refusing a request whose client has gone")
+            else:
+                logger.warning(
+                    "Refusing non-localhost request from %s: "
+                    "no remote password is set", addr,
+                )
             return _no_password_refusal()
-        request_path = urlsplit(request.path).path
-        path = unquote(request_path)
+        try:
+            path = unquote(urlsplit(request.path).path)
+        except ValueError:
+            # A target ``urlsplit`` cannot parse (``//[``) matches no route.
+            path = request.path
         if path in ("", "/"):
             # Rendered per page load (off-thread: it reads the
             # template, TIPS.md and the trick files), never cached
@@ -5858,8 +6119,10 @@ class RemoteAccessServer:
         tunnel is, so these two routes authenticate the requester the
         way :meth:`ServerApi.authenticate` does a WebSocket client: a
         direct loopback peer (no forwarded client IP: a browser or
-        program on this machine) and a machine link enrolled with its
-        CA are served as they are; everybody else must send the
+        program on this machine) whose request names this machine
+        (:func:`_names_this_machine`: not a page of another site in
+        that browser) and a machine link enrolled with its CA are
+        served as they are; everybody else must send the
         configured ``remote_password`` as the password of an HTTP
         ``Authorization: Basic`` credential (401 with a
         ``WWW-Authenticate`` challenge otherwise, which a browser on
@@ -5886,7 +6149,11 @@ class RemoteAccessServer:
                 b'{"error": "This private server serves no trajectory data"}',
             )
         ip = self._client_ip(connection)
-        if _connection_peer_is_loopback(connection) and sorcar_api.is_loopback_ip(ip):
+        if (
+            _connection_peer_is_loopback(connection)
+            and sorcar_api.is_loopback_ip(ip)
+            and _names_this_machine(request)
+        ):
             return None
         if await self._peer_client_ca(connection):
             return None
@@ -5928,9 +6195,9 @@ class RemoteAccessServer:
         doesn't ask for a password").
 
         To key the lockout on the *real* client instead, when the direct
-        TCP peer is loopback we trust the client IP that cloudflared
-        forwards in the upgrade request headers (``Cf-Connecting-Ip``,
-        falling back to the first hop of ``X-Forwarded-For``).  The
+        TCP peer is loopback we trust the client IP that the relay
+        (cloudflared, a local reverse proxy) reports in the upgrade
+        request headers (:func:`_forwarded_client_ip`).  The
         header is honoured **only** for loopback peers — a non-loopback
         peer connecting directly (bypassing cloudflared) could otherwise
         spoof the header to evade or poison the lockout — so direct
@@ -5938,7 +6205,10 @@ class RemoteAccessServer:
 
         Returns:
             A stable per-client string used as the rate-limit key, or
-            ``"?"`` when the peer address is unknown.
+            ``"?"`` when the peer address is unknown or a relayed
+            request names no client that can be believed
+            (:func:`_forwarded_client_ip`).  A loopback address means
+            a client on this machine that no proxy relayed.
         """
         peer_ip = _peer_ip(websocket)
         if peer_ip and sorcar_api.is_loopback_ip(peer_ip):
@@ -6064,6 +6334,13 @@ class RemoteAccessServer:
         app_window = urlsplit(ws_path).query == standalone_app.APP_WINDOW_WS_QUERY
         if app_window:
             standalone_app.app_window_event("open")
+        # A password session ends with its password, whether it sends
+        # another frame or not.
+        password_watch: asyncio.Task[None] | None = None
+        if auth.kind == "remote":
+            conn_state["password"] = auth.password
+            self._password_sessions[websocket] = conn_state
+            password_watch = asyncio.create_task(self._watch_password_session(websocket))
         try:
             async for message in websocket:
                 try:
@@ -6075,25 +6352,14 @@ class RemoteAccessServer:
                 if not self._frame_password_accepted(cmd, auth.kind, conn_state):
                     # Every frame of a password-authenticated client
                     # must carry the password in force NOW (it is
-                    # re-read from config.json each time, so a
-                    # rotated password shuts the old session out at
-                    # its next command; the one exception is the
-                    # client that asked for the rotation, until it
-                    # speaks the new password).  The close makes the
-                    # browser reconnect and ask for the password again.
+                    # re-read from config.json each time; the one
+                    # exception is the client that asked for the
+                    # rotation, until it speaks the new password).
                     logger.warning(
                         "Frame %r from %s carries a wrong password; closing",
                         cmd.get("type", ""), websocket.remote_address,
                     )
-                    # Through the printer's per-endpoint send lock and
-                    # bounded send like every other frame, so a peer
-                    # that stopped reading cannot hold this handler.
-                    await self._reply_direct(
-                        websocket,
-                        {"type": "error", "code": "auth_failed", "text": "Wrong password."},
-                        "wrong-password close",
-                    )
-                    await websocket.close()
+                    await self._shut_out(websocket)
                     break
                 try:
                     await self._server_api.dispatch(cmd, ctx)
@@ -6110,21 +6376,44 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("WS handler error", exc_info=True)
         finally:
-            if is_local:
-                self._printer.unregister_local_tabs(conn_state["conn_id"])
-            self._agent_server.drop_connection_state(conn_state["conn_id"])
-            self._agent_server.browser_tabs.viewer_gone(conn_state["conn_id"])
-            self._agent_server.terminals.viewer_gone(conn_state["conn_id"])
-            self._server_api.remote_views.viewer_gone(conn_state["conn_id"])
-            self._printer.unbind_conn(conn_state["conn_id"])
-            self._printer.remove_client(websocket)
-            if app_window:
-                # The browser closes with "going away" when the page is
-                # gone (window closed, reload); any other code (our
-                # keepalive timed out, the connection broke) leaves
-                # the page there, connecting again.
-                gone = websocket.close_code == standalone_app.APP_WINDOW_GONE_CLOSE_CODE
-                standalone_app.app_window_event("closing" if gone else "dropped")
+            if password_watch is not None:
+                password_watch.cancel()
+            self._password_sessions.pop(websocket, None)
+            conn_id = conn_state["conn_id"]
+            try:
+                if is_local:
+                    self._printer.unregister_local_tabs(conn_id)
+                # Each service is told on its own: one that fails (a
+                # thread that cannot start) costs neither the others
+                # their notice nor the connection its release below.
+                for gone_for in (
+                    self._agent_server.drop_connection_state,
+                    self._agent_server.browser_tabs.viewer_gone,
+                    self._agent_server.terminals.viewer_gone,
+                    self._server_api.remote_views.viewer_gone,
+                ):
+                    try:
+                        gone_for(conn_id)
+                    except Exception:
+                        logger.warning(
+                            "Connection teardown step %s failed",
+                            gone_for.__qualname__, exc_info=True,
+                        )
+            finally:
+                self._printer.unbind_conn(conn_id)
+                self._printer.remove_client(websocket)
+                if app_window:
+                    # The browser closes with "going away" when the page
+                    # is gone (window closed, reload); any other code
+                    # (our keepalive timed out, the connection broke)
+                    # leaves the page there, connecting again.  So does
+                    # a close this daemon started (its listeners
+                    # closing), which the page answers with our code.
+                    gone = (
+                        websocket.close_code == standalone_app.APP_WINDOW_GONE_CLOSE_CODE
+                        and websocket.protocol.close_rcvd_then_sent
+                    )
+                    standalone_app.app_window_event("closing" if gone else "dropped")
 
     def _stored_remote_password(self) -> str:
         """Return the ``remote_password`` of ``config.json`` as of now.
@@ -6150,7 +6439,7 @@ class RemoteAccessServer:
         two separately let an old password end up under the current
         stamp, where no later ``stat`` could tell it from a fresh read.
         """
-        stamp = _file_stamp(Path(user_config.CONFIG_PATH))
+        stamp = file_stamp(Path(user_config.CONFIG_PATH))
         cached_stamp, password = self._remote_password_cache
         if stamp != cached_stamp:
             password = str(load_config().get("remote_password", "") or "")
@@ -6182,8 +6471,8 @@ class RemoteAccessServer:
         first frame with the password in force, which ends the
         allowance.  It is per connection (gone with the socket) and
         never widens who is admitted: that connection was already in.
-        Every other password-authenticated client is shut out at its
-        next frame, as before.  The allowance belongs to that one
+        Every other password-authenticated client is shut out, at its
+        next frame or by its watch.  The allowance belongs to that one
         rotation: ``conn_state["rotated_to"]`` keeps the password the
         frame asked for, and once the stored password is another one
         (a later change by another client or ``install.sh``) the old
@@ -6194,8 +6483,13 @@ class RemoteAccessServer:
         An EMPTY stored password means remote access is off: every
         frame of every password-authenticated client is refused, the
         one that cleared the password included (its ``saveConfig``
-        was the last frame it got served), before the equality and
-        in-flight checks, which would otherwise admit a bare frame.
+        was the last frame it got served, and the shut-out is its
+        answer), before the equality and in-flight checks, which
+        would otherwise admit a bare frame.
+
+        ``conn_state["password"]`` keeps the stored password the
+        connection last presented, for a session that sends nothing
+        (:meth:`_password_session_stale`).
         """
         client_pw = cmd.pop("password", "")
         if kind != "remote":
@@ -6203,37 +6497,104 @@ class RemoteAccessServer:
         if not isinstance(client_pw, str):
             client_pw = ""
         stored = self._stored_remote_password()
-        if not stored:
-            conn_state.pop("rotated_from", None)
+        if not self._password_in_force(client_pw, stored, conn_state):
             return False
         if password_accepted(client_pw, stored):
             conn_state.pop("rotated_from", None)
+            conn_state["password"] = stored
             if cmd.get("type") == "saveConfig":
                 cfg = cmd.get("config")
                 new_pw = cfg.get("remote_password") if isinstance(cfg, dict) else None
                 if isinstance(new_pw, str) and new_pw != stored:
                     conn_state["rotated_from"] = stored
                     conn_state["rotated_to"] = new_pw
+        return True
+
+    @staticmethod
+    def _password_in_force(password: str, stored: str, conn_state: dict[str, Any]) -> bool:
+        """Whether *password* is good for a ``"remote"`` connection while *stored* is stored.
+
+        It is when it is the stored one, or the one the connection
+        itself replaced with the stored one (``rotated_from`` and
+        ``rotated_to`` of *conn_state*, see
+        :meth:`_frame_password_accepted`).  None is while no password
+        is stored.
+        """
+        if not stored:
+            return False
+        if password_accepted(password, stored):
             return True
         rotated_from = conn_state.get("rotated_from", "")
-        if not rotated_from or not password_accepted(conn_state.get("rotated_to", ""), stored):
-            conn_state.pop("rotated_from", None)
-            return False
-        return password_accepted(client_pw, rotated_from)
+        return (
+            bool(rotated_from)
+            and password_accepted(conn_state.get("rotated_to", ""), stored)
+            and password_accepted(password, rotated_from)
+        )
+
+    def _password_session_stale(self, endpoint: Any) -> bool:
+        """Whether *endpoint* is a password session whose password is no longer in force.
+
+        The per-frame check refuses such a session at the next frame
+        it sends; one that sends nothing after the password was
+        changed or cleared would go on receiving every event.  So the
+        printer asks before it writes each frame
+        (``WebPrinter.revoked``): the session gets nothing more from
+        the moment ``config.json`` holds another password, whoever
+        wrote it (a ``saveConfig``, ``install.sh``), and its watch
+        closes it (:meth:`_watch_password_session`).  The password
+        looked at is the stored one the session last presented
+        (``conn_state["password"]``); the connection that asked for
+        the rotation keeps its allowance.  Local-token, certificate
+        and loopback clients are no password sessions.  Costs them a
+        dictionary miss, a password session one ``stat``.
+        """
+        conn_state = self._password_sessions.get(endpoint)
+        return conn_state is not None and not self._password_in_force(
+            conn_state["password"], self._stored_remote_password(), conn_state,
+        )
+
+    async def _watch_password_session(self, websocket: ServerConnection) -> None:
+        """Shut a password session out soon after its password stopped being in force.
+
+        It is already sent nothing (:meth:`_password_session_stale`);
+        this tells its page so, which would otherwise look connected
+        until the user typed something.  Runs as a task of the
+        connection's handler, looking every
+        :data:`REMOTE_PASSWORD_POLL` seconds.
+        """
+        while not self._password_session_stale(websocket):
+            await asyncio.sleep(REMOTE_PASSWORD_POLL)
+        logger.warning(
+            "The password of %s is no longer in force; closing", websocket.remote_address,
+        )
+        await self._shut_out(websocket)
+
+    async def _shut_out(self, websocket: ServerConnection) -> None:
+        """Tell the client of *websocket* that its password is wrong, then close the socket.
+
+        It leaves the printer first, with what was queued for it: the
+        error is the one frame it is still sent, by the bounded send
+        every frame goes through, so a peer that stopped reading
+        cannot hold the caller.  At the error the page forgets the
+        password it holds; the close makes it reconnect and ask for
+        the one in force.
+        """
+        self._printer.remove_client(websocket)
+        await self._printer._timed_send(websocket, json.dumps(
+            {"type": "error", "code": "auth_failed", "text": "Wrong password."},
+        ))
+        await websocket.close()
 
     def _bootstrap_events(self) -> list[dict[str, Any]]:
-        """The events a ``ready`` answers with: ``tricksData``,
+        """The events a ``ready`` answers with after its ``tricksData``:
         ``tipsData``, and after an install that retired the VS Code
         extension or that ran into problems its ``notification``.
 
-        Reads ``MY_INJECTION.md``, the bundled promptlets and tips, the
-        opt-out marker, the ``.vscode-retired`` flag and the
-        ``.install-problems`` file, so callers run it off the event loop.
+        Reads the bundled tips, the opt-out marker, the
+        ``.vscode-retired`` flag and the ``.install-problems`` file, so
+        callers run it off the event loop.
         """
-        events: list[dict[str, Any]] = [
-            {"type": "tricksData", **read_tricks_data()},
-            {"type": "tipsData", **tips_data(_read_version())},
-        ]
+        events: list[dict[str, Any]] = [{"type": "tipsData", **tips_data(_read_version())}]
         for event in (vscode_retired_notice(self._loopback_url), install_problems_notice()):
             if event is not None:
                 events.append(event)
@@ -6313,15 +6674,16 @@ class RemoteAccessServer:
         """
         flag_path = self._server_reset_flag_path()
         try:
-            # Shared atomic writer (pid/thread-unique temp + replace):
-            # a hand-rolled fixed ``.tmp`` sibling let a concurrent
+            # Shared atomic writer (unique temp + replace): a
+            # hand-rolled fixed ``.tmp`` sibling let a concurrent
             # writer truncate the temp inode the first writer had
             # already renamed onto the flag, exposing an empty flag.
-            _atomic_write_text(
+            atomic_write_text(
                 flag_path,
                 json.dumps(
                     {"requested_at": time.time(), "conn_id": conn_id},
                 ),
+                create_mode=0o666,
             )
         except OSError:
             logger.debug(
@@ -6506,16 +6868,14 @@ class RemoteAccessServer:
             # No await between the lookup and the callback registration:
             # once the callback is registered the guards belong to the
             # spawn job and its done-callback.
-            spawn = loop.run_in_executor(
-                None, self._spawn_update_script, script, conn_id,
-            )
-            spawn.add_done_callback(
-                partial(self._update_spawned, conn_id, time.time()),
+            spawn = _submit_spawn(
+                loop, partial(self._update_spawned, conn_id, time.time()),
+                self._spawn_update_script, script, conn_id,
             )
         except BaseException:
-            # Nothing was spawned (or its submission itself failed, e.g.
-            # the executor is shut down): admit runs again and let a
-            # later Update click start over.
+            # Nothing was spawned, and a spawn whose submission was
+            # refused never runs (:func:`_submit_spawn`): admit runs
+            # again and let a later Update click start over.
             self._update_starting = False
             self._set_update_barrier(False)
             raise
@@ -6545,7 +6905,7 @@ class RemoteAccessServer:
         later Update click starts over.  A spawn that lands after
         :meth:`stop_async` cancelled the watcher that existed keeps its
         detached installer but starts no watcher on the stopped
-        server's loop (as :meth:`_handle_update_models` does).
+        server's loop (as :meth:`_update_models_spawned` does).
 
         Args:
             conn_id: Requesting connection id (``""`` to broadcast).
@@ -6804,7 +7164,9 @@ class RemoteAccessServer:
         cross-process update lock to another installer), otherwise a
         generic failure pointing at the log.  A clean exit that recorded
         nothing closes the notification a previous run may have left on
-        the pages.  Either way the installer is gone once this returns,
+        the pages.  The notification is the newest installer's: once a
+        later one was spawned, this watcher leaves it to that one's.
+        Either way the installer is gone once this returns,
         so the run-admission barrier raised for it is lowered: a daemon
         the installer did not restart (a failed or no-op update) must
         accept tasks again.  Unless the barrier already belongs to the
@@ -6830,15 +7192,18 @@ class RemoteAccessServer:
         if not self._update_in_progress():
             self._set_update_barrier(False)
         notice = await asyncio.to_thread(install_problems_notice, since=started - 1.0)
+        newest = self._update_proc is proc
         if notice is not None:
-            broadcast_to_conn(self._printer, notice, "")
+            if newest:
+                broadcast_to_conn(self._printer, notice, "")
             return
         if proc.returncode == 0:
-            broadcast_to_conn(
-                self._printer,
-                {"type": "notification", "id": INSTALL_PROBLEMS_NOTICE_ID, "close": True},
-                "",
-            )
+            if newest:
+                broadcast_to_conn(
+                    self._printer,
+                    {"type": "notification", "id": INSTALL_PROBLEMS_NOTICE_ID, "close": True},
+                    "",
+                )
             return
         output = await asyncio.to_thread(
             _read_log_from, self._update_log_path, log_offset,
@@ -6897,15 +7262,58 @@ class RemoteAccessServer:
                 f"(output: {self._update_models_log_path})"
             ),
         }, conn_id)
-        spawned = await loop.run_in_executor(
-            None, self._spawn_update_models, conn_id,
-        )
+        # No await between the submission and the callback registration:
+        # the guard belongs to the spawn job and its done-callback.
+        try:
+            spawn = _submit_spawn(
+                loop, partial(self._update_models_spawned, conn_id),
+                self._spawn_update_models, conn_id,
+            )
+        except BaseException:
+            # The submission was refused (the executor is shut down, no
+            # thread could be started), so its job never spawns and no
+            # callback owns the guard: it goes and a later click starts
+            # over.
+            self._update_models_starting = False
+            raise
+        # Shielded: a cancelled handler leaves the spawn running, and
+        # its callback releases the guard and starts the watcher.
+        await asyncio.shield(spawn)
+
+    def _update_models_spawned(
+        self,
+        conn_id: str,
+        spawn: asyncio.Future[subprocess.Popen[bytes] | None],
+    ) -> None:
+        """Hand a spawned catalog updater to its exit watcher and release the guard.
+
+        Done-callback of the spawn future of :meth:`_handle_update_models`,
+        run on the event loop whether or not the handler is still
+        awaiting it (as :meth:`_update_spawned` for the installer).
+        The process is recorded, the single-flight guard released and
+        the watcher installed in one loop step: were the guard released
+        on the worker thread, a click landing before this step could
+        start a second updater, whose watcher handle the first handler
+        then replaced with its own, leaving a watcher that
+        :meth:`stop_async` never cancels.  A failed spawn (``None``,
+        already reported as an ``error`` event, or a raise the awaiting
+        handler re-raises) only releases the guard.
+
+        Args:
+            conn_id: Requesting connection id (``""`` to broadcast).
+            spawn: The executor future of the spawn.
+        """
+        failed = spawn.cancelled() or spawn.exception() is not None
+        proc = None if failed else spawn.result()
+        if proc is not None:
+            self._update_models_proc = proc
+        self._update_models_starting = False
         # ``stop_async`` cancels only the watcher that exists when it
         # runs; a spawn still in flight then must not install one on
         # the stopped server's loop (the updater is detached by design).
-        if spawned is not None and not self._shutdown_initiated:
+        if proc is not None and not self._shutdown_initiated:
             self._update_models_watch_task = asyncio.create_task(
-                self._watch_update_models_exit(spawned, conn_id),
+                self._watch_update_models_exit(proc, conn_id),
             )
 
     def _spawn_update_models(
@@ -6927,18 +7335,14 @@ class RemoteAccessServer:
         Returns:
             The started process, or ``None`` when the spawn failed.
         """
-        try:
-            spawned = self._spawn_detached(
-                self._update_models_argv, str(Path.home()), None,
-                self._update_models_log_path, conn_id,
-                "the model catalog update",
-            )
-            if spawned is None:
-                return None
-            self._update_models_proc = spawned[0]
-            return spawned[0]
-        finally:
-            self._update_models_starting = False
+        spawned = self._spawn_detached(
+            self._update_models_argv, str(Path.home()), None,
+            self._update_models_log_path, conn_id,
+            "the model catalog update",
+        )
+        if spawned is None:
+            return None
+        return spawned[0]
 
     async def _watch_update_models_exit(
         self, proc: subprocess.Popen[bytes], conn_id: str,
@@ -7154,6 +7558,7 @@ class RemoteAccessServer:
         raw_path: str,
         work_dir: str,
         tab_id: str,
+        # Passed (positionally, through asyncio.to_thread) by _open_path_only_prompt.
         file_only: bool = False,
     ) -> Path | None:
         """Resolve *raw_path* for a tab, trying its pending worktree too.
@@ -7165,6 +7570,12 @@ class RemoteAccessServer:
         not merged yet), the same relative path is tried inside the
         worktree directory — that is where the task's committed
         artifacts live until the merge.
+
+        A *work_dir* naming a worktree that was merged and removed (a
+        stored task keeps the folder it ran in) stands for the same
+        folder of its repository, for a path that stays inside it; a
+        path that leaves the folder resolves as written.  An absolute
+        path into such a worktree stands for the repository's copy too.
 
         Args:
             raw_path: The path as printed in the transcript (may be
@@ -7183,9 +7594,16 @@ class RemoteAccessServer:
         try:
             path = Path(os.path.expanduser(raw_path))
             if path.is_absolute() or not work_dir:
-                candidates = [path]
+                # Resolved first: ``..`` must leave the worktree as written.
+                candidates = [remap_vanished_worktree(path.resolve())]
             else:
-                candidates = [Path(work_dir) / path]
+                folder = Path(work_dir)
+                remapped = remap_vanished_worktree(folder)
+                if remapped != folder and (folder / path).resolve().is_relative_to(
+                    folder.resolve()
+                ):
+                    folder = remapped
+                candidates = [folder / path]
                 wt_dir = self._printer.worktree_dir_for_tab(tab_id)
                 if wt_dir and wt_dir != work_dir:
                     candidates.append(Path(wt_dir) / path)
@@ -7313,7 +7731,7 @@ class RemoteAccessServer:
                 # the read, and the whole of it would land in one frame.
                 preview = path.suffix.lower() in _PREVIEW_SUFFIXES
                 cap = _OPEN_BINARY_MAX_BYTES if inline_mime else _OPEN_FILE_MAX_BYTES
-                with open(path, "rb") as f:
+                with _open_regular_file(path) as f:
                     data = f.read() if preview else f.read(cap + 1)
                 oversize = len(data) > cap
                 if oversize and not preview:
@@ -7393,12 +7811,14 @@ class RemoteAccessServer:
         client):
         the write is refused with ``conflict`` set unless ``force`` is
         true, so the client can offer the user an explicit overwrite.
+        A file that already holds the very text being saved is not a
+        conflict (the same save, sent again after its reply was lost).
         Check and write happen under :data:`_SAVE_FILE_LOCK`, so of two
         clients of THIS daemon racing with the same stale stamp exactly
         one wins; a sibling process writing the file concurrently is
         outside that guarantee (the same as any editor's).
-        The file is replaced atomically (pid-unique temp +
-        ``Path.replace``, see :func:`_atomic_publish`) with its
+        The file is replaced atomically
+        (:func:`~kiss.core.utils.atomic_write_text`) with its
         permission bits preserved, and written byte-for-byte as UTF-8
         without newline translation so CRLF files stay CRLF.
 
@@ -7461,16 +7881,24 @@ class RemoteAccessServer:
                         # Bounded like _handle_open_file's read: a file
                         # that outgrew the display cap since it was
                         # opened cannot match its stamp anyway.
-                        with open(path, "rb") as f:
+                        with _open_regular_file(path) as f:
                             current = f.read(_OPEN_FILE_MAX_BYTES + 1)
-                        if _file_version(current) != expected_version:
+                        # A file that already holds the text being saved
+                        # is no conflict, whatever its stamp: it is this
+                        # save sent again after its reply was lost with
+                        # the connection (the client still holds the
+                        # stamp of the text it opened).
+                        if current != data and _file_version(current) != expected_version:
                             reply["error"] = (
                                 f"{path.name} changed on disk since it was opened"
                             )
                             reply["conflict"] = True
                             return reply
-                    _atomic_publish(
-                        path, partial(_write_bytes_with_mode, data=data, st=st),
+                    # *path* is resolved inside the tab's folder: a link
+                    # put there since then is replaced, not written through.
+                    atomic_write_text(
+                        path, content, mode=stat_module.S_IMODE(st.st_mode),
+                        follow_symlink=False,
                     )
                     reply["ok"] = True
                     reply["version"] = _file_version(data)
@@ -7546,10 +7974,10 @@ class RemoteAccessServer:
                 # Atomic: a reader with the previous share of this chat
                 # open, or a concurrent share of the same chat from
                 # another client, must never observe a torn page.
-                _atomic_write_text(out_path, page)
+                atomic_write_text(out_path, page, create_mode=0o666, follow_symlink=False)
                 reply["ok"] = True
                 reply["path"] = str(out_path)
-            except OSError as exc:
+            except Exception as exc:
                 reply["error"] = f"Failed to write the chat page: {exc}"
             return reply
 
@@ -7620,30 +8048,23 @@ class RemoteAccessServer:
             :_SHARE_TASKS_MAX_ID_CHARS
         ]
         peek = self._printer.peek_recording_for_task
+        reply: dict[str, Any] = {
+            "type": "share_tasks",
+            "tabId": tab_id,
+            "chatId": chat_id,
+            "tasks": [],
+            "truncated": False,
+        }
 
-        def _load_tasks() -> dict[str, Any]:
-            reply: dict[str, Any] = {
-                "type": "share_tasks",
-                "tabId": tab_id,
-                "chatId": chat_id,
-                "tasks": [],
-                "truncated": False,
-            }
-            if not chat_id.strip():
-                return reply
-            try:
-                if task_id_filter.strip():
-                    row = _load_chat_events_by_task_id(task_id_filter)
-                    rows = [row] if row else []
-                    truncated = False
-                else:
-                    rows, truncated = _load_all_chat_events_by_chat_id(
-                        chat_id, _SHARE_TASKS_MAX_REPLY_BYTES,
-                    )
-            except Exception as exc:
-                logger.warning("shareChatTasks: load failed", exc_info=True)
-                reply["error"] = f"Failed to load the chat history: {exc}"
-                return reply
+        def _load_tasks() -> tuple[list[dict[str, Any]], bool]:
+            if task_id_filter.strip():
+                row = _load_chat_events_by_task_id(task_id_filter)
+                rows = [row] if row else []
+                truncated = False
+            else:
+                rows, truncated = _load_all_chat_events_by_chat_id(
+                    chat_id, _SHARE_TASKS_MAX_REPLY_BYTES,
+                )
             # The sub-agent transcripts ride along inside their task's
             # entry, so they share the task's byte budget: the walk
             # below re-charges each entry (task + sub-agents) newest
@@ -7687,11 +8108,16 @@ class RemoteAccessServer:
                 entry["subagents"] = subs
                 entries.append(entry)
             entries.reverse()
-            reply["tasks"] = entries
-            reply["truncated"] = truncated
-            return reply
+            return entries, truncated
 
-        reply = await asyncio.to_thread(_load_tasks)
+        if chat_id.strip():
+            # One error boundary for the task rows and the sub-agent
+            # walk alike: both read the history database.
+            try:
+                reply["tasks"], reply["truncated"] = await asyncio.to_thread(_load_tasks)
+            except Exception as exc:
+                logger.warning("shareChatTasks: load failed", exc_info=True)
+                reply["error"] = f"Failed to load the chat history: {exc}"
         await self._reply_direct(endpoint, reply, "shareChatTasks")
 
     async def _handle_check_paths(
@@ -7766,8 +8192,10 @@ class RemoteAccessServer:
             {"type": "replayImage", "taskId": ..., "index": ...,
              "token": <echo>, "mime": ..., "b64": ...}
 
-        or, when the task or the picture is unknown, the same without
-        ``mime``/``b64`` and with an ``error``.
+        or, when the task or the picture is unknown or the transcript
+        cannot be read, the same without ``mime``/``b64`` and with an
+        ``error`` (the page then shows the picture as missing; with no
+        answer it would show it as loading for good).
 
         Args:
             cmd: The parsed ``getReplayImage`` command (``taskId``,
@@ -7782,12 +8210,17 @@ class RemoteAccessServer:
             "type": "replayImage", "taskId": task_id, "index": index,
             "token": self._cmd_str(cmd, "token"),
         }
-        image = await asyncio.to_thread(self._agent_server.replay_image, task_id, index)
-        if image is None:
-            reply["error"] = "no such picture"
+        try:
+            image = await asyncio.to_thread(self._agent_server.replay_image, task_id, index)
+        except Exception as exc:
+            logger.warning("getReplayImage: load failed", exc_info=True)
+            reply["error"] = f"Failed to load the picture: {exc}"
         else:
-            reply["mime"] = str(image.get("mime") or "image/png")
-            reply["b64"] = image["b64"]
+            if image is None:
+                reply["error"] = "no such picture"
+            else:
+                reply["mime"] = str(image.get("mime") or "image/png")
+                reply["b64"] = image["b64"]
         await self._reply_direct(endpoint, reply, "getReplayImage")
 
     async def _reply_direct(
@@ -8374,11 +8807,15 @@ class RemoteAccessServer:
     def _loopback_url(self) -> str:
         """The ``http://127.0.0.1:PORT`` URL for local-machine access.
 
-        Plain HTTP: loopback traffic never leaves the machine, so the
-        browser needs no certificate trust (LAN and tunnel URLs stay
-        ``https://``).
+        ``http://[::1]:PORT`` for a listener on the IPv6 loopback or
+        wildcard address: asyncio binds an IPv6 socket IPv6-only, so
+        ``127.0.0.1`` does not reach it.  Plain HTTP: loopback traffic
+        never leaves the machine, so the browser needs no certificate
+        trust (LAN and tunnel URLs stay ``https://``).
         """
-        return f"http://127.0.0.1:{self.port}"
+        host = self.host
+        ipv6_only = host == "::" or (":" in host and sorcar_api.is_loopback_ip(host))
+        return f"http://{'[::1]' if ipv6_only else '127.0.0.1'}:{self.port}"
 
     @property
     def _serves_local_ca(self) -> bool:
@@ -8386,30 +8823,34 @@ class RemoteAccessServer:
         return not self._ssl_certfile
 
     def _lan_urls(self) -> list[str]:
-        """Return ``https://<lan-ip>:PORT`` URLs for this host's LAN IPs.
+        """Return the ``https://<address>:PORT`` URLs LAN devices can dial.
 
         Returns ``[]`` when LAN clients cannot actually reach the
         webapp — the server is bound to a loopback-only host, or no
         ``remote_password`` is configured (``_process_request`` answers
         non-loopback peers 403 in that case) — so the UI never
-        advertises a LAN URL that would be refused.
+        advertises a LAN URL that would be refused.  A listener on one
+        address is reachable at that address alone; the IPv4 wildcard
+        one at every LAN IP of the host; the IPv6 wildcard one (bound
+        IPv6-only by asyncio) at none of them, the probe being IPv4.
 
         Uses only the cached :attr:`_last_ips` snapshot (seeded
-        off-thread in ``_setup_server`` before the first URL-file
+        off-thread in :meth:`_bind_listeners` before the first URL-file
         write, refreshed by the watchdog), so callers on the event
         loop never block on the socket probes in
         :func:`_get_local_ips`.  Before that first probe completes —
         e.g. a client that connects during the listener/tunnel setup
-        window and asks for welcome info — no LAN URLs are advertised
-        yet rather than probing on the loop.
+        window and asks for welcome info — the snapshot is empty and no
+        LAN URLs are advertised yet rather than probing on the loop.
         """
-        if self.host == "localhost" or sorcar_api.is_loopback_ip(self.host):
+        host = self.host
+        if host in ("localhost", "::") or sorcar_api.is_loopback_ip(host):
             return []
         if not self._stored_remote_password():
             return []
-        if not self._ips_probed:
-            return []
-        return [f"https://{ip}:{self.port}" for ip in sorted(self._last_ips)]
+        if host in ("", "0.0.0.0"):
+            return [f"https://{ip}:{self.port}" for ip in sorted(self._last_ips)]
+        return [f"https://{f'[{host}]' if ':' in host else host}:{self.port}"]
 
     def _write_url_file_sync(self) -> None:
         """Write the URL file with local, loopback, LAN + tunnel URLs.
@@ -8443,7 +8884,7 @@ class RemoteAccessServer:
                     self._url_file, self._local_url, self._current_tunnel_url(),
                     self._loopback_url, self._lan_urls(), self._serves_local_ca,
                 )
-                self._url_file_stamp = _file_stamp(self._url_file)
+                self._url_file_stamp = file_stamp(self._url_file)
 
     def _remove_own_url_file(self) -> None:
         """Delete the URL file while it is still the one this server last wrote.
@@ -8466,7 +8907,7 @@ class RemoteAccessServer:
             exclusive_file_lock(_url_file_lock_path(self._url_file), timeout=5.0),
         ):
             if self._url_file_stamp is not None and (
-                _file_stamp(self._url_file) == self._url_file_stamp
+                file_stamp(self._url_file) == self._url_file_stamp
             ):
                 _remove_url_file(self._url_file)
 
@@ -8768,8 +9209,19 @@ class RemoteAccessServer:
                 if self._update_in_progress() or not self._arm_update_barrier_if_idle():
                     continue
                 self._update_starting = True
-                spawn = loop.run_in_executor(None, self._spawn_deferred_restart, path)
-                spawn.add_done_callback(partial(self._update_spawned, "", time.time()))
+                try:
+                    spawn = _submit_spawn(
+                        loop, partial(self._update_spawned, "", time.time()),
+                        self._spawn_deferred_restart, path,
+                    )
+                except BaseException:
+                    # The submission was refused, so its job never spawns
+                    # and no callback owns the guard and the barrier:
+                    # both go, runs are admitted again and the next poll
+                    # starts over.
+                    self._update_starting = False
+                    self._set_update_barrier(False)
+                    raise
                 await asyncio.shield(spawn)
             except Exception:  # noqa: BLE001 — the loop must outlive one bad poll
                 logger.warning("Deferred restart check failed", exc_info=True)
@@ -8822,15 +9274,27 @@ class RemoteAccessServer:
         Skips the post when tunneling is disabled or the URL is
         unchanged since the last post, so a watchdog restart that
         yields the same public hostname does not re-notify
-        subscribers.
+        subscribers.  A post that failed is not recorded as made: the
+        watchdog's tunnel check tries it again, on its next tick first
+        and then :func:`_tunnel_backoff_delay` apart (recorded, the URL
+        of a quick tunnel stayed unannounced until the tunnel's next
+        restart).
         """
         url = self._active_url
-        if self.use_tunnel and url is not None and url != self._last_posted_url:
-            assert self._loop is not None
-            await self._loop.run_in_executor(
-                None, _post_url_to_message_board, url, self._ntfy_base_url,
-            )
+        if not self.use_tunnel or url is None or url == self._last_posted_url:
+            return
+        assert self._loop is not None
+        posted = await self._loop.run_in_executor(
+            None, _post_url_to_message_board, url, self._ntfy_base_url,
+        )
+        if posted:
             self._last_posted_url = url
+            self._ntfy_failure_count = 0
+        else:
+            self._ntfy_next_retry = time.monotonic() + _tunnel_backoff_delay(
+                self._ntfy_failure_count,
+            )
+            self._ntfy_failure_count += 1
 
     async def _send_welcome_info(self, conn_id: str = "") -> None:
         """Send the active remote URL (and the update state) to a client.
@@ -8954,6 +9418,9 @@ class RemoteAccessServer:
         deferred (``deferred: true`` → :meth:`AgentServer._defer_replay`):
         the client gets its running state and a ``replay_deferred``
         offer and fetches the transcript when the user opens the tab.
+        Before any replay the client is told which machine every tab
+        is on, and the run state of the tabs on no chat and no machine,
+        which have no replay (``RemoteTabs.replay_bindings``).
         A ``ready`` whose legacy ``restoredTabs`` seed an EMPTY
         registry is the exception: those tabs are new to every client,
         so all of them are replayed to everyone (one connection-scoped
@@ -8976,8 +9443,14 @@ class RemoteAccessServer:
         # configured folder, which ``setWorkDir`` pins before ``ready``.
         # A page that reconnects with the composer history on hand
         # names its newest text (``inputHistorySince``) and gets only
-        # what was typed since, not the whole list again.
-        await self._run_cmd({"type": "getModels", "connId": conn_id})
+        # what was typed since, not the whole list again.  The model
+        # list echoes the ``generation`` the page stamped its ``ready``
+        # with, as a ``getModels`` reply does: the page tells by it an
+        # answer asked before the user's latest pick.
+        await self._run_cmd({
+            "type": "getModels", "connId": conn_id,
+            "generation": request_generation(cmd),
+        })
         await self._run_cmd({
             "type": "getInputHistory", "connId": conn_id,
             "since": cmd.get("inputHistorySince"),
@@ -8993,9 +9466,20 @@ class RemoteAccessServer:
         await self._send_welcome_info(conn_id)
         # The Inject promptlets and the tips: the daemon owns both files
         # (and the opt-out marker), so every surface paints them from
-        # these events (the page also embeds them at load).
+        # these events (the page also embeds the tips and the bundled
+        # promptlets at load; the user's own are sent only here, to a
+        # client that has authenticated: ``_build_html``).  The
+        # promptlets are read and sent by one worker call, like every
+        # edit's list: read there and sent from here, they would follow
+        # the list of an edit another window made meanwhile and leave
+        # this page's panel without it.  A notice dismissed since the
+        # worker read its markers is not sent: it would follow the
+        # dismissal's ``close`` and put the toast back
+        # (``ServerApi.dismiss_notice``).
+        await asyncio.to_thread(broadcast_tricks_data, self._printer, conn_id)
         for bootstrap in await asyncio.to_thread(self._bootstrap_events):
-            broadcast_to_conn(self._printer, bootstrap, conn_id)
+            if bootstrap.get("id") not in self._server_api.dismissed_notices:
+                broadcast_to_conn(self._printer, bootstrap, conn_id)
         await self._reply_direct(
             websocket, {"type": "focusInput", "tabId": tab_id}, "ready focusInput",
         )
@@ -9017,6 +9501,9 @@ class RemoteAccessServer:
             # the replay's publication reopened or rebound it on every
             # surface (A22-1).
             bound = await asyncio.to_thread(self._agent_server.tab_registry.bound_tabs)
+        # The machine every tab is on, before any transcript, and the run
+        # state of the tabs that are in none of the replays below.
+        await asyncio.to_thread(self._server_api.remote_tabs.replay_bindings, conn_id)
         # Only the tab the client is looking at (``tabId``) gets its
         # transcript now.  The other bound tabs are DEFERRED: the
         # client receives their
@@ -9154,7 +9641,7 @@ class RemoteAccessServer:
             # be silently killed when the process exits.  A refusal
             # like any other: the composer keeps the draft.
             self._agent_server._refuse_run(
-                tab_id, "Server is shutting down; task not started.",
+                tab_id, "Server is shutting down; task not started.", cmd=cmd,
             )
             return
         prompt = cmd.get("prompt", "")
@@ -9179,6 +9666,7 @@ class RemoteAccessServer:
                     f"{prompt_size / 1_000_000:.1f} MB and the limit is "
                     f"{_MAX_PROMPT_BYTES / 1_000_000:.0f} MB. Shorten it, or "
                     f"put the long part in a file and attach that.",
+                    cmd=cmd,
                 )
                 return
         attachments = cmd.get("attachments")
@@ -9205,6 +9693,9 @@ class RemoteAccessServer:
         run_cmd: dict[str, Any] = {
             "type": "run",
             "prompt": prompt,
+            # The page's name for this prompt, echoed in every answer
+            # about it (``task_runner._prompt_of``).
+            "promptId": cmd.get("promptId"),
             "model": cmd.get("model", ""),
             "workDir": work_dir,
             "tabId": tab_id,
@@ -9622,6 +10113,11 @@ class RemoteAccessServer:
                 await self._restart_tunnel_url()
             return
 
+        if now >= self._ntfy_next_retry:
+            # No-op unless the tunnel's URL is still to be announced; a
+            # post takes its time, so the clock is read again after it.
+            await self._post_url_if_changed()
+            now = time.monotonic()
         if (
             self._tunnel_started_at is not None
             and now - self._tunnel_started_at < _TUNNEL_STARTUP_GRACE
@@ -9822,7 +10318,7 @@ class RemoteAccessServer:
             _terminate_declined_cloudflared(self._tunnel_adopted_pid, grace_s=5.0)
         self._reset_tunnel_proc_state()
 
-    async def _ping_one_ws(self, ws: Any) -> None:
+    async def _ping_one_ws(self, ws: ServerConnection) -> None:
         """Send a ping to a single WebSocket client, closing if stale.
 
         A client that answers the protocol-level ping is then sent an
@@ -9846,9 +10342,12 @@ class RemoteAccessServer:
         stream behind the transcript parts queued ahead of it and its
         pong cannot arrive before the peer has read those, so an
         absolute deadline dropped a peer on a slow link that was
-        taking the transcript the whole time (audit 2026-11-01).  Any
-        failure aborts the transport, which ends the connection's
-        handler; ``close()`` would wait for the same drain.
+        taking the transcript the whole time (audit 2026-11-01).  Nor
+        does the pong's deadline run while the daemon itself is not
+        reading the connection (:data:`_RECEIVE_QUEUE_FRAMES`): the
+        pong waits in the socket then.  Any failure aborts the
+        transport, which ends the connection's handler; ``close()``
+        would wait for the same drain.
 
         The heartbeat is queued like any other frame
         (:meth:`WebPrinter._schedule_send`): it takes its place in the
@@ -9868,24 +10367,16 @@ class RemoteAccessServer:
         covers every connection, so an unauthenticated peer that went
         away is still closed.
         """
+        transport = ws.transport
         try:
-            transport = getattr(ws, "transport", None)
-            if transport is None:
-                pong = await asyncio.wait_for(
-                    ws.ping(), timeout=self._printer._send_timeout,
-                )
-                await asyncio.wait_for(pong, timeout=_WS_PING_TIMEOUT)
-            else:
-                pong = await _await_while_draining(
-                    transport, ws.ping(), self._printer._send_timeout,
-                )
-                await _await_while_draining(transport, pong, _WS_PING_TIMEOUT)
+            pong = await _await_while_draining(
+                transport, ws.ping(), self._printer._send_timeout,
+            )
+            await _await_while_draining(transport, pong, _WS_PING_TIMEOUT, reply=True)
             if ws in self._printer._pending_sends:
                 self._printer._schedule_send(ws, _WS_HEARTBEAT_FRAME)
         except Exception:
-            transport = getattr(ws, "transport", None)
-            if transport is not None:
-                transport.abort()
+            transport.abort()
 
     async def _check_for_update(self) -> None:
         """Poll PyPI and broadcast an ``update_available`` event.
@@ -9938,11 +10429,11 @@ class RemoteAccessServer:
         MACHINES subpanel refreshes and unfolds for a new machine
         without waiting for its own poll.
         """
-        seen = _file_stamp(machines.machines_file())
+        seen = file_stamp(machines.machines_file())
         while True:
             await asyncio.sleep(MACHINES_REGISTRY_POLL_SECONDS)
             try:
-                stamp = _file_stamp(machines.machines_file())
+                stamp = file_stamp(machines.machines_file())
                 if stamp == seen:
                     continue
                 seen = stamp
@@ -9954,7 +10445,7 @@ class RemoteAccessServer:
     async def _watchdog(self) -> None:
         """Unified periodic watchdog (runs every :data:`TUNNEL_CHECK_INTERVAL`).
 
-        Each tick performs seven checks:
+        Each tick performs eight checks:
 
         1. **Tunnel health** — if the ``cloudflared`` process died
            (e.g. macOS killed it during sleep), restart it.
@@ -9988,6 +10479,9 @@ class RemoteAccessServer:
            (:func:`machines.forget_after_sleep`): they are dead, and a
            request would otherwise hang on one and back the machine
            off.
+        8. **TLS certificate** — re-issue and hot-load the
+           auto-generated server certificate when the LAN IPs changed
+           or it is expiring (:meth:`_refresh_tls_cert`).
         """
         while True:
             await asyncio.sleep(TUNNEL_CHECK_INTERVAL)
@@ -10076,14 +10570,14 @@ class RemoteAccessServer:
         daemon that predates the handler, or to a pid reused since a
         stale endpoint file was written, would kill it.
         """
-        elapsed = 0.0
+        scanned_mtime, elapsed = -1.0, 0.0
         while True:
             try:
                 mtime = _trusted_clients_dir().stat().st_mtime
             except OSError:
                 mtime = -1.0
-            if mtime != self._trusted_clients_mtime or elapsed >= TUNNEL_CHECK_INTERVAL:
-                self._trusted_clients_mtime, elapsed = mtime, 0.0
+            if mtime != scanned_mtime or elapsed >= TUNNEL_CHECK_INTERVAL:
+                scanned_mtime, elapsed = mtime, 0.0
                 try:
                     await self._reload_trusted_clients()
                 except Exception:
@@ -10525,13 +11019,8 @@ class RemoteAccessServer:
         (:meth:`_ping_one_ws`), then sends the ``heartbeat`` frame
         ``media/transport.js`` watches.
 
-        The receive queue is unbounded (``max_queue=None``): a
-        connection's frames are handled one at a time
-        (:meth:`_ws_handler`), so with the library's default of 16
-        queued frames a client sending more while a slow command runs
-        would get its transport paused, which also holds back its pong
-        and makes the watchdog abort a live connection.  Memory stays
-        bounded by ``max_size`` per frame and the peer's send rate.
+        The receive queue holds :data:`_RECEIVE_QUEUE_FRAMES` frames,
+        not the library's default of 16.
         """
         bind = asyncio.ensure_future(serve(
             self._ws_handler,
@@ -10544,7 +11033,7 @@ class RemoteAccessServer:
             ping_interval=None,
             ping_timeout=None,
             max_size=_MAX_LINE_BYTES,
-            max_queue=None,
+            max_queue=_RECEIVE_QUEUE_FRAMES,
             # Each connection sniffs its first byte and speaks TLS or
             # plain HTTP accordingly (``_HeadAwareServerConnection``),
             # so the listener itself is created without ``ssl``.
@@ -10572,7 +11061,7 @@ class RemoteAccessServer:
         the same port beside our ``0.0.0.0`` socket and take over every
         ``127.0.0.1`` connection.  Linux refuses that bind while the
         wildcard listener exists.  A listener on a single non-loopback
-        address (``--host 192.168.1.5``) needs it on every platform:
+        address (``host="192.168.1.5"``) needs it on every platform:
         same-machine clients prove they are local by connecting from a
         loopback address, which that listener cannot accept.
         """
@@ -10674,7 +11163,7 @@ class RemoteAccessServer:
         file a local client must trust.  With auto-generated
         certificates that is the local CA under the TLS dir; with a
         custom ``--certfile`` it is the ``ca.pem`` beside it when one
-        exists (the layout :func:`_generate_self_signed_cert` produces),
+        exists (where :func:`tls_certs.ensure_local_ca` keeps the CA),
         else the certificate itself (a self-signed certificate is its
         own trust anchor).
 
@@ -10775,6 +11264,7 @@ class RemoteAccessServer:
                 file=sys.stderr,
             )
             raise SystemExit(2)
+        self._listened = True
         await self._bind_loopback_alias_or_repick_port(ephemeral)
         # Local clients (``run_agent`` and other ``daemon_client``
         # runs) may connect from here on: the endpoint file is written before
@@ -10813,7 +11303,7 @@ class RemoteAccessServer:
             own_tunnel_pid: int | None = None
             if password:
                 adopted = await asyncio.to_thread(
-                    _try_adopt_existing_cloudflared, self.port,
+                    _try_adopt_existing_cloudflared, self.port, self.tunnel_token,
                 )
                 if adopted is not None:
                     adopted_pid, adopted_port, adopted_url = adopted
@@ -10868,7 +11358,6 @@ class RemoteAccessServer:
                 )
 
         self._last_ips = await asyncio.to_thread(_get_local_ips)
-        self._ips_probed = True
         # The broadcast reaches the clients that connected while the
         # tunnel was starting (the listeners are up by then; their
         # welcome info reported no URL yet).
@@ -11378,28 +11867,25 @@ class RemoteAccessServer:
         if not active:
             return
 
-        # Signal first: the pre-emptive persistence below waits for the
-        # history write lock and, behind another writer, for SQLite's
-        # busy timeout; the workers must already be stopping meanwhile.
-        # Its rewrite touches only rows still at the creation sentinel,
-        # so a worker that finishes its cleanup first is never clobbered.
+        deadline = time.monotonic() + timeout
         for _tab_id, _state, stop_event, _thread in active:
             if stop_event is not None:
                 stop_event.set()
 
-        try:
-            from kiss.agents.sorcar.persistence import (
-                _shutdown_persist_in_flight_results,
-            )
-
-            _shutdown_persist_in_flight_results(
-                {task_id for task_id, _, _, _ in active},
-            )
-        except Exception:  # noqa: BLE001 — best-effort, must not block shutdown
-            logger.debug(
-                "Pre-emptive shutdown persistence failed",
-                exc_info=True,
-            )
+        # The pre-emptive persistence runs beside the joins, on a thread
+        # of its own: it waits for the history write lock (no bound)
+        # and, behind another writer, for SQLite's busy timeout, and
+        # inline it kept the whole shutdown behind a stuck writer, the
+        # deadline not even started.  Its rewrite touches only rows
+        # still at the creation sentinel, so a worker that finishes its
+        # cleanup first is never clobbered.
+        persist = threading.Thread(
+            target=_persist_shutdown_results,
+            args=({task_id for task_id, _, _, _ in active},),
+            name="shutdown-persist",
+            daemon=True,
+        )
+        persist.start()
 
         logger.warning(
             "Shutdown: stopping %d in-flight agent task(s) before exit: %s",
@@ -11407,7 +11893,6 @@ class RemoteAccessServer:
             ", ".join(tab_id for tab_id, _, _, _ in active),
         )
 
-        deadline = time.monotonic() + timeout
         for tab_id, state, _stop_event, thread in active:
             # A worker registered by ``_cmd_run`` but not yet started
             # cannot be joined (``Thread.join`` raises before start).
@@ -11446,6 +11931,7 @@ class RemoteAccessServer:
                     "it may be persisted as a process-killed task",
                     tab_id,
                 )
+        persist.join(max(0.0, deadline - time.monotonic()))
 
     def _install_signal_handlers(self) -> None:
         """Register handlers for catchable termination signals.
@@ -11546,13 +12032,18 @@ class RemoteAccessServer:
         up, killed when they ignore it), the streams of tabs running on
         remote machines, the brand's sign-in hook (SIGTERM, killed when
         it ignores it: its kill thread would not survive the interpreter's
-        exit), the brand's ``services.d`` helpers (the same), the
+        exit), the brand's ``services.d`` helpers (the same), the talk
+        clip playing on this machine's speakers (its player has a session
+        of its own, and the failsafe's ``os._exit`` skips the exit hook
+        that would end it), the
         SEA-registry watcher, the ``@``-picker's file-index worker
         (joined after its queue is closed: ``stop_async`` used to leave
         it blocked on the queue, retaining the server, L2-2) and the
         ghost-text autocomplete worker (the same, L2-1).  Every step is
         idempotent: the SIGTERM thread runs the first three early.
         """
+        from kiss.server import talk_player
+
         self._stop_active_agent_tasks()
         self._await_active_merges()
         self._disconnect_mcp_servers()
@@ -11564,6 +12055,7 @@ class RemoteAccessServer:
         self._server_api.remote_views.close_all()
         self._server_api.signin.shutdown()
         self._services.stop()
+        talk_player.shutdown()
         self._stop_sea_command_watcher()
         self._agent_server._file_index.stop()
         self._agent_server._stop_complete_worker()
@@ -11593,8 +12085,14 @@ class RemoteAccessServer:
         (:attr:`_shutdown_initiated`, as :meth:`stop_async` does): the
         write queued in the executor but not yet at its lock would
         otherwise publish the file after the removal.  The instance is
-        done for, as after a stop.  The blocking :meth:`start` keeps
-        its tunnel on purpose, for the next daemon to adopt.
+        done for, as after a stop, so once its listener was bound
+        (:attr:`_listened`) its children are stopped as a stop does
+        (:meth:`_shutdown_children`): it took commands from then on,
+        and an agent task started since would otherwise run on with
+        nothing left to stop it.  A setup that never listened admitted
+        none: the tasks in the process's registry are another server's
+        and are left alone.  The blocking :meth:`start` keeps its
+        tunnel on purpose, for the next daemon to adopt.
         """
         _raise_open_file_limit()
         async with self._lifecycle_lock:
@@ -11604,6 +12102,8 @@ class RemoteAccessServer:
                 await self._setup_server()
             except BaseException:
                 self._shutdown_initiated = True
+                if self._listened:
+                    await asyncio.to_thread(self._shutdown_children)
                 await asyncio.to_thread(self._stop_tunnel)
                 await asyncio.to_thread(self._remove_own_url_file)
                 raise
@@ -11736,6 +12236,50 @@ class RemoteAccessServer:
 def _proc_live(starting: bool, proc: subprocess.Popen[bytes] | None) -> bool:
     """Whether a child is being spawned (*starting*) or *proc* is still running."""
     return starting or (proc is not None and proc.poll() is None)
+
+
+def _submit_spawn[T](
+    loop: asyncio.AbstractEventLoop,
+    spawned: Callable[[asyncio.Future[Any]], object],  # ``Any``: *spawn* alone decides ``T``
+    spawn: Callable[..., T],
+    *args: Any,
+) -> asyncio.Future[T | None]:
+    """Run ``spawn(*args)`` in the default executor, handing its future to *spawned*.
+
+    A submission that raises can leave its job queued all the same: the
+    executor queues the job before it starts the thread that then cannot
+    be started, and runs it later with no future and nothing watching
+    the process.  So the job waits for the verdict given here and spawns
+    only when *spawned* is the done-callback of its future.  When this
+    raises, the job never spawns and the caller releases its guards.
+
+    Args:
+        loop: The server's event loop.
+        spawned: Done-callback of the spawn; it owns the caller's guards
+            once this has returned.
+        spawn: The blocking function that starts the process.
+        *args: Its arguments.
+
+    Returns:
+        The future of ``spawn(*args)``.
+    """
+    verdict: ConcurrentFuture[bool] = ConcurrentFuture()
+    accepted = False
+    try:
+        future = loop.run_in_executor(None, _spawn_if_accepted, verdict, spawn, *args)
+        future.add_done_callback(spawned)
+        accepted = True
+    finally:
+        # In a ``finally``: no path leaves the job waiting.
+        verdict.set_result(accepted)
+    return future
+
+
+def _spawn_if_accepted[T](
+    verdict: ConcurrentFuture[bool], spawn: Callable[..., T], *args: Any,
+) -> T | None:
+    """Executor job of :func:`_submit_spawn`: ``spawn(*args)``, or nothing when refused."""
+    return spawn(*args) if verdict.result() else None
 
 
 async def _wait_exit(proc: subprocess.Popen[bytes]) -> None:

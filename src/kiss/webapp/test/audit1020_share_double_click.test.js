@@ -16,29 +16,29 @@ const assert = require('assert');
 const {
   makePage: makeChatPage,
   send,
+  click,
+  byId,
+  ofType,
   stubRaf,
   readyTabId,
+  recordTimers,
+  fireTimers,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 
 const {test, report} = makeRunner();
 
+// The delay of the failsafe main.js arms (setShareInFlight).  The
+// recorder matches it exactly, so it changes with the product's value.
 const FAILSAFE_MS = 120000;
 
-/** A page whose long timers (the failsafe) are captured, not scheduled. */
+/** A page whose failsafe timers are recorded, not scheduled. */
 function makePage() {
-  const longTimers = [];
+  let longTimers;
   const wv = makeChatPage({
     beforeScripts: win => {
       stubRaf(win);
-      const realSetTimeout = win.setTimeout.bind(win);
-      win.setTimeout = (fn, ms, ...args) => {
-        if (ms >= FAILSAFE_MS) {
-          longTimers.push(fn);
-          return -longTimers.length;
-        }
-        return realSetTimeout(fn, ms, ...args);
-      };
+      longTimers = recordTimers(win, FAILSAFE_MS);
     },
   });
   wv.longTimers = longTimers;
@@ -46,12 +46,11 @@ function makePage() {
 }
 
 function clickShare(wv) {
-  const el = wv.win.document.getElementById('share-btn');
-  el.dispatchEvent(new wv.win.MouseEvent('click', {bubbles: true}));
+  click(wv.win, byId(wv.win, 'share-btn'));
 }
 
 function requests(wv, type) {
-  return wv.posted.filter(m => m.type === type);
+  return ofType(wv.posted, type);
 }
 
 /** Drive one small task through the page so the transcript has panels. */
@@ -165,7 +164,7 @@ async function run() {
     clickShare(wv);
     assert.strictEqual(requests(wv, 'shareChatTasks').length, 1);
     assert.strictEqual(wv.longTimers.length, 1, 'one failsafe timer armed');
-    wv.longTimers[0]();
+    fireTimers(wv.longTimers);
     clickShare(wv);
     assert.strictEqual(requests(wv, 'shareChatTasks').length, 2);
     wv.win.close();

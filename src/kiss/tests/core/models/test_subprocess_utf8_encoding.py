@@ -70,6 +70,7 @@ _CLAUDE_REPLIES_FROM_A_FILE = """
     sys.stdout.buffer.write(
         (json.dumps(event, ensure_ascii=False) + chr(10)).encode("utf-8"))
     sys.stdout.buffer.flush()
+    print(json.dumps({"type": "result", "usage": {}}), flush=True)
 """
 
 

@@ -24,7 +24,7 @@ import kiss.agents.sorcar.local_endpoint as local_endpoint
 import kiss.agents.sorcar.persistence as persistence
 import kiss.core.user_config as user_config
 import kiss.server.web_server as web_server
-from kiss.core.config import kiss_home
+from kiss.core.config import kiss_home, remote_url_file
 
 
 @pytest.fixture()
@@ -84,29 +84,10 @@ def test_user_config_test_override_pin_wins(fresh_home: Path) -> None:
 
 def test_web_server_paths_resolve_lazily(fresh_home: Path) -> None:
     assert web_server._tls_dir() == fresh_home / "tls"
-    assert web_server._url_file_path() == fresh_home / "remote-url.json"
-    assert web_server._URL_FILE == fresh_home / "remote-url.json"
+    assert remote_url_file() == fresh_home / "remote-url.json"
+    assert web_server.RemoteAccessServer()._url_file == fresh_home / "remote-url.json"
     assert local_endpoint.default_endpoint_path() == fresh_home / "sorcar-local.json"
     assert web_server.RemoteAccessServer()._local_endpoint_file == (
         fresh_home / "sorcar-local.json"
     )
     assert web_server._cloudflared_pidfile() == fresh_home / "cloudflared.pid"
-
-
-def test_web_server_url_file_override_reaches_production_consumers(
-    fresh_home: Path,
-) -> None:
-    """A temporary ``_URL_FILE`` pin must redirect the real server.
-
-    The lazy PEP 562 attribute is often pinned by tests.  Merely making
-    attribute reads return the pin is insufficient: the production
-    constructor resolves its default through ``_url_file_path``.
-    """
-    pinned = fresh_home / "pinned" / "remote.json"
-    web_server._URL_FILE = pinned
-    try:
-        assert web_server._url_file_path() == pinned
-        assert web_server.RemoteAccessServer()._url_file == pinned
-    finally:
-        del web_server._URL_FILE
-    assert web_server._url_file_path() == fresh_home / "remote-url.json"

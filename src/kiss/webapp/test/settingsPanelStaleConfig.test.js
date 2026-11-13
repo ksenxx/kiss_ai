@@ -196,6 +196,28 @@ function testClosedPanelIsStillRepainted() {
   console.log('  ok - a closed panel is still repainted by configData');
 }
 
+// The "Drive my Chrome" label names the folder to load in Chrome.  It is
+// the answering daemon's own ($KISS_HOME may be anywhere, and the sheet
+// may show a registered machine's settings); a daemon older than the
+// field has the product's usual folder, not the one the reply before it
+// named.
+function testTheExtensionFolderIsTheAnsweringDaemons() {
+  const {win} = makePage({placeholders: {HOME_DIR: '.kiss'}});
+  const shown = () =>
+    win.document.getElementById('cfg-chrome-extension-dir').textContent;
+  assert.strictEqual(shown(), '~/.kiss/chrome_extension');
+  send(win, {
+    type: 'configData',
+    config: {...STORED, chrome_extension_dir: '/srv/home/chrome_extension'},
+    apiKeys: {},
+  });
+  assert.strictEqual(shown(), '/srv/home/chrome_extension');
+  send(win, {type: 'configData', config: STORED, apiKeys: {}});
+  assert.strictEqual(shown(), '~/.kiss/chrome_extension');
+  win.close();
+  console.log('  ok - the extension folder shown is the answering daemon\'s');
+}
+
 // Reopening the panel (a new editing session accepts the stored value
 // again) is covered by settingsEditedGuardRepaint.test.js
 // (testReopenedPanelShowsTheServerValueNotTheOldEdit).
@@ -205,6 +227,7 @@ function main() {
   testClosingBeforeTheReplyStillSavesTheEdit();
   testUntouchedPanelStillSavesNothing();
   testClosedPanelIsStillRepainted();
+  testTheExtensionFolderIsTheAnsweringDaemons();
   console.log('settingsPanelStaleConfig.test.js: all tests passed');
 }
 

@@ -37,11 +37,11 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from typing import Any
 
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import make_capturing_server
+from kiss.tests.server.pause import Pause
 
 
 class TestCompleteSnapshotClobber(unittest.TestCase):
@@ -119,39 +119,23 @@ class TestRunStartWindowPromptLoss(unittest.TestCase):
     requires ``tab.is_task_active`` — which is only set once the
     worker thread has begun executing ``_run_task``.  The winning
     submit assigns ``tab.task_thread`` under ``_state_lock``, then
-    broadcasts ``clear`` (network I/O — a wide window), and only then
-    calls ``thread.start()``.  A second submit landing in that window
+    publishes the tab (a file write and a broadcast — a wide window),
+    and only then announces the run and calls ``thread.start()``.  A
+    second submit landing in that window
     sees ``task_thread is not None`` (busy) and ``is_task_active ==
     False`` — and silently drops the user's prompt: it is neither
     queued into ``pending_user_messages`` nor echoed, and no new task
     is started.  A fast double-submit therefore loses the second
     message, contradicting the invariant stated in the code itself.
+    Echoed before the run's ``clear``, the message is wiped off the
+    page again: its echo follows the ``clear``.
     """
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt2-race-")
-        self.server = AgentServer()
-        self.events: list[dict[str, Any]] = []
-        self.first_clear_entered = threading.Event()
-        self.release = threading.Event()
-        self._blocked_once = False
-        self._events_lock = threading.Lock()
-
-        def blocking_broadcast(event: dict[str, Any]) -> None:
-            do_block = False
-            with self._events_lock:
-                self.events.append(event)
-                if event.get("type") == "clear" and not self._blocked_once:
-                    self._blocked_once = True
-                    do_block = True
-            if do_block:
-                self.first_clear_entered.set()
-                self.release.wait(timeout=30)
-
-        self.server.printer.broadcast = blocking_broadcast  # type: ignore[assignment]
+        self.server, self.events = make_capturing_server()
 
     def tearDown(self) -> None:
-        self.release.set()
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -173,35 +157,37 @@ class TestRunStartWindowPromptLoss(unittest.TestCase):
             target=self.server._handle_command, args=(dict(first_cmd),),
             daemon=True,
         )
-        t1.start()
-        assert self.first_clear_entered.wait(timeout=30), (
-            "first run never reached its clear broadcast"
-        )
-        second_cmd = dict(first_cmd)
-        second_cmd["prompt"] = "bughunt2 follow-up during start window"
-        self.server._handle_command(second_cmd)
+        with Pause(AgentServer._publish_tabs_state.__code__, bool) as gate:
+            t1.start()
+            assert gate.paused.wait(timeout=30), "first run never published its tab"
+            second_cmd = dict(first_cmd)
+            second_cmd["prompt"] = "bughunt2 follow-up during start window"
+            self.server._handle_command(second_cmd)
 
-        with self.server._state_lock:
-            tab_state = agent_state.find_by_tab(tab_id)
-            assert tab_state is not None
-            queued = list(tab_state.pending_user_messages)
-        with self._events_lock:
-            echoes = [
-                e for e in self.events
-                if e.get("type") == "prompt"
-                and e.get("text") == "bughunt2 follow-up during start window"
-            ]
-        with self._events_lock:
-            clears_before_release = [
-                e for e in self.events if e.get("type") == "clear"
-            ]
-        assert len(clears_before_release) == 1, (
-            f"{len(clears_before_release)} clear events — a second "
-            "concurrent submit passed the busy guard and started a "
-            "second task"
-        )
-        self.release.set()
+            with self.server._state_lock:
+                tab_state = agent_state.find_by_tab(tab_id)
+                assert tab_state is not None
+                queued = list(tab_state.pending_user_messages)
+            assert not [e for e in list(self.events) if e.get("type") == "clear"], (
+                "a second concurrent submit passed the busy guard and "
+                "started a second task"
+            )
         t1.join(timeout=30)
+        assert queued == ["bughunt2 follow-up during start window"], (
+            "BUG: a submit landing in the run start window "
+            "(task_thread assigned, thread not yet started, "
+            "is_task_active still False) silently dropped the user's "
+            f"prompt — pending_user_messages={queued!r}"
+        )
+        frames = [
+            "clear" if e.get("type") == "clear" else "echo"
+            for e in list(self.events)
+            if e.get("type") == "clear" or e.get("steer")
+        ]
+        assert frames[:2] == ["clear", "echo"] and frames.count("echo") == 1, (
+            "the follow-up must be echoed once, after the run's clear "
+            f"(which empties the tab): {frames}"
+        )
         # The first run exits at its "No model available" check without
         # ever draining the queued prompt, so the runner re-submits it
         # as the tab's next run once the first worker has torn down
@@ -221,16 +207,6 @@ class TestRunStartWindowPromptLoss(unittest.TestCase):
             time.sleep(0.02)
         assert state is not None and state.task_thread is None, (
             "the queued prompt was never re-run after the first run ended"
-        )
-        assert queued == ["bughunt2 follow-up during start window"], (
-            "BUG: a submit landing in the run start window "
-            "(task_thread assigned, thread not yet started, "
-            "is_task_active still False) silently dropped the user's "
-            f"prompt — pending_user_messages={queued!r}"
-        )
-        assert echoes, (
-            "BUG: the queued follow-up was never echoed back as a "
-            "'prompt' event, so the user's message vanished from the UI"
         )
 
 

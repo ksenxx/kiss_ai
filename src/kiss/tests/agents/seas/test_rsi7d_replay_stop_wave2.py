@@ -10,9 +10,10 @@ the replay running uncancelled in the job registry; a replay with no calling tas
 
 The Stop is a real ``KeyboardInterrupt`` raised by a tracer on the ``return``
 event of ``agent_dispatch.launch_agent_job``, the window in question; it is the
-same delivery model as ``PyThreadState_SetAsyncExc``.  No daemon runs, so the
-job's dispatch ends with a connection error on its own: what tells the two
-behaviours apart is whether the replay's stop was requested.
+same delivery model as ``PyThreadState_SetAsyncExc``.  The SEA file does not
+exist, so the job's dispatch ends with that error on its own before any daemon
+is dialled: what tells the two behaviours apart is whether the replay's stop was
+requested.
 """
 
 from __future__ import annotations

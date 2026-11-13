@@ -67,6 +67,7 @@ _CHILD = """
     (wt.wt_dir / "agent.txt").write_text("unaccepted work\\n", encoding="utf-8")
 
     lock = repo / ".git" / "kiss-preserve"
+    lock.rmdir()  # empty: the worktree setup removed its own marker
     lock.write_text("")
     try:
         first = agent.{first_call}
@@ -192,6 +193,7 @@ def test_create_worktree_keeps_the_unretired_claim(
     (wt.wt_dir / "agent.txt").write_text("unaccepted work\n", encoding="utf-8")
 
     lock = env.repo / ".git" / "kiss-preserve"
+    lock.rmdir()  # empty: the worktree setup removed its own marker
     lock.write_text("")
     try:
         agent._retire_previous_worktree()
@@ -236,6 +238,7 @@ def test_same_process_reclaim_honours_the_volatile_claim(env: IsolatedKissHome) 
     (wt.wt_dir / "agent.txt").write_text("unaccepted work\n", encoding="utf-8")
 
     lock = env.repo / ".git" / "kiss-preserve"
+    lock.rmdir()  # empty: the worktree setup removed its own marker
     lock.write_text("")
     try:
         agent._retire_previous_worktree()

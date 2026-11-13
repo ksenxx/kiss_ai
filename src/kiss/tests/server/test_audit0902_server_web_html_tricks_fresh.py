@@ -2,19 +2,19 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E: the remote webapp page must not serve a trick list frozen at daemon start.
+"""E2E: which promptlets the remote web app's page holds, and which follow the login.
 
-``RemoteAccessServer`` rendered ``media/chat.html`` once in ``__init__``
-and served those bytes for every later ``GET /``.  The page embeds
-``window.__TRICKS__`` (the Inject-instruction panel's list), so a user
-who edits ``~/.kiss/MY_INJECTION.md`` while the daemon runs saw the
-OLD list in the chat page until the daemon restarted — while the
-same daemon's ghost-text ``trick`` completions (``tricks.read_tricks``
-is re-read on every keystroke) already offered the NEW trick.  Two
-views of one list disagreeing is exactly the stale-cache inconsistency
-this pins:
-after the file changes, the next page load must carry the new trick,
-and the page must agree with the daemon's own completion source.
+The page (``GET /``) is served before any login, to whoever reaches
+the port: it embeds the promptlets shipped with the package and none
+of the user's own (``MY_INJECTION.md``).  Those reach the page with
+``tricksData``, the daemon's answer to the ``ready`` of a page that
+has authenticated.
+
+Neither list is frozen at daemon start (``RemoteAccessServer`` once
+rendered ``media/chat.html`` in ``__init__`` and served those bytes
+for every later ``GET /``): both files are re-read, so the Inject
+panel agrees with the daemon's ghost-text ``trick`` completions
+(``tricks.read_tricks`` on every keystroke).
 """
 
 from __future__ import annotations
@@ -28,12 +28,22 @@ from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
-from kiss.core.user_config import CONFIG_PATH, save_config
+from websockets.asyncio.client import ClientConnection, connect
+
+from kiss.core.user_config import save_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
+_PASSWORD = "Correct-Horse-Battery-1"
+_BUNDLED = "Bundled trick: read the error message."
+_BUNDLED_NEW = "Bundled trick: bisect the regression."
 _TRICK_A = "Alpha trick: run the tests first."
 _TRICK_B = "Bravo trick: profile before optimising."
+
+
+def _tricks_file(*tricks: str) -> str:
+    """Return the text of a promptlet file holding *tricks*."""
+    return "".join(f"## Trick\n\n{trick}\n\n" for trick in tricks)
 
 
 class _RecordingPrinter:
@@ -45,23 +55,22 @@ class _RecordingPrinter:
 
 
 class TestServedTricksFollowFileEdits(IsolatedAsyncioTestCase):
-    """Edit MY_INJECTION.md while the daemon runs; reload the page."""
+    """Edit the promptlet files while a password-protected daemon runs; reload the page."""
 
     async def asyncSetUp(self) -> None:
         self.port = find_free_port()
-        self._orig_config = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
-        save_config({"remote_password": ""})
         self._saved_env = {
             k: os.environ.get(k) for k in ("KISS_HOME", "KISS_INJECTIONS_PATH")
         }
         kiss_dir = Path(tempfile.mkdtemp(prefix="kiss_html_fresh_")) / ".kiss"
         kiss_dir.mkdir(parents=True)
         self.my_injection = kiss_dir / "MY_INJECTION.md"
-        self.my_injection.write_text("## Trick\n\n" + _TRICK_A + "\n", encoding="utf-8")
-        empty_bundled = kiss_dir / "empty_INJECTIONS.md"
-        empty_bundled.write_text("", encoding="utf-8")
+        self.my_injection.write_text(_tricks_file(_TRICK_A), encoding="utf-8")
+        self.bundled = kiss_dir / "bundled_INJECTIONS.md"
+        self.bundled.write_text(_tricks_file(_BUNDLED), encoding="utf-8")
         os.environ["KISS_HOME"] = str(kiss_dir)
-        os.environ["KISS_INJECTIONS_PATH"] = str(empty_bundled)
+        os.environ["KISS_INJECTIONS_PATH"] = str(self.bundled)
+        save_config({"remote_password": _PASSWORD})  # in the home set just above
         self.server = RemoteAccessServer(
             host="127.0.0.1", port=self.port, work_dir=tempfile.mkdtemp(),
         )
@@ -74,24 +83,29 @@ class TestServedTricksFollowFileEdits(IsolatedAsyncioTestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-        if self._orig_config is not None:
-            CONFIG_PATH.write_text(self._orig_config)
 
-    async def _served_tricks(self) -> list[str]:
+    async def _page(self) -> str:
+        """Return the page a tunnel visitor who has not logged in is served."""
         reader, writer = await asyncio.open_connection(
             "127.0.0.1", self.port, ssl=no_verify_ssl(),
             server_hostname="localhost",
         )
         writer.write(
-            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            b"GET / HTTP/1.1\r\nHost: localhost\r\n"
+            b"Cf-Connecting-Ip: 203.0.113.9\r\nConnection: close\r\n\r\n"
         )
         await writer.drain()
         raw = await asyncio.wait_for(reader.read(), timeout=15)
         writer.close()
-        body = raw.split(b"\r\n\r\n", 1)[1].decode("utf-8")
-        m = re.search(r"window\.__TRICKS__\s*=\s*(\[.*?\]);", body, re.DOTALL)
-        assert m is not None, "TRICKS_JSON placeholder was not substituted"
-        return list(json.loads(m.group(1).replace("<\\/", "</")))
+        return raw.split(b"\r\n\r\n", 1)[1].decode("utf-8")
+
+    async def _ready_tricks(self, ws: ClientConnection) -> tuple[list[str], int]:
+        """Send the ``ready`` of a page load; return the promptlets and the user's count."""
+        await ws.send(json.dumps({"type": "ready", "tabId": "t1", "password": _PASSWORD}))
+        while True:
+            event = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
+            if event["type"] == "tricksData":
+                return event["tricks"], event["userCount"]
 
     def _daemon_trick_completions(self, query: str) -> list[str]:
         printer = _RecordingPrinter()
@@ -99,25 +113,41 @@ class TestServedTricksFollowFileEdits(IsolatedAsyncioTestCase):
         saved = backend.printer
         backend.printer = printer  # type: ignore[assignment]
         try:
-            backend._complete(query)
+            backend._complete_seq_latest[""] = 1
+            backend._complete(query, 1)
         finally:
             backend.printer = saved
         comps = next(e for e in printer.events if e["type"] == "completions")
         return [c["text"] for c in comps["completions"] if c["type"] == "trick"]
 
-    async def test_page_reload_serves_edited_tricks(self) -> None:
-        self.assertEqual(await self._served_tricks(), [_TRICK_A])
+    async def test_page_served_before_login_holds_no_personal_promptlet(self) -> None:
+        """The page of a visitor who never logs in carries the bundled promptlets only."""
+        body = await self._page()
+        self.assertFalse(_TRICK_A in body, "the page discloses MY_INJECTION.md before any login")
+        self.assertIn("window.__MY_TRICKS_COUNT__ = 0;", body)
+        match = re.search(r"window\.__TRICKS__\s*=\s*(\[.*?\]);", body, re.DOTALL)
+        assert match is not None, "TRICKS_JSON placeholder was not substituted"
+        self.assertEqual(json.loads(match.group(1)), [_BUNDLED])
 
-        # The user edits the file while the daemon keeps running.
-        self.my_injection.write_text(
-            "## Trick\n\n" + _TRICK_B + "\n\n## Trick\n\n" + _TRICK_A + "\n",
-            encoding="utf-8",
-        )
-        # The daemon's own completion source already sees the edit …
-        self.assertEqual(self._daemon_trick_completions("Bravo"), [_TRICK_B])
-        # … so the next page load must agree with it.
-        self.assertEqual(
-            await self._served_tricks(), [_TRICK_B, _TRICK_A],
-            "BUG: remote webapp serves the trick list frozen at daemon "
-            "start; the Inject panel disagrees with ghost completions",
-        )
+        # A package upgrade under the running daemon: the next page load follows it.
+        self.bundled.write_text(_tricks_file(_BUNDLED_NEW), encoding="utf-8")
+        self.assertIn(json.dumps([_BUNDLED_NEW]), await self._page())
+
+    async def test_personal_promptlets_follow_the_login(self) -> None:
+        """``ready`` from a logged-in page gets the user's promptlets, re-read on every load."""
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
+            additional_headers={"Cf-Connecting-Ip": "203.0.113.9"},
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": _PASSWORD}))
+            self.assertEqual(json.loads(await ws.recv())["type"], "auth_ok")
+            self.assertEqual(await self._ready_tricks(ws), ([_TRICK_A, _BUNDLED], 1))
+
+            # The user edits the file while the daemon keeps running.
+            self.my_injection.write_text(_tricks_file(_TRICK_B, _TRICK_A), encoding="utf-8")
+            # The daemon's own completion source already sees the edit …
+            self.assertEqual(self._daemon_trick_completions("Bravo"), [_TRICK_B])
+            # … so the next page load must agree with it.
+            self.assertEqual(
+                await self._ready_tricks(ws), ([_TRICK_B, _TRICK_A, _BUNDLED], 2),
+            )

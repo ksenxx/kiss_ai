@@ -17,19 +17,12 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {makeRunner} = require('./ui_antipattern_harness');
+const {makeRunner, key} = require('./ui_antipattern_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
-const runner = makeRunner();
+// Every window a test built: the runner closes them when it has ended.
 const windows = [];
-
-function test(name, fn) {
-  try {
-    runner.test(name, fn);
-  } finally {
-    while (windows.length) windows.pop().close();
-  }
-}
+const {test, report} = makeRunner({windows});
 
 function makeDom(scripts) {
   const dom = new JSDOM(
@@ -42,12 +35,6 @@ function makeDom(scripts) {
     win.eval(fs.readFileSync(path.join(MEDIA, name), 'utf8'));
   }
   return win;
-}
-
-function key(win, name) {
-  win.document.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: name, bubbles: true, cancelable: true}),
-  );
 }
 
 function enabledItems(win, selector) {
@@ -82,15 +69,15 @@ test('the iframe copy (SOURCE) opens, clamps and navigates by keyboard', () => {
   const items = enabledItems(win, '#sorcar-content-context-menu .sorcar-ctx-item');
   assert.strictEqual(items.length, 2);
   assert.strictEqual(win.document.activeElement, items[0]);
-  key(win, 'End');
+  key(win, win.document, 'End');
   assert.strictEqual(win.document.activeElement, items[1]);
-  key(win, 'ArrowDown');
+  key(win, win.document, 'ArrowDown');
   assert.strictEqual(win.document.activeElement, items[0], 'wraps to the first');
-  key(win, 'ArrowUp');
+  key(win, win.document, 'ArrowUp');
   assert.strictEqual(win.document.activeElement, items[1], 'wraps to the last');
-  key(win, 'Home');
+  key(win, win.document, 'Home');
   assert.strictEqual(win.document.activeElement, items[0]);
-  key(win, 'Escape');
+  key(win, win.document, 'Escape');
   assert.strictEqual(win.document.getElementById('sorcar-content-context-menu'), null);
 });
 
@@ -106,12 +93,12 @@ test('the tree menu clamps and navigates with the shared helpers', () => {
   assertClamped(win, menu, 200, 24 * items.length);
   const rows = enabledItems(win, '#sidebar-context-menu .tree-ctx-item');
   assert.strictEqual(win.document.activeElement, rows[0]);
-  key(win, 'ArrowDown');
+  key(win, win.document, 'ArrowDown');
   assert.strictEqual(win.document.activeElement, rows[1], 'skips the disabled row');
-  key(win, 'Home');
-  key(win, ' ');
+  key(win, win.document, 'Home');
+  key(win, win.document, ' ');
   assert.deepStrictEqual(ran, ['one']);
   assert.ok(menu.hidden, 'running an item closes the menu');
 });
 
-runner.report('contextMenuSharedNav_wave3');
+report('contextMenuSharedNav_wave3');

@@ -19,6 +19,7 @@ No mocks, patches, fakes, or test doubles.
 
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 import tempfile
@@ -28,6 +29,7 @@ from pathlib import Path
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.persistence_helpers import close_db
 
 
 class _TempDbTestBase:
@@ -35,18 +37,17 @@ class _TempDbTestBase:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         th._invalidate_chat_context_cache("")
 
     def teardown_method(self) -> None:
-        th._close_db()
+        close_db()
         th._invalidate_chat_context_cache("")
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        th._DB_PATH, th._KISS_DIR = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
@@ -107,7 +108,7 @@ class TestLegacySchemaMigration(_TempDbTestBase):
             "INSERT INTO task_history (id, timestamp, task, result, chat_id,"
             " extra) VALUES (1, ?, 'parent', 'ok', 'chatA', ?)",
             (now, '{"model": "m1", "cost": 1.5, "is_parallel": "false",'
-                  ' "is_worktree": "0", "tokens": "12"}'),
+                  ' "is_worktree": "0", "tokens": "12", "endTs": 1e300}'),
         )
         conn.execute(
             "INSERT INTO task_history (id, timestamp, task, result, chat_id,"
@@ -132,6 +133,7 @@ class TestLegacySchemaMigration(_TempDbTestBase):
         assert parent["model"] == "m1"
         assert parent["cost"] == 1.5
         assert parent["tokens"] == 12
+        assert parent["end_ts"] == 0  # no INTEGER holds 1e300: unset, not a failed migration
         assert parent["is_parallel"] == 0
         assert "is_worktree" not in parent.keys()
         assert child["parent_task_id"] == parent["id"]
@@ -206,6 +208,28 @@ class TestAddTaskAndExtra(_TempDbTestBase):
         th._save_task_extra({"parent_task_id": parent_id}, task_id=task_id)
         subs = th._load_subagent_rows_by_parent_task_id(parent_id)
         assert [s["task_id"] for s in subs] == [task_id]
+
+    @pytest.mark.parametrize(("number", "kept"), [
+        (1e300, 0), (-1e300, 0), (8_640_000_000_000_001, 0),
+        (8_640_000_000_000_000, 8_640_000_000_000_000),
+    ])
+    def test_a_number_past_the_date_range_is_unset(self, number: float, kept: int) -> None:
+        """Past ``chat_summary._MAX_EPOCH_MS`` a time or count is 0 to every reader and writer."""
+        task_id, _ = th._add_task("t")
+        db = th._get_db()
+        # A foreign tool's row: SQLite keeps 1e300 as a REAL in an INTEGER column.
+        db.execute("UPDATE task_history SET end_ts = ?1, tokens = ?1, steps = ?1", (number,))
+        shown = json.loads(str(th._load_history(limit=1)[0]["extra"]))
+        read = (th.task_end_ms(task_id), shown["endTs"], shown["tokens"], shown["steps"])
+        assert read == (kept,) * 4
+        # Unfinished to the usage walk too, as to the chat summary and the digest.
+        assert th._add_late_task_usage(task_id, 0, 0.0, 0)[1] == ("" if kept else task_id)
+        # The writers store the number the same way instead of raising OverflowError.
+        extra: dict[str, object] = dict.fromkeys(("startTs", "endTs", "tokens", "steps"), number)
+        th._add_task("u", extra=extra)
+        assert th._save_task_extra(extra, task_id=task_id)
+        stored = db.execute("SELECT start_ts, end_ts, tokens, steps FROM task_history").fetchall()
+        assert [tuple(row) for row in stored] == [(kept,) * 4] * 2
 
 
 class TestShutdownPersist(_TempDbTestBase):

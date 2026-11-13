@@ -15,8 +15,14 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, ofType} = require('./simplify2_harness');
-const {makeRow, selectFilter} = require('./history_helpers');
+const {ofType} = require('./simplify2_harness');
+const {
+  makeRow,
+  selectFilter,
+  openChatsPage,
+  sendHistory,
+  historyRows,
+} = require('./history_helpers');
 
 function session(i, tags) {
   return makeRow({
@@ -33,20 +39,13 @@ function session(i, tags) {
 }
 
 function bootFullPage() {
-  const {win, posted} = makePage({bodyClass: 'remote-chat'});
-  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
-  win.document.getElementById('sidebar').classList.add('open');
+  const {win, posted} = openChatsPage();
   // A full page: the list believes more rows exist.
   const page = [];
   for (let i = 1; i <= 50; i++)
     page.push(session(i, i % 2 ? 'work,coding' : 'personal'));
-  const first = ofType(posted, 'getHistory').pop();
-  send(win, {
-    type: 'history',
-    sessions: page,
-    offset: 0,
-    generation: first ? first.generation : 0,
-  });
+  sendHistory(win, posted, page);
+  assert.strictEqual(historyRows(win).length, 50, 'the full page is listed');
   // Laid out, and taller than what is left once half the rows hide.
   const list = win.document.getElementById('history-list');
   Object.defineProperty(list, 'scrollHeight', {value: 100, configurable: true});

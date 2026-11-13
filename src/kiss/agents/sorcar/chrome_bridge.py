@@ -11,10 +11,15 @@ Protocol (JSON text frames), a mutual challenge-response handshake:
 
 - server -> extension: ``{"type": "challenge", "nonce": "<hex>"}`` at
   connect.
-- extension -> server: ``{"type": "hello", "proof": sha256(token+":"+nonce)}``;
+- extension -> server: ``{"type": "hello", "proof": sha256(token+":"+nonce),
+  "version": "<the version of the manifest Chrome loaded>"}``;
   a wrong proof gets ``hello_error`` and a 4001 close.  The raw token
   never crosses the wire, so a rogue local process that occupies the
-  port learns nothing reusable (each nonce is single-use).
+  port learns nothing reusable (each nonce is single-use).  A version
+  other than the installed one (:func:`extension_version`) gets
+  ``hello_error`` and a 4004 close: Chrome runs a copy of the extension
+  it loaded before the installed one was written, and that copy, so
+  refused, reloads the extension (see :func:`install_extension`).
 - server -> extension: ``{"type": "hello_ok", "proof": sha256(nonce+":"+token)}``;
   the extension verifies this before executing any command, so the rogue
   listener cannot drive the browser either.
@@ -51,6 +56,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import secrets
 import socket
 import threading
@@ -64,6 +70,7 @@ from typing import Any
 from websockets.sync.client import connect
 from websockets.sync.server import Server, ServerConnection, serve
 
+from kiss.core import tool_interrupt
 from kiss.core.brand import BRAND, PRODUCT_NAME, render_brand
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
@@ -77,11 +84,11 @@ MAX_MESSAGE_BYTES = 64 * 1024 * 1024  # screenshots ride this socket as data URL
 CONFIG_FILE_NAME = "bridge-config.json"
 
 _EXTENSION_SOURCE = Path(__file__).resolve().parent / "chrome_extension"
-_EXTENSION_FILES = ("manifest.json", "background.js")
 _PROBE_TIMEOUT_SECS = 1.0
 _CONFIG_LOCK_TIMEOUT_SECS = 5.0
 _REPLY_MARGIN_SECS = 1.0  # the extension's deadline runs at most this much short of ours
 _PONG_TIMEOUT_SECS = 5.0  # a pong not written by then: the extension stopped reading
+_SERVER_EXIT_SECS = 5.0  # a shut-down server's thread leaves its accept loop within moments
 
 
 def extension_dir() -> Path:
@@ -99,45 +106,94 @@ def extension_dir() -> Path:
     return kiss_home() / "chrome_extension"
 
 
-def bundled_extension_file(name: str, brand: dict[str, str] = BRAND) -> bytes:
-    """Return the bundled extension file *name* as it is installed.
+def bundled_extension(brand: dict[str, str] = BRAND) -> dict[str, bytes]:
+    """Return the extension's files as they are installed, by name.
 
     The manifest names the extension after the brand (``{{PRODUCT_NAME}}
     Bridge``), so a white-label install never shows the stock product
-    name in ``chrome://extensions``; the other files are copied verbatim.
+    name in ``chrome://extensions``, and its ``version`` names the build:
+    three numbers taken from a hash of both bundled files, so that any
+    change to either is a new version.  The worker is the bundled one
+    under a name of that build's own, ``background-<version>.js``, which
+    the manifest points at (see :func:`install_extension`).
 
     Args:
-        name: One of ``_EXTENSION_FILES``.
         brand: The brand strings (the product's by default).
 
     Returns:
-        The file content, brand placeholders filled in for the manifest.
+        The content of every file :func:`install_extension` writes, in
+        the order it writes them: the worker, then the manifest.
     """
-    data = (_EXTENSION_SOURCE / name).read_bytes()
-    if name != "manifest.json":
-        return data
+    worker = (_EXTENSION_SOURCE / "background.js").read_bytes()
     # The placeholders sit inside JSON strings: escape the brand values
     # (a quote or backslash in a product name must not break the file).
     escaped = {key: json.dumps(value)[1:-1] for key, value in brand.items()}
-    return render_brand(data.decode("utf-8"), escaped).encode("utf-8")
+    source = (_EXTENSION_SOURCE / "manifest.json").read_text(encoding="utf-8")
+    manifest = json.loads(render_brand(source, escaped))
+    digest = hashlib.sha256(worker + json.dumps(manifest).encode("utf-8")).digest()
+    # Chrome takes up to four numbers, each at most 65535.
+    build = (int.from_bytes(digest[at : at + 2], "big") for at in (0, 2, 4))
+    manifest["version"] = "1." + ".".join(map(str, build))
+    worker_name = f"background-{manifest['version']}.js"
+    manifest["background"]["service_worker"] = worker_name
+    text = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+    return {worker_name: worker, "manifest.json": text.encode("utf-8")}
+
+
+def extension_version(brand: dict[str, str] = BRAND) -> str:
+    """Return the version of the manifest :func:`install_extension` writes.
+
+    The extension names it in its hello: a bridge takes only the
+    extension Chrome loaded from the files that bridge installed.
+
+    Args:
+        brand: The brand strings (the product's by default).
+
+    Returns:
+        The version, ``1.<n>.<n>.<n>``.
+    """
+    return str(json.loads(bundled_extension(brand)["manifest.json"])["version"])
 
 
 def install_extension() -> Path:
-    """Copy the bundled extension files into :func:`extension_dir`.
+    """Install the bundled extension into :func:`extension_dir`.
 
-    Files that already match the bundled copy are left untouched; a
-    changed ``background.js`` is replaced (atomically: Chrome loads the
-    file at every service-worker start and must never see a truncated
-    copy), which Chrome picks up at the next service-worker start (a
-    reload from ``chrome://extensions`` picks up a manifest change).
+    Chrome may load the extension at any moment, and it reads a worker in
+    two steps, its size and about a millisecond later its bytes: a worker
+    replaced in between by a longer one is cut off at the old size, and
+    a worker that does not parse is gone until the extension is reloaded.
+    So no worker file is ever replaced.  Every build's worker has a file
+    of its own, written before the manifest that names it, and the
+    manifest, which Chrome reads in one piece, is replaced atomically:
+    whichever manifest Chrome reads, the worker it names is there, whole.
+
+    Nor is a worker file removed: those of other builds (the
+    ``background.js`` of an install from before this layout among them)
+    stay.  A Chrome that loaded a build's manifest starts the worker it
+    names from disk whenever the extension is switched on, for as long
+    as that Chrome runs: without the file the extension has no worker
+    ("Service worker registration failed") until it is reloaded by hand;
+    with it the worker runs, is refused by the bridge and reloads the
+    extension.  No install can tell whether such a Chrome is left, or
+    whether another process is installing that build right now.  A
+    worker is some 50 KB, and one is added only when the extension's
+    code changes.
+
+    Chrome runs the worker it loaded until the extension is reloaded or,
+    the installed version being another by then, until Chrome starts
+    again.  The worker reloads the extension itself when a bridge refuses
+    its version (``refused`` in ``background.js``).  A worker from before
+    that answer keeps running until the user reloads the extension on
+    ``chrome://extensions``; the bridge refuses it and says so
+    (:meth:`ChromeBridge.call`).
 
     Returns:
         The extension directory.
     """
     target = extension_dir()
     target.mkdir(parents=True, exist_ok=True)
-    for name in _EXTENSION_FILES:
-        data = bundled_extension_file(name)
+    files = bundled_extension()
+    for name, data in files.items():
         dest = target / name
         if not dest.exists() or dest.read_bytes() != data:
             atomic_write_text(dest, data.decode("utf-8"), create_mode=0o644)
@@ -263,11 +319,14 @@ class ChromeBridge:
         self._ids = count(1)
         self._conn: _Connection | None = None
         self._connected = threading.Event()
+        self._extension_version = extension_version()
+        self._outdated = False  # the last extension to say hello was an older copy
         # Held while _conn and _connected change together: a drop that checks
         # "is this still the live connection?" must not clear a newer one.
         # Reentrant: task threads take it through locked_call (see _Connection).
         self._conn_lock = threading.RLock()
         self._server: Server | None = None
+        self._server_thread: threading.Thread | None = None  # serves _server
 
     @property
     def extension_connected(self) -> bool:
@@ -291,10 +350,9 @@ class ChromeBridge:
         into :func:`extension_dir` and the bound port and token written
         next to them -- unless the file already names a bridge that still
         answers (another KISS process, normally the daemon) and *takeover*
-        is False: then the socket is closed again and the caller is told
-        which process owns the extension, since Chrome keeps one
-        connection and a rewritten file would only strand it once that
-        process exits.
+        is False: then nothing is bound and the caller is told which
+        process owns the extension, since Chrome keeps one connection and
+        a rewritten file would only strand it once that process exits.
 
         Args:
             takeover: Publish this server even over a live one (the daemon,
@@ -307,6 +365,28 @@ class ChromeBridge:
                 the config file.
         """
         try:
+            if self._write_config:
+                self._publish(takeover)
+            else:
+                self._serve(self._bind())
+            logger.info("chrome bridge listening on 127.0.0.1:%d", self._port)
+        except BaseException:
+            # A ChromeBridgeError (a socket bound by then has nobody to serve
+            # it; a file written by then, when the thread could not start,
+            # names it), or a Stop (an injected KeyboardInterrupt) landing
+            # anywhere in here, after the config was written and the server
+            # thread started included: a bridge its caller never got would
+            # otherwise keep serving and own the file.
+            self.stop()
+            raise
+
+    def _bind(self) -> Server:
+        """Bind the loopback socket; connections queue on it until :meth:`_serve`.
+
+        Raises:
+            ChromeBridgeError: the socket cannot be bound.
+        """
+        try:
             server = serve(
                 self._handle,
                 "127.0.0.1",
@@ -317,41 +397,50 @@ class ChromeBridge:
             raise ChromeBridgeError(f"cannot listen on 127.0.0.1:{self._port}: {e}") from e
         self._server = server
         self._port = server.socket.getsockname()[1]
+        return server
+
+    def _serve(self, server: Server) -> None:
+        """Serve the bound socket of *server* in a thread.
+
+        Raises:
+            ChromeBridgeError: the thread cannot start (thread exhaustion).
+        """
+        # Recorded before its start: a Stop landing in the start must not
+        # leave a serving thread that stop() does not wait for.
+        self._server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         try:
-            if self._write_config:
-                self._publish(server, takeover)
-            else:
-                _serve(server)
-            logger.info("chrome bridge listening on 127.0.0.1:%d", self._port)
-        except BaseException:
-            # A ChromeBridgeError (the socket nobody would serve; nothing was
-            # published), or a Stop (an injected KeyboardInterrupt) landing
-            # anywhere in here, after the server thread started and the config
-            # was written included: a bridge its caller never got would
-            # otherwise keep serving and own the file.
-            self.stop()
-            raise
+            self._server_thread.start()
+        except RuntimeError as e:
+            raise ChromeBridgeError(f"cannot start the bridge server thread: {e}") from e
 
-    def _publish(self, server: Server, takeover: bool) -> None:
-        """Serve *server* and write bridge-config.json, unless a live bridge owns the file.
+    def _publish(self, takeover: bool) -> None:
+        """Bind, write bridge-config.json and serve, unless a live bridge owns the file.
 
-        The probe for another process's bridge, the server thread's start
-        and the write are one critical section under the config lock: two
+        The probe for another process's bridge, the write and the server
+        thread's start are one critical section under the config lock: two
         processes starting together would otherwise both find no live
         bridge and both publish, and the one whose file lost would serve a
-        port no extension ever reads.  The thread starts before the write,
-        so the next starter's probe (which needs this server's challenge
-        frame) finds it answering.  The staged copy of the file has mode
-        600 from the start (the token must never sit in a world-readable
-        file), and the lock keeps a predecessor's
-        :func:`_remove_config_if_owned` from unlinking the file between
-        its ownership check and its unlink.
+        port no extension ever reads.  The socket is bound after the
+        probe: a start that defers to a live bridge (every
+        ``use_my_chrome`` call of a CLI run beside the daemon) creates no
+        server at all.  The thread starts after the write, still under
+        the lock: the next starter's probe (which needs this server's
+        challenge frame) waits for the lock and finds it answering, the
+        extension's connection queues on the bound socket meanwhile, and
+        a file that cannot be written starts no serving loop (websockets
+        leaves the loop's selector, a descriptor, to the garbage
+        collector).  The
+        staged copy of the file has mode 600 from the start (the token
+        must never sit in a world-readable file), and the lock keeps a
+        predecessor's :func:`_remove_config_if_owned` from unlinking the
+        file between its ownership check and its unlink.
 
         Raises:
             ChromeBridgeError: another process's bridge owns the file and
                 *takeover* is False; the extension files or the config
                 file cannot be written; the lock stays held past
-                :data:`_CONFIG_LOCK_TIMEOUT_SECS`; the thread cannot start.
+                :data:`_CONFIG_LOCK_TIMEOUT_SECS`; the socket cannot be
+                bound; the thread cannot start.
         """
         config = extension_dir() / CONFIG_FILE_NAME
         try:
@@ -365,10 +454,11 @@ class ChromeBridge:
                             "connected to); run this task through that process"
                         )
                 install_extension()
-                _serve(server)
+                server = self._bind()
                 atomic_write_text(
                     config, json.dumps({"port": self._port, "token": self._token}), mode=0o600
                 )
+                self._serve(server)
         except OSError as e:  # an unwritable KISS_HOME, or the config lock stuck
             raise ChromeBridgeError(f"cannot publish the bridge in {extension_dir()}: {e}") from e
 
@@ -379,12 +469,7 @@ class ChromeBridge:
         extension reports a missing bridge instead of retrying a dead port
         (a newer bridge's file, recognised by its token, is left alone).
         """
-        if self._server is not None:
-            self._server.shutdown()
-            # Forgotten under _conn_lock: a handshake still in flight (the
-            # listener's close does not end it) checks there, before
-            # publishing its connection, that this bridge still runs.
-            locked_call(self._conn_lock, self._forget_server)
+        server, thread = locked_call(self._conn_lock, self._close_listener)
         conn = self._conn  # one read: the handler thread may drop it meanwhile
         if conn is not None:
             self._drop_connection(conn, "bridge server stopped")
@@ -399,9 +484,29 @@ class ChromeBridge:
                 logger.debug("Exception caught", exc_info=True)
         if self._write_config:
             _remove_config_if_owned(extension_dir() / CONFIG_FILE_NAME, self._token)
+        if server is not None:
+            # Last, and holding no lock: it can wait for the handlers of the
+            # connections just closed, and nothing above may wait for it.
+            _release_server(server, thread)
 
-    def _forget_server(self) -> None:
-        self._server = None
+    def _close_listener(self) -> tuple[Server | None, threading.Thread | None]:
+        """Stop listening and hand the server and its thread to one caller, under ``_conn_lock``.
+
+        Under that lock a handshake still in flight (the listener's close
+        does not end it) checks, before publishing its connection, that
+        this bridge still runs.  Only the ``stop()`` that gets the server
+        releases it, so two stops at once (the daemon's shutdown and the
+        exit hook) never close its descriptors twice.  Nothing here
+        waits: ``Server.shutdown()`` is that caller's, once the lock is
+        free (:func:`_release_server`).  The server is forgotten after
+        the close: a Stop landing in between leaves it to the next
+        ``stop()``, which closes it again (harmless).
+        """
+        server, thread = self._server, self._server_thread
+        if server is not None:
+            server.socket.close()
+            self._server = self._server_thread = None
+        return server, thread
 
     def wait_for_extension(self, timeout: float) -> bool:
         """Block until an extension is connected or *timeout* seconds pass.
@@ -409,14 +514,19 @@ class ChromeBridge:
         A bridge started lazily by the first tool call is found by the
         extension on its next reconnect attempt (a few seconds); waiting
         here turns that first call's certain failure into a result.
+        Waited in short slices, as the reply is (:func:`_result_before`):
+        a task's Stop is not delivered inside one long wait.
 
         Args:
             timeout: Maximum seconds to wait.
 
         Returns:
             True when an extension is connected.
+
+        Raises:
+            ToolCallInterrupted: When the calling tool call was stopped.
         """
-        return self._connected.wait(timeout)
+        return tool_interrupt.wait_interruptible(self._connected, timeout)
 
     def call(self, cmd: str, args: dict[str, Any] | None = None, timeout: float = 30.0) -> Any:
         """Send a command to the extension and wait for its result.
@@ -435,12 +545,22 @@ class ChromeBridge:
                 times out, or the extension reports an error.
         """
         conn = self._conn
+        if conn is None and self._outdated:
+            raise ChromeBridgeError(
+                f"Chrome loaded its copy of the {PRODUCT_NAME} Bridge extension before the one "
+                f"in {extension_dir()} was installed, and it is not running the new one. Open "
+                "chrome://extensions, switch on Developer mode if it is off (Chrome runs the "
+                "extension only with it), and click the reload button (the round arrow) on "
+                "the extension's card. With Developer mode on, later updates load by "
+                "themselves."
+            )
         if conn is None:
             raise ChromeBridgeError(
                 f"the {PRODUCT_NAME} Bridge extension is not connected. "
                 f"Install it once: open chrome://extensions, enable Developer mode, "
                 f"click 'Load unpacked' and choose {extension_dir()}. "
-                "If it is installed, click its toolbar icon to wake it."
+                "If it is installed, keep Developer mode on (Chrome switches the extension "
+                "off without it) and click its toolbar icon to wake it."
             )
         msg_id = next(self._ids)
         fut: Future = Future()
@@ -517,15 +637,18 @@ class ChromeBridge:
         budget passes mid-write (``shutdown`` takes none of websockets'
         mutexes and fails the blocked write), and the connection is then
         dropped like any other failed send.  The watchdog is bound to
-        *conn*'s socket and cancelled once the write returned, so it never
-        cuts a later, healthy connection.
+        *conn*'s socket and cuts nothing once the write has returned:
+        ``cancel()`` does not stop a timer whose thread is already in
+        its body, so the cut and the end of the write both go through
+        the ``settled`` lock, which the write keeps once it has it.
 
         Raises:
             ChromeBridgeError: the frame could not be written (*what*
                 names it); the connection is dropped.
         """
         cut = threading.Event()
-        watchdog = threading.Timer(budget, _cut_socket, (conn.ws.socket, cut))
+        settled = threading.Lock()
+        watchdog = threading.Timer(budget, _cut_socket, (conn.ws.socket, cut, settled))
         try:
             watchdog.start()
             conn.ws.send(frame)
@@ -540,6 +663,7 @@ class ChromeBridge:
             raise ChromeBridgeError(f"lost the extension connection: {e}") from e
         finally:
             watchdog.cancel()
+            settled.acquire()  # waits out a cut under way: two calls that never block
 
     # -- connection handling (server thread) -------------------------------
 
@@ -563,12 +687,26 @@ class ChromeBridge:
                 except Exception:  # noqa: BLE001 - peer already gone
                     logger.debug("Exception caught", exc_info=True)
                 return
+            if first.get("version") != self._extension_version:
+                # Chrome runs a copy of the extension it loaded before these
+                # files were installed, or another process's install replaced
+                # them: they are put back, and the worker, so refused, finds
+                # another version on disk than its own and reloads the
+                # extension.  A worker from before that answer existed runs
+                # on: the user reloads the extension once.
+                self._outdated = True
+                if self._write_config:
+                    install_extension()
+                ws.send(json.dumps({"type": "hello_error", "error": "outdated extension"}))
+                ws.close(4004, "outdated extension")
+                return
             ws.send(json.dumps({"type": "hello_ok", "proof": _proof(nonce, self._token)}))
             with self._conn_lock:
                 if self._server is None:  # stopped while this handshake was in flight
                     return  # closed on return: the extension looks for a live bridge
                 old, self._conn = self._conn, conn
                 self._connected.set()
+                self._outdated = False
             if old is not None:  # a second Chrome profile connected: keep the newest
                 # Closed off this thread: the close waits up to websockets'
                 # close_timeout (10 s) for the old peer's close frame, and a
@@ -657,8 +795,8 @@ def _close_replaced(ws: ServerConnection) -> None:
         logger.debug("Exception caught", exc_info=True)
 
 
-def _cut_socket(sock: socket.socket, cut: threading.Event) -> None:
-    """Watchdog body of :meth:`ChromeBridge._send`: fail a write blocked on a full buffer.
+def _cut_socket(sock: socket.socket, cut: threading.Event, settled: threading.Lock) -> None:
+    """Watchdog body of :meth:`ChromeBridge._write`: fail a write blocked on a full buffer.
 
     ``shutdown`` wakes the thread blocked in ``sendall`` with an error
     (and the connection's reader with end-of-file) without taking any
@@ -668,9 +806,16 @@ def _cut_socket(sock: socket.socket, cut: threading.Event) -> None:
         sock: The connection's socket.
         cut: Set before the shutdown, so the sender can tell the deadline
             from any other write failure.
+        settled: Held for the cut; kept by the write once it has
+            returned, and nothing is cut then.
     """
-    cut.set()
-    _shutdown_socket(sock)
+    if not settled.acquire(blocking=False):
+        return
+    try:
+        cut.set()
+        _shutdown_socket(sock)
+    finally:
+        settled.release()
 
 
 def _shutdown_socket(sock: socket.socket) -> None:
@@ -701,16 +846,45 @@ def _config_lock(config: Path) -> AbstractContextManager[bool]:
     return exclusive_file_lock(lock, timeout=_CONFIG_LOCK_TIMEOUT_SECS)
 
 
-def _serve(server: Server) -> None:
-    """Start the thread that serves *server*'s bound socket.
+def _release_server(server: Server, thread: threading.Thread | None) -> None:
+    """Shut down *server*, whose listening socket is closed, and close what it leaves open.
 
-    Raises:
-        ChromeBridgeError: the thread cannot start (thread exhaustion).
+    Called once per server (:meth:`ChromeBridge._close_listener`), holding
+    no lock.  ``Server.shutdown()`` wakes the serving loop; from
+    websockets 17 on it also waits for that loop and for every
+    connection handler to end.  A handler takes the bridge's lock before
+    it ends, and a loop that never started (the publication failed after
+    the bind, or the thread could not start) would be waited for for
+    good: such a server is not shut down, its closed socket serves
+    nobody.
+
+    What stays open is the loop's wake-up channel: a pipe that websockets
+    15 never closes (two descriptors per server, and a start that fails
+    after the bind makes one server per ``use_my_chrome`` call), a socket
+    pair that websockets 17 closes in its shutdown and from its loop, so
+    not for a server that had neither.  It is closed once *thread* has
+    left its selector, which watches one end: closed under it, the thread
+    would sleep for good; one still serving after
+    :data:`_SERVER_EXIT_SECS` keeps it.
     """
-    try:
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-    except RuntimeError as e:
-        raise ChromeBridgeError(f"cannot start the bridge server thread: {e}") from e
+    if thread is not None and thread.ident is not None:  # its loop started
+        try:
+            server.shutdown()
+        except RuntimeError:
+            # websockets 17 at interpreter exit: the thread pool it closes
+            # other open connections on (a handshake in flight) is refused.
+            # They end with the process.
+            logger.debug("Exception caught", exc_info=True)
+        thread.join(_SERVER_EXIT_SECS)
+        if thread.is_alive():  # pragma: no cover - the closed socket ends its accept loop
+            logger.warning("the chrome bridge server thread did not exit; its pipe stays open")
+            return
+    for name in ("shutdown_watcher", "shutdown_notifier"):  # absent on Windows
+        end = getattr(server, name, None)
+        if isinstance(end, int):
+            os.close(end)
+        elif end is not None:
+            end.close()
 
 
 def _remove_config_if_owned(config: Path, token: str) -> None:

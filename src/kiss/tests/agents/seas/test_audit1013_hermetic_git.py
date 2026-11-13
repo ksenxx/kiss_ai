@@ -22,8 +22,8 @@ from typing import Any
 
 import pytest
 
-from kiss.core.processes import start_process_group
-from kiss.tests.agents.seas.conftest import git, seed_repo
+from kiss.core.processes import run_process_group, start_process_group
+from kiss.tests.agents.seas.conftest import git, hermetic_git_env, seed_repo
 from kiss.tests.conftest import posix_only
 
 
@@ -32,14 +32,14 @@ def test_seed_repo_ignores_global_hooks_and_signing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The seeded repository is built with the helper's hermetic git, so a global
-    ``core.hooksPath`` whose pre-commit hook waits for ever, a ``commit.gpgsign``, an
-    ``init.defaultBranch`` and an identity exported by the launching shell never reach
-    it; each call keeps the helper's 60 s cap."""
+    ``core.hooksPath`` whose pre-commit hook waits for ever, the same hook in an exported
+    ``GIT_TEMPLATE_DIR``, a ``commit.gpgsign``, an ``init.defaultBranch`` and an identity
+    exported by the launching shell never reach it; each call keeps the helper's 60 s cap."""
     monkeypatch.setenv("GIT_AUTHOR_NAME", "Inherited Author")
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "inherited@example.test")
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "inherited@example.test")
-    hooks = tmp_path / "hooks"
-    hooks.mkdir()
+    hooks = tmp_path / "template" / "hooks"
+    hooks.mkdir(parents=True)
     hook = hooks / "pre-commit"
     hook.write_text("#!/bin/sh\nexec sleep 3600\n", encoding="utf-8")
     hook.chmod(0o755)
@@ -50,6 +50,7 @@ def test_seed_repo_ignores_global_hooks_and_signing(
         encoding="utf-8",
     )
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+    monkeypatch.setenv("GIT_TEMPLATE_DIR", str(hooks.parent))
     repo = tmp_path / "repo"
     seed_repo(repo)
     assert git(repo, "branch", "--show-current") == "main"
@@ -61,7 +62,10 @@ def test_seed_repo_ignores_global_hooks_and_signing(
 def test_global_git_config_does_not_reach_the_test_repositories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A global ``commit.gpgsign`` (and identity) is invisible to the helper's commits."""
+    """A global ``commit.gpgsign`` (and identity) is invisible to the helper's commits, and so
+    is what the launching shell exported for git: the same signing as command-scope config,
+    which outranks the repository's own, and a ``GIT_DIR`` that selects another repository.
+    :func:`hermetic_git_env` hides both from the SEA's git; the session's search ceiling stays."""
     gitconfig = tmp_path / "gitconfig"
     gitconfig.write_text(
         "[user]\n\temail = global@example.com\n\tname = Global\n"
@@ -69,6 +73,12 @@ def test_global_git_config_does_not_reach_the_test_repositories(
         encoding="utf-8",
     )
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "commit.gpgsign")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", "gpg.program")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", "/bin/false")
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "elsewhere"))
     monkeypatch.delenv("GIT_AUTHOR_EMAIL", raising=False)
     monkeypatch.delenv("GIT_COMMITTER_EMAIL", raising=False)
     repo = tmp_path / "repo"
@@ -89,6 +99,21 @@ def test_global_git_config_does_not_reach_the_test_repositories(
     # Compare the epoch seconds: newer git (2.54 on macOS, 2.56 on Windows) prints
     # the UTC offset of ``%cI`` as ``Z`` where git 2.43 prints ``+00:00``.
     assert git(repo, "log", "-1", "--format=%ct") == "1893456000"
+    # A search ceiling is no override: the folder under it is in no repository.
+    inner = repo / "inner"
+    inner.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(repo), prepend=os.pathsep)
+    assert git(inner, "rev-parse", "--show-toplevel", check=False) == ""
+    # The same for git run with the process environment, as the SEA under test runs it.
+    before = dict(os.environ)
+    with pytest.MonkeyPatch.context() as env:
+        hermetic_git_env(env)
+        commit = ["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "sea"]
+        run_process_group(commit, 60).check_returncode()
+        assert run_process_group(["git", "-C", str(inner), "rev-parse"], 60).returncode == 128
+    assert git(repo, "log", "-1", "--format=%s %ae") == "sea t@t"
+    assert dict(os.environ) == before
+    assert not (tmp_path / "elsewhere").exists()
 
 
 def _dead(pid: int) -> bool:

@@ -65,7 +65,7 @@ class _LiveServer:
     """
 
     def __init__(self, tmp_path: Path, port: int) -> None:
-        from kiss.server.web_server import _generate_self_signed_cert
+        from kiss.tests.local_ws import _generate_self_signed_cert
 
         self.tmp_path = tmp_path
         self.port = port
@@ -84,6 +84,7 @@ class _LiveServer:
         # up on it.  One-shot: the request clears it, so the reload the
         # cached page then performs is answered at once.
         self.stall_page = threading.Event()
+        self.resume_page = threading.Event()  # also awaited by the stalled request; stop() sets it
 
     PAGE_STALL_S = 7.0
 
@@ -101,6 +102,7 @@ class _LiveServer:
                 ).path in ("", "/"):
                     live.stall_page.clear()
                     await asyncio.sleep(live.PAGE_STALL_S)
+                    await asyncio.to_thread(live.resume_page.wait)
                 return await super()._process_request(connection, request)
 
         async def scenario() -> None:
@@ -134,6 +136,7 @@ class _LiveServer:
     def start(self) -> None:
         """Boot the server and block until it accepts connections."""
         self._done.clear()
+        self.resume_page.clear()
         ready = threading.Event()
         self._thread = threading.Thread(
             target=self._run, args=(ready,), daemon=True
@@ -155,6 +158,7 @@ class _LiveServer:
     def stop(self) -> None:
         """Shut the server down and block until its port is released."""
         self._done.set()
+        self.resume_page.set()
         self.server = None
         self.loop = None
         if self._thread is not None:
@@ -260,6 +264,7 @@ _UI_STATE_JS = r"""
     overlayRect: overlay ? overlay.getBoundingClientRect().toJSON() : null,
     appShown: !!app && app.style.display !== 'none',
     msg: msg ? msg.textContent : null,
+    firstMsg: window.__banner_first_msg || null,
     input: inp ? inp.value : null,
     controlled: !!(navigator.serviceWorker && navigator.serviceWorker.controller),
     marker: window.__offline_shell_marker || null,
@@ -340,6 +345,13 @@ _RELOADED_FROM_SERVER_JS = (
     " && document.getElementById('app')"
     " && document.getElementById('app').style.display === ''"
 )
+
+_RECORD_BANNER_MSG_JS = r"""
+new MutationObserver(() => {
+  const msg = document.querySelector('.kiss-server-loading--banner #kiss-server-loading-msg');
+  if (msg) window.__banner_first_msg ||= msg.textContent;
+}).observe(document.getElementById('kiss-server-loading'), {attributeFilter: ['class']})
+"""
 
 
 def _wait_for(page: Page, predicate: str, timeout_ms: int = 30_000) -> None:
@@ -426,6 +438,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
 
             # 2. Outage: the socket closes, the app stays visible under
             #    the banner, and sending is held back.
+            page.evaluate(_RECORD_BANNER_MSG_JS)  # the wording changes 8 s into an outage
             live_server.stop()
             _wait_for(
                 page,
@@ -437,7 +450,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
             during = page.evaluate(_UI_STATE_JS)
             assert during["appShown"], during
             assert during["overlayShown"] and during["banner"], during
-            assert during["msg"] == f"Reconnecting to {PRODUCT_NAME} Server ...", during
+            assert during["firstMsg"] == f"Reconnecting to {PRODUCT_NAME} Server ...", during
             assert during["input"] == "typed while offline", during
             assert during["marker"] == "before-outage", during
             rect = during["overlayRect"]
@@ -532,9 +545,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
             # wrong navigation whenever the cached page's socket
             # authenticated before its parser finished: the page then
             # reloads itself (below) before DCL, ``goto`` follows the
-            # reload, and Chromium queues that second request for the
-            # same URL behind the still-stalled first one, so the
-            # measured time was the full stall.
+            # reload, and the clock stops on that one.
             response = page.goto(url, wait_until="commit")
             elapsed = time.monotonic() - started
             assert response is not None and response.from_service_worker
@@ -547,6 +558,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
             # server's copy.  That happens within milliseconds, so it is
             # observed through the reloaded page.
             _wait_for(page, _RELOADED_FROM_SERVER_JS, timeout_ms=60_000)
+            live_server.resume_page.set()  # not earlier: the reload must be answered first
             fresh = page.evaluate(_UI_STATE_JS)
             assert fresh["offlineReloaded"] is None, (
                 "a server-served page clears the reload-once guard; "

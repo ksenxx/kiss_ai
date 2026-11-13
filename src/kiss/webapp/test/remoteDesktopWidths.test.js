@@ -17,7 +17,7 @@ function sidebarW(win) {
 
 // MIN_W / DEFAULT_W (the 20vw fallback of --sidebar-default-w, 205px
 // at jsdom's 1024px window) come from panel_resize_cases.  Drags,
-// clamping and persistence of the width are covered by
+// keyboard steps, clamping and persistence of the width are covered by
 // remoteSidebarResize.test.js.
 
 // The CSS checks read the computed styles of live elements.  jsdom
@@ -235,26 +235,10 @@ function testDefaultSeededFromOneFifthOfTheWindow() {
   console.log('PASS resize logic seeds its default from a fifth of the window');
 }
 
-function testKeyboardBaselineIsTheDefaultWidth() {
-  const {win} = makePage({desktopMatches: true});
-  const resizer = win.document.getElementById('sidebar-resizer');
-  resizer.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}),
-  );
-  assert.strictEqual(
-    sidebarW(win),
-    `${DEFAULT_W + 16}px`,
-    'ArrowRight must grow from the default width',
-  );
-  win.close();
-  console.log('PASS keyboard resize starts from the default width');
-}
-
 testCssSidebarWidthIsOneFifthOfTheWindow();
 testCssDockedRulesRequireAnOpenSidebar();
 testCssSettingsPanelStaysNarrow();
 testCssChatPanelsNotRestyled();
 testCssComposerFullWidth();
 testDefaultSeededFromOneFifthOfTheWindow();
-testKeyboardBaselineIsTheDefaultWidth();
 console.log('All remoteDesktopWidths tests passed.');

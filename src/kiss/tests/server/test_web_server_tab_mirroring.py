@@ -33,6 +33,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -44,13 +45,10 @@ from websockets.asyncio.client import ClientConnection, connect
 import kiss.agents.sorcar.persistence as th
 import kiss.core.user_config as vc
 from kiss.server import agent_state
-from kiss.server.tab_registry import TabRegistry
-from kiss.server.web_server import (
-    RemoteAccessServer,
-    _generate_self_signed_cert,
-)
+from kiss.server.tab_registry import OpenTabOutcome, TabRegistry
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import is_root, posix_only
-from kiss.tests.local_ws import open_local_connection
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 from kiss.tests.server.conftest import (
     find_free_port,
     no_verify_ssl,
@@ -70,6 +68,18 @@ def _tab_entry(snapshot: dict[str, Any], tab_id: str) -> dict[str, Any]:
         if t.get("tabId") == tab_id:
             return dict(t)
     raise AssertionError(f"tab {tab_id!r} not in snapshot {snapshot!r}")
+
+
+def _for_tab_t(event: dict[str, Any]) -> bool:
+    """Whether *event* is addressed to the tab ``tab-t``."""
+    return event.get("tabId") == "tab-t"
+
+
+def _tab_t_has_no_pin(snapshot: dict[str, Any]) -> bool:
+    """Whether a ``tabs_state`` lists ``tab-t`` with no task it is pinned to."""
+    return any(
+        t.get("tabId") == "tab-t" and not t.get("taskId") for t in snapshot.get("tabs", [])
+    )
 
 
 class TabMirroringBase(IsolatedAsyncioTestCase):
@@ -121,8 +131,7 @@ class TabMirroringBase(IsolatedAsyncioTestCase):
         await self._stop_server()
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         vc.CONFIG_DIR = self._orig_cfg_dir
         vc.CONFIG_PATH = self._orig_cfg_path
@@ -204,7 +213,7 @@ class TabMirroringBase(IsolatedAsyncioTestCase):
         task_id, chat_id = th._add_task(task)
         for ev in events:
             th._append_chat_event(ev, task_id=task_id)
-        th._save_task_result(task_id, "success: seeded")
+        th._save_task_result("success: seeded", task_id)
         return task_id, chat_id
 
 
@@ -499,6 +508,72 @@ class TestTabMirroring(TabMirroringBase):
             len(ids), len(set(ids)), f"duplicate tab ids in registry: {ids}",
         )
 
+    async def test_neighbour_task_answers_only_the_surface_that_asked(self) -> None:
+        """(h) Reading back through a chat grows one surface's thread only.
+
+        Two surfaces show tab T on the chat's newest task B.  Surface A
+        asks for the task before B.  The answer names the task it is
+        adjacent to and reaches A alone: spliced into the other
+        surface's transcript too, it would sit where THAT thread ends,
+        which is another task as soon as the two have read to different
+        depths, and the tasks in between could never be loaded there.
+        """
+        task_a, chat_id = self._seed_chat(
+            "Task A", [{"type": "prompt", "text": "prompt A"}],
+        )
+        task_b, _ = th._add_task("Task B", chat_id=chat_id)
+        th._append_chat_event(
+            {"type": "prompt", "text": "prompt B"}, task_id=task_b,
+        )
+        th._save_task_result("success: seeded", task_b)
+
+        def _on_tab(ev: dict[str, Any]) -> bool:
+            return bool(ev.get("tabId") == "tab-t")
+
+        ws_a = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._send(ws_a, {
+            "type": "openTab", "tabId": "tab-t", "title": "new chat",
+        })
+        await self._send(ws_a, {
+            "type": "resumeSession", "chatId": chat_id,
+            "taskId": task_b, "tabId": "tab-t",
+        })
+        self.assertIsNotNone(
+            await self._wait_for_event(ws_a, "task_events", pred=_on_tab),
+        )
+        ws_b = await self._connect_ok()
+        await self._ready(ws_b, tab_id="tab-t")
+        self.assertIsNotNone(
+            await self._wait_for_event(ws_b, "task_events", pred=_on_tab),
+        )
+
+        await self._send(ws_a, {
+            "type": "getAdjacentTask", "tabId": "tab-t",
+            "taskId": task_b, "direction": "prev",
+        })
+        asked = await self._wait_for_event(ws_a, "adjacent_task_events")
+        assert asked is not None, "the surface that asked got no answer"
+        self.assertEqual(asked["task_id"], task_a)
+        self.assertEqual(
+            asked["adjacent_to"], task_b,
+            "the answer must name the task it is adjacent to",
+        )
+
+        # B asks for its own neighbour: the first answer on its socket
+        # is that one, not the task A scrolled to.
+        await self._send(ws_b, {
+            "type": "getAdjacentTask", "tabId": "tab-t",
+            "taskId": task_b, "direction": "next",
+        })
+        own = await self._wait_for_event(ws_b, "adjacent_task_events")
+        assert own is not None, "the second surface got no answer of its own"
+        self.assertEqual(
+            (own["direction"], own["task_id"], own["adjacent_to"]),
+            ("next", None, task_b),
+            "a neighbour one surface asked for reached another surface",
+        )
+
 
 class TestTabMirroringReviewFixes(TabMirroringBase):
     """Pins for the five defects found by the read-only review."""
@@ -518,7 +593,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
         th._append_chat_event(
             {"type": "prompt", "text": "new prompt B"}, task_id=task_b,
         )
-        th._save_task_result(task_b, "success: seeded")
+        th._save_task_result("success: seeded", task_b)
         self.assertEqual(chat_b, chat_id)
 
         ws_a = await self._connect_ok()
@@ -561,6 +636,72 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
             "ready replay silently switched the tab to the chat's "
             "latest task",
         )
+
+    async def test_ready_replay_of_a_running_chat_shows_the_running_task(self) -> None:
+        """A pin on an older task ends when the chat runs.
+
+        Tab T was resumed to the finished task A of chat C, and C runs
+        task B since.  A ``ready`` brings B's transcript with the
+        running state: sent A's, the page shows a finished task as
+        running and takes B's output into it.  That holds from B's
+        admission on, before its history row exists.  The pin goes on
+        every surface, so the tab is B's from then on; a click that
+        names A all the same (from a history row that does not say
+        yet that the chat runs) is answered with B's transcript too.
+        """
+        task_a, chat_id = self._seed_chat(
+            "Old task A", [{"type": "prompt", "text": "old prompt A"}],
+        )
+
+        ws_a = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._send(ws_a, {"type": "openTab", "tabId": "tab-t", "title": "new chat"})
+        await self._send(ws_a, {
+            "type": "resumeSession", "chatId": chat_id, "taskId": task_a, "tabId": "tab-t",
+        })
+        pinned = await self._wait_for_event(ws_a, "task_events", pred=_for_tab_t)
+        assert pinned is not None
+        self.assertEqual(pinned["task_id"], task_a, "an idle chat's pin is honoured")
+
+        release = threading.Event()
+        worker = threading.Thread(target=release.wait, daemon=True)
+        worker.start()
+        try:
+            # What a run in tab T registers on admission; its history
+            # row comes after its setup (``_cmd_run``).
+            run_b = agent_state.AgentState(
+                "provisional-key-of-b", tab_id="tab-t", chat_id=chat_id, server_owned=True,
+                task_thread=worker, is_task_active=True,
+            )
+            run_b.last_user_prompt = "prompt B"
+            agent_state.register(run_b)
+            ws_c = await self._connect_ok()
+            await self._ready(ws_c, tab_id="tab-t")
+            frames: list[dict[str, Any]] = []
+            while not frames or frames[-1].get("type") != "task_events":
+                frame = json.loads(await asyncio.wait_for(ws_c.recv(), timeout=8))
+                if _for_tab_t(frame):
+                    frames.append(frame)
+            unpinned = await self._wait_for_event(
+                ws_a, "tabs_state", pred=_tab_t_has_no_pin,
+            )
+            task_b, _ = th._add_task("prompt B", chat_id=chat_id)
+            agent_state.rekey(run_b, str(task_b))
+            await self._send(ws_a, {
+                "type": "resumeSession", "chatId": chat_id, "taskId": task_a, "tabId": "tab-t",
+            })
+            clicked = await self._wait_for_event(ws_a, "task_events", pred=_for_tab_t)
+        finally:
+            release.set()
+            worker.join(timeout=5)
+        self.assertEqual(frames[-1]["task"], "prompt B", "a running chat replayed a finished task")
+        self.assertTrue(
+            any(f.get("type") == "status" and f.get("running") for f in frames),
+            "the tab is not told its chat runs",
+        )
+        self.assertIsNotNone(unpinned, "the other surface still has the tab pinned to task A")
+        assert clicked is not None, "the click was not answered"
+        self.assertEqual(clicked["task_id"], task_b, "a click replayed a finished task")
 
     async def test_subagent_close_broadcasts_to_all_clients(self) -> None:
         """[2] Closing a sub-agent tab must mirror to every client.
@@ -1072,13 +1213,13 @@ class TestTabRegistryPersistenceFailure(unittest.TestCase):
         """Failed persists log ONE error, keep serving the in-memory
         state, and re-persist on the next mutation / flush."""
         reg = TabRegistry(self.path)
-        self.assertTrue(reg.open_tab("t1", "one"))
+        self.assertIs(reg.open_tab("t1", "one"), OpenTabOutcome.OPENED)
         self.assertIn("t1", self.path.read_text(encoding="utf-8"))
 
         os.chmod(self.reg_dir, 0o500)
         with self.assertLogs("kiss.server.tab_registry", level="ERROR") as cm:
-            self.assertTrue(reg.open_tab("t2", "two"))
-            self.assertTrue(reg.open_tab("t3", "three"))
+            self.assertIs(reg.open_tab("t2", "two"), OpenTabOutcome.OPENED)
+            self.assertIs(reg.open_tab("t3", "three"), OpenTabOutcome.OPENED)
         errors = [r for r in cm.records if r.levelname == "ERROR"]
         self.assertEqual(
             len(errors), 1,
@@ -1092,7 +1233,7 @@ class TestTabRegistryPersistenceFailure(unittest.TestCase):
 
         # Recovery via the next mutation once the dir is writable.
         os.chmod(self.reg_dir, 0o755)
-        self.assertTrue(reg.open_tab("t4", "four"))
+        self.assertIs(reg.open_tab("t4", "four"), OpenTabOutcome.OPENED)
         on_disk = self.path.read_text(encoding="utf-8")
         for tab in ("t1", "t2", "t3", "t4"):
             self.assertIn(tab, on_disk)
@@ -1100,9 +1241,9 @@ class TestTabRegistryPersistenceFailure(unittest.TestCase):
     def test_flush_persists_dirty_state(self) -> None:
         """``flush()`` re-persists state whose last mutation failed."""
         reg = TabRegistry(self.path)
-        self.assertTrue(reg.open_tab("t1", "one"))
+        self.assertIs(reg.open_tab("t1", "one"), OpenTabOutcome.OPENED)
         os.chmod(self.reg_dir, 0o500)
-        self.assertTrue(reg.open_tab("t2", "two"))
+        self.assertIs(reg.open_tab("t2", "two"), OpenTabOutcome.OPENED)
         os.chmod(self.reg_dir, 0o755)
         reg.flush()
         on_disk = self.path.read_text(encoding="utf-8")

@@ -28,6 +28,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     serve,
     tool_call_body,
+    tool_calls_body,
 )
 
 
@@ -238,3 +239,92 @@ def test_failed_session_summarizer_gets_the_digest_and_only_finish() -> None:
     assert "<p>from the digest</p>" in requests[4]["messages"][-1]["content"]
     assert "success: true" in result
     assert "<p>done</p>" in result
+
+
+def read_log(last_paragraph: str) -> str:
+    """Return a log that ends with a paragraph.
+
+    Args:
+        last_paragraph: The paragraph.
+    """
+    return "file contents:\n\n" + last_paragraph
+
+
+def check(passes: bool) -> str:
+    """Report a check.
+
+    Args:
+        passes: Whether it passed.
+    """
+    return "passed" if passes else "Error: exit 1"
+
+
+def test_a_result_that_quotes_the_next_results_header_keeps_its_boundary() -> None:
+    """A result holding ``\\n\\n[next tool]: `` neither hides nor invents a failing call.
+
+    The results of a turn are recorded as ``[name]: text`` paragraphs, so
+    a ``read_log`` result ending with a paragraph ``[check]: ...`` reads
+    like the start of the next result.  Told apart by text alone, turn 1
+    lost its failing ``check`` (its result began with the quoted line)
+    and turn 2 gained one (its passing ``check`` began with the quoted
+    ``Error``); the recorder now stores each result's length.
+    """
+    script = [
+        tool_calls_body(
+            [("read_log", {"last_paragraph": "[check]: a line of the log"}),
+             ("check", {"passes": False})], 500,
+        ),
+        tool_calls_body(
+            [("read_log", {"last_paragraph": "[check]: Error: quoted from an old run"}),
+             ("check", {"passes": True})], 500,
+        ),
+        tool_call_body("finish", {"result": "<p>from the digest</p>"}, 500),
+        finish_body("<p>done</p>"),
+    ]
+    agent = RelentlessAgent("handoff-digest-boundary-test")
+    with tempfile.TemporaryDirectory() as td, serve(script) as (url, requests):
+        agent.run(
+            model_name=MODEL,
+            prompt_template="Check the logs.",
+            tools=[read_log, check],
+            max_steps=2,
+            max_sub_sessions=2,
+            max_budget=5.0,
+            work_dir=td,
+            verbose=False,
+            model_config={"base_url": url, "api_key": "local"},
+        )
+    prompt = requests[2]["messages"][-1]["content"]
+    assert (
+        "## Last failing tool calls\n- check(passes=False)\n  Error: exit 1\n\n"
+        "## Last 4 of 4 tool calls (oldest first)\n"
+        "1. read_log(last_paragraph=[check]: a line of the log) -> "
+        "file contents:\n\n[check]: a line of the log\n"
+        "2. check(passes=False) -> Error: exit 1\n"
+        "3. read_log(last_paragraph=[check]: Error: quoted from an old run) -> "
+        "file contents:\n\n[check]: Error: quoted from an old run\n"
+        "4. check(passes=True) -> passed\n"
+    ) in prompt
+
+
+def test_result_lengths_that_are_not_those_of_the_calls_are_ignored() -> None:
+    """A results message is read from its text when its lengths do not describe it."""
+    results: dict[str, Any] = {"role": "user", "content": "[Bash]: a.py\n\n[Read]: Error: none"}
+    turn = [
+        {"role": "model", "content": _call("Bash", command="ls") + "\n" + _call("Read", path="a")},
+        results,
+    ]
+    # In turn: exact, too few (the first paragraph is not Read's), more than the calls,
+    # none, not numbers, short of the text, past the next paragraph, and no list.
+    for lengths in ([4, 11], [4], [4, 11, 0], [], ["4", "11"], [4, 10], [5, 11], 4):
+        results["result_lengths"] = lengths
+        parsed = [(call.name, call.result) for call in parse_tool_calls(turn)]
+        assert parsed == [("Bash", "a.py"), ("Read", "Error: none")], lengths
+    # A negative length would step back to an earlier paragraph of the same tool.
+    stepped: dict[str, Any] = {
+        "role": "user",
+        "content": "[X]: a\n\n[X]: b\n\n[X]: c",
+        "result_lengths": [9, -15, 9],
+    }
+    turn = [{"role": "model", "content": "\n".join([_call("X")] * 3)}, stepped]
+    assert [call.result for call in parse_tool_calls(turn)] == ["a", "b", "c"]

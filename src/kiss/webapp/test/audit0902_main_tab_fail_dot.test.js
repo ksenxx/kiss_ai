@@ -23,6 +23,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {tabEl} = require('./subagent_tab_helpers');
 
 const {send} = harness;
 
@@ -36,9 +37,7 @@ function makePage() {
 // a test reads its dot by bringing it on screen first (switchToTab is the
 // Chats-panel pick and retires nothing).
 function tabStrip(win, tabId) {
-  const el = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
+  const el = tabEl(win, tabId);
   assert.ok(el, `tab ${tabId} must be the chat on screen`);
   return el;
 }
@@ -54,10 +53,7 @@ function dotOf(win, tabId) {
 // Whether *tabId* is running, on screen (spinner on the strip) or not
 // (the tab record, the only view of a background chat).
 function isRunning(win, tabId) {
-  const onStrip = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-  if (onStrip) return dotOf(win, tabId) === 'running';
+  if (tabEl(win, tabId)) return dotOf(win, tabId) === 'running';
   const rec = win._testApi.openTabs().find(t => t.id === tabId);
   assert.ok(rec, `tab ${tabId} must be open`);
   return rec.isRunning;

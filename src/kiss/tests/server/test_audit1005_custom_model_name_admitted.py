@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -35,6 +37,7 @@ from kiss.core.models import model_info
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import install_cli_script
 from kiss.tests.server.conftest import clear_tab_states
 from kiss.tests.server.parallel_agent_harness import (
     IsolatedKissHome,
@@ -181,3 +184,69 @@ def test_unpriced_name_with_explicit_endpoint_is_still_refused(home: IsolatedKis
         assert endpoint.requests == []
     finally:
         endpoint.server.stop()
+
+
+_CODEX_FINISHES = """\
+import json
+import os
+import pathlib
+import sys
+
+sys.stdin.read()
+pathlib.Path(os.environ["KISS_TEST_ARGV_FILE"]).write_text(json.dumps(sys.argv[1:]))
+call = {"name": "finish", "arguments": {"success": True, "summary_in_html": "<p>alias ran</p>"}}
+text = "Done.\\n" + json.dumps({"tool_calls": [call]})
+print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}))
+usage = {"input_tokens": 5, "cached_input_tokens": 0, "output_tokens": 1}
+print(json.dumps({"type": "turn.completed", "usage": usage}), flush=True)
+"""
+
+
+def _result_text(home: IsolatedKissHome, model: str) -> str:
+    """Run one task on *model* through the daemon and return its result text."""
+    printer = _CapturePrinter()
+    AgentServer(printer=printer)._cmd_run({
+        "type": "run",
+        "tabId": _TAB,
+        "prompt": "review the change",
+        "workDir": str(home.repo),
+        "model": model,
+        "useWorktree": False,
+        "autoCommit": False,
+        "useWebTools": False,
+        "classifyTasks": False,
+    })
+    _wait_idle()
+    results = [e for e in printer.events if e.get("type") == "result"]
+    assert len(results) == 1, results
+    return str(results[0].get("text"))
+
+
+def test_unlisted_effort_alias_runs_where_its_level_is_applied(
+    home: IsolatedKissHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``codex/gpt-6-astra-xhigh`` (the ccxbestrouter reviewer) is no catalog key.
+
+    The gate refused this effort alias ("No model available") although its
+    base model was available.  It runs GPT-6 Astra at ``xhigh`` effort through
+    the (stand-in) Codex CLI, priced by the base's entry: a name the catalog
+    cannot price fails the run at its first ``calculate_cost``.  A ``cc/``
+    alias stays refused: Claude Code would run its base without the level.
+    """
+    for cli in ("claude", "codex"):
+        install_cli_script(tmp_path / cli, f"#!{sys.executable}\n{_CODEX_FINISHES}")
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    argv_file = tmp_path / "argv.json"
+    monkeypatch.setenv("KISS_TEST_ARGV_FILE", str(argv_file))
+    cc_alias = next(
+        f"{name}-xhigh"
+        for name in model_info.get_available_models()
+        if name.startswith("cc/") and f"{name}-xhigh" not in model_info.MODEL_INFO
+    )
+    assert "No model available" in _result_text(home, cc_alias)
+    assert not argv_file.exists()
+    assert "codex/gpt-6-astra-xhigh" not in model_info.MODEL_INFO
+    assert "<p>alias ran</p>" in _result_text(home, "codex/gpt-6-astra-xhigh")
+    argv = json.loads(argv_file.read_text(encoding="utf-8"))
+    assert argv[argv.index("-m") + 1] == "gpt-6-astra"
+    assert 'model_reasoning_effort="xhigh"' in argv

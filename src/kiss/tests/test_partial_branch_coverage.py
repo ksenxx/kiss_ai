@@ -4,12 +4,8 @@
 # add your name here
 """Targeted integration tests to cover partial branches across the codebase.
 
-The ``drain_queue_messages`` tests moved to
-``tests/agents/third_party_agents/test_partial_branch_coverage.py`` and
-the ``generate_api_docs`` test to
-``tests/scripts/test_partial_branch_coverage.py``, per the packaging
-invariants for tests depending on those areas.  The remaining test
-depends on ``kiss.agents.obsolete``, which no invariant constrains.
+The one test left here depends on ``kiss.agents.obsolete``, which no
+packaging invariant for tests constrains.
 
 No mocks, test doubles, or fakes.
 """

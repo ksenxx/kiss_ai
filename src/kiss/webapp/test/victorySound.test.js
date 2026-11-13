@@ -24,16 +24,9 @@ const {installAudio} = require('./speech_helpers');
 const {spawnSubagent} = require('./subagent_tab_helpers');
 
 const {send, readyTabId, stubRaf, flushMicrotasks: settle} = harness;
-const runner = makeRunner();
-const report = runner.report;
+// Every page a test builds; the runner closes them when the test has ended.
 const openWindows = [];
-
-/** Run one test through the shared runner, then close its windows. */
-async function test(name, fn) {
-  const result = runner.test(name, fn);
-  if (result) await result;
-  while (openWindows.length) openWindows.pop().close();
-}
+const {test, report} = makeRunner({windows: openWindows});
 
 const URL = '/media/victory.mp3?v=abc123';
 const KEY = 'kissVictorySound';
@@ -156,6 +149,20 @@ test('a tab this page does not show (closed by the user) still plays; an unknown
   assert.strictEqual(played.length, 1, 'dispatched sub-agent: ' + JSON.stringify(played));
 });
 
+test('the copy of a task end sent to a tab viewing the task ends that tab in silence', () => {
+  const {win, played, tabId} = makePage();
+  const viewing = () => win._testApi.openTabs().find(t => t.id === tabId);
+  // The task was launched in a tab closed since: its end reaches every
+  // page and sounds.  This page shows the task in another tab, which
+  // the daemon sends a copy of the end, marked `viewer`.
+  send(win, {type: 'task_done', success: true, tabId: 'tab-that-launched-it'});
+  playedOnce(played, 'the end of the task');
+  assert.strictEqual(viewing().isRunning, true, 'the viewing tab is not told yet');
+  send(win, {type: 'task_done', success: true, tabId, viewer: true});
+  playedOnce(played, 'BUG - a second jingle for one task end');
+  assert.strictEqual(viewing().isRunning, false, 'BUG - the copy does not end the viewing tab');
+});
+
 test('the Settings checkbox mutes and unmutes, and persists', () => {
   const {win, played, tabId} = makePage({stored: 'off'});
   const box = win.document.getElementById('cfg-victory-sound');
@@ -201,7 +208,13 @@ test('an opaque origin (localStorage throws) plays and keeps the box usable', ()
 
 test('no Audio constructor, or no clip configured: nothing to play, no error', () => {
   const noAudio = makePage({audio: false});
+  const errors = [];
+  noAudio.win.addEventListener('error', e => {
+    errors.push(String(e.error));
+    e.preventDefault();
+  });
   send(noAudio.win, {type: 'task_done', success: true, tabId: noAudio.tabId});
+  assert.deepStrictEqual(errors, [], 'no Audio constructor: no error');
   const noVoice = makePage({voice: false});
   send(noVoice.win, {type: 'task_done', success: true, tabId: noVoice.tabId});
   assert.strictEqual(noVoice.played.length, 0, JSON.stringify(noVoice.played));
@@ -430,7 +443,7 @@ const last = test('every play() the autoplay policy refuses sounds at the next g
 // nothing then, and is dropped with the ones queued after it, so an
 // old finish never plays against the current setting.
 const mutedLate = test('a deferred jingle muted before the gesture stays silent', async () => {
-    await last;
+  await last;
   let allowed = false;
   const page = makePage({
     playResult: () =>

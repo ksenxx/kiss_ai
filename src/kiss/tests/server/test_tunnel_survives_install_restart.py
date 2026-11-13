@@ -104,8 +104,14 @@ for _ in range(200):
 
 server._install_signal_handlers()
 print("READY", flush=True)
+# Short turns, as the daemon's main thread wakes for its 2 s polls: Python
+# runs a signal handler only when the main thread next executes bytecode,
+# and a SIGTERM that lands between the interpreter's last signal check and
+# the sleep's system call does not interrupt that sleep.  One long sleep
+# then never ran the handler (1 of 2 and 1 of 96 drivers on an idle
+# machine, 2026-11-10), and the test blamed the missing shim on the product.
 while True:
-    time.sleep(3600)
+    time.sleep(0.05)
 """
 
 
@@ -141,9 +147,8 @@ class TestEarlyDetachOnSigterm(unittest.TestCase):
 
                 # The installer's escalation, compressed: SIGTERM, a
                 # short grace (far below the 30s loop-unwind failsafe,
-                # but room for the shim's fork under a full-suite load:
-                # 2 s was missed once in the 98-way run of 2026-11-01),
-                # then SIGKILL.
+                # with room for the shim's fork under a full-suite
+                # load), then SIGKILL.
                 proc.send_signal(signal.SIGTERM)
                 time.sleep(5.0)
                 proc.kill()

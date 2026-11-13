@@ -25,24 +25,26 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeSharedPage, send} = require('./simplify2_harness');
+// openTabIds: every open tab id (chats and content tabs), in tab order.
+// Chats are not rendered as a row any more, so this is the only place to
+// see them.
+const {
+  makePage: makeSharedPage,
+  send,
+  ofType,
+  tabIds: openTabIds,
+} = require('./simplify2_harness');
+const {tabEl} = require('./subagent_tab_helpers');
 
 function makePage() {
-  const {win, posted} = makeSharedPage({
+  return makeSharedPage({
     bodyClass: 'remote-chat',
     sourceUrl: 'audit0902-readychat-main.js',
   });
-  return {win, posted};
 }
 
 function readies(posted) {
-  return posted.filter(m => m.type === 'ready');
-}
-
-// Every open tab id (chats and content tabs), in tab order.  Chats are
-// not rendered as a row any more, so this is the only place to see them.
-function openTabIds(win) {
-  return win._testApi.openTabs().map(t => t.id);
+  return ofType(posted, 'ready');
 }
 
 function openReport(win, name) {
@@ -91,7 +93,7 @@ function testReadyOnContentTabNamesOwningChat() {
   // The reported chat is what the "..." menu's Git Commit acts on
   // while a content tab is on screen.
   clickGitCommit(win);
-  const commit = posted.filter(m => m.type === 'autocommitAction').pop();
+  const commit = ofType(posted, 'autocommitAction').pop();
   assert.ok(commit, 'Git Commit posts autocommitAction');
   assert.strictEqual(
     commit.tabId,
@@ -100,6 +102,64 @@ function testReadyOnContentTabNamesOwningChat() {
   );
   win.close();
   console.log('  ok - ready on a content tab names the owning chat');
+}
+
+function testContentTabOfAnotherChatStandsForTheChatLeft() {
+  const {win, posted} = makePage();
+  const chatA = win._testApi.getActiveTabId();
+  openReport(win, 'owned-by-a.html');
+  const report = win._testApi.getActiveTabId();
+  // The user moves on to a second chat and looks at A's report from it.
+  win._testApi.createNewTab();
+  const chatB = win._testApi.getActiveTabId();
+  win._testApi.switchToTab(report);
+  reconnect(win);
+  assert.strictEqual(
+    readies(posted).pop().tabId,
+    chatB,
+    'ready names the chat the report was reached from, not its owner',
+  );
+  clickGitCommit(win);
+  const commit = posted.filter(m => m.type === 'autocommitAction').pop();
+  assert.strictEqual(commit.tabId, chatB, 'and so does Git Commit');
+
+  // The tab left for the report is B's sub-agent; it finishes, its tab
+  // closes, and its parent chat stands behind the report.
+  const sub = chatB + '__sub_7';
+  win._testApi.switchToTab(chatB);
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: sub,
+    parent_tab_id: chatB,
+    description: 'helper',
+    task_id: '7',
+    taskIndex: 0,
+    isSubagentTab: true,
+  });
+  win._testApi.switchToTab(sub);
+  win._testApi.switchToTab(report);
+  send(win, {type: 'subagentDone', tab_id: sub});
+  assert.strictEqual(
+    openTabIds(win).join(','),
+    [chatA, report, chatB].join(','),
+    "the sub-agent's tab is closed",
+  );
+  reconnect(win);
+  assert.strictEqual(
+    readies(posted).pop().tabId,
+    chatB,
+    'a finished sub-agent hands the report over to its parent chat',
+  );
+
+  // Closing the report gives the screen back to that chat, not to the
+  // chat that owns the report.
+  const close = win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id="${report}"] .chat-tab-close`,
+  );
+  close.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.strictEqual(win._testApi.getActiveTabId(), chatB);
+  win.close();
+  console.log('  ok - a content tab stands for the chat it was reached from');
 }
 
 function testReadyOnChatTabIsUnchanged() {
@@ -113,7 +173,7 @@ function testReadyOnChatTabIsUnchanged() {
   assert.strictEqual(again.length, 2);
   assert.strictEqual(again[1].tabId, second, 'a chat tab reports itself');
   clickGitCommit(win);
-  const commit = posted.filter(m => m.type === 'autocommitAction').pop();
+  const commit = ofType(posted, 'autocommitAction').pop();
   assert.strictEqual(commit.tabId, second);
   win.close();
   console.log('  ok - ready on a chat tab is unchanged');
@@ -142,9 +202,7 @@ function testReadyOnOrphanContentTabFallsBackToAnyChat() {
     'the content tab survives the snapshot',
   );
   assert.ok(
-    win.document.querySelector(
-      `#tab-list .chat-tab[data-tab-id=${JSON.stringify(contentTab)}]`,
-    ),
+    tabEl(win, contentTab),
     'the content tab is still on the group strip',
   );
   assert.ok(!openTabIds(win).includes(chatB), 'chat B is gone');
@@ -192,9 +250,9 @@ function testReadyWithNoChatReportsNone() {
 
   // Git Commit from the "..." menu has no chat tab to act for: it
   // must not fall back to the content tab, and the user must be told.
-  const commitsBefore = posted.filter(m => m.type === 'autocommitAction');
+  const commitsBefore = ofType(posted, 'autocommitAction');
   clickGitCommit(win);
-  const commits = posted.filter(m => m.type === 'autocommitAction');
+  const commits = ofType(posted, 'autocommitAction');
   assert.strictEqual(
     commits.length,
     commitsBefore.length,
@@ -218,6 +276,7 @@ function testReadyWithNoChatReportsNone() {
 
 function main() {
   testReadyOnContentTabNamesOwningChat();
+  testContentTabOfAnotherChatStandsForTheChatLeft();
   testReadyOnChatTabIsUnchanged();
   testReadyOnOrphanContentTabFallsBackToAnyChat();
   testReadyWithNoChatReportsNone();

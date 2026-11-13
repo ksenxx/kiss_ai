@@ -18,14 +18,19 @@ function subagentTabEls(win) {
   );
 }
 
-/** The first tool-call panel whose header names run_parallel, or null. */
-function runParallelPanel(win) {
+/** The first tool-call panel whose header names *toolName*, or null. */
+function toolPanel(win, toolName) {
   const headers = win.document.querySelectorAll('#output .ev.tc .tc-h');
   for (const h of headers) {
-    const txt = (h.textContent || '').replace(/^[^A-Za-z]+/, '').trim();
-    if (txt.startsWith('run_parallel')) return h.closest('.ev.tc');
+    const txt = h.textContent.replace(/^[^A-Za-z]+/, '').trim();
+    if (txt.startsWith(toolName)) return h.closest('.ev.tc');
   }
   return null;
+}
+
+/** The first run_parallel tool-call panel, or null. */
+function runParallelPanel(win) {
+  return toolPanel(win, 'run_parallel');
 }
 
 /**
@@ -367,6 +372,7 @@ module.exports = {
   announceFinished,
   openSubTabIds,
   subagentTabEls,
+  toolPanel,
   runParallelPanel,
   togglePanel,
   clickClose,

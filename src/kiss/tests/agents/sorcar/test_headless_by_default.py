@@ -24,6 +24,7 @@ page the tool was on.
 from __future__ import annotations
 
 import struct
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -244,5 +245,40 @@ def test_show_browser_without_an_open_page_reports_state(tmp_path):
         assert web.show_browser(visible=False) == "Browser is now headless."
         assert web._headless is True
         assert web._is_alive()
+    finally:
+        web.close()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a window needs an X server")
+def test_show_browser_that_cannot_open_a_window_keeps_browsing_headless(
+    tmp_path, monkeypatch, server
+):
+    """A window that cannot open (no X server) must not strand the tool in window mode.
+
+    The failed switch left ``_headless`` off: every later tool call tried
+    the same headed launch and failed the same way.  It also dropped the
+    session it had captured from the browser it closed: the headless
+    browser that took over opened on a blank page, logged out.
+    """
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    web = WebUseTool(user_data_dir=str(tmp_path / "profile"))
+    try:
+        assert web.show_browser().startswith("Error making the browser visible:")
+        tree = web.go_to_url(_RED_PAGE)
+        assert tree.startswith("Page:"), tree[:300]
+
+        web.go_to_url(f"{server}/login")
+        assert web.show_browser().startswith("Error making the browser visible:")
+        assert web.show_browser().startswith("Error making the browser visible:")  # kept again
+        # The next call launches headless where the agent was, still logged in.
+        assert f"URL: {server}/login" in web.get_page_content()
+        assert SESSION_COOKIE in web.go_to_url(f"{server}/cookies")
+
+        # An explicit close_browser() after a failed switch starts afresh.
+        assert web.show_browser().startswith("Error making the browser visible:")
+        web.close_browser()
+        assert "URL: about:blank" in web.get_page_content()
+        assert SESSION_COOKIE not in web.go_to_url(f"{server}/cookies")
     finally:
         web.close()

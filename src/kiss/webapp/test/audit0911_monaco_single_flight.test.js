@@ -25,24 +25,23 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, sleep} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  sleep,
+  recordTimers,
+  fireTimers,
+} = require('./simplify2_harness');
 
 function makePage() {
-  // Capture the Monaco loader's 10-second timeout so the test can fire it
+  // Record the Monaco loader's 10-second timeout so the test can fire it
   // deterministically.  ensureMonaco() appends the loader script and
   // arms the timer synchronously; the only asynchrony between the steps
   // below is promise settlement, so `sleep(0)` is the exact wait.
-  const monacoTimeouts = [];
+  let monacoTimeouts;
   const {win} = makeChatPage({
     beforeScripts(win) {
-      const origSetTimeout = win.setTimeout.bind(win);
-      win.setTimeout = function (fn, ms, ...args) {
-        if (ms === 10000) {
-          monacoTimeouts.push(fn);
-          return 0x7fffffff - monacoTimeouts.length;
-        }
-        return origSetTimeout(fn, ms, ...args);
-      };
+      monacoTimeouts = recordTimers(win, 10000);
     },
     sourceUrl: 'audit0911-monaco-main.js',
   });
@@ -57,16 +56,12 @@ function loaderScripts(win) {
 
 function openCodeFile(win, name) {
   // fileContent arrives from the server as a window message.
-  win.dispatchEvent(
-    new win.MessageEvent('message', {
-      data: {
-        type: 'fileContent',
-        name: name,
-        path: '/ws/' + name,
-        content: 'print(1)\n',
-      },
-    }),
-  );
+  send(win, {
+    type: 'fileContent',
+    name: name,
+    path: '/ws/' + name,
+    content: 'print(1)\n',
+  });
 }
 
 async function main() {
@@ -80,7 +75,7 @@ async function main() {
   assert.strictEqual(monacoTimeouts.length, 1, 'P1 armed its 10s timeout');
 
   // 2. P1 times out: the single-flight slot empties (a retry is allowed).
-  monacoTimeouts[0]();
+  fireTimers(monacoTimeouts.slice(0, 1));
   await sleep(0);
 
   // 3. Second code file: flight P2 appends S2.

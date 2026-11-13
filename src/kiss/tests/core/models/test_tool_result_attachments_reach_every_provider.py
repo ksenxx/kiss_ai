@@ -609,3 +609,27 @@ class TestAnExplicitToolUseIdIsHonoured:
         }
         assert pairs[_SECOND_CALL_ID] == "SECOND-ANSWER"
         assert pairs[_TOOL_CALL_ID] == "FIRST-ANSWER"
+
+
+class TestTextNoUtf8BodyCanCarryStillReachesAnthropic:
+    """``json.loads`` turns a ``"\\ud83d"`` escape (a page's truncated emoji, a
+    model's own tool argument) into a lone surrogate.  The Anthropic SDK raised
+    ``UnicodeEncodeError`` while building the body, before anything was sent,
+    and again for every later request, since the text stays in the
+    conversation.  The body now carries well-formed text, as the
+    OpenAI-compatible transports' does: a pair split into two code points
+    joined, a lone half as U+FFFD."""
+
+    def test_a_turn_sends_the_repaired_tool_result(self) -> None:
+        """The turn after the tool call goes out, with the result repaired."""
+        body = anthropic_body_after_tool_result({"result": "caf\ud800 \ud83d\ude00"})
+        assert body["messages"][-1]["content"][0]["content"] == "caf\ufffd \U0001f600"
+
+    def test_the_keep_alive_ping_sends_the_repaired_tool_argument(self) -> None:
+        """The ping re-sends the conversation, the model's own argument included."""
+        with ScriptedAnthropicServer() as server:
+            model = anthropic_model_with_tool_call(server.base_url)
+            model.conversation[-1]["content"][0]["input"] = {"path": "caf\ud800"}
+            assert model.keep_prompt_cache_warm({}) is not None
+            sent = server.requests[-1]["messages"][1]["content"][0]["input"]
+        assert sent == {"path": "caf\ufffd"}

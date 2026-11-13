@@ -24,8 +24,14 @@ const {
   lastMsg,
   click,
   byId,
+  pickMachine,
 } = require('./simplify2_harness');
-const {openSettings, closeSettings, statusLine} = require('./settings_helpers');
+const {
+  openSettings,
+  closeSettings,
+  statusLine,
+  MACHINES,
+} = require('./settings_helpers');
 const {runAgentSubpanelTests} = require('./settings_agent_subpanel');
 
 const BASE = {installed: true, loggedIn: false, authMethod: 'none', useSubscription: true,
@@ -149,18 +155,9 @@ function testRemoteSheetLinkErrorOutageAndPollGates() {
   const clock = installClock(win);
   const statusRequests = () => posted.filter(m => m.type === 'getCodexStatus').length;
   send(win, {type: 'configData', config: {}, machine: 'laptop'});
-  send(win, {
-    type: 'machines',
-    machines: [
-      {name: 'laptop', status: 'reachable', local: true},
-      {name: 'gpu-box', status: 'reachable', address: 'ssh me@gpu'},
-    ],
-    checkedAt: 1,
-  });
+  send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
   win._testApi.createNewTab();
-  const sel = byId(win, 'chat-machine');
-  sel.value = 'gpu-box';
-  sel.dispatchEvent(new win.Event('change', {bubbles: true}));
+  pickMachine(win, 'gpu-box');
   openSettings(win);
   const btn = byId(win, 'cfg-codex-login-btn');
   const note = byId(win, 'cfg-codex-login-note');

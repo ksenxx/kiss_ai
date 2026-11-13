@@ -21,7 +21,6 @@ No mocks, patches, fakes, or test doubles.
 
 from __future__ import annotations
 
-import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -30,24 +29,21 @@ import pytest
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.sorcar_agent import _generate_commit_message
 
-_SavedState = tuple[Path, "sqlite3.Connection | None", Path]
+_SavedState = tuple[Path, Path]
 
 
 def _redirect_db(tmpdir: str) -> _SavedState:
-    old: _SavedState = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old: _SavedState = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore_db(saved: _SavedState) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+    th._close_thread_db()
+    th._DB_PATH, th._KISS_DIR = saved
 
 
 class TestWorktreeCommitMessageBranches:

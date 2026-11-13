@@ -43,6 +43,7 @@ const {
   rightClick,
   key,
   openExplorer,
+  forbidNativeDialogs,
 } = require('./ui_antipattern_harness');
 
 function makePage(beforeMain) {
@@ -53,13 +54,8 @@ function makePage(beforeMain) {
       stubRaf(win);
       fakeMatchMedia(win, true);
       copied = stubClipboard(win).writes;
-      // Native dialogs are gone from main.js; any call is a regression.
-      win.prompt = () => {
-        throw new Error('window.prompt must not be called');
-      };
-      win.confirm = () => {
-        throw new Error('window.confirm must not be called');
-      };
+      // Native dialogs are gone from main.js; a call fails the test.
+      forbidNativeDialogs(win);
       if (beforeMain) beforeMain(win);
     },
     extraScripts: [
@@ -537,11 +533,13 @@ async function main() {
     });
     rightClick(win, nested);
     assert.deepStrictEqual(errors, [], 'the menu opens without an error');
-    const labels = all(win, '#sidebar-context-menu .tree-ctx-item').map(i =>
-      i.textContent.trim(),
-    );
+    const labels = menuLabels(win);
     assert.ok(labels.includes('Remove Folder from Explorer'), labels.join(','));
-    assert.ok(!labels.includes('Cut') && !labels.includes('Delete'), labels.join(','));
+    assert.ok(!labels.includes('Delete'), labels.join(','));
+    assert.ok(
+      menuItem(win, 'Cut').classList.contains('disabled'),
+      'a top-level folder cannot be cut',
+    );
     win.close();
   });
 

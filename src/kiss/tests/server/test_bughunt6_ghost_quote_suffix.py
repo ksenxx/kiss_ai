@@ -54,13 +54,13 @@ class TestGhostSuffixQuotesSurvive(unittest.TestCase):
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _ghost_suggestion(self, query: str) -> str:
-        self.server._complete(query)
+        self.server._complete_seq_latest[""] = 1
+        self.server._complete(query, 1)
         ghosts = [
             e for e in self.events
             if e.get("type") == "ghost" and e.get("query") == query

@@ -14,19 +14,21 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
-const {captureTimers} = require('./simplify2_harness');
+const {captureTimers, fireCapturedTimers} = require('./simplify2_harness');
 
 const {test, report} = h.makeRunner();
 
 /**
  * Fire the 100 / 300 ms retries focusInputWithRetry armed (captured by
- * simplify2_harness.captureTimers) without waiting for them; returns
- * how many were armed.
+ * simplify2_harness.captureTimers) without waiting for them, as a
+ * browser would: one the page cancelled stays quiet.  Returns how many
+ * were armed.
  */
-function fireFocusRetries(timers) {
+function fireFocusRetries(win, timers) {
   const retries = timers.filter(t => t.ms === 100 || t.ms === 300);
-  for (const t of retries) t.cb();
-  return retries.length;
+  const armed = retries.length;
+  fireCapturedTimers(win, retries);
+  return armed;
 }
 
 function startTask(win, tabId) {
@@ -89,7 +91,7 @@ async function main() {
       manual: true,
       message: 'nothing to commit',
     });
-    fireFocusRetries(timers);
+    fireFocusRetries(win, timers);
     assert.strictEqual(
       win.document.activeElement,
       search,
@@ -128,7 +130,7 @@ async function main() {
     assert.ok(box, 'the folder picker opened');
     box.focus();
     assert.strictEqual(win.document.activeElement, box, 'precondition');
-    assert.strictEqual(fireFocusRetries(timers), 2, 'the forced request armed its two retries');
+    assert.strictEqual(fireFocusRetries(win, timers), 2, 'the forced request armed its two retries');
     assert.strictEqual(
       win.document.activeElement,
       box,

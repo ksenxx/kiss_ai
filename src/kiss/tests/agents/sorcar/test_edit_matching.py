@@ -10,6 +10,8 @@ with the tools (``test_honest_edit.py``, the container tests).
 
 from __future__ import annotations
 
+import time
+
 from kiss.agents.sorcar.edit_matching import (
     TolerantMatch,
     nearest_region,
@@ -72,6 +74,13 @@ def test_reindent_prefixes_the_non_blank_lines() -> None:
     assert reindent("x = 1\n", "") == "x = 1\n"
 
 
+CLOSEST_CALL = (
+    "result = expensive_operation(items)\nif result is not None:\n    save(result, force=True)\n"
+)
+CALLS = "result = expensive_operation(item)\nreturn None\n# unrelated\n" + CLOSEST_CALL
+WANTED_CALL = "result = expensive_operation(item)\nif result:\n    save(result)\n"
+
+
 def test_nearest_region_names_the_closest_window() -> None:
     assert nearest_region(FILE, "    y = 3\n    return x + y\n") == (
         3, 4, "    y = 2\t \n    return x + y\n",
@@ -84,3 +93,40 @@ def test_nearest_region_names_the_closest_window() -> None:
     assert nearest_region("x\ny\nx\ny\n", "x\nz\n") == (1, 2, "x\ny\n")
     assert nearest_region("axc\ncba\n", "abc") == (1, 1, "axc\n")
     assert nearest_region("", "a") is None and nearest_region(FILE, "") is None
+    # Windows sharing the same line with the old string: the closest character by character.
+    arms = "if a:\n    return 1\nif b:\n    return 1\nif cc:\n    return 1\n"
+    assert nearest_region(arms, "if c:\n    return 1\n") == (5, 6, "if cc:\n    return 1\n")
+    # A line counts whatever its indentation, at the place the old string has it.
+    assert nearest_region("a\nb\n\tkey = 1\nc\n", "x\nkey = 1\n") == (2, 3, "b\n\tkey = 1\n")
+    # No line in common with the old string.
+    text = "a = 1\nb = 2\nvalue = compute(3)\nd = 4\n"
+    assert nearest_region(text, "x\nvalue = compute(4)\n") == (2, 3, "b = 2\nvalue = compute(3)\n")
+    braces = "}\nq\n}\nw\nvalue = compute(3)\n}!\n"
+    assert nearest_region(braces, "value = compute(4)\n}\n") == (5, 6, "value = compute(3)\n}!\n")
+    # An old string of blank lines only is nearest to the first blank line.
+    assert nearest_region("\n\nkey = 1\n\nx\n", "\nkey = 2\n") == (2, 3, "\nkey = 1\n")
+    assert nearest_region("a\n\nb\n", "\n") == (2, 2, "\n")
+    # Review 2026-11-11 S4-4: the closest window shares no line with the old string and
+    # another window shares one; only the windows sharing a line were compared.
+    assert nearest_region(CALLS, WANTED_CALL) == (4, 6, CLOSEST_CALL)
+
+
+def test_nearest_region_of_a_long_text_is_found_at_once() -> None:
+    """Review 2026-11-11 S4-1, S4-4: a text with too many windows to compare each.
+
+    The windows compared there are the ones sharing words with the old
+    string line by line, the rarest words first, within a budget: the
+    search for windows sharing a line was quadratic in a text of equal
+    lines (it hung on 20,000) and missed the window sharing none.
+    """
+    started = time.monotonic()
+    filler = "".join(f"filler_{number} = {number}\n" for number in range(20_000))
+    assert nearest_region(filler + CALLS, WANTED_CALL) == (20_004, 20_006, CLOSEST_CALL)
+    # A single window is the answer as it is, whatever its size.
+    braces = "}\n" * 120_000
+    assert nearest_region(braces, braces + "changed\n") == (1, 120_000, braces)
+    # Words on every line are not counted: no window is likelier than the first.
+    same = "x = 1\n" * 40_000
+    wanted = "x = 1\n" * 20_000 + "changed\n"
+    assert nearest_region(same, wanted) == (1, 20_001, "x = 1\n" * 20_001)
+    assert time.monotonic() - started < 15

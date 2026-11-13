@@ -27,11 +27,14 @@ from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.tests.conftest import posix_only
 
 
-def _fake_git(folder: Path, body: str) -> None:
+def _fake_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> None:
     """Put an executable ``git`` running *body* (a shell snippet) first on PATH."""
-    script = folder / "git"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = bin_dir / "git"
     script.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
 
 @posix_only("the fake git is a shell script")
@@ -39,10 +42,7 @@ def test_a_stuck_git_is_cut_off_and_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A git that never returns fails within the cap instead of hanging the task."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _fake_git(bin_dir, "exec sleep 30")
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    _fake_git(tmp_path, monkeypatch, "exec sleep 30")
     monkeypatch.setattr(sea, "GIT_TIMEOUT_SECONDS", 0.5)
     started = time.monotonic()
     proc = sea._git("rev-parse", "--show-toplevel", cwd=tmp_path)
@@ -57,10 +57,7 @@ def test_a_stuck_git_is_cut_off_and_reported(
 @posix_only("the fake git is a shell script")
 def test_git_reads_no_stdin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A git waiting for input gets end-of-file at once: nothing of the task's stdin reaches it."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _fake_git(bin_dir, "printf 'stdin:[%s]' \"$(cat)\"")
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    _fake_git(tmp_path, monkeypatch, "printf 'stdin:[%s]' \"$(cat)\"")
     # Under pytest fd 0 is already at end-of-file, so an inherited stdin would
     # look closed too: give fd 0 real content for the call, which the fake
     # git's ``cat`` would echo back if ``_git`` did not use DEVNULL.

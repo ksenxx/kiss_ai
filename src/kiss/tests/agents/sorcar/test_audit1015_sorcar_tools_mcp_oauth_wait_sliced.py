@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.mcp_oauth import MCPLoginSession, make_mcp_auth_tools
-from kiss.agents.sorcar.mcp_servers import MCPServerConfig
+from kiss.agents.sorcar.mcp_servers import MCPServerConfig, save_mcp_server
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
     end_tool_call,
@@ -39,6 +39,7 @@ def pending_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     """A session whose sign-in never finishes, published as the active one."""
     monkeypatch.setenv("KISS_HOME", str(tmp_path / "home"))
     cfg = MCPServerConfig(name="slow", transport="http", url="http://127.0.0.1:9/mcp")
+    save_mcp_server(cfg, "user", ".")  # as connect_mcp_server does: finish answers for it only
     session = MCPLoginSession(cfg)
     previous = MCPLoginSession._active
     MCPLoginSession._active = session

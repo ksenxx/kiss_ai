@@ -35,20 +35,17 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    th._close_thread_db()
+    (th._DB_PATH, th._KISS_DIR) = saved
 
 
 def _make_repo(path: Path) -> Path:
@@ -187,6 +184,10 @@ class TestDirtyWorkingTreeMerge:
 
         result = GitWorktreeOps.squash_merge_branch(self.repo, "feature")
         assert result == MergeResult.CONFLICT
+        # git refused before touching anything, so nothing is undone: the
+        # edit the caller's clean check did not see is still there, staged.
+        assert (self.repo / "fileA.txt").read_text() == "dirty staged\n"
+        assert _git("diff", "--cached", "--name-only", cwd=self.repo).stdout == "fileA.txt\n"
 
         _git("reset", "--hard", "HEAD", cwd=self.repo)
         _git("branch", "-D", "feature", cwd=self.repo)

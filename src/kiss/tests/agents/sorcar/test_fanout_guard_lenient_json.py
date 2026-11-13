@@ -48,13 +48,55 @@ def test_strict_json_is_unchanged() -> None:
     assert parse_tasks_json(r'["a\\|b", "c\nd"]') == ["a\\|b", "c\nd"]
 
 
-def test_unrepairable_input_names_the_backslash_rule() -> None:
-    """An unescaped quote still fails, and the error says how to escape."""
+def test_unescaped_quote_names_the_place_and_the_quote_rule() -> None:
+    """An unescaped quote still fails; the error shows where and how to escape it.
+
+    Of the 72 refused arguments in the task history that still fail
+    (replayed 2026-11-11), 59 broke on a double quote inside a string
+    and none on a backslash or a newline, the only two the hint named.
+    """
+    raw = r'["rg -n \"x|y\\(" src"]'
     with pytest.raises(ValueError) as info:
-        parse_tasks_json(r'["rg -n \"x|y\\(" src"]', "commands")
+        parse_tasks_json(raw, "commands")
     message = str(info.value)
     assert message.startswith("commands must be a JSON array of strings")
+    assert f"Decoding stopped after {raw[:18]!r} (Expecting ',' delimiter)" in message
+    assert 'a double quote is written \\"' in message
     assert "backslash must be doubled" in message
+    # One of the refused commands, as the model wrote it: decoding
+    # stops at the quote inside the grep pattern (the lone backslash
+    # before it is repaired, and shown doubled).
+    raw = r"""["grep -rn 'a\|b' src; grep '"type": "done"' src", "ls"]"""
+    with pytest.raises(ValueError) as info:
+        parse_tasks_json(raw, "commands")
+    repaired = raw.replace(r"\|", r"\\|")
+    stopped = repaired[:repaired.index('"type') + 1]
+    assert f"Decoding stopped after {stopped!r} (Expecting ',' delimiter)" in str(info.value)
+
+
+def test_text_that_is_no_array_of_strings_is_told_to_be_one(tmp_path: Path) -> None:
+    """Bare text is refused with the array rule, not the escaping rules.
+
+    Two ``run_parallel`` calls in a row passed one bare task text each
+    (history events 11058392 and 11058395): the backslash hint of the
+    first refusal told the model nothing about the second.
+    """
+    deep = "[" * 100_000  # nested past the decoder's depth: a RecursionError, no ValueError
+    for text in ("Review hosts.py only against the user's stated requirements.",
+                 "[" + "1" * 5000 + "]",  # past json's integer limit: a plain ValueError
+                 deep,
+                 r'["a\|b", ' + deep):  # the same, raised by the decode of the repaired text
+        with pytest.raises(ValueError) as info:
+            parse_tasks_json(text)
+        message = str(info.value)
+        assert message.startswith("tasks must be a JSON array of strings, got ")
+        assert message.endswith(
+            ' Pass a JSON array of strings, even for one item: ["first", "second"].'
+        )
+        assert "backslash" not in message
+    # The real tool answers with that refusal instead of raising.
+    report = UsefulTools(work_dir=str(tmp_path)).run_commands_parallel(commands=deep)
+    assert report.startswith("Error: commands must be a JSON array of strings, got '[[[")
 
 
 def test_shell_substitution_hint_is_kept() -> None:

@@ -39,7 +39,9 @@ agent's LLM run is replaced by a deterministic function (no mocks).
 
 from __future__ import annotations
 
+import inspect
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -51,6 +53,7 @@ import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class _Base(unittest.TestCase):
@@ -60,14 +63,12 @@ class _Base(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-run-vs-close-")
         self._saved_db = (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         )
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         _persistence._KISS_DIR = kiss_dir
         _persistence._DB_PATH = kiss_dir / "history.db"
-        _persistence._db_conn = None
 
         self.server = AgentServer()
         self.server.use_private_tab_registry(Path(self.tmpdir) / "tabs.json")
@@ -87,11 +88,9 @@ class _Base(unittest.TestCase):
         self._parent_class.run = self._original_run
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
-        if _persistence._db_conn is not None:
-            _persistence._db_conn.close()
+        _persistence._close_thread_db()
         (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved_db
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -237,3 +236,62 @@ class TestRunVsCloseSweep(_Base):
             self.assertFalse(t_run.is_alive() or t_close.is_alive())
             self._wait_for_task_end(tab_id)
             self._assert_consistent(tab_id)
+
+
+def _waits_for_state_lock(thread: threading.Thread) -> bool:
+    """True once *thread* stands at ``ready_tab_sync``'s ``with self._state_lock:`` line.
+
+    The line a thread blocked in the lock's acquire reports: whatever
+    the sync reads before it takes the lock has been read by then.
+    """
+    lines, first = inspect.getsourcelines(AgentServer.ready_tab_sync)
+    lock_line = first + next(i for i, line in enumerate(lines) if "with self._state_lock" in line)
+    frame = sys._current_frames().get(thread.ident or -1)
+    return (
+        frame is not None
+        and frame.f_code is AgentServer.ready_tab_sync.__code__
+        and frame.f_lineno == lock_line
+    )
+
+
+class TestReadySyncVsClose(unittest.TestCase):
+    """A ``ready`` tab sync racing a ``closeTab`` leaves the closed tab no chat view.
+
+    ``ready_tab_sync`` gives every chat-bound tab of the registry its
+    chat view.  It read the bound tabs before it took ``STATE_LOCK``,
+    so a close that ran in between (row removed, view dropped) was
+    followed by the sync putting the view back.  The closed tab then
+    counted as a viewer of the chat: every later run of the chat was
+    streamed to it too, and nothing dropped the view again.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp(prefix="kiss-ready-vs-close-")
+        self._saved_db = redirect_persistence(self.tmpdir)
+        self.server = AgentServer()
+        self.server.use_private_tab_registry(Path(self.tmpdir) / "tabs.json")
+
+    def tearDown(self) -> None:
+        restore_persistence(self._saved_db)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_close_between_registry_read_and_view_write_leaves_no_view(self) -> None:
+        """The sync is held at ``STATE_LOCK`` while the tab closes; it must not restore the view."""
+        server = self.server
+        # A first client's ``ready`` seeds the empty registry with its chat tab.
+        bound, adopted = server.ready_tab_sync([{"tabId": "tab-1", "chatId": "chat-1"}])
+        self.assertTrue(adopted)
+        self.assertEqual(bound, [("tab-1", "chat-1", "")])
+        sync = threading.Thread(target=server.ready_tab_sync, args=([],), daemon=True)
+        with agent_state.STATE_LOCK:
+            sync.start()
+            deadline = time.monotonic() + 30
+            while not _waits_for_state_lock(sync):
+                self.assertLess(time.monotonic(), deadline, "the sync never reached STATE_LOCK")
+                time.sleep(0.005)
+            server._close_tab("tab-1")
+        sync.join(timeout=20)
+        self.assertFalse(sync.is_alive())
+        self.assertFalse(server.tab_registry.has_tab("tab-1"))
+        with agent_state.STATE_LOCK:
+            self.assertEqual(server._chat_viewer_tabs_locked("chat-1", ""), [])

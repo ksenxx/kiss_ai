@@ -17,29 +17,24 @@
 //     floats over the view's top right corner.  A virtual tab (a
 //     commit's patch) has nothing on disk to re-read and gets none.
 //
-// jsdom cannot navigate: every window.location.reload() surfaces as a
-// "Not implemented: navigation" jsdomError, which is how the reloads
-// are counted.
+// The reloads are counted by the harness's reloadCountingConsole.
 
 const assert = require('assert');
-const {VirtualConsole} = require('jsdom');
 const {
   makePage: buildPage,
   send,
   stubMonaco,
   waitFor,
   click,
+  flushMicrotasks,
+  reloadCountingConsole,
 } = require('./simplify2_harness');
 
 function makePage() {
   const reloads = [];
-  const vc = new VirtualConsole();
-  vc.on('jsdomError', err => {
-    if (/navigation/.test(String(err && err.message))) reloads.push(1);
-  });
   let created;
   const {win, posted} = buildPage({
-    virtualConsole: vc,
+    virtualConsole: reloadCountingConsole(reloads),
     extraScripts: ['marked.min.js'],
     beforeScripts: w => {
       created = stubMonaco(w);
@@ -203,6 +198,8 @@ async function testMarkdownButtonInBarAndBareHtmlButtonFloats() {
     floating.parentNode.classList.contains('content-tab-view'),
     'it is a direct child of the tab view',
   );
+  // An editor is only created once the Monaco loader's promise resolves.
+  await flushMicrotasks();
   assert.strictEqual(created.length, 0, 'no editor for the two previews');
   win.close();
   console.log(
@@ -210,7 +207,7 @@ async function testMarkdownButtonInBarAndBareHtmlButtonFloats() {
   );
 }
 
-async function testBinaryReportAndDirectoryFloatVirtualHasNone() {
+function testBinaryReportAndDirectoryFloatVirtualHasNone() {
   const {win, posted} = makePage();
   send(win, {
     type: 'fileContent',
@@ -271,7 +268,7 @@ async function testBinaryReportAndDirectoryFloatVirtualHasNone() {
     testChatsRowRefreshButtonReloadsTheApp();
     await testEditableFileButtonSitsInSaveBarAndReloadsFromDisk();
     await testMarkdownButtonInBarAndBareHtmlButtonFloats();
-    await testBinaryReportAndDirectoryFloatVirtualHasNone();
+    testBinaryReportAndDirectoryFloatVirtualHasNone();
     console.log('refreshButtons.test.js: all tests passed');
   } catch (err) {
     console.error('FAIL:', err && err.stack ? err.stack : err);

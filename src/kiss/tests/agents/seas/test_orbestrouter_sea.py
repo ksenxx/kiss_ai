@@ -32,12 +32,13 @@ _SEA_PATH = Path(orbestrouter_sea.__file__).resolve()
 
 
 def test_both_models_are_openrouter_twins_of_the_bestrouter_models() -> None:
-    """Fable 5.2 works, Astra reviews, both as priced ``openrouter/`` catalog entries."""
+    """Fable 5.2 works, Astra (xhigh effort) reviews, both as priced ``openrouter/`` catalog
+    entries."""
     assert orbestrouter_sea.SIMPLE_MODEL == "openrouter/anthropic/claude-opus-5.5-medium"
     assert orbestrouter_sea.PRIMARY_MODEL == "openrouter/anthropic/claude-fable-5.2-max"
-    assert orbestrouter_sea.REVIEW_MODEL == "openrouter/openai/gpt-6-astra"
+    assert orbestrouter_sea.REVIEW_MODEL == "openrouter/openai/gpt-6-astra-xhigh"
     assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-2-max"
-    assert bestrouter_sea.REVIEW_MODEL == "gpt-6-astra"
+    assert bestrouter_sea.REVIEW_MODEL == "gpt-6-astra-xhigh"
     for model in (
         orbestrouter_sea.SIMPLE_MODEL,
         orbestrouter_sea.PRIMARY_MODEL,
@@ -68,17 +69,20 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
         "Use 'openrouter/anthropic/claude-opus-5.5-medium' for simple questions and queries.",
         "Use 'openrouter/anthropic/claude-fable-5.2-max' model for all other tasks, including "
         "software development and analysis and writing.",
-        "Use openrouter/openai/gpt-6-astra (not codex) through "
-        "`run_agent(model=\"openrouter/openai/gpt-6-astra\", tool_profile=\"review\", "
+        "Use openrouter/openai/gpt-6-astra-xhigh (not codex) through "
+        "`run_agent(model=\"openrouter/openai/gpt-6-astra-xhigh\", tool_profile=\"review\", "
         "wait=\"false\")` for a thorough read-only review and debugging of the other model's "
         "work,",
-        "Use at most 75% of the task budget in openrouter/openai/gpt-6-astra,",
+        "Use at most 75% of the task budget in openrouter/openai/gpt-6-astra-xhigh,",
         "Use the model names literally without hallucinating new model names.",
     ):
         assert phrase in flat, phrase
     # The bestrouter's direct-vendor names never leak into the OpenRouter protocol.
     assert f"'{bestrouter_sea.SIMPLE_MODEL}'" not in protocol
-    assert f"'{bestrouter_sea.PRIMARY_MODEL}'" not in protocol and " gpt-6-astra " not in protocol
+    assert f"'{bestrouter_sea.PRIMARY_MODEL}'" not in protocol
+    # The reviewer is unquoted and wraps onto a new line: only the flat text shows a leak.
+    assert f" {bestrouter_sea.REVIEW_MODEL} " in " ".join(bestrouter_sea.SYSTEM_PROMPT.split())
+    assert f" {bestrouter_sea.REVIEW_MODEL} " not in flat
     # Same working rules as the bestrouter, word for word.
     rules = protocol.split("Working rules:", 1)[1]
     assert rules == bestrouter_sea.SYSTEM_PROMPT.split("Working rules:", 1)[1]

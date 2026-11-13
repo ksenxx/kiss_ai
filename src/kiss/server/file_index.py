@@ -12,8 +12,8 @@ replaces both with an index that is
 * **built once per root and persisted** under ``$KISS_HOME/file-index``
   so a daemon restart reloads it instead of rescanning;
 * **refreshed by directory mtime**: a rescan ``stat``s every known
-  directory and re-lists only those whose mtime changed, so keeping a
-  100k-entry tree fresh costs a fraction of a second;
+  directory and re-lists only those whose mtime changed or was recent when
+  last read, so keeping a 100k-entry tree fresh costs a fraction of a second;
 * **ordered once, at build time**, by how likely an entry is to be what
   a user wants to hand to an agent (source before bulk data, files
   outside generated-run containers first, shallow before deep), so a
@@ -49,6 +49,7 @@ import logging
 import os
 import posixpath
 import queue
+import stat
 import sys
 import threading
 import time
@@ -59,6 +60,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
+from kiss.core.config import kiss_home
 from kiss.core.utils import atomic_write_text, is_root_dir
 from kiss.server.helpers import SUGGESTION_LIMIT
 
@@ -118,6 +120,15 @@ STALE_AFTER = 60.0
 
 # Persisted listing format version; bump when the JSON layout changes.
 _CACHE_VERSION = 1
+
+# A directory or ``.gitignore`` whose mtime is less than this many
+# nanoseconds old can change again without its mtime moving: file systems
+# stamp a change with a clock that ticks every few milliseconds, or every
+# two seconds (FAT); the third second covers that clock running behind
+# ``time.time_ns()`` (the kernel's tick, a file server's clock).  What a
+# scan reads from one is recorded under an mtime it does not have, so the
+# next scan reads it again.
+_RACY_NS = 3_000_000_000
 
 # Per directory: (mtime_ns, sorted file names, sorted subdirectory names).
 Listings = dict[str, tuple[int, list[str], list[str]]]
@@ -185,10 +196,14 @@ def _parse_gitignore(text: str) -> tuple[set[str], set[str], set[str], set[str]]
     anchored: set[str] = set()
     anchored_dirs: set[str] = set()
     for raw_line in text.splitlines():
+        # More lenient than git, which keeps leading whitespace in the
+        # pattern: an indented entry is taken for the name it was meant as.
         line = raw_line.strip()
         if not line or line.startswith("#") or line.startswith("!"):
             continue
-        if "*" in line or "?" in line:
+        # Git's own test (``is_glob_special``): a bracket expression, closed
+        # or not, and a backslash escape never mean the name as written.
+        if "*" in line or "?" in line or "[" in line or "\\" in line:
             continue
         entry = line.rstrip("/")
         if "/" in entry:
@@ -229,21 +244,21 @@ def _hidden_dir_on_path(base: str, parts: list[str]) -> bool:
     return False
 
 
-def _list_dir(abs_dir: str) -> tuple[list[str], list[str]]:
+def _list_dir(abs_dir: str) -> tuple[list[str], list[str]] | None:
     """List *abs_dir* as ``(sorted file names, sorted subdirectory names)``.
 
     Symbolic links and Windows junctions count as files (they are listed
     but never followed: ``Application Data`` -> ``AppData\\Local`` would
     otherwise recurse to :data:`MAX_DEPTH`); Windows-hidden directories
-    are dropped like dot-directories; an unreadable directory lists as
-    empty, and one the OS refused (see :data:`_refused`) is answered
-    empty without asking again.  ``is_dir`` reads the type the kernel
+    are dropped like dot-directories; a directory that cannot be listed
+    gives ``None``, and one the OS refused (see :data:`_refused`) is
+    answered so without asking again.  ``is_dir`` reads the type the kernel
     returned with the entry, so no per-entry ``stat`` system call happens.
     """
     files: list[str] = []
     dirs: list[str] = []
     if abs_dir in _refused:
-        return [], []
+        return None
     try:
         with os.scandir(abs_dir) as it:
             for entry in it:
@@ -260,7 +275,7 @@ def _list_dir(abs_dir: str) -> tuple[list[str], list[str]]:
             )
         else:
             logger.debug("cannot list %s", abs_dir, exc_info=True)
-        return [], []
+        return None
     return sorted(files), sorted(dirs)
 
 
@@ -272,8 +287,13 @@ _DATA_EXTS = frozenset(
 
 
 def _encode(text: str) -> bytes:
-    """UTF-8 encode *text*, keeping the escaped bytes of undecodable file names."""
-    return text.encode("utf-8", "surrogateescape")
+    """UTF-8 encode *text* for the search blob; every string has an encoding.
+
+    A surrogate is encoded as it is: the escaped byte of an undecodable
+    file name, and the lone one a client's query may carry, which a
+    strict encoding refuses.
+    """
+    return text.encode("utf-8", "surrogatepass")
 
 
 def _end_dist(path: str, query: str) -> int:
@@ -346,19 +366,49 @@ class _DerivedDir(NamedTuple):
 
 
 def _gitignore_mtime(abs_dir: str) -> int:
-    """mtime of ``abs_dir/.gitignore`` in ns, ``-1`` when it cannot be read."""
+    """mtime of ``abs_dir/.gitignore`` in ns, ``-2`` (no file's mtime) when it cannot be read."""
     try:
         return os.stat(abs_dir + "/.gitignore").st_mtime_ns
     except OSError:
-        return -1
+        return -2
+
+
+# Bytes of the longest ``.gitignore`` that is read; hand-written ones stay far below.
+_GITIGNORE_MAX_BYTES = 1 << 20
+
+# How a ``.gitignore`` is opened: without waiting for the other end of a pipe, and
+# without taking a terminal it may name as the daemon's own.
+_READ_ONLY = (
+    os.O_RDONLY
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_NOCTTY", 0)
+    | getattr(os, "O_BINARY", 0)
+)
 
 
 def _read_file_into(path: str, out: list[str]) -> None:
-    """Append the text of *path* to *out*; nothing on a read or decoding error."""
+    """Append the text of the ignore file *path* to *out*; nothing when it cannot be read.
+
+    Nor when it is no ignore file.  The name may be a link to anything,
+    so only a regular file is read (a device's bytes never end, a pipe's
+    may never come), and of that at most :data:`_GITIGNORE_MAX_BYTES`: a
+    longer one is left unread.
+    """
     try:
-        out.append(Path(path).read_text(encoding="utf-8"))
+        fd = os.open(path, _READ_ONLY)
+    except OSError:
+        return
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return
+        with open(fd, "rb", closefd=False) as file:
+            data = file.read(_GITIGNORE_MAX_BYTES + 1)
+        if len(data) <= _GITIGNORE_MAX_BYTES:
+            out.append(data.decode("utf-8"))
     except (OSError, UnicodeDecodeError):
         pass
+    finally:
+        os.close(fd)
 
 
 def _read_gitignore(abs_dir: str) -> str | None:
@@ -386,11 +436,14 @@ def _read_gitignore(abs_dir: str) -> str | None:
     return text[0] if text else None
 
 
-def _child_rules(abs_dir: str, rel: str, rules: _Rules) -> _Rules:
-    """Merge ``abs_dir/.gitignore`` into *rules* for the directories below."""
+def _child_rules(abs_dir: str, rel: str, rules: _Rules) -> _Rules | None:
+    """Merge ``abs_dir/.gitignore`` into *rules* for the directories below.
+
+    ``None`` when the file cannot be read.
+    """
     text = _read_gitignore(abs_dir)
     if text is None:
-        return rules
+        return None
     names, dir_names, anchored, anchored_dirs = _parse_gitignore(text)
     if not names and not dir_names and not anchored and not anchored_dirs:
         return rules
@@ -448,8 +501,9 @@ def _derive(
     exts = _DATA_EXTS
     for f in kept_files:
         # Dotfiles and data files rank last; inlined, this loop runs once
-        # per file in the tree.
-        (data if f[0] == "." or f.rpartition(".")[2] in exts else plain).append(prefix + f)
+        # per file in the tree.  A name without a dot has no suffix.
+        _, dot, ext = f.rpartition(".")
+        (data if f[0] == "." or (dot and ext in exts) else plain).append(prefix + f)
     n_data = len(data)
     plain.extend(prefix + d + "/" for d in kept_dirs)
     return buckets, kept_dirs, [len(kept_files), n_data], wide
@@ -530,7 +584,9 @@ class FileView:
             if pos < 0:
                 break
             i = bisect_right(starts, pos) - 1
-            if i >= wide_from and len(out) >= want:
+            # Only on reaching the wide region, while ``out`` holds non-wide
+            # hits alone: after that the wide hits compete among themselves.
+            if i >= wide_from and len(out) >= want and not out[-1][0]:
                 break
             end = starts[i + 1] - 1
             dist = end - blob.rfind(query, pos, end) - n
@@ -598,7 +654,6 @@ class FileIndex:
     :meth:`view` objects.
 
     Attributes:
-        root: Absolute directory the entries are relative to.
         paths: Relative entries in priority order; directories end with
             ``/``.
         dirs: Relative paths (no trailing ``/``) of every directory the
@@ -607,8 +662,8 @@ class FileIndex:
         listings: Raw per-directory listings keyed by relative path
             (``""`` for the root), the input of the next mtime-pruned
             rescan and what gets persisted.
-        relisted: Whether the scan read any directory afresh instead of
-            reusing a cached listing (so the persisted copy is stale).
+        relisted: Whether the scan read a listing that differs from the
+            cached one (so the persisted copy is stale).
         wide_from: Index in ``paths`` of the first entry inside a wide
             container (``len(paths)`` when there is none).
         built_at: ``time.monotonic()`` when the scan started — anything
@@ -621,7 +676,6 @@ class FileIndex:
 
     def __init__(
         self,
-        root: str,
         paths: list[str],
         dirs: frozenset[str],
         listings: Listings,
@@ -630,7 +684,6 @@ class FileIndex:
         wide_from: int,
     ) -> None:
         """Wrap the results of :meth:`scan`; see the class attributes."""
-        self.root = root
         self.paths = paths
         self.wide_from = wide_from
         self.dirs = dirs
@@ -661,11 +714,13 @@ class FileIndex:
         plus list concatenation.  Skip rules (dot-directories,
         :data:`JUNK_DIR_NAMES`, ``.gitignore`` entries accumulated on the
         way down) apply to the listed names, so a rule change never
-        needs a re-listing.
+        needs a re-listing.  A directory or ``.gitignore`` read less than
+        :data:`_RACY_NS` after its last change is read again by the next
+        scan: a change within the same clock tick leaves the mtime alone.
 
         A directory the OS refuses to let this process read (see
-        :data:`_refused`) is indexed as its bare ``dir/`` entry: nothing
-        below it, and no listing of it is kept for persistence.
+        :data:`_refused`), or whose listing fails for now, is indexed as its
+        bare ``dir/`` entry: nothing below it, and no listing of it is kept.
 
         Args:
             root: Absolute directory to index.
@@ -684,7 +739,7 @@ class FileIndex:
                 which may wait on the OS, runs behind it.
 
         Returns:
-            A new index; ``relisted`` tells whether anything was read.
+            A new index; ``relisted`` tells whether any listing changed.
         """
         # Not wrapped in gc.disable() for the walk's ~15% saving: the
         # switch is process-wide, and a cold scan of a large tree (up to
@@ -718,7 +773,7 @@ class FileIndex:
         stat = os.stat
         while pending and total < _SCAN_FILES_CAP:
             rel, depth, in_wide, rules = pending.popleft()
-            abs_dir = root + "/" + rel if rel else root
+            abs_dir = os.path.join(root, *rel.split("/")) if rel else root
             # A refused directory (see ``_refused``) contributes nothing of
             # its own -- its parent's listing already holds its ``dir/``
             # entry -- and keeps no listing: neither a later scan nor the
@@ -749,23 +804,36 @@ class FileIndex:
                     d.gitignore_mtime != -1 if d is not None else ".gitignore" in files
                 )
             else:
-                files, subdirs = _list_dir(abs_dir)
-                if abs_dir in _refused:
-                    # Dropping the cached listing it had changes what is
-                    # persisted; a directory never cached changes nothing.
+                # Asked before the listing is read; see ``_RACY_NS``.
+                if time.time_ns() - mtime < _RACY_NS:
+                    mtime -= 1
+                listing = _list_dir(abs_dir)
+                if listing is None:
+                    # Refused, or not listable for now (no descriptor left,
+                    # an I/O error): an empty listing would stand for its
+                    # contents.  Dropping the cached listing it had changes
+                    # what is persisted; one never cached changes nothing.
                     relisted = relisted or cached is not None
                     continue
+                files, subdirs = listing
+                # A fresh listing is derived afresh: under ``mtime - 1`` the
+                # previous scan's entry could pass for current.
+                d = None
                 new[rel] = (mtime, files, subdirs)
-                relisted = True
+                # A racy listing found unchanged is persisted already.
+                relisted = relisted or new[rel] != cached
                 has_gitignore = ".gitignore" in files
             # A trusted build records an unread .gitignore as -2, an mtime
-            # no file has, so the scan that follows derives its rules.
+            # no file has, so the scan that follows derives its rules; so
+            # does a scan that reads a racy one (``_RACY_NS``).
             if not has_gitignore:
                 gitignore_mtime = -1
             elif trusted:
                 gitignore_mtime = -2
             else:
                 gitignore_mtime = _gitignore_mtime(abs_dir)
+                if time.time_ns() - gitignore_mtime < _RACY_NS:
+                    gitignore_mtime, d = -2, None
             if (
                 d is None
                 or d.mtime != mtime
@@ -775,13 +843,20 @@ class FileIndex:
             ):
                 child_rules = rules
                 if has_gitignore and not trusted:
-                    child_rules = _child_rules(abs_dir, rel, rules)
+                    merged = _child_rules(abs_dir, rel, rules)
                     if abs_dir in _refused:
                         # Reading its .gitignore was refused, so nothing
                         # below it can be read either: drop its listing.
                         del new[rel]
                         relisted = True
                         continue
+                    if merged is None:
+                        # Not readable now (no permission, a link without a
+                        # target), and no mtime tells when it will be: the
+                        # next scan tries again.
+                        gitignore_mtime = -2
+                    else:
+                        child_rules = merged
                 d = _DerivedDir(
                     mtime, in_wide, rules, gitignore_mtime, child_rules,
                     *_derive(rel, files, subdirs, in_wide, child_rules),
@@ -815,12 +890,12 @@ class FileIndex:
         paths = out[0] + out[1] + out[2] + out[3]
         del paths[_SCAN_FILES_CAP:]
         wide_from = min(len(out[0]) + len(out[1]), len(paths))
-        return cls(root, paths, frozenset(dirs), new, derived, relisted, wide_from)
+        return cls(paths, frozenset(dirs), new, derived, relisted, wide_from)
 
     @classmethod
-    def empty(cls, root: str) -> FileIndex:
-        """Return an index of *root* with no entries (a failed scan)."""
-        return cls(root, [], frozenset({""}), {}, {}, False, 0)
+    def empty(cls) -> FileIndex:
+        """Return an index with no entries (a failed scan)."""
+        return cls([], frozenset({""}), {}, {}, False, 0)
 
     def view_keys(self) -> list[tuple[str, bool]]:
         """Return the ``(sub_dir, complement)`` keys of the views :meth:`view` served.
@@ -1024,7 +1099,8 @@ class FileIndexRegistry:
         self.home = os.path.abspath(home or str(Path.home()))
         self._cache_dir = cache_dir
         self._indexes: dict[str, FileIndex] = {}
-        self._pending: set[str] = set()
+        # Roots with a queued job, and when each was last asked for.
+        self._pending: dict[str, float] = {}
         self._building: str | None = None
         self._lock = threading.Lock()
         self._jobs: queue.Queue[tuple[str, float, Callable[[], object] | None] | None] = (
@@ -1130,7 +1206,8 @@ class FileIndexRegistry:
             then never run and the caller must not wait for it.
         """
         root, _ = self.root_for(work_dir)
-        return self._enqueue(root, on_ready)
+        with self._lock:
+            return self._enqueue_locked(root, on_ready)
 
     def refresh(self, work_dir: str) -> None:
         """Queue a rescan of the root covering *work_dir* if it is indexed.
@@ -1140,24 +1217,22 @@ class FileIndexRegistry:
         """
         root, _ = self.root_for(work_dir)
         with self._lock:
-            known = root in self._indexes
-        if known:
-            self._enqueue(root, None)
+            if root in self._indexes:
+                self._enqueue_locked(root, None)
 
-    def _enqueue(self, root: str, on_ready: Callable[[], object] | None) -> bool:
-        """Queue a build of *root*; a duplicate callback-less job is dropped.
+    def _enqueue_locked(self, root: str, on_ready: Callable[[], object] | None) -> bool:
+        """Queue a build of *root*, :attr:`_lock` held; a duplicate callback-less job is dropped.
 
         Returns whether a job will run for this request (a dropped
         duplicate counts: the pending job covers it).
         """
-        with self._lock:
-            return self._enqueue_locked(root, on_ready)
-
-    def _enqueue_locked(self, root: str, on_ready: Callable[[], object] | None) -> bool:
-        """:meth:`_enqueue` with :attr:`_lock` held by the caller."""
         if self._stopped:
             return False
+        now = time.monotonic()
         if on_ready is None and root in self._pending:
+            # The pending job answers this request too: no scan that
+            # started before now may count as its answer.
+            self._pending[root] = now
             return True
         if self._worker is None:
             worker = threading.Thread(
@@ -1172,9 +1247,9 @@ class FileIndexRegistry:
                 logger.exception("file index worker failed to start")
                 return False
             self._worker = worker
-        self._pending.add(root)
+        self._pending[root] = now
         # Under the lock, so no job can land behind the stop sentinel.
-        self._jobs.put((root, time.monotonic(), on_ready))
+        self._jobs.put((root, now, on_ready))
         return True
 
     def stop(self) -> None:
@@ -1188,8 +1263,6 @@ class FileIndexRegistry:
 
     def _cache_path(self, root: str) -> Path:
         """Return the persisted-listings file of *root*."""
-        from kiss.core.config import kiss_home
-
         base = self._cache_dir if self._cache_dir is not None else kiss_home() / "file-index"
         # ``fsencode`` round-trips surrogate-escaped (undecodable) path
         # bytes that ``str.encode("utf-8")`` would reject.
@@ -1233,7 +1306,7 @@ class FileIndexRegistry:
             index = FileIndex.scan(root, {}, previous, rules)
         except Exception:
             logger.exception("file index scan of %s failed", root)
-            index = FileIndex.empty(root)
+            index = FileIndex.empty()
         # Rebuild the views tabs used since the previous build, here on
         # the worker thread, so the next keystroke does not pay for them.
         if previous is not None:
@@ -1259,9 +1332,10 @@ class FileIndexRegistry:
             # a ``refresh`` during the walk (the tree changed after it
             # started) still queues the rescan it needs; ``_building``
             # keeps ``_current`` from queueing a walk for staleness
-            # alone while this one runs.
+            # alone while this one runs.  The job takes the time of the
+            # last request it absorbed while pending.
             with self._lock:
-                self._pending.discard(root)
+                queued_at = max(queued_at, self._pending.pop(root, queued_at))
                 self._building = root
                 current = self._indexes.get(root)
             if current is None or current.built_at < queued_at:

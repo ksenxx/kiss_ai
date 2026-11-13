@@ -88,6 +88,26 @@ def test_small_absolute_but_large_relative_changes_are_applied(
     }
 
 
+def test_a_variable_price_is_not_a_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenRouter lists a router at "-1" per token: its catalog entry keeps its price.
+
+    The sentinel was stored as -$1,000,000/M, a price the catalog loader refuses for the whole
+    file.  A listed router is not retired either, and no entry is created for a new one.
+    """
+    listing = {
+        "data": [
+            _or_model("openrouter/auto", "-1", "-1"),
+            _or_model("acme/router-preview", "-1", "-1"),
+        ]
+    }
+    current = {"openrouter/openrouter/auto": _entry(1.0, 2.0)}
+    with _listing_server(listing, {"data": []}) as url:
+        _point_fetch_at(monkeypatch, url)
+        fetched = mod.fetch_openrouter()
+    assert mod.compute_changes(current, fetched, {}, {}, {}, {}) == ([], [])
+    assert mod.find_deprecated_models(current, fetched, {}, {}, {}) == []
+
+
 def test_together_prices_use_the_same_precision_and_threshold() -> None:
     """Together's per-1M listing gets the relative comparison too, embeddings included."""
     current = {

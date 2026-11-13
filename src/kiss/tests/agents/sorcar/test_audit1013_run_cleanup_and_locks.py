@@ -279,7 +279,8 @@ class TestLockedCall:
 
     def test_classifier_cache(self) -> None:
         # The cache file lives under the session's temporary KISS_HOME.
-        self._hammer(task_classifier._cache_lock, task_classifier.clear_classification_cache)
+        lookup = functools.partial(task_classifier.cached_classification, "t", "m")
+        self._hammer(task_classifier._cache_lock, lookup)
 
     def test_slow_holder_is_waited_for(self) -> None:
         """A holder still alive (a side channel's charge) is never bypassed:

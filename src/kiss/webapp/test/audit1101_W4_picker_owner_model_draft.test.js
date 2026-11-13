@@ -37,9 +37,12 @@ const {
   sleep,
   byId,
   pickMachine,
+  lastMsg,
+  plain,
 } = require('./simplify2_harness');
 const {openSettings, typeInto} = require('./settings_helpers');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {typeAndSend} = require('./attachment_helpers');
 
 const {test, report} = makeRunner();
 const pages = [];
@@ -138,6 +141,13 @@ const DRAFT = {
   apiKey: 'new-unsaved-key',
   headers: 'X-Unsaved: unique',
 };
+/** A second listed model, for the tests that edit two. */
+const OTHER = {
+  name: 'other',
+  endpoint: 'https://o/v1',
+  api_key: 'k',
+  headers: '',
+};
 
 /** Open the sheet on one model and save an edit of all four boxes. */
 function editAndSave(win, posted) {
@@ -157,7 +167,7 @@ function editAndSave(win, posted) {
   typeInto(win, 'cfg-custom-api-key', DRAFT.apiKey);
   typeInto(win, 'cfg-custom-headers', DRAFT.headers);
   byId(win, 'custom-model-save-btn').click();
-  const msg = posted.filter(m => m.type === 'saveMyModel').pop();
+  const msg = lastMsg(posted, 'saveMyModel');
   assert.strictEqual(msg.originalName, OLD.name);
   assert.strictEqual(msg.name, DRAFT.name);
   // As before: Save puts the pre-edit values back at once.
@@ -195,9 +205,8 @@ async function main() {
     pick(win, picker, 'A-private.pdf');
     await readsSettled(page);
     assert.deepStrictEqual(chipNames(win), [], "BUG: A's file appeared in B");
-    byId(win, 'task-input').value = 'Task intended for B';
-    byId(win, 'send-btn').click();
-    const frame = posted.filter(m => m.type === 'submit').pop();
+    typeAndSend(win, 'Task intended for B');
+    const frame = lastMsg(posted, 'submit');
     assert.strictEqual(frame.tabId, second);
     assert.strictEqual(
       (frame.attachments || []).length,
@@ -245,13 +254,57 @@ async function main() {
       'the chip is ready',
     );
     assert.deepStrictEqual(chipNames(win), ['mine.pdf']);
-    byId(win, 'task-input').value = 'Task with a file';
-    byId(win, 'send-btn').click();
-    const frame = posted.filter(m => m.type === 'submit').pop();
+    typeAndSend(win, 'Task with a file');
+    const frame = lastMsg(posted, 'submit');
     assert.strictEqual(frame.tabId, first);
     assert.strictEqual(
       frame.attachments.map(f => f.name).join(','),
       'mine.pdf',
+    );
+  });
+
+  await test('W3 audit 2026-11-12: a file attached on a file view goes to the chat the view was reached from', async () => {
+    // Upload and a drop stay usable on a file view (a content tab in
+    // front on a stacked surface).  Like Stop and Share there, they act
+    // on the chat the view was reached from, whichever chat owns it.
+    const page = pageWithPicker();
+    const {win} = page;
+    const {api, first, second} = twoTabs(win);
+    api.endLaunch();
+    api.switchToTab(first);
+    send(win, {
+      type: 'fileContent',
+      tabId: first,
+      name: 'notes.txt',
+      path: '/tmp/notes.txt',
+      content: 'notes',
+    });
+    const view = api.getActiveTabId();
+    assert.notStrictEqual(view, first, 'setup: the file view is in front');
+    // The page has left the view when the picker delivers its file.
+    const picker = openPickerIn(page, view);
+    api.switchToTab(second);
+    pick(win, picker, 'picked.pdf');
+    // Back on the view, coming from the other chat: a file is dropped.
+    api.switchToTab(view);
+    const drop = new win.Event('drop', {bubbles: true, cancelable: true});
+    drop.dataTransfer = {
+      files: [new win.File(['bytes'], 'dropped.pdf', {type: 'application/pdf'})],
+    };
+    byId(win, 'input-container').dispatchEvent(drop);
+    await readsSettled(page);
+    assert.strictEqual(page.reads.length, 2, 'setup: both files were read');
+    api.switchToTab(first);
+    assert.deepStrictEqual(
+      chipNames(win),
+      ['picked.pdf'],
+      'picked on the view reached from the first chat',
+    );
+    api.switchToTab(second);
+    assert.deepStrictEqual(
+      chipNames(win),
+      ['dropped.pdf'],
+      'dropped on the view reached from the second chat',
     );
   });
 
@@ -273,7 +326,7 @@ async function main() {
     assert.deepStrictEqual(boxValues(win), DRAFT, 'with every typed value');
     // It is still an edit of the old model: Save posts the same rename.
     byId(win, 'custom-model-save-btn').click();
-    const retry = posted.filter(m => m.type === 'saveMyModel').pop();
+    const retry = lastMsg(posted, 'saveMyModel');
     assert.strictEqual(retry.originalName, OLD.name);
     assert.strictEqual(retry.name, DRAFT.name);
     assert.strictEqual(retry.endpoint, DRAFT.endpoint);
@@ -351,13 +404,7 @@ async function main() {
     const {win, posted} = makePage();
     pages.push(win);
     editAndSave(win, posted);
-    send(win, {
-      type: 'myModelsData',
-      models: [
-        OLD,
-        {name: 'other', endpoint: 'https://o/v1', api_key: 'k', headers: ''},
-      ],
-    });
+    send(win, {type: 'myModelsData', models: [OLD, OTHER]});
     win.document.querySelectorAll('.custom-model-edit-btn')[1].click();
     typeInto(win, 'cfg-custom-endpoint', 'https://other-draft/v1');
     send(win, {
@@ -376,18 +423,12 @@ async function main() {
     // Before the daemon answers that save, the list (another surface's
     // change) shows a second model, which the user edits and saves as
     // it is: two saves await their answers, in order.
-    const other = {
-      name: 'other',
-      endpoint: 'https://o/v1',
-      api_key: 'k',
-      headers: '',
-    };
-    send(win, {type: 'myModelsData', models: [OLD, other]});
+    send(win, {type: 'myModelsData', models: [OLD, OTHER]});
     assert.strictEqual(editVisible(win), false, 'nothing acknowledged yet');
     win.document.querySelectorAll('.custom-model-edit-btn')[1].click();
     byId(win, 'custom-model-save-btn').click();
-    const second = posted.filter(m => m.type === 'saveMyModel').pop();
-    assert.strictEqual(second.originalName, other.name, 'setup: second save');
+    const second = lastMsg(posted, 'saveMyModel');
+    assert.strictEqual(second.originalName, OTHER.name, 'setup: second save');
     // The first save is refused: its draft comes back, not the second's.
     send(win, {
       type: 'error',
@@ -401,11 +442,11 @@ async function main() {
     );
     // The second save is acknowledged by the list: the editor on the
     // first draft is left alone.
-    send(win, {type: 'myModelsData', models: [OLD, other]});
+    send(win, {type: 'myModelsData', models: [OLD, OTHER]});
     assert.strictEqual(editVisible(win), true);
     assert.deepStrictEqual(boxValues(win), DRAFT);
     byId(win, 'custom-model-save-btn').click();
-    const retry = posted.filter(m => m.type === 'saveMyModel').pop();
+    const retry = lastMsg(posted, 'saveMyModel');
     assert.strictEqual(retry.originalName, OLD.name, 'Save retries the rename');
     assert.strictEqual(retry.name, DRAFT.name);
   });
@@ -417,8 +458,7 @@ async function main() {
     const {win, posted} = makePage();
     pages.push(win);
     editAndSave(win, posted);
-    const other = {name: 'other', endpoint: 'https://o/v1', api_key: 'k', headers: ''};
-    send(win, {type: 'myModelsData', models: [OLD, other]});
+    send(win, {type: 'myModelsData', models: [OLD, OTHER]});
     win.document.querySelectorAll('.custom-model-edit-btn')[1].click();
     typeInto(win, 'cfg-custom-endpoint', 'https://other-typed/v1');
     byId(win, 'custom-model-save-btn').click();
@@ -455,8 +495,7 @@ async function main() {
     const {win, posted} = makePage();
     pages.push(win);
     editAndSave(win, posted);
-    const other = {name: 'other', endpoint: 'https://o/v1', api_key: 'k', headers: ''};
-    send(win, {type: 'myModelsData', models: [OLD, other]});
+    send(win, {type: 'myModelsData', models: [OLD, OTHER]});
     win.document.querySelectorAll('.custom-model-edit-btn')[1].click();
     typeInto(win, 'cfg-custom-endpoint', 'https://other-typed/v1');
     send(win, {type: 'error', text: "A custom model named 'concurrent-model' already exists"});
@@ -476,7 +515,7 @@ async function main() {
     // Cancel puts that draft back, and it stands over the refused one
     // until it is added.
     editAndSave(win, posted);
-    send(win, {type: 'myModelsData', models: [OLD, other]});
+    send(win, {type: 'myModelsData', models: [OLD, OTHER]});
     typeInto(win, 'cfg-custom-model-name', 'next-add');
     typeInto(win, 'cfg-custom-endpoint', 'https://next-add/v1');
     win.document.querySelectorAll('.custom-model-edit-btn')[1].click();
@@ -487,7 +526,7 @@ async function main() {
     assert.strictEqual(boxValues(win).name, 'next-add');
     assert.strictEqual(boxValues(win).endpoint, 'https://next-add/v1');
     byId(win, 'custom-model-add-btn').click();
-    const added = posted.filter(m => m.type === 'saveMyModel').pop();
+    const added = lastMsg(posted, 'saveMyModel');
     assert.strictEqual(added.name, 'next-add', 'Add sends that draft');
     assert.strictEqual(editVisible(win), true, 'then the refused draft is back');
     assert.deepStrictEqual(boxValues(win), DRAFT);
@@ -515,7 +554,7 @@ async function main() {
     assert.deepStrictEqual(boxValues(win), next, 'the newer draft stands');
     // What Add now submits is that draft, not the refused one.
     byId(win, 'custom-model-add-btn').click();
-    const msg = posted.filter(m => m.type === 'saveMyModel').pop();
+    const msg = lastMsg(posted, 'saveMyModel');
     assert.strictEqual(msg.name, next.name);
     assert.strictEqual(msg.originalName, undefined);
   });
@@ -564,7 +603,7 @@ async function main() {
     );
     assert.deepStrictEqual(boxValues(win), DRAFT);
     byId(win, 'custom-model-save-btn').click();
-    const retry = posted.filter(m => m.type === 'saveMyModel').pop();
+    const retry = lastMsg(posted, 'saveMyModel');
     assert.strictEqual(retry.originalName, OLD.name);
   });
 
@@ -576,18 +615,12 @@ async function main() {
     win.document.querySelector('.custom-model-edit-btn').click();
     typeInto(win, 'cfg-custom-endpoint', 'https://edited/v1');
     byId(win, 'custom-model-save-btn').click();
-    const msg = posted.filter(m => m.type === 'saveMyModel').pop();
+    const msg = lastMsg(posted, 'saveMyModel');
     assert.strictEqual(msg.originalName, OLD.name);
     assert.strictEqual(msg.name, OLD.name);
     // Another surface added a model meanwhile: its broadcast still
     // lists old-model with the old endpoint.
-    send(win, {
-      type: 'myModelsData',
-      models: [
-        OLD,
-        {name: 'other', endpoint: 'https://o/v1', api_key: 'k', headers: ''},
-      ],
-    });
+    send(win, {type: 'myModelsData', models: [OLD, OTHER]});
     send(win, {
       type: 'error',
       text: 'Could not write ~/.s10s/MY_MODELS.json: disk full',
@@ -609,7 +642,7 @@ async function main() {
           api_key: OLD.api_key,
           headers: OLD.headers,
         },
-        {name: 'other', endpoint: 'https://o/v1', api_key: 'k', headers: ''},
+        OTHER,
       ],
     });
     send(win, {type: 'error', text: 'Update failed: no network'});
@@ -624,7 +657,7 @@ async function main() {
     typeInto(win, 'cfg-custom-model-name', 'added-model');
     typeInto(win, 'cfg-custom-endpoint', 'https://added/v1');
     byId(win, 'custom-model-add-btn').click();
-    assert.strictEqual(posted.filter(m => m.type === 'saveMyModel').pop().name, 'added-model');
+    assert.strictEqual(lastMsg(posted, 'saveMyModel').name, 'added-model');
     send(win, {
       type: 'myModelsData',
       models: [
@@ -652,7 +685,7 @@ async function main() {
     typeInto(win, 'cfg-custom-model-name', 'added-model');
     typeInto(win, 'cfg-custom-endpoint', 'https://added/v1');
     byId(win, 'custom-model-add-btn').click();
-    const msg = posted.filter(m => m.type === 'saveMyModel').pop();
+    const msg = lastMsg(posted, 'saveMyModel');
     assert.strictEqual(msg.name, 'added-model');
     assert.strictEqual(
       boxValues(win).name,
@@ -670,6 +703,49 @@ async function main() {
     );
     assert.strictEqual(boxValues(win).endpoint, 'https://added/v1');
     assert.strictEqual(editVisible(win), false, 'still an Add, not an edit');
+  });
+
+  // Two Adds in flight, both refused in order.  A draft is the whole
+  // form (name, endpoint, key, headers): the first comes back complete,
+  // the second waits for the name box the first one stands in and
+  // comes back once the retry frees it.
+  await test('two Adds refused in order give back both whole drafts', () => {
+    const {win, posted} = makePage();
+    pages.push(win);
+    openSettings(win);
+    send(win, {type: 'myModelsData', models: []});
+    const A = {name: 'model-a', endpoint: 'https://a.example/v1', apiKey: 'key-a', headers: 'X-A: one'};
+    const B = {name: 'model-b', endpoint: 'https://b.example/v1', apiKey: 'key-b', headers: 'X-B: two'};
+    const add = values => {
+      typeInto(win, 'cfg-custom-model-name', values.name);
+      typeInto(win, 'cfg-custom-endpoint', values.endpoint);
+      typeInto(win, 'cfg-custom-api-key', values.apiKey);
+      typeInto(win, 'cfg-custom-headers', values.headers);
+      byId(win, 'custom-model-add-btn').click();
+    };
+    const refuse = () =>
+      send(win, {type: 'error', command: 'saveMyModel', text: 'Could not write MY_MODELS.json'});
+    add(A);
+    add(B);
+    refuse();
+    assert.deepStrictEqual(
+      boxValues(win),
+      A,
+      "BUG: the first refused Add came back with the second's fields",
+    );
+    refuse();
+    assert.deepStrictEqual(boxValues(win), A, 'the second draft waits for the name box');
+    // The retry sends the first draft as it was typed, and frees the box.
+    byId(win, 'custom-model-add-btn').click();
+    const retry = lastMsg(posted, 'saveMyModel');
+    assert.deepStrictEqual(plain(retry), {type: 'saveMyModel', ...A});
+    assert.deepStrictEqual(boxValues(win), B, 'BUG: the second refused Add is lost');
+    // Typing since a save stands over that save's refusal until sent.
+    typeInto(win, 'cfg-custom-model-name', 'model-c');
+    refuse();
+    assert.deepStrictEqual(boxValues(win), {...B, name: 'model-c'}, 'the newer typing stands');
+    byId(win, 'custom-model-add-btn').click();
+    assert.deepStrictEqual(boxValues(win), A, 'the refused retry is back once that is sent');
   });
 
   await test("F2: a remote machine's refusal brings the draft back while its sheet shows", () => {
@@ -703,7 +779,7 @@ async function main() {
     typeInto(win, 'cfg-custom-model-name', DRAFT.name);
     typeInto(win, 'cfg-custom-endpoint', DRAFT.endpoint);
     byId(win, 'custom-model-save-btn').click();
-    const msg = posted.filter(m => m.type === 'saveMyModel').pop();
+    const msg = lastMsg(posted, 'saveMyModel');
     assert.strictEqual(msg.machine, 'gpu-box');
     assert.strictEqual(editVisible(win), false);
     // Another machine's forwarded error is not this save's.
@@ -729,7 +805,6 @@ async function main() {
     assert.strictEqual(boxValues(win).endpoint, DRAFT.endpoint);
     // Once the sheet shows another machine, a refusal is only toasted.
     byId(win, 'custom-model-cancel-btn').click();
-    byId(win, 'custom-model-save-btn');
     win.document.querySelector('.custom-model-edit-btn').click();
     typeInto(win, 'cfg-custom-model-name', 'second-try');
     byId(win, 'custom-model-save-btn').click();

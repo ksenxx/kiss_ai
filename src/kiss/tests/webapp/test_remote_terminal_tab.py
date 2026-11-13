@@ -40,10 +40,8 @@ from kiss.tests.server.test_explorer_scm_commands import (
     harness,  # noqa: F401  (module fixture used by param name)
 )
 from kiss.tests.server.test_terminal_tab_service import hermetic_shell, session_count
-from kiss.tests.webapp.test_workspace_sections import (
-    _dismiss_update_toast,
-    _set_work_dir,
-)
+from kiss.tests.webapp.test_content_tab_editing import _dismiss_toasts
+from kiss.tests.webapp.test_workspace_sections import _set_work_dir
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="terminal tabs need a pty",
@@ -76,8 +74,19 @@ def browser():
 @pytest.fixture(autouse=True)
 def no_leftover_shells(harness: ExplorerHarness):
     """A page a failed test left behind keeps its shells for the grace
-    period; hang them up so every test starts from zero shells."""
-    harness.server._agent_server.terminals.shutdown()
+    period; hang them up so every test starts from zero shells.
+
+    Tab by tab, not with ``shutdown``: a service shut down starts no
+    more shells, and the tests share the module's daemon.
+    """
+    terminals = harness.server._agent_server.terminals
+    with terminals._lock:
+        leftover = list(terminals._sessions)
+    for tab_id in leftover:
+        terminals.close(tab_id)
+    deadline = time.monotonic() + 5.0
+    while session_count(terminals) and time.monotonic() < deadline:
+        time.sleep(0.05)
     yield
 
 
@@ -98,7 +107,7 @@ def _open_page(browser, harness: ExplorerHarness):
         "document.getElementById('meta-workdir').textContent.length > 1",
         timeout=30000,
     )
-    _dismiss_update_toast(page, harness)
+    _dismiss_toasts(page)
     return context, page
 
 
@@ -257,7 +266,7 @@ def test_shell_starts_in_the_workspace_the_page_browses(browser, harness):
     restored afterwards for the module's other tests)."""
     context, page = _open_page(browser, harness)
     try:
-        _set_work_dir(page, harness, str(harness.plain_dir))
+        _set_work_dir(page, str(harness.plain_dir))
         _open_terminal(page)
         page.keyboard.type("pwd; echo marker-$((40+2))\n")
         text = _unwrapped(_wait_for_output(page, "marker-42"))
@@ -265,7 +274,7 @@ def test_shell_starts_in_the_workspace_the_page_browses(browser, harness):
         assert str(harness.work_dir) not in text
         _close_active_tab(page)
         _wait_sessions(harness, 0)
-        _set_work_dir(page, harness, str(harness.work_dir))
+        _set_work_dir(page, str(harness.work_dir))
     finally:
         context.close()
 

@@ -30,8 +30,10 @@ from websockets.extensions.permessage_deflate import PerMessageDeflate
 import kiss.agents.sorcar.machines as mach
 import kiss.agents.sorcar.persistence as th
 import kiss.core.user_config as vc
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import find_free_port
+from kiss.tests.local_ws import _generate_self_signed_cert
+from kiss.tests.persistence_helpers import close_db
 
 # Bigger than one deflate block and than the transport's write limit,
 # so the reply is compressed and drained in several steps.
@@ -52,12 +54,11 @@ class TestMachineLinkDeflate(TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp(prefix="kiss-link-deflate-"))
-        self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved_persistence = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = self.tmpdir / ".kiss"
         kiss_dir.mkdir()
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         self._saved_cfg = (vc.CONFIG_DIR, vc.CONFIG_PATH)
         vc.CONFIG_DIR = self.tmpdir / "config"
         vc.CONFIG_PATH = vc.CONFIG_DIR / "config.json"
@@ -86,8 +87,8 @@ class TestMachineLinkDeflate(TestCase):
             self.loop.call_soon_threadsafe(self.loop.stop)
             self._thread.join(timeout=30)
             self.loop.close()
-            th._close_db()
-            th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
+            close_db()
+            th._DB_PATH, th._KISS_DIR = self._saved_persistence
             vc.CONFIG_DIR, vc.CONFIG_PATH = self._saved_cfg
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 

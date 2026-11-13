@@ -17,7 +17,6 @@ const {
   stubRaf,
   sendEmptyWorkDir,
   loadMainCss,
-  settle: tick,
 } = require('./simplify2_harness');
 const {
   makeRow,
@@ -110,7 +109,7 @@ function testAskingRowShowsQuestionMark() {
   );
 }
 
-async function testMarkFlipsWithTasksUpdated() {
+function testMarkFlipsWithTasksUpdated() {
   const {win, posted} = makePage();
   openChatsPanel(win);
   sendEmptyWorkDir(win);
@@ -137,10 +136,7 @@ async function testMarkFlipsWithTasksUpdated() {
     'while the question is open',
   );
 
-  // Answered: the next nudge brings the spinner back.  (A refresh in the
-  // same tick as the previous one folds into its end-of-tick refetch,
-  // so let that tick end first.)
-  await tick();
+  // Answered: the next nudge brings the spinner back.
   posted.length = 0;
   send(win, {type: 'tasks_updated'});
   answerHistory(win, posted, [
@@ -153,13 +149,6 @@ async function testMarkFlipsWithTasksUpdated() {
   );
 }
 
-async function main() {
-  testAskingRowShowsQuestionMark();
-  await testMarkFlipsWithTasksUpdated();
-  console.log('\n2 passed, 0 failed');
-}
-
-main().catch(e => {
-  console.error(e);
-  process.exit(1);
-});
+testAskingRowShowsQuestionMark();
+testMarkFlipsWithTasksUpdated();
+console.log('\n2 passed, 0 failed');

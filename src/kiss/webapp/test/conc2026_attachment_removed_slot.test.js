@@ -4,7 +4,7 @@
 // add your name here
 
 // End-to-end (JSDOM) regression test for the removed-slot phantom error
-// (audit candidate E / CAND-1, tmp/audit-media-cand-E.md).
+// (audit candidate E / CAND-1).
 //
 // The bug: fillAttachmentSlot()'s catch block pushes to the owning tab's
 // attachErrors UNCONDITIONALLY, even when ownerFiles.indexOf(slot) is -1,

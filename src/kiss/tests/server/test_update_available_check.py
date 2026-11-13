@@ -16,14 +16,21 @@ JSON API (no mocks/patches) and override
 ``web_server._PYPI_LATEST_URL`` to point at it.  The
 ``_VERSION_CHECK_INTERVAL`` constant is also overridden to a small
 value so the periodic loop runs within the test budget.
+
+The root conftest switches the check off for the whole test session
+(``KISS_DISABLE_UPDATE_CHECK=1``, inherited by subprocess daemons);
+these are the check's own tests, so :class:`_UpdateCheckTestBase`
+lifts the switch while one of them runs.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import tempfile
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
@@ -33,11 +40,18 @@ import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as ws
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.tests.remote_daemon import start_remote_daemon
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
+
+_KILL_SWITCH = "KISS_DISABLE_UPDATE_CHECK"
 
 
 class _PypiStub:
-    """Local HTTP server impersonating the PyPI JSON endpoint."""
+    """Local HTTP server impersonating the PyPI JSON endpoint.
+
+    It also counts the ``CONNECT`` a client sends when the stub is its
+    HTTPS proxy, and refuses the tunnel with *status*.
+    """
 
     def __init__(self, payload: dict[str, object] | None,
                  status: int = 200) -> None:
@@ -70,6 +84,8 @@ class _PypiStub:
                 self.end_headers()
                 self.wfile.write(body)
 
+            do_CONNECT = do_GET  # noqa: N815 — BaseHTTPRequestHandler API
+
         self._server = HTTPServer(("127.0.0.1", 0), Handler)
         port = self._server.server_address[1]
         self.url = f"http://127.0.0.1:{port}/pypi/kiss-agent-framework/json"
@@ -92,8 +108,14 @@ class _UpdateCheckTestBase(IsolatedAsyncioTestCase):
         "info": {"version": PYPI_VERSION},
     }
     PYPI_STATUS = 200
+    # False: the daemon under test starts with the session's kill switch.
+    LIFTS_KILL_SWITCH = True
 
     async def asyncSetUp(self) -> None:
+        if self.LIFTS_KILL_SWITCH:
+            self.addCleanup(
+                os.environ.__setitem__, _KILL_SWITCH, os.environ.pop(_KILL_SWITCH, ""),
+            )
         self.tmpdir = tempfile.mkdtemp()
         self.saved = redirect_persistence(self.tmpdir)
         self._orig_url = ws._PYPI_LATEST_URL
@@ -106,7 +128,7 @@ class _UpdateCheckTestBase(IsolatedAsyncioTestCase):
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.server.web_server import _generate_self_signed_cert
+        from kiss.tests.local_ws import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
         self.server = RemoteAccessServer(
@@ -120,12 +142,13 @@ class _UpdateCheckTestBase(IsolatedAsyncioTestCase):
         await self.server.start_async()
 
     async def asyncTearDown(self) -> None:
+        # The server stops first: its 0.2 s check loop must not see the
+        # real PyPI address come back while the kill switch is lifted.
+        await self.server.stop_async()
         ws._PYPI_LATEST_URL = self._orig_url
         ws._VERSION_CHECK_INTERVAL = self._orig_interval
-        await self.server.stop_async()
         self.pypi.stop()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -241,6 +264,44 @@ class TestUpdateCheckHandlesNetworkErrors(_UpdateCheckTestBase):
                 await writer.wait_closed()
             except Exception:
                 pass
+
+
+class TestUpdateCheckSwitchedOff(_UpdateCheckTestBase):
+    """With the session's ``KISS_DISABLE_UPDATE_CHECK=1`` the daemon never asks."""
+
+    LIFTS_KILL_SWITCH = False
+
+    async def test_the_daemon_neither_asks_pypi_nor_learns_a_release(self) -> None:
+        await asyncio.sleep(1.0)  # five ticks of the 0.2 s check loop
+        self.assertEqual(self.pypi.hits, 0)
+        self.assertIsNone(self.server._latest_version)
+
+
+def test_a_subprocess_test_daemon_does_not_ask_pypi(tmp_path: Path) -> None:
+    """The session's kill switch reaches the daemons ``start_remote_daemon`` spawns.
+
+    The child reaches HTTPS hosts through a local proxy, where its
+    request to PyPI would arrive as ``CONNECT pypi.org:443``.  The check
+    runs right after the daemon wrote ``remote-url.json``.
+    """
+    proxy = _PypiStub(None, status=502)
+    proxy.start()
+    address = proxy.url.partition("/pypi/")[0]
+    home = tmp_path / "home"
+    daemon = start_remote_daemon(home, env={
+        "HTTPS_PROXY": address, "https_proxy": address, "NO_PROXY": "", "no_proxy": "",
+        "HOME": str(tmp_path),
+    })
+    try:
+        deadline = time.monotonic() + 30
+        while not (home / "remote-url.json").exists():
+            assert time.monotonic() < deadline, "the daemon never finished starting"
+            time.sleep(0.05)
+        time.sleep(1.0)
+        assert proxy.hits == 0
+    finally:
+        daemon.stop()
+        proxy.stop()
 
 
 class TestVersionCompare(IsolatedAsyncioTestCase):

@@ -24,6 +24,7 @@ from typing import Any
 from kiss.agents.sorcar import persistence as th
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.persistence_helpers import close_db
 
 
 def _history_event_from_real_backend(
@@ -48,7 +49,7 @@ def _history_event_from_real_backend(
     """
     tmp = tempfile.mkdtemp(prefix="kiss-history-running-test-")
     orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
-    th._close_db()
+    close_db()
     th._DB_PATH = Path(tmp) / "history.db"  # type: ignore[attr-defined]
 
     stop = threading.Event()
@@ -103,7 +104,7 @@ def _history_event_from_real_backend(
             stop.set()
             worker.join(timeout=2.0)
         agent_state.agent_states.clear()
-        th._close_db()
+        close_db()
         th._DB_PATH = orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -114,7 +115,7 @@ def test_backend_marks_alive_thread_as_running() -> None:
     on its row."""
     tmp = tempfile.mkdtemp(prefix="kiss-history-running-test-")
     orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
-    th._close_db()
+    close_db()
     th._DB_PATH = Path(tmp) / "history.db"  # type: ignore[attr-defined]
     stop = threading.Event()
     worker: threading.Thread | None = None
@@ -153,7 +154,7 @@ def test_backend_marks_alive_thread_as_running() -> None:
             stop.set()
             worker.join(timeout=2.0)
         agent_state.agent_states.clear()
-        th._close_db()
+        close_db()
         th._DB_PATH = orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(tmp, ignore_errors=True)
 

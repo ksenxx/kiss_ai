@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import cron_agent, daemon_client, sea_commands
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 
 CHANNEL_SEA = (
     "from kiss.agents.seas.base.base_sea import ChannelSea\n"
@@ -41,10 +42,10 @@ def _home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     seas.mkdir(parents=True)
     (seas / "mychan_sea.py").write_text(CHANNEL_SEA)
     (home / "SEAS.md").write_text(str(tmp_path / "seas") + "\n")
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
     assert sea_commands.get_command("mychan") is not None
     yield home
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
 
 
 def _capture(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:

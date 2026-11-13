@@ -28,7 +28,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from kiss.core.processes import run_process_group
@@ -76,6 +76,9 @@ _WINDOWS_CANDIDATES = (
     r"Chromium\Application\chrome.exe",
 )
 
+# The options of ``env`` that take the next word as their operand.
+_ENV_OPERAND_OPTIONS = frozenset({"-u", "--unset", "-C", "--chdir", "-P"})
+
 
 @dataclass(frozen=True)
 class ResolvedBrowser:
@@ -98,15 +101,18 @@ class ResolvedBrowser:
 def family_name(path_or_name: str) -> str | None:
     """Return the Chromium-family display name for *path_or_name*.
 
+    Only the last component names the browser: a directory above it
+    (the home of a user called ``operator``) says nothing about it.
+
     Args:
         path_or_name: Executable path, ``.desktop`` file name or
-            application bundle path.
+            application bundle path, with ``/`` or ``\\`` separators.
 
     Returns:
         The display name, or ``None`` when the browser is not
         Chromium-based (or unknown).
     """
-    low = path_or_name.lower()
+    low = PureWindowsPath(path_or_name).name.lower()  # split at "/" and "\" alike
     for needle, name in _CHROMIUM_FAMILY:
         if needle in low:
             return name
@@ -199,12 +205,22 @@ def browser_commands_from_env() -> list[list[str]]:
 
 
 def _executable_of(command: list[str]) -> str | None:
-    """Resolve the executable a command line runs, skipping an ``env FOO=bar``
-    wrapper and ``%U``-style placeholders; ``None`` when it is not installed."""
-    for word in command:
-        if word == "env" or "=" in word or word.startswith("%"):
-            continue
-        return _which(word)
+    """Resolve the executable a command line runs; ``None`` when it is not installed.
+
+    An ``env`` wrapper is skipped with its assignments and options
+    (``env FOO=bar``, ``/usr/bin/env -u NAME``), as are ``%U``-style
+    placeholders.
+    """
+    words = iter(command)
+    in_env = False
+    for word in words:
+        if os.path.basename(word) == "env":
+            in_env = True
+        elif in_env and word.startswith("-"):
+            if word in _ENV_OPERAND_OPTIONS:
+                next(words, None)
+        elif "=" not in word and not word.startswith("%"):
+            return _which(word)
     return None
 
 
@@ -297,7 +313,7 @@ def _mac_app_executable(app_path: str) -> str | None:
     try:
         with info.open("rb") as fh:
             executable = plistlib.load(fh).get("CFBundleExecutable")
-    except (OSError, ValueError):  # plistlib.InvalidFileException is a ValueError
+    except Exception:  # unreadable: missing, cut short (an ExpatError), a root that is no dict
         return None
     if not isinstance(executable, str):
         return None

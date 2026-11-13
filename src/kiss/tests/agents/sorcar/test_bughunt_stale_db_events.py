@@ -33,17 +33,16 @@ import kiss.agents.sorcar.persistence as th
 
 def _redirect(tmpdir: str):
     """Redirect the DB to a temp dir and reset the singleton connection."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore(saved):
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    (th._DB_PATH, th._KISS_DIR) = saved
 
 
 class TestStaleDbEvents:
@@ -55,9 +54,7 @@ class TestStaleDbEvents:
 
     def teardown_method(self):
         th._flush_chat_events()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir_a, ignore_errors=True)
         shutil.rmtree(self.tmpdir_b, ignore_errors=True)
@@ -79,7 +76,6 @@ class TestStaleDbEvents:
                 {"type": "text_delta", "content": f"x{i}"}, task_id=task_a,
             )
         th._DB_PATH = Path(self.tmpdir_b) / "history.db"
-        th._db_conn = None
         db_b = th._get_db()
         import time as _time
         with th._rw_lock.write_lock():
@@ -98,30 +94,8 @@ class TestStaleDbEvents:
             f"{leaked[:3]}..."
         )
 
-    def test_append_with_stale_origin_path_is_dropped(self):
-        """A late append stamped with an old DB path must be a no-op."""
-        task_id, _ = th._add_task("current-task", chat_id="chat-cur")
-        th._append_chat_event(
-            {"type": "followup_suggestion", "text": "late suggestion"},
-            task_id=task_id,
-            origin_db_path="/nonexistent/old/history.db",
-        )
-        assert self._events_for(task_id) == []
-
-    def test_append_with_current_origin_path_persists(self):
-        """The guard must not drop legitimate same-database appends."""
-        task_id, _ = th._add_task("current-task-2", chat_id="chat-cur2")
-        th._append_chat_event(
-            {"type": "followup_suggestion", "text": "fresh suggestion"},
-            task_id=task_id,
-            origin_db_path=th._current_db_path(),
-        )
-        events = self._events_for(task_id)
-        assert len(events) == 1
-        assert events[0]["type"] == "followup_suggestion"
-
-    def test_append_without_origin_path_keeps_working(self):
-        """Default (no origin) appends behave exactly as before."""
+    def test_append_persists_to_the_active_database(self):
+        """An append lands on its task in the database it was made against."""
         task_id, _ = th._add_task("current-task-3", chat_id="chat-cur3")
         th._append_chat_event({"step": 1}, task_id=task_id)
         events = self._events_for(task_id)

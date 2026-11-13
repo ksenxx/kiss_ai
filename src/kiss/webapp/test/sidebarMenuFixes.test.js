@@ -28,6 +28,7 @@ const {
   stubRaf,
   fakeMatchMedia,
   stubClipboard,
+  withTeardown,
 } = require('./simplify2_harness');
 const {
   send,
@@ -40,6 +41,7 @@ const {
   ofType,
   all,
   makeRunner,
+  forbidNativeDialogs,
   menuItem,
   toast,
   toastInput,
@@ -50,16 +52,11 @@ const {
   openScm,
   pinWorkspace,
 } = require('./ui_antipattern_harness');
+const {trackWindow, closeWindows} = require('./workdir_helpers');
 
-const runner = makeRunner();
-const report = runner.report;
-const openWindows = [];
-
-/** Run one test through the shared runner, then close its windows. */
-async function test(name, fn) {
-  await runner.test(name, fn);
-  while (openWindows.length) openWindows.pop().close();
-}
+const {test: runTest, report} = makeRunner();
+// Each test's windows are closed once it has settled.
+const test = withTeardown(runTest, closeWindows);
 
 function makePage() {
   let copied;
@@ -67,13 +64,8 @@ function makePage() {
     stubRaf(win);
     fakeMatchMedia(win, true);
     copied = stubClipboard(win).writes;
-    // Native dialogs are gone from main.js; any call is a regression.
-    win.prompt = () => {
-      throw new Error('window.prompt must not be called');
-    };
-    win.confirm = () => {
-      throw new Error('window.confirm must not be called');
-    };
+    // Native dialogs are gone from main.js; a call fails the test.
+    forbidNativeDialogs(win);
   }
   const {win, posted} = makeChatPage({
     bodyClass: 'remote-chat',
@@ -84,7 +76,7 @@ function makePage() {
       'treeContextMenu.js',
     ],
   });
-  openWindows.push(win);
+  trackWindow(win);
   return {win, posted, copied};
 }
 
@@ -112,7 +104,7 @@ async function main() {
     const row = explorerRow(win, WD + '/a.txt');
     rightClick(win, row);
     click(win, menuItem(win, 'Rename...'));
-    await sleep(5);
+    await sleep(0);
     const input = row.querySelector('input.explorer-input');
     assert.ok(input, 'the rename box replaces the name');
     assert.strictEqual(win.document.activeElement, input, 'the box has focus');
@@ -144,7 +136,11 @@ async function main() {
     assert.strictEqual(input.selectionStart, 2);
     assert.strictEqual(input.selectionEnd, 5);
     assert.strictEqual(all(win, '.explorer-row.is-file').length, 3);
-    await sleep(5);
+    // jsdom fires no blur when the listing moves the focused box through
+    // a fragment, so fire the one a browser may: the box has its focus
+    // back when the blur's deferred check runs, and nothing commits.
+    input.dispatchEvent(new win.FocusEvent('blur'));
+    await sleep(0);
     assert.strictEqual(
       ofType(posted, 'fsAction').length,
       0,
@@ -174,7 +170,7 @@ async function main() {
     // Enter commits a rename to a sibling path.
     rightClick(win, row);
     click(win, menuItem(win, 'Rename...'));
-    await sleep(5);
+    await sleep(0);
     const input2 = row.querySelector('input.explorer-input');
     input2.value = 'z.txt';
     key(win, input2, 'Enter');
@@ -184,9 +180,20 @@ async function main() {
     assert.strictEqual(fsActions[0].path, WD + '/a.txt');
     assert.strictEqual(fsActions[0].dest, WD + '/z.txt');
     assert.strictEqual(fsActions[0].workDir, WD);
+    // So does a blur that sticks (a click elsewhere).
+    rightClick(win, row);
+    click(win, menuItem(win, 'Rename...'));
+    await sleep(0);
+    const input3 = row.querySelector('input.explorer-input');
+    input3.value = 'y.txt';
+    input3.blur();
+    await sleep(0);
+    const blurred = ofType(posted, 'fsAction');
+    assert.strictEqual(blurred.length, 2, 'a blur that sticks commits');
+    assert.strictEqual(blurred[1].dest, WD + '/y.txt');
   });
 
-  await test('Folder picker: Select only picks a folder the daemon listed', async () => {
+  await test('Folder picker: Select only picks a folder the daemon listed', () => {
     const {win, posted} = makePage();
     openExplorer(win, posted, []);
     click(win, byId(win, 'explorer-pick-folder'));
@@ -288,7 +295,7 @@ async function main() {
     assert.strictEqual(ofType(posted, 'saveConfig').length, 0);
   });
 
-  await test("Folder picker: the global working directory is browsed, not the chat's task folder, and a pick re-roots", async () => {
+  await test("Folder picker: the global working directory is browsed, not the chat's task folder, and a pick re-roots", () => {
     const {win, posted} = makePage();
     pinWorkspace(win);
     // The active chat replays a task that ran in a sub-folder.  There
@@ -365,7 +372,7 @@ async function main() {
     );
   });
 
-  await test('Folder picker: Up stays at a root ("/" and "C:\\")', async () => {
+  await test('Folder picker: Up stays at a root ("/" and "C:\\")', () => {
     const {win, posted} = makePage();
     openExplorer(win, posted, []);
     click(win, byId(win, 'explorer-pick-folder'));
@@ -416,7 +423,7 @@ async function main() {
     assert.strictEqual(list[list.length - 1].path, 'C:\\');
   });
 
-  await test('Commit menu: a failed action still refreshes Source Control', async () => {
+  await test('Commit menu: a failed action still refreshes Source Control', () => {
     const {win, posted} = makePage();
     const row = openScm(win, posted);
     assert.ok(row, 'the commit row renders');
@@ -443,7 +450,7 @@ async function main() {
     assert.ok(note.includes('could not apply'), 'the error is shown');
   });
 
-  await test('Commit menu: Copy Commit Message copies the whole message', async () => {
+  await test('Commit menu: Copy Commit Message copies the whole message', () => {
     const {win, posted, copied} = makePage();
     const row = openScm(win, posted);
     rightClick(win, row);
@@ -454,7 +461,7 @@ async function main() {
     assert.strictEqual(copied[1], SHA_A);
   });
 
-  await test('Commit menu: Create Tag... without a message makes a lightweight tag; names survive', async () => {
+  await test('Commit menu: Create Tag... without a message makes a lightweight tag; names survive', () => {
     const {win, posted} = makePage();
     const row = openScm(win, posted);
     rightClick(win, row);
@@ -508,7 +515,7 @@ async function main() {
     assert.ok(win.document.body.textContent.includes('Created branch topic'));
   });
 
-  await test('Explorer shortcuts: Ctrl+Alt+C copies the path on Linux', async () => {
+  await test('Explorer shortcuts: Ctrl+Alt+C copies the path on Linux', () => {
     const {win, posted, copied} = makePage();
     openExplorer(win, posted, [
       {name: 'a.txt', path: WD + '/a.txt', isDir: false},
@@ -521,7 +528,7 @@ async function main() {
     assert.strictEqual(copied[1], 'a.txt');
   });
 
-  await test('Folder picker: a navigation while a Select waits does not pick the new folder', async () => {
+  await test('Folder picker: a navigation while a Select waits does not pick the new folder', () => {
     const {win, posted} = makePage();
     openExplorer(win, posted, []);
     click(win, byId(win, 'explorer-pick-folder'));
@@ -579,7 +586,7 @@ async function main() {
     assert.strictEqual(ofType(posted, 'setWorkDir').length, 0);
   });
 
-  await test('Chat header drop-down: a folder picked there re-roots the views past a content tab', async () => {
+  await test('Chat header drop-down: a folder picked there re-roots the views past a content tab', () => {
     const {win, posted} = makePage();
     pinWorkspace(win);
     send(win, {
@@ -655,7 +662,7 @@ async function main() {
     assert.ok(explorerRow(win, WD + '/dir/child.txt'), 'the child is listed');
     rightClick(win, dirRow);
     click(win, menuItem(win, 'Rename...'));
-    await sleep(5);
+    await sleep(0);
     send(win, {
       type: 'dirListing',
       token: req.token,
@@ -675,7 +682,7 @@ async function main() {
     assert.strictEqual(ofType(posted, 'fsAction').length, 0);
   });
 
-  await test('Explorer: a refresh keeps the focused row focused and the single tab stop', async () => {
+  await test('Explorer: a refresh keeps the focused row focused and the single tab stop', () => {
     const {win, posted} = makePage();
     const req = openExplorer(win, posted, [
       {name: 'a.txt', path: WD + '/a.txt', isDir: false},
@@ -684,7 +691,7 @@ async function main() {
     const row = explorerRow(win, WD + '/a.txt');
     row.focus();
     assert.strictEqual(win.document.activeElement, row);
-    send(win, {
+    const listing = {
       type: 'dirListing',
       token: req.token,
       path: WD,
@@ -693,18 +700,40 @@ async function main() {
         {name: 'a.txt', path: WD + '/a.txt', isDir: false},
         {name: 'b.txt', path: WD + '/b.txt', isDir: false},
       ],
-    });
+    };
+    send(win, listing);
     assert.strictEqual(
       win.document.activeElement,
       row,
       'BUG: the focused row lost focus',
     );
-    const stops = all(win, '.explorer-row').filter(r => r.tabIndex === 0);
-    assert.strictEqual(stops.length, 1, 'exactly one tab stop in the tree');
-    assert.strictEqual(stops[0], row);
+    const tabStops = () =>
+      all(win, '.explorer-row').filter(r => r.tabIndex === 0);
+    assert.deepStrictEqual(tabStops(), [row], 'exactly one tab stop');
+    // An error refresh removes the rows: the focus and the tab stop a
+    // removed row held go to the folder's own row.
+    const failed = {...listing, entries: undefined, error: 'Permission denied'};
+    const folder = explorerRow(win, WD);
+    send(win, failed);
+    assert.ok(!row.isConnected, 'the error replaced the rows');
+    assert.strictEqual(
+      win.document.activeElement,
+      folder,
+      'BUG: the focus fell out of the tree',
+    );
+    assert.deepStrictEqual(tabStops(), [folder], 'BUG: no tab stop is left');
+    // A control outside the tree keeps its focus; the stop its removed
+    // row held is still repaired.
+    send(win, listing);
+    explorerRow(win, WD + '/a.txt').focus();
+    const input = byId(win, 'task-input');
+    input.focus();
+    send(win, failed);
+    assert.strictEqual(win.document.activeElement, input);
+    assert.deepStrictEqual(tabStops(), [folder]);
   });
 
-  await test('Menus: opening a tree menu closes an open content context menu', async () => {
+  await test('Menus: opening a tree menu closes an open content context menu', () => {
     const {win, posted} = makePage();
     openExplorer(win, posted, [
       {name: 'a.txt', path: WD + '/a.txt', isDir: false},
@@ -718,17 +747,29 @@ async function main() {
     const area = byId(win, 'content-tab-area');
     const view = area && area.querySelector('.content-tab-view');
     assert.ok(view, 'the content tab renders');
+    // Closing may remove the menu, so it is looked up without byId's
+    // existence check.
+    const contentMenuOpen = () => {
+      const menu = win.document.getElementById('sorcar-content-context-menu');
+      return !!menu && !menu.hidden && menu.style.display !== 'none';
+    };
     rightClick(win, view);
-    const contentMenu = byId(win, 'sorcar-content-context-menu');
-    assert.ok(contentMenu && !contentMenu.hidden, 'the content menu opened');
+    assert.ok(contentMenuOpen(), 'the content menu opened');
     rightClick(win, explorerRow(win, WD + '/a.txt'));
     const treeMenu = byId(win, 'sidebar-context-menu');
     assert.ok(treeMenu && !treeMenu.hidden, 'the tree menu opened');
-    // Closing may remove the menu, so look it up without byId's existence check.
-    const stillOpen = win.document.getElementById('sorcar-content-context-menu');
     assert.ok(
-      !stillOpen || stillOpen.hidden || stillOpen.style.display === 'none',
+      !contentMenuOpen(),
       'BUG: the content context menu stayed open under the tree menu',
+    );
+    // So does a right-click outside the content area, where the browser's
+    // own menu opens (the composer).
+    rightClick(win, view);
+    assert.ok(contentMenuOpen(), 'the content menu reopened');
+    rightClick(win, byId(win, 'task-input'));
+    assert.ok(
+      !contentMenuOpen(),
+      'BUG: the content context menu stayed open under the native menu',
     );
   });
 

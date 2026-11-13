@@ -199,6 +199,10 @@ class TestDeleteMyInjectionTrick(_TricksHome):
         )
         self.assertIsNone(tricks.delete_my_injection_trick("Line one.\nLine two."))
         self.assertEqual(self.user_text(), tricks.DEFAULT_MY_INJECTION)
+        # Whatever line break the client spelled, the reader lists LF.
+        self.assertIsNone(tricks.append_my_injection_trick("Line one.\nLine two."))
+        self.assertIsNone(tricks.delete_my_injection_trick("Line one.\rLine two."))
+        self.assertEqual(self.user_text(), tricks.DEFAULT_MY_INJECTION)
 
     def test_unknown_body_reports_error_without_touching_file(self) -> None:
         self.user_file.write_text(_USER, encoding="utf-8")
@@ -404,20 +408,18 @@ class TestDeleteTrickCommand(_TricksHome):
 
 
 class TestRemotePageUserCount(_TricksHome):
-    """The remote page freezes the user count next to the trick list."""
+    """The remote page, served before any login, holds the bundled promptlets only."""
 
-    def test_build_html_sets_my_tricks_count(self) -> None:
+    def test_build_html_holds_no_user_promptlet(self) -> None:
         self.user_file.write_text(_USER, encoding="utf-8")
         html = _build_html()
         self.assertNotIn("{{MY_TRICKS_COUNT}}", html)
         m = re.search(r"window\.__MY_TRICKS_COUNT__\s*=\s*(\d+);", html)
         assert m is not None, "MY_TRICKS_COUNT placeholder was not substituted"
-        self.assertEqual(int(m.group(1)), 3)
+        self.assertEqual(int(m.group(1)), 0)
         t = re.search(r"window\.__TRICKS__\s*=\s*(\[.*?\]);", html, re.DOTALL)
         assert t is not None
-        self.assertEqual(json.loads(t.group(1))[:3], [
-            "First mine.", "Second mine.", "Third mine.",
-        ])
+        self.assertEqual(json.loads(t.group(1)), ["Bundled promptlet one.", "Bundled two."])
 
 
 class TestDeleteTrickOverLocalConnection(_TricksHome):

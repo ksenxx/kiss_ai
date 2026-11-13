@@ -25,7 +25,8 @@ server (:class:`_ScriptedDaemon`, speaking the daemon's handshake
 frames) with the browser's own ``WebSocket`` and timers: a frame the
 daemon must not receive twice (an Explorer copy) posted while the
 socket is down is delivered once, after a ``pong`` confirmed the
-reconnect's batch, however many connections die before one.
+reconnect's batch; one ``main.js`` gave up because the connection died
+before that ``pong`` is not delivered at all, only the user's retry is.
 """
 
 
@@ -349,16 +350,23 @@ def test_fs_action_posted_while_disconnected_is_sent_once_after_the_pong(
     tmp_path: Path,
 ) -> None:
     """An Explorer copy posted while the socket is down goes out once,
-    after a ``pong`` confirmed the reconnect's batch, however many
-    connections die before one (W9 F1).  The batch is at-least-once: a
-    connection lost before its ``pong`` re-sends it on the next, which
-    for a replayable frame (``setModel``) means a repeated delivery and
-    for a copy into the file's own folder would mean a second file
-    (``notes copy 2.txt`` behind ``notes copy.txt``: the daemon names
-    every such copy afresh).  The shim runs in Chromium with the
-    browser's own ``WebSocket`` and timers against a real localhost
-    server speaking the daemon's frames, which runs the copy it receives
-    through the daemon's own ``fs_action``."""
+    after a ``pong`` confirmed the reconnect's batch (W9 F1).  The batch
+    is at-least-once: a connection lost before its ``pong`` re-sends it
+    on the next, which for a replayable frame (``setModel``) means a
+    repeated delivery and for a copy into the file's own folder would
+    mean a second file (``notes copy 2.txt`` behind ``notes copy.txt``:
+    the daemon names every such copy afresh).
+
+    ``main.js`` gives a pending copy up each time it hears that the
+    connection is gone ("the pending Explorer/Git action was not
+    completed. Try again once it reconnects"), so the shim must not
+    deliver it later (W4-011): the page pastes again at every drop, as
+    that user does, connections 2 and 3 die before their ``pong``, and
+    only the paste made after the last drop reaches the daemon; each of
+    the two given up before it would have made one more copy.  The shim
+    runs in Chromium with the browser's own ``WebSocket`` and timers
+    against a real localhost server speaking the daemon's frames, which
+    runs the copy it receives through the daemon's own ``fs_action``."""
     folder = tmp_path / "folder"
     folder.mkdir()
     src = folder / "notes.txt"
@@ -369,19 +377,26 @@ def test_fs_action_posted_while_disconnected_is_sent_once_after_the_pong(
         try:
             goto_retrying_network_change(page, daemon.url, wait_until="load")
             page.wait_for_function("window.__connected.at(-1) === true", timeout=15000)
-            daemon.close(1)
-            page.wait_for_function("window.__connected.at(-1) === false", timeout=15000)
             page.evaluate(
                 """args => {
-                  window.__t.postMessage({type: 'setModel', model: 'replayable'});
-                  window.__t.postMessage({
-                    type: 'fsAction', action: 'copy', path: args.src, dest: args.dest,
-                    name: '', query: '', overwrite: false, workDir: args.root,
-                    tabId: 't1', token: 'fs-1',
+                  let pastes = 0;
+                  window.addEventListener('message', e => {
+                    const d = e && e.data;
+                    if (!d || d.type !== 'daemonStatus' || d.connected) return;
+                    if (pastes === 0) {
+                      window.__t.postMessage({type: 'setModel', model: 'replayable'});
+                    }
+                    pastes += 1;
+                    window.__t.postMessage({
+                      type: 'fsAction', action: 'copy', path: args.src, dest: args.dest,
+                      name: '', query: '', overwrite: false, workDir: args.root,
+                      tabId: 't1', token: 'fs-' + pastes,
+                    });
                   });
                 }""",
                 {"src": str(src), "dest": str(folder), "root": str(tmp_path)},
             )
+            daemon.close(1)
             daemon.wait_for(4, "fsAction")
             page.wait_for_function("window.__connected.at(-1) === true", timeout=15000)
         finally:
@@ -389,11 +404,14 @@ def test_fs_action_posted_while_disconnected_is_sent_once_after_the_pong(
     by_type: dict[str, list[int]] = {}
     for number, frame in daemon.frames:
         by_type.setdefault(frame["type"], []).append(number)
-    # The batch went out on every connection after the drop, its copy on
-    # the confirmed one only, behind the batch's ping.
+    # The batch went out on every connection after the drop; the copy on
+    # the confirmed one only, behind the batch's ping: the third paste,
+    # the one the user still awaited.
     assert by_type["setModel"] == [2, 3, 4], daemon.frames
     assert by_type["fsAction"] == [4], daemon.frames
     assert by_type["ping"] == [2, 3, 4], daemon.frames
+    copies = [frame["token"] for _, frame in daemon.frames if frame["type"] == "fsAction"]
+    assert copies == ["fs-3"], daemon.frames
     kinds = [frame["type"] for number, frame in daemon.frames if number == 4]
     assert kinds.index("ping") < kinds.index("fsAction"), kinds
     assert daemon.results == [{"ok": True, "path": str(folder / "notes copy.txt")}]

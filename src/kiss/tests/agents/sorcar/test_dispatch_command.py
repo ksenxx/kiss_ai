@@ -115,7 +115,7 @@ class _Caller:
     model_name = "m"
     work_dir = ""
     # Asks for sub-agents: a child on the caller's own model family is not
-    # refused (``fanout_guard.same_family_conflict``), so the budget rule
+    # refused (``fanout_guard.same_model_conflict``), so the budget rule
     # under test is reached.
     task_description = "size the budgets of the sub-agents"
 
@@ -176,6 +176,15 @@ def test_review_without_a_budget_holds_one_sized_by_the_diff(tmp_path: Path) -> 
     assert budget("Verify the listed changes", tool_profile="shell") == 50.0
     # The cap never raises a small share.
     assert budget("Review the diff", tool_profile="review", max_budget="3") == 3.0
+    # On another machine the work dir is a path there: this machine's diff of the same
+    # path does not size the review (nor does the $5 of no diff), which keeps the share.
+    for remote_dir in ("", str(repo), "/srv/only-on-the-machine"):
+        sent = agent_dispatch.dispatch_command(
+            "Verify the listed changes", agent_dispatch.DEFAULT_AGENT_PATH, remote_dir, "", None,
+            60.0, _Caller(), options=agent_dispatch.RunOptions(tool_profile="review"),
+            inherit=True, machine="box",
+        )
+        assert sent["max_budget"] == 50.0, remote_dir
 
 
 _BUDGETED_SEA = """

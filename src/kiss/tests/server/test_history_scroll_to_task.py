@@ -15,6 +15,7 @@ from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
 from kiss.server.server import AgentServer
+from kiss.tests.persistence_helpers import close_db
 
 
 class TestResumeSessionWithTaskId:
@@ -31,9 +32,7 @@ class TestResumeSessionWithTaskId:
         """
         orig_dir = th._KISS_DIR
         orig_db = th._DB_PATH
-        orig_conn = th._db_conn
         try:
-            th._db_conn = None
             th._KISS_DIR = tmp_path
             th._DB_PATH = tmp_path / "history.db"
 
@@ -83,8 +82,7 @@ class TestResumeSessionWithTaskId:
             assert ev_list[1]["text"] == "alpha response"
             assert te_specific[0]["chat_id"] == chat_id
         finally:
-            th._close_db()
-            th._db_conn = orig_conn
+            close_db()
             th._KISS_DIR = orig_dir
             th._DB_PATH = orig_db
 
@@ -92,9 +90,7 @@ class TestResumeSessionWithTaskId:
         """_cmd_resume_session passes taskId through to _replay_session."""
         orig_dir = th._KISS_DIR
         orig_db = th._DB_PATH
-        orig_conn = th._db_conn
         try:
-            th._db_conn = None
             th._KISS_DIR = tmp_path
             th._DB_PATH = tmp_path / "history.db"
 
@@ -124,8 +120,7 @@ class TestResumeSessionWithTaskId:
             assert te[0]["task"] == "the task"
             assert te[0]["task_id"] == task_id
         finally:
-            th._close_db()
-            th._db_conn = orig_conn
+            close_db()
             th._KISS_DIR = orig_dir
             th._DB_PATH = orig_db
 
@@ -135,9 +130,7 @@ class TestResumeSessionWithTaskId:
         """When taskId is None, _replay_session loads the latest task."""
         orig_dir = th._KISS_DIR
         orig_db = th._DB_PATH
-        orig_conn = th._db_conn
         try:
-            th._db_conn = None
             th._KISS_DIR = tmp_path
             th._DB_PATH = tmp_path / "history.db"
 
@@ -165,8 +158,7 @@ class TestResumeSessionWithTaskId:
             assert len(te) == 1
             assert te[0]["task"] == "new task"
         finally:
-            th._close_db()
-            th._db_conn = orig_conn
+            close_db()
             th._KISS_DIR = orig_dir
             th._DB_PATH = orig_db
 
@@ -176,9 +168,7 @@ class TestResumeSessionWithTaskId:
         """When taskId doesn't exist, falls back to loading the latest task."""
         orig_dir = th._KISS_DIR
         orig_db = th._DB_PATH
-        orig_conn = th._db_conn
         try:
-            th._db_conn = None
             th._KISS_DIR = tmp_path
             th._DB_PATH = tmp_path / "history.db"
 
@@ -204,7 +194,6 @@ class TestResumeSessionWithTaskId:
             assert len(te) == 1
             assert te[0]["task"] == "only task"
         finally:
-            th._close_db()
-            th._db_conn = orig_conn
+            close_db()
             th._KISS_DIR = orig_dir
             th._DB_PATH = orig_db

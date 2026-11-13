@@ -43,20 +43,20 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _set_task_favorite,
 )
+from kiss.tests.persistence_helpers import close_db
 
 
 def _redirect(tmpdir: str) -> tuple:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    saved = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return saved
 
 
 def _restore(saved: tuple) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+    th._DB_PATH, th._KISS_DIR = saved
 
 
 class _TempDbTestBase:
@@ -68,7 +68,7 @@ class _TempDbTestBase:
         th._invalidate_chat_context_cache("")
 
     def teardown_method(self) -> None:
-        th._close_db()
+        close_db()
         th._invalidate_chat_context_cache("")
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)

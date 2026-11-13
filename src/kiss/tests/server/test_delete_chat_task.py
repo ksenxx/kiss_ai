@@ -17,6 +17,7 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import tempfile
+from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
@@ -50,9 +51,7 @@ class _DbTest:
 
     def teardown_method(self) -> None:
         clear_agent_states()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -194,6 +193,42 @@ class TestDeleteCommands(_DbTest):
         assert all(n["connId"] == "c9" and n["tabId"] == "tab-x" for n in notices)
         assert {"type": "tasks_updated"} not in events
 
+    def test_history_that_cannot_be_opened_is_answered_with_the_failure(self) -> None:
+        """A directory stands where ``history.db`` was: the delete and the spend read fail.
+
+        Neither used to be answered: the page kept its row without a
+        word, and a daemon asking over a link (the ``generation``)
+        waited out its timeout.  Nobody is told that the rows went.
+        """
+        task_id, _ = th._add_task("kept")
+        server, events = make_capturing_server()
+        db_file = Path(th._DB_PATH)
+        blocked = db_file.with_name("history.db.blocked")
+        blocked.mkdir()
+        th._close_thread_db()
+        th._DB_PATH = blocked
+        try:
+            server._cmd_delete_task(
+                {"taskId": task_id, "tabId": "tab-1", "connId": "c1", "generation": 7},
+            )
+            server._cmd_get_task_usage({"taskIds": [task_id], "connId": "c1"})
+        finally:
+            th._close_thread_db()
+            th._DB_PATH = db_file
+            blocked.rmdir()
+
+        refusal = "Cannot delete the task: unable to open database file"
+        assert [n["text"] for n in _notices(events)] == [refusal]
+        deleted = next(e for e in events if e["type"] == "historyDeleted")
+        assert (deleted["generation"], deleted["refused"], deleted["connId"]) == (7, refusal, "c1")
+        usage = next(e for e in events if e["type"] == "taskUsage")
+        assert usage["error"] == "unable to open database file" and "tasks" not in usage
+        assert {"type": "tasks_updated"} not in events
+        assert server._history_deletes == 0
+        assert _count("SELECT COUNT(*) FROM task_history WHERE id = ?", task_id) == 1
+        server._cmd_get_task_usage({"taskIds": [task_id], "connId": "c1"})
+        assert task_id in next(e for e in reversed(events) if e["type"] == "taskUsage")["tasks"]
+
     def test_finished_parent_of_a_running_subtask_is_refused(self) -> None:
         """The sub-task's rows would go with the parent's while its worker still writes them."""
         parent, chat_id = th._add_task("parent done")
@@ -268,7 +303,5 @@ def test_sqlite_rows_are_really_gone_on_disk(tmp_path: Any) -> None:
         finally:
             other.close()
     finally:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         restore_persistence(saved)

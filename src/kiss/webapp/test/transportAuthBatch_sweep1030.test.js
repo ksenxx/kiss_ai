@@ -15,12 +15,6 @@
 //          daemon unreachable), the close only scheduled another backoff
 //          reconnect: Unlock, Cancel and Escape were dead until a later
 //          reconnect reached the server, up to a minute after it was back.
-//  BATCH   A frame posted between the reconnect flush and its `pong` went
-//          straight out, untracked.  When the socket died before the
-//          `pong`, the next connection re-sent the flushed batch, which
-//          the server applied AFTER the newer frame: the newer setting was
-//          silently reverted.  Such a frame now waits behind the
-//          unconfirmed batch and goes out once, after it.
 
 const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
@@ -32,6 +26,8 @@ const {
   openNextSocket,
   frames,
   settle,
+  unlock,
+  overlayText,
 } = require('./transport_page_helpers');
 
 const {test, report} = makeRunner();
@@ -50,6 +46,10 @@ function dialogShown(doc) {
   return doc.getElementById('auth-modal').style.display === 'flex';
 }
 
+function errorLine(doc) {
+  return doc.getElementById('auth-modal-error').textContent;
+}
+
 /**
  * The server asks for a password, drops the idle socket while the user
  * types, the user presses Unlock (which reconnects at once) and that
@@ -62,19 +62,9 @@ async function unlockWhileServerUnreachable(page) {
   assert.ok(dialogShown(doc), 'auth_required opens the dialog');
   sockets[0].fireClose(); // idle unauthenticated socket dropped
   openNextSocket(sockets, timers, 0).fireClose(); // the quiet reconnect fails
-  doc.getElementById('auth-modal-input').value = 'typed-pw';
-  doc.getElementById('auth-modal-ok').click();
-  await settle(); // the dialog's promise hands the password on
+  await unlock(doc, 'typed-pw');
   assert.strictEqual(sockets.length, 3, 'Unlock reconnects at once');
   sockets[2].fireClose(); // ... and that attempt fails too
-}
-
-/** The saveConfig values a fake server applied, over every socket in order. */
-function appliedValues(sockets) {
-  return sockets
-    .flatMap(frames)
-    .filter(f => f.type === 'saveConfig')
-    .map(f => f.config.value);
 }
 
 async function main() {
@@ -90,15 +80,12 @@ async function main() {
         doc.getElementById('auth-modal-input').value,
         'typed-pw',
       );
-      assert.strictEqual(
-        doc.getElementById('auth-modal-error').textContent,
-        'Cannot reach the server; retrying ...',
-      );
+      assert.strictEqual(errorLine(doc), 'Cannot reach the server; retrying ...');
       doc.getElementById('auth-modal-cancel').click();
       await settle();
       assert.ok(!dialogShown(doc), 'Cancel closes the dialog');
       assert.strictEqual(
-        doc.getElementById('kiss-server-loading-msg').textContent,
+        overlayText(page.window),
         'A password is needed to use this server.',
       );
       page.window.close();
@@ -130,68 +117,71 @@ async function main() {
     ]);
     sockets[3].fireMessage({type: 'auth_ok'});
     assert.ok(!dialogShown(doc), 'auth_ok closes the dialog');
-    assert.strictEqual(doc.getElementById('auth-modal-error').textContent, '');
+    assert.strictEqual(errorLine(doc), '');
     page.window.close();
   });
 
   await test(
-    'BATCH: a frame posted before the pong is never overwritten by the ' +
-      're-sent batch',
+    'DIALOG: a typed password the server rejects as the first auth of a ' +
+      'reconnect is reported, in place of the cannot-reach note',
     async () => {
       const page = newPage();
-      const {window, sockets, timers} = page;
-      const transport = window.acquireTransport();
-      // Changed while offline: queued, flushed on the reconnect.
-      transport.postMessage({type: 'saveConfig', config: {value: 'A'}});
+      const {doc, sockets, timers} = page;
+      await unlockWhileServerUnreachable(page);
+      const s = openNextSocket(sockets, timers, 2);
+      s.fireOpen();
+      assert.deepStrictEqual(frames(s), [
+        {type: 'auth', password: 'typed-pw', parts: true},
+      ]);
+      s.fireMessage({type: 'auth_required'}); // how a wrong FIRST auth is answered
+      assert.strictEqual(errorLine(doc), 'That password is not correct. Try again.');
+      page.window.close();
+    },
+  );
+
+  await test('DIALOG: the cannot-reach note goes when the server answers an empty Unlock', async () => {
+    const page = newPage();
+    const {doc, sockets} = page;
+    await unlockWhileServerUnreachable(page);
+    await unlock(doc, '');
+    sockets[3].fireOpen();
+    sockets[3].fireMessage({type: 'auth_required'}); // answers the empty probe
+    assert.strictEqual(errorLine(doc), '');
+    page.window.close();
+  });
+
+  await test(
+    'DIALOG: an Unlock sent before the probe is answered stays pending: the ' +
+      "probe's auth_required does not call it wrong and auth_ok stores it",
+    async () => {
+      const page = newPage();
+      const {doc, sockets, timers, window} = page;
       sockets[0].fireOpen();
-      sockets[0].fireMessage({type: 'auth_ok'});
-      // Changed again before the server's pong confirms the batch.
-      transport.postMessage({type: 'saveConfig', config: {value: 'B'}});
-      sockets[0].fireClose(); // died before the pong
-      const next = openNextSocket(sockets, timers, 0);
-      next.fireOpen();
-      next.fireMessage({type: 'auth_ok'});
-      // Wave 4: the held frame waits for the pong of the re-sent batch
-      // too (it never joins that batch; see
-      // transportUnconfirmedBatch_wave4.test.js).
-      assert.deepStrictEqual(appliedValues([next]), ['A']);
-      next.fireMessage({type: 'pong'});
-      const applied = appliedValues(sockets);
-      assert.strictEqual(
-        applied[applied.length - 1],
-        'B',
-        'the newer setting must win: ' + JSON.stringify(applied),
-      );
-      assert.deepStrictEqual(
-        appliedValues([next]),
-        ['A', 'B'],
-        'the next connection re-sends the batch, then the newer frame',
-      );
+      sockets[0].fireMessage({type: 'auth_required'});
+      sockets[0].fireClose(); // idle unauthenticated socket dropped
+      const s = openNextSocket(sockets, timers, 0);
+      s.fireOpen(); // the quiet reconnect sends the empty probe
+      await unlock(doc, 'typed-pw'); // second auth of the same socket
+      s.fireMessage({type: 'auth_required'}); // answers the probe
+      assert.strictEqual(errorLine(doc), '');
+      s.fireMessage({type: 'auth_ok'});
+      assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), 'typed-pw');
       window.close();
     },
   );
 
-  await test('BATCH: once the pong confirms the batch, nothing is re-sent', async () => {
+  await test('DIALOG: a typed password answered with auth_locked is not sent again', async () => {
     const page = newPage();
-    const {window, sockets, timers} = page;
-    const transport = window.acquireTransport();
-    transport.postMessage({type: 'saveConfig', config: {value: 'A'}});
+    const {doc, sockets, timers} = page;
     sockets[0].fireOpen();
-    sockets[0].fireMessage({type: 'auth_ok'});
-    transport.postMessage({type: 'saveConfig', config: {value: 'B'}});
-    sockets[0].fireMessage({type: 'pong'});
-    transport.postMessage({type: 'saveConfig', config: {value: 'C'}});
-    assert.deepStrictEqual(appliedValues(sockets), ['A', 'B', 'C']);
+    sockets[0].fireMessage({type: 'auth_required'});
+    await unlock(doc, 'typed-pw');
+    sockets[0].fireMessage({type: 'auth_locked', retry_after: 30});
     sockets[0].fireClose();
-    const next = openNextSocket(sockets, timers, 0);
-    next.fireOpen();
-    next.fireMessage({type: 'auth_ok'});
-    assert.deepStrictEqual(
-      frames(next).map(f => f.type),
-      ['auth'],
-      'a confirmed batch and the frames after it are not re-sent',
-    );
-    window.close();
+    const s = openNextSocket(sockets, timers, 0); // the lockout is over
+    s.fireOpen();
+    assert.deepStrictEqual(frames(s), [{type: 'auth', password: '', parts: true}]);
+    page.window.close();
   });
 
   report('transportAuthBatch_sweep1030');

@@ -18,8 +18,10 @@ const {
   stubRaf,
   ofType,
   installXtermStub,
+  openChat,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {assertJsonEqual: same} = require('./workdir_helpers');
 
 function makePage() {
   return makeChatPage({
@@ -29,19 +31,6 @@ function makePage() {
     },
     extraScripts: ['browserTab.js', 'terminalTab.js'],
   });
-}
-
-function openChat(win) {
-  send(win, {
-    type: 'tabs_state',
-    tabs: [{tabId: 'a1', chatId: 'chat-1', title: 'a1', workDir: '/ws'}],
-  });
-  send(win, {type: 'task_events', tabId: 'a1', task: 'the task', events: []});
-}
-
-/** Structural equality across the jsdom realm (its objects are not ours). */
-function same(actual, expected) {
-  assert.strictEqual(JSON.stringify(actual), JSON.stringify(expected));
 }
 
 const {test, report} = makeRunner();
@@ -68,6 +57,7 @@ async function main() {
     ]);
     const img = win.document.querySelector('.browser-tab-view img');
     assert.ok(img && img.src.endsWith('BBBB'), 'the last frame is painted');
+    win.close();
   });
 
   await test('a frame for a tab the page does not show is acknowledged too', () => {
@@ -77,6 +67,7 @@ async function main() {
     same(ofType(posted, 'browserFrameAck'), [
       {tab_id: 'browser__9@box', type: 'browserFrameAck'},
     ]);
+    win.close();
   });
 
   report('browserFrameAck');

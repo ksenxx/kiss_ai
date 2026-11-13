@@ -35,8 +35,8 @@ from pathlib import Path
 
 import pytest
 
-from kiss.server.web_server import _generate_self_signed_cert
 from kiss.tests.conftest import posix_only
+from kiss.tests.local_ws import _generate_self_signed_cert
 from kiss.tests.scripts.test_install_update_lock import WHITELISTED_TOOLS
 from kiss.tests.test_install_runtime_setup import REPO, Sandbox
 

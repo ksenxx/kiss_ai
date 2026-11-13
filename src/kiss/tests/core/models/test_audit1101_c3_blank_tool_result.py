@@ -199,3 +199,29 @@ def test_chat_conversation_handed_to_responses_model_keeps_the_output(result: st
         assert new.generate()[0] == "done"
         assert len(rsp.requests) == 1
         assert _function_call_outputs(rsp.requests[0].body) == [(_CALL_ID, result)]
+
+
+@pytest.mark.parametrize("delegated", [False, True], ids=["chat", "responses"])
+def test_tool_result_with_lone_surrogates_still_reaches_the_request(delegated: bool) -> None:
+    """A tool result no UTF-8 body can carry is repaired instead of failing every request.
+
+    ``json.loads`` turns a ``"\\ud83d"`` escape into a lone surrogate.  The
+    SDK raised ``UnicodeEncodeError`` while building the body, before
+    anything was sent, and again for every later turn, since the result
+    stays in the conversation.  The body now carries well-formed text: a
+    pair split into two code points joined, a lone half as U+FFFD.
+    """
+    config = {"use_responses_api": True, "reasoning_effort": "high"} if delegated else {}
+    with ScriptedOpenAIServer(_responses_reply if delegated else _chat_reply) as server:
+        model = OpenAICompatibleModel(
+            _MODEL, base_url=server.base_url, api_key="k", model_config=config
+        )
+        model.initialize("Run quiet, then continue.")
+        _tool_turn(model, "caf\ud800 \ud83d\ude00")
+        calls, content, _ = model.generate_and_process_with_tools(
+            {"quiet": quiet}, tools_schema=_TOOLS
+        )
+        assert (calls, content) == ([], "done")
+        body = server.requests[1].body
+        sent = _function_call_outputs(body)[0][1] if delegated else body["messages"][-1]["content"]
+        assert sent == "caf\ufffd \U0001f600"

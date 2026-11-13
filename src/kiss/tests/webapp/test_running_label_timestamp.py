@@ -24,8 +24,8 @@ Two bugs were patched to enforce this invariant:
    when both are present.  The ``endTs`` value is persisted into the
    task_history ``extra`` JSON column by ``_save_task_extra`` and
    replayed on history list / replay so the frontend can flip the
-   "Running …" label to "Done (Xm Ys)" as soon as
-   ``Date.now() >= endTs``, even when no live ``task_done`` event
+   "Running …" label to the time the task took ("Xm Ys") as soon
+   as ``Date.now() >= endTs``, even when no live ``task_done`` event
    arrives (e.g. the task finished while no client was connected).
 """
 
@@ -96,22 +96,22 @@ def test_status_handler_anchors_t0_to_ev_start_ts():
 
 def test_timer_tick_flips_to_done_when_now_exceeds_end_ts():
     """``_renderTimerTick`` must check the agent's recorded end
-    timestamp and switch the label to ``Done (Xm Ys)`` (computed
-    from ``endTs - t0``) as soon as ``Date.now() >= endTs``."""
+    timestamp and switch the label to the time the task took
+    (``Xm Ys``, computed from ``endTs - t0``) as soon as
+    ``Date.now() >= endTs``."""
     src = _read(MAIN_JS)
     body = _extract_fn_body(src, "_renderTimerTick")
     assert "endTs" in body, (
         "_renderTimerTick must consult the agent's endTs"
     )
-    assert "Done" in body or "doneLabelFor" in body, (
-        "_renderTimerTick must emit a 'Done (…)' label when "
+    assert "doneLabelFor" in body, (
+        "_renderTimerTick must emit the time the task took when "
         "Date.now() >= endTs"
     )
-    if "doneLabelFor" in body:
-        helper = _extract_fn_body(src, "doneLabelFor")
-        assert "'Done ('" in helper, (
-            "doneLabelFor must format the 'Done (…)' label"
-        )
+    helper = _extract_fn_body(src, "doneLabelFor")
+    assert "endMs - startMs" in helper, (
+        "doneLabelFor must format the span endMs - startMs"
+    )
     assert "Date.now()" in body and ">=" in body, (
         "_renderTimerTick must compare Date.now() >= endTs"
     )
@@ -120,12 +120,17 @@ def test_timer_tick_flips_to_done_when_now_exceeds_end_ts():
 def test_task_done_uses_event_start_and_end_ts():
     """The ``case 'task_done':`` handler must compute the duration
     from the agent-supplied ``ev.endTs - ev.startTs`` (not from the
-    client wall clock at event arrival time)."""
-    body = _extract_case_body(_read(MAIN_JS), "task_done")
+    client wall clock at event arrival time).  The computation is
+    ``endedTaskTime``, shared with the other terminal events."""
+    src = _read(MAIN_JS)
+    assert "endedTaskTime(ev)" in _extract_case_body(src, "task_done"), (
+        "task_done must take its label from endedTaskTime(ev)"
+    )
+    body = _extract_fn_body(src, "endedTaskTime")
     assert "ev.endTs" in body and "ev.startTs" in body, (
-        "task_done must compute elapsed from ev.endTs - ev.startTs"
+        "endedTaskTime must compute elapsed from ev.endTs - ev.startTs"
     )
     assert re.search(
         r"ev\.endTs\s*-\s*ev\.startTs|ev\.startTs\s*&&\s*ev\.endTs",
         body,
-    ), "task_done must subtract ev.startTs from ev.endTs"
+    ), "endedTaskTime must subtract ev.startTs from ev.endTs"

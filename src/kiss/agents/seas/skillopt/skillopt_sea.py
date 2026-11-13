@@ -1043,9 +1043,26 @@ def _calling_agent() -> Any:
     return current_agent()
 
 
-def _attribute(parent: Any, cost: float, tokens: int, steps: int) -> None:
-    """Fold a rollout's or analyst's spend into *parent* (no-op without a parent)."""
+def _attribute(
+    parent: Any,
+    cost: float,
+    tokens: int,
+    steps: int,
+    model: str = "",
+    binding: tuple[Any, str] | None = None,
+) -> None:
+    """Fold a rollout's or analyst's spend into *parent* (no-op without a parent).
+
+    An analyst call names its *model*: it is charged as a side call of the
+    task (bound by *binding*, filed under *model* in the Spend panel, no
+    step), as a ``decide`` call is.  A rollout's spend is folded whole.
+    """
     if parent is None or cost <= 0 and tokens <= 0:
+        return
+    if model:
+        from kiss.agents.sorcar.sorcar_agent import _attribute_side_call_usage
+
+        _attribute_side_call_usage(parent, model, cost, tokens, binding)
         return
     from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
 
@@ -1119,9 +1136,16 @@ class Optimizer:
     def _save(self) -> None:
         self.state_path.write_text(json.dumps(self.state, indent=1), encoding="utf-8")
 
-    def _spend(self, cost: float, tokens: int, steps: int) -> None:
+    def _spend(
+        self,
+        cost: float,
+        tokens: int,
+        steps: int,
+        model: str = "",
+        binding: tuple[Any, str] | None = None,
+    ) -> None:
         self.state["total_cost"] = float(self.state["total_cost"]) + cost
-        _attribute(self.parent, cost, tokens, steps)
+        _attribute(self.parent, cost, tokens, steps, model, binding)
 
     def _rollouts(self, target: Target, tasks: list[EvalTask], work_root: Path) -> list[Rollout]:
         """Roll *target* out on *tasks* through the env; results in task order."""
@@ -1142,9 +1166,15 @@ class Optimizer:
     def _ask(self, prompt: str, name: str) -> str:
         """One non-agentic call to the optimizer model; ``""`` when the call fails or is refused."""
         agent = KISSAgent(f"skillopt {name}")
+        model = self.cfg.optimizer_model or self.cfg.model
+        binding = None
+        if self.parent is not None:
+            from kiss.agents.sorcar.sorcar_agent import side_call_binding
+
+            binding = side_call_binding(self.parent)
         try:
             return agent.run(
-                model_name=self.cfg.optimizer_model or self.cfg.model,
+                model_name=model,
                 prompt_template=prompt,
                 is_agentic=False,
                 verbose=False,
@@ -1154,7 +1184,7 @@ class Optimizer:
             self._log(f"  {name} call failed: {type(exc).__name__}: {exc}")
             return ""
         finally:
-            self._spend(agent.budget_used, agent.total_tokens_used, 1)
+            self._spend(agent.budget_used, agent.total_tokens_used, 1, model, binding)
 
     def _analyze(self, rollouts: list[Rollout], template: str, name: str) -> list[Patch]:
         """Run one analyst over minibatches of *rollouts* and collect its patches."""

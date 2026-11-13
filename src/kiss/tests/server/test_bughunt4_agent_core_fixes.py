@@ -56,6 +56,7 @@ from kiss.core.models.model_info import model as _model_factory
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.tests.conftest import executor_of, seed_worktree
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.conftest import assert_repo_root, run_git, run_git_checked
 
 
@@ -78,20 +79,19 @@ class _TempDbTestBase:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         th._invalidate_chat_context_cache("")
         self._saved_states = dict(agent_state.agent_states)
         agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
-        th._close_db()
+        close_db()
         th._invalidate_chat_context_cache("")
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        th._DB_PATH, th._KISS_DIR = self.saved
         agent_state.agent_states.clear()
         agent_state.agent_states.update(self._saved_states)
         shutil.rmtree(self.tmpdir, ignore_errors=True)

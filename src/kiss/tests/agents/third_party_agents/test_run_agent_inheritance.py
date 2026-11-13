@@ -105,7 +105,7 @@ def _parent_after_a_run(repo: Path) -> ChatSorcarAgent:
     """
     parent = ChatSorcarAgent("inherit-parent")
     # A parent whose task asks for sub-agents may dispatch children of
-    # its own model family (fanout_guard.same_family_conflict).
+    # its own model family (fanout_guard.same_model_conflict).
     parent.task_description = "delegate the greeting to a sub-agent"
     parent.model_name = PARENT_MODEL
     parent._launch_model_name = PARENT_MODEL
@@ -671,7 +671,7 @@ def _run_parent(
     """Run a ``ChatSorcarAgent`` whose scripted model calls ``run_agent`` once."""
     parent = ChatSorcarAgent("inherit-e2e-parent")
     # The task asks for a sub-agent, so the child may share the parent's
-    # model family (fanout_guard.same_family_conflict).
+    # model family (fanout_guard.same_model_conflict).
     result = parent.run(
         prompt_template="delegate to a sorcar sub-agent",
         model_name=STANDIN_MODEL,

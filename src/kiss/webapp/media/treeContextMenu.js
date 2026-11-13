@@ -15,12 +15,12 @@
 //
 // The menu behaves like VS Code's: it opens at the pointer (kept inside
 // the viewport), Up / Down move between enabled items, Enter / Space run
-// the focused one, Escape or a click anywhere else closes it, and a
-// disabled item is shown greyed out and cannot be run.  The keyboard model
-// and the viewport clamp are contentContextMenu.js's (`menuKeyNav`,
-// `clampMenu`), so that file must be loaded first.
+// the focused one, Escape, Tab (the focus moves on) or a click anywhere
+// else closes it, and a disabled item is shown greyed out and cannot be
+// run.  The keyboard model and the viewport clamp are
+// contentContextMenu.js's (`menuKeyNav`, `clampMenu`), so that file must
+// be loaded first.
 
-/* global module */
 'use strict';
 
 (function (root) {
@@ -59,7 +59,7 @@
 
   function onKeyDown(e) {
     if (menu)
-      root.ContentContextMenu.menuKeyNav(e, focusableItems(menu), close);
+      root.ContentContextMenu.menuKeyNav(e, focusableItems(menu), close, close);
   }
 
   function onDocPointerDown(e) {
@@ -154,12 +154,5 @@
     return el;
   }
 
-  const api = {show: show};
-
-  if (root && typeof root === 'object') {
-    root.TreeContextMenu = api;
-  }
-  if (typeof module !== 'undefined' && module.exports) {
-    module.exports = api;
-  }
-})(typeof window !== 'undefined' ? window : this);
+  root.TreeContextMenu = {show: show};
+})(window);

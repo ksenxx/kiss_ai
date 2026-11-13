@@ -16,15 +16,18 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-const {paste, settle} = require('./attachment_helpers');
+const {
+  makePage,
+  send,
+  click,
+  byId,
+  typeInto,
+} = require('./simplify2_harness');
+const {key} = require('./ui_antipattern_harness');
+const {paste, settle, typeAndSend} = require('./attachment_helpers');
 
 function clickSend(win) {
-  win.document
-    .getElementById('send-btn')
-    .dispatchEvent(
-      new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-    );
+  click(win, byId(win, 'send-btn'));
 }
 
 function assertComposerCleared(win, label) {
@@ -54,9 +57,7 @@ async function fillComposer(win, text) {
     new win.File(['%PDF-1.4'], 'notes.pdf', {type: 'application/pdf'}),
   );
   await settle(() => chips.querySelector('.file-chip:not(.pending)'));
-  const inp = win.document.getElementById('task-input');
-  inp.value = text;
-  inp.dispatchEvent(new win.Event('input', {bubbles: true}));
+  typeInto(win, byId(win, 'task-input'), text);
   assert.strictEqual(
     chips.children.length,
     1,
@@ -101,36 +102,20 @@ async function testAppendToRunningTaskClearsComposer() {
   console.log('  ok - appending to a running task clears the composer');
 }
 
-function key(inp, win, name) {
-  inp.dispatchEvent(
-    new win.KeyboardEvent('keydown', {
-      key: name,
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
-}
-
 // The composer's x button is a third copy of the same sequence: it must
 // reset the prompt-history cursor like a send does, or ArrowDown after
 // clearing refills the composer with the next history entry.
-async function testClearButtonResetsLikeASend() {
+function testClearButtonResetsLikeASend() {
   const {win} = makePage();
   const inp = win.document.getElementById('task-input');
-  inp.value = 'first';
-  clickSend(win);
-  inp.value = 'second';
-  clickSend(win);
-  key(inp, win, 'ArrowUp');
-  key(inp, win, 'ArrowUp');
+  typeAndSend(win, 'first');
+  typeAndSend(win, 'second');
+  key(win, inp, 'ArrowUp');
+  key(win, inp, 'ArrowUp');
   assert.strictEqual(inp.value, 'first', 'ArrowUp walks the history');
-  win.document
-    .getElementById('input-clear-btn')
-    .dispatchEvent(
-      new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-    );
+  click(win, byId(win, 'input-clear-btn'));
   assertComposerCleared(win, 'clear button');
-  key(inp, win, 'ArrowDown');
+  key(win, inp, 'ArrowDown');
   assert.strictEqual(inp.value, '', 'ArrowDown after clearing is inert');
   win.close();
   console.log('  ok - the clear button resets the composer like a send');
@@ -139,7 +124,7 @@ async function testClearButtonResetsLikeASend() {
 async function main() {
   await testFreshSubmitClearsComposer();
   await testAppendToRunningTaskClearsComposer();
-  await testClearButtonResetsLikeASend();
+  testClearButtonResetsLikeASend();
   console.log('audit0903_composer_reset.test.js: all passed.');
 }
 

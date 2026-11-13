@@ -7,25 +7,29 @@
 // main.js turns each swipe into a step between its four mobile screens
 // (chats, chat, file, task info):
 //
-//   MobileSwipe.install(document, direction => {...}, {
-//     ignore: '#task-input, .browser-view',   // touches here never swipe
+//   MobileSwipe.install(document, (direction, e) => {...}, {
+//     ignore: '#task-input, .browser-url',    // touches here never swipe
 //     scrollPositions: () => [...],           // sideways scroll offsets
 //   });                                       // the DOM cannot report
 //
-// `direction` is 'left' (the finger moved right to left) or 'right'.
+// `direction` is 'left' (the finger moved right to left) or 'right';
+// `e` is the touch event that ended the swipe, whose target is the
+// element the finger went down on (main.js asks the daemon about a
+// swipe that began on a streamed browser page).
 // A touch is a swipe when one finger travels at least SWIPE_MIN_PX
 // sideways, clearly more sideways than up or down, within
 // SWIPE_MAX_MS, and nothing under it used the drag for itself:
 //
 //   * a second finger at any point (a pinch) cancels it;
 //   * a touch that starts inside an `ignore` element is left to that
-//     element (the composer's own swipe gestures, the streamed browser
-//     screen that forwards drags to the remote page);
+//     element (the composer's own swipe gestures, the text of the
+//     browser tab's address field);
 //   * an ancestor that scrolls sideways (overflow-x, or the page
 //     itself) and did scroll during the touch, or any
 //     `scrollPositions()` entry that changed (a Monaco editor scrolls
 //     sideways through transforms, not scrollLeft), means the finger
-//     was scrolling, not swiping;
+//     was scrolling, not swiping, also when the scroll is back where
+//     it started by the time the finger lifts;
 //   * a text selection made during the touch (long-press then drag)
 //     is a selection, not a swipe.
 //
@@ -135,8 +139,23 @@
       };
     }
 
+    /** Whether content has scrolled sideways since the touch *start*. */
+    function scrolled(start) {
+      return (
+        start.scrollers.some(s => s.el.scrollLeft !== s.left) ||
+        !sameNumbers(start.positions, scrollPositions())
+      );
+    }
+
+    /** A scroll seen while the finger is down ends the touch for good:
+     *  the finger may bring the content back before it lifts. */
+    function onScroll() {
+      if (touch && scrolled(touch)) cancel();
+    }
+
     function onMove(e) {
       if (e.touches.length !== 1) cancel();
+      else onScroll();
     }
 
     function onEnd(e) {
@@ -149,8 +168,7 @@
       if (Math.abs(dx) < SWIPE_MIN_PX) return;
       if (Math.abs(dx) < Math.abs(dy) * SWIPE_AXIS_RATIO) return;
       if (Date.now() - start.at > SWIPE_MAX_MS) return;
-      if (start.scrollers.some(s => s.el.scrollLeft !== s.left)) return;
-      if (!sameNumbers(start.positions, scrollPositions())) return;
+      if (scrolled(start)) return;
       const selection = selectionEnds();
       if (
         selection &&
@@ -163,6 +181,7 @@
     const opts = {capture: true, passive: true};
     root.addEventListener('touchstart', onStart, opts);
     root.addEventListener('touchmove', onMove, opts);
+    root.addEventListener('scroll', onScroll, opts);
     root.addEventListener('touchend', onEnd, opts);
     root.addEventListener('touchcancel', cancel, opts);
   }

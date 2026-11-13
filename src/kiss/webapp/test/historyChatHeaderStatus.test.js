@@ -16,12 +16,14 @@ const {
   send,
   ofType,
   sendEmptyWorkDir,
-  settle: tick,
 } = require('./simplify2_harness');
 const {installTokenisedCss} = require('./designTokens');
+const {key: keyIn} = require('./ui_antipattern_harness');
 const {
   makeRow: helperMakeRow,
   sendHistory,
+  sendHistoryPage,
+  lastGetHistory,
   chatHeader: header,
   chatTabs,
 } = require('./history_helpers');
@@ -175,12 +177,12 @@ function testHeaderShowsLastTaskIcon() {
   );
   const resumes = ofType(posted, 'resumeSession');
   assert.strictEqual(resumes.length, 1, 'the icon opens the chat');
-  assert.strictEqual(resumes[0].id, 'A');
+  assert.strictEqual(resumes[0].chatId, 'A');
   win.close();
   console.log("  ok - the chat header shows its last task's icon");
 }
 
-async function testHeaderFollowsTaskStatus() {
+function testHeaderFollowsTaskStatus() {
   const {win, posted} = makePage();
   openSidebar(win);
   sendEmptyWorkDir(win);
@@ -195,8 +197,6 @@ async function testHeaderFollowsTaskStatus() {
   assertMirrors(win, 'A', 1, 'while running');
 
   // The task asks a question: the header shows the "?" too.
-  // Every nudge below waits a tick first: a refresh in the same tick as
-  // the previous one folds into its end-of-tick refetch.
   posted.length = 0;
   send(win, {type: 'tasks_updated'});
   sendHistory(win, posted, [
@@ -211,7 +211,6 @@ async function testHeaderFollowsTaskStatus() {
   assertMirrors(win, 'A', 1, 'while asking');
 
   // Answered and finished: the just-completed tick, on both.
-  await tick();
   posted.length = 0;
   send(win, {type: 'tasks_updated'});
   sendHistory(win, posted, [
@@ -222,7 +221,6 @@ async function testHeaderFollowsTaskStatus() {
 
   // A newer task launched in the same chat fails: the header follows
   // the new last task, not the completed older one.
-  await tick();
   posted.length = 0;
   send(win, {type: 'tasks_updated'});
   sendHistory(win, posted, [
@@ -268,16 +266,11 @@ function testNewestLaunchWinsAcrossPagesAndOrder() {
   Object.defineProperty(list, 'clientHeight', {value: 100, configurable: true});
   list.scrollTop = 900;
   list.dispatchEvent(new win.Event('scroll'));
-  const req = posted.filter(m => m && m.type === 'getHistory').pop();
+  const req = lastGetHistory(posted);
   assert.ok(req && req.offset === 50, 'the scroll asked for the next page');
-  send(win, {
-    type: 'history',
-    offset: 50,
-    generation: req.generation,
-    sessions: [
-      makeRow({id: 'A', task_id: 60, failed: true, startTs: 1_700_000_100_000}),
-    ],
-  });
+  sendHistoryPage(win, posted, 50, [
+    makeRow({id: 'A', task_id: 60, failed: true, startTs: 1_700_000_100_000}),
+  ]);
   assert.ok(
     rowMark(win, 60).classList.contains('status-cross'),
     'the older row shows its cross',
@@ -464,7 +457,7 @@ function testChevronFoldsAndHeaderOpensLastTask() {
   assert.strictEqual(chatTabs(win).length, tabsBefore, 'one tab for the chat');
   const resumes = ofType(posted, 'resumeSession');
   assert.strictEqual(resumes.length, 1, 'the chat is resumed once');
-  assert.strictEqual(resumes[0].id, 'A', 'at chat A');
+  assert.strictEqual(resumes[0].chatId, 'A', 'at chat A');
   assert.strictEqual(resumes[0].taskId, 2, 'at its last task');
   assert.strictEqual(
     resumes[0].tabId,
@@ -565,7 +558,7 @@ function testEventlessLastTaskResumesByChatId() {
     1,
     'resumed by chat id, not shown read-only',
   );
-  assert.strictEqual(resumes[0].id, 'E');
+  assert.strictEqual(resumes[0].chatId, 'E');
   assert.strictEqual(resumes[0].taskId, 5);
   // The daemon binds the tab to the chat on replay: a second header
   // click finds it and opens nothing more.
@@ -636,12 +629,6 @@ function headerTitle(win, chatId) {
   return header(win, chatId).querySelector(':scope > .history-chat-title');
 }
 
-function keyIn(win, el, key) {
-  el.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key, bubbles: true, cancelable: true}),
-  );
-}
-
 /**
  * The pencil on a chat panel's header (and a double-click on its
  * title) turns the summary into a text box: Enter saves the new text
@@ -673,15 +660,20 @@ function testPencilEditsTheChatSummary() {
     'the pencil is visible while the header is not hovered',
   );
 
-  const tabsBefore = chatTabs(win).length;
+  const activeBefore = win._testApi.getActiveTabId();
   pencil.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   let input = headerTitle(win, 'A').querySelector('input');
   assert.ok(input, 'the pencil opens a text box in the title');
   assert.strictEqual(input.value, 'Fix the login bug');
   assert.ok(group(win, 'A').classList.contains('renaming'));
-  // A click inside the box is not a click on the header.
+  // A click inside the box is not a click on the header, which would
+  // open the chat in a fresh tab.
   input.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.strictEqual(chatTabs(win).length, tabsBefore, 'the chat did not open');
+  assert.strictEqual(
+    win._testApi.getActiveTabId(),
+    activeBefore,
+    'the chat did not open',
+  );
   // Escape: nothing saved, the old title is back.
   input.value = 'typo';
   keyIn(win, input, 'Escape');
@@ -742,9 +734,9 @@ function testPencilEditsTheChatSummary() {
   console.log('  ok - the pencil edits the chat summary');
 }
 
-async function main() {
+function main() {
   testHeaderShowsLastTaskIcon();
-  await testHeaderFollowsTaskStatus();
+  testHeaderFollowsTaskStatus();
   testNewestLaunchWinsAcrossPagesAndOrder();
   testLegacyFlatViewHasNoHeaders();
   testChevronFoldsAndHeaderOpensLastTask();
@@ -753,7 +745,9 @@ async function main() {
   console.log('\n7 passed, 0 failed');
 }
 
-main().catch(e => {
+try {
+  main();
+} catch (e) {
   console.error(e);
   process.exit(1);
-});
+}

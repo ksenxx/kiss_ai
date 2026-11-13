@@ -26,6 +26,9 @@ const MEDIA = path.join(__dirname, '..', 'media');
 // Below run-all.js's 120 s suite limit, so a hung suite is killed and
 // reported here (and its coverage directory removed) first.
 const CHILD_TIMEOUT_MS = 90 * 1000;
+// How long the cleanup of a killed gate (`removeCoverageOnceGone`) waits
+// for the suite's process group to be gone.
+const CLEANUP_TIMEOUT_MS = 5 * 1000;
 
 // Node 24+ enables the Maglev compiler and background Sparkplug compilation;
 // either can hang `process.exit()` (nodejs/node#64274), which is why
@@ -38,6 +41,34 @@ const V8_FLAGS = ['--no-maglev', '--no-concurrent-sparkplug'];
 // (`read ENOTCONN`): the suite runs without the guard below, and the
 // timeout kills the suite itself.
 const WINDOWS = process.platform === 'win32';
+
+// The `identity` of every file under media/ when this gate's first suite
+// started, by path (`runCovered` notes them, `measure` compares).
+let mediaAtStart;
+
+/**
+ * What changes whenever `file`'s text does: its inode, size and
+ * timestamps; undefined when there is no such file.
+ */
+function identity(file) {
+  const s = fs.statSync(file, {throwIfNoEntry: false});
+  return s && `${s.ino}:${s.size}:${s.mtimeMs}:${s.ctimeMs}`;
+}
+
+/**
+ * The `identity` of every file under media/, by path.  A copy of this
+ * file run from a scratch directory (the gate's own tests) has no media/
+ * beside it and nothing to measure: none then.
+ */
+function mediaIdentities() {
+  const ids = {};
+  if (!fs.existsSync(MEDIA)) return ids;
+  for (const name of fs.readdirSync(MEDIA, {recursive: true})) {
+    const file = path.join(MEDIA, name);
+    ids[file] = identity(file);
+  }
+  return ids;
+}
 
 /**
  * SIGKILL process group `pgid`; a group already gone is fine.  Anything
@@ -65,7 +96,8 @@ function killGroup(pgid) {
  * as soon as the guard returns, when the suite exits or after
  * CHILD_TIMEOUT_MS (the guard is SIGKILLed first), so nothing the suite
  * started outlives the gate, run by run-all.js or on its own.  Should the
- * gate itself be killed first, the guard kills the group.
+ * gate itself be killed first, the guard kills the group and has the
+ * coverage directory removed (`retireGroup`).
  *
  * The child runs with V8_FLAGS only.  This process's own flags are not
  * passed on: a `node -e` / `-p` gate would make the child run that code
@@ -74,9 +106,15 @@ function killGroup(pgid) {
  * through the environment.  The suite writes straight to this process's
  * stdout and stderr, so what it printed survives a kill of the whole
  * process group.  When it fails or times out the coverage directory is
- * removed and the process exits with the suite's status.
+ * removed and the process exits with the suite's status.  The directory
+ * is removed as well when a report cannot be read (one cut short does
+ * not parse), which throws.
+ *
+ * Before the gate's first suite the identity of every media file is
+ * noted, for `measure` to refuse one that changed since.
  */
 function runCovered(testFile, mark) {
+  mediaAtStart = mediaAtStart || mediaIdentities();
   const covDir = fs.mkdtempSync(path.join(os.tmpdir(), `${mark}-cov-`));
   const suite = path.join(__dirname, testFile);
   const res = spawnSync(
@@ -108,11 +146,13 @@ function runCovered(testFile, mark) {
     console.error(`coverage gate: ${why}`);
     process.exit(res.status || 1);
   }
-  const reports = fs
-    .readdirSync(covDir)
-    .map(f => JSON.parse(fs.readFileSync(path.join(covDir, f), 'utf-8')));
-  fs.rmSync(covDir, {recursive: true, force: true});
-  return reports;
+  try {
+    return fs
+      .readdirSync(covDir)
+      .map(f => JSON.parse(fs.readFileSync(path.join(covDir, f), 'utf-8')));
+  } finally {
+    fs.rmSync(covDir, {recursive: true, force: true});
+  }
 }
 
 /**
@@ -206,10 +246,24 @@ function isCodeLine(line) {
  * zero count even when it shares a line with run code).  Returns the
  * counts, the missed lines, and the file's text with its covered-byte
  * map for gates that also inspect branches.
+ *
+ * `reports` hold byte offsets into the text the suites eval'd, so they
+ * fit the file only while it is the one the suites read: a file that
+ * changed since `runCovered` started the first of them is refused by
+ * name (exit 1) instead of measured, which would report lines the
+ * suites ran as uncovered.
  */
 function measure(target, mark, reports, everyByte) {
   const name = target.file;
-  const src = fs.readFileSync(path.join(MEDIA, target.file), 'utf-8');
+  const file = path.join(MEDIA, name);
+  const src = fs.readFileSync(file, 'utf-8');
+  if (identity(file) !== mediaAtStart[file]) {
+    console.error(
+      `coverage gate: media/${name} changed while its suite ran, so the ` +
+        'coverage cannot be mapped onto it; run the gate again',
+    );
+    process.exit(1);
+  }
   const lines = src.split('\n');
   const regions = target.wholeFile
     ? [[0, lines.length]]
@@ -306,7 +360,7 @@ function gateRegions(opts) {
  * its end means the gate is gone before it could kill the group (killed
  * with its own process group, as run-all.js stops a gate, or by a
  * terminal's Ctrl-C, which reaches only the gate's group); the guard then
- * SIGKILLs the group, itself, the suite and what it started included.
+ * retires the group (`retireGroup`).
  */
 function guardSuite(suite) {
   const child = spawn(process.execPath, [...V8_FLAGS, suite], {
@@ -314,10 +368,72 @@ function guardSuite(suite) {
   });
   child.on('exit', code => process.exit(code === null ? 1 : code));
   const gate = new net.Socket({fd: 3, readable: true, writable: false});
-  gate.on('close', () => killGroup(process.pid));
+  gate.on('close', retireGroup);
   gate.resume();
+}
+
+/**
+ * The guard, once its gate is gone: SIGKILL the group, itself, the suite
+ * and what it started included.  The gate would have removed the coverage
+ * directory and the guard cannot, dying with the group, so it first
+ * starts a cleanup (`removeCoverageOnceGone`, this file run as a script)
+ * outside the group: in a session of its own, holding none of the gate's
+ * output, and without NODE_V8_COVERAGE, or it would write a report of its
+ * own into the directory it removes (the variable is named with no value:
+ * `spawn` copies it into an environment that does not name it).  `spawn`
+ * returns once the cleanup runs there, and the group is killed whether or
+ * not it could be started.
+ */
+function retireGroup() {
+  const covDir = process.env.NODE_V8_COVERAGE;
+  try {
+    spawn(
+      process.execPath,
+      [...V8_FLAGS, __filename, '--cleanup', String(process.pid), covDir],
+      {
+        env: Object.assign({}, process.env, {NODE_V8_COVERAGE: undefined}),
+        stdio: 'ignore',
+        detached: true,
+      },
+    );
+  } finally {
+    killGroup(process.pid);
+  }
+}
+
+/**
+ * The cleanup `retireGroup` starts as `node coverage_gate.js --cleanup
+ * <pgid> <covDir>`: remove `covDir` once no process of group `pgid` is
+ * left to write a report into it (the guard writes its own as it kills
+ * the group: node flushes coverage before a process signals itself), or
+ * after CLEANUP_TIMEOUT_MS (a zombie nobody reaps stays in its group).
+ * It kills nothing: the guard has, and a group whose processes are all
+ * gone may be another's by now.
+ */
+function removeCoverageOnceGone(pgid, covDir) {
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + CLEANUP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(-pgid, 0);
+    } catch {
+      break; // ESRCH: every process of the group has exited.
+    }
+    Atomics.wait(pause, 0, 0, 20);
+  }
+  fs.rmSync(covDir, {recursive: true, force: true});
 }
 
 module.exports = {runCovered, measure, gateRegions, killGroup};
 
-if (require.main === module) guardSuite(process.argv[2]);
+if (require.main === module) {
+  if (process.argv[2] === '--cleanup') {
+    removeCoverageOnceGone(Number(process.argv[3]), process.argv[4]);
+    // Exit rather than wait for the event loop to empty: a NODE_OPTIONS
+    // preload may keep a timer on it, and nothing is left to kill this
+    // process.
+    process.exit(0);
+  } else {
+    guardSuite(process.argv[2]);
+  }
+}

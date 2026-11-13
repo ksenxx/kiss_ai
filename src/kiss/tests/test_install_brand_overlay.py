@@ -57,7 +57,7 @@ class _Install:
         self.app = tmp_path / "home" / ".kiss" / "kiss"
         for root in (self.project, self.app):
             (root / _MEDIA).mkdir(parents=True)
-            for name in ("brand.json", "brand.css", "kiss-icon.svg", "thumbnail.jpeg"):
+            for name in ("brand.json", "brand.css", "kiss-icon.svg"):
                 (root / _MEDIA / name).write_text(f"stock {name}\n", encoding="utf-8")
             (root / _MEDIA / "other.css").write_text("stock other\n", encoding="utf-8")
         self.stock = _media_files(self.project)
@@ -91,7 +91,6 @@ def test_overlay_files_replace_the_app_media_and_are_listed(tmp_path: Path) -> N
     assert installed["kiss-icon.svg"] == "<svg/>\n"
     # Files the overlay does not provide keep their stock content.
     assert installed["brand.css"] == "stock brand.css\n"
-    assert installed["thumbnail.jpeg"] == "stock thumbnail.jpeg\n"
     assert installed["other.css"] == "stock other\n"
 
 

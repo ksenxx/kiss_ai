@@ -6,16 +6,22 @@
 """Script to run all code quality checks: syntax check, lint, and type check."""
 
 import argparse
+import contextlib
+import errno
 import hashlib
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 """Repository root (``src/kiss/scripts/check.py`` is four levels deep)."""
@@ -71,19 +77,128 @@ def _echo_lines(stream: Iterable[str], quiet: bool) -> Iterator[str]:
         yield line
 
 
-def run_command(cmd: list[str], description: str, quiet: bool = False) -> list[str] | None:
+STAGE_TIMEOUT = 1800.0
+"""Seconds a stage may run before it is killed and counted as failed: far
+longer than the slowest healthy stage (a cold mypy or pyright pass takes
+minutes), so that only a stage that hangs meets it."""
+
+_PIPE_GRACE = 5.0
+"""Seconds of waiting for more output of a stage that was stopped: what
+it had written arrives at once, and only a process that left its group (a
+daemon in a session of its own) can hold the pipe open any longer."""
+
+_POLL = 0.1
+"""Seconds between two looks at a running stage: has it exited, is it late."""
+
+_LEASH = (
+    "/bin/sh", "-c",
+    'exec 3<&0 </dev/null; ( (read _ <&3; kill -9 0) >/dev/null 2>&1 & ); exec "$@" 3<&-', "sh",
+)
+"""What a stage's command is prefixed with on POSIX: a watcher in the
+stage's process group kills that group once the stage's stdin pipe (the
+leash, moved to fd 3) closes.  :func:`_stop_stage` closes it, and the
+kernel does when ``check`` itself is killed, so no stage outlives it.
+A subshell that exits at once starts the watcher, so the stage has no
+child it did not start and may wait until it has none left."""
+
+
+def _pump(stream: IO[str], lines: queue.Queue[str | None]) -> None:
+    """Queue every line of *stream*, then ``None``: the body of a stage's reader thread.
+
+    The pipe ends only once every process holding its other end lets
+    go, so the thread may outlive the stage; whoever takes the lines
+    waits for the queue, never for the pipe, and shuts the queue down
+    when it stops listening: the thread then ends at its next line
+    instead of waiting for room.  The stream is closed here, by its only
+    reader.
+    """
+    with contextlib.suppress(queue.ShutDown), stream:
+        try:
+            for line in stream:
+                lines.put(line)
+        finally:
+            lines.put(None)
+
+
+def _stop_stage(proc: subprocess.Popen[str]) -> None:
+    """Kill the stage *proc* and, on POSIX, all it started; a no-op once they are gone."""
+    if proc.stdin is not None:
+        proc.stdin.close()  # the leash: its watcher kills the stage's whole group
+    proc.kill()  # the stage itself: all there is on Windows, or should the watcher be gone
+
+
+def _stage_lines(
+    proc: subprocess.Popen[str], lines: queue.Queue[str | None], timeout: float,
+    timed_out: threading.Event,
+) -> Iterator[str]:
+    """Yield the output lines of the stage *proc* as they arrive, then stop the stage.
+
+    *lines* is the queue :func:`_pump` fills from the stage's pipe.
+    The stage is over when its process exits, or after *timeout* seconds
+    (*timed_out* is then set), not when its pipe closes: a child it left
+    behind may hold the pipe.  :func:`_stop_stage` then closes the pipe,
+    unless a process outside the stage's group holds it; that one is
+    given up after :data:`_PIPE_GRACE` seconds.  The grace counts only
+    the time spent waiting for a line, so a caller that is slow to take
+    the lines loses none of them.
+    """
+    deadline = time.monotonic() + timeout
+    look = 0.0  # when to look at the stage next
+    line: str | None = ""  # None once the pipe has closed
+    while line is not None:
+        now = time.monotonic()
+        if now >= look:
+            if proc.poll() is not None or now >= deadline:
+                break
+            look = now + _POLL
+        try:
+            line = lines.get(timeout=_POLL)
+        except queue.Empty:
+            continue
+        if line is not None:
+            yield line
+    else:  # the pipe closed first: only the exit is left to wait for
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(max(0.0, deadline - time.monotonic()))
+    if proc.poll() is None:  # still running now that the deadline has passed
+        timed_out.set()
+    _stop_stage(proc)
+    grace = _PIPE_GRACE
+    while line is not None and grace > 0:
+        waiting_since = time.monotonic()
+        try:
+            line = lines.get(timeout=grace)
+        except queue.Empty:
+            break
+        grace -= time.monotonic() - waiting_since
+        if line is not None:
+            yield line
+
+
+def run_command(
+    cmd: list[str], description: str, quiet: bool = False, timeout: float = STAGE_TIMEOUT,
+) -> list[str] | None:
     """Run a command and return its error lines when it fails.
+
+    The command runs at the project root (the stages name ``src/``
+    relatively, and the cached verdict is of that tree, wherever
+    ``check`` was started), in a session of its own with an empty stdin,
+    and is over when its process exits: whatever it left running is
+    killed then.  A command still running after *timeout* seconds is
+    killed the same way and fails.
 
     Args:
         cmd: List of command arguments to execute.
         description: Human-readable description of the command for logging.
         quiet: Print one status line per stage instead of streaming
             the stage's output; the error lines still reach the digest.
+        timeout: Seconds the command may run.
 
     Returns:
         ``None`` when the command exits with code 0, otherwise the
         :func:`error_lines` of its combined stdout/stderr for the
-        final digest.
+        final digest, ending with a ``timed out`` line when *timeout*
+        ended the command.
     """
     if not quiet:
         print(f"\n{'=' * 60}")
@@ -91,14 +206,27 @@ def run_command(cmd: list[str], description: str, quiet: bool = False) -> list[s
         print(f"Command: {' '.join(cmd)}")
         print(f"{'=' * 60}\n", flush=True)
 
-    with subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
-        env=stage_env(),
-    ) as proc:
-        assert proc.stdout is not None
-        digest = error_lines(_echo_lines(proc.stdout, quiet))
+    leashed = os.name == "posix"
+    if leashed and shutil.which(cmd[0]) is None:  # behind the leash it would be exit code 127
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), cmd[0])
+    proc = subprocess.Popen(
+        [*_LEASH, *cmd] if leashed else cmd,
+        stdin=subprocess.PIPE if leashed else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+        cwd=PROJECT_ROOT, env=stage_env(), start_new_session=leashed,
+    )
+    lines: queue.Queue[str | None] = queue.Queue(maxsize=1024)  # full: the stage waits
+    timed_out = threading.Event()
+    try:
+        threading.Thread(target=_pump, args=(proc.stdout, lines), daemon=True).start()
+        digest = error_lines(_echo_lines(_stage_lines(proc, lines, timeout, timed_out), quiet))
+    finally:
+        _stop_stage(proc)
+        lines.shutdown(immediate=True)  # nobody listens any more: see _pump
         returncode = proc.wait()
     if returncode != 0:
+        if timed_out.is_set():
+            digest.append(f"timed out: still running after {timeout:g} s, killed")
         print(f"{'' if quiet else chr(10)}❌ {description} failed with exit code {returncode}")
         return digest
     print(f"{'' if quiet else chr(10)}✅ {description} passed")
@@ -137,6 +265,17 @@ def uv_run(*command: str, root: Path = PROJECT_ROOT) -> list[str]:
         root: The project root the check runs on.
     """
     return ["uv", "run", *(["--no-sync"] if in_worktree(root) else []), *command]
+
+
+def no_sync(command: list[str]) -> list[str]:
+    """Return *command* with ``--no-sync`` when it is a ``uv run`` that would sync first.
+
+    Args:
+        command: The command of a stage.
+    """
+    if command[:2] == ["uv", "run"] and "--no-sync" not in command:
+        return ["uv", "run", "--no-sync", *command[2:]]
+    return command
 
 
 def project_script(script: str, module: str, *args: str, root: Path = PROJECT_ROOT) -> list[str]:
@@ -203,15 +342,21 @@ CHECK_CONFIG_FILES = (
     "ruff.toml",
     ".ruff.toml",
     "setup.cfg",
+    "website/kisssorcar.github.io/docs/sea-commands.md",
+    "website/kisssorcar.github.io/docs/cli.md",
 )
-"""Root files whose change must invalidate the cached verdict: the
-checks read their rules from them."""
+"""Files outside the source trees whose change must invalidate the cached
+verdict: the root files the checks read their rules from, and the pages
+``sea lint`` and ``sea docs`` read (``sea_docs.GENERATED_FILES``, spelled
+here like :data:`WORKTREES_DIR`; a test holds the two lists together)."""
 
 
 def tree_fingerprint(root: Path = PROJECT_ROOT) -> str:
     """Return a hash of the path, size and mtime of every source file under *root*.
 
-    Covers ``src/`` and the root files that steer the checks
+    Covers the source trees ``src/`` and ``projects/`` (the type checkers
+    follow the imports of ``src/`` into the packages of ``projects/``) and
+    the files outside them that the checks read
     (:data:`CHECK_CONFIG_FILES`); caches, ``node_modules`` and ``tmp/``
     are skipped.
 
@@ -223,20 +368,20 @@ def tree_fingerprint(root: Path = PROJECT_ROOT) -> str:
         top = root / name
         if top.is_file():
             stat = top.stat()
-            digest.update(f"{top.name}:{stat.st_size}:{stat.st_mtime_ns}\n".encode())
-    src = root / "src"
-    for dirpath, dirnames, filenames in os.walk(src):
-        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
-        for name in sorted(filenames):
-            if name.endswith((".pyc", ".pyo")):
-                continue
-            path = Path(dirpath) / name
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            rel = path.relative_to(root).as_posix()
-            digest.update(f"{rel}:{stat.st_size}:{stat.st_mtime_ns}\n".encode())
+            digest.update(f"{name}:{stat.st_size}:{stat.st_mtime_ns}\n".encode())
+    for tree in ("src", "projects"):
+        for dirpath, dirnames, filenames in os.walk(root / tree):
+            dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
+            for name in sorted(filenames):
+                if name.endswith((".pyc", ".pyo")):
+                    continue
+                path = Path(dirpath) / name
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                rel = path.relative_to(root).as_posix()
+                digest.update(f"{rel}:{stat.st_size}:{stat.st_mtime_ns}\n".encode())
     return digest.hexdigest()
 
 
@@ -254,15 +399,26 @@ def cached_verdict(fingerprint: str, full: bool) -> dict[str, Any] | None:
 
 
 def save_verdict(fingerprint: str, full: bool, exit_code: int, log: str) -> None:
-    """Record the verdict of a run on the tree *fingerprint* for :func:`cached_verdict`."""
+    """Record the verdict of a run on the tree *fingerprint* for :func:`cached_verdict`.
+
+    The verdict is written to a file of this call's own and renamed over
+    the cache, so checks that end together in one tree each publish a
+    whole document.  Written into the cache itself, a short verdict kept
+    the tail of a longer one saved between its open and its write: no
+    JSON, and the next run checked the unchanged tree again.  (Staged
+    here with the standard library alone, like the rest of the script:
+    it must run on a tree whose modules do not import.)
+    """
+    verdict = {"fingerprint": fingerprint, "full": full, "exit_code": exit_code, "log": log}
     try:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CACHE_FILE.write_text(
-            json.dumps(
-                {"fingerprint": fingerprint, "full": full, "exit_code": exit_code, "log": log}
-            ),
-            encoding="utf-8",
-        )
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=CACHE_FILE.parent, prefix=f"{CACHE_FILE.name}.",
+            delete_on_close=False,  # removed when the block ends, if the rename did not take it
+        ) as staged:
+            json.dump(verdict, staged)
+            staged.close()
+            os.replace(staged.name, CACHE_FILE)
     except OSError:
         pass
 
@@ -301,86 +457,32 @@ def run_checks(
     return failed
 
 
-def _should_skip_path(path: Path) -> bool:
-    """Check if a path should be skipped by consulting ``.gitignore`` rules.
+def _removed_meanwhile(function: object, path: object, error: BaseException) -> None:
+    """``shutil.rmtree`` error handler: pass over what is gone, raise anything else.
 
-    Uses ``git check-ignore`` to determine whether *path* (or any ancestor)
-    is covered by ``.gitignore``.  The ``.git`` directory itself is always
-    skipped because it is not listed in ``.gitignore`` but must never be
-    cleaned.
-
-    Args:
-        path: Path object to check.
-
-    Returns:
-        True if the path is inside ``.git`` or is git-ignored, False otherwise.
+    Checks started together in one tree remove the same directories; a
+    file another of them removed first is removed all the same.
     """
-    if ".git" in path.parts:
-        return True
-    result = subprocess.run(
-        ["git", "check-ignore", "-q", str(path)],
-        capture_output=True,
-        cwd=PROJECT_ROOT,
-        check=False,
-    )
-    return result.returncode == 0
+    if not isinstance(error, FileNotFoundError):
+        raise error
 
 
 def clean_build_artifacts() -> None:
-    """Remove build artifacts and caches.
+    """Remove the build artifacts at the repository root.
 
-    Removes directories like build/, dist/, .mypy_cache/, .pytest_cache/,
-    .ruff_cache/, *.egg-info/, all __pycache__ directories, and all .pyc files.
-    Skips paths inside .venv, venv, .git, and node_modules directories.
-
-    Equivalent to:
-        rm -rf build/ dist/ .pytest_cache .mypy_cache .ruff_cache && \
-        find . -type d -name __pycache__ -exec rm -r {} + && \
-        find . -type f -name "*.pyc" -delete
-
-    Returns:
-        None.
+    Equivalent to ``rm -rf dist build *.egg-info artifacts uv_cache``.
     """
-    dirs_to_remove = [
-        "dist",
-        "build",
-        "*.egg-info",
-        ".claude",
-        "artifacts",
-        "uv_cache",
-    ]
-
     print(f"\n{'=' * 60}")
     print("Running: Clean build artifacts")
     print(f"{'=' * 60}\n")
 
     removed_count = 0
-
-    for pattern in dirs_to_remove:
-        if "*" in pattern:
-            for path in PROJECT_ROOT.glob(pattern):
-                if path.is_dir():
-                    print(f"  Removing: {path}")
-                    shutil.rmtree(path)
-                    removed_count += 1
-        else:
-            path = PROJECT_ROOT / pattern
-            if path.exists() and path.is_dir():
+    for pattern in ("dist", "build", "*.egg-info", "artifacts", "uv_cache"):
+        for path in PROJECT_ROOT.glob(pattern):
+            if path.is_dir():
                 print(f"  Removing: {path}")
-                shutil.rmtree(path)
+                shutil.rmtree(path, onexc=_removed_meanwhile)
                 removed_count += 1
-
-    for pycache in PROJECT_ROOT.rglob("__pycache__"):
-        if pycache.is_dir() and not _should_skip_path(pycache):
-            print(f"  Removing: {pycache}")
-            shutil.rmtree(pycache)
-            removed_count += 1
-
-    for pyc_file in PROJECT_ROOT.rglob("*.pyc"):
-        if not _should_skip_path(pyc_file):
-            print(f"  Removing: {pyc_file}")
-            pyc_file.unlink()
-            removed_count += 1
 
     if removed_count == 0:
         print("  No artifacts to clean.")
@@ -388,23 +490,74 @@ def clean_build_artifacts() -> None:
         print(f"\n✅ Cleaned {removed_count} items")
 
 
-def main() -> int:
-    """Run all code quality checks.
+def check_stages(
+    full: bool, read_only: bool, root: Path = PROJECT_ROOT
+) -> list[tuple[list[str], str]]:
+    """Return the stages of a run as ``(command, description)`` pairs, in order.
 
-    Parses command-line arguments and runs code quality checks including
-    dependency installation, syntax checking with py_compile, linting with ruff,
-    and type checking with mypy.
+    Args:
+        full: Whether pyright and the webapp lint run as well.
+        read_only: Whether to leave out the stages that change the tree or
+            the environment (``uv sync``, the API docs, the SEA tables) and
+            to run the others on the environment as it is (``uv run
+            --no-sync``), so that the run can go beside the tests.
+        root: The tree the stages check.
+    """
+    stages: list[tuple[list[str], str]] = []
+    if not read_only:
+        stages += [
+            (sync_command(root), "Install dependencies (uv sync)"),
+            (project_script("generate-api-docs", "kiss.scripts.generate_api_docs", root=root),
+             "Generate API docs"),
+        ]
+    stages.append(
+        (project_script("sea", "kiss.agents.sorcar.sea_cli", "lint", root=root),
+         "Lint SEAs (sea lint)")
+    )
+    if not read_only:
+        stages.append(
+            (project_script("sea", "kiss.agents.sorcar.sea_cli", "docs", root=root),
+             "Generate SEA vocabulary tables (sea docs)")
+        )
+    stages += [
+        (uv_run("python", "-m", "compileall", "-q", "src/", root=root),
+         "Syntax check (compileall)"),
+        (uv_run("ruff", "check", "src/", root=root), "Lint code (ruff)"),
+        (uv_run("mypy", "src/", root=root), "Type check (mypy)"),
+    ]
+    if full:
+        stages.append((uv_run("pyright", "src/", root=root), "Type check (pyright)"))
+        webapp_dir = root / "src" / "kiss" / "webapp"
+        if (webapp_dir / "node_modules").is_dir() and shutil.which("npm"):
+            stages.append(
+                (["npm", "--prefix", str(webapp_dir), "run", "lint"], "Webapp lint")
+            )
+    if read_only:
+        stages = [(no_sync(command), description) for command, description in stages]
+    return stages
+
+
+def main() -> int:
+    """Run all code quality checks on the tree this script is part of.
+
+    Cleans the build artifacts, then runs every stage (dependency sync,
+    the generated docs, ``sea lint``, ``compileall``, ruff, mypy; with
+    ``--full`` pyright and the webapp lint as well) and prints the
+    verdict with the error lines of each failed stage.  ``--read-only``
+    neither cleans nor syncs nor generates docs: it only reads the
+    sources, for a run beside the tests.
 
     Returns:
         Exit code 0 if all checks pass, 1 if any check fails.
     """
     parser = argparse.ArgumentParser(description="Run code quality checks")
-    parser.add_argument(
+    cleaning = parser.add_mutually_exclusive_group()
+    cleaning.add_argument(
         "--no-clean",
         action="store_true",
         help="Skip cleaning build artifacts before running checks",
     )
-    parser.add_argument(
+    cleaning.add_argument(
         "--clean-only",
         action="store_true",
         help="Only clean build artifacts, do not run checks",
@@ -423,9 +576,19 @@ def main() -> int:
             "run on an unchanged tree prints the previous verdict"
         ),
     )
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help=(
+            "Change neither the tree nor the environment: no cleaning, no uv sync, "
+            "no generated docs, no --fix; for a run beside the tests"
+        ),
+    )
     args = parser.parse_args()
+    if args.read_only and (args.fix or args.clean_only):
+        parser.error("--read-only changes nothing: it goes with neither --fix nor --clean-only")
 
-    if not args.no_clean:
+    if not args.no_clean and not args.read_only:
         clean_build_artifacts()
         if args.clean_only:
             return 0
@@ -441,29 +604,9 @@ def main() -> int:
             print(cached["log"], end="")
             return int(cached["exit_code"])
 
-    checks = [
-        (sync_command(), "Install dependencies (uv sync)"),
-        (project_script("generate-api-docs", "kiss.scripts.generate_api_docs"),
-         "Generate API docs"),
-        (project_script("sea", "kiss.agents.sorcar.sea_cli", "lint"), "Lint SEAs (sea lint)"),
-        (project_script("sea", "kiss.agents.sorcar.sea_cli", "docs"),
-         "Generate SEA vocabulary tables (sea docs)"),
-        (uv_run("python", "-m", "compileall", "-q", "src/"), "Syntax check (compileall)"),
-        (uv_run("ruff", "check", "src/"), "Lint code (ruff)"),
-        (uv_run("mypy", "src/"), "Type check (mypy)"),
-    ]
-
-    if args.full:
-        checks.append((uv_run("pyright", "src/"), "Type check (pyright)"))
-        webapp_dir = PROJECT_ROOT / "src" / "kiss" / "webapp"
-        if (webapp_dir / "node_modules").is_dir() and shutil.which("npm"):
-            checks.append(
-                (["npm", "--prefix", str(webapp_dir), "run", "lint"], "Webapp lint")
-            )
-
     print("\n🔍 Running all code quality checks...\n")
 
-    failed = run_checks(checks, quiet=args.fix)
+    failed = run_checks(check_stages(args.full, args.read_only), quiet=args.fix)
     verdict = verdict_text(failed)
     print(verdict, end="")
     if args.fix:

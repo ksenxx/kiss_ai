@@ -5,7 +5,7 @@
 """End-to-end regression tests for the asyncTearDown orphan-sweep guard.
 
 The root ``tests/conftest.py`` joins every live ``orphan-task-sweep``
-thread before a test's teardown closes ``persistence._db_conn``.  That
+thread before a test's teardown closes its database connection.  That
 guard originally wrapped only the sync ``tearDown`` — but CPython's
 ``IsolatedAsyncioTestCase._callTearDown`` awaits ``asyncTearDown``
 FIRST, and dozens of async server test files close the connection
@@ -65,11 +65,10 @@ class SweepTeardownRace(unittest.IsolatedAsyncioTestCase):
     """Mirror of the production fixture pattern that used to SIGSEGV."""
 
     async def asyncSetUp(self) -> None:
-        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(tempfile.mkdtemp(prefix="kiss_sweep_race_"))
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         db = th._get_db()
         old_ts = time.time() - 3600.0
         rows = [
@@ -104,10 +103,8 @@ class SweepTeardownRace(unittest.IsolatedAsyncioTestCase):
         # The exact pattern the production async fixtures use — closing
         # the module-global connection, which may belong to the sweep
         # thread.  Safe only because the guard joined the sweep above.
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved
+        th._close_thread_db()
+        th._DB_PATH, th._KISS_DIR = self._saved
 '''
 
 

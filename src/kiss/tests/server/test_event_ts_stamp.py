@@ -134,9 +134,10 @@ def test_replay_ignores_junk_legacy_timestamps() -> None:
 
     Covers the data-forensics cases: TEXT/BLOB column junk, NaN, inf,
     non-positive values, and values beyond the ECMAScript Date range.
-    Non-numeric junk is dropped from the event so the replay frame
-    stays JSON-serializable (bytes would otherwise crash ``json.dumps``
-    in the frame sizing and the transport).
+    Junk that is not a finite number is dropped from the event so the
+    replay frame stays JSON: bytes would crash ``json.dumps`` in the
+    frame sizing and the transport, and the page's ``JSON.parse``
+    rejects the ``NaN``/``Infinity`` a non-finite float is written as.
     """
     junk = ["garbage", b"\x00", float("nan"), float("inf"), 0, -1, 9e12]
     events = _coalesced_replay_events([
@@ -144,9 +145,9 @@ def test_replay_ignores_junk_legacy_timestamps() -> None:
         for i, v in enumerate(junk)
     ])
     assert all("ts" not in ev for ev in events)
-    assert "_timestamp" not in events[0] and "_timestamp" not in events[1]
+    assert all("_timestamp" not in ev for ev in events[:4])
     assert events[4]["_timestamp"] == 0
-    json.dumps(events)
+    json.dumps(events, allow_nan=False)
 
 
 def test_replay_non_list_events_returns_empty() -> None:

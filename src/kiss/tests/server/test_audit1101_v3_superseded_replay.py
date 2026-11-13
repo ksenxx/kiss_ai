@@ -42,9 +42,15 @@ import kiss.agents.sorcar.persistence as th
 import kiss.server.server as server_module
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.agents.sorcar.test_steer_inputs import _redirect, _restore
-from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.tests.local_ws import (
+    LocalReader,
+    LocalWriter,
+    _generate_self_signed_cert,
+    open_local_connection,
+)
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.pause import Pause
 
 _TAB = "shared-tab"
@@ -89,20 +95,50 @@ class TestSupersededReplay(unittest.TestCase):
         th._append_chat_event({"type": "text_delta", "text": "B transcript"}, task_id=self.task_b)
 
     def tearDown(self) -> None:
-        th._close_db()
+        close_db()
         _restore(self.saved)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _frames(self, kind: str) -> list[dict]:
         return [e for e in self.events if e.get("type") == kind and e.get("tabId") == _TAB]
 
-    def _replay(self, chat_id: str, task_id: str, conn_id: str, failures: list) -> None:
+    def _replay(
+        self, chat_id: str, task_id: str, conn_id: str, failures: list, *, reopen: bool = False,
+    ) -> None:
         try:
-            self.server._replay_session(chat_id, _TAB, task_id=task_id, conn_id=conn_id)
+            self.server._replay_session(
+                chat_id, _TAB, task_id=task_id, conn_id=conn_id, reopen=reopen,
+            )
         except BaseException as exc:  # noqa: BLE001 - reported by the test thread
             failures.append(exc)
         finally:
             th._close_thread_db()
+
+    def _defer(self, chat_id: str, task_id: str, conn_id: str, failures: list) -> None:
+        try:
+            self.server._defer_replay(chat_id, _TAB, task_id, conn_id)
+        except BaseException as exc:  # noqa: BLE001 - reported by the test thread
+            failures.append(exc)
+        finally:
+            th._close_thread_db()
+
+    def _walk(self, parent_task_id: str, parent_tab_id: str, conn_id: str, failures: list) -> None:
+        """Walk the sub-agents of *parent_task_id*, scoped to *conn_id* when non-empty."""
+        try:
+            self.server._open_persisted_subagent_tabs(
+                parent_task_id=parent_task_id, parent_tab_id=parent_tab_id, conn_id=conn_id,
+            )
+        except BaseException as exc:  # noqa: BLE001 - reported by the test thread
+            failures.append(exc)
+        finally:
+            th._close_thread_db()
+
+    def _about(self, tab_id: str, since: int = 0) -> list[str]:
+        """The types of the frames about *tab_id* from *since* on."""
+        return [
+            ev["type"] for ev in self.events[since:]
+            if tab_id in (ev.get("tab_id"), ev.get("tabId"))
+        ]
 
     def _race(
         self,
@@ -271,20 +307,11 @@ class TestSupersededReplay(unittest.TestCase):
         self._live(self.task_b, self.chat_b)
         self.server._replay_session(self.chat_a, _TAB, task_id=self.task_a)
         self.events.clear()
-
-        def deferred(chat_id: str, task_id: str, conn_id: str, failures: list) -> None:
-            try:
-                self.server._defer_replay(chat_id, _TAB, task_id, conn_id)
-            except BaseException as exc:  # noqa: BLE001 - reported by the test thread
-                failures.append(exc)
-            finally:
-                th._close_thread_db()
-
         # The ready snapshot named (chat A, task A); the tab is rebound to
         # chat B before the deferred replay acts on it.
         self._race(
             (self.chat_a, self.task_a, "reconnecting"), (self.chat_b, self.task_b, ""),
-            held_at=AgentServer._defer_replay.__code__, first_call=deferred,
+            held_at=AgentServer._defer_replay.__code__, first_call=self._defer,
         )
         self.assertEqual(self.server._tab_chat_views[_TAB], self.chat_b)
         self.assertEqual(
@@ -389,10 +416,13 @@ class TestSupersededReplay(unittest.TestCase):
         """
         child = self._live_child()
         self._live(self.task_b, self.chat_b)
+        # The replay is a reopening (any other stands down on a closed
+        # tab at once): superseded, it leaves the user's close as it is.
         self.server._closed_subagent_tabs.add(_TAB)
         self._race(
             (self.chat_a, child, "conn-1"), (self.chat_b, self.task_b, ""),
             held_at=AgentServer._reopen_subagent_tab.__code__,
+            first_call=lambda *replay: self._replay(*replay, reopen=True),
         )
         self.assertEqual(self.server.tab_registry.bindings()[_TAB], self.chat_b)
         self.assertEqual(self.server._tab_chat_views.get(_TAB), self.chat_b)
@@ -529,7 +559,7 @@ class TestSupersededReplay(unittest.TestCase):
             try:
                 self.server._open_persisted_subagent_tabs(
                     parent_task_id=self.task_a, parent_tab_id="parent-tab",
-                    conn_id="reconnecting", transcripts=False,
+                    conn_id="reconnecting",
                 )
             except BaseException as exc:  # noqa: BLE001 - reported by the test thread
                 failures.append(exc)
@@ -569,8 +599,68 @@ class TestSupersededReplay(unittest.TestCase):
             "the child's offer was sent after the chat takeover's transcript",
         )
 
+    def test_superseded_replay_opens_no_subagent_tab_below_the_tab_it_lost(self) -> None:
+        """Audit V5 F1: the descendant walk is fenced by the view its replay gave the tab.
+
+        Held at the read of its sub-agent rows, after its own transcript,
+        a replay (or a ready's deferral) let another chat, or another
+        task of its chat, take the tab, then announced and filled its
+        child's tab below it.
+        """
+        child_tab = f"{_TAB}__sub_{self._child_of(self.task_a, self.chat_a)}"
+        other_task, _ = th._add_task("chat A, another task", self.chat_a)
+        rows = th._load_subagent_rows_by_parent_task_id.__code__
+        for takeover in ((self.chat_b, self.task_b, ""), (self.chat_a, other_task, "")):
+            self._race((self.chat_a, self.task_a, ""), takeover, held_at=rows)
+            self.assertEqual(self._about(child_tab), [], f"announced below {takeover}")
+        self.server._replay_session(self.chat_a, _TAB, task_id=self.task_a)
+        self.events.clear()
+        self._race(
+            (self.chat_a, self.task_a, "reconnecting"), (self.chat_b, self.task_b, ""),
+            held_at=rows, first_call=self._defer,
+        )
+        self.assertEqual(self._about(child_tab), [], "offered below the rebound tab")
+
+    def _walk_losing_its_child_tab(self, held_at: Any, finish: bool = False) -> list[str]:
+        """What a walk held at *held_at* sends about a child's tab another sub-agent took.
+
+        The child also finishes inside the window when *finish*; a
+        later, scoped walk of the same parent is included.
+        """
+        child = self._live_child()
+        child_tab = f"parent-tab__sub_{child}"
+        other = self._child_of(self.task_b, self.chat_b)
+        taken: list[int] = []
+
+        def take_over() -> None:
+            if finish:
+                agent_state.unregister(child)
+            self.server._replay_session(self.chat_b, child_tab, task_id=other)
+            taken.append(len(self.events))
+
+        self._race_action((self.task_a, "parent-tab", ""), take_over, held_at, self._walk)
+        failures: list[BaseException] = []
+        self._walk(self.task_a, "parent-tab", "reconnecting", failures)
+        self.assertEqual(failures, [])
+        self.assertEqual(self.server._tab_view_locked(child_tab), ("", other))
+        return self._about(child_tab, taken[0])
+
+    def test_walk_yields_a_child_tab_another_subagent_replay_pinned(self) -> None:
+        """Audit V5 F2: the walk's child guards read the tab's pin, not only its chat view.
+
+        A sub-agent replay installs no chat view, only its task pin: a
+        walk held before the child's completion signal sent the old
+        child's frames into the tab another sub-agent's replay had
+        taken; so did every later walk.  (The child's offer is checked
+        and sent under the lock a takeover commits under, see
+        ``test_deferred_child_offer_is_not_sent_after_a_chat_takeover_of_its_tab``.)
+        """
+        done = AgentServer._emit_pending_ask.__code__
+        self.assertEqual(self._walk_losing_its_child_tab(done, finish=True), [], "completion")
+
     def test_scoped_replay_of_a_tab_closed_meanwhile_does_not_reopen_it(self) -> None:
         """A18-3 (astra) / A18-1 (fable): a ready's refresh of a closed tab stands down."""
+        self._live(self.task_a, self.chat_a)
         self.server._replay_session(self.chat_a, _TAB, task_id=self.task_a)
         self.events.clear()
 
@@ -583,12 +673,47 @@ class TestSupersededReplay(unittest.TestCase):
             "the stale scoped replay reopened the tab the user closed",
         )
         self.assertNotIn(_TAB, self.server._tab_chat_views)
-        # What it still sends reaches the asking connection alone (the
-        # page dropped the tab on the close's ``tabs_state``).
-        self.assertEqual(
-            {ev.get("connId") for ev in self._frames("task_events") + self._frames("status")},
-            {"reconnecting"},
+        self._assert_closed_tab_left_alone(_TAB)
+
+    def _assert_closed_tab_left_alone(self, tab_id: str) -> None:
+        """A stale refresh gave the closed *tab_id* no subscription, no pin and no frame."""
+        self.assertNotIn(
+            tab_id, self.server.printer._fanout_plan(self.task_a)[0],
+            "the closed tab was subscribed to the running task again",
         )
+        self.assertNotIn(tab_id, self.server._tab_opened_task_ids)
+        self.assertEqual(self._about(tab_id), [], "frames for a tab no surface shows")
+
+    def test_ready_fan_out_leaves_a_tab_closed_since_its_snapshot_alone(self) -> None:
+        """Audit 2026-11-11 (V2): neither resume of a ``ready`` revives a closed tab's subscription.
+
+        The fan-out resumes the tabs of a registry snapshot.  A viewer
+        of a running chat, or the run's own tab, that another surface
+        closed before its resume ran was pinned and subscribed again:
+        a viewer no surface shows (so a parent the run's next sub-agent
+        tabs could be opened under), told ``running:true`` on every
+        connection.
+        """
+        self._live(self.task_a, self.chat_a)
+        own = "owner-" + self.task_a
+        for tab, deferred in ((_TAB, True), (own, True), (own, False)):
+            with self.subTest(tab=tab, deferred=deferred):
+                resume = {
+                    "type": "resumeSession", "chatId": self.chat_a, "tabId": tab,
+                    "replayConnId": "reconnecting", "deferred": deferred,
+                }
+                if tab == own:
+                    # As ``_cmd_run`` publishes and subscribes the launching tab.
+                    self.server._registry_update_tab(tab, chat_id=self.chat_a, create=True)
+                    self.server.printer.subscribe_tab(self.task_a, tab)
+                else:
+                    self.server._replay_session(self.chat_a, tab, task_id=self.task_a)
+                    resume["taskId"] = self.task_a
+                self.assertIn(tab, self.server.printer.viewer_tab_ids(self.task_a))
+                self.server._close_tab(tab)
+                self.events.clear()
+                self.server._handle_command(resume)
+                self._assert_closed_tab_left_alone(tab)
 
     def test_scoped_replay_of_a_rebound_tab_refreshes_to_the_current_chat(self) -> None:
         """A18-3 (astra) / A18-1 (fable): a ready's refresh of a rebound tab shows the new chat."""
@@ -608,16 +733,21 @@ class TestSupersededReplay(unittest.TestCase):
             "the stale scoped replay rebound the tab to the chat it no longer shows",
         )
 
-    def _race_action(self, first: tuple[str, str, str], action: Callable[[], None]) -> None:
-        """Run replay *first* on a thread held at its history read while *action* runs."""
+    def _race_action(
+        self,
+        first: tuple[str, str, str],
+        action: Callable[[], None],
+        held_at: Any = th._load_chat_events_by_task_id.__code__,
+        first_call: Callable[..., None] | None = None,
+    ) -> None:
+        """Run *first* on a thread held at *held_at* (its history read) while *action* runs."""
         failures: list[BaseException] = []
-        with Pause(
-            th._load_chat_events_by_task_id.__code__,
-            lambda _locals: threading.current_thread().name == "held",
-        ) as pause:
-            held = threading.Thread(target=self._replay, args=(*first, failures), name="held")
+        with Pause(held_at, lambda _locals: threading.current_thread().name == "held") as pause:
+            held = threading.Thread(
+                target=first_call or self._replay, args=(*first, failures), name="held",
+            )
             held.start()
-            self.assertTrue(pause.paused.wait(10), "the replay never reached its history read")
+            self.assertTrue(pause.paused.wait(10), "the held thread never reached its hold")
             action()
             pause.release()
             held.join(10)
@@ -667,7 +797,7 @@ class TestSupersededReplay(unittest.TestCase):
 
 
 class TestSupersededReplayLive(IsolatedAsyncioTestCase):
-    """The V4 interleavings over a real daemon and two live connections.
+    """The V4 and V5 interleavings over a real daemon and live connections.
 
     The races above run against a bare server whose broadcast is
     captured.  Here the same ``Pause`` seams hold the daemon's own
@@ -704,23 +834,32 @@ class TestSupersededReplayLive(IsolatedAsyncioTestCase):
         for _, writer in (self.resumer, self.taker):
             writer.close()
         await self.remote.stop_async()
-        th._close_db()
+        close_db()
         _restore(self.saved)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     async def _resume(
         self, conn: tuple[LocalReader, LocalWriter], chat_id: str, task_id: str,
-        replay_id: str, scoped: bool,
+        replay_id: str, scoped: bool, reopen: bool = False, tab_id: str = _TAB,
     ) -> None:
-        """Send *conn*'s ``resumeSession`` of *task_id* into the shared tab."""
+        """Send *conn*'s ``resumeSession`` of *task_id* into *tab_id* (default: the shared tab)."""
         cmd: dict[str, Any] = {
-            "type": "resumeSession", "chatId": chat_id, "taskId": task_id, "tabId": _TAB,
+            "type": "resumeSession", "chatId": chat_id, "taskId": task_id, "tabId": tab_id,
             "replayId": replay_id,
         }
         if scoped:
             cmd["scoped"] = True
+        if reopen:
+            cmd["reopen"] = True
         conn[1].write(json.dumps(cmd).encode("utf-8") + b"\n")
         await conn[1].drain()
+
+    async def _close(self, tab_id: str) -> None:
+        """The taker closes *tab_id*; returns once the daemon is through with the close."""
+        cmd = {"type": "closeTab", "tabId": tab_id}
+        self.taker[1].write(json.dumps(cmd).encode("utf-8") + b"\n")
+        await self.taker[1].drain()
+        await self._received(self.taker)
 
     async def _received(
         self, conn: tuple[LocalReader, LocalWriter], replay_id: str = "",
@@ -763,7 +902,8 @@ class TestSupersededReplayLive(IsolatedAsyncioTestCase):
         ]
 
     async def _race(self, child: str, held_at: Any, matching: Callable[[dict[str, Any]], bool],
-                    before_release: Callable[[], None] | None = None) -> None:
+                    before_release: Callable[[], None] | None = None,
+                    reopen: bool = False) -> None:
         """Hold the resumer's replay of *child* at *held_at* while the taker resumes chat B.
 
         *before_release* runs while the replay is held, after the
@@ -772,7 +912,9 @@ class TestSupersededReplayLive(IsolatedAsyncioTestCase):
         ``self.taker_frames``.
         """
         with Pause(held_at, matching) as pause:
-            await self._resume(self.resumer, self.chat_a, child, "child", scoped=True)
+            await self._resume(
+                self.resumer, self.chat_a, child, "child", scoped=True, reopen=reopen,
+            )
             self.assertTrue(
                 await asyncio.to_thread(pause.paused.wait, 10),
                 "the child's replay never reached the hold",
@@ -811,7 +953,7 @@ class TestSupersededReplayLive(IsolatedAsyncioTestCase):
             self.server._closed_subagent_tabs.add(_TAB)
         await self._race(
             child, AgentServer._reopen_subagent_tab.__code__,
-            lambda loc: loc.get("task_id") == child,
+            lambda loc: loc.get("task_id") == child, reopen=True,
         )
         self._assert_tab_shows_chat_b()
         self.assertEqual(self.server.printer.tasks_for_tab(_TAB), [self.task_b])
@@ -848,6 +990,59 @@ class TestSupersededReplayLive(IsolatedAsyncioTestCase):
             before_release=lambda: agent_state.unregister(running),
         )
         self._assert_tab_shows_chat_b()
+
+    async def test_live_subagent_fetch_that_is_no_reopening_leaves_a_closed_tab_closed(
+        self,
+    ) -> None:
+        """V5-F2 on the wire: a deferred tab's transcript fetch does not undo a user's close.
+
+        The taker closes the running child's tab before the resumer
+        fetches its transcript (``reopen`` unset), or while that fetch
+        is held between its attach and its announcement.  The resumer
+        gets the close and nothing of the tab after it, a connection
+        opened afterwards that replays the parent is told the close
+        again (never to open the tab, never that the running child is
+        done), and the tab stays unsubscribed.
+        """
+        for close_first in (True, False):
+            child = _persist_child(self.task_a, self.chat_a)
+            _register_running(self, child, self.chat_a, self.task_a)
+            sub_tab = f"{_TAB}__sub_{child}"
+            fetch = (self.resumer, self.chat_a, child, "fetch")
+            if close_first:
+                await self._close(sub_tab)
+                await self._resume(*fetch, scoped=True, tab_id=sub_tab)
+            else:
+                with Pause(
+                    AgentServer._reopen_subagent_tab.__code__,
+                    lambda loc: loc.get("task_id") == child,
+                ) as pause:
+                    await self._resume(*fetch, scoped=True, tab_id=sub_tab)
+                    self.assertTrue(
+                        await asyncio.to_thread(pause.paused.wait, 10),
+                        "the fetch never reached the announcement",
+                    )
+                    await self._close(sub_tab)
+            frames = await self._received(self.resumer, "fetch")
+            later = await open_local_connection(self.remote)
+            await self._resume(later, self.chat_a, self.task_a, "parent", scoped=True)
+            replayed = await self._received(later, "parent")
+            later[1].close()
+            kinds = [
+                [
+                    ev["type"] for ev in got
+                    if sub_tab in (ev.get("tab_id"), ev.get("tabId"))
+                    and ev["type"] in (
+                        "closeSubagentTab", "openSubagentTab", "subagentDone",
+                        "status", "task_events",
+                    )
+                ]
+                for got in (frames, replayed)
+            ]
+            with self.subTest(close_first=close_first):
+                self.assertEqual(kinds, [["closeSubagentTab"], ["closeSubagentTab"]])
+                self.assertEqual(self.server.printer.tasks_for_tab(sub_tab), [])
+                self.assertIn(sub_tab, self.server._closed_subagent_tabs)
 
 
 if __name__ == "__main__":

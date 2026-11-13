@@ -202,21 +202,6 @@ class ConsolePrinterRegression(unittest.TestCase):
         self.assertIn("Steps: 1/10", buf.getvalue())
         p.print("   ", type="usage_info")
 
-    def test_notification_severities(self) -> None:
-        for severity, label in (
-            ("info", "INFO"),
-            ("warning", "WARNING"),
-            ("error", "ERROR"),
-            ("unknown", "INFO"),
-        ):
-            p, buf = _make_printer()
-            p.print("note body", type="notification", severity=severity,
-                    progress_message="sub detail")
-            out = buf.getvalue()
-            self.assertIn(label, out)
-            self.assertIn("note body", out)
-            self.assertIn("sub detail", out)
-
     def test_result_panel_non_yaml_and_empty(self) -> None:
         p, buf = _make_printer()
         p.print("plain markdown result", type="result")

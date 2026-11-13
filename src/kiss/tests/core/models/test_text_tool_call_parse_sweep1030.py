@@ -17,6 +17,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from kiss.core.context_compaction import (
+    KEEP_RECENT_TOOL_RESULTS,
+    apply_compaction,
+    plan_compaction,
+)
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.model import _parse_text_based_tool_calls, _ToolCallFilteredStream
 
@@ -98,6 +103,85 @@ def test_an_undecodable_object_before_a_call_does_not_abort_the_parse() -> None:
     assert "".join(tokens).startswith("Note " + _HUGE_INT_OBJECT)
     assert parse_tool_arguments(_HUGE_INT_OBJECT) == {}
     assert list(_iter_jsonl([_HUGE_INT_OBJECT, '{"type": "ok"}'])) == [{"type": "ok"}]
+
+
+_TOO_DEEP = "[" * 100_000
+"""Text the decoder refuses with ``RecursionError``: nesting past its recursion limit."""
+
+
+def _count(n: int) -> str:
+    """Count to *n*."""
+    return "ok"
+
+
+def test_json_too_deep_for_the_decoder_is_undecodable_not_fatal() -> None:
+    """Past its nesting limit ``json.loads`` raises ``RecursionError``, not ``ValueError``.
+
+    The arguments fallback, the CLI event stream, the typing of an
+    ``<invoke>`` argument and the transcript of a handed-off call caught
+    only ``ValueError``, so such text ended the turn.
+    """
+    from kiss.core.models.model import _iter_jsonl, parse_tool_arguments
+
+    assert parse_tool_arguments(_TOO_DEEP) == {}
+    assert list(_iter_jsonl([_TOO_DEEP, '{"type": "ok"}'])) == [{"type": "ok"}]
+    model = ClaudeCodeModel("cc/opus")
+    calls = [{"id": "c1", "name": "_count", "arguments": {"n": _TOO_DEEP}}]
+    model._decode_text_arguments(calls, {"_count": _count})
+    assert calls[0]["arguments"] == {"n": _TOO_DEEP}
+    handed_off = {"name": "Bash", "arguments": _TOO_DEEP}
+    model.conversation = [
+        {"role": "user", "content": "Go"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "type": "function", "function": handed_off}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+    ]
+    assert f"[Assistant]: [Tool Call] Bash({_TOO_DEEP})" in model._build_prompt()
+
+
+def test_json_too_deep_for_the_encoder_is_not_fatal_to_the_transcript() -> None:
+    """``json.dumps`` gives up on nesting that ``json.loads`` accepts (Python 3.14).
+
+    The transcript compares a handed-off call with the call its turn's
+    text quotes, and writes a turn's JSON object back once a compaction
+    stubbed a call in it: stored arguments, or a value next to the call,
+    nested that deep raised ``RecursionError`` out of the prompt builder.
+    Where the decoder refuses the nesting as well, nothing is decoded and
+    the turns read the same.
+    """
+    deep = _deep(60_000, "1")
+    stored = '{"payload": ' + deep + "}"
+    quote = '{"tool_calls": [{"name": "tool", "arguments": {"payload": {}}}]}'
+    handed_off = {"name": "tool", "arguments": stored}
+    model = ClaudeCodeModel("cc/opus")
+    model.conversation = [
+        {"role": "user", "content": "Go"},
+        {
+            "role": "assistant",
+            "content": quote,
+            "tool_calls": [{"id": "c1", "type": "function", "function": handed_off}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+    ]
+    assert model._build_prompt() == (
+        f"[User]: Go\n\n[Assistant]: {quote}\n[Tool Call] tool({stored})\n\n[Tool Result]: ok"
+    )
+    write = '{"name": "Write", "arguments": {"content": "' + "x" * 600 + '"}}'
+    own = '{"tool_calls": [' + write + '], "note": ' + deep + "}"
+    ls = '{"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}'
+    model.conversation = [{"role": "user", "content": "Go"}]
+    for text in [own] + [ls] * (KEEP_RECENT_TOOL_RESULTS + 1):
+        calls = _parse_text_based_tool_calls(text)
+        model.add_message_to_conversation("assistant", text)
+        model._replace_last_assistant_with_tool_calls(text, calls)
+        model.add_function_results_to_conversation_and_return(
+            [(call["name"], {"result": "ok"}) for call in calls]
+        )
+    apply_compaction(plan_compaction(model.conversation))
+    assert model._build_prompt().startswith(f"[User]: Go\n\n[Assistant]: {own}\n\n")
 
 
 def test_the_stream_filter_hides_a_deeply_wrapped_call() -> None:

@@ -133,6 +133,7 @@ def test_claude_code_live(tmp_path: Path) -> None:
 
 @requires_codex
 @pytest.mark.live_cli
+@pytest.mark.live_api
 @pytest.mark.slow
 def test_codex_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The real codex CLI, locked down, drives KISS's tools."""

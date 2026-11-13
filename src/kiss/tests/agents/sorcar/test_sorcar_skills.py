@@ -14,17 +14,21 @@ tool is built and invoked for real.  No model calls are made.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import shutil
+import sys
 import threading
 import time
 from pathlib import Path
+from types import CodeType, FrameType
 from typing import Any
 
 import pytest
 import yaml
 
+from kiss.agents.sorcar import skills, useful_tools
 from kiss.agents.sorcar.skills import (
     Skill,
     bundled_skills_dir,
@@ -32,6 +36,7 @@ from kiss.agents.sorcar.skills import (
     load_permission_rules,
     load_skill_content,
     make_skill_tool,
+    parse_frontmatter,
     skill_permission,
 )
 from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
@@ -271,6 +276,69 @@ def test_fifo_skill_file_skipped_without_blocking(isolated_homes: Path) -> None:
     assert "no longer readable" in str(outcome[1])
 
 
+def _stop_at(
+    seen: list[tuple[CodeType, int]], point: tuple[CodeType, int] | None,
+    frame: Any, event: str, arg: object,
+) -> Any:
+    """Trace function: note in *seen* the instructions of the tool modules, or stop at *point*.
+
+    Python delivers a Stop (an exception injected into the task thread)
+    at a check point of the thread's bytecode; raising from the opcode
+    hook right before an instruction is the same, at a chosen one.
+    """
+    if frame.f_code.co_filename not in (skills.__file__, useful_tools.__file__):
+        return None
+    frame.f_trace_opcodes = True
+    here = (frame.f_code, frame.f_lasti)
+    if event == "opcode" and point is None:
+        seen.append(here)
+    elif event == "opcode" and here == point and not seen:
+        seen.append(here)
+        raise KeyboardInterrupt
+    return functools.partial(_stop_at, seen, point)
+
+
+def _descriptors_on(path: Path) -> list[int]:
+    """Return this process's open descriptors of the file *path*."""
+    file = path.stat()
+    found = []
+    for name in os.listdir("/dev/fd"):
+        with contextlib.suppress(OSError):  # the listing's own descriptor is closed by now
+            if os.path.samestat(os.fstat(int(name)), file):
+                found.append(int(name))
+    return found
+
+
+@posix_only("/dev/fd lists the open descriptors")
+def test_stop_during_a_skill_read_leaves_no_descriptor_open(isolated_homes: Path) -> None:
+    """Audit 2026-11-12 B5/A8: a Stop landing between the ``os.open`` of ``SKILL.md`` and the
+    ``with`` that closes it left the descriptor open for the life of the daemon.  The read is
+    stopped at every instruction the calling thread runs in the tool modules; none may leak."""
+    path = _write_skill(isolated_homes / "project" / ".agents" / "skills", "one", "d") / "SKILL.md"
+    points: list[tuple[CodeType, int]] = []
+    sys.settrace(functools.partial(_stop_at, points, None))
+    try:
+        assert parse_frontmatter(path) is not None
+    finally:
+        sys.settrace(None)
+    assert points
+    for point in dict.fromkeys(points):
+        stopped: list[tuple[CodeType, int]] = []
+        sys.settrace(functools.partial(_stop_at, stopped, point))
+        try:
+            with contextlib.suppress(KeyboardInterrupt):
+                parse_frontmatter(path)
+        finally:
+            sys.settrace(None)
+        assert stopped == [point]
+        deadline = time.monotonic() + 5  # a read still closing on its own thread is no leak
+        while (leaked := _descriptors_on(path)) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        for fd in leaked:
+            os.close(fd)
+        assert not leaked, f"descriptor left open by a Stop at {point[0].co_name}+{point[1]}"
+
+
 
 def test_skill_permission_default_allow() -> None:
     """With no matching rule the skill is allowed."""
@@ -364,12 +432,43 @@ def test_load_skill_content_lists_resources(isolated_homes: Path) -> None:
     (skill_dir / "scripts" / "extract.py").write_text("print('x')")
     (skill_dir / "references").mkdir()
     (skill_dir / "references" / "forms.md").write_text("forms")
+    (skill_dir / "a&b.md").write_text("markup characters in a name")
+    # Leave less recursion headroom than the real tree's depth.  This exercises the
+    # iterative walk without exceeding macOS PATH_MAX or Windows MAX_PATH.
+    tree_depth = 50
+    deep = skill_dir
+    for _ in range(tree_depth):
+        deep = deep / "d"
+        deep.mkdir()
+    (deep / "bottom.md").write_text("bottom")
+    locked = skill_dir / "locked"
+    locked.mkdir()
+    (locked / "hidden.md").write_text("hidden")
     skill = discover_skills(str(project))["pdf"]
-    content = load_skill_content(skill)
+    locked.chmod(0)  # cannot be listed: contributes nothing, the rest still lists
+    old_recursion_limit = sys.getrecursionlimit()
+    frame: FrameType | None = sys._getframe()
+    stack_depth = 0
+    while frame is not None:
+        stack_depth += 1
+        frame = frame.f_back
+    try:
+        sys.setrecursionlimit(stack_depth + tree_depth - 10)
+        content = load_skill_content(skill)
+    finally:
+        sys.setrecursionlimit(old_recursion_limit)
+        locked.chmod(0o755)
+    can_list_locked = os.name == "nt" or os.geteuid() == 0
+    assert ("<file>locked/hidden.md</file>" in content) == can_list_locked
     assert "<skill_resources>" in content
+    deep_resource = f"<file>{'d/' * tree_depth}bottom.md</file>"
+    references_resource = "<file>references/forms.md</file>"
+    assert deep_resource in content
+    assert content.index(deep_resource) < content.index(references_resource)
     assert "<file>scripts/extract.py</file>" in content
-    assert "<file>references/forms.md</file>" in content
+    assert references_resource in content
     assert "<file>SKILL.md</file>" not in content
+    assert "<file>a&amp;b.md</file>" in content  # escaped as the catalog's fields are
     assert "print('x')" not in content
 
 

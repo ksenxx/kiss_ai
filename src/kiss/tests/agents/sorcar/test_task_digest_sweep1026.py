@@ -48,6 +48,7 @@ import pytest
 
 from kiss.agents.sorcar import persistence, task_digest
 from kiss.tests.agents.sorcar.test_persistence_read_lock_stall import EVENTS, add_heavy_task
+from kiss.tests.persistence_helpers import close_db
 
 #: Upper bound on how long a probe waits for the step it expects to see
 #: before the lock is taken.  Normally a few milliseconds.
@@ -63,7 +64,7 @@ def kiss_home(tmp_path: Path) -> Iterator[Path]:
     try:
         yield tmp_path
     finally:
-        persistence._close_db()
+        close_db()
         persistence._KISS_DIR, persistence._DB_PATH = saved
 
 

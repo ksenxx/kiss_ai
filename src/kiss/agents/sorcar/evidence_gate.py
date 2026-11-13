@@ -8,10 +8,10 @@
 The coding gate (:mod:`kiss.agents.sorcar.coding_gate`) and the
 containerised coding SEA (:mod:`kiss.agents.seas.coding.coding_sea`) need
 to know when the agent's work changed: to arm the gate on a code file a
-shell command wrote, to count the changes between the agent's own passing
-run of its verifier and a finish (that run is reused when nothing changed),
-and to re-review only after a change.  What a shell command changes is
-read from its simple commands
+shell command wrote, to count the changes between a passing run of the
+verifier and a finish (the SEA reuses the agent's own run when nothing
+changed, the gate its own last one), and to review only after a change.
+What a shell command changes is read from its simple commands
 (:func:`~kiss.agents.sorcar.shell_scan.simple_commands`), the way the
 shell reads them: a program such as ``rm`` or ``cp`` counts in command
 position only (``cat install.sh`` and ``git commit -m "rm stale"`` run
@@ -29,11 +29,11 @@ gate no longer refuses on the summary's wording.
 from __future__ import annotations
 
 import itertools
-import json
 import posixpath
 import re
 from typing import Any
 
+from kiss.agents.sorcar.fanout_guard import SUBAGENT_DIR_PREFIX, parse_tasks_json
 from kiss.agents.sorcar.shell_scan import (
     SHELLS,
     UV_VALUED_OPTIONS,
@@ -65,12 +65,16 @@ _TARGET_OPTION = re.compile(r"(?:-[a-su-zA-Z]*t|--target-directory=?)(?P<value>.
 #: owner to copy, attached (``--reference=RFILE``) or in the next word: the
 #: mode is then no operand, and every operand is a file.
 _REFERENCE_OPTION = re.compile(r"--reference=?(?P<value>.*)")
+#: A ``chmod`` mode that starts with a dash (``-x``, ``-rw,o=r``): its first
+#: operand, not an option (the characters GNU ``chmod`` reads a mode from).
+_CHMOD_MODE = re.compile(r"-[rwxXstugoa,+=0-7]")
 #: A python interpreter in command position, whose ``-m MODULE`` runs a tool.
 _PYTHON = re.compile(r"python[0-9.]*$")
-#: ``sed``'s in-place option, among its options in any position.  An
+#: ``sed``'s in-place option, among its options in any position (``--i``:
+#: any prefix of ``--in-place``, its only long option in ``i``).  An
 #: in-place edit of scratch files only (``sed -i s/a/b/ tmp/x/f``) changes
 #: nothing of the work, like a copy into ``tmp/``.
-_SED_INPLACE = re.compile(r"-[a-zA-Z]*i|--in-place")
+_SED_INPLACE = re.compile(r"-[a-zA-Z]*i|--i")
 #: The build tools whose bare call builds; a call naming only check targets
 #: (``make test``, ``make -k check V=1``) builds nothing.
 BUILD_TOOLS = frozenset({"make", "cmake", "ninja"})
@@ -80,8 +84,9 @@ _FIX_OPTION = re.compile(r"--fix\b")
 #: ``find``'s actions that run a command on each file found.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 #: A path under a ``tmp`` directory: the scratch directory of the run (``tmp/x``,
-#: ``./tmp/x``, ``/home/u/repo/tmp/x``) or the system's (``/tmp/x``).
-_SCRATCH = re.compile(r"(?:^|/)tmp(?:/|$)")
+#: ``./tmp/x``, ``/home/u/repo/tmp/x``) or the system's (``/tmp/x``); or one in a
+#: sub-agent's private folder, wherever the system keeps its temp directory.
+_SCRATCH = re.compile(rf"(?:^|/)(?:tmp(?:/|$)|{SUBAGENT_DIR_PREFIX}[^/]*/)")
 
 _PIP = re.compile(r"(?:install|uninstall)\b")
 _NODE = re.compile(r"(?:install|i|ci|add|remove|uninstall|update|build)\b")
@@ -152,8 +157,12 @@ def shell_commands(args: Any) -> list[str]:
         args: The call's arguments as the trajectory recorded them.
 
     Returns:
-        ``[command]`` for ``Bash``; the list behind ``commands`` (a JSON list
-        or a list) for ``run_commands_parallel``; empty for anything else.
+        ``[command]`` for ``Bash``.  For ``run_commands_parallel``, the
+        commands as the tool decodes them
+        (:func:`~kiss.agents.sorcar.fanout_guard.parse_tasks_json`); text
+        the tool refuses (no array of commands: it runs nothing) is read
+        as one command, and a list gives its strings.  Empty for anything
+        else.
     """
     if not isinstance(args, dict):
         return []
@@ -162,7 +171,7 @@ def shell_commands(args: Any) -> list[str]:
     commands = args.get("commands")
     if isinstance(commands, str):
         try:
-            commands = json.loads(commands)
+            return parse_tasks_json(commands)
         except ValueError:
             return [commands]
     if isinstance(commands, list):
@@ -240,11 +249,17 @@ def runs_subcommand(words: list[str], tools: dict[str, re.Pattern[str]]) -> bool
 def _named_operands(program: str, words: list[str]) -> list[str]:
     """The files the writing *program* changes among its arguments *words*.
 
-    See :data:`WRITING_PROGRAMS`.  A copy's ``-t DIR`` /
-    ``--target-directory DIR`` names its destination (``cp -t src a.py``
-    changes ``src``, not ``a.py``); a ``chmod --reference=RFILE a.py``
-    takes its mode from ``RFILE`` (read, not changed) and changes
-    ``a.py``, its first operand.
+    See :data:`WRITING_PROGRAMS`.  Every word after a ``--`` is an
+    operand.  A copy's ``-t DIR`` / ``--target-directory DIR`` names its
+    destination (``cp -t src a.py`` changes ``src``, not ``a.py``), and
+    a copy into a directory writes a file of each source's name there,
+    listed too (``src/a.py``): for a directory by the words (``-t``,
+    several sources, a trailing ``/``) and, the words not telling, for
+    a destination whose name has no suffix.  A ``chmod
+    --reference=RFILE a.py`` takes its mode from ``RFILE`` (read, not
+    changed) and changes ``a.py``, its first operand; a ``chmod`` mode
+    that starts with a dash (``chmod -x a.py``) is the first operand,
+    not an option.
     """
     if program == "dd":
         return [word[3:] for word in words if word.startswith("of=")]
@@ -252,11 +267,14 @@ def _named_operands(program: str, words: list[str]) -> list[str]:
     target: str | None = None
     value_next = skip_next = False
     rule = WRITING_PROGRAMS[program]
-    for word in words:
+    for position, word in enumerate(words):
         if skip_next:
             skip_next = False
         elif value_next:
             target, value_next = word, False
+        elif word == "--":
+            operands.extend(words[position + 1:])
+            break
         elif program in _TARGET_PROGRAMS and (match := _TARGET_OPTION.match(word)):
             # ``-t DIR``, ``-tDIR``, ``-rt DIR``, ``--target-directory[=| ]DIR``
             target = match["value"] or None
@@ -264,10 +282,18 @@ def _named_operands(program: str, words: list[str]) -> list[str]:
         elif rule == "rest" and (match := _REFERENCE_OPTION.match(word)):
             # ``--reference[=| ]RFILE`` supplies the mode or owner: every operand is a file
             rule, skip_next = "all", not match["value"]
-        elif not word.startswith("-"):
+        elif not word.startswith("-") or (program == "chmod" and _CHMOD_MODE.match(word)):
             operands.append(word)
     if rule == "last":
-        return operands[-1:] if target is None else [target]
+        directory = target is not None  # ``-t DIR``
+        if target is None:
+            if not operands:
+                return []
+            target = operands.pop()
+        if directory or len(operands) > 1 or not posixpath.splitext(posixpath.basename(target))[1]:
+            names = map(posixpath.basename, operands)  # ``""`` for a source named ``dir/``
+            return [target, *(posixpath.join(target, name) for name in names if name)]
+        return [target]
     if rule == "rest":
         return operands[1:]
     return operands if target is None else [target, *operands]
@@ -276,24 +302,29 @@ def _named_operands(program: str, words: list[str]) -> list[str]:
 def _sed_files(words: list[str]) -> list[str]:
     """The files an in-place ``sed`` edits among its arguments *words*.
 
-    The first plain operand is the script unless an ``-e`` / ``-f``
-    option (``--expression``, ``--file``; its value the next word,
-    attached as in ``-es/a/b/`` or ``-nes/a/b/``, or after ``=``)
-    supplied it; the plain operands after it are the files.  ``-l`` /
-    ``--line-length`` take a value too; ``-i`` only an attached suffix.
+    GNU sed reads its options wherever they stand among the operands,
+    up to a ``--``, after which every word is an operand.  The first
+    operand is the script unless an ``-e`` / ``-f`` option
+    (``--expression``, ``--file`` or an unambiguous prefix of either;
+    its value the next word, attached as in ``-es/a/b/`` or
+    ``-nes/a/b/``, or after ``=``) supplied it, before or after it;
+    the other operands are the files.  ``-l`` / ``--line-length`` take
+    a value too; ``-i`` only an attached suffix.
     """
-    files: list[str] = []
+    operands: list[str] = []
     script_given = value_next = False
-    for word in words:
+    for position, word in enumerate(words):
         if value_next:
             value_next = False
-        elif word in ("--expression", "--file", "--line-length"):
-            script_given = script_given or word != "--line-length"
-            value_next = True
-        elif word.startswith(("--expression=", "--file=")):
-            script_given = True
+        elif word == "--":
+            operands.extend(words[position + 1:])
+            break
         elif word.startswith("--"):
-            continue
+            name, attached, _ = word[2:].partition("=")
+            # ``--f`` is no script option: it is ``--follow-symlinks`` as much as ``--file``
+            script = "expression".startswith(name) or (name != "f" and "file".startswith(name))
+            script_given = script_given or script
+            value_next = not attached and (script or "line-length".startswith(name))
         elif word.startswith("-"):
             for index, letter in enumerate(word[1:], 2):  # a cluster: -ne 's/a/b/', -nes/a/b/
                 if letter in "ef":
@@ -305,11 +336,9 @@ def _sed_files(words: list[str]) -> list[str]:
                     break
                 if letter == "i":  # the suffix, if any, is attached
                     break
-        elif script_given:
-            files.append(word)
         else:
-            script_given = True  # the script itself
-    return files
+            operands.append(word)
+    return operands if script_given else operands[1:]
 
 
 def _program_changes(argv: list[str], cwd: str | None) -> list[str]:
@@ -374,7 +403,8 @@ def _program_changes(argv: list[str], cwd: str | None) -> list[str]:
         files = _sed_files(argv[1:])
         if files and all(_in_scratch(cwd, path) for path in files):
             return []
-        return [program, *operands]
+        # a file ``--`` protects may start with a dash
+        return [program, *operands, *(path for path in files if path.startswith("-"))]
     if program in BUILD_TOOLS:
         targets = argv[1:]
         only_checks = any(_CHECK_TARGET.match(t) for t in targets) and all(

@@ -98,6 +98,9 @@ the pipe holds and whether the hook is still running (:func:`_hook_lines`)."""
 PASTE_LIMIT = 4096
 """Characters of a paste handed to the hook: enough for any redirect URL, less than a pipe holds."""
 
+ENDED_ELSEWHERE = "The sign-in was ended from another window: click a button to start it again."
+"""The ``signinError`` of a window whose login another window's click or "Not now" ended."""
+
 Reply = Callable[[dict[str, Any], bool], None]
 """Delivers an event to the window that clicked (``False``) or to every window (``True``)."""
 
@@ -272,16 +275,22 @@ class SigninLogin:
 
     One login at a time: a new :meth:`start` ends the running one, so a
     second click (another window's, a retry, the other provider) never
-    leaves two hooks waiting on two loopback ports.
+    leaves two hooks waiting on two loopback ports.  A window whose
+    login another window ended is told so (:data:`ENDED_ELSEWHERE`).
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[str] | None = None
+        self._owner = ""
+        """The window whose :meth:`start` ran ``_proc`` (``""``: none to tell), with the
+        provider it clicked and its reply; all under ``_lock``."""
+        self._provider = ""
+        self._reply: Reply | None = None
         self._ending: list[threading.Thread] = []
         """The :meth:`_end` threads of ended hooks not yet gone, under ``_lock``."""
 
-    def start(self, provider: str, reply: Reply) -> None:
+    def start(self, provider: str, reply: Reply, owner: str = "") -> None:
         """Run ``signin login`` *provider*; relay its lines to *reply* from a thread.
 
         The window that clicked gets ``signinUrl`` (``provider``, ``url``)
@@ -295,13 +304,16 @@ class SigninLogin:
             reply: Delivers an event to the clicking window
                 (``reply(event, False)``) or to every window
                 (``reply(event, True)``).
+            owner: The clicking window (its connection id): the one
+                told when another window ends this login, and the one
+                whose own running login this click ends silently.
         """
         hook = signin_hook()
         if hook is None:
             reply({"type": "signinError", "provider": provider, "error": "no sign-in hook"}, False)
             return
         with self._lock:
-            self._end_locked()
+            self._end_locked(owner)
             try:
                 # In a group of its own: a helper the hook starts (and
                 # that inherits its stdout) is ended with it, or the
@@ -322,6 +334,7 @@ class SigninLogin:
             assert proc.stdin is not None
             os.set_blocking(proc.stdin.fileno(), False)  # see paste()
             self._proc = proc
+            self._owner, self._provider, self._reply = owner, provider, reply
         thread = threading.Thread(
             target=self._relay,
             args=(proc, provider, reply),
@@ -375,14 +388,18 @@ class SigninLogin:
                 return False
         return True
 
-    def cancel(self) -> None:
+    def cancel(self, owner: str = "") -> None:
         """End the running login, if any; its relay thread then stays silent.
 
         Returns at once: the hook is sent SIGTERM here, and a thread
         sees it gone (:meth:`_end_locked`).
+
+        Args:
+            owner: The window that cancels (its connection id); another
+                window's login is told that it was ended.
         """
         with self._lock:
-            self._end_locked()
+            self._end_locked(owner)
 
     def shutdown(self) -> None:
         """End the running login and wait, bounded, until every ended hook is gone.
@@ -400,8 +417,13 @@ class SigninLogin:
         for thread in threads:
             thread.join(max(0.0, deadline - time.monotonic()))
 
-    def _end_locked(self) -> None:
+    def _end_locked(self, by: str = "") -> None:
         """End the running hook and forget it (the lock is held).
+
+        The window that started it is told (:data:`ENDED_ELSEWHERE`)
+        when *by* names another one: it is waiting for an answer the
+        hook's relay no longer sends.  Its own cancel or new click, and
+        an end naming no window (the daemon's shutdown), stay silent.
 
         Its stdin is closed and its process group is sent SIGTERM at
         once; a thread (:meth:`_end`) then kills whatever of the group
@@ -422,6 +444,10 @@ class SigninLogin:
         exited = proc.poll() is not None
         assert proc.stdin is not None
         proc.stdin.close()
+        if by and self._owner not in ("", by):
+            assert self._reply is not None
+            error = {"type": "signinError", "provider": self._provider, "error": ENDED_ELSEWHERE}
+            self._reply(error, False)
         if exited:
             return
         try:
@@ -453,7 +479,8 @@ class SigninLogin:
         the same way: a retry that started between the check and the
         send would otherwise see the old failure reported after its own
         URL.  A sign-in that succeeded is announced through the status
-        lock (:func:`_signed_in`), outside this one.  The lines are read
+        lock (:func:`_signed_in`), outside this one, and whoever ended
+        the hook since: the user is signed in.  The lines are read
         until the hook's exit (:func:`_hook_lines`), so a helper that
         outlives it with its stdout cannot hold up the result.
         """
@@ -471,23 +498,26 @@ class SigninLogin:
         with self._lock:
             if self._proc is not proc:  # ended by cancel() or a newer start()
                 proc.stdout.close()
-                return  # _end_locked() closed its stdin and reaps it, after its group's signals
-            self._proc = None
-            proc.wait()  # at once: the lines ran out at its exit; reaped by the lock holder alone
-            proc.stdout.close()
-            # Closed here, not left to the Popen's finaliser (a ResourceWarning
-            # and a pipe held open until the collector gets to it).  No paste()
-            # reaches the stream any more (it is not the current hook's), and
-            # the stream buffers nothing (paste() writes the descriptor), so
-            # the close cannot block or fail.
-            assert proc.stdin is not None
-            proc.stdin.close()
-            if proc.returncode != 0 or not last.get("logged_in"):
-                error = last.get("error") or (
-                    f"the sign-in hook exited with status {proc.returncode}"
-                    if url
-                    else "the sign-in hook printed no sign-in page"
-                )
-                reply({"type": "signinError", "provider": provider, "error": str(error)}, False)
-                return
+                # _end_locked() closed its stdin and reaps it, after its group's signals.
+                if not last.get("logged_in"):
+                    return
+            else:
+                self._proc = None
+                proc.wait()  # at once: the lines ran out at its exit; reaped by the lock holder
+                proc.stdout.close()
+                # Closed here, not left to the Popen's finaliser (a ResourceWarning
+                # and a pipe held open until the collector gets to it).  No paste()
+                # reaches the stream any more (it is not the current hook's), and
+                # the stream buffers nothing (paste() writes the descriptor), so
+                # the close cannot block or fail.
+                assert proc.stdin is not None
+                proc.stdin.close()
+                if proc.returncode != 0 or not last.get("logged_in"):
+                    error = last.get("error") or (
+                        f"the sign-in hook exited with status {proc.returncode}"
+                        if url
+                        else "the sign-in hook printed no sign-in page"
+                    )
+                    reply({"type": "signinError", "provider": provider, "error": str(error)}, False)
+                    return
         locked_call(_status_lock, _signed_in, reply, str(last.get("email") or ""))

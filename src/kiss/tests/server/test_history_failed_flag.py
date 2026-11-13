@@ -23,6 +23,7 @@ from typing import Any
 
 from kiss.agents.sorcar import persistence as th
 from kiss.server.server import AgentServer
+from kiss.tests.persistence_helpers import close_db
 
 
 class TestHistoryFailedFlag(unittest.TestCase):
@@ -31,7 +32,7 @@ class TestHistoryFailedFlag(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.mkdtemp()
         self._orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
-        th._close_db()
+        close_db()
         th._DB_PATH = Path(self._tmp) / "history.db"  # type: ignore[attr-defined]
 
         self.server = AgentServer()
@@ -48,7 +49,7 @@ class TestHistoryFailedFlag(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        th._close_db()
+        close_db()
         th._DB_PATH = self._orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(self._tmp, ignore_errors=True)
 
@@ -153,7 +154,7 @@ class TestHistoryFailedFlag(unittest.TestCase):
         """A database created before the ``success`` column existed gets
         it on open, and its legacy rows (NULL verdict) are not failed.
         """
-        th._close_db()
+        close_db()
         db_path = Path(self._tmp) / "legacy.db"
         th._DB_PATH = db_path  # type: ignore[attr-defined]
         with sqlite3.connect(str(db_path)) as legacy:

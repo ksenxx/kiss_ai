@@ -46,10 +46,12 @@ Rules, each a :class:`Finding` code:
     A declared key merely repeats the value the script's base classes
     lay (``WorkerSea``'s worker defaults, a parent SEA's settings).
 ``no-description``
-    A registered ``/command`` whose script defines no ``description()``.
+    A ``/command``, bundled or registered, whose script defines no
+    ``description()``.
 ``unknown-model``
     ``settings()["model"]`` names neither a catalogued model nor a
-    model-picker SEA.
+    model-picker SEA: a bundled one for a bundled script, a registered
+    one for any other.
 ``lock-without-value``
     A ``locked`` key the merged settings give no value, so the lock
     protects nothing.
@@ -57,6 +59,13 @@ Rules, each a :class:`Finding` code:
     ``settings()["hidden"]`` evaluates to ``True`` but is not written
     as the literal ``True``, so the command registry (which reads the
     source, never runs it) still lists the script.
+``hidden-not-returned``
+    The reverse: a ``settings`` method of the file writes the literal
+    ``"hidden": True``, so the command registry hides the script, but
+    the script's ``settings()`` do not return it.  The registry reads
+    every method of that name, a helper class's too
+    (:func:`~kiss.agents.sorcar.sea_settings.sea_methods`), and every
+    path through it, a branch the run does not take too.
 ``stale-docstring``
     A docstring of the script (module, class, function or constant)
     mentions a getter the contract no longer has (``model()``,
@@ -105,7 +114,6 @@ from kiss.agents.sorcar.sea_commands import (
     bundled_commands,
     check_sea,
     defines,
-    get_command,
     inherited_settings,
     load_sea,
     model_sea,
@@ -120,8 +128,11 @@ from kiss.agents.sorcar.sea_settings import (
     RENAMED_SETTINGS,
     SEA_BASES,
     SeaError,
-    declares_hidden,
+    expand_user,
+    own_statements,
+    sea_methods,
     settings_dicts,
+    settings_literals,
 )
 from kiss.core.utils import atomic_write_text
 
@@ -182,8 +193,13 @@ def bundled_seas() -> list[Path]:
 
 
 def registered_commands() -> dict[Path, str]:
-    """Return ``script -> /command name`` of every registered command (bundled and user folders)."""
-    return {path: name for name, path in registered_entries()}
+    """Return ``script -> /command name`` of every command, bundled and registered.
+
+    A bundled script keeps its bundled name when a ``SEAS.md`` script is
+    registered in its place, so what is checked of it (``no-description``)
+    is the same on every machine.
+    """
+    return {path: name for name, path in [*bundled_commands().items(), *registered_entries()]}
 
 
 def default_targets(registered: bool, commands: Mapping[Path, str]) -> list[Path]:
@@ -286,11 +302,14 @@ def _stale_declares_claim(match: re.Match[str]) -> str:
     The claim is compared with what the command's script's
     ``settings()`` returns as written (before its base class's defaults
     are laid under it), so a settings change of a bundled SEA is caught in
-    every page that quotes it.
+    every page that quotes it.  The command is the bundled one
+    (:func:`bundled_commands`, as ``sea docs`` renders it): a user's
+    ``SEAS.md`` script of the same name must not make the checkout's
+    pages stale.
     """
     name = match.group(1) or match.group(4)
     claim = match.group(2) or match.group(3)
-    path = get_command(name)
+    path = bundled_commands().get(name)
     if path is None:
         return f"`/{name}` is not a registered command"
     try:
@@ -340,7 +359,7 @@ def lint_prose(root: Path | None = None) -> list[Finding]:
 
 def _script_of(path: Path) -> Path:
     """Return the script of a folder (``xxx/xxx_sea.py``, else its first ``*_sea.py``) or *path*."""
-    path = path.expanduser().resolve()
+    path = Path(expand_user(str(path))).resolve()
     if path.is_dir():
         script = sea_script_in(path)
         if script.is_file():
@@ -390,7 +409,12 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
         # just has no own dict to compare, and the checks below that
         # read one find nothing.
         declared = {}
-    inherited = inherited_settings(seas[-1])
+    try:
+        inherited = inherited_settings(seas[-1])
+    except SeaError:
+        # A base's ``settings`` that keeps state refuses a second call
+        # on the instance: not broken either, nothing to compare with.
+        inherited = {}
     for key, value in declared.items():
         if key not in META_SETTINGS and key in inherited and inherited[key] == value:
             findings.append(
@@ -409,7 +433,7 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
             )
         )
     model = merged.get("model")
-    if isinstance(model, str) and model and not _known_model(model):
+    if isinstance(model, str) and model and not _known_model(model, path):
         findings.append(
             Finding(
                 path,
@@ -426,7 +450,10 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
                     f"locked key {key!r} has no value to protect",
                 )
             )
-    if declared.get("hidden") is True and not declares_hidden(path):
+    # What the command registry reads (``declares_hidden``), from the tree at hand.
+    literal = settings_literals(tree).get("hidden")
+    hidden_line = literal.lineno if literal is not None and literal.value is True else 0
+    if declared.get("hidden") is True and not hidden_line:
         findings.append(
             Finding(
                 path,
@@ -435,14 +462,32 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
                 "script",
             )
         )
+    if hidden_line and merged.get("hidden") is not True:
+        findings.append(
+            Finding(
+                path,
+                "hidden-not-returned",
+                f"line {hidden_line}: this literal `\"hidden\": True` hides the script (every "
+                "settings method of the file is read), but the script's settings() do not "
+                "return it",
+            )
+        )
     return findings
 
 
-def _known_model(name: str) -> bool:
-    """Return whether *name* is in the model catalogue or names a model-picker SEA."""
+def _known_model(name: str, script: Path) -> bool:
+    """Return whether *name* is in the model catalogue or names a model-picker SEA.
+
+    For a bundled *script* the SEA is the bundled command of that name,
+    whatever ``SEAS.md`` registers in its place, so the checkout's own
+    scripts lint alike on every machine; for any other script it is the
+    registered command, which is what the script's run resolves the name to.
+    """
     from kiss.core.models.model_info import MODEL_INFO
 
-    return name in MODEL_INFO or model_sea(name) is not None
+    if name in MODEL_INFO:
+        return True
+    return model_sea(name, bundled=script.resolve() in bundled_seas()) is not None
 
 
 def _lint_source(path: Path, source: str, tree: ast.Module) -> list[Finding]:
@@ -592,26 +637,14 @@ def _settings_dict_keys(tree: ast.Module) -> list[ast.Constant]:
     return keys
 
 
-def _own_returns(node: ast.AST) -> list[ast.Return]:
-    """Return the ``return`` statements of *node*'s own body, not of nested functions or classes."""
-    scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
-    returns: list[ast.Return] = []
-    for child in ast.iter_child_nodes(node):
-        if isinstance(child, ast.Return):
-            returns.append(child)
-        elif not isinstance(child, scopes):
-            returns.extend(_own_returns(child))
-    return returns
-
-
 def _literal_verdicts(tree: ast.Module) -> list[ast.Constant]:
-    """Return every ``None`` or string literal a ``tool_call_hook`` of the script returns itself."""
+    """Return every ``None`` or string literal a ``tool_call_hook`` method of the script
+    (:func:`~kiss.agents.sorcar.sea_settings.sea_methods`) returns itself."""
     return [
         ret.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "tool_call_hook"
-        for ret in _own_returns(node)
-        if isinstance(ret.value, ast.Constant)
+        for node in sea_methods(tree, "tool_call_hook")
+        for ret in own_statements(node)
+        if isinstance(ret, ast.Return) and isinstance(ret.value, ast.Constant)
         and (ret.value.value is None or isinstance(ret.value.value, str))
     ]
 
@@ -710,9 +743,12 @@ def _entry_spans(
     (``**(settings)``, ``"timeout": (5.0)``), so each span is widened
     over the ``(`` and ``)`` tokens around it.
     """
+    # ``newline=""``: a line ends where Python ends it, at a lone ``\r`` too, so the token
+    # rows are the lines ``ast`` and *offsets* count.
+    lines = io.StringIO(data.decode("utf-8"), newline="")
     tokens = [
         (_byte_offset(tok.start, data, offsets), _byte_offset(tok.end, data, offsets), tok.string)
-        for tok in tokenize.generate_tokens(io.StringIO(data.decode("utf-8")).readline)
+        for tok in tokenize.generate_tokens(lines.readline)
         if tok.type not in (tokenize.NL, tokenize.COMMENT)
         and literal.lineno <= tok.start[0] <= (literal.end_lineno or 0)
     ]
@@ -850,12 +886,24 @@ def _span(node: ast.expr, offsets: list[int]) -> tuple[int, int]:
     )
 
 
+def _renamed_literal(literal: str, old: str, new: str) -> str:
+    """Return the source of a string literal that reads *new*, given one that reads *old*.
+
+    *new* goes inside *literal*'s own quotes and prefix when *old* is
+    spelled out there; a spelling that only decodes to *old* (adjacent
+    literals, an escape) becomes ``repr(new)``.
+    """
+    renamed = literal.replace(old, new, 1)
+    return renamed if ast.literal_eval(f"({renamed})") == new else repr(new)
+
+
 def _rewrites(tree: ast.Module, data: bytes) -> list[tuple[int, int, str, str]]:
     """Return the byte-span edits ``--fix`` makes to the source *data*, as
     ``(start, end, new text, note)``.
 
     A renamed ``settings()`` key gets its current name inside its own
-    quotes; a ``kind`` / ``preset`` / ``channel`` entry with a literal
+    quotes (:func:`_renamed_literal`);
+    a ``kind`` / ``preset`` / ``channel`` entry with a literal
     value is dropped once the class derives from the base class it
     asked for (:func:`_base_rewrites`); an ``allow_fan_out`` /
     ``is_parallel`` entry is dropped, as is a removed key named in a
@@ -864,7 +912,8 @@ def _rewrites(tree: ast.Module, data: bytes) -> list[tuple[int, int, str, str]]:
     ``ALLOW`` and its
     literal string ``refuse(<the literal>)``, with ``from
     kiss.agents.seas.base.base_sea import ...`` of the names the
-    script does not import yet inserted after its leading imports.
+    script does not import yet inserted after its leading imports,
+    below the comments it starts with.
     """
     lines = data.splitlines(keepends=True)
     offsets = [0]
@@ -879,7 +928,7 @@ def _rewrites(tree: ast.Module, data: bytes) -> list[tuple[int, int, str, str]]:
     for key in _settings_dict_keys(tree):
         if key.value in RENAMED_SETTINGS:
             new = RENAMED_SETTINGS[key.value]
-            edits.append((*_span(key, offsets), text(key).replace(key.value, new, 1),
+            edits.append((*_span(key, offsets), _renamed_literal(text(key), key.value, new),
                           f"{key.value!r} -> {new!r}"))
     needed: set[str] = set()
     entries = [entry for entry in _removed_entries(tree) if entry.base is not None]
@@ -921,9 +970,15 @@ def _rewrites(tree: ast.Module, data: bytes) -> list[tuple[int, int, str, str]]:
     }
     missing = sorted(needed - imported)
     if missing:
-        # After the leading imports (and the module docstring): an import
-        # after the class would leave the class's new base undefined.
-        at = 0
+        # Where the first statement starts (there is one: the class or the
+        # hook the names are for), below the comments ahead of it: a
+        # shebang counts on line 1 only, a ``coding`` cookie on lines 1 and
+        # 2.  Then after the module docstring and the leading imports: an
+        # import after the class would leave the class's new base undefined.
+        at = next(
+            offset for offset, line in zip(offsets, lines)
+            if line.strip() and not line.lstrip().startswith(b"#")
+        )
         for index, statement in enumerate(tree.body):
             docstring = index == 0 and isinstance(statement, ast.Expr) and isinstance(
                 statement.value, ast.Constant
@@ -969,8 +1024,9 @@ def fix_sea(path: Path) -> list[str]:
         One line per rewrite (empty when nothing changed).
 
     Raises:
-        SeaError: The rewritten text no longer parses (a failure of the
-            codemod itself, not of the script); the file is left as it was.
+        SeaError: The rewritten bytes no longer parse as ``import`` reads
+            them (a failure of the codemod itself, not of the script); the
+            file is left as it was.
     """
     source, encoding = _read_source(path)
     tree = ast.parse(source, filename=str(path))
@@ -979,22 +1035,23 @@ def fix_sea(path: Path) -> list[str]:
     changed: list[str] = []
     # Applied last span first, so earlier offsets stay valid; the spans are distinct.
     for start, end, new, note in sorted(_rewrites(tree, data), reverse=True):
-        lineno = data[:start].count(b"\n") + 1
+        lineno = len((data[:start] + b".").splitlines())  # the line of *start*, as ``ast`` counts
         data = data[:start] + new.encode("utf-8") + data[end:]
         changed.append(f"{path}:{lineno}: {note}")
     if changed:
-        rewritten = data.decode("utf-8")
         try:
-            ast.parse(rewritten, filename=str(path))  # never save a script that no longer parses
+            # The script's own bytes (the rewrite inserts ASCII only), parsed
+            # as ``import`` will read them, the declared encoding included:
+            # never save a script that no longer parses.
+            rewritten = data.decode("utf-8").encode(encoding)
+            ast.parse(rewritten, filename=str(path))
         except PARSE_ERRORS as exc:
             raise SeaError(
                 f"{path}: the rewrite no longer parses and was not saved: {exc}"
             ) from exc
-        # The script's own bytes (the rewrite inserts ASCII only), passed
-        # through the writer's UTF-8 unchanged by ``surrogateescape``.
+        # Passed through the writer's UTF-8 unchanged by ``surrogateescape``.
         atomic_write_text(
-            path, rewritten.encode(encoding).decode("utf-8", "surrogateescape"),
-            errors="surrogateescape",
+            path, rewritten.decode("utf-8", "surrogateescape"), errors="surrogateescape"
         )
     return list(reversed(changed))
 

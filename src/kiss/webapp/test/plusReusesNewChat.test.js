@@ -17,8 +17,16 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  click,
+  byId,
+  stubRaf,
+  tabIds: chatIds,
+} = require('./simplify2_harness');
 const {paste, settle, chipPending} = require('./attachment_helpers');
+const {activeTabId: activeId} = require('./subagent_tab_helpers');
 
 function makePage() {
   return makeChatPage({
@@ -29,17 +37,7 @@ function makePage() {
 }
 
 function clickPlus(win) {
-  win.document
-    .getElementById('new-chat-btn')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function chatIds(win) {
-  return Array.from(win._testApi.openTabs(), t => t.id);
-}
-
-function activeId(win) {
-  return win._testApi.getActiveTabId();
+  click(win, byId(win, 'new-chat-btn'));
 }
 
 function composer(win) {
@@ -58,7 +56,7 @@ function snapshot(win, extra) {
     .openTabs()
     .filter(t => !t.isContentTab && !t.isSubagentTab)
     .map(t => ({tabId: t.id, title: t.title}));
-  send(win, {type: 'tabs_state', tabs: tabs.concat(extra || [])});
+  send(win, {type: 'tabs_state', tabs: tabs.concat(extra)});
 }
 
 function testPlusOnNewChatKeepsIt() {
@@ -162,7 +160,6 @@ function testPlusOnUsedChatBringsAnExistingNewChatForward() {
 
 function testPlusMovesTheDraftToTheNewChatBroughtForward() {
   const {win} = makePage();
-  const boot = activeId(win);
   useActiveChat(win);
   snapshot(win, [{tabId: 'spare', title: 'new chat'}]);
   composer(win).value = 'carry me';
@@ -176,7 +173,6 @@ function testPlusMovesTheDraftToTheNewChatBroughtForward() {
     ['spare'],
     'the draft moved, so the chat left behind had nothing to keep',
   );
-  assert.ok(!chatIds(win).includes(boot));
   win.close();
   console.log('  ok - + moves the draft into the new chat it brings forward');
 }
@@ -203,13 +199,12 @@ async function attachPng(win, name) {
 // The draft "+" carries over is the text AND the attachments: a chat
 // left behind with an unsent image must not take it down with its tab.
 async function testPlusCarriesTheAttachmentsWithTheDraft() {
-  const {win, posted} = makePage();
+  const {win} = makePage();
   const boot = activeId(win);
   useActiveChat(win);
   await attachPng(win, 'draft.png');
   composer(win).value = 'describe it';
   assert.deepStrictEqual(chipNames(win), ['draft.png']);
-  posted.length = 0;
 
   clickPlus(win);
 

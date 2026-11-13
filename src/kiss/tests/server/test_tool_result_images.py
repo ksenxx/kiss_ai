@@ -15,7 +15,9 @@ These tests drive the real printer through ``print(type="tool_call")``
 """
 
 import base64
+import itertools
 import os
+import threading
 import time
 from typing import TYPE_CHECKING, cast
 
@@ -51,6 +53,13 @@ def _new_printer() -> JsonPrinter:
 
 def _tool_results(printer: JsonPrinter) -> list[dict]:
     return [e for e in printer.stop_recording() if e["type"] == "tool_result"]
+
+
+def _keep_resizing(path: os.PathLike[str], stop: threading.Event) -> None:
+    """Flip *path* between a size over the per-image cap and a small one until *stop*."""
+    sizes = itertools.cycle((_MAX_RESULT_IMAGE_BYTES + 1024, 1024))
+    while not stop.wait(0.003):
+        os.truncate(path, next(sizes))
 
 
 def _run_tool(
@@ -290,6 +299,44 @@ class TestResultImagesFiltered:
         imgdir.mkdir()
         printer = _new_printer()
         ev = _run_tool(printer, "Bash", {"command": "gen"}, f"{imgdir}\n")
+        assert "images" not in ev
+
+    @posix_only("os.mkfifo")
+    def test_fifo_named_like_image_skipped_without_waiting_for_a_writer(self, tmp_path):
+        """Only a regular file is read: opening a FIFO must not hold the task."""
+        fifo = tmp_path / "pipe.png"
+        os.mkfifo(fifo)
+        printer = _new_printer()
+        ev = _run_tool(printer, "Bash", {"command": "gen"}, f"{fifo}\n")
+        assert "images" not in ev
+
+    def test_file_that_outgrows_the_cap_while_it_is_read_is_not_embedded(self, tmp_path):
+        """The cap holds for the bytes embedded, whatever size the file had when checked."""
+        shot = tmp_path / "growing.png"
+        shot.write_bytes(b"x" * 1024)
+        stop = threading.Event()
+        printer = _new_printer()
+        writer = threading.Thread(target=_keep_resizing, args=(shot, stop))
+        writer.start()
+        try:
+            for _ in range(200):
+                printer.print(str(shot), type="tool_result", tool_name="Bash", tool_input={})
+        finally:
+            stop.set()
+            writer.join()
+        sizes = [
+            len(base64.b64decode(image["b64"]))
+            for ev in _tool_results(printer)
+            for image in ev.get("images", [])
+        ]
+        assert max(sizes, default=0) <= _MAX_RESULT_IMAGE_BYTES
+
+    def test_unresolvable_candidates_skipped(self):
+        # ``find -print0`` output is one token with embedded NULs, and a lone
+        # surrogate cannot be encoded for the filesystem: neither is a path.
+        text = "./a.png\x00./b.png\x00 \ud800.png"
+        ev = _run_tool(_new_printer(), "Bash", {"command": "find . -print0"}, text)
+        assert ev["content"] == text
         assert "images" not in ev
 
     def test_finish_result_suppressed_entirely(self, tmp_path):

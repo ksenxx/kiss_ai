@@ -347,10 +347,15 @@ class TestC5StalledPromptWrite:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
     ) -> None:
         """The bounded write must not disturb an ordinary, healthy turn."""
+        # Healthy: the turn's terminal event takes the place of the silence.
         body = (
-            _ONE_EVENT_THEN_QUIET_CODEX.replace("time.sleep(60)", "")
+            _ONE_EVENT_THEN_QUIET_CODEX.replace(
+                "time.sleep(60)", 'print(json.dumps({"type": "turn.completed"}), flush=True)'
+            )
             if name == "codex"
-            else _ONE_EVENT_THEN_QUIET_CLAUDE.replace("time.sleep(60)", "")
+            else _ONE_EVENT_THEN_QUIET_CLAUDE.replace(
+                "time.sleep(60)", 'print(json.dumps({"type": "result"}), flush=True)'
+            )
         )
         install_cli(tmp_path, monkeypatch, name, body)
         model = self._model(name, timeout=20)

@@ -5,16 +5,16 @@
 """E2E: the server-reset flag is published through the shared atomic writer.
 
 ``RemoteAccessServer._write_server_reset_flag`` hand-rolled its own
-"write a temp file, then ``os.replace``" sequence next to the module's
-``_atomic_write_text`` helper, and did it worse: the temp name was the
-FIXED ``server-reset-pending.json.tmp`` (so sibling daemons sharing a
-KISS home can interleave writes into one temp file — the exact hazard
-``_atomic_publish``'s docstring documents and its pid/thread/uuid
-suffix prevents) and a failed publish left the temp file behind (the
-helper unlinks it).  These tests pin the shared helper's contract on
-the flag path: no residue on failure, and a flag that is either absent
-or a complete JSON document under concurrent writers from two server
-instances (real threads, one shared directory).
+"write a temp file, then ``os.replace``" sequence instead of calling
+the shared ``atomic_write_text`` helper, and did it worse: the temp
+name was the FIXED ``server-reset-pending.json.tmp`` (so sibling
+daemons sharing a KISS home can interleave writes into one temp file —
+the hazard the helper's unique staging name prevents) and a failed
+publish left the temp file behind (the helper unlinks it).  These
+tests pin the shared helper's contract on the flag path: no residue on
+failure, and a flag that is either absent or a complete JSON document
+under concurrent writers from two server instances (real threads, one
+shared directory).
 """
 
 from __future__ import annotations

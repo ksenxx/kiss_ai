@@ -61,9 +61,7 @@ class TestRestoreParentTabWithSubagents:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -115,10 +113,17 @@ class TestRestoreParentTabWithSubagents:
     ) -> None:
         """Each persisted sub-agent row reopens in its own sub-agent
         tab anchored to the parent tab, replaying its own events."""
-        _, events, _, sub_ids, parent_tab_id = (
+        server, events, _, sub_ids, parent_tab_id = (
             self._resume_restored_parent_tab()
         )
         opens = [e for e in events if e.get("type") == "openSubagentTab"]
+        offers = [e for e in events if e.get("type") == "replay_deferred"]
+        assert [o["tabId"] for o in offers] == [op["tab_id"] for op in opens]
+        # Each tab fetches its own transcript when opened.
+        for offer in offers:
+            server._replay_session(
+                chat_id=offer["chatId"], tab_id=offer["tabId"], task_id=offer["taskId"],
+            )
         assert len(opens) == len(sub_ids), f"events={events}"
         for idx, (op, sub_id) in enumerate(zip(opens, sub_ids)):
             assert op["parent_tab_id"] == parent_tab_id

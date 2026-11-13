@@ -217,14 +217,14 @@ def test_a_sleep_closes_the_ssh_forward_unless_it_is_being_opened(
     """The wake kills the kept ssh; the next request opens a new one; a login in progress stays."""
     machine = mach.add_machine("near", sshd.login)
     assert mach.machine_status(machine) == "reachable"
-    tunnel = mach._tunnels[sshd.login]
+    tunnel = mach._tunnels[sshd.login, remote.port]
     assert tunnel.process is not None and tunnel.alive()
     pid = tunnel.process.pid
 
     _stage_sleep(100.0)
     assert mach.forget_after_sleep() > 90.0
     assert tunnel.process is None and not tunnel.alive()
-    assert mach._tunnels[sshd.login] is tunnel  # kept in the cache, opened again on use
+    assert mach._tunnels == {(sshd.login, remote.port): tunnel}  # kept in the cache
     assert mach.machine_status(machine) == "reachable"
     assert tunnel.process is not None and tunnel.process.pid != pid and tunnel.alive()
 

@@ -46,6 +46,7 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.core import stop_signal, tool_interrupt
 from kiss.core.kiss_agent import KISSAgent, NativeTurn
 from kiss.core.kiss_error import BudgetExceededError
@@ -508,11 +509,26 @@ def _reply(client: socket.socket) -> dict[str, Any]:
         return dict(json.loads(reply.readline()))
 
 
-@pytest.mark.parametrize("hold", [hold_until_interrupted, hold_until_released])
-def test_a_call_queued_behind_a_tool_when_the_stop_ends_the_block_is_refused(hold: Any) -> None:
-    """Two calls through the agent's real executor: a Stop ends the block while the
-    second waits behind the first.  Whether the first obeys the interrupt or has to
-    be abandoned after :data:`STOP_WAIT_SECONDS`, the second never starts its tool.
+def _end_hold(calls: list[socket.socket], frame: FrameType, event: str, arg: Any) -> None:
+    """Profile hook: the held tool returns and both calls are answered before the listener stops.
+    Each reply is awaited on its socket, within the socket's timeout, and left there to read."""
+    if event == "call" and frame.f_code is ToolBridge._stop_listener.__code__:
+        sys.setprofile(None)
+        RELEASE_HOLD.set()
+        answered = [call.recv(1, socket.MSG_PEEK) for call in calls]
+        assert all(answered), "a call was never answered"
+
+
+@pytest.mark.parametrize(
+    ("hold", "at_close"),
+    [(hold_until_interrupted, None), (hold_until_released, None), (hold_until_released, _end_hold)],
+)
+def test_a_call_queued_behind_a_tool_when_the_stop_ends_the_block_is_refused(
+    hold: Any, at_close: Any
+) -> None:
+    """Two calls through the agent's real executor: a Stop ends the block while the second
+    waits behind the first.  Whether the first obeys the interrupt, is abandoned after
+    :data:`STOP_WAIT_SECONDS` or returns as the listener stops, the second never starts its tool.
     """
     HOLD_STARTED.clear()
     RELEASE_HOLD.clear()
@@ -539,8 +555,10 @@ def test_a_call_queued_behind_a_tool_when_the_stop_ends_the_block_is_refused(hol
             assert bridge.calls_in_flight == 2
             stopped_at = time.monotonic()
             stop.set()
+            if at_close:
+                sys.setprofile(functools.partial(at_close, [second, first]))
         elapsed = time.monotonic() - stopped_at
-        if hold is hold_until_interrupted:
+        if hold is hold_until_interrupted or at_close:
             assert elapsed < STOP_WAIT_SECONDS - 1, f"the block took {elapsed:.1f}s to end"
         else:
             assert elapsed >= STOP_WAIT_SECONDS, f"the deaf tool was not abandoned ({elapsed:.1f}s)"
@@ -550,6 +568,7 @@ def test_a_call_queued_behind_a_tool_when_the_stop_ends_the_block_is_refused(hol
         assert LATE_CALLS == [], "the queued tool ran after the bridge returned"
         assert bridge.calls_in_flight == 0
     finally:
+        sys.setprofile(None)
         RELEASE_HOLD.set()
         stop_signal.set_thread_stop_event(None)
 
@@ -692,6 +711,130 @@ def test_a_hook_the_stop_abandoned_consults_no_guard_once_its_turn_is_closed() -
         assert old_guard.asked == [] and PROBE_RAN == []
         assert agent.messages == [] and agent.tool_calls_made == 0
     finally:
+        RELEASE_HOOK.set()
+        stop_signal.set_thread_stop_event(None)
+
+
+def test_a_call_reaching_the_executor_after_its_turn_closed_counts_nothing() -> None:
+    """A served call handed to the executor once its turn is closed is refused and
+    leaves the agent's call count alone, like the rest of its books: the count is
+    the next run's by then, and so are the ``tool_call_hook`` and the
+    ``tool_call_guard``, which are not asked about it (the root SEA's hook takes a
+    ``summary`` call for the summary its run owes).  The executor is called
+    directly with a closed turn."""
+    PROBE_RAN.clear()
+    agent = KISSAgent("closed turn count")
+    agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
+    agent.function_map = {"summary": probe}
+    sea = BaseSea()
+    sea.summary_due = True
+    agent.tool_call_hook = sea.tool_call_hook
+    guard = _Guard()
+    agent.tool_call_guard = guard
+    turn = NativeTurn()
+    turn.closed.set()
+    try:
+        name, response = agent._execute_tool_on_helper_thread(
+            {"name": "summary", "arguments": {}}, stop_event=None, printer_binding=None, turn=turn
+        )
+        assert (name, response) == ("summary", refusal_result("summary", "The turn has ended."))
+        assert PROBE_RAN == [] and agent.messages == []
+        assert agent.tool_calls_made == 0
+        assert sea.summary_due is True, "the next run's tool_call_hook was asked about the call"
+        assert guard.asked == []
+    finally:
+        stop_signal.set_thread_stop_event(None)
+
+
+PAUSED_BEFORE_TOOL = threading.Event()
+RESUME_TOOL = threading.Event()
+
+
+def _pause_before_the_tool(frame: FrameType, event: str, arg: Any) -> None:
+    """Profile hook of a bridge thread: hold an admitted call at ``_execute_tool``'s entry."""
+    if event == "call" and frame.f_code is KISSAgent._execute_tool.__code__:
+        PAUSED_BEFORE_TOOL.set()
+        RESUME_TOOL.wait(30)
+
+
+def test_a_call_admitted_before_its_turn_closed_runs_no_tool_after_it() -> None:
+    """A served call the Stop abandoned between its admission and its tool (nothing to
+    interrupt yet) resumes once the turn is closed and the agent reset for the next run,
+    which registered another tool under the same name: the call is refused as the
+    turn's, and runs neither tool."""
+    PAUSED_BEFORE_TOOL.clear()
+    RESUME_TOOL.clear()
+    PROBE_RAN.clear()
+    LATE_CALLS.clear()
+    stop = threading.Event()
+    agent = KISSAgent("abandoned native dispatch")
+    agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
+    agent.function_map = {"probe": probe}
+    agent._cached_tools_schema = _schema("probe")
+    stop_signal.set_thread_stop_event(stop)
+    try:
+        with agent._native_tools_exposed():
+            assert isinstance(agent.model, CodexModel)
+            bridge = agent.model._tool_bridge
+            assert bridge is not None
+            threading.setprofile(_pause_before_the_tool)
+            first = _call(bridge, "probe")
+            assert PAUSED_BEFORE_TOOL.wait(5)
+            threading.setprofile(None)
+            stop.set()
+        assert agent._native_turn.closed.is_set()
+        agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
+        agent.function_map = {"probe": later}
+        RESUME_TOOL.set()
+        assert _reply(first) == {"text": refusal_result("probe", "The turn has ended.")}
+        assert LATE_CALLS == [], "the abandoned call ran the next run's tool"
+        assert PROBE_RAN == []
+        assert agent.messages == [] and agent.tool_calls_made == 0
+    finally:
+        threading.setprofile(None)
+        RESUME_TOOL.set()
+        stop_signal.set_thread_stop_event(None)
+
+
+def _allow_as_the_bridge_gives_up(frame: FrameType, event: str, arg: Any) -> None:
+    """Profile hook of the agent's thread: the held hook allows once the bridge has given up
+    on its call (the served calls are being replayed) and the tool starts before the turn
+    is closed."""
+    if event == "call" and frame.f_code is CodexModel._replay_served_calls.__code__:
+        sys.setprofile(None)
+        RELEASE_HOOK.set()
+        assert HOLD_STARTED.wait(5), "the tool never started"
+
+
+def test_a_tool_started_after_the_stop_gave_up_is_interrupted_when_its_turn_closes() -> None:
+    """A served call sits in its ``tool_call_hook`` through the Stop's bounded wait, which
+    finds nothing to interrupt; the hook allows right after, with the turn still open, and
+    the tool starts.  Closing the turn interrupts it: nobody else is left to."""
+    HOOK_STARTED.clear()
+    RELEASE_HOOK.clear()
+    HOLD_STARTED.clear()
+    stop = threading.Event()
+    agent = KISSAgent("late native tool")
+    agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
+    agent.function_map = {"hold_until_interrupted": hold_until_interrupted}
+    agent._cached_tools_schema = _schema("hold_until_interrupted")
+    agent.tool_call_hook = hold_hook_until_released
+    stop_signal.set_thread_stop_event(stop)
+    try:
+        with agent._native_tools_exposed():
+            assert isinstance(agent.model, CodexModel)
+            bridge = agent.model._tool_bridge
+            assert bridge is not None
+            first = _call(bridge, "hold_until_interrupted")
+            assert HOOK_STARTED.wait(5)
+            stop.set()
+            sys.setprofile(_allow_as_the_bridge_gives_up)
+        assert agent._native_turn.closed.is_set() and HOLD_STARTED.is_set()
+        closed_at = time.monotonic()
+        assert _reply(first) == {"text": USER_INTERRUPTED_MESSAGE}
+        assert time.monotonic() - closed_at < 5, "the tool ran on after its turn was closed"
+    finally:
+        sys.setprofile(None)
         RELEASE_HOOK.set()
         stop_signal.set_thread_stop_event(None)
 

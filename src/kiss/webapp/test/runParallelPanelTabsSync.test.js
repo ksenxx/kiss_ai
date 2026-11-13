@@ -6,7 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, readyTabId} = require('./simplify2_harness');
 const {
   runParallelPanel,
   subagentTabEls,
@@ -20,9 +20,7 @@ const {
 /** Start a parent fan-out before any child announcements arrive. */
 function runningParallelPanel() {
   const {win, posted} = makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const parentId = ready.tabId;
+  const parentId = readyTabId(posted);
 
   send(win, {type: 'status', running: true, tabId: parentId});
   send(win, {type: 'tool_call', name: 'run_parallel', tabId: parentId});
@@ -140,15 +138,20 @@ function testManualSubTabCloseKeepsSiblingsOpen() {
   // A running sub-agent's tab stays open unless the USER closes it: the
   // hand close removes that tab alone and is echoed to the daemon, which
   // mirrors it to every other surface.
+  const before = posted.length;
   clickClose(win, subTabIds[0]);
   assert.strictEqual(
     subagentTabEls(win).length,
     2,
     'a hand close of a running sub-agent tab closes that tab',
   );
-  assert.ok(
-    posted.some(m => m.type === 'closeTab' && m.tabId === subTabIds[0]),
-    'the backend must be told about the hand close of the running tab',
+  assert.deepStrictEqual(
+    posted
+      .slice(before)
+      .filter(m => m.type === 'closeTab')
+      .map(m => m.tabId),
+    [subTabIds[0]],
+    'the backend must be told once about the hand close of the running tab',
   );
   send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
 
@@ -425,12 +428,7 @@ function testReadyReplayKeepsFinishedSubTabClosed() {
   // A reload (or another window) replays the running parent: the
   // daemon marks its finished child closedHistory.  Its tab closed when
   // it finished, so it stays closed here too until the panel reopens it.
-  const {win, posted} = makePage();
-  const parentId = posted.find(m => m.type === 'ready').tabId;
-  send(win, {type: 'status', running: true, tabId: parentId});
-  send(win, {type: 'tool_call', name: 'run_parallel', tabId: parentId});
-  const panel = runParallelPanel(win);
-  assert.ok(panel, 'run_parallel tool_call must render a panel');
+  const {win, posted, parentId, panel} = runningParallelPanel();
 
   announceChild(win, parentId, 'finished-task', 0, {
     isDone: true,
@@ -573,6 +571,18 @@ function testRunParallelFinishAutoCollapseClosesSubTabs() {
     panel.classList.contains('collapsed'),
     'a fan-out whose children all finished collapses on its own',
   );
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    0,
+    'INVARIANT VIOLATED: the finished run_parallel panel is collapsed ' +
+      'but its sub-agent tabs remain open',
+  );
+  for (const id of subTabIds) {
+    assert.ok(
+      posted.some(m => m.type === 'closeTab' && m.tabId === id),
+      'the backend must be told to close sub-agent tab ' + id,
+    );
+  }
   send(win, {
     type: 'tool_result',
     tabId: parentId,
@@ -594,15 +604,8 @@ function testRunParallelFinishAutoCollapseClosesSubTabs() {
   assert.strictEqual(
     subagentTabEls(win).length,
     0,
-    'INVARIANT VIOLATED: the finished run_parallel panel is collapsed ' +
-      'but its sub-agent tabs remain open',
+    'the agent moving on reopens none of the closed sub-agent tabs',
   );
-  for (const id of subTabIds) {
-    assert.ok(
-      posted.some(m => m.type === 'closeTab' && m.tabId === id),
-      'the backend must be told to close sub-agent tab ' + id,
-    );
-  }
 
   send(win, {
     type: 'tool_call',

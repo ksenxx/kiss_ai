@@ -55,6 +55,22 @@ class TestEditCrlfPreservation(unittest.TestCase):
             b"alpha\r\nBETA\r\nGAMMA\r\ndelta\r\n",
         )
 
+    def test_one_line_old_string_adds_its_new_lines_with_crlf(self) -> None:
+        """A one-line old_string is found as it is; the lines its
+        new_string adds (LF, as Read showed the file) were written with a
+        bare LF into the CRLF file."""
+        p = self.dir / "f.txt"
+        p.write_bytes(b"alpha\r\nbeta\r\ngamma\r\nbeta\r\n")
+        self.tools.Read(str(p))
+        result = self.tools.Edit(str(p), "gamma", "gamma\ngamma2")
+        self.assertIn("Successfully replaced 1", result)
+        self.assertEqual(p.read_bytes(), b"alpha\r\nbeta\r\ngamma\r\ngamma2\r\nbeta\r\n")
+        result = self.tools.Edit(str(p), "beta", "beta\nbeta2", replace_all=True)
+        self.assertIn("Successfully replaced 2", result)
+        self.assertEqual(
+            p.read_bytes(), b"alpha\r\nbeta\r\nbeta2\r\ngamma\r\ngamma2\r\nbeta\r\nbeta2\r\n",
+        )
+
     def test_replace_all_preserves_crlf(self) -> None:
         """replace_all on a CRLF file must keep CRLF everywhere."""
         p = self.dir / "f.txt"

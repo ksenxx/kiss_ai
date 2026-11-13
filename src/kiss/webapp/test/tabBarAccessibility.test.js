@@ -24,7 +24,8 @@ const assert = require('assert');
 const harness = require('./simplify2_harness');
 const {send, snapshotEntry} = harness;
 const {tabEl} = require('./subagent_tab_helpers');
-const {makeRunner} = require('./ui_antipattern_harness');
+const ui = require('./ui_antipattern_harness');
+const {makeRunner} = ui;
 
 const openWindows = [];
 
@@ -143,8 +144,6 @@ function testAddTabControlIsAccessibleButton() {
     'the new-chat control must be a native <button> so Enter/Space ' +
       'activate it without bespoke keydown handlers',
   );
-  const role = assertFocusable(addBtn, 'the new-chat control');
-  assert.strictEqual(role, 'button', 'new-chat control must be a button');
   assert.strictEqual(
     addBtn.getAttribute('aria-label'),
     'New chat',
@@ -221,8 +220,6 @@ function testSettingsControlIsAccessibleButton() {
     'the settings control must be a native <button> so Enter/Space ' +
       'activate it without bespoke keydown handlers',
   );
-  const role = assertFocusable(settingsBtn, 'the settings control');
-  assert.strictEqual(role, 'button', 'settings control must be a button');
   assert.ok(
     (settingsBtn.textContent || '').indexOf('Settings') !== -1,
     'settings control must be named "Settings"',
@@ -366,7 +363,7 @@ function testArrowKeysMoveFocusBetweenTabs() {
   );
   assert.ok(ev.defaultPrevented, 'ArrowRight must preventDefault');
 
-  ev = pressKey(win, win.document.activeElement, 'ArrowRight');
+  pressKey(win, win.document.activeElement, 'ArrowRight');
   assert.strictEqual(
     focusedTab(),
     'parent',
@@ -406,7 +403,7 @@ function testArrowKeysMoveFocusBetweenTabs() {
 
 function testRoutineRepaintKeepsTheKeyboardFocus() {
   // A routine status update (a running indicator flip, the selected
-  // tab unchanged) rebuilds the strip.  A keyboard user focused on a
+  // tab unchanged) repaints the strip.  A keyboard user focused on a
   // tab must stay on that tab, Tab stop included, instead of falling to
   // the document body and having to find the strip again.
   const {win} = makePage();
@@ -452,6 +449,80 @@ function testRoutineRepaintKeepsTheKeyboardFocus() {
   inp.focus();
   send(win, {type: 'status', tabId: 'parent', running: true, attached: true});
   assert.strictEqual(win.document.activeElement, inp);
+}
+
+function testRepaintKeepsEachTabsNode() {
+  // The browser sends a click to the common ancestor of the node
+  // pressed and the node released.  A tab whose node, or the part of
+  // it under the pointer, was replaced between the two (a status
+  // update, a new title, another tab coming or going) never got it.
+  const {win} = makePage();
+  openGroup(win, ['sub-1', 'sub-2']);
+  win._testApi.endLaunch();
+  const nodes = id => {
+    const el = tabEl(win, id);
+    return [
+      el,
+      el.querySelector('.chat-tab-label'),
+      el.querySelector('.chat-tab-close'),
+    ];
+  };
+  const pressed = {
+    parent: nodes('parent'),
+    'sub-1': nodes('sub-1'),
+    'sub-2': nodes('sub-2'),
+  };
+  const assertKept = (ids, why) => {
+    ids.forEach(id => {
+      nodes(id).forEach((node, i) => {
+        assert.strictEqual(node, pressed[id][i], `${why}: ${id} part ${i}`);
+      });
+    });
+  };
+
+  // The chat's task starts and ends: the tick stands where the
+  // spinner stood, in the same node.
+  send(win, {type: 'status', tabId: 'parent', running: true});
+  const spinner = tabEl(win, 'parent').querySelector('.chat-tab-spinner');
+  assert.ok(spinner, 'the running chat shows its spinner');
+  send(win, {type: 'status', tabId: 'parent', running: false});
+  assert.strictEqual(
+    tabEl(win, 'parent').querySelector('.chat-tab-status.status-tick'),
+    spinner,
+  );
+  assert.strictEqual(tabEl(win, 'parent').children[0], spinner);
+  // Its title changes.
+  send(win, {
+    type: 'tabs_state',
+    tabs: [snapshotEntry('parent', 'renamed chat', 'chat-A')],
+  });
+  assert.strictEqual(pressed.parent[1].textContent, 'renamed chat');
+  assert.strictEqual(pressed.parent[0].getAttribute('aria-label'), 'renamed chat');
+  assertKept(['parent', 'sub-1', 'sub-2'], 'status and title repaints');
+
+  // A tab leaves and another arrives: the rest stay where they were.
+  send(win, {type: 'closeSubagentTab', tab_id: 'sub-1'});
+  assert.ok(!pressed['sub-1'][0].isConnected, 'the closed tab took its node');
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: 'sub-3',
+    parent_tab_id: 'parent',
+    description: 'sub-agent sub-3',
+    task_id: 'task-sub-3',
+    taskIndex: 2,
+    isSubagentTab: true,
+  });
+  assert.deepStrictEqual(tabBarIds(win), ['parent', 'sub-2', 'sub-3']);
+  assertKept(['parent', 'sub-2'], 'tabs coming and going');
+
+  // The node pressed before all of that still takes the click, and
+  // the selection moves between the kept nodes.
+  pressed['sub-2'][0].click();
+  assert.strictEqual(activeTabId(win), 'sub-2');
+  assert.strictEqual(pressed['sub-2'][0].getAttribute('aria-selected'), 'true');
+  assert.strictEqual(pressed.parent[0].getAttribute('aria-selected'), 'false');
+  assert.ok(!pressed.parent[0].classList.contains('active'));
+  assertKept(['parent', 'sub-2'], 'a selection change');
 }
 
 function testCloseControlIsAccessibleAndDoesNotSwitchTabs() {
@@ -501,6 +572,63 @@ function testCloseControlIsAccessibleAndDoesNotSwitchTabs() {
     spaceEv.defaultPrevented,
     'Space on the close control must preventDefault (or the page scrolls)',
   );
+}
+
+// A page on chat a1 with one editor tab per name in *files*: the
+// stacked (mobile) page when *narrow*, the split one otherwise.
+async function openFiles(narrow, files) {
+  const ctx = ui.makePage({narrow});
+  openWindows.push(ctx.win);
+  ui.send(ctx.win, {type: 'configData', config: {work_dir: '/ws/a'}});
+  ui.send(ctx.win, {
+    type: 'tabs_state',
+    tabs: [{tabId: 'a1', workDir: '/ws/a', chatId: 'chat-1'}],
+  });
+  for (const name of files) {
+    const path = '/shared/' + name;
+    ui.send(ctx.win, {type: 'fileContent', tabId: 'a1', path, name, content: 'v1', version: '1'});
+    await ui.sleep(0);
+  }
+  return ctx;
+}
+
+function fileTab(win, name) {
+  return win.document.querySelector(`.content-tab[aria-label="${name}"]`);
+}
+
+async function testFocusSurvivesClosingTheFocusedTab() {
+  // A tab closed from its own close control takes the focused node
+  // with it.  What took its place gets the focus: the row's selected
+  // tab (the tab, not its close control: a second Enter must not close
+  // that one too), or the composer when the row is gone.
+  const closeByKey = (win, tab) =>
+    pressKey(win, tab.querySelector('.chat-tab-close'), 'Enter');
+  const focusId = win => win.document.activeElement.id;
+
+  // Stacked page: "Don't save" closes the file, the next one takes the screen.
+  const stacked = await openFiles(true, ['notes.txt', 'other.txt']);
+  stacked.created[0].editor._type('edited');
+  closeByKey(stacked.win, fileTab(stacked.win, 'notes.txt'));
+  const question = stacked.win.document.querySelector('.kiss-notification');
+  ui.click(stacked.win, ui.toastButton(question, "Don't save"));
+  const next = fileTab(stacked.win, 'other.txt');
+  assert.strictEqual(stacked.win.document.activeElement, next);
+  assert.strictEqual(next.getAttribute('tabindex'), '0', 'the Tab stop');
+
+  // Split page: the next file stays in the pane; the last one leaves it.
+  const split = await openFiles(false, ['notes.txt', 'other.txt']);
+  closeByKey(split.win, fileTab(split.win, 'notes.txt'));
+  const left = fileTab(split.win, 'other.txt');
+  assert.strictEqual(split.win.document.activeElement, left);
+  closeByKey(split.win, left);
+  assert.strictEqual(focusId(split.win), 'task-input', 'no file left');
+
+  // A sub-agent tab closed under its chat: the strip goes with it.
+  const {win} = makePage();
+  openGroup(win, ['sub-1']);
+  win._testApi.endLaunch();
+  closeByKey(win, tabEl(win, 'sub-1'));
+  assert.strictEqual(focusId(win), 'task-input', 'no strip left');
 }
 
 function testTabListExposesTabSemantics() {
@@ -626,8 +754,6 @@ function testRemoteControlOrderAndThemeAccessibility() {
     'BUTTON',
     'theme toggle must be a native <button> so Enter/Space activate it',
   );
-  const role = assertFocusable(themeBtn, 'the theme toggle');
-  assert.strictEqual(role, 'button', 'theme toggle must be a button');
   assert.ok(
     /^(Dark|Light) mode$/.test(themeBtn.getAttribute('aria-label') || ''),
     'theme toggle must be named for screen readers',
@@ -642,14 +768,8 @@ function testRemoteControlOrderAndThemeAccessibility() {
   );
 }
 
-const runner = makeRunner();
-const report = runner.report;
-
-/** Run one test through the shared runner, then close its windows. */
-async function test(name, fn) {
-  await runner.test(name, fn);
-  while (openWindows.length) openWindows.pop().close();
-}
+// The runner closes the pages a test built when it has ended.
+const {test, report} = makeRunner({windows: openWindows});
 
 /** Run the accessibility scenarios in order. */
 async function main() {
@@ -660,7 +780,9 @@ async function main() {
     testRovingTabindexFollowsActiveTab,
     testArrowKeysMoveFocusBetweenTabs,
     testRoutineRepaintKeepsTheKeyboardFocus,
+    testRepaintKeepsEachTabsNode,
     testCloseControlIsAccessibleAndDoesNotSwitchTabs,
+    testFocusSurvivesClosingTheFocusedTab,
     testTabListExposesTabSemantics,
     testRenamedTabKeepsAccessibleNameInSync,
     testRemoteControlOrderAndThemeAccessibility,

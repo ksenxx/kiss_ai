@@ -102,7 +102,7 @@ function testCollapsedByDefaultAndToggles() {
 
 /** The task's session as a history reply carries it, titled `title`. */
 function freshSession(title) {
-  return JSON.parse(JSON.stringify(makeSession({title, preview: title})));
+  return makeSession({title, preview: title});
 }
 
 function testExpandedStateSurvivesRerender() {

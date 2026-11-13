@@ -25,15 +25,20 @@ only the poll interval is shortened.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from unittest import skipUnless
 
 import kiss.server.web_server as ws
 from kiss.server import agent_state
+from kiss.tests.conftest import nproc_limit_lowered_to_one, thread_start_can_be_starved
+from kiss.tests.server.pause import Pause, Pauses
 from kiss.tests.server.test_update_available_check import _UpdateCheckTestBase
 
 # Writes "<args>\n<KISS_HOME>\n<physical cwd>" to {mark}, then holds until
@@ -267,3 +272,80 @@ class DeferredRestartTest(_UpdateCheckTestBase):
         self._write_record(self._record_json(workdir=str(Path(self.tmpdir) / "gone")))
         await self._wait_until(self.mark.exists, "the restart installer to start")
         self.assertEqual(Path(self._started()[2]), Path.home().resolve())
+
+    def _shut_the_executor_down(self, loc: dict[str, Any]) -> bool:
+        """Pause matcher: this server's poller loses the executor just before its spawn."""
+        if loc["self"] is self.server:
+            self._pool.shutdown(wait=False)
+            self._shut.set()
+        return False
+
+    async def test_a_refused_spawn_submission_is_retried_by_a_later_poll(self) -> None:
+        """A refusal left the guard and the barrier up: no later poll, no new task."""
+        loop = asyncio.get_running_loop()
+        self._pool = ws._default_executor()
+        loop.set_default_executor(self._pool)
+        self._shut = asyncio.Event()
+        arm = ws.RemoteAccessServer._arm_update_barrier_if_idle.__code__
+        with Pause(arm, self._shut_the_executor_down):
+            self._write_record(self._record_json())
+            # Set in the poller's loop step, which the refusal ends.
+            await asyncio.wait_for(self._shut.wait(), 10)
+        loop.set_default_executor(ws._default_executor())
+        self.assertFalse(self.server._update_in_progress())
+        self.assertFalse(self._barrier_up())
+        await self._wait_until(self.mark.exists, "the restart installer to start")
+
+    def _starve_the_spawn(self, loc: dict[str, Any]) -> bool:
+        """Pause matcher: this server's poller submits its spawn where no thread can start.
+
+        The loop gets a fresh one-worker executor and the thread limit is
+        lowered until the loop's next step, which sets ``_starved``.
+        """
+        if loc["self"] is self.server and not self._starved.is_set():
+            loop = asyncio.get_running_loop()
+            loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+            self._limit.enter_context(nproc_limit_lowered_to_one())
+            loop.call_soon(self._limit.close)
+            loop.call_soon(self._starved.set)
+        return False
+
+    def _note_spawn(self, loc: dict[str, Any]) -> bool:
+        """Pause matcher that holds nothing: every installer a future receives, in ``_spawned``."""
+        match loc["result"]:
+            case (subprocess.Popen() as installer, int()):
+                self._spawned.append(installer)
+        return False
+
+    @skipUnless(thread_start_can_be_starved(), "RLIMIT_NPROC does not starve threads here")
+    async def test_a_spawn_queued_by_a_refused_submission_never_runs(self) -> None:
+        """A thread that could not start left the spawn queued: it ran unwatched, barrier down."""
+        fifo = Path(self.tmpdir) / "hold"
+        os.mkfifo(fifo)
+        self.installer.write_text(f'#!/bin/bash\nread -n 1 < "{fifo}"\n')
+        self.server._install_root = self.installer.parent
+        self._starved = asyncio.Event()
+        self._spawned: list[subprocess.Popen[bytes]] = []
+        arm = ws.RemoteAccessServer._arm_update_barrier_if_idle.__code__
+        hooks = Pauses(
+            Pause(arm, self._starve_the_spawn), Pause(Future.set_result.__code__, self._note_spawn),
+        )
+        with open(fifo, "r+b", buffering=0) as hold:
+            try:
+                with contextlib.ExitStack() as self._limit, hooks:
+                    self._write_record(self._record_json())
+                    await asyncio.wait_for(self._starved.wait(), 10)
+                    self.assertFalse(self.server._update_in_progress())
+                    self.assertFalse(self._barrier_up())
+                    # The same executor can start its one thread now: the queued job runs first.
+                    self.assertTrue(await asyncio.to_thread(self.record.exists))
+                    self.assertEqual(self._spawned, [])
+                    # With the record gone the poller stays out: a click starts the one installer.
+                    self.record.unlink()
+                    await self.server._handle_run_update("")
+                self.assertEqual(self._spawned, [self.server._update_proc])
+                self.assertTrue(self._barrier_up())
+            finally:
+                hold.write(b"xx")  # a byte lets one stand-in go
+                for installer in self._spawned:
+                    await asyncio.to_thread(installer.wait, 10)

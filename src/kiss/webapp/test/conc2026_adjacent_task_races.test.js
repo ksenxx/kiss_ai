@@ -36,6 +36,12 @@
 //           overscroll can fetch again instead of being blocked for
 //           ever by a reply the outage swallowed.
 //
+//   CAND-5  A reply names the task it is adjacent to (`adjacent_to`).
+//           One asked for by another surface showing the tab, whose
+//           thread ends on another task, is NOT spliced here (the
+//           tasks in between could never be loaded) and leaves this
+//           page's own request in flight.
+//
 // The harness mirrors adjacentTaskScroll.test.js (overscroll + adjacent
 // replies) and bgRenderTabSwap_sweep1026.test.js (a hidden parent's
 // `summary` swapping a reopened sub-agent tab off screen).
@@ -45,7 +51,15 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 
-const {send, clickTab, fakeGeometry, wheel, getAdjacent} = harness;
+const {
+  send,
+  clickTab,
+  wheel,
+  getAdjacent,
+  makeLaunchedPage: makePage,
+  statusMetrics,
+  showHistoryTask,
+} = harness;
 const {
   bootParallelRun,
   finishFanOut,
@@ -53,39 +67,18 @@ const {
   subagentTabEls,
 } = require('./subagent_tab_helpers');
 
-function makePage() {
-  const page = harness.makePage();
-  page.win._testApi.endLaunch();
-  page.win._testApi.hideWelcome();
-  return page;
-}
-
-function statusRow(win) {
-  const doc = win.document;
-  return {
-    tokens: doc.getElementById('status-tokens').textContent,
-    budget: doc.getElementById('status-budget').textContent,
-    steps: doc.getElementById('status-steps').textContent,
-  };
-}
-
 const TS = 1767225600000;
 
-// Tab with a finished history task ('42') on screen, geometry faked so
-// edge overscroll can fire — same shape as adjacentTaskScroll.test.js.
-function setupWithHistoryTask(win, posted) {
-  const tabId = harness.readyTabId(posted);
-  const O = win.document.getElementById('output');
-  fakeGeometry(O, {sh: 3000, ch: 500});
+// The daemon's reply to a 'prev' getAdjacentTask: task W = '41'.
+function answerPrevTask41(win, tabId) {
   send(win, {
-    type: 'task_events',
+    type: 'adjacent_task_events',
     tabId,
-    chat_id: 'chat-abc',
-    task_id: '42',
-    task: 'My old task',
-    events: [{type: 'system_output', text: 'hello\n'}],
+    direction: 'prev',
+    task: 'Older task',
+    task_id: '41',
+    events: [{type: 'system_output', text: 'older\n'}],
   });
-  return {tabId, O};
 }
 
 // Overscroll at the top until a getAdjacentTask request leaves, then
@@ -95,14 +88,7 @@ function loadPrevTask41(win, posted, tabId, O) {
   wheel(win, O, -50, 10);
   const adj = getAdjacent(posted);
   assert.ok(adj.length >= 1, 'overscroll at top must request the prev task');
-  send(win, {
-    type: 'adjacent_task_events',
-    tabId,
-    direction: 'prev',
-    task: 'Older task',
-    task_id: '41',
-    events: [{type: 'system_output', text: 'older\n'}],
-  });
+  answerPrevTask41(win, tabId);
   assert.strictEqual(
     O.querySelectorAll('.adjacent-task[data-task-id="41"]').length,
     1,
@@ -120,7 +106,7 @@ function loadPrevTask41(win, posted, tabId, O) {
 function testNoDuplicateAdjacentRegionAfterTabSwitch() {
   const {win, posted} = makePage();
   try {
-    const {tabId, O} = setupWithHistoryTask(win, posted);
+    const {tabId, O} = showHistoryTask(win, posted);
     loadPrevTask41(win, posted, tabId, O);
 
     // Away to tab B (transcript detaches into A's fragment) and back.
@@ -155,14 +141,7 @@ function testNoDuplicateAdjacentRegionAfterTabSwitch() {
         'transcript), not for 41 again',
     );
     assert.strictEqual(adj[adj.length - 1].direction, 'prev');
-    send(win, {
-      type: 'adjacent_task_events',
-      tabId,
-      direction: 'prev',
-      task: 'Older task',
-      task_id: '41',
-      events: [{type: 'system_output', text: 'older\n'}],
-    });
+    answerPrevTask41(win, tabId);
     assert.strictEqual(
       O.querySelectorAll('.adjacent-task[data-task-id="41"]').length,
       1,
@@ -179,13 +158,13 @@ function testNoDuplicateAdjacentRegionAfterTabSwitch() {
 
 // The anchors describe the thread they were saved with: a tab whose
 // task changed while it was in the background (a new run started on it
-// from another surface: its task_settings name the new task id) comes
-// back with its anchors rewound to that task, as a fresh transcript's
-// are, and the edge flags cleared.
+// from another surface: its `clear`, then its task_settings naming the
+// new task id) comes back with its anchors rewound to that task, as a
+// fresh transcript's are, and the edge flags cleared.
 function testAnchorsOfAnotherTaskAreNotRestored() {
   const {win, posted} = makePage();
   try {
-    const {tabId, O} = setupWithHistoryTask(win, posted);
+    const {tabId, O} = showHistoryTask(win, posted);
     loadPrevTask41(win, posted, tabId, O);
     // The chat has nothing older than 41: the edge is remembered...
     O.scrollTop = 0;
@@ -196,6 +175,7 @@ function testAnchorsOfAnotherTaskAreNotRestored() {
     assert.strictEqual(getAdjacent(posted).length, before, 'no fetch past the edge');
 
     win._testApi.createNewTab();
+    send(win, {type: 'clear', tabId});
     send(win, {type: 'task_settings', tabId, settings: {task_id: '43'}});
     clickTab(win, tabId);
     assert.strictEqual(win._testApi.getActiveTabId(), tabId);
@@ -237,7 +217,7 @@ function testBgEventTabSwapKeepsRestoredStatusRow() {
       tabId: tabP,
       ts: TS,
     });
-    const parentRow = statusRow(win);
+    const parentRow = statusMetrics(win);
     assert.deepStrictEqual(parentRow, {
       tokens: 'Tokens: 999',
       budget: 'Cost: $9.99',
@@ -270,7 +250,7 @@ function testBgEventTabSwapKeepsRestoredStatusRow() {
         },
       ],
     });
-    const subRow = statusRow(win);
+    const subRow = statusMetrics(win);
     assert.deepStrictEqual(subRow, {
       tokens: 'Tokens: 555',
       budget: 'Cost: $5.55',
@@ -291,7 +271,7 @@ function testBgEventTabSwapKeepsRestoredStatusRow() {
       'the fold must have closed sub-agent tab S and put parent tab P ' +
         'on screen (scenario precondition)',
     );
-    const after = statusRow(win);
+    const after = statusMetrics(win);
     assert.deepStrictEqual(
       after,
       parentRow,
@@ -314,7 +294,7 @@ function testBgEventTabSwapKeepsRestoredStatusRow() {
 function testDetachedLoaderRemovedOnRestore() {
   const {win, posted} = makePage();
   try {
-    const {tabId, O} = setupWithHistoryTask(win, posted);
+    const {tabId, O} = showHistoryTask(win, posted);
     O.scrollTop = 0;
     wheel(win, O, -50, 10);
     assert.ok(
@@ -332,14 +312,7 @@ function testDetachedLoaderRemovedOnRestore() {
     assert.notStrictEqual(win._testApi.getActiveTabId(), tabId);
 
     // The reply lands addressed to the switched-away tab and is dropped.
-    send(win, {
-      type: 'adjacent_task_events',
-      tabId,
-      direction: 'prev',
-      task: 'Older task',
-      task_id: '41',
-      events: [{type: 'system_output', text: 'older\n'}],
-    });
+    answerPrevTask41(win, tabId);
 
     clickTab(win, tabId);
     assert.strictEqual(win._testApi.getActiveTabId(), tabId);
@@ -362,7 +335,7 @@ function testDetachedLoaderRemovedOnRestore() {
 function testDaemonDisconnectClearsAdjacentLoading() {
   const {win, posted} = makePage();
   try {
-    const {O} = setupWithHistoryTask(win, posted);
+    const {O} = showHistoryTask(win, posted);
     O.scrollTop = 0;
     wheel(win, O, -50, 10);
     assert.strictEqual(
@@ -399,6 +372,102 @@ function testDaemonDisconnectClearsAdjacentLoading() {
   }
 }
 
+// CAND-5: every surface showing the tab holds its own stretch of the
+// chat's thread, so a neighbour belongs here only when this thread
+// ends on the task the reply is adjacent to.
+function testNeighbourOfAnotherEdgeIsNotSpliced() {
+  const {win, posted} = makePage();
+  try {
+    const {tabId, O} = showHistoryTask(win, posted);
+    const reply = (direction, adjacentTo, taskId) =>
+      send(win, {
+        type: 'adjacent_task_events',
+        tabId,
+        direction,
+        adjacent_to: adjacentTo,
+        task: 'Task ' + taskId,
+        task_id: taskId,
+        events: [{type: 'system_output', text: 'output ' + taskId + '\n'}],
+      });
+    const spliced = () =>
+      Array.from(O.querySelectorAll('.adjacent-task')).map(
+        el => el.dataset.taskId,
+      );
+
+    O.scrollTop = 0;
+    wheel(win, O, -50, 10);
+    assert.strictEqual(getAdjacent(posted).length, 1, 'prev of 42 is asked');
+
+    // Another surface read three tasks further up and asked for more.
+    reply('prev', '39', '38');
+    reply('next', '50', '51');
+    assert.deepStrictEqual(
+      spliced(),
+      [],
+      'a neighbour of a task this thread does not end on must not be ' +
+        'spliced: tasks 41..39 would be unreachable above it',
+    );
+    assert.ok(
+      O.querySelector('.adjacent-loader'),
+      "another surface's reply must leave this page's request in flight",
+    );
+
+    // The answers to this page's own edges are spliced.
+    reply('prev', '42', '41');
+    reply('next', '42', '43');
+    assert.deepStrictEqual(spliced(), ['41', '43']);
+    O.scrollTop = 0;
+    wheel(win, O, -50, 10);
+    const adj = getAdjacent(posted);
+    assert.strictEqual(
+      String(adj[adj.length - 1].taskId),
+      '41',
+      'the thread now ends on 41: the next overscroll asks beyond it',
+    );
+    console.log('PASS a neighbour of another edge is not spliced');
+  } finally {
+    win.close();
+  }
+}
+
+// A run that has no history row yet (its setup) is replayed without a
+// task id.  The task shown before it is not the thread's edge any
+// more: the edges come with the run's next event that names its task,
+// so the thread is read back from the run and reaches the task before
+// it.  The run can get its row while the replay is on its way: an
+// event that names the task then arrives before the replay as well.
+function testReplayOfARunWithoutARowForgetsTheTaskBeforeIt() {
+  for (const namedBeforeReplay of [false, true]) {
+    const {win, posted} = makePage();
+    try {
+      const {tabId, O} = showHistoryTask(win, posted);
+      const live = {type: 'text_delta', tabId, taskId: '43', text: 'live\n'};
+      if (namedBeforeReplay) send(win, live);
+      send(win, {
+        type: 'task_events',
+        tabId,
+        chat_id: 'chat-abc',
+        task_id: null,
+        task: 'A run in its setup',
+        events: [],
+      });
+      send(win, {type: 'status', tabId, running: true});
+      send(win, live);
+      O.scrollTop = 0;
+      wheel(win, O, -50, 10);
+      assert.deepStrictEqual(
+        getAdjacent(posted).map(m => [String(m.taskId), m.direction]),
+        [['43', 'prev']],
+        'the thread is read back from the run, not from the task before it' +
+          (namedBeforeReplay ? ' (task named before the replay)' : ''),
+      );
+    } finally {
+      win.close();
+    }
+  }
+  console.log('PASS a replay of a run without a row forgets the task before it');
+}
+
 function main() {
   const tests = [
     testNoDuplicateAdjacentRegionAfterTabSwitch,
@@ -406,6 +475,8 @@ function main() {
     testBgEventTabSwapKeepsRestoredStatusRow,
     testDetachedLoaderRemovedOnRestore,
     testDaemonDisconnectClearsAdjacentLoading,
+    testNeighbourOfAnotherEdgeIsNotSpliced,
+    testReplayOfARunWithoutARowForgetsTheTaskBeforeIt,
   ];
   const failures = [];
   for (const t of tests) {

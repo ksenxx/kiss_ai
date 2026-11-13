@@ -63,113 +63,88 @@ class _UsageEvent(NamedTuple):
     interruption could strand a committed record, and no compaction
     window in which a committed record is invisible.
 
-    Deduplication identity (``source``, ``seq``):
+    Deduplication identity (``source``):
 
     * ``source=None`` marks a ONE-SHOT adjustment (a fan-out totals
       bank, a TTS synthesis bank, a property-setter overwrite delta).
       Its producer appends it at most once, so it needs no identity:
       every keyless record counts, and compaction folds it without
       retaining anything.
-    * A RETRYABLE transaction carries its producer's stable ``source``
-      plus a per-source sequence number that is MONOTONIC in append
-      order: a session bank is ``(_session_key(executor), 0)``, an
-      abandoned-child reclaim is ``("reclaim:<txn>", generation)``,
-      a classifier fold is ``("classifier:<invocation>", 0)``.  A
-      retry after an injected stop re-appends the SAME ``(source,
-      seq)`` with the same values, and readers count each ``(source,
-      seq)`` once (first record wins) while summing
-      (:func:`_ledger_totals`).  The monotonicity contract — a
-      producer never appends ``(source, seq)`` after it has appended
-      ``(source, seq')`` with ``seq' > seq``, except as an identical
-      retry of an already-appended record — is what lets the folded
-      dedup state be one MAX seq per source (:class:`_SeenMap`,
-      O(#producers)) instead of one retained key per event.
+    * A RETRYABLE transaction carries its producer's stable ``source``:
+      a session bank is ``_session_key(executor)``, a classifier fold
+      is ``"classifier:<invocation>"``.  A retry after an injected
+      stop re-appends the SAME source with the same values, and
+      readers count each source once (first record wins) while
+      summing (:func:`_ledger_totals`).
     """
 
     source: str | None
-    seq: int
     budget: float
     tokens: int
     steps: int
 
 
-class _SeenMap:
-    """Immutable max-``seq``-per-``source`` map for folded ledger records.
+class _SeenSources:
+    """Immutable set of the retryable sources of the folded ledger records.
 
-    Compaction must remember, for every retryable source it has ever
-    folded, the highest sequence number folded — so a late retry
-    duplicate of a folded record still deduplicates.  Round 6 showed
-    that keeping this as one flat ``frozenset`` of every historical
-    key made compaction quadratic (each fold copied the whole set).
-    This map instead stores the entries as a tuple of plain dict
-    LEVELS, newest last:
-
-    * :meth:`including` adds a fold's newly-seen sources as one new
-      level and then coalesces adjacent levels while the older of the
-      two holds at most twice the entries of the newer — the classic
-      geometric-merge discipline, which keeps the level count
-      O(log #sources) and bounds the TOTAL merge work over an epoch by
-      O(#sources * log #sources).  No fold ever copies the whole
-      historical state again.
-    * :meth:`get` scans levels newest-first; per-source seqs are
-      monotonic and newer levels hold newer folds, so the first hit is
-      the maximum, and merges let the newer level's entries win.
+    Compaction must remember every retryable source it has ever
+    folded, so a late retry duplicate of a folded record still
+    deduplicates.  Round 6 showed that keeping this as one flat
+    ``frozenset`` of every historical key made compaction quadratic
+    (each fold copied the whole set).  The sources are instead stored
+    as a tuple of plain set LEVELS, newest last: :meth:`including`
+    adds a fold's newly-seen sources as one new level and then
+    coalesces adjacent levels while the older of the two holds at most
+    twice the entries of the newer — the classic geometric-merge
+    discipline, which keeps the level count O(log #sources) and bounds
+    the TOTAL merge work over an epoch by O(#sources * log #sources).
+    No fold ever copies the whole historical state again.
 
     Instances are immutable after construction (levels are private to
     the compaction that built them until published inside a
     :class:`_LedgerView`), so readers on any thread can consult a
-    published map without locks.
+    published set without locks.
     """
 
     __slots__ = ("levels",)
 
-    def __init__(self, levels: tuple[dict[str, int], ...] = ()) -> None:
-        """Wrap *levels* (newest last); each dict is owned exclusively.
+    def __init__(self, levels: tuple[set[str], ...] = ()) -> None:
+        """Wrap *levels* (newest last); each set is owned exclusively.
 
         Args:
-            levels: Max-seq dicts, oldest first.  Callers hand over
-                ownership: the dicts are never mutated afterwards.
+            levels: Disjoint source sets, oldest first.  Callers hand
+                over ownership: the sets are never mutated afterwards.
         """
         self.levels = levels
 
-    def get(self, source: str) -> int | None:
-        """Return the highest folded seq for *source*, or ``None``.
+    def __contains__(self, source: str) -> bool:
+        """Return whether a record of *source* has been folded.
 
         Args:
             source: The producer's stable transaction source.
-
-        Returns:
-            The maximum folded sequence number, or ``None`` when no
-            record of *source* has been folded.
         """
-        for level in reversed(self.levels):
-            seq = level.get(source)
-            if seq is not None:
-                return seq
-        return None
+        for level in self.levels:
+            if source in level:
+                return True
+        return False
 
-    def including(self, delta: dict[str, int]) -> _SeenMap:
-        """Return a new map that also covers *delta* (newest entries).
+    def including(self, delta: set[str]) -> _SeenSources:
+        """Return a new set that also holds *delta* (the newest sources).
 
         Args:
-            delta: Newly folded ``source -> max seq`` entries; the
-                caller hands over ownership of the dict.
+            delta: Newly folded sources, none of them in this set; the
+                caller hands over ownership of the set.
 
         Returns:
-            ``self`` when *delta* is empty, else a new immutable map.
+            ``self`` when *delta* is empty, else a new immutable set.
         """
         if not delta:
             return self
         levels = [*self.levels, delta]
         while len(levels) >= 2 and len(levels[-2]) <= 2 * len(levels[-1]):
             newer = levels.pop()
-            older = levels.pop()
-            merged = dict(older)
-            # Newer entries win: per-source seqs are monotonic, so the
-            # newer level's seq for a shared source is the maximum.
-            merged.update(newer)
-            levels.append(merged)
-        return _SeenMap(tuple(levels))
+            levels.append(levels.pop() | newer)
+        return _SeenSources(tuple(levels))
 
 
 class _LedgerView(NamedTuple):
@@ -181,18 +156,18 @@ class _LedgerView(NamedTuple):
     an asynchronously injected stop anywhere in compaction leaves
     either the old complete view or the new complete view, never a
     torn or record-losing intermediate state.  ``seen`` carries the
-    max folded seq per retryable source (see :class:`_SeenMap`) so a
-    retry duplicate of a folded record still counts once.
+    folded retryable sources (see :class:`_SeenSources`) so a retry
+    duplicate of a folded record still counts once.
     """
 
     budget: float
     tokens: int
     steps: int
     fold_index: int
-    seen: _SeenMap
+    seen: _SeenSources
 
 
-_EMPTY_VIEW = _LedgerView(0.0, 0, 0, 0, _SeenMap())
+_EMPTY_VIEW = _LedgerView(0.0, 0, 0, 0, _SeenSources())
 
 #: Compaction threshold: when an epoch's unfolded suffix
 #: (``records[view.fold_index:]``) reaches this length, the next
@@ -223,10 +198,10 @@ class _UsageLedger:
     The agent's ``_usage_ledger`` attribute always points at one of
     these; :meth:`RelentlessAgent.reset_usage` swaps in a fresh
     instance with a single ``STORE_ATTR`` (the epoch boundary).  The
-    instance itself is the EPOCH TOKEN: abandoned-subagent items
-    record it at registration and their reclaims commit INTO that
-    exact object (:meth:`RelentlessAgent._attribute_usage`'s *epoch*
-    argument), so a reset racing a reclaim can never route a prior
+    instance itself is the EPOCH TOKEN: a sub-task or side call
+    captures it when it starts and its fold commits INTO that exact
+    object (:meth:`RelentlessAgent._attribute_usage`'s *epoch*
+    argument), so a reset racing the fold can never route a prior
     epoch's spend into the current one.
 
     Mutation protocol (lock-free for writers, single-store for
@@ -253,14 +228,14 @@ class _UsageLedger:
       still exact) and the next epoch starts fresh.
 
     Memory: the epoch retains every record it ever banked (a small
-    immutable tuple each) plus one max-seq entry per retryable
-    producer.  Both are linear in real work done — a record per
-    committed transaction, a ``seen`` entry per session / reclaim
-    transaction / classifier invocation — and the epoch is dropped
+    immutable tuple each) plus one ``seen`` entry per retryable
+    source.  Both are linear in real work done — a record per
+    committed transaction, a ``seen`` entry per session / keyed
+    charge / classifier invocation — and the epoch is dropped
     whole at the next ``reset_usage()``.  Read time stays
     O(:data:`_COMPACTION_THRESHOLD`) and cumulative compaction time is
-    O(n log n) in the number of events (see :class:`_SeenMap`), never
-    the round-6 quadratic full-key-set copy.
+    O(n log n) in the number of events (see :class:`_SeenSources`),
+    never the round-6 quadratic full-key-set copy.
     """
 
     __slots__ = ("view", "records", "compaction_lock")
@@ -278,8 +253,8 @@ def _session_key(agent: Base) -> str:
     Assigned on first use through ``dict.setdefault`` — one atomic C
     call — so a banking retry (``perform_task``'s ``except
     BaseException`` re-bank after an injected stop) and a concurrent
-    server-thread reclaim always observe the SAME key for one session,
-    and their duplicate ledger records deduplicate on read.  A
+    reader on another thread always observe the SAME key for one
+    session, and duplicate ledger records deduplicate on read.  A
     ``uuid4`` hex never collides across executors, unlike ``id()``,
     which the allocator reuses after garbage collection; the key also
     stays valid after the executor is collected, so banked executors
@@ -343,12 +318,10 @@ def _ledger_totals(ledger: _UsageLedger) -> tuple[float, int, int]:
     with complete transactions.
 
     Duplicate retryable records — retries re-appending the same
-    ``(source, seq)`` — count once: a suffix record is skipped when
-    its seq is already covered by the view's folded max
-    (``view.seen``) or by an earlier suffix record of the same source
-    (per-source seqs are monotonic in append order, so a max
-    comparison is a membership test).  Keyless one-shot records all
-    count; their producers append them at most once.
+    ``source`` — count once: a suffix record is skipped when its
+    source is already folded (``view.seen``) or carried by an earlier
+    suffix record.  Keyless one-shot records all count; their
+    producers append them at most once.
 
     Cost: O(len(suffix)) time per read; compaction keeps that below
     roughly :data:`_COMPACTION_THRESHOLD` (plus whatever raced in
@@ -387,15 +360,14 @@ def _ledger_totals_and_banked(
 
 def _fold_suffix(
     events: list[_UsageEvent], view: _LedgerView, session_key: str | None
-) -> tuple[float, int, int, dict[str, int], bool]:
+) -> tuple[float, int, int, set[str], bool]:
     """Sum *events*, the unfolded suffix after *view*, on top of the view's totals.
 
     This is THE dedup rule of the ledger, shared by every reader
     (:func:`_ledger_totals_and_banked`) and by the compactor
     (:meth:`RelentlessAgent._maybe_compact`): a sourced event counts
-    only when its ``seq`` is above both the source's folded max in
-    ``view.seen`` and the source's max seen earlier in *events*;
-    unsourced events always count.
+    only when its source is neither in ``view.seen`` nor carried by an
+    earlier event of *events*; unsourced events always count.
 
     Args:
         events: ``records[view.fold_index:]`` (or a prefix of it).
@@ -405,28 +377,24 @@ def _fold_suffix(
 
     Returns:
         ``(budget, tokens, steps, delta, banked)``: the extended totals,
-        the per-source max ``seq`` of the events that counted (what a
-        compactor merges into ``view.seen``), and whether *session_key*
-        appears in ``view.seen`` or in *events*.
+        the sources of the events that counted (what a compactor adds
+        to ``view.seen``), and whether *session_key* appears in
+        ``view.seen`` or in *events*.
     """
     budget = view.budget
     tokens = view.tokens
     steps = view.steps
     seen = view.seen
-    banked = session_key is not None and seen.get(session_key) is not None
-    delta: dict[str, int] = {}
+    banked = session_key is not None and session_key in seen
+    delta: set[str] = set()
     for event in events:
         source = event.source
         if source is not None:
             if source == session_key:
                 banked = True
-            folded = seen.get(source)
-            if folded is not None and event.seq <= folded:
+            if source in seen or source in delta:
                 continue
-            prev = delta.get(source)
-            if prev is not None and event.seq <= prev:
-                continue
-            delta[source] = event.seq
+            delta.add(source)
         budget += event.budget
         tokens += event.tokens
         steps += event.steps
@@ -965,7 +933,7 @@ class RelentlessAgent(Base):
         if delta:
             deltas = [0.0, 0, 0]
             deltas[field] = delta
-            self._commit_usage_event(ledger, _UsageEvent._make((None, 0, *deltas)))
+            self._commit_usage_event(ledger, _UsageEvent._make((None, *deltas)))
 
     def _usage_ledger_object(self) -> _UsageLedger:
         """Return the current ledger epoch, creating it lazily.
@@ -983,14 +951,13 @@ class RelentlessAgent(Base):
     def _usage_epoch(self) -> _UsageLedger:
         """Return the current epoch token (the ledger object itself).
 
-        An adjustment producer that outlives task boundaries — the
-        abandoned-subagent bookkeeping in ``sorcar_agent`` — records
-        this token when it registers a source and later commits INTO
-        the recorded object (:meth:`_attribute_usage`'s *epoch*
-        argument), so spend from a source created under a PRIOR epoch
-        can never be attributed to the current one (``reset_usage``
-        swaps the token, and a late commit lands in the discarded
-        object).
+        A producer that can outlive its task — a ``run_agent`` job, a
+        side channel, a side call — captures this token when it starts
+        and later commits INTO the captured object
+        (:meth:`_attribute_usage`'s *epoch* argument), so spend made
+        under a PRIOR epoch can never be attributed to the current one
+        (``reset_usage`` swaps the token, and a late commit lands in
+        the discarded object).
         """
         return self._usage_ledger_object()
 
@@ -1025,8 +992,8 @@ class RelentlessAgent(Base):
         — a losing caller returns immediately (some later commit will
         compact), so no unwind order can block or deadlock.  Under the
         lock, the fold sums ``records[view.fold_index:n]`` exactly as
-        a reader would (dedup against ``view.seen`` plus per-source
-        max within the slice) and then publishes ONE new
+        a reader would (dedup against ``view.seen`` and within the
+        slice) and then publishes ONE new
         :class:`_LedgerView` with a single ``STORE_ATTR``.  The
         records list is NOT touched, so:
 
@@ -1040,9 +1007,9 @@ class RelentlessAgent(Base):
 
         Cumulative fold time over an epoch is O(n log n) in the number
         of events: each event is summed in exactly one fold (folds
-        cover disjoint slices) and the folded per-source max-seq state
-        merges geometrically (:class:`_SeenMap`) instead of copying
-        the whole historical key set each time (the round-6 quadratic
+        cover disjoint slices) and the folded source set merges
+        geometrically (:class:`_SeenSources`) instead of copying the
+        whole historical key set each time (the round-6 quadratic
         finding).  A stop that leaks the lock merely disables
         compaction for this epoch: reads degrade to O(records) but
         stay exact, and the next epoch gets a fresh lock.
@@ -1098,6 +1065,8 @@ class RelentlessAgent(Base):
     def _begin_run_usage_epoch(self) -> None:
         """Start the run's usage epoch; called by :meth:`_reset` at run start.
 
+        ``SorcarAgent.run`` also calls it ahead of its setup, so a run
+        that fails there does not report the previous run's usage.
         ``ChatSorcarAgent`` overrides this with a no-op because its
         ``run`` starts the epoch earlier, when the task row is
         allocated: from that moment a side channel may capture the
@@ -1114,9 +1083,7 @@ class RelentlessAgent(Base):
         TEAR: each property read sums the ledger afresh, and a
         concurrent append or reset between two of those reads yields
         an impossible mix (e.g. the old budget with the new
-        tokens/steps) — a final abandoned-child reclaim that reads
-        such a mix permanently loses the unseen dimension from the
-        parent's accounting.
+        tokens/steps), which a final save would then keep.
         """
         return _ledger_totals(self._usage_ledger_object())
 
@@ -1157,7 +1124,6 @@ class RelentlessAgent(Base):
         tokens: int,
         steps: int,
         key: str | None = None,
-        seq: int = 0,
         epoch: Any = None,
     ) -> None:
         """Add a usage delta to the cumulative counters as ONE record.
@@ -1167,7 +1133,7 @@ class RelentlessAgent(Base):
         the tokens) and cannot lose to or erase any other usage writer
         — including :meth:`_reset` (the record either lands in the old
         epoch, linearizing before the reset, or in the new one) and a
-        server-thread reclaim.  Never blocks: there is no lock to leak.
+        server-thread fold.  Never blocks: there is no lock to leak.
         A zero delta appends nothing, so an empty classifier fold and
         repeated zero adjustments do not grow the ledger — and a
         keyed retry of a zero-delta transaction is symmetric (neither
@@ -1178,15 +1144,12 @@ class RelentlessAgent(Base):
             tokens: Token count to add.
             steps: Step count to add.
             key: Stable transaction source for a RETRYABLE adjustment
-                (abandoned-child reclaim, classifier fold): a retry
-                re-appends the same ``(key, seq)`` and readers count
-                it once.  ``None`` marks a one-shot adjustment
+                (a classifier fold, a keyed side-channel or gate
+                charge): a retry re-appends the same *key* and readers
+                count it once.  ``None`` marks a one-shot adjustment
                 (fan-out totals, TTS, property-setter deltas), which
                 is appended at most once by its producer and therefore
                 needs no dedup identity.
-            seq: Per-*key* sequence number, MONOTONIC in commit order
-                (an abandoned-child reclaim passes its generation);
-                ignored for one-shot adjustments.
             epoch: The ledger epoch object captured at the start of
                 the producer's transaction
                 (:meth:`_usage_epoch`), or ``None`` for the current
@@ -1200,14 +1163,7 @@ class RelentlessAgent(Base):
             return
         ledger = epoch if isinstance(epoch, _UsageLedger) else self._usage_ledger_object()
         self._commit_usage_event(
-            ledger,
-            _UsageEvent(
-                key,
-                int(seq) if key is not None else 0,
-                float(budget),
-                int(tokens),
-                int(steps),
-            ),
+            ledger, _UsageEvent(key, float(budget), int(tokens), int(steps))
         )
 
     def _accumulate_usage(self, agent: Base) -> None:
@@ -1234,10 +1190,10 @@ class RelentlessAgent(Base):
           appends at most one extra same-key record — deduplicated on
           read, so no interleaving double-counts or loses the spend.
 
-        The pre-append ledger scan (folded seen map plus the unfolded
-        suffix) is an
-        optimization, not a correctness requirement: it keeps repeated
-        reclaims of an already-banked session from growing the ledger.
+        The pre-append ledger scan (the folded sources plus the
+        unfolded suffix) is an optimization, not a correctness
+        requirement: it keeps repeated banks of an already-banked
+        session from growing the ledger.
         See ``test_conc2026_relentless_usage_double_bank.py``, which
         proves the exactly-once property by injecting at every opcode
         boundary and by racing concurrent bankers.
@@ -1251,7 +1207,7 @@ class RelentlessAgent(Base):
         if _ledger_totals_and_banked(ledger, key)[3]:
             return
         budget, tokens, steps = _session_usage(agent)
-        self._commit_usage_event(ledger, _UsageEvent(key, 0, budget, tokens, steps))
+        self._commit_usage_event(ledger, _UsageEvent(key, budget, tokens, steps))
 
     def _live_budget_used(self) -> float:
         """The task's spend so far, including the live session's.
@@ -1448,7 +1404,7 @@ class RelentlessAgent(Base):
             system_prompt += self._framework_instructions()
         for session in range(self.max_sub_sessions):
             # One coherent snapshot for the whole session prologue: a
-            # server-thread reclaim can publish between two separate
+            # server-thread fold can land between two separate
             # property reads and tear the triple (see usage_snapshot).
             budget_banked, tokens_banked, steps_banked = self.usage_snapshot()
             remaining_budget = self.max_budget - budget_banked
@@ -1535,21 +1491,17 @@ class RelentlessAgent(Base):
                     and (exc.__cause__ is not None or not isinstance(exc, KISSError))
                 ) or executor.step_count <= 1:
                     error_result = finish(False, False, f"{type(exc).__name__}: {exc}")
-                    if summaries:
-                        # Terminal like any final-session finish: merged
-                        # with the prior sessions' summaries below.
-                        result = error_result
-                    else:
-                        if self.printer:
-                            self.printer.print(
-                                error_result,
-                                type="result",
-                                step_count=executor.step_count,
-                                total_tokens=executor.total_tokens_used,
-                                cost=f"${executor.budget_used:.4f}",
-                                cost_usd=executor.budget_used,
-                            )
+                    if not summaries:
+                        # The executor raised before it could emit its own
+                        # result.  Its session is banked, so the event
+                        # carries the task's totals like a merged one: the
+                        # session's own, added to offsets a child's fold
+                        # may have re-published since, would count twice.
+                        self._emit_merged_result_event(yaml.safe_load(error_result))
                         return error_result
+                    # Terminal like any final-session finish: merged
+                    # with the prior sessions' summaries below.
+                    result = error_result
                 else:
                     result = finish(
                         False,
@@ -1816,19 +1768,20 @@ class RelentlessAgent(Base):
         return set()
 
     def _emit_merged_result_event(self, payload: dict[str, Any]) -> None:
-        """Emit a ``type="result"`` event with merged multi-session totals.
+        """Emit a ``type="result"`` event with the task's cumulative totals.
 
         Complements — never replaces — the per-session Result events emitted
         by the inner :class:`KISSAgent`.  Called from :meth:`perform_task`
         only when the terminal outcome depends on information the inner
         emit could not carry:
 
-        * prior session summaries must be preserved (multi-session merge), or
+        * prior session summaries must be preserved (multi-session merge),
         * all sub-sessions were exhausted (no inner session ever returned a
-          terminal ``is_continue=False``).
+          terminal ``is_continue=False``), or
+        * the session raised before it could emit a result of its own.
 
-        For single-session terminations, the inner Result event is already
-        authoritative and this helper is not called.
+        For a single session that ends with ``finish``, the inner Result
+        event is already authoritative and this helper is not called.
 
         The offsets are read and the event printed under
         :data:`_OFFSET_PUBLISH_LOCK`, which every publisher of new
@@ -1864,8 +1817,8 @@ class RelentlessAgent(Base):
         The run's last word on its spend: emitted at the end of
         ``SorcarAgent.run``, after every fold that can land past the
         last session's final event (a stopped or late ``run_agent``
-        job's spend, the pre-run classifier's), so the UI's cost
-        matches the persisted task cost.
+        job's spend, the classifier's of a run that ended before
+        ``_reset``), so the UI's cost matches the persisted task cost.
 
         The structured fields are the ledger's ABSOLUTE totals, sent
         through the printer's ``broadcast`` rather than ``print``: the
@@ -1890,7 +1843,7 @@ class RelentlessAgent(Base):
     def _publish_usage_totals(self) -> None:
         """Send the ledger's totals as one ``usage_info`` event (lock held)."""
         # One snapshot for both the text and the structured fields,
-        # so a reclaim landing between two reads cannot make them
+        # so a fold landing between two reads cannot make them
         # disagree.
         printer: Any = self.printer
         budget, tokens, steps = self.usage_snapshot()

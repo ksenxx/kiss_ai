@@ -11,6 +11,10 @@
 // pointer, wheel, keyboard and paste events on it.  This module builds
 // the view for one such page: an address bar (back, forward, reload,
 // URL) over a <img> that shows the latest frame and captures input.
+// A finger's drag scrolls the page; the daemon is asked, each time one
+// goes down, whether a drag to the right from there has anything to
+// scroll, so that the phone layout can take the others for its swipe
+// back to the chat.
 //
 //   const view = BrowserTabView.create(tabId, {
 //     send: msg => api[msg.type](msg),   // browserNavigate / browserInput /
@@ -18,9 +22,16 @@
 //   });
 //   view.el                 -> element to mount in the content area
 //   view.frame(ev)          -> paint a browserFrame event
+//   view.touched(ev)        -> take a browserTouch event (the daemon's
+//                              answer about a finger)
+//   view.whenDragRightIsFree(callback)
+//                           -> call back if the last finger's drag to
+//                              the right had nothing to scroll
 //   view.state(ev)          -> apply a browserState event (url, title, history)
 //   view.error(text)        -> show a navigation error in the address bar
+//   view.setBadge(name, isDefault, note) -> name the browser in the bar
 //   view.setVisible(bool)   -> start/stop streaming for this surface
+//   view.resubscribe()      -> report the viewport again after a reconnect
 //   view.dispose()          -> stop observers, tell the daemon we left
 //
 // Coordinates: a frame is at most as large as the viewer, so it is
@@ -34,11 +45,18 @@
   const BUTTON_NAMES = ['left', 'middle', 'right', 'back', 'forward'];
   // The `buttons` bit of each button above.
   const BUTTON_BITS = [1, 4, 2, 8, 16];
+  // All of them.  A pointer has buttons the remote page has no name
+  // for (a pen's eraser, 32): those are no press there.
+  const BUTTONS_MASK = 31;
   const RESIZE_DEBOUNCE_MS = 150;
   // Presses closer than this in time and space count up (double,
   // triple click) - pointer events carry no click count of their own.
   const MULTI_CLICK_MS = 400;
   const MULTI_CLICK_PX = 5;
+  // How long after a swipe the daemon's answer about its finger still
+  // counts: well above a mobile round trip, short enough for the
+  // screen to turn as the swipe's effect.
+  const TOUCH_ANSWER_MS = 600;
 
   function modifiers(e) {
     return {
@@ -197,17 +215,19 @@
       send({type: 'browserInput', tab_id: tabId, event});
     }
 
-    // The pointer event forwarded last: where the remote pointer is.
+    // The pointer event forwarded last and the page point it mapped to:
+    // where the remote pointer is.
     let lastPointer = null;
-    function mouse(action, e, extra) {
+    let lastPoint = null;
+    function mouse(action, e, extra, point) {
       lastPointer = e;
-      const p = pagePoint(e);
+      lastPoint = point || pagePoint(e);
       const event = Object.assign(
         {
           kind: 'mouse',
           action,
-          x: Math.round(p.x * 100) / 100,
-          y: Math.round(p.y * 100) / 100,
+          x: Math.round(lastPoint.x * 100) / 100,
+          y: Math.round(lastPoint.y * 100) / 100,
           button:
             action === 'mouseMoved' || action === 'mouseWheel'
               ? 'none'
@@ -259,6 +279,12 @@
     }
     // The buttons down on the remote page, a `buttons` bitmask.
     let held = 0;
+    // The screen lost focus with a button down and no pointer event
+    // has come since.
+    let heldAtBlur = false;
+    // The view was hidden with a button down: that press ended on the
+    // remote page then, and its pointer is ignored until it lets go.
+    let heldAtHide = false;
     /**
      * Forward the button transitions from *held* to *e*'s `buttons`: a
      * press or a release per changed button, in button order.  Pointer
@@ -269,7 +295,7 @@
      * remote page with that press or release missing.
      */
     function syncButtons(e) {
-      const buttons = e.buttons || 0;
+      const buttons = e.buttons & BUTTONS_MASK;
       for (let i = 0; i < BUTTON_BITS.length; i++) {
         const bit = BUTTON_BITS[i];
         if ((held & bit) === (buttons & bit)) continue;
@@ -283,6 +309,8 @@
     }
     screen.addEventListener('pointerdown', e => {
       if (e.pointerType === 'touch') return;
+      heldAtBlur = false;
+      heldAtHide = false;
       screen.focus();
       if (screen.setPointerCapture && e.pointerId !== undefined) {
         try {
@@ -295,6 +323,8 @@
     });
     screen.addEventListener('pointerup', e => {
       if (e.pointerType === 'touch') return;
+      heldAtBlur = false;
+      heldAtHide = false;
       flushMove();
       syncButtons(e);
       e.preventDefault();
@@ -307,15 +337,27 @@
     // buttons down ends the press on the remote page (its pressed
     // state, :active) without mouseup or click, as the cancel ended it
     // here.
-    screen.addEventListener('pointercancel', e => {
-      if (e.pointerType === 'touch' || !held) return;
+    function cancelPress() {
+      if (!held) return;
       flushMove();
       held = 0;
-      mouse('mouseMoved', lastPointer, {buttons: 0});
+      mouse('mouseMoved', lastPointer, {buttons: 0}, lastPoint);
+    }
+    screen.addEventListener('pointercancel', e => {
+      if (e.pointerType !== 'touch') cancelPress();
     });
     screen.addEventListener('pointermove', e => {
       if (e.pointerType === 'touch') return;
-      if ((e.buttons || 0) !== held) {
+      if (heldAtHide && e.buttons) return;
+      heldAtHide = false;
+      // A button let go in another window or tab gets no pointerup
+      // either: the screen lost focus with it down, and the first move
+      // back shows none.  That press ends as a cancelled one does.  A
+      // button still down then (the focus only moved, or the pointer
+      // came back holding it) keeps its press.
+      if (heldAtBlur && !e.buttons) cancelPress();
+      heldAtBlur = false;
+      if ((e.buttons & BUTTONS_MASK) !== held) {
         flushMove();
         syncButtons(e);
       }
@@ -341,15 +383,44 @@
     // A second finger (a pinch) or a cancelled touch ends the gesture:
     // its final touchend must not click where the first finger landed.
     let touchStart = null;
+    // What the finger last put down asked the daemon: a drag scrolls
+    // the remote page, and only the daemon can tell whether a drag to
+    // the right from that point has anything to scroll there (the
+    // page, a wide table in it, a frame).  `scrollsLeft` is its answer
+    // (null until it comes, see view.touched); `free` waits for it
+    // (see view.whenDragRightIsFree).
+    let asked = null;
+    let fingers = 0;
+    const viewKey = Math.random().toString(36).slice(2);
+    function forgetAsked() {
+      if (asked) clearTimeout(asked.timer);
+      asked = null;
+    }
     screen.addEventListener(
       'touchstart',
       e => {
+        forgetAsked();
         if (e.touches.length !== 1) {
           touchStart = null;
           return;
         }
         const t = e.touches[0];
         touchStart = {x: t.clientX, y: t.clientY, moved: false};
+        const point = pagePoint(t);
+        // Every surface showing the page gets the answer: the id says
+        // whose finger it is about.
+        asked = {
+          id: viewKey + '-' + ++fingers,
+          scrollsLeft: null,
+          free: null,
+          timer: null,
+        };
+        inputEvent({
+          kind: 'touch',
+          id: asked.id,
+          x: Math.round(point.x * 100) / 100,
+          y: Math.round(point.y * 100) / 100,
+        });
       },
       {passive: true},
     );
@@ -366,6 +437,12 @@
         const dy = touchStart.y - t.clientY;
         if (!touchStart.moved && Math.abs(dx) + Math.abs(dy) < 6) return;
         touchStart.moved = true;
+        // The remote pointer follows the finger.  Chromium takes wheels
+        // at a page edge for a history swipe, which lasts until the
+        // pointer moves: without the move a drag past the edge (the
+        // phone's swipe back to the chat) left the page deaf to every
+        // later drag.
+        mouse('mouseMoved', t, {buttons: held});
         mouse('mouseWheel', t, {deltaX: dx, deltaY: dy});
         touchStart.x = t.clientX;
         touchStart.y = t.clientY;
@@ -423,12 +500,16 @@
       e.preventDefault();
     });
     screen.addEventListener('keyup', e => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') return;
-      heldKeys.delete(e.code || e.key);
+      // Only a key forwarded down is forwarded up: not the paste's V, nor
+      // a key pressed elsewhere or released already (the blur, a hide).
+      if (!heldKeys.delete(e.code || e.key)) return;
       key('up', e);
       e.preventDefault();
     });
-    screen.addEventListener('blur', releaseKeys);
+    screen.addEventListener('blur', () => {
+      heldAtBlur = held !== 0;
+      releaseKeys();
+    });
     screen.addEventListener('paste', e => {
       const text =
         e.clipboardData && e.clipboardData.getData
@@ -486,9 +567,51 @@
         // Layout has to settle before the size is meaningful.
         resizeTimer = setTimeout(reportViewport, 0);
       } else {
+        // The caller hid the screen: with no box left, neither the move
+        // waiting for its frame nor what a pointer or finger that is
+        // down does next can be mapped to the page.  Their gestures end.
+        pendingMove = null;
+        if (held) heldAtHide = true;
+        cancelPress();
+        touchStart = null;
+        forgetAsked();
         releaseKeys();
         reportViewport();
       }
+    };
+
+    /**
+     * The daemon's answer (a `browserTouch` event) about a finger put
+     * down on the page.  One about the finger of another surface, or
+     * about a finger this view no longer waits for, changes nothing.
+     */
+    view.touched = function (ev) {
+      if (!asked || ev.id !== asked.id) return;
+      asked.scrollsLeft = !!ev.scrollsLeft;
+      clearTimeout(asked.timer);
+      const free = asked.free;
+      asked.free = null;
+      if (free && !asked.scrollsLeft) free();
+    };
+
+    /**
+     * Call *callback* if a drag to the right from where the last finger
+     * went down had nothing to scroll on the remote page, so that the
+     * drag can count as a swipe of the surface instead: now when the
+     * daemon has said so, else when it says so within TOUCH_ANSWER_MS.
+     * Without its word (an older daemon, a dead link) the drag stays
+     * the page's; the next finger, hiding the view and disposing it
+     * end the wait.
+     */
+    view.whenDragRightIsFree = function (callback) {
+      if (!asked || asked.scrollsLeft) return;
+      if (asked.scrollsLeft === false) {
+        callback();
+        return;
+      }
+      asked.free = callback;
+      clearTimeout(asked.timer);
+      asked.timer = setTimeout(forgetAsked, TOUCH_ANSWER_MS);
     };
 
     view.frame = function (ev) {
@@ -530,6 +653,7 @@
     view.dispose = function () {
       if (view.disposed) return;
       releaseKeys();
+      forgetAsked();
       view.disposed = true;
       clearTimeout(resizeTimer);
       if (moveFrame !== null) cancelAnimationFrame(moveFrame);

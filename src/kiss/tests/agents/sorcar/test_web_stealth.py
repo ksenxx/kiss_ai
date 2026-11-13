@@ -33,7 +33,9 @@ Unreachable without doubles (documented, not mocked): the ``chrome``
 channel branch of ``chrome_channel`` (needs Google Chrome installed), the
 ``playwright`` fallback import (needs Patchright uninstalled), the
 non-Linux branch of ``virtual_display``, an Xvfb that starts but never
-reports its display (15 s timeout), and ``_glide_onto`` returning
+reports its display (15 s timeout), descriptor exhaustion at the selector
+of ``_read_display_number`` (``Popen`` has just released more descriptors
+than it takes, so only another thread can cause it), and ``_glide_onto`` returning
 ``None`` for an element without a rendered box — ``scroll_into_view_if_needed``
 already waits for visibility, so that guard only fires when the element
 is removed between that call and ``bounding_box()``.
@@ -43,6 +45,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import functools
 import gc
 import importlib.util
 import json
@@ -57,13 +60,16 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import FrameType
 from urllib.parse import parse_qs, quote, urlparse
 
 import pytest
 
 from kiss.agents.sorcar import web_stealth
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.core.tool_interrupt import inject_async_exception
+from kiss.core.tool_interrupt import ToolCallInterrupted, inject_async_exception
+from kiss.tests.agents.sorcar.test_webuse_unresponsive_page_timeout import _stop_in
+from kiss.tests.server.pause import Pause
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
 
@@ -201,8 +207,10 @@ class _Handler(BaseHTTPRequestHandler):
     403); ``/so-nocaptcha?pass=1|0`` is Stack Overflow's "Human
     verification" page with reCAPTCHA's two frames (served by the test's
     route on www.google.com), whose tick either submits the page to
-    ``/so-nocaptcha-done`` or opens the puzzle; ``/links?to=P`` is a page
-    with a link to *P* and a search form submitting to *P*.
+    ``/so-nocaptcha-done`` or opens the puzzle, and with ``back=N`` leads
+    back to the page that led there on all but the *N*-th request;
+    ``/links?to=P`` is a page with a link to *P* and a search form
+    submitting to *P*.
     """
 
     challenge_hits: dict[str, int] = {}
@@ -309,6 +317,9 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/so-nocaptcha":
             query = parse_qs(urlparse(self.path).query)
             body = _SO_NOCAPTCHA_PAGE.replace("PASS", query.get("pass", ["0"])[0])
+            n = self.challenge_hits[self.path] = self.challenge_hits.get(self.path, 0) + 1
+            if n < int(query.get("back", ["0"])[0]):
+                body = body.replace("'/so-nocaptcha-done'", "document.referrer")
         elif path == "/so-nocaptcha-done":
             body = "<title>Real content</title><body><h1>Welcome</h1></body>"
         elif path == "/links":
@@ -678,6 +689,21 @@ def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, s
         web_stealth.stop_virtual_display()
     assert not _open_fds() - fds_before
     assert atexit._ncallbacks() == callbacks_before
+    # A daemon holding more than FD_SETSIZE descriptors gets a displayfd
+    # pipe numbered above 1023, which ``select.select`` refused (C/C03-F1).
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 2048), hard), hard))
+    held = [os.open(os.devnull, os.O_RDONLY)]
+    try:
+        while held[-1] < 1024:
+            held.append(os.open(os.devnull, os.O_RDONLY))
+        assert web_stealth.virtual_display() is not None
+        web_stealth.stop_virtual_display()
+    finally:
+        for fd in held:
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+    assert not _open_fds() - fds_before
     # Descriptor exhaustion: with two descriptors of headroom the pipe
     # still fits but Popen's own pipe does not; with none, not even the
     # pipe does (where a descriptor another thread opened meanwhile lands
@@ -751,6 +777,15 @@ def test_broken_xvfb_binary_means_no_virtual_display(tool, tmp_path):
     try:
         assert web_stealth.virtual_display() is None
         assert web_stealth._XVFB_PROC is None
+        # Bytes that are no display number fail the call: the error reaches the
+        # caller from the start-up thread, which first terminated the wrapper.
+        fake.write_text('#!/bin/sh\nprintf "\\377\\n" > "/proc/self/fd/$2"\nexec sleep 300\n')
+        with pytest.raises(UnicodeDecodeError):
+            web_stealth.virtual_display()
+        wrappers = subprocess.run(
+            ["pgrep", "-P", str(os.getpid()), "-f", "^sh -c Xvfb -displayfd "], capture_output=True
+        ).stdout
+        assert not wrappers and web_stealth._XVFB_PROC is None
     finally:
         os.environ["PATH"] = saved_path
     assert web_stealth.virtual_display() is not None
@@ -796,7 +831,7 @@ def test_stop_during_xvfb_startup_leaves_no_wrapper_behind(tool, tmp_path):
             time.sleep(0.05)
         xvfb_pid = int(pid_file.read_text())
         assert os.path.exists(f"/proc/{xvfb_pid}")
-        time.sleep(0.2)  # the thread is now polling the displayfd pipe
+        time.sleep(0.2)  # its start-up thread is now polling the displayfd pipe
         assert inject_async_exception(thread.ident or -1, KeyboardInterrupt) == 1
         thread.join(timeout=15)
         assert not thread.is_alive()
@@ -815,77 +850,128 @@ def test_stop_during_xvfb_startup_leaves_no_wrapper_behind(tool, tmp_path):
     assert web_stealth.virtual_display() is not None
 
 
-def test_stop_after_xvfb_reported_its_display_leaves_it_owned_or_dead(tool, tmp_path):
-    """A14-4 (astra): a Stop landing once the display number was read must not orphan Xvfb.
+def _start_display(outcome: list[object]) -> None:
+    """Thread body: record what ``virtual_display`` returned, or the exception that ended it."""
+    try:
+        outcome.append(web_stealth.virtual_display())
+    except BaseException as error:  # the Stop under test, or what replaced it
+        outcome.append(type(error))
 
-    The display number read, the ``finally`` no longer terminated the
-    wrapper, but the owner (``_XVFB_PROC``) was published only
-    afterwards: a Stop in between left the wrapper and its Xvfb running
-    with no owner, so ``stop_virtual_display`` could not reap them and
-    the next launch started a second display.  The Stop is raised, on
-    the task thread, at the statement that follows the ``try`` /
-    ``finally`` of ``virtual_display`` (the auditor's injection point).
+
+def _group_alive(pgid: int) -> bool:
+    """Whether process group *pgid* still has a member."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+class _StopCallerAt:
+    """Profile hook: inject the task's Stop into the calling thread at one moment of start-up.
+
+    Set with ``threading.setprofile``, it runs on whichever thread
+    executes the start-up; the Stop is the runner's own, raised in
+    ``caller`` at its next check point.  The moment is the first time,
+    once the wrapper is spawned, that the Python function with code
+    *site* returns (*event* ``"return"``) or the builtin *site* does
+    (``"c_return"``); with no such *event* the hook only watches.  The
+    wrapper's ``Popen`` is kept for the test.
+    """
+
+    def __init__(self, event: str, site: object) -> None:
+        self.event, self.site = event, site
+        self.outcome: list[object] = []
+        self.caller = threading.Thread(target=_start_display, args=(self.outcome,), daemon=True)
+        self.wrapper: subprocess.Popen[bytes] | None = None
+        self.fired = False
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        if event == "return" and frame.f_code is subprocess.Popen.__init__.__code__:
+            self.wrapper = self.wrapper or frame.f_locals["self"]
+        if self.wrapper is None or self.fired or event != self.event:
+            return
+        if (arg if event == "c_return" else frame.f_code) is self.site:
+            self.fired = True
+            inject_async_exception(self.caller.ident or -1, KeyboardInterrupt)
+
+
+@pytest.mark.parametrize(
+    ("event", "site"),
+    [
+        pytest.param("return", subprocess.Popen.__init__.__code__, id="wrapper spawned"),
+        pytest.param("c_return", os.close, id="write end closed"),
+        pytest.param("return", web_stealth._read_display_number.__code__, id="display number read"),
+    ],
+)
+def test_stop_at_any_moment_of_xvfb_startup_leaves_it_owned_or_dead(tool, event, site):
+    """A Stop landing on the caller at any moment of the start-up must not orphan Xvfb.
+
+    The start-up ran on the calling task thread, where a Stop is raised
+    as a call returns, before its result is bound.  As ``Popen``
+    returned, the wrapper and its Xvfb lived on with no owner
+    (B/S13-F1).  As the pipe's write end was closed, the ``finally``
+    closed its number again: the ``OSError`` replaced the Stop and
+    skipped the wrapper's termination (A/S13-F8).  Once the display
+    number was read, the owner was not published yet (A14-4, astra).
     """
     tool.close()
     web_stealth.stop_virtual_display()
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    pid_file = tmp_path / "xvfb.pid"
-    # Reports its pid and a display number on the displayfd (reopened
-    # through /proc: a shell redirection takes one-digit fd numbers only),
-    # then lives on.
-    fake = fake_bin / "Xvfb"
-    fake.write_text(
-        f'#!/bin/sh\necho $$ > {pid_file}\necho 42 > "/proc/self/fd/$2"\nexec sleep 300\n'
-    )
-    fake.chmod(0o755)
-    source = Path(web_stealth.__file__).read_text(encoding="utf-8").splitlines()
-    start = next(i for i, line in enumerate(source) if line.startswith("def virtual_display("))
-    target = 1 + next(  # 1-based
-        i for i, line in enumerate(source) if i > start and line == "    if display is None:"
-    )
-    outcome: list[object] = []
-
-    def stop_at_target(frame, event, arg):  # noqa: ANN001, ANN202
-        if frame.f_code.co_name != "virtual_display":
-            return None
-        if event == "line" and frame.f_lineno == target:
-            raise KeyboardInterrupt
-        return stop_at_target
-
-    def start_display() -> None:
-        sys.settrace(stop_at_target)
-        try:
-            outcome.append(web_stealth.virtual_display())
-        except KeyboardInterrupt:
-            outcome.append(KeyboardInterrupt)
-        finally:
-            sys.settrace(None)
-
-    saved_path = os.environ["PATH"]
-    os.environ["PATH"] = f"{fake_bin}:{saved_path}"
-    xvfb_pid = -1
+    hook = _StopCallerAt(event, site)
+    threading.setprofile(hook)
     try:
-        thread = threading.Thread(target=start_display, daemon=True)
-        thread.start()
-        thread.join(timeout=30)
-        assert not thread.is_alive()
-        assert outcome == [KeyboardInterrupt]
-        xvfb_pid = int(pid_file.read_text())
-        # The display number was read (the fake did not die early), so the
-        # Stop landed after the start-up guard: owned (then reaped here)
-        # or already dead, never a running orphan.
-        assert os.path.exists(f"/proc/{xvfb_pid}")
+        hook.caller.start()
+        hook.caller.join(timeout=30)
+        assert not hook.caller.is_alive()
+        assert hook.outcome == [KeyboardInterrupt]
+        # Owned (then reaped here) or already dead, never a running orphan.
         web_stealth.stop_virtual_display()
+        assert hook.wrapper is not None
         deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and os.path.exists(f"/proc/{xvfb_pid}"):
+        while time.monotonic() < deadline and _group_alive(hook.wrapper.pid):
             time.sleep(0.1)
-        assert not os.path.exists(f"/proc/{xvfb_pid}"), "fake Xvfb leaked past the Stop"
+        assert not _group_alive(hook.wrapper.pid), "the wrapper or its Xvfb leaked past the Stop"
     finally:
-        os.environ["PATH"] = saved_path
-        if xvfb_pid > 0:  # on failure: do not leave the fake behind for real
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(xvfb_pid, signal.SIGTERM)
+        threading.setprofile(None)
+        if hook.wrapper is not None and hook.wrapper.poll() is None:  # on failure: no orphan
+            os.killpg(hook.wrapper.pid, signal.SIGKILL)
+            hook.wrapper.wait(timeout=10)
+    assert web_stealth.virtual_display() is not None
+
+
+def _threads_since(others: set[threading.Thread]) -> set[threading.Thread]:
+    """The running threads that are not in *others*."""
+    return {thread for thread in threading.enumerate() if thread.ident and thread not in others}
+
+
+def test_caller_stopped_while_another_start_up_runs_starts_no_xvfb(tool):
+    """A request whose caller left while it waited for the lock is dropped, not started.
+
+    The start-up thread of a stopped caller outlives it, queued behind
+    the start-up that holds the lock: once that one ends without a
+    display, it must not start (and kill) an Xvfb for nobody.
+    """
+    tool.close()
+    web_stealth.stop_virtual_display()
+    hook = _StopCallerAt("", None)
+    others = set(threading.enumerate())
+    threading.setprofile(hook)
+    try:
+        with web_stealth._XVFB_LOCK:  # held as another caller's start-up holds it
+            hook.caller.start()
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and len(_threads_since(others)) < 2:
+                time.sleep(0.01)  # until the caller's start-up thread runs, queued
+            assert inject_async_exception(hook.caller.ident or -1, KeyboardInterrupt) == 1
+            hook.caller.join(timeout=30)
+            assert hook.outcome == [KeyboardInterrupt]
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and _threads_since(others):
+            time.sleep(0.01)  # until the queued start-up had its turn
+        assert not _threads_since(others)
+        assert hook.wrapper is None, "an Xvfb was started for a caller that had left"
+    finally:
+        threading.setprofile(None)
     assert web_stealth.virtual_display() is not None
 
 
@@ -1267,6 +1353,41 @@ def test_press_and_hold_bar_is_held_like_a_person(tool, server):
     assert time.monotonic() - start < 12 + 10 + 10
 
 
+def test_stop_during_a_held_press_releases_the_button(tool, server):
+    """A Stop landing while the challenge widget is held lets the button go.
+
+    The release was reached only when the hold ran to its end: the page
+    kept the button down for whatever tool call came next.
+    """
+    tool.go_to_url(f"{server}/events")
+    stopping = functools.partial(_stop_in, threading.get_ident())
+    with Pause(web_stealth.hold_tremor.__code__, stopping), pytest.raises(ToolCallInterrupted):
+        tool._press_at({"x": 300.0, "y": 300.0, "width": 40.0, "height": 40.0}, 5.0)
+    ev = _ev(tool)
+    assert ev["down"] > 0, "the press never went down"
+    assert ev["up"] >= ev["down"], "the mouse button was left pressed"
+
+
+def _close(page, _entry) -> bool:
+    """A :class:`Pause` hook: close *page* at the entry of the hooked function."""
+    page.close()
+    return False
+
+
+def test_a_press_on_a_page_that_closes_raises_what_cut_it_short(tool, server):
+    """The release of a press whose page closed fails quietly: the hold's own error is raised."""
+    tool.go_to_url(f"{server}/events")
+    page = tool._page
+    tool._page = closing = tool._context.new_page()
+    error = web_stealth.playwright_api().Error
+    try:
+        with Pause(web_stealth.hold_tremor.__code__, functools.partial(_close, closing)):
+            with pytest.raises(error, match=r"^Mouse\.move: "):
+                tool._press_at({"x": 300.0, "y": 300.0, "width": 40.0, "height": 40.0}, 5.0)
+    finally:
+        tool._page = page
+
+
 def test_press_and_hold_two_step_variant_is_pressed_again(tool, server):
     """A bar that asks to "press again when prompted" gets a second hold, not a note.
 
@@ -1350,6 +1471,12 @@ def test_press_and_hold_button_narrower_than_its_widget_is_held(tool, server):
     assert time.monotonic() - start < 12 + 10 + 10
 
 
+def _live_frame_handles(tool: WebUseTool) -> int:
+    """Count the element handles the driver keeps alive for the tool's browser."""
+    objects = tool._page._impl_obj._connection._objects.values()
+    return sum(getattr(obj, "_type", None) == "ElementHandle" for obj in objects)
+
+
 def test_press_and_hold_target_is_the_visible_frames_button(tool, server):
     """The target is the visible copy's button: not the element, a decoy or a hidden copy."""
     tool.go_to_url(f"{server}/inert")  # launches the browser when this test runs alone
@@ -1358,6 +1485,11 @@ def test_press_and_hold_target_is_the_visible_frames_button(tool, server):
     assert widget["width"] == 900, widget
     box = _widget_box(tool)
     assert box is not None, widget
+    # A poll keeps none of the frame handles it read the boxes through
+    # (five frames a poll here, the widget polled for as long as it shows).
+    handles = _live_frame_handles(tool)
+    assert tool._challenge_widget(web_stealth.PERIMETERX_CHECK) == box
+    assert _live_frame_handles(tool) == handles
     assert abs(box["x"] - widget["x"]) < 1 and abs(box["y"] - widget["y"]) < 1, (box, widget)
     assert (box["width"], box["height"]) == (200, 100), box
     # Every point the old press drew from (35-65 % of the element) misses it.
@@ -1514,6 +1646,30 @@ def test_recaptcha_box_is_ticked_after_a_turnstile_box_cleared_into_it(tool, ser
     assert elapsed < 2 * 12 + 10, elapsed
 
 
+def test_pages_handing_over_to_each_other_run_out_of_presses(tool, server):
+    """Each vendor's box is pressed once in one wait, however often the pages alternate.
+
+    The count restarted at every hand-over and each press renewed the
+    wait: a Turnstile box clearing into a reCAPTCHA box that leads back
+    to it was ticked for as long as the two alternated (four rounds
+    here, then content).  Turnstile's second showing is now waited out
+    and reported.
+    """
+    tool.go_to_url(f"{server}/inert")
+    tool._context.route("https://challenges.cloudflare.com/**", _serve_turnstile_widget)
+    tool._context.route("https://www.google.com/recaptcha/**", _serve_recaptcha_frames)
+    then = quote(f"/so-nocaptcha?pass=1&back=4&t={time.time_ns()}", safe="")
+    try:
+        start = time.monotonic()
+        tree = tool.go_to_url(f"{server}/turnstile?then={then}")
+        elapsed = time.monotonic() - start
+    finally:
+        tool._context.unroute("https://www.google.com/recaptcha/**")
+        tool._context.unroute("https://challenges.cloudflare.com/**")
+    assert tree.startswith("Note: 127.0.0.1:") and "/turnstile" in tool._page.url, tree[:300]
+    assert elapsed < 3 * 12 + 10, elapsed
+
+
 def test_stack_overflow_captcha_puzzle_ends_the_wait(tool, server):
     """A tick answered with the picture puzzle is reported at once, with the way out.
 
@@ -1656,6 +1812,48 @@ def test_semanticscholar_puzzle_is_answered_from_crossref(tool, server):
     assert 'heading "Another paper" [level=2]' in tree and "Cited by 0 (Crossref)" in tree
     assert "Begin" not in tree
     assert 3 <= elapsed < 15, elapsed
+
+
+def test_crossref_lookup_survives_a_network_change(tool, server, monkeypatch):
+    """A Crossref lookup that a host network change aborts is issued again.
+
+    On 12 Nov 2026 the bench's semanticscholar row and two of four reruns
+    fell back to the bare puzzle note because ``page.goto`` to
+    api.crossref.org died with ``net::ERR_NETWORK_CHANGED`` (other jobs'
+    Docker veth links come and go on this box).  Chromium raises that
+    error only for a real interface change, so the first Crossref
+    navigation fails with it here through the tool's own ``_goto``; the
+    real navigation then runs against the routed Crossref answer.
+    """
+    real_goto = tool._goto
+    crossref_calls: list[str] = []
+
+    def goto(url: str, wait_until: str = "domcontentloaded"):
+        if url.startswith(web_stealth.CROSSREF_WORKS_URL):
+            crossref_calls.append(url)
+            if len(crossref_calls) == 1:
+                raise web_stealth.playwright_api().Error(
+                    f"Page.goto: net::ERR_NETWORK_CHANGED at {url}"
+                )
+        return real_goto(url, wait_until)
+
+    tool.go_to_url(f"{server}/inert")
+    monkeypatch.setattr(tool, "_goto", goto)
+    tool._context.route("https://*.awswaf.com/**", _serve_inert_script)
+    tool._context.route("https://www.semanticscholar.org/**", _serve_aws_captcha_page)
+    tool._context.route("https://api.crossref.org/**", _serve_crossref_answer)
+    try:
+        tree = tool.go_to_url(_S2_PAPER_URL)
+    finally:
+        tool._context.unroute("https://api.crossref.org/**")
+        tool._context.unroute("https://www.semanticscholar.org/**")
+        tool._context.unroute("https://*.awswaf.com/**")
+    first = tree.splitlines()[0]
+    assert len(crossref_calls) == 2, crossref_calls
+    assert "'Real content paper Doe Roe' was looked up on Crossref" in first, first
+    assert "2 work(s) found" in first
+    assert 'heading "Real content paper <with> markup" [level=2]' in tree
+    assert tool._page.url.startswith(web_stealth.CROSSREF_WORKS_URL)
 
 
 @pytest.mark.parametrize(

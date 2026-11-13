@@ -58,6 +58,7 @@ from kiss.tests.lock_injection import (
     inject,
     lock_is_free,
 )
+from kiss.tests.persistence_helpers import close_db
 
 
 class _Peer(threading.Thread):
@@ -184,7 +185,7 @@ def _check_connections_closable() -> None:
         if not owner.is_alive() and not lock_is_free(conn.lock)
     ]
     assert not leaked, f"a dead thread left its connection lock held: {leaked}"
-    for name, target in (("_rw_lock", _take_write_lock), ("_close_db", persistence._close_db)):
+    for name, target in (("_rw_lock", _take_write_lock), ("close_db", close_db)):
         probe = threading.Thread(target=target, daemon=True)
         probe.start()
         probe.join(20.0)
@@ -253,7 +254,6 @@ def _redirect_home() -> None:
     os.environ["KISS_HOME"] = str(home)
     persistence._KISS_DIR = home
     persistence._DB_PATH = home / "history.db"
-    persistence._db_conn = None
 
 
 def run_hammer(name: str) -> None:

@@ -22,6 +22,7 @@ const {
   recordTimers,
   fireTimers,
   queueRaf,
+  readyTabId,
 } = require('./simplify2_harness');
 
 // main.js showSpinner() arms the wait spinner 250 ms after a transcript
@@ -31,7 +32,7 @@ const {
 const SPINNER_DELAY_MS = 250;
 
 function startRunningTask(win, posted, taskId) {
-  const tabId = posted.find(m => m.type === 'ready').tabId;
+  const tabId = readyTabId(posted);
   win._testApi.hideWelcome();
   send(win, {type: 'setTaskText', text: 'live task', tabId});
   send(win, {type: 'status', running: true, tabId});

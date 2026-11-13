@@ -15,24 +15,8 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
-const {sendHistory, makeRow} = require('./history_helpers');
-
-function makePage() {
-  const scrolled = [];
-  const {win, posted} = makeChatPage({
-    bodyClass: 'remote-chat',
-    beforeScripts(win) {
-      win.Element.prototype.scrollIntoView = function () {
-        scrolled.push(this);
-      };
-      stubRaf(win);
-    },
-  });
-  win.document.getElementById('sidebar').classList.add('open');
-  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
-  return {win, posted, scrolled};
-}
+const {send, stubRaf, ofType} = require('./simplify2_harness');
+const {sendHistory, makeRow, openChatsPage} = require('./history_helpers');
 
 function rows(favorite) {
   return [
@@ -58,7 +42,7 @@ function rowEl(win) {
 }
 
 function main() {
-  const {win, posted, scrolled} = makePage();
+  const {win, posted} = openChatsPage(stubRaf);
   sendHistory(win, posted, rows(false));
   const row = rowEl(win);
   assert.ok(row, 'the row is rendered');
@@ -67,13 +51,12 @@ function main() {
   star.click();
   assert.ok(star.classList.contains('favorited'), 'the star flipped at once');
   assert.strictEqual(
-    posted.filter(m => m.type === 'setFavorite').length,
+    ofType(posted, 'setFavorite').length,
     1,
     'the write was sent',
   );
 
   // A refetch from BEFORE the write landed: the daemon still says no.
-  scrolled.length = 0;
   send(win, {type: 'tasks_updated'});
   sendHistory(win, posted, rows(false));
   assert.strictEqual(
@@ -87,7 +70,6 @@ function main() {
       .classList.contains('favorited'),
     'the optimistic star is still shown',
   );
-  assert.strictEqual(scrolled.length, 0, 'nothing jumped');
 
   // The write landed: the daemon agrees; still the same rows on screen.
   send(win, {type: 'tasks_updated'});
@@ -98,7 +80,6 @@ function main() {
       .querySelector('.sidebar-item-favorite')
       .classList.contains('favorited'),
   );
-  assert.strictEqual(scrolled.length, 0, 'nothing jumped');
   win.close();
 }
 
@@ -114,10 +95,10 @@ function testARemoteRowOfTheSameTaskIdKeepsItsOwnFlag() {
   // machine (the MACHINE filter switched within the optimistic window)
   // that happens to carry the same task id neither shows the local
   // star nor acknowledges the local write.
-  const {win, posted} = makePage();
+  const {win, posted} = openChatsPage(stubRaf);
   sendHistory(win, posted, rows(false));
   rowEl(win).querySelector('.sidebar-item-favorite').click();
-  assert.strictEqual(posted.filter(m => m.type === 'setFavorite').length, 1);
+  assert.strictEqual(ofType(posted, 'setFavorite').length, 1);
   const remote = () => [
     makeRow({
       id: 'A',

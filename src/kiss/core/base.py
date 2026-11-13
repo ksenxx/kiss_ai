@@ -61,6 +61,11 @@ if sys.platform == "win32":  # pragma: no branch
     SYSTEM_PROMPT += _WINDOWS_SUFFIX
     SYSTEM_PROMPT_LITE += _WINDOWS_SUFFIX
 
+#: UTF-8 bytes of an agent's name kept in its trajectory file name.  File
+#: systems cap a name at 255 bytes, and the prefix, the id, the stamp and
+#: the staging suffix of ``atomic_write_text`` share them with the name.
+TRAJECTORY_NAME_BYTES = 120
+
 
 @dataclass
 class TrajectoryScope:
@@ -255,7 +260,11 @@ class Base:
         # its workers after the task); every character that is not a
         # word character, dot or dash becomes ``_`` so the file name is
         # valid on every platform (Windows rejects ``: \ * ? " < > |``).
-        name_safe = re.sub(r"[^\w.-]", "_", self.name)
+        # A long name is cut on a character boundary: ``_save`` runs in
+        # ``KISSAgent.run``'s ``finally``, where "File name too long"
+        # would replace the run's result.
+        name_bytes = re.sub(r"[^\w.-]", "_", self.name).encode()[:TRAJECTORY_NAME_BYTES]
+        name_safe = name_bytes.decode(errors="ignore")
         return folder_path / f"trajectory_{name_safe}_{self.id}_{self._trajectory_stamp}.yaml"
 
     def _add_message(self, role: str, content: Any, timestamp: int | None = None) -> None:

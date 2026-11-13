@@ -123,6 +123,99 @@ KEY_PAGE = b"""<!DOCTYPE html>
   <div id="key-result"></div>
 </body></html>"""
 
+# Rows with a "Delete" button and an unlabelled text field each; a click
+# or a keystroke is logged in the title.  "Decor" is hidden from the
+# accessibility tree but visible on screen, as is all the last list item
+# holds, and the "Ghost" buttons take no pointer events: Playwright hands
+# out no element reference for those.
+ROWS_PAGE = b"""<!DOCTYPE html>
+<html><head><title>Rows</title></head>
+<body>
+  <div aria-hidden="true"><button>Decor</button> art</div>
+  <ul>
+    <li>one <button onclick="document.title += ' one'">Delete</button>
+      <input oninput="document.title += ' 1'"></li>
+    <li>two <button onclick="document.title += ' two'">Delete</button>
+      <input oninput="document.title += ' 2'"></li>
+    <li>three <button onclick="document.title += ' three'">Delete</button>
+      <input oninput="document.title += ' 3'"></li>
+  </ul>
+  <button id="g1" style="pointer-events:none">Ghost</button>
+  <button id="g2" style="pointer-events:none">Ghost</button>
+  <ol><li><div aria-hidden="true">bullet</div></li></ol>
+</body></html>"""
+
+# Two cards that are links of one name, next to a link hidden from the
+# accessibility tree but visible on screen.  The snapshot the ids come from
+# leaves a card's name to the heading inside it.  Below them: text in a
+# plain container, a container that is nothing but its label (on screen,
+# then without a box), an iframe, a link that says more than a name holds,
+# a link named by some of what it contains, and two links the pointer
+# reaches only through what they hold (one takes no pointer events, the
+# other has no box of its own).
+CARDS_PAGE = b"""<!DOCTYPE html>
+<html><head><title>Cards</title></head>
+<body><main>
+  <a id="one" href="#" onclick="document.title='first';return false"><h2>Open</h2></a>
+  <a id="two" href="#" onclick="document.title='second';return false"><h2>Open</h2></a>
+  <a aria-hidden="true" href="#">decorative</a>
+  <div>plain words</div>
+  <div aria-label="Price: it's 5" style="width:9px;height:9px"></div>
+  <span title="unseen"></span>
+  <iframe srcdoc="<button>Inner</button>"></iframe>
+  <a href="#"><p>%s</p></a>
+</main>
+<a href="#" onclick="document.title='rich';return false"><h3>It's: 5</h3><p>stars <b>now</b></p>
+  <figure><img alt="Photo" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" width="9"
+    height="9"></figure>
+  <div aria-hidden="true">unsaid <i>words</i></div><ul><li>item</li></ul></a>
+<a href="#" aria-label="Swatch" style="pointer-events:none"
+  onclick="document.title='swatch';return false"><span
+  style="display:inline-block;width:9px;height:9px;pointer-events:auto"></span></a>
+<div style="position:relative;height:9px"><a href="#" aria-label="Badge"
+  onclick="document.title='badge';return false"><span
+  style="position:absolute;width:9px;height:9px"></span></a></div>
+</body></html>""" % (b"word " * 190)
+
+# Its tree: what Playwright's plain ARIA snapshot of the page says, with an id
+# on each link and the label of the container that is on screen as its text.
+CARDS_TREE = f"""\
+- main:
+  - [1] link "Open":
+    - /url: "#"
+    - heading "Open" [level=2]
+  - [2] link "Open":
+    - /url: "#"
+    - heading "Open" [level=2]
+  - text: plain words
+  - text: "Price: it's 5"
+  - iframe
+  - [3] link:
+    - /url: "#"
+    - paragraph: {('word ' * 190).strip()}
+- [4] 'link "It''s: 5 stars now item"':
+  - /url: "#"
+  - 'heading "It''s: 5" [level=3]'
+  - paragraph: stars now
+  - figure:
+    - img "Photo"
+  - list:
+    - listitem: item
+- [5] link "Swatch":
+  - /url: "#"
+- [6] link "Badge":
+  - /url: "#\""""
+
+# A button next to an iframe of another site (``localhost``, so a renderer of
+# its own) whose script never returns: the iframe is wedged, the page is not.
+FRAMED_PAGE = b"""<!DOCTYPE html>
+<html><head><title>Framed</title></head>
+<body>
+  <button onclick="document.title = 'Pressed'">Press</button>
+  <iframe src="http://localhost:%s/spin"></iframe>
+</body></html>"""
+SPIN_PAGE = b"<!DOCTYPE html><html><body><script>while (true) {}</script></body></html>"
+
 # A form whose submission the server answers only after SLOW_POST_SECS,
 # longer than the 5 s bound of the positioned click in ``_human_click``.
 SLOW_FORM_PAGE = b"""<!DOCTYPE html>
@@ -156,6 +249,10 @@ def http_server():
                 "/empty": EMPTY_PAGE,
                 "/newtab": NEW_TAB_PAGE,
                 "/keytest": KEY_PAGE,
+                "/rows": ROWS_PAGE,
+                "/cards": CARDS_PAGE,
+                "/framed": FRAMED_PAGE % self.headers.get("Host", "").rsplit(":", 1)[-1].encode(),
+                "/spin": SPIN_PAGE,
                 "/slowform": SLOW_FORM_PAGE,
                 "/hostile-title": HOSTILE_TITLE_PAGE,
             }
@@ -298,6 +395,135 @@ class TestClick:
         result = web_tool.click(int(match.group(1)))
         assert result.startswith("Page: Slow Form"), result
         assert SLOW_POSTS == ["/slowform"]
+
+    def test_an_id_names_its_element_whatever_the_page_does_meanwhile(self, web_tool, http_server):
+        """An id acts on the element it was shown next to, or on nothing.
+
+        Ids were looked up again by role, name and position on every use.
+        After the page changed under the agent, the id of a removed row's
+        button clicked the next row's (the positions shift), the last
+        row's id clicked the first row's (the "only match" and "first
+        visible" fallbacks), and an id the tree never had was numbered
+        against a snapshot the agent had not seen.  Pinning the ids to
+        element references read before and after the tree left the ones
+        that could not be matched to be found by position still: of two
+        cards of one name that had traded places, the first id pressed
+        the second.  The tree and the reference behind each id are now
+        one snapshot of the page.
+        """
+
+        def rows(role: str) -> list[int]:
+            tree = web_tool.go_to_url(f"{http_server}/rows")
+            return [int(i) for i in re.findall(rf"\[(\d+)\] {role}", tree)]
+
+        def title() -> str:
+            return str(web_tool.evaluate_script("() => document.title"))
+
+        def refused(result: str, element_id: int) -> bool:
+            return f"element {element_id}: " in result and "get_page_content()" in result
+
+        # A row inserted above moves every position; the ids stay on their elements.
+        insert_row = (
+            "() => document.querySelector('ul').insertAdjacentHTML('afterbegin',"
+            " '<li>zero <button onclick=\"document.title += \\' zero\\'\">Delete</button>"
+            "<input oninput=\"document.title += \\' 0\\'\"></li>')"
+        )
+        arrive_for_a_while = (
+            "() => { window.busy = true; const until = performance.now() + 300;"
+            f" const add = {insert_row};"
+            " (function tick() { add();"
+            " if (performance.now() < until) setTimeout(tick, 0); else window.busy = false; })(); }"
+        )
+        deletes = rows('button "Delete"')
+        assert len(deletes) == 3
+        web_tool.evaluate_script(insert_row)
+        assert web_tool.click(deletes[1]).startswith("Page: Rows two")
+        fields = rows("textbox")
+        web_tool.evaluate_script(insert_row)
+        assert web_tool.type_text(fields[2], "x").startswith("Page: Rows 3")
+
+        # A removed element's id is refused: the next row's button is not clicked...
+        deletes = rows('button "Delete"')
+        web_tool.evaluate_script("() => document.querySelectorAll('li')[1].remove()")
+        assert refused(web_tool.click(deletes[1]), deletes[1])
+        # ...nor the first row's for the last one's...
+        web_tool.evaluate_script("() => document.querySelectorAll('li')[1].remove()")
+        assert refused(web_tool.click(deletes[2]), deletes[2])
+        # ...and an element swapped for a look-alike is not the one the agent saw.
+        web_tool.evaluate_script(
+            "() => { const li = document.querySelector('li'); li.replaceWith(li.cloneNode(true)); }"
+        )
+        assert refused(web_tool.click(deletes[0]), deletes[0])
+        assert refused(web_tool.click(len(web_tool._elements) + 1), len(web_tool._elements) + 1)
+        assert title() == "Rows"
+        # An id of a document the tab has left is refused the same way, on the
+        # document it went back to as well (Playwright's own error named a frame).
+        web_tool.go_to_url(f"{http_server}/keytest")
+        deletes = rows('button "Delete"')
+        web_tool.evaluate_script("() => history.back()")
+        deadline = time.monotonic() + 10
+        while title() != "Key Test" and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert refused(web_tool.click(deletes[0]), deletes[0])
+        assert title() == "Key Test"
+
+        # Two cards of one name trade places: the id presses the card it was shown
+        # next to.  A card's name, which the snapshot leaves to the heading inside
+        # it, is shown; the link hidden from the accessibility tree is not, nor is
+        # what the iframe holds.
+        tree = web_tool.go_to_url(f"{http_server}/cards")
+        assert tree.split("\n\n", 1)[1] == CARDS_TREE
+        web_tool.evaluate_script(
+            "() => { const two = document.getElementById('two'); two.parentNode.prepend(two); }"
+        )
+        assert web_tool.click(1).startswith("Page: first")
+        assert web_tool.click(4).startswith("Page: rich")
+        # A link the pointer cannot reach itself is pressed through the node
+        # inside it that it can reach.
+        assert web_tool.click(5).startswith("Page: swatch")
+        assert web_tool.click(6).startswith("Page: badge")
+
+        # An element the pointer cannot reach, nor anything inside it (a button
+        # that takes no pointer events, an option of a closed list), has no
+        # reference to pin an id to: it is shown without one.  What is hidden from
+        # the accessibility tree is not shown at all.
+        rows("button")
+        tree = web_tool.get_page_content()
+        assert tree.endswith('- button "Ghost"\n- button "Ghost"\n- list:\n  - listitem'), tree
+        assert "Decor" not in tree
+        tree = web_tool.go_to_url(http_server)
+        assert '- option "Red" [selected]' in tree and "] option" not in tree, tree
+
+        # Rows arriving while the page is being read: the tree and its ids are one
+        # snapshot, so the id next to row two's button presses that button.
+        rows("button")
+        for pressed in range(1, 4):
+            web_tool.evaluate_script(arrive_for_a_while)
+            tree = web_tool.get_page_content()
+            deadline = time.monotonic() + 30
+            while web_tool.evaluate_script("() => String(window.busy)") == "true":
+                assert time.monotonic() < deadline
+                time.sleep(0.05)
+            match = re.search(r'text: two\n\s+- \[(\d+)\] button "Delete"', tree)
+            assert match, tree
+            assert web_tool.click(int(match.group(1))).startswith("Page: Rows" + " two" * pressed)
+
+    def test_ids_work_on_a_page_whose_iframe_does_not_answer(self, web_tool, http_server):
+        """An iframe that never answers holds the tree up for seconds, and breaks nothing.
+
+        The snapshot the tree and its ids come from reads the page's iframes too.
+        One wedged in a renderer of its own keeps it waiting until its deadline
+        for them (2 s), when the page's own part comes back.
+        """
+        try:
+            started = time.monotonic()
+            tree = web_tool.go_to_url(f"{http_server}/framed")
+            match = re.search(r'\[(\d+)\] button "Press"', tree)
+            assert match, tree
+            assert web_tool.click(int(match.group(1))).startswith("Page: Pressed")
+            assert time.monotonic() - started < 60
+        finally:
+            web_tool.go_to_url("about:blank")
 
     def test_click_does_not_adopt_a_tab_another_task_opened(self, web_tool, http_server):
         """A tab that appears during the click but was not opened by the page stays alone.

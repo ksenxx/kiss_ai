@@ -47,7 +47,8 @@ from pathlib import Path
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from kiss.core.brand import PRODUCT_NAME
@@ -70,6 +71,9 @@ the daemon admits as a machine link (:mod:`kiss.agents.sorcar.machines`):
 ssh.  Deleting a file revokes that machine at its next connection."""
 TLS_LOCK_FILE = ".tls.lock"
 """Lock file (in the TLS directory) serialising every writer of the directory."""
+TLS_LOCK_TIMEOUT_S = 30.0
+"""Upper bound on waiting for a sibling process that holds :data:`TLS_LOCK_FILE`
+(issuing a certificate takes well under a second)."""
 
 CA_VALIDITY_DAYS = 3650
 # Apple rejects TLS server certificates valid for more than 825 days,
@@ -77,7 +81,6 @@ CA_VALIDITY_DAYS = 3650
 SERVER_CERT_VALIDITY_DAYS = 820
 RENEWAL_THRESHOLD_DAYS = 30
 
-_ORGANIZATION = PRODUCT_NAME
 _CA_COMMON_NAME_PREFIX = f"{PRODUCT_NAME} Local CA"
 _HOSTNAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$")
 
@@ -101,11 +104,11 @@ def _subject(common_name: str) -> x509.Name:
     """Return the subject name of a certificate this module issues."""
     return x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, _ORGANIZATION),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, PRODUCT_NAME),
     ])
 
 
-def _write_private_key(path: Path, key: ec.EllipticCurvePrivateKey) -> None:
+def _write_private_key(path: Path, key: ec.EllipticCurvePrivateKey | rsa.RSAPrivateKey) -> None:
     """Write *key* as PEM to *path*, mode 0600, atomically replacing any old file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -135,13 +138,6 @@ def _write_certificate(path: Path, cert: x509.Certificate) -> None:
 
 def _load_certificate(path: Path) -> x509.Certificate:
     return x509.load_pem_x509_certificate(path.read_bytes())
-
-
-def _load_private_key(path: Path) -> ec.EllipticCurvePrivateKey:
-    key = serialization.load_pem_private_key(path.read_bytes(), password=None)
-    if not isinstance(key, ec.EllipticCurvePrivateKey):
-        raise ValueError(f"{path} is not an EC private key")
-    return key
 
 
 def _generate_key() -> ec.EllipticCurvePrivateKey:
@@ -268,22 +264,43 @@ def issue_server_cert(
     san = x509.SubjectAlternativeName(
         [x509.DNSName(n) for n in dns_names] + [x509.IPAddress(ip) for ip in ips],
     )
-    _issue_leaf(
-        cert_path, key_path, ca_cert, ca_key, dns_names[0], ExtendedKeyUsageOID.SERVER_AUTH, san,
+    issue_leaf(
+        cert_path, key_path, ca_cert, ca_key, _generate_key(), dns_names[0],
+        ExtendedKeyUsageOID.SERVER_AUTH, san,
     )
 
 
-def _issue_leaf(
+def issue_leaf[Key: (ec.EllipticCurvePrivateKey, rsa.RSAPrivateKey)](
     cert_path: Path,
     key_path: Path,
     ca_cert: x509.Certificate,
     ca_key: ec.EllipticCurvePrivateKey,
+    key: Key,
     common_name: str,
     extended_key_usage: x509.ObjectIdentifier,
-    san: x509.SubjectAlternativeName | None,
-) -> None:
-    """Write an end-entity certificate and its key signed by the CA (key file first)."""
-    key = _generate_key()
+    san: x509.SubjectAlternativeName | None = None,
+    content_commitment: bool = False,
+) -> tuple[x509.Certificate, Key]:
+    """Write an end-entity certificate for *key* signed by the CA, and *key* (key file first).
+
+    Valid for :data:`SERVER_CERT_VALIDITY_DAYS`, with the
+    ``digitalSignature`` key usage and one extended key usage.
+
+    Args:
+        cert_path: Where to write the PEM certificate.
+        key_path: Where to write the PEM private key (0600).
+        ca_cert: The CA certificate to chain to.
+        ca_key: The CA private key that signs the certificate.
+        key: The certificate's new private key.
+        common_name: The subject's Common Name.
+        extended_key_usage: The purpose the certificate is issued for.
+        san: The subject alternative names, for a certificate that has any.
+        content_commitment: Set the ``contentCommitment`` key usage too
+            (a certificate that signs documents).
+
+    Returns:
+        The certificate and *key*, in that order.
+    """
     subject = _subject(common_name)
     now = _now()
     builder = (
@@ -298,7 +315,7 @@ def _issue_leaf(
         .add_extension(
             x509.KeyUsage(
                 digital_signature=True,
-                content_commitment=False,
+                content_commitment=content_commitment,
                 key_encipherment=False,
                 data_encipherment=False,
                 key_agreement=False,
@@ -327,6 +344,7 @@ def _issue_leaf(
     )
     _write_private_key(key_path, key)
     _write_certificate(cert_path, cert)
+    return cert, key
 
 
 def _expiring(cert: x509.Certificate) -> bool:
@@ -334,22 +352,22 @@ def _expiring(cert: x509.Certificate) -> bool:
     return cert.not_valid_after_utc - _now() <= datetime.timedelta(days=RENEWAL_THRESHOLD_DAYS)
 
 
-def _current_pair(
+def current_cert_and_key(
     cert_path: Path, key_path: Path, issuer: x509.Certificate | None = None,
-) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey] | None:
+) -> tuple[x509.Certificate, PrivateKeyTypes] | None:
     """Return the certificate and key at the paths when they need no re-issue, else ``None``.
 
     Current means: both files exist, parse and match, the certificate's
     validity has started (a pair made while the clock ran ahead is one
     clients reject as not yet valid) and is not ending within
     :data:`RENEWAL_THRESHOLD_DAYS` and, when *issuer* is given, *issuer*
-    signed it.
+    signed it.  The caller checks that the key is of the type it issues.
     """
     if not cert_path.is_file() or not key_path.is_file():
         return None
     try:
         cert = _load_certificate(cert_path)
-        key = _load_private_key(key_path)
+        key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
         if issuer is not None:
             cert.verify_directly_issued_by(issuer)
     except Exception:
@@ -361,6 +379,16 @@ def _current_pair(
     ):
         return None
     return cert, key
+
+
+def _current_pair(
+    cert_path: Path, key_path: Path, issuer: x509.Certificate | None = None,
+) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey] | None:
+    """:func:`current_cert_and_key` for the pairs this module issues, whose keys are EC keys."""
+    pair = current_cert_and_key(cert_path, key_path, issuer)
+    if pair is None or not isinstance(pair[1], ec.EllipticCurvePrivateKey):
+        return None
+    return pair[0], pair[1]
 
 
 def server_cert_is_current(
@@ -447,10 +475,10 @@ def ensure_local_client_pair(tls_dir: Path) -> tuple[Path, Path]:
         # extended key usage and no SAN; its Common Name names this host.
         # A remote daemon admits it once the local CA is in its
         # TRUSTED_CLIENTS_DIR.
-        _issue_leaf(
-            cert_path, key_path, ca_cert, ca_key,
+        issue_leaf(
+            cert_path, key_path, ca_cert, ca_key, _generate_key(),
             f"{PRODUCT_NAME} machine link {_host_or_localhost()}"[:64],
-            ExtendedKeyUsageOID.CLIENT_AUTH, None,
+            ExtendedKeyUsageOID.CLIENT_AUTH,
         )
     return cert_path, key_path
 
@@ -488,10 +516,11 @@ def enrolled_client_ca(peer_cert_der: bytes, trusted_dir: Path) -> str:
     """
     try:
         leaf = x509.load_der_x509_certificate(peer_cert_der)
-    except ValueError:
+        extensions = leaf.extensions
+    except Exception:  # not a certificate, or one whose extensions do not parse
         return ""
     try:
-        if leaf.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+        if extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
             return ""  # a CA certificate (the enrolled one itself) is not a client
     except x509.ExtensionNotFound:
         pass

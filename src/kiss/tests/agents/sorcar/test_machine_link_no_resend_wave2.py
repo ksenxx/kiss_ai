@@ -18,7 +18,9 @@ records every command it receives; nothing is mocked.
 The same stand-in, given a handler of the test's own, stages the link's
 races (audit A09): a retirement during the handshake, a socket abandoned
 under a request after the host slept, two stream handshakes of which the
-later one succeeds.
+later one succeeds.  It also plays the peer whose answer to the ``auth``
+frame is none a daemon gives, and the daemon that hangs up on a
+connection once it is in.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from websockets.protocol import State
 from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar.machines import Machine, MachineError, MachineLink
 from kiss.tests.local_ws import fake_daemon
+from kiss.tests.server.pause import Pause
 
 
 class _Daemon:
@@ -153,6 +156,44 @@ def test_a_kept_socket_found_closed_before_sending_is_replaced_and_the_command_s
         link.close()
         daemon.close()
     assert daemon.received == ["probe", "probe"]
+
+
+def _see_the_close_first(entered: dict[str, Any]) -> bool:
+    """At the entry of ``MachineLink._exchange``: wait for the daemon's close; hold nobody."""
+    _wait_closed(entered["self"])
+    return False
+
+
+def test_a_socket_found_closed_again_or_on_its_first_use_fails_the_request_unsent(
+    tmp_path: Path,
+) -> None:
+    """The daemon answers its first connection only and hangs up on the others once they are in.
+
+    A kept socket found closed is replaced once: the replacement found
+    closed too fails the request, and so does a link's first socket.
+    """
+    served: list[ServerConnection] = []
+
+    async def answer_the_first_connection_only(ws: ServerConnection) -> None:
+        served.append(ws)
+        if len(served) == 1:
+            await daemon._handle(ws)
+
+    daemon = _Daemon(tmp_path, answer_the_first_connection_only)
+    daemon.close_after_answer = True
+    link = _link(daemon)
+    try:
+        assert link.request({"type": "probe"}, "probeReply", timeout=10)["type"] == "probeReply"
+        with Pause(MachineLink._exchange.__code__, _see_the_close_first):
+            with pytest.raises(MachineError, match="did not answer"):
+                link.request({"type": "probe"}, "probeReply", timeout=10)
+            with pytest.raises(MachineError, match="did not answer"):
+                _link(daemon).request({"type": "probe"}, "probeReply", timeout=10)
+    finally:
+        link.close()
+        daemon.close()
+    assert daemon.received == ["probe"]
+    assert len(served) == 3
 
 
 def _wait_until(condition: Callable[[], bool], what: str) -> None:
@@ -295,4 +336,32 @@ def test_a_handshake_that_succeeds_after_another_failed_clears_the_back_off(
         other_failed.set()
         for stream in streams:
             stream.close()
+        daemon.close()
+
+
+def test_an_unexpected_answer_to_the_auth_frame_refuses_the_link_and_hangs_up(
+    tmp_path: Path,
+) -> None:
+    """A peer that answers the ``auth`` frame with another frame is no daemon to link to.
+
+    The dial closes the socket it opened, which the peer sees: nothing
+    of a refused handshake stays open.
+    """
+    hung_up = threading.Event()
+
+    async def answer_busy(ws: ServerConnection) -> None:
+        await ws.recv()  # the auth frame
+        await ws.send(json.dumps({"type": "busy"}))
+        await ws.wait_closed()
+        hung_up.set()
+
+    daemon = _Daemon(tmp_path, answer_busy, answer_auth=False)
+    link = _link(daemon)
+    try:
+        with pytest.raises(MachineError, match=r"refused the connection: \{'type': 'busy'\}"):
+            link.request({"type": "ping"}, "pong")
+        assert hung_up.wait(10), "the refused socket stayed open"
+        assert link._ws is None
+        assert link._health.retry_at > time.monotonic()
+    finally:
         daemon.close()

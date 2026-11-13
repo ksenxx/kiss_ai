@@ -6,9 +6,9 @@
 
 The runner rewrites a ``/xxx text`` prompt to a long ``run_agent``
 directive before handing it to the LLM.  Every user-visible surface
-(the ``task_history.task`` column, the frequent-tasks table, the
-chat's ``last_user_prompt``) MUST still show the raw ``/xxx text``
-the user typed — not the internal directive.  This is achieved via
+(the ``task_history.task`` column, the chat's ``last_user_prompt``)
+MUST still show the raw ``/xxx text`` the user typed — not the
+internal directive.  This is achieved via
 the ``_history_prompt`` kwarg on :meth:`ChatSorcarAgent.run` (added
 by the SEA feature), which decouples the LLM prompt from the
 persistence prompt.
@@ -46,8 +46,8 @@ def test_history_prompt_kwarg_persists_raw_slash_prompt(
     """``_history_prompt`` overrides every persistence + display write.
 
     The LLM sees the ``run_agent`` directive in ``prompt_template``;
-    the history row, ``last_user_prompt`` and frequent-tasks entry
-    all see the raw ``/slack post hi`` the user typed.
+    the history row and ``last_user_prompt`` see the raw
+    ``/slack post hi`` the user typed.
     """
     raw_prompt = "/slack post hi to #general"
     llm_directive = (

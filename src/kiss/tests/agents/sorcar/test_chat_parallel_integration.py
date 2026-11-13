@@ -36,6 +36,7 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_context,
     _save_task_result,
 )
+from kiss.tests.persistence_helpers import close_db
 
 
 def _retry_on_busy[T](op: Callable[[], T], attempts: int = 8) -> T:
@@ -120,17 +121,16 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
 
 def _redirect(tmpdir: str) -> tuple:
     """Point the persistence module at a temp directory and reset the conn."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore(saved: tuple) -> None:
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    (th._DB_PATH, th._KISS_DIR) = saved
 
 
 
@@ -144,9 +144,7 @@ class TestSequentialSharedChatId:
 
     def teardown_method(self) -> None:
         self.srv.shutdown()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -238,9 +236,7 @@ class TestParallelFlowSimulation:
 
     def teardown_method(self) -> None:
         self.srv.shutdown()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -335,9 +331,7 @@ class TestChatContextVisibleToSubAgents:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -398,7 +392,7 @@ class TestConcurrentThreadPoolExecutor:
 
     def teardown_method(self) -> None:
         self.srv.shutdown()
-        th._close_db()
+        close_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

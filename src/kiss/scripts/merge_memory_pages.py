@@ -20,8 +20,9 @@ Usage:
 For every page in ``SOURCE_DIR`` and in each of its domain memories:
 
 * a page ``DEST_DIR`` does not have is added -- unless ``DEST_DIR`` holds a
-  tombstone for it that is newer than the page: then the page was deleted
-  after it was last written, and it stays out;
+  tombstone for it that is not older than the page: then the page was
+  deleted after it was last written, and it stays out (deleted in the same
+  second, it stays out as a conflict, see below);
 * a page both have with the same bytes is left alone;
 * a page both have with different content is replaced when the source's
   ``updated`` is the newer (a page without a parsable ``updated`` counts its
@@ -38,7 +39,8 @@ than the deletion is removed, and the tombstone is copied so the deletion
 travels on to the next machine (over an older tombstone of the destination,
 never over a newer one); a page newer than the deletion was written again
 after it and wins -- the tombstone is dropped.  A page and a tombstone of
-the same second are a conflict, resolved in favour of the page.  A memory
+the same second are a conflict: the destination keeps what it has -- its
+page, or its deletion -- and the page is named on stdout.  A memory
 holding both a page and its tombstone -- a write interrupted before it could
 clear the tombstone -- keeps the page; the tombstone is stale and removed.
 
@@ -84,7 +86,7 @@ import shutil
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -125,7 +127,7 @@ def is_page(path: Path) -> bool:
     name = path.name
     if name in DEBRIS_NAMES or name.endswith("~") or ".sync-conflict-" in name:
         return False
-    if path.suffix != ".md" or not PAGE_NAME_RE.match(path.stem):
+    if path.suffix != ".md" or not PAGE_NAME_RE.fullmatch(path.stem):
         return False
     return not path.is_symlink() and path.is_file()
 
@@ -227,7 +229,7 @@ def is_domain_memory(path: Path) -> bool:
     Args:
         path: An entry of a memory directory.
     """
-    return bool(PAGE_NAME_RE.match(path.name)) and not path.is_symlink() and path.is_dir()
+    return bool(PAGE_NAME_RE.fullmatch(path.name)) and not path.is_symlink() and path.is_dir()
 
 
 def tombstones(memory_dir: Path) -> dict[str, tuple[Path, float]]:
@@ -236,7 +238,10 @@ def tombstones(memory_dir: Path) -> dict[str, tuple[Path, float]]:
     A tombstone is ``.tombstones/<name>`` holding the deletion time as an
     ``updated`` stamp (kiss.core.memoryfield.pages.MemoryDir.delete); one
     that holds something else counts its modification time.  Entries that
-    are not named like a page, or are symlinks, are not tombstones.
+    are not named like a page, or are symlinks, are not tombstones.  A
+    tombstone removed since it was listed is left out: the sync lists a
+    memory while agents use it, and writing a deleted page again removes
+    its tombstone.
 
     Args:
         memory_dir: A memory or domain memory directory.
@@ -246,11 +251,12 @@ def tombstones(memory_dir: Path) -> dict[str, tuple[Path, float]]:
     if not directory.is_dir() or directory.is_symlink():
         return found
     for path in directory.iterdir():
-        if not PAGE_NAME_RE.match(path.name) or path.is_symlink() or not path.is_file():
+        if not PAGE_NAME_RE.fullmatch(path.name) or path.is_symlink() or not path.is_file():
             continue
-        first_line = path.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
-        stamp = parse_stamp(first_line.strip())
-        found[path.name] = (path, path.stat().st_mtime if stamp is None else stamp)
+        with suppress(FileNotFoundError):
+            first_line = path.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
+            stamp = parse_stamp(first_line.strip())
+            found[path.name] = (path, path.stat().st_mtime if stamp is None else stamp)
     return found
 
 
@@ -317,8 +323,11 @@ def merge(
                     counts["conflicts"] += 1
                     conflicts.append(prefix + source.stem)
                     continue
-                deleted[0].unlink()
             install_file(source, dest)
+            if deleted is not None:
+                # Only now, with the page in place (as MemoryDir.write): a
+                # failed copy keeps the tombstone, and with it the deletion.
+                deleted[0].unlink()
             counts["added"] += 1
             continue
         dest_bytes = dest.read_bytes()
@@ -342,15 +351,13 @@ def merge(
             conflicts.append(prefix + source.stem)
     for name, (tombstone, deleted_at) in sorted(source_tombstones.items()):
         dest = dest_dir / f"{name}.md"
-        if dest.exists():
+        doomed = dest.exists()
+        if doomed:
             page_time = updated_at(dest, dest.read_bytes().decode("utf-8", errors="replace"))
             verdict = compare(deleted_at, page_time, tolerance)
             if verdict == 0:
                 counts["conflicts"] += 1
                 conflicts.append(prefix + name)
-            elif verdict > 0:
-                dest.unlink()
-                counts["removed"] += 1
             if verdict <= 0:
                 # A page written again after the deletion outlives it; a
                 # page too close to call is kept, deletion being the
@@ -359,11 +366,18 @@ def merge(
         # The deletion travels on, unless the destination knows a later one.
         known = dest_tombstones.get(name)
         if known is None or deleted_at > known[1]:
-            install_tombstone(tombstone, dest_dir, name)
+            if not install_tombstone(tombstone, dest_dir, name):
+                continue  # nowhere to record the deletion: it is not carried out
+        if doomed:
+            # Only now, with its tombstone in place (as MemoryDir.delete): a
+            # merge that fails in between leaves the page beside a tombstone,
+            # never a page gone with no record, which the next sync brings back.
+            dest.unlink()
+            counts["removed"] += 1
     return counts, conflicts
 
 
-def install_tombstone(tombstone: Path, dest_dir: Path, name: str) -> None:
+def install_tombstone(tombstone: Path, dest_dir: Path, name: str) -> bool:
     """Copy *tombstone* into *dest_dir*'s tombstone directory as *name*.
 
     A tombstone directory that is a symlink is not one (:func:`tombstones`
@@ -373,12 +387,17 @@ def install_tombstone(tombstone: Path, dest_dir: Path, name: str) -> None:
         tombstone: The tombstone to copy.
         dest_dir: The memory receiving it.
         name: The deleted page's name.
+
+    Returns:
+        True once the tombstone is in place; False when there is no
+        directory to put it in.
     """
     directory = dest_dir / TOMBSTONES_DIR
     if directory.is_symlink():
-        return
+        return False
     directory.mkdir(exist_ok=True)
     install_file(tombstone, directory / name)
+    return True
 
 
 @contextmanager
@@ -389,9 +408,16 @@ def memory_locks(memory_dir: Path, domains: list[str]) -> Iterator[None]:
     around every write and delete (``kiss.core.file_lock``): an exclusive
     lock on ``<memory>.lock`` beside the memory directory and on
     ``<memory>/<domain>.lock`` for a domain memory, ``flock`` on POSIX and
-    ``msvcrt.locking`` of the file's first byte on Windows.  An agent never
-    holds two of them at once, so taking several here, in a fixed order,
-    cannot deadlock with one.  The same protocol as ``memory_locks`` of the
+    ``msvcrt.locking`` of the file's first byte on Windows.  As there, each
+    directory is resolved first: a memory or domain memory reached through
+    a symlink has the lock of the directory it points to, taken once when
+    two names lead to one directory.  The locks are taken in the order of
+    those directories (a memory, then its own domain memories by name),
+    the same for every merge whatever names led to them: in the order of
+    the names, two merges into memories that reach two directories under
+    swapped names each held one lock and waited for the other.  An agent
+    never holds two of them at once, so it cannot deadlock with a merge
+    either.  The same protocol as ``memory_locks`` of the
     sync_history_and_memory SEA (``memory_delta.py``), repeated here
     because this file cannot import the package.
 
@@ -403,18 +429,18 @@ def memory_locks(memory_dir: Path, domains: list[str]) -> Iterator[None]:
     Raises:
         TimeoutError: When a lock is still held after :data:`LOCK_TIMEOUT`.
     """
-    paths = [Path(f"{memory_dir}.lock")] + [memory_dir / f"{name}.lock" for name in sorted(domains)]
-    descriptors: list[int] = []
-    try:
+    roots = {root.resolve() for root in [memory_dir, *(memory_dir / name for name in domains)]}
+    # Ordered by directory, as text: without symlinks, the order of the SEA's memory_locks.
+    paths = [Path(f"{root}.lock") for root in sorted(roots, key=str)]
+    # Each descriptor is closed whatever happens, and unlocked first only once its
+    # lock was taken: Windows refuses to unlock a byte range that is not held.
+    with ExitStack() as stack:
         for path in paths:
             descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-            descriptors.append(descriptor)
+            stack.callback(os.close, descriptor)
             _lock(descriptor, path)
+            stack.callback(_unlock, descriptor)
         yield
-    finally:
-        for descriptor in reversed(descriptors):
-            _unlock(descriptor)
-            os.close(descriptor)
 
 
 def _lock(descriptor: int, path: Path) -> None:
@@ -480,6 +506,10 @@ def main(argv: list[str]) -> int:
 
     Args:
         argv: ``[--tolerance SECONDS] SOURCE_DIR DEST_DIR``.
+
+    Returns:
+        Process exit status: 0 on success, 1 when the merge could not be
+        done, 2 on a usage error.
     """
     tolerance = 0.0
     if len(argv) == 4 and argv[0] == "--tolerance":
@@ -488,13 +518,17 @@ def main(argv: list[str]) -> int:
         except ValueError:
             tolerance = -1.0
         argv = argv[2:]
-    if len(argv) != 2 or tolerance < 0:
+    if len(argv) != 2 or not tolerance >= 0:  # "not >=": NaN is refused with the negatives
         print(
             f"Usage: {Path(sys.argv[0]).name} [--tolerance SECONDS] SOURCE_DIR DEST_DIR",
             file=sys.stderr,
         )
         return 2
-    counts, conflicts = locked_merge(Path(argv[0]), Path(argv[1]), tolerance)
+    try:
+        counts, conflicts = locked_merge(Path(argv[0]), Path(argv[1]), tolerance)
+    except OSError as exc:  # a lock still held (TimeoutError), or a path that is no directory
+        print(f"{Path(sys.argv[0]).name}: {exc}", file=sys.stderr)
+        return 1
     print(" ".join(f"{key} {value}" for key, value in counts.items()))
     for name in conflicts:
         print(name)

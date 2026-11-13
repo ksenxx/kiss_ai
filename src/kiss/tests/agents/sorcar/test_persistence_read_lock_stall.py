@@ -22,6 +22,13 @@ the default 5 ms switch interval hands the GIL back only every 45 ms,
 which leaves the writer about one try per load.  A count, not a
 wall-time ratio, so the test holds under a loaded CI box.
 
+The sub-agent loader also kept one read lock across the SELECTs of all
+of a parent's sub-agents (2026-11-10: a replay of a parent with 147 of
+them kept the event writer, and every flush waiting for it, out for the
+whole load).  The last test holds the loader inside its first SELECT
+until a writer waits for the lock, and checks that the writer gets it
+before the second SELECT.
+
 Everything is real: the real database, lock, writer thread and loaders.
 """
 
@@ -39,6 +46,9 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import persistence
+from kiss.tests.agents.sorcar import rwlock_probe
+from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
+from kiss.tests.persistence_helpers import close_db
 
 EVENTS = 1500
 LOADS = 3
@@ -58,7 +68,7 @@ def kiss_home(tmp_path: Path) -> Iterator[Path]:
     try:
         yield tmp_path
     finally:
-        persistence._close_db()
+        close_db()
         persistence._KISS_DIR, persistence._DB_PATH = saved
 
 
@@ -192,3 +202,74 @@ def test_adjacent_task_decodes_outside_the_read_lock(kiss_home: Path) -> None:
     for session in assert_lock_released_for_decode(load):
         assert session is not None and session["task_id"] == heavy_id
         assert len(session["events"]) == EVENTS
+
+
+class SelectOrder:
+    """``sys.setprofile`` hook of the loader thread: note each transcript SELECT, hold the first.
+
+    The loader is inside ``_select_event_rows``, so under the read lock,
+    from ``held`` until ``go``.
+    """
+
+    def __init__(self, order: list[str]) -> None:
+        self.order = order
+        self.held = threading.Event()
+        self.go = threading.Event()
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        """Note each ``_select_event_rows`` call and park the thread in the first."""
+        if frame.f_code is persistence._select_event_rows.__code__ and event == "call":
+            self.order.append("select")
+            if not self.held.is_set():
+                self.held.set()
+                self.go.wait(30)
+
+
+def load_sub_agents(parent_id: str, loaded: list[Any], watch: SelectOrder) -> None:
+    """Thread body: load the sub-agents of *parent_id* under *watch*."""
+    sys.setprofile(watch)
+    try:
+        loaded.append(persistence._load_subagent_rows_by_parent_task_id(parent_id))
+    finally:
+        sys.setprofile(None)
+
+
+def take_write_lock(order: list[str]) -> None:
+    """Thread body: note in *order* when the write lock was held."""
+    with persistence._rw_lock.write_lock():
+        order.append("write")
+
+
+def test_load_subagent_rows_lets_a_waiting_writer_in_between_sub_agents(kiss_home: Path) -> None:
+    """``_load_subagent_rows_by_parent_task_id`` takes the read lock once per sub-agent.
+
+    A writer that starts waiting while the first sub-agent's events are
+    read gets the lock before the second one's are, not after the last.
+    """
+    parent_id, chat_id = persistence._add_task("parent", "")
+    child_ids = []
+    for index in range(3):
+        extra: dict[str, object] = {"parent_task_id": parent_id}
+        child_id, _ = persistence._add_task(f"child {index}", chat_id, extra)
+        persistence._queue_chat_event({"type": "text", "text": f"event of child {index}"}, child_id)
+        child_ids.append(child_id)
+    persistence._flush_chat_events()
+    order: list[str] = []
+    loaded: list[Any] = []
+    watch = SelectOrder(order)
+    loader = threading.Thread(target=load_sub_agents, args=(parent_id, loaded, watch))
+    writer = threading.Thread(target=take_write_lock, args=(order,))
+    loader.start()
+    try:
+        assert watch.held.wait(30), "the loader never read a sub-agent's events"
+        writer.start()
+        assert wait_until(lambda: rwlock_probe.pending_writers(persistence._rw_lock) == 1, 30.0)
+    finally:
+        watch.go.set()
+    loader.join(30)
+    writer.join(30)
+    assert not loader.is_alive() and not writer.is_alive()
+    assert order == ["select", "write", "select", "select"], order
+    (rows,) = loaded
+    assert [r["task_id"] for r in rows] == child_ids
+    assert [r["events"][0]["text"] for r in rows] == [f"event of child {i}" for i in range(3)]

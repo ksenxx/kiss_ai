@@ -20,12 +20,15 @@ instant the daemon stops).
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import http.client
 import json
+import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -57,6 +60,25 @@ FORKER = """#!/bin/sh
 sleep 600 &
 echo $! >> "$KISS_HOME/forker-children"
 """  # breaks the rule that a service stays in the foreground
+STAYER = """#!/bin/sh
+trap 'echo asked >> "$KISS_HOME/stayer-asked"' TERM
+echo $$ > "$KISS_HOME/stayer-pid"
+while :; do sleep 600 & wait; done
+"""  # records a SIGTERM and lives on: only SIGKILL ends it
+OWNER = """import time
+from kiss.server.services import Services
+Services().start()
+time.sleep(600)
+"""  # a daemon as far as its services can tell
+PID_1 = """import os, subprocess, time
+from kiss.server.services import Services
+services = Services()
+services.start()
+while not os.path.exists(os.environ["KISS_HOME"] + "/flaky-runs"):
+    time.sleep(0.05)
+services.stop()
+print(subprocess.run(["ps", "-A", "-o", "stat="], capture_output=True, text=True).stdout)
+"""  # prints the state of every process left in its PID namespace
 
 
 def wait_until(check: Callable[[], Any], seconds: float = 30.0) -> Any:
@@ -172,6 +194,49 @@ def test_the_daemon_runs_its_services_while_it_runs(home: Path) -> None:
     assert (home / "flaky-runs").read_text() == runs
 
 
+@posix_only("sh scripts, process groups and ps")
+def test_services_die_with_a_daemon_that_is_killed(home: Path) -> None:
+    """A daemon that dies without ``stop`` (SIGKILL) still takes its services with it."""
+    (home / "services.d").mkdir(parents=True)
+    executable(home / "services.d" / "stayer", STAYER)
+    owner = subprocess.Popen(
+        [sys.executable, "-c", OWNER], env={**os.environ, "KISS_HOME": str(home)}
+    )
+    try:
+        stayer = int(wait_until(lambda: text_of(home / "stayer-pid").strip()))
+        try:
+            owner.kill()
+            owner.wait()
+            wait_until(lambda: not alive(stayer), 60)
+        finally:
+            with contextlib.suppress(OSError):  # its group, had it been left running
+                os.killpg(stayer, signal.SIGKILL)
+        assert text_of(home / "stayer-asked")  # asked to stop first, killed for staying
+    finally:
+        owner.kill()
+        owner.wait()
+
+
+@posix_only("sh scripts and ps")
+def test_a_daemon_that_is_pid_1_leaves_no_zombie_service(home: Path) -> None:
+    """As PID 1 (a container without an init) the daemon reaps no orphan: a service leaves none."""
+    namespace = ["unshare", "-Urpf", "--kill-child", "--mount-proc"]
+    try:
+        subprocess.run([*namespace, "true"], capture_output=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("no unprivileged PID namespace here")
+    (home / "services.d").mkdir(parents=True)
+    executable(home / "services.d" / "flaky", FLAKY)
+    states = subprocess.run(
+        [*namespace, sys.executable, "-c", PID_1],
+        env={**os.environ, "KISS_HOME": str(home)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    ).stdout.split()
+    assert states and not any(state.startswith("Z") for state in states)
+
+
 def get(port: int, target: str, accept_encoding: str = "") -> tuple[int, dict[str, str], bytes]:
     """One GET from a browser on this machine (``Accept-Encoding: identity`` when none given)."""
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
@@ -207,7 +272,8 @@ def test_text_answers_are_compressed_and_hashed_media_kept(daemon: RemoteDaemon)
     assert "pragma" not in headers and "expires" not in headers
     assert gzip.decompress(body) == original and len(body) < len(original) / 2
     # A browser that does not take gzip (or refuses it with q=0) gets the bytes as they are.
-    for accept in ("", "gzip;q=0", "br"):
+    # The space before ``q=`` may be a tab (RFC 9110 5.6.3).
+    for accept in ("", "gzip;q=0", "gzip;\tq=0", "br"):
         status, headers, body = get(daemon.port, main_js.group(1), accept)
         assert (status, body, headers["cache-control"]) == (200, original, IMMUTABLE)
         assert "content-encoding" not in headers and headers["vary"] == "Accept-Encoding"
@@ -216,7 +282,7 @@ def test_text_answers_are_compressed_and_hashed_media_kept(daemon: RemoteDaemon)
     # included -- unless a ``gzip`` member of its own refuses it.
     for accept in ("*", "br, *;q=0.5", "*, gzip;q=junk"):
         assert get(daemon.port, main_js.group(1), accept)[1]["content-encoding"] == "gzip", accept
-    for accept in ("*;q=0", "gzip;q=0, *", "*, gzip;q=0"):
+    for accept in ("*;q=0", "*; \tq=0", "gzip;q=0, *", "*, gzip;q=0"):
         assert "content-encoding" not in get(daemon.port, main_js.group(1), accept)[1], accept
     # The coding list may come as several header lines.
     conn = http.client.HTTPConnection("127.0.0.1", daemon.port, timeout=30)

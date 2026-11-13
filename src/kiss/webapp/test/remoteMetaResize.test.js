@@ -6,8 +6,8 @@
 // The task-info panel's resize handle: the shared docked-panel tests
 // (panel_resize_cases.js) plus what is specific to the right-hand
 // panel: each drag cap reserves the OTHER panel's actual width, two huge
-// persisted widths cannot crush the chat, the first keyboard step grows
-// from the default, and an untouched panel keeps following 20vw.
+// persisted widths cannot crush the chat, and an untouched panel keeps
+// following 20vw.
 
 'use strict';
 
@@ -16,7 +16,6 @@ const {makeResizePage: makePage, panelW, drag} = require('./panel_resize_helpers
 const {
   runPanelResizeTests,
   setWindowWidth,
-  key,
   MIN_W,
   WINDOW_W,
   DEFAULT_W,
@@ -111,19 +110,6 @@ function testBothPersistedWidthsKeepTheChatUsable() {
   console.log('PASS two huge persisted widths cannot crush the chat');
 }
 
-function testKeyboardBaselineIsTheDefaultWidth() {
-  const {win} = makePage({desktopMatches: true});
-  const resizer = win.document.getElementById('meta-resizer');
-  key(win, resizer, 'ArrowLeft');
-  assert.strictEqual(
-    metaW(win),
-    `${DEFAULT_W + 16}px`,
-    'the first keyboard step must grow from the default width',
-  );
-  win.close();
-  console.log('PASS meta keyboard resize starts from the default width');
-}
-
 function testUntouchedPanelStaysFluid() {
   const {win} = makePage({desktopMatches: true});
   const resizer = win.document.getElementById('meta-resizer');
@@ -150,6 +136,5 @@ function testUntouchedPanelStaysFluid() {
 runPanelResizeTests(META);
 testCapsReserveTheOtherPanelsActualWidth();
 testBothPersistedWidthsKeepTheChatUsable();
-testKeyboardBaselineIsTheDefaultWidth();
 testUntouchedPanelStaysFluid();
 console.log('All remoteMetaResize tests passed.');

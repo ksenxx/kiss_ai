@@ -32,10 +32,13 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import timeit
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -57,6 +60,8 @@ from kiss.core.processes import (
     run_process_group,
     start_process_group,
 )
+from kiss.core.tool_interrupt import inject_async_exception
+from kiss.tests.conftest import posix_only
 from kiss.tests.lock_injection import inject, lock_is_free
 
 
@@ -116,7 +121,7 @@ class _Worker(threading.Thread):
     def __init__(
         self,
         target: Callable[[], object],
-        hook: Callable[[FrameType, str, Any], None],
+        hook: Callable[[FrameType, str, Any], None] | None = None,
         log: Callable[[FrameType, str, Any], None] | None = None,
     ) -> None:
         super().__init__(daemon=True)
@@ -205,14 +210,25 @@ def test_stop_at_the_timeout_acquire_leaves_the_guard_free() -> None:
         proc.wait(10)
 
 
+# (innermost frame, its caller) of a thread waiting on its child's pipes: the
+# readiness wait of ``_read_some`` and of ``communicate`` on POSIX, then the
+# poll and the reader-thread join that stand for them on Windows.
+_PIPE_WAITS = {
+    ("select", "_pipe_readable"),
+    ("select", "_communicate"),
+    ("_windows_pipe_readable", "_pipe_readable"),
+    ("join", "_communicate"),
+}
+
+
 def _wait_in_pipe_select(worker: threading.Thread) -> subprocess.Popen[bytes]:
-    """Wait until *worker* is in ``_read_some``'s readiness wait; the child it is reading."""
+    """Wait until *worker* waits on its child's pipes (:data:`_PIPE_WAITS`); the child."""
     deadline = time.monotonic() + 30
     while True:
         frame = sys._current_frames().get(worker.ident or 0)
         caller = frame.f_back if frame is not None else None
-        if frame is not None and frame.f_code.co_name == "select" and caller is not None:
-            if caller.f_code.co_name == "_read_some":
+        if frame is not None and caller is not None:
+            if (frame.f_code.co_name, caller.f_code.co_name) in _PIPE_WAITS:
                 proc = _stack_local(frame, "proc")
                 assert isinstance(proc, subprocess.Popen)
                 return proc
@@ -220,21 +236,34 @@ def _wait_in_pipe_select(worker: threading.Thread) -> subprocess.Popen[bytes]:
         time.sleep(0.001)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the pipe wait is a readiness wait on POSIX")
-def test_stop_while_waiting_on_a_quiet_pipe_kills_and_reaps_the_child() -> None:
+@pytest.mark.parametrize(
+    "run",
+    [
+        partial(run_capped, _py("import time; time.sleep(60)"), limit=1000, timeout=60),
+        partial(run_process_group, _py("import time; time.sleep(60)"), timeout=60),
+    ],
+    ids=["run_capped", "run_process_group"],
+)
+def test_stop_while_waiting_on_a_quiet_pipe_kills_and_reaps_the_child(
+    run: Callable[[], object],
+) -> None:
     """A Stop landing while the task thread waits on a silent child's pipe is acted on promptly.
 
     An injected exception is raised between bytecodes, never inside the
     blocking ``epoll``/``kqueue`` wait: a single wait for the whole
     remaining timeout kept the Stop pending — and the child running —
     until the child spoke or the command's timeout (five minutes for a
-    staged diff) ran out.
+    staged diff) ran out.  ``run_process_group`` waited the same way in
+    one ``communicate`` (a minute for a HEIC converter), and on Windows
+    ``run_capped`` sat in a plain read of the pipe.  The Stop is the
+    daemon's own: its injector sets it at once in a thread that is not
+    starting a child.
     """
     raised: list[BaseException] = []
 
     def body() -> None:
         try:
-            run_capped(_py("import time; time.sleep(60)"), limit=1000, timeout=60)
+            run()
         except BaseException as exc:  # the injected Stop is the expected outcome
             raised.append(exc)
 
@@ -242,8 +271,8 @@ def test_stop_while_waiting_on_a_quiet_pipe_kills_and_reaps_the_child() -> None:
     worker.start()
     proc = _wait_in_pipe_select(worker)
     try:
-        assert inject(worker) == 1
-        worker.join(5)
+        assert inject_async_exception(worker.ident or 0, KeyboardInterrupt) == 1
+        worker.join(10)
         assert not worker.is_alive(), "the Stop sat behind the pipe wait"
         assert isinstance(raised[0], KeyboardInterrupt)
         # The child sleeps for a minute: an exit status now means the
@@ -475,6 +504,174 @@ def test_stop_landing_as_the_spawning_call_returns_kills_and_reaps_the_child(
     assert log.group_kills == [None], "the group was signalled after its leader was reaped"
 
 
+class _ForkReturnStop:
+    """Profile hook parking the worker as the C call that forks its child returns.
+
+    ``self.pid = _fork_exec(...)`` in ``Popen._execute_child``: the child
+    runs and its pid is not stored yet.  An exception pending when the
+    hook returns is raised right there, exactly as one set while the
+    thread was blocked in the fork is.
+    """
+
+    def __init__(self) -> None:
+        self.parked = threading.Event()
+        self.resume = threading.Event()
+        self.proc: subprocess.Popen[Any] | None = None
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> None:
+        if event != "c_return" or getattr(arg, "__name__", None) != "fork_exec":
+            return
+        sys.setprofile(None)
+        self.proc = _stack_local(frame, "proc")
+        self.parked.set()
+        self.resume.wait(30)
+
+
+@posix_only("the fork is CPython's ``_fork_exec``; Windows spawns with ``CreateProcess``")
+@pytest.mark.parametrize("run", _runners(_py("import time; time.sleep(60)")))
+def test_stop_sent_while_the_child_is_forked_takes_the_child_down(
+    run: Callable[[], object],
+) -> None:
+    """A Stop sent while the thread forks its child is raised once the child is in hand.
+
+    ``Popen`` stores the child's pid in the bytecode after the call that
+    forks it, and that call blocks with the GIL released until the
+    child execs.  A Stop set meanwhile was raised at the check ending
+    the call, before the pid was stored: 15 of 1200 Stops sent at random
+    moments of a 40 ms ``run_process_group`` left a child that nobody
+    could kill or reap.  The production injector now leaves a Stop for
+    a thread inside ``Popen.__init__`` to that thread, which sets it
+    once the spawn has ended.  The injector does not wait for the
+    spawn (the worker stays parked in the fork until it has returned):
+    it used to, for a second, and then set the Stop into the fork.
+    """
+    hook = _ForkReturnStop()
+    worker = _Worker(run, hook)
+    worker.start()
+    assert hook.parked.wait(30), "the worker never forked a child"
+    proc = hook.proc
+    assert proc is not None
+    try:
+        assert inject_async_exception(worker.ident or 0, KeyboardInterrupt) == 1
+        hook.resume.set()
+        worker.join(10)
+        assert not worker.is_alive(), "the task thread hung after the Stop"
+        _assert_stopped_child_is_gone(worker, proc)
+    finally:
+        hook.resume.set()
+        if proc.pid is not None and proc.returncode is None:
+            kill_process_tree(proc)
+            worker.join(10)
+            proc.wait(10)
+
+
+def _slow_exec_env(root: str, seconds: float) -> dict[str, str]:
+    """An environment whose ``PATH`` takes a child about *seconds* to search for ``sleep``.
+
+    Each entry ahead of the real one leads through thirty symbolic
+    links of 1600 path components each to a directory without
+    ``sleep``, a millisecond or so per failed ``execve``, and is
+    repeated until the search lasts *seconds*.
+    """
+    os.mkdir(os.path.join(root, "d"))
+    hop = "d/../" * 800
+    target = hop
+    for link in range(30):
+        os.symlink(target, os.path.join(root, f"s{link}"))
+        target = f"{hop}s{link}"
+    slow = os.path.join(root, "s29")
+    lookup = partial(os.path.exists, os.path.join(slow, "sleep"))
+    per_lookup = min(timeit.repeat(lookup, number=5, repeat=5)) / 5
+    real = os.path.dirname(shutil.which("sleep") or "")
+    return {"PATH": os.pathsep.join([slow] * int(seconds / per_lookup) + [real])}
+
+
+def _wait_in_fork(worker: threading.Thread) -> subprocess.Popen[Any]:
+    """Wait until *worker* runs ``Popen._execute_child``, which forks its child; the ``Popen``."""
+    deadline = time.monotonic() + 30
+    while True:
+        frame = sys._current_frames().get(worker.ident or 0)
+        if frame is not None and frame.f_code.co_name == "_execute_child":
+            proc = _stack_local(frame, "proc")
+            assert isinstance(proc, subprocess.Popen)
+            return proc
+        assert time.monotonic() < deadline, "the worker never forked a child"
+        time.sleep(0.001)
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="CPython forks with vfork on Linux only: elsewhere the fork returns before the exec",
+)
+@pytest.mark.parametrize("run", _runners(["sleep", "60"]))
+def test_stop_sent_seconds_before_the_exec_ends_takes_the_child_down(
+    run: Callable[..., object],
+) -> None:
+    """A Stop sent while the child is still seconds from its exec is raised with the child in hand.
+
+    Nothing parks the worker here: the child searches a ``PATH`` that
+    takes it two seconds (:func:`_slow_exec_env`) and ``vfork`` keeps
+    the task thread inside the forking call for as long, as an
+    executable on a slow mount does.  The injector waited for such a
+    spawn for a second and then set the Stop anyway: raised as the
+    fork returned, it lost the child.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        worker = _Worker(partial(run, env=_slow_exec_env(root, 2.0)))
+        worker.start()
+        proc = _wait_in_fork(worker)
+        started = time.monotonic()
+        try:
+            assert inject_async_exception(worker.ident or 0, KeyboardInterrupt) == 1
+            sent = time.monotonic() - started
+            worker.join(30)
+            held = time.monotonic() - started
+            assert not worker.is_alive(), "the task thread hung after the Stop"
+            _assert_stopped_child_is_gone(worker, proc)
+            assert sent < 1 < held, f"sent in {sent:.2f}s, raised {held:.2f}s after it was sent"
+        finally:
+            if proc.pid is not None and proc.returncode is None:
+                kill_process_tree(proc)
+                worker.join(10)
+                proc.wait(10)
+
+
+@pytest.mark.parametrize(
+    "parked_in",
+    [
+        subprocess.Popen.communicate,
+        pytest.param(
+            threading.Thread.start,
+            marks=pytest.mark.skipif(not IS_WINDOWS, reason="POSIX communicate starts no thread"),
+        ),
+    ],
+    ids=["communicate", "reader-start"],
+)
+def test_stop_raised_as_communicate_begins_kills_the_child_and_closes_its_pipes(
+    parked_in: Any,
+) -> None:
+    """A Stop raised as ``communicate`` begins, before a reader runs, leaves no pipe open.
+
+    On Windows ``communicate`` reads each pipe on a thread of its own,
+    which closes it at EOF, so ``run_process_group``'s handler left
+    both pipes alone once ``communicate`` had been entered: a Stop
+    raised there, before either reader existed, left them open for as
+    long as the caller kept the error; so did one raised as the first
+    reader was started, which was made by then and never ran.  The
+    handler now leaves a pipe only to a reader that claimed it.  POSIX
+    closes both pipes either way: the Windows branch runs on Windows
+    only, where this test is the regression, and nothing short of a
+    double for the platform reaches it here.  Nor is a reader that
+    cannot start (the address-space limit that provokes it is POSIX's)
+    or that starts while the handler runs (a window of a few bytecodes)
+    reproducible there: both end in the claim this test checks.
+    """
+    _stop_while_parked(
+        _ThreadStartStop(parked_in.__code__),
+        partial(run_process_group, _py("import time; time.sleep(60)"), timeout=60),
+    )
+
+
 _LEAVING_LAUNCHER = """\
 import pathlib, subprocess, sys
 child = subprocess.Popen(
@@ -487,7 +684,11 @@ pathlib.Path(sys.argv[1]).write_text(str(child.pid))
 
 
 def _running(pid: int) -> bool:
-    """Whether *pid* is alive and, where ``/proc`` tells, not a zombie awaiting init's reap."""
+    """Whether *pid* is alive and, where ``/proc`` tells, not dead already.
+
+    A killed process shows as a zombie awaiting init's reap (``Z``),
+    then for an instant, while init releases it, as dead (``X``).
+    """
     if not pid_alive(pid):
         return False
     if not Path("/proc/self").exists():
@@ -496,7 +697,7 @@ def _running(pid: int) -> bool:
         stat = Path(f"/proc/{pid}/stat").read_text()
     except OSError:  # reaped between the two looks
         return False
-    return stat.rsplit(")", 1)[1].split()[0] != "Z"
+    return stat.rsplit(")", 1)[1].split()[0] not in ("Z", "X")
 
 
 def test_stop_landing_as_the_exited_leader_is_seen_takes_its_descendants_down(

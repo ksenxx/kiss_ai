@@ -17,10 +17,19 @@ batch (a task flush waited forever), and a later take re-counted the
 orphan, leaving the watermark short for good.  The batch now stays in
 the deque until it is persisted, so a replacement writer simply takes it
 again, and a flusher waits for its own target event to leave the deque
-rather than for a counter: a writer dying between persisting a batch and
-popping it (the round-2 reviewer's case) only makes the replacement
-persist that batch again; it can no longer release a flusher whose event
-is still queued.
+rather than for a count of the events written: a writer dying between
+persisting a batch and popping it (the round-2 reviewer's case) only
+makes the replacement persist that batch again; it can no longer release
+a flusher whose event is still queued.
+
+2026-11-10: a waiting flusher looked for its event in the whole queue on
+every 50 ms tick.  Behind a blocked writer some twenty flushers scanned
+400,000 queued events each, under the GIL, and starved the thread whose
+progress would have unblocked the writer.  A flusher now fixes, once,
+the number of pops after which its event has left the queue, and the
+writer counts each pop right after making it: a writer that dies between
+the two leaves the count behind, never ahead, and an empty queue
+releases the flusher whatever the count says.
 
 The tests use real threads, the real writer and a real sqlite database;
 the writer deaths are produced the way the daemon stops a thread, by an
@@ -33,7 +42,9 @@ from __future__ import annotations
 
 import inspect
 import json
+import sys
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from types import FrameType
@@ -44,6 +55,7 @@ import pytest
 import kiss.agents.sorcar.persistence as th
 from kiss.core.locked import locked_call
 from kiss.server.task_runner import inject_keyboard_interrupt
+from kiss.tests.persistence_helpers import close_db
 
 
 @pytest.fixture
@@ -51,9 +63,9 @@ def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pat
     """Point persistence at a fresh database under *tmp_path*."""
     monkeypatch.setattr(th, "_KISS_DIR", tmp_path)
     monkeypatch.setattr(th, "_DB_PATH", tmp_path / "history.db")
-    th._close_db()
+    close_db()
     yield tmp_path
-    th._close_db()
+    close_db()
 
 
 def _event_count(task_id: str) -> int:
@@ -105,6 +117,45 @@ def test_a_task_scoped_flush_survives_a_concurrent_append(isolated_db: Path) -> 
     assert not flush.is_alive(), "the flush did not return"
     assert not errors, errors
     assert _event_count(task_a) == 1
+
+
+def test_a_stop_inside_the_writers_start_leaves_one_writer(isolated_db: Path) -> None:
+    """A Stop cutting the lazy start once the writer's OS thread exists leaves one writer.
+
+    The starter starts a writer again while it still holds the
+    interpreter (hence the switch interval), before the first thread
+    reports itself started: two writers would each persist the queued
+    event and each pop it, the second pop taking the next event unwritten.
+    """
+    task_id, _chat = th._add_task("stopped start")
+
+    def stop_once_the_thread_exists(_frame: FrameType, kind: str, arg: Any) -> None:
+        if kind == "c_return" and getattr(arg, "__name__", "") == "start_joinable_thread":
+            raise KeyboardInterrupt
+
+    def flush() -> None:
+        flusher = threading.Thread(target=th._flush_chat_events, args=(task_id,), daemon=True)
+        flusher.start()
+        flusher.join(30)
+        assert not flusher.is_alive(), "the flush hung"
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(5.0)
+    sys.setprofile(stop_once_the_thread_exists)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            th._queue_chat_event({"type": "text", "text": "once"}, task_id)
+        th._start_event_writer()
+    finally:
+        sys.setprofile(None)
+        sys.setswitchinterval(interval)
+    flush()
+    th._queue_chat_event({"type": "text", "text": "next"}, task_id)
+    flush()
+    rows = th._get_db().execute(
+        "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq", (task_id,),
+    ).fetchall()
+    assert [json.loads(row[0])["text"] for row in rows] == ["once", "next"]
 
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
@@ -163,30 +214,81 @@ def test_a_writer_that_dies_holding_a_batch_leaves_it_to_its_replacement(
     assert th._pending_count(None) == 0
 
 
+def test_flushes_waiting_behind_a_long_queue_do_not_rescan_it(isolated_db: Path) -> None:
+    """Flushes parked behind a long queue leave the CPU to the rest of the process.
+
+    Sixteen flushes wait for events queued behind 200,000 others while the
+    writer is blocked.  Each used to search the whole queue for its event
+    on every tick, which together took the GIL for most of the second
+    measured here; a comparison of two counts takes next to none of it.
+    """
+    bulk, _chat = th._add_task("bulk task")
+    waiting = [th._add_task(f"flushed task {index}")[0] for index in range(16)]
+    event = json.dumps({"type": "text", "text": "x"})
+    flushers = [
+        threading.Thread(
+            target=th._flush_chat_events, args=(task,), name=f"r2-waiting-{task}", daemon=True,
+        )
+        for task in waiting
+    ]
+    # The writer blocks on the write lock, so the queue stays long while
+    # the flushes wait behind it.
+    with th._rw_lock.write_lock():
+        for _ in range(200_000):
+            th._queue_chat_event(event, bulk)
+        for task in waiting:
+            th._queue_chat_event(event, task)
+        for flusher in flushers:
+            flusher.start()
+        time.sleep(0.5)  # every flush has fixed its target and waits by now
+        cpu = time.process_time()
+        time.sleep(1.0)
+        cpu = time.process_time() - cpu
+    for flusher in flushers:
+        flusher.join(60)
+    assert not any(flusher.is_alive() for flusher in flushers), "a flush did not return"
+    assert cpu < 0.25, f"sixteen waiting flushes used {cpu:.2f}s of CPU in one second"
+    assert [_event_count(task) for task in waiting] == [1] * len(waiting)
+
+
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
-@pytest.mark.parametrize("pops", [0, 1, th._BATCH_MAX - 1, th._BATCH_MAX])
+@pytest.mark.parametrize(
+    ("boundary", "pops"),
+    [
+        ("_event_deque.popleft()", 0),
+        ("_event_deque.popleft()", 1),
+        ("_event_deque.popleft()", th._BATCH_MAX - 1),
+        ("_pending_cond.notify_all()", th._BATCH_MAX),
+        ("_events_popped += 1", 0),
+        ("_events_popped += 1", th._BATCH_MAX - 1),
+    ],
+)
 def test_a_writer_that_dies_acknowledging_a_batch_cannot_release_a_later_flush(
-    isolated_db: Path, pops: int,
+    isolated_db: Path, boundary: str, pops: int,
 ) -> None:
     """A flush waiting for an event behind a persisted batch returns only once its own
-    event is persisted, whichever pop of the acknowledgement the writer dies at.
+    event is persisted, whichever step of the acknowledgement the writer dies at.
 
     Task A fills the writer's first batch and task B's event is next.  The
-    writer dies inside ``_release_batch_locked`` once *pops* of A's events
-    left the queue (``_BATCH_MAX``: after the last pop, before the wake-up).
-    The round-2 writer counted the batch as written before popping it, so
-    the replacement's re-persisting of A satisfied B's flusher with B still
-    queued (the round-3 review's case).  Now the flusher waits for B itself:
-    while the replacement is held before persisting the batch holding B,
-    the flusher is still waiting and B is still queued; it returns once B
-    is persisted.  The handshakes are trace events of the real functions.
+    writer dies inside ``_release_batch_locked`` at the line *boundary* of
+    the loop pass *pops*: before that pass's pop (*pops* of A's events
+    have left the queue), before its count (one more has left, uncounted),
+    or after the last pass, before the wake-up.  The round-2 writer counted
+    the batch as written before popping it, so the replacement's
+    re-persisting of A satisfied B's flusher with B still queued (the
+    round-3 review's case).  The writer now counts a pop only after making
+    it, and the flusher waits for the count of B's own pop: while the
+    replacement is held before persisting the batch holding B, the flusher
+    is still waiting and B is still queued; it returns once B is persisted,
+    also when a pop the dead writer never counted leaves the count one
+    short of B's.  The handshakes are trace events of the real functions.
     """
     task_a, _chat = th._add_task("bulk task")
     task_b, _chat = th._add_task("flushed task")
     event = json.dumps({"type": "text", "text": "x"})
     th._stop_event_writer()
+    popped = th._events_popped  # the queue is empty and nothing pops until the batch below
     source, first_line = inspect.getsourcelines(th._release_batch_locked)
-    boundary = "_pending_cond.notify_all()" if pops == th._BATCH_MAX else "_event_deque.popleft()"
     boundary_line = first_line + next(
         index for index, line in enumerate(source) if line.strip() == boundary
     )
@@ -248,7 +350,8 @@ def test_a_writer_that_dies_acknowledging_a_batch_cannot_release_a_later_flush(
         assert first_taken.wait(10), "the writer never took its first batch"
         flusher.start()
         assert target_fixed.wait(10), "the flush did not fix its target"
-        assert targets[0] is not None and targets[0][0] == task_b
+        # B is the 257th event queued and none has been popped yet.
+        assert targets == [popped + th._BATCH_MAX + 1]
         release_first.set()
         assert dying.wait(10), "the writer never reached the death boundary"
         writer = th._event_writer_thread

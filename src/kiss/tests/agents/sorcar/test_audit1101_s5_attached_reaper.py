@@ -33,13 +33,13 @@ import docker
 import pytest
 
 from kiss.agents.sorcar.docker_manager import _KILL_WAIT_S, DockerManager
-from kiss.tests.agents.seas.test_coding_sea_evidence_gate import _wait_until
 from kiss.tests.agents.sorcar.docker_test_containers import (
     IMAGE,
     image_container_ids,
     is_docker_available,
     remove_new_image_containers,
 )
+from kiss.tests.conftest import wait_for
 
 pytestmark = [
     pytest.mark.slow,
@@ -99,8 +99,8 @@ def test_a_closed_attached_manager_still_reaps_its_delayed_exec(cleanup: None) -
             info = owner.client.api.exec_inspect(exec_ids[0])
             return bool(info.get("Pid")) and not info.get("Running")
 
-        assert _wait_until(killed, timeout=15), "the delayed command ran on after the close"
-        assert _wait_until(_no_reaper_thread, timeout=10), "the reaper did not end with its exec"
+        assert wait_for(killed, timeout=15), "the delayed command ran on after the close"
+        assert wait_for(_no_reaper_thread, timeout=10), "the reaper did not end with its exec"
     finally:
         release.set()
         api.exec_start = real_start

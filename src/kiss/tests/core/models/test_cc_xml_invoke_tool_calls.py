@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -226,12 +227,16 @@ class TestInvokeTurns:
             '<parameter name="summary">123</parameter>\n'
             '<parameter name="options">{"a": [1, 2]}</parameter>\n</invoke>'
         )
-        calls, _, _, _ = _turn(fake_claude, _delta_lines(text, 5))
+        calls, _, _, m = _turn(fake_claude, _delta_lines(text, 5))
         assert calls[0]["arguments"] == {
             "success": False,
             "summary": "123",
             "options": {"a": [1, 2]},
         }
+        # The typed call is still the invoke of the turn's text: the next
+        # prompt shows it once, not again as a ``[Tool Call]`` line.
+        m.add_function_results_to_conversation_and_return([("finish", {"result": "ok"})])
+        assert "[Tool Call]" not in m._build_prompt()
 
         text = (
             '<invoke name="type_text">\n<parameter name="element_id">12</parameter>\n'
@@ -290,6 +295,22 @@ class TestInvokeTurns:
         text = "Done. See <inv"
         calls, _, shown, _ = _turn(fake_claude, _delta_lines(text, 4))
         assert calls == [] and shown == text
+
+    def test_a_loop_of_unclosed_blocks_is_read_once(self, fake_claude: Path) -> None:
+        """A repetition loop of blocks that never close costs one scan, not one per opener.
+
+        Every ``<invoke name="`` and ``<parameter name="`` searched the rest
+        of the text for a closer that was not there: 8,000 units took 18 s
+        when the turn ended, and as long in the panel filter once the block
+        closed.
+        """
+        loop = '<invoke name="Bash">\n<parameter name="command">ls\n' * 16_000
+        started = time.monotonic()
+        calls, content, shown, _ = _turn(fake_claude, _delta_lines(loop, 4096))
+        assert calls == [] and content == loop and shown == loop
+        calls, _, shown, _ = _turn(fake_claude, _delta_lines(loop + "</invoke>", 4096))
+        assert [(c["name"], c["arguments"]) for c in calls] == [("Bash", {})] and shown == ""
+        assert time.monotonic() - started < 20
 
 
 def test_parser_reads_only_line_opening_invokes() -> None:

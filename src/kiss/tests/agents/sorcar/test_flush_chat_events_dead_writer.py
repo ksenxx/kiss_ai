@@ -12,7 +12,7 @@ writer thread is ``None`` OR no longer alive::
 
 ``_flush_chat_events`` historically only checked ``is None`` before
 calling ``_event_queue.join()``.  When the writer thread had died (for
-example, it was stopped during a DB swap by ``_close_db`` /
+example, it was stopped during a DB swap by ``close_db`` /
 ``_stop_event_writer`` while items were still queued) the thread
 reference is non-``None`` but ``is_alive()`` is ``False``.  In that state
 ``join()`` waits forever for a ``task_done()`` that the dead writer can
@@ -42,17 +42,16 @@ from kiss.agents.sorcar.persistence import (
 
 
 def _redirect(tmpdir: str) -> tuple:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    saved = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return saved
 
 
 def _restore(saved: tuple) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+    th._DB_PATH, th._KISS_DIR = saved
 
 
 class TestFlushChatEventsDeadWriter:
@@ -65,9 +64,7 @@ class TestFlushChatEventsDeadWriter:
 
     def teardown_method(self) -> None:
         th._stop_event_writer()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

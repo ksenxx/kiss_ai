@@ -25,6 +25,7 @@
 
 const assert = require('assert');
 const {openSettings, closeSettings, typeInto} = require('./settings_helpers');
+const {chatTabs} = require('./history_helpers');
 const {
   makePage: makeSharedPage,
   send,
@@ -45,17 +46,6 @@ function assertNoDirectoryFields(win) {
     !labels.some(t => /^(Working|Memory) directory/.test(t)),
     'no settings label may read "Working directory" or "Memory directory"',
   );
-}
-
-// The chat tabs mirrored from the registry, in tab order. There is no
-// row of chat tabs any more (the Chats panel lists them), so the
-// internal tab list is the subject.
-function tabBarIds(win) {
-  // Array.from: the list comes from the JSDOM realm; deepStrictEqual
-  // compares prototypes too.
-  return Array.from(win._testApi.openTabs())
-    .filter(t => !t.isSubagentTab && !t.isContentTab)
-    .map(t => t.id);
 }
 
 function tabEntry(tabId, workDir) {
@@ -144,8 +134,11 @@ function testRemoteAdoptsGlobalWorkDirWithoutEcho() {
     type: 'tabs_state',
     tabs: [tabEntry('p-1', '/srv/project'), tabEntry('q-1', '/srv/other')],
   });
+  // There is no row of chat tabs any more (the Chats panel lists them),
+  // so the internal tab list is the subject.  Array.from: the list comes
+  // from the JSDOM realm, and deepStrictEqual compares prototypes too.
   assert.deepStrictEqual(
-    tabBarIds(win),
+    Array.from(chatTabs(win), t => t.id),
     ['p-1', 'q-1'],
     'the tab bar still shows every registry tab: the directory is where ' +
       'tasks run, not a filter',

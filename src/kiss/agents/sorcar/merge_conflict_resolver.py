@@ -164,13 +164,14 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
             compaction=merge_settings.get("compaction", True),
         )
     finally:
-        budget, tokens, steps = _live_agent_usage(agent)
         try:
+            budget, tokens, steps = _live_agent_usage(agent)
             _attribute_sub_usage(parent_agent, budget, tokens, steps, epoch=epoch)
         finally:
-            # Whatever the attribution did (a Stop can land in its lock
-            # wait): without ``subagentDone`` every surface watching the
-            # parent keeps the resolver's tab open, spinner and all.
+            # Whatever the accounting did (a Stop can land in reading the
+            # spend or in the attribution's lock wait): without
+            # ``subagentDone`` every surface watching the parent keeps
+            # the resolver's tab open, spinner and all.
             if printer is not None:
                 _notify_subagent_done(
                     printer, _persisted_task_id(agent), sub_tab_id, model_name,
@@ -192,6 +193,10 @@ def resolve_merge_conflict(
     (the first four parameters are its contract).  Must be called with
     the repository checked out on ``wt.original_branch`` and clean (the
     state ``_do_merge`` is in after a CONFLICT), under the same locks.
+    A checkout that holds a git operation of the user's (a cherry-pick
+    sequence, say), conflicts or changes to tracked files (theirs, or a
+    merge left in place around a file they saved meanwhile or that
+    could not be reset) is not touched.
 
     Args:
         parent_agent: The agent of the task whose merge conflicted; the
@@ -206,19 +211,29 @@ def resolve_merge_conflict(
     Returns:
         :attr:`MergeResult.SUCCESS` when the branch is merged and
         committed, :attr:`MergeResult.MERGE_FAILED` when the resolved
-        merge could not be committed (tree reset), otherwise
-        :attr:`MergeResult.CONFLICT` with the tree restored to clean.
+        merge could not be committed and is taken back, otherwise
+        :attr:`MergeResult.CONFLICT`: with the merge taken back, with
+        it left in place where git refused to (a warning says what the
+        checkout holds), or with a checkout that was not touched.  A
+        merge is taken back by its own paths
+        (:meth:`~kiss.agents.sorcar.git_worktree.GitWorktreeOps.abort_conflicted_merge`):
+        a file the user saved elsewhere while the agent ran stays.
     """
     repo = wt.repo_root
     before = GitWorktreeOps.status_porcelain(repo)
+    if GitWorktreeOps.operation_in_progress(repo) or any(
+        not line.startswith("??") for line in before.splitlines()
+    ):
+        # The cleanup below ends any sequence and resets every path the
+        # merge writes: what is there before the merge is the user's, or
+        # what a merge that could not be taken back left.
+        return MergeResult.CONFLICT
     head_before = GitWorktreeOps.head_sha(repo) or ""
     try:
         # Inside the ``try``: a Stop can land after git applied the
         # conflicting change but before this call returns, and only
         # the handler below restores the tree.
-        conflicted = GitWorktreeOps.begin_conflicted_merge(
-            repo, wt.branch, wt.baseline_commit, before,
-        )
+        conflicted = GitWorktreeOps.begin_conflicted_merge(repo, wt.branch, wt.baseline_commit)
         if conflicted is None:
             return MergeResult.CONFLICT
         if conflicted:
@@ -238,9 +253,10 @@ def resolve_merge_conflict(
     except BaseException:
         GitWorktreeOps.abort_conflicted_merge(repo, before, head_before)
         raise
-    if result == MergeResult.CONFLICT:
+    if result != MergeResult.SUCCESS:
         logger.warning(
-            "merge agent left branch %s unresolved; restoring clean tree", wt.branch,
+            "the merge of branch %s ended as %s; taking it back", wt.branch, result.value,
         )
-        GitWorktreeOps.abort_conflicted_merge(repo, before, head_before)
+        if not GitWorktreeOps.abort_conflicted_merge(repo, before, head_before):
+            return MergeResult.CONFLICT
     return result

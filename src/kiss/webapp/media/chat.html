@@ -61,13 +61,11 @@
 
     <div id="tab-status-bar">
       <div class="status">
-        <span class="status-side"><span id="status-text">Ready</span></span>
+        <span id="status-text">Ready</span>
         <span id="status-machine" title="Server machine"></span>
-        <span class="status-side status-side-right">
-          <span id="status-tokens" class="status-metric"></span>
-          <span id="status-budget" class="status-metric"></span>
-          <span id="status-steps" class="status-metric"></span>
-        </span>
+        <span id="status-tokens"></span>
+        <span id="status-budget"></span>
+        <span id="status-steps"></span>
       </div>
     </div>
 
@@ -593,9 +591,18 @@
             <input type="checkbox" id="cfg-compaction" checked>
             Compaction
           </label>
-          <label class="config-label config-checkbox">
+          <!-- chrome_bridge: ticked, the daemon starts the bridge that the
+               extension connects to at boot and right after the save
+               (the sheet saves when it closes), which is also what
+               installs the extension folder the label names
+               (chrome_bridge.start_if_enabled).  The folder shown is the
+               product's usual one (data-default) until the configData of
+               the daemon the sheet is for names its own (main.js
+               populateConfigForm).  The text is one element, so that it
+               stays one item of the label's flex row. -->
+          <label class="config-label config-checkbox" title="Ticked: the bridge that the &quot;{{PRODUCT_NAME}} Bridge&quot; extension connects to runs from daemon start. Clear: an agent's first use of your Chrome starts it.">
             <input type="checkbox" id="cfg-chrome-bridge">
-            Drive my Chrome: serve the "{{PRODUCT_NAME}} Bridge" extension (~/{{HOME_DIR}}/chrome_extension) from daemon start
+            <span class="config-checkbox-text">Drive my Chrome: tick this box and close Settings. Then, in Chrome on the computer that runs {{PRODUCT_NAME}}, open chrome://extensions, turn on Developer mode, click "Load unpacked" and select the folder <span id="cfg-chrome-extension-dir" data-default="~/{{HOME_DIR}}/chrome_extension">~/{{HOME_DIR}}/chrome_extension</span>. It is listed there as "{{PRODUCT_NAME}} Bridge". Leave Developer mode on: without it Chrome switches the extension off.</span>
           </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-victory-sound" checked>

@@ -31,9 +31,11 @@ from kiss.tests.conftest import posix_only
 
 
 def test_writing_commands_and_scratch_paths_are_recognised() -> None:
-    for path in ("tmp/x", "./tmp/a.log", "/u/repo/tmp/probe/out", "sub/tmp/notes", "tmp"):
+    for path in ("tmp/x", "./tmp/a.log", "/u/repo/tmp/probe/out", "sub/tmp/notes", "tmp",
+                 "/var/folders/T/kiss-sub-ab12cd34/probe.py"):  # a sub-agent's private folder
         assert eg.is_scratch_path(path), path
-    for path in ("tmpfile", "mytmp/x", "tmp/../a.py", "a.tmp", "src/a.py"):
+    for path in ("tmpfile", "mytmp/x", "tmp/../a.py", "a.tmp", "src/a.py", "src/kiss-sub-x.py",
+                 "/var/folders/T/kiss-sub-ab12cd34/../a.py"):
         assert not eg.is_scratch_path(path), path
     for command in ("echo x > f.txt", "cat a >> log", "tee out.txt", "cp a b", "mv a b",
                     "sed -i s/a/b/ f", "sed --in-place s/a/b/ f", "git apply p.diff",
@@ -88,6 +90,13 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
                     "sed -i -es/a/b/ src/a.py tmp/x/f", "sed -i -fscript.sed src/a.py tmp/x/f",
                     "sed -i -ne s/a/b/ src/a.py tmp/x/f", "sed -i --line-length 5 s/a/b/ src/a.py",
                     "sed -i -E -e s/a/b/ -e s/c/d/ a.py",
+                    # audit 2026-11-10 (B/S4-F4): GNU sed takes a script option after its
+                    # files, an abbreviated long one too, and only files after ``--``
+                    "sed -i src/a.py tmp/x/f -e s/a/b/", "sed -i src/a.py tmp/x/f --expr s/a/b/",
+                    "sed -i -e s/a/b/ tmp/x/f -- -a.py", "sed -i --exp=s/a/b/ src/a.py tmp/x/f",
+                    "sed -i src/a.py --fi=x.sed tmp/x/f",
+                    # ... and an abbreviated ``--in-place`` (real sed edits with all three)
+                    "sed --in s/a/b/ src/a.py", "sed --i s/a/b/ f", "sed --in-pl=.bak s/a/b/ f",
                     # a tool's subcommand that is a tool, a launcher's program (full-suite
                     # sweep 2026-11-03: `uv pip install -e .` had passed only because `pip`
                     # matched anywhere)
@@ -138,6 +147,8 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
                     "S=tmp/x; cp a $S/b", "mkdir -p tmp/x && T=tmp/x && mv tmp/old $T/new",
                     "cd /repo && S=tmp/x && gh api pages > $S/pages.json", "rm -rf /tmp/probe",
                     "chmod +x tmp/x/verify.sh", "dd if=/dev/zero of=tmp/x/blob bs=1k count=1",
+                    # a mode that starts with a dash is chmod's first operand, not an option
+                    "chmod -x tmp/x/verify.sh", "chmod -R -w tmp/x", "chmod -v -rw,o=r tmp/x/k",
                     "bash -c '# no command' > tmp/out", "sh -c ' ' > /dev/null",
                     "chmod --reference=tmp/ref tmp/log", "chown --reference tmp/ref tmp/log",
                     "chmod --reference=src/a.py tmp/log",  # the reference file is only read
@@ -145,6 +156,8 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
                     "sed -i s/a/b/ tmp/x/f", "sed -n -i.bak -e s/a/b/ --expression=p tmp/x/f tmp/y",
                     "sed -i -es/a/b/ tmp/x/f", "sed -nie s/a/b/ tmp/x/f", "sed -in s/a/b/ tmp/x/f",
                     "sed -i -l5 s/a/b/ tmp/x/f", "sed -i -E -e s/a/b/ -e s/c/d/ tmp/x/f",
+                    "sed -i tmp/x/f -e s/a/b/", "sed -i --exp=s/a/b/ tmp/x/f -- tmp/y",
+                    "sed --in s/a/b/ tmp/x/f",
                     "T=tmp/x && sed -i 's/^W = .*/W = 1/' $T/recompute.py && grep -n W $T/r.py",
                     # the command read as it was meant to run (audit 2026-11-03: a variable
                     # assigned after && used past the ; that ends its list)
@@ -197,6 +210,13 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
     # not a list: the text itself, where a quoted word is text, not a command
     assert not eg.writes_files({"commands": '{"a": "rm f"}'})
     assert not eg.writes_files({"commands": '{"a": "echo 1 > f"}'})
+    # the commands are the ones the tool runs, decoded as it decodes them (audit 2026-11-11,
+    # N1 and N4): a lone backslash (grep's ``\|``) and a raw newline in a string are no
+    # error, and text nested past the decoder's depth is one command like any other text
+    lone = r'''["grep -c 'a\|b' notes.txt > src/app.py", "git checkout main"]'''
+    assert eg.file_changes({"commands": lone}) == ["src/app.py", "git", "checkout", "main"]
+    assert eg.file_changes({"commands": '["cat <<EOF > a.py\nx = 1\nEOF", "ls"]'}) == ["a.py"]
+    assert eg.shell_commands({"commands": "[" * 100_000}) == ["[" * 100_000]
     # the files a call changes, as its commands name them (the program first)
     assert eg.file_changes({"command": "cp a.py tmp/x/; cp tmp/x/a.py b.py > log 2>&1"}) == [
         "log", "cp", "b.py"]
@@ -214,6 +234,25 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
         "chmod", "src/main.py", "tmp/log"]
     assert eg.file_changes({"command": "chown --reference tmp/ref a.py"}) == ["chown", "a.py"]
     assert eg.file_changes({"command": "chmod 755 bin/run"}) == ["chmod", "bin/run"]
+    # a mode that starts with a dash was dropped as an option and the file with it
+    assert eg.file_changes({"command": "chmod -x bin/run"}) == ["chmod", "bin/run"]
+    assert eg.file_changes({"command": "chmod -fR -w src"}) == ["chmod", "src"]
+    # ``--`` ends a writing program's options: a file after it may start with a dash
+    # (audit 2026-11-12: ``-dest.py`` was dropped, or its ``t`` read as ``-t``)
+    assert eg.file_changes({"command": "cp -- tmp/source.py -dest.py"}) == ["cp", "-dest.py"]
+    assert eg.file_changes({"command": "rm -f -- -dest.py"}) == ["rm", "-dest.py"]
+    assert eg.file_changes({"command": "chmod -- -x -run.py"}) == ["chmod", "-run.py"]
+    # a copy into a directory writes a file of each source's name there, which was not
+    # listed: a directory by the words (``-t``, several sources, a trailing ``/``) or,
+    # the words not telling, a destination without a suffix
+    assert eg.file_changes({"command": "cp tmp/source.py src/"}) == [
+        "cp", "src/", "src/source.py"]
+    assert eg.file_changes({"command": "cp -t pkg.d tmp/a.py tmp/b.py"}) == [
+        "cp", "pkg.d", "pkg.d/a.py", "pkg.d/b.py"]
+    assert eg.file_changes({"command": "install tmp/a.py tmp/b.py pkg.d"}) == [
+        "install", "pkg.d", "pkg.d/a.py", "pkg.d/b.py"]
+    assert eg.file_changes({"command": "cp tmp/source.py src"}) == ["cp", "src", "src/source.py"]
+    assert eg.file_changes({"command": "cp src/a.py src/a.py.orig"}) == ["cp", "src/a.py.orig"]
     # find's ``{}`` are its matches, under its start paths
     assert eg.file_changes({"command": "find . -name '*.pyc' -exec rm {} +"}) == ["rm", "."]
     assert eg.file_changes({"command": "find src lib -delete"}) == ["find", "src", "lib"]
@@ -246,6 +285,11 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
     assert eg.file_changes({
         "command": "uv run --no-project --no-sync sed -i s/old/new/ source.py",
     }) == ["sed", "s/old/new/", "source.py"]
+    # a script option after the files, and a file ``--`` protects, keep the files (B/S4-F4)
+    assert eg.file_changes({"command": "sed -i source.py tmp/log -e s/old/new/g"}) == [
+        "sed", "source.py", "tmp/log", "s/old/new/g"]
+    assert eg.file_changes({"command": "sed -i -e s/a/b/ tmp/log -- -source.py"}) == [
+        "sed", "s/a/b/", "tmp/log", "-source.py"]
     assert eg.file_changes({"command": "uv -q --directory /w run -p 3.12 cp a.py b.py"}) == [
         "cp", "b.py"]
     assert eg.file_changes({"command": "uv run bash -c 'echo 1 > f'"}) == ["f"]

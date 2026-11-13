@@ -48,6 +48,9 @@ from typing import Any
 TOOL_SCHEMA_ATTR = "__kiss_tool_schema__"
 """The function attribute :func:`tool_schema` stores the declaration on."""
 
+UNLISTED_ATTR = "__kiss_unlisted__"
+"""The function attribute :func:`unlisted` sets."""
+
 
 def tool_schema[F: Callable[..., Any]](
     parameters: dict[str, Any], *, description: str = ""
@@ -88,3 +91,23 @@ def declared_schema(func: Callable[..., Any]) -> dict[str, Any] | None:
     """
     declared = getattr(func, TOOL_SCHEMA_ATTR, None)
     return declared if isinstance(declared, dict) else None
+
+
+def unlisted[F: Callable[..., Any]](func: F) -> F:
+    """Mark *func* as a tool the agent runs when called but does not list for the model.
+
+    An unlisted tool's definition is left out of every model request,
+    the native tool definitions and the text catalog alike, so it costs
+    no context.  A model that learned its name and arguments another
+    way (from the result of a search tool, say) can still call it.
+
+    Returns:
+        *func* itself.
+    """
+    setattr(func, UNLISTED_ATTR, True)
+    return func
+
+
+def is_unlisted(func: Callable[..., Any]) -> bool:
+    """Return whether *func* was marked :func:`unlisted`."""
+    return getattr(func, UNLISTED_ATTR, False) is True

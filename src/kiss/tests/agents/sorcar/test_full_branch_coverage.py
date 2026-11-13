@@ -16,24 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
-
-class TestCloseDbNotInitialized:
-    """Cover _close_db early return when _db_conn is None (line 52)."""
-
-    def test_close_db_when_not_initialized(self) -> None:
-        """Closing DB when connection was never opened should be a no-op."""
-        original_conn = th._db_conn
-        original_path = th._DB_PATH
-        try:
-            th._db_conn = None
-            th._close_db()
-            assert th._db_conn is None
-        finally:
-            th._db_conn = original_conn
-            th._DB_PATH = original_path
 
 
 class TestResumeChatNoMatch:

@@ -58,7 +58,7 @@ _CHILD = textwrap.dedent(
     service = TerminalService(printer=None)
 
     def hang_up(tab, pid, fd, release=-1):
-        session = _Session(tab_id=tab, conn_id="c", pid=pid, fd=fd, shell="sh", cwd="/")
+        session = _Session(tab_id=tab, conn_id="c", pid=pid, fd=fd)
         with service._lock:
             service._sessions[tab] = session
         service.close(tab)

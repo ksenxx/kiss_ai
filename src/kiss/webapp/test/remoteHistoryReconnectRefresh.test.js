@@ -17,6 +17,7 @@ const {
   rowByTitle,
   makeRow,
   sendHistory,
+  openChatsPanel,
 } = require('./history_helpers');
 
 const OLD_TASK = makeRow({
@@ -27,8 +28,7 @@ const OLD_TASK = makeRow({
   work_dir: '/var/repo/alpha',
 });
 
-function makePage(opts) {
-  const {desktopMatches = false} = opts || {};
+function makePage({desktopMatches}) {
   return makeChatPage({
     bodyClass: 'remote-chat',
     beforeScripts(win) {
@@ -39,15 +39,6 @@ function makePage(opts) {
 
 function getHistoryMsgs(posted) {
   return ofType(posted, 'getHistory');
-}
-
-function openDrawer(win) {
-  const btn = win.document.getElementById('menu-btn');
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.ok(
-    win.document.getElementById('sidebar').classList.contains('open'),
-    'burger click must open the drawer',
-  );
 }
 
 // The reconnect refetch of an open sidebar and the idle tasks_updated
@@ -92,7 +83,7 @@ function testMobileLifecycleShowsTaskStartedWhileDisconnected() {
     config: {work_dir: '/var/repo/alpha'},
     apiKeys: {},
   });
-  openDrawer(win);
+  openChatsPanel(win);
   sendHistory(win, posted, [OLD_TASK]);
   assert.ok(
     rowByTitle(win, 'old completed task'),
@@ -129,7 +120,7 @@ function testMobileLifecycleShowsTaskStartedWhileDisconnected() {
 
 function testStaleGenerationReplyIsDropped() {
   const {win, posted} = makePage({desktopMatches: false});
-  openDrawer(win);
+  openChatsPanel(win);
   const stale = lastGetHistory(posted);
   assert.ok(stale, 'opening the drawer posts getHistory');
   send(win, {type: 'daemonStatus', connected: false});

@@ -139,7 +139,7 @@ def test_nothing_to_do_and_unknown_messages() -> None:
     assert apply_compaction(plan_compaction([], keep_recent=20)) == 0
     conversation: list[Any] = ["junk", {"role": "system", "content": BIG}, {"type": "reasoning"}]
     assert apply_compaction(plan_compaction(conversation, keep_recent=0)) == 0
-    assert make_stub("abc", preview_chars=2).endswith("\nab")
+    assert make_stub("abc").endswith("\nabc")
 
 
 def test_plan_drop_and_gate() -> None:
@@ -408,6 +408,35 @@ def test_results_after_the_last_assistant_turn_are_never_compacted() -> None:
     assert "do not repeat a command that has side effects" in texts[0]
 
 
+def test_keep_recent_counts_tool_results_not_their_text_parts() -> None:
+    """A result made of blocks is one result, kept or compacted whole with its call.
+
+    An Anthropic result with a picture is a list of parts, and each text
+    part is compacted on its own.  Counted as a result each, the two texts
+    of a result filled two places of the kept window: ``keep_recent=6``
+    kept the three newest of these eight results and stubbed five.  A
+    result with no text at all (the ninth) still takes no place in it.
+    """
+    conversation: list[dict[str, Any]] = [{"role": "user", "content": "task"}]
+    for i in range(8):
+        conversation.append(_write_call("anthropic", f"t{i}", "Bash", {"command": BIG}))
+        parts = [{"type": "text", "text": BIG}, {"type": "image"}, {"type": "text", "text": BIG}]
+        conversation.append(_result("anthropic", f"t{i}", parts))
+    conversation.append(_write_call("anthropic", "shot", "Bash", {"command": "ls"}))
+    conversation.append(_result("anthropic", "shot", [{"type": "image"}]))
+    conversation.append({"role": "assistant", "content": "seen everything"})
+    plan = plan_compaction(conversation, keep_recent=6)
+    assert [r.kind for r in plan] == ["result"] * 4 + ["argument"] * 2
+    assert apply_compaction(plan) == 6
+    stubbed = [
+        [part["text"].startswith(STUB_PREFIX) for part in m["content"][0]["content"][::2]]
+        for m in conversation[2:17:2]
+    ]
+    assert stubbed == [[True, True]] * 2 + [[False, False]] * 6
+    commands = [_arguments(m)["command"] for m in conversation[1:17:2]]
+    assert [c.startswith(ARGUMENT_STUB_PREFIX) for c in commands] == [True] * 2 + [False] * 6
+
+
 FILE_TEXT = "def f():\n    return 1\n" * 100  # 2,300 characters
 
 
@@ -424,7 +453,7 @@ def _write_call(shape: str, call_id: str, name: str, args: dict[str, Any]) -> di
                             "function": {"name": name, "arguments": json.dumps(args)}}]}
 
 
-def _result(shape: str, call_id: str, text: str) -> dict[str, Any]:
+def _result(shape: str, call_id: str, text: str | list[dict[str, Any]]) -> dict[str, Any]:
     if shape == "anthropic":
         return {"role": "user",
                 "content": [{"type": "tool_result", "tool_use_id": call_id, "content": text}]}
@@ -495,8 +524,34 @@ def test_old_write_and_edit_arguments_are_stubbed_and_point_at_the_file(shape: s
     assert last == {"command": "ls"}
     # A second plan finds nothing more to do.
     assert plan_compaction(conversation, keep_recent=1) == []
-    # Arguments can be left alone.
-    assert plan_compaction(conversation, keep_recent=0, arguments=False) == []
+
+
+def test_json_arguments_keep_non_ascii_text_as_the_model_wrote_it() -> None:
+    """A compacted call's JSON arguments are not rewritten with ASCII escapes.
+
+    Escaped, every CJK character of the stub's preview and of the untouched
+    ``file_path`` took six characters: the call got longer than it was and
+    the planned drop was overstated.  A lone surrogate keeps its escape, the
+    one spelling of it a UTF-8 request body can carry.
+    """
+    raw = '{"file_path": "/tmp/日本語.md", "note": "lone \\ud83d", "content": "' + "漢" * 600 + '"}'
+    function = {"name": "Write", "arguments": raw}
+    conversation: list[dict[str, Any]] = [
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "w1", "type": "function", "function": function}]},
+        _result("generic", "w1", "ok"),
+        _write_call("generic", "last", "Bash", {"command": "ls"}),
+        _result("generic", "last", "ok"),
+    ]
+    plan = plan_compaction(conversation, keep_recent=0)
+    assert apply_compaction(plan) == 1
+    after = function["arguments"]
+    # What went is what was planned (the stub's one newline is two characters of JSON).
+    assert len(raw) - len(after) == dropped_chars(plan) - 1 > 0
+    assert '"/tmp/日本語.md"' in after and '"lone \\ud83d"' in after
+    assert json.loads(after)["content"].endswith("漢" * ARGUMENT_PREVIEW_CHARS)
+    assert after.encode("utf-8").decode("utf-8") == after
 
 
 def test_stubs_are_references_the_table_expands() -> None:
@@ -648,6 +703,53 @@ def test_malformed_arguments_are_skipped() -> None:
     assert plan_compaction(conversation, keep_recent=0) == []
 
 
+DEEP = 60_000
+"""Nesting no interpreter follows to the end: ``json.loads`` gives up on it (Python 3.13),
+or ``json.dumps`` once the decoder accepted it (3.14)."""
+
+
+def test_arguments_nested_too_deep_to_follow_are_left_alone() -> None:
+    """Stored arguments can nest deeper than the interpreter follows.  ``json.loads`` then
+    raises ``RecursionError``, not ``ValueError`` (Python 3.13); on 3.14 the decoder accepts
+    them and ``json.dumps`` raises when the stubbed arguments are written back; ``str`` of a
+    ``file_path`` nested that deep raises too.  One such call made every plan of the session
+    raise.  Its arguments are opaque, like text that is not JSON: the plan leaves them alone
+    and stubs the other calls, and a whole-turn removal counts nothing for an item it cannot
+    measure.  (Which of the three guards a call reaches depends on the interpreter; the
+    write-back guard is reached on 3.14 only, where the decoder follows deeper than the
+    encoder.)"""
+    nested: dict[str, Any] = {}
+    for _ in range(DEEP):
+        nested = {"a": nested}
+    deep_json = '{"a":' * DEEP + "1" + "}" * DEEP
+    long_text = "x" * 600
+    conversation: list[dict[str, Any]] = [
+        {"role": "user", "content": "task"},
+        _write_call("generic", "plain", "Bash", {"command": long_text}),
+        _result("generic", "plain", "ok"),
+        {"type": "function_call", "call_id": "deep", "name": "Bash",
+         "arguments": '{"payload": ' + deep_json + ', "command": "' + long_text + '"}'},
+        _result("responses", "deep", "ok"),
+        _write_call("anthropic", "path", "Write", {"file_path": nested, "content": long_text}),
+        _result("anthropic", "path", "ok"),
+        {"role": "assistant", "content": "Done."},
+    ]
+    plan = plan_compaction(conversation, keep_recent=0)
+    assert [replacement.holder for replacement in plan] == [
+        conversation[1]["tool_calls"][0]["function"]
+    ]
+    assert apply_compaction(plan) == 1
+    assert _arguments(conversation[1])["command"].startswith(ARGUMENT_STUB_PREFIX)
+    turns: list[dict[str, Any]] = [{"role": "user", "content": "task"}]
+    for index in range(12):
+        turns.append(_write_call("anthropic", f"t{index}", "Bash", {"payload": nested}))
+        turns.append(_result("anthropic", f"t{index}", "ok"))
+    removal = plan_turn_removal(turns)
+    assert removal is not None and (removal.start, removal.stop, removal.turns) == (1, 5, 2)
+    # The two results are measured; the two calls, too deep to measure, count nothing.
+    assert removal.dropped == 2 * len(json.dumps(turns[2])) - len(removal.note)
+
+
 def test_target_and_the_lower_floor_above_it() -> None:
     assert compaction_target_tokens(500_000, 100_000, 0.3) == 150_000
     # The start threshold is the floor of the target ...
@@ -769,7 +871,7 @@ PASSBACK_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
 @pytest.mark.parametrize("build", [_generic, _anthropic, _responses])
 def test_turn_removal_keeps_the_task_and_the_newest_turns(build) -> None:
     conversation = build(12)
-    removal = plan_turn_removal(conversation, keep_recent=10)
+    removal = plan_turn_removal(conversation)
     assert removal is not None
     assert (removal.start, removal.turns) == (1, 2)
     assert removal.dropped > 0
@@ -781,7 +883,7 @@ def test_turn_removal_keeps_the_task_and_the_newest_turns(build) -> None:
     # Three more turns: the next removal absorbs the earlier note, so one
     # note states the cumulative count, and the newest ten turns stay.
     conversation.extend(build(3)[1:])
-    again = plan_turn_removal(conversation, keep_recent=10)
+    again = plan_turn_removal(conversation)
     assert again is not None
     assert (again.start, again.turns) == (1, 5)
     apply_turn_removal(conversation, again)
@@ -789,8 +891,8 @@ def test_turn_removal_keeps_the_task_and_the_newest_turns(build) -> None:
     assert sum(1 for m in conversation if m.get("role") == "user") == 2 + (
         10 if build is _anthropic else 0
     )
-    assert plan_turn_removal(conversation, keep_recent=10) is None
-    assert plan_turn_removal(build(2), keep_recent=10) is None
+    assert plan_turn_removal(conversation) is None
+    assert plan_turn_removal(build(2)) is None
 
 
 def test_agent_removes_whole_old_turns_for_a_reasoning_passback_family() -> None:

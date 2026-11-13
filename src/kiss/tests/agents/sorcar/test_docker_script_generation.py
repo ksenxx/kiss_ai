@@ -28,8 +28,10 @@ points to (astra-4).  The Perl editor is reached through a bash whose
 """
 
 import functools
+import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -41,10 +43,11 @@ from pathlib import Path
 
 from kiss.agents.sorcar.docker_manager import (
     MAX_OUTPUT_CHARS,
-    PendingAppend,
+    PendingRewrite,
     _new_utf8_decoder,
     _rewrite_instead,
     _with_exit_code,
+    probe_command,
 )
 from kiss.agents.sorcar.docker_tools import _CHUNK_BYTES, DockerTools
 from kiss.agents.sorcar.useful_tools import _truncate_output
@@ -161,14 +164,45 @@ def switching_bash(
     return result
 
 
+def host_bash_with_a_missing_locale(command: str, description: str) -> str:
+    """Run *command* as a container without its locale does: bash warns first, on the one stream."""
+    return host_bash(f"exec 2>&1\nexport LC_ALL=xx_XX.UTF-8\n{command}", description)
+
+
+def planting_bash(target: Path, victim: Path, command: str, description: str) -> str:
+    """Run *command* without python; the Perl editor finds a link to *victim* planted for it.
+
+    The link waits at ``.<name>.<pid>.tmp`` beside *target*, the name the
+    Perl editor once staged the new text under (``exec`` keeps the pid).
+    """
+    if command.startswith("perl "):
+        link = shlex.quote(f"{target.parent}/.{target.name}.") + "$$.tmp"
+        command = f"ln -s {shlex.quote(str(victim))} {link}\nexec {command}"
+    return host_bash_without_python(command, description)
+
+
 def _read_bytes(path: str) -> bytes:
     """The bytes of the local file *path* (the container's ``read_bytes`` of the guards)."""
     return Path(path).read_bytes()
 
 
-def _forget(pending: PendingAppend) -> None:
+def _read_bytes_then_rewrite(rewritten: bytes, path: str) -> bytes:
+    """The bytes of *path*, which holds *rewritten* once they are read: a writer in between."""
+    data = Path(path).read_bytes()
+    Path(path).write_bytes(rewritten)
+    return data
+
+
+def _forget(pending: PendingRewrite | None) -> None:
     """The guards' ``remember`` of a test that makes no append."""
     del pending
+
+
+def _link_probe(path: str) -> bool:
+    """The guards' ``link`` probe of *path*, run by the local bash and read as the managers do."""
+    return subprocess.run(
+        ["/bin/bash", "-c", probe_command(path, "link")], check=False,
+    ).returncode != 1
 
 
 def _collect(results: list[str], call: Callable[..., str], *args: str) -> None:
@@ -328,13 +362,23 @@ class TestDockerToolsWithoutDocker(unittest.TestCase):
 
     @gnu_coreutils_only
     def test_both_editors_retry_lf_needles_on_crlf_files(self) -> None:
-        """The Perl fallback matches the Python editor on CRLF files (A08 astra-15 / fable-12)."""
+        """The Perl fallback matches the Python editor on CRLF files (A08 astra-15 / fable-12).
+
+        A one-line needle is found as it is in a CRLF file; the lines its
+        new text adds take the file's line ends all the same, as the host
+        Edit writes them (they were written with a bare LF), unless the
+        edit is ``exact`` (S11 re-fix round 2).
+        """
         for tools in (self.tools, DockerTools(host_bash_without_python)):
             target = self.dir / "crlf.txt"
             target.write_bytes(b"old\r\nsecond\r\n")
             result = tools.Edit(str(target), "old\nsecond", "new\nlast")
             self.assertIn("Successfully replaced 1 occurrence", result)
             self.assertEqual(target.read_bytes(), b"new\r\nlast\r\n")
+            self.assertIn("Successfully", tools.Edit(str(target), "last", "more\nlast"))
+            self.assertEqual(target.read_bytes(), b"new\r\nmore\r\nlast\r\n")
+            self.assertIn("Successfully", tools.Edit(str(target), "more", "a\nb", exact=True))
+            self.assertEqual(target.read_bytes(), b"new\r\na\nb\r\nlast\r\n")
 
     @gnu_coreutils_only
     def test_both_editors_publish_a_new_file_keeping_mode_and_links(self) -> None:
@@ -372,6 +416,237 @@ class TestDockerToolsWithoutDocker(unittest.TestCase):
             self.assertEqual(leftovers, [])
             for path in (target, real, link, one, two):
                 path.unlink()
+
+    @gnu_coreutils_only
+    def test_a_read_only_file_is_refused_and_a_sed_on_it_is_no_edit(self) -> None:
+        """A file this user may not write is not replaced by a rename (S11 re-fix rounds 2, 3).
+
+        The rename takes the directory's permission only: Write and both
+        editors replaced a 0444 file and reported success, where the host
+        tools and the shell's ``>`` answer "Permission denied".  The
+        ``exact`` Edit a shell rewrite is applied as still replaced it
+        (round 3).  A ``sed -i`` does replace such a file: the guards'
+        probe now says so and it is not made as an Edit, as on the host;
+        a python rewrite, itself refused, still is.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root may write a read-only file")
+        target = self.dir / "locked.txt"
+        target.write_text("old\n", encoding="utf-8")
+        target.chmod(0o444)
+        for bash in (host_bash, host_bash_without_python):
+            tools = DockerTools(bash)
+            for refused in (
+                tools.Edit(str(target), "old", "new"),
+                tools.Edit(str(target), "old", "new", exact=True),
+                tools.Write(str(target), "new\n"),
+                tools.Write(str(target), "x" * 100_000),
+            ):
+                self.assertTrue(refused.startswith("Error"), refused)
+                self.assertIn("Permission denied", refused)
+            self.assertEqual(target.read_text(encoding="utf-8"), "old\n")
+            self.assertEqual([p.name for p in self.dir.iterdir()], ["locked.txt"])
+        sed = f"sed -i 's/old/new/' {target}"
+        python = (
+            f"python3 - <<'EOF'\np = '{target}'\ns = open(p).read()\n"
+            "s = s.replace('old', 'new')\nopen(p, 'w').write(s)\nEOF"
+        )
+        for command, mode, made_as_edit in (
+            (sed, 0o444, False), (python, 0o444, True), (sed, 0o644, True),
+        ):
+            target.chmod(mode)
+            try:
+                made = _rewrite_instead(  # None: the command runs as written
+                    command, str(self.dir), os.path.exists, os.path.isdir, _link_probe,
+                    _read_bytes, "rewrite", 30, 1000, _forget,
+                )
+            except ToolRedirect as redirect:
+                made = redirect.name
+            self.assertEqual(made, "Edit" if made_as_edit else None, (command, oct(mode)))
+
+    @gnu_coreutils_only
+    def test_a_path_that_is_not_a_regular_file_is_refused(self) -> None:
+        """A FIFO or a directory is neither edited nor replaced (S11 re-fix round 2).
+
+        Both editors opened the path they were given: a FIFO nobody
+        writes to blocked the Edit until its timeout and a directory
+        came back as a traceback, where the host Edit answers "File not
+        found".  Write renamed its staged file over a FIFO (over
+        ``/dev/null`` in a container) and reported success, where the
+        host Write refuses.
+        """
+        fifo, folder = self.dir / "fifo", self.dir / "folder"
+        os.mkfifo(fifo)
+        folder.mkdir()
+        for path in (fifo, folder):
+            for bash in (host_bash, host_bash_without_python):
+                self.assertEqual(
+                    DockerTools(bash).Edit(str(path), "a", "b"),
+                    f"Error: File not found: {path}\n\n[exit code: 1]",
+                )
+            for content in ("one piece", "x" * 100_000):
+                refused = self.tools.Write(str(path), content)
+                self.assertTrue(refused.startswith(f"Error: {path} exists and is not"), refused)
+        self.assertTrue(stat.S_ISFIFO(fifo.stat().st_mode))
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["fifo", "folder"])
+
+    @gnu_coreutils_only
+    def test_a_file_name_of_the_full_length_is_written_and_edited(self) -> None:
+        """A 255-byte name leaves no room for a longer sibling (S11 re-fix round 2).
+
+        The staged copy was named after the file (``<name>.kiss-partial-<hex>``,
+        ``.<name>.<hex>.tmp``): Write and the Python editor answered
+        "File name too long" and the Perl editor wrote the file in place.
+        The changed inode proves the new text was staged and renamed.
+        """
+        target = self.dir / ("n" * 255)
+        self.assertIn("Successfully wrote", self.tools.Write(str(target), "old\n"))
+        for bash in (host_bash, host_bash_without_python):
+            target.write_text("old\n", encoding="utf-8")
+            before = target.stat().st_ino
+            edited = DockerTools(bash).Edit(str(target), "old", "new")
+            self.assertIn("Successfully replaced 1", edited)
+            self.assertEqual(target.read_text(encoding="utf-8"), "new\n")
+            self.assertNotEqual(target.stat().st_ino, before)
+        self.assertEqual([p.name for p in self.dir.iterdir()], [target.name])
+
+    @gnu_coreutils_only
+    def test_the_perl_editor_stages_under_a_name_nobody_planted(self) -> None:
+        """A link waiting at a guessable staging name is not written through (S11 re-fix 2).
+
+        The Perl editor staged the new text at ``.<name>.<pid>.tmp``,
+        opened for writing: a symlink planted there sent the text into
+        the file it pointed to and was then renamed over the edited file.
+        """
+        target, victim = self.dir / "perl.txt", self.dir / "victim.txt"
+        target.write_text("old value\n", encoding="utf-8")
+        target.chmod(0o640)
+        victim.write_text("victim original\n", encoding="utf-8")
+        tools = DockerTools(functools.partial(planting_bash, target, victim))
+        self.assertIn("Successfully replaced 1", tools.Edit(str(target), "old", "new"))
+        self.assertFalse(target.is_symlink())
+        self.assertEqual(target.read_text(encoding="utf-8"), "new value\n")
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o640)
+        self.assertEqual(victim.read_text(encoding="utf-8"), "victim original\n")
+
+    @gnu_coreutils_only
+    def test_a_write_or_an_edit_that_failed_opens_with_error(self) -> None:
+        """A failure reads as one to whoever asks whether the call went through (S11 re-fix).
+
+        The output of the command that failed came back as it was (a
+        ``mkdir`` diagnostic, a traceback), and by the tools' convention
+        only a result opening with ``Error`` is a failure: the agent ran
+        the rest of a compound command after it and the digest replayed
+        the write.  An error the editors word themselves stays as it is.
+        """
+        blocker = self.dir / "blocker"
+        blocker.write_text("x", encoding="utf-8")
+        unmade = self.tools.Write(str(blocker / "notes.md"), "never written")
+        self.assertTrue(unmade.startswith("Error: "), unmade)
+        self.assertIn("exit code:", unmade)
+        latin1 = self.dir / "latin1.txt"
+        latin1.write_bytes(b"one\xff\n")
+        undecoded = self.tools.Edit(str(latin1), "one", "uno")
+        self.assertTrue(undecoded.startswith("Error: Traceback"), undecoded)
+        self.assertIn("UnicodeDecodeError", undecoded)
+        self.assertEqual(latin1.read_bytes(), b"one\xff\n")
+        missing = self.tools.Edit(str(self.dir / "absent.txt"), "one", "uno")
+        self.assertTrue(missing.startswith("Error: File not found"), missing)
+        # The strings of an Edit that could not be stored (no file may pass 1 KiB here).
+        small = self.dir / "small.txt"
+        small.write_text("one\n", encoding="utf-8")
+        unstored = DockerTools(size_limited_bash).Edit(str(small), "one", "x" * 4000)
+        self.assertTrue(unstored.startswith("Error: "), unstored)
+        self.assertIn("exit code:", unstored)
+        self.assertEqual(small.read_text(encoding="utf-8"), "one\n")
+
+    @gnu_coreutils_only
+    def test_a_shell_warning_before_the_outcome_does_not_change_it(self) -> None:
+        """An edit that landed stays one behind a shell's warnings (S11 re-fix).
+
+        The bash of a container whose locale is not installed warns
+        before every command's own output.  The outcome was read off the
+        start of the result: a batch stopped after its first edit and
+        reported an error for an edit that was in the file.
+        """
+        tools = DockerTools(host_bash_with_a_missing_locale)
+        target = self.dir / "noisy.txt"
+        target.write_text("one\ntwo\n", encoding="utf-8")
+        single = tools.Edit(str(target), "one", "uno")
+        self.assertIn("warning: setlocale", single.splitlines()[0])
+        self.assertIn("Successfully replaced 1", single)
+        self.assertFalse(single.startswith("Error"), single)
+        batch = tools.Edit(str(target), edits=json.dumps([
+            {"old_string": "uno", "new_string": "eins"},
+            {"old_string": "two", "new_string": "zwei"},
+        ]))
+        self.assertFalse(batch.startswith("Error"), batch)
+        self.assertEqual(target.read_text(encoding="utf-8"), "eins\nzwei\n")
+        unmade = tools.Edit(str(target), "absent", "x")
+        self.assertTrue(unmade.startswith("Error: "), unmade)
+        self.assertIn("String not found in file", unmade)
+
+    @gnu_coreutils_only
+    def test_both_editors_replace_the_matched_lines_where_they_are(self) -> None:
+        """The whitespace-tolerant match is replaced at its place (S11 re-fix 6).
+
+        The matched lines went to the editors as text to find: a longer
+        line holding the same text made the one match "appear 2 times".
+        The place is counted in bytes (the "\u00e9" before it is two); when
+        the file changed since it was fetched (other bytes at the place,
+        or the file ending before it), the text is searched for as
+        before.
+        """
+        target = self.dir / "span.txt"
+        for bash in (host_bash, host_bash_without_python):
+            for eol in ("\n", "\r\n"):
+                target.write_bytes(f"pr\u00e9fix  one  two{eol}  one  two{eol}".encode())
+                tools = DockerTools(bash, _read_bytes)
+                result = tools.Edit(str(target), " one two", " changed\n more")
+                self.assertIn("Successfully replaced 1", result)
+                self.assertEqual(
+                    target.read_bytes(),
+                    f"pr\u00e9fix  one  two{eol}  changed{eol}  more{eol}".encode(),
+                )
+            for rewritten in ("added first\n\u00e9\n  one  two\n", "  one  two\n"):
+                target.write_text("\u00e9 a longer first line\n  one  two\n", encoding="utf-8")
+                tools = DockerTools(
+                    bash, functools.partial(_read_bytes_then_rewrite, rewritten.encode()),
+                )
+                result = tools.Edit(str(target), " one two", " changed")
+                self.assertIn("Successfully replaced 1", result)
+                self.assertEqual(
+                    target.read_text(encoding="utf-8"),
+                    rewritten.replace("  one  two", "  changed"),
+                )
+
+    @gnu_coreutils_only
+    def test_write_keeps_a_newline_at_the_end_of_a_path(self) -> None:
+        """A path ending in a newline names its own file, not the one without it (S11 re-fix 1).
+
+        A command substitution drops the trailing newlines of what it
+        captures: the resolved target lost its own, so the Write of
+        ``name\\n`` replaced ``name`` and reported success, and the same
+        cut sent the parent directory and the discard elsewhere.
+        """
+        plain, odd = self.dir / "target", self.dir / "target\n"
+        plain.write_text("plain", encoding="utf-8")
+        for content in ("one piece", "x" * 100_000):
+            self.assertIn("Successfully wrote", self.tools.Write(str(odd), content))
+            self.assertEqual(odd.read_text(encoding="utf-8"), content)
+            self.assertEqual(plain.read_text(encoding="utf-8"), "plain")
+        nested = self.dir / "sub\n" / "file.txt"
+        self.assertIn("Successfully wrote", self.tools.Write(str(nested), "in"))
+        self.assertEqual(nested.read_text(encoding="utf-8"), "in")
+        # A store that fails (the target is a directory) discards its staging file.
+        folder = self.dir / "folder\n"
+        folder.mkdir()
+        for content in ("one piece", "x" * 100_000):
+            self.assertNotIn("Successfully wrote", self.tools.Write(str(folder), content))
+        self.assertEqual(
+            sorted(p.name for p in self.dir.iterdir()),
+            ["folder\n", "sub\n", "target", "target\n"],
+        )
 
     @gnu_coreutils_only
     def test_both_editors_report_a_failed_write_and_keep_the_file(self) -> None:
@@ -460,7 +735,7 @@ class TestDockerToolsWithoutDocker(unittest.TestCase):
         self.assertIn("Successfully wrote", tools.Write(str(link), "x" * 100_000))
         partials = [p for p in seen if ".kiss-partial-" in p]
         self.assertEqual(len(partials), 1, seen)
-        self.assertTrue(partials[0].startswith(str(real)), partials[0])
+        self.assertEqual(Path(partials[0]).parent, other, partials[0])
         self.assertTrue(link.is_symlink())
         self.assertEqual(real.read_text(encoding="utf-8"), "x" * 100_000)
         self.assertEqual(sorted(p.name for p in other.iterdir()), ["real.txt"])
@@ -488,8 +763,17 @@ class TestDockerToolsWithoutDocker(unittest.TestCase):
         self.assertEqual(second.read_text(encoding="utf-8"), "second-original")
         self.assertEqual(os.readlink(link), str(second))
         self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["first", "link", "second"])
-        notes = {m.group() for c in commands for m in re.finditer(r"/tmp/\.kiss-partial-\w+", c)}
+        noted = re.compile(r"/tmp/\.kiss-partial-\w+\.note")
+        notes = {m.group() for c in commands for m in noted.finditer(c)}
         self.assertTrue(notes and not any(Path(n).exists() for n in notes), notes)
+        # A file in ``/tmp`` is staged in the directory of the notes: under
+        # the note's very name, its pieces overwrote the path noted there
+        # and the next command read them as one (S11 re-fix round 2).
+        handle, beside = tempfile.mkstemp(dir="/tmp", prefix="kiss-note-")
+        os.close(handle)
+        self.addCleanup(os.unlink, beside)
+        self.assertIn("Successfully wrote", self.tools.Write(beside, content))
+        self.assertEqual(Path(beside).read_text(encoding="utf-8"), content)
         # A one-piece store (no note to read) still discards its staging
         # file where the target resolves.
         (self.dir / "adir").mkdir()

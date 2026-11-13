@@ -5,22 +5,12 @@
 """Bug-hunt 8 (group B): filenames with leading/trailing spaces are
 mangled by over-eager whitespace stripping.
 
-Two independent stripping bugs, one per assigned source file:
-
-* ``merge_flow._capture_untracked`` applied ``line.strip()`` to every
-  ``git ls-files --others`` output line.  A new untracked file whose
-  name ends (or begins) with a space — legal on every POSIX
-  filesystem, and NOT C-quoted by git (space is a printable
-  character) — was therefore recorded under a mangled name that does
-  not exist on disk, silently hiding the agent-created file from
-  every caller.
-
-* ``merge_flow._unquoted_name_lines`` called ``output.strip()`` on the
-  whole ``git diff --name-only`` output before splitting, eating the
-  leading spaces of the FIRST listed path (and trailing spaces of the
-  last).  ``_get_worktree_changed_files`` then reported a wrong path
-  and ``_conflict_of``'s overlap sets could never match the
-  real on-disk name.
+The merge flow's changed-file listing stripped whitespace from git's
+output: ``line.strip()`` on every ``git ls-files --others`` line and
+``output.strip()`` on the whole ``git diff --name-only`` output.  A
+file whose name begins or ends with a space (legal on every POSIX
+filesystem, and NOT C-quoted by git: space is a printable character)
+was therefore listed under a name that does not exist on disk.
 
 No mocks, patches, fakes, or test doubles: real git repositories, a
 real ``ChatSorcarAgent`` worktree, real server mixin methods.
@@ -37,10 +27,9 @@ from pathlib import Path
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.merge_flow import _capture_untracked
 from kiss.server.server import AgentServer
 from kiss.tests.conftest import IS_WINDOWS
-from kiss.tests.server.worktree_helpers import merge_conflict, worktree_changed_files
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 
 def _git(cwd: str | Path, *args: str) -> str:
@@ -51,44 +40,6 @@ def _git(cwd: str | Path, *args: str) -> str:
     assert result.returncode == 0, f"git {args}: {result.stderr}"
     return result.stdout
 
-
-class TestUntrackedSpaceNames(unittest.TestCase):
-    """Untracked files with space-adjacent names must survive capture."""
-
-    def setUp(self) -> None:
-        self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt8-spc-")
-        self.repo = Path(self.tmpdir) / "repo"
-        self.repo.mkdir()
-        _git(self.repo, "init", "-q")
-        _git(self.repo, "config", "user.email", "t@t")
-        _git(self.repo, "config", "user.name", "t")
-        (self.repo / "seed.txt").write_text("seed\n")
-        _git(self.repo, "add", "-A")
-        _git(self.repo, "commit", "-qm", "init")
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_capture_untracked_preserves_space_names(self) -> None:
-        """``_capture_untracked`` must return the exact on-disk names.
-
-        Win32 silently strips trailing spaces when creating a file
-        (``"trail "`` lands on disk as ``trail``), so only the
-        leading-space name can be verified on Windows.
-        """
-        if not IS_WINDOWS:
-            (self.repo / "trail ").write_text("agent\n")
-        (self.repo / " lead.txt").write_text("agent\n")
-        captured = _capture_untracked(str(self.repo))
-        if not IS_WINDOWS:
-            self.assertIn(
-                "trail ", captured,
-                f"trailing-space name mangled by capture: {sorted(captured)}",
-            )
-        self.assertIn(
-            " lead.txt", captured,
-            f"leading-space name mangled by capture: {sorted(captured)}",
-        )
 
 class TestWorktreeLeadingSpaceChangedFiles(unittest.TestCase):
     """Worktree changed-file listing must keep leading spaces in names."""
@@ -134,28 +85,21 @@ class TestWorktreeLeadingSpaceChangedFiles(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_changed_files_keep_leading_space(self) -> None:
-        """Editing `` lead.txt`` in the worktree must report the exact
-        on-disk path, not a strip()-mangled one."""
+        """An edited `` lead.txt`` and new untracked files must be listed
+        under their exact on-disk paths, not strip()-mangled ones.
+
+        Win32 silently strips trailing spaces when creating a file
+        (``"trail "`` lands on disk as ``trail``), so only the
+        leading-space names can be verified on Windows.
+        """
         target = Path(self.wt_dir, " lead.txt")
         target.write_text("line1\nline2-agent\n")
+        untracked = [" new.txt"] if IS_WINDOWS else [" new.txt", "trail "]
+        for name in untracked:
+            Path(self.wt_dir, name).write_text("agent\n")
 
         changed = worktree_changed_files(self.server, self.tab_id)
-        self.assertIn(
-            " lead.txt", changed,
-            "leading space stripped from the changed-file listing: "
-            f"{changed}",
-        )
-
-    def test_conflict_check_sees_dirty_main_edit_of_space_name(self) -> None:
-        """A dirty main-tree edit of `` lead.txt`` must flag a conflict
-        with the worktree's edit of the same file."""
-        Path(self.wt_dir, " lead.txt").write_text("line1\nline2-agent\n")
-        Path(self.repo, " lead.txt").write_text("line1-user\nline2\n")
-
-        self.assertTrue(
-            merge_conflict(self.server, self.tab_id),
-            "conflict check missed the overlap on the space-named file",
-        )
+        self.assertEqual(changed, sorted([" lead.txt", *untracked]))
 
 
 if __name__ == "__main__":

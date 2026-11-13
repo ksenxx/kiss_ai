@@ -24,10 +24,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar import task_digest
 from kiss.agents.sorcar.persistence import _add_task, _append_chat_event, _flush_chat_events
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.tool_interrupt import USER_INTERRUPTED_MESSAGE
+from kiss.core.tool_verdict import ToolRedirect
 
 _LOG_HEADER = "== Progress log written by the task (newest entries) ==\n"
 
@@ -76,7 +79,7 @@ def _task(
 def _write(path: Path, text: str, mtime: float | None = None) -> None:
     """Write *text* to *path* (parents created), optionally setting its modification time."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="")
     if mtime is not None:
         os.utime(path, (mtime, mtime))
 
@@ -300,3 +303,39 @@ def test_a_relative_log_path_is_read_from_the_work_dir(tmp_path: Path) -> None:
     marker = "[older progress-log entries elided]\n"
     assert task_digest.progress_log_tail(task, limit=len(marker) + 9) == marker + "- step 9\n"
     assert task_digest.progress_log_tail({"events": [], "work_dir": str(tmp_path)}) == ""
+
+
+def test_a_here_document_append_replays_only_the_text_it_appended(tmp_path: Path) -> None:
+    """Audit 2026-11-10 S12-F1: an append is logged as a ``Write`` of the whole file.
+
+    Under an agent the Bash tool applies ``cat >> log <<EOF`` as
+    ``Write(the file's text + the body)``, so the event's content holds
+    what other tasks left in the shared log: only the body is replayed.
+    A here-document that overwrites, and a later plain ``Write``, still
+    put their whole content.
+    """
+    now = time.time()
+    log = tmp_path / "tmp" / "PROGRESS.md"
+    _write(log, "# another task\n- OTHER-TASK-ENTRY\n")
+    tools = UsefulTools(work_dir=str(tmp_path))
+    tools.redirect = True  # as under an agent
+    command = "cat >> tmp/PROGRESS.md <<'EOF'\n- MY-ENTRY\nEOF"
+    with pytest.raises(ToolRedirect) as redirect:
+        tools.Bash(command=command, description="log")
+    content = redirect.value.arguments["content"]
+    assert content == "# another task\n- OTHER-TASK-ENTRY\n- MY-ENTRY\n"
+    appended = [
+        {"type": "tool_call", "name": "Bash", "command": command},
+        *_write_call(redirect.value.arguments["file_path"], content),
+        {"type": "tool_result", "content": redirect.value.note, "tool_name": "Bash"},
+    ]
+    assert _log_of(_task(tmp_path, appended, now - 60)) == "- MY-ENTRY"
+    overwritten = [
+        {"type": "tool_call", "name": "Bash",
+         "command": "cat > tmp/PROGRESS.md <<'EOF'\n# mine\nEOF"},
+        *_write_call(log, "# mine\n"),
+        {"type": "tool_result", "content": "ok", "tool_name": "Bash"},
+    ]
+    assert _log_of(_task(tmp_path, [*appended, *overwritten], now - 60)) == "# mine"
+    rewritten = [*appended, *_write_call(log, "# all of it\n- new\n")]
+    assert _log_of(_task(tmp_path, rewritten, now - 60)) == "# all of it\n- new"

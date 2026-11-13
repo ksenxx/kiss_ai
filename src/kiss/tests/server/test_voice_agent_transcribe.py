@@ -39,6 +39,8 @@ import unittest
 import wave
 from pathlib import Path
 
+import pytest
+
 from kiss.server.speech import (
     SAMPLE_RATE,
     TRAILING_SILENCE_KEEP_SECONDS,
@@ -285,6 +287,7 @@ class TestTrimTrailingSilence(unittest.TestCase):
         self.assertEqual(trim_trailing_silence(pcm), pcm)
 
 
+@pytest.mark.live_api
 @unittest.skipUnless(
     HAVE_MAC_TTS and HAVE_OPENAI_KEY, "needs macOS TTS and OPENAI_API_KEY"
 )

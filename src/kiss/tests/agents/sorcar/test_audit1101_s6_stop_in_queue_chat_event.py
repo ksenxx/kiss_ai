@@ -28,7 +28,7 @@ calls the producer wedged.
 
 The producer's flat-out loop lives in a frame of its own (``spin``):
 CPython 3.13 leaves a ``while`` loop's back-edge outside the exception
-table of the handlers of its own frame (cpython #108214), so a Stop
+table of the handlers of its own frame (cpython gh-130279), so a Stop
 raised on the back-edge of a loop written inside the ``try`` would
 escape the ``except KeyboardInterrupt`` and kill the producer; raised
 in ``spin``, it reaches the producer at its covered call.
@@ -48,6 +48,7 @@ import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.task_runner import inject_keyboard_interrupt
+from kiss.tests.persistence_helpers import close_db
 
 _INJECTIONS = 250
 
@@ -68,9 +69,9 @@ def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pat
     """Point persistence at a fresh database under *tmp_path*."""
     monkeypatch.setattr(th, "_KISS_DIR", tmp_path)
     monkeypatch.setattr(th, "_DB_PATH", tmp_path / "history.db")
-    th._close_db()
+    close_db()
     yield tmp_path
-    th._close_db()
+    close_db()
 
 
 @pytest.mark.usefixtures("no_cyclic_gc")

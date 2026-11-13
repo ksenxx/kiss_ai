@@ -36,6 +36,7 @@ import kiss.core.user_config as vc
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
+from kiss.tests.server.pause import Pause
 
 
 class _IsolatedConfig:
@@ -208,7 +209,7 @@ class TestRecentWorkDirsOverLocalChannel(IsolatedAsyncioTestCase):
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.server.web_server import _generate_self_signed_cert
+        from kiss.tests.local_ws import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
         self.server = RemoteAccessServer(
@@ -230,8 +231,7 @@ class TestRecentWorkDirsOverLocalChannel(IsolatedAsyncioTestCase):
             except Exception:
                 pass
         await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         self.cfg.exit()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -404,6 +404,49 @@ class TestRecentWorkDirsOverLocalChannel(IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.server._agent_server.work_dir, str(self.dir_b))
         self.assertEqual(vc.load_config().get("work_dir"), str(self.dir_b))
+
+    async def test_folder_not_created_yet_is_persisted_but_not_listed(self) -> None:
+        """A folder that does not exist yet (the first task creates it)
+        is adopted and persisted as ``work_dir`` like any other, so a
+        daemon restart keeps it; only the selected-so-far list, which
+        holds existing directories, leaves it out."""
+        reader, writer = await self._connect()
+        missing = str(Path(self.tmpdir) / "not_created_yet")
+        await self._send(
+            writer, {"type": "setWorkDir", "workDir": missing, "reply": True},
+        )
+        reply = await self._drain_until(
+            reader, lambda m: m.get("type") == "configData",
+        )
+        self.assertEqual(reply["config"]["work_dir"], missing)
+        self.assertEqual(reply["config"]["recent_work_dirs"], [])
+        self.assertEqual(self.server._agent_server.work_dir, missing)
+        self.assertEqual(vc.load_config().get("work_dir"), missing)
+
+    async def test_folder_removed_while_it_is_adopted_is_still_persisted(self) -> None:
+        """The folder is there when the pick arrives and gone when its
+        row is written (a peer removed it in between): ``work_dir`` is
+        persisted all the same.  It used to be adopted and broadcast
+        with nothing written, so a restart went back to the old one."""
+        reader, writer = await self._connect()
+        doomed = Path(self.tmpdir) / "removed_mid_adoption"
+        doomed.mkdir()
+
+        def remove_the_folder(frame_locals: dict[str, Any]) -> bool:
+            shutil.rmtree(doomed, ignore_errors=True)
+            return False
+
+        with Pause(vc.record_recent_work_dir.__code__, remove_the_folder):
+            await self._send(
+                writer, {"type": "setWorkDir", "workDir": str(doomed), "reply": True},
+            )
+            reply = await self._drain_until(
+                reader, lambda m: m.get("type") == "configData",
+            )
+        self.assertFalse(doomed.exists())
+        self.assertEqual(reply["config"]["work_dir"], str(doomed))
+        self.assertEqual(self.server._agent_server.work_dir, str(doomed))
+        self.assertEqual(vc.load_config().get("work_dir"), str(doomed))
 
     async def test_filesystem_root_is_never_recorded(self) -> None:
         """``_apply_new_work_dir`` refuses a root before recording it."""

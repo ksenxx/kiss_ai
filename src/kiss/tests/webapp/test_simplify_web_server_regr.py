@@ -57,8 +57,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)

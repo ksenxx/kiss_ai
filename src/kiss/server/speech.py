@@ -55,7 +55,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from kiss.core import config as config_module
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.kiss_agent import KISSAgent
+from kiss.core.models.model import Attachment
 from kiss.core.speech_synthesis import _env_timeout_seconds, audio_timeout_seconds
 from kiss.core.utils import replace_waiting_for_readers
 
@@ -96,9 +99,7 @@ def default_models_dir() -> Path:
     always downloading hundreds of MB of models into the real
     ``$KISS_HOME/models``.
     """
-    from kiss.core.config import kiss_home
-
-    return kiss_home() / "models"
+    return config_module.kiss_home() / "models"
 
 
 SAMPLE_RATE = 16000
@@ -373,9 +374,7 @@ VOICE_DEBUG_KEEP = 200
 
 def voice_debug_dir() -> Path:
     """Return the folder that keeps recent wake recordings for debugging."""
-    from kiss.core.config import kiss_home
-
-    return kiss_home() / "voice-debug"
+    return config_module.kiss_home() / "voice-debug"
 
 
 def save_voice_recording(pcm: bytes, info: dict[str, Any]) -> Path | None:
@@ -419,15 +418,22 @@ def save_voice_recording(pcm: bytes, info: dict[str, Any]) -> Path | None:
 def update_voice_recording_info(wav_path: Path, info: dict[str, Any]) -> None:
     """Write *info* as the JSON note of the recording at *wav_path*.
 
+    A recording pruned meanwhile (its transcription outlasted
+    :data:`VOICE_DEBUG_KEEP` newer ones) keeps no note: no sweep would
+    find one without its WAV.  The WAV is looked for after the write,
+    and a sweep unlinks the WAV first, so whichever of the two comes
+    last removes the note.
+
     Args:
         wav_path: A WAV path returned by :func:`save_voice_recording`.
         info: JSON-serializable details (replaces the previous note).
             A disk error is reported on stderr, not raised.
     """
+    note = wav_path.with_suffix(".json")
     try:
-        wav_path.with_suffix(".json").write_text(
-            json.dumps(info, indent=2), encoding="utf-8",
-        )
+        note.write_text(json.dumps(info, indent=2), encoding="utf-8")
+        if not wav_path.exists():
+            note.unlink(missing_ok=True)
     except OSError as err:
         print(f"could not save voice recording note: {err}", file=sys.stderr, flush=True)
 
@@ -458,27 +464,116 @@ def download_total_timeout_seconds() -> float:
     )
 
 
+_LOOKUPS = threading.BoundedSemaphore(8)
+"""Caps the address lookups in flight (:func:`_lookup`): one the resolver
+never answers keeps its thread, and a download must not add to those forever."""
+
+
+def _lookup(host: str, port: int, found: list[Any]) -> None:
+    """Thread body of :func:`_resolve`: put *host*'s addresses, or the lookup error, in *found*."""
+    if not _LOOKUPS.acquire(blocking=False):
+        found.append(OSError("too many address lookups are stalled"))
+        return
+    try:
+        found.append(socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM))
+    except Exception as exc:  # handed to the download that waits for it
+        found.append(exc)
+    finally:
+        _LOOKUPS.release()
+
+
+def _resolve(host: str, port: int, deadline: float) -> list[Any]:
+    """``getaddrinfo`` for a TCP connection to *host*, given up at *deadline* (``TimeoutError``).
+
+    The resolver takes no timeout and cannot be interrupted, and a
+    lookup has no socket for a download's deadline to shut down.  So
+    it runs in a daemon thread, which is left behind when it stalls.
+    """
+    found: list[Any] = []
+    lookup = threading.Thread(
+        target=_lookup, args=(host, port, found), name="download-lookup", daemon=True
+    )
+    lookup.start()
+    lookup.join(max(0.0, deadline - time.monotonic()))
+    if not found:
+        raise TimeoutError(f"the address lookup of {host} timed out")
+    if isinstance(found[0], Exception):
+        raise found[0]
+    return list(found[0])
+
+
+def _connect(
+    deadline: float, address: tuple[str, int], timeout: float, source_address: Any
+) -> socket.socket:
+    """``socket.create_connection`` whose address lookup is bounded (:func:`_resolve`).
+
+    The connection factory of :class:`_WatchedHTTP`.  The lookup ends
+    *timeout* seconds from now, like each connect and read after it,
+    and at the download's *deadline* at the latest; the stock factory's
+    lookup is bounded by neither.  Each address it finds is then given
+    what is left until the *deadline*, not a *timeout* of its own (a
+    millisecond once it has passed: a socket connected by then is shut
+    down as it registers).
+    """
+    host, port = address
+    error = OSError(f"no address for {host}")
+    for *_, sockaddr in _resolve(host, port, min(deadline, time.monotonic() + timeout)):
+        # The address as a literal no lookup leaves this host for; an IPv6
+        # link-local one needs its scope (the sockaddr's fourth field).
+        scope = f"%{sockaddr[3]}" if len(sockaddr) == 4 and sockaddr[3] else ""
+        left = max(deadline - time.monotonic(), 0.001)
+        try:
+            return socket.create_connection(
+                (sockaddr[0] + scope, sockaddr[1]), min(timeout, left), source_address
+            )
+        except OSError as exc:
+            error = exc
+    raise error
+
+
 class _WatchedHTTP(http.client.HTTPConnection):
     """An HTTP connection that registers its socket with *watch* once connected.
 
     For :func:`_download_url_to_file`'s deadline, which shuts the
     socket down (:func:`_shut_down`) to end a transfer wherever it is:
     in the headers ``urlopen`` reads, a chunked body's size lines, or
-    the body.
+    the body.  Before there is a socket, the deadline bounds the
+    lookup of the address and the connect to it (:func:`_connect`).
     """
 
     def __init__(self, *args: Any, watch: _WatchedHandler, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.watch = watch
+        self._create_connection = functools.partial(_connect, watch.deadline)
 
     def connect(self) -> None:
         """Connect, then register the socket with the deadline's watch."""
         super().connect()
         self.watch.register(self.sock)
 
+    def _tunnel(self) -> None:
+        """Register the socket before a proxy's reply to ``CONNECT`` is read, inside ``connect``."""
+        self.watch.register(self.sock)
+        super()._tunnel()  # type: ignore[misc]  # not in typeshed
+
 
 class _WatchedHTTPS(_WatchedHTTP, http.client.HTTPSConnection):
-    """:class:`_WatchedHTTP` over TLS."""
+    """:class:`_WatchedHTTP` over TLS, whose handshake is watched as well."""
+
+    def connect(self) -> None:
+        """Connect and register the TLS socket before its handshake, which a peer can stall too.
+
+        The stock ``connect`` returns with the handshake done: registered
+        only then, a handshake ran for a per-read timeout whatever the deadline.
+        """
+        http.client.HTTPConnection.connect(self)
+        self.sock = self._context.wrap_socket(  # type: ignore[attr-defined]  # not in typeshed
+            self.sock,
+            server_hostname=self._tunnel_host or self.host,  # type: ignore[attr-defined]
+            do_handshake_on_connect=False,
+        )
+        self.watch.register(self.sock)
+        self.sock.do_handshake()
 
 
 class _WatchedHandler(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
@@ -493,8 +588,10 @@ class _WatchedHandler(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
     (and the lock its caller holds) going past the deadline.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, deadline: float) -> None:
+        """*deadline*: the ``time.monotonic()`` at which :meth:`expire` is due."""
         super().__init__()
+        self.deadline = deadline
         self._lock = threading.Lock()
         self._sockets: list[socket.socket] = []
         self._expired = False
@@ -536,7 +633,8 @@ def _download_url_to_file(url: str, dest: Path) -> None:
     (:func:`_ensure_downloaded_model` or the web server's
     ``_ensure_voice_model``, both of which hold an exclusive lock)
     waited.  ``urlopen``'s timeout bounds the connect and every socket
-    read, but a per-read bound alone is not enough: a server
+    read (and :func:`_connect` the address lookup before them, which
+    no socket timeout reaches), but a per-read bound alone is not enough: a server
     trickling one byte before each socket timeout keeps every read
     alive and the copy running indefinitely (gpt-5.6-sol conc review,
     finding 3), and a check between chunks does not bound the headers
@@ -552,7 +650,7 @@ def _download_url_to_file(url: str, dest: Path) -> None:
     total = download_total_timeout_seconds()
     deadline = time.monotonic() + total
     exceeded = f"download of {url} exceeded the {total:g}s total deadline"
-    watched = _WatchedHandler()
+    watched = _WatchedHandler(deadline)
     cut_off = threading.Timer(total, watched.expire)
     cut_off.daemon = True
     cut_off.start()
@@ -767,9 +865,6 @@ def transcribe_pcm(
     if not pcm:
         return {"text": "", "language": None}
     try:
-        from kiss.core.kiss_agent import KISSAgent
-        from kiss.core.models.model import Attachment
-
         model_config: dict[str, Any] = {
             "temperature": 0,
             "modalities": ["text"],
@@ -777,8 +872,6 @@ def transcribe_pcm(
         }
         base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
         if base_url and audio_model.startswith("gpt-"):
-            from kiss.core import config as config_module
-
             model_config["base_url"] = base_url
             model_config["api_key"] = (
                 os.environ.get("OPENAI_API_KEY", "")

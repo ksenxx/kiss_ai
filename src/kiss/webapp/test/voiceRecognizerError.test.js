@@ -92,9 +92,11 @@ function fakeWorkerClass(workers) {
   };
 }
 
-function makeVoicePage() {
+function makeVoicePage(options) {
   const workers = [];
-  const page = voicePageState({autoGrant: true, noVosk: true});
+  const page = voicePageState(
+    Object.assign({autoGrant: true, noVosk: true}, options),
+  );
   const {win} = makePage({
     beforeScripts: win => {
       stubVoiceSurface(win, page);
@@ -201,6 +203,36 @@ async function main() {
   assert.strictEqual(crashed.workers.length, 2, 'a fresh model was loaded');
   assert.ok(!crashed.workers[1].terminated, 'the fresh worker is live');
   crashed.win.close();
+
+  // A worker that dies while a start is still in flight (the microphone
+  // prompt is unanswered) fails that start, and the error stays on the
+  // button when the superseded start settles on the late grant.
+  const starting = makeVoicePage({autoGrant: false});
+  const startingBtn = micBtn(starting.win);
+  startingBtn.click();
+  await waitFor(
+    () => starting.mic.calls.length === 1,
+    'the microphone is asked for',
+  );
+  starting.workers[0].emitError({message: 'the speech worker crashed'});
+  await waitFor(
+    () => startingBtn.classList.contains('voice-error'),
+    'a worker that died must fail the start',
+  );
+  starting.mic.calls[0].grant();
+  await settle();
+  await settle();
+  assert.ok(
+    startingBtn.classList.contains('voice-error') &&
+      /worker crashed/.test(startingBtn.getAttribute('data-tooltip') || ''),
+    'the error must outlive the start it failed: ' + startingBtn.className,
+  );
+  assert.deepStrictEqual(
+    starting.log,
+    ['track-stopped'],
+    'the late microphone is released and no audio graph is opened',
+  );
+  starting.win.close();
   console.log('voiceRecognizerError.test.js passed');
 }
 

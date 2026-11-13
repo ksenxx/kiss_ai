@@ -51,12 +51,11 @@ class _LocalHarness(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-fixer-webserver-")
 
-        self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved_persistence = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
 
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
@@ -92,7 +91,7 @@ class _LocalHarness(unittest.TestCase):
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
         self.loop.close()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
+        th._DB_PATH, th._KISS_DIR = self._saved_persistence
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _open_conn(
@@ -176,6 +175,7 @@ class TestPromptTruncationIsByteBased(_LocalHarness):
         self._send_line(writer, {
             "type": "submit",
             "prompt": prompt,
+            "promptId": "big-prompt-id",
             "tabId": "tab-big",
             "model": "",
             "attachments": [],
@@ -195,6 +195,8 @@ class TestPromptTruncationIsByteBased(_LocalHarness):
         refusal = _refusal()
         assert refusal is not None
         self.assertEqual(refusal["code"], "prompt_refused")
+        # The refusal names the prompt, so the page puts back that one.
+        self.assertEqual(refusal["promptIds"], ["big-prompt-id"])
         self.assertIn("too long to send", refusal["text"])
         self.assertIn("1.2 MB", refusal["text"])
         self.assertIn("limit is 1 MB", refusal["text"])

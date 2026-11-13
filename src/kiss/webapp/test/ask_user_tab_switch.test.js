@@ -22,6 +22,8 @@ const {
   answering,
 } = require('./simplify2_harness');
 const {tabEl} = require('./subagent_tab_helpers');
+const {key} = require('./ui_antipattern_harness');
+const {typeAndSend} = require('./attachment_helpers');
 
 function makePage(opts) {
   return makeChatPage({
@@ -76,9 +78,7 @@ function testNewQuestionSwitchesTabWithoutToast() {
   const otherTab = api.getActiveTabId();
   assert.notStrictEqual(otherTab, questionTab);
   // The user has been working on the other tab since their last submit.
-  win.document
-    .getElementById('task-input')
-    .dispatchEvent(new win.KeyboardEvent('keydown', {key: 'a', bubbles: true}));
+  key(win, win.document.getElementById('task-input'), 'a');
 
   send(win, {
     type: 'askUser',
@@ -116,8 +116,7 @@ function testNewQuestionSwitchesTabWithoutToast() {
   // Answering retires the question.
   clickTab(win, questionTab);
   assert.ok(answering(win));
-  win.document.getElementById('task-input').value = 'tok_live_123';
-  win.document.getElementById('send-btn').click();
+  typeAndSend(win, 'tok_live_123');
   assert.ok(
     posted.some(
       m =>

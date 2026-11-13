@@ -12,6 +12,7 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
+const {waitFor} = require('./simplify2_harness');
 
 const {test, report} = h.makeRunner();
 
@@ -27,8 +28,7 @@ async function editorLanguage(name) {
     content: 'FROM python:3.12\n',
     version: 'v1',
   });
-  for (let i = 0; i < 100 && created.length < 1; i++) await h.sleep(20);
-  assert.strictEqual(created.length, 1, 'one editor was created');
+  await waitFor(() => created.length === 1, 'one editor was created');
   const language = created[0].language;
   win.close();
   return language;

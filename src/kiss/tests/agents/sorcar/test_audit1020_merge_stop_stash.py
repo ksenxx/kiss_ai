@@ -22,12 +22,23 @@ test injects the interrupt exactly as the runner does
 
 from __future__ import annotations
 
+import _thread
+import functools
+import logging
+import os
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from types import FrameType
+from typing import Any
+
+import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, _git
@@ -63,18 +74,52 @@ def _install_lingering_pre_commit(repo: Path, hooks: Path, ready: Path) -> None:
 
 
 class _MergeThread(threading.Thread):
-    """Runs ``agent.merge()`` and keeps whatever it raised."""
+    """Runs *call* (``agent.merge``, a ``stash_pop``) and keeps whatever it raised."""
 
-    def __init__(self, agent: ChatSorcarAgent) -> None:
+    def __init__(self, call: Callable[[], object]) -> None:
         super().__init__(daemon=True)
-        self.agent = agent
+        self.call = call
         self.raised: BaseException | None = None
 
     def run(self) -> None:
         try:
-            self.agent.merge()
+            self.call()
         except BaseException as exc:
             self.raised = exc
+
+
+def _install_racing_git(tmpdir: Path, repo: Path, after_drop: str) -> str:
+    """Return a ``PATH`` whose ``git`` loses its first ``stash drop`` to the user's own stash.
+
+    The user's entry is pushed just before the real drop runs, so the drop,
+    which goes by position, takes theirs; the shell *after_drop* then runs
+    before the script ends.  Every other command is git's own.
+    """
+    real, raced = shutil.which("git"), tmpdir / "raced"
+    (tmpdir / "bin").mkdir()
+    script = tmpdir / "bin" / "git"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'case " $* " in *" stash drop "*) if [ ! -e {raced} ]; then\n'
+        f"    touch {raced}\n"
+        f"    echo \"the user's work\" > {repo}/u.txt\n"
+        f"    {real} -C {repo} stash push -q --include-untracked -m \"the user's own\" -- u.txt\n"
+        f'    {real} "$@"; status=$?\n'
+        f"    {after_drop}\n"
+        "    exit $status\n"
+        "fi;; esac\n"
+        f'exec {real} "$@"\n'
+    )
+    script.chmod(0o755)
+    return f"{script.parent}{os.pathsep}{os.environ['PATH']}"
+
+
+def _stop_as_the_drop_thread_starts(frame: FrameType, event: str, arg: Any) -> None:
+    """Profile hook: inject the Stop as ``_drop_stash``'s call that starts its thread returns."""
+    if (event == "c_return" and arg is _thread.start_new_thread
+            and frame.f_code is GitWorktreeOps._drop_stash.__code__):
+        sys.setprofile(None)
+        inject(threading.current_thread())
 
 
 class TestStopDuringSquashCommit:
@@ -104,7 +149,7 @@ class TestStopDuringSquashCommit:
 
     def _merge_stopped_during_commit(self) -> None:
         """Run the merge on a thread and inject the Stop while ``git commit`` runs."""
-        merger = _MergeThread(self.agent)
+        merger = _MergeThread(self.agent.merge)
         merger.start()
         deadline = time.monotonic() + 30
         while not self.ready.exists():
@@ -133,3 +178,73 @@ class TestStopDuringSquashCommit:
         assert _git("stash", "list", cwd=self.repo).stdout == ""
         assert _git("rev-parse", "--verify", self.wt.branch, cwd=self.repo).returncode == 0
         assert self.agent._merge_conflict_warning is None
+
+
+class TestDropTookTheUsersEntry:
+    """A drop that removed the user's own stash entry puts it back, Stop or not.
+
+    ``git stash drop`` goes by position, and the user's ``git stash`` (which
+    takes none of the merge's locks) moves every position between the look
+    at the list and the drop.  The entry the drop then removed is in no ref
+    until it is stored back: a Stop between the two used to lose it.
+    """
+
+    def setup_method(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.repo = _make_repo(self.tmpdir / "repo")
+        (self.repo / "f.txt").write_text(USER_NOTES)
+        assert GitWorktreeOps.stash_if_dirty(self.repo) is True
+
+    def teardown_method(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_a_stop_as_the_drop_ends_does_not_lose_it(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        dropped = self.tmpdir / "dropped"
+        racing = _install_racing_git(self.tmpdir, self.repo, f"touch {dropped}; sleep 0.5")
+        monkeypatch.setenv("PATH", racing)
+        popper = _MergeThread(functools.partial(GitWorktreeOps.stash_pop, self.repo))
+        popper.start()
+        deadline = time.monotonic() + 30
+        while not dropped.exists():
+            assert time.monotonic() < deadline and popper.is_alive(), repr(popper.raised)
+            time.sleep(0.002)
+        assert inject(popper) == 1
+        popper.join(timeout=30)
+
+        assert isinstance(popper.raised, KeyboardInterrupt), repr(popper.raised)
+        listed = _git("stash", "list", cwd=self.repo).stdout.splitlines()
+        assert len(listed) == 1 and listed[0].endswith("the user's own"), listed
+        assert (self.repo / "f.txt").read_text() == USER_NOTES
+
+    def test_a_stop_as_the_drop_starts_waits_for_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The Stop raised as the call that starts the drop's thread returns is raised once
+        that thread has ended.  (With no thread to be had the drop runs on the caller's,
+        as before: that takes a process out of threads, which no test here makes.)"""
+        monkeypatch.setenv("PATH", _install_racing_git(self.tmpdir, self.repo, "sleep 0.5"))
+        sys.setprofile(_stop_as_the_drop_thread_starts)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                GitWorktreeOps.stash_pop(self.repo)
+        finally:
+            sys.setprofile(None)
+
+        listed = _git("stash", "list", cwd=self.repo).stdout.splitlines()
+        assert len(listed) == 1 and listed[0].endswith("the user's own"), listed
+        assert (self.repo / "f.txt").read_text() == USER_NOTES
+
+    def test_one_that_cannot_be_stored_back_is_named_for_recovery(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        lock = self.repo / ".git" / "refs" / "stash.lock"  # git cannot update refs/stash
+        monkeypatch.setenv("PATH", _install_racing_git(self.tmpdir, self.repo, f": > {lock}"))
+        with caplog.at_level(logging.ERROR, logger="kiss.agents.sorcar.git_worktree"):
+            assert GitWorktreeOps.stash_pop(self.repo)
+        lock.unlink()
+
+        recovery = re.search(r"git stash store ([0-9a-f]{40})", caplog.text)
+        assert recovery, caplog.text
+        assert _git("stash", "store", recovery[1], cwd=self.repo).returncode == 0
+        assert _git("stash", "pop", cwd=self.repo).returncode == 0
+        assert (self.repo / "u.txt").read_text() == "the user's work\n"

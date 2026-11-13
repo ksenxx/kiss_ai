@@ -83,6 +83,7 @@ from websockets.sync.server import ServerConnection, serve
 
 from kiss.agents.sorcar import agent_dispatch, cron_agent, daemon_client, local_endpoint
 from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.tests.local_ws import make_test_tls
 
 _TOKEN = "audit0903-token"
@@ -414,24 +415,37 @@ def test_run_agent_tool_reports_unconfirmed_stop_despite_result(
     unconfirmed-stop error string — releasing the workspace with a
     success report here could hand the workspace to a later dispatch
     while this task still runs finalization.
+
+    Audit 2026-11-12 (B4): the job stays a live job of its caller, and
+    what the sub-task had not spent of its budget stays reserved:
+    nothing charges what it spends from here on.
     """
     monkeypatch.setattr(daemon_client, "_STOP_CONFIRM_GRACE_SECONDS", 1.0)
     daemon = _RacingFinishDaemon(finish_delay=0.6, send_terminal_status=False)
+    monkeypatch.setenv("KISS_HOME", str(tmp_path))
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
     script.write_text(_HELPER_SEA)
+    parent = SorcarAgent("unconfirmed-stop-parent")
+    parent.max_budget = 10.0
+    parent.budget_used = 0.0
+    parent._current_executor = None
     try:
-        out = make_run_agent_tool(str(tmp_path))(
-            "finishes without terminal status", str(script), timeout="0.3",
+        out = make_run_agent_tool(str(tmp_path), parent)(
+            "finishes without terminal status", str(script), max_budget="4", timeout="0.3",
         )
         job_id = agent_dispatch.notice_job_id(out)
         assert job_id, out
-        out = agent_dispatch.make_agent_job_tool()(job_id, "kill")
+        out = agent_dispatch.make_agent_job_tool(parent)(job_id, "kill")
         assert out == agent_dispatch.unconfirmed_stop_error("helper"), out
         assert "MAY STILL BE RUNNING" in out
         assert "finished on my own" not in out
+        (job,) = agent_dispatch.live_agent_jobs(parent)
+        assert job.job_id == job_id and job.finished
+        assert parent.budget_used == pytest.approx(0.02)
+        assert agent_dispatch.reserved_budget([job]) == pytest.approx(3.98)
     finally:
-        agent_dispatch.kill_jobs_of(None)
+        agent_dispatch.kill_jobs_of(parent)
         daemon.close()
 
 

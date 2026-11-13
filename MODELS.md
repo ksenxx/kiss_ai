@@ -1,6 +1,6 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **1077 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **1092 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, such as `bedrock/us.anthropic.claude-opus-4-6-v1` or `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`) are the Claude ids the updater found in its AWS region (`AWS_REGION`, default `us-east-1`): the system-defined cross-region inference profiles and any foundation model id that accepts on-demand calls there. Each one is a copy of its `claude-*` entry (same context length, capabilities and `-low`/`-medium`/`-high`/`-max` effort suffixes) with the prices scaled by Bedrock's regional premium: a `global.` profile costs the same as the `claude-*` entry, a geographic (`us.`, `eu.`, `apac.`, `jp.`, `au.`) or in-region (`anthropic.`) id of a Claude 4.5-or-later model 10% more. Configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`, to use them; re-running the updater on a machine in another region relists the ids that region serves. An id the region serves that is not in the catalog can still be used by name or added under Settings → Custom Models.
 
@@ -9,20 +9,20 @@ The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, s
 | OpenAI | 89 |
 | Anthropic | 82 |
 | Amazon Bedrock (`bedrock/*`) | 144 |
-| Gemini | 49 |
+| Gemini | 57 |
 | Together AI | 109 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 496 |
+| OpenRouter | 503 |
 | Claude Code CLI (`cc/*`) | 79 |
 | Codex CLI (`codex/*`) | 11 |
 
 Current catalog capability totals:
 
-- **1033** generation-capable models
-- **885** function-calling-capable models
-- **7** embedding models
-- **30** decision models
+- **1044** generation-capable models
+- **887** function-calling-capable models
+- **8** embedding models
+- **32** decision models
 
 Full model list:
 
@@ -360,7 +360,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Gemini (49)</strong></summary>
+<summary><strong>Gemini (57)</strong></summary>
 
 - `gemini-2.5-flash`
 - `gemini-2.5-flash-image`
@@ -407,6 +407,14 @@ Full model list:
 - `gemini-4-argon-high`
 - `gemini-4-argon-low`
 - `gemini-4-argon-medium`
+- `gemini-4-carbon`
+- `gemini-4-carbon-high`
+- `gemini-4-carbon-low`
+- `gemini-4-carbon-medium`
+- `gemini-4-hydrogen`
+- `gemini-4-hydrogen-high`
+- `gemini-4-hydrogen-low`
+- `gemini-4-hydrogen-medium`
 - `gemini-embedding-001`
 - `gemini-embedding-2`
 - `gemini-embedding-2-preview`
@@ -560,7 +568,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (496)</strong></summary>
+<summary><strong>OpenRouter (503)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -655,10 +663,7 @@ Full model list:
 - `openrouter/baseten/elephant-1`
 - `openrouter/baseten/joey-1`
 - `openrouter/baseten/mammoth-1`
-- `openrouter/bytedance-seed/seed-1.6`
-- `openrouter/bytedance-seed/seed-1.6-flash`
 - `openrouter/bytedance-seed/seed-2-1-turbo`
-- `openrouter/bytedance-seed/seed-2.0-code`
 - `openrouter/bytedance-seed/seed-2.0-lite`
 - `openrouter/bytedance-seed/seed-2.0-mini`
 - `openrouter/bytedance/ui-tars-1.5-7b`
@@ -708,6 +713,9 @@ Full model list:
 - `openrouter/google/gemini-3.7-flash`
 - `openrouter/google/gemini-3.8-flash`
 - `openrouter/google/gemini-4-argon`
+- `openrouter/google/gemini-4-carbon`
+- `openrouter/google/gemini-4-hydrogen`
+- `openrouter/google/gemini-decision-1`
 - `openrouter/google/gemini-omni-1.1-flash`
 - `openrouter/google/gemini-omni-1.2-flash`
 - `openrouter/google/gemma-2-27b-it`
@@ -721,12 +729,15 @@ Full model list:
 - `openrouter/gryphe/mythomax-l2-13b`
 - `openrouter/ibm-granite/granite-4.2-8b`
 - `openrouter/inclusionai/ling-3.0-flash`
+- `openrouter/inclusionai/ling-3.0-flash-fin`
+- `openrouter/inclusionai/ling-3.0-flash-sante`
 - `openrouter/inclusionai/ling-3.0-flash-vl`
 - `openrouter/inclusionai/ling-3.0-tiny`
 - `openrouter/inclusionai/ling-3.1-flash`
 - `openrouter/inference-net/schematron-v2-small`
 - `openrouter/inference-net/schematron-v2-turbo`
 - `openrouter/jaredpalmer/kev-4b`
+- `openrouter/kt/midm-k-3.0-pro`
 - `openrouter/liquid/d1`
 - `openrouter/liquid/d1-ultra`
 - `openrouter/liquid/d1.1`
@@ -787,11 +798,14 @@ Full model list:
 - `openrouter/morph/morph-v3-fast`
 - `openrouter/morph/morph-v3-large`
 - `openrouter/morph/reflex`
+- `openrouter/motif-technologies/motif-3`
 - `openrouter/nace-ai/drex-max`
+- `openrouter/nace-ai/drex-max-finance`
 - `openrouter/nace-ai/drex-v1.5`
 - `openrouter/nace-ai/drex-v2.0`
 - `openrouter/nex-agi/nex-n2.5-mini`
 - `openrouter/nex-agi/nex-n2.5-pro`
+- `openrouter/nex-agi/nex-n2.6`
 - `openrouter/nousresearch/hermes-4-405b`
 - `openrouter/nvidia/nemotron-3-nano-30b-a3b`
 - `openrouter/nvidia/nemotron-3-super-120b-a12b`
@@ -899,7 +913,6 @@ Full model list:
 - `openrouter/prism-ml/ternary-bonsai-2-27b`
 - `openrouter/prism-ml/ternary-bonsai-2-9b`
 - `openrouter/qwen/qwen-2.5-72b-instruct`
-- `openrouter/qwen/qwen-2.5-7b-instruct`
 - `openrouter/qwen/qwen-2.5-coder-32b-instruct`
 - `openrouter/qwen/qwen-plus`
 - `openrouter/qwen/qwen-plus-2025-07-28:thinking`
@@ -969,11 +982,13 @@ Full model list:
 - `openrouter/thedrummer/skyfall-36b-v2`
 - `openrouter/thedrummer/unslopnemo-12b`
 - `openrouter/thinkingmachines/inkling`
+- `openrouter/thinkingmachines/inkling-2-small`
 - `openrouter/thinkingmachines/inkling-small`
 - `openrouter/togethercomputer/tev1-4b-experimental`
 - `openrouter/typesafe/jev-1.13`
 - `openrouter/typesafe/jev-1.14`
 - `openrouter/unbiased/pareto-26.10`
+- `openrouter/unbiased/pareto-26.10-preview`
 - `openrouter/unbiased/pareto-26.9`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-decide`

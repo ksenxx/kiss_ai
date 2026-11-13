@@ -52,7 +52,7 @@ even on an endpoint without schema support.  Should a provider reject
 the structured-output parameters, one plain retry (same prompt, no
 schema knobs) recovers.  :func:`_parse_verdict` extracts the object
 even when a lax model wraps it in code fences or prose, and accepts
-only genuinely boolean values.
+only a boolean or one of its string spellings (:func:`_verdict_bool`).
 
 Anthropic models get the plain prompt only.  Measured on the live API,
 ``output_format`` adds ~280 input tokens of grammar and 1.0–1.4 s of
@@ -366,11 +366,7 @@ def classification_enabled(override: bool | None = None) -> bool:
         return override
     from kiss.core.user_config import load_config
 
-    try:
-        return bool(load_config().get("classify_tasks", True))
-    except Exception:  # pragma: no cover — unreadable config
-        logger.debug("Could not read classify_tasks", exc_info=True)
-        return True
+    return bool(load_config()["classify_tasks"])
 
 
 def _verdict_bool(value: Any) -> bool | None:
@@ -402,8 +398,8 @@ def _parse_verdict(result: str) -> TaskClassification | None:
     The schema demands a bare JSON object, but a lax model (or one on an
     endpoint without structured-output enforcement) may wrap it in a
     code fence or surround it with prose, so every JSON object embedded
-    in *result* is tried, in order, until one carries a genuinely
-    boolean ``is_simple`` value.
+    in *result* is tried, in order, until one carries an ``is_simple``
+    value :func:`_verdict_bool` reads as a boolean.
 
     Args:
         result: The response text of the non-agentic classification
@@ -411,7 +407,7 @@ def _parse_verdict(result: str) -> TaskClassification | None:
 
     Returns:
         The parsed :class:`TaskClassification`, or ``None`` when no
-        JSON object holding a boolean ``is_simple`` value can be found
+        JSON object holding such an ``is_simple`` value can be found
         in *result*.
     """
     decoder = json.JSONDecoder()
@@ -573,11 +569,12 @@ def _read_cache_file(path: Path) -> dict[str, dict[str, Any]]:
     Returns:
         Valid, unexpired entries (the ``is_simple`` boolean plus the
         ``ts`` write time) in file order.  A missing,
-        unreadable or malformed file yields an empty mapping.
+        unreadable or malformed file (JSON nested past the parser's
+        stack included) yields an empty mapping.
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
     if not isinstance(raw, dict):
         return {}
@@ -682,7 +679,6 @@ def _remember_locked(key: str, is_simple: bool) -> None:
     path = _cache_path()
     cache: dict[str, dict[str, Any]] | None = None
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         with exclusive_file_lock(
             path.with_name(path.name + ".lock"), timeout=CLASSIFIER_CACHE_LOCK_TIMEOUT_SECONDS,
         ):
@@ -722,32 +718,14 @@ def _write_cache_file(path: Path, cache: dict[str, dict[str, Any]]) -> None:
     try:
         tmp_path.write_text(json.dumps(cache), encoding="utf-8")
         os.replace(tmp_path, path)
-    except OSError:
+    except BaseException:
+        # A Stop (an injected KeyboardInterrupt) lands here too.  The unlink stays best-effort:
+        # an OSError of its own would replace the Stop, and the caller swallows OSError.
         try:
             tmp_path.unlink()
         except OSError:
             pass
         raise
-
-
-def clear_classification_cache() -> None:
-    """Forget every memoised verdict, in memory and on disk.
-
-    A test helper: a prompt or criteria change needs no reset because
-    the criteria text is part of the cache key.
-    """
-    locked_call(_cache_lock, _clear_locked)
-
-
-def _clear_locked() -> None:
-    """Drop the mirror and the cache file (``_cache_lock`` held)."""
-    global _cache, _cache_loaded_from
-    _cache = None
-    _cache_loaded_from = None
-    try:
-        _cache_path().unlink()
-    except OSError:
-        pass
 
 
 def _attempt_classification(

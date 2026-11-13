@@ -136,7 +136,6 @@ function runTests() {
 try {
   runTests();
   console.log('\nAll tests passed');
-  process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);
   process.exit(1);

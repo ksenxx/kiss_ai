@@ -8,7 +8,6 @@ BUG-19: discard() now acquires repo_lock — checkout serialized with
         merge/release from other tabs.
 BUG-20: merge() reports a checkout failure instead of silently failing.
 BUG-21: checkout_error() removed — checkout() returns (bool, stderr).
-BUG-22: _conflict_of misses staged files — KNOWN LIMITATION.
 BUG-23: _try_setup_worktree now checks commit_staged return value and
         uses --no-verify for the baseline commit.
 BUG-24: _get_worktree_changed_files returns [] on git diff failure —
@@ -25,7 +24,6 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
-    _git,
 )
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
@@ -35,52 +33,7 @@ from kiss.tests.agents.sorcar.test_worktree_audit5 import (  # noqa: F401
     _restore_db,
 )
 from kiss.tests.conftest import seed_worktree
-from kiss.tests.server.worktree_helpers import merge_conflict, worktree_changed_files
-
-
-class TestBug22ConflictMissesStaged:
-    """BUG-22: This is a known limitation. The fix would require
-    adding a staged-files check to _conflict_of. Kept as-is
-    because git merge --squash handles it at merge time.
-    """
-
-    def setup_method(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-        self._saved = _redirect_db(self._tmpdir)
-
-    def teardown_method(self) -> None:
-        _restore_db(self._saved)
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def test_staged_overlap_not_detected(self) -> None:
-        """BUG-22: Staged overlap is not detected (known limitation)."""
-        repo = _make_repo(Path(self._tmpdir) / "repo")
-
-        agent = ChatSorcarAgent("test")
-        agent._chat_id = "test22"
-        wt_work = agent._try_setup_worktree(repo, str(repo))
-        assert wt_work is not None
-
-        wt = agent._wt
-        assert wt is not None
-
-        (wt.wt_dir / "shared.txt").write_text("agent version\n")
-        GitWorktreeOps.commit_all(wt.wt_dir, "agent changes shared.txt")
-
-        (repo / "shared.txt").write_text("user version\n")
-        _git("add", "shared.txt", cwd=repo)
-
-        server = AgentServer()
-        server.work_dir = str(repo)
-        state = agent_state.AgentState(
-            "task-t22", agent=agent, tab_id="t22", server_owned=True,
-        )
-        agent_state.register(state)
-        try:
-            has_conflict = merge_conflict(server, "t22")
-        finally:
-            agent_state.unregister(state.task_id, state)
-        assert has_conflict is True
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 
 class TestBug24SilentDiscardOnGitFailure:

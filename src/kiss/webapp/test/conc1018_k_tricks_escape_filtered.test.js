@@ -15,11 +15,12 @@
 // still closes the editor first and the sheet second.
 
 const assert = require('assert');
-const {makePage, click, typeInto} = require('./simplify2_harness');
-
-function rows(doc) {
-  return Array.from(doc.getElementById('tricks-list').children);
-}
+const {
+  makePage,
+  click,
+  typeInto,
+  promptletRows: rows,
+} = require('./simplify2_harness');
 
 function escape(win, el) {
   el.dispatchEvent(

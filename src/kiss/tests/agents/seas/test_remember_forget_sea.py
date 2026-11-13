@@ -30,31 +30,21 @@ from typing import Any
 import pytest
 
 from kiss.agents.seas import agents_md
-from kiss.agents.seas.base.base_sea import BaseSea, WorkerSea
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.forget import forget_sea
 from kiss.agents.seas.forget.forget_sea import ForgetSea
 from kiss.agents.seas.remember import remember_sea
 from kiss.agents.seas.remember.remember_sea import RememberSea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.utils import read_bytes_waiting_for_writer
 from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import (
-    assert_no_removed_getters,
+    assert_worker_contract,
     system_message,
     tool_names,
     tool_results,
 )
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
-
-_WORKER_SETTINGS: dict[str, Any] = {
-    "tool_profile": "bash",
-    "max_budget": 1.0,
-    "auto_classify": False,
-    "use_web_tools": False,
-    "use_memory": False,
-}
-"""Both SEAs' resolved settings: ``settings()`` plus the ``WorkerSea`` defaults."""
 
 
 @pytest.fixture(autouse=True)
@@ -88,16 +78,7 @@ def test_sea_methods_follow_the_contract() -> None:
     assert "`list_instructions`" in forget_sea.SYSTEM_PROMPT
     assert ForgetSea().tools([]) == [forget_sea.forget_instruction, agents_md.list_instructions]
     for module, sea in ((remember_sea, RememberSea()), (forget_sea, ForgetSea())):
-        assert isinstance(sea, WorkerSea), module.__name__
-        assert sea.settings({}) == {"tool_profile": "bash", "max_budget": 1.0}
-        assert sea.settings({"model": "m"})["model"] == "m"
-        # ``resolve_settings`` evaluates the declared settings (``settings()``
-        # over the ``WorkerSea`` defaults) only; ``system_prompt`` is a hook
-        # the daemon applies.
-        declared = sea_commands.declared_settings([sea])
-        assert resolve_settings(declared) == _WORKER_SETTINGS, module.__name__
-        assert sea_commands.base_settings([sea]) == _WORKER_SETTINGS, module.__name__
-        assert_no_removed_getters(module)
+        assert_worker_contract(module, sea, {"tool_profile": "bash", "max_budget": 1.0})
 
 
 def test_remember_creates_the_file_and_appends_bullets(_fresh_agents_md: Path) -> None:
@@ -311,8 +292,8 @@ def _concurrent_remembers_scenario() -> None:
         return agents_md.add_instruction(f"Concurrent rule {i}")
 
     pool = ThreadPoolExecutor(max_workers=16)
-    try:
-        replies = list(pool.map(add, range(16), timeout=120))
+    try:  # a stuck worker is reported here, well before the parent's deadline ends this interpreter
+        replies = list(pool.map(add, range(16), timeout=60))
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
     assert all(r.startswith("Remembered in ") for r in replies), replies

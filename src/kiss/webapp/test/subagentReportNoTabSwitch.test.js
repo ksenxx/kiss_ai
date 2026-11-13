@@ -42,6 +42,7 @@ const {
   tabEl,
   visibleSrcdoc,
   activeTabId,
+  chatSurfaceVisible,
   swipeLeftToFileScreen,
 } = require('./subagent_tab_helpers');
 
@@ -73,10 +74,8 @@ function testSubagentReportDoesNotStealFocus() {
     'BUG - a sub-agent finishing is not the task finishing: the parent ' +
       'task is still running, so its report must not switch tabs',
   );
-  const out = win.document.getElementById('output');
-  assert.notStrictEqual(
-    out.style.display,
-    'none',
+  assert.ok(
+    chatSurfaceVisible(win),
     'the chat surface of the still-running parent must stay visible',
   );
 

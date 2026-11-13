@@ -43,8 +43,13 @@ from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.core.user_config as vc
 from kiss.server import standalone_app
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-from kiss.tests.conftest import posix_only
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import (
+    nproc_limit_lowered_to_one,
+    posix_only,
+    thread_start_can_be_starved,
+)
+from kiss.tests.local_ws import _generate_self_signed_cert
 from kiss.tests.server.conftest import (
     find_free_port,
     no_verify_ssl,
@@ -139,6 +144,43 @@ class TestAppWindowConnection(IsolatedAsyncioTestCase):
         self.assertIs(await self._open(), False)
         await self._close(other)
         self.assertIs(await self._open(), False)
+
+    async def _popups(self, count: int) -> None:
+        """Wait, at most ten seconds, for the daemon to count *count* popup connections."""
+        self.addCleanup(setattr, standalone_app, "_app_windows", 0)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10
+        while standalone_app._app_windows != count and loop.time() < deadline:
+            await asyncio.sleep(0.02)
+        self.assertEqual(standalone_app._app_windows, count)
+
+    async def test_only_a_close_the_page_started_is_the_page_going_away(self) -> None:
+        """Code 1001 arms the quit when the page sent it, not when it answers the daemon's close."""
+        popup = await self._connect("?appWindow=1")
+        await self._popups(1)
+        armed = standalone_app._quit_armings
+        await popup.close(code=standalone_app.APP_WINDOW_GONE_CLOSE_CODE)
+        await self._popups(0)
+        self.assertEqual(standalone_app._quit_armings, armed + 1, "the page went away")
+        await self._connect("?appWindow=1")
+        await self._popups(1)
+        armed = standalone_app._quit_armings
+        self.server._close_ws_listeners()
+        await self._popups(0)
+        self.assertEqual(standalone_app._quit_armings, armed, "the daemon closed it: a drop")
+
+    async def test_a_failed_service_teardown_still_releases_the_popup(self) -> None:
+        """A teardown step that raises (remote views cannot start their thread)
+        skips neither the printer's unbinding nor the popup count."""
+        if not thread_start_can_be_starved():
+            pytest.skip("RLIMIT_NPROC cannot starve Thread.start on this host")
+        popup = await self._connect("?appWindow=1")
+        await self._popups(1)
+        printer = self.server._printer
+        with nproc_limit_lowered_to_one():
+            await popup.close()
+            await self._popups(0)
+        self.assertEqual((printer._conn_endpoints, printer._remote_clients), ({}, set()))
 
     @unittest.skipUnless(platform.system() == "Darwin", "the daemon quits the browser on macOS")
     async def test_the_popup_going_away_quits_the_windowless_browser(self) -> None:
@@ -273,12 +315,18 @@ def test_a_quit_timer_armed_before_a_later_close_does_not_act(
 
     Two reloads in a row arm two timers; the first one's deadline
     falls inside the second reload's grace period, with the popup
-    between connections (and off screen when minimized).
+    between connections (and off screen when minimized).  Nor may a
+    timer act once the popup connected again: that connection dropped
+    (the keepalive timed out), the page is still there, minimized.
     """
     bundle, browser = windowless_browser
     assert standalone_app.app_window_event("open")
     assert standalone_app.app_window_event("closing")  # reload 1: the first timer is armed
     first = standalone_app._quit_armings
+    assert standalone_app.app_window_event("open")
+    assert standalone_app.app_window_event("dropped")
+    assert not standalone_app.quit_closed_app(bundle, armed=first)
+    assert browser.poll() is None, "the first timer quit a browser whose page was still there"
     assert standalone_app.app_window_event("open")
     assert standalone_app.app_window_event("closing")  # reload 2: a second timer
     assert not standalone_app.quit_closed_app(bundle, armed=first)

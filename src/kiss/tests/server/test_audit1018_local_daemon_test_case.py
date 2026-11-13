@@ -29,6 +29,7 @@ from pathlib import Path
 from kiss.agents.sorcar import persistence
 from kiss.server import agent_state
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.parallel_agent_harness import LocalDaemonTestCase
 
 # Written by the test methods below so the outer test can inspect the
@@ -180,7 +181,7 @@ def test_live_task_thread_at_teardown_is_an_error_not_a_leak() -> None:
     assert _SEEN["db_before_release"] == inner_db
     assert _SEEN["db_after_release"] == inner_db
     # Now that the worker is gone the home can be released the normal way.
-    persistence._close_db()
+    close_db()
     case.home.cleanup()
     assert not Path(case.tmpdir).exists()
     assert persistence._DB_PATH == db_path_before

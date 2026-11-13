@@ -100,7 +100,7 @@ class _CloseTunnels:
         self.tunnel = mach.SshTunnel(LOGIN, 1)
 
     def __call__(self) -> None:
-        locked_call(mach._tunnels_lock, mach._tunnels.setdefault, LOGIN, self.tunnel)
+        locked_call(mach._tunnels_lock, mach._tunnels.setdefault, (LOGIN, 1), self.tunnel)
         mach.close_tunnels()
 
 

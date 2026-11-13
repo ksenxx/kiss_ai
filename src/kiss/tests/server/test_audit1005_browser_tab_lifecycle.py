@@ -186,7 +186,10 @@ def test_closing_the_last_tab_right_before_opening_another_keeps_the_new_tab(
 class _StallingPage(http.server.BaseHTTPRequestHandler):
     """A page whose response never comes: its navigation only ends by a close."""
 
+    arrivals: list[str] = []  # the requests that reached the server, in order
+
     def do_GET(self) -> None:  # noqa: N802 - http.server API
+        self.arrivals.append(self.path)
         time.sleep(20)
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
@@ -206,7 +209,7 @@ def stalling_server() -> Any:
 def test_closing_a_tab_still_loading_is_no_error(
     daemon: Any, page_server: str, stalling_server: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The aborted navigation of a tab closed mid-load is not reported."""
+    """The aborted navigation of a tab closed mid-load is not reported, whoever closes it."""
     server, printer = daemon
     service = server.browser_tabs
     monkeypatch.setenv("KISS_HEADLESS", "1")
@@ -226,3 +229,12 @@ def test_closing_a_tab_still_loading_is_no_error(
     time.sleep(1)
     assert not _events(printer, "browserError")
     assert set(service._pages) == {first}
+    # A stopping daemon closes every tab too: it tells the surfaces,
+    # then has the browser exit, which aborts a load the same way.
+    arrived = len(_StallingPage.arrivals)
+    server._handle_command({"type": "browserOpen", "url": stalling_server, "connId": "c1"})
+    _wait(lambda: len(_StallingPage.arrivals) > arrived, "second stalled load")
+    service.shutdown()
+    assert not _events(printer, "browserError")
+    opened = {e["tab_id"] for e in _events(printer, "openBrowserTab")}
+    assert {e["tab_id"] for e in _events(printer, "closeBrowserTab")} == opened

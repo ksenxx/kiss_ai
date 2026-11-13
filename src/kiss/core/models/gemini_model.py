@@ -9,24 +9,25 @@ import base64
 import binascii
 import json
 import logging
+import threading
 import time
 import uuid
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 from kiss.core import stop_signal
 from kiss.core.kiss_error import ContentFilterError, KISSError, OutputCapError
 from kiss.core.models.model import (
-    _AUDIO_FORMAT_TO_MIME,
     FRAMEWORK_ONLY_CONFIG_KEYS,
     Attachment,
     Model,
     ThinkingCallback,
     TokenCallback,
+    _audio_format_to_mime,
     iter_assistant_tool_calls,
     merge_system_texts,
     parse_tool_arguments,
@@ -39,7 +40,9 @@ from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias
 from kiss.core.models.stream_abort import (
     CONNECT_TIMEOUT,
     RequestAbortWatchdog,
+    make_pool_abortable,
     stall_error,
+    stop_error,
     stop_or_stall_error,
 )
 
@@ -47,6 +50,18 @@ logger = logging.getLogger(__name__)
 
 # Portable effort levels above Gemini's top ``thinking_level``.
 _GEMINI_TOP_LEVEL = {"xhigh": "high", "max": "high"}
+
+# Whole-request deadline of an embeddings call, which answers in seconds:
+# the read timeout only bounds the silence between two reads, so a peer
+# that trickles its reply would hold the calling thread for good.
+# ``model_config["timeout"]`` overrides it, as on the OpenAI transport.
+_EMBEDDINGS_TIMEOUT = 60.0
+
+# Deepest nesting of a JSON tool result that is sent parsed; a deeper one
+# is sent as its text.  The SDK builds a request with one Python call per
+# nesting level, so a result nested about a thousand deep raised
+# ``RecursionError`` in every request of the conversation that held it.
+_MAX_RESULT_NESTING = 100
 
 
 # The request parameters Gemini accepts, taken from the SDK's own config
@@ -123,6 +138,19 @@ class _ResponseTrackingHttpxClient(httpx.Client):
         response = super().send(request, **kwargs)
         self.last_response = response
         return response
+
+
+class _EmbeddingClient(NamedTuple):
+    """What one embedding at a time sends through: an SDK client over an abortable pool."""
+
+    api_key: str  # the key ``sdk`` was built with
+    pool: _ResponseTrackingHttpxClient
+    sdk: genai.Client
+
+    def close(self) -> None:
+        """Close the SDK client, and the pool it leaves open."""
+        self.sdk.close()
+        self.pool.close()
 
 
 _END_OF_STREAM = object()
@@ -307,10 +335,42 @@ def _media_block_to_part(block: dict[str, Any]) -> types.Part | None:
         data = _decode_base64(audio.get("data", ""))
         if data is not None:
             fmt = audio.get("format", "")
-            mime_type = _AUDIO_FORMAT_TO_MIME.get(fmt, f"audio/{fmt}" if fmt else "audio/mpeg")
+            mime_type = _audio_format_to_mime(fmt)
             return types.Part.from_bytes(data=data, mime_type=mime_type)
     logger.warning("Dropping unconvertible %s block for Gemini.", block_type)
     return None
+
+
+def _nested_within(value: Any, limit: int) -> bool:
+    """Return whether parsed JSON *value* nests its containers at most *limit* deep.
+
+    Walked level by level rather than recursively: the depth is what must
+    not reach the interpreter's stack.
+    """
+    containers = [value] if isinstance(value, (dict, list)) else []
+    for _ in range(limit):
+        containers = [
+            child
+            for container in containers
+            for child in (container.values() if isinstance(container, dict) else container)
+            if isinstance(child, (dict, list))
+        ]
+    return not containers
+
+
+def _finite_json(value: Any) -> Any:
+    """Return JSON *value* with each NaN and infinity spelled as a string.
+
+    Python's decoder accepts ``NaN``, ``Infinity`` and a number that
+    overflows to one, and the SDK writes them back as bare tokens.  Those
+    are not JSON: Gemini answers 400 ``Invalid JSON payload`` to that
+    request and to every later one of the conversation holding the value.
+    """
+    try:
+        json.dumps(value, allow_nan=False)
+    except ValueError:
+        return json.loads(json.dumps(value), parse_constant=str)
+    return value
 
 
 def _tool_result_response_dict(content: Any) -> dict[str, Any]:
@@ -321,17 +381,22 @@ def _tool_result_response_dict(content: Any) -> dict[str, Any]:
             list of Anthropic nested blocks whose text is extracted.
 
     Returns:
-        A JSON-serializable dict for ``FunctionResponse.response``.
+        A JSON-serializable dict for ``FunctionResponse.response``: a
+        string that is JSON nested at most :data:`_MAX_RESULT_NESTING`
+        deep parsed (under ``result`` unless it is an object, each NaN
+        and infinity as its name), any other content under ``result`` as
+        it is.
     """
     if isinstance(content, list):
         content = text_of_parts(content)
     if isinstance(content, str):
         try:
             parsed = json.loads(content)
-            return parsed if isinstance(parsed, dict) else {"result": parsed}
-        except ValueError:  # JSONDecodeError, or the decoder's integer digit limit
+            if _nested_within(parsed, _MAX_RESULT_NESTING):
+                parsed = _finite_json(parsed)
+                return parsed if isinstance(parsed, dict) else {"result": parsed}
+        except (ValueError, RecursionError):  # not JSON, or too many digits or levels to decode
             logger.debug("Exception caught", exc_info=True)
-            return {"result": content}
     return {"result": content}
 
 
@@ -379,10 +444,35 @@ class GeminiModel(Model):
         )
         self.api_key = api_key
         self._thought_signatures: dict[str, bytes] = {}
+        # Set once the API refused this model's thinking_config (a model
+        # without thinking refuses any): later requests carry none.
+        self._thinking_refused = False
         # The pool behind ``client``, kept so a stream abort can reach the
         # live response; built with the client, and closed when the client
         # is replaced, by _build_client.
         self._http_client: _ResponseTrackingHttpxClient
+        # The embedding client no call is using, under the one key "idle":
+        # ``dict.pop`` takes it and ``dict.setdefault`` puts it back, each
+        # atomic, so no two calls share a client and at most one is kept.
+        self._idle_embedding_client: dict[str, _EmbeddingClient] = {}
+
+    def _new_client(self) -> tuple[_ResponseTrackingHttpxClient, genai.Client]:
+        """Return a new abortable tracking pool and a ``genai.Client`` that sends through it.
+
+        Abortable (:func:`make_pool_abortable`) so that a Stop or a deadline
+        also ends a connection still in its TLS handshake: the pool does not
+        list it yet, and the connect timeout alone would bound it.  The pool
+        is closed when the client cannot be built (no API key): nothing else
+        holds it.
+        """
+        pool = _ResponseTrackingHttpxClient(self._stream_stall_timeout)
+        try:
+            make_pool_abortable(pool)
+            options = types.HttpOptions(httpx_client=pool)
+            return pool, genai.Client(api_key=self.api_key, http_options=options)
+        except BaseException:
+            pool.close()
+            raise
 
     def _build_client(self) -> genai.Client:
         """Return a new ``genai.Client`` over a fresh tracking pool; close the previous pool.
@@ -394,11 +484,7 @@ class GeminiModel(Model):
         It is closed here instead, once the replacement exists, rather than
         left with its keep-alive sockets to the garbage collector.
         """
-        http_client = _ResponseTrackingHttpxClient(self._stream_stall_timeout)
-        client = genai.Client(
-            api_key=self.api_key,
-            http_options=types.HttpOptions(httpx_client=http_client),
-        )
+        http_client, client = self._new_client()
         if self.client is not None:
             # The client being replaced was built here too: this is its pool.
             self._http_client.close()
@@ -488,7 +574,7 @@ class GeminiModel(Model):
             types.Part: The function-call part.
         """
         return types.Part(
-            function_call=types.FunctionCall(name=name, args=args),
+            function_call=types.FunctionCall(name=name, args=_finite_json(args)),
             thought_signature=self._thought_signatures.get(call_id) or FOREIGN_CALL_SIGNATURE,
         )
 
@@ -711,7 +797,8 @@ class GeminiModel(Model):
         dropped in silence: ``GenerateContentConfig`` forbids extras, so
         forwarding them blindly would raise a ``ValidationError``.
         ``thinking_config`` and ``reasoning_effort`` are merged by
-        :meth:`_thinking_config`.  OpenAI-style ``role="system"``
+        :meth:`_thinking_config`, and left out for a model that refused
+        one.  OpenAI-style ``role="system"``
         messages (present when the conversation was handed off from an
         OpenAI-schema model, e.g. via the Sorcar ``set_model`` tool) are
         hoisted into Gemini's ``system_instruction``, since Gemini
@@ -736,9 +823,10 @@ class GeminiModel(Model):
             params.setdefault("max_output_tokens", max_output_tokens)
         if stop_sequences is not None:
             params.setdefault("stop_sequences", stop_sequences)
-        params["thinking_config"] = self._thinking_config(
+        thinking_config = self._thinking_config(
             params.get("thinking_config"), params.pop("reasoning_effort", None)
         )
+        params["thinking_config"] = None if self._thinking_refused else thinking_config
 
         params = self._keep_supported_request_params(params, _GEMINI_CONFIG_FIELDS, "Gemini")
         params["tools"] = tools
@@ -819,6 +907,12 @@ class GeminiModel(Model):
             and the candidate's ``finishReason`` (``"STOP"``,
             ``"MAX_TOKENS"``), ``None`` for an empty stream.
 
+        The read ends at the chunk that ends the turn (a blocked prompt,
+        or usage sent with or after the finish reason), not at the end
+        of the body: a gateway may hold a finished response open, and
+        the stall watchdog would then cut a complete answer or a refusal
+        as a stall, to be asked and billed again.
+
         The stall is bounded at both levels, because neither alone is
         enough:
 
@@ -854,6 +948,7 @@ class GeminiModel(Model):
         parts: list[Any] = []
         usage_chunk = None
         last_chunk = None
+        finish: types.FinishReason | None = None
         finish_reason: str | None = None
         block_reason: str | None = None
         # The wait for the headers is bounded as a whole (connection,
@@ -878,10 +973,20 @@ class GeminiModel(Model):
                     if chunk.prompt_feedback is not None and chunk.prompt_feedback.block_reason:
                         block_reason = _reason_name(chunk.prompt_feedback.block_reason)
                     if chunk.candidates and chunk.candidates[0].finish_reason:
-                        finish_reason = _reason_name(chunk.candidates[0].finish_reason)
+                        finish = chunk.candidates[0].finish_reason
+                        finish_reason = _reason_name(finish)
                     chunk_parts = self._parts_from_response(chunk)
                     self._stream_parts(chunk_parts)
                     parts.extend(chunk_parts)
+                    if block_reason is not None or (
+                        finish_reason is not None and chunk.usage_metadata is not None
+                    ):
+                        # The turn is over: a blocked prompt generates
+                        # nothing, and usage sent with or after the finish
+                        # reason bills the turn.  Usage from before it is a
+                        # running count, so a bare finish reason reads on.
+                        # Leaving the loop closes the stream.
+                        break
         except httpx.TimeoutException as e:
             # The byte-level clock fired first; report it in the same
             # words as the event-level watchdog would have.
@@ -914,7 +1019,14 @@ class GeminiModel(Model):
                 stop_reason=finish_reason,
             )
         self._rejected_response = None
-        return parts, usage_chunk or last_chunk, finish_reason
+        response = usage_chunk or last_chunk
+        if response is not None and finish is not None:
+            # The billed chunk may have come before the finishReason-only
+            # one: it carries the reason too, for ``stop_reason_of``.
+            candidates = response.candidates or [types.Candidate()]
+            candidates[0].finish_reason = finish
+            response.candidates = candidates
+        return parts, response, finish_reason
 
     def generate_and_process_with_tools(
         self,
@@ -948,7 +1060,17 @@ class GeminiModel(Model):
         chat_messages = self._chat_messages()
         contents = self._convert_conversation_to_gemini_contents(chat_messages)
         config = self._build_config(chat_messages, tools=gemini_tools)
-        all_parts, response, finish_reason = self._stream_turn(contents, config)
+        try:
+            all_parts, response, finish_reason = self._stream_turn(contents, config)
+        except errors.ClientError as e:
+            if "Thinking is not enabled" not in str(e):
+                raise
+            # A model without thinking (gemini-2.5-flash-image) refuses any
+            # thinking_config, the default include_thoughts included: ask
+            # again without one, as every later request of this model does.
+            self._thinking_refused = True
+            config = self._build_config(chat_messages, tools=gemini_tools)
+            all_parts, response, finish_reason = self._stream_turn(contents, config)
         content, function_calls = self._parse_parts(all_parts)
         if finish_reason == "MAX_TOKENS" and gemini_tools and not function_calls:
             # A tool-bearing turn with no completed call is unusable (a
@@ -1042,12 +1164,27 @@ class GeminiModel(Model):
             return input_tokens, output_tokens, cached_tokens, 0
         return 0, 0, 0, 0
 
-    def get_embedding(  # pragma: no cover – API call
+    def get_embedding(
         self,
         text: str,
         embedding_model: str | None = None,
     ) -> list[float]:
         """Generates an embedding vector for the given text.
+
+        The request ends at the calling thread's Stop and at
+        :data:`_EMBEDDINGS_TIMEOUT`.  The abort shuts down every socket of
+        the pool it watches, and one instance embeds for several threads
+        at once (the memory tools), so a call sends through a client no
+        other call is using: the instance's idle one, with the connection
+        earlier calls left open, or a new one when none is idle.  The
+        client is idle again afterwards, unless its request was cut or
+        never sent, or another client took its place meanwhile.
+
+        A thread of its own takes the client, sends through it and puts it
+        away (:meth:`_run_embedding`), and this call waits for it.  The
+        calling thread cannot own the client: a Stop is injected there at
+        any check point, the cleanup's own included, and would leave the
+        client neither idle nor closed.
 
         Args:
             text: The text to generate an embedding for.
@@ -1061,11 +1198,73 @@ class GeminiModel(Model):
 
         Raises:
             KISSError: If embedding generation fails.
+            KeyboardInterrupt: The user pressed Stop: before the request,
+                which is then not sent, or before its reply was back.
         """
         model_to_use = embedding_model or self.model_name
+        if stop_signal.stop_requested():  # nothing is started: the idle client stays idle
+            raise stop_error()
+        deadline = float(self.model_config.get("timeout", _EMBEDDINGS_TIMEOUT))
+        outcome: list[list[float] | BaseException] = []
+        worker = threading.Thread(
+            target=self._run_embedding,
+            args=(outcome, stop_signal.get_thread_stop_event(), deadline, model_to_use, text),
+            name="gemini-embedding",
+            daemon=True,
+        )
         try:
-            response = self.client.models.embed_content(model=model_to_use, contents=text)
-            return list(response.embeddings[0].values)
+            worker.start()
+            worker.join()
+            result = outcome[0]
+            if isinstance(result, BaseException):
+                raise result
         except Exception as e:
+            if stop_signal.stop_requested():  # the watchdog cut the request
+                raise stop_error() from e
             logger.debug("Exception caught", exc_info=True)
             raise KISSError(f"Embedding generation failed for model {model_to_use}: {e}") from e
+        if stop_signal.stop_requested():  # set too late for the watchdog to cut the reply
+            raise stop_error()
+        return result
+
+    def _run_embedding(
+        self,
+        outcome: list[list[float] | BaseException],
+        stop_event: threading.Event | None,
+        deadline: float,
+        model_to_use: str,
+        text: str,
+    ) -> None:
+        """Embed *text* for :meth:`get_embedding`, on a thread that receives no injected Stop.
+
+        Args:
+            outcome: Receives the vector, or the exception that ended the request.
+            stop_event: The calling thread's stop event: it ends this request too.
+            deadline: Seconds the whole request may take.
+            model_to_use: The embedding model.
+            text: The text to embed.
+        """
+        stop_signal.set_thread_stop_event(stop_event)
+        leased = self._idle_embedding_client.pop("idle", None)
+        due = 0.0  # no request yet
+        try:
+            if leased is not None and leased.api_key != self.api_key:
+                leased.close()  # built with a key since replaced
+                leased = None
+            if leased is None:  # nothing idle: the first call, one beside another, or after a cut
+                pool, sdk = self._new_client()
+                leased = _EmbeddingClient(self.api_key, pool, sdk)
+            if stop_signal.stop_requested():  # pressed while the client was got ready: not sent
+                raise stop_error()
+            due = time.monotonic() + deadline
+            with RequestAbortWatchdog(leased.pool, deadline, "gemini-embeddings-abort-watchdog"):
+                response: Any = leased.sdk.models.embed_content(model=model_to_use, contents=text)
+            outcome.append(list(response.embeddings[0].values))
+        except BaseException as e:  # raised by get_embedding, in the calling thread
+            outcome.append(e)
+        finally:
+            if leased is not None:
+                # Kept unless the watchdog may have shut its sockets down, or no request started.
+                cut = stop_signal.stop_requested() or time.monotonic() >= due
+                if cut or self._idle_embedding_client.setdefault("idle", leased) is not leased:
+                    leased.close()

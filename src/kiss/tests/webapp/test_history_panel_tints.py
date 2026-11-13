@@ -482,6 +482,12 @@ def _assert_purple_tabs(page) -> None:
     purple = _var_color(page, "--purple")
     page.click(_DONE_TAB)
     page.wait_for_selector(_DONE_TAB + ".active", state="attached")
+    # A tab keeps its node when it becomes active, so on the remote page
+    # its pill fades to the new look (``transition`` in remote-codex.css):
+    # the colours are read once that has run.
+    page.wait_for_function(
+        "() => !document.getAnimations().some(a => a instanceof CSSTransition)"
+    )
     for sel in (_RUNNING_TAB, _DONE_TAB):
         _assert_tint(_style(page, sel, "backgroundColor"), purple, f"tab {sel}", _MIN_TAB_ALPHA)
     assert _alpha_of(_style(page, _DONE_TAB, "backgroundColor")) > _alpha_of(

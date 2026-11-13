@@ -12,8 +12,11 @@ and changed-file detection only see agent-produced changes.
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
@@ -22,6 +25,7 @@ from kiss.agents.sorcar.git_worktree import (
     MergeResult,
     _git,
 )
+from kiss.tests.conftest import posix_only
 
 
 def _make_repo(path: Path) -> Path:
@@ -171,11 +175,11 @@ class TestCopyDirtyState:
     def test_dirty_submodule_falls_back_to_the_main_checkout(self) -> None:
         """A dirty tracked submodule cannot be snapshotted (audit S4/F4):
         flattened into the worktree's uninitialized gitlink directory, its
-        files were invisible to git, so an agent edit there reached neither
-        a commit nor the ignored-file rescue and the finalizer deleted its
-        only copy.  The real worktree setup now refuses the snapshot,
-        removes its partial worktree and branch, and leaves the user's
-        checkout, with the submodule edit, intact."""
+        files were invisible to git, so an agent edit there never reached
+        a commit and the finalizer deleted its only copy.  The real
+        worktree setup now refuses the snapshot, removes its partial
+        worktree and branch, and leaves the user's checkout, with the
+        submodule edit, intact."""
         with tempfile.TemporaryDirectory() as tmp:
             sub = _make_repo(Path(tmp) / "sub")
             repo = _make_repo(Path(tmp) / "repo")
@@ -490,3 +494,49 @@ class TestEndToEndBaselineWorkflow:
             assert "fix.py" in all_changed
             assert "README.md" not in all_changed
 
+
+# A task's worktree setup in a process of its own: one case kills it, one stops it (SIGINT gets
+# its default handler back: a test run in the background hands its children an ignored one).
+_SETUP = (
+    "import signal, sys; from kiss.agents.sorcar.sorcar_agent import SorcarAgent; "
+    "signal.signal(signal.SIGINT, signal.default_int_handler); "
+    "agent = SorcarAgent('setup'); agent.work_dir = sys.argv[1]; print(agent.create_worktree())"
+)
+_GIT_DIR = '"$(git rev-parse --git-common-dir)"'
+_SETUP_PID = '"$(ps -o ppid= -p $PPID)"'  # as a hook sees it: the parent of its git
+
+
+@posix_only("the hooks are POSIX shell scripts")
+@pytest.mark.parametrize(("hook_name", "failure", "created", "reclaimed", "kept"), [
+    # Before the dirty state is copied; the others right after the baseline commit.
+    ("post-checkout", f"touch {_GIT_DIR}/kiss-preserve", False, 0, False),  # no marker can be made
+    ("post-commit", f"kill -9 {_SETUP_PID}", False, 0, True),  # dies before the record
+    ("post-commit", f"kill -INT {_SETUP_PID}", False, 0, False),  # is stopped before the record
+    ("post-commit", f"touch {_GIT_DIR}/config.lock", False, 0, False),  # no record can be written
+    ("post-commit", "git symbolic-ref HEAD refs/heads/kiss-unborn", False, 0, False),  # no HEAD
+    ("post-commit",  # the marker cannot be removed
+     f'cd {_GIT_DIR}/kiss-preserve && for m in *; do rm "$m" && mkdir -p "$m/x"; done',
+     True, 0, True),
+    ("post-commit", "true", True, 1, False),  # nothing fails: reclaimed as before
+])
+def test_the_copied_dirty_state_is_never_reclaimed_as_task_work(
+    tmp_path: Path, hook_name: str, failure: str, created: bool, reclaimed: int, kept: bool,
+) -> None:
+    """Audit 2026-11-10 C/C10-F2: only a recorded baseline lets an orphan be reclaimed."""
+    repo = _make_repo(tmp_path / "repo")
+    seed = _git("rev-parse", "HEAD", cwd=repo).stdout
+    (repo / "README.md").write_text("private draft\n")
+    hook = repo / ".git" / "hooks" / hook_name
+    hook.write_text(f'#!/bin/sh\nrm "$0"\n{failure}\n')
+    hook.chmod(0o755)
+    setup = subprocess.run([sys.executable, "-c", _SETUP, str(repo)],
+                           capture_output=True, text=True, timeout=300)
+    assert not hook.exists(), setup.stderr  # the failure struck
+    assert ("Created worktree" in setup.stdout) == created, setup.stdout
+    (repo / ".git" / "config.lock").unlink(missing_ok=True)
+    _git("restore", "README.md", cwd=repo)  # the user discards the draft
+    assert GitWorktreeOps.reclaim_orphaned_worktrees(repo) == reclaimed
+    assert _git("rev-parse", "HEAD", cwd=repo).stdout == seed
+    assert (repo / "README.md").read_text() == "# Test\n"
+    # Only a setup that died, or whose marker stays, leaves its branch to the user.
+    assert bool(_git("branch", "--list", "kiss/wt-*", cwd=repo).stdout.strip()) == kept

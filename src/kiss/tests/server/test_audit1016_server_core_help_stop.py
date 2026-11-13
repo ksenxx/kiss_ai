@@ -50,6 +50,7 @@ from kiss.agents.sorcar import local_endpoint, persistence, sea_commands
 from kiss.core.config import kiss_home
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 
 _STOP_LABEL = "Task stopped by user"
 
@@ -142,7 +143,7 @@ class TestStopDuringHelp(TestCase):
         home.mkdir(parents=True, exist_ok=True)
         seas_md = home / "SEAS.md"
         seas_md.write_text(str(self.tmp / "seas") + "\n", encoding="utf-8")
-        self.addCleanup(sea_commands._reset_for_tests)
+        self.addCleanup(reset_sea_registry)
         self.addCleanup(seas_md.unlink)
         sea_commands.refresh_registry()
         assert sea_commands.get_command("slowhelp") == sea.resolve()

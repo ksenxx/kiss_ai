@@ -49,7 +49,8 @@ FINISH_TEXT = json.dumps(
 # Call N of the stand-in records its stdin prompt and plays turns[N] (the
 # last turn repeats): it makes the turn's MCP calls through the proxy,
 # reporting each as a completed ``mcp_tool_call`` item like Codex, then
-# answers with the turn's text and, if the turn has one, its usage.
+# answers with the turn's text and ends the turn, with its usage if the
+# turn has one.
 _FAKE_CODEX = """#!{python}
 import json, os, pathlib, sys
 print(json.dumps({{"type": "thread.started", "thread_id": "t-1"}}), flush=True)
@@ -82,8 +83,10 @@ if turn["mcp_calls"]:
     asyncio.run(call_tools())
 print(json.dumps({{"type": "item.completed", "item": {{
     "type": "agent_message", "text": turn["text"]}}}}), flush=True)
+completed = {{"type": "turn.completed"}}
 if turn.get("usage"):
-    print(json.dumps({{"type": "turn.completed", "usage": turn["usage"]}}), flush=True)
+    completed["usage"] = turn["usage"]
+print(json.dumps(completed), flush=True)
 """
 
 

@@ -36,7 +36,7 @@ import certifi
 import pytest
 from playwright.sync_api import Page, sync_playwright
 
-from kiss.server.web_server import _generate_self_signed_cert
+from kiss.tests.local_ws import _generate_self_signed_cert
 
 _TERMINAL_JS = (
     Path(__file__).resolve().parents[2] / "webapp" / "media" / "terminalTab.js"

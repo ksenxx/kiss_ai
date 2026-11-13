@@ -17,12 +17,13 @@ Shared by ``run_parallel`` / ``run_agent`` and the daemon:
   puts the child on the read-only ``review`` tool profile.  The
   reviewer marker is inherited down the sub-tree and across daemon
   dispatches so a reviewer's helpers get the same reduced toolset.
-* A sub-agent of the caller's own model family is the same model with
-  less context (:func:`same_family_conflict`): it is refused unless the
-  call is a fan-out over disjoint named pieces of work
-  (:func:`named_pieces`), the caller's task asks for sub-agents
-  (:func:`asks_for_sub_agents`), another family is pinned, or the child
-  is a review (which the dispatcher moves to another family).
+* A sub-agent on the caller's own model at the caller's own effort is
+  the same model with less context (:func:`same_model_conflict`): it is
+  refused unless the call is a fan-out over disjoint named pieces of
+  work (:func:`named_pieces`), the caller's task asks for sub-agents
+  (:func:`asks_for_sub_agents`), or the child is a review (which the
+  dispatcher moves to another family).  Another model, or the same
+  model at another effort, is not refused, whatever its vendor.
 """
 
 from __future__ import annotations
@@ -32,8 +33,9 @@ import os
 import re
 import subprocess
 from collections.abc import Sequence
+from typing import Any
 
-from kiss.core.models.model_families import family_of, other_family_model, same_family
+from kiss.core.models.model_families import other_worker_model, same_model_and_effort
 
 _REVIEW_WORDS = re.compile(
     r"\b(review\w*|audit\w*|critiqu\w*|inspect\w*|regression\w*"
@@ -75,26 +77,25 @@ def changed_lines(work_dir: str) -> int:
 
     ``0`` when *work_dir* is not a git repository or git is missing;
     binary files count as none.  An untracked file counts as git's
-    numstat would count it once added (see :func:`_new_file_lines`).
+    numstat would count it once added (see :func:`_new_file_lines`), so
+    staging a file does not change the count: tracked or not, only the
+    files under *work_dir* count, also when it is a subdirectory of its
+    repository.  Before the first commit ``HEAD`` names nothing, and
+    the diff is against the empty tree: every staged file is new.
 
     Args:
         work_dir: The directory whose diff a review is to read.
     """
-    # Bytes, not text: git prints a name unquoted (with ``-z``, or with
-    # ``core.quotePath`` off), and a name need not be UTF-8.
     try:
-        numstat = subprocess.run(
-            ["git", "diff", "--numstat", "HEAD"], cwd=work_dir, capture_output=True,
-            timeout=30, check=False,
-        ).stdout
-        untracked = subprocess.run(
-            ["git", "ls-files", "-z", "--others", "--exclude-standard"], cwd=work_dir,
-            capture_output=True, timeout=30, check=False,
-        ).stdout
+        diff = _git(work_dir, "diff", "--numstat", "HEAD", "--", ".")
+        if diff.returncode:
+            empty_tree = _git(work_dir, "hash-object", "-t", "tree", "--stdin").stdout
+            diff = _git(work_dir, "diff", "--numstat", empty_tree.decode().strip(), "--", ".")
+        untracked = _git(work_dir, "ls-files", "-z", "--others", "--exclude-standard").stdout
     except (OSError, subprocess.SubprocessError):
         return 0
     lines = 0
-    for row in numstat.splitlines():
+    for row in diff.stdout.splitlines():
         # ``<added>\t<deleted>\t<path>``; binary files show ``-`` counts.
         columns = row.split(b"\t", 2)
         for count in columns[:2]:
@@ -104,6 +105,23 @@ def changed_lines(work_dir: str) -> int:
         if name:
             lines += _new_file_lines(os.path.join(root, name))
     return lines
+
+
+def _git(work_dir: str, *args: str) -> subprocess.CompletedProcess[bytes]:
+    """Run ``git`` *args* in *work_dir* with no input, whatever its exit status.
+
+    The output is bytes, not text: git prints a file name unquoted
+    (with ``-z``, or with ``core.quotePath`` off), and a name need not
+    be UTF-8.
+
+    Raises:
+        OSError: When git is missing or *work_dir* cannot be entered.
+        subprocess.SubprocessError: When git does not end in 30 seconds.
+    """
+    return subprocess.run(
+        ["git", *args], cwd=work_dir, stdin=subprocess.DEVNULL, capture_output=True,
+        timeout=30, check=False,
+    )
 
 
 def _new_file_lines(path: bytes) -> int:
@@ -167,6 +185,27 @@ def is_implementation_task(task: str) -> bool:
     return _IMPLEMENTATION_WORDS.search(task) is not None
 
 
+def is_read_only_review(task: str, tool_profile: str) -> bool:
+    """Return whether a sub-task with *task* and *tool_profile* is a read-only review.
+
+    The ``review`` profile makes it one.  With no profile named, a task
+    that reads as a review (:func:`is_review_task`) and asks for no
+    changes (:func:`is_implementation_task`) is one too; any other
+    profile is the caller's choice of another toolset.
+
+    Args:
+        task: A sub-agent task description.
+        tool_profile: The call's canonical ``tool_profile``, ``""`` when
+            it named none.
+
+    Returns:
+        True for a read-only review.
+    """
+    return tool_profile == "review" or (
+        not tool_profile and is_review_task(task) and not is_implementation_task(task)
+    )
+
+
 _SUB_AGENT_WORDS = re.compile(
     r"sub-?agent|sub-?task|run_parallel|run_agent|parallel agents"
     r"|adversarial (?:testing|training)|second opinion|reviewer",
@@ -181,8 +220,8 @@ def asks_for_sub_agents(task: str) -> bool:
     ``run_parallel``, ``run_agent``, "parallel agents", "adversarial
     testing", "adversarial training", "second opinion" or "reviewer"
     (case-insensitive, plurals included).  A caller whose own task asks
-    for them may dispatch children of its own model family
-    (:func:`same_family_conflict`).
+    for them may dispatch children on its own model and effort
+    (:func:`same_model_conflict`).
 
     Args:
         task: The calling agent's task text.
@@ -210,7 +249,7 @@ def named_pieces(task: str) -> set[str]:
     ``and/or`` or ``I/O``), a directory ending in ``/``, a dotted module
     or file name whose components start with a letter
     (``kiss.agents.sorcar``, ``README.md``; ``3.12`` and ``gpt-4.1`` are
-    not pieces, nor are ``e.g.`` / ``i.e.``), a URL, or a backticked
+    not pieces, nor are ``e.g.`` / ``i.e.`` in any case), a URL, or a backticked
     span (the command or name as written, plus the pieces inside it).
     Pieces are compared as written: ``x.py`` and ``src/x.py`` are two
     pieces, ``Foo.py`` and ``foo.py`` too.
@@ -238,20 +277,28 @@ def named_pieces(task: str) -> set[str]:
                 or path.startswith(("/", "./", "../", "~/"))
             ):
                 pieces.add(path)
-        elif dotted not in _PROSE_DOTTED:
+        elif dotted.lower() not in _PROSE_DOTTED:
             pieces.add(dotted)
     return pieces
+
+
+#: How the name of a sub-agent's private folder, in the system temp directory,
+#: starts.  The folder is the sub-agent's scratch dir, holds its job logs and
+#: spilled output, is the temp directory of every command its tools start, and
+#: is deleted when the sub-agent ends.
+SUBAGENT_DIR_PREFIX = "kiss-sub-"
 
 
 def is_scratch_piece(piece: str) -> bool:
     """Whether *piece* is a path under a ``tmp`` directory (``tmp/x``, ``./tmp/x``, ``/w/tmp/x``).
 
-    Scratch files are shared by design (a progress log, instructions
-    copied for every child, probe output): naming one is no claim on
-    the work.
+    Or one in a sub-agent's private folder (:data:`SUBAGENT_DIR_PREFIX`),
+    wherever the system keeps its temp directory.  Scratch files are
+    shared by design (a progress log, instructions copied for every
+    child, probe output): naming one is no claim on the work.
     """
     parts = piece.strip().lstrip("~").split("/")
-    return "tmp" in parts[:-1]
+    return any(part == "tmp" or part.startswith(SUBAGENT_DIR_PREFIX) for part in parts[:-1])
 
 
 def _under(piece: str, directory: str) -> bool:
@@ -313,22 +360,32 @@ def undivided_work(tasks: Sequence[str]) -> str:
     return "; ".join(overlaps)
 
 
-def same_family_conflict(
+def same_model_conflict(
     parent_model: str, child_model: str, tasks: Sequence[str], parent_task: str, review: bool,
+    parent_config: dict[str, Any] | None = None, child_config: dict[str, Any] | None = None,
+    pin_config: dict[str, Any] | None = None, inheriting: str = "",
 ) -> str:
-    """Return why a sub-task on the caller's own model family may not start, or ``""``.
+    """Return why a sub-task on the caller's own model and effort may not start, or ``""``.
 
-    Inside a task a sub-agent of the caller's family
-    (:func:`~kiss.core.models.model_families.same_family`) is the same
-    model with less context: a fan-out to it costs more and succeeds less
-    often than the caller doing the work itself.
+    Inside a task a sub-agent that runs the caller's model at the
+    caller's reasoning effort
+    (:func:`~kiss.core.models.model_families.same_model_and_effort`) is
+    the same model with less context: a fan-out to it costs more and
+    succeeds less often than the caller doing the work itself.  The
+    vendor does not decide: a stronger or a cheaper model of the
+    caller's family, or the caller's model at another effort, is a
+    different worker (the rule compared families until 2026-11-11 and
+    refused 29 launches of Fable 5.2 max by an Opus 5.5 medium caller).
     The child may start when (i) the call is a fan-out of two or more
     tasks over disjoint named pieces of work (:func:`undivided_work`),
     (ii) the caller's own task asks for sub-agents
-    (:func:`asks_for_sub_agents`), (iii) *child_model* is of another
-    family (the call pinned it), or (iv) the child is a *review*, which
+    (:func:`asks_for_sub_agents`), (iii) *child_model* differs from the
+    caller's in model or effort, or (iv) the child is a *review*, which
     the dispatcher moves to another family instead.  Nothing is refused
-    when either model is unknown (empty).
+    when either model is unknown (empty).  The refusal names the pin to
+    pass (:func:`~kiss.core.models.model_families.other_worker_model`):
+    a configured model this rule lets through as the sub-task would run
+    it; where nothing configured differs it names none.
 
     Args:
         parent_model: The calling agent's model.
@@ -338,6 +395,14 @@ def same_family_conflict(
             ``run_parallel``).
         parent_task: The calling agent's current task text.
         review: Whether the sub-task is a review.
+        parent_config: The model configuration the caller runs with; its
+            ``reasoning_effort`` outranks the effort of *parent_model*.
+        child_config: The one the sub-task would run with: the call's
+            option, the SEA's setting, or the inherited one.
+        pin_config: The one of its own, which it runs any model with:
+            the call's option, else the SEA's setting.
+        inheriting: The model name under which a sub-task without one
+            inherits the caller's: the model the caller was launched with.
 
     Returns:
         ``""`` when the dispatch may proceed, else the reason, ending
@@ -345,18 +410,21 @@ def same_family_conflict(
     """
     if review or not parent_model or not child_model:
         return ""
-    if not same_family(parent_model, child_model) or asks_for_sub_agents(parent_task):
+    if (
+        not same_model_and_effort(parent_model, child_model, parent_config, child_config)
+        or asks_for_sub_agents(parent_task)
+    ):
         return ""
     shortfall = undivided_work(tasks)
     if not shortfall:
         return ""
-    other = other_family_model(parent_model)
-    pin = f'model="{other}"' if other else 'model="<a model of another family>"'
+    pin = other_worker_model(parent_model, parent_config, pin_config, inheriting)
     return (
-        f"a sub-agent on {child_model} is this task's own model family "
-        f"({family_of(parent_model)}), the same model with less context, and {shortfall}. "
+        f"a sub-agent on {child_model} is this task's own model at its own effort, "
+        f"the same model with less context, and {shortfall}. "
         "Ways out: do the work inline in this task; or name the disjoint files/commands in "
-        f"each task of a run_parallel; or pass {pin}."
+        "each task of a run_parallel; or pass another model or effort"
+        + (f' (model="{pin}").' if pin else ".")
     )
 
 
@@ -383,6 +451,7 @@ def _decode_json_leniently(text: str) -> object:
 
     Raises:
         ValueError: If the text is not JSON even after the repair.
+        RecursionError: If its arrays or objects nest past the decoder's depth.
     """
     try:
         return json.loads(text, strict=False)
@@ -404,25 +473,35 @@ def parse_tasks_json(tasks: str, name: str = "tasks") -> list[str]:
         The decoded, non-empty list of strings.
 
     Raises:
-        ValueError: If *tasks* is not valid JSON, is not an array, is
-            empty, or holds anything but non-empty strings.  The message
-            tells the model how to fix the call, including the case of a
-            shell substitution such as ``$(cat file)`` that was never
-            expanded.
+        ValueError: If *tasks* is not valid JSON (or nests past the
+            decoder's depth), is not an array, is empty, or holds
+            anything but non-empty strings.  The message
+            tells the model how to fix the call: a shell substitution
+            such as ``$(cat file)`` was never expanded, text that is no
+            array must be one, and an array that does not decode shows
+            where decoding stopped.  As a rule that is a double quote
+            inside a string not written ``\\"`` (59 of the 72 arguments
+            the task history shows refused, on 2026-11-11; the others
+            were no array, or had text after it): backslashes and
+            newlines are repaired by the lenient decoder.
     """
     stripped = tasks.strip()
     try:
         parsed = _decode_json_leniently(stripped)
-    except ValueError:
-        hint = (
-            " Inside a JSON string every backslash must be doubled (write "
-            '\\\\| for grep\'s \\|) and a newline written as \\n.'
-        )
-        if stripped.startswith("$(") or stripped.startswith("`"):
+    except (ValueError, RecursionError) as error:  # RecursionError: nested past the decoder's depth
+        if stripped.startswith(("$(", "`")):
             hint = (
                 " Shell substitutions are not expanded in tool arguments; "
                 "Read the file first and paste its JSON array here."
             )
+        elif isinstance(error, json.JSONDecodeError) and stripped.startswith("["):
+            hint = (
+                f" Decoding stopped after {error.doc[max(0, error.pos - 40):error.pos]!r} "
+                f'({error.msg}): inside a JSON string a double quote is written \\" and '
+                "every backslash must be doubled (\\\\| for grep's \\|)."
+            )
+        else:
+            hint = ' Pass a JSON array of strings, even for one item: ["first", "second"].'
         raise ValueError(
             f"{name} must be a JSON array of strings, got {stripped[:80]!r}."
             + hint

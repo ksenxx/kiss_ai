@@ -40,6 +40,7 @@
 
 const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {twoTabs, clickTab} = require('./simplify2_harness');
 const {
   makeVoicePage: makeHelperPage,
   micBtn,
@@ -68,6 +69,12 @@ function makeVoicePage() {
 
 function triggered(page) {
   return micBtn(page.win).classList.contains('voice-triggered');
+}
+
+/** Deliver a wake-word final from the grammar recognizer, or the free one. */
+function wakeFinal(page, fromGrammar) {
+  const rec = fromGrammar ? lastRecognizer(page) : lastFreeRecognizer(page);
+  rec.handlers.result({result: {text: fromGrammar ? 'hey sore car' : 'hey soccer'}});
 }
 
 async function main() {
@@ -181,11 +188,80 @@ async function main() {
     assert.ok(triggered(page), 'a free final 1 s after the grammar one wakes');
   });
 
-  await test('a late confirmation still ships the wake word audio', async () => {
+  await test('a command spoken before the second recognizer confirms the wake is posted', async () => {
     const page = makeVoicePage();
     await startPipeline(page);
     const proc = lastProcessor(page);
     page.clock.now += 3000;
+    feed(proc, true, 4); // ~1 s of "hey sorcar"
+    feed(proc, false, 4); // the endpointing silence
+    wakeFinal(page, true); // the grammar recognizer hears it first
+    // The user goes straight on: 0.77 s of command, then silence, all
+    // before the free recognizer's final lands 1.5 s later.
+    for (let i = 0; i < 6; i++) {
+      page.clock.now += 256;
+      feed(proc, i < 3, 1);
+    }
+    wakeFinal(page, false);
+    assert.ok(triggered(page), 'the confirming final within 2.5 s wakes');
+    feed(proc, false, 20); // nothing more is said
+    const sent = page.posted.filter(m => m.type === 'voiceTranscribe');
+    assert.strictEqual(
+      sent.length,
+      1,
+      'the command spoken before the confirmation is posted',
+    );
+    assert.strictEqual(
+      sent[0].wakeSamples,
+      8 * 4096,
+      'the preamble ends where the wake word was first heard',
+    );
+    const buf = Buffer.from(sent[0].audio, 'base64');
+    const pcm = new Int16Array(buf.buffer, buf.byteOffset, buf.length / 2);
+    let commandSamples = 0;
+    for (let i = sent[0].wakeSamples; i < pcm.length; i++) {
+      if (pcm[i] > 10000) commandSamples++;
+    }
+    assert.strictEqual(
+      commandSamples,
+      3 * 4096,
+      'the command follows the preamble, where speaker identification hears it',
+    );
+  });
+
+  await test('a wake word heard on one chat is not confirmed onto another', async () => {
+    const page = makeVoicePage();
+    const {first, second} = twoTabs(page.win);
+    clickTab(page.win, first);
+    await startPipeline(page);
+    page.clock.now += 3000;
+    wakeFinal(page, true); // heard while chat `first` is on screen
+    clickTab(page.win, second); // the user moves on before the free final
+    page.clock.now += 256;
+    wakeFinal(page, false);
+    assert.ok(
+      !triggered(page),
+      'words heard on one chat must not open a round on another',
+    );
+    // Said again on the chat now on screen, it takes both recognizers anew.
+    page.clock.now += 256;
+    wakeFinal(page, true);
+    assert.ok(!triggered(page), 'the refused final confirms nothing later');
+    page.clock.now += 256;
+    wakeFinal(page, false);
+    assert.ok(triggered(page), 'the wake word said on this chat wakes it');
+  });
+
+  // Whichever recognizer hears the word first, the audio the ring held
+  // then is kept until the other confirms; an earlier final of the
+  // confirming recognizer that is stale by then (2.6 s old) plays no part.
+  async function lateConfirmation(grammarFirst) {
+    const page = makeVoicePage();
+    await startPipeline(page);
+    const proc = lastProcessor(page);
+    page.clock.now += 3000;
+    wakeFinal(page, !grammarFirst);
+    page.clock.now += 2600; // past the 2.5 s agreement window
     feed(proc, true, 4); // ~1 s of "hey sorcar"
     const out = feed(proc, false, 4); // the endpointing silence
     // Chrome swaps a sink that hears 30 s of exact zeros for a fake one
@@ -195,13 +271,14 @@ async function main() {
       out.every(v => v !== 0 && Math.abs(v) < 1e-6),
       'the processor output is never exact silence and never audible',
     );
-    lastRecognizer(page).handlers.result({result: {text: 'hey sore car'}});
+    wakeFinal(page, grammarFirst);
+    assert.ok(!triggered(page), 'the stale final does not confirm');
     for (let i = 0; i < 6; i++) {
-      page.clock.now += 256; // 1.5 s more before the free final
+      page.clock.now += 256; // 1.5 s more before the confirming final
       feed(proc, false, 1);
     }
-    lastFreeRecognizer(page).handlers.result({result: {text: 'hey soccer'}});
-    assert.ok(triggered(page), 'the free final within 2.5 s wakes');
+    wakeFinal(page, !grammarFirst);
+    assert.ok(triggered(page), 'the confirming final within 2.5 s wakes');
     speak(page);
     const sent = page.posted.find(m => m.type === 'voiceTranscribe');
     assert.strictEqual(sent.wakeAgreed, true, 'the server learns both recognizers agreed');
@@ -212,9 +289,13 @@ async function main() {
     assert.strictEqual(
       wordSamples,
       4 * 4096,
-      'the 2 s ring held on while the wake awaited its confirmation',
+      'the audio of the word heard first is the preamble of the confirmed wake',
     );
-  });
+  }
+  await test('a late confirmation still ships the wake word audio', () =>
+    lateConfirmation(true));
+  await test('so does a late confirmation of a free final that came first', () =>
+    lateConfirmation(false));
 
   windows.forEach(win => win.close());
   report('voiceWakeIgnoresPartials');

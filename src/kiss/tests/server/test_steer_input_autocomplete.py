@@ -33,6 +33,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.pause import Pause
 
@@ -95,7 +96,8 @@ class TestSteerInputSavedForAutocomplete:
         assert st.pending_user_messages == ["also update the changelog"]
         assert _steer_texts() == ["also update the changelog"]
 
-        server._complete("also up")
+        server._complete_seq_latest[""] = 1
+        server._complete("also up", 1)
         assert "also update the changelog" in _completion_texts(events)
         ghost = [e for e in events if e.get("type") == "ghost"]
         assert ghost and ghost[-1]["suggestion"] == "date the changelog"
@@ -162,6 +164,44 @@ class TestSteerInputSavedForAutocomplete:
             assert any(e.get("text") == "private old instruction" for e in events)
         else:
             assert owner.unattributed_prompt_echoes == ["private old instruction"]
+
+    def test_echo_of_an_owner_that_ended_meanwhile_is_still_filed(self, tmp_path: Path) -> None:
+        """The owner takes the message and ends during the history write.
+
+        The echo is stamped with the row the message was admitted on,
+        so that task's transcript keeps it although no live agent
+        answers for the row any more.
+        """
+        printer = MemoryPrinter()
+        server = AgentServer(printer=printer)
+        server.use_private_tab_registry(tmp_path / "tabs.json")
+        owner_id, owner_chat = th._add_task("steered task")
+        agent = ChatSorcarAgent("steering")
+        agent._last_task_id = owner_id
+        owner = AgentState(
+            str(owner_id), agent=agent, chat_id=owner_chat, tab_id="steered", is_task_active=True,
+        )
+        agent_state.register(owner)
+        printer.subscribe_tab(owner.task_id, "steered")
+        gate = Pause(th._record_steer_input.__code__, bool)
+        worker = threading.Thread(
+            target=server._cmd_append_user_message,
+            args=({"tabId": "steered", "prompt": "last instruction"},),
+        )
+        with gate:
+            worker.start()
+            assert gate.paused.wait(10)
+            printer.agent_task_finished(agent, owner_id)
+            assert agent_state.get(str(owner_id)) is None
+            gate.release()
+        worker.join(10)
+        assert not worker.is_alive()
+        th._flush_chat_events()
+        session = th._load_chat_events_by_task_id(str(owner_id))
+        assert session is not None
+        events = session["events"]
+        assert isinstance(events, list)
+        assert any(e.get("text") == "last instruction" for e in events)
 
     def test_dropped_message_is_not_saved(self) -> None:
         """A message no live task accepts is neither queued nor remembered."""
@@ -259,7 +299,7 @@ class TestSteerInputSavedForAutocomplete:
         agent_state.register(st)
 
         saved = (th._DB_PATH, th._KISS_DIR)
-        th._close_db()
+        close_db()
         # A directory is not a database file: every open fails.
         th._DB_PATH = tmp_path
         th._KISS_DIR = tmp_path
@@ -268,7 +308,7 @@ class TestSteerInputSavedForAutocomplete:
                 {"tabId": "tab-4", "prompt": "still echoed"},
             )
         finally:
-            th._close_db()
+            close_db()
             th._DB_PATH, th._KISS_DIR = saved
 
         assert st.pending_user_messages == ["still echoed"]

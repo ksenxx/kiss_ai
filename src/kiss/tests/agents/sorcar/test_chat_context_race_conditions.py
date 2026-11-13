@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.persistence_helpers import close_db
 
 _PEER_SCRIPT = """
 import sys
@@ -39,18 +40,17 @@ persistence._save_task_result(sys.argv[2], task_id=sys.argv[1])
 
 def _redirect(tmpdir: str):
     """Point persistence at a temporary DB and reset cached state."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     th._invalidate_chat_context_cache("")
     return old
 
 
 def _restore(saved):
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    (th._DB_PATH, th._KISS_DIR) = saved
     th._invalidate_chat_context_cache("")
 
 
@@ -72,7 +72,7 @@ class TestChatContextCacheStaleWrite:
 
     def teardown_method(self) -> None:
         th._stop_event_writer()
-        th._close_db()
+        close_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -145,7 +145,7 @@ class TestChatContextCachePeerCommit:
 
     def teardown_method(self) -> None:
         th._stop_event_writer()
-        th._close_db()
+        close_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

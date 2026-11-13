@@ -177,7 +177,7 @@ def test_synced_rows_learn_the_machine_they_ran_on_from_their_first_events(
         here = history_columns.host_name()
         ids = {
             name: persistence._add_task(name, chat_id="c-" + name)[0]
-            for name in ("settings", "prompt", "own", "silent", "stamped")
+            for name in ("settings", "prompt", "own", "silent", "stamped", "blob")
         }
         db = persistence._get_db()
         events = [
@@ -186,6 +186,9 @@ def test_synced_rows_learn_the_machine_they_ran_on_from_their_first_events(
             ("own", 0, '{"type": "task_settings", "settings": {"host": "' + here + '"}}'),
             ("own", 1, '{"type": "system_prompt", "text": "Machine info: ' + here + ' (arm64)"}'),
             ("stamped", 0, '{"type": "system_prompt", "text": "Machine info: lab (x86_64)"}'),
+            # A foreign writer's BLOB reads as its text: characters, not bytes, are
+            # counted up to the host (the two differ after the non-ASCII one).
+            ("blob", 0, '{"note": "caf\u00e9", "settings": {"host": "blob-box.lan"}}'.encode()),
         ]
         db.executemany(
             "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, 1.0)",
@@ -195,12 +198,13 @@ def test_synced_rows_learn_the_machine_they_ran_on_from_their_first_events(
         db.commit()
 
         assert sorted(history_columns.task_origins(db)) == sorted(
-            [("gpu-box", ids["settings"]), ("lab", ids["prompt"])]
+            [("gpu-box", ids["settings"]), ("lab", ids["prompt"]), ("blob-box", ids["blob"])]
         )
-        assert persistence._backfill_task_machines() == 2
+        assert persistence._backfill_task_machines() == 3
         machines = dict(db.execute("SELECT id, machine FROM task_history").fetchall())
         assert {name: machines[task_id] for name, task_id in ids.items()} == {
             "settings": "gpu-box", "prompt": "lab", "own": "", "silent": "", "stamped": "box",
+            "blob": "blob-box",
         }
         # Once per database: the marker makes a second start a no-op.
         db.execute("UPDATE task_history SET machine = '' WHERE id = ?", (ids["prompt"],))

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+import multiprocessing
 import os
 import shutil
 import stat
@@ -26,14 +27,29 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.server import tricks
-from kiss.server.commands import _CommandsMixin
+from kiss.server.commands import _CommandsMixin, broadcast_to_conn
 from kiss.server.sorcar import API, validate_command
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import is_root, posix_only
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.conftest import EntryGate
 
 _BUNDLED = "## Trick\n\nBundled promptlet one.\n\n## Trick\n\nBundled two.\n"
+
+
+def _edit_in_sibling(home: str, op: str, start: Any) -> None:
+    """One sibling process's 30 edits of the file in *home*, begun together with the others'."""
+    os.environ["KISS_HOME"] = home  # importing this module pinned the child's own
+    start.wait(60)
+    for i in range(30):
+        if op == "edit":
+            tricks.edit_my_injection_trick(f"edit {i}", f"edited {i}")
+        elif op == "delete":
+            tricks.delete_my_injection_trick(f"delete {i}")
+        else:
+            tricks.append_my_injection_trick(f"{op} {i}")
 
 
 class _TricksHome(unittest.TestCase):
@@ -140,6 +156,28 @@ class TestAppendMyInjectionTrick(_TricksHome):
         self.assertNotIn("\r", self.user_text())
         self.assertIn("Fresh.\nBody.", tricks.read_tricks_data()["tricks"])
 
+    def test_every_line_break_the_reader_knows_is_stored_as_lf(self) -> None:
+        # The file is read with universal newlines and its sections are
+        # parsed with ``str.splitlines``: a lone CR or a form feed in a
+        # stored body comes back as LF.  Stored raw, a heading behind a
+        # lone CR became a section of its own on the next read (the rest
+        # of the promptlet gone from the panel) and a retry was no
+        # duplicate of what the first add listed.
+        self.assertEqual(
+            tricks.append_my_injection_trick("First line\r## Sneaky\rtail"),
+            "Promptlet must not contain a line starting with '## '",
+        )
+        self.assertFalse(self.user_file.exists())
+        self.assertIsNone(tricks.append_my_injection_trick("One\rTwo\x0cThree"))
+        self.assertTrue(
+            self.user_file.read_bytes().endswith(b"\n## Trick\n\nOne\nTwo\nThree\n")
+        )
+        self.assertIn("One\nTwo\nThree", tricks.read_tricks_data()["tricks"])
+        self.assertEqual(
+            tricks.append_my_injection_trick("One\rTwo\x0cThree"),
+            "That promptlet is already in ~/.kiss/MY_INJECTION.md",
+        )
+
     def test_markdown_escapes_round_trip_verbatim(self) -> None:
         # The reader strips CommonMark backslash escapes, so the writer
         # doubles the backslashes that would be stripped: the panel
@@ -172,6 +210,36 @@ class TestAppendMyInjectionTrick(_TricksHome):
             ["That promptlet is already in ~/.kiss/MY_INJECTION.md"] * 7,
         )
         self.assertEqual(self.user_text().count(body), 1)
+
+    def test_edits_of_sibling_processes_all_survive(self) -> None:
+        """Processes sharing the brand home (two daemons) lose none of each other's edits.
+
+        Two adders, an editor and a deleter start together, each rewriting
+        the whole file from the text it read.  A lock that another process
+        keeps costs the caller the bounded wait, not a hang.
+        """
+        for i in range(30):
+            tricks.append_my_injection_trick(f"edit {i}")
+            tricks.append_my_injection_trick(f"delete {i}")
+        spawn = multiprocessing.get_context("spawn")
+        ops = ("add", "also add", "edit", "delete")
+        start = spawn.Barrier(len(ops))
+        siblings = [
+            spawn.Process(target=_edit_in_sibling, args=(str(self.kiss_dir), op, start))
+            for op in ops
+        ]
+        for sibling in siblings:
+            sibling.start()
+        for sibling in siblings:
+            sibling.join(120)
+        self.assertEqual([sibling.exitcode for sibling in siblings], [0] * len(ops))
+        self.assertCountEqual(
+            tricks.read_tricks_data()["tricks"][1:-2],
+            [f"{kind} {i}" for kind in ("add", "also add", "edited") for i in range(30)],
+        )
+        with exclusive_file_lock(self.user_file.with_suffix(".lock")):
+            with self.assertRaises(TimeoutError):
+                tricks.append_my_injection_trick("Too late.")
 
     def test_non_utf8_file_reports_error_without_writing(self) -> None:
         self.user_file.write_bytes(b"## Trick\n\n\xff\xfe broken\n")
@@ -304,6 +372,29 @@ class TestAddTrickCommand(_TricksHome):
         assert resync is not None
         self.assertEqual(resync["connId"], "c2")
         self.assertNotIn("Blocked.", resync["tricks"])
+
+    def test_an_older_list_is_never_sent_after_a_newer_one(self) -> None:
+        """A promptlet deleted while its add still holds the older list stays deleted on screen."""
+        gate = EntryGate(broadcast_to_conn.__code__)
+        parked = gate.start(self.server._cmd_add_trick, {"text": "First."})
+        newer = threading.Thread(
+            target=self.server._cmd_delete_trick, args=({"text": "First."},), daemon=True,
+        )
+        try:
+            self.assertTrue(gate.reached.wait(30), "the first add never read the list")
+            threading.setprofile(None)  # only ``parked`` carries the gate
+            newer.start()
+            newer.join(0.5)  # over before the release only when nothing orders the two sends
+        finally:
+            threading.setprofile(None)
+            gate.release.set()
+            parked.join(30)
+        newer.join(30)
+        self.assertFalse(parked.is_alive() or newer.is_alive())
+        msg = self.server.last("tricksData")
+        assert msg is not None
+        self.assertNotIn("First.", msg["tricks"])
+        self.assertEqual(msg["tricks"], tricks.read_tricks_data()["tricks"])
 
 
 class TestAddTrickOverLocalEndpoint(_TricksHome):

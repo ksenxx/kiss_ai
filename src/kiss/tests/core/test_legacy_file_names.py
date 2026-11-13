@@ -29,6 +29,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.core import config
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.tests.conftest import posix_only
+from kiss.tests.persistence_helpers import close_db
 
 
 def assert_old_name_left_behind(old: Path, new_name: str) -> None:
@@ -49,14 +50,13 @@ def kiss_dir(monkeypatch: pytest.MonkeyPatch):
     home = Path(tmp) / ".kiss"
     home.mkdir()
     monkeypatch.setenv("KISS_HOME", str(home))
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    saved = (th._DB_PATH, th._KISS_DIR)
     th._KISS_DIR = home
-    th._db_conn = None
     try:
         yield home
     finally:
-        th._close_db()
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+        close_db()
+        (th._DB_PATH, th._KISS_DIR) = saved
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -103,7 +103,7 @@ def test_events_journalled_against_the_old_path_are_replayed(kiss_dir: Path) -> 
         [(task_id, json.dumps({"type": "result", "text": "kept"}), 1.0, str(th._DB_PATH))], 3,
     )
     th._journal_final_result(task_id, "<p>kept</p>")
-    th._close_db()
+    close_db()
 
     th._DB_PATH = kiss_dir / "history.db"
     th._get_db()  # the first open renames the database and its journals
@@ -123,7 +123,7 @@ def test_rows_journalled_against_an_unrelated_sorcar_db_are_dropped(kiss_dir: Pa
     """A sorcar.db still beside history.db is another database, not its former name."""
     th._DB_PATH = kiss_dir / "history.db"
     task_id, _chat = th._add_task("new version")
-    th._close_db()
+    close_db()
     other = sqlite3.connect(kiss_dir / "sorcar.db")  # e.g. created by an old version run later
     other.execute("CREATE TABLE t (x)")
     other.commit()
@@ -155,7 +155,7 @@ def test_claimed_journal_snapshots_follow_the_database_and_keep_their_markers(
         "INSERT INTO replayed_journals (snapshot, timestamp) VALUES (?, 2.0)", (committed,),
     )
     th._get_db().commit()
-    th._close_db()  # the replayer died after committing one snapshot and claiming the other
+    close_db()  # the replayer died after committing one snapshot and claiming the other
     for name, text in ((pending, "pending"), (committed, "twice")):
         (kiss_dir / name).write_text(json.dumps({
             "task_id": task_id, "event_json": json.dumps({"type": "result", "text": text}),
@@ -499,7 +499,7 @@ def test_a_history_db_abandoned_in_april_2026_does_not_hide_sorcar_db(kiss_dir: 
     th._DB_PATH = kiss_dir / "sorcar.db"
     th._add_task("the real history")
     (kiss_dir / "sorcar.db.final_results.jsonl").write_text("")
-    th._close_db()
+    close_db()
     write_march_2026_history_db(kiss_dir / "history.db")
     (kiss_dir / "history.db-wal").write_bytes(b"stale wal")
 
@@ -525,10 +525,10 @@ def test_a_current_history_db_is_never_set_aside(kiss_dir: Path) -> None:
     """Both names present and history.db current: sorcar.db is an unrelated file, left alone."""
     th._DB_PATH = kiss_dir / "history.db"
     th._add_task("current")
-    th._close_db()
+    close_db()
     th._DB_PATH = kiss_dir / "sorcar.db"
     th._add_task("written by a downgrade")
-    th._close_db()
+    close_db()
 
     th._DB_PATH = kiss_dir / "history.db"
     rows = th._get_db().execute("SELECT task FROM task_history").fetchall()
@@ -545,7 +545,7 @@ def test_sorcar_db_linked_to_history_db_is_not_a_second_database(kiss_dir: Path)
     assert [r["task"] for r in th._get_db().execute("SELECT task FROM task_history")] == [
         "adopted",
     ]
-    th._close_db()
+    close_db()
     assert [r["task"] for r in th._get_db().execute("SELECT task FROM task_history")] == [
         "adopted",
     ]

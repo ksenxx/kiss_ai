@@ -75,7 +75,7 @@ class TestTunnelRestartKeepsServer(IsolatedAsyncioTestCase):
         self.server._start_tunnel = fake_start_tunnel  # type: ignore[method-assign]
 
         self._orig_post = ws_mod._post_url_to_message_board
-        ws_mod._post_url_to_message_board = lambda *_a, **_k: None  # type: ignore[assignment]
+        ws_mod._post_url_to_message_board = lambda *_a, **_k: True  # type: ignore[assignment]
 
         self._orig_load_config = ws_mod.load_config
         ws_mod.load_config = lambda: {"remote_password": "test-pw"}  # type: ignore[assignment]

@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import persistence
+from kiss.tests.persistence_helpers import close_db
 
 
 @pytest.fixture
@@ -27,9 +28,9 @@ def temp_db(
 ) -> Generator[Path]:
     db_path = tmp_path / "history.db"
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
-    persistence._close_db()
+    close_db()
     yield db_path
-    persistence._close_db()
+    close_db()
 
 
 def test_add_task_accepts_flat_parent_task_id_shape(temp_db: Path) -> None:  # noqa: ARG001

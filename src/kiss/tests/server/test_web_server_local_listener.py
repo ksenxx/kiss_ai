@@ -49,7 +49,7 @@ class TestLocalListener(IsolatedAsyncioTestCase):
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.server.web_server import _generate_self_signed_cert
+        from kiss.tests.local_ws import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
         self.endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
@@ -65,8 +65,7 @@ class TestLocalListener(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -312,7 +311,7 @@ class TestLocalListener(IsolatedAsyncioTestCase):
         """``stop_async`` removes the endpoint file it wrote on shutdown."""
         certfile = Path(self.tmpdir) / "cert2.pem"
         keyfile = Path(self.tmpdir) / "key2.pem"
-        from kiss.server.web_server import _generate_self_signed_cert
+        from kiss.tests.local_ws import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
         extra_endpoint = Path(self.tmpdir) / "sorcar-local-extra.json"
         srv = RemoteAccessServer(
@@ -334,7 +333,7 @@ class TestLocalListener(IsolatedAsyncioTestCase):
         ownership witness."""
         certfile = Path(self.tmpdir) / "cert3.pem"
         keyfile = Path(self.tmpdir) / "key3.pem"
-        from kiss.server.web_server import _generate_self_signed_cert
+        from kiss.tests.local_ws import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
         shared = Path(self.tmpdir) / "sorcar-local-shared.json"
         first = RemoteAccessServer(

@@ -20,6 +20,9 @@ const {
   send,
   readyTabId,
   output,
+  // The running task without its prompt echo: the tests here send their
+  // own prompts.
+  openRunningTask,
 } = require('./simplify2_harness');
 const {sendStep} = require('./prompt_step_helpers');
 
@@ -28,21 +31,6 @@ function makePage() {
   const {win, posted} = buildPage({extraScripts: ['marked.min.js']});
   loadMainCss(win);
   return {win, posted};
-}
-
-/**
- * Start a running task on the ready tab.  Unlike the harness's startTask
- * this sends no prompt event: the tests here send their own prompts.
- */
-function startTask(win, posted, task) {
-  send(win, {
-    type: 'task_events',
-    events: [],
-    task,
-    tabId: readyTabId(posted),
-    chat_id: 'chat-' + task.replace(/\W+/g, '-'),
-  });
-  send(win, {type: 'status', running: true});
 }
 
 function topLevel(win) {
@@ -55,7 +43,7 @@ function header(panel, cls) {
 
 function testPromptPanelsStartCollapsed() {
   const {win, posted} = makePage();
-  startTask(win, posted, 'Fold the prompts');
+  openRunningTask(win, posted, 'Fold the prompts');
   send(win, {type: 'system_prompt', text: 'You are a careful assistant.'});
   send(win, {type: 'prompt', text: 'Fold the prompts'});
   const sys = output(win).querySelector('.ev.system-prompt');
@@ -89,7 +77,7 @@ function testPromptPanelsStartCollapsed() {
 
 function testEarlyPromptPanelsStartCollapsedAndStayCollapsedWhenReplaced() {
   const {win, posted} = makePage();
-  startTask(win, posted, 'Early prompts');
+  openRunningTask(win, posted, 'Early prompts');
   send(win, {type: 'system_prompt', text: 'early system', early: true});
   send(win, {type: 'prompt', text: 'early prompt', early: true});
   let sys = output(win).querySelector('.ev.system-prompt');
@@ -117,7 +105,7 @@ function testEarlyPromptPanelsStartCollapsedAndStayCollapsedWhenReplaced() {
 
 function testUserUnfoldSurvivesEarlyReplace() {
   const {win, posted} = makePage();
-  startTask(win, posted, 'Unfold early');
+  openRunningTask(win, posted, 'Unfold early');
   send(win, {type: 'prompt', text: 'early prompt', early: true});
   const pr = output(win).querySelector('.ev.prompt');
   header(pr, 'prompt').dispatchEvent(
@@ -142,7 +130,7 @@ function testUserUnfoldSurvivesEarlyReplace() {
 
 function testUserCanUnfoldAndRefold() {
   const {win, posted} = makePage();
-  startTask(win, posted, 'Toggle');
+  openRunningTask(win, posted, 'Toggle');
   send(win, {type: 'system_prompt', text: 'system text'});
   const sys = output(win).querySelector('.ev.system-prompt');
   const hdr = header(sys, 'system-prompt');
@@ -172,7 +160,7 @@ function testUserCanUnfoldAndRefold() {
 
 function testFirstSummaryFoldsPromptsUnderIt() {
   const {win, posted} = makePage();
-  startTask(win, posted, 'Summarize');
+  openRunningTask(win, posted, 'Summarize');
   send(win, {type: 'system_prompt', text: 'system text'});
   send(win, {type: 'prompt', text: 'Summarize'});
   for (let i = 1; i <= 3; i++) sendStep(win, i);
@@ -226,7 +214,7 @@ function testFirstSummaryFoldsPromptsUnderIt() {
 
 function testFirstSummaryFoldsPromptsEvenWhenUserUnfoldedThem() {
   const {win, posted} = makePage();
-  startTask(win, posted, 'Pinned prompt');
+  openRunningTask(win, posted, 'Pinned prompt');
   send(win, {type: 'prompt', text: 'Pinned prompt'});
   const pr = output(win).querySelector('.ev.prompt');
   header(pr, 'prompt').dispatchEvent(
@@ -249,7 +237,7 @@ function testFirstSummaryFoldsPromptsEvenWhenUserUnfoldedThem() {
 
 function testPromptWithImageIsFoldedUnderSummary() {
   const {win, posted} = makePage();
-  startTask(win, posted, 'Picture prompt');
+  openRunningTask(win, posted, 'Picture prompt');
   send(win, {
     type: 'prompt',
     text: 'Look at this ![shot](data:image/png;base64,iVBORw0KGgo=)',
@@ -278,7 +266,7 @@ function testPromptWithImageIsFoldedUnderSummary() {
 
 function testSteerMessageStaysOutsideWhilePromptEchoFolds() {
   const {win, posted} = makePage();
-  startTask(win, posted, 'Steered');
+  openRunningTask(win, posted, 'Steered');
   send(win, {type: 'prompt', text: 'Steered'});
   sendStep(win, 1);
   send(win, {type: 'prompt', text: 'also do this', steer: true});
@@ -350,7 +338,7 @@ function testReplayOfRunningTaskFoldsPromptsUnderSummary() {
 
 function testFinishedTaskFoldsEverythingIntoTrajectory() {
   const {win, posted} = makePage();
-  startTask(win, posted, 'Finished');
+  openRunningTask(win, posted, 'Finished');
   send(win, {type: 'system_prompt', text: 'system text'});
   send(win, {type: 'prompt', text: 'Finished'});
   sendStep(win, 1);

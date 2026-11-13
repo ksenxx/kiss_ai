@@ -20,6 +20,7 @@ import asyncio
 import json
 import shutil
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
@@ -28,8 +29,9 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from kiss.core.user_config import save_config
-from kiss.server.web_server import RemoteAccessServer
+from kiss.server.web_server import _EXECUTOR_WORKERS, RemoteAccessServer
 from kiss.tests.server.conftest import (
+    FORWARDED_VISITOR,
     environ,
     find_free_port,
     no_verify_ssl,
@@ -86,6 +88,23 @@ class TestNonAuthSecondFrame(IsolatedAsyncioTestCase):
         self.assertEqual(replies[0], {"type": "auth_required"})
         self.assertEqual(replies[1]["type"], "error")
         self.assertEqual(replies[1]["code"], "auth_failed")
+
+    async def test_busy_executor_does_not_delay_a_direct_loopback_client(self) -> None:
+        """H1-d: only a peer that is not direct loopback awaits the stored-password read."""
+        save_config({"remote_password": ""})
+        url, release = f"wss://127.0.0.1:{self.port}/ws", threading.Event()
+        loop = asyncio.get_running_loop()
+        busy = [loop.run_in_executor(None, release.wait, 60) for _ in range(_EXECUTOR_WORKERS)]
+        try:
+            async with connect(url, ssl=no_verify_ssl()) as ws:
+                await ws.send(json.dumps({"type": "auth", "token": self.server.local_token}))
+                reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+        finally:
+            release.set()
+            await asyncio.gather(*busy)
+        async with connect(url, ssl=no_verify_ssl(), additional_headers=FORWARDED_VISITOR) as ws:
+            refusal = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        self.assertEqual((reply["type"], refusal["code"]), ("auth_ok", "localhost_only"))
 
 
 if __name__ == "__main__":

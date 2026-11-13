@@ -20,6 +20,12 @@ Findings covered (audit ``tmp/audit/03-core-models-c.md``):
   is already parsed.
 * **R5** — the Anthropic and Claude Code cache-creation parsers were the
   same function twice; one shared parser must keep both answers equal.
+
+Also covered: a turn is finished only by its terminal event
+(``turn.completed`` / a ``result`` that is not an error).  Both adapters
+used to commit whatever text had arrived when the CLI exited cleanly
+without it, and ``cc/*`` took the text of an ``is_error`` result (``Not
+logged in``, ``Exceeded maximum turns``) for the model's answer.
 """
 
 import json
@@ -31,6 +37,7 @@ import pytest
 from anthropic.types import Usage
 from anthropic.types.cache_creation import CacheCreation
 
+from kiss.core.kiss_error import KISSError
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.codex_model import CodexModel
@@ -120,6 +127,30 @@ _CLAUDE_REPORTS_NULL_OUTPUT_TOKENS = """
 """
 
 
+def _prints_json_noise(*events: dict[str, Any]) -> str:
+    """Stand-in body: print *events*, each after noise that is JSON but no event object."""
+    return f"""
+    import json
+    import sys
+
+    sys.stdin.read()
+    for event in {events!r}:
+        for noise in ('42', '"warming up"', 'null', '[1, 2]', 'true'):
+            print(noise, flush=True)
+        print(json.dumps(event), flush=True)
+    """
+
+
+_CODEX_PRINTS_JSON_NOISE = _prints_json_noise(
+    {"type": "item.completed", "item": {"type": "agent_message", "text": "hi"}},
+    {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}},
+)
+_CLAUDE_PRINTS_JSON_NOISE = _prints_json_noise(
+    {"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "hi"}]}},
+    {"type": "result", "result": "hi", "usage": {"input_tokens": 10, "output_tokens": 5}},
+)
+
+
 def finish(result: str) -> str:
     """Finish the task and return its result.
 
@@ -193,6 +224,8 @@ _CLAUDE_STOPS_MID_JSON = """
         print(json.dumps({"type": "content_block_delta",
                           "delta": {"type": "text_delta", "text": chunk}}),
               flush=True)
+    print(json.dumps({"type": "result", "result": "ignored", "usage": {}}),
+          flush=True)
 """
 
 _CLAUDE_STOPS_MID_TOOL_CALL = """
@@ -204,6 +237,8 @@ _CLAUDE_STOPS_MID_TOOL_CALL = """
         print(json.dumps({"type": "content_block_delta",
                           "delta": {"type": "text_delta", "text": chunk}}),
               flush=True)
+    print(json.dumps({"type": "result", "result": "ignored", "usage": {}}),
+          flush=True)
 """
 
 
@@ -359,6 +394,142 @@ class TestI7NullUsageFields:
         ) == (0, 0, 0, 0, 0)
 
 
+@pytest.mark.parametrize(
+    ("cli", "body", "model_class", "model_name"),
+    [
+        ("codex", _CODEX_PRINTS_JSON_NOISE, CodexModel, "codex/default"),
+        ("claude", _CLAUDE_PRINTS_JSON_NOISE, ClaudeCodeModel, "cc/opus"),
+    ],
+    ids=["codex", "claude"],
+)
+def test_json_noise_lines_do_not_end_the_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cli: str,
+    body: str,
+    model_class: Any,
+    model_name: str,
+) -> None:
+    """A stdout line that is valid JSON but no event object (``42``, ``null``,
+    ``[1, 2]``) is noise: the answer and its usage survive it."""
+    install_cli(tmp_path, monkeypatch, cli, body)
+    model = model_class(model_name)
+    model.initialize("hi")
+
+    content, response = model.generate()
+
+    assert content == "hi"
+    assert model.extract_input_output_token_counts_from_response(response)[:2] == (10, 5)
+
+
+_CODEX_EXITS_BEFORE_TURN_COMPLETED = """
+    import json
+    import sys
+
+    sys.stdin.read()
+    print(json.dumps({"type": "item.completed",
+                      "item": {"type": "agent_message", "text": "partial answer"}}),
+          flush=True)
+"""
+
+_CLAUDE_EXITS_BEFORE_ITS_RESULT = """
+    import json
+    import sys
+
+    sys.stdin.read()
+    print(json.dumps({"type": "content_block_delta",
+                      "delta": {"type": "text_delta", "text": "partial answer"}}),
+          flush=True)
+"""
+
+_CLAUDE_REPORTS_AN_ERROR_RESULT = """
+    import json
+    import os
+    import sys
+
+    sys.stdin.read()
+    print(json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True,
+                      "result": "Exceeded maximum turns",
+                      "usage": {"input_tokens": 17, "output_tokens": 3}}), flush=True)
+    sys.exit(int(os.environ["KISS_TEST_EXIT_STATUS"]))
+"""
+
+_CLAUDE_REPORTS_A_NULL_RESULT_TEXT = """
+    import json
+    import sys
+
+    sys.stdin.read()
+    print(json.dumps({"type": "result", "result": None,
+                      "usage": {"input_tokens": 10, "output_tokens": 5}}), flush=True)
+"""
+
+
+@pytest.mark.parametrize(
+    ("cli", "body", "model_class", "model_name"),
+    [
+        ("codex", _CODEX_EXITS_BEFORE_TURN_COMPLETED, CodexModel, "codex/default"),
+        ("claude", _CLAUDE_EXITS_BEFORE_ITS_RESULT, ClaudeCodeModel, "cc/opus"),
+    ],
+    ids=["codex", "claude"],
+)
+def test_a_stream_without_its_terminal_event_is_not_a_finished_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cli: str,
+    body: str,
+    model_class: Any,
+    model_name: str,
+) -> None:
+    """A CLI that exits cleanly before ``turn.completed`` / ``result`` cut its
+    answer short: the text is not committed (``test_cc_stream_usage`` pins
+    that the usage seen is still billed)."""
+    install_cli(tmp_path, monkeypatch, cli, body)
+    tokens: list[str] = []
+    model = model_class(model_name, token_callback=tokens.append)
+    model.initialize("hi")
+
+    with pytest.raises(KISSError, match="ended without"):
+        model.generate()
+
+    assert tokens == ["partial answer"]
+    assert [message["role"] for message in model.conversation] == ["user"]
+
+
+@pytest.mark.parametrize("exit_status", ["0", "1"])
+def test_a_claude_error_result_is_not_an_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_status: str
+) -> None:
+    """``is_error`` fails the turn whatever the exit status: the result's text
+    is the CLI's error message, and the usage it reports is still billed."""
+    install_cli(tmp_path, monkeypatch, "claude", _CLAUDE_REPORTS_AN_ERROR_RESULT)
+    monkeypatch.setenv("KISS_TEST_EXIT_STATUS", exit_status)
+    model = ClaudeCodeModel("cc/opus")
+    model.initialize("hi")
+
+    with pytest.raises(KISSError, match="Exceeded maximum turns"):
+        model.generate()
+
+    assert [message["role"] for message in model.conversation] == ["user"]
+    partial = model.take_partial_usage_response()
+    assert model.extract_input_output_token_counts_from_response(partial)[:2] == (17, 3)
+    assert model.take_partial_usage_response() is None
+
+
+def test_a_null_result_text_leaves_the_answer_a_string(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A JSON ``null`` for the result's text is no text, not a ``None`` answer."""
+    install_cli(tmp_path, monkeypatch, "claude", _CLAUDE_REPORTS_A_NULL_RESULT_TEXT)
+    model = ClaudeCodeModel("cc/opus")
+    model.initialize("hi")
+
+    content, response = model.generate()
+
+    assert content == ""
+    assert model.conversation[-1] == {"role": "assistant", "content": ""}
+    assert model.extract_input_output_token_counts_from_response(response)[:2] == (10, 5)
+
+
 class _AnthropicResponse:
     """The only part of an Anthropic message the extractor reads."""
 
@@ -444,8 +615,14 @@ def test_stand_in_scripts_are_valid_python() -> None:
         _CLAUDE_OVERRUNS_THE_DEADLINE_AFTER_A_TOOL_CALL,
         _CODEX_REPORTS_NULL_OUTPUT_TOKENS,
         _CLAUDE_REPORTS_NULL_OUTPUT_TOKENS,
+        _CODEX_PRINTS_JSON_NOISE,
+        _CLAUDE_PRINTS_JSON_NOISE,
         _CLAUDE_EMITS_ORDINARY_JSON,
         _CLAUDE_STOPS_MID_JSON,
         _CLAUDE_STOPS_MID_TOOL_CALL,
+        _CODEX_EXITS_BEFORE_TURN_COMPLETED,
+        _CLAUDE_EXITS_BEFORE_ITS_RESULT,
+        _CLAUDE_REPORTS_AN_ERROR_RESULT,
+        _CLAUDE_REPORTS_A_NULL_RESULT_TEXT,
     ):
         compile(textwrap.dedent(body), "<stand-in>", "exec")

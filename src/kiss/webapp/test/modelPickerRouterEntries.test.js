@@ -107,4 +107,3 @@ test('picking autorouter posts selectModel like any other row', () => {
 });
 
 report('modelPickerRouterEntries');
-process.exit(0);

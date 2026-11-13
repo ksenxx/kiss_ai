@@ -26,8 +26,17 @@ const {
   fakeMatchMedia,
   waitFor,
   ofType,
+  readyTabId,
 } = require('./simplify2_harness');
-const {makeRunner, byId, showSection} = require('./ui_antipattern_harness');
+const {
+  WD,
+  makeRunner,
+  byId,
+  key,
+  showSection,
+  pinWorkspace,
+  all: rowsIn,
+} = require('./ui_antipattern_harness');
 
 const {test, report} = makeRunner();
 
@@ -49,19 +58,22 @@ function makePage(opts) {
   });
 }
 
-const WD = '/ws/repo';
-
-/** Deliver the config reply that pins the workspace. */
-function pinWorkspace(win) {
-  send(win, {type: 'configData', config: {work_dir: WD}});
-}
-
-function rowsIn(win, sel) {
-  return Array.from(win.document.querySelectorAll(sel));
+/** A git log entry as the daemon sends it. */
+function commit(sha, parents, subject, files) {
+  return {
+    sha,
+    shortSha: sha.slice(0, 7),
+    parents,
+    author: 'A',
+    date: new Date().toISOString(),
+    refs: [],
+    subject,
+    files: files || [],
+  };
 }
 
 async function main() {
-  await test('Explorer: root listing, stale-token replies ignored, errors in place', async () => {
+  test('Explorer: root listing, stale-token replies ignored, errors in place', () => {
     const {win, posted} = makePage();
     pinWorkspace(win);
     showSection(win, 'meta-explorer');
@@ -154,7 +166,7 @@ async function main() {
     win.close();
   });
 
-  await test('Explorer: task news re-lists loaded folders only; empty folder note', async () => {
+  test('Explorer: task news re-lists loaded folders only; empty folder note', () => {
     const {win, posted} = makePage();
     pinWorkspace(win);
     showSection(win, 'meta-explorer');
@@ -207,9 +219,7 @@ async function main() {
       '(empty)',
     );
     // Keyboard: Enter on a folder row toggles it (collapses here).
-    srcRow.dispatchEvent(
-      new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
-    );
+    key(win, srcRow, 'Enter');
     assert.strictEqual(srcRow.getAttribute('aria-expanded'), 'false');
     assert.ok(srcRow.nextSibling.hidden);
     win.close();
@@ -259,16 +269,6 @@ async function main() {
     const B = 'b'.repeat(40);
     const C = 'c'.repeat(40);
     const R = 'r'.repeat(40);
-    const commit = (sha, parents, subject, files) => ({
-      sha,
-      shortSha: sha.slice(0, 7),
-      parents,
-      author: 'A',
-      date: new Date().toISOString(),
-      refs: [],
-      subject,
-      files: files || [],
-    });
     send(win, {
       type: 'gitLog',
       token: lg[0].token,
@@ -407,7 +407,7 @@ async function main() {
     win.close();
   });
 
-  await test('Source Control: error replies and empty repo', async () => {
+  test('Source Control: error replies and empty repo', () => {
     const {win, posted} = makePage();
     pinWorkspace(win);
     showSection(win, 'meta-scm');
@@ -464,7 +464,7 @@ async function main() {
     win.close();
   });
 
-  await test('Explorer and Source Control are collapsible sections of the task-info panel (remote only)', async () => {
+  test('Explorer and Source Control are collapsible sections of the task-info panel (remote only)', () => {
     const {win, posted} = makePage({collapsed: 'meta-explorer'});
     const explorer = byId(win, 'meta-explorer');
     const scm = byId(win, 'meta-scm');
@@ -505,23 +505,13 @@ async function main() {
     win.close();
   });
 
-  await test('Source Control: graph waits for the matching log during a refresh', async () => {
+  test('Source Control: graph waits for the matching log during a refresh', () => {
     const {win, posted} = makePage();
     pinWorkspace(win);
     showSection(win, 'meta-scm');
     const tok = ofType(posted, 'gitStatus')[0].token;
     const H1 = '1'.repeat(40);
     const H2 = '2'.repeat(40);
-    const commit = (sha, parents, subject) => ({
-      sha,
-      shortSha: sha.slice(0, 7),
-      parents,
-      author: 'A',
-      date: new Date().toISOString(),
-      refs: [],
-      subject,
-      files: [],
-    });
     send(win, {
       type: 'gitStatus',
       token: tok,
@@ -583,7 +573,7 @@ async function main() {
     win.close();
   });
 
-  await test('Explorer: an entry that turned from file into folder is a live folder', async () => {
+  test('Explorer: an entry that turned from file into folder is a live folder', () => {
     const {win, posted} = makePage();
     pinWorkspace(win);
     showSection(win, 'meta-explorer');
@@ -625,7 +615,7 @@ async function main() {
     win.close();
   });
 
-  await test('Explorer: two folders resolving to one target stay separate nodes', async () => {
+  test('Explorer: two folders resolving to one target stay separate nodes', () => {
     const {win, posted} = makePage();
     pinWorkspace(win);
     showSection(win, 'meta-explorer');
@@ -673,7 +663,7 @@ async function main() {
     win.close();
   });
 
-  await test('active tab changes retarget the views to the tab workspace', async () => {
+  test('active tab changes retarget the views to the tab workspace', () => {
     // No pinned workspace: every tab is visible, and each browses the
     // folder it runs in.
     const {win, posted} = makePage();
@@ -684,7 +674,7 @@ async function main() {
       byId(win, 'explorer-tree').textContent.trim(),
       'No workspace folder',
     );
-    const mine = posted.find(m => m.type === 'ready').tabId;
+    const mine = readyTabId(posted);
     send(win, {
       type: 'tabs_state',
       tabs: [

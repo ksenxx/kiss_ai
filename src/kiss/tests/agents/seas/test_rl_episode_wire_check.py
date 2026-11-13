@@ -21,31 +21,41 @@ fake adapter could reach.
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
-from kiss.agents.sorcar.sea_settings import execute_python_file
-from kiss.tests.agents.seas.sea_contract import system_message
-from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
-    ScriptedHandler,
-    serve,
-    text_body,
-    tool_call_body,
-)
+import pytest
 
-ROOT = Path(__file__).resolve().parents[5]
-SCRIPT = ROOT / "examples" / "rl_episode" / "wire_check.py"
-SEA_PATH = ROOT / "examples" / "rl_episode" / "rl_episode_sea.py"
-PROMPT = str(execute_python_file(SEA_PATH)["SYSTEM_PROMPT"])
+from kiss.agents.sorcar.sea_settings import execute_python_file
+from kiss.core.processes import SIGKILL, kill_process_tree, pid_alive, start_process_group
+from kiss.tests.agents.seas.sea_contract import system_message
+from kiss.tests.agents.seas.test_rl_episode_example import EPISODE, SEA, SEA_PATH, SECRET, _guess
+from kiss.tests.agents.sorcar.local_model_server import MODEL, ScriptedHandler, serve, text_body
+from kiss.tests.conftest import IS_WINDOWS, posix_only
+
+SCRIPT = SEA_PATH.parent / "wire_check.py"
+PROMPT = str(SEA["SYSTEM_PROMPT"])
 RECORDING_PROXY = execute_python_file(SCRIPT)["RecordingProxy"]
-EPISODE, SECRET = "episode-7", 45
 SOLVED = [50, 25, 37, SECRET]
+LAUNCHER = """\
+import os, subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+with open(sys.argv[1] + ".tmp", "w") as out:
+    out.write(f"{os.getpid()} {child.pid}")
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+time.sleep(120)
+"""
+"""A script that, like the wire check with its episode, waits on a subprocess of its own.
+
+It records its pid and the subprocess's in the file it is given, in one rename.
+"""
 
 
 class HeaderRecordingHandler(ScriptedHandler):
@@ -64,10 +74,6 @@ def _values(headers: list[tuple[str, str]], name: str) -> list[str]:
     return [value for header, value in headers if header == name]
 
 
-def _guess(value: int) -> bytes:
-    return tool_call_body("guess", {"value": value}, 500)
-
-
 def _origin(url: str) -> str:
     """The scripted server's origin: ``serve()`` yields ``.../v1``, the proxy forwards the path."""
     return url.removesuffix("/v1")
@@ -82,12 +88,38 @@ def _env(tmp_path: Path) -> dict[str, str]:
 
 
 def _run(
-    tmp_path: Path, *args: str, env: dict[str, str] | None = None
+    tmp_path: Path, *args: str, env: dict[str, str] | None = None,
+    script: Path = SCRIPT, timeout: float = 300,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, str(SCRIPT), *args], env=env or _env(tmp_path), cwd=tmp_path,
-        capture_output=True, text=True, timeout=300, check=False,
-    )
+    """Run *script* to its end in a process group of its own, for at most *timeout* seconds.
+
+    The wire check waits on a subprocess of its own (the episode), which a
+    ``subprocess.run`` deadline would leave running: it kills the script alone.  A run
+    that is cut short (the deadline, a Ctrl-C) is killed here with its whole group before
+    it is reaped, as :func:`kiss.core.processes.run_process_group` does (which takes no
+    ``cwd``).
+    """
+    command = [sys.executable, str(script), *args]
+    proc: subprocess.Popen[str] = object.__new__(subprocess.Popen)
+    try:
+        start_process_group(
+            proc, command, env=env or _env(tmp_path), cwd=tmp_path,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except BaseException:
+        if getattr(proc, "pid", None) is None:
+            raise  # never spawned; ``Popen.__init__`` closed what it had opened
+        if proc.returncode is None:  # a reaped child's group id is not this run's any more
+            kill_process_tree(proc)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+        # On Windows a pipe ``communicate`` reads on a thread is closed by that thread, at EOF.
+        for pipe, reader in ((proc.stdout, "stdout_thread"), (proc.stderr, "stderr_thread")):
+            if pipe is not None and not (IS_WINDOWS and hasattr(proc, reader)):
+                pipe.close()
+        raise
+    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
 
 
 def test_every_recorded_system_message_is_the_prompt_byte_for_byte(tmp_path: Path) -> None:
@@ -214,3 +246,40 @@ def test_without_a_key_the_openai_default_stops_before_any_traffic(tmp_path: Pat
     assert proc.returncode == 2
     assert "OPENAI_API_KEY is not set" in proc.stderr
     assert proc.stdout == ""
+
+
+@posix_only("a pid is probed with signal 0")
+def test_a_run_past_its_deadline_is_killed_with_the_subprocess_it_started(tmp_path: Path) -> None:
+    # At the deadline ``subprocess.run`` killed the script alone and left the episode, a
+    # subprocess of the script, running.  LAUNCHER stands in for the script here, so that the
+    # deadline can be short and both pids are on record.
+    launcher, pids = tmp_path / "launcher.py", tmp_path / "pids"
+    launcher.write_text(LAUNCHER, encoding="utf-8")
+    deadline = 1.0
+    # The deadline starts at the spawn, before the launcher has its subprocess: a run cut short
+    # with no pids on record proves nothing and is repeated with twice the time.
+    while not pids.exists():
+        assert deadline <= 64, "the launcher never recorded its pids"
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run(tmp_path, str(pids), script=launcher, timeout=deadline)
+        deadline *= 2
+    leader, descendant = (int(pid) for pid in pids.read_text(encoding="utf-8").split())
+    gone_by = time.monotonic() + 10  # a killed orphan is reaped by whoever adopted it
+    while pid_alive(descendant) and time.monotonic() < gone_by:
+        time.sleep(0.05)
+    if pid_alive(descendant):
+        os.kill(descendant, SIGKILL)  # the leak ends here, not after its 120 s
+        pytest.fail("the script's subprocess outlived the deadline")
+    assert not pid_alive(leader), "the script was not reaped"
+
+
+@posix_only("a child that fails in exec, and the wording of the errors")
+def test_a_run_that_cannot_start_raises_with_no_child_to_kill(tmp_path: Path) -> None:
+    # The two ways the cleanup meets no running child: nothing was spawned (an argument the OS
+    # refuses) and the child died in ``exec`` (no such working directory) and is reaped already.
+    # Not reachable here: a killed child that outlasts the bounded reap, and the Windows case
+    # in which ``communicate``'s reader threads own the pipes.
+    with pytest.raises(ValueError, match="null"):
+        _run(tmp_path, "embedded\0null")
+    with pytest.raises(OSError, match="missing"):
+        _run(tmp_path / "missing", env=_env(tmp_path))

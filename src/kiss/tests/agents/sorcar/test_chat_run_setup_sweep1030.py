@@ -4,8 +4,12 @@
 # add your name here
 """End-to-end tests of ``ChatSorcarAgent.run``'s setup window and printer.
 
-Two defects of ``ChatSorcarAgent.run``:
+Three defects of ``ChatSorcarAgent.run``:
 
+* A run stopped as the allocation of its row returned finished a row
+  that did not exist: the allocation chose the row's id, and the Stop
+  was raised before the run had it.  The committed row stayed
+  "running" for as long as the daemon lived.
 * A run stopped (or failing) after its row was allocated but before
   ``super().run`` was entered never banked the pre-run classifier's
   spend: only ``SorcarAgent.run``'s cleanup folded it, so the row and
@@ -37,18 +41,20 @@ import sys
 import threading
 from collections.abc import Iterator
 from datetime import datetime, timedelta
+from types import FrameType
 from typing import Any
 
 import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
+    _add_task,
     _flush_chat_events,
     _get_db,
     _load_chat_events_by_task_id,
 )
-from kiss.agents.sorcar.task_classifier import clear_classification_cache
 from kiss.server.task_runner import inject_keyboard_interrupt
+from kiss.tests.conftest import clear_classification_cache
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -192,6 +198,50 @@ def test_stop_during_setup_still_banks_classifier_spend(home: IsolatedKissHome) 
         (agent.last_task_id,),
     ).fetchone()
     assert tuple(row) == (pytest.approx(budget), 52, 1, "Task interrupted")
+
+
+def test_stop_as_the_row_is_allocated_finishes_that_row(home: IsolatedKissHome) -> None:
+    """A Stop raised as the row's allocation returns must not strand the row.
+
+    ``_add_task`` has committed the row by the time it returns, and the
+    injected ``KeyboardInterrupt`` is raised at the check that ends the
+    call, before the caller binds what it returned.  The run's cleanup
+    then finished an id of its own that named no row, and the committed
+    row kept ``end_ts`` 0 and "Agent Failed Abruptly": the orphan sweep
+    leaves the rows of a live process alone.  The trace function raises
+    the Stop on that return, in a run the daemon would persist
+    (``_skip_persistence``), which only knows a row the agent published.
+    """
+    allocated: list[str] = []
+
+    def stop_as_the_allocation_returns(frame: FrameType, event: str, arg: Any) -> Any:
+        if frame.f_code is not _add_task.__code__:
+            return None
+        if event == "return":
+            sys.settrace(None)
+            allocated.append(arg[0])
+            raise KeyboardInterrupt
+        return stop_as_the_allocation_returns
+
+    agent = ChatSorcarAgent("allocation-stop")
+    sys.settrace(stop_as_the_allocation_returns)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            agent.run(
+                prompt_template="refactor the parser module and update its tests",
+                model_name=STANDIN_MODEL,
+                work_dir=str(home.repo),
+                web_tools=False,
+                use_memory=False,
+                _skip_persistence=True,
+            )
+    finally:
+        sys.settrace(None)
+    (task_id,) = allocated
+    row = _get_db().execute(
+        "SELECT result, end_ts FROM task_history WHERE id = ?", (task_id,),
+    ).fetchone()
+    assert row["result"] == "Task interrupted" and row["end_ts"] > 0, dict(row)
 
 
 def test_second_verbose_run_persists_its_task_settings(home: IsolatedKissHome) -> None:

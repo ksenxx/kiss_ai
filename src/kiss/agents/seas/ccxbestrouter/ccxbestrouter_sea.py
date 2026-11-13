@@ -10,7 +10,7 @@ a non-blocking ``run_agent`` on at most 75% of the budget), with the Claude
 models taken through Claude Code and the reviewer through Codex:
 :data:`SIMPLE_MODEL` is Claude Opus 5.5 (medium effort) for simple questions,
 :data:`PRIMARY_MODEL` is Claude Fable 5.2 (max effort) and :data:`REVIEW_MODEL`
-is GPT-6 Astra.
+is GPT-6 Astra (xhigh effort).
 
 Three ways to run it::
 
@@ -35,8 +35,12 @@ SIMPLE_MODEL = "cc/claude-opus-5-5-medium"
 PRIMARY_MODEL = "cc/claude-fable-5-2-max"
 """The model for every other task: Claude Fable 5.2 at max effort via Claude Code."""
 
-REVIEW_MODEL = "codex/gpt-6-astra"
-"""The model that reviews and debugs the primary model's work: GPT-6 Astra via Codex."""
+REVIEW_MODEL = "codex/gpt-6-astra-xhigh"
+"""The model that reviews and debugs the primary model's work: GPT-6 Astra (xhigh) via Codex.
+
+An effort alias the catalog does not list: it runs, and is sized and priced, as
+``codex/gpt-6-astra``, and the Codex adapter passes the effort to the CLI.
+"""
 
 SYSTEM_PROMPT = routing_prompt(
     "ccxbestrouter", SIMPLE_MODEL, PRIMARY_MODEL, REVIEW_MODEL

@@ -20,6 +20,14 @@ for an audio attachment.
 Each scenario runs in a fresh interpreter (the modules must not be imported
 yet) with a barrier releasing both threads together; without the lock in
 ``kiss.core.models.model`` the deadlock is reproduced on every run.
+
+The lock cannot cover the OpenAI SDK's own look at ``sys.modules["httpx2"]``
+(``openai._httpx2``, on every client construction and request): while the
+prewarm thread imports the Anthropic SDK, and with it ``httpx2``, a task
+thread building its OpenAI client found the module half initialised and
+died with ``AttributeError: partially initialized module 'httpx2' has no
+attribute 'URL'``.  ``HALF_IMPORTED_HTTPX2_CHILD`` holds the prewarm inside
+that import, should it still start one once the daemon's modules are loaded.
 """
 
 from __future__ import annotations
@@ -78,6 +86,64 @@ CHILD = textwrap.dedent(
     print("|".join(errors) or "ok")
     """
 )
+
+
+HALF_IMPORTED_HTTPX2_CHILD = textwrap.dedent(
+    """
+    import importlib.abc
+    import importlib.util
+    import sys
+    import threading
+
+    import kiss.server.server as server  # what the daemon has loaded when it starts
+    from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+
+    entered, release = threading.Event(), threading.Event()
+
+    class PausedLoader(importlib.abc.Loader):
+        def __init__(self, loader):
+            self.loader = loader
+
+        def create_module(self, spec):
+            return self.loader.create_module(spec)
+
+        def exec_module(self, module):
+            entered.set()
+            release.wait(60)
+            self.loader.exec_module(module)
+
+    class PauseHttpx2(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name != "httpx2":
+                return None
+            sys.meta_path.remove(self)
+            spec = importlib.util.find_spec(name)
+            spec.loader = PausedLoader(spec.loader)
+            return spec
+
+    sys.meta_path.insert(0, PauseHttpx2())
+    prewarm = threading.Thread(target=server._prewarm_task_dependencies)
+    prewarm.start()
+    while prewarm.is_alive() and not entered.wait(0.01):
+        pass
+    try:
+        OpenAICompatibleModel("gpt-4o-mini", "http://127.0.0.1:9/v1", "key").initialize("hi")
+        print("ok")
+    except Exception as exc:  # noqa: BLE001 - reported to the parent
+        print(f"{type(exc).__name__}: {exc}")
+    release.set()
+    prewarm.join(120)
+    """
+)
+
+
+def test_task_builds_its_openai_client_while_the_prewarm_imports_httpx2() -> None:
+    proc = subprocess.run(
+        [sys.executable, "-c", HALF_IMPORTED_HTTPX2_CHILD],
+        capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "ok", proc.stdout + proc.stderr
 
 
 @pytest.mark.parametrize(

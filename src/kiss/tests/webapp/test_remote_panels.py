@@ -361,10 +361,8 @@ def _start_remote_server(
     state: dict[str, object],
 ) -> None:
     """Run the production RemoteAccessServer until *done* is set."""
-    from kiss.server.web_server import (
-        RemoteAccessServer,
-        _generate_self_signed_cert,
-    )
+    from kiss.server.web_server import RemoteAccessServer
+    from kiss.tests.local_ws import _generate_self_signed_cert
 
     certfile = tmp_path / "cert.pem"
     keyfile = tmp_path / "key.pem"

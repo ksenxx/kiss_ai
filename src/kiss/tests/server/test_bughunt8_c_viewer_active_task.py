@@ -34,8 +34,10 @@ import threading
 import unittest
 from typing import Any
 
+import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
+from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import AgentServer
 
 
@@ -53,6 +55,23 @@ class _EventRecorder:
     def for_tab(self, tab_id: str) -> list[dict[str, Any]]:
         with self._lock:
             return [e for e in self.events if e.get("tabId") == tab_id]
+
+
+class _ParkingPrinter(JsonPrinter):
+    """Parks the thread named ``walker`` once it has read a task's viewers."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.walker: threading.Thread | None = None
+        self.parked = threading.Event()
+        self.release = threading.Event()
+
+    def _fanout_targets(self, task_id: Any) -> list[str]:
+        targets = super()._fanout_targets(task_id)
+        if threading.current_thread() is self.walker:
+            self.parked.set()
+            self.release.wait(10)
+        return targets
 
 
 def _register_busy_viewer(tab_id: str, task_id: str) -> AgentState:
@@ -129,7 +148,7 @@ class TestStatusEndSkipsBusyViewer(unittest.TestCase):
         self.server.printer.subscribe_tab("7301", idle_viewer)
 
         self.server.printer.broadcast = self.recorder  # type: ignore[assignment]
-        self.server._broadcast_status_end_to_viewers("7301", launcher)
+        self.server._broadcast_status_end_to_viewers("7301", launcher, "")
 
         busy_events = self.recorder.for_tab(busy_viewer)
         self.assertEqual(
@@ -144,6 +163,67 @@ class TestStatusEndSkipsBusyViewer(unittest.TestCase):
         self.assertEqual(len(idle_events), 1)
         self.assertEqual(idle_events[0].get("type"), "status")
         self.assertIs(idle_events[0].get("running"), False)
+
+    def test_viewer_is_told_how_the_task_ended(self) -> None:
+        """A viewer's tab gets its own copy of the run's end, ahead of its status.
+
+        The launcher's event names the launcher's tab only: without a
+        copy of its own a viewer reads ``Done`` for a stopped task and
+        keeps the question the task left open, and never opens the
+        reports of a finished one.  The copy is marked ``viewer``: a
+        page sounds its jingle for the launcher's event alone.
+        """
+        launcher = "bh8c-fail-launcher"
+        busy_viewer = "bh8c-fail-busy"
+        idle_viewer = "bh8c-fail-idle"
+        _register_busy_viewer(busy_viewer, "7999")
+        for tab in (launcher, busy_viewer, idle_viewer):
+            self.server.printer.subscribe_tab("7302", tab)
+        self.server.printer.broadcast = self.recorder  # type: ignore[assignment]
+        stopped = {"type": "task_stopped", "startTs": 1, "endTs": 2, "subagent": False}
+        self.server._broadcast_status_end_to_viewers("7302", launcher, "", end_event=stopped)
+        self.server._broadcast_status_end_to_viewers(
+            "7302", launcher, "", end_event={**stopped, "type": "task_done"},
+        )
+        self.assertEqual(self.recorder.for_tab(busy_viewer), [])
+        self.assertEqual(self.recorder.for_tab(launcher), [])
+        self.assertEqual(
+            self.recorder.for_tab(idle_viewer),
+            [
+                {**stopped, "tabId": idle_viewer, "viewer": True},
+                {"type": "status", "running": False, "tabId": idle_viewer},
+                {**stopped, "type": "task_done", "tabId": idle_viewer, "viewer": True},
+                {"type": "status", "running": False, "tabId": idle_viewer},
+            ],
+        )
+
+    def test_viewer_that_left_the_run_meanwhile_is_told_nothing(self) -> None:
+        """The walk reads the run's viewers, then a replay moves one to another chat.
+
+        That tab shows the other chat by the time its turn comes: the
+        old run's end would label it Stopped.
+        """
+        printer = _ParkingPrinter()
+        server = AgentServer(printer=printer)
+        viewer = "bh8c-moved-viewer"
+        self.addCleanup(server._close_tab, viewer)
+        _other_task, other_chat = th._add_task("A finished task of another chat")
+        printer.subscribe_tab("7303", viewer)
+        printer.broadcast = self.recorder  # type: ignore[assignment]
+        printer.walker = threading.Thread(
+            target=server._broadcast_status_end_to_viewers,
+            args=("7303", "bh8c-moved-launcher", ""),
+            kwargs={"end_event": {"type": "task_stopped", "startTs": 1, "endTs": 2}},
+            daemon=True,
+        )
+        printer.walker.start()
+        self.assertTrue(printer.parked.wait(10))
+        server._cmd_resume_session({"chatId": other_chat, "tabId": viewer})
+        shown = self.recorder.for_tab(viewer)
+        printer.release.set()
+        printer.walker.join(10)
+        self.assertFalse(printer.walker.is_alive())
+        self.assertEqual(self.recorder.for_tab(viewer), shown)
 
 
 if __name__ == "__main__":

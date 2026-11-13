@@ -190,5 +190,28 @@ def test_a_jar_that_could_not_be_read_deletes_nothing(browser: Any, tool: WebUse
     assert tool._carried_cookies == []
 
 
+def test_a_failed_import_carries_nothing(browser: Any, tool: WebUseTool) -> None:
+    """Cookies the destination never took are not carried: the next switch deletes none.
+
+    The destination closed under the first switch, so the import failed;
+    the browser taken over next has an empty jar of its own, which read
+    as a logout and deleted the original login on the way back."""
+    source, closing, reopened = (browser.new_context() for _ in range(3))
+    for context in (source, closing, reopened):
+        context.new_page()
+    source.add_cookies([_cookie("A")])
+    _use(tool, source)
+    session = tool._capture_session()
+    _use(tool, closing)
+    closing.close()
+    tool._restore_session(session)
+    _use(tool, reopened)
+    session = tool._capture_session()
+    assert session.cookies == []
+    _use(tool, source)
+    tool._restore_session(session)
+    assert _values(source) == {("A", None)}
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

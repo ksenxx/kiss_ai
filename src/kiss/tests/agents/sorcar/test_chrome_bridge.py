@@ -45,6 +45,7 @@ from typing import Any
 import pytest
 from websockets.client import ClientProtocol
 from websockets.exceptions import ConnectionClosed
+from websockets.frames import Frame, Opcode
 from websockets.sync.client import connect
 from websockets.uri import parse_uri
 
@@ -54,6 +55,7 @@ from kiss.agents.sorcar.chrome_bridge import (
     ChromeBridge,
     ChromeBridgeError,
     extension_dir,
+    extension_version,
     start_if_enabled,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool, _format_bridge_result
@@ -71,6 +73,11 @@ def _proof(key: str, message: str) -> str:
     return hashlib.sha256(f"{key}:{message}".encode()).hexdigest()
 
 
+def _hello(token: str, nonce: str) -> dict[str, str]:
+    """The hello of the extension this product installs, in answer to the challenge *nonce*."""
+    return {"type": "hello", "proof": _proof(token, nonce), "version": extension_version()}
+
+
 class ExtensionPeer:
     """The extension's side of the bridge protocol, over a real socket.
 
@@ -79,6 +86,13 @@ class ExtensionPeer:
     reader thread answers every command immediately, so the synchronous
     WebUseTool API can be called directly.  The responder returns the
     command's result or raises ChromeBridgeError to send an error reply.
+
+    The constructor returns once the bridge has published the connection.
+    The bridge sends ``hello_ok`` first (the extension needs the server's
+    proof before any command) and reads this peer's frames only after the
+    publish, so the pong to one ping is the sign; returning on ``hello_ok``
+    let a ``bridge.call`` right after it find no connection.  A test that
+    holds the publish back itself passes ``wait_published=False``.
     """
 
     def __init__(
@@ -86,25 +100,34 @@ class ExtensionPeer:
         port: int,
         token: str,
         responder: Callable[[dict[str, Any]], Any] | None = None,
+        wait_published: bool = True,
     ):
         self.ws = connect(f"ws://127.0.0.1:{port}")
         challenge = json.loads(self.ws.recv(timeout=5))
         assert challenge["type"] == "challenge"
         nonce = challenge["nonce"]
-        self.ws.send(json.dumps({"type": "hello", "proof": _proof(token, nonce)}))
+        self.ws.send(json.dumps(_hello(token, nonce)))
         hello = json.loads(self.ws.recv(timeout=5))
         assert hello["type"] == "hello_ok"
         assert hello["proof"] == _proof(nonce, token)  # server proves itself too
         self.incoming: queue.Queue[Any] = queue.Queue()
         self._responder = responder
+        self._published = threading.Event()
+        if wait_published:
+            self.ws.send(json.dumps({"type": "ping"}))
+        else:  # no ping of the constructor's: every pong is the test's own
+            self._published.set()
         self._thread = threading.Thread(target=self._pump, daemon=True)
         self._thread.start()
+        assert self._published.wait(5), "the bridge never served this connection"
 
     def _pump(self) -> None:
         try:
             while True:
                 msg = json.loads(self.ws.recv(timeout=30))
-                if self._responder is not None and isinstance(msg.get("id"), int):
+                if msg == {"type": "pong"} and not self._published.is_set():
+                    self._published.set()  # the constructor's ping, not a test's
+                elif self._responder is not None and isinstance(msg.get("id"), int):
                     try:
                         self.reply(msg["id"], result=self._responder(msg))
                     except ChromeBridgeError as e:
@@ -187,6 +210,52 @@ def test_bad_token_rejected(bridge: ChromeBridge) -> None:
     assert not bridge.extension_connected
 
 
+@pytest.mark.parametrize("installs", [True, False], ids=["installing", "not-installing"])
+def test_an_extension_chrome_loaded_before_this_install_is_refused_and_named(
+    installs: bool,
+) -> None:
+    """Chrome keeps running the worker it loaded: one of another install gets no command.
+
+    The worker of an install from before this check names no version, one
+    of another build names its own.  A bridge that installs the extension
+    puts its files back, whatever replaced them, so that the reload (the
+    refused worker's own, or the one the user is asked for) loads this
+    install.  Chrome switches an unpacked extension that reloads off
+    while Developer mode is off, so both complaints name the mode.
+    """
+    ext = chrome_bridge.install_extension()
+    another = b'{"version": "1.0.0"}'
+    b = ChromeBridge(write_config=installs)
+    b.start()
+    try:
+        (ext / "manifest.json").write_bytes(another)
+        for names in ({}, {"version": "1.0.0"}):
+            ws = connect(f"ws://127.0.0.1:{b.port}")
+            nonce = json.loads(ws.recv(timeout=5))["nonce"]
+            ws.send(json.dumps({"type": "hello", "proof": _proof(b.token, nonce)} | names))
+            refusal = {"type": "hello_error", "error": "outdated extension"}
+            assert json.loads(ws.recv(timeout=5)) == refusal
+            with pytest.raises(ConnectionClosed) as closed:
+                ws.recv(timeout=5)
+            assert closed.value.rcvd is not None and closed.value.rcvd.code == 4004
+            assert not b.extension_connected
+        mine = chrome_bridge.bundled_extension()["manifest.json"]
+        assert (ext / "manifest.json").read_bytes() == (mine if installs else another)
+        with pytest.raises(ChromeBridgeError, match="click the reload button") as refused:
+            b.call("list_tabs", timeout=1.0)
+        assert str(ext) in str(refused.value)
+        assert "switch on Developer mode if it is off" in str(refused.value)
+        # The extension of this install is taken, and with it the complaint is over.
+        ExtensionPeer(b.port, b.token).close()
+        assert _eventually(lambda: not b.extension_connected)
+        with pytest.raises(ChromeBridgeError, match="is not connected") as absent:
+            b.call("list_tabs", timeout=1.0)
+        assert "keep Developer mode on" in str(absent.value)
+    finally:
+        b.stop()
+        chrome_bridge.install_extension()
+
+
 def test_first_message_not_hello_rejected(bridge: ChromeBridge) -> None:
     ws = connect(f"ws://127.0.0.1:{bridge.port}")
     assert json.loads(ws.recv(timeout=5))["type"] == "challenge"
@@ -261,14 +330,22 @@ def test_command_timeout(bridge: ChromeBridge) -> None:
         peer2.close()
 
 
-def _parked_in_the_reply_wait(thread: threading.Thread) -> bool:
-    """Whether *thread* is blocked inside ``Future.result``'s condition wait."""
+def _parked_in_a_wait_of(thread: threading.Thread, function: str) -> bool:
+    """Whether *thread* is blocked in a condition wait under a call of *function*."""
     assert thread.ident is not None
     frame = sys._current_frames().get(thread.ident)
     if frame is None:
         return False
     names = [entry.name for entry in traceback.extract_stack(frame)]
-    return "result" in names and names[-1] == "wait"
+    return function in names and names[-1] == "wait"
+
+
+def _catching(caught: list[BaseException], call: Callable[..., Any], *args: Any) -> None:
+    """Thread body: make *call*, keeping what it raises (a Stop is the expected outcome)."""
+    try:
+        call(*args)
+    except BaseException as exc:  # noqa: BLE001
+        caught.append(exc)
 
 
 def test_a_stop_while_waiting_for_the_reply_ends_the_wait_within_a_slice(
@@ -283,18 +360,13 @@ def test_a_stop_while_waiting_for_the_reply_ends_the_wait_within_a_slice(
     """
     peer = ExtensionPeer(bridge.port, bridge.token)  # receives, never answers
     caught: list[BaseException] = []
-
-    def worker() -> None:
-        try:
-            bridge.call("list_tabs", timeout=30.0)
-        except BaseException as exc:  # noqa: BLE001 - the Stop is the expected outcome
-            caught.append(exc)
-
-    thread = threading.Thread(target=worker, daemon=True)
+    thread = threading.Thread(
+        target=_catching, args=(caught, bridge.call, "list_tabs"), daemon=True,
+    )
     thread.start()
     try:
         peer.next_command()  # the frame is on the wire: the caller now waits for the reply
-        assert _eventually(lambda: _parked_in_the_reply_wait(thread))
+        assert _eventually(lambda: _parked_in_a_wait_of(thread, "result"))
         started = time.monotonic()
         assert inject(thread) == 1
         thread.join(5)
@@ -306,6 +378,21 @@ def test_a_stop_while_waiting_for_the_reply_ends_the_wait_within_a_slice(
         assert bridge.extension_connected  # the timeout path (a drop) was not taken
     finally:
         peer.close()
+    # The wait for an extension to connect (the first call of a bridge it
+    # has not found yet) is sliced the same way.
+    assert _eventually(lambda: not bridge.extension_connected)
+    caught.clear()
+    waiter = threading.Thread(
+        target=_catching, args=(caught, bridge.wait_for_extension, 30.0), daemon=True,
+    )
+    waiter.start()
+    assert _eventually(lambda: _parked_in_a_wait_of(waiter, "wait_for_extension"))
+    started = time.monotonic()
+    assert inject(waiter) == 1
+    waiter.join(5)
+    assert not waiter.is_alive(), "the Stop did not end the wait for the extension"
+    assert time.monotonic() - started < 3
+    assert [type(exc) for exc in caught] == [KeyboardInterrupt]
 
 
 def test_late_reply_for_unknown_id_ignored(bridge: ChromeBridge) -> None:
@@ -379,7 +466,7 @@ class StalledPeer:
         assert self._next_event().status_code == 101
         assert self.proto.handshake_exc is None
         nonce = self.recv_json()["nonce"]
-        self.send_json({"type": "hello", "proof": _proof(bridge.token, nonce)})
+        self.send_json(_hello(bridge.token, nonce))
         assert self.recv_json()["type"] == "hello_ok"
         assert bridge.wait_for_extension(5)
 
@@ -446,21 +533,27 @@ class StalledPeer:
 
 
 def _reader_at_recv(reader: threading.Thread) -> bool:
-    """Whether websockets' *reader* thread is on the ``socket.recv`` line of ``recv_events``."""
+    """Whether websockets' *reader* thread waits for the socket in ``recv_events``.
+
+    websockets 15 blocks in ``socket.recv`` there; 17 waits in a selector
+    first, whose frames lie under that of ``recv_events``.
+    """
     frame = sys._current_frames().get(reader.ident or 0)
-    return (
-        frame is not None
-        and frame.f_code.co_name == "recv_events"
-        and "socket.recv(" in linecache.getline(frame.f_code.co_filename, frame.f_lineno)
-    )
+    while frame is not None and frame.f_code.co_name != "recv_events":
+        frame = frame.f_back
+    if frame is None:
+        return False
+    line = linecache.getline(frame.f_code.co_filename, frame.f_lineno)
+    return "socket.recv(" in line or "poller.select()" in line
 
 
 def _wait_until_reader_parked(reader: threading.Thread) -> None:
-    """Wait until websockets' *reader* thread is blocked in its socket ``recv``.
+    """Wait until websockets' *reader* thread is parked waiting for the socket.
 
     On the ``recv`` line in two samples 50 ms apart, with nothing
     arriving: the thread is inside the call, which chose to block when
     it was entered, so a non-blocking flag set afterwards cannot reach it.
+    (Parked in websockets 17's selector, it reads only once data is there.)
     """
     deadline = time.monotonic() + 10
     while True:
@@ -503,6 +596,69 @@ def test_a_pong_the_extension_stopped_reading_is_cut_and_the_connection_dropped(
         stalled.abort()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="needs a pipe that stays full, as above")
+def test_a_pong_written_as_its_deadline_passes_keeps_the_connection(bridge: ChromeBridge) -> None:
+    """A watchdog that fired as the write returned cuts nothing once the write has returned.
+
+    ``Timer.cancel`` does not stop a timer whose thread is already in its
+    body: the watchdog of a pong that got through at the very end of its
+    budget shut the socket down afterwards, under whatever the healthy
+    connection carried next.  The watchdog's thread is parked as it
+    enters its body (a profile hook: nothing is replaced), the peer
+    drains the pipe so the write returns, and the watchdog is let go.
+    """
+    stalled = StalledPeer(bridge)
+    fired, written = threading.Event(), threading.Event()
+    watchdogs: list[threading.Thread] = []
+
+    def park(frame: Any, event: str, arg: Any) -> None:
+        if event == "call" and frame.f_code is chrome_bridge._cut_socket.__code__:
+            watchdogs.append(threading.current_thread())
+            fired.set()
+            written.wait(30)
+
+    conn = bridge._conn
+    assert conn is not None
+    try:
+        stalled.fill_pipe(bridge)
+        threading.setprofile(park)  # for the watchdog's thread, started by the pong's write
+        try:
+            stalled.send_json({"type": "ping"})
+            assert fired.wait(chrome_bridge._PONG_TIMEOUT_SECS + 10), "the watchdog never fired"
+        finally:
+            threading.setprofile(None)
+        stalled.sock.settimeout(0.2)
+        deadline = time.monotonic() + 10
+        while not conn.lock.acquire(blocking=False):  # held by the pong's write
+            assert time.monotonic() < deadline, "the drained pong was never written"
+            try:
+                stalled.sock.recv(1 << 20)
+            except TimeoutError:
+                pass
+        conn.lock.release()
+        written.set()
+        watchdogs[0].join(5)
+        assert not watchdogs[0].is_alive()
+        try:  # what was still in the pipe: the fill's last bytes, the pong
+            while stalled.sock.recv(1 << 20):
+                pass
+        except TimeoutError:
+            pass
+        assert bridge.extension_connected
+        pong = Frame(Opcode.TEXT, json.dumps({"type": "pong"}).encode()).serialize(mask=False)
+        stalled.send_json({"type": "ping"})
+        stalled.sock.settimeout(5)
+        received = b""
+        while len(received) < len(pong):
+            part = stalled.sock.recv(len(pong) - len(received))
+            assert part, "the watchdog cut the connection after its write had returned"
+            received += part
+        assert received == pong
+    finally:
+        written.set()
+        stalled.abort()
+
+
 def test_stop_does_not_wait_for_a_peer_that_stopped_reading(bridge: ChromeBridge) -> None:
     """``stop()`` shuts the live socket down before closing it, as the timeout path does.
 
@@ -535,9 +691,11 @@ def test_a_handshake_in_flight_cannot_connect_a_stopped_bridge() -> None:
     try:
         nonce = json.loads(ws.recv(timeout=5))["nonce"]
         b.stop()
-        ws.send(json.dumps({"type": "hello", "proof": _proof(b.token, nonce)}))
-        ws.send(json.dumps({"type": "ping"}))
+        # websockets 17 closes the connection as its server shuts down: there
+        # the hello itself is refused.
         with pytest.raises(ConnectionClosed):
+            ws.send(json.dumps(_hello(b.token, nonce)))
+            ws.send(json.dumps({"type": "ping"}))
             while True:
                 msg = json.loads(ws.recv(timeout=5))
                 assert msg.get("type") != "pong", "a stopped bridge serves the extension"
@@ -572,18 +730,20 @@ def test_start_installs_extension_and_writes_config_under_kiss_home() -> None:
     ext = extension_dir()
     assert ext == Path(os.environ["KISS_HOME"]) / "chrome_extension"
     bundled = Path(chrome_bridge.__file__).parent / "chrome_extension"
-    (ext / "background.js").parent.mkdir(parents=True, exist_ok=True)
-    (ext / "background.js").write_text("// stale copy from an older install")
     b = ChromeBridge(write_config=True)
     b.start()
     try:
         assert b.port != 0  # ephemeral: whatever the kernel handed out
-        assert (ext / "background.js").read_bytes() == (bundled / "background.js").read_bytes()
         # The manifest is installed with the brand filled in: Chrome lists
         # the extension under the product's name, never the placeholder
-        # or the stock name.
+        # or the stock name.  Its version is the one the bridge takes.
         manifest = json.loads((ext / "manifest.json").read_text(encoding="utf-8"))
         assert manifest["name"] == f"{PRODUCT_NAME} Bridge"
+        assert manifest["version"] == extension_version()
+        # The worker it names is the bundled one, in a file of this build's own.
+        worker = ext / manifest["background"]["service_worker"]
+        assert worker.name == f"background-{extension_version()}.js"
+        assert worker.read_bytes() == (bundled / "background.js").read_bytes()
         assert "{{" not in (ext / "manifest.json").read_text(encoding="utf-8")
         assert "{{PRODUCT_NAME}}" in (bundled / "manifest.json").read_text(encoding="utf-8")
         cfg_path = ext / CONFIG_FILE_NAME
@@ -600,25 +760,42 @@ def test_start_installs_extension_and_writes_config_under_kiss_home() -> None:
     assert not cfg_path.exists()
 
 
-@pytest.mark.skipif(IS_WINDOWS, reason="a replaced file keeps its old inode only on POSIX")
-def test_install_replaces_the_extension_files_instead_of_rewriting_them_in_place() -> None:
-    """Chrome may load ``background.js`` at any moment: it must never see a truncated copy.
+def test_install_neither_replaces_nor_removes_a_worker_file_chrome_may_read() -> None:
+    """Chrome reads a worker's size, then its bytes: no install changes the file in between.
 
-    A reader that opened the stale file (Chrome starting the service
-    worker from disk) keeps a complete file, and the new content lands
-    under the name atomically, as ``bridge-config.json`` does; an
-    in-place rewrite truncated the file first and filled it after.
+    Every build's worker has a file of its own, which its manifest names,
+    so an install leaves the worker of every other build as it is (here
+    the ``background.js`` of an install from before workers were named
+    after their build, and one of another build), however long ago this
+    one was installed: a Chrome that loaded another build's manifest
+    starts that build's worker whenever the extension is switched on, and
+    another process may be installing that build right now.
     """
     ext = extension_dir()
     ext.mkdir(parents=True, exist_ok=True)
-    stale = b"// stale copy from an older install\n"
-    (ext / "background.js").write_bytes(stale)
-    with (ext / "background.js").open("rb") as reader:
+    stale = b"// the worker of another install\n"
+    others = [ext / "background.js", ext / "background-1.2.3.4.js"]
+    for other in others:
+        other.write_bytes(stale)
+    try:
         chrome_bridge.install_extension()
-        assert reader.read() == stale
-    installed = (ext / "background.js").read_bytes()
-    assert installed == chrome_bridge.bundled_extension_file("background.js")
-    assert (ext / "background.js").stat().st_mode & 0o444 == 0o444  # readable as before
+        files = chrome_bridge.bundled_extension()
+        worker = ext / json.loads(files["manifest.json"])["background"]["service_worker"]
+        assert worker.name == f"background-{extension_version()}.js"
+        assert {name: (ext / name).read_bytes() for name in files} == files
+        bundled = (chrome_bridge._EXTENSION_SOURCE / "background.js").read_bytes()
+        assert files[worker.name] == bundled
+        assert worker.stat().st_mode & 0o444 == 0o444  # Chrome can read it
+        written = [(ext / name).stat().st_mtime_ns for name in files]
+        chrome_bridge.install_extension()  # nothing changed: nothing is written again
+        assert [(ext / name).stat().st_mtime_ns for name in files] == written
+        a_year_ago = time.time() - 365 * 24 * 3600
+        os.utime(ext / "manifest.json", (a_year_ago, a_year_ago))
+        chrome_bridge.install_extension()
+        assert [other.read_bytes() for other in others] == [stale, stale]
+    finally:
+        for other in others:
+            other.unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize("at", ["publication", "registration"])
@@ -669,26 +846,39 @@ def test_bundled_manifest_survives_quotes_and_backslashes_in_the_brand() -> None
     # A product name with JSON-special characters still yields a valid
     # manifest (the values are escaped into the JSON strings).
     brand = {"product_name": 'ACME "Assistant" C:\\Tools é'}
-    manifest = json.loads(chrome_bridge.bundled_extension_file("manifest.json", brand))
+    files = chrome_bridge.bundled_extension(brand)
+    manifest = json.loads(files["manifest.json"])
     assert manifest["name"] == 'ACME "Assistant" C:\\Tools é Bridge'
-    assert manifest["action"]["title"].startswith('ACME "Assistant" C:\\Tools é Bridge')
+    # default_title: the key Chrome reads the toolbar tooltip from.
+    assert manifest["action"]["default_title"].startswith('ACME "Assistant" C:\\Tools é Bridge')
     assert 'ACME "Assistant" C:\\Tools é agent' in manifest["description"]
-    # The other files are copied byte for byte.
-    bundled = Path(chrome_bridge.__file__).parent / "chrome_extension"
-    assert (
-        chrome_bridge.bundled_extension_file("background.js", brand)
-        == (bundled / "background.js").read_bytes()
-    )
+    # The version names the build, in numbers Chrome takes (four of at most
+    # 65535): another brand's manifest is another build.
+    version = [int(part) for part in manifest["version"].split(".")]
+    assert len(version) == 4 and max(version) <= 65535
+    assert manifest["version"] == extension_version(brand) != extension_version()
+    # The worker is the same under every brand, in the file its manifest names.
+    worker = manifest["background"]["service_worker"]
+    assert worker == f"background-{manifest['version']}.js"
+    stock = chrome_bridge.bundled_extension()
+    assert files[worker] == stock[f"background-{extension_version()}.js"]
 
 
 def test_second_process_defers_to_a_live_bridge_and_daemon_takes_over() -> None:
     daemon = ChromeBridge(write_config=True)
     daemon.start(takeover=True)
     try:
-        # A CLI run beside the daemon: the extension stays with the daemon.
-        cli = ChromeBridge(write_config=True)
-        with pytest.raises(ChromeBridgeError, match=f"port {daemon.port}"):
-            cli.start()
+        # A CLI run beside the daemon: the extension stays with the daemon,
+        # and the refused start binds nothing (websockets never closes a
+        # Server's shutdown pipe: every refused use_my_chrome call leaked
+        # its two descriptors).
+        open_fds = 0 if IS_WINDOWS else len(os.listdir("/dev/fd"))
+        for _ in range(3):
+            cli = ChromeBridge(write_config=True)
+            with pytest.raises(ChromeBridgeError, match=f"port {daemon.port}"):
+                cli.start()
+            assert cli.port == 0
+        assert IS_WINDOWS or _eventually(lambda: len(os.listdir("/dev/fd")) <= open_fds)
         assert _config()["token"] == daemon.token
         # A restarted daemon (its predecessor still up during the overlap)
         # takes the file over...
@@ -993,6 +1183,13 @@ def test_tool_screenshot_saves_png_under_the_work_dir(tmp_path: Path) -> None:
         assert str(shots[0].resolve()) in out
         assert base64.b64encode(shots[0].read_bytes()).decode() == _TINY_PNG_B64
         assert tool.use_my_chrome("close_tab", tab_id=1) == "Tab closed."
+        # A sub-agent's goes to its private folder, not to the work tree.
+        private = tmp_path / "kiss-sub-x"
+        private.mkdir()
+        sub = WebUseTool(work_dir=str(work_dir), private_dir=str(private))
+        assert str(private / "chrome-shot-") in sub.use_my_chrome("screenshot", tab_id=1)
+        assert len(list(private.glob("chrome-shot-*.png"))) == 1
+        assert len(list((work_dir / "tmp").iterdir())) == 1
         # A malformed payload is an error string, not a crash.
         assert "unexpected screenshot payload" in tool._save_bridge_shot("not-a-data-url")
     finally:

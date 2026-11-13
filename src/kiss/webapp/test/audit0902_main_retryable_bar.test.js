@@ -6,10 +6,11 @@
 // End-to-end (JSDOM) tests for the worktree action bar after a
 // RETRYABLE `worktree_result` failure.
 //
-// The daemon (server/merge_flow.py) flags a deferred discard -- a
-// sub-agent is still writing into the worktree -- and a failed "Do
-// nothing" with `retryable: true` precisely so that "the page keeps
-// the bar's buttons instead of stripping the only retry controls".
+// The daemon (server/merge_flow.py) flags an action it could not take
+// yet -- a merge or discard is already in progress on the tab -- and a
+// failed "Do nothing" with `retryable: true` precisely so that "the
+// page keeps the bar's buttons instead of stripping the only retry
+// controls".
 // main.js did keep the bar, but every button had been disabled by the
 // click that sent the action and nothing ever re-armed them: the bar
 // the message told the user to retry with was dead.  These tests pin
@@ -21,7 +22,7 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 
-const {send, clickTab, plain} = harness;
+const {send, clickTab, plain, ofType} = harness;
 const {bar, barButtons} = require('./worktree_bar_helpers');
 
 // The sourceURL is what audit0902_main_retryable_bar.coverage.js keys on.
@@ -59,7 +60,7 @@ function assertAllDisabled(win, why) {
 }
 
 function worktreeActions(posted) {
-  return posted.filter(m => m.type === 'worktreeAction').map(plain);
+  return plain(ofType(posted, 'worktreeAction'));
 }
 
 function testRetryableResultReArmsVisibleBar() {
@@ -76,23 +77,23 @@ function testRetryableResultReArmsVisibleBar() {
     {type: 'worktreeAction', action: 'discard', tabId},
   ]);
 
-  // The daemon deferred the discard (a sub-agent is still writing) and
-  // asks the user to retry.
+  // The daemon could not discard yet (another action is in progress on
+  // the tab) and asks the user to retry.
   send(win, {
     type: 'worktree_result',
     tabId,
     success: false,
     retryable: true,
     message:
-      "Discard deferred: a sub-agent of branch 'kiss_wt-1' is still " +
-      'running. Retry once it finishes.',
+      'A merge or discard is already in progress on this tab. ' +
+      'Wait for it to finish before discarding.',
   });
   assert.ok(bar(win), 'a retryable failure keeps the bar');
   assertAllEnabled(win, 'after a retryable failure');
   assert.ok(
     win.document
       .getElementById('output')
-      .textContent.includes('Discard deferred'),
+      .textContent.includes('already in progress'),
     'the failure is reported in the transcript',
   );
 
@@ -119,6 +120,41 @@ function testRetryableResultReArmsVisibleBar() {
   console.log('  ok - retryable worktree_result re-arms the visible bar');
 }
 
+function testFailedMergeKeepsAndReArmsTheBar() {
+  const {win, posted} = makePage();
+  const tabId = win._testApi.getActiveTabId();
+
+  send(win, {type: 'worktree_done', tabId});
+  clickBarButton(win, 'Auto-commit and merge');
+  assertAllDisabled(win, 'while the merge is in flight');
+
+  // What the daemon sends when a pre-commit hook rejects the merge's
+  // commit: the worktree is still pending.
+  send(win, {
+    type: 'worktree_result',
+    tabId,
+    success: false,
+    message:
+      "Cannot merge: committing 'kiss/wt-1' failed (a pre-commit hook " +
+      'may have rejected the commit). Then retry the merge.',
+    retryable: true,
+  });
+  assert.ok(bar(win), 'a failed merge keeps the bar');
+  assertAllEnabled(win, 'after a failed merge');
+
+  clickBarButton(win, 'Auto-commit and merge');
+  assert.deepStrictEqual(
+    worktreeActions(posted),
+    [
+      {type: 'worktreeAction', action: 'merge', tabId},
+      {type: 'worktreeAction', action: 'merge', tabId},
+    ],
+    'the merge can be retried from the kept bar',
+  );
+  win.close();
+  console.log('  ok - a failed merge keeps the bar for the retry');
+}
+
 function testRetryableResultReArmsBackgroundBar() {
   const {win, posted} = makePage();
   const tabA = win._testApi.getActiveTabId();
@@ -139,7 +175,7 @@ function testRetryableResultReArmsBackgroundBar() {
     tabId: tabB,
     success: false,
     retryable: true,
-    message: "Discard deferred: a sub-agent of branch 'kiss_wt-2' is running.",
+    message: 'A merge or discard is already in progress on this tab.',
   });
   assert.strictEqual(bar(win), null, 'the background result stays off tab A');
 
@@ -149,7 +185,7 @@ function testRetryableResultReArmsBackgroundBar() {
   assert.ok(
     win.document
       .getElementById('output')
-      .textContent.includes('Discard deferred'),
+      .textContent.includes('already in progress'),
     'the failure is in tab B\u2019s transcript',
   );
   clickBarButton(win, 'Discard');
@@ -195,6 +231,7 @@ function testNonRetryableFailureStillDismisses() {
 
 function main() {
   testRetryableResultReArmsVisibleBar();
+  testFailedMergeKeepsAndReArmsTheBar();
   testRetryableResultReArmsBackgroundBar();
   testNonRetryableFailureStillDismisses();
   console.log('all audit0902 retryable-bar tests passed');

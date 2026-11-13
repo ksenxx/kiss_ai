@@ -52,10 +52,10 @@ from unittest import IsolatedAsyncioTestCase
 
 from kiss.agents.sorcar.decide_tool import decisions_tool_available
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.task_classifier import clear_classification_cache
 from kiss.core import config as config_module
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-from kiss.tests.local_ws import open_local_connection
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import clear_classification_cache
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 _KISS_ROOT = Path(__file__).resolve().parents[2]

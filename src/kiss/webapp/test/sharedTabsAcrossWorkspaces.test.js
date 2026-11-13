@@ -20,31 +20,16 @@ const {
   send,
   click: clickEl,
   sendTabsState,
+  sendWorkDir,
+  stripIds,
+  tabIds: tabBarIds,
 } = require('./simplify2_harness');
 const {makePage, runTests} = require('./workdir_helpers');
-
-function setWorkspace(win, dir) {
-  send(win, {type: 'configData', config: {work_dir: dir}, apiKeys: {}});
-}
-
-function tabBarIds(win) {
-  // Every open tab, in tab order. There is no row of chat tabs: a chat
-  // is picked in the Chats panel and only the group on screen is
-  // rendered (on #tab-list), so the tab records are the shared state.
-  // (Copied into this realm: deepStrictEqual compares prototypes too.)
-  return Array.from(win._testApi.openTabs(), t => t.id);
-}
 
 function activeTabId(win) {
   // The strip's active entry is the tab on screen.
   const el = win.document.querySelector('#tab-list .chat-tab.active');
   return el ? el.dataset.tabId : null;
-}
-
-function stripIds(win) {
-  return Array.from(win.document.querySelectorAll('#tab-list .chat-tab'))
-    .filter(el => !!el.dataset.tabId)
-    .map(el => el.dataset.tabId);
 }
 
 const MIXED_TABS = [
@@ -63,7 +48,7 @@ const MIXED_TABS = [
 
 function testEveryRegistryTabIsShownWhateverTheWorkspace() {
   const {win, posted} = makePage();
-  setWorkspace(win, '/ws/a');
+  sendWorkDir(win, '/ws/a');
   sendTabsState(win, MIXED_TABS);
   assert.deepStrictEqual(
     tabBarIds(win),
@@ -88,7 +73,7 @@ function testWorkspaceChangeLeavesTheTabBarAlone() {
   // filter only: the strips, the active tab and every draft stay put,
   // and no placeholder tab is spawned.
   const {win} = makePage();
-  setWorkspace(win, '/ws/a');
+  sendWorkDir(win, '/ws/a');
   sendTabsState(win, MIXED_TABS);
   win._testApi.switchToTab('b1'); // the Chats-panel pick
   assert.strictEqual(activeTabId(win), 'b1');
@@ -96,7 +81,7 @@ function testWorkspaceChangeLeavesTheTabBarAlone() {
   input.value = 'draft on b1';
   input.dispatchEvent(new win.Event('input', {bubbles: true}));
 
-  setWorkspace(win, '/ws/zzz');
+  sendWorkDir(win, '/ws/zzz');
   assert.deepStrictEqual(tabBarIds(win), ['a1', 'wt', 'b1', 'un', 'api']);
   assert.strictEqual(activeTabId(win), 'b1', 'the active tab survives');
   assert.strictEqual(input.value, 'draft on b1', 'the draft survives');
@@ -113,7 +98,7 @@ function testConfigArrivingAfterSnapshotChangesNothing() {
   sendTabsState(win, MIXED_TABS);
   const before = tabBarIds(win);
   const active = activeTabId(win);
-  setWorkspace(win, '/ws/b');
+  sendWorkDir(win, '/ws/b');
   assert.deepStrictEqual(tabBarIds(win), before);
   assert.strictEqual(activeTabId(win), active);
 }
@@ -122,7 +107,7 @@ function testHistoryClickOnAnotherWorkspaceChatActivatesItsTab() {
   // The chat of a history row is already open in a tab: the click
   // switches to that tab instead of resuming the chat in a new one.
   const {win, posted} = makePage();
-  setWorkspace(win, '/ws/a');
+  sendWorkDir(win, '/ws/a');
   sendTabsState(win, [
     {tabId: 'a1', workDir: '/ws/a', chatId: 'chat-1'},
     {tabId: 'b1', workDir: '/ws/b', chatId: 'chat-2'},
@@ -161,9 +146,10 @@ function testFileFromAnotherWorkspaceTabOpensAsBackgroundContentTab() {
   // tab's group and waits without pulling the user off the tab they
   // read. On the phone layout (this jsdom page has no matchMedia, so
   // no desktop split) content tabs stay off the chat screen: the strip
-  // lists the file only on its own file screen, under its owner.
+  // lists the file only on its own file screen, which lists nothing
+  // else.
   const {win} = makePage();
-  setWorkspace(win, '/ws/a');
+  sendWorkDir(win, '/ws/a');
   sendTabsState(win, [
     {tabId: 'a1', workDir: '/ws/a', chatId: 'chat-1'},
     {tabId: 'b1', workDir: '/ws/b', chatId: 'chat-2'},
@@ -209,13 +195,13 @@ function testFileFromAnotherWorkspaceTabOpensAsBackgroundContentTab() {
   const strip = Array.from(
     win.document.querySelectorAll('#tab-list .chat-tab'),
   );
-  assert.strictEqual(
-    strip.length,
-    2,
-    "the file screen lists the owner's group",
+  assert.strictEqual(strip.length, 1, 'the file screen lists the file alone');
+  assert.ok(strip[0].classList.contains('content-tab'));
+  assert.notStrictEqual(
+    win.document.getElementById('tab-bar').style.display,
+    'none',
+    'and shows its strip for that one file',
   );
-  assert.strictEqual(strip[0].dataset.tabId, 'b1');
-  assert.ok(strip[1].classList.contains('content-tab'));
   assert.strictEqual(
     win.document
       .querySelector('#tab-list .chat-tab.active')
@@ -223,12 +209,8 @@ function testFileFromAnotherWorkspaceTabOpensAsBackgroundContentTab() {
     true,
     'the content tab is a first-class tab the user can activate',
   );
-  clickEl(win, strip[0]);
-  assert.strictEqual(
-    activeTabId(win),
-    'b1',
-    'the strip leads back to the chat',
-  );
+  win._testApi.switchToTab('b1'); // back on the chat screen
+  assert.deepStrictEqual(stripIds(win), ['b1'], 'the chat is listed again');
 }
 
 function testOneContentTabPerPathAcrossWorkspaces() {

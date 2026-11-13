@@ -72,6 +72,8 @@ class _HtmlToRichParser(SkippingHTMLParser):
         """The open styled elements, innermost last, as ``(tag, style)``
         with *style* composed with the enclosing styles."""
         self._list_stack: list[int | None] = []
+        self._marker_end = 0
+        """The text offset just after the last list marker."""
         self._in_pre = 0
         self._pre_end = 0
         self._cell_start = 0
@@ -112,7 +114,10 @@ class _HtmlToRichParser(SkippingHTMLParser):
             self.text.append("─" * 40, style="dim")
             self.text.append("\n")
             return
-        if tag in _BLOCK_TAGS:
+        # A block that opens a list item (``<li><p>``) continues the marker's line (a
+        # marker whose line has ended lost its space).  A nested item starts its own.
+        at_marker = len(self.text) == self._marker_end and self.text.plain.endswith(" ")
+        if tag in _BLOCK_TAGS and (tag == "li" or not at_marker):
             self._newline(2 if tag == "p" or tag.startswith("h") else 1)
         if tag == "pre":
             self._in_pre += 1
@@ -130,6 +135,7 @@ class _HtmlToRichParser(SkippingHTMLParser):
             else:
                 self.text.append(f"{indent}{marker}. ")
                 self._list_stack[-1] = marker + 1
+            self._marker_end = len(self.text)
         style = _STYLE_TAGS.get(tag)
         if style is not None:
             parent = self._style_stack[-1][1] if self._style_stack else ""
@@ -192,7 +198,8 @@ def html_to_rich(html: str) -> Text:
     """Convert an HTML fragment to a styled :class:`rich.text.Text`.
 
     Args:
-        html: The HTML string to render (plain text is returned as-is).
+        html: The HTML string to render.  Text without markup is HTML too:
+            its whitespace runs collapse and a ``<word>`` in it is a tag.
 
     Returns:
         A :class:`rich.text.Text` with the rendered, styled content.

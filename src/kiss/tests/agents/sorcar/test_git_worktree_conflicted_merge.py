@@ -78,9 +78,7 @@ class TestBeginConflictedMerge:
             self.repo, branch, baseline or "",
         ) == MergeResult.CONFLICT
 
-        conflicted = GitWorktreeOps.begin_conflicted_merge(
-            self.repo, branch, baseline, "",
-        )
+        conflicted = GitWorktreeOps.begin_conflicted_merge(self.repo, branch, baseline)
 
         assert conflicted == ["f.txt"]
         text = (self.repo / "f.txt").read_text()
@@ -98,9 +96,7 @@ class TestBeginConflictedMerge:
         branch, _ = _conflicting_branch(self.repo, with_baseline=False)
         assert GitWorktreeOps.squash_merge_branch(self.repo, branch) == MergeResult.CONFLICT
 
-        conflicted = GitWorktreeOps.begin_conflicted_merge(
-            self.repo, branch, None, "",
-        )
+        conflicted = GitWorktreeOps.begin_conflicted_merge(self.repo, branch, None)
 
         assert conflicted == ["f.txt"]
         assert "<<<<<<< " in (self.repo / "f.txt").read_text()
@@ -112,7 +108,7 @@ class TestBeginConflictedMerge:
         _run(self.repo, "commit", "-qm", "agent adds file")
         _run(self.repo, "checkout", "-q", "main")
 
-        assert GitWorktreeOps.begin_conflicted_merge(self.repo, "task", None, "") == []
+        assert GitWorktreeOps.begin_conflicted_merge(self.repo, "task", None) == []
         assert _git("diff", "--cached", "--name-only", cwd=self.repo).stdout.split() == [
             "new.txt",
         ]
@@ -121,13 +117,11 @@ class TestBeginConflictedMerge:
         before = GitWorktreeOps.status_porcelain(self.repo)
         head = _run(self.repo, "rev-parse", "HEAD").strip()
 
-        assert GitWorktreeOps.begin_conflicted_merge(
-            self.repo, "no-such", head, before,
-        ) is None
+        assert GitWorktreeOps.begin_conflicted_merge(self.repo, "no-such", head) is None
         assert GitWorktreeOps.status_porcelain(self.repo) == before
 
     def test_unknown_branch_without_baseline_returns_none_and_restores(self) -> None:
-        assert GitWorktreeOps.begin_conflicted_merge(self.repo, "no-such", None, "") is None
+        assert GitWorktreeOps.begin_conflicted_merge(self.repo, "no-such", None) is None
         assert GitWorktreeOps.status_porcelain(self.repo) == ""
 
 
@@ -138,7 +132,7 @@ class TestFinishConflictedMerge:
         self.branch, self.baseline = _conflicting_branch(self.repo, with_baseline=True)
         self.head_before = _run(self.repo, "rev-parse", "HEAD").strip()
         self.conflicted = GitWorktreeOps.begin_conflicted_merge(
-            self.repo, self.branch, self.baseline, "",
+            self.repo, self.branch, self.baseline,
         )
         assert self.conflicted == ["f.txt"]
 
@@ -192,22 +186,41 @@ class TestFinishConflictedMerge:
         assert (self.repo / "f.txt").read_text() == "a\nB-user\nc\n"
         assert _run(self.repo, "show", f"{self.branch}:f.txt") == "a\nB-agent\nc\nd-agent\n"
 
-    def test_markers_of_a_larger_configured_size_are_detected(self) -> None:
+    # 3: markers shorter than git's default of seven were taken for resolved
+    # text, and the merge was committed with every one of them in the file.
+    @pytest.mark.parametrize(("size", "driver"), [(12, ""), (3, ""), (3, " merge=named")])
+    def test_markers_of_a_configured_size_are_detected(self, size: int, driver: str) -> None:
         GitWorktreeOps.abort_conflicted_merge(self.repo, "", self.head_before)
-        (self.repo / ".gitattributes").write_text("f.txt conflict-marker-size=12\n")
-        _run(self.repo, "add", ".gitattributes")
-        _run(self.repo, "commit", "-qm", "wider markers")
-        head = _run(self.repo, "rev-parse", "HEAD").strip()
+        # A merge driver of the user's: its markers name temporary files, not ``HEAD``.
+        _run(
+            self.repo, "config", "merge.named.driver", "git merge-file --marker-size=%L %A %O %B",
+        )
+        # Not committed: git merges by the attributes the working tree has at that time.
+        (self.repo / ".gitattributes").write_text(f"f.txt conflict-marker-size={size}{driver}\n")
         assert GitWorktreeOps.begin_conflicted_merge(
-            self.repo, self.branch, self.baseline, "",
+            self.repo, self.branch, self.baseline,
         ) == ["f.txt"]
-        assert "<<<<<<<<<<<< " in (self.repo / "f.txt").read_text()
-        _run(self.repo, "add", "f.txt")
+        assert (self.repo / "f.txt").read_text().startswith("a\n" + "<" * size + " ")
+        (self.repo / "doc.txt").write_text(">>> prompt\n")
+        _run(self.repo, "add", "f.txt", "doc.txt")
+        # The markers are as long as git wrote them, whatever the attribute says since
+        # (reviews 2026-11-12: a size raised afterwards, in ``.gitattributes`` or in
+        # ``info/attributes``, hid them, and the merge was committed with them).
+        (self.repo / ".gitattributes").unlink()
+        (self.repo / ".git" / "info").mkdir(exist_ok=True)
+        (self.repo / ".git" / "info" / "attributes").write_text("* conflict-marker-size=20\n")
 
-        assert GitWorktreeOps.paths_with_conflict_markers(self.repo, ["f.txt"]) == ["f.txt"]
+        # Each path by its own length: in ``doc.txt`` git wrote none, and three are text.
+        assert GitWorktreeOps.paths_with_conflict_markers(
+            self.repo, ["doc.txt", "f.txt"],
+        ) == ["f.txt"]
         assert GitWorktreeOps.finish_conflicted_merge(
-            self.repo, self.branch, ["f.txt"], head,
+            self.repo, self.branch, ["f.txt"], self.head_before,
         ) == MergeResult.CONFLICT
+        # Resolved, a line that only looks like a shorter marker is text.
+        (self.repo / "f.txt").write_text("a\n<< both\nc\n")
+        _run(self.repo, "add", "f.txt")
+        assert GitWorktreeOps.paths_with_conflict_markers(self.repo, ["f.txt"]) == []
 
     # ``:(odd)`` is long-form pathspec magic (and ``:`` is illegal in NTFS
     # file names); ``[odd]`` is a glob that matches ``o.txt``/``d.txt`` but
@@ -227,6 +240,9 @@ class TestFinishConflictedMerge:
     def test_git_failure_reports_every_path_as_unresolved(self) -> None:
         missing = Path(self.tmpdir) / "no-such-repo"
         assert GitWorktreeOps.paths_with_conflict_markers(missing, ["f.txt"]) == ["f.txt"]
+        # Nor is a git that cannot start (one argument over the kernel's limit).
+        too_long = ["f.txt", "d" * 3_000_000]
+        assert GitWorktreeOps.paths_with_conflict_markers(self.repo, too_long) == too_long
 
     def test_deleted_file_resolution_is_accepted(self) -> None:
         _run(self.repo, "rm", "-q", "f.txt")
@@ -245,16 +261,28 @@ class TestAbortConflictedMerge:
     def teardown_method(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_restores_clean_tree_and_removes_new_untracked_files(self) -> None:
+    def test_restores_tracked_state_and_keeps_files_git_never_knew(self) -> None:
+        """The merge's own files go with the reset; a file nobody staged stays (C10-F8).
+
+        A tree that was clean before the merge used to be swept with
+        ``git clean -fd``, which took a file the user's editor saved
+        during the resolution for one the resolver left behind."""
         branch, baseline = _conflicting_branch(self.repo, with_baseline=True)
+        _run(self.repo, "checkout", "-q", branch)
+        (self.repo / "added.txt").write_text("a file the agent added\n")
+        _run(self.repo, "add", ".")
+        _run(self.repo, "commit", "-qm", "agent adds a file")
+        _run(self.repo, "checkout", "-q", "main")
         head = _run(self.repo, "rev-parse", "HEAD").strip()
-        assert GitWorktreeOps.begin_conflicted_merge(self.repo, branch, baseline, "")
-        (self.repo / "scratch.txt").write_text("left behind by the resolver\n")
+        assert GitWorktreeOps.begin_conflicted_merge(self.repo, branch, baseline)
+        assert (self.repo / "added.txt").exists()
+        (self.repo / "notes.txt").write_text("saved by the user's editor\n")
 
         GitWorktreeOps.abort_conflicted_merge(self.repo, "", head)
 
-        assert GitWorktreeOps.status_porcelain(self.repo) == ""
-        assert not (self.repo / "scratch.txt").exists()
+        assert GitWorktreeOps.status_porcelain(self.repo) == "?? notes.txt"
+        assert (self.repo / "notes.txt").read_text() == "saved by the user's editor\n"
+        assert not (self.repo / "added.txt").exists()
         assert _run(self.repo, "rev-parse", "HEAD").strip() == head
         assert (self.repo / "f.txt").read_text() == "a\nB-user\nc\n"
         # The task branch is untouched.

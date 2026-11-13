@@ -32,15 +32,16 @@ import asyncio
 import json
 import shutil
 import tempfile
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 from kiss.agents.sorcar import machines as mach
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import find_free_port
-from kiss.tests.local_ws import open_local_connection
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 from kiss.tests.remote_daemon import start_remote_daemon
 
 
@@ -98,18 +99,24 @@ class TestRemoteNestedSubagentRelay(IsolatedAsyncioTestCase):
     """One local daemon, one remote daemon whose fake model fans out twice."""
 
     async def asyncSetUp(self) -> None:
+        # Cleanups, each registered as its resource starts, not asyncTearDown:
+        # unittest skips the tear-down when the set-up fails, and the model
+        # server such a set-up left serving kept pytest from exiting.
         self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         mach.save_machines([])
+        self.addCleanup(mach.save_machines, [])
         _NestedFanOutModel.calls = 0
         self.model_server = HTTPServer(("127.0.0.1", find_free_port()), _NestedFanOutModel)
-        self.model_thread = asyncio.get_running_loop().run_in_executor(
-            None, self.model_server.serve_forever,
-        )
+        self.addCleanup(self.model_server.server_close)
+        threading.Thread(target=self.model_server.serve_forever, daemon=True).start()
+        self.addCleanup(self.model_server.shutdown)
         endpoint = f"http://127.0.0.1:{self.model_server.server_port}/v1"
         self.remote = await asyncio.to_thread(
             start_remote_daemon, Path(self.tmpdir) / "remote-home", password="pw-remote",
             config={"custom_endpoint": endpoint, "custom_api_key": "k", "max_budget": 100},
         )
+        self.addCleanup(self.remote.stop)
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
@@ -118,23 +125,17 @@ class TestRemoteNestedSubagentRelay(IsolatedAsyncioTestCase):
             keyfile=str(keyfile), url_file=Path(self.tmpdir) / "remote-url.json",
             local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
+        # Registered before the start: one that fails part-way is stopped too.
+        self.addAsyncCleanup(self.server.stop_async)
         await self.server.start_async()
         self.reader, self.writer = await open_local_connection(self.server)
+        self.addCleanup(self.writer.close)
         await self._send({
             "type": "machineAction", "action": "add", "name": "box",
             "address": self.remote.url, "machinePassword": "pw-remote",
         })
         added = await self._until("machines")
         self.assertEqual(added["error"], "")
-
-    async def asyncTearDown(self) -> None:
-        self.writer.close()
-        await self.server.stop_async()
-        self.remote.stop()
-        self.model_server.shutdown()
-        await self.model_thread
-        mach.save_machines([])
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _send(self, cmd: dict[str, Any]) -> None:
         self.writer.write(json.dumps(cmd).encode("utf-8") + b"\n")

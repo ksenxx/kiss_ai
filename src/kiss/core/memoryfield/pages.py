@@ -217,8 +217,9 @@ def render_page(frontmatter: dict[str, Any], body: str) -> str:
     for key, value in frontmatter.items():
         if key not in ordered and value not in (None, ""):
             ordered[key] = str(value)
+    # Literal NEL (U+0085) is folded to a space by YAML readers; escape it.
     yaml_text = yaml.safe_dump(
-        ordered, default_flow_style=False, sort_keys=False, allow_unicode=True
+        ordered, default_flow_style=False, sort_keys=False, allow_unicode=False
     )
     return f"---\n{yaml_text}---\n{text}"
 
@@ -336,12 +337,13 @@ class MemoryDir:
             The page as written.
 
         Raises:
-            ValueError: If the name is invalid or the body is empty.
+            ValueError: If the name is invalid, the body is empty or the
+                tombstone directory is a symlink.
             TimeoutError: If another process holds the memory's lock past
                 :data:`MUTATION_LOCK_TIMEOUT`; nothing is written.
         """
         path = self.page_path(name)
-        tombstone = self.tombstone_path(name)
+        tombstone = self._tombstone_dir() / path.stem
         incoming, body = split_frontmatter(body)
         if not body.strip():
             raise ValueError("Refusing to write an empty page.")
@@ -377,8 +379,9 @@ class MemoryDir:
             # exposes.  create_mode=0o666: pages are deliberately plain
             # documents — a new page gets Path.write_text's umask-derived bits
             # (helper default 0o600 is for secret-bearing files); an existing
-            # page keeps its mode.
-            atomic_write_text(path, raw, create_mode=0o666)
+            # page keeps its mode.  follow_symlink=False: a link put at the
+            # path since it was validated is replaced, never written through.
+            atomic_write_text(path, raw, create_mode=0o666, follow_symlink=False)
             # The page is back: a tombstone left by an earlier deletion would
             # otherwise delete it again on the next sync with another machine.
             # Cleared only AFTER the page is published: a write that fails or
@@ -407,19 +410,6 @@ class MemoryDir:
         """
         return exclusive_file_lock(Path(f"{self.root}.lock"), timeout=MUTATION_LOCK_TIMEOUT)
 
-    def tombstone_path(self, name: str) -> Path:
-        """Return where the tombstone of page *name* lives once the page is deleted.
-
-        Args:
-            name: Page name, with or without ``.md``.
-
-        Raises:
-            ValueError: If the name is invalid (see :meth:`page_path`), or
-                the tombstone directory is a symlink -- a write through it
-                would land outside the memory.
-        """
-        return self._tombstone_dir() / self.page_path(name).stem
-
     def _tombstone_dir(self) -> Path:
         """Return the tombstone directory, refusing one that is a symlink."""
         directory = self.root / TOMBSTONES_DIR
@@ -439,13 +429,14 @@ class MemoryDir:
 
         Raises:
             FileNotFoundError: If the page does not exist.
-            ValueError: If the name is invalid, or the tombstone cannot be
-                placed (see :meth:`tombstone_path`); the page is then kept.
+            ValueError: If the name is invalid, or the tombstone directory is
+                a symlink -- a write through it would land outside the
+                memory; the page is then kept.
             TimeoutError: If another process holds the memory's lock past
                 :data:`MUTATION_LOCK_TIMEOUT`; the page is then kept.
         """
         path = self.page_path(name)
-        tombstone = self.tombstone_path(name)
+        tombstone = self._tombstone_dir() / path.stem
         with self._mutation_lock():
             if not path.is_file():
                 raise FileNotFoundError(f"Page {path.name} does not exist.")
@@ -453,7 +444,9 @@ class MemoryDir:
             # interrupted in between leaves the page beside a stale
             # tombstone, which the merge resolves in favour of the page
             # (see :meth:`write`) -- never a vanished page with no record
-            # of the deletion.
-            tombstone.parent.mkdir(exist_ok=True)
-            atomic_write_text(tombstone, now_iso() + "\n", create_mode=0o666)
+            # of the deletion.  A symlinked tombstone is replaced: written
+            # through, the time would land outside the memory.
+            atomic_write_text(
+                tombstone, now_iso() + "\n", create_mode=0o666, follow_symlink=False
+            )
             unlink_waiting_for_holders(path)

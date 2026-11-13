@@ -18,10 +18,14 @@ const {
   clickTab,
   ofType: msgsOf,
   snapshotEntry,
+  stubDesktop,
   typeInto,
   plain,
+  tabIds: tabBarIds,
 } = require('./simplify2_harness');
 const {trackWindow, runTests} = require('./workdir_helpers');
+const {activeTabId, tabEl} = require('./subagent_tab_helpers');
+const {pickTabMenuItem} = require('./ui_antipattern_harness');
 
 // The runner closes every window once its test returns: a `daemonStatus
 // connected:true` arms main.js's SCM badge poll (`setInterval`), which
@@ -30,20 +34,13 @@ function makePage(initialState) {
   return buildPage({initialState, beforeScripts: trackWindow});
 }
 
-// Every open tab in tab order.  No row renders the chat tabs any more
-// (the chat on screen is the one picked in the Chats panel; the strip
-// under it only lists that chat's group), so the tab records are the
-// mirror of the daemon registry that the tests compare against.
-function tabBarIds(win) {
-  return plain(win._testApi.openTabs().map(t => t.id));
-}
-
+// Every open tab in tab order (tabBarIds, tabBarTitles).  No row renders
+// the chat tabs any more (the chat on screen is the one picked in the
+// Chats panel; the strip under it only lists that chat's group), so the
+// tab records are the mirror of the daemon registry that the tests
+// compare against.
 function tabBarTitles(win) {
   return plain(win._testApi.openTabs().map(t => t.title));
-}
-
-function activeTabId(win) {
-  return win._testApi.getActiveTabId();
 }
 
 // --- ready / boot ---------------------------------------------------------
@@ -130,6 +127,59 @@ function testSnapshotRestoresSavedSelection() {
     activeTabId(win),
     't2',
     "this client's own saved selection is restored from the snapshot",
+  );
+}
+
+function testReloadOverAFileLandsBackOnItsChat() {
+  // A stacked surface: a file the user opens takes the chat's place and
+  // is the active tab.  A file tab is not restored after a reload, so
+  // what is persisted while one is on screen still names its chat, and
+  // the composer it hides is no draft of its own.
+  const stacked = w => {
+    trackWindow(w);
+    stubDesktop(w, false);
+  };
+  const snapshot = {
+    type: 'tabs_state',
+    tabs: [
+      snapshotEntry('t1', 'one', 'chat-1'),
+      snapshotEntry('t2', 'two', 'chat-2'),
+    ],
+  };
+  const composer = win => win.document.getElementById('task-input');
+
+  const first = buildPage({beforeScripts: stacked});
+  send(first.win, snapshot);
+  first.win._testApi.endLaunch();
+  first.win._testApi.switchToTab('t2');
+  typeInto(first.win, composer(first.win), 'draft of two');
+  send(first.win, {
+    type: 'fileContent',
+    tabId: 't2',
+    path: '/ws/notes.md',
+    name: 'notes.md',
+    content: '# Notes',
+    version: 'v1',
+  });
+  const onScreen = first.win._testApi
+    .openTabs()
+    .find(t => t.id === activeTabId(first.win));
+  assert.ok(onScreen.isContentTab, 'precondition: the file is on screen');
+  first.win.dispatchEvent(new first.win.Event('pagehide'));
+  const state = plain(first.getState());
+  assert.strictEqual(state.chatId, 't2', "the file's chat is the selection");
+  assert.deepStrictEqual(state.inputDrafts, {t2: 'draft of two'});
+
+  const second = buildPage({initialState: state, beforeScripts: stacked});
+  send(second.win, snapshot);
+  assert.strictEqual(activeTabId(second.win), 't2');
+  assert.strictEqual(composer(second.win).value, 'draft of two');
+  second.win._testApi.endLaunch();
+  second.win._testApi.switchToTab('t1');
+  assert.strictEqual(
+    composer(second.win).value,
+    '',
+    'the first chat got none of it',
   );
 }
 
@@ -537,14 +587,15 @@ function testChatClosedElsewhereUnderItsFileClearsTheRun() {
 }
 
 function testChatClosedLocallyUnderItsFileClearsTheRun() {
-  // The same through the strip's close button of the owner chat.
+  // The same through the file tab's menu: the file screen's strip lists
+  // the file alone, and Close Others closes the chats behind it.
   const {win, posted} = makePage(undefined);
   const shown = openRunningChatFile(win);
-  const closeBtn = win.document.querySelector(
-    '#tab-list .chat-tab[data-tab-id="ta"] .chat-tab-close',
+  pickTabMenuItem(win, tabEl(win, shown.file.id), 'Close Others');
+  assert.deepStrictEqual(
+    msgsOf(posted, 'closeTab').map(m => m.tabId),
+    ['ta', 'tb'],
   );
-  closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.deepStrictEqual(msgsOf(posted, 'closeTab').map(m => m.tabId), ['ta']);
   assertRunCleared(win, shown);
 }
 
@@ -554,6 +605,7 @@ const tests = [
   testTabsAreNoLongerPersistedLocally,
   testSnapshotAdoptsTabsAndDropsPlaceholder,
   testSnapshotRestoresSavedSelection,
+  testReloadOverAFileLandsBackOnItsChat,
   testSnapshotFollowsTitlesOrderAndRemovals,
   testSnapshotClipsLongTitles,
   testActiveTabRemovalActivatesSurvivor,

@@ -97,9 +97,7 @@ class _PersistenceHarness:
         th._flush_chat_events()
         for tid in self._registered_task_ids:
             agent_state.unregister(tid)
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

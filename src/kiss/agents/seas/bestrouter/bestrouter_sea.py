@@ -7,7 +7,8 @@
 The routing protocol (:data:`SYSTEM_PROMPT`) fixes the models by name:
 :data:`SIMPLE_MODEL` answers simple questions and queries (the tab starts on it),
 :data:`PRIMARY_MODEL` runs every other task, including software development, analysis
-and writing, and
+and writing, and the judgement steps of a task that mostly dispatches sub-agents (the
+triage of a failed test run, the decision on a sub-agent's failure, the final summary), and
 :data:`REVIEW_MODEL` is dispatched through a non-blocking ``run_agent`` for a read-only
 review and debugging pass over the primary model's work, on at most 75% of
 the task budget.
@@ -37,7 +38,7 @@ SIMPLE_MODEL = "claude-opus-5-5-medium"
 PRIMARY_MODEL = "claude-fable-5-2-max"
 """The model that does every task but simple questions and queries."""
 
-REVIEW_MODEL = "gpt-6-astra"
+REVIEW_MODEL = "gpt-6-astra-xhigh"
 """The model that reviews and debugs the primary model's work."""
 
 SYSTEM_PROMPT = f"""\
@@ -45,7 +46,11 @@ SYSTEM_PROMPT = f"""\
 
 Use '{SIMPLE_MODEL}' for simple questions and queries.
 Use '{PRIMARY_MODEL}' model for all other tasks, including software development and analysis
-and writing. Use
+and writing. A task that mostly dispatches sub-agents may dispatch, wait and log on
+'{SIMPLE_MODEL}', but its judgement steps run on '{PRIMARY_MODEL}': call
+`set_model("{PRIMARY_MODEL}")` before you triage a failed test run, before you act on a
+sub-agent result that reports a failure or a warning, and before you write the final
+summary. Use
 {REVIEW_MODEL} (not codex) through `run_agent(model="{REVIEW_MODEL}", tool_profile="review",
 wait="false")` for a thorough read-only review and debugging of the other model's work,
 keep working while it runs and collect it with `agent_job(job_id, "wait")`. Check

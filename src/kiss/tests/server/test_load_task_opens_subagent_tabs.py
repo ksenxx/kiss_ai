@@ -32,6 +32,7 @@ Spec
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import threading
@@ -122,9 +123,7 @@ class TestLoadParentOpensSubagentTabs:
         self.saved = redirect_persistence(self.tmpdir)
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -172,26 +171,64 @@ class TestLoadParentOpensSubagentTabs:
             assert op["taskIndex"] == i
             assert op["parent_tab_id"] == parent_tab_id
 
-        sub_task_events = [
+        # The history click sends no sub-agent transcript: each tab gets
+        # an offer, fetched when the user opens it.
+        assert not [
             e for e in events
             if e.get("type") == "task_events"
             and e.get("tabId") in expected_sub_tab_ids
         ]
-        assert len(sub_task_events) == 3
-        for i, te in enumerate(sub_task_events):
-            assert te["tabId"] == expected_sub_tab_ids[i]
-            assert te["task_id"] == sub_ids[i]
-            assert any(
-                ev.get("type") == "text_delta"
-                and ev.get("text") == f"subagent-{i}-event"
-                for ev in te["events"]
-            )
+        offers = [e for e in events if e.get("type") == "replay_deferred"]
+        assert [o["tabId"] for o in offers] == expected_sub_tab_ids
+        assert [o["taskId"] for o in offers] == [str(s) for s in sub_ids]
 
         parent_idx = events.index(parent_task_events[0])
         for op in opens:
             assert events.index(op) > parent_idx
-        for op, te in zip(opens, sub_task_events, strict=True):
-            assert events.index(op) < events.index(te)
+        for op, offer in zip(opens, offers, strict=True):
+            assert events.index(op) < events.index(offer)
+
+        for i, sub_id in enumerate(sub_ids):
+            del events[:]
+            server._replay_session(
+                chat_id=chat_id, tab_id=expected_sub_tab_ids[i], task_id=sub_id,
+            )
+            fetched = [e for e in events if e.get("type") == "task_events"]
+            assert len(fetched) == 1
+            assert fetched[0]["tabId"] == expected_sub_tab_ids[i]
+            assert fetched[0]["task_id"] == sub_id
+            assert any(
+                ev.get("type") == "text_delta"
+                and ev.get("text") == f"subagent-{i}-event"
+                for ev in fetched[0]["events"]
+            )
+
+    def test_history_click_of_a_wide_fan_out_sends_no_sub_agent_transcript(
+        self,
+    ) -> None:
+        """Ninety sub-agents' transcripts stay on disk until their tabs open.
+
+        Replaying them all with the parent kept the daemon's event loop
+        sending about fifty megabytes per viewer for some twelve seconds.
+        """
+        chat_id = "chat-wide-fan-out"
+        parent_id = _seed_parent(chat_id)
+        big = "x" * 20_000
+        for i in range(90):
+            _seed_subagent(
+                parent_task_id=parent_id, chat_id=chat_id,
+                description=f"sub {i}", event_text=big,
+            )
+        server, events = _make_server()
+
+        server._replay_session(chat_id=chat_id, tab_id="tab-wide", task_id=parent_id)
+
+        kinds = [e.get("type") for e in events]
+        assert kinds.count("openSubagentTab") == 90
+        assert kinds.count("replay_deferred") == 90
+        assert kinds.count("task_events") == 1
+        sent = sum(len(json.dumps(e)) for e in events)
+        assert sent < 200_000, f"{sent} bytes broadcast for 1.8 MB of sub-agent transcripts"
 
     def test_parent_load_with_no_subagents_emits_only_parent_events(
         self,

@@ -7,13 +7,19 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from kiss.core.config import kiss_home
 from kiss.scripts import cost_report
+from kiss.tests.branded_package import make_branded_package
 
 _SCHEMA = (
     "CREATE TABLE task_history (id TEXT PRIMARY KEY, timestamp REAL NOT NULL, "
@@ -74,9 +80,24 @@ def _seed(db: Path, now: float) -> None:
         _usage(2, 60_000, 0.30, cache_read=0),
         {"type": "tool_call", "name": "Read", "path": "/repo/a.py"},
         _usage(3, 150_000, 0.70, cache_read=1000),
-        {"type": "tool_call", "name": "Read", "path": "/repo/a.py"},
+        # The same window: Read's defaults, as a range is persisted (strings in "extras").
+        {"type": "tool_call", "name": "Read", "path": "/repo/a.py",
+         "extras": {"start_line": "1", "max_lines": "2000"}},
         _usage(4, 250_000, 1.20, cache_read=2000),
         {"type": "tool_call", "name": "Read", "file_path": "/home/u/.kiss/AGENTS.md"},
+        # Not a repository's either: this home's file (also spelled with ``~``, see
+        # seeded_db), a stock home's with Windows separators, a longer name.  A
+        # repository's: one on Windows, a clone inside a home (install.sh's
+        # ~/.kiss/kiss_ai) and, to stock KISS, the two only Seamless Loop knows as its home's.
+        *({"type": "tool_call", "name": "Read", "path": path} for path in (
+            str(kiss_home() / "AGENTS.md"), f"~/{kiss_home().name}/AGENTS.md",
+            "C:\\Users\\u\\.kiss\\SORCAR.md", "/repo/NOT_AGENTS.md", "C:\\repo\\AGENTS.md",
+            "/home/u/.kiss/kiss_ai/AGENTS.md", "~/.s10s/AGENTS.md", "/home/u/.s10s/AGENTS.md",
+        )),
+        # Three windows of one file, the second read twice: one repeat.
+        *({"type": "tool_call", "name": "Read", "path": "/repo/big.py",
+           "extras": {"start_line": start, "max_lines": "400"}}
+          for start in ("1", "401", "401", "801")),
         _usage(5, 420_000, 2.00),
         {"type": "prompt", "text": "task <h3>Previous Session 1</h3>"},
         _usage(6, 30_000, 2.10),
@@ -156,7 +177,10 @@ def _seed(db: Path, now: float) -> None:
 
 
 @pytest.fixture
-def seeded_db(tmp_path: Path) -> Path:
+def seeded_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # ``~`` is the directory that holds the session's KISS_HOME, so the seed can spell it.
+    monkeypatch.setenv("HOME", str(kiss_home().parent))
+    monkeypatch.setenv("USERPROFILE", str(kiss_home().parent))
     db = tmp_path / "history.db"
     _seed(db, time.time())
     return db
@@ -173,9 +197,10 @@ def test_kpis_from_seeded_db(seeded_db: Path) -> None:
     # window); the cycle rows each have an in-window parent and are not
     # counted twice.
     assert kpis["cost_usd"] == pytest.approx(20.0)
-    assert kpis["agents_md_reads"] == 2  # the ~/.kiss one is not counted
-    assert kpis["reads"] == 6 and kpis["repeat_reads"] == 1
-    assert kpis["repeat_read_ratio"] == pytest.approx(1 / 6, abs=1e-4)
+    # ./AGENTS.md, ./SORCAR.md, the Windows one, the clone's and the two .s10s ones,
+    # no home's; a.py and the second window of big.py are read twice.
+    assert (kpis["agents_md_reads"], kpis["reads"], kpis["repeat_reads"]) == (6, 18, 2)
+    assert kpis["repeat_read_ratio"] == pytest.approx(2 / 18, abs=1e-4)
     # Root steps 1-6 and 8 are its own; step 7 (after run_parallel) and the
     # repeated step-6 monitor event are not; the two children add 2 each.
     assert kpis["steps_by_context_bucket"] == {
@@ -231,6 +256,34 @@ def test_kpis_from_seeded_db(seeded_db: Path) -> None:
     ) > 12_000
 
 
+def test_brand_home_instructions_are_not_repository_reads(seeded_db: Path, tmp_path: Path) -> None:
+    """A Seamless Loop install knows ``.s10s`` as its home: its two files are the user's."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "kiss.scripts.cost_report", "--db", str(seeded_db), "--json"],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ, "PYTHONPATH": str(make_branded_package(tmp_path / "brand"))},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["agents_md_reads"] == 4
+
+
+def test_helper_of_an_earlier_reviewer_is_reviewer_spend(seeded_db: Path) -> None:
+    """A reviewer that started before the window owns its in-window helper's spend, once."""
+    now = time.time()
+    conn = sqlite3.connect(seeded_db)
+    conn.executemany(
+        "INSERT INTO task_history (id, parent_task_id, task, cost, timestamp) VALUES (?,?,?,?,?)",
+        [("oldrev", "old", "Review the old diff", 50.0, now - 30 * 86400),
+         ("late", "oldrev", "Summarize files", 30.0, now - 60),
+         ("late2", "late", "Count lines", 20.0, now - 50)],
+    )
+    conn.commit()
+    conn.close()
+    kpis = cost_report.compute_kpis(cost_report.load_tasks(str(seeded_db), now - 86400))
+    # Of the old tree's in-window $1 + $9 + $30, late's $30 (which folds late2's $20).
+    assert kpis["reviewer_trees"] == 2 and kpis["reviewer_share_max"] == pytest.approx(0.75)
+
+
 def test_empty_window(tmp_path: Path) -> None:
     db = tmp_path / "empty.db"
     conn = sqlite3.connect(db)
@@ -242,6 +295,112 @@ def test_empty_window(tmp_path: Path) -> None:
     assert kpis["tree_cost_median_usd"] == 0 and kpis["cost_per_llm_call_usd"] == 0.0
     assert kpis["refused_per_1k_calls"] == 0.0
     assert "tasks" in cost_report.format_report(kpis, "the last 24 h")
+
+
+def test_a_window_holding_more_tasks_than_one_statement_binds(tmp_path: Path) -> None:
+    """Every task of the window has its events scanned and its ancestors loaded, however many.
+
+    One statement binds 32,766 values on a stock SQLite (250,000 on Debian's); the ids of
+    the window's tasks, and then those of their parents outside it, were bound all at once,
+    so a longer window died of ``too many SQL variables``.  Every task here has a parent of
+    its own.
+    """
+    db = tmp_path / "long.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(_SCHEMA)
+    tasks = conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) + 1
+    conn.execute(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)"
+        " INSERT INTO task_history (id, timestamp, task, parent_task_id)"
+        " SELECT 't' || i, 1.0, '', 'p' || i FROM n",
+        (tasks,),
+    )
+    # The parents still in the history started before the window, one of them under a root.
+    conn.executemany(
+        "INSERT INTO task_history (id, timestamp, task, parent_task_id) VALUES (?, 0.0, '', ?)",
+        [("p1", "root"), (f"p{tasks}", ""), ("root", "")],
+    )
+    conn.executemany(
+        "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, 1, ?, 1.0)",
+        [(task, json.dumps({"type": "llm_call"})) for task in ("t1", f"t{tasks}")],
+    )
+    conn.commit()
+    conn.close()
+    rows = cost_report.load_tasks(str(db), 0.5)
+    assert len(rows) == tasks + 3
+    assert [rows[task].llm_calls for task in ("t1", "t2", f"t{tasks}")] == [1, 0, 1]
+    assert [rows[task].in_window for task in ("t1", "p1", f"p{tasks}", "root")] == [
+        True, False, False, False,
+    ]
+
+
+def test_a_count_field_that_is_not_a_number_contributes_nothing(tmp_path: Path) -> None:
+    """``output_tokens`` and ``total_steps`` of a foreign event count as zero, not as a crash.
+
+    So does a ``cost`` no total can hold: NaN, an infinity, an integer beyond a float.
+    """
+    db = tmp_path / "foreign.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(_SCHEMA)
+    conn.execute("INSERT INTO task_history (id, timestamp, task) VALUES ('t', 1.0, 'x')")
+    events = [
+        {"type": "llm_call", "output_tokens": "n/a", "cost": 0.5},
+        {"type": "llm_call", "output_tokens": [7]},
+        {**_usage(1, 1000, 0.5), "total_steps": {"n": 1}},
+        *({"type": "llm_call", "cost": cost} for cost in (float("nan"), float("inf"), 10**400)),
+    ]
+    conn.executemany(
+        "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES ('t', ?, ?, 1.0)",
+        [(seq, json.dumps(event)) for seq, event in enumerate(events)],
+    )
+    conn.commit()
+    conn.close()
+    row = cost_report.load_tasks(str(db), 0)["t"]
+    assert (row.llm_calls, row.llm_output_tokens, row.llm_cost) == (5, 0, 0.5)
+    assert cost_report.compute_kpis({"t": row})["cost_per_llm_call_usd"] == 0.1
+    assert (row.first_context, row.bucket_steps) == (1000, {})
+
+
+def _charge_until(db: Path, stop: threading.Event) -> None:
+    """Until *stop*: record a $1 ``llm_call`` of task ``t0`` and add it to its row, atomically."""
+    conn = sqlite3.connect(db)
+    event = json.dumps({"type": "llm_call", "cost": 1.0})
+    while not stop.is_set():
+        with conn:
+            conn.execute("UPDATE task_history SET cost = cost + 1 WHERE id = 't0'")
+            conn.execute(
+                "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES ('t0', 1, ?, 1.0)",
+                (event,),
+            )
+    conn.close()
+
+
+def test_a_report_of_a_database_in_use_reads_one_snapshot(tmp_path: Path) -> None:
+    """A task's totals and its events are those of one moment while the daemon writes.
+
+    The rows and the events were read in separate statements, each of its own snapshot: a
+    commit between them gave a task the cost of one moment and the calls of a later one.
+    """
+    db = tmp_path / "live.db"
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA journal_mode=WAL")  # the daemon's mode: readers do not block it
+    conn.executescript(_SCHEMA)
+    conn.executemany(
+        "INSERT INTO task_history (id, timestamp, task) VALUES (?, 1.0, 'x')",
+        [(f"t{number}",) for number in range(200)],
+    )
+    conn.commit()
+    conn.close()
+    stop = threading.Event()
+    writer = threading.Thread(target=_charge_until, args=(db, stop))
+    writer.start()
+    try:
+        loads = [cost_report.load_tasks(str(db), 0)["t0"] for _ in range(10)]
+    finally:
+        stop.set()
+        writer.join()
+    assert [row.cost - row.llm_cost for row in loads] == [0.0] * 10
+    assert loads[-1].llm_calls > loads[0].llm_calls  # the writer did commit in between
 
 
 def test_absolute_window(seeded_db: Path) -> None:
@@ -313,6 +472,18 @@ def test_main_since_until_and_baseline(
     assert text.splitlines()[1].split()[-1] == "0"
     with pytest.raises(ValueError):
         cost_report.main(["--db", str(seeded_db), "--since", "not-a-date"])
+
+
+def test_a_path_that_reads_as_uri_syntax_names_the_database(
+    seeded_db: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """URI punctuation in a legal host path never changes which database is opened."""
+    name = "kiss#home %41" if os.name == "nt" else "kiss#home ?mode=rw %41"
+    home = seeded_db.parent / name
+    home.mkdir()
+    moved = seeded_db.rename(home / "history.db")
+    assert cost_report.main(["--db", str(moved), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["tasks"] == 8
 
 
 def test_main_missing_db(tmp_path: Path) -> None:

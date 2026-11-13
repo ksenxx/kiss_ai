@@ -521,11 +521,12 @@ def test_a_stop_during_the_parent_end_join_still_ends_the_run_as_stopped(
         "        return settings | {'model': 'm'}\n"
     )
     agent = SorcarAgent("u1-parent")
-    job = agent_dispatch.start_agent_job("helper", {
+    job = agent_dispatch.new_agent_job("helper", {
         "name": "helper", "prompt": "never finishes", "sea_path": str(script),
         "work_dir": str(tmp_path), "model_name": "", "budget": None, "timeout": 60.0,
         "parent_agent": agent,
     }, agent)
+    agent_dispatch.launch_agent_job(job)
     agent_dispatch.wait_until_started(job)
     assert job.running.is_set() and job.thread.is_alive()
     model = StandInModelServer(_finish_body)

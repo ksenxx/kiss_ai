@@ -19,7 +19,7 @@ the clip on this machine's speakers
   caller only hands over events that carry one);
 * utterances are deduped by ``talkId`` (bounded set, as in main.js)
   and serialised on one worker thread so back-to-back ``talk()`` calls
-  never speak over each other (``enqueueTalkPlayback`` parity), and
+  never speak over each other (``pumpTalkQueue`` parity), and
   the agent loop never blocks on playback.
 
 The player command honours the ``KISS_SORCAR_PLAY_CMD`` environment
@@ -32,10 +32,17 @@ whose real player runs as a grandchild, each playback child is
 started in its own process group (POSIX) and a timeout kills the
 whole group — killing only the direct child would leave the
 grandchild holding the audio device and overlapping the next clip.
+
+A shutdown ends the clip being played the same way and drops the
+queued ones: :func:`shutdown` for the daemon's, and an ``atexit`` hook
+for the interpreter's exit (the worker is a daemon thread, and a player
+in a group of its own would outlive the process with nobody left to
+time it out).
 """
 
 from __future__ import annotations
 
+import atexit
 import base64
 import logging
 import math
@@ -47,6 +54,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from typing import Any
 
 from kiss.core.locked import locked_call
@@ -58,6 +66,10 @@ _PLAY_CMD_ENV = "KISS_SORCAR_PLAY_CMD"
 _PLAY_TIMEOUT_ENV = "KISS_SORCAR_PLAY_TIMEOUT"
 _MAX_TALK_IDS = 500
 _PLAYBACK_TIMEOUT = 600.0
+# Seconds between two looks at a playing child (``Popen.wait``'s own interval).
+_EXIT_POLL = 0.05
+# Seconds a shutdown waits for the worker: both graces of the group kill, and slack.
+_SHUTDOWN_WAIT = 12.0
 
 _FALLBACK_PLAYERS: tuple[tuple[str, ...], ...] = (
     ("mpg123", "-q"),
@@ -122,15 +134,15 @@ def _playback_timeout() -> float:
     return _PLAYBACK_TIMEOUT
 
 
-def _run_playback(argv: list[str]) -> None:
+def _run_playback(argv: list[str], stop: threading.Event) -> None:
     """Run one playback child to completion.
 
     A player that cannot start or exits non-zero is skipped silently
     (the browser clients still play their copy), and its output is
     suppressed so a chatty player never pollutes the daemon's terminal
     or logs.  A hung child is killed after :func:`_playback_timeout`
-    seconds — together with its whole process group on POSIX (see
-    :func:`_kill_playback`).
+    seconds, and a playing one as soon as *stop* is set (the player's
+    shutdown) — together with its whole process group on POSIX.
     """
     try:
         proc: subprocess.Popen[bytes] = popen_process_group(
@@ -141,21 +153,26 @@ def _run_playback(argv: list[str]) -> None:
         )
     except OSError:
         return
-    try:
-        proc.wait(timeout=_playback_timeout())
-    except subprocess.TimeoutExpired:
-        # The child was started in its own process group, so the kill
-        # reaches grandchildren too: a ``KISS_SORCAR_PLAY_CMD`` wrapper
-        # script's real player must die with the wrapper, or it would
-        # keep the audio device and play over the next clip.  SIGTERM
-        # first (players flush and release the device), SIGKILL five
-        # seconds later; the wait after that is bounded, so a SIGKILLed
-        # player stuck in the kernel (an audio device or network file
-        # system that does not return) cannot wedge the sole talk
-        # worker for good.  A child that outlives the wait stays ours;
-        # ``subprocess`` reaps it later from its unreaped-children list
-        # once it finally dies.
-        terminate_process_group(proc)
+    deadline = time.monotonic() + _playback_timeout()
+    # Waited for in slices on *stop*: the shutdown only sets it, so this
+    # thread stays the one that signals the group and reaps its leader
+    # (``terminate_process_group`` needs the leader unreaped to the end).
+    while proc.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or stop.wait(min(remaining, _EXIT_POLL)):
+            # The child was started in its own process group, so the kill
+            # reaches grandchildren too: a ``KISS_SORCAR_PLAY_CMD`` wrapper
+            # script's real player must die with the wrapper, or it would
+            # keep the audio device and play over the next clip.  SIGTERM
+            # first (players flush and release the device), SIGKILL five
+            # seconds later; the wait after that is bounded, so a SIGKILLed
+            # player stuck in the kernel (an audio device or network file
+            # system that does not return) cannot wedge the sole talk
+            # worker for good.  A child that outlives the wait stays ours;
+            # ``subprocess`` reaps it later from its unreaped-children list
+            # once it finally dies.
+            terminate_process_group(proc)
+            return
 
 
 class TalkPlayer:
@@ -165,7 +182,8 @@ class TalkPlayer:
     single daemon worker thread that plays them strictly one at a
     time (the browser client's talk-queue behaviour).  Playback of the same
     ``talkId`` more than once is suppressed with a bounded set (the
-    browser client's ``spokenTalkIds`` behaviour).
+    browser client's ``spokenTalkIds`` behaviour).  :meth:`shutdown`
+    ends the player for good.
     """
 
     def __init__(self) -> None:
@@ -178,9 +196,14 @@ class TalkPlayer:
         # A SimpleQueue, whose put/get are C calls: a queue.Queue's
         # put is a Python ``with self.not_full:``, which the same
         # injection leaks, wedging the worker's get and every later
-        # play.
-        self._queue: queue.SimpleQueue[tuple[dict[str, Any], list[str]]] = queue.SimpleQueue()
+        # play.  ``None`` is the shutdown's wake-up.
+        self._queue: queue.SimpleQueue[tuple[dict[str, Any], list[str]] | None] = (
+            queue.SimpleQueue()
+        )
         self._worker: threading.Thread | None = None
+        # Set by ``shutdown``: nothing more is admitted or played, and
+        # the clip being played is stopped.
+        self._closed = threading.Event()
 
     def play(self, event: dict[str, Any]) -> bool:
         """Queue one ``talk`` *event* for playback (non-blocking).
@@ -196,8 +219,8 @@ class TalkPlayer:
 
         Returns:
             ``True`` when the machine has a player and the event carries
-            a clip (it is queued, unless already spoken); ``False``
-            otherwise.
+            a clip (it is queued, unless already spoken or the player
+            was shut down); ``False`` otherwise.
         """
         if not event.get("audioB64"):
             return False
@@ -209,8 +232,8 @@ class TalkPlayer:
         return True
 
     def _admit_locked(self, talk_id: Any) -> bool:
-        """Make sure the worker runs and record *talk_id*; ``False`` when already spoken."""
-        if talk_id and talk_id in self._spoken_ids:
+        """Make sure the worker runs and record *talk_id*; ``False`` when spoken or shut down."""
+        if self._closed.is_set() or (talk_id and talk_id in self._spoken_ids):
             return False
         # The worker before the record: a start that fails (thread
         # exhaustion) raises out of ``play`` with nothing remembered,
@@ -228,13 +251,41 @@ class TalkPlayer:
         return True
 
     def _drain(self) -> None:
-        """Worker loop: play queued events one at a time, forever."""
-        while True:
-            event, player = self._queue.get()
+        """Worker loop: play queued events one at a time, until :meth:`shutdown`."""
+        # Only the published worker drains.  A Stop can cut ``start`` short
+        # once this thread is spawned but before it is alive; the next
+        # ``play`` then starts another, and two drainers would play two
+        # clips at once.  (No Stop is injected here: a plain ``with``.)
+        with self._lock:
+            if self._worker is not threading.current_thread():
+                return
+        while (entry := self._queue.get()) is not None and not self._closed.is_set():
             try:
-                self._play_clip(event, player)
+                self._play_clip(*entry)
             except Exception:
                 logger.exception("talk playback failed")
+
+    def shutdown(self) -> None:
+        """End the player for good: stop the clip being played, drop the queued ones.
+
+        Idempotent and bounded.  Nothing is admitted afterwards; the
+        worker ends its player's whole process group (SIGTERM, SIGKILL
+        after the grace), removes the clip's temp file and exits, and
+        this waits for that at most ``_SHUTDOWN_WAIT`` seconds (a
+        SIGKILLed player stuck in the kernel is left to the worker, as
+        on a playback timeout).
+        """
+        worker = locked_call(self._lock, self._close_locked)
+        # Alive only: a worker whose ``start`` a Stop cut short may not run
+        # yet (it cannot be joined), and ends at the wake-up once it does.
+        if worker is not None and worker.is_alive():
+            worker.join(_SHUTDOWN_WAIT)
+
+    def _close_locked(self) -> threading.Thread | None:
+        """Close admission and wake the worker; return it."""
+        self._closed.set()
+        self._queue.put(None)
+        return self._worker
 
     def _play_clip(self, event: dict[str, Any], player: list[str]) -> None:
         """Play the event's ``audioB64`` clip with the *player* argv prefix.
@@ -253,7 +304,7 @@ class TalkPlayer:
         try:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(audio)
-            _run_playback([*player, path])
+            _run_playback([*player, path], self._closed)
         finally:
             try:
                 os.unlink(path)
@@ -263,6 +314,7 @@ class TalkPlayer:
 
 _shared_lock = threading.RLock()
 _shared_player: TalkPlayer | None = None
+_exiting = False
 
 
 def shared_player() -> TalkPlayer:
@@ -286,3 +338,39 @@ def _shared_player_locked() -> TalkPlayer:
     if _shared_player is None:
         _shared_player = TalkPlayer()
     return _shared_player
+
+
+def shutdown() -> None:
+    """Shut the shared player down, if there is one: the daemon's shutdown.
+
+    Called by ``web_server.RemoteAccessServer._shutdown_children``.
+    Bounded and idempotent (:meth:`TalkPlayer.shutdown`).  The next
+    :func:`shared_player` call makes a fresh player, for an embedder
+    that starts another server in this process.
+    """
+    player = locked_call(_shared_lock, _take_shared_player)
+    if player is not None:
+        player.shutdown()
+
+
+def _take_shared_player() -> TalkPlayer | None:
+    global _shared_player
+    player = _shared_player
+    if not _exiting:
+        _shared_player = None
+    return player
+
+
+def _shutdown_at_exit() -> None:
+    """Interpreter exit: shut the shared player down and keep it the shared one.
+
+    Threads run until every exit hook has, so a talk can still arrive:
+    it reaches this shut-down player, never a fresh one that nothing
+    would stop.
+    """
+    global _exiting
+    _exiting = True
+    shared_player().shutdown()
+
+
+atexit.register(_shutdown_at_exit)

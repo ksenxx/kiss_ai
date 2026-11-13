@@ -118,6 +118,7 @@ function testWorkspaceLineMergesMetadata(win) {
     WS_A + ' • gpt-5 • parallel',
     `row A workspace+meta text mismatch; got: ${aWs.textContent}`,
   );
+  assert.strictEqual(aWs.title, aWs.textContent, 'the line is its own tooltip');
   assert.strictEqual(
     bWs.textContent,
     WS_B + ' • claude-3.7-sonnet • sequential',

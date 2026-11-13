@@ -23,8 +23,11 @@ Real printers, real threads, real bash streaming — nothing is mocked.
 
 from __future__ import annotations
 
+import tempfile
 import threading
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 from kiss.server.json_printer import _CLOSED_TASK_MEMORY, JsonPrinter
 
@@ -139,6 +142,49 @@ class TestPrinterTaskStateLifetime(unittest.TestCase):
             "the oldest finished task should have been evicted first"
         )
         assert self._offset_keys(printer) == set()
+
+    def test_straggler_cannot_resurrect_a_task_the_memory_forgot(self) -> None:
+        """A straggler later than the bounded memory still finds no home.
+
+        Once ``_CLOSED_TASK_MEMORY`` later cleanups evict a finished
+        task's tombstone, its absence proves nothing: per-task state is
+        then created only for a task the agent-state registry holds
+        active.  The delayed fold of a finished child
+        (``set_usage_offsets``), a thread still bound to the task, its
+        model pick, its tool call and its image all leave no entry.
+        """
+        printer = JsonPrinter()
+        dead = SimpleNamespace(last_task_id="dead")
+        printer.agent_task_allocated(dead, "dead")
+        printer.set_usage_offsets("dead", 1.0, 10, 1)
+        assert self._offset_keys(printer) == {"dead"}
+        printer.agent_task_finished(dead, "dead")
+        for index in range(_CLOSED_TASK_MEMORY):
+            printer.cleanup_task(f"later-{index}")
+        assert "dead" not in printer._closed_tasks
+
+        printer.set_usage_offsets("dead", 1.25, 100, 2)
+        printer.adopt_thread_binding("dead")
+        self.addCleanup(printer.adopt_thread_binding, "")
+        printer.tokens_offset = 7
+        printer.broadcast_agent_model_pick("some-model", "tab", "dead")
+        with tempfile.TemporaryDirectory() as folder:
+            image = Path(folder) / "shot.png"
+            image.write_bytes(b"png")
+            printer.print("Bash", type="tool_call", tool_input={"command": "x"})
+            printer.print(str(image), type="tool_result", tool_name="Bash", tool_input={})
+        assert self._offset_keys(printer) == set()
+        assert "dead" not in printer._task_model_override
+        assert "dead" not in printer._tool_call_started
+        assert "dead" not in printer._image_b64_used
+
+        live = SimpleNamespace(last_task_id="live")
+        printer.agent_task_allocated(live, "live")
+        self.addCleanup(printer.agent_task_finished, live, "live")
+        printer.set_usage_offsets("live", 2.0, 20, 2)
+        assert self._offset_keys(printer) == {"live"}, (
+            "a task the registry holds active must still store its offsets"
+        )
 
 
 if __name__ == "__main__":

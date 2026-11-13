@@ -18,14 +18,18 @@ publish leaves no residue behind.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from pathlib import Path
+from types import FrameType
 
 import pytest
 
+from kiss.core.utils import atomic_write_text
 from kiss.server.tab_registry import OpenTabOutcome, TabRegistry
 from kiss.tests.conftest import HOT_READER_PAUSE
+from kiss.tests.lock_injection import inject
 
 _WRITERS = 8
 _ROUNDS = 150
@@ -130,3 +134,30 @@ def test_flush_retries_a_failed_save(tmp_path: Path) -> None:
     path.rmdir()
     reg.flush()
     assert json.loads(path.read_text(encoding="utf-8"))["tabs"][0]["tabId"] == "t1"
+
+
+def test_flush_saves_what_a_stop_during_the_save_left_unwritten(tmp_path: Path) -> None:
+    """A task's Stop landing in a mutation's save leaves the change for ``flush``.
+
+    The change is in memory by then; the registry used to count itself
+    clean all the same, so shutdown skipped it and a restart restored
+    the old tabs.
+    """
+    path = tmp_path / "tabs.json"
+    reg = TabRegistry(path)
+    reg.update_tab("t", title="old title", create=True)
+
+    def stop_at_the_save(frame: FrameType, event: str, arg: object) -> None:
+        if event == "call" and frame.f_code is atomic_write_text.__code__:
+            inject(threading.current_thread())  # the runner's Stop, as the save begins
+
+    sys.setprofile(stop_at_the_save)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            reg.update_tab("t", title="new title")
+    finally:
+        sys.setprofile(None)
+    assert json.loads(path.read_text(encoding="utf-8"))["tabs"][0]["title"] == "old title"
+    reg.flush()
+    assert TabRegistry(path).snapshot() == reg.snapshot()
+    assert reg.snapshot()[0]["title"] == "new title"

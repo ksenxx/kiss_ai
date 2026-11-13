@@ -163,7 +163,7 @@ def load_layers(
             class or has malformed settings.
     """
     raw_path = cmd.get("seaPath")
-    if raw_path is None or (isinstance(raw_path, str) and raw_path == ""):
+    if raw_path in (None, ""):
         if base is None:
             return [BaseSea()]
         raw_path = str(base)

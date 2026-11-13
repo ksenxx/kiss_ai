@@ -47,14 +47,13 @@ from kiss.server.sorcar import translate_client_command
 from kiss.server.web_server import (
     RemoteAccessServer,
     _compare_versions,
-    _generate_self_signed_cert,
     _get_local_ips,
     _read_url_from_file,
     _remove_url_file,
     _save_url_file,
     _version_tuple,
 )
-from kiss.tests.local_ws import open_local_connection
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 _IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")

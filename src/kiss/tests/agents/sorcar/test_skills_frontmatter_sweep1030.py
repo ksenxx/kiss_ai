@@ -70,3 +70,25 @@ def test_one_bad_skill_does_not_break_the_skill_tool(project: Path, frontmatter:
     assert "<name>bad</name>" in (tool.__doc__ or "")
     assert "Bad skill body." in tool("bad")
     assert "Good body." in tool("good")
+
+
+@pytest.mark.parametrize("description, shown", [
+    ("*l5", "Bad skill body."), ("{tree: *l5}", "Bad skill body."), ("2026-11-10", "2026-11-10"),
+    ("0x" + "F" * 5000, "Bad skill body."),
+], ids=["list", "mapping", "date", "hex-int"])
+def test_an_alias_tree_is_not_a_description(project: Path, description: str, shown: str) -> None:
+    """A ``description`` of lists sharing lists is not written out as text (audit 2026-11-10).
+
+    These 300 bytes of YAML are 2.8 million characters as text, nine
+    times more per level: the description is a scalar's (a date is
+    one, as before), else the body's.  So is one no text can be made
+    of: YAML loads a hexadecimal integer of any length, and ``str`` of
+    it past the interpreter's 4300-digit limit raised ``ValueError``
+    out of ``make_skill_tool`` (sweep 2026-11-11).
+    """
+    levels = ['l0: &l0 ["a","a","a","a","a","a","a","a","a"]']
+    levels += [f"l{n}: &l{n} [{','.join([f'*l{n - 1}'] * 9)}]" for n in range(1, 6)]
+    _write_bad_skill(project, "\n".join([*levels, f"description: {description}"]))
+    tool = make_skill_tool(str(project))
+    assert tool is not None
+    assert f"<name>bad</name>\n<description>{shown}</description>" in (tool.__doc__ or "")

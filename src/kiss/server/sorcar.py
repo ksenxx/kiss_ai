@@ -125,7 +125,7 @@ from kiss.core.remote_password import password_accepted
 from kiss.core.user_config import load_config
 from kiss.core.utils import is_root_dir
 from kiss.server import sidebar_panels
-from kiss.server.commands import broadcast_to_conn, request_generation
+from kiss.server.commands import broadcast_to_conn, request_generation, str_field
 from kiss.server.remote_tabs import ROUTED_COMMANDS, RemoteTabs
 from kiss.server.remote_views import VIEW_COMMANDS, RemoteViews
 from kiss.server.signin import SigninLogin
@@ -428,6 +428,19 @@ def is_loopback_ip(ip: str) -> bool:
     return parsed.is_loopback
 
 
+def _request_origin(websocket: Any) -> str:
+    """Return the ``Origin`` header of *websocket*'s upgrade request, ``""`` when it has none."""
+    request = getattr(websocket, "request", None)
+    headers = getattr(request, "headers", None)
+    return headers.get("Origin", "") if headers is not None else ""
+
+
+def _is_loopback_origin(origin: str) -> bool:
+    """Whether *origin* names a page served at ``localhost`` or a loopback address."""
+    host = urlsplit(origin).hostname or ""
+    return host == "localhost" or is_loopback_ip(host)
+
+
 AuthKind = Literal["local", "loopback", "remote"]
 """How a connection authenticated: local token, loopback browser or remote password."""
 
@@ -454,17 +467,24 @@ class Auth:
             is sent to it as separate ``part`` frames
             (:func:`~kiss.agents.sorcar.local_endpoint.frame_parts`),
             whole to any other client.
+        password: The stored password a ``"remote"`` client was
+            admitted with (``""`` for the other kinds).  The transport
+            shuts the session out once another one is in force.
     """
 
     kind: AuthKind
     link: bool = False
     parts: bool = False
+    password: str = ""
 
 
-def _auth_result(kind: AuthKind, msg: Any) -> Auth:
+def _auth_result(kind: AuthKind, msg: Any, password: str = "") -> Auth:
     """Return the :class:`Auth` of an accepted ``auth`` frame *msg*."""
     fields = msg if isinstance(msg, dict) else {}
-    return Auth(kind, link=fields.get("link") is True, parts=fields.get("parts") is True)
+    return Auth(
+        kind, link=fields.get("link") is True, parts=fields.get("parts") is True,
+        password=password,
+    )
 
 
 def _auth_ok(local: bool) -> str:
@@ -795,6 +815,10 @@ class ServerApi:
         self._pending_actions: dict[tuple[str, str], asyncio.Task[None]] = {}
         # The brand's running ``signin login`` (see ``signin_login``).
         self.signin = SigninLogin()
+        # The ids of the notices this daemon was told to retire (see
+        # ``dismiss_notice``): a ``ready`` skips them in the event-loop
+        # step in which it sends its bootstrap events.
+        self.dismissed_notices: set[str] = set()
         # Set by ``cancel_background_replies``: from then on no reply
         # is spawned (a frame can still arrive while the cancelled
         # tasks are awaited, before the listeners close).
@@ -1164,15 +1188,31 @@ class ServerApi:
         binds = cmd["type"] in ("submit", "run", "resumeSession") and cmd.get("machine")
         if not tab_id or not (binds or key in self._pending_routes):
             return False
-        self._spawn_after(self._pending_routes, key, self._dispatch_logged(cmd, ctx))
+        self._spawn_after(
+            self._pending_routes, key, self._dispatch_logged(cmd, ctx, tab_id if binds else ""),
+        )
         return True
 
-    async def _dispatch_logged(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Dispatch *cmd* now, logging a failure instead of dying silently in a background task."""
+    async def _dispatch_logged(
+        self, cmd: dict[str, Any], ctx: ApiContext, binds_tab: str = "",
+    ) -> None:
+        """Dispatch *cmd* now, logging a failure instead of dying silently in a background task.
+
+        The bind of a command that binds *binds_tab* is expected from
+        here, on the event loop and after the connection's earlier
+        commands for the tab, and not from the moment its thread runs:
+        a close of the tab by another connection that lands in between
+        stands the bind down too (:meth:`RemoteTabs.expect_bind`).
+        """
+        if binds_tab:
+            self.remote_tabs.expect_bind(binds_tab, cmd)
         try:
             await self._dispatch_now(cmd, ctx)
         except Exception:  # noqa: BLE001 - a background task must not die silently
             logger.warning("Error handling client command %r", cmd["type"], exc_info=True)
+        finally:
+            if binds_tab:
+                self.remote_tabs.bind_settled(cmd)
 
     def _spawn_panel_reply(
         self, key: tuple[str, str, str], reply: Coroutine[Any, Any, None],
@@ -1351,13 +1391,26 @@ class ServerApi:
         Returns:
             True for a browser page served at a loopback address.
         """
-        if not self._is_direct_loopback(websocket):
-            return False
-        request = getattr(websocket, "request", None)
-        headers = getattr(request, "headers", None)
-        origin = headers.get("Origin", "") if headers is not None else ""
-        host = urlsplit(origin).hostname or ""
-        return host == "localhost" or is_loopback_ip(host)
+        return self._is_direct_loopback(websocket) and _is_loopback_origin(
+            _request_origin(websocket),
+        )
+
+    def _is_foreign_page(self, websocket: Any) -> bool:
+        """Whether *websocket* was opened by a browser page not served at a loopback address.
+
+        A browser names the page that opens a WebSocket as ``Origin``
+        and lets every page open one to 127.0.0.1: the same-origin
+        policy does not bind WebSockets.  A page of another site shown
+        by this machine's own browser therefore arrives as a direct
+        loopback peer, and its origin (``null`` for a sandboxed frame
+        or a file) is all that tells it from the web app opened here.
+        A program sends no ``Origin``.
+
+        Args:
+            websocket: The connection to classify.
+        """
+        origin = _request_origin(websocket)
+        return bool(origin) and not _is_loopback_origin(origin)
 
     async def _admit_loopback_browser(
         self, msg: Any, websocket: Any, token: str
@@ -1494,7 +1547,13 @@ class ServerApi:
            AND again for every attempt (against a freshly re-loaded
            config), so it mirrors the transport's 403 gate
            (``RemoteAccessServer._process_request``) and also covers a
-           password cleared at any point mid-handshake.
+           password cleared at any point mid-handshake.  A direct
+           loopback peer whose ``Origin`` names another site (a page
+           of some website open in a browser on this machine, a
+           DNS-rebound name) is refused the same way
+           (:meth:`_is_foreign_page`): the browser lets any page
+           connect to localhost, and with no password its empty probe
+           would be the whole login.
         3. Otherwise up to two ``auth`` attempts are read: a correct
            password (a constant-time compare against the configured
            ``remote_password`` as re-loaded for that attempt, so a
@@ -1556,10 +1615,12 @@ class ServerApi:
                 logger.debug("Locked peer %s sent no usable frame", ip, exc_info=True)
             await self._refuse(websocket, _auth_locked(lock_remaining))
             return None
-        stored_password = (await asyncio.to_thread(load_config)).get(
-            "remote_password", "",
-        )
-        if not stored_password and not self._is_direct_loopback(websocket):
+        # A direct loopback peer passes this gate whatever is stored and
+        # skips the read: a job of the shared executor, it would make the
+        # machine's own clients wait while every worker is busy.
+        if not self._is_direct_loopback(websocket) and not (
+            await asyncio.to_thread(load_config)
+        ).get("remote_password", ""):
             # Defense in depth for the empty-password localhost-only
             # lockdown (primary gate: the transport's
             # ``_process_request`` refuses non-loopback peers with 403
@@ -1606,7 +1667,12 @@ class ServerApi:
                 stored_password = (
                     await asyncio.to_thread(load_config)
                 ).get("remote_password", "")
-                if not stored_password and not self._is_direct_loopback(websocket):
+                # A page of another site in this machine's browser is
+                # not this machine's client either: the empty password
+                # below would admit it (:meth:`_is_foreign_page`).
+                if not stored_password and (
+                    not self._is_direct_loopback(websocket) or self._is_foreign_page(websocket)
+                ):
                     logger.warning(_NO_PASSWORD_LOG, ip)
                     await self._refuse(websocket, _NO_PASSWORD_REFUSAL)
                     return None
@@ -1627,20 +1693,19 @@ class ServerApi:
                     )
                     await self._refuse(websocket, _auth_locked(lock_remaining))
                     return None
-                client_pw = msg.get("password", "")
-                if not isinstance(client_pw, str):
-                    client_pw = ""
+                client_pw = str_field(msg, "password")
                 if msg.get("type") == "auth" and not token and password_accepted(
                     client_pw, stored_password,
                 ):
                     await websocket.send(_auth_ok(local=False))
                     # With no password set only a direct loopback peer
+                    # that is no page of another site
                     # gets here (the gate above): it is admitted as a
                     # loopback client, never password-checked per
                     # frame, like a browser opened at 127.0.0.1.  A
                     # password-authenticated client is "remote".
                     return _auth_result(
-                        "remote" if stored_password else "loopback", msg,
+                        "remote" if stored_password else "loopback", msg, stored_password,
                     )
                 if msg.get("type") != "auth":
                     # No password was tried: close without the
@@ -1912,8 +1977,7 @@ class ServerApi:
         from :func:`kiss.server.sidebar_panels.apps_status` (a cached
         probe subprocess; ``refresh: true`` — the subpanel's refresh
         button, or an app waiting for its connect task — probes again).
-        The direct reply is ``{"type": "appsStatus", "apps": [...],
-        "checkedAt": <epoch ms>}``.
+        The direct reply is ``{"type": "appsStatus", "apps": [...]}``.
 
         A probe takes seconds, and each connection's commands are
         dispatched one at a time, so the reply is produced by a
@@ -1934,11 +1998,9 @@ class ServerApi:
             refresh: Probe again even when the cache is fresh.
         """
         try:
-            apps, checked_at = await asyncio.to_thread(sidebar_panels.apps_status, refresh)
+            apps, _ = await asyncio.to_thread(sidebar_panels.apps_status, refresh)
             await self._backend._reply_direct(
-                endpoint,
-                {"type": "appsStatus", "apps": apps, "checkedAt": checked_at},
-                "getAppsStatus",
+                endpoint, {"type": "appsStatus", "apps": apps}, "getAppsStatus",
             )
         except Exception:  # noqa: BLE001 - a background task must not die silently
             logger.warning("getAppsStatus reply failed", exc_info=True)
@@ -2000,10 +2062,10 @@ class ServerApi:
         The rows come from :func:`kiss.server.sidebar_panels.machines_report`
         (the local machine first, then every registered one with its
         reachability; ``refresh: true`` pings again).  The direct reply
-        is ``{"type": "machines", "machines": [...], "checkedAt": <epoch
-        ms>, "action": "", "name": "", "error": ""}``, produced by a
-        background task like ``appsStatus`` so the pings never hold up
-        the connection's other commands.
+        is ``{"type": "machines", "machines": [...], "action": "",
+        "name": "", "error": ""}``, produced by a background task like
+        ``appsStatus`` so the pings never hold up the connection's other
+        commands.
 
         Args:
             cmd: The ``getMachines`` command (optional ``refresh``).
@@ -2057,9 +2119,9 @@ class ServerApi:
                 machine link never takes one for its answer.
         """
         ip, port = self._local_machine_address()
-        rows, checked_at = sidebar_panels.machines_report(ip, port, refresh)
+        rows, _ = sidebar_panels.machines_report(ip, port, refresh)
         event: dict[str, Any] = {
-            "type": "machines", "machines": rows, "checkedAt": checked_at,
+            "type": "machines", "machines": rows,
             "action": action, "name": name, "error": error,
         }
         if generation:
@@ -2134,11 +2196,8 @@ class ServerApi:
         action = str(cmd["action"])
         name = str(cmd["name"])
         address = str(cmd.get("address") or "")
-        try:
-            # An ``add`` without a name registers the address's host.
-            machine = name.strip() or default_name(address)
-        except ValueError:  # a malformed address: the action refuses it below
-            machine = ""
+        # An ``add`` without a name registers the address's host.
+        machine = name.strip() or default_name(address)
         async with self._machine_lock(machine):
             try:
                 error = await asyncio.to_thread(
@@ -2614,6 +2673,13 @@ class ServerApi:
         the choice holds in every browser of this daemon.  Every window
         then gets a ``close`` for the toast.  An unknown id is ignored.
 
+        The id joins :attr:`dismissed_notices` before the marker is
+        written.  A ``ready`` reads the marker on a worker thread and
+        sends the notice later, on the event loop, where it skips the
+        ids of that set: a notice read before this dismissal is sent
+        before the ``close`` below or not at all, never after it (the
+        page would put the toast back).
+
         Args:
             cmd: The ``dismissNotice`` command with the notification ``id``.
             ctx: The transport context of the current call (unused —
@@ -2621,6 +2687,7 @@ class ServerApi:
         """
         if cmd.get("id") != VSCODE_RETIRED_NOTICE_ID:
             return
+        self.dismissed_notices.add(VSCODE_RETIRED_NOTICE_ID)
         await asyncio.to_thread(dismiss_vscode_retired_notice)
         self._backend._printer.broadcast(
             {"type": "notification", "id": VSCODE_RETIRED_NOTICE_ID, "close": True},
@@ -2662,7 +2729,7 @@ class ServerApi:
         (:class:`kiss.server.signin.SigninLogin`); the window gets
         ``signinUrl`` as soon as the hook prints the page to open, every
         window ``signinDone`` when the sign-in succeeds, the clicking
-        window ``signinError`` when it fails.
+        window ``signinError`` when it fails or another window ends it.
 
         Args:
             cmd: The ``signinLogin`` command with the ``provider`` id
@@ -2671,8 +2738,9 @@ class ServerApi:
             ctx: The transport context of the current call; supplies
                 the ``conn_id`` the URL and errors are stamped with.
         """
-        reply = self._signin_reply(ctx.conn_state["conn_id"], self._signin_attempt(cmd))
-        await asyncio.to_thread(self.signin.start, str(cmd["provider"]), reply)
+        conn_id = ctx.conn_state["conn_id"]
+        reply = self._signin_reply(conn_id, self._signin_attempt(cmd))
+        await asyncio.to_thread(self.signin.start, str(cmd["provider"]), reply, conn_id)
 
     async def signin_paste(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Forward a pasted redirect URL or code to the running sign-in hook.
@@ -2697,9 +2765,10 @@ class ServerApi:
 
         Args:
             cmd: The ``signinCancel`` command (unused).
-            ctx: The transport context of the current call (unused).
+            ctx: The transport context of the current call; supplies the
+                ``conn_id``, so another window's sign-in hears it was ended.
         """
-        await asyncio.to_thread(self.signin.cancel)
+        await asyncio.to_thread(self.signin.cancel, ctx.conn_state["conn_id"])
 
     async def update_when_idle(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Arm (or cancel) an update that runs once no task is running.

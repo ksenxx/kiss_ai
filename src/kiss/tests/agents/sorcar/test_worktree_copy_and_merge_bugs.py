@@ -20,10 +20,6 @@ Reproduces and guards against three bugs (see tmp/findings-2.md):
   branch BEFORE stashing, so a user sitting on a different branch
   with dirty edits got ``CHECKOUT_FAILED`` even though ``merge()``'s
   docstring promises uncommitted changes are stashed first.
-* A09-1 — a merge landed the worktree's git-ignored ``tmp/PROGRESS.md``
-  twice: the teardown's ignored-file rescue (never over an existing
-  copy; a different one gets a ``.kiss-rescued-<ns>`` sibling), then
-  an unconditional write that destroyed the main checkout's own copy.
 
 All tests use real temporary git repos (subprocess git commands, no
 mocks) and are independent of each other.
@@ -41,7 +37,6 @@ from kiss.agents.sorcar.git_worktree import (
     MergeResult,
 )
 from kiss.tests.conftest import posix_only
-from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -338,52 +333,3 @@ class TestB3StashBeforeCheckout:
             "dirty edits on the original branch must be restored after merge"
         )
         assert _git(repo, "stash", "list").stdout.strip() == ""
-
-
-MAIN_PROGRESS = "# Task A\n- A's log, merged earlier\n"
-BRANCH_PROGRESS = "# Task B\n- B's log, in the worktree\n"
-
-
-class TestMergeKeepsTheMainCheckoutsProgressLog:
-    """A09-1: ``merge()`` never destroys a different ``tmp/PROGRESS.md`` of the main checkout."""
-
-    def test_different_main_copy_is_kept_and_the_worktrees_lands_beside_it(self) -> None:
-        """The real merge path: the rescue's sibling is the ONLY landing of the worktree's log."""
-        home = IsolatedKissHome(prefix="kiss-merge-progress-")
-        agent = ChatSorcarAgent("test-a09-1")
-        try:
-            repo = home.repo
-            (repo / ".gitignore").write_text("tmp/\n")
-            _git(repo, "add", ".gitignore").check_returncode()
-            _git(repo, "commit", "-m", "ignore tmp").check_returncode()
-            (repo / "tmp").mkdir()
-            (repo / "tmp" / "PROGRESS.md").write_text(MAIN_PROGRESS)
-
-            agent.work_dir = str(repo)
-            agent.create_worktree()
-            (wt,) = agent.worktrees
-            (wt.wt_dir / "b.txt").write_text("B\n")
-            (wt.wt_dir / "tmp").mkdir(exist_ok=True)
-            (wt.wt_dir / "tmp" / "PROGRESS.md").write_text(BRANCH_PROGRESS)
-
-            msg = agent.merge()
-
-            assert f"Successfully merged branch '{wt.branch}'" in msg, msg
-            assert (repo / "b.txt").read_text() == "B\n"
-            kept = repo / "tmp" / "PROGRESS.md"
-            assert kept.read_text() == MAIN_PROGRESS, (
-                "the main checkout's own log must not be overwritten by the worktree's"
-            )
-            siblings = sorted((repo / "tmp").glob("PROGRESS.kiss-rescued-*.md"))
-            assert [p.read_text() for p in siblings] == [BRANCH_PROGRESS], (
-                "the worktree's log is landed once, beside the kept copy"
-            )
-            assert "Copied tmp/PROGRESS.md" not in msg, msg
-            # The message names git's resolved repository root (macOS's
-            # temp dir is /var -> /private/var).
-            assert f"Kept the main checkout's {kept.resolve()}" in msg, msg
-            assert f"the worktree's copy is beside it at {siblings[0].resolve()}" in msg, msg
-        finally:
-            if agent._wt_pending:
-                agent.discard()
-            home.cleanup()

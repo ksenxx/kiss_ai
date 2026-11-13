@@ -97,6 +97,8 @@ class TestRunningWorktreeReplay(unittest.TestCase):
 
     def test_deferred_viewer_tab_learns_the_running_tasks_worktree(self) -> None:
         wt_work_dir = self._create_worktree()
+        # A ``ready`` defers the tabs of its registry snapshot.
+        self.server._registry_update_tab("tab-v", chat_id=self.chat_id, create=True)
         self._resume("tab-v", deferred=True, replayConnId="conn-1")
         self.assertIn("tab-v", self.printer._fanout_targets(self.state.task_id))
         self.assertEqual(self.printer.worktree_dir_for_tab("tab-v"), wt_work_dir)

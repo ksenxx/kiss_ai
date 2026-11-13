@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 
+from kiss.agents.sorcar import git_worktree
 from kiss.agents.sorcar.git_worktree import (
     COMMIT_MESSAGE_DIFF_LIMIT_BYTES,
     GitWorktreeOps,
@@ -116,13 +117,6 @@ def test_huge_diff_is_capped_and_summarised(repo: Path) -> None:
     assert text.count("\n+result line") < 60_000
 
 
-def test_custom_cap_is_honoured(repo: Path) -> None:
-    _stage_big_file(repo, "results.txt", 5_000)
-    text = GitWorktreeOps.staged_diff(repo, max_bytes=10_000)
-    assert text.startswith("[Patch truncated to its first 10,000 bytes;")
-    assert len(text.encode()) < 20_000
-
-
 def test_stdout_head_without_newline_keeps_the_bytes(repo: Path) -> None:
     """A cap smaller than the first line cannot cut back to a line
     boundary and returns the raw head."""
@@ -136,7 +130,10 @@ def test_stdout_head_without_newline_keeps_the_bytes(repo: Path) -> None:
 
 
 def test_stdout_head_watchdog_kills_a_hung_git_and_reports_truncation(
-    repo: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    repo: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A git that stops producing output is killed at the timeout and
     its partial output is flagged incomplete, never returned as whole."""
@@ -162,15 +159,16 @@ def test_stdout_head_watchdog_kills_a_hung_git_and_reports_truncation(
         cwd=str(repo), check=True, capture_output=True,
         env={**os.environ, "HANG_WARM_UP": "1"},
     )
+    monkeypatch.setattr(git_worktree, "_GIT_TIMEOUT_SECONDS", 0.5)
     started = time.monotonic()
     with caplog.at_level(logging.WARNING, logger="kiss.agents.sorcar.git_worktree"):
         text, truncated = _git_stdout_head(
-            "-c", external, "diff", "--cached", cwd=repo, max_bytes=10_000, timeout=0.5,
+            "-c", external, "diff", "--cached", cwd=repo, max_bytes=10_000,
         )
     assert time.monotonic() - started < 10
     assert truncated is True
     assert text == "PARTIAL-LINE\nmore"
-    # The message names the timeout that fired, not the module default.
+    # The message names the bound in force for the call, read when it ran.
     assert any("timed out after 0.5s" in r.getMessage() for r in caplog.records), [
         r.getMessage() for r in caplog.records
     ]
@@ -189,13 +187,13 @@ while True:
 
 
 def _read_head_in_thread(
-    args: tuple[str, ...], cwd: Path, max_bytes: int, timeout: float,
+    args: tuple[str, ...], cwd: Path, max_bytes: int,
 ) -> tuple[threading.Thread, list[tuple[str, bool]]]:
     """Start ``_git_stdout_head`` on a daemon thread; its result lands in the list."""
     results: list[tuple[str, bool]] = []
 
     def run() -> None:
-        results.append(_git_stdout_head(*args, cwd=cwd, max_bytes=max_bytes, timeout=timeout))
+        results.append(_git_stdout_head(*args, cwd=cwd, max_bytes=max_bytes))
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
@@ -204,7 +202,7 @@ def _read_head_in_thread(
 
 @pytest.mark.skipif(IS_WINDOWS, reason="a Job Object kills every descendant on Windows")
 def test_stdout_head_gives_up_on_an_escaped_child_that_keeps_writing(
-    repo: Path, tmp_path: Path,
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A descendant git left in its own session that keeps the pipe busy
     cannot hold the reader past the grace after the watchdog: the give-up
@@ -213,10 +211,9 @@ def test_stdout_head_gives_up_on_an_escaped_child_that_keeps_writing(
     spew.write_text(_SPEWING_CHILD, encoding="utf-8")
     pid_file = tmp_path / "spew.pid"
     alias = f'alias.spew=!"{sys.executable}" "{spew}" "{pid_file}"'
+    monkeypatch.setattr(git_worktree, "_GIT_TIMEOUT_SECONDS", 1.0)
     started = time.monotonic()
-    thread, results = _read_head_in_thread(
-        ("-c", alias, "spew"), repo, max_bytes=1_000_000, timeout=1.0,
-    )
+    thread, results = _read_head_in_thread(("-c", alias, "spew"), repo, max_bytes=1_000_000)
     limit = 1.0 + PIPE_GIVE_UP_SECONDS + 3.0
     thread.join(limit)
     try:

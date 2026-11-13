@@ -8,6 +8,7 @@
 import json
 import logging
 import re
+import sys
 import threading
 import time
 from abc import abstractmethod
@@ -17,8 +18,17 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 
 import httpx
+
+# The OpenAI SDK takes ``sys.modules["httpx2"]`` as ready whenever it is
+# there (``openai._httpx2``, on every client construction and request).
+# Its first import running on another thread (the Anthropic SDK's, on the
+# daemon's prewarm thread) failed an OpenAI task with "partially
+# initialized module 'httpx2'"; imported with the SDK, it is whole before
+# any client exists.
+import httpx2  # noqa: F401
 from openai import APIConnectionError, APITimeoutError, BadRequestError, OpenAI
 from openai.resources.chat.completions import Completions
+from openai.types.chat import ChatCompletionMessage
 
 if TYPE_CHECKING:  # pragma: no cover – import cycle avoided at runtime
     from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
@@ -48,7 +58,6 @@ from kiss.core.models.model import (
 from kiss.core.models.stream_abort import (
     CONNECT_TIMEOUT,
     STALL_MARKER,
-    RequestAbortWatchdog,
     make_pool_abortable,
     shutdown_pool_sockets,
     stop_error,
@@ -84,9 +93,13 @@ _RETRY_BACKOFF_SECONDS = 0.5
 # per request.
 _CLIENT_TIMEOUT = 1800.0
 
-# How often ``_blocking_request`` looks at the stop event while its worker
+# How often ``_await_call`` looks at the stop event while its worker
 # thread waits on the provider; the stream watchdog's stop poll rate.
 _BLOCKING_STOP_POLL_SECONDS = 0.1
+
+# What a caller that gave a stream's opening call up stores as its
+# response, so that the worker closes a stream that opens after all.
+_ABANDONED = object()
 
 # Chat Completions ``finish_reason`` values meaning the provider cut the
 # completion short, with the cause shown to the user.  ``error`` is how a
@@ -100,7 +113,7 @@ _CUT_SHORT_FINISH_REASONS = {
 }
 
 
-def _terminal_error(reason: str, output_cap_reason: str, message: str) -> KISSError:
+def _terminal_error(reason: str, output_cap_reason: str, message: str, text: str = "") -> KISSError:
     """Return the error for a completion the provider ended short of success.
 
     The one classification both transports share; each keeps its own
@@ -116,6 +129,8 @@ def _terminal_error(reason: str, output_cap_reason: str, message: str) -> KISSEr
             budget on this transport (``"length"`` /
             ``"max_output_tokens"``).
         message: The error message.
+        text: The text the completion held when it ended; the typed
+            errors carry it.
 
     Returns:
         :class:`OutputCapError` (carrying *reason* as ``stop_reason``)
@@ -125,14 +140,40 @@ def _terminal_error(reason: str, output_cap_reason: str, message: str) -> KISSEr
         plain :class:`KISSError`.
     """
     if reason == output_cap_reason:
-        return OutputCapError(message, stop_reason=reason)
+        return OutputCapError(message, stop_reason=reason, text=text)
     if reason == "content_filter":
-        return ContentFilterError(message)
+        return ContentFilterError(message, text=text)
     return KISSError(message)
 
 
+def _well_formed(value: Any) -> Any:
+    """Return a copy of request data whose text is well-formed Unicode.
+
+    ``json.loads`` turns a ``"\\ud83d"`` escape (a page's truncated emoji,
+    a model's own argument echoed back by its tool) into a lone
+    surrogate, which no UTF-8 request body can carry.  A pair split into
+    two code points is joined; a half without its partner becomes U+FFFD.
+
+    Args:
+        value: A request argument: text, or dicts and lists holding some.
+
+    Returns:
+        The repaired copy; a value of any other type is returned as is.
+    """
+    if isinstance(value, str):
+        return value.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+    if isinstance(value, dict):
+        return {_well_formed(key): _well_formed(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_well_formed(item) for item in value]
+    return value
+
+
 def _call_into(outcome: dict[str, Any], create: Callable[..., Any], kwargs: dict[str, Any]) -> None:
-    """Worker-thread body of ``_blocking_request``: store ``create``'s result or error in *outcome*.
+    """Worker-thread body of ``_await_call``: store ``create``'s result or error in *outcome*.
+
+    A result whose caller stored :data:`_ABANDONED` meanwhile is a stream
+    nobody will read: it is closed here.
 
     Args:
         outcome: Receives ``"response"`` on success, else ``"error"``.
@@ -140,9 +181,79 @@ def _call_into(outcome: dict[str, Any], create: Callable[..., Any], kwargs: dict
         kwargs: Its keyword arguments.
     """
     try:
-        outcome["response"] = create(**kwargs)
+        try:
+            response = create(**kwargs)
+        except UnicodeEncodeError:
+            # The SDK could not encode the request body (nothing was
+            # sent): text of the conversation holds a lone surrogate, and
+            # would fail every later request the same way.
+            response = create(**_well_formed(kwargs))
+        if outcome.setdefault("response", response) is _ABANDONED:
+            response.close()
     except BaseException as error:  # noqa: BLE001 - re-raised on the requesting thread
         outcome["error"] = error
+
+
+def _await_call(
+    outcome: dict[str, Any],
+    create: Callable[..., Any],
+    kwargs: dict[str, Any],
+    deadline: float,
+    abort: Callable[[], object],
+    name: str,
+) -> None:
+    """Run ``create(**kwargs)`` on a worker thread until it answers, a Stop or *deadline*.
+
+    A thread blocked in the SDK call cannot notice a Stop, and shutting
+    the request's socket down wakes only a call waiting on it, not one
+    asleep before the SDK's own retry (a ``Retry-After`` of up to a
+    minute).  So the call runs on a worker thread while this one watches
+    the stop event (at the watchdog's poll rate) and the deadline.  A call
+    given up is torn down with *abort*, which wakes a worker parked on
+    the socket; one the abort cannot reach is abandoned (a daemon
+    thread) until the SDK returns.
+
+    Args:
+        outcome: Receives ``"response"`` or ``"error"`` (:func:`_call_into`);
+            still empty on return when the call was given up.
+        create: The SDK call to run.
+        kwargs: Its keyword arguments.
+        deadline: The ``time.monotonic()`` instant to give the call up at.
+        abort: Tears down the client of a call given up.
+        name: The worker thread's name.
+    """
+    stop_event = stop_signal.get_thread_stop_event() or threading.Event()
+    worker = threading.Thread(
+        target=_call_into, args=(outcome, create, kwargs), name=name, daemon=True
+    )
+    try:
+        worker.start()
+        while worker.is_alive():
+            if stop_event.is_set():
+                # A reply landing this very moment is billed too: give
+                # the worker one poll interval to store it.
+                worker.join(_BLOCKING_STOP_POLL_SECONDS)
+                break
+            if time.monotonic() >= deadline:
+                break
+            worker.join(_BLOCKING_STOP_POLL_SECONDS)  # returns with the answer at once
+    finally:
+        # Also on a KeyboardInterrupt raised into this thread (the
+        # runner's forced stop), even one landing inside start()
+        # before the worker reports itself alive (is_alive() is
+        # still False then, yet the worker runs): a worker that has
+        # not answered is torn down, failing at once on the closed
+        # client if it had not sent the request yet.
+        if not outcome:
+            abort()
+            # The shutdown wakes the worker; one that already had the
+            # whole reply in hand stores it now, so wait a poll
+            # interval before the caller looks at the outcome: a reply
+            # that landed between the check and the abort was billed and
+            # must not be dropped.  A worker that has not started
+            # yet cannot be joined and has nothing to store.
+            if worker.is_alive():
+                worker.join(_BLOCKING_STOP_POLL_SECONDS)
 
 
 # Per-request timeout for embeddings calls.  The client's own timeout is
@@ -203,6 +314,25 @@ def _openai_fast_multiplier(model_name: str) -> float:
         if bare.startswith(prefix):
             return factor
     return _OPENAI_FAST_MULTIPLIER
+
+
+def _usd_amount(value: Any) -> float | None:
+    """Return *value* as a USD amount, or ``None`` when it is not one.
+
+    A reported cost is added to the run's spend, where ``NaN`` makes
+    every later budget comparison false and a negative figure refunds
+    the run; an integer beyond the float range does not convert at all.
+
+    Args:
+        value: A cost field of a response's ``usage``.
+
+    Returns:
+        The amount when *value* is a finite, non-negative number (a
+        boolean is not), else ``None``.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value) if 0 <= value <= sys.float_info.max else None
 
 
 def _provider_model_name(model_name: str) -> str:
@@ -452,6 +582,16 @@ def _delta_reasoning_text(delta: Any) -> str | None:
     return "".join(texts) or None
 
 
+def _message_text(message: ChatCompletionMessage) -> str:
+    """Return the text of a non-streamed chat completion *message*.
+
+    A model that declines answers with ``refusal`` and null ``content``:
+    the refusal is then the text of the turn, as the Responses transport
+    reads a ``refusal`` part.
+    """
+    return message.content or message.refusal or ""
+
+
 def _anthropic_media_block_to_openai_part(block: dict[str, Any]) -> dict[str, Any] | None:
     """Convert an Anthropic ``image``/``document`` block to an OpenAI content part.
 
@@ -634,6 +774,48 @@ def _function_call_item(
     return item
 
 
+def _streamed_slot(
+    slots: dict[int, dict[str, str]], index: int, blank: dict[str, str]
+) -> dict[str, str]:
+    """Return the slot of *slots* at *index*, made the last entry of the dict.
+
+    The last entry is thereby the call being streamed, whatever its
+    index: a fragment that names no call continues it.
+
+    Args:
+        slots: Streamed tool-call slots by index.  Mutated in place.
+        index: The index of the call an event belongs to.
+        blank: The slot to insert when *index* holds none.
+
+    Returns:
+        The slot now at *index*.
+    """
+    slot = slots[index] = slots.pop(index, blank)
+    return slot
+
+
+def _indexless_slot(accum: dict[int, dict[str, str]], call_id: str | None) -> int:
+    """Return the accumulator index of a ``tool_calls`` delta sent without ``index``.
+
+    A provider that omits ``index`` still opens each call with its id.
+
+    Args:
+        accum: The per-index accumulator.
+        call_id: The delta's ``id`` (empty or ``None`` on a continuation).
+
+    Returns:
+        The slot already holding *call_id*, the next free index for an
+        id not seen yet, and for a delta without id the last entry (the
+        call being streamed, see :func:`_streamed_slot`).
+    """
+    if not call_id:
+        return next(reversed(accum), 0)
+    for index, slot in accum.items():
+        if slot["id"] == call_id:
+            return index
+    return max(accum, default=-1) + 1
+
+
 def _accumulate_tool_call_deltas(
     accum: dict[int, dict[str, str]], tool_call_deltas: list[Any]
 ) -> None:
@@ -645,7 +827,10 @@ def _accumulate_tool_call_deltas(
         tool_call_deltas: The ``delta.tool_calls`` entries of one chunk.
     """
     for tc_delta in tool_call_deltas:
-        slot = accum.setdefault(tc_delta.index, {"id": "", "name": "", "arguments": ""})
+        index = tc_delta.index
+        if index is None:
+            index = _indexless_slot(accum, tc_delta.id)
+        slot = _streamed_slot(accum, index, {"id": "", "name": "", "arguments": ""})
         if tc_delta.id:
             slot["id"] = tc_delta.id
         if tc_delta.function:
@@ -679,9 +864,8 @@ class OpenAICompatibleBase(Model):
         Resolves the provider model name (thinking-alias and
         ``openrouter/`` prefix stripped) and applies the catalog's default
         thinking level: when ``MODEL_INFO`` declares one for this model
-        and the caller set neither ``reasoning_effort`` nor a native
-        ``reasoning.effort``, ``reasoning_effort`` is defaulted on a copy
-        of ``model_config``.
+        and the caller asked for no effort (:meth:`_asks_for_effort`),
+        ``reasoning_effort`` is defaulted on a copy of ``model_config``.
 
         Args:
             model_name: The KISS catalog model name.
@@ -701,15 +885,22 @@ class OpenAICompatibleBase(Model):
         self.api_key = api_key
         self._api_model_name = _provider_model_name(model_name)
         thinking_level = _model_thinking_level(self.model_name)
-        reasoning_cfg = self.model_config.get("reasoning")
-        has_native_effort = isinstance(reasoning_cfg, dict) and "effort" in reasoning_cfg
-        if (
-            thinking_level is not None
-            and "reasoning_effort" not in self.model_config
-            and not has_native_effort
-        ):
+        if thinking_level is not None and not self._asks_for_effort():
             self.model_config = dict(self.model_config)
             self.model_config["reasoning_effort"] = thinking_level
+
+    def _asks_for_effort(self) -> bool:
+        """Whether ``model_config`` names a reasoning effort, in either spelling.
+
+        ``reasoning_effort`` is the Chat Completions parameter and the
+        framework's portable key, ``reasoning.effort`` the Responses
+        API's own; each transport sends the one its API takes, and a
+        level under the portable key outranks the other on both.
+        """
+        reasoning = self.model_config.get("reasoning")
+        return "reasoning_effort" in self.model_config or (
+            isinstance(reasoning, dict) and "effort" in reasoning
+        )
 
     def __str__(self) -> str:
         """Return a debug string showing the class, model and endpoint."""
@@ -799,17 +990,16 @@ class OpenAICompatibleBase(Model):
         only, and until the headers are complete there is no response
         whose socket the stream watchdog could shut down: a peer
         trickling header bytes would hold the turn for good, past any
-        Stop.  So the call runs under a :class:`RequestAbortWatchdog`
-        that shuts the pool's sockets down at the thread's Stop or at the
-        request's deadline (:meth:`_request_deadline`: the read timeout
-        for every attempt the SDK may make, so its one silent retry of a
-        header timeout is kept).  The pool is then dead for good
-        (:func:`make_pool_abortable`), so the client is retired
+        Stop.  So the call runs on a worker thread (:func:`_await_call`)
+        and is given up at the thread's Stop or at the request's
+        deadline (:meth:`_request_deadline`: the read timeout for every
+        attempt the SDK may make, so its one silent retry of a header
+        timeout is kept).  The client is then retired
         (:meth:`_abort_pending_request`) for the next turn to build a
-        fresh one, and the cut request's connection error is reported as
-        the Stop, or as the stall the stream watchdog would have raised.
-        Leaving the block disarms the watchdog, so the stream handed back
-        runs under the event watchdog only.
+        fresh one, and the cut request is reported as the Stop, or as
+        the stall the stream watchdog would have raised.  A stream that
+        opens after the call was given up is closed by the worker; the
+        one handed back runs under the event watchdog only.
 
         Args:
             create: The SDK call that opens the stream.
@@ -822,20 +1012,29 @@ class OpenAICompatibleBase(Model):
             KeyboardInterrupt: The user pressed Stop before the headers came.
             TimeoutError: The headers were not complete by the deadline.
         """
-        seconds = self._request_deadline(kwargs)
-        due = time.monotonic() + seconds
+        due = time.monotonic() + self._request_deadline(kwargs)
+        outcome: dict[str, Any] = {}
         try:
-            with RequestAbortWatchdog(
-                self.client._client, seconds, "openai-stream-open-abort-watchdog"
-            ):
-                return create(**kwargs)
-        except BaseException as err:
-            if not (stop_signal.stop_requested() or time.monotonic() >= due):
-                raise
+            _await_call(
+                outcome, create, kwargs, due, self._abort_pending_request, "model-stream-open"
+            )
+        except BaseException:
+            # A forced Stop: nobody reads a stream that just opened, so it
+            # goes down with its client.
             self._abort_pending_request()
-            if isinstance(err, APIConnectionError):
-                raise stop_or_stall_error(self._stream_stall_timeout) from err
             raise
+        finally:
+            # On every way out: a stream that opens from here on is the
+            # worker's to close.
+            stream = outcome.setdefault("response", _ABANDONED)
+        if stream is not _ABANDONED:
+            return stream
+        err = outcome.get("error")
+        if err is None or stop_signal.stop_requested() or time.monotonic() >= due:
+            self._abort_pending_request()
+            if err is None or isinstance(err, APIConnectionError):
+                raise stop_or_stall_error(self._stream_stall_timeout) from err
+        raise err
 
     def _blocking_request(self, create: Callable[..., Any], kwargs: dict[str, Any]) -> Any:
         """Issue one non-streamed request, aborting it as soon as the user presses Stop.
@@ -845,8 +1044,8 @@ class OpenAICompatibleBase(Model):
         minutes, so no stall clock applies.  But a thread blocked in the
         SDK call cannot notice a Stop, and no stream watchdog can reach a
         request that has no response yet.  So the call runs on a worker
-        thread while this one watches the stop event (at the watchdog's
-        poll rate).  On a Stop the pending socket is shut down, which
+        thread while this one watches the stop event
+        (:func:`_await_call`).  On a Stop the pending socket is shut down, which
         wakes the worker, and the client is closed and dropped so the
         SDK's retry of the woken call fails at once instead of re-sending
         the stopped request and the next turn builds a fresh pool.  A
@@ -873,7 +1072,8 @@ class OpenAICompatibleBase(Model):
         Args:
             create: The SDK call (``client.chat.completions.create``,
                 ``client.responses.create`` or an adaptive wrapper of one).
-            kwargs: The request kwargs.
+            kwargs: The request kwargs; a configured ``stream_options``
+                is dropped here, since the request opens no stream.
 
         Returns:
             The SDK response object.
@@ -882,47 +1082,26 @@ class OpenAICompatibleBase(Model):
             KeyboardInterrupt: The user pressed Stop during the request.
             TimeoutError: No reply arrived by the request's deadline.
         """
-        stop_event = stop_signal.get_thread_stop_event() or threading.Event()
+        # OpenAI answers ``stream_options`` without ``stream`` with HTTP 400.
+        kwargs.pop("stream_options", None)
         seconds = self._request_deadline(kwargs)
         deadline = time.monotonic() + seconds
         outcome: dict[str, Any] = {}
-        worker = threading.Thread(
-            target=_call_into,
-            args=(outcome, create, kwargs),
-            name="model-blocking-request",
-            daemon=True,
-        )
         try:
-            worker.start()
-            while worker.is_alive():
-                if stop_event.wait(_BLOCKING_STOP_POLL_SECONDS):
-                    # A reply landing this very moment is billed too: give
-                    # the worker one poll interval to store it.
-                    worker.join(_BLOCKING_STOP_POLL_SECONDS)
-                    break
-                if time.monotonic() >= deadline:
-                    break
+            _await_call(
+                outcome,
+                create,
+                kwargs,
+                deadline,
+                self._abort_pending_request,
+                "model-blocking-request",
+            )
         finally:
-            # Also on a KeyboardInterrupt raised into this thread (the
-            # runner's forced stop), even one landing inside start()
-            # before the worker reports itself alive (is_alive() is
-            # still False then, yet the worker runs): a worker that has
-            # not answered is torn down, failing at once on the closed
-            # client if it had not sent the request yet, and a reply it
-            # already stored is still billed.
-            if not outcome:
-                self._abort_pending_request()
-                # The shutdown wakes the worker; one that already had the
-                # whole reply in hand stores it now, so wait a poll
-                # interval before looking at the outcome: a reply that
-                # landed between the check and the abort was billed and
-                # must not be dropped.  A worker that has not started
-                # yet cannot be joined and has nothing to store.
-                if worker.is_alive():
-                    worker.join(_BLOCKING_STOP_POLL_SECONDS)
+            # Also on a KeyboardInterrupt raised into this thread: a
+            # reply the worker already stored is still billed.
             if "response" in outcome:
                 self._rejected_response = outcome["response"]
-        if stop_event.is_set():
+        if stop_signal.stop_requested():
             raise stop_error()
         if "response" not in outcome and time.monotonic() >= deadline:
             raise TimeoutError(
@@ -1036,23 +1215,20 @@ class OpenAICompatibleBase(Model):
 
         The request names the model by its provider id
         (:func:`_provider_model_name`), as the chat and Responses requests
-        do.  Its connect phase is capped at ``CONNECT_TIMEOUT``: the call
-        runs inline on the task thread, where a Stop arrives only as an
-        injected ``KeyboardInterrupt``, and that cannot land while the
-        thread waits in ``connect()``.  The client's one silent retry
-        (:data:`_MAX_RETRIES`) may send the request twice, so a silent
-        endpoint is reported after up to twice the timeout.  The timeout
-        also bounds the whole request (:class:`RequestAbortWatchdog`,
-        which cuts it at the thread's Stop as well): the SDK's own
+        do.  Its connect phase is capped at ``CONNECT_TIMEOUT``.  The
+        timeout also bounds the whole request (:func:`_await_call`,
+        which gives it up at the thread's Stop as well): the SDK's own
         timeout bounds the silence between two reads only, which a peer
         sending a byte before each read resets for as long as it likes,
-        holding a memory-search worker that process exit joins.  A
-        configured ``timeout`` of ``None`` (no SDK timeout) leaves the
-        watchdog's bound at the default.
+        and its sleep before the one silent retry (:data:`_MAX_RETRIES`)
+        follows the provider's ``Retry-After``; either would hold a
+        memory-search worker that process exit joins.  A configured
+        ``timeout`` of ``None`` (no SDK timeout) leaves the bound at the
+        default.
 
         The request goes through a client of its own, closed with the
-        call, not the shared ``self.client``: the watchdog's cut shuts
-        down every socket of the pool it watches, and that pool
+        call, not the shared ``self.client``: the cut shuts down every
+        socket of the client's pool, and that pool
         (:func:`make_pool_abortable`) then refuses every later
         connection, so a shared client would be dead for good after one
         cut request, and the cut would reach the concurrent requests of
@@ -1077,12 +1253,23 @@ class OpenAICompatibleBase(Model):
         read = timeout.read if isinstance(timeout, httpx.Timeout) else None
         deadline = read if read is not None else EMBEDDINGS_TIMEOUT
         client = self._build_client()
+        outcome: dict[str, Any] = {}
         try:
-            with RequestAbortWatchdog(client._client, deadline, "embeddings-abort-watchdog"):
-                response = client.embeddings.create(
-                    model=_provider_model_name(model_to_use), input=text_or_texts, timeout=timeout
-                )
-            ordered = sorted(response.data, key=lambda item: item.index)
+            _await_call(
+                outcome,
+                client.embeddings.create,
+                {
+                    "model": _provider_model_name(model_to_use),
+                    "input": text_or_texts,
+                    "timeout": timeout,
+                },
+                time.monotonic() + deadline,
+                partial(shutdown_pool_sockets, client._client),
+                "model-embeddings-request",
+            )
+            if "response" not in outcome:
+                raise outcome.get("error") or TimeoutError(f"no reply within {deadline:g}s")
+            ordered = sorted(outcome["response"].data, key=lambda item: item.index)
             expected = 1 if isinstance(text_or_texts, str) else len(text_or_texts)
             if [item.index for item in ordered] != list(range(expected)):
                 raise ValueError(
@@ -1091,7 +1278,7 @@ class OpenAICompatibleBase(Model):
                 )
             return [list(item.embedding) for item in ordered]
         except Exception as e:
-            if stop_signal.stop_requested():  # the watchdog cut the request
+            if stop_signal.stop_requested():  # the request was given up at the Stop
                 raise stop_error() from e
             logger.debug("Exception caught", exc_info=True)
             raise KISSError(f"Embedding generation failed for model {model_to_use}: {e}") from e
@@ -1300,26 +1487,20 @@ class OpenAICompatibleBase(Model):
             ``cost`` (plus ``upstream_inference_cost`` when
             ``usage.is_byok`` is true) for a model served by OpenRouter
             (an ``openrouter/`` name or a custom endpoint whose base URL
-            is openrouter.ai) whose response carries a numeric
-            ``usage.cost``, else ``None`` so the agent falls back to
-            ``calculate_cost``.
+            is openrouter.ai) whose response carries a ``usage.cost``
+            that is an amount (:func:`_usd_amount`, as is the sum), else
+            ``None`` so the agent falls back to ``calculate_cost``.
         """
         if not self.model_name.startswith("openrouter/") and not self._base_url_is_openrouter():
             return None
         usage = _get_attr_or_key(response, "usage")
-        cost = _get_attr_or_key(usage, "cost")
-        if isinstance(cost, bool) or not isinstance(cost, int | float):
-            return None
+        cost = _usd_amount(_get_attr_or_key(usage, "cost"))
+        if cost is None or _get_attr_or_key(usage, "is_byok") is not True:
+            return cost
         upstream = _get_attr_or_key(
             _get_attr_or_key(usage, "cost_details"), "upstream_inference_cost"
         )
-        if (
-            _get_attr_or_key(usage, "is_byok") is not True
-            or isinstance(upstream, bool)
-            or not isinstance(upstream, int | float)
-        ):
-            upstream = 0.0
-        return float(cost) + float(upstream)
+        return _usd_amount(cost + (_usd_amount(upstream) or 0.0))
 
     def _apply_cache_control_for_openrouter_anthropic(self, kwargs: dict[str, Any]) -> None:
         """Add top-level cache_control for OpenRouter Anthropic prompt caching.
@@ -1647,23 +1828,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         return OpenAICompatibleModel._build_tool_call_lists(entries)
 
     @staticmethod
-    def _finalize_stream_response(response: Any | None, last_chunk: Any | None) -> Any:
-        """Pick the best response object from a stream.
-
-        Args:
-            response: The chunk containing usage info, if seen.
-            last_chunk: The last chunk seen in the stream.
-
-        Returns:
-            A response-like object with usage info when available.
-        """
-        if response is not None:
-            return response
-        if last_chunk is not None:
-            return last_chunk
-        raise KISSError("Streaming response was empty.")
-
-    @staticmethod
     def _extract_output_audio(response: Any) -> Any | None:
         """Return the output-audio object of a chat completion, if any.
 
@@ -1704,7 +1868,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             return ""
         return str(_get_attr_or_key(err, "message") or err)
 
-    def _raise_for_finish_reason(self, choice: Any, response: Any) -> None:
+    def _raise_for_finish_reason(self, choice: Any, response: Any, text: str = "") -> None:
         """Reject a completion the provider cut short instead of using its partial output.
 
         A :data:`_CUT_SHORT_FINISH_REASONS` value means the output stopped
@@ -1725,6 +1889,8 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             response: The response (or the stream's usage chunk) the
                 choice came with; a gateway may put the upstream error
                 there instead of on the choice.
+            text: The text a stream delivered before it ended; a
+                non-streamed choice carries its own.
 
         Raises:
             KISSError: When the provider cut the completion short:
@@ -1743,7 +1909,8 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             f"{cause}{f' ({error})' if error else ''}, so its text and any tool-call "
             f"arguments are incomplete.{advice}"
         )
-        raise _terminal_error(finish_reason, "length", message)
+        text = text or getattr(getattr(choice, "message", None), "content", None) or ""
+        raise _terminal_error(finish_reason, "length", message, text)
 
     def _raise_for_failed_completion(self, response: Any) -> None:
         """Reject a non-streamed response that carries no usable choice.
@@ -1788,7 +1955,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
 
         Args:
             kwargs: Fully built request arguments; ``stream`` and
-                ``stream_options`` are set here.
+                ``stream_options.include_usage`` are set here.
             adaptive: Send through :meth:`_create_chat_completion_adaptive`
                 (which may retry once without ``reasoning_effort``)
                 instead of a plain create.
@@ -1799,17 +1966,22 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             ``finish_reason`` (:meth:`_consume_chat_stream` refuses a
             stream that ended without one).
         """
-        kwargs["stream_options"] = {"include_usage": True}
+        # The usage chunk is the stream's billing record, so it is asked
+        # for whatever else the caller's ``stream_options`` hold.
+        configured = kwargs.get("stream_options")
+        kwargs["stream_options"] = {
+            **(configured if isinstance(configured, dict) else {}),
+            "include_usage": True,
+        }
         if adaptive:
             create: Callable[..., Any] = partial(self._create_chat_completion_adaptive, self.client)
             watchdog_name = "openai-tools-stream-abort-watchdog"
         else:
             create = self.client.chat.completions.create
             watchdog_name = "openai-stream-abort-watchdog"
-        content, tool_calls_accum, response, last_chunk, finish_choice = self._stream_request(
+        content, tool_calls_accum, response, finish_choice = self._stream_request(
             create, kwargs, partial(self._consume_chat_stream, watchdog_name=watchdog_name)
         )
-        response = self._finalize_stream_response(response, last_chunk)
         # Billed: kept for ``take_partial_usage_response`` until the public
         # generation method hands the response to its caller.
         self._rejected_response = response
@@ -1817,7 +1989,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
 
     def _consume_chat_stream(
         self, stream: Any, watchdog_name: str
-    ) -> tuple[str, dict[int, dict[str, str]], Any, Any, Any]:
+    ) -> tuple[str, dict[int, dict[str, str]], Any, Any]:
         """Read one open chat-completion stream, driving the token/thinking callbacks.
 
         ``stop_aware_events`` (instead of a bare ``for chunk in ...``)
@@ -1833,10 +2005,10 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             watchdog_name: Thread name of the abort watchdog.
 
         Returns:
-            ``(content, tool_call_accumulator, usage_chunk, last_chunk,
-            finish_choice)``; ``usage_chunk`` is ``None`` when no chunk
-            carried usage, ``finish_choice`` is the choice that carried
-            the ``finish_reason``.
+            ``(content, tool_call_accumulator, response, finish_choice)``;
+            ``response`` is the last chunk read that carried usage, else
+            the last chunk, ``finish_choice`` the choice that carried the
+            ``finish_reason``.
 
         Raises:
             KISSError: When the stream ended before any choice carried a
@@ -1874,21 +2046,26 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                         if reasoning:
                             self._open_thinking_if_closed()
                             self._invoke_token_callback(reasoning)
-                        if delta.content:
-                            self._close_thinking_if_open()
-                            content += delta.content
-                            self._invoke_token_callback(delta.content)
+                        # A refusal streams in its own field, ``content`` null.
+                        for text in (delta.content, delta.refusal):
+                            if text:
+                                self._close_thinking_if_open()
+                                content += text
+                                self._invoke_token_callback(text)
                         if delta.tool_calls:
                             self._close_thinking_if_open()
                             _accumulate_tool_call_deltas(tool_calls_accum, delta.tool_calls)
-                    if finish_choice is not None and response is not None:
+                    if finish_choice is not None and chunk.usage is not None:
                         # The answer and its billing are both complete;
                         # only ``[DONE]`` can follow.  Waiting for it let
                         # a connection that went silent here trip the
                         # stall watchdog, and the retry billed the
                         # finished turn again.  Leaving the loop closes
                         # the stream (the watched generator's cleanup),
-                        # as v2 does on ``response.completed``.
+                        # as v2 does on ``response.completed``.  The
+                        # usage must be on this chunk: usage sent before
+                        # the finish reason is a running count, and the
+                        # final one may still follow.
                         break
             except (httpx.HTTPError, APIConnectionError) as err:
                 # A transport failure AFTER ``finish_reason`` arrived
@@ -1927,7 +2104,12 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 "Chat Completions stream ended without a finish_reason, so its text "
                 "and any tool-call arguments may be incomplete."
             )
-        return content, tool_calls_accum, response, last_chunk, finish_choice
+        return (
+            content,
+            tool_calls_accum,
+            response if response is not None else last_chunk,
+            finish_choice,
+        )
 
     def _stream_text(self, kwargs: dict[str, Any]) -> tuple[str, Any]:
         """Stream a chat completion, invoking the token callback for each text delta.
@@ -1943,12 +2125,12 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         if self.token_callback is None:
             response = self._blocking_request(self.client.chat.completions.create, kwargs)
             self._raise_for_failed_completion(response)
-            return response.choices[0].message.content or "", response
+            return _message_text(response.choices[0].message), response
 
         content, _accum, response, finish_choice = self._stream_chat_completion(
             kwargs, adaptive=False
         )
-        self._raise_for_finish_reason(finish_choice, response)
+        self._raise_for_finish_reason(finish_choice, response, content)
         return content, response
 
     def _build_chat_kwargs(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1956,9 +2138,12 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
 
         Re-syncs the SDK client with the current endpoint inputs
         (:meth:`_ensure_client`), copies ``model_config`` (dropping keys
-        that are not Chat Completions parameters), attaches the provider
-        model name and ``messages``, and applies OpenRouter Anthropic cache
-        control.
+        that are not Chat Completions parameters, after sending a
+        ``reasoning.effort`` that names a level as ``reasoning_effort``
+        where that key names none: a null one is no setting, as on the
+        Responses transport a tool turn may be delegated to),
+        attaches the provider model name and ``messages``, and applies
+        OpenRouter Anthropic cache control.
 
         Args:
             messages: The normalized messages to send.
@@ -1968,6 +2153,12 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         """
         self._ensure_client()
         kwargs = self._config_request_params()
+        reasoning = kwargs.get("reasoning")
+        if isinstance(reasoning, dict) and reasoning.get("effort") is not None:
+            if kwargs.get("reasoning_effort") is None:
+                kwargs["reasoning_effort"] = reasoning["effort"]
+            if len(reasoning) == 1:
+                del kwargs["reasoning"]  # nothing left that this API would ignore
         kwargs.update({"model": self._api_model_name, "messages": messages})
         return self._finish_request_kwargs(kwargs, _CHAT_REQUEST_PARAMS, "OpenAI Chat Completions")
 
@@ -2039,15 +2230,15 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
 
         tools = self._resolve_openai_tools_schema(function_map, tools_schema)
 
-        if (
-            tools
-            and "reasoning_effort" in self.model_config
-            and self._should_delegate_to_responses()
-        ):
+        if tools and self._asks_for_effort() and self._should_delegate_to_responses():
             return self._generate_with_tools_via_responses(function_map, tools)
 
         kwargs = self._build_chat_kwargs(self._normalized_conversation_checked())
-        kwargs["tools"] = tools or None
+        if tools:
+            kwargs["tools"] = tools
+        else:
+            # No tools is no key: ``"tools": null`` is outside the API's contract.
+            kwargs.pop("tools", None)
 
         if self.token_callback is not None:
             (
@@ -2056,7 +2247,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 response,
                 finish_choice,
             ) = self._stream_chat_completion(kwargs, adaptive=True)
-            self._raise_for_finish_reason(finish_choice, response)
+            self._raise_for_finish_reason(finish_choice, response, content)
             function_calls, raw_tool_calls = self._parse_tool_call_accum(tool_calls_accum)
         else:
             response = self._blocking_request(
@@ -2064,7 +2255,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             )
             self._raise_for_failed_completion(response)
             message = response.choices[0].message
-            content = message.content or ""
+            content = _message_text(message)
             function_calls, raw_tool_calls = self._parse_tool_calls_from_message(message)
 
         self._append_assistant_turn(content, function_calls, raw_tool_calls)
@@ -2449,13 +2640,17 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             rejected = delegate.take_partial_usage_response()
             if rejected is not None:
                 self._rejected_response = rejected
-            # A Stop during the delegate's pending request closed the
-            # SHARED client (_abort_pending_request) and dropped only the
-            # delegate's reference; drop this model's too, or _reuse_client
-            # keeps the closed pool and the next turn fails to send.
+            raise
+        finally:
+            # An abort of the delegate's pending request (a Stop, the
+            # request deadline) closed the SHARED client
+            # (_abort_pending_request) and dropped only the delegate's
+            # reference; drop this model's too, or _reuse_client keeps the
+            # closed pool and every later turn fails to send.  The turn
+            # may still return normally: a reply that landed as the
+            # deadline's abort ran is kept.
             if delegate.client is None:
                 self.client = None
-            raise
 
         # Everything the delegate appended is this turn's native output
         # (message / reasoning / function_call items); only its

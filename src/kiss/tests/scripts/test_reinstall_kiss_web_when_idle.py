@@ -15,16 +15,21 @@ launchd and checks that the worker ran exactly once.
 Every test runs the real script copied into a throwaway checkout whose
 ``install.sh`` and ``scripts/check-kiss-web-active-tasks.py`` are small
 stand-ins driven by files in that checkout (how many probes stay busy, what
-each install run prints), against a throwaway ``$HOME`` whose
-``.kiss/kiss/.venv/bin/python`` is this interpreter.  So nothing installs
-anything, restarts the real daemon or touches the real ``~/.kiss``.  The
+each install run prints), against a throwaway ``$HOME`` whose ``.kiss``
+holds a daemon's endpoint file and whose ``.kiss/kiss/.venv/bin/python``
+is this interpreter.  So nothing installs anything, restarts the real
+daemon or touches the real ``~/.kiss``.  One test runs the real probe
+against a stand-in daemon that reports a task in flight.  The
 Linux launcher branches run on any OS through a ``PATH`` of symlinks to the
 real tools plus stub ``uname`` / ``systemd-run`` / ``setsid`` binaries,
 exactly as the install.sh tests stub ``git`` and ``curl``.
 """
 
+import asyncio
+import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -33,21 +38,30 @@ import time
 import unittest
 from pathlib import Path
 
+from websockets.asyncio.server import ServerConnection
+
 from kiss.tests.conftest import posix_only
+from kiss.tests.local_ws import fake_daemon
 
 pytestmark = posix_only("the helper is a bash script for macOS/Linux daemons")
 
 REPO = Path(__file__).resolve().parents[4]
 SCRIPT = REPO / "scripts" / "reinstall-kiss-web-when-idle.sh"
+PROBE = REPO / "scripts" / "check-kiss-web-active-tasks.py"
 
 # The probe exits 1 (busy) when its 0-based index is listed in ``busy-probes``
-# (or that file says ``all``), else 0 (idle).
+# (or that file says ``all``), else 0 (idle).  Each run appends to
+# ``probe-log`` the endpoint file it was given, the interpreter it ran under
+# and its strictness.
 CHECK_STUB = """\
-import pathlib, sys
+import os, pathlib, sys
 root = pathlib.Path(__file__).resolve().parent.parent
 count = root / "probe-count"
 n = int(count.read_text() or 0)
 count.write_text(str(n + 1))
+with open(root / "probe-log", "a") as log:
+    log.write("\\t".join([os.environ.get("KISS_SORCAR_LOCAL", ""), sys.executable,
+                          os.environ.get("KISS_ACTIVE_TASKS_STRICT", "")]) + "\\n")
 busy = (root / "busy-probes").read_text().split()
 sys.exit(1 if busy == ["all"] or str(n) in busy else 0)
 """
@@ -71,6 +85,12 @@ TOOLS = ["bash", "date", "dirname", "basename", "sed", "id", "mkdir", "grep", "s
          "tr", "env", "head", "tail", "mv", "wc", "cat", "nohup"]
 
 
+async def _busy_daemon(ws: ServerConnection) -> None:
+    """Answer the probe's ``activeTasksQuery`` with one task in flight."""
+    await ws.recv()
+    await ws.send(json.dumps({"type": "activeTasksResponse", "count": 1, "tabs": ["t"]}))
+
+
 class ReinstallWhenIdleTest(unittest.TestCase):
     """Run the real helper against a throwaway checkout and ``$HOME``."""
 
@@ -85,9 +105,10 @@ class ReinstallWhenIdleTest(unittest.TestCase):
         install.chmod(0o755)
         (self.checkout / "probe-count").write_text("0")
         self.home = self.root / "home"
-        venv_bin = self.home / ".kiss" / "kiss" / ".venv" / "bin"
-        venv_bin.mkdir(parents=True)
-        (venv_bin / "python").symlink_to(sys.executable)
+        self.kiss_python = self.app_python(self.home / ".kiss", "kiss")
+        # The daemon's endpoint file: the worker asks the daemon of every
+        # state directory that holds one (the stand-in probe never reads it).
+        self.kiss_endpoint = self.endpoint(self.home / ".kiss")
         self.label = f"kiss-reinstall-test-{os.getpid()}-{time.time_ns()}"
         self.script = self.checkout / "scripts" / SCRIPT.name
         self.logdir = self.checkout / "tmp" / "reinstall-kiss-web"
@@ -109,6 +130,25 @@ class ReinstallWhenIdleTest(unittest.TestCase):
         if pidfile.exists():
             subprocess.run(["kill", pidfile.read_text().strip()], capture_output=True, check=False)
         shutil.rmtree(self.root, ignore_errors=True)
+
+    def app_python(self, state_dir, app):
+        """Make this interpreter the python of app *app* in state directory *state_dir*."""
+        python = state_dir / app / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.symlink_to(sys.executable)
+        return python
+
+    def endpoint(self, state_dir):
+        """Create the endpoint file of a daemon in state directory *state_dir*."""
+        path = state_dir / "sorcar-local.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+        return path
+
+    def probe_log(self):
+        """Return ``[endpoint, interpreter, strictness]`` of each run of the stand-in probe."""
+        return [line.split("\t") for line in
+                (self.checkout / "probe-log").read_text().splitlines()]
 
     def arrange(self, busy_probes, outcomes):
         """Set which probes (0-based, or ``"all"``) report busy and what each install run prints."""
@@ -142,7 +182,9 @@ class ReinstallWhenIdleTest(unittest.TestCase):
             "kiss-web has tasks in flight; restart deferred (re-run this script once they finish).",
             "kiss-web is up (1s): http://localhost:8787",
         ])
-        result = self.run_worker()
+        # $KISS_HOME names the daemon's own state directory, as it does in the
+        # shell of a Sorcar task: that daemon is still asked once per poll.
+        result = self.run_worker(KISS_HOME=str(self.home / ".kiss"))
         log = self.log.read_text()
         self.assertEqual(result.returncode, 0, log)
         self.assertEqual(result.stdout + result.stderr, "", "worker must log to its file only")
@@ -165,9 +207,75 @@ class ReinstallWhenIdleTest(unittest.TestCase):
         self.assertIn("done.", self.log.read_text())
         self.assertEqual(self.transcripts(), [f"{self.label}.install-1.log"])
 
+    def test_worker_asks_every_state_directory_through_its_own_app(self):
+        """Each daemon that published an endpoint is asked; one busy answer means busy.
+
+        A white-label brand keeps its daemon's state, and the app whose
+        python has the probe's dependencies, in its own home (``~/.s10s``,
+        app ``~/.s10s/s10s``; ``~/.s10s/kiss`` before the app was named after
+        the home), and ``$KISS_HOME`` names any directory (app ``kiss``).  The
+        worker asked ``~/.kiss`` alone, so on such an install it took a busy
+        daemon for an absent one.
+        """
+        home, elsewhere = self.home, self.root / "opt"
+        brand_python = self.app_python(home / ".s10s", "s10s")
+        legacy_python = self.app_python(home / ".old", "kiss")
+        elsewhere_python = self.app_python(elsewhere, "kiss")
+        bindir = self.root / "python3-bin"
+        bindir.mkdir()
+        (bindir / "python3").symlink_to(sys.executable)
+        (home / ".cache").mkdir()  # no endpoint file: no daemon to ask
+        asked = [
+            [str(self.endpoint(home / ".bare")), str(bindir / "python3"), "1"],
+            [str(self.kiss_endpoint), str(self.kiss_python), "1"],
+            [str(self.endpoint(home / ".old")), str(legacy_python), "1"],
+            [str(self.endpoint(home / ".s10s")), str(brand_python), "1"],
+            [str(self.endpoint(elsewhere)), str(elsewhere_python), "1"],
+        ]
+        # The second daemon asked is busy once: that poll stops there.
+        self.arrange(busy_probes=[1], outcomes=["kiss-web is up (1s): http://localhost:8787"])
+        result = self.run_worker(
+            PATH=f"{bindir}:{os.environ['PATH']}", KISS_HOME=str(elsewhere),
+        )
+        self.assertEqual(result.returncode, 0, self.log.read_text())
+        self.assertEqual(self.probe_log(), asked[:2] + asked * 3)
+        self.assertEqual(self.transcripts(), [f"{self.label}.install-1.log"])
+
+    def test_worker_installs_at_once_when_no_daemon_published_an_endpoint(self):
+        self.kiss_endpoint.unlink()
+        self.arrange(busy_probes="all", outcomes=["kiss-web is up (1s): http://localhost:8787"])
+        result = self.run_worker(KISS_REINSTALL_DEADLINE_SECONDS="5")
+        self.assertEqual(result.returncode, 0, self.log.read_text())
+        self.assertEqual(self.probes(), 0)
+        self.assertEqual(self.transcripts(), [f"{self.label}.install-1.log"])
+
+    async def worker_beside_a_busy_daemon(self, endpoint_file):
+        """Run the worker, with a 2 s deadline, while a daemon at *endpoint_file* has a task."""
+        async with fake_daemon(self.root, _busy_daemon, endpoint_file=endpoint_file):
+            return await asyncio.to_thread(self.run_worker, KISS_REINSTALL_DEADLINE_SECONDS="2")
+
+    def test_worker_waits_for_a_busy_daemon_in_a_brand_home(self):
+        """The real probe, a daemon with a task in ``~/.s10s``: ``install.sh`` must not run."""
+        shutil.copy(PROBE, self.checkout / "scripts" / PROBE.name)
+        self.kiss_endpoint.unlink()
+        # The brand's app python: this interpreter with its packages (a
+        # symlink to it would lose the virtual environment).
+        python = self.home / ".s10s" / "s10s" / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+        python.chmod(0o755)
+        self.arrange(busy_probes=[], outcomes=["kiss-web is up (1s): http://localhost:8787"])
+        result = asyncio.run(
+            self.worker_beside_a_busy_daemon(self.home / ".s10s" / "sorcar-local.json")
+        )
+        log = self.log.read_text()
+        self.assertEqual(result.returncode, 2, log)
+        self.assertIn("deadline reached without an idle window; giving up.", log)
+        self.assertEqual(self.transcripts(), [])
+
     def test_worker_uses_python3_when_the_app_venv_is_absent(self):
         self.arrange(busy_probes=[], outcomes=["kiss-web is up (1s): http://localhost:8787"])
-        (self.home / ".kiss" / "kiss" / ".venv" / "bin" / "python").unlink()
+        self.kiss_python.unlink()
         bindir = self.root / "python3-bin"
         bindir.mkdir()
         (bindir / "python3").symlink_to(sys.executable)
@@ -214,8 +322,9 @@ class ReinstallWhenIdleTest(unittest.TestCase):
             stub.chmod(0o755)
         return str(bindir)
 
-    def run_launcher(self, path):
-        return subprocess.run(["/bin/bash", str(self.script)], env={**self.env, "PATH": path},
+    def run_launcher(self, path, **env):
+        return subprocess.run(["/bin/bash", str(self.script)],
+                              env={**self.env, "PATH": path, **env},
                               capture_output=True, text=True, timeout=60)
 
     def stubs_for(self, os_name, **stubs):
@@ -224,8 +333,13 @@ class ReinstallWhenIdleTest(unittest.TestCase):
 
     def test_linux_launcher_runs_the_worker_in_a_one_shot_transient_unit(self):
         self.arrange(busy_probes=[0], outcomes=["kiss-web is up (1s): http://localhost:8787"])
-        # The stub records its arguments, applies the --setenv entries and
-        # runs the trailing command detached, as systemd-run would.
+        # The caller's daemon keeps its state in $KISS_HOME, which the unit
+        # must be told: it does not inherit the caller's environment.
+        elsewhere = self.root / "opt"
+        self.kiss_endpoint.unlink()
+        asked = [str(self.endpoint(elsewhere)), str(self.app_python(elsewhere, "kiss")), "1"]
+        # The stub records its arguments and runs the trailing command
+        # detached under the --setenv entries alone, as systemd-run would.
         systemd_run = (
             "#!/bin/bash\n"
             f"printf '%s\\n' \"$@\" > '{self.checkout}/systemd-run-args'\n"
@@ -238,29 +352,40 @@ class ReinstallWhenIdleTest(unittest.TestCase):
             "  esac\n"
             "  shift\n"
             "done\n"
-            "nohup env \"${exports[@]}\" \"$@\" </dev/null >/dev/null 2>&1 &\n"
+            "nohup env -i \"${exports[@]}\" \"$@\" </dev/null >/dev/null 2>&1 &\n"
             f"echo $! > '{self.checkout}/worker-pid'\n"
         )
-        result = self.run_launcher(self.stubs_for("Linux", **{"systemd-run": systemd_run}))
+        result = self.run_launcher(
+            self.stubs_for("Linux", **{"systemd-run": systemd_run}), KISS_HOME=str(elsewhere),
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"Detached job {self.label}", result.stdout)
         args = (self.checkout / "systemd-run-args").read_text().splitlines()
         self.assertEqual(args[:3], ["--user", f"--unit={self.label}", "--collect"])
         self.assertIn(f"--setenv=HOME={self.home}", args)
+        self.assertIn(f"--setenv=KISS_HOME={elsewhere}", args)
         self.assertIn(f"--setenv=KISS_REINSTALL_LABEL={self.label}", args)
         self.assertIn("--setenv=KISS_REINSTALL_POLL_SECONDS=0.1", args)
         self.assertEqual(args[-3:], ["/bin/bash", str(self.script), "--worker"])
         self.assertTrue(os.path.isabs(args[-2]), "a transient unit starts in $HOME: absolute path")
         log = self.wait_for_log("done.")
         self.assertEqual(log.count("worker started"), 1)
+        # Busy once, then idle for the three polls the worker wants.
+        self.assertEqual(self.probe_log(), [asked] * 4)
 
     def test_launcher_falls_back_to_setsid_without_launchd_or_systemd(self):
         self.arrange(busy_probes=[], outcomes=["kiss-web is up (1s): http://localhost:8787"])
-        setsid = ("#!/bin/bash\n[ \"$1\" = -f ] && shift\n\"$@\" &\n"
+        setsid = ("#!/bin/bash\n[ \"$1\" = -f ] && shift\n"
+                  f"printf '%s\\n' \"$@\" > '{self.checkout}/setsid-args'\n"
+                  "\"$@\" &\n"
                   f"echo $! > '{self.checkout}/worker-pid'\n")
         result = self.run_launcher(self.stubs_for("Linux", setsid=setsid))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"Detached job {self.label}", result.stdout)
+        # Without a $KISS_HOME of the caller's, the job is given none.
+        args = (self.checkout / "setsid-args").read_text().splitlines()
+        self.assertEqual(args[0], "env")
+        self.assertEqual([arg for arg in args if arg.startswith("KISS_HOME=")], [])
         log = self.wait_for_log("done.")
         self.assertEqual(log.count("worker started"), 1)
 

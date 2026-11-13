@@ -57,15 +57,11 @@ logger = logging.getLogger(__name__)
 class OpenTabOutcome(enum.Enum):
     """Atomic result of :meth:`TabRegistry.open_tab`.
 
-    The three cases are decided in ONE locked section so callers never
+    The outcome is decided in ONE locked section so callers never
     need an unlocked follow-up probe (``has_tab``) to tell "already
     registered" apart from "registry full" — a concurrent ``closeTab``
     between two such calls used to turn a benign re-announce of an
     existing tab into a spurious "Tab limit reached" rejection.
-
-    Truth-value compatibility: only :attr:`OPENED` is truthy, matching
-    the method's previous boolean contract (``True`` exactly when a
-    new tab was appended), so existing boolean callers keep working.
     """
 
     OPENED = "opened"
@@ -81,8 +77,6 @@ class OpenTabOutcome(enum.Enum):
     """The open's ``ack`` token was already decided (a page's transport
     re-sent a batch whose confirmation was lost); nothing changed."""
 
-    def __bool__(self) -> bool:
-        return self is OpenTabOutcome.OPENED
 
 _MAX_TITLE_CHARS = 200
 """Cap stored titles: clients clip for display, the wire stays small."""
@@ -212,7 +206,6 @@ class TabRegistry:
         self._lock = threading.RLock()
         self._tabs: list[dict[str, str]] = []
         self._persist_failed = False
-        self._heal_pending = False
         # In-memory (never persisted) per-tab publication tokens: every
         # ``open_tab`` / ``update_tab`` that touches a tab stamps it
         # with a fresh monotonically increasing generation.  A caller
@@ -238,6 +231,10 @@ class TabRegistry:
         # canonical: a client's list is what it showed before it lost
         # the daemon, and the tabs closed meanwhile must not come back.
         self._seedable = True
+        # The file's text as this instance last wrote it, or as it loaded
+        # it: :meth:`flush` writes when the state no longer matches, be it
+        # after a write that failed or one a task's Stop cut short.
+        self._saved = self._text()
         self._load()
 
     def _load(self) -> None:
@@ -269,10 +266,14 @@ class TabRegistry:
         # non-owner also constructs on the canonical path (the embedded
         # launcher's server builds its ``AgentServer`` before swapping
         # in its private registry), and a load-time write from it would
-        # race the owning daemon.  Remember the pending heal instead;
-        # the owner persists it on its first mutation or, failing that,
-        # at shutdown (:meth:`flush`).
-        self._heal_pending = self._tabs != entries
+        # race the owning daemon.  Remember the pending heal instead
+        # (no state has the empty text); the owner persists it on its
+        # first mutation or, failing that, at shutdown (:meth:`flush`).
+        self._saved = self._text() if self._tabs == entries else ""
+
+    def _text(self) -> str:
+        """The file's content for the current state (caller holds the lock)."""
+        return json.dumps({"tabs": self._tabs, "acks": list(self._decided_acks)}, indent=1)
 
     def _save_locked(self) -> None:
         """Atomically persist the tab list (caller holds the lock).
@@ -284,15 +285,13 @@ class TabRegistry:
         the file.
         """
         self._seedable = False  # mutated: canonical from now on, written or not
+        text = self._text()
         try:
             # The shared unique-temp writer: a fixed ``tabs.json.tmp``
             # let a sibling registry instance (another daemon, a test
             # next to a live daemon) truncate the temp inode this one
             # was about to rename into place, publishing an empty file.
-            atomic_write_text(
-                self._path,
-                json.dumps({"tabs": self._tabs, "acks": list(self._decided_acks)}, indent=1),
-            )
+            atomic_write_text(self._path, text)
         except OSError:
             if not self._persist_failed:
                 logger.error(
@@ -312,7 +311,7 @@ class TabRegistry:
         self._persist_failed = False
         # Every save writes the FULL in-memory state, so any pending
         # load-time heal is on disk now.
-        self._heal_pending = False
+        self._saved = text
 
     def flush(self) -> None:
         """Re-persist the registry if it has unsaved state.
@@ -320,14 +319,15 @@ class TabRegistry:
         Called at daemon shutdown so that (a) tabs mutated while the
         disk was unwritable are not silently lost across a restart and
         (b) entries healed at load time (a sanitized root work dir)
-        reach the disk even when no tab was ever mutated.  A no-op
-        when the file already matches the in-memory state.
+        reach the disk even when no tab was ever mutated, and (c) a
+        mutation whose save a task's Stop cut short is not lost either.
+        A no-op when the file already matches the in-memory state.
         """
         locked_call(self._lock, self._flush_locked)
 
     def _flush_locked(self) -> None:
         """Under ``_lock``: the body of :meth:`flush`."""
-        if self._persist_failed or self._heal_pending:
+        if self._text() != self._saved:
             self._save_locked()
 
     def _bump_generation_locked(self, tab_id: str) -> int:
@@ -539,8 +539,8 @@ class TabRegistry:
 
         Returns:
             The :class:`OpenTabOutcome`, decided atomically under the
-            registry lock: :attr:`~OpenTabOutcome.OPENED` (truthy)
-            when a new tab was appended, :attr:`~OpenTabOutcome.EXISTS`
+            registry lock: :attr:`~OpenTabOutcome.OPENED` when a new
+            tab was appended, :attr:`~OpenTabOutcome.EXISTS`
             when the id is already registered (also returned for a
             blank id — nothing to open, nothing to reject),
             :attr:`~OpenTabOutcome.FULL` when the hard cap refused it,
@@ -626,7 +626,7 @@ class TabRegistry:
     def _reopened_since_locked(self, tab_id: str, token: int) -> bool:
         """Locked body of :meth:`reopened_since` (*tab_id* pre-cleaned)."""
         return (
-            self._generations.get(tab_id, 0) > token
+            self._republished_since_locked(tab_id, token)
             or self._find_locked(tab_id) is not None
         )
 
@@ -823,6 +823,37 @@ class TabRegistry:
         if self._generations.get(tab_id, 0) != generation:
             return False
         changed, _, _ = self._update_tab_locked(tab_id, None, title, None, None, None, False)
+        return changed
+
+    def unpin_task(self, tab_id: str, task_id: str) -> bool:
+        """Clear *tab_id*'s task pin only if it still names *task_id*.
+
+        The conditional twin of a pin-clearing :meth:`update_tab` for
+        a caller that found the pin void (a finished task of a chat
+        that runs, ``AgentServer._unpin_past_of_running_chat``): a tab
+        another surface resumed to another task meanwhile keeps that
+        pin.  The comparison and the update are one atomic operation
+        under the registry lock; an unpin that applies is a
+        publication of its own (it re-stamps the tab).
+
+        Args:
+            tab_id: The shared tab identifier.
+            task_id: The task the pin is expected to name.
+
+        Returns:
+            ``True`` when the tab was pinned to *task_id* and no longer
+            is.
+        """
+        return locked_call(
+            self._lock, self._unpin_task_locked, _clean_str(tab_id), _clean_str(task_id),
+        )
+
+    def _unpin_task_locked(self, tab_id: str, task_id: str) -> bool:
+        """Under ``_lock``: the body of :meth:`unpin_task`."""
+        entry = self._find_locked(tab_id)
+        if entry is None or entry["taskId"] != task_id:
+            return False
+        changed, _, _ = self._update_tab_locked(tab_id, None, None, None, None, "", False)
         return changed
 
     def update_tab(

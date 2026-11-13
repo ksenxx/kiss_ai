@@ -45,9 +45,14 @@ def password_accepted(password: str, stored: str) -> bool:
     constant-time compare).  With none, only the empty password is
     accepted: that keeps a browser on the daemon's own machine working
     before ``install.sh`` ever set a password (the daemon admits no
-    other peer while the password is empty).
+    other peer while the password is empty).  A lone surrogate, which a
+    JSON frame may carry, is compared like any other character rather
+    than raised as a ``UnicodeEncodeError`` past the caller's count of
+    failed attempts.
     """
-    return hmac.compare_digest(password.encode("utf-8"), stored.encode("utf-8"))
+    return hmac.compare_digest(
+        password.encode("utf-8", "surrogatepass"), stored.encode("utf-8", "surrogatepass")
+    )
 
 
 def stored_password() -> str:

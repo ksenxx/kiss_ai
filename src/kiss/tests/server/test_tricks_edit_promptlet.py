@@ -219,10 +219,13 @@ class TestEditMyInjectionTrick(_TricksHome):
         self.assertFalse(self.user_file.exists(), "nothing was seeded or written")
 
     def test_new_body_starting_a_heading_is_rejected(self) -> None:
-        self.assertEqual(
-            tricks.edit_my_injection_trick("First mine.", "Fine line\n## Trick"),
-            "Promptlet must not contain a line starting with '## '",
-        )
+        # Behind a lone CR too: the file is read with universal newlines.
+        for new_text in ("Fine line\n## Trick", "Fine line\r## Trick"):
+            self.assertEqual(
+                tricks.edit_my_injection_trick("First mine.", new_text),
+                "Promptlet must not contain a line starting with '## '",
+                repr(new_text),
+            )
         self.assertEqual(self.user_text(), _USER)
 
     def test_unknown_body_reports_error_without_touching_file(self) -> None:

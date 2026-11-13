@@ -17,6 +17,7 @@ photo silently.
 from __future__ import annotations
 
 import base64
+import logging
 from pathlib import Path
 
 import pytest
@@ -45,7 +46,16 @@ def test_uploaded_photo_is_converted_on_the_way_in(heic_photo: Path) -> None:
     assert attachments[0].data.startswith(_JPEG_SOI)
 
 
-@pytest.mark.parametrize("raw", [[], None, "nonsense", {"a": 1}])
-def test_decode_attachments_without_a_payload(raw: object) -> None:
-    """An absent or malformed field yields no attachments at all."""
-    assert decode_attachments(raw) is None
+@pytest.mark.parametrize(
+    ("raw", "logged"), [([], False), (None, False), ("nonsense", True), ({"a": 1}, True)]
+)
+def test_decode_attachments_without_a_payload(
+    raw: object, logged: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An absent or malformed field yields no attachments; only a malformed one is logged.
+
+    ``None`` is the field of a ``submit`` that carried none.
+    """
+    with caplog.at_level(logging.WARNING, logger="kiss.server.task_runner"):
+        assert decode_attachments(raw) is None
+    assert ("malformed attachments field" in caplog.text) is logged

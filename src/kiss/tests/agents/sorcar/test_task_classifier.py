@@ -51,12 +51,12 @@ from kiss.agents.sorcar.task_classifier import (
     cached_classification,
     classification_enabled,
     classify_task,
-    clear_classification_cache,
     remember_classification,
 )
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
+from kiss.core.kiss_error import BudgetExceededError
 from kiss.server.json_printer import JsonPrinter
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import clear_classification_cache, posix_only
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     IsolatedKissHome,
@@ -393,6 +393,18 @@ def test_malformed_cache_file_is_ignored_and_rewritten(
     cache_file.write_text(json.dumps(["a", "list"]), encoding="utf-8")
     assert cached_classification("x", STANDIN_MODEL) is None
 
+    # JSON nested deeper than the parser's stack (RecursionError, not a
+    # ValueError) is a miss on load and on the merge before a memo, not
+    # a classification that raises into the task's launch.
+    clear_classification_cache()
+    cache_file.write_text('{"deep": ' + "[" * 10_000 + "]" * 10_000 + "}", encoding="utf-8")
+    assert cached_classification("x", STANDIN_MODEL) is None
+    remember_classification("y", STANDIN_MODEL, None, TaskClassification(is_simple=True))
+    assert cached_classification("y", STANDIN_MODEL) == TaskClassification(is_simple=True)
+    assert list(json.loads(cache_file.read_text(encoding="utf-8"))) == [
+        _cache_key("y", STANDIN_MODEL, None),
+    ]
+
     clear_classification_cache()
     cache_file.write_text(
         json.dumps({
@@ -658,19 +670,6 @@ def test_concurrent_processes_keep_every_memo(env: IsolatedKissHome) -> None:
     assert missing == []
 
 
-def test_clear_cache_removes_file_and_memory(env: IsolatedKissHome) -> None:
-    """``clear_classification_cache`` forgets everything, twice is fine."""
-    remember_classification(
-        "t", "m", None, TaskClassification(is_simple=True),
-    )
-    cache_file = env.kiss_home / CLASSIFIER_CACHE_FILENAME
-    assert cache_file.is_file()
-    clear_classification_cache()
-    assert not cache_file.exists()
-    assert cached_classification("t", "m") is None
-    clear_classification_cache()
-
-
 def test_unwritable_cache_dir_keeps_verdict(env: IsolatedKissHome) -> None:
     """A cache that cannot be written only loses the memo.
 
@@ -697,6 +696,27 @@ def test_unwritable_cache_dir_keeps_verdict(env: IsolatedKissHome) -> None:
     finally:
         os.environ["KISS_HOME"] = saved
         clear_classification_cache()
+
+
+def _stop_at_replace(frame: Any, event: str, arg: object) -> None:
+    """Profile function: a Stop (``KeyboardInterrupt``) as ``os.replace`` is about to be called."""
+    if event == "c_call" and arg is os.replace:
+        raise KeyboardInterrupt
+
+
+def test_stopped_or_failed_cache_write_leaves_no_temp_file(env: IsolatedKissHome) -> None:
+    """A Stop or ``OSError`` at the cache rename leaves no temp file; only the Stop propagates."""
+    sys.setprofile(_stop_at_replace)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            remember_classification("t", "m", None, TaskClassification(is_simple=True))
+    finally:
+        sys.setprofile(None)
+    assert not [name for name in os.listdir(env.kiss_home) if name.endswith(".tmp")]
+    (env.kiss_home / CLASSIFIER_CACHE_FILENAME).mkdir()  # the rename onto a directory fails
+    remember_classification("u", "m", None, TaskClassification(is_simple=True))
+    assert not [name for name in os.listdir(env.kiss_home) if name.endswith(".tmp")]
+    assert cached_classification("u", "m") == TaskClassification(is_simple=True)
 
 
 _HOLD_LOCK = r"""
@@ -1345,7 +1365,9 @@ def test_chat_agent_classifies_only_when_the_verdict_can_choose_the_prompt(
     ``ChatSorcarAgent.run`` must not pay for a classification whose
     verdict it would then ignore: no built-in toolset (a script-only
     SEA) and a profile without the edit tools skip the classifier; the
-    ``edit`` profile keeps it."""
+    ``edit`` profile keeps it.  A run with the caller's own base prompt,
+    which replaces both, skips it too (audit 2026-11-10 L/L01-F1)."""
+    custom = "You answer with the finish tool."
     seen: list[dict[str, Any]] = []
     lock = threading.Lock()
 
@@ -1358,16 +1380,18 @@ def test_chat_agent_classifies_only_when_the_verdict_can_choose_the_prompt(
 
     server = StandInModelServer(respond)
     try:
-        cases: list[tuple[dict[str, Any], bool]] = [
-            ({"append_basic_tools": False}, False),
-            ({"tool_profile": "review"}, False),
-            ({"tool_profile": "edit"}, True),
+        cases: list[tuple[type[SorcarAgent], dict[str, Any], bool]] = [
+            (ChatSorcarAgent, {"append_basic_tools": False}, False),
+            (ChatSorcarAgent, {"tool_profile": "review"}, False),
+            (ChatSorcarAgent, {"tool_profile": "edit"}, True),
+            (SorcarAgent, {"tool_profile": "edit", "base_system_prompt": custom}, False),
+            (ChatSorcarAgent, {"tool_profile": "edit", "base_system_prompt": custom}, False),
         ]
-        for kwargs, classified in cases:
+        for agent_class, kwargs, classified in cases:
             with lock:
                 seen.clear()
             clear_classification_cache()
-            agent = ChatSorcarAgent("clf-chat-gate")
+            agent = agent_class("clf-chat-gate")
             result = agent.run(
                 model_name=STANDIN_MODEL,
                 prompt_template=_DEV_TASK,
@@ -1387,7 +1411,107 @@ def test_chat_agent_classifies_only_when_the_verdict_can_choose_the_prompt(
                 assert len(seen) > classifier_calls, (kwargs, seen)
             assert classifier_calls == (1 if classified else 0), kwargs
             assert agent.system_prompt.startswith(
-                SYSTEM_PROMPT if classified else SYSTEM_PROMPT_LITE
+                kwargs.get("base_system_prompt")
+                or (SYSTEM_PROMPT if classified else SYSTEM_PROMPT_LITE)
             ), kwargs
     finally:
         server.stop()
+
+
+def test_preseed_is_gated_like_the_run_it_describes(env: IsolatedKissHome) -> None:
+    """A driver's pre-seed pays for a classification only when the run would.
+
+    Told the run's settings, ``classify_task_for_run`` applies the run's
+    gate: a profile without the edit tools (named, or inferred for a
+    reviewer's child), no built-in toolset and a caller's base prompt
+    fix the system prompt, so neither the pre-seed nor the run calls the
+    classifier.  Told nothing, it classifies and the run reuses the
+    verdict, whatever profile the run then names.
+    """
+    custom = "You answer with the finish tool."
+    task = "Look over the parser module."
+    seen: list[dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def respond(request: dict[str, Any]) -> dict[str, Any]:
+        with lock:
+            seen.append(request)
+        if _is_classifier_request(request):
+            return _verdict_body(False)
+        return finish_response("<p>ok</p>")
+
+    server = StandInModelServer(respond)
+    try:
+        cases: list[tuple[bool, dict[str, Any], bool, bool]] = [
+            # (the driver describes the run, the run's settings, a reviewer's child, classified)
+            (True, {"tool_profile": ""}, False, True),
+            (True, {"tool_profile": "review"}, False, False),
+            (True, {"tool_profile": "", "append_basic_tools": False}, False, False),
+            (True, {"tool_profile": "", "base_system_prompt": custom}, False, False),
+            (True, {"tool_profile": ""}, True, False),
+            (True, {"tool_profile": "edit"}, True, True),
+            (False, {"tool_profile": "edit"}, True, True),
+        ]
+        for described, settings, reviewer, classified in cases:
+            case = (described, settings, reviewer)
+            with lock:
+                seen.clear()
+            clear_classification_cache()
+            agent = SorcarAgent("clf-preseed-gate")
+            if reviewer:
+                agent._subagent_info = {"reviewer": True}
+            agent.classify_task_for_run(
+                STANDIN_MODEL, task, server.model_config, enabled=True,
+                **(settings if described else {}),
+            )
+            with lock:
+                assert sum(map(_is_classifier_request, seen)) == (1 if classified else 0), case
+            result = agent.run(
+                model_name=STANDIN_MODEL,
+                prompt_template=task,
+                model_config=server.model_config,
+                work_dir=str(env.repo),
+                use_memory=False,
+                web_tools=False,
+                is_parallel=False,
+                max_steps=4,
+                max_budget=1.0,
+                verbose=False,
+                **settings,
+            )
+            assert yaml.safe_load(result)["success"] is True, (case, result)
+            with lock:
+                assert sum(map(_is_classifier_request, seen)) == (1 if classified else 0), case
+            assert agent.system_prompt.startswith(
+                settings.get("base_system_prompt")
+                or (SYSTEM_PROMPT if classified else SYSTEM_PROMPT_LITE)
+            ), case
+    finally:
+        server.stop()
+
+
+def test_classifier_spend_counts_against_the_run_budget(
+    env: IsolatedKissHome, endpoint: _CountingClassifierEndpoint,
+) -> None:
+    """The classifier's spend is the task's from the first session on: a
+    run whose budget the classification used up makes no model call of
+    its own, and the cleanup's fold counts the spend once."""
+    agent = SorcarAgent("clf-budget")
+    with pytest.raises(BudgetExceededError):
+        agent.run(
+            # A priced model, so that the verdict's 52 tokens cost money.
+            model_name="gpt-4o-mini",
+            prompt_template=_DEV_TASK,
+            model_config=endpoint.model_config,
+            work_dir=str(env.repo),
+            tool_profile="edit",
+            use_memory=False,
+            web_tools=False,
+            is_parallel=False,
+            max_budget=1e-6,
+            verbose=False,
+        )
+    assert len(endpoint.requests) == 1
+    budget, _tokens, steps = agent.usage_snapshot()
+    assert budget > 1e-6
+    assert steps == 1

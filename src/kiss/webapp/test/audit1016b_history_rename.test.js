@@ -13,12 +13,14 @@
 // Runs with: node test/audit1016b_history_rename.test.js
 
 const assert = require('assert');
-const {ofType, recordTimers} = require('./simplify2_harness');
+const {ofType, plain, recordTimers} = require('./simplify2_harness');
+const {key} = require('./ui_antipattern_harness');
 const {
   makeRow,
   sendHistory,
   openChatsPage,
   chatHeader,
+  chatTabs,
   freezeClock,
 } = require('./history_helpers');
 
@@ -33,12 +35,6 @@ function pencil(win, chatId) {
 function pencilShown(win, chatId) {
   const p = pencil(win, chatId);
   return !!p && win.getComputedStyle(p).display !== 'none';
-}
-
-function chatTabs(win) {
-  return win._testApi
-    .openTabs()
-    .filter(t => !t.isSubagentTab && !t.isContentTab);
 }
 
 function mouse(win, el, type, detail) {
@@ -113,18 +109,15 @@ function testRemoteOnlyChatIsRenamedOnItsMachine() {
   rename(win, 'R', 'Remote, renamed');
   // The mixed chat renames as a local one does.
   rename(win, 'M', 'Mixed, renamed');
-  assert.deepStrictEqual(
-    JSON.parse(JSON.stringify(ofType(posted, 'setChatSummary'))),
-    [
-      {
-        type: 'setChatSummary',
-        chatId: 'R',
-        summary: 'Remote, renamed',
-        machine: 'boxb',
-      },
-      {type: 'setChatSummary', chatId: 'M', summary: 'Mixed, renamed'},
-    ],
-  );
+  assert.deepStrictEqual(plain(ofType(posted, 'setChatSummary')), [
+    {
+      type: 'setChatSummary',
+      chatId: 'R',
+      summary: 'Remote, renamed',
+      machine: 'boxb',
+    },
+    {type: 'setChatSummary', chatId: 'M', summary: 'Mixed, renamed'},
+  ]);
   assert.strictEqual(title(win, 'R').textContent, 'Remote, renamed');
   win.close();
   console.log('  ok - a remote-only chat is renamed on its machine');
@@ -166,9 +159,7 @@ function rename(win, chatId, text) {
   const input = title(win, chatId).querySelector('input');
   assert.ok(input, chatId + ': the double-click opens the rename box');
   input.value = text;
-  input.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
-  );
+  key(win, input, 'Enter');
 }
 
 testDoubleClickOpensTheChatOnce();

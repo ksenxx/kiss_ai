@@ -21,8 +21,8 @@ and that a plain copy would clobber:
   keeping for a model both have the row that counts more tasks (the copy
   that saw more of the shared history), sorted by task count, and bullets
   are united, keeping each distinct bullet once.  The combination is the
-  same whichever machine computes it (the copy with more rows, then the
-  greater text, sets the layout), so both machines end up with one text.
+  same whichever machine computes it (the copy with more models, then the
+  greater layout, sets the layout), so both machines end up with one text.
 * ``MODEL_DECISIONS.md`` -- the routing ledger: a title and one table to
   which every autorouter task appends a row ``| time | task_id | unit |
   tier | model | reason | outcome |``.  Merge rule: the union of the rows
@@ -56,6 +56,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from typing import IO
 
 try:
@@ -75,6 +76,37 @@ DEFAULT_HOME_DIR = ".kiss"
 
 PHASE_MERGE = "_merge"
 """Internal sub-command the remote runs: merge stdin into its copy of a note."""
+
+MERGE_ATTEMPTS = 3
+"""Merges of a note replaced under each of them before :func:`merge_into_file` gives up."""
+
+LOCK_SECONDS = 10
+"""The longest a read or a merge waits for a note's lock before it gives up (:func:`lock_note`)."""
+
+SSH_DEADLINES = (
+    "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3"
+)
+"""ssh options that fail a command on a host that does not answer instead of hanging it.
+
+At most ConnectTimeout seconds to connect and shake hands, and a connection
+that goes silent later is dropped after ServerAliveCountMax probes
+ServerAliveInterval seconds apart.
+"""
+
+REMOTE_READ = f"""import fcntl, sys, time
+note = open(sys.argv[1], "rb")
+deadline = time.monotonic() + {LOCK_SECONDS}
+while True:
+    try:
+        fcntl.flock(note, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            sys.exit("still locked by another process after {LOCK_SECONDS} s")
+        time.sleep(0.05)
+sys.stdout.buffer.write(note.read())
+"""
+"""What the remote's ``python3`` runs to print a note: the locked read of :func:`read_note`."""
 
 _STAMP = re.compile(r"refreshed (\d{4}-\d{2}-\d{2})")
 _BULLET = re.compile(r"^[-*+] ")
@@ -233,7 +265,7 @@ def merge_evidence(ours: str, theirs: str) -> str:
     day -- or both unstamped -- are combined, and both machines must
     arrive at the same text whichever side they merge from, so the
     *base* is chosen by a rule symmetric in the two copies: the one with
-    more table rows, then more bullets, then the greater text.  The
+    more models, then more bullets, then the greater layout.  The
     base's prose and layout are kept; its table body becomes the union of
     both tables' rows keyed by the first cell (the model) -- a model both
     list keeps the row with the larger second cell (tasks), the greater
@@ -256,20 +288,31 @@ def merge_evidence(ours: str, theirs: str) -> str:
         return ours
     if not ours.strip():
         return theirs
-    if ours.strip() == theirs.strip():
-        return max(ours, theirs)  # the same text: settle the surrounding whitespace too
+    if ours == theirs:
+        return ours  # the same text bar surrounding blank lines is merged: one text after a sync
     our_stamp, their_stamp = stamp_of(ours), stamp_of(theirs)
     if our_stamp != their_stamp:
         return theirs if their_stamp > our_stamp else ours
     other, base = sorted((ours, theirs), key=_evidence_rank)
     lines = base.splitlines()
-    start, body, end = split_table(lines)
+    start, body, _end = split_table(lines)
     other_lines = other.splitlines()
-    other_start, other_body, other_end = split_table(other_lines)
+    other_start, other_body, _other_end = split_table(other_lines)
     header = [normalized(line) for line in lines[start:body]]
     other_header = [normalized(line) for line in other_lines[other_start:other_body]]
     if header and other_header and header != other_header:
         return base
+    return _combine(lines, other_lines)
+
+
+def _combine(lines: list[str], other_lines: list[str]) -> str:
+    """Return the base's *lines* with its rows and bullets united with the other copy's.
+
+    With no other lines, the base as a merge writes it: its own repeated rows and
+    bullets united, its rows sorted, its bullet groups moved together.
+    """
+    start, body, end = split_table(lines)
+    _other_start, other_body, other_end = split_table(other_lines)
     rows = _merge_rows(lines[body:end] if start >= 0 else [], other_lines[other_body:other_end])
     bullets = _merge_bullets(lines, other_lines)
     out: list[str] = []
@@ -293,15 +336,18 @@ def merge_evidence(ours: str, theirs: str) -> str:
     return "\n".join(out).rstrip("\n") + "\n"
 
 
-def _evidence_rank(text: str) -> tuple[int, int, str]:
-    """Return the key that picks the base of a same-day merge: rows, bullets, then the text.
+def _evidence_rank(text: str) -> tuple[int, int, list[str], list[str], str]:
+    """Return the key that picks the base of a same-day merge.
 
-    A merge result never ranks below either input (it holds every row and
-    bullet of both), so merging it again with one of them keeps it as it is.
+    Taken of the text as a merge writes it (:func:`_combine` with nothing): its rows,
+    its bullets, its layout -- the lines before and after the table body -- and last the
+    text itself.  A merge result holds every row and bullet of both inputs in the layout
+    of its base, so it ranks below neither input in rows, bullets and layout, and
+    merging it again with one of them keeps it as it is.
     """
-    lines = text.splitlines()
+    lines = _combine(text.splitlines(), []).splitlines()
     _start, body, end = split_table(lines)
-    return (max(end - body, 0), len(split_bullets(lines)), text)
+    return (max(end - body, 0), len(split_bullets(lines)), lines[:body], lines[end:], text)
 
 
 def _task_count(row: str) -> int | None:
@@ -426,25 +472,53 @@ def kiss_dir(home_dir: str | None = None) -> str:
 
 
 def read_note(path: str) -> str | None:
-    """Return the text of the file at *path*, or ``None`` when there is none."""
+    """Return the text of the file at *path*, or ``None`` when there is none.
+
+    Read under the note's lock (:func:`lock_note`, as a reader), so a merge
+    rewriting the note in place is seen before it or after it, never
+    between its write and its truncate.
+
+    Raises:
+        SyncError: When the note stays locked (:func:`lock_note`).
+    """
     try:
         with open(path, encoding="utf-8") as handle:
+            lock_note(handle, shared=True)
             return handle.read()
     except FileNotFoundError:
         return None
 
 
-def lock_note(handle: IO[str]) -> None:
+def lock_note(handle: IO[str], shared: bool = False) -> None:
     """Take the lock the agents take to append to a note: ``flock`` on the open note.
 
     The same lock as ``kiss.core.file_lock.lock_exclusive`` (``flock`` on
     POSIX, the note's first byte on Windows), so that the autorouter's
     ``log_decision`` and this script's merges take turns on the ledger.
-    Waits for the holder; released by :func:`unlock_note` or by closing
-    the file.
+    Waits for the holder, :data:`LOCK_SECONDS` at most (on Windows the ten
+    tries of ``LK_LOCK``, a second apart); released by :func:`unlock_note`
+    or by closing the file.  *shared* is the lock of a reader: it waits
+    for a writer, not for another reader, and a file opened for reading
+    only may hold it (over NFS ``flock`` grants the exclusive one to a
+    writable file only).
+
+    Raises:
+        SyncError: When another process still holds the lock at the
+            deadline (``OSError`` on Windows).
     """
     if fcntl is not None:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        mode = (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB
+        deadline = time.monotonic() + LOCK_SECONDS
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), mode)
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise SyncError(
+                        f"still locked by another process after {LOCK_SECONDS} s"
+                    ) from None
+                time.sleep(0.05)
     elif msvcrt is not None:  # pragma: no cover -- Windows-only branch
         os.lseek(handle.fileno(), 0, os.SEEK_SET)
         msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
@@ -468,6 +542,9 @@ def merge_into_file(name: str, path: str, theirs: str | None) -> str:
     an agent that opened the note to append and is waiting for the lock
     keeps the file it opened, so its row lands after the merged text
     instead of in an orphaned copy -- and two merges at once take turns.
+    ``/rsi7d`` does replace the evidence by a rename, without the lock: a
+    merge that then finds another file at *path* than the one it merged
+    into merges again, into that one.
 
     Args:
         name: The note's name (picks the merge rule).
@@ -476,27 +553,40 @@ def merge_into_file(name: str, path: str, theirs: str | None) -> str:
 
     Returns:
         ``"unchanged"``, ``"created"`` or ``"updated"``.
+
+    Raises:
+        SyncError: When the note was replaced during each of
+            :data:`MERGE_ATTEMPTS` merges, or stays locked (:func:`lock_note`).
     """
-    ours = read_note(path)
-    if ours is None and not merge_note(name, "", theirs or "").strip():
+    try:
+        os.stat(path)
+        existed = True
+    except FileNotFoundError:
+        existed = False
+    if not existed and not merge_note(name, "", theirs or "").strip():
         return "unchanged"  # nothing to create
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, mode=0o700, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    with os.fdopen(fd, "r+", encoding="utf-8") as handle:
-        lock_note(handle)
-        try:
-            current = handle.read()
-            merged = merge_note(name, current, theirs or "")
-            if merged == current:
-                return "unchanged"
-            handle.seek(0)
-            handle.write(merged)
-            handle.truncate()
-            handle.flush()
-        finally:
-            unlock_note(handle)
-    return "created" if ours is None else "updated"
+    for _attempt in range(MERGE_ATTEMPTS):
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "r+", encoding="utf-8") as handle:
+            lock_note(handle)
+            try:
+                current = handle.read()
+                merged = merge_note(name, current, theirs or "")
+                if merged != current:
+                    handle.seek(0)
+                    handle.write(merged)
+                    handle.truncate()
+                    handle.flush()
+                if not os.path.samefile(handle.fileno(), path):
+                    continue  # merged into a file a rename has replaced meanwhile
+            finally:
+                unlock_note(handle)
+        if merged == current:
+            return "unchanged"
+        return "updated" if existed else "created"
+    raise SyncError(f"{path} was replaced during each of {MERGE_ATTEMPTS} merges into it")
 
 
 # --------------------------------------------------------------------------
@@ -505,9 +595,14 @@ def merge_into_file(name: str, path: str, theirs: str | None) -> str:
 
 
 def _ssh(host: str, command: str, stdin: bytes = b"") -> subprocess.CompletedProcess[bytes]:
-    """Run *command* on *host* through ssh in batch mode (no prompts) and return the result."""
+    """Run *command* on *host* through ssh in batch mode (no prompts) and return the result.
+
+    A host that does not answer fails the command (:data:`SSH_DEADLINES`), and what
+    the remote runs gives up on a locked note by itself (:data:`LOCK_SECONDS`): no cap
+    on the whole command, which would cut short a note that only takes long to travel.
+    """
     return subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", host, command],
+        ["ssh", "-o", "BatchMode=yes", *SSH_DEADLINES, host, command],
         input=stdin,
         capture_output=True,
         check=False,
@@ -519,7 +614,8 @@ def fetch_remote(host: str, name: str, home_dir: str) -> str | None:
 
     The remote's KISS home is resolved as :func:`kiss_dir` resolves it
     there: ``$KISS_HOME`` of the ssh session when set, else
-    ``$HOME/<home_dir>``.
+    ``$HOME/<home_dir>``.  The note is read under its lock there
+    (:data:`REMOTE_READ`), as :func:`read_note` reads this machine's.
 
     Args:
         host: ``user@host`` of the remote machine.
@@ -527,11 +623,13 @@ def fetch_remote(host: str, name: str, home_dir: str) -> str | None:
         home_dir: The brand's state directory name (:func:`brand_home_dir`).
 
     Raises:
-        SyncError: When ssh or the remote command fails.
+        SyncError: When ssh or the remote command fails, or the remote's
+            copy is not UTF-8: decoded with replacement characters it
+            would be merged into this machine's copy.
     """
     command = (
         f'h=$HOME/{shlex.quote(home_dir)}; f="${{KISS_HOME:-$h}}/{name}";'
-        ' if [ -f "$f" ]; then cat "$f"; else exit 3; fi'
+        f' if [ -f "$f" ]; then python3 -c {shlex.quote(REMOTE_READ)} "$f"; else exit 3; fi'
     )
     done = _ssh(host, command)
     if done.returncode == 3:
@@ -541,7 +639,10 @@ def fetch_remote(host: str, name: str, home_dir: str) -> str | None:
             f"could not read {name} on {host} (ssh exited {done.returncode}):"
             f" {done.stderr.decode('utf-8', 'replace').strip()}"
         )
-    return done.stdout.decode("utf-8", "replace")
+    try:
+        return done.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SyncError(f"{name} on {host} is not UTF-8: {exc}") from None
 
 
 def push_remote(host: str, name: str, text: str, home_dir: str) -> str:
@@ -609,7 +710,7 @@ def sync(host: str, home: str, home_dir: str) -> int:
                 print(f"{name}: neither machine has it")
                 continue
             remote_state = push_remote(host, name, merged, home_dir)
-        except (SyncError, OSError) as exc:
+        except (SyncError, OSError, UnicodeError) as exc:  # UnicodeError: a note not in UTF-8
             print(f"warning: {name}: {exc}", file=sys.stderr)
             failed = 1
             continue
@@ -629,7 +730,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if len(args) == 3 and args[0] == PHASE_MERGE:
             name, home_dir = args[1], args[2]
-            print(merge_into_file(name, os.path.join(kiss_dir(home_dir), name), sys.stdin.read()))
+            # The sender writes UTF-8 (push_remote); sys.stdin would decode it in this locale's.
+            theirs = sys.stdin.buffer.read().decode("utf-8")
+            print(merge_into_file(name, os.path.join(kiss_dir(home_dir), name), theirs))
             return 0
         if len(args) == 4 and args[0] == "merge":
             print(merge_into_file(args[1], args[2], read_note(args[3])))
@@ -638,7 +741,7 @@ def main(argv: list[str] | None = None) -> int:
         if is_host and args[0] not in ("merge", PHASE_MERGE):
             home_dir = brand_home_dir()
             return sync(args[0], kiss_dir(home_dir), home_dir)
-    except (SyncError, OSError) as exc:
+    except (SyncError, OSError, UnicodeError) as exc:
         print(f"sync_kiss_notes: {exc}", file=sys.stderr)
         return 1
     print(USAGE, file=sys.stderr)

@@ -19,9 +19,12 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
+from itertools import accumulate
 
 _BLANKS = re.compile(r"[ \t]+")
+_WORD = re.compile(r"\w+")
 
 
 @dataclass(frozen=True)
@@ -140,15 +143,90 @@ def reindent(new: str, indent: str) -> str:
     )
 
 
+_BUDGET = 200_000
+"""What :func:`nearest_region` spends at most, on each: the characters of the windows it
+compares with the old string, and the places of shared words it counts to choose them."""
+
+
+def _closest(texts: Iterable[str], wanted: str) -> int:
+    """Return the index of the one of *texts* most like *wanted*, the first of equally close ones.
+
+    Compared with :class:`difflib.SequenceMatcher`; ``quick_ratio`` (an
+    upper bound) is checked before the real ratio, as
+    ``difflib.get_close_matches`` does.
+    """
+    matcher = difflib.SequenceMatcher(None, "", wanted)
+    best, best_ratio = 0, -1.0
+    for index, text in enumerate(texts):
+        matcher.set_seq1(text)
+        if matcher.quick_ratio() <= best_ratio:
+            continue
+        ratio = matcher.ratio()
+        if ratio > best_ratio:
+            best, best_ratio = index, ratio
+    return best
+
+
+def _likely_starts(normalized: list[str], wanted: list[str], last: int) -> list[int]:
+    """Return the starts of the windows of *normalized* sharing words with *wanted*, line by line.
+
+    A window's weight is the length of the words its lines hold of the
+    line of *wanted* at the same place; a start before the first window
+    or past the *last* one counts as that window.  The rarest words are
+    counted first and the counting stops at :data:`_BUDGET` places, so
+    a word on every line costs nothing.  The window sharing most comes
+    first, the earlier of equals.
+    """
+    places: dict[str, list[int]] = {}
+    for place, line in enumerate(wanted):
+        for word in set(_WORD.findall(line)):
+            places.setdefault(word, []).append(place)
+    lines: dict[str, list[int]] = {}
+    for index, line in enumerate(normalized):
+        for word in places.keys() & _WORD.findall(line):
+            lines.setdefault(word, []).append(index)
+    shared: dict[int, int] = {}
+    spent = 0
+    costs = sorted((len(places[word]) * len(found), word) for word, found in lines.items())
+    for cost, word in costs:
+        spent += cost
+        if spent > _BUDGET:
+            break
+        for place in places[word]:
+            for index in lines[word]:
+                start = min(max(index - place, 0), last)
+                shared[start] = shared.get(start, 0) + len(word)
+    return [start for _, start in sorted((-length, start) for start, length in shared.items())]
+
+
+def _within_budget(starts: Iterable[int], ends: list[int], count: int) -> list[int]:
+    """Return the first of *starts* whose windows of *count* lines hold :data:`_BUDGET` characters.
+
+    ``ends[i]`` is the length of the lines before line ``i``.  The
+    first window is in whatever its size.
+    """
+    chosen: list[int] = []
+    spent = 0
+    for start in starts:
+        spent += ends[start + count] - ends[start]
+        if chosen and spent > _BUDGET:
+            break
+        chosen.append(start)
+    return chosen
+
+
 def nearest_region(text: str, old: str) -> tuple[int, int, str] | None:
     """Return the window of *text* most like *old*: its 1-based first and last line, its text.
 
     The windows are those of as many lines as *old* has (the whole text
     when it is shorter), compared after :func:`normalize_line` with
-    :class:`difflib.SequenceMatcher`; ``quick_ratio`` (an upper bound)
-    is checked before the real ratio, as ``difflib.get_close_matches``
-    does, so a long file is scanned in reasonable time.  The first of
-    equally close windows wins.
+    :class:`difflib.SequenceMatcher`: every window, while their text
+    fits :data:`_BUDGET`.  Comparing every window of a long file took
+    minutes (110 s for 50 lines against 20,000), so there only the
+    likely ones are compared (:func:`_likely_starts`; the likeliest
+    that fit the budget), or the first windows when none is likely.
+    The first of equally close windows wins, and a single window is the
+    answer as it is.
 
     Args:
         text: The file's text.
@@ -163,15 +241,16 @@ def nearest_region(text: str, old: str) -> tuple[int, int, str] | None:
     if not old_lines or not file_lines:
         return None
     normalized = [normalize_line(line) for line in file_lines]
-    count = min(len(old_lines), len(file_lines))
-    wanted = "\n".join(normalize_line(line) for line in old_lines)
-    matcher = difflib.SequenceMatcher(None, "", wanted)
-    best, best_ratio = 0, -1.0
-    for index in range(len(file_lines) - count + 1):
-        matcher.set_seq1("\n".join(normalized[index : index + count]))
-        if matcher.quick_ratio() <= best_ratio:
-            continue
-        ratio = matcher.ratio()
-        if ratio > best_ratio:
-            best, best_ratio = index, ratio
+    wanted = [normalize_line(line) for line in old_lines]
+    count = min(len(wanted), len(normalized))
+    last = len(normalized) - count
+    ends = list(accumulate((len(line) + 1 for line in normalized), initial=0))
+    starts = _within_budget(range(last + 1), ends, count)
+    if len(starts) <= last:
+        likely = _likely_starts(normalized, wanted, last)
+        starts = sorted(_within_budget(likely, ends, count)) or starts
+    best = starts[0]
+    if len(starts) > 1:
+        windows = ("\n".join(normalized[start : start + count]) for start in starts)
+        best = starts[_closest(windows, "\n".join(wanted))]
     return best + 1, best + count, "".join(file_lines[best : best + count])

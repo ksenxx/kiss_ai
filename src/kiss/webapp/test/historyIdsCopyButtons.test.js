@@ -14,114 +14,58 @@ const {
   sendEmptyWorkDir,
   rowsByTitle,
   stubClipboard,
+  recordTimers,
+  fireTimers,
+  settle,
 } = require('./simplify2_harness');
+const {makeRow} = require('./history_helpers');
 
 // How long a copy button shows its "copied" feedback (panelCopy.js).
 const FLASH_MS = 1500;
 
-/**
- * A `beforeScripts` hook: the page's flash-revert timers (FLASH_MS) are
- * recorded in `timeouts` as `{cb, ms, id, cleared}` and held, never
- * armed, so the feedback a test has just asserted cannot expire under it
- * while it yields to the event loop on a slow host; `clearTimeout` marks
- * a held timer `cleared`, and fireTimeout plays one by hand.  Every
- * other timer the page arms runs for real.
- */
-function holdFlashTimers(win, timeouts) {
-  const realSetTimeout = win.setTimeout;
-  const realClearTimeout = win.clearTimeout;
-  let nextHeldId = -1; // a real timer id is a positive integer
-  win.setTimeout = function (cb, ms, ...args) {
-    if (ms !== FLASH_MS) return realSetTimeout.call(win, cb, ms, ...args);
-    const id = nextHeldId--;
-    timeouts.push({cb, ms, id, cleared: false});
-    return id;
-  };
-  win.clearTimeout = function (id) {
-    const held = timeouts.find(t => t.id === id);
-    if (held) held.cleared = true;
-    else realClearTimeout.call(win, id);
-  };
-}
-
+// The page's flash-revert timers are recorded in `timeouts` and held,
+// never armed, so the feedback a test has just asserted cannot expire
+// under it while it yields to the event loop on a slow host; fireTimers
+// plays them by hand.
 function makePage() {
   let clipboardWrites;
-  const timeouts = [];
+  let timeouts;
   const {win, posted} = makeHarnessPage({
     beforeScripts(win) {
       clipboardWrites = stubClipboard(win).writes;
-      holdFlashTimers(win, timeouts);
+      timeouts = recordTimers(win, FLASH_MS);
     },
   });
   return {win, posted, clipboardWrites, timeouts};
 }
 
-/** Let the clock reach *timer*'s due time: it runs unless it was cleared. */
-function fireTimeout(win, timer) {
-  if (timer.cleared) return;
-  win.clearTimeout(timer.id);
-  timer.cb();
-}
-
-const WS = '/Users/koushik/work/repo';
-
-function baseRow(overrides) {
-  return Object.assign(
-    {
-      has_events: false,
-      failed: false,
-      is_running: false,
-      tokens: 100,
-      cost: 0.01,
-      steps: 1,
-      is_favorite: false,
-      work_dir: WS,
-      model: 'gpt-5',
-      is_parallel: false,
-      startTs: 1_700_000_000_000,
-      endTs: 1_700_000_005_000,
-    },
-    overrides,
-  );
-}
-
 const SESSIONS_FIXTURE = [
-  baseRow({
+  makeRow({
     id: 'chat-a',
     task_id: 'task-a',
     parent_task_id: 'parent-a',
     title: 'copy row A — chat + task + parent',
-    timestamp: 1_700_000_000,
-    preview: 'copy row A — chat + task + parent',
   }),
-  baseRow({
+  makeRow({
     id: 'chat-b',
     task_id: 'task-b',
     title: 'copy row B — chat + task',
-    timestamp: 1_700_000_100,
-    preview: 'copy row B — chat + task',
   }),
-  baseRow({
+  makeRow({
     id: 'chat-c',
     task_id: null,
     title: 'copy row C — chat only',
-    timestamp: 1_700_000_200,
-    preview: 'copy row C — chat only',
   }),
-  baseRow({
+  makeRow({
     id: '',
     task_id: 'task-d',
     title: 'copy row D — task only',
-    timestamp: 1_700_000_300,
-    preview: 'copy row D — task only',
   }),
-  baseRow({
+  makeRow({
     id: '',
     task_id: null,
     parent_task_id: 'parent-e',
     title: 'copy row E — parent only',
-    timestamp: 1_700_000_400,
-    preview: 'copy row E — parent only',
   }),
 ];
 
@@ -129,12 +73,6 @@ function loadHistory(ctx) {
   sendEmptyWorkDir(ctx.win);
   send(ctx.win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
   return rowsByTitle(ctx.win);
-}
-
-// Every open tab: the strip renders only the chat on screen, so a DOM
-// count of `.chat-tab` is 1 whatever the number of open chats.
-function tabCount(win) {
-  return win._testApi.openTabs().length;
 }
 
 function testButtonsRenderPerId() {
@@ -221,17 +159,17 @@ function testButtonsRenderPerId() {
 async function testChatCopyButtonCopiesChatId() {
   const ctx = makePage();
   const rows = loadHistory(ctx);
-  const {win, clipboardWrites, posted} = ctx;
+  const {win, clipboardWrites} = ctx;
 
   const a = rows['copy row A — chat + task + parent'];
   const chatBtn = a.querySelector('.ids-copy-chat');
   assert.ok(chatBtn, 'row A chat copy button must exist');
 
-  const tabsBefore = tabCount(win);
-  const postedBefore = posted.length;
+  // A click on the row itself opens its task in a fresh tab.
+  const activeBefore = win._testApi.getActiveTabId();
 
   click(win, chatBtn);
-  await new Promise(r => setTimeout(r, 0));
+  await settle();
 
   assert.deepStrictEqual(
     clipboardWrites,
@@ -241,14 +179,9 @@ async function testChatCopyButtonCopiesChatId() {
   );
 
   assert.strictEqual(
-    tabCount(win),
-    tabsBefore,
-    'clicking the chat copy button must not open a new tab',
-  );
-  const newMsgs = posted.slice(postedBefore);
-  assert.ok(
-    !newMsgs.some(m => m && m.type === 'resumeSession'),
-    'clicking the chat copy button must not post resumeSession',
+    win._testApi.getActiveTabId(),
+    activeBefore,
+    'clicking the chat copy button must not open the row',
   );
 
   assert.ok(
@@ -267,17 +200,16 @@ async function testChatCopyButtonCopiesChatId() {
 async function testTaskCopyButtonCopiesTaskId() {
   const ctx = makePage();
   const rows = loadHistory(ctx);
-  const {win, clipboardWrites, posted} = ctx;
+  const {win, clipboardWrites} = ctx;
 
   const b = rows['copy row B — chat + task'];
   const taskBtn = b.querySelector('.ids-copy-task');
   assert.ok(taskBtn, 'row B task copy button must exist');
 
-  const tabsBefore = tabCount(win);
-  const postedBefore = posted.length;
+  const activeBefore = win._testApi.getActiveTabId();
 
   click(win, taskBtn);
-  await new Promise(r => setTimeout(r, 0));
+  await settle();
 
   assert.deepStrictEqual(
     clipboardWrites,
@@ -287,14 +219,9 @@ async function testTaskCopyButtonCopiesTaskId() {
   );
 
   assert.strictEqual(
-    tabCount(win),
-    tabsBefore,
-    'clicking the task copy button must not open a new tab',
-  );
-  const newMsgs = posted.slice(postedBefore);
-  assert.ok(
-    !newMsgs.some(m => m && m.type === 'resumeSession'),
-    'clicking the task copy button must not post resumeSession',
+    win._testApi.getActiveTabId(),
+    activeBefore,
+    'clicking the task copy button must not open the row',
   );
 
   assert.ok(
@@ -312,12 +239,10 @@ async function testNumericTaskIdCopiesAsString() {
   send(ctx.win, {
     type: 'history',
     sessions: [
-      baseRow({
+      makeRow({
         id: 'chat-n',
         task_id: 12345,
         title: 'copy row N — numeric task id',
-        timestamp: 1_700_000_600,
-        preview: 'copy row N — numeric task id',
       }),
     ],
     offset: 0,
@@ -329,7 +254,7 @@ async function testNumericTaskIdCopiesAsString() {
   assert.ok(taskBtn, 'numeric-task-id row must render a task copy button');
 
   click(ctx.win, taskBtn);
-  await new Promise(r => setTimeout(r, 0));
+  await settle();
 
   assert.deepStrictEqual(
     ctx.clipboardWrites,
@@ -361,7 +286,7 @@ async function testFallbackCopyPathWithoutClipboardApi() {
   assert.ok(chatBtn, 'row A chat copy button must exist');
 
   click(win, chatBtn);
-  await new Promise(r => setTimeout(r, 0));
+  await settle();
 
   assert.deepStrictEqual(
     execCalls,
@@ -400,8 +325,8 @@ async function testRejectedClipboardFallsBackToExecCommand() {
   assert.ok(chatBtn, 'row A chat copy button must exist');
 
   click(win, chatBtn);
-  await new Promise(r => setTimeout(r, 0));
-  await new Promise(r => setTimeout(r, 0));
+  await settle();
+  await settle();
 
   assert.deepStrictEqual(
     execCalls,
@@ -430,30 +355,30 @@ async function testRepeatedClicksRestartFlashTimer() {
 
   let armed = timeouts.length;
   click(win, chatBtn);
-  await new Promise(r => setTimeout(r, 0));
+  await settle();
   assert.ok(
     chatBtn.classList.contains('copied'),
     'first click must flash the "copied" feedback',
   );
-  const firstFlash = timeouts.slice(armed).filter(t => t.ms === FLASH_MS);
+  const firstFlash = timeouts.slice(armed);
   assert.strictEqual(firstFlash.length, 1, 'the first click arms one revert');
 
   // A second click 1.2 s later, then the clock reaches the first
   // click's 1.5 s mark and, later, the second click's.
   armed = timeouts.length;
   click(win, chatBtn);
-  await new Promise(r => setTimeout(r, 0));
-  const secondFlash = timeouts.slice(armed).filter(t => t.ms === FLASH_MS);
+  await settle();
+  const secondFlash = timeouts.slice(armed);
   assert.strictEqual(secondFlash.length, 1, 'the second click arms one revert');
 
-  fireTimeout(win, firstFlash[0]);
+  fireTimers(firstFlash);
   assert.ok(
     chatBtn.classList.contains('copied'),
     "the first click's stale timer must not end the second " +
       'click\'s "copied" feedback early',
   );
 
-  fireTimeout(win, secondFlash[0]);
+  fireTimers(secondFlash);
   assert.ok(
     !chatBtn.classList.contains('copied'),
     'the "copied" feedback must still revert after the second timer',

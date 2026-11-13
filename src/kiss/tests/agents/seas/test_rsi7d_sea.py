@@ -220,7 +220,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
         "patch_sorcar",
     ]
     for name in names:
-        assert f"`{name}" in sea.SYSTEM_PROMPT or name in sea.SYSTEM_PROMPT, name
+        assert f"`{name}" in sea.SYSTEM_PROMPT, name  # back-quoted: no suffix of another tool
     assert sea_commands.slash_command_task("/rsi7d") is None  # a slash command needs task text
     assert sea_commands.sea_settings(_SEA_PATH) == resolve_settings(declared)
     run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "all")
@@ -260,7 +260,10 @@ def test_editable_dirs_include_the_bundled_channel_seas(checkout: Path) -> None:
     assert rows["ask"]["editable_path"] == str(third_party / "ask" / "ask_sea.py")
     assert rows["ask"]["prompt_constant"] == "SYSTEM_PROMPT"
     assert rows["demo"]["editable_path"] == str(checkout / "demo" / "demo_sea.py")
-    assert "ask" in sea._signatures()
+    signatures = sea._signatures()
+    assert "ask" in signatures
+    # An editable SEA with no prompt of its own has no text to recognise its runs by.
+    assert "noprompt" in sea._editable_seas() and "noprompt" not in signatures
     section = "## Lessons from recent runs (rsi7d)\n- Cite."
     assert sea.patch_sea_prompt("ask", "", section).startswith("Patched SYSTEM_PROMPT of")
     assert "- Cite." in (third_party / "ask" / "ask_sea.py").read_text(encoding="utf-8")
@@ -355,7 +358,7 @@ def test_sea_runs_links_dispatches_and_prompt_signatures(checkout: Path) -> None
         steps=4,
         model="model-b",
     )
-    persist_task(
+    plain = persist_task(
         "plain", [_result_event(True)], result="<p>plain</p>", parent_task_id=parent, cost=0.5,
     )
     fdemo = checkout / "fdemo" / "fdemo_sea.py"
@@ -373,7 +376,9 @@ def test_sea_runs_links_dispatches_and_prompt_signatures(checkout: Path) -> None
         steps=2,
     )
     data = json.loads(sea.sea_runs(days=1))
-    assert data["unmatched_dispatches"] >= 1
+    assert data["unmatched_dispatches"] == 1  # "never persisted"; the plain call is not counted
+    listed = {r["task_id"] for entry in data["seas"].values() for r in entry["runs"]}
+    assert plain not in listed
     demo = data["seas"]["demo"]
     assert demo["agents"] == [sea_path]
     assert [r["task_id"] for r in demo["runs"]] == [child]
@@ -911,7 +916,6 @@ def test_seas_dir_falls_back_to_the_bundled_directory(
     # A window of the sh SEA's own prompt text, cut from the bundled copy.
     assert signatures["sh"] in sea._sea_prompt_text(_SEAS_DIR / "sh" / "sh_sea.py")
     assert len(signatures["sh"]) == sea.SIGNATURE_CHARS and "review_paper" in signatures
-    assert "dummy" not in signatures  # no prompt getter
 
 
 def test_parse_scope_reads_leading_names_and_the_seas_dir_option(
@@ -934,9 +938,12 @@ def test_parse_scope_reads_leading_names_and_the_seas_dir_option(
     assert scope == sea.Scope(folder.resolve(), ("alpha",))
     assert sea.parse_scope(f"alpha --seas-dir={folder}").names == ("alpha",)
     assert sea.parse_scope("--seas-dir userseas alpha") == scope  # relative to the work dir
-    home = Path.home()
-    tilde = Path("~") / folder.relative_to(home) if folder.is_relative_to(home) else folder
-    assert sea.parse_scope(f"--seas-dir {tilde}").seas_dir == folder.resolve()
+    # ``~`` is the home folder, which is the test's own for this one call (a temporary
+    # folder is seldom under the real one); Windows reads it from USERPROFILE.
+    with pytest.MonkeyPatch.context() as home:
+        home.setenv("HOME", str(tmp_path))
+        home.setenv("USERPROFILE", str(tmp_path))
+        assert sea.parse_scope("--seas-dir ~/userseas").seas_dir == folder.resolve()
     # With a folder only its SEAs are names: neither the checkout's nor registered ones.
     assert sea.parse_scope(f"--seas-dir {folder} demo").names == ()
     assert sea.parse_scope(f"--seas-dir {folder} slack alpha").names == ()

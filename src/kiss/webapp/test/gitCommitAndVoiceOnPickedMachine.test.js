@@ -10,8 +10,6 @@
 // submits to that machine; a tab back on this machine commits and
 // submits here.
 
-/* global require */
-
 'use strict';
 
 const assert = require('assert');
@@ -24,10 +22,7 @@ const {
 } = require('./workdir_helpers');
 const {pickMachine} = require('./simplify2_harness');
 const {MACHINES, bootOnGpuBox} = require('./picked_machine_helpers');
-
-function tabId(win) {
-  return win._testApi.getActiveTabId();
-}
+const {activeTabId: tabId} = require('./subagent_tab_helpers');
 
 function testTheButtonCommitsTheMachinesFolder() {
   const {win, posted} = bootOnGpuBox();

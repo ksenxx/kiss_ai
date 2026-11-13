@@ -22,6 +22,7 @@ import shutil
 import socket
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -235,13 +236,23 @@ def test_apply_and_readme_sync_record_decisions_models(
                     "fc": True,
                     "emb": False,
                     "gen": True,
-                }
+                },
+                JEV_PINNED: {
+                    "context_length": 32000,
+                    "input_price_per_1M": 0.03,
+                    "output_price_per_1M": 0.0,
+                    "fc": False,
+                    "emb": False,
+                    "gen": False,
+                    "dec": True,
+                },
             }
         )
     )
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", catalog)
-    # ``current`` knows a pinned Jev that is missing from disk, so the
-    # update path must rebuild it from ``current`` and keep its ``dec``.
+    # The pinned Jev is repriced in place and must keep its ``dec``.  (It
+    # used to be absent from disk and rebuilt from ``current``; an update
+    # whose entry an existing catalog lacks is now skipped as stale.)
     current = {
         JEV_PINNED: {
             "context_length": 32000,
@@ -401,7 +412,7 @@ def test_live_probe_new_models_keeps_decisions_and_drops_dead_candidates() -> No
     assert (kept[0]["gen"], kept[0]["emb"], kept[0]["fc"]) == (False, False, False)
     assert kept[0]["use_responses_api"] is False
     assert "gen" not in kept[1]
-    assert candidates[2]["_skip"] is True
+    assert (candidates[2]["gen"], candidates[2]["emb"], candidates[2]["dec"]) == (False,) * 3
 
 
 _JEV_ENTRY = {
@@ -496,3 +507,26 @@ def test_main_test_existing_keeps_dec_without_a_key(
     assert f"{JEV}: probe inconclusive, stored capabilities kept" in out
     assert "changed" not in out
     assert json.loads(target.read_text())[JEV]["dec"] is True
+
+
+def test_a_model_without_a_key_is_reported_untested_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit SC1: with no key to send no probe runs, yet the pauses between the probes were
+    slept all the same: a second per model, minutes for a listing of another vendor's models."""
+    from kiss.core import config as config_module
+    from kiss.core.models import model_info  # noqa: F401 - loaded before the clock starts
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "")
+    started = time.monotonic()
+    caps = mod.test_model_capabilities("openrouter/openai/gpt-5.5")
+    assert time.monotonic() - started < 0.9
+    assert caps == {
+        "dec": False,
+        "gen": None,
+        "emb": None,
+        "fc": None,
+        "thinking": mod.UNVERIFIED,
+        "use_responses_api": None,
+    }

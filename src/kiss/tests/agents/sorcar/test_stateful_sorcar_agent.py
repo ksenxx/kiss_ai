@@ -9,6 +9,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import MAX_TASKS, ChatSorcarAgent
@@ -16,21 +17,21 @@ from kiss.agents.sorcar.persistence import (
     _add_task,
     _save_task_result,
 )
+from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
 
 
 def _redirect(tmpdir: str) -> tuple:
     """Redirect DB to a temp dir and reset the singleton connection."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore(saved: tuple) -> None:
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    (th._DB_PATH, th._KISS_DIR) = saved
 
 
 def _seed_chat(n: int) -> str:
@@ -50,9 +51,7 @@ class TestBuildChatPromptTruncation:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -156,9 +155,7 @@ class TestBuildChatPromptDigest:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -217,3 +214,58 @@ class TestBuildChatPromptDigest:
         body = out.split("for reference\n\n")[1].split("\n\n---\n\n# Task")[0]
         assert len(body) <= 6_000
         assert "<pre>code 2</pre>" not in out and "Result 2 heading" in out
+
+
+class TestRunArguments:
+    """``run`` fills its arguments into the task, never into the chat history around it."""
+
+    def setup_method(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = _redirect(self.tmpdir)
+
+    def teardown_method(self) -> None:
+        th._close_thread_db()
+        _restore(self.saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_history_quoting_a_placeholder_reaches_the_model_as_written(self) -> None:
+        """Three runs of one chat on the scripted local model; the second passes arguments."""
+        earlier_task = "Explain what the {task} and {x} placeholders of a prompt template do"
+        earlier_result = "<p>{task} is the task argument; {x} is filled the same way.</p>"
+        agent = ChatSorcarAgent("test")
+        with serve([finish_body(earlier_result)]) as (url, requests):
+            settings: dict[str, Any] = {
+                "model_name": MODEL,
+                "model_config": {"base_url": url, "api_key": "local"},
+                "work_dir": self.tmpdir,
+                "use_memory": False,
+                "web_tools": False,
+                "verbose": False,
+            }
+            agent.run(prompt_template=earlier_task, **settings)
+            agent.run(
+                prompt_template="Do this now: {task} (use {x})",
+                arguments={"task": "sort the list", "x": "quicksort"},
+                **settings,
+            )
+            with_arguments = agent.last_task_id
+            agent.run(prompt_template="And once more", **settings)
+        prompts = [
+            str(next(m for m in request["messages"] if m["role"] == "user")["content"])
+            for request in requests
+        ]
+        assert len(prompts) == 3
+        history = f"### Task 1\n{earlier_task}\n\n### Result 1\n{earlier_result}\n\n"
+        task = "Do this now: sort the list (use quicksort)"
+        assert history + "---\n\n# Task (work on it now)\n\n" + task in prompts[1]
+        # The row holds the task as it ran: the next run quotes that, not a template with holes.
+        assert history + f"### Task 2\n{task}\n\n### Result 2\n" in prompts[2]
+        # The prompt event synthesized for a run no printer recorded is what the model got.
+        session = th._load_chat_events_by_task_id(with_arguments)
+        assert session is not None
+        replayed = next(
+            str(event["text"])
+            for event in cast(list[dict[str, Any]], session["events"])
+            if event["type"] == "prompt"
+        )
+        assert history in replayed and replayed in prompts[1]

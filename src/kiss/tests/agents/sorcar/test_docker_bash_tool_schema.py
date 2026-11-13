@@ -128,6 +128,22 @@ class TestDockerBashToolExposesBothLimits(unittest.TestCase):
         self.assertTrue(result.startswith("Started background job"), result)
         self.assertIn("bash_job(", result)
 
+    def test_invalid_on_timeout_is_refused_as_on_the_host(self) -> None:
+        """A value other than ``kill`` / ``background`` is an error, not a silent ``kill``."""
+        result = self._bash_tool()("echo ran-anyway", "a misspelt on_timeout", on_timeout="detach")
+        self.assertEqual(
+            result, "Error: on_timeout must be \"kill\" or \"background\", got 'detach'.",
+        )
+
+    def test_until_wins_over_on_timeout_background_as_on_the_host(self) -> None:
+        """``until`` polls the command; ``on_timeout="background"`` must not drop it for a job."""
+        result = self._bash_tool()(
+            "echo READY", "poll with both options", timeout_seconds=10,
+            on_timeout="background", until="READY", poll_seconds=1,
+        )
+        self.assertIn("[until 'READY'", result)
+        self.assertNotIn("Job ", result)
+
     def test_docker_bash_without_a_manager_still_raises(self) -> None:
         """The forwarder refuses to run without a container attached."""
         from kiss.core.kiss_error import KISSError

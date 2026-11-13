@@ -26,8 +26,11 @@ import tempfile
 from contextlib import closing
 from typing import Any
 
+import pytest
+
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
+from kiss.server.commands import sea_commands_event
 from kiss.server.server import AgentServer
 from kiss.tests.agents.sorcar.test_steer_inputs import (
     _input_history,
@@ -35,6 +38,7 @@ from kiss.tests.agents.sorcar.test_steer_inputs import (
     _restore,
     _set_task_timestamp,
 )
+from kiss.tests.persistence_helpers import close_db
 
 
 def _store_blob_task(task_id: str, text: bytes) -> None:
@@ -57,7 +61,7 @@ class TestBlobTaskTexts:
         th._record_steer_input("fix the typo")
 
     def teardown_method(self) -> None:
-        th._close_db()
+        close_db()
         _restore(self.saved)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -79,6 +83,16 @@ class TestBlobTaskTexts:
     def test_slash_command_usage_counts_the_blob_row(self) -> None:
         usage = th._load_slash_command_usage()
         assert usage == {"discover": (1, 1001.0)}
+
+    @pytest.mark.parametrize("junk", ["'abc'", "x'00ff'", "9e999"])
+    def test_slash_command_usage_survives_a_junk_timestamp(self, junk: str) -> None:
+        """A run dated by text, a BLOB or an infinity is the oldest; the ``/`` popup is answered."""
+        with closing(sqlite3.connect(th._DB_PATH)) as conn, conn:
+            conn.execute(
+                f"UPDATE task_history SET timestamp = {junk} WHERE id = ?", (self.blob_id,),
+            )
+        assert th._load_slash_command_usage() == {"discover": (1, 0.0)}
+        assert sea_commands_event(["discover"])["recent"] == ["discover"]
 
     def test_the_replay_session_of_the_blob_row_is_json(self) -> None:
         session = th._load_chat_events_by_task_id(self.blob_id)
@@ -102,7 +116,7 @@ class TestInputHistoryCommandIsAnswered:
 
     def teardown_method(self) -> None:
         agent_state.agent_states.clear()
-        th._close_db()
+        close_db()
         _restore(self.saved)
         shutil.rmtree(self.tmp, ignore_errors=True)
 

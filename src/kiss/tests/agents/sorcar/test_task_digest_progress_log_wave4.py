@@ -17,11 +17,16 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from kiss.agents.sorcar import task_digest
+from kiss.agents.sorcar.docker_tools import DockerTools
 from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.tests.agents.sorcar.test_docker_script_generation import host_bash
 from kiss.tests.agents.sorcar.test_task_digest_progress_log_wave3 import (
     _edit_call,
     _log_of,
@@ -105,16 +110,100 @@ def test_edits_of_a_crlf_log_are_replayed_as_the_tool_applied_them(tmp_path: Pat
         {"old_string": "- ", "new_string": "* ", "replace_all": True},
     ])
     batch = tools.Edit(str(log), edits=multi)
-    assert not single.startswith("Error") and not batch.startswith("Error")
-    assert log.read_bytes() == b"# log\r\n* new status\r\n* step 2\r\n"
+    # S11 re-fix round 2: old text of one line is found as it is, and the
+    # lines its new text adds take the file's CRLF all the same; those of
+    # an ``exact`` edit (a ``sed -i`` applied as an Edit) stay as given.
+    # The replay converted neither and showed a bare LF the file never held.
+    one_line = {"old_string": "step 2", "new_string": "step 2\n* step 3"}
+    as_sed = {"old_string": "step 3", "new_string": "step 3\n* step 4"}
+    results = [
+        single,
+        batch,
+        tools.Edit(str(log), one_line["old_string"], one_line["new_string"]),
+        tools.Edit(str(log), as_sed["old_string"], as_sed["new_string"], exact=True),
+    ]
+    assert not any(result.startswith("Error") for result in results)
+    assert log.read_bytes() == b"# log\r\n* new status\r\n* step 2\r\n* step 3\n* step 4\r\n"
     events = [
         *_write_call(log, "# log\r\n- old status\r\n"),
         *_edit_call(log, {"old_string": "- old status\n", "new_string": "- new status\n"}, single),
         *_edit_call(log, {"extras": {"edits": multi}}, batch),
+        *_edit_call(log, one_line, results[2]),
+        *_edit_call(log, {**as_sed, "extras": {"exact": "True"}}, results[3]),
     ]
     task_id = _task(tmp_path, events, time.time() - 600)
 
-    assert _log_of(task_id) == "# log\r\n* new status\r\n* step 2"
+    assert _log_of(task_id) == "# log\r\n* new status\r\n* step 2\r\n* step 3\n* step 4"
+
+
+def test_an_exact_edit_is_not_replayed_on_a_whitespace_similar_block(tmp_path: Path) -> None:
+    # An ``exact`` edit matches verbatim only.  Its old text was another
+    # task's block, indented unlike the task's own: the replay matched the
+    # task's block ignoring whitespace and showed a status the task never
+    # wrote there.
+    log = tmp_path / "tmp" / "PROGRESS.md"
+    tools = UsefulTools(work_dir=str(tmp_path))
+    own = "# log\n  - old\n  - next\n"
+    tools.Write(str(log), own)
+    with log.open("a", encoding="utf-8", newline="") as other_task:
+        other_task.write(" - old\n - next\n")
+    edit = {"old_string": " - old\n - next\n", "new_string": " - done\n - next\n"}
+    result = tools.Edit(str(log), edit["old_string"], edit["new_string"], exact=True)
+    assert log.read_text(encoding="utf-8") == own + edit["new_string"], result
+    events = [
+        *_write_call(log, own),
+        *_edit_call(log, {**edit, "extras": {"exact": "True"}}, result),
+    ]
+    task_id = _task(tmp_path, events, time.time() - 600)
+
+    assert _log_of(task_id) == (own + edit["new_string"]).rstrip()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the container scripts need GNU coreutils")
+def test_a_container_batch_edit_that_stopped_part_way_replays_what_it_applied(
+    tmp_path: Path,
+) -> None:
+    # S11 re-fix 5: the container Edit applies a batch one edit at a time,
+    # stops at the first that fails and names the edits already in the file
+    # (the host one writes all or nothing); the replay took that answer for
+    # a call that wrote nothing and showed the entries the edits replaced.
+    log = tmp_path / "tmp" / "PROGRESS.md"
+    original = "# log\n- first old\n- second old\n- third old\n"
+    _write(log, original)
+    tools = DockerTools(host_bash)
+    stopped = json.dumps([
+        {"old_string": "first old", "new_string": "first done"},
+        {"old_string": "second old", "new_string": "second done"},
+        {"old_string": "missing", "new_string": "never"},
+        {"old_string": "third old", "new_string": "third done"},
+    ])
+    refused = json.dumps([
+        {"old_string": "missing", "new_string": "never"},
+        {"old_string": "third old", "new_string": "third done"},
+    ])
+    stopped_result = tools.Edit(str(log), edits=stopped)
+    refused_result = tools.Edit(str(log), edits=refused)
+    assert stopped_result.startswith("Error: edit 3: edits 1-2 applied; String not found")
+    assert refused_result.startswith("Error: edit 1: String not found")
+    applied = "# log\n- first done\n- second done\n- third old\n"
+    assert log.read_text(encoding="utf-8") == applied
+    # A Write the container could not make (the parent is a file) answered
+    # with the failed command's output as it was, which the replay, like
+    # every reader of the tools' "Error" convention, took for a success.
+    blocker = tmp_path / "blocker"
+    _write(blocker, "x")
+    unmade = blocker / "PROGRESS.md"
+    unmade_result = tools.Write(str(unmade), "never written")
+    assert "exit code:" in unmade_result and not unmade.exists()
+    events = [
+        *_write_call(log, original),
+        *_edit_call(log, {"extras": {"edits": stopped}}, stopped_result),
+        *_edit_call(log, {"extras": {"edits": refused}}, refused_result),
+        {"type": "tool_call", "name": "Write", "path": str(unmade), "content": "never written"},
+        {"type": "tool_result", "content": unmade_result},
+    ]
+
+    assert _log_of(_task(tmp_path, events, time.time() - 600)) == applied.rstrip()
 
 
 def test_a_task_that_only_appended_to_an_older_log_shows_its_own_edits(tmp_path: Path) -> None:

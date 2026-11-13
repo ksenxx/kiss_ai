@@ -14,9 +14,11 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -169,12 +171,15 @@ def append_events(
     )
 
 
-def sync(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def sync(
+    *args: str, env: dict[str, str] | None = None, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run the sync_db command line.
 
     Args:
         *args: Command-line arguments after the module name.
         env: Environment of the process; the current one when ``None``.
+        timeout: Seconds after which the run counts as hung (``TimeoutExpired``).
 
     Returns:
         The completed process, with text stdout and stderr.
@@ -185,6 +190,7 @@ def sync(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedP
         text=True,
         check=False,
         env=env,
+        timeout=timeout,
     )
 
 
@@ -556,18 +562,26 @@ def test_a_task_the_target_has_without_events_gets_them_all(tmp_path: Path) -> N
 
 
 def test_events_of_a_task_without_a_task_row_do_not_travel(tmp_path: Path) -> None:
-    """``events.task_id`` references ``task_history``; orphans are never looked at."""
-    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    """``events.task_id`` references ``task_history``; orphans are never looked at.
+
+    Neither for a target without the task nor, above the events it has,
+    for a target that holds a task of that id.
+    """
+    source, empty, holding = (tmp_path / name for name in ("src.db", "empty.db", "holding.db"))
     src = make_db(source)
     add_task(src, "a", events=1)
     append_events(src, "orphan", 1, 2)
     src.close()
-    make_db(target).close()
+    make_db(empty).close()
+    dst = make_db(holding)
+    add_task(dst, "orphan", events=1)
+    dst.close()
 
-    done = sync(str(source), str(target))
+    for target, expected in ((empty, [("a", 1)]), (holding, [("a", 1), ("orphan", 1)])):
+        done = sync(str(source), str(target))
 
-    assert done.returncode == 0, done.stderr
-    assert event_keys(target) == [("a", 1)]
+        assert done.returncode == 0, done.stderr
+        assert event_keys(target) == expected
 
 
 CRON_MARKER = "You are running as an unattended scheduled automation (cron job)."
@@ -805,6 +819,51 @@ def test_a_column_add_column_cannot_express_is_refused(tmp_path: Path) -> None:
     assert "strict" not in column_info(target, "task_history")
 
 
+def keep_migrating(source: Path, begun: threading.Event, done: threading.Event) -> None:
+    """Rename a task column of *source* every millisecond, each a new schema, until *done*."""
+    conn = sqlite3.connect(source, isolation_level=None, timeout=60.0)
+    try:
+        number = 0
+        while not done.wait(0.001):
+            conn.execute(f"ALTER TABLE task_history RENAME COLUMN m{number} TO m{number + 1}")
+            number += 1
+            begun.set()
+    finally:
+        conn.close()
+
+
+def test_a_source_migrated_during_the_extract_is_read_at_one_instant(tmp_path: Path) -> None:
+    """The extract takes the schema and the rows of a live source from one snapshot.
+
+    Another connection keeps changing the schema of the WAL-mode source, and a large
+    manifest holds the extract between its copy of the schema and its copy of the rows:
+    read apart, the rows named a column the delta's table did not have and the sync died.
+    """
+    source, target, manifest = tmp_path / "src.db", tmp_path / "dst.db", tmp_path / "have.gz"
+    src = make_db(source)
+    src.execute("PRAGMA journal_mode=WAL")
+    src.execute("ALTER TABLE task_history ADD COLUMN m0 TEXT DEFAULT ''")
+    add_task(src, "a", events=1)
+    src.close()
+    make_db(target).close()
+    with open(manifest, "wb") as handle:
+        sync_db.write_json_gz({"tasks": {f"t{n}": None for n in range(100_000)}}, handle)
+    runner = sync_db.Runner("python3", None, [])
+    ends = sync_db.Location(str(source)), sync_db.Location(str(target))
+    begun, done = threading.Event(), threading.Event()
+    migration = threading.Thread(target=keep_migrating, args=(source, begun, done))
+    migration.start()
+    try:
+        assert begun.wait(60)
+        sync_db.synchronize(*ends, runner, target_manifest=str(manifest))
+        assert migration.is_alive()  # the schema kept changing until the sync was over
+    finally:
+        done.set()
+        migration.join(60)
+    assert not migration.is_alive()
+    assert task_ids(target) == ["a"] and event_keys(target) == [("a", 1)]
+
+
 def test_dry_run_reports_what_a_real_run_would_do(tmp_path: Path) -> None:
     """A dry run applies the merge rules instead of counting the delta."""
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
@@ -874,6 +933,10 @@ def test_unexpected_constraint_failure_aborts_the_merge(tmp_path: Path) -> None:
 
     assert done.returncode == 1
     assert "events are frozen" in done.stderr
+    # ``synchronize``, which the peer sync calls, reports SQLite's failure as its own error.
+    ends = sync_db.Location(str(source)), sync_db.Location(str(target))
+    with pytest.raises(sync_db.SyncError, match="events are frozen"):
+        sync_db.synchronize(*ends, sync_db.Runner("python3", None, []))
     assert task_ids(target) == []
     assert event_keys(target) == []
 
@@ -1035,6 +1098,58 @@ def test_dry_run_needs_a_writable_target(tmp_path: Path) -> None:
     assert "dry run needs" in done.stderr
 
 
+@posix_only("limits the file size with bash's ulimit")
+def test_a_target_that_cannot_grow_fails_with_the_cause(tmp_path: Path) -> None:
+    """A merge the disk refuses reports the I/O error, and the target stays as it was.
+
+    SQLite rolls the whole transaction back by itself after an I/O error, so the
+    ``ROLLBACK`` issued next failed in turn (``cannot rollback - no transaction is
+    active``) and that was the only thing reported.
+    """
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    for number in range(12):
+        add_task(src, f"s{number}", events=10, task="x" * 2000)
+    src.close()
+    dst = make_db(target)
+    for number in range(40):
+        add_task(dst, f"d{number}", events=30, task="y" * 2000)
+    dst.close()
+    kibibytes = target.stat().st_size // 1024 + 8  # room for 8 KiB more; the merge needs 72
+    done = subprocess.run(
+        ["bash", "-c", f'ulimit -f {kibibytes}; exec "$@"', "bash",
+         sys.executable, "-m", "kiss.scripts.sync_db", str(source), str(target)],
+        capture_output=True, text=True, check=False, timeout=120,
+    )
+    assert done.returncode == 1
+    assert done.stderr.rstrip().endswith("sync_db: disk I/O error"), done.stderr
+    assert task_ids(target) == sorted(f"d{number}" for number in range(40))
+
+
+@posix_only("needs the OpenSSH client")
+def test_a_host_that_never_answers_the_ssh_handshake_fails_the_sync(tmp_path: Path) -> None:
+    """The real ``ssh`` gives up on a host that takes the connection and then says nothing.
+
+    Nothing accepts on the listener, so ssh connects, sends its banner and waits for the
+    host's: for ever before it had a connect deadline.  The caller's own ``-o`` still wins
+    over that default, one second instead of ten.  (The deadline for a connection that dies
+    later, ServerAliveInterval, needs a real sshd to test.)
+    """
+    source = tmp_path / "src.db"
+    make_db(source).close()
+    with socket.create_server(("127.0.0.1", 0)) as silent:
+        args = (str(source), "127.0.0.1:/x.db", "--port", str(silent.getsockname()[1]))
+        started = time.monotonic()
+        default = sync(*args, timeout=60)
+        between = time.monotonic()
+        explicit = sync(*args, "-o", "ConnectTimeout=1", timeout=60)
+        explicit_seconds = time.monotonic() - between
+    for done in (default, explicit):
+        assert done.returncode == 1 and "timed out" in done.stderr, done.stderr
+        assert "_manifest failed on 127.0.0.1 (exit 255)" in done.stderr
+    assert explicit_seconds < between - started - 5
+
+
 def ssh_available() -> bool:
     """Report whether the test's remote host answers a batch-mode ssh.
 
@@ -1130,6 +1245,110 @@ def test_remote_round_trip(tmp_path: Path) -> None:
         ("r1", ""), ("r2", ""), ("r3", stamped[1]),
     ]
     assert event_keys(back) == [("r1", 1), ("r1", 2), ("r1", 3), ("r2", 1)]
+
+
+FAKE_SSH = """#!/bin/bash
+while [ "$1" = -o ] || [ "$1" = -p ]; do shift 2; done
+shift                       # drop the host argument
+exec bash -c "$1"
+"""
+
+
+@posix_only("drives the script with a bash ssh stand-in")
+def test_a_script_too_long_for_one_raw_argument_still_runs_on_the_remote(tmp_path: Path) -> None:
+    """A remote phase travels in one command-line argument, which Linux caps at 128 KiB.
+
+    The checkout here is the real one with the script grown by some 10 KB of comments:
+    base64 of the plain sources was 7 KB short of the cap and no longer fitted (``OSError:
+    Argument list too long: 'ssh'``), so the sources travel compressed.  Both directions
+    run, and the merge on the remote uses the chat-summary module shipped with the script.
+    """
+    package = tmp_path / "kiss"
+    script = package / "scripts" / "sync_db.py"
+    script.parent.mkdir(parents=True)
+    (package / "agents" / "sorcar").mkdir(parents=True)
+    real = Path(sync_db.__file__).resolve()
+    for module in sync_db.SHIPPED_MODULES.values():
+        shutil.copy(real.parent.parent / module, package / module)
+    columns_source = (package / sync_db.SHIPPED_MODULES["history_columns"]).read_text()
+    script.write_text(
+        real.read_text() + "".join(f"# {line}\n" for line in columns_source.splitlines())
+    )
+    ssh = tmp_path / "bin" / "ssh"
+    ssh.parent.mkdir()
+    ssh.write_text(FAKE_SSH)
+    ssh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{ssh.parent}{os.pathsep}{os.environ['PATH']}"}
+    local, remote, back = (tmp_path / name for name in ("local.db", "remote.db", "back.db"))
+    src = make_db(local)
+    add_task(src, "r1", events=2, chat_id="c1", task="Plot the results")
+    src.close()
+    dst = make_db(remote)
+    add_chats(dst)
+    dst.close()
+    make_db(back).close()
+    for source, target in (
+        (str(local), f"me@fakehost:{remote}"),
+        (f"me@fakehost:{remote}", str(back)),
+    ):
+        done = subprocess.run(
+            [sys.executable, str(script), source, target],
+            capture_output=True, text=True, check=False, env=env, timeout=120,
+        )
+        assert done.returncode == 0, done.stderr
+        assert "1 task row(s) added, 2 event row(s) added" in done.stdout
+    assert chats(remote) == [("c1", "Plot the results", 1000000)]
+    assert event_keys(back) == [("r1", 1), ("r1", 2)]
+
+
+def test_a_machine_without_an_ssh_client_fails_like_any_other_sync_error(tmp_path: Path) -> None:
+    """An ssh that cannot be started is reported in one line with exit status 1, not a traceback."""
+    local = tmp_path / "local.db"
+    make_db(local).close()
+    done = sync(str(local), "me@fakehost:/remote.db", env={**os.environ, "PATH": str(tmp_path)})
+    assert done.returncode == 1
+    assert done.stderr.splitlines()[-1].startswith("sync_db: cannot run ssh: "), done.stderr
+    assert "Traceback" not in done.stderr
+
+
+@posix_only("drives the script with a bash ssh stand-in")
+def test_a_remote_shell_that_prints_fails_like_any_other_sync_error(tmp_path: Path) -> None:
+    """What is not the gzip stream a phase writes is reported in one line, not a traceback.
+
+    A remote start-up file that prints puts its text in front of the
+    manifest (a push) or of the delta (a pull), and a connection that
+    drops cuts them short; neither database changes.  A remote disk
+    that refuses the delta is not such a stream's fault and keeps its
+    own words.
+    """
+    ssh = tmp_path / "bin" / "ssh"
+    ssh.parent.mkdir()
+    ssh.touch(mode=0o755)
+    env = {**os.environ, "PATH": f"{ssh.parent}{os.pathsep}{os.environ['PATH']}"}
+    local, remote = tmp_path / "local.db", tmp_path / "remote.db"
+    for path in (local, remote):
+        conn = make_db(path)
+        add_task(conn, path.stem, events=1)
+        conn.close()
+    ways = ((str(local), f"me@fakehost:{remote}"), (f"me@fakehost:{remote}", str(local)))
+
+    for stand_in, complaint in (
+        (FAKE_SSH.replace("exec ", "echo Welcome\nexec "), "Not a gzipped file (b'We')"),
+        (FAKE_SSH.replace('exec bash -c "$1"', 'bash -c "$1" | head -c 12'), "ended before"),
+    ):
+        ssh.write_text(stand_in)
+        for source, target in ways:
+            done = sync(source, target, env=env)
+            assert done.returncode == 1
+            assert done.stderr.splitlines()[-1].startswith("sync_db: a phase's output is not")
+            assert complaint in done.stderr
+            assert "Traceback" not in done.stderr
+    ssh.write_text(FAKE_SSH.replace("exec ", "ulimit -f 4\nexec "))
+    done = sync(*ways[0], env=env)
+    assert done.returncode == 1
+    assert "File too large" in done.stderr and "is not the gzip stream" not in done.stderr
+    assert task_ids(local) == ["local"]
+    assert task_ids(remote) == ["remote"]
 
 
 CHAT_DDL = """
@@ -1235,9 +1454,11 @@ def test_chat_summaries_need_the_table_on_the_target_only(tmp_path: Path) -> Non
     assert task_ids(target) == ["a"]
 
     # The other way round: the target's rows are rebuilt from the arriving
-    # tasks whether or not the source ever had the table.
+    # tasks whether or not the source ever had the table -- or the column
+    # that tells a sub-agent's row from a chat's own, which the target fills in.
     older, newer = tmp_path / "older.db", tmp_path / "newer.db"
     src = make_db(older)
+    src.execute("ALTER TABLE task_history DROP COLUMN parent_task_id")
     add_task(src, "b", events=1, chat_id="c2", task="Fix the login bug on the settings page")
     src.close()
     dst = make_db(newer)
@@ -1272,8 +1493,9 @@ def test_chat_summaries_without_the_expected_columns_are_refused(tmp_path: Path)
 def test_chat_summaries_need_the_summary_code_next_to_the_script(tmp_path: Path) -> None:
     """A copy of the script without the checkout's shipped modules stops rather than guesses.
 
-    The chat-summary phase reads the column module first (the target's
-    ``chat_summaries`` columns), then the summary module.
+    The merge reads the carry-over script first (what a deletion takes
+    with it); the chat-summary phase then reads the column module (the
+    target's ``chat_summaries`` columns) before the summary module.
     """
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     src = make_db(source)
@@ -1285,15 +1507,17 @@ def test_chat_summaries_need_the_summary_code_next_to_the_script(tmp_path: Path)
     stray = tmp_path / "scripts" / "sync_db.py"
     stray.parent.mkdir()
     shutil.copy(sync_db.__file__, stray)
-    done = subprocess.run(
-        [sys.executable, str(stray), str(source), str(target)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert done.returncode == 1
-    assert "cannot read" in done.stderr and "history_columns.py" in done.stderr
-    assert task_ids(target) == []
+    for missing in ("carry_over_tables.py", "history_columns.py"):
+        done = subprocess.run(
+            [sys.executable, str(stray), str(source), str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert done.returncode == 1
+        assert "cannot read" in done.stderr and missing in done.stderr
+        assert task_ids(target) == []
+        shutil.copy(Path(sync_db.__file__).with_name("carry_over_tables.py"), stray.parent)
 
 
 EDIT_SCRIPT = (
@@ -1537,12 +1761,15 @@ def test_a_task_recreated_after_its_deletion_travels(tmp_path: Path) -> None:
 
     The extract must leave the recreated task in, as the merge would
     keep it, so that a plain sync and a ``--full`` one agree; a task the
-    tombstone does date stays out of both.
+    tombstone does date stays out of both.  Each one's sub-task shares
+    its fate.
     """
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     src = make_db(source)
     add_task(src, "reused", timestamp=6000.0, events=2)
+    add_task(src, "reused-sub", parent_task_id="reused", timestamp=6001.0, events=1)
     add_task(src, "older", timestamp=4000.0, events=1)
+    add_task(src, "older-sub", parent_task_id="older", timestamp=4001.0, events=1)
     src.close()
     dst = make_db(target)
     _tombstone(dst, "deleted_tasks", "reused", 5000.0)
@@ -1554,38 +1781,149 @@ def test_a_task_recreated_after_its_deletion_travels(tmp_path: Path) -> None:
     for flags, path in (((), target), (("--full",), full)):
         done = sync(str(source), str(path), *flags)
         assert done.returncode == 0, done.stderr
-        assert task_ids(path) == ["reused"], flags
-        assert event_keys(path) == [("reused", 1), ("reused", 2)], flags
+        assert task_ids(path) == ["reused", "reused-sub"], flags
+        assert event_keys(path) == [("reused", 1), ("reused", 2), ("reused-sub", 1)], flags
+
+
+def test_a_deleted_chat_takes_the_tasks_its_deleting_machine_never_saw(tmp_path: Path) -> None:
+    """A chat deleted on one machine does not come back with a task only the other one had.
+
+    The deleting machine recorded the chat and the tasks it held.  A task
+    of the chat it had never seen, and that task's sub-task, are older
+    than the deletion and go with the chat on both machines; a task
+    started after the deletion is the chat's new life.
+    """
+    here, there = tmp_path / "here.db", tmp_path / "there.db"
+    dst = make_db(here)
+    _tombstone(dst, "deleted_tasks", "known", 2000.0)
+    _tombstone(dst, "deleted_chats", "shared", 2000.0)
+    dst.close()
+    src = make_db(there)
+    add_task(src, "known", chat_id="shared", events=1)
+    add_task(src, "unseen", chat_id="shared", events=2)
+    add_task(src, "sub", chat_id="sub-chat", parent_task_id="unseen", events=1)
+    add_task(src, "later", chat_id="shared", timestamp=3000.0, events=1)
+    src.close()
+    full, pristine = tmp_path / "here-full.db", tmp_path / "here-pristine.db"
+    shutil.copy(here, full)
+    shutil.copy(here, pristine)
+    gone = [("known", 2000.0), ("sub", 2000.0), ("unseen", 2000.0)]
+
+    for flags, path in (((), here), (("--full",), full)):
+        done = sync(str(there), str(path), *flags)
+        assert done.returncode == 0, done.stderr
+        assert task_ids(path) == ["later"], flags
+        assert event_keys(path) == [("later", 1)], flags
+        assert rows(path, "SELECT id, deleted_ts FROM deleted_tasks ORDER BY id") == gone, flags
+
+    # The other way, the machine that holds them carries the deletion out.
+    done = sync(str(pristine), str(there))
+    assert done.returncode == 0, done.stderr
+    assert "3 task row(s) deleted" in done.stdout
+    assert task_ids(there) == ["later"]
+    assert event_keys(there) == [("later", 1)]
+    assert rows(there, "SELECT id, deleted_ts FROM deleted_tasks ORDER BY id") == gone
+
+
+def test_a_deleted_task_takes_its_sub_tasks_wherever_they_are(tmp_path: Path) -> None:
+    """A task deleted on a machine that held none of its sub-tasks still takes them all.
+
+    The sub-tasks the target holds go with the parent's row, whatever
+    their age -- a running one once it has ended -- and one that arrives
+    later from a third machine stays out, with its events and its own
+    sub-task.  One that began after the parent's deletion is recorded as
+    deleted a millisecond after it began, whatever the clocks say (one
+    machine's runs an hour ahead): a task of its id that began later
+    than that, on another machine, is another task and lives.
+    """
+    source, target, third = (tmp_path / name for name in ("src.db", "dst.db", "third.db"))
+    ahead = time.time() + 3600
+    src = make_db(source)
+    _tombstone(src, "deleted_tasks", "parent", 2000.0)
+    src.close()
+    dst = make_db(target)
+    add_task(dst, "parent", events=1)
+    add_task(dst, "child", parent_task_id="parent", events=2)
+    add_task(dst, "grandchild", parent_task_id="child", events=1)
+    add_task(dst, "late", parent_task_id="parent", timestamp=3000.0, events=1)
+    add_task(dst, "ahead", parent_task_id="parent", timestamp=ahead, events=1)
+    add_task(dst, "ahead-sub", parent_task_id="ahead", timestamp=ahead + 1, events=1)
+    add_task(dst, "busy", parent_task_id="child", result="Agent Failed Abruptly", events=1)
+    add_task(dst, "kept", events=1)
+    dst.close()
+    other = make_db(third)
+    add_task(other, "straggler", parent_task_id="grandchild", events=1)
+    add_task(other, "straggler-sub", parent_task_id="straggler", events=1)
+    add_task(other, "late", timestamp=4000.0, events=1)
+    other.close()
+
+    done = sync(str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert "6 task row(s) deleted" in done.stdout
+    assert task_ids(target) == ["busy", "kept"]
+    assert event_keys(target) == [("busy", 1), ("kept", 1)]
+    assert dict(rows(target, "SELECT id, deleted_ts FROM deleted_tasks")) == {
+        "parent": 2000.0, "child": 2000.0, "grandchild": 2000.0, "busy": 2000.0,
+        "late": 3000.0 + 0.001, "ahead": ahead + 0.001, "ahead-sub": ahead + 1 + 0.001,
+    }  # fmt: skip
+
+    dst = sqlite3.connect(target, isolation_level=None)
+    dst.execute("UPDATE task_history SET result = 'done' WHERE id = 'busy'")
+    dst.close()
+    # The third machine's own "late" began after the deletion recorded for that id.
+    for origin, destination in ((third, target), (target, third)):
+        done = sync(str(origin), str(destination))
+
+        assert done.returncode == 0, done.stderr
+        assert task_ids(destination) == ["kept", "late"]
+        assert event_keys(destination) == [("kept", 1), ("late", 1)]
 
 
 def test_a_deleted_chat_loses_its_summary_row_but_a_deleted_task_does_not(
     tmp_path: Path,
 ) -> None:
-    """Only a chat deletion drops the chat's row: a task deletion keeps its title."""
+    """Only a chat deletion drops the chat's row: a task deletion keeps its title.
+
+    A chat deleted long ago and started again is a deleted chat once
+    more when its last task goes: its row is dropped by the merge that
+    removes the task, not by the next one.  Losing a sub-agent's row
+    changes nothing a chat's row says, so such a chat keeps all of it.
+    """
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     src = make_db(source)
-    _tombstone(src, "deleted_tasks", "t1", 5000.0)
-    _tombstone(src, "deleted_tasks", "c1", 5000.0)
+    for task_id in ("t1", "c1", "a1", "s1"):
+        _tombstone(src, "deleted_tasks", task_id, 5000.0)
     _tombstone(src, "deleted_chats", "chat-gone", 5000.0)
+    for chat_id in ("chat-again", "chat-sub"):
+        _tombstone(src, "deleted_chats", chat_id, 1.0)
     src.close()
     dst = make_db(target)
     add_task(dst, "t1", chat_id="chat-kept", events=1)
     add_task(dst, "c1", chat_id="chat-gone", events=1)
+    add_task(dst, "a1", chat_id="chat-again", events=1)
+    add_task(dst, "s1", chat_id="chat-sub", parent_task_id="elsewhere", events=1)
     dst.execute(
         "CREATE TABLE chat_summaries (chat_id TEXT PRIMARY KEY, summary TEXT,"
         " last_launched INTEGER, last_finished INTEGER, user_summary TEXT DEFAULT '')"
     )
     dst.execute("INSERT INTO chat_summaries VALUES ('chat-kept', 's', 1, 1, 'My title')")
     dst.execute("INSERT INTO chat_summaries VALUES ('chat-gone', 's', 1, 1, '')")
+    dst.execute("INSERT INTO chat_summaries VALUES ('chat-again', 's', 2000, 1, 'Again')")
+    dst.execute("INSERT INTO chat_summaries VALUES ('chat-sub', 's', 2000, 1, 'Sub')")
     dst.close()
 
     done = sync(str(source), str(target))
 
     assert done.returncode == 0, done.stderr
     assert task_ids(target) == []
-    assert rows(target, "SELECT chat_id, user_summary FROM chat_summaries") == [
-        ("chat-kept", "My title")
+    # What was worked out from the deleted task goes with it, as in the web app.
+    assert rows(target, "SELECT * FROM chat_summaries ORDER BY chat_id") == [
+        ("chat-kept", "", 0, 0, "My title"),
+        ("chat-sub", "s", 2000, 1, "Sub"),
     ]
+    assert "3 chat summary row(s) refreshed" in done.stdout
+    assert "0 chat summary row(s) refreshed" in sync(str(source), str(target)).stdout
 
 
 def test_a_chat_started_again_after_its_deletion_keeps_its_row(tmp_path: Path) -> None:

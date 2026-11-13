@@ -34,8 +34,8 @@ from websockets.asyncio.client import connect
 
 import kiss.core.user_config as vc
 from kiss.server import agent_state
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-from kiss.tests.local_ws import open_local_connection
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 RAW_TAB = "  tab-1 "
@@ -97,8 +97,24 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
         with agent_state.STATE_LOCK:
             return {st.tab_id for st in agent_state.agent_states.values()}
 
-    def _assert_no_backend_trace(self) -> None:
+    async def _assert_no_backend_trace(self) -> None:
+        """Assert the closed tab left nothing behind, once its teardown is over.
+
+        ``closeTab`` is answered by the ``tabs_state`` snapshot that omits
+        the tab, and the tab's backend state is torn down AFTER that
+        broadcast: by the command's own thread (``_drop_tab_state``), or
+        by the finished task's thread when its ``_dispose_if_closed``
+        claims the closed tab first.  A client that has read the snapshot
+        can therefore still find the state for a moment (asserting at once
+        failed on a loaded machine), so the teardown is waited for.
+        """
         backend = self.server._agent_server
+        deadline = time.monotonic() + 60
+        while (
+            self._tab_ids_with_state()
+            or {RAW_TAB, CANON_TAB} & backend._tab_chat_views.keys()
+        ) and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
         self.assertEqual(self._tab_ids_with_state(), set())
         self.assertFalse(backend.tab_registry.has_tab(CANON_TAB))
         self.assertNotIn(RAW_TAB, backend._tab_chat_views)
@@ -147,7 +163,7 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "closeTab", "tabId": CANON_TAB}))
             tabs = await self._recv_until(ws.recv, "tabs_state")
             self.assertEqual(tabs["tabs"], [])
-        self._assert_no_backend_trace()
+        await self._assert_no_backend_trace()
 
     async def test_wss_close_with_padded_id_drops_canonical_state(self) -> None:
         async with connect(
@@ -162,7 +178,7 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "closeTab", "tabId": RAW_TAB}))
             tabs = await self._recv_until(ws.recv, "tabs_state")
             self.assertEqual(tabs["tabs"], [])
-        self._assert_no_backend_trace()
+        await self._assert_no_backend_trace()
 
     async def test_validation_error_reply_carries_canonical_tab_id(self) -> None:
         async with connect(
@@ -181,7 +197,7 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "run", "tabId": "   "}))
             error = await self._recv_until(ws.recv, "error")
             self.assertNotIn("tabId", error)
-        self._assert_no_backend_trace()
+        await self._assert_no_backend_trace()
 
     async def test_non_string_tab_id_is_left_for_the_handler(self) -> None:
         async with connect(
@@ -194,7 +210,7 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             ))
             reply = await self._recv_until(ws.recv, "pathsExist")
             self.assertEqual(reply["tabId"], "")
-        self._assert_no_backend_trace()
+        await self._assert_no_backend_trace()
 
     async def test_local_padded_tab_id_registers_one_local_tab(self) -> None:
         reader, writer = await open_local_connection(self.server)
@@ -243,4 +259,4 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
         finally:
             writer.close()
             await writer.wait_closed()
-        self._assert_no_backend_trace()
+        await self._assert_no_backend_trace()

@@ -25,6 +25,7 @@ import threading
 
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
@@ -92,5 +93,26 @@ class TestStopRunTokenGuard:
             self.server._cmd_stop({"tabId": "api-guard-3"})
             assert state.stop_event is not None
             assert state.stop_event.is_set()
+        finally:
+            agent_state.unregister(state.task_id, state)
+
+    def test_running_statuses_name_the_run(self) -> None:
+        """An owner's and a viewer's running status carry the run's id, which a rekey keeps.
+
+        Audit L06 F1: a UI stop names only its tab, so one a dead link
+        held back stops whatever run owns the tab when it is sent.  The
+        statuses name the run, so that a stop can.
+        """
+        state = self._register("run-s", "tab-s", "")
+        state.is_task_active = True
+        printer = MemoryPrinter()
+        server = AgentServer(printer)
+        try:
+            server._broadcast_replay_status("tab-s", {})
+            agent_state.rekey(state, "row-s")
+            server._broadcast_viewer_running("viewer", state, 0)
+            statuses = [ev for ev in printer.emitted if ev["type"] == "status"]
+            assert [ev.get("runId") for ev in statuses] == [state.run_id, state.run_id]
+            assert state.run_id != agent_state.AgentState("another run").run_id
         finally:
             agent_state.unregister(state.task_id, state)

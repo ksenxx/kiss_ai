@@ -20,16 +20,14 @@
 //   * an answer that lands after its connection dropped is ignored,
 //     and a drop cancels the retry and the deferred reload.
 //
-// jsdom cannot navigate: window.location.reload() surfaces as a "Not
-// implemented: navigation" jsdomError on the virtual console, which is
-// how the reloads are counted.  fetch is replayed from a script so the
-// test controls every answer; the page's timers are recorded and fired
-// by hand.
+// The reloads are counted by the harness's reloadCountingConsole.  fetch
+// is replayed from a script so the test controls every answer; the
+// page's timers are recorded and fired by hand.
 
 'use strict';
 
 const assert = require('assert');
-const {VirtualConsole} = require('jsdom');
+const {reloadCountingConsole} = require('./simplify2_harness');
 const {
   newAuthDom,
   bootShim,
@@ -44,11 +42,9 @@ const {
 
 function page() {
   const reloads = [];
-  const vc = new VirtualConsole();
-  vc.on('jsdomError', err => {
-    if (/navigation/.test(String(err && err.message))) reloads.push(1);
+  const {window} = newAuthDom('https://example.test/', {
+    virtualConsole: reloadCountingConsole(reloads),
   });
-  const {window} = newAuthDom('https://example.test/', {virtualConsole: vc});
   const sockets = [];
   installFakeWebSocket(window, sockets);
   const timers = installFakeTimers(window);

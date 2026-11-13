@@ -30,18 +30,26 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar.coding_gate import CodingGate, run_on_host
+from kiss.agents.sorcar.exec_bridge import ExecBridge
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.benchmarks.terminal_bench.exec_bridge_server import ExecBridgeServer
 from kiss.core import stop_signal
+from kiss.core.processes import kill_process_tree, start_process_group
 from kiss.core.tool_interrupt import inject_async_exception
+from kiss.tests.agents.seas import test_coding_sea_evidence_gate as bridged
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     ScriptedHandler,
     serve,
     text_body,
 )
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import posix_only, wait_for
 
 pytestmark = posix_only("process groups and bash")
 
@@ -97,6 +105,27 @@ def test_host_timeout_is_bounded_by_an_escaped_descendant_holding_stdout(tmp_pat
     assert code is None and output == "partial\n"  # output kept after the command closed stdout
     assert run_on_host("echo done", str(tmp_path), 5) == (0, "done\n")
     assert run_on_host("echo err >&2; exit 3", str(tmp_path), 5) == (3, "err\n")
+    with pytest.raises(FileNotFoundError):  # a bash that cannot start: nothing is left to end
+        run_on_host("echo done", str(tmp_path / "missing"), 5)
+
+
+def test_a_host_command_that_ended_is_not_held_by_a_process_it_left_behind(tmp_path: Path) -> None:
+    """A command that exits while a process it started in the background still holds its
+    stdout (a verifier that leaves a server running) was waited for until the deadline and
+    then read as a timeout.  Its exit status is returned once it has ended, with the output
+    read, and what it left in its group is killed; a descendant that escaped the group
+    bounds the wait by the reap grace."""
+    started = time.monotonic()
+    result = run_on_host("echo $$ > pid; sleep 30 & echo left; exit 3", str(tmp_path), 20)
+    assert result == (3, "left\n") and time.monotonic() - started < 5, result
+    pid = _pid_from(tmp_path / "pid")
+    deadline = time.monotonic() + 3
+    while _group_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _group_alive(pid)
+    started = time.monotonic()
+    result = run_on_host(f"{_ESCAPED_SLEEPER} & echo left", str(tmp_path), 20)
+    assert result == (0, "left\n") and time.monotonic() - started < 5, result
 
 
 def test_an_interrupted_host_command_dies_with_its_group(tmp_path: Path) -> None:
@@ -122,6 +151,57 @@ def test_an_interrupted_host_command_dies_with_its_group(tmp_path: Path) -> None
     while _group_alive(pid) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not _group_alive(pid)
+
+
+class _StopAsBashStarts:
+    """A trace of the caller's thread: the Stop lands as the spawn of ``run_on_host`` returns.
+
+    At the return of :func:`start_process_group` the trace turns itself off and
+    injects ``KeyboardInterrupt`` into the thread, as the Stop watchdog does;
+    ``bash`` is the process that call started.
+    """
+
+    def __init__(self) -> None:
+        self.bash: subprocess.Popen[bytes] | None = None
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> Any:
+        if event == "call":
+            return self if frame.f_code is start_process_group.__code__ else None
+        if event == "return":
+            sys.settrace(None)
+            self.bash = next(
+                value for value in frame.f_locals.values() if isinstance(value, subprocess.Popen)
+            )
+            inject_async_exception(threading.get_ident(), KeyboardInterrupt)
+        return self
+
+
+def test_a_stop_as_the_host_command_starts_ends_it(tmp_path: Path) -> None:
+    """The spawn ran before the ``try`` whose ``finally`` ends the command, so a Stop
+    raised as it returned left bash, and the verifier under it, running."""
+    trace = _StopAsBashStarts()
+    outcome: dict[str, Any] = {}
+
+    def run() -> None:
+        sys.settrace(trace)
+        try:
+            outcome["result"] = run_on_host("sleep 30", str(tmp_path), 30)
+        except KeyboardInterrupt:
+            outcome["interrupted"] = True
+        finally:
+            sys.settrace(None)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(10)
+    bash = trace.bash
+    assert not worker.is_alive() and bash is not None and outcome == {"interrupted": True}, outcome
+    try:
+        assert wait_for(lambda: not _group_alive(bash.pid), timeout=3), "bash outlived the Stop"
+    finally:
+        if bash.returncode is None:  # the run that fails here left it running
+            kill_process_tree(bash)
+            bash.wait(5)
 
 
 def test_a_stop_while_the_verifier_runs_ends_the_wait_and_the_verifier(tmp_path: Path) -> None:
@@ -230,3 +310,50 @@ def test_bare_stage_results_are_unchanged_without_a_stop(tmp_path: Path) -> None
     assert gate.last_verifier_run == (1, "checked\n")
     assert not stop_signal.stop_requested()
     assert os.path.exists(tmp_path / "tmp" / "verify.sh")
+
+
+def test_a_stopped_stage_runs_nothing_where_the_agents_next_run_works(tmp_path: Path) -> None:
+    """B/S11-F2 (audit 2026-11-10): a stopped run's stage runs nothing in the agent's next run."""
+    old, new = tmp_path / "old", tmp_path / "new"
+    for root, verifier in ((old, "true\n"), (new, "touch ran\n")):
+        (root / "tmp").mkdir(parents=True)
+        (root / "tmp" / "verify.sh").write_text(verifier)
+    # The old run's `git diff` hangs in a clean filter (which it runs to compare the
+    # changed file's content with the commit's) until it is killed.
+    driver = tmp_path / "driver.sh"
+    driver.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(tmp_path / 'held'))}\nexec sleep 120\n")
+    driver.chmod(0o755)
+    (old / "code.txt").write_text("seed\n")
+    for args in (["init", "-q"], ["add", "code.txt"],
+                 ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "seed"],
+                 ["config", "filter.hang.clean", str(driver)]):
+        subprocess.run(["git", "-C", str(old), *args], check=True, timeout=60)
+    (old / ".gitattributes").write_text("code.txt filter=hang\n")
+    (old / "code.txt").write_text("changed\n")
+    loop = bridged._Loop()
+    server = ExecBridgeServer(bridged.LocalEnvironment(str(new)), loop.loop)
+    agent = SorcarAgent("gate-shell")
+    agent.work_dir = str(old)
+    gate = CodingGate(agent._gate_shell, str(old), "tmp")
+
+    def stopped_run_then_the_next() -> None:
+        try:
+            gate.run_stages({"summary_in_html": "done"}, "task")
+        except KeyboardInterrupt:
+            # The stopped run is over: the agent's next run works on the bridge.
+            agent.work_dir, agent.docker_manager = str(new), ExecBridge(f"exec:{server.url}")
+
+    runner = threading.Thread(target=stopped_run_then_the_next, daemon=True)
+    runner.start()
+    try:
+        held = wait_for((tmp_path / "held").exists, timeout=60)
+        # The Stop: it ends the run even when the stage never got as far as its git diff.
+        injector, hits = _inject_after(runner, 0.0)
+        runner.join(30)
+        injector.join(5)
+        ended = wait_for(
+            lambda: all(t.name != "gate-verifier" for t in threading.enumerate()), timeout=30)
+    finally:
+        bridged._close(server, loop)
+    assert held and ended and hits == [1] and agent.docker_manager is not None
+    assert not (new / "ran").exists(), "the stopped stage ran the next run's verifier"

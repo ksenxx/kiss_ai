@@ -135,13 +135,18 @@ def test_wrapper_option_values_and_pipes_into_groups(work: Path) -> None:
         "timeout -s KILL 5 cat <<EOF > notes.md\nx\nEOF",
         "stdbuf -o L cat <<EOF > notes.md\nx\nEOF",
         "nice -n +5 cat <<EOF > notes.md\nx\nEOF",
-        "cat <<EOF | (cd sub && cat > ../notes.md)\nx\nEOF",
-        "cat <<EOF | { cd sub; cat > ../notes.md; }\nx\nEOF",
         "cat <<EOF | while true; do cat > notes.md; break; done\nx\nEOF",
         "cat <<EOF | (cat) > notes.md\nx\nEOF",
         "cat <<EOF | ( (cat) ) | tee notes.md\nx\nEOF",
     ):
         assert heredoc_guard(command, cwd, os.path.lexists) == refusal, command
+    # the ``..`` is the filesystem's to resolve (audit 2026-11-10 S10-F6): the path keeps it
+    through_sub = HEREDOC_VERDICT.format(path=f"{work}/sub/../notes.md")
+    for command in (
+        "cat <<EOF | (cd sub && cat > ../notes.md)\nx\nEOF",
+        "cat <<EOF | { cd sub; cat > ../notes.md; }\nx\nEOF",
+    ):
+        assert heredoc_guard(command, cwd, os.path.lexists) == through_sub, command
     for command in (
         # A group command that is no copier writes output of its own.
         "cat <<EOF | (grep x) > notes.md\nx\nEOF",
@@ -158,7 +163,7 @@ def test_wrapper_option_values_and_pipes_into_groups(work: Path) -> None:
     assert heredoc_targets("cat <<EOF | (grep x | sort) > out.txt\nx\nEOF") == ["out.txt"]
     tools = UsefulTools(work_dir=str(work))
     out = tools.Bash("cat <<EOF | (cd sub && cat > ../notes.md)\nnew\nEOF", "rewrite")
-    assert out == refusal
+    assert out == through_sub
     assert notes.read_text() == "old\n"
 
 
@@ -173,6 +178,20 @@ def test_shell_view_target_reads_the_command_as_bash_does(work: Path) -> None:
     assert shell_view_target("(cd sub && cat log.txt)", cwd) == log
     assert shell_view_target("/bin/cat a.py", cwd) == a
     assert shell_view_target("cd sub; cat ../a.py", cwd) == a
+    # The script or pattern given by a long, an attached or a file option, a long
+    # option's value and ``--`` are no file operand either.
+    for command in (
+        "grep -n --regexp=line a.py",
+        "sed -n --expression=1p a.py",
+        "grep -n -f sub/log.txt a.py",
+        "sed -n --file=sub/log.txt a.py",
+        "head --lines 1 a.py",
+        "tail --bytes 20 a.py",
+        "grep -n --context 1 line a.py",
+        "grep -n -- line a.py",
+        "cat -- a.py",
+    ):
+        assert shell_view_target(command, cwd) == a, command
     # Text, a here-document body and an unresolvable operand show no file.
     assert shell_view_target("echo 'cat a.py'", cwd) is None
     assert shell_view_target("cat > x.md <<'EOF'\ncat a.py\nEOF", cwd) is None
@@ -193,6 +212,10 @@ def test_sed_in_place_is_judged_per_command() -> None:
         "sed -i.bak -e 's/a\\nb/c/' f",
         "sed --in-place 's/a\\nb/c/' f",
         "sed --in-place=.bak 's/a\\nb/c/' f",
+        # GNU sed takes any prefix of --in-place: these ran unrefused
+        "sed --in-pl 's/a\\nb/c/' f",
+        "sed --i 's/a\\nb/c/' f",
+        "sed --in=.bak 's/a\\nb/c/' f",
         "/usr/bin/sed -ni 's/a\\nb/c/p' f",
         "cd d && sed -i \"s/a\\nb/c/\" f",
     ):

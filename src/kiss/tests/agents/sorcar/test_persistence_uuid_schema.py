@@ -13,6 +13,8 @@ import uuid
 
 import pytest
 
+from kiss.tests.persistence_helpers import close_db
+
 
 @contextlib.contextmanager
 def _fresh_persistence_module(tmp_path, db_path=None):
@@ -34,11 +36,11 @@ def _fresh_persistence_module(tmp_path, db_path=None):
     from kiss.agents.sorcar import persistence as P
     P._KISS_DIR = tmp_path
     P._DB_PATH = db_path if db_path is not None else tmp_path / "history.db"
-    P._close_db()
+    close_db(P)
     try:
         yield P
     finally:
-        P._close_db()
+        close_db(P)
         for name in list(sys.modules):
             if name.startswith("kiss.agents.sorcar.persistence"):
                 del sys.modules[name]

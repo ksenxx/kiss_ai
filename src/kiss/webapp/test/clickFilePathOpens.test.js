@@ -18,12 +18,7 @@ const {findLinks} = require('./file_link_helpers');
 // (clickFilePathExistsOnly.test.js covers the exists / does-not-exist
 // split against the real filesystem).
 function makePage() {
-  const {win, posted} = makeChatPage({beforeScripts: answerCheckPaths});
-  return {win, posted};
-}
-
-function flushTextStream(win) {
-  send(win, {type: 'text_end'});
+  return makeChatPage({beforeScripts: answerCheckPaths});
 }
 
 // Every path shape (absolute, dot-relative, workspace-relative,
@@ -135,7 +130,7 @@ function testFilePathInStreamedTextLinkifiedOnFlush() {
   send(win, {type: 'text_delta', text: 'Edit '});
   send(win, {type: 'text_delta', text: '/srv/app/main.py'});
   send(win, {type: 'text_delta', text: ' please'});
-  flushTextStream(win);
+  send(win, {type: 'text_end'});
   const links = findLinks(win, '/srv/app/main.py');
   assert.strictEqual(
     links.length,
@@ -174,11 +169,12 @@ function testFilePathInsideCodeBlockLinkified() {
 function testHttpUrlNotLinkifiedAsFilePath() {
   const {win} = makePage();
   send(win, {type: 'prompt', text: 'see https://example.com/foo/bar.json'});
-  const links = findLinks(win, '/foo/bar.json');
   assert.strictEqual(
-    links.length,
+    win.document.querySelectorAll(
+      '#output [data-path], #output [data-path-candidate]',
+    ).length,
     0,
-    'URL path component must NOT be linkified as a filepath',
+    'no part of the URL may be linkified as a filepath',
   );
   win.close();
   console.log('  ok - URL path slice is not linkified');

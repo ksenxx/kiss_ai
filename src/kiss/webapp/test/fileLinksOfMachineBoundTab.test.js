@@ -5,8 +5,6 @@
 
 'use strict';
 
-/* global require, console */
-
 // A transcript file link of a tab bound to a registered machine names
 // a file on THAT machine: the daemon forwards the `checkPaths` and the
 // click's `openFile` there unchanged, so the `workDir` they carry must
@@ -257,6 +255,68 @@ function testATasksOwnDirectoryWinsOverTheMachinesCurrentOne(hidden) {
   );
 }
 
+// A transcript's paths are relative to the folder ITS task ran in, not
+// to the folder the tab browses by now.  With `adjacent` the previous
+// task of the chat is spliced in, whose task_settings name another
+// folder than the current task's; without, the current task prints a
+// result after the global working directory moved.
+function testATranscriptResolvesInItsOwnTasksFolder(machine, adjacent) {
+  const PREV = '/workspace/previous';
+  const CUR = '/workspace/current';
+  const {win, posted} = machine ? makeBoundPage(false) : makePage();
+  if (!machine) {
+    send(win, {type: 'daemonStatus', connected: true});
+    send(win, {type: 'configData', config: {work_dir: CUR}, apiKeys: {}});
+    send(win, {type: 'tabs_state', tabs: [{tabId: BOX, chatId: 'chat-box', title: 'box'}]});
+  }
+  const settings = (id, dir) => ({
+    type: 'task_settings',
+    settings: {task_id: id, chat_id: 'chat-box', work_dir: dir},
+  });
+  send(win, {
+    type: 'task_events',
+    tabId: BOX,
+    task: 'current',
+    task_id: 'current',
+    chat_id: 'chat-box',
+    extra: JSON.stringify({work_dir: CUR, startTs: 1}),
+    events: [settings('current', CUR)],
+  });
+  send(win, {type: 'configData', config: {work_dir: '/workspace/new'}, apiKeys: {}});
+  posted.length = 0;
+  const shown = {
+    type: 'result',
+    tabId: BOX,
+    success: true,
+    summary: '<p>See reports/a.txt</p><img src="plots/a.png">',
+  };
+  if (adjacent) {
+    send(win, {
+      type: 'adjacent_task_events',
+      tabId: BOX,
+      direction: 'prev',
+      task: 'previous',
+      task_id: 'previous',
+      events: [settings('previous', PREV), shown],
+    });
+  } else {
+    send(win, shown);
+  }
+  const want = adjacent ? PREV : CUR;
+  const check = ofType(posted, 'checkPaths')[0];
+  const image = ofType(posted, 'openFile').find(m => /^img-\d+$/.test(m.token));
+  assert.strictEqual(check.workDir, want, "BUG - the link was checked outside its task's folder");
+  assert.strictEqual(image.workDir, want, "BUG - the picture was read outside its task's folder");
+  assert.strictEqual(check.machine, machine || undefined);
+  win.close();
+  console.log(
+    '  ok - ' +
+      (adjacent ? 'a spliced-in task' : 'the running task') +
+      ' resolves its paths in its own folder' +
+      (machine ? ' on the machine' : ''),
+  );
+}
+
 testCheckAndOpenUseTheMachinesDirectory();
 testHiddenBoundTabChecksOnTheMachineToo();
 testInlineImagesOfABoundTabLoadFromTheMachine();
@@ -264,3 +324,6 @@ testUnknownMachineDirectoryFallsBackToItsDaemon();
 testLocalTabKeepsThisDaemonsDirectory();
 testATasksOwnDirectoryWinsOverTheMachinesCurrentOne(false);
 testATasksOwnDirectoryWinsOverTheMachinesCurrentOne(true);
+testATranscriptResolvesInItsOwnTasksFolder('', true);
+testATranscriptResolvesInItsOwnTasksFolder('', false);
+testATranscriptResolvesInItsOwnTasksFolder('box', true);

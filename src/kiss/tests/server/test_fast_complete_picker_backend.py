@@ -61,9 +61,8 @@ class TestFastCompletePickerBackend:
         self._saved_kiss_injections = os.environ.get("KISS_INJECTIONS_PATH")
         os.environ["KISS_HOME"] = str(kiss_dir)
         os.environ["KISS_INJECTIONS_PATH"] = str(fake_path)
-        self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved_persistence = (th._DB_PATH, th._KISS_DIR)
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         th._KISS_DIR = kiss_dir
 
     def teardown_method(self) -> None:
@@ -75,10 +74,8 @@ class TestFastCompletePickerBackend:
             os.environ.pop("KISS_INJECTIONS_PATH", None)
         else:
             os.environ["KISS_INJECTIONS_PATH"] = self._saved_kiss_injections
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._DB_PATH, th._KISS_DIR = self._saved_persistence
+        th._close_thread_db()
 
     def _run(
         self,
@@ -88,15 +85,19 @@ class TestFastCompletePickerBackend:
         snapshot_content: str | None = "",
         chat_id: str = "",
         conn_id: str = "",
+        tab_id: str = "",
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Run ``_complete`` and return the (ghost_events, completions_events)."""
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
+        server._complete_seq_latest[conn_id] = 1
         server._complete(
             query,
+            1,
             snapshot_content=snapshot_content,
             chat_id=chat_id,
             conn_id=conn_id,
+            tab_id=tab_id,
         )
         ghosts = [e for e in events if e.get("type") == "ghost"]
         comps = [e for e in events if e.get("type") == "completions"]
@@ -113,16 +114,18 @@ class TestFastCompletePickerBackend:
         assert isinstance(ev["completions"], list)
 
     def test_completions_event_carries_conn_id_when_set(self) -> None:
-        """``connId`` is stamped on the event when the request has one."""
+        """``connId`` and ``tabId`` are stamped on both events when the request has them."""
         server = AgentServer()
-        _, comps = self._run(server, "Reproduce", conn_id="win-7")
-        assert comps[0]["connId"] == "win-7"
+        ghosts, comps = self._run(server, "Reproduce", conn_id="win-7", tab_id="tab-3")
+        for event in (ghosts[0], comps[0]):
+            assert (event["connId"], event["tabId"]) == ("win-7", "tab-3")
 
     def test_completions_event_omits_conn_id_for_direct_callers(self) -> None:
-        """Empty connId is NOT stamped (matches ``_emit_ghost``)."""
+        """An empty connId or tabId is NOT stamped, on either event."""
         server = AgentServer()
-        _, comps = self._run(server, "Reproduce")
-        assert "connId" not in comps[0]
+        ghosts, comps = self._run(server, "Reproduce")
+        for event in (ghosts[0], comps[0]):
+            assert "connId" not in event and "tabId" not in event
 
     def test_tricks_appear_in_completions(self) -> None:
         """Tricks are returned as full sentence lines (head + trick)."""
@@ -295,8 +298,10 @@ class TestFastCompletePickerBackend:
         )
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
+        server._complete_seq_latest[""] = 1
         server._complete(
             "x = betaq_marker_",
+            1,
             snapshot_file=str(p),
             snapshot_content=None,
         )

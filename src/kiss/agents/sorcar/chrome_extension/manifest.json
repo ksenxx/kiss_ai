@@ -5,6 +5,6 @@
   "description": "Lets your local {{PRODUCT_NAME}} agent drive this browser (list and open tabs, navigate, run JavaScript in a page, take screenshots) when you ask it to. Connects only to ws://127.0.0.1 with a per-start token.",
   "permissions": ["tabs", "scripting", "alarms", "debugger"],
   "host_permissions": ["<all_urls>"],
-  "action": { "title": "{{PRODUCT_NAME}} Bridge — click to reconnect" },
+  "action": { "default_title": "{{PRODUCT_NAME}} Bridge — click to reconnect" },
   "background": { "service_worker": "background.js" }
 }

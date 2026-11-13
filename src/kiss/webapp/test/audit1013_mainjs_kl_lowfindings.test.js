@@ -50,7 +50,7 @@ const {
   captureTimers,
   ofType,
 } = require('./simplify2_harness');
-const {makeRunner} = require('./ui_antipattern_harness');
+const {makeRunner, key} = require('./ui_antipattern_harness');
 
 const {test, report} = makeRunner();
 
@@ -103,13 +103,7 @@ function openText(win, path, content, version, line) {
 
 /** Press Enter in a form input: sidebarInlineForm submits the form. */
 function pressEnter(win, input) {
-  input.dispatchEvent(
-    new win.KeyboardEvent('keydown', {
-      key: 'Enter',
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
+  key(win, input, 'Enter');
 }
 
 function openForm(list) {

@@ -13,7 +13,7 @@ const {JSDOM} = require('jsdom');
 const PANEL_COPY_PATH = path.join(__dirname, '..', 'media', 'panelCopy.js');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
-const {stubClipboard, flushMicrotasks} = require('./simplify2_harness');
+const {stubClipboard, flushMicrotasks, click} = require('./simplify2_harness');
 
 // Every window made, closed once the run is over so node can exit.
 const openWindows = [];
@@ -55,12 +55,7 @@ function recordExecCommand(document, ok) {
 function clickFirst(el, selector) {
   const btn = el.querySelector(selector);
   assert.ok(btn, `expected to find ${selector} inside panel`);
-  btn.dispatchEvent(
-    new btn.ownerDocument.defaultView.MouseEvent('click', {
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
+  click(btn.ownerDocument.defaultView, btn);
 }
 
 async function run() {
@@ -170,7 +165,6 @@ async function run() {
     await flushMicrotasks();
 
     assert.strictEqual(getClipboard(), rawMd);
-    assert.notStrictEqual(getClipboard(), 'Result Hello World');
   });
 
   await test('clicking copy on a Prompt panel copies the raw markdown', async () => {

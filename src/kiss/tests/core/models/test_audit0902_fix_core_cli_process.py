@@ -146,7 +146,7 @@ def _lingers_after_closing_stdout(eof_marker: Path) -> str:
 
 
 def _thinking_then_bad_event_then_ok(counter: Path) -> str:
-    """Stand-in body: first run opens thinking then emits a JSON array; later runs reply."""
+    """Stand-in body: first run opens thinking then emits a malformed event; later runs reply."""
     return f"""
     import json
     import os
@@ -163,8 +163,9 @@ def _thinking_then_bad_event_then_ok(counter: Path) -> str:
         print(json.dumps({{"type": "content_block_delta",
                            "delta": {{"type": "thinking_delta",
                                       "thinking": "let me think"}}}}), flush=True)
-        # Valid JSON, not an object: the event iterator calls .get() on it.
-        print(json.dumps([1, 2, 3]), flush=True)
+        # An event whose delta is not an object: the parser calls .get() on it
+        # (a line that is no event object at all is skipped as noise).
+        print(json.dumps({{"type": "content_block_delta", "delta": "oops"}}), flush=True)
         sys.exit(0)
     print(json.dumps({{"type": "assistant",
                        "message": {{"id": "m2",
@@ -420,6 +421,47 @@ def _grandchild_holds_stderr(pid_file: Path, escapes_group: bool) -> str:
     """
 
 
+def _reads_stdin_once_told(go: Path, received: Path) -> str:
+    """Child source: wait for *go* to exist, read stdin to EOF, record its size in *received*."""
+    part = f"{received}.part"
+    return textwrap.dedent(f"""
+        import os, sys, time
+        while not os.path.exists({str(go)!r}):
+            time.sleep(0.01)
+        size = len(sys.stdin.buffer.read())
+        with open({part!r}, "w") as f:
+            f.write(str(size))
+        os.replace({part!r}, {str(received)!r})
+    """)
+
+
+class _CallerHeldPastTheDeadline:
+    """A ``caller_error`` poll that holds the caller once, past the deadline; it reports no error.
+
+    It stands for a caller kept off the CPU between its deadline check
+    and its look at the writer: it returns once the deadline is well
+    past, the child was told to read and has read its stdin to EOF, and
+    the writer thread is gone.
+    """
+
+    def __init__(self, go: Path, received: Path) -> None:
+        self.go = go
+        self.received = received
+        self.deadline: float | None = None  # set once the supervisor is built
+
+    def __call__(self) -> None:
+        if self.deadline is None:
+            return
+        deadline, self.deadline = self.deadline, None
+        # Past the deadline by more than the writer's poll: a writer with
+        # a clock of its own has given up by then.
+        time.sleep(max(deadline - time.monotonic(), 0.0) + 0.3)
+        self.go.touch()
+        limit = time.monotonic() + 30
+        while (not self.received.exists() or _writer_threads()) and time.monotonic() < limit:
+            time.sleep(0.01)
+
+
 class TestNonBlockingWriterDeliversThePrompt:
     """The rewritten writer must still deliver every byte, in every ending."""
 
@@ -449,6 +491,21 @@ class TestNonBlockingWriterDeliversThePrompt:
         content, _response = model.generate()
         assert content == "DONE"
         assert not _writer_threads()
+
+    def test_a_prompt_counts_as_sent_only_when_the_child_got_all_of_it(
+        self, tmp_path: Path
+    ) -> None:
+        """Only the caller ends a write at the deadline.  The writer used to give up at the
+        deadline by itself and close stdin; a caller that looked a moment later found the
+        writer finished, took the prompt for sent, and the child answered its first 64 KiB."""
+        go, received = tmp_path / "go", tmp_path / "received"
+        held = _CallerHeldPastTheDeadline(go, received)
+        timeout = 2.0
+        child = [sys.executable, "-c", _reads_stdin_once_told(go, received)]
+        with _CLIProcess(child, "held-caller", timeout, caller_error=held) as proc:
+            held.deadline = time.monotonic() + timeout
+            proc.send_prompt(_BIG_PROMPT)
+        assert int(received.read_text()) == len(_BIG_PROMPT)
 
     @pytest.mark.parametrize("escapes_group", [False, True], ids=["in-group", "own-session"])
     def test_reader_held_by_a_grandchild_is_reported_and_left_attached(

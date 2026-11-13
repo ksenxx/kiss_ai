@@ -35,6 +35,7 @@ from kiss.core.models import model_info
 from kiss.core.models.model_info import model as model_factory
 from kiss.tests.agents.sorcar.local_model_server import MODEL, serve, tool_call_body
 from kiss.tests.conftest import executor_of
+from kiss.tests.persistence_helpers import close_db
 
 
 def _find_tool(tools: list, name: str) -> Any:
@@ -102,9 +103,9 @@ def _isolate_sorcar_db(tmp_path: Path) -> Any:
     test_dir.mkdir()
     sorcar_persistence._KISS_DIR = test_dir
     sorcar_persistence._DB_PATH = test_dir / "history.db"
-    sorcar_persistence._close_db()
+    close_db()
     yield
-    sorcar_persistence._close_db()
+    close_db()
     sorcar_persistence._KISS_DIR = orig_kiss_dir
     sorcar_persistence._DB_PATH = orig_db_path
 

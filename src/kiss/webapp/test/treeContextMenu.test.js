@@ -7,8 +7,8 @@
 // context menu the Explorer and Source Control trees open on
 // right-click.  Covers item rendering (labels, keybindings, disabled
 // rows, separator squashing), viewport clamping, keyboard navigation
-// (Up / Down / Home / End / Enter / Space / Escape), outside-click and
-// window-blur dismissal, and the `closed` callback.
+// (Up / Down / Home / End / Enter / Space / Escape / Tab), outside-click
+// and window-blur dismissal, and the `closed` callback.
 
 'use strict';
 
@@ -16,8 +16,8 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {MEDIA} = require('./simplify2_harness');
+const {key} = require('./ui_antipattern_harness');
 
 function makeDom() {
   const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
@@ -35,16 +35,6 @@ function makeDom() {
     'treeContextMenu.js must install window.TreeContextMenu',
   );
   return win;
-}
-
-function key(win, name) {
-  win.document.dispatchEvent(
-    new win.KeyboardEvent('keydown', {
-      key: name,
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
 }
 
 function isOpen(win) {
@@ -150,7 +140,7 @@ function testViewportClamping() {
   ]);
   assert.strictEqual(el.style.left, '0px');
   assert.strictEqual(el.style.top, '0px');
-  key(win, 'Escape');
+  key(win, win.document, 'Escape');
   console.log('ok: menu is kept inside the viewport');
 }
 
@@ -174,27 +164,27 @@ function testKeyboardNavigation() {
   const enabled = [items[0], items[2], items[3]];
   const active = () => win.document.activeElement;
   assert.strictEqual(active(), enabled[0]);
-  key(win, 'ArrowDown');
+  key(win, win.document, 'ArrowDown');
   assert.strictEqual(active(), enabled[1], 'ArrowDown skips the disabled row');
-  key(win, 'ArrowDown');
+  key(win, win.document, 'ArrowDown');
   assert.strictEqual(active(), enabled[2]);
-  key(win, 'ArrowDown');
+  key(win, win.document, 'ArrowDown');
   assert.strictEqual(active(), enabled[0], 'ArrowDown wraps to the first item');
-  key(win, 'ArrowUp');
+  key(win, win.document, 'ArrowUp');
   assert.strictEqual(active(), enabled[2], 'ArrowUp wraps to the last item');
-  key(win, 'ArrowUp');
+  key(win, win.document, 'ArrowUp');
   assert.strictEqual(active(), enabled[1]);
-  key(win, 'Home');
+  key(win, win.document, 'Home');
   assert.strictEqual(active(), enabled[0]);
-  key(win, 'End');
+  key(win, win.document, 'End');
   assert.strictEqual(active(), enabled[2]);
-  // Focus lost from the menu (e.g. the user tabbed away): ArrowDown
-  // starts from the first item again.
+  // Focus lost from the menu without a key (the page blurred the
+  // item): ArrowDown starts from the first item again.
   enabled[2].blur();
-  key(win, 'ArrowDown');
+  key(win, win.document, 'ArrowDown');
   assert.strictEqual(active(), enabled[0]);
-  key(win, 'ArrowDown');
-  key(win, 'Enter');
+  key(win, win.document, 'ArrowDown');
+  key(win, win.document, 'Enter');
   assert.deepStrictEqual(ran, ['two'], 'Enter runs the focused item');
   assert.strictEqual(closedCalls, 1, 'the closed callback fires once');
   assert.ok(!isOpen(win));
@@ -203,31 +193,85 @@ function testKeyboardNavigation() {
   win.TreeContextMenu.show(win.document, 0, 0, [
     {label: 'Go', run: () => ran.push('go')},
   ]);
-  key(win, ' ');
+  key(win, win.document, ' ');
   assert.deepStrictEqual(ran, ['two', 'go']);
   win.TreeContextMenu.show(win.document, 0, 0, [
     {label: 'Go', run: () => ran.push('go2')},
   ]);
-  key(win, 'Escape');
+  key(win, win.document, 'Escape');
   assert.ok(!isOpen(win), 'Escape closes the menu');
   assert.deepStrictEqual(ran, ['two', 'go'], 'Escape runs nothing');
   // Keys with no menu open are ignored, and Enter with nothing focused
   // runs nothing.
-  key(win, 'Enter');
+  key(win, win.document, 'Enter');
   win.TreeContextMenu.show(win.document, 0, 0, [
     {label: 'Go', run: () => ran.push('go3')},
   ]);
   win.document.activeElement.blur();
-  key(win, 'Enter');
+  key(win, win.document, 'Enter');
   assert.deepStrictEqual(ran, ['two', 'go']);
   // A menu of only disabled rows ignores navigation keys.
   win.TreeContextMenu.show(win.document, 0, 0, [
     {label: 'Off', enabled: false},
   ]);
-  key(win, 'ArrowDown');
+  key(win, win.document, 'ArrowDown');
   assert.ok(isOpen(win));
-  key(win, 'Escape');
+  key(win, win.document, 'Escape');
   console.log('ok: keyboard navigation matches VS Code menus');
+}
+
+/**
+ * Tab leaves the menu with the browser's own focus move, so the menu
+ * closes: left open, its document-level key handler went on taking the
+ * arrow keys of whatever the user tabbed into and pulled the focus back
+ * onto the first menu item.
+ */
+function testTabLeavesTheMenu() {
+  const win = makeDom();
+  const editor = win.document.createElement('textarea');
+  win.document.body.appendChild(editor);
+  let closedCalls = 0;
+  win.TreeContextMenu.show(
+    win.document,
+    0,
+    0,
+    [
+      {label: 'Rename', run: () => {}},
+      {label: 'Delete', run: () => {}},
+    ],
+    () => closedCalls++,
+  );
+  const press = (target, name) => {
+    const ev = new win.KeyboardEvent('keydown', {
+      key: name,
+      bubbles: true,
+      cancelable: true,
+    });
+    target.dispatchEvent(ev);
+    return ev;
+  };
+  const tab = press(win.document.activeElement, 'Tab');
+  assert.strictEqual(
+    tab.defaultPrevented,
+    false,
+    'Tab keeps its default: the browser moves the focus on',
+  );
+  assert.ok(!isOpen(win), 'Tab closes the menu');
+  assert.strictEqual(closedCalls, 1, 'the closed callback fires once');
+  // jsdom does not move the focus on Tab; the browser would.
+  editor.focus();
+  const arrow = press(editor, 'ArrowDown');
+  assert.strictEqual(
+    arrow.defaultPrevented,
+    false,
+    'ArrowDown in the editor is the editor\'s: the caret moves',
+  );
+  assert.strictEqual(
+    win.document.activeElement,
+    editor,
+    'the focus stays in the editor',
+  );
+  console.log('ok: Tab closes the menu and hands the keys back');
 }
 
 function testDismissal() {
@@ -278,8 +322,8 @@ function testDismissal() {
   assert.strictEqual(rows(win)[0].textContent, 'Y');
   // Escape when nothing is open is ignored; a closed callback that is
   // not a function is ignored.
-  key(win, 'Escape');
-  key(win, 'Escape');
+  key(win, win.document, 'Escape');
+  key(win, win.document, 'Escape');
   win.TreeContextMenu.show(
     win.document,
     0,
@@ -296,6 +340,7 @@ function main() {
   testRenderingAndSeparators();
   testViewportClamping();
   testKeyboardNavigation();
+  testTabLeavesTheMenu();
   testDismissal();
   console.log('All tests passed');
 }

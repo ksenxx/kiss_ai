@@ -40,6 +40,7 @@ being new enough to have it.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import secrets
@@ -62,18 +63,49 @@ except ImportError:  # POSIX has no msvcrt
     msvcrt = None  # type: ignore[assignment]
 
 
-def _lock_exclusive(lock_file: IO[str]) -> None:
-    """Take an exclusive lock on *lock_file*: ``flock`` on POSIX, ``msvcrt`` on Windows."""
+# Longest wait for another writer's ``.config.lock`` (the web app's own bound on
+# it, kiss.core.user_config._LOCK_TIMEOUT_S: a holder is done in well under a
+# second, so one that outlasts this is wedged) and the time between two tries.
+LOCK_TIMEOUT = 30.0
+LOCK_POLL = 0.05
+
+
+def _try_lock(lock_file: IO[str]) -> bool:
+    """Probe the lock on *lock_file* once without waiting; True when it is now held.
+
+    False means another process holds it; any other failure of the lock call
+    is permanent and is raised (as in ``kiss.core.file_lock``).
+    """
     if fcntl is not None:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
     elif msvcrt is not None:  # pragma: no cover — Windows-only branch
-        while True:
-            lock_file.seek(0)
-            try:
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
-                return
-            except OSError:
-                time.sleep(0.05)
+        lock_file.seek(0)
+        try:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EDEADLK):
+                raise
+            return False
+    return True
+
+
+def _lock_exclusive(lock_file: IO[str]) -> None:
+    """Take an exclusive lock on *lock_file*: ``flock`` on POSIX, ``msvcrt`` on Windows.
+
+    Raises:
+        TimeoutError: When another process still holds the lock after
+            :data:`LOCK_TIMEOUT` seconds.
+    """
+    deadline = time.monotonic() + LOCK_TIMEOUT
+    while not _try_lock(lock_file):
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"{lock_file.name} still locked by another process after {LOCK_TIMEOUT:g}s"
+            )
+        time.sleep(LOCK_POLL)
 
 
 def _replace_waiting_for_readers(source: str, target: str) -> None:
@@ -158,6 +190,11 @@ def configure(path: str, work_dir: str, password: str = "") -> str:
 
     Returns:
         The password in force after the update.
+
+    Raises:
+        OSError: When the file cannot be read, kept or written, or (a
+            ``TimeoutError``) when another writer still holds its lock
+            after :data:`LOCK_TIMEOUT` seconds.
     """
     # The lock is keyed to the path as *named* -- the web app's save_config
     # flocks ``.config.lock`` beside the ``config.json`` it was told about,
@@ -192,7 +229,8 @@ def configure(path: str, work_dir: str, password: str = "") -> str:
             config["work_dir"] = work_dir
             # mkstemp gives every writer its own staging file; a fixed
             # name would let two concurrent runs truncate and publish
-            # each other's half-written JSON.
+            # each other's half-written JSON.  It is created readable by
+            # its owner only, as the file holding the password must be.
             fd, temporary = tempfile.mkstemp(
                 prefix=os.path.basename(path) + ".sorcar-new-", dir=directory
             )
@@ -201,7 +239,6 @@ def configure(path: str, work_dir: str, password: str = "") -> str:
                     json.dump(config, handle, indent=2)
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.chmod(temporary, 0o600)
                 _replace_waiting_for_readers(temporary, path)
             except BaseException:
                 try:

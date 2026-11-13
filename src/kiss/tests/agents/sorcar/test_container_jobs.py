@@ -22,7 +22,14 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.container_jobs import JOBS_DIR, KILL_ALL_SCRIPT, ContainerJobs
+from kiss.agents.sorcar.container_jobs import (
+    GONE_STATUS,
+    JOB_ID,
+    JOBS_DIR,
+    KILL_ALL_SCRIPT,
+    LOST_STATUS,
+    ContainerJobs,
+)
 from kiss.agents.sorcar.docker_manager import DockerManager
 
 IMAGE = "python:3.11-slim"
@@ -48,9 +55,27 @@ def _ps(manager: DockerManager, needle: str) -> str:
     ``sleep 300`` but not the pattern text itself).
     """
     pattern = f"{needle[:-1]}[{needle[-1]}]"
+    # ``2>`` before ``<``: a process gone since the glob listed it is no line of the answer.
     return manager.Bash(
-        f"for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null | grep -E -- {pattern!r} "
+        f"for d in /proc/[0-9]*; do tr '\\0' ' ' 2>/dev/null < $d/cmdline | grep -E -- {pattern!r} "
         "&& echo; done; true", "ps", 30, 5000)
+
+
+def _lose(manager: DockerManager, jobs: ContainerJobs, seconds: int) -> str:
+    """Start ``sleep <seconds>`` as a job and kill every process naming it, as ``pkill -f`` would.
+
+    The job's shell is among them (its command line holds the command), so no exit file is
+    written.  The image has no ``pkill``: the processes are found by their command lines,
+    the pattern's last character bracketed so the killing shell is not one of them.
+    """
+    job_id, report = jobs.start(f"sleep {seconds}")
+    assert job_id is not None, report
+    manager.Bash(
+        f"for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null | grep -qE -- "
+        f"'sleep {str(seconds)[:-1]}[{str(seconds)[-1]}]' && kill -KILL ${{d#/proc/}}; done; true",
+        "pkill -f", 30, 500)
+    assert _ps(manager, f"sleep {seconds}").strip() == ""
+    return job_id
 
 
 def test_background_jobs_in_a_container() -> None:
@@ -129,6 +154,29 @@ def test_background_jobs_in_a_container() -> None:
         assert "status: running" in jobs.bash_job(job3, "wait", timeout_seconds=1)
         assert time.monotonic() - t0 >= 1
         assert "status: exited killed" in jobs.bash_job(job3, "kill")
+        # Audit 2026-11-10 (C13-F5): a job stopped from outside (``pkill -f`` and its command:
+        # the job's shell dies with it and writes no exit file) is not running for ever.  The
+        # registry, a tail and a wait each settle it themselves, a job per script here.
+        lost = _lose(manager, jobs, 297)
+        assert jobs.last_running() is None
+        lost_status = f"status: exited {LOST_STATUS}"
+        assert lost_status in jobs.bash_job(lost) and lost_status in jobs.bash_job(_lose(
+            manager, jobs, 296))
+        t0 = time.monotonic()
+        assert jobs.wait(_lose(manager, jobs, 295), 30) == f"exited {LOST_STATUS}"
+        assert time.monotonic() - t0 < 15
+        # So is one whose recorded pid a stranger holds now: it is settled, not signalled.
+        recycled = _lose(manager, jobs, 293)
+        manager.Bash(f"echo 1 > {JOBS_DIR}/{recycled}.pid", "recycle the pid", 30, 500)
+        assert lost_status in jobs.bash_job(recycled)
+        # A job whose shell alone was killed (a zombie here: pid 1 reaps nothing) still has
+        # its child in the process group: running as before, until bash_job kills it.
+        orphaned, _ = jobs.start("sleep 294")
+        assert orphaned is not None
+        manager.Bash(f"kill -KILL $(cat {JOBS_DIR}/{orphaned}.pid)", "the shell only", 30, 500)
+        assert "status: running" in jobs.bash_job(orphaned) and jobs.last_running() == orphaned
+        assert "sleep 294" in _ps(manager, "sleep 294")
+        assert "status: exited killed" in jobs.bash_job(orphaned, "kill")
         # A job whose shell ended leaves a child running in its process group:
         # the sweep before a checkpoint restore still ends it.
         job4, _ = jobs.start("sleep 298 > /dev/null 2>&1 < /dev/null & exit 0")
@@ -155,6 +203,12 @@ def test_background_jobs_in_a_container() -> None:
             assert time.monotonic() < deadline, "the finished job's child survived the sweep"
             time.sleep(0.2)
         manager.Bash(f"kill -KILL {other}", "end the unrelated session", 30, 500)
+        # A recorded pid with no /proc entry at all: neither kill prints the
+        # shell's complaint about it (the sweep's caller reads job ids).
+        manager.Bash(f"echo 999999 > {JOBS_DIR}/{job2}.pid", "a pid nobody has", 30, 500)
+        assert "No such file" not in jobs.bash_job(job2, "kill")
+        swept = manager.Bash(KILL_ALL_SCRIPT, "kill every job", 30, 5000).split()
+        assert all(JOB_ID.fullmatch(word) for word in swept), swept
         # A fresh registry (a later session of the task) still addresses the job
         # through its files in the container; a malformed id never reaches a script.
         later = ContainerJobs(manager.Bash)
@@ -298,13 +352,15 @@ def test_adopted_process_is_a_job() -> None:
             assert time.monotonic() < deadline, "the exec'd parent or its child survived the sweep"
             time.sleep(0.2)
         # The watcher and the kill compare the start time too: a pid that no
-        # longer holds the process adopted (here: a tampered start time) is an
-        # ended job to the watcher and nobody's to signal for the kill.
+        # longer holds the process adopted (here: a tampered start time, and no
+        # token on record: a stranger carries neither) is an ended job to the
+        # watcher and nobody's to signal for the kill.
         manager.Bash("nohup sleep 36 > /dev/null 2>&1 &", "leave a stranger", 30, 500)
         stranger = _pid_of(manager, "sleep 36")
         stranger_id, _ = jobs.adopt(stranger, "sleep 36", "")
         assert stranger_id is not None
-        manager.Bash(f"echo 0 > {JOBS_DIR}/{stranger_id}.owner", "another process now", 30, 500)
+        manager.Bash(f"echo 0 > {JOBS_DIR}/{stranger_id}.owner; : > {JOBS_DIR}/{stranger_id}.token",
+                     "another process now", 30, 500)
         deadline = time.monotonic() + 10
         while "status: running" in jobs.bash_job(stranger_id, "tail"):
             assert time.monotonic() < deadline, "the watcher took the stranger for the job"
@@ -331,6 +387,164 @@ def test_adopted_process_is_a_job() -> None:
             manager.Bash(f"rm -f {JOBS_DIR}; mv {JOBS_DIR}.bak {JOBS_DIR}", "unblock", 30, 500)
         assert jobs.commands == known and jobs.last_running() is None
         assert "sleep 37" in _ps(manager, "sleep 37")
+        # A job whose files are gone (the agent cleared /tmp) has nothing left to
+        # record: its watcher ends, writing no exit file for the job that is no
+        # more, instead of retrying a write into the missing jobs dir for ever.
+        for clear in (f"rm -f {JOBS_DIR}/{{id}}.*", f"rm -rf {JOBS_DIR}"):
+            gone_id, _ = jobs.adopt(fourth, "sleep 37", "")
+            assert gone_id is not None
+            watcher = f": {JOBS_DIR}/{gone_id}.exit"
+            assert watcher in _ps(manager, watcher)
+            manager.Bash(clear.format(id=gone_id), "clear the job's files", 30, 500)
+            deadline = time.monotonic() + 15
+            while _ps(manager, watcher).strip():
+                assert time.monotonic() < deadline, f"the watcher outlived its job ({clear})"
+                time.sleep(0.5)
+            assert manager.Bash(f"ls {JOBS_DIR}/{gone_id}.exit 2>&1; true", "ls", 30,
+                                500).strip().endswith("No such file or directory")
+        assert "sleep 37" in _ps(manager, "sleep 37")
+    finally:
+        manager.close()
+        live.remove(force=True)
+
+
+def test_a_job_whose_files_are_gone_is_unknown_not_running() -> None:
+    """Review of 2026-11-11 (S6, finding 2): a job whose files are gone (the agent cleared
+    ``/tmp``) counted as running for ever, one that had exited 0 included: ``last_running``
+    chose it and every wait on it ran to its deadline.  What became of it cannot be known:
+    every action says so at once, the registry passes it over, and a kill, which has no pid
+    to signal, marks nothing killed."""
+    live = _live_container()
+    if live is None:
+        pytest.skip("Docker is not available")
+    manager = DockerManager(f"container:{live.id}", workdir="/tmp")
+    try:
+        manager.open()
+        jobs = ContainerJobs(manager.Bash)
+        for seconds, clear in ((291, f"rm -f {JOBS_DIR}/*"), (293, f"rm -rf {JOBS_DIR}")):
+            commands = ("exit 0", f"sleep {seconds}", f"sleep {seconds + 1}")
+            ended, _ = jobs.start(commands[0])
+            started, _ = jobs.start(commands[1])
+            manager.Bash(f"nohup {commands[2]} > /dev/null 2>&1 &", "leave", 30, 500)
+            adopted, _ = jobs.adopt(_pid_of(manager, commands[2]), commands[2], "")
+            assert ended is not None and started is not None and adopted is not None
+            assert "status: exited 0" in jobs.bash_job(ended, "wait", timeout_seconds=30)
+            assert jobs.last_running() == adopted
+            manager.Bash(clear, "clear the jobs' files", 30, 500)
+            assert jobs.last_running() is None
+            for job, command in zip((ended, started, adopted), commands, strict=True):
+                gone = (f"Job {job}: {command}\nstatus: {GONE_STATUS}\nlog: {JOBS_DIR}/{job}.log\n"
+                        "--- last 50 log lines ---")
+                assert jobs.bash_job(job, "tail").rstrip() == gone
+                t0 = time.monotonic()
+                assert jobs.wait(job, 30) == GONE_STATUS
+                assert time.monotonic() - t0 < 15
+                assert jobs.bash_job(job, "kill").rstrip() == gone
+            # Nothing was signalled and nothing written: the jobs' pids are not known any more.
+            assert all(command in _ps(manager, command) for command in commands[1:])
+            assert manager.Bash(f"ls {JOBS_DIR} 2>/dev/null; true", "ls", 30, 500).strip() == ""
+    finally:
+        manager.close()
+        live.remove(force=True)
+
+
+def _leader(manager: DockerManager, seconds: int) -> int:
+    """Start a session leader that, once told to go, leaves a ``sleep <seconds>`` in its
+    process group and exits (its waiting parent reaps it); return the leader's pid.  It
+    carries no exec token: its group is the only handle on what it leaves."""
+    script = (f"echo \\$\\$ > /tmp/lead{seconds}; while [ ! -e /tmp/go{seconds} ]; do sleep 0.1; "
+              f"done; sleep {seconds} & exit 0")
+    return int(manager.Bash(
+        f"sh -c 'env -u KISS_EXEC_TOKEN setsid sh -c \"{script}\" & wait' "
+        "> /dev/null 2>&1 < /dev/null & "
+        f"for i in $(seq 50); do [ -s /tmp/lead{seconds} ] && break; sleep 0.1; done; "
+        f"cat /tmp/lead{seconds}", "lead", 30, 500).split()[-1])
+
+
+def test_the_group_of_an_adopted_leader_that_ended_is_still_killed() -> None:
+    """Audit 2026-11-10 (B/S2-F4): an adopted process that led its own process group and
+    ended leaves the group the job's: a child it created after its adoption is killed by
+    ``bash_job`` and by the end-of-task sweep, and a stranger given the pid is not."""
+    live = _live_container()
+    if live is None:
+        pytest.skip("Docker is not available")
+    manager = DockerManager(f"container:{live.id}", workdir="/tmp")
+    try:
+        manager.open()
+        jobs = ContainerJobs(manager.Bash)
+        orphaned = {}
+        for seconds in (281, 282):
+            pid = _leader(manager, seconds)
+            job, _ = jobs.adopt(pid, f"leader {seconds}", "")
+            assert job is not None
+            manager.Bash(f"touch /tmp/go{seconds}; for i in $(seq 50); do [ -e /proc/{pid} ] "
+                         "|| break; sleep 0.1; done", "the leader ends", 30, 500)
+            assert f"sleep {seconds}" in _ps(manager, f"sleep {seconds}")
+            orphaned[seconds] = (job, pid)
+        # a live process with another start time under the recorded pid is a stranger
+        manager.Bash("setsid sleep 283 > /dev/null 2>&1 < /dev/null &", "a bystander", 30, 500)
+        (job, pid), stranger = orphaned[281], _pid_of(manager, "sleep 283")
+        manager.Bash(f"echo {stranger} > {JOBS_DIR}/{job}.pid", "pid", 30, 500)
+        jobs.bash_job(job, "kill")
+        assert "sleep 283" in _ps(manager, "sleep 283") and "sleep 281" in _ps(manager, "sleep 281")
+        manager.Bash(f"echo {pid} > {JOBS_DIR}/{job}.pid", "pid", 30, 500)
+        jobs.bash_job(job, "kill")
+        assert _ps(manager, "sleep 281") == "" and "sleep 282" in _ps(manager, "sleep 282")
+        manager.Bash(f"echo {stranger} > {JOBS_DIR}/{job}.pid", "pid", 30, 500)
+        swept = manager.Bash(KILL_ALL_SCRIPT, "sweep", 30, 500).split()
+        assert job not in swept and orphaned[282][0] in swept
+        assert _ps(manager, "sleep 282") == "" and "sleep 283" in _ps(manager, "sleep 283")
+    finally:
+        manager.close()
+        live.remove(force=True)
+
+
+def _launcher(seconds: int) -> str:
+    """A command leaving a shell that leads no process group and, once told to go, starts a
+    ``sleep <seconds>`` and ends at once; the command prints the shell's pid."""
+    script = f"while [ ! -e /tmp/go{seconds} ]; do sleep 0.1; done; sleep {seconds} & exit 0"
+    return f"nohup sh -c {shlex.quote(script)} > /dev/null 2>&1 & echo $!"
+
+
+def test_what_an_adopted_process_that_ended_left_running_is_still_killed() -> None:
+    """An adopted process that led no process group and ended by itself is no parent to find
+    its children by.  They carry the token of the command that left it: ``bash_job`` kills
+    them when that command left no other job (one of two is not told from the other by it),
+    and the end-of-task sweep whatever the jobs' commands left."""
+    live = _live_container()
+    if live is None:
+        pytest.skip("Docker is not available")
+    manager = DockerManager(f"container:{live.id}", workdir="/tmp")
+    try:
+        manager.open()
+        jobs = ContainerJobs(manager.Bash)
+        manager.Bash("nohup sleep 270 > /dev/null 2>&1 &", "a bystander", 30, 500)
+        ended = {}
+        kept: str | None = None
+        for seconds, command in ((271, _launcher(271)), (272, _launcher(272)), (
+                273, f"nohup sleep 274 > /dev/null 2>&1 & {_launcher(273)}")):
+            pid = int(manager.Bash(command, "leave", 30, 500).split()[-1])
+            job, _ = jobs.adopt(pid, f"launcher {seconds}", "")
+            assert job is not None
+            assert manager.Bash(f"ls {JOBS_DIR}/{job}.group 2>&1; true", "ls", 30,
+                                500).strip().endswith("No such file or directory")
+            if seconds == 273:
+                kept, _ = jobs.adopt(_pid_of(manager, "sleep 274"), "sleep 274", "")
+                assert kept is not None
+            manager.Bash(f"touch /tmp/go{seconds}", "the launcher starts its child and ends", 30,
+                         500)
+            assert "status: exited (exit code unknown: adopted process)" in jobs.bash_job(
+                job, "wait", timeout_seconds=30)
+            assert f"sleep {seconds}" in _ps(manager, f"sleep {seconds}")
+            ended[seconds] = job
+        jobs.bash_job(ended[271], "kill")
+        assert _ps(manager, "sleep 271") == ""
+        jobs.bash_job(ended[273], "kill")
+        assert all(f"sleep {n}" in _ps(manager, f"sleep {n}") for n in (270, 272, 273, 274))
+        swept = manager.Bash(KILL_ALL_SCRIPT, "sweep", 30, 500).split()
+        assert swept == [kept]
+        assert all(_ps(manager, f"sleep {n}") == "" for n in (272, 273, 274))
+        assert "sleep 270" in _ps(manager, "sleep 270")
     finally:
         manager.close()
         live.remove(force=True)

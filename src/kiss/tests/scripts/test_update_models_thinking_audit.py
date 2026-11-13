@@ -256,15 +256,19 @@ class TestDetectThinkingLevelGateHolds:
     @pytest.mark.parametrize(
         "name",
         [
-            "gemini-3.6-pro",
+            "openrouter/google/gemini-3.6-pro",
             "openrouter/google/gemini-3.6-flash",
             "openrouter/~google/gemini-latest",
         ],
     )
-    def test_gemini_and_google_are_gated_out(
+    def test_openrouter_google_routes_are_gated_out(
         self, gate_probe: _RecordingModelStub, name: str
     ) -> None:
-        """``-pro`` Gemini and OpenRouter Google routes are never probed with effort."""
+        """OpenRouter Google routes are never probed with effort.
+
+        Direct ``gemini-*`` keys ARE probed, their ``-pro`` models included: see
+        ``test_thinking_probe_runs_for_gemini_pro_models``.
+        """
         import kiss.scripts.update_models as mod
 
         assert mod.detect_thinking_level(name) is None
@@ -505,19 +509,20 @@ class TestDetectThinkingLevelGateHolds:
     @pytest.mark.parametrize(
         "name",
         [
-            # Substring filter: -pro, chat-latest, -image
+            # Name filters: OpenAI's -pro models, chat-latest, -image
             "gpt-5.5-chat-latest",
             "gpt-image-2",
             "openrouter/openai/gpt-image-2",
-            "gemini-3-pro",
-            "openrouter/anthropic/claude-3-pro",
+            "gemini-3-pro-image",
+            "gpt-5.5-pro",
+            "openrouter/openai/o3-pro",
         ],
     )
-    def test_substring_filters_stay_effective(
+    def test_name_filters_stay_effective(
         self, gate_probe: _RecordingModelStub, name: str
     ) -> None:
-        """The ``-pro``, ``chat-latest``, ``-image`` marker filter must stay
-        active — those variants are documented to reject ``reasoning_effort``.
+        """OpenAI's ``-pro`` models and the ``chat-latest`` and ``-image``
+        variants are documented to reject ``reasoning_effort``: never probed.
         """
         import kiss.scripts.update_models as mod
 

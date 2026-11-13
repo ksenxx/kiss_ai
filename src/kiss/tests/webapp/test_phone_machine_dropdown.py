@@ -32,8 +32,8 @@ from kiss.tests.conftest import goto_retrying_network_change, mark_version_seen
 from kiss.tests.server.test_explorer_scm_commands import (
     harness,  # noqa: F401  (module fixture used by param name)
 )
+from kiss.tests.webapp.test_content_tab_editing import _dismiss_toasts
 from kiss.tests.webapp.test_workspace_sections import (
-    _dismiss_update_toast,
     browser,  # noqa: F401  (module fixture used by param name)
 )
 
@@ -121,7 +121,7 @@ def test_a_tap_after_a_refresh_keeps_the_picker_s_options(browser, harness):
         sent.clear()
         received.clear()
         _wait_for_boot(page, received)
-        _dismiss_update_toast(page, harness)
+        _dismiss_toasts(page)
         before = page.evaluate(_MARK_JS)
         assert not page.evaluate(_STATE_JS)["open"], "closed before the tap"
         asked = _count(sent, "getMachines")

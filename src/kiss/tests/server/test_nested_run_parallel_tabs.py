@@ -59,20 +59,17 @@ class TestNestedRunParallelOpensTabs:
         self.tmpdir = tempfile.mkdtemp()
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        self.saved_db = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved_db = (th._DB_PATH, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         self.saved_states = dict(agent_state.agent_states)
         agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
         agent_state.agent_states.clear()
         agent_state.agent_states.update(self.saved_states)
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved_db
+        th._close_thread_db()
+        th._DB_PATH, th._KISS_DIR = self.saved_db
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_parent_tab_id_is_derived_until_viewers_say_otherwise(self) -> None:

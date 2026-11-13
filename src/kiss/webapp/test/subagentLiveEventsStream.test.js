@@ -22,8 +22,6 @@
 // background (rendered into its detached fragment) and once the user
 // activates it -- and must NOT leak into the parent tab's transcript.
 
-/* global require, console */
-
 'use strict';
 
 const assert = require('assert');

@@ -24,6 +24,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from kiss.core import config as config_module
 from kiss.core import tool_interrupt
 from kiss.core.memoryfield.index import Embedder, SearchHit, VectorIndex, embedding_text
 from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, is_valid_page_name
@@ -424,14 +425,13 @@ class MemoryTools:
                 cut and says how many pages it holds.  Capped at the
                 configured ceiling.
         """
-        from kiss.core.config import DEFAULT_CONFIG
-
         try:
             selected = self._selected(memory)
         except ValueError as e:
             return f"Error: {e}"
-        budget = max_output_chars or DEFAULT_CONFIG.tool_output_default_chars
-        budget = max(1, min(int(budget), DEFAULT_CONFIG.tool_output_max_chars))
+        config = config_module.DEFAULT_CONFIG
+        budget = max_output_chars or config.tool_output_default_chars
+        budget = max(1, min(int(budget), config.tool_output_max_chars))
         lines = []
         for memory_name, index in selected.items():
             for name in index.memory.page_names():
@@ -456,7 +456,7 @@ class MemoryTools:
         return (
             f"{kept}\n... [{len(lines) - shown} more pages not shown: pass memory=<name> "
             f"to list one memory, memory_search(query) to find a page, or "
-            f"max_output_chars up to {DEFAULT_CONFIG.tool_output_max_chars}]"
+            f"max_output_chars up to {config.tool_output_max_chars}]"
         )
 
     def memory_refresh(

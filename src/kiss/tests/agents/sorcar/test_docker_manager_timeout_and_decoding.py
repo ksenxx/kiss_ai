@@ -20,16 +20,27 @@ output bounded in memory while it streams, as the host ``Bash`` does
 (head and tail once it passes twice ``_CAPTURE_CHARS``), and the
 truncation marker still counts the whole output.
 
+Audit 2026-11-10 (B/S4-F3): output the worker read ahead of a slow stream
+callback waits in a bounded queue, the command is killed at the deadline or
+a Stop before that queue is taken, and no callback runs after a Stop.
+
 Every test here drives a real container through the real docker daemon; no
 mocks, patches or doubles.
 """
 
+import threading
 import time
 import tracemalloc
 import unittest
 
-from kiss.agents.sorcar.docker_manager import DockerManager
+from kiss.agents.sorcar.coding_gate import bash_exit_code
+from kiss.agents.sorcar.docker_manager import STOPPED_MESSAGE, DockerManager
 from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
+from kiss.tests.conftest import wait_for
+
+#: 20 MB of output at once (over 600 stream frames), then a wait: a command that has
+#: printed far ahead of a slow reader and is still running at any deadline.
+_FLOOD = "head -c 20000000 /dev/zero | tr '\\0' a; sleep 30"
 
 #: Python source that emits the two bytes of "é" in two separate writes,
 #: each flushed and separated by a sleep, so the docker exec stream
@@ -122,6 +133,35 @@ class TestDockerManagerTimeoutAndTruncation(unittest.TestCase):
         result = self.env.Bash("echo hello", "small")
         self.assertEqual(result.strip(), "hello")
 
+    def test_the_status_of_a_command_survives_any_output_budget(self) -> None:
+        """A small ``max_output_chars`` cuts the output, never the status that follows it.
+
+        The ``[exit code: N]`` line and the timeout sentence were cut with
+        the output, so a failed command read as one that passed (cross
+        finding X7 of 2026-11-12; the exec bridge's twin is in
+        ``test_exec_bridge_until.py``).
+        """
+        for budget in (1, 20, 59, 200):
+            result = self.env.Bash("seq 1 200; exit 7", "fails", max_output_chars=budget)
+            self.assertTrue(result.endswith("\n[exit code: 7]"), (budget, result))
+            self.assertEqual(bash_exit_code(result, container=True), "7", (budget, result))
+        result = self.env.Bash(
+            "seq 1 200; exit 7", "polled", timeout_seconds=2, max_output_chars=5, until="NEVER",
+            poll_seconds=1,
+        )
+        self.assertIn("\n[exit code: 7]\n[until 'NEVER': not matched after ", result)
+        result = self.env.Bash(
+            "seq 1 200; sleep 30", "hangs", timeout_seconds=2, max_output_chars=5,
+        )
+        self.assertTrue(result.startswith("Error: command timed out after 2"), result)
+        self.assertEqual(bash_exit_code(result, container=True), "timeout", result)
+        # The status is data too (``run_bash``, which the agent's tool hands to the coding
+        # gate): in the text, a line the command printed read as the tool's (round 2, B2 #9).
+        self.assertEqual(self.env.run_bash("echo '[exit code: 7]'", "prints").code, "0")
+        self.assertEqual(self.env.run_bash("echo '[exit code: 0]'; exit 7", "fails").code, "7")
+        self.assertEqual(self.env.run_bash("sleep 30", "hangs", timeout_seconds=1).code, "timeout")
+        self.assertEqual(self.env.run_bash("rm -rf /", "refused").code, "refused")
+
     def test_a_flood_of_output_is_kept_bounded_in_memory(self) -> None:
         """50 MB of output never sits whole in the daemon; the marker counts it all (claude-2)."""
         tracemalloc.start()
@@ -136,6 +176,57 @@ class TestDockerManagerTimeoutAndTruncation(unittest.TestCase):
         self.assertLessEqual(len(result), 4000)
         self.assertRegex(result, r"truncated 4999\d{4} chars")
         self.assertLess(peak, 24_000_000, f"the output was kept whole: peak {peak} bytes")
+
+    def test_a_slow_stream_callback_delays_neither_the_deadline_nor_a_stop(self) -> None:
+        """The kill comes before the queued output, and a Stop ends the streaming (B/S4-F3).
+
+        A 30 ms callback under a flood: the unfixed code kept every frame it had read
+        ahead and, at the deadline or the Stop, put all of them (some 600) through the
+        callback before it killed the command, 18 s after a 1 s deadline.
+        """
+        earlier = set(threading.enumerate())
+        calls: list[str] = []
+        stop = threading.Event()
+
+        def slow(text: str) -> None:
+            calls.append(text)
+            time.sleep(0.03)
+
+        def stopping(text: str) -> None:
+            slow(text)
+            if len(calls) == 20:
+                stop.set()
+
+        def failing(text: str) -> None:
+            slow(text)
+            if len(calls) == 20:
+                raise RuntimeError("callback failed")
+
+        def exec_threads() -> list[str]:
+            return [thread.name for thread in set(threading.enumerate()) - earlier
+                    if thread.name.startswith("docker-exec-")]
+
+        self.env.stream_callback = slow
+        start = time.monotonic()
+        result = self.env.Bash(_FLOOD, "flood", timeout_seconds=1)
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertIn("timed out", result)
+        self.assertLess(len(calls), 200, "the callback was fed a backlog no queue should hold")
+        calls.clear()
+        self.env.stream_callback, self.env.stop_event = stopping, stop
+        self.addCleanup(setattr, self.env, "stop_event", None)
+        start = time.monotonic()
+        result = self.env.Bash(_FLOOD, "flood", timeout_seconds=60)
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertIn(STOPPED_MESSAGE, result)
+        self.assertEqual(len(calls), 20, "output was streamed after the Stop")
+        # A callback that fails leaves the worker's queue full for good: that worker
+        # must end all the same, as must the workers of the two calls above.
+        calls.clear()
+        self.env.stream_callback, self.env.stop_event = failing, None
+        with self.assertRaisesRegex(RuntimeError, "callback failed"):
+            self.env.Bash(_FLOOD, "flood", timeout_seconds=60)
+        self.assertTrue(wait_for(lambda: not exec_threads()), exec_threads())
 
     def test_timeout_does_not_leave_the_command_running(self) -> None:
         """A timed-out streaming command is killed inside the container."""

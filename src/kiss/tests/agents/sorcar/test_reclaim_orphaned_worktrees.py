@@ -44,20 +44,17 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    th._close_thread_db()
+    (th._DB_PATH, th._KISS_DIR) = saved
 
 
 def _make_repo(path: Path) -> Path:
@@ -476,6 +473,31 @@ class TestReclaimSafetyGuards:
         assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
         assert not GitWorktreeOps.load_preserve_marker(self.repo, branch)
         lock.unlink()
+
+    def test_a_git_that_cannot_start_is_not_mistaken_for_a_conflict(self) -> None:
+        """A recorded baseline longer than the kernel lets one argument be
+        keeps every git command that names it from starting, the content
+        re-check included: that is no conflict verdict, so the worktree
+        is not parked and merges once the record is right again."""
+        branch = "kiss/wt-1000-cannot-start"
+        wt_dir = _plant_orphan_worktree(
+            self.repo, branch, with_baseline=True, dirty_kind="clean",
+        )
+        (wt_dir / "new.txt").write_text("new\n")
+        GitWorktreeOps.stage_all(wt_dir)
+        assert GitWorktreeOps.commit_all(wt_dir, "wt edit")
+        baseline = GitWorktreeOps.load_baseline_commit(self.repo, branch)
+        assert baseline
+        config = self.repo / ".git" / "config"
+        recorded = config.read_text()
+        config.write_text(recorded.replace(baseline, baseline + "0" * 3_000_000))
+
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+        assert not GitWorktreeOps.load_preserve_marker(self.repo, branch)
+
+        config.write_text(recorded)
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
+        assert (self.repo / "new.txt").read_text() == "new\n"
 
     def test_non_conflict_merge_failure_is_retried(self) -> None:
         """A merge that fails for another reason (here the main tree's

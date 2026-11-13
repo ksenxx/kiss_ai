@@ -1,15 +1,17 @@
 """End-to-end tests for the recall evaluation against a synthetic Sorcar task database.
 
 Deliberately uncovered: the ``if not query`` branch in ``llm_probes`` (a
-probe model returning an empty completion). It cannot be reached without a
-fake model and is a one-line skip-with-warning.
+probe model returning an empty completion, or quote characters only). It
+cannot be reached without a fake model and is a one-line skip-with-warning.
 """
 
 import argparse
 import json
 import os
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -145,6 +147,16 @@ def test_task_page_body_and_truncation() -> None:
     )
     body = task_page_body(task)
     assert body.startswith("# Task (2025-09-12)\n\ndo X\n\n# Result\n\ndone **well**\n")
+    # A result that is not HTML (a row older than finish()'s HTML guarantee) is
+    # Markdown: read as HTML, its lines collapse into one and the tag it only
+    # mentions hides everything after it.
+    legacy = PastTask(
+        task_id="abc", timestamp=0.0, task="t",
+        result="## Changes\n\n- added `<head>` tag\n- tests pass\n",
+    )
+    assert task_page_body(legacy).endswith(
+        "# Result\n\n## Changes\n\n- added `<head>` tag\n- tests pass\n"
+    )
     huge = PastTask(task_id="abc", timestamp=0.0, task="t", result="é" * 20_000)
     truncated = task_page_body(huge)
     assert truncated.endswith("[truncated]\n")
@@ -179,6 +191,28 @@ def test_build_memory_keyword_index_and_fusion(tmp_path: Path) -> None:
     assert fused == ["a", "b"]
     assert reciprocal_rank_fusion([["a"], ["b"]], k=5) == ["a", "b"]
     assert reciprocal_rank_fusion([], k=3) == []
+
+
+def _build_when_released(start: threading.Barrier, root: Path, tasks: list[PastTask]) -> list[str]:
+    """Build the corpus in *root* once the other builder is ready too."""
+    start.wait(timeout=30)
+    return build_memory_from_tasks(MemoryDir(root), tasks)
+
+
+def test_two_evaluations_prune_one_corpus_at_once(tmp_path: Path) -> None:
+    """Two evaluations of one corpus directory that both find its stale pages
+    remove them between them: a page the other one deleted first is gone, not
+    a ``FileNotFoundError`` that aborts the evaluation."""
+    tasks = load_past_tasks(make_db(tmp_path / "history.db"), limit=10, min_result_chars=10)
+    root = tmp_path / "memory"
+    names = build_memory_from_tasks(MemoryDir(root), tasks)
+    for number in range(20):
+        MemoryDir(root).write(f"stale-{number}", "left by an earlier, larger corpus")
+    start = threading.Barrier(2)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        builds = [pool.submit(_build_when_released, start, root, tasks) for _ in range(2)]
+        assert [build.result(timeout=120) for build in builds] == [names, names]
+    assert MemoryDir(root).page_names() == sorted(names)
 
 
 def test_probe_helpers_and_metrics() -> None:
@@ -287,9 +321,15 @@ def test_main_cli_offline(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert main([*args, "--rebuild"]) == 0
     assert json.loads(out.read_text())["corpus_pages"] == 5
     # A smaller --limit prunes the corpus exactly instead of leaving stale pages behind.
+    # Its report replaces the previous one, which is never rewritten in place: what a
+    # reader of that file holds (here a second name of it) stays the whole old report,
+    # and two evaluations publishing to one --out cannot interleave into a mixed one.
+    previous = tmp_path / "previous-results.json"
+    os.link(out, previous)
     smaller = [a if a != "10" else "2" for a in args]
     assert main(smaller) == 0
     assert json.loads(out.read_text())["corpus_pages"] == 2
+    assert json.loads(previous.read_text())["corpus_pages"] == 5
     assert len(list((tmp_path / "memory").glob("*.md"))) == 2
     assert main(args) == 0
     assert json.loads(out.read_text())["corpus_pages"] == 5

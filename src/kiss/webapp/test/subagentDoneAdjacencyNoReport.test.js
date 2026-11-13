@@ -215,8 +215,9 @@ function testUserOpenedContentTabSurvivesAndIsNotStolen() {
     'precondition: a user-opened file focuses its tab',
   );
 
-  // The file screen's strip lists the chat group too: the user steps
-  // onto the sub-agent tab from there.
+  // The file screen's strip lists files only: back on the chat (the
+  // Chats panel's pick), the user steps onto the sub-agent tab.
+  win._testApi.switchToTab(parentId);
   clickTab(win, tabEl(win, subTabIds[0]));
   assert.strictEqual(activeTabId(win), subTabIds[0], 'precondition');
 

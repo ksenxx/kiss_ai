@@ -138,14 +138,18 @@ class SubagentReopenCloseRaceTest(TwoClientHarness):
         rows = _persistence._load_subagent_rows_by_parent_task_id(str(parents[0]["id"]))
         return str(rows[0]["task_id"]) if rows else None
 
-    def _resume(self, client: Client, child: str, sub_tab: str) -> None:
+    def _resume(self, client: Client, child: str, sub_tab: str, reopen: bool = False) -> None:
         """``resumeSession`` *sub_tab* on *client* and wait for ITS transcript.
 
         Counted, not merely awaited: an unscoped replay requested by
-        another client also reaches this one.
+        another client also reaches this one.  *reopen* is the user
+        asking for a closed tab again (an expanded fan-out panel): only
+        that undoes a close.
         """
         before = len(client.of_type("task_events", tabId=sub_tab))
-        client.send({"type": "resumeSession", "taskId": child, "tabId": sub_tab})
+        client.send({
+            "type": "resumeSession", "taskId": child, "tabId": sub_tab, "reopen": reopen,
+        })
         self.wait_for(
             lambda: len(client.of_type("task_events", tabId=sub_tab)) > before,
             what=f"{client.name}: transcript of the sub-agent tab",
@@ -168,7 +172,9 @@ class SubagentReopenCloseRaceTest(TwoClientHarness):
         opens_before = len(b.of_type("openSubagentTab", tab_id=sub_tab))
         os.environ["KISS_RACE_DELAY"] = "0.1"
         try:
-            b.send({"type": "resumeSession", "taskId": child, "tabId": sub_tab})
+            b.send({
+                "type": "resumeSession", "taskId": child, "tabId": sub_tab, "reopen": True,
+            })
             self.wait_for(
                 _replay_thread_in_window,
                 timeout=10,
@@ -217,7 +223,7 @@ class SubagentReopenCloseRaceTest(TwoClientHarness):
                 break
             # The close landed after B's commit: B's tab is closed.
             # Reopen it on B and try the window again.
-            self._resume(b, child, sub_tab)
+            self._resume(b, child, sub_tab, reopen=True)
         self.assertTrue(hit, "never landed the close inside B's attach-to-commit window")
 
         # B's tab is open (its last event for the tab is the reopen):

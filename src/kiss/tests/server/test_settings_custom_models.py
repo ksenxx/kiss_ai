@@ -21,9 +21,10 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 import kiss.core.models.model_info as mi
-from kiss.server.commands import _CommandsMixin
+from kiss.server.commands import _CommandsMixin, _my_models_event
 from kiss.server.sorcar import API
 from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.server.conftest import EntryGate
 
 
 class _MyModelsFileCase(unittest.TestCase):
@@ -439,6 +440,36 @@ class TestMyModelsCommandHandlers(_MyModelsFileCase):
             self.assertIn("Could not write", err["text"])
         finally:
             mi.USER_MY_MODELS_PATH.parent.chmod(0o755)
+
+    def _last_list_after_racing(self, stale: Any, cmd: dict[str, Any], doomed: str) -> list[str]:
+        """The last list sent when *doomed* is deleted while *stale* holds an older list unsent."""
+        gate = EntryGate(_my_models_event.__code__)
+        parked = gate.start(stale, cmd)
+        newer = threading.Thread(
+            target=self.server._cmd_delete_my_model, args=({"name": doomed},), daemon=True,
+        )
+        try:
+            self.assertTrue(gate.reached.wait(30), "the stale publisher never read the list")
+            threading.setprofile(None)  # only ``parked`` carries the gate
+            newer.start()
+            newer.join(0.5)  # over before the release only when nothing orders the two sends
+        finally:
+            threading.setprofile(None)
+            gate.release.set()
+            parked.join(30)
+        newer.join(30)
+        self.assertFalse(parked.is_alive() or newer.is_alive())
+        msg = self.server.last("myModelsData")
+        assert msg is not None
+        return [m["name"] for m in msg["models"]]
+
+    def test_an_older_list_is_never_sent_after_a_newer_one(self) -> None:
+        """A model deleted while a save or a ``get`` holds an older list is not shown again."""
+        save, get = self.server._cmd_save_my_model, self.server._cmd_get_my_models
+        self.assertEqual(self._last_list_after_racing(save, {"name": "m1"}, "m1"), [])
+        save({"name": "m2"})
+        self.assertEqual(self._last_list_after_racing(get, {"connId": "c1"}, "m2"), [])
+        self.assertEqual(mi.list_custom_models(), [])
 
 
 if __name__ == "__main__":

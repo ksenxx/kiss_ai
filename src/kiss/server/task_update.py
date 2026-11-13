@@ -28,11 +28,11 @@ import dataclasses
 import logging
 import threading
 import time
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Iterable
+from typing import Any, cast
 
 from kiss.agents.seas.ask.ask_sea import AskSea
-from kiss.agents.sorcar.persistence import TASK_USAGE_LOCK, task_start_ms
+from kiss.agents.sorcar.persistence import TASK_USAGE_LOCK, task_start_ms, usage_totals_event
 from kiss.agents.sorcar.sea_commands import evaluate_sea
 from kiss.core import stop_signal
 from kiss.core.locked import _race_delay, locked_call
@@ -145,6 +145,7 @@ def charge_side_channel_usage(
     steps: int,
     epoch: Any = None,
     tab_id: str = "",
+    key: str | None = None,
 ) -> None:
     """Charge a side channel's spend to the task it worked for.
 
@@ -161,13 +162,23 @@ def charge_side_channel_usage(
     are broadcast as its own ``usage_info`` (recorded and persisted),
     so its replayed transcript ends with the cost its row will store.  A task
     with no row at all (a run that persists none) is banked on its
-    live agent like an unfinished one.  A task that finishes in the
-    moment between the row check and the bank, after its final save
-    read its counters, loses the spend (the same narrow window every
-    live-agent bank has).  A charge that fails (a row update, a usage
+    live agent like an unfinished one.  The row check and the bank are
+    one section under ``TASK_USAGE_LOCK``, which the task's final save
+    holds from reading its counters to writing its row: a save that
+    comes first leaves the finished row for the charge to add to, one
+    that comes second reads the bank.  A charge that fails (a row update, a usage
     broadcast, a chat-event write) is logged, never raised: it must not
     cost the caller what follows it, the tabs' ``subagentDone`` or the
     ``/ask`` answer panel.
+
+    A charge made with a *key* counts once however often it is made: the
+    live ledger counts the key once, the finished rows take it in one
+    transaction that leaves the key as its receipt
+    (:func:`~kiss.agents.sorcar.persistence._add_keyed_task_usage`), and
+    what a running ancestor owes is recorded there and banked like a
+    remote sub-agent's growth (:func:`_bank_remote_charge`).  A key the
+    charge's ledger holds is charged nowhere again (:func:`_key_on_ledger`):
+    its row may have finished since, from a snapshot of that ledger.
 
     Args:
         printer: The printer that shows the task's tabs, or ``None``.
@@ -189,13 +200,15 @@ def charge_side_channel_usage(
         tab_id: A tab that gets *task_id*'s new totals besides the tabs
             watching the task (whose subscriptions lapse a few minutes
             after it ends), or ``""``.
+        key: The key of a charge its caller may make again (a gate
+            review attempt a stop ended), or ``None``.
     """
     if not task_id or (budget <= 0 and tokens <= 0 and steps <= 0):
         return
     try:
         locked_call(
             TASK_USAGE_LOCK, _charge_locked,
-            printer, task_agent, task_id, budget, tokens, steps, epoch, tab_id,
+            printer, task_agent, task_id, budget, tokens, steps, epoch, tab_id, key,
         )
     except Exception:
         log.warning("side-channel spend of task %s not charged", task_id, exc_info=True)
@@ -210,19 +223,79 @@ def _charge_locked(
     steps: int,
     epoch: Any,
     tab_id: str,
+    key: str | None,
 ) -> None:
     """Charge the spend to the row or the live agent (``TASK_USAGE_LOCK`` held).
 
     See :func:`charge_side_channel_usage` for the arguments.
     """
-    from kiss.agents.sorcar.persistence import _add_late_task_usage
-
-    updated, running = _add_late_task_usage(
-        task_id, tokens, budget, steps, banked=task_agent is None,
+    from kiss.agents.sorcar.persistence import (
+        _add_keyed_task_usage,
+        _add_late_task_usage,
+        _unpublished_keyed_charge,
     )
+
+    charge = 0
+    if key:
+        # The caller's second charge of a key: the first is counted already, on
+        # the ledger (this bridge banks there only with a live agent) or in the row.
+        if task_agent is not None and _key_on_ledger(task_agent, epoch, key):
+            return  # the ledger's snapshot is the row's totals, or will be
+        charged = _add_keyed_task_usage(task_id, key, tokens, budget, steps)
+        if charged is None:
+            # The row kept the key as its receipt.  A Stop may have cut the
+            # first charge between its commit and its publication: publish
+            # the rows' totals their latest usage events still miss.
+            stale, running, owed = _unpublished_keyed_charge(task_id, key)
+            # As the first charge's events: they carry the share, under the
+            # key, only when it went to the running ancestor's live agent.
+            state = agent_state.get(running) if owed else None
+            owed = state is not None and state.agent is not None
+            if owed:
+                stale = _unpublished_keyed_charge(task_id, key, by_key=True)[0]
+            _publish_rows(
+                printer, task_id, tab_id, stale,
+                {"cost": budget, "tokens": tokens, "steps": steps} if owed else None,
+                key=key,
+            )
+            return
+        updated, running, charge = charged
+    else:
+        updated, running = _add_late_task_usage(
+            task_id, tokens, budget, steps, banked=task_agent is None,
+        )
     _publish_charge(
         printer, task_agent, task_id, budget, tokens, steps, epoch, tab_id, updated, running,
+        charge=charge, key=key,
     )
+
+
+def _key_on_ledger(task_agent: Any, epoch: Any, key: str) -> bool:
+    """Whether the ledger a keyed charge of *task_agent* is banked on holds *key*.
+
+    That ledger is *epoch*, or without one *task_agent*'s current epoch
+    (``RelentlessAgent._attribute_usage``).  A bank on it leaves no
+    receipt in the row, but the row's final save writes a snapshot of
+    it under ``TASK_USAGE_LOCK``, which the caller holds: the totals of
+    a row finished since hold the key, where a second add would double
+    it, and those of a running row will.
+    """
+    from kiss.agents.sorcar.relentless_agent import _ledger_totals_and_banked, _UsageLedger
+
+    ledger = epoch if isinstance(epoch, _UsageLedger) else task_agent._usage_epoch()
+    return _ledger_totals_and_banked(ledger, key)[3]
+
+
+def _usage_and_stamp(agent: Any) -> tuple[tuple[float, int, int], list[float | int] | None]:
+    """Return *agent*'s live totals and the ledger they rest on (``None`` without one).
+
+    Called under the offsets' publish lock (``_OFFSET_PUBLISH_LOCK``).
+    """
+    from kiss.agents.sorcar.sorcar_agent import _live_agent_usage
+
+    snapshot = getattr(agent, "usage_snapshot", None)
+    stamp = list(cast("Iterable[float | int]", snapshot())) if callable(snapshot) else None
+    return _live_agent_usage(agent), stamp
 
 
 def _publish_charge(
@@ -237,6 +310,7 @@ def _publish_charge(
     updated: list[tuple[str, int, float, int]],
     running: str,
     charge: int = 0,
+    key: str | None = None,
 ) -> None:
     """Bank on the live agent what the rows did not take, and publish the new totals.
 
@@ -244,11 +318,13 @@ def _publish_charge(
     held): *updated* and *running* are what the row charge returned
     (:func:`~kiss.agents.sorcar.persistence._add_late_task_usage`), the
     other arguments :func:`charge_side_channel_usage`'s.  *charge* is
-    the ``remote_charges`` id of a remote sub-agent's growth, banked
-    through :func:`_bank_remote_charge`; ``0`` for a side channel's.
+    the ``remote_charges`` id of what the running row owes (a remote
+    sub-agent's growth, a keyed charge's share of a running ancestor),
+    banked through :func:`_bank_remote_charge`; ``0`` for a spend
+    banked on the ledger directly, under *key* when it has one.
     """
-    from kiss.agents.sorcar.persistence import _append_chat_event
-    from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage, _live_agent_usage
+    from kiss.agents.sorcar.relentless_agent import _OFFSET_PUBLISH_LOCK
+    from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
 
     _race_delay()  # test hook: widens the row-check-to-bank window
     if not updated and not running:
@@ -258,8 +334,8 @@ def _publish_charge(
         running = task_id
     banked = False
     if running:
-        # Banked first: the task can finish (saving its counters) at
-        # any moment after the transaction above released it.
+        # The running task's final save waits for ``TASK_USAGE_LOCK``,
+        # held here: it reads its counters with this bank on them.
         if running == task_id:
             agent = task_agent
         else:
@@ -278,7 +354,7 @@ def _publish_charge(
             if charge:
                 _bank_remote_charge(agent, charge, budget, tokens, steps)
             else:
-                _attribute_sub_usage(agent, budget, tokens, steps, epoch=epoch)
+                _attribute_sub_usage(agent, budget, tokens, steps, epoch=epoch, key=key)
             banked = True
             if printer is not None:
                 # Publish the new totals (banked plus the in-flight
@@ -288,37 +364,63 @@ def _publish_charge(
                 # last one, and both its replayed transcript and a
                 # ``run_agent`` caller waiting on it
                 # (daemon_client.run) take the cost from the latest.
-                live_budget, live_tokens, live_steps = _live_agent_usage(agent)
-                printer.broadcast({
-                    "type": "usage_info",
-                    "text": "",
-                    "taskId": running,
-                    "total_tokens": live_tokens,
-                    "cost": f"${live_budget:.4f}",
-                    "cost_usd": live_budget,
-                    "total_steps": live_steps,
-                })
+                (live_budget, live_tokens, live_steps), stamp = locked_call(
+                    _OFFSET_PUBLISH_LOCK, _usage_and_stamp, agent,
+                )
+                event = usage_totals_event(running, live_tokens, live_budget, live_steps)
+                # The ledger these totals rest on (the in-flight session's
+                # counters excluded), as a per-step event's stamp: a killed
+                # task's orphan recovery adopts this event's totals and reads
+                # from the stamp which remote charges they hold
+                # (persistence._usage_event_offsets).  Both are read under
+                # the publish lock every bank holds, so no bank lands
+                # between them.
+                if stamp is not None:
+                    event["banked"] = stamp
+                printer.broadcast(event)
+    _publish_rows(
+        printer, task_id, tab_id, updated,
+        # The spend was banked on the running ancestor above, so a
+        # ``run_agent`` caller still waiting on this row's task must
+        # not fold it again (daemon_client._net_totals subtracts it).
+        {"cost": budget, "tokens": tokens, "steps": steps} if banked else None,
+        key=key,
+    )
+
+
+def _publish_rows(
+    printer: Any,
+    task_id: str,
+    tab_id: str,
+    updated: list[tuple[str, int, float, int]],
+    ancestor_charged: dict[str, Any] | None,
+    key: str | None = None,
+) -> None:
+    """Broadcast and persist a ``usage_info`` with each updated row's new totals.
+
+    Args:
+        printer: The daemon's printer, or ``None``.
+        task_id: The task the charge was for (its tab is *tab_id*).
+        tab_id: The tab of *task_id*.
+        updated: ``(id, tokens, cost, steps)`` of each finished row charged.
+        ancestor_charged: The charge banked on a running ancestor, which
+            each event carries, or ``None``.
+        key: The charge's key, which an event carrying *ancestor_charged*
+            carries as ``charge_key``: a retry that publishes the event
+            again (:func:`_charge_locked`) is then subtracted once by a
+            ``run_agent`` caller (``daemon_client._net_totals``).
+    """
+    from kiss.agents.sorcar.persistence import _append_chat_event
+
     for row_id, row_tokens, row_cost, row_steps in updated:
         # ``taskId``: the tab that showed this row may already run a
         # newer task, whose cost this late event must not overwrite
         # (the chat page drops usage events of another task).
-        event: dict[str, Any] = {
-            "type": "usage_info",
-            "text": "",
-            "taskId": row_id,
-            "total_tokens": row_tokens,
-            "cost": f"${row_cost:.4f}",
-            "cost_usd": row_cost,
-            "total_steps": row_steps,
-        }
-        if banked:
-            # The spend was banked on the running ancestor above,
-            # so a ``run_agent`` caller still waiting on this row's
-            # task must not fold it again (daemon_client._net_totals
-            # subtracts it).
-            event["ancestor_charged"] = {
-                "cost": budget, "tokens": tokens, "steps": steps,
-            }
+        event = usage_totals_event(row_id, row_tokens, row_cost, row_steps)
+        if ancestor_charged is not None:
+            event["ancestor_charged"] = dict(ancestor_charged)
+            if key:
+                event["charge_key"] = key
         stamp_event_ts(event)
         if printer is not None:
             printer.broadcast_transient(
@@ -506,7 +608,9 @@ def _bank_remote_charge(agent: Any, charge: int, budget: float, tokens: int, ste
     it) or after the bank.  The ledger counts the charge's key once,
     and the task's final save, a snapshot of the ledger, holds every
     marked charge and no other.  ``TASK_USAGE_LOCK`` is held, as for
-    every bank of a late charge.
+    every bank of a late charge.  The publish lock is taken in slices:
+    the caller may be a task thread (a keyed charge's share of a
+    running ancestor), which a Stop must reach while it waits.
 
     Args:
         agent: The running row's live agent (a ``RelentlessAgent``).
@@ -515,13 +619,13 @@ def _bank_remote_charge(agent: Any, charge: int, budget: float, tokens: int, ste
         tokens: The growth's tokens.
         steps: The growth's steps.
     """
-    from kiss.agents.sorcar.persistence import _mark_remote_charge_banked
+    from kiss.agents.sorcar import sorcar_agent
     from kiss.agents.sorcar.relentless_agent import _OFFSET_PUBLISH_LOCK
-    from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
 
-    with _OFFSET_PUBLISH_LOCK:
-        _mark_remote_charge_banked(charge, *agent.usage_snapshot())
-        _attribute_sub_usage(agent, budget, tokens, steps, key=f"remote:{charge}")
+    locked_call(
+        _OFFSET_PUBLISH_LOCK, sorcar_agent._bank_remote_charge,
+        agent, charge, budget, tokens, steps,
+    )
 
 
 def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
@@ -559,9 +663,7 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     When the task finished while the update ran (its row already holds
     the final totals) the spend is added to the row and its finished
     ancestors instead (see :func:`charge_side_channel_usage`), so it is
-    never counted twice.  Only an update that ends in the few
-    milliseconds between the final save reading the counters and
-    writing the row can lose its spend.
+    counted once, whenever the update ends.
 
     Args:
         parent_agent: The agent of the running task to report on.
@@ -818,13 +920,16 @@ class TaskUpdateRunner:
             # ran: the child's stop event observes the task's and ends with it.
             error = "The task was stopped before this update finished."
             cost = getattr(exc, "task_update_cost", 0.0)
-        except Exception as exc:
+        except BaseException as exc:
+            # ``BaseException``: a cancelled asyncio call or a
+            # ``SystemExit`` is a failed update too, not one recorded
+            # below without an error; the thread ends here either way.
             error = f"{type(exc).__name__}: {exc}"
             cost = getattr(exc, "task_update_cost", 0.0)
             log.warning("task update for %s failed", task_id, exc_info=True)
         finally:
-            # Also on a BaseException: an update pinned on ``running``
-            # would never be restarted by ``poll`` nor pruned.
+            # In a ``finally``: an update pinned on ``running`` would
+            # never be restarted by ``poll`` nor pruned.
             with self._lock:
                 upd = self._updates.setdefault(task_id, TaskUpdate())
                 if text:

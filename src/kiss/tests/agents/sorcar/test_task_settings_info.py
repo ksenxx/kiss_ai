@@ -26,10 +26,13 @@ import platform
 import re
 import shutil
 import sqlite3
+import sys
 import tempfile
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, cast
+
+import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -40,6 +43,7 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
     _save_task_extra,
 )
+from kiss.agents.sorcar.project_interpreter import project_interpreter
 from kiss.agents.sorcar.relentless_agent import (
     DEFAULT_MAX_BUDGET,
     RelentlessAgent,
@@ -47,6 +51,7 @@ from kiss.agents.sorcar.relentless_agent import (
     _nonempty,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.useful_tools import uv_in_worktree
 from kiss.server import agent_state
 from kiss.server.json_printer import (
     JsonPrinter,
@@ -54,6 +59,7 @@ from kiss.server.json_printer import (
     _usage_info_event_from_session,
     with_synthesized_events,
 )
+from kiss.tests.conftest import IS_WINDOWS
 from kiss.tests.core.test_budget_enforcement_e2e import (
     _CHEAP,
     _read_body,
@@ -122,16 +128,13 @@ class _DBRedirect:
         self.tmpdir = tempfile.mkdtemp()
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self.saved
+        th._close_thread_db()
+        (th._DB_PATH, th._KISS_DIR) = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
@@ -194,6 +197,81 @@ class TestSystemPromptTaskSettings(_DBRedirect):
             f"{_nonempty(uname.node)} ({_nonempty(uname.machine)})"
         )
         assert f"- Machine info: {expected_machine}" in system_text
+        # The work dir has no environment: the Python that commands find on PATH is named.
+        on_path = shutil.which("python3") or shutil.which("python")
+        interpreter = project_interpreter(self.tmpdir)
+        assert interpreter.startswith(f"{on_path} (Python ") and interpreter.endswith(")")
+        assert f"- Interpreter: {interpreter}" in system_text
+
+    @pytest.mark.skipif(IS_WINDOWS, reason="symlinks need privileges on Windows")
+    def test_interpreter_is_the_projects_environment_also_from_a_worktree(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A fixer and its reviewer are told one Python: the main checkout's environment."""
+        project = Path(self.tmpdir).resolve()
+        python = project / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.symlink_to(sys.executable)
+        named = f"{python} (Python {platform.python_version()})"
+        assert project_interpreter(str(project)) == named
+        # From a directory inside the project too, as for a ``uv run`` typed there
+        # (audit 2026-11-12: the Python on PATH was named).
+        inside = project / "src" / "pkg"
+        inside.mkdir(parents=True)
+        assert project_interpreter(str(inside)) == named
+        # ... but not from a project of its own in there: without an environment yet, its
+        # ``uv run`` builds one rather than use the outer project's.
+        on_path = shutil.which("python3") or shutil.which("python")
+        (inside / "pyproject.toml").write_text("[project]\nname = 'inner'\nversion = '0'\n")
+        assert project_interpreter(str(inside)).startswith(f"{on_path} (Python ")
+        worktree = project / ".kiss-worktrees" / "kiss_wt-1-ab" / "sub"
+        worktree.mkdir(parents=True)
+        assert project_interpreter(str(worktree)) == named
+        # A repository nested in that worktree has an environment of its own: its worktree is
+        # told that one (the innermost), where a ``uv run`` typed there is sent as well.
+        nested = worktree / "nested"
+        nested_python = nested / ".venv" / "bin" / "python"
+        nested_python.parent.mkdir(parents=True)
+        nested_python.symlink_to(sys.executable)
+        nested_worktree = nested / ".kiss-worktrees" / "kiss_wt-2-cd"
+        nested_worktree.mkdir(parents=True)
+        assert project_interpreter(str(nested_worktree)) == named.replace(
+            str(python), str(nested_python))
+        assert uv_in_worktree("uv run python -V", str(nested_worktree))[2].endswith(
+            f" {nested_python} -V")
+
+        agent = ChatSorcarAgent("reviewer")
+        settings: dict[str, Any] = {"model_name": "m1", "max_sub_sessions": None,
+                                    "max_steps": None, "max_budget": 2.0,
+                                    "work_dir": str(worktree)}
+        agent._reset(**settings, docker_image=None)
+        assert f"- Interpreter: {named}" in agent._task_settings_section()
+        # In a container the commands run on the container's Python, which is not this one.
+        agent._reset(**settings, docker_image="python:3.13")
+        assert "- Interpreter:" not in agent._task_settings_section()
+
+        # An environment whose Python does not run is passed over for PATH's ...
+        python.unlink()
+        python.write_text("#!/bin/sh\necho 0.0.1\n")  # not executable
+        assert project_interpreter(str(worktree)).startswith(f"{on_path} (Python ")
+        # ... and with no Python anywhere the line is left out.
+        empty = project / "empty"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+        assert project_interpreter(str(worktree)) == ""
+        agent._reset(**settings, docker_image=None)
+        assert "- Interpreter:" not in agent._task_settings_section()
+        # A probe that failed is not remembered: the same binary is named once it runs
+        # (audit 2026-11-12: the failure was cached while the binary kept its modification time).
+        python.chmod(0o755)
+        assert project_interpreter(str(worktree)) == f"{python} (Python 0.0.1)"
+        # With no environment in the main checkout there is none to share: the worktree's
+        # own, which uv then builds, is the one named.
+        shutil.rmtree(project / ".venv")
+        own = worktree / ".venv" / "bin" / "python"
+        own.parent.mkdir(parents=True)
+        own.symlink_to(sys.executable)
+        assert project_interpreter(str(worktree)) == named.replace(str(python), str(own))
 
     def test_subagent_hook_reports_parentage(self) -> None:
         """A sub-agent's settings name its parent task id."""

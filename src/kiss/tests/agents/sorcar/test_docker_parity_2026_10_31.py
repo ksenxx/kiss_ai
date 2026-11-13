@@ -121,7 +121,6 @@ class _Harness:
         self.verdict = ALLOW
         self.agent: Any = KISSAgent("docker-parity-executor")
         self.agent.printer = self.printer
-        self.agent.verbose = False
         self.agent.tool_call_hook = self.hook
         self.agent.function_map = dict(self.tools)
 
@@ -405,6 +404,39 @@ def test_a_container_tilde_target_is_not_resolved_in_the_daemons_home(env: Docke
     assert listing.count("No such file") == 2 and listing.endswith("[exit code: 2]"), listing
 
 
+def test_a_container_cd_through_a_link_leaves_a_target_only_the_shell_knows(
+    env: DockerManager,
+) -> None:
+    """``cd link/../deep; cat > victim <<EOF``: bash enters the ``deep`` the link leads to.
+
+    There is no ``deep`` next to the link, so bash takes the path as
+    written, through the link.  The guard judged ``deep/victim`` next to
+    the link (no such file: a new one) and the command rewrote the
+    existing file, unread (cross finding X5 of 2026-11-12).  The
+    container is asked which directories exist, as the host is: the
+    copy is refused by ``Bash`` and by the fan-out, and one after a
+    ``cd`` bash walks as written creates its file as before.
+    """
+    h = _Harness(env)
+    env.Bash(
+        "mkdir -p /tmp/x5/other/sub /tmp/x5/other/deep /tmp/x5/plain/a /tmp/x5/plain/b"
+        " && ln -s other/sub /tmp/x5/link && printf 'ORIGINAL\\n' > /tmp/x5/other/deep/victim",
+        "seed", 30, 500,
+    )
+    landed = env.Bash("cd /tmp/x5/link/../deep && pwd -P", "the shell itself", 30, 500)
+    assert landed == "/tmp/x5/other/deep\n", landed
+    through_the_link = "cd /tmp/x5/link/../deep; cat > victim <<'EOF'\nowned\nEOF"
+    out = h.call("Bash", command=through_the_link, description="through a link")
+    assert out == HEREDOC_UNRESOLVED_VERDICT.format(path="victim"), out
+    report = h.tools["run_commands_parallel"](json.dumps([through_the_link]))
+    assert report.startswith("1 commands: 0 succeeded, 1 failed"), report
+    assert HEREDOC_UNRESOLVED_VERDICT.format(path="victim") in report, report
+    assert _cat(env, "/tmp/x5/other/deep/victim") == "ORIGINAL\n"
+    walked = "cd /tmp/x5/plain/a/../b; cat > fresh <<'EOF'\nowned\nEOF"
+    assert h.call("Bash", command=walked, description="walked") == ""
+    assert _cat(env, "/tmp/x5/plain/b/fresh") == "owned\n"
+
+
 def test_the_rest_of_a_compound_container_rewrite_runs_after_the_applied_call(
     env: DockerManager,
 ) -> None:
@@ -465,6 +497,19 @@ def test_the_rest_of_a_compound_container_rewrite_runs_after_the_applied_call(
     assert out == CD_VERDICT.format(cwd="/tmp/nowhere"), out
     assert h.tool_calls()[-1] == "Bash" and _cat(env, "/tmp/app/notes.md") == "hello\n"
     assert env.Bash("test -e /tmp/nowhere", "check", 30, 500) == "[exit code: 1]"
+    # A Write that failed in the container leaves the rest unmade as well (S11 re-fix):
+    # its result was the failed command's output as it was, and only a result opening
+    # with "Error" tells the agent that the call did not go through.
+    env.Bash("printf x > /tmp/app/blocker", "seed", 30, 500)
+    failing = "cat > /tmp/app/blocker/log.txt <<'EOF' && echo ran > /tmp/app/ran\nhello\nEOF"
+    out = h.call("Bash", command=failing, description="write, mark")
+    rest = _rest("echo ran > /tmp/app/ran", "write, mark")
+    assert "whose result follows:\nError: " in out and "[exit code: 1]" in out, out
+    assert out.endswith(
+        f"{call_text('Bash', rest)} was not made: the Write did not go through."
+    ), out
+    assert h.tool_calls()[-2:] == ["Bash", "Write"]
+    assert env.Bash("test -e /tmp/app/ran", "check", 30, 500) == "[exit code: 1]"
     h.verdict = refuse("not now")
     out = h.call("Bash", command=command, description="rewrite, show")
     rest = _rest("cd /tmp/app && cat notes.md && pwd", "rewrite, show")

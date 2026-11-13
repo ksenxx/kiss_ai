@@ -183,6 +183,33 @@ async function main() {
     win.close();
   });
 
+  // The dropdown hangs off the body, so nothing takes it away when the
+  // pane folds under it: a run starting in the chat on screen (from
+  // another surface, say) folds the pane with no pointer press here.
+  await test('a run that folds the content pane closes its open menu', async () => {
+    const ctx = h.makePage();
+    const {win} = ctx;
+    await h.openDirtyContentTab(ctx);
+    const fileBtn = win.document.querySelector('.content-menubar .content-menu-btn');
+    h.click(win, fileBtn);
+    assert.ok(
+      win.document.querySelector('.content-menu-dropdown'),
+      'precondition: the menu is open',
+    );
+    h.send(win, {
+      type: 'status',
+      running: true,
+      tabId: win._testApi.getActiveTabId(),
+    });
+    assert.ok(
+      win.document.body.classList.contains('content-pane-folded'),
+      'precondition: the run folded the pane',
+    );
+    assert.strictEqual(win.document.querySelector('.content-menu-dropdown'), null);
+    assert.strictEqual(fileBtn.getAttribute('aria-expanded'), 'false');
+    win.close();
+  });
+
   report('ui_antipattern_tab_menu_keyboard');
 }
 

@@ -55,6 +55,11 @@ from kiss.server.server import AgentServer
 
 _UNKNOWN_MODEL = "audit0924-runpath-no-such-model"
 _WAIT_S = 60.0
+# The ids the page sends the prompts under (``promptId``): the first
+# run's, the late prompt's, and a second late message's.
+_FIRST_ID = "first-prompt-id"
+_LATE_ID = "late-prompt-id"
+_ALSO_LATE_ID = "also-late-prompt-id"
 
 
 def _clear_states(prefix: str) -> None:
@@ -76,7 +81,10 @@ class _TeardownAgent(ChatSorcarAgent):
     before ``finish`` is processed by the runner — inside the teardown
     window in which ``task_thread`` is still installed.  ``stop_first``
     additionally sets the run's ``stop_event`` so the runner sees a
-    stopped run.
+    stopped run.  ``also_late`` is a second message typed right after
+    the late prompt, and ``update_starts`` arms the self-update gate
+    (as the idle poller does, under ``_state_lock``) so the re-run of
+    what the run left is refused.
     """
 
     def __init__(self) -> None:
@@ -87,6 +95,8 @@ class _TeardownAgent(ChatSorcarAgent):
         self.late_prompt: str = ""
         self.via_run_command: bool = False
         self.stop_first: bool = False
+        self.also_late: str = ""
+        self.update_starts: bool = False
 
     def run(self, *args: Any, **kwargs: Any) -> str:
         """Allocate a task row, submit the late prompt once, return."""
@@ -108,14 +118,18 @@ class _TeardownAgent(ChatSorcarAgent):
                 assert st is not None and st.stop_event is not None
                 st.stop_event.set()
             if self.late_prompt:
+                late = {"tabId": self.tab, "prompt": self.late_prompt, "promptId": _LATE_ID}
                 if self.via_run_command:
-                    self.server._cmd_run(
-                        {"tabId": self.tab, "prompt": self.late_prompt},
-                    )
+                    self.server._cmd_run(late)
                 else:
-                    self.server._cmd_append_user_message(
-                        {"tabId": self.tab, "prompt": self.late_prompt},
-                    )
+                    self.server._cmd_append_user_message(late)
+            if self.also_late:
+                self.server._cmd_append_user_message(
+                    {"tabId": self.tab, "prompt": self.also_late, "promptId": _ALSO_LATE_ID},
+                )
+            if self.update_starts:
+                with self.server._state_lock:
+                    self.server._update_installing = True
         return finish(True, summary_in_html=f"<p>done {prompt_template}</p>")
 
 
@@ -126,6 +140,8 @@ class _CapturePrinter(JsonPrinter):
     a ``task_done`` event is broadcast — the runner emits it after
     ``followup_queue_closed`` is raised and outside ``STATE_LOCK``, so
     the message hits the post-loop branch of ``_cmd_run``.
+    ``stop_after_inject`` then sets the run's ``stop_event``: the user
+    pressed Stop before the run was torn down.
     """
 
     def __init__(self) -> None:
@@ -134,6 +150,7 @@ class _CapturePrinter(JsonPrinter):
         self.server: AgentServer | None = None
         self.tab: str = ""
         self.inject_on_done: str = ""
+        self.stop_after_inject: bool = False
         self._injected = False
 
     def broadcast(self, event: dict[str, Any]) -> None:
@@ -147,8 +164,12 @@ class _CapturePrinter(JsonPrinter):
         ):
             self._injected = True
             self.server._cmd_run(
-                {"tabId": self.tab, "prompt": self.inject_on_done},
+                {"tabId": self.tab, "prompt": self.inject_on_done, "promptId": _LATE_ID},
             )
+            if self.stop_after_inject:
+                st = agent_state.find_by_tab(self.tab)
+                assert st is not None and st.stop_event is not None
+                st.stop_event.set()
         super().broadcast(event)
 
 
@@ -187,6 +208,9 @@ def _start_run(
     via_run_command: bool = False,
     stop_first: bool = False,
     inject_on_done: str = "",
+    also_late: str = "",
+    update_starts: bool = False,
+    stop_after_inject: bool = False,
 ) -> tuple[_TeardownAgent, _CapturePrinter, AgentServer]:
     """Start *prompt* on *tab_id* through the real ``_cmd_run`` and wait for idle."""
     models = get_available_models()
@@ -197,12 +221,15 @@ def _start_run(
     printer.server = server
     printer.tab = tab_id
     printer.inject_on_done = inject_on_done
+    printer.stop_after_inject = stop_after_inject
     agent = _TeardownAgent()
     agent.server = server
     agent.tab = tab_id
     agent.late_prompt = late_prompt
     agent.via_run_command = via_run_command
     agent.stop_first = stop_first
+    agent.also_late = also_late
+    agent.update_starts = update_starts
     # ``_cmd_run`` carries a previous state's agent over to the new
     # run, which is how the scripted agent reaches ``_run_task_inner``.
     pre = AgentState(
@@ -213,6 +240,7 @@ def _start_run(
         "type": "run",
         "tabId": tab_id,
         "prompt": prompt,
+        "promptId": _FIRST_ID,
         "workDir": str(tmp_path),
         "useWorktree": False,
         "autoCommit": False,
@@ -242,7 +270,11 @@ class TestTeardownPromptIsReDispatched:
         _clear_states(self.PREFIX)
 
     def _assert_redispatched(
-        self, printer: _CapturePrinter, tab_id: str, late: str,
+        self,
+        printer: _CapturePrinter,
+        tab_id: str,
+        late: str,
+        late_ids: tuple[str, ...] = (_LATE_ID,),
     ) -> None:
         # A SECOND run was started on the same tab (two ``clear``
         # broadcasts) ...
@@ -272,6 +304,15 @@ class TestTeardownPromptIsReDispatched:
         # The first run's client token must not leak into the second
         # run's status envelope.
         assert st.client_run_token == ""
+        # Each run's ``clear`` names the prompts it runs (the second,
+        # the messages it stands for and not the finished run's), and
+        # so does the tab's transcript from then on.
+        assert [c.get("promptIds") for c in clears] == [[_FIRST_ID], list(late_ids)]
+        assert _events_of(printer, "setTaskText")[-1].get("promptIds") == list(late_ids)
+        assert printer.server is not None
+        printer.server._cmd_resume_session({"chatId": st.chat_id, "tabId": tab_id})
+        replays = [e for e in _events_of(printer, "task_events") if e.get("tabId") == tab_id]
+        assert replays[-1].get("promptsTaken") == [_FIRST_ID, *late_ids]
 
     def test_prompt_appended_before_finish_is_run_next(self, tmp_path: Path) -> None:
         tab_id = f"{self.PREFIX}-append"
@@ -287,6 +328,47 @@ class TestTeardownPromptIsReDispatched:
             e for e in _events_of(printer, "prompt") if e.get("text") == late
         ]
         assert len(echoes) == 1
+
+    def test_messages_left_by_a_run_are_one_run_under_all_their_ids(self, tmp_path: Path) -> None:
+        tab_id = f"{self.PREFIX}-joined"
+        _agent, printer, _server = _start_run(
+            tmp_path, tab_id, "first task", late_prompt="one more thing", also_late="and another",
+        )
+        self._assert_redispatched(
+            printer, tab_id, "one more thing\n\nand another", (_LATE_ID, _ALSO_LATE_ID),
+        )
+
+    @pytest.mark.parametrize(
+        ("echoed", "stopped"), [(True, False), (False, False), (False, True)],
+    )
+    def test_late_message_no_run_takes_is_refused_by_name(
+        self, tmp_path: Path, echoed: bool, stopped: bool,
+    ) -> None:
+        """The page gets back the very message that will not run.
+
+        The run made of it is turned down (an update began), or none is
+        made (Stop was pressed while the message waited for it).  Typed
+        while the agent still ran its step, the message was echoed into
+        the first task and is among the prompts taken; typed once the
+        run was over, it got no answer but the refusal and is not: only
+        a prompt the tab was told about is.
+        """
+        tab_id = f"{self.PREFIX}-refused-{echoed}-{stopped}"
+        late = "typed before the update began"
+        _agent, printer, server = _start_run(
+            tmp_path,
+            tab_id,
+            "first task",
+            late_prompt=late if echoed else "",
+            inject_on_done="" if echoed else late,
+            update_starts=not stopped,
+            stop_after_inject=stopped,
+        )
+        assert len(_events_of(printer, "clear")) == 1
+        refusals = [e for e in _events_of(printer, "error") if e.get("code") == "prompt_refused"]
+        assert [(e.get("tabId"), e.get("promptIds")) for e in refusals] == [(tab_id, [_LATE_ID])]
+        taken = [_FIRST_ID, _LATE_ID] if echoed else [_FIRST_ID]
+        assert server._prompts_taken_from(tab_id) == {"promptsTaken": taken}
 
     def test_run_command_during_teardown_is_run_next(self, tmp_path: Path) -> None:
         tab_id = f"{self.PREFIX}-run"
@@ -328,6 +410,11 @@ class TestTeardownPromptIsReDispatched:
             "No model available" in str(r.get("text", ""))
             for r in _events_of(printer, "result")
         )
+        # Echoed into the stopped task, the message is not handed back.
+        assert [e.get("promptIds") for e in _events_of(printer, "prompt") if e.get("steer")] == [
+            [_LATE_ID],
+        ]
+        assert not [e for e in _events_of(printer, "error") if e.get("code") == "prompt_refused"]
 
     def test_thread_is_never_started_under_state_lock(self, tmp_path: Path) -> None:
         # The re-dispatch happens from the first run's worker: it must

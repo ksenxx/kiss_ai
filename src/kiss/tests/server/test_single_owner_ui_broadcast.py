@@ -175,11 +175,11 @@ class TestSingleOwnerUiBroadcast(unittest.TestCase):
 
     def test_worktree_strip_broadcasts_one_owner_copy(self) -> None:
         """``worktree_done`` and ``worktree_result`` are emitted once."""
-        self._make_pending_worktree()
+        wt = self._make_pending_worktree()
         self.server._present_pending_worktree(OWNER_TAB, discard_if_empty=False)
 
         done = self._assert_single_owner_copy("worktree_done")
-        self.assertEqual(done.get("changedFiles"), ["agent.txt"])
+        self.assertEqual(done.get("branch"), wt.branch)
         self._assert_no_mirror_of()
 
         self.server._handle_command({

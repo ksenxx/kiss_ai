@@ -41,13 +41,11 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.server import ServerConnection
 
 import kiss.agents.sorcar.persistence as th
+import kiss.core.config
 from kiss.agents.sorcar import local_endpoint
 from kiss.server import agent_state
-from kiss.server.web_server import (
-    RemoteAccessServer,
-    _generate_self_signed_cert,
-)
-from kiss.tests.local_ws import fake_daemon
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.local_ws import _generate_self_signed_cert, fake_daemon
 
 _SCRIPT_PATH = (
     Path(__file__).resolve().parents[4]
@@ -55,18 +53,17 @@ _SCRIPT_PATH = (
 )
 
 
-def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+def _redirect_persistence(tmpdir: str) -> tuple[Path, Path]:
+    saved = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
+    return saved
 
 
-def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
+def _restore_persistence(saved: tuple[Path, Path]) -> None:
+    th._DB_PATH, th._KISS_DIR = saved
 
 
 def _run_helper(
@@ -87,6 +84,35 @@ def _run_helper(
         timeout=timeout,
         check=False,
     )
+
+
+def _run_probe(env: dict[str, str], *options: str) -> subprocess.CompletedProcess[str]:
+    """Run the helper under exactly *env*, the interpreter started with *options*."""
+    return subprocess.run(
+        [sys.executable, *options, str(_SCRIPT_PATH)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def _branded_app(root: Path, home_dir: str) -> Path:
+    """Build in *root* what ``kiss.core.config`` imports, under a brand whose home is *home_dir*.
+
+    Returns the directory to put on ``PYTHONPATH``: the app of a
+    white-label install, whose daemon keeps its state in ``~/<home_dir>``.
+    """
+    core = Path(kiss.core.config.__file__).resolve().parent
+    (root / "kiss" / "core").mkdir(parents=True)
+    shutil.copy(core.parent / "__init__.py", root / "kiss")
+    for module in core.glob("*.py"):
+        shutil.copy(module, root / "kiss" / "core")
+    media = root / "kiss" / "webapp" / "media"
+    media.mkdir(parents=True)
+    (media / "brand.json").write_text(json.dumps({"home_dir": home_dir}), encoding="utf-8")
+    return root
 
 
 def _one_shot_handler(lines: list[bytes]):
@@ -140,8 +166,7 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
             agent_state.agent_states.clear()
             agent_state.agent_states.update(self._registry_snapshot)
         await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         _restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -193,7 +218,10 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
         self.assertIn("1 in-flight task", result.stderr)
         self.assertIn(fake_tab_id, result.stderr)
         self.assertIn("task=3233", result.stderr)
-        self.assertIn("KISS_FORCE_RESTART", result.stderr)
+        # Nothing reads KISS_FORCE_RESTART any more: the message must not
+        # offer it as an override.
+        self.assertIn("Refusing to kill.", result.stderr)
+        self.assertNotIn("KISS_FORCE_RESTART", result.stderr)
         # The busy daemon names the file install.sh records its deferred
         # restart in: next to its remote-url.json.
         self.assertEqual(
@@ -345,3 +373,61 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
             self.assertIn("refused connection", result.stderr)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
+
+
+class TestDefaultEndpointFile(IsolatedAsyncioTestCase):
+    """Without ``KISS_SORCAR_LOCAL`` the probe asks the daemon of its interpreter's app.
+
+    The probe defaulted to ``~/.kiss/sorcar-local.json`` whatever the
+    install: on a white-label one, whose daemon publishes its endpoint
+    in the brand's home (``~/.s10s``), a busy daemon read as "no daemon,
+    safe to kill".
+    """
+
+    def setUp(self) -> None:
+        self.scratch = Path(tempfile.mkdtemp())
+        self.home = self.scratch / "home"
+        self.home.mkdir()
+        # Nothing of the test runner's environment: no KISS_HOME, no
+        # KISS_SORCAR_LOCAL, no PYTHONPATH.  ``USERPROFILE`` is
+        # ``Path.home()`` on Windows, where python.exe needs ``SYSTEMROOT``.
+        self.env = {
+            "HOME": str(self.home),
+            "USERPROFILE": str(self.home),
+            "PATH": os.defpath,
+            "KISS_ACTIVE_TASKS_TIMEOUT": "5.0",
+            **{name: os.environ[name] for name in ("SYSTEMROOT",) if name in os.environ},
+        }
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.scratch, ignore_errors=True)
+
+    async def test_branded_app_asks_the_daemon_in_the_brand_home(self) -> None:
+        """A busy daemon in ``~/.s10s`` is busy; ``$KISS_HOME`` names another home."""
+        app = _branded_app(self.scratch / "app", ".s10s")
+        env = {**self.env, "PYTHONPATH": str(app)}
+        endpoint_file = self.home / ".s10s" / "sorcar-local.json"
+        endpoint_file.parent.mkdir()
+        handler = _one_shot_handler(
+            [b'{"type":"activeTasksResponse","count":1,"tabs":["t"]}\n'],
+        )
+        elsewhere = self.scratch / "custom"
+        async with fake_daemon(self.scratch, handler, endpoint_file=endpoint_file):
+            busy = await asyncio.to_thread(_run_probe, env)
+            moved = await asyncio.to_thread(_run_probe, {**env, "KISS_HOME": str(elsewhere)})
+        self.assertEqual(busy.returncode, 1, busy.stderr)
+        self.assertIn("1 in-flight task", busy.stderr)
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        self.assertIn(f"not present at {elsewhere / 'sorcar-local.json'}", moved.stderr)
+
+    def test_python_without_the_package_asks_the_stock_home(self) -> None:
+        """A bare interpreter cannot know the brand: ``$KISS_HOME``, else ``~/.kiss``."""
+        stock = _run_probe(self.env, "-S")
+        self.assertEqual(stock.returncode, 0, stock.stderr)
+        self.assertIn(
+            f"not present at {self.home / '.kiss' / 'sorcar-local.json'}", stock.stderr,
+        )
+        elsewhere = self.scratch / "custom"
+        moved = _run_probe({**self.env, "KISS_HOME": str(elsewhere)}, "-S")
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        self.assertIn(f"not present at {elsewhere / 'sorcar-local.json'}", moved.stderr)

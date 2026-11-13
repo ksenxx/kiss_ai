@@ -19,6 +19,8 @@ const {
   installFakeWebSocket,
   installFakeTimers,
   pendingTimers,
+  runTicks,
+  retryButton,
   newAuthDom,
   bootShim,
 } = require('./transport_page_helpers');
@@ -35,14 +37,6 @@ function page() {
   const timers = installFakeTimers(window, {intervals, clock});
   bootShim(window);
   return {window, sockets, timers, intervals, clock};
-}
-
-function retryButton(window) {
-  return window.document.getElementById('kiss-server-loading-action');
-}
-
-function runTicks(intervals) {
-  for (const t of intervals) if (!t.cleared) t.fn();
 }
 
 function main() {

@@ -213,16 +213,15 @@ class TestUnmergedMultiRepoWorkReachesTheMergeBar(_TwoRepoRun):
         self.assertEqual(done["branch"], wt_a.branch)
         self.assertEqual(done["worktreeDir"], str(wt_a.wt_dir))
         self.assertEqual(
-            done["changedFiles"], sorted(["a.txt", f"{wt_b.repo_root}/b.txt"]),
-        )
-        self.assertEqual(
-            [(w["repoRoot"], w["branch"], w["changedFiles"]) for w in done["worktrees"]],
+            done["worktrees"],
             [
-                (str(wt_a.repo_root), wt_a.branch, ["a.txt"]),
-                (str(wt_b.repo_root), wt_b.branch, ["b.txt"]),
+                {"branch": wt_a.branch, "worktreeDir": str(wt_a.wt_dir)},
+                {"branch": wt_b.branch, "worktreeDir": str(wt_b.wt_dir)},
             ],
         )
-        self.assertFalse(done["hasConflict"])
+        self.assertEqual(
+            self.server._list_pending(agent), [(wt_a, ["a.txt"]), (wt_b, ["b.txt"])],
+        )
         self.assertFalse((self.repo / "a.txt").exists())
         self.assertFalse((self.repo_b / "b.txt").exists())
 

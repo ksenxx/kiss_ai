@@ -16,7 +16,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, click, byId} = require('./simplify2_harness');
 const {sendHistory, makeRow} = require('./history_helpers');
 
 function scopedFetches(posted, tabId) {
@@ -25,8 +25,8 @@ function scopedFetches(posted, tabId) {
   );
 }
 
-/** Adopt `tab-b` (bound to chat c-b) next to the boot tab and defer it. */
-function adoptDeferredTab(win, taskId) {
+/** Adopt `tab-b` (bound to chat c-b) next to the boot tab. */
+function adoptTab(win) {
   const bootTab = win._testApi.getActiveTabId();
   send(win, {
     type: 'tabs_state',
@@ -39,9 +39,45 @@ function adoptDeferredTab(win, taskId) {
     win._testApi.openTabs().some(t => t.id === 'tab-b'),
     'the registry tab was adopted',
   );
+  return bootTab;
+}
+
+/** Adopt `tab-b` and defer it: its state, then the offer. */
+function adoptDeferredTab(win, taskId) {
+  const bootTab = adoptTab(win);
   send(win, {type: 'status', running: false, tabId: 'tab-b'});
   send(win, {type: 'replay_deferred', tabId: 'tab-b', chatId: 'c-b', taskId});
   return bootTab;
+}
+
+// The daemon sends a tab's state with the offer only when it has one, so
+// the offer alone must settle the state of a tab adopted from the
+// registry.  Until the daemon has spoken the tab's task may be running
+// on another surface, and "+" must not retire the chat left behind.
+function testOfferAloneSettlesTheTabState() {
+  for (const offered of [false, true]) {
+    const {win} = makePage();
+    adoptTab(win);
+    if (offered) {
+      send(win, {
+        type: 'replay_deferred',
+        tabId: 'tab-b',
+        chatId: 'c-b',
+        taskId: '',
+      });
+    }
+    win._testApi.switchToTab('tab-b');
+    click(win, byId(win, 'new-chat-btn'));
+    assert.strictEqual(
+      win._testApi.openTabs().some(t => t.id === 'tab-b'),
+      !offered,
+      offered
+        ? 'the offer settled the state: the idle chat left behind is retired'
+        : 'a chat whose state the daemon still owes stays open',
+    );
+    win.close();
+  }
+  console.log('  ok - an offer alone settles the state of an adopted tab');
 }
 
 function testFetchOnFirstActivationOnly() {
@@ -55,7 +91,7 @@ function testFetchOnFirstActivationOnly() {
   win._testApi.switchToTab('tab-b');
   const fetches = scopedFetches(posted, 'tab-b');
   assert.strictEqual(fetches.length, 1, 'opening the tab fetches once');
-  assert.strictEqual(fetches[0].id, 'c-b');
+  assert.strictEqual(fetches[0].chatId, 'c-b');
   assert.strictEqual(fetches[0].taskId, undefined, 'no pinned task');
   win._testApi.switchToTab(bootTab);
   win._testApi.switchToTab('tab-b');
@@ -151,7 +187,7 @@ function testActiveSubagentTabFetchesItsOwnOffer() {
   });
   const own = scopedFetches(posted, 'tab-b__sub_1');
   assert.strictEqual(own.length, 1, 'an active child fetches its own offer');
-  assert.strictEqual(own[0].id, 'c-b');
+  assert.strictEqual(own[0].chatId, 'c-b');
   assert.strictEqual(own[0].taskId, 's1');
   // An offer for the parent while the child is on screen: fetched too.
   send(win, {
@@ -195,7 +231,7 @@ function testHistoryClickOnDeferredTabResumesOnce() {
 
 function testNewRunDropsThePendingFetch() {
   const {win, posted} = makePage();
-  const bootTab = adoptDeferredTab(win, 'old-task');
+  adoptDeferredTab(win, 'old-task');
   // A run started on the tab from another surface: its live events are
   // the transcript; the withheld (older) one must not be fetched over
   // them when the user opens the tab.
@@ -203,12 +239,12 @@ function testNewRunDropsThePendingFetch() {
   send(win, {type: 'status', running: true, tabId: 'tab-b', startTs: 1});
   win._testApi.switchToTab('tab-b');
   assert.strictEqual(scopedFetches(posted, 'tab-b').length, 0);
-  win._testApi.switchToTab(bootTab);
   win.close();
   console.log('  ok - a new run drops the pending fetch');
 }
 
 function main() {
+  testOfferAloneSettlesTheTabState();
   testFetchOnFirstActivationOnly();
   testPinnedTaskAndUnknownTab();
   testActiveSubagentTabFetchesItsOwnOffer();

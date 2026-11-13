@@ -18,11 +18,8 @@ const {tabEl, deferChatTranscripts} = require('./subagent_tab_helpers');
 
 const {test, report} = h.makeRunner();
 
-function scopedFetches(posted) {
-  return h
-    .ofType(posted, 'resumeSession')
-    .filter(m => m.scoped === true && /^tab-[bc]$/.test(m.tabId));
-}
+// The two registry chats whose transcripts the daemon deferred.
+const DEFERRED = ['tab-b', 'tab-c'];
 
 // The boot chat (tabA, first in the list, on screen) with a sub-agent
 // tab so the strip is shown, plus two registry chats whose transcripts
@@ -52,7 +49,7 @@ function pageWithDeferredTabs() {
   });
   assert.strictEqual(win._testApi.getActiveTabId(), tabA, 'tabA is on screen');
   assert.strictEqual(
-    scopedFetches(posted).length,
+    h.scopedFetches(posted, DEFERRED).length,
     0,
     'precondition: the deferred tabs were not fetched',
   );
@@ -62,12 +59,7 @@ function pageWithDeferredTabs() {
 function pickMenuItem(win, tabA, label) {
   const tab = tabEl(win, tabA);
   tab.focus();
-  h.rightClick(win, tab);
-  const item = h
-    .all(win, '#tab-context-menu .tab-ctx-item')
-    .find(el => el.textContent === label);
-  assert.ok(item, `the "${label}" item exists`);
-  h.click(win, item);
+  h.pickTabMenuItem(win, tab, label);
 }
 
 async function main() {
@@ -79,7 +71,7 @@ async function main() {
     assert.ok(!ids.includes('tab-c') && !ids.includes('sub-a'), 'all closed');
     assert.strictEqual(ids.length, 1, 'one fresh chat replaces them');
     assert.deepStrictEqual(
-      scopedFetches(posted),
+      h.scopedFetches(posted, DEFERRED),
       [],
       'no transcript was fetched for a tab closed by the same action',
     );
@@ -93,7 +85,7 @@ async function main() {
     h.send(win, {type: 'status', running: false, tabId: 'sub-a'});
     pickMenuItem(win, tabA, 'Close Inactive');
     assert.strictEqual(win._testApi.openTabs().length, 1, 'one fresh chat');
-    assert.deepStrictEqual(scopedFetches(posted), []);
+    assert.deepStrictEqual(h.scopedFetches(posted, DEFERRED), []);
     win.close();
   });
 
@@ -105,7 +97,7 @@ async function main() {
     const ids = win._testApi.openTabs().map(t => t.id);
     assert.strictEqual(ids.join(','), 'tab-c', 'only the running tab survives');
     assert.strictEqual(win._testApi.getActiveTabId(), 'tab-c');
-    const fetches = scopedFetches(posted);
+    const fetches = h.scopedFetches(posted, DEFERRED);
     assert.strictEqual(fetches.length, 1, 'the survivor is fetched once');
     assert.strictEqual(fetches[0].tabId, 'tab-c');
     win.close();
@@ -133,7 +125,7 @@ async function main() {
     for (const id of ['tab-b', 'tab-c', 'sub-a'])
       assert.ok(!ids.includes(id), `${id} closed`);
     assert.deepStrictEqual(
-      scopedFetches(posted),
+      h.scopedFetches(posted, DEFERRED),
       [],
       'no transcript was fetched for a tab closed by the same action',
     );
@@ -149,7 +141,7 @@ async function main() {
     assert.strictEqual(ids.length, 1, 'one fresh chat replaces them');
     for (const id of ['tab-b', 'tab-c', 'sub-a'])
       assert.ok(!ids.includes(id), `${id} closed`);
-    assert.deepStrictEqual(scopedFetches(posted), []);
+    assert.deepStrictEqual(h.scopedFetches(posted, DEFERRED), []);
     win.close();
   });
 
@@ -161,7 +153,7 @@ async function main() {
     const ids = win._testApi.openTabs().map(t => t.id);
     assert.strictEqual(ids.join(','), tabA, 'only the running root survives');
     assert.strictEqual(win._testApi.getActiveTabId(), tabA);
-    assert.deepStrictEqual(scopedFetches(posted), []);
+    assert.deepStrictEqual(h.scopedFetches(posted, DEFERRED), []);
     win.close();
   });
 

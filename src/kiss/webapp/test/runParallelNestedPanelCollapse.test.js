@@ -21,7 +21,7 @@
 // (media/transport.js driven over a stub WebSocket), so the frames the
 // daemon would see are exactly the ones the assertions inspect.
 
-/* global require, console, process */
+/* global require, console */
 
 'use strict';
 
@@ -29,6 +29,7 @@ const assert = require('assert');
 const {
   subagentTabEls,
   togglePanel,
+  clickClose,
   bootParallelRun: bootSharedRun,
   spawnSubagent,
 } = require('./subagent_tab_helpers');
@@ -50,7 +51,7 @@ function makePage() {
   // The real parser fires DOMContentLoaded once every body script has
   // run; the webapp shim defers app-bound events until then so none
   // are lost while main.js is still being fetched.  jsdom keeps
-  // readyState 'loading' until a later macrotask, so fire it here to
+  // readyState 'loading' until this task has ended, so fire it here to
   // flush the shim's queue synchronously.
   win.document.dispatchEvent(
     new win.Event('DOMContentLoaded', {bubbles: true}),
@@ -478,7 +479,7 @@ function testReplayWhileViewingSubagentKeepsWholeTranscript() {
   );
   const out = st.win.document.getElementById('output');
   const headers = Array.from(out.querySelectorAll('.ev.tc > .tc-h')).map(h =>
-    (h.textContent || '').replace(/^[^A-Za-z]+/, '').trim(),
+    h.textContent.replace(/^[^A-Za-z]+/, '').trim(),
   );
   assert.ok(
     headers.some(h => h.startsWith('summary')),
@@ -510,21 +511,27 @@ function testFailedReplayDoesNotStrandLaterCloses() {
   const st = bootParallelRun(2);
   openNewChat(st);
 
-  // The broken transcript is meant to throw inside the page; marking the
-  // error handled keeps jsdom from printing it as an uncaught exception.
-  st.win.addEventListener('error', e => e.preventDefault(), {once: true});
-  try {
-    st.deliver({
-      type: 'task_events',
-      tabId: st.parentId,
-      task: 'broken replay',
-      task_id: 'parent-task',
-      events: [null],
-    });
-  } catch {
-    // The webapp shim hands the throw straight back to the caller.
-  }
+  // The broken transcript throws inside the page, which jsdom reports
+  // as an error event on the window; marking it handled keeps jsdom
+  // from printing it as an uncaught exception.
+  let replayErrors = 0;
+  st.win.addEventListener(
+    'error',
+    e => {
+      replayErrors += 1;
+      e.preventDefault();
+    },
+    {once: true},
+  );
+  st.deliver({
+    type: 'task_events',
+    tabId: st.parentId,
+    task: 'broken replay',
+    task_id: 'parent-task',
+    events: [null],
+  });
   st.drain();
+  assert.strictEqual(replayErrors, 1, 'the broken replay threw in the page');
 
   // The parent chat is hidden behind the new one (its sub-agents are
   // still running, so "+" did not retire it); the Chats panel's pick
@@ -626,7 +633,327 @@ function testAdjacentTaskSummaryLeavesLiveFanOutAlone() {
   console.log('  ok adjacent task summary leaves fan-out alone');
 }
 
-async function main() {
+/**
+ * Boot a root whose child finished while the grandchild it dispatched
+ * still runs, with the child's history open again: the child's finish
+ * closed its tab and left the grandchild's open, the user expanded the
+ * root's fan-out to read the child, and the daemon's replay of the
+ * child announced the running grandchild below it.
+ *
+ * @returns {object} Boot state plus `childId` (the finished child's
+ *     reopened tab) and `grandchildId` (the running grandchild's tab).
+ */
+function bootReopenedChildOverRunningGrandchild() {
+  const st = bootParallelRun(1, false);
+  const childId = st.subTabIds[0];
+  const childTranscript = [
+    {type: 'tool_call', name: 'run_agent', tabId: childId},
+    {type: 'tool_result', tabId: childId, content: 'job started'},
+    {type: 'result', tabId: childId, summary: 'child done', success: true},
+  ];
+  st.deliver(childTranscript[0]);
+  const grandchildId = spawnSubagent(st, childId, 'deep-task', 'deep', 0, {
+    deliver: st.deliver,
+  });
+  st.deliver(childTranscript[1]);
+  st.deliver(childTranscript[2]);
+  st.deliver({type: 'subagentDone', tab_id: childId});
+
+  togglePanel(st.win, st.panel, st.drain);
+  st.deliver({
+    type: 'openSubagentTab',
+    tab_id: childId,
+    parent_tab_id: st.parentId,
+    description: 'sub 1',
+    task_id: 'sub-task-1',
+    isDone: true,
+    reopened: true,
+  });
+  st.deliver({
+    type: 'task_events',
+    tabId: childId,
+    task: 'sub 1',
+    task_id: 'sub-task-1',
+    events: childTranscript,
+  });
+  st.deliver({
+    type: 'openSubagentTab',
+    tab_id: grandchildId,
+    parent_tab_id: childId,
+    description: 'deep',
+    task_id: 'deep-task',
+    isDone: false,
+  });
+  assert.deepStrictEqual(
+    subagentTabStates(st.win).sort(),
+    [childId + ' idle', grandchildId + ' running'],
+    'sanity: the finished child is open again over its running grandchild',
+  );
+  return Object.assign(st, {childId, grandchildId});
+}
+
+/**
+ * Every open sub-agent tab as "<id> running" or "<id> idle" (copied
+ * out of the page's realm, so deepStrictEqual compares plain arrays).
+ */
+function subagentTabStates(win) {
+  return Array.from(win._testApi.openTabs())
+    .filter(t => t.isSubagentTab)
+    .map(t => t.id + (t.isRunning ? ' running' : ' idle'));
+}
+
+/** The user folds the root's fan-out panel by its header. */
+function foldByHeaderClick(st) {
+  togglePanel(st.win, st.panel, st.drain);
+}
+
+/** The root's next `summary` call swallows its fan-out panel. */
+function foldBySummary(st) {
+  st.deliver({
+    type: 'tool_call',
+    name: 'summary',
+    tabId: st.parentId,
+    description: 'progress so far',
+  });
+}
+
+/** A new task in the root throws its transcript away. */
+function foldByClear(st) {
+  st.deliver({type: 'clear', tabId: st.parentId, chat_id: 7});
+}
+
+/** The daemon replays the root's transcript, summary included. */
+function foldByReplay(st) {
+  st.deliver({
+    type: 'task_events',
+    tabId: st.parentId,
+    task: 'parent replay',
+    task_id: 'parent-task',
+    events: [
+      {
+        type: 'tool_call',
+        name: 'run_parallel',
+        tabId: st.parentId,
+        extras: {tasks: JSON.stringify(['sub 1'])},
+      },
+      {type: 'tool_result', tabId: st.parentId, content: 'sub-agents done'},
+      {
+        type: 'tool_call',
+        name: 'summary',
+        tabId: st.parentId,
+        description: 'progress so far',
+      },
+    ],
+  });
+}
+
+// A fold closes a finished child's tab on the page's own account, not
+// the user's, so the child's still-running grandchild keeps its tab:
+// open, running and on screen.  The daemon mirrors every `closeTab` a
+// page sends to all surfaces, so it must hear of the child's only.
+// The header click, the live summary and the wipe close the child at
+// once; the replay queues the close until the transcript is complete.
+function testFoldKeepsRunningGrandchildOfFinishedChild() {
+  const folds = [
+    {fold: foldByHeaderClick, viewGrandchild: false},
+    {fold: foldBySummary, viewGrandchild: true},
+    {fold: foldByClear, viewGrandchild: true},
+    {fold: foldByReplay, viewGrandchild: true},
+  ];
+  for (const {fold, viewGrandchild} of folds) {
+    const st = bootReopenedChildOverRunningGrandchild();
+    if (viewGrandchild) {
+      st.win._testApi.switchToTab(st.grandchildId);
+      st.drain();
+    }
+    const onScreen = st.win._testApi.getActiveTabId();
+    const before = st.posted.length;
+
+    fold(st);
+
+    const closes = st.posted
+      .slice(before)
+      .filter(m => m.type === 'closeTab')
+      .map(m => m.tabId);
+    assert.deepStrictEqual(
+      closes,
+      [st.childId],
+      'BUG ' +
+        fold.name +
+        ': the daemon must be told to close the finished child only, ' +
+        'not its running grandchild',
+    );
+    assert.deepStrictEqual(
+      subagentTabStates(st.win),
+      [st.grandchildId + ' running'],
+      fold.name + ': the running grandchild keeps its tab',
+    );
+    assert.strictEqual(
+      st.win._testApi.getActiveTabId(),
+      onScreen,
+      fold.name + ': the tab on screen must not change',
+    );
+    st.deliver({type: 'subagentDone', tab_id: st.grandchildId});
+    assert.deepStrictEqual(
+      subagentTabStates(st.win),
+      [],
+      fold.name + ": the grandchild's own finish closes its tab",
+    );
+    st.win.close();
+  }
+  console.log('  ok a fold keeps a finished child\u2019s running grandchild');
+}
+
+// While the finished child's tab was closed, the root's fan-out panel
+// looked after the running grandchild.  Announced below the reopened
+// child, the grandchild goes back to the child's panel and the root's
+// panel stays the root's: folded and unfolded, it reopens the child
+// below the root, under the tab id the daemon knows it by.
+function testRootPanelStaysTheRootsAfterGrandchildReturns() {
+  const st = bootReopenedChildOverRunningGrandchild();
+  togglePanel(st.win, st.panel, st.drain);
+  const before = st.posted.length;
+
+  togglePanel(st.win, st.panel, st.drain);
+
+  const resumes = st.posted
+    .slice(before)
+    .filter(m => m.type === 'resumeSession')
+    .map(m => [m.taskId, m.tabId, m.parentTabId]);
+  assert.deepStrictEqual(
+    resumes,
+    [['sub-task-1', st.childId, st.parentId]],
+    'BUG: the root panel must reopen its child below the root',
+  );
+  const child = Array.from(st.win._testApi.openTabs()).find(
+    t => t.id === st.childId,
+  );
+  assert.strictEqual(
+    child && child.rootId,
+    st.parentId,
+    "the reopened child's tab belongs to the root's group",
+  );
+  st.win.close();
+  console.log('  ok the root panel stays the root\u2019s');
+}
+
+/** The daemon's answer to the reopening of the child's tab. */
+function answerReopening(st, isDone) {
+  st.deliver({
+    type: 'openSubagentTab',
+    tab_id: st.subTabIds[0],
+    parent_tab_id: st.parentId,
+    description: 'sub 1',
+    task_id: 'sub-task-1',
+    isDone,
+    reopened: true,
+  });
+}
+
+// The user closed a running child's tab and unfolded its fan-out to get
+// it back.  Until the daemon answers that reopening, the page's last
+// word on the child is that it runs, so no fold may close the tab: the
+// daemon would take that `closeTab` for the user's and close the tab on
+// every surface.  The answer settles it: a child still running keeps
+// its tab until its own finish, one that finished meanwhile is history
+// the next fold closes.
+function testFoldKeepsRunningChildWhileItsReopeningIsPending() {
+  const folds = [foldByHeaderClick, foldBySummary, foldByClear, foldByReplay];
+  for (const fold of folds) {
+    const st = bootParallelRun(1, false);
+    const childId = st.subTabIds[0];
+    clickClose(st.win, childId);
+    st.drain();
+    assert.deepStrictEqual(subagentTabStates(st.win), [], 'the user closed it');
+    togglePanel(st.win, st.panel, st.drain);
+    const before = st.posted.length;
+
+    fold(st);
+
+    assert.deepStrictEqual(
+      st.posted.slice(before).filter(m => m.type === 'closeTab'),
+      [],
+      'BUG ' + fold.name + ': the daemon was told to close a running child',
+    );
+    assert.deepStrictEqual(
+      subagentTabStates(st.win),
+      [childId + ' running'],
+      fold.name + ': the reopened child keeps its tab, as running',
+    );
+    // The header click stands for the two answers; the other folds
+    // leave the daemon's word to the same handler.
+    if (fold === foldByHeaderClick) {
+      answerReopening(st, false);
+      assert.deepStrictEqual(
+        subagentTabStates(st.win),
+        [childId + ' running'],
+        'a child still running keeps its tab',
+      );
+      st.deliver({type: 'subagentDone', tab_id: childId});
+      assert.deepStrictEqual(subagentTabStates(st.win), [], 'until it ends');
+    } else if (fold === foldBySummary) {
+      answerReopening(st, true);
+      assert.deepStrictEqual(
+        subagentTabStates(st.win),
+        [childId + ' idle'],
+        'a child that finished meanwhile is history',
+      );
+      togglePanel(st.win, st.panel, st.drain);
+      assert.ok(
+        st.posted
+          .slice(before)
+          .some(m => m.type === 'closeTab' && m.tabId === childId),
+        'which the next fold closes',
+      );
+    }
+    st.win.close();
+  }
+  console.log('  ok a fold keeps a running child whose reopening is pending');
+}
+
+// The same reopening one level down, met by the other automatic close:
+// the reopened sub-agent's parent ends first.  The page closes the
+// parent's tab with the descendants that do not run and tells the
+// daemon of each; the reopened one runs, so it is not among them.
+function testParentEndKeepsRunningChildWhileItsReopeningIsPending() {
+  const st = bootParallelRun(1, false);
+  const parentId = st.subTabIds[0];
+  st.deliver({type: 'tool_call', name: 'run_agent', tabId: parentId});
+  const childId = spawnSubagent(st, parentId, 'deep-task', 'deep', 0, {
+    deliver: st.deliver,
+  });
+  clickClose(st.win, childId);
+  st.drain();
+  // The parent's transcript on screen: its fan-out folded and unfolded.
+  st.win._testApi.switchToTab(parentId);
+  st.drain();
+  const panel = Array.from(
+    st.win.document.querySelectorAll('#output .ev.tc'),
+  ).pop();
+  togglePanel(st.win, panel, st.drain);
+  togglePanel(st.win, panel, st.drain);
+  assert.ok(
+    subagentTabEls(st.win).some(el => el.dataset.tabId === childId),
+    'sanity: unfolding the fan-out reopened the child',
+  );
+  const before = st.posted.length;
+
+  st.deliver({type: 'subagentDone', tab_id: parentId});
+
+  assert.deepStrictEqual(
+    st.posted
+      .slice(before)
+      .filter(m => m.type === 'closeTab')
+      .map(m => m.tabId),
+    [parentId],
+    'BUG: the daemon was told to close a running child with its parent',
+  );
+  assert.deepStrictEqual(subagentTabStates(st.win), [childId + ' running']);
+  st.win.close();
+  console.log('  ok a parent\u2019s end keeps such a child too');
+}
+
+function main() {
   const tests = [
     testSummaryAdoptionPreservesRunningTabs,
     testReCollapsingSummaryClosesReopenedTabs,
@@ -637,19 +964,13 @@ async function main() {
     testReplayWhileViewingSubagentKeepsWholeTranscript,
     testFailedReplayDoesNotStrandLaterCloses,
     testAdjacentTaskSummaryLeavesLiveFanOutAlone,
+    testFoldKeepsRunningGrandchildOfFinishedChild,
+    testRootPanelStaysTheRootsAfterGrandchildReturns,
+    testFoldKeepsRunningChildWhileItsReopeningIsPending,
+    testParentEndKeepsRunningChildWhileItsReopeningIsPending,
   ];
-  // RP_ONLY runs a single scenario, which is how each test here was
-  // shown to fail on its own before the fix (the suite otherwise stops
-  // at the first failure).
-  const only = process.env.RP_ONLY || '';
-  for (const t of tests) {
-    if (only && t.name !== only) continue;
-    await t();
-  }
+  for (const t of tests) t();
   console.log('runParallelNestedPanelCollapse.test.js: all tests passed');
 }
 
-main().catch(err => {
-  console.error(err && err.stack ? err.stack : err);
-  process.exit(1);
-});
+main();

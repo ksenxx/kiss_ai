@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import TracebackType
 from typing import Any
@@ -111,12 +112,20 @@ class _Handler(BaseHTTPRequestHandler):
             )
             server.request_paths.append(self.path)
         body = b"".join(server.chunks)
+        time.sleep(server.delay)
         self.send_response(server.status)
         self.send_header("Content-Type", server.content_type)
-        self.send_header("Content-Length", str(len(body)))
+        if server.hold is None:
+            self.send_header("Content-Length", str(len(body)))
+        else:
+            # No length: the body ends when the connection closes.
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
         self.wfile.flush()
+        if server.hold is not None:
+            server.hold.wait()
+            self.close_connection = True
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         """Silence the default stderr access log."""
@@ -141,6 +150,8 @@ class ScriptedAnthropicServer:
         chunks: list[bytes] | None = None,
         status: int = 200,
         content_type: str = "text/event-stream",
+        hold: threading.Event | None = None,
+        delay: float = 0.0,
     ) -> None:
         """Start the server on an ephemeral loopback port.
 
@@ -151,11 +162,16 @@ class ScriptedAnthropicServer:
                 turns the scripted reply into a real API error (give the
                 error JSON as a single chunk).
             content_type: The Content-Type of every reply.
+            hold: When given, every reply's body stays open after its
+                chunks (no EOF) until this event is set.
+            delay: Seconds of silence before every reply's first byte.
         """
         self._server = _DaemonServer(("127.0.0.1", 0), _Handler)
         self._server.chunks = chunks or text_message_stream()  # type: ignore[attr-defined]
         self._server.status = status  # type: ignore[attr-defined]
         self._server.content_type = content_type  # type: ignore[attr-defined]
+        self._server.hold = hold  # type: ignore[attr-defined]
+        self._server.delay = delay  # type: ignore[attr-defined]
         self._server.requests = []  # type: ignore[attr-defined]
         self._server.request_headers = []  # type: ignore[attr-defined]
         self._server.request_paths = []  # type: ignore[attr-defined]

@@ -17,18 +17,18 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import unittest
 from typing import Any
 
+import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.task_classifier import (
     _DISABLE_ENV as _CLASSIFIER_DISABLE_ENV,
-)
-from kiss.agents.sorcar.task_classifier import (
-    clear_classification_cache,
 )
 from kiss.core import config as config_module
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import clear_classification_cache
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -39,6 +39,7 @@ from kiss.tests.server.parallel_agent_harness import (
 )
 
 _CLASSIFIER_MARKER = "You are a task classifier"
+_TAB = "launch-phase-tab"
 _KEY_FIELDS = (
     "GEMINI_API_KEY",
     "OPENAI_API_KEY",
@@ -91,6 +92,11 @@ class TestLaunchPhases(unittest.TestCase):
             setattr(keys, name, "")
         keys.OPENAI_API_KEY = "kiss-launch-phase-standin-key"
         self.classifier_calls = 0
+        # What a test has a client do while the classifier is out, the
+        # worker it then joins, and what the agent's turns were sent.
+        self.replayed_meanwhile: tuple[str, str] | None = None
+        self.worker: threading.Thread | None = None
+        self.agent_requests: list[str] = []
         self._lock = threading.Lock()
         self.standin = StandInModelServer(self._respond)
         self.printer = CapturePrinter()
@@ -122,13 +128,19 @@ class TestLaunchPhases(unittest.TestCase):
         if _CLASSIFIER_MARKER in request_text(request):
             with self._lock:
                 self.classifier_calls += 1
+            if self.replayed_meanwhile is not None:
+                chat_id, task_id = self.replayed_meanwhile
+                self.worker = agent_state.find_by_tab(_TAB).task_thread  # type: ignore[union-attr]
+                self.server._replay_session(chat_id, _TAB, task_id=task_id)
             return _verdict_body()
+        with self._lock:
+            self.agent_requests.append(request_text(request))
         return finish_response("launch phase done")
 
-    def _run(self, *, classify: bool | None = None) -> None:
+    def _cmd(self, *, classify: bool | None = None, **fields: Any) -> dict[str, Any]:
         cmd: dict[str, Any] = {
             "type": "run",
-            "tabId": "launch-phase-tab",
+            "tabId": _TAB,
             "prompt": "say hello",
             "model": STANDIN_MODEL,
             "workDir": str(self.repo),
@@ -136,10 +148,14 @@ class TestLaunchPhases(unittest.TestCase):
             "useWebTools": False,
             "maxBudget": 5.0,
             "modelConfig": self.standin.model_config,
+            **fields,
         }
         if classify is not None:
             cmd["classifyTasks"] = classify
-        self.server._run_task(cmd)
+        return cmd
+
+    def _run(self, *, classify: bool | None = None, **fields: Any) -> None:
+        self.server._run_task(self._cmd(classify=classify, **fields))
 
     def test_launch_phases_are_shown_and_cleared(self) -> None:
         """The user sees "Classifying task…" while the classifier is
@@ -161,6 +177,41 @@ class TestLaunchPhases(unittest.TestCase):
         self.assertEqual(self.classifier_calls, 0)
         phases = [e["text"] for e in self.printer.events_of_type("launch_phase")]
         self.assertEqual(phases, [""])
+
+    def test_a_run_on_a_fixed_prompt_is_not_classified(self) -> None:
+        """No edit tools, a caller's base prompt, a rejected profile: no verdict to pay for."""
+        for fields in (
+            {"toolProfile": "review"},
+            {"systemPrompt": "Answer in one word."},
+            {"toolProfile": "no-such-profile"},
+            # A reviewer's child names no profile: the agent infers ``review``.
+            {"parentTaskId": "no-such-parent", "parentReviewer": True},
+        ):
+            with self.subTest(fields):
+                self._run(classify=True, **fields)
+                self.assertEqual(self.classifier_calls, 0)
+                phases = [e["text"] for e in self.printer.events_of_type("launch_phase")]
+                self.assertNotIn("Classifying task…", phases)
+
+    def test_chat_opened_in_the_tab_meanwhile_keeps_its_task_pin(self) -> None:
+        """A client opens another chat's task in the tab while the classifier is out.
+
+        The task that replay pins is the tab's: the run then starting in
+        its own chat must not take it, or it is seeded with the other
+        conversation and the tab forgets the task it shows.
+        """
+        other_task, other_chat = th._add_task("an older conversation")
+        self.replayed_meanwhile = (other_chat, str(other_task))
+        self.server._cmd_run(self._cmd(classify=True))
+        deadline = time.monotonic() + 60
+        while self.worker is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert self.worker is not None, "the run never reached its classification"
+        self.worker.join(120)
+        self.assertFalse(self.worker.is_alive())
+        self.assertEqual(self.server._tab_opened_task_ids.get(_TAB), str(other_task))
+        self.assertEqual(len(self.agent_requests), 1)
+        self.assertNotIn("an older conversation", self.agent_requests[0])
 
 
 if __name__ == "__main__":

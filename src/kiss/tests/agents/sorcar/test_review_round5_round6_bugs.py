@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import persistence
+from kiss.tests.persistence_helpers import close_db
 
 
 @pytest.fixture
@@ -27,9 +28,9 @@ def temp_db(
 ) -> Generator[Path]:
     db_path = tmp_path / "history.db"
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
-    persistence._close_db()
+    close_db()
     yield db_path
-    persistence._close_db()
+    close_db()
 
 
 def test_save_task_extra_raises_on_is_favorite_payload(temp_db: Path) -> None:  # noqa: ARG001
@@ -98,7 +99,7 @@ def test_bx_handles_falsy_string_literals_during_migration(
 
     import kiss.agents.sorcar.persistence as P
 
-    P._close_db()
+    close_db()
     monkeypatch.setattr(P, "_DB_PATH", legacy_db)
     db = P._get_db()
     try:
@@ -125,7 +126,7 @@ def test_bx_handles_falsy_string_literals_during_migration(
             f"'1' must coerce to 1, got {result['truthy_string_one']}"
         )
     finally:
-        P._close_db()
+        close_db()
 
 
 def test_migration_toggles_foreign_keys_off_during_rename() -> None:

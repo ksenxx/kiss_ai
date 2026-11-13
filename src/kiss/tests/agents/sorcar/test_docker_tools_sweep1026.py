@@ -36,7 +36,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.docker_manager import STOPPED_MESSAGE, DockerManager
+from kiss.agents.sorcar.docker_manager import STOPPED_MESSAGE, DockerManager, PendingEdit
 from kiss.agents.sorcar.docker_tools import DockerTools
 from kiss.core.tool_verdict import ALLOW, ToolRedirect, Verdict, refuse
 from kiss.tests.agents.sorcar.docker_test_containers import IMAGE, is_docker_available
@@ -297,6 +297,201 @@ def test_docker_redirected_edit_is_applied_verbatim_only(env: DockerManager) -> 
         finally:
             if backend == "perl":
                 _raw(env, _PYTHON_ON)
+
+
+def test_docker_redirected_edit_is_refused_once_the_file_holds_another_text(
+    env: DockerManager,
+) -> None:
+    """The Edit a rewrite is redirected to is made only while it is what the command stands for.
+
+    Its pairs are settled from the file's text when the command is
+    converted.  Another writer of the container landing before the Edit
+    (here from the hook, past this manager) may leave a text the command
+    changes otherwise: a line holding a per-line ``sed`` pattern twice,
+    where the ``replace_all`` settled for two lines replaced both, and a
+    string a python ``.replace`` did not find, which the Edit left out.
+    The Edit is refused, as the host's is, and writes nothing; the
+    command issued again does what it does by itself.  So is the Edit
+    of a file nobody can read any more.  Only the Edit made for the
+    command is held to it.
+    """
+    h = _Harness(env)
+    sed = "sed -i 's/a/X/' /tmp/stale.txt"
+    refused = (
+        "whose result follows:\nError: /tmp/stale.txt changed since the {} was read as this "
+        "Edit, which the command no longer stands for: nothing was written. Re-issue the command."
+    )
+    program = (
+        "s = open('/tmp/stale.txt', newline='').read()\n"
+        "s = s.replace('one', '1').replace('two', '2')\n"
+        "open('/tmp/stale.txt', 'w', newline='').write(s)\n"
+    )
+    writes: list[str] = []
+
+    def hook_after_another_writer(name: str, args: dict[str, Any]) -> Verdict:
+        if name == "Edit" and writes:
+            _raw(env, writes.pop())
+        return h.hook(name, args)
+
+    h.agent.tool_call_hook = hook_after_another_writer
+    python = f"python3 - <<'EOF'\n{program}EOF"
+    both = json.dumps([
+        {"old_string": "one", "new_string": "1", "replace_all": True},
+        {"old_string": "two", "new_string": "2", "replace_all": True},
+    ])
+    for command, what, seeded, changed, edit in (
+        (sed, "`sed -i` call", "a\\na\\n", "a a\\n",
+         {"old_string": "a", "new_string": "X", "replace_all": True}),
+        (python, "python heredoc", "one\\n", "one\\ntwo\\n",
+         {"old_string": "one", "new_string": "1", "replace_all": True}),
+        # Two replacements settled, of which the file then takes one.
+        (python, "python heredoc", "one\\ntwo\\n", "one\\n", {"edits": both}),
+    ):
+        _raw(env, f"printf '{seeded}' > /tmp/stale.txt; printf '{changed}' > /tmp/stale_oracle.txt")
+        writes.append(f"printf '{changed}' > /tmp/stale.txt")
+        out = h.call("Bash", command=command, description="rewrite")
+        assert h.hook_calls[-1] == ("Edit", {"file_path": "/tmp/stale.txt", **edit, "exact": True})
+        assert out.endswith(refused.format(what)), out
+        assert _raw(env, "cat /tmp/stale.txt") == _raw(env, "cat /tmp/stale_oracle.txt")
+        h.call("Bash", command=command, description="rewrite")
+        _raw(env, command.replace("stale.txt", "stale_oracle.txt"))
+        assert _raw(env, "cat /tmp/stale.txt") == _raw(env, "cat /tmp/stale_oracle.txt"), what
+    # A file removed meanwhile; the command issued again finds none.
+    _raw(env, "printf 'a\\na\\n' > /tmp/stale.txt")
+    writes.append("rm /tmp/stale.txt")
+    out = h.call("Bash", command=sed, description="rewrite")
+    assert out.endswith(refused.format("`sed -i` call")), out
+    out = h.call("Bash", command=sed, description="rewrite")
+    assert "whose result follows:\nError: File not found: /tmp/stale.txt" in out, out
+    # The Edit the hook refused leaves the next one, another Edit of the file, as it is.
+    _raw(env, "printf 'a\\na\\n' > /tmp/stale.txt")
+    h.verdict = refuse("not yet")
+    h.call("Bash", command=sed, description="rewrite")
+    assert isinstance(env.pending_append, PendingEdit)
+    h.verdict = ALLOW
+    out = h.call("Edit", file_path="/tmp/stale.txt", old_string="a\na", new_string="b")
+    assert out.startswith("Successfully replaced 1 occurrence(s)"), out
+    assert env.pending_append is None and _raw(env, "cat /tmp/stale.txt") == "b\n"
+
+
+#: A ``.pth`` file of the container python's site-packages (the shell names the directory).
+_PTH = "\"$(python3 -c 'import site; print(site.getsitepackages()[0])')/shadow.pth\""
+
+
+def test_docker_python_rewrite_is_no_edit_where_another_module_shadows_its_import(
+    env: DockerManager,
+) -> None:
+    """A python rewrite is made as an Edit only where its imports are the library's.
+
+    Python searches the directory a program read from stdin runs in, and
+    the entries of ``PYTHONPATH``, before its own library: with a
+    ``json`` module there ``import json`` fails in bash and the file
+    stays as it was, while the Edit the program stands for was made
+    (cross finding X6 of 2026-11-12; the host asks ``_host_shadows``).
+    The container is asked, in the environment the command gets; an
+    answer nobody got (the task is stopped) stands for no Edit either.
+    It is the interpreter that is asked where it finds the modules
+    (round 2, B7 #28): a reading of the directory and ``PYTHONPATH``
+    saw neither a directory python's own startup puts first (a
+    ``.pth``) nor a module the library's ``json`` itself imports.
+    """
+    h = _Harness(env)
+    assert env.container is not None
+    program = ("import json\ns = open('/tmp/shadow/a.py').read()\ns = s.replace('x', 'y')\n"
+               "open('/tmp/shadow/a.py', 'w').write(s)\n")
+    rewrite = f"python3 - <<'EOF'\n{program}EOF"
+    command = f"cd /tmp/shadow && {rewrite}"
+    refused = "REFUSED: the python heredoc did NOT run"
+    _raw(env, "mkdir -p /tmp/shadow/lib && printf 'x = 1\\n' > /tmp/shadow/a.py")
+    module = "printf 'raise RuntimeError(1)\\n' > json.py"
+    # How the module gets there, and the environment of the command.
+    layouts: tuple[tuple[str, dict[str, str]], ...] = (
+        (module, {}),  # in the directory the program runs in
+        ("mv json.py lib/", {"PYTHONPATH": "lib"}),  # in a PYTHONPATH directory, named from it
+        # A package whose __init__ is an extension module.
+        ("rm lib/json.py && mkdir json && : > json/__init__.so", {}),
+        # In an archive on PYTHONPATH.
+        (f"rm -r json && {module} && python3 -m zipfile -c lib.zip json.py && rm json.py",
+         {"PYTHONPATH": "lib.zip"}),
+        (":", {"PYTHONPATH": "lib.zip/"}),  # the same archive, as python takes it too
+        # In a directory of the archive.
+        (f"mkdir pkg && {module} && mv json.py pkg/ && python3 -m zipfile -c lib.zip pkg"
+         " && rm -r pkg", {"PYTHONPATH": "lib.zip/pkg"}),
+        # Named as python reads it: `..` drops the name before it, whatever is there.
+        (":", {"PYTHONPATH": "missing/../lib.zip/pkg"}),
+        # In a directory an executable line of a site-packages .pth puts first.
+        (f"mkdir -p /tmp/pthlib && {module} && mv json.py /tmp/pthlib/ && printf "
+         f"'import sys; sys.path.insert(0, \"/tmp/pthlib\")\\n' > {_PTH}", {}),
+        # A module of the directory that the library's json imports (through re).
+        ("printf 'raise RuntimeError(1)\\n' > enum.py", {}),
+    )
+    for setup, environment in layouts:
+        _raw(env, f"cd /tmp/shadow && {setup}")
+        env.exec_env = environment
+        try:
+            in_bash = env.container.exec_run(["/bin/bash", "-c", command], environment=environment)
+            assert in_bash.exit_code == 1, setup
+            out = h.call("Bash", command=command, description="shadowed")
+            assert out.startswith(refused), (setup, out)
+        finally:
+            env.exec_env = {}
+            _raw(env, f"rm -f {_PTH}")
+    _raw(env, "rm /tmp/shadow/lib.zip /tmp/shadow/enum.py")
+    assert h.hook_calls[-1][0] == "Bash" and _raw(env, "cat /tmp/shadow/a.py") == "x = 1\n"
+    # An answer nobody got: the directory may hold any module.
+    env.stop_event = threading.Event()
+    env.stop_event.set()
+    try:
+        assert h.call("Bash", command=rewrite, description="stopped").startswith(refused)
+    finally:
+        env.stop_event = None
+    # Where nothing shadows the import, the program is made as its Edit.
+    out = h.call("Bash", command=command, description="not shadowed")
+    assert out.startswith("Applied as Edit("), out
+    assert _raw(env, "cat /tmp/shadow/a.py") == "y = 1\n"
+
+
+def test_docker_python_rewrite_is_no_edit_where_bash_finds_no_python(env: DockerManager) -> None:
+    """A python rewrite is made as an Edit only where bash finds its interpreter.
+
+    Without one the command fails as written (status 127) and the file
+    stays as it was, while the Edit it stands for would be made (by the
+    editor's Perl fallback); the container is asked.  One found through
+    a relative ``PATH`` entry counts as not found: the entry names
+    another directory after the command's ``cd``.
+    """
+    h = _Harness(env)
+    assert env.container is not None
+    program = ("s = open('/tmp/nopy.py').read()\ns = s.replace('x', 'y')\n"
+               "open('/tmp/nopy.py', 'w').write(s)\n")
+    command = f"python3 - <<'EOF'\n{program}EOF"
+    _raw(env, "printf 'x = 1\\n' > /tmp/nopy.py")
+    _raw(env, _PYTHON_OFF)
+    try:
+        in_bash = env.container.exec_run(["/bin/bash", "-c", command])
+        assert in_bash.exit_code == 127, in_bash.output
+        out = h.call("Bash", command=command, description="no python3")
+    finally:
+        _raw(env, _PYTHON_ON)
+    assert out.startswith("REFUSED: the python heredoc did NOT run"), out
+    # A relative PATH entry names another directory after the command's cd.
+    relbin = f"{env.workdir}/relbin"
+    _raw(env, f"mkdir -p {relbin} && ln -sf /usr/local/bin/python3 {relbin}/")
+    env.exec_env = environment = {"PATH": "relbin:/usr/bin:/bin"}
+    try:
+        in_bash = env.container.exec_run(
+            ["/bin/bash", "-c", f"cd /tmp && {command}"], environment=environment,
+            workdir=env.workdir,
+        )
+        assert in_bash.exit_code == 127, in_bash.output
+        out = h.call("Bash", command=f"cd /tmp && {command}", description="relative PATH")
+    finally:
+        env.exec_env = {}
+    assert out.startswith("REFUSED: the python heredoc did NOT run"), out
+    assert _raw(env, "cat /tmp/nopy.py") == "x = 1\n"
+    out = h.call("Bash", command=command, description="python3 found")
+    assert out.startswith("Applied as Edit("), out
+    assert _raw(env, "cat /tmp/nopy.py") == "y = 1\n"
 
 
 def test_docker_run_commands_parallel_refuses_shell_rewrites(env: DockerManager) -> None:

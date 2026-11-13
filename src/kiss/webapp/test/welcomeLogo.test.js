@@ -17,7 +17,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage} = require('./simplify2_harness.js');
+const {makePage, send, click} = require('./simplify2_harness.js');
 
 function testMarkupHasLogosAndNoSuggestions() {
   const {win} = makePage();
@@ -52,15 +52,9 @@ function testNewChatRequestsWelcomeInfoOnly() {
 
   // "+" keeps a chat that is still new; the daemon's task-text echo
   // makes the boot chat "used" so "+" opens a new one.
-  win.dispatchEvent(
-    new win.MessageEvent('message', {
-      data: {type: 'setTaskText', text: 'first task'},
-    }),
-  );
+  send(win, {type: 'setTaskText', text: 'first task'});
   posted.length = 0;
-  win.document
-    .getElementById('new-chat-btn')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  click(win, win.document.getElementById('new-chat-btn'));
   const types = posted.map(m => m.type);
   assert.ok(types.includes('newChat'), `new chat posts newChat: ${types}`);
   // The welcome info (remote URL) is the only information a new chat asks
@@ -97,10 +91,10 @@ function testHighlightSheetFollowsTheTheme() {
   assert.strictEqual(link.getAttribute('href'), '/m/light.css', 'light at start');
   const btn = win.document.getElementById('theme-btn');
   assert.ok(btn, 'the theme toggle exists');
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  click(win, btn);
   assert.ok(!win.document.body.classList.contains('light-theme'));
   assert.strictEqual(link.getAttribute('href'), '/m/dark.css', 'dark after toggle');
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  click(win, btn);
   assert.ok(win.document.body.classList.contains('light-theme'));
   assert.strictEqual(link.getAttribute('href'), '/m/light.css', 'light again');
   win.close();

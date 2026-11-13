@@ -31,10 +31,13 @@ bound: it never exceeds the true spend.  ``tokens`` are raised the same
 way, but only on rows whose cost is short: a missing fold loses both,
 while a token-only gap has another cause.  ``steps`` are left alone.
 
-A task is left alone while it, or one of its sub-tasks, is still
+A task is left alone while it, or one of its direct sub-tasks, is still
 running or ended less than ten minutes ago: a sub-task's row is saved
 a moment before its spend is charged to the parent, and repairing the
-parent in that gap would count the sub-task twice.  A row that never
+parent in that gap would count the sub-task twice.  A deeper sub-task
+that still runs holds nothing back: what it folds into its finished
+parent later is added to every finished ancestor in the same
+transaction, a repaired one included.  A row that never
 ended but started over a day ago is treated as dead, not running: its
 agent died before saving, and no fold will follow.  A task on a
 ``parent_task_id`` cycle is left alone too, since it lists an ancestor
@@ -50,12 +53,15 @@ and, once every row is repaired, changes nothing.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import math
 import sqlite3
 import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 
 from kiss.core.config import kiss_home
 
@@ -89,11 +95,12 @@ class Repair:
 
 
 def _num(value: object) -> float:
-    """Return *value* as a float, 0.0 when it is missing or not a number."""
+    """Return *value* as a float, 0.0 when it is missing or not a finite number."""
     try:
-        return float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
         return 0.0
+    return number if math.isfinite(number) else 0.0
 
 
 def _own_spend(conn: sqlite3.Connection) -> dict[str, tuple[float, int]]:
@@ -298,7 +305,8 @@ def apply_repairs(conn: sqlite3.Connection, repairs: list[Repair]) -> list[Repai
                 skipped.append(repair)
         conn.execute("COMMIT")
     except BaseException:
-        conn.execute("ROLLBACK")
+        if conn.in_transaction:  # not after an I/O error: SQLite has rolled back by itself
+            conn.execute("ROLLBACK")
         raise
     return skipped
 
@@ -337,34 +345,35 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.min_shortfall > 0:
         parser.error("--min-shortfall must be a positive number")
-    mode = "rw" if args.apply else "ro"
-    try:
-        conn = sqlite3.connect(f"file:{args.db}?mode={mode}", uri=True, timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("SELECT 1 FROM task_history LIMIT 1")
-    except sqlite3.Error as exc:
-        print(f"cannot open {args.db}: {exc}", file=sys.stderr)
-        return 1
-    repairs, unsettled, cyclic = plan_repairs(conn, args.min_shortfall)
-    for repair in repairs:
-        print(_format(repair))
-    total = sum(repair.added_cost for repair in repairs)
-    skipped_notes = []
-    if unsettled:
-        skipped_notes.append(f"{unsettled} skipped as running or ended in the last 10 minutes")
-    if cyclic:
-        skipped_notes.append(f"{cyclic} skipped as sitting on a parent_task_id cycle")
-    print(
-        f"{len(repairs)} task{'s' if len(repairs) != 1 else ''} short by "
-        f"${total:,.4f} in total" + "".join(f"; {note}" for note in skipped_notes)
-    )
-    if not args.apply:
-        if repairs:
-            print("dry run: re-run with --apply to write these totals")
-        conn.close()
-        return 0
-    skipped = apply_repairs(conn, repairs)
-    conn.close()
+    uri = f"{Path(args.db).absolute().as_uri()}?mode={'rw' if args.apply else 'ro'}"
+    with contextlib.ExitStack() as stack:  # closes the connection on every way out
+        try:
+            conn = stack.enter_context(
+                contextlib.closing(sqlite3.connect(uri, uri=True, timeout=30.0))
+            )
+            conn.row_factory = sqlite3.Row
+            conn.execute("SELECT 1 FROM task_history LIMIT 1")
+        except sqlite3.Error as exc:
+            print(f"cannot open {args.db}: {exc}", file=sys.stderr)
+            return 1
+        repairs, unsettled, cyclic = plan_repairs(conn, args.min_shortfall)
+        for repair in repairs:
+            print(_format(repair))
+        total = sum(repair.added_cost for repair in repairs)
+        skipped_notes = []
+        if unsettled:
+            skipped_notes.append(f"{unsettled} skipped as running or ended in the last 10 minutes")
+        if cyclic:
+            skipped_notes.append(f"{cyclic} skipped as sitting on a parent_task_id cycle")
+        print(
+            f"{len(repairs)} task{'s' if len(repairs) != 1 else ''} short by "
+            f"${total:,.4f} in total" + "".join(f"; {note}" for note in skipped_notes)
+        )
+        if not args.apply:
+            if repairs:
+                print("dry run: re-run with --apply to write these totals")
+            return 0
+        skipped = apply_repairs(conn, repairs)
     written = len(repairs) - len(skipped)
     added = total - sum(repair.added_cost for repair in skipped)
     print(f"updated {written} row{'s' if written != 1 else ''} (+${added:,.4f})")

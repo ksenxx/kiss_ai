@@ -23,18 +23,21 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send} = require('./simplify2_harness.js');
+const {
+  makePage: makeChatPage,
+  send,
+  pickerSections,
+} = require('./simplify2_harness.js');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {trackWindow, closeWindows} = require('./workdir_helpers');
 
 const {test, report} = makeRunner();
 
-// Every page built, closed together at the end so no timer of theirs
-// keeps the process alive.
-const windows = [];
-
+// Every page built is closed at the end so no timer of theirs keeps the
+// process alive.
 function makePage() {
   const page = makeChatPage();
-  windows.push(page.win);
+  trackWindow(page.win);
   return page;
 }
 
@@ -77,12 +80,6 @@ function seaCommandItems(win) {
   return Array.from(picker(win).querySelectorAll('.ac-item'));
 }
 
-function seaCommandSectionLabels(win) {
-  return Array.from(picker(win).querySelectorAll('.ac-section')).map(
-    s => s.textContent,
-  );
-}
-
 function main() {
   test('the daemon-pushed command list', () => {
     const {win} = makePage();
@@ -96,7 +93,7 @@ function main() {
     // Typing ``/`` alone -> popup with ALL commands.
     setInput(win, '/');
     assert.ok(isPickerOpen(win), 'popup opens on lone /');
-    assert.deepStrictEqual(seaCommandSectionLabels(win), ['Commands']);
+    assert.deepStrictEqual(pickerSections(win), ['Commands']);
     const allItems = seaCommandItems(win);
     assert.strictEqual(allItems.length, 4);
     // The first item is preselected and carries the "tab" hint.
@@ -217,7 +214,7 @@ function main() {
       frequent: ['delta', 'zeta', 'alpha'],
     });
     setInput(win, '/');
-    assert.deepStrictEqual(seaCommandSectionLabels(win), [
+    assert.deepStrictEqual(pickerSections(win), [
       'Recent',
       'Frequent',
       'Commands',
@@ -230,7 +227,7 @@ function main() {
     assert.strictEqual(selectedText(win), 'zeta');
     // Filtering applies to every group; empty groups drop their header.
     setInput(win, '/a');
-    assert.deepStrictEqual(seaCommandSectionLabels(win), [
+    assert.deepStrictEqual(pickerSections(win), [
       'Recent',
       'Frequent',
       'Commands',
@@ -240,7 +237,7 @@ function main() {
       ['zeta', 'beta', 'delta', 'alpha', 'gamma'],
     );
     setInput(win, '/eps');
-    assert.deepStrictEqual(seaCommandSectionLabels(win), ['Commands']);
+    assert.deepStrictEqual(pickerSections(win), ['Commands']);
     assert.deepStrictEqual(
       seaCommandItems(win).map(el => el.dataset.text),
       ['eps'],
@@ -302,10 +299,7 @@ function main() {
     assert.strictEqual(seaCommandRequests(posted), requests);
     // The next keystroke shows the new ranking (alpha is now recent).
     setInput(win, '/a');
-    assert.deepStrictEqual(seaCommandSectionLabels(win), [
-      'Recent',
-      'Commands',
-    ]);
+    assert.deepStrictEqual(pickerSections(win), ['Recent', 'Commands']);
     assert.deepStrictEqual(
       seaCommandItems(win).map(el => el.dataset.text),
       ['alpha', 'beta', 'gamma'],
@@ -344,10 +338,10 @@ function main() {
     setInput(win, '/g');
     assert.ok(isPickerOpen(win));
     send(win, {type: 'ghost', query: '/g', suggestion: 'host-ghost'});
-    const ghost = win.document.getElementById('ghost-overlay');
-    // The overlay stays hidden / empty while a slash popup is up.
-    assert.ok(
-      !ghost || !ghost.textContent || ghost.style.display === 'none',
+    // The overlay stays empty while a slash popup is up.
+    assert.strictEqual(
+      win.document.getElementById('ghost-overlay').textContent,
+      '',
       'ghost overlay must not paint under slash popup',
     );
   });
@@ -356,6 +350,6 @@ function main() {
 try {
   main();
 } finally {
-  windows.forEach(w => w.close());
+  closeWindows();
 }
 report('seaSlashCommandAutocomplete');

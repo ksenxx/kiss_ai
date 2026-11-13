@@ -26,8 +26,10 @@ import unittest
 from pathlib import Path
 from tempfile import mkdtemp
 
+import pytest
+
 from kiss.core.file_lock import lock_exclusive, unlock
-from kiss.scripts.check import PROJECT_ROOT, _should_skip_path
+from kiss.scripts.check import PROJECT_ROOT
 from kiss.tests.conftest import IS_WINDOWS
 
 _REMOTE_CONFIG = (
@@ -114,6 +116,30 @@ class RemoteConfigConcurrentWritersTest(unittest.TestCase):
         self.assertEqual(saved["remote_password"], "chosen-pass")
         if not IS_WINDOWS:  # Windows chmod carries no group/other bits
             self.assertEqual(self.config.stat().st_mode & 0o077, 0)
+
+    @pytest.mark.slow
+    def test_a_lock_that_stays_held_fails_the_deploy_instead_of_hanging_it(self) -> None:
+        """A wedged holder of ``.config.lock`` costs the script its 30 s bound, not forever.
+
+        It exits 1 naming the lock and leaves the configuration as it was.
+        The Windows half (an ``msvcrt`` error other than "held by another
+        process" is raised, not retried for good) cannot run here: reaching
+        ``msvcrt`` on POSIX takes a stand-in module, which is a test double.
+        """
+        before = json.dumps({"last_model": "claude-opus-5"})
+        self.config.write_text(before)
+        with open(self.tmp / ".config.lock", "w", encoding="utf-8") as held:
+            lock_exclusive(held)
+            done = subprocess.run(
+                [sys.executable, str(_REMOTE_CONFIG), str(self.config), "/home/ubuntu/kiss"],
+                capture_output=True, text=True, timeout=120, check=False,
+            )
+        self.assertEqual((done.returncode, done.stdout), (1, ""), done.stderr)
+        self.assertIn(".config.lock still locked by another process", done.stderr)
+        self.assertEqual(self.config.read_text(), before)
+        self.assertEqual(
+            sorted(p.name for p in self.tmp.iterdir()), [".config.lock", "config.json"]
+        )
 
 
 class RemoteConfigSymlinkLockTest(unittest.TestCase):
@@ -222,22 +248,6 @@ class CheckProjectRootTest(unittest.TestCase):
         """The constant points at the checkout the script cleans and checks."""
         self.assertTrue((PROJECT_ROOT / "pyproject.toml").is_file())
         self.assertTrue((PROJECT_ROOT / "src" / "kiss").is_dir())
-
-    def test_should_skip_path_skips_git_internals(self) -> None:
-        """Paths inside .git are always skipped."""
-        self.assertTrue(_should_skip_path(PROJECT_ROOT / ".git" / "config"))
-
-    def test_should_skip_path_keeps_tracked_files(self) -> None:
-        """A tracked source file is not skipped."""
-        self.assertFalse(
-            _should_skip_path(PROJECT_ROOT / "src" / "kiss" / "scripts" / "check.py")
-        )
-
-    def test_should_skip_path_skips_ignored_files(self) -> None:
-        """A path .gitignore covers is skipped (cwd-independent via PROJECT_ROOT)."""
-        # __pycache__ directories are ignored in this repository.
-        ignored = PROJECT_ROOT / "src" / "kiss" / "__pycache__" / "x.pyc"
-        self.assertTrue(_should_skip_path(ignored))
 
 
 if __name__ == "__main__":

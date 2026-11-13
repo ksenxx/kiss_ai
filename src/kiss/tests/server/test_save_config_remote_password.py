@@ -17,15 +17,19 @@ configured:
   echoing an untouched box) changes nothing and sends no
   ``remotePasswordChanged``.
 * Another password-authenticated session is not told the new password
-  and is shut out at its next command; a new session is admitted with
-  the new password only.
+  and is shut out at once, whether it sends a frame or not: it gets
+  ``auth_failed``, the close, and no event broadcast after the
+  rotation.  A new session is admitted with the new password only.
+* A password another process wrote into ``config.json``
+  (``install.sh``) shuts a silent session out the same way.
+* A big frame stops at the part that was waiting for a slow session to
+  read the earlier ones when the password changed.
 * An empty password saved from a local-token client disables remote
   access: a forwarded peer is turned away, the token client carries on.
 * Clearing the password signs EVERY connected password-authenticated
-  session out at its next frame (old password, empty password or no
-  password at all), the session that cleared it included, and no new
-  remote handshake is admitted; a direct loopback browser is still
-  served.
+  session out at once, the session that cleared it included (it is
+  sent the shut-out, not the replies to its save), and no new remote
+  handshake is admitted; a direct loopback browser is still served.
 
 The browser side (the transport adopting the new password, the Settings
 panel's box) is covered by ``webapp/test/remotePasswordEdit.test.js``
@@ -34,13 +38,20 @@ and ``webapp/test/transportFramePassword.test.js``.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import socket
 from typing import Any
 
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
+from websockets.typing import Origin
 
-from kiss.core.user_config import load_config
+from kiss.agents.sorcar.local_endpoint import PART_CHARS
+from kiss.core.user_config import api_keys_env_path, load_config, save_config
+from kiss.server.web_server import _PART_ROOM_BYTES, _unsent_bytes
+from kiss.tests.conftest import posix_only
 from kiss.tests.server.conftest import no_verify_ssl
 from kiss.tests.server.test_plain_http_loopback_and_frame_password import (
     AUTH_OK,
@@ -126,6 +137,36 @@ class TestSaveConfigRemotePassword(_ServerCase):
             await stale.send(json.dumps({"type": "auth", "password": self.password}))
             self.assertEqual((await self._recv(stale))["type"], "auth_required")
 
+    async def test_a_password_stored_before_a_failed_key_write_reaches_the_transport(self) -> None:
+        """A save that stored the password and then failed still tells its sender.
+
+        The key store cannot be locked (its lock path is a directory), so
+        the save fails after ``config.json`` took the new password; the
+        sender reconnects with the password it was told.  ``$HOME`` is a
+        scratch directory: a key save also edits the shell RCs there.
+        """
+        old_home = os.environ.get("HOME")
+        if old_home is None:
+            self.addCleanup(os.environ.pop, "HOME", None)
+        else:
+            self.addCleanup(os.environ.__setitem__, "HOME", old_home)
+        os.environ["HOME"] = str(self._endpoint_file.parent)
+        lock = api_keys_env_path().with_name(".api_keys.env.kiss.lock")
+        lock.unlink(missing_ok=True)
+        lock.mkdir()
+        self.addCleanup(lock.rmdir)
+        ws = await self._authed()
+        await ws.send(json.dumps({
+            "type": "saveConfig", "config": {"remote_password": self.new_password},
+            "apiKeys": {"KISS_TEST_UNSAVED_KEY": "made-up"}, "password": self.password,
+        }))
+        self.assertEqual((await self._recv_until(ws, "error"))["command"], "saveConfig")
+        changed = await self._recv_until(ws, "remotePasswordChanged", "configData")
+        self.assertEqual(changed["type"], "remotePasswordChanged")
+        self.assertEqual(load_config()["remote_password"], changed["password"])
+        await ws.close()
+        await (await self._authed(changed["password"])).close()
+
     async def test_saving_the_same_password_changes_nothing(self) -> None:
         ws = await self._authed()
         await ws.send(json.dumps({
@@ -147,11 +188,8 @@ class TestSaveConfigRemotePassword(_ServerCase):
         ws = await self._authed()
         await self._save(ws, self.new_password, password=self.password)
         await ws.close()
-        # The other session was not told the new password: its next
-        # frame (old password) is answered by the shut-out, nothing else.
-        await other.send(json.dumps({"type": "ping", "password": self.password}))
-        self.assertEqual((await self._recv(other))["code"], "auth_failed")
-        await other.close()
+        # The other session was not told the new password.
+        await self._assert_shut_out(other)
         async with connect(
             f"wss://127.0.0.1:{self._port}/ws", ssl=no_verify_ssl(),
             additional_headers=self._forwarded,
@@ -177,18 +215,92 @@ class TestSaveConfigRemotePassword(_ServerCase):
             # Refused before any frame is read (sending one may fail).
             self.assertEqual((await self._recv(remote)).get("code"), "localhost_only")
 
-    async def _assert_shut_out(self, ws: Any, **frame: Any) -> None:
-        """The next frame of *ws* is refused with ``auth_failed`` and the socket closed.
+    async def _assert_shut_out(self, ws: Any) -> list[dict[str, Any]]:
+        """The daemon shuts *ws* out without a frame from it: ``auth_failed``, then the close.
 
-        Args:
-            ws: The admitted connection.
-            frame: Extra fields of the frame, e.g. ``password=...``.
+        Returns:
+            Every frame *ws* was sent before the socket closed (within 5 s).
         """
-        await ws.send(json.dumps({"type": "getConfig", **frame}))
-        reply = await self._recv(ws)
-        self.assertEqual(reply.get("code"), "auth_failed", reply)
-        with self.assertRaises(ConnectionClosed):
-            await ws.recv()
+        frames: list[dict[str, Any]] = []
+        try:
+            async with asyncio.timeout(5):
+                while True:
+                    frames.append(await self._recv(ws))
+        except ConnectionClosed:
+            pass
+        self.assertEqual([frame.get("code") for frame in frames[-1:]], ["auth_failed"], frames)
+        return frames
+
+    async def test_a_rotation_shuts_a_silent_session_out_at_once(self) -> None:
+        """A session that sends nothing stops receiving events when another one rotates.
+
+        The per-frame check never sees it.  The session that rotated, a
+        local-token client and the browser on this machine carry on.
+        """
+        silent = await self._authed()
+        rotator = await self._authed()
+        token = await connect(f"ws://127.0.0.1:{self._port}/ws")
+        await token.send(json.dumps({"type": "auth", "token": self._token()}))
+        self.assertEqual(await self._recv(token), AUTH_OK_LOCAL)
+        browser = await connect(
+            f"ws://127.0.0.1:{self._port}/ws", origin=Origin(f"http://127.0.0.1:{self._port}"),
+        )
+        await browser.send(json.dumps({"type": "auth"}))
+        self.assertEqual(await self._recv(browser), AUTH_OK)
+
+        await self._save(rotator, self.new_password, password=self.password)
+        self._server._printer.broadcast({"type": "after_rotation"})
+
+        frames = await self._assert_shut_out(silent)
+        self.assertNotIn("after_rotation", [frame["type"] for frame in frames])
+        for kept in (rotator, token, browser):
+            await self._recv_until(kept, "after_rotation")
+            await kept.close()
+
+    async def test_a_password_written_by_another_process_shuts_a_silent_session_out(self) -> None:
+        """``install.sh`` writes ``config.json`` itself: no command of the daemon announces it."""
+        silent = await self._authed()
+        save_config({"remote_password": self.new_password})
+        await self._assert_shut_out(silent)
+
+    # A later part is held back by the bytes the reader's kernel has
+    # not taken, which the daemon can count on Linux and macOS only;
+    # elsewhere the whole frame may be written before the password changes.
+    @posix_only("_unsent_bytes counts the kernel's send queue on Linux and macOS only")
+    async def test_a_part_waiting_for_room_is_not_sent_once_the_password_changed(self) -> None:
+        """The password changes while a big frame's later part waits for a slow reader.
+
+        The reader's socket buffer is 16 KiB and it reads nothing.  The
+        frame has enough parts to fill macOS's auto-grown TCP window,
+        so the daemon must hold a later part until earlier ones are read.
+        """
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024)
+        sock.connect(("127.0.0.1", self._port))
+        reader = await connect(
+            f"ws://127.0.0.1:{self._port}/ws", sock=sock, compression=None,
+            additional_headers=self._forwarded,
+        )
+        await reader.send(json.dumps({"type": "auth", "password": self.password, "parts": True}))
+        self.assertEqual(await self._recv(reader), AUTH_OK)
+        reader.transport.pause_reading()
+        endpoint = next(iter(self._server._password_sessions))
+        # Fill even the TCP receive window that macOS grows during connect().
+        self._server._printer.broadcast(
+            {"type": "big", "text": "\\" * (16 * PART_CHARS)},
+        )
+        async with asyncio.timeout(5):
+            while _unsent_bytes(endpoint.transport) <= _PART_ROOM_BYTES:
+                await asyncio.sleep(0.005)
+
+        save_config({"remote_password": self.new_password})
+        reader.transport.resume_reading()
+
+        frames = await self._assert_shut_out(reader)
+        parts = [frame for frame in frames if frame["type"] == "part"]
+        self.assertTrue(parts)
+        self.assertEqual([frame["seq"] for frame in parts], list(range(len(parts))))
+        self.assertTrue(all(frame.get("more") is True for frame in parts))
 
     async def test_clearing_the_password_from_a_remote_session_signs_every_remote_session_out(
         self,
@@ -197,19 +309,15 @@ class TestSaveConfigRemotePassword(_ServerCase):
         await other.send(json.dumps({"type": "ping", "password": self.password}))
         self.assertEqual((await self._recv(other))["type"], "pong")
         ws = await self._authed()
-        await self._save(ws, "", password=self.password)
-        # The session that cleared it keeps no allowance: its old
-        # password, a bare frame and the empty password are all refused.
-        await self._assert_shut_out(ws, password=self.password)
-        # Already-connected sessions are refused whatever they present,
-        # a bare frame included, so none of them can set a new password
-        # and turn remote access back on.
-        await other.send(json.dumps({
-            "type": "saveConfig", "config": {"remote_password": self.new_password},
+        await ws.send(json.dumps({
+            "type": "saveConfig", "config": {"remote_password": ""}, "password": self.password,
         }))
-        self.assertEqual((await self._recv(other))["code"], "auth_failed")
-        with self.assertRaises(ConnectionClosed):
-            await other.recv()
+        # Remote access is off from the save on: the session that
+        # cleared it is sent the shut-out alone, not the replies to its
+        # save, and none of the connected ones is left to set a new
+        # password and turn remote access back on.
+        self.assertEqual([frame["type"] for frame in await self._assert_shut_out(ws)], ["error"])
+        await self._assert_shut_out(other)
         self.assertEqual(load_config()["remote_password"], "")
         # And no new relayed session is admitted: the handshake is
         # refused before any frame is read.
@@ -222,14 +330,12 @@ class TestSaveConfigRemotePassword(_ServerCase):
     async def test_clearing_the_password_from_a_token_client_signs_remote_sessions_out(
         self,
     ) -> None:
-        remote_old = await self._authed()
-        remote_bare = await self._authed()
+        remote = await self._authed()
         async with connect(f"ws://127.0.0.1:{self._port}/ws") as ws:
             await ws.send(json.dumps({"type": "auth", "token": self._token()}))
             self.assertEqual(await self._recv(ws), AUTH_OK_LOCAL)
             await self._save(ws, "")
-        await self._assert_shut_out(remote_old, password=self.password)
-        await self._assert_shut_out(remote_bare)
+        await self._assert_shut_out(remote)
         # A loopback browser without a token is still served bare.
         async with connect(f"ws://127.0.0.1:{self._port}/ws") as loopback:
             await loopback.send(json.dumps({"type": "auth"}))

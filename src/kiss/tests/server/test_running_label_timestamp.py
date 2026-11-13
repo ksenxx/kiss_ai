@@ -24,9 +24,9 @@ from kiss.server import web_server
 def test_task_runner_persists_start_end_ts_to_extra():
     """``_save_task_extra`` must persist both timestamps to the
     ``extra`` JSON column so a later history load can flip "Running …"
-    to "Done (…)" without a live ``task_done`` event.  The payload is
-    built by :func:`build_task_extra_payload`, so verify the returned
-    dict carries ``startTs`` and ``endTs`` end-to-end."""
+    to the time the task took without a live ``task_done`` event.  The
+    payload is built by :func:`build_task_extra_payload`, so verify the
+    returned dict carries ``startTs`` and ``endTs`` end-to-end."""
     from kiss.server.task_runner import build_task_extra_payload
 
     payload = build_task_extra_payload(

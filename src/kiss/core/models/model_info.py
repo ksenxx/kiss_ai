@@ -28,7 +28,11 @@ from kiss.core.brand import HOME_DIR
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Model, ThinkingCallback, TokenCallback
-from kiss.core.utils import atomic_write_text, seed_file_atomically
+from kiss.core.utils import (
+    atomic_write_text,
+    read_bytes_waiting_for_writer,
+    seed_file_atomically,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -335,11 +339,15 @@ def _read_my_models_file() -> dict[str, Any] | None:
     Returns ``None`` when the file is unreadable, corrupt, or not a
     JSON object — the CRUD writers refuse to touch such a file, because
     "recovering" it by rewriting would silently destroy whatever the
-    user's hand-edited registry still holds.
+    user's hand-edited registry still holds.  A replace in flight
+    (:func:`_write_my_models_file` in another thread or process) is
+    waited out: on Windows the open fails for its duration, and a
+    reader that took that for a corrupt file ran a custom model against
+    the default provider.
     """
     _seed_my_models_file()
     try:
-        raw = json.loads(USER_MY_MODELS_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(read_bytes_waiting_for_writer(USER_MY_MODELS_PATH).decode("utf-8"))
     except (OSError, ValueError):
         logger.debug("Unreadable or corrupt %s", USER_MY_MODELS_PATH, exc_info=True)
         return None
@@ -394,8 +402,9 @@ def _seed_new_custom_entry(name: str) -> dict[str, Any]:
     """Return the loader-required keys for a brand-new *name* entry.
 
     A name that resolves to a catalog model (exactly, through a harbor
-    prefix such as ``openai/gpt-6.1-sol``, or as a ``bedrock/<id>``
-    profile of a ``claude-*`` entry; the one rule of
+    prefix such as ``openai/gpt-6.1-sol``, as a ``bedrock/<id>``
+    profile of a ``claude-*`` entry, or as an ``-xhigh`` alias the
+    catalog does not list, which has no level; the one rule of
     :func:`_lookup_model_info`) copies THAT model's context length,
     ``thinking`` level, capability flags, transport flag, fallback,
     thinking overrides and prices, cache prices included and scaled by
@@ -624,15 +633,17 @@ _PER_1M_PRICE_FIELDS = (
 
 
 def _require_number(key: str, value: Any) -> None:
-    """Raise unless *value* is a finite, non-negative JSON number (a boolean is not).
+    """Raise unless *value* is a JSON number :func:`_is_price` accepts (a boolean is not).
 
-    The same predicate as :func:`_is_price` applies to every price and
-    to the context length: a negative price would bill a negative cost,
-    an infinite one (``1e309``) or ``NaN`` a ``NaN`` cost, and an
-    integer beyond the float range (``10**400``) passes ``isinstance``
-    but raises ``OverflowError`` in the cache-price derivation
+    The same predicate applies to every price and to the context
+    length: a negative price would bill a negative cost, an infinite
+    one (``1e309``) or ``NaN`` a ``NaN`` cost, an integer beyond the
+    float range (``10**400``) passes ``isinstance`` but raises
+    ``OverflowError`` in the cache-price derivation
     (:func:`_normalize_entry`), which runs after the loader's
-    try/except and would abort the whole catalog import.
+    try/except and would abort the whole catalog import, and a finite
+    figure outside the price range overflows in that derivation or in
+    :func:`calculate_cost` (see :data:`_MAX_PRICE`).
 
     Args:
         key: The entry field, named in the error.
@@ -640,13 +651,16 @@ def _require_number(key: str, value: Any) -> None:
 
     Raises:
         TypeError: When *value* is not a number.
-        ValueError: When it is negative, infinite, ``NaN`` or too large
-            for a float.
+        ValueError: When it is negative, infinite, ``NaN`` or outside
+            the price range.
     """
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{key} must be a number, got {value!r}")
     if not _is_price(value):
-        raise ValueError(f"{key} must be a finite, non-negative number, got {value!r}")
+        raise ValueError(
+            f"{key} must be a finite, non-negative number "
+            f"(0 or {_MIN_PRICE:g} to {_MAX_PRICE:g}), got {value!r}"
+        )
 
 
 def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
@@ -698,24 +712,33 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
       caller's ``model_config["use_responses_api"]`` always overrides it.
 
     The context length and every price must be finite, non-negative
-    JSON numbers (an optional price may also be absent or ``null``): a
-    string price would otherwise pass here and raise later in
-    arithmetic, at import for the whole catalog or in every cost lookup
-    of the entry, and a negative, infinite or over-float one would bill
-    a negative or ``NaN`` cost or abort the catalog import (see
-    :func:`_require_number`).
+    JSON numbers within the price range (an optional price may also be
+    absent or ``null``): a string price would otherwise pass here and
+    raise later in arithmetic, at import for the whole catalog or in
+    every cost lookup of the entry, and a negative, infinite or
+    out-of-range one would bill a negative or ``NaN`` cost or abort the
+    catalog import (see :func:`_require_number`).  ``alias_of``, ``fallback`` and
+    ``thinking`` must be strings (or absent or ``null``):
+    :func:`_strip_thinking_alias` returns the first as a model name, at
+    import for a ``-{level}`` key, :func:`get_fallback_model` the
+    second, and the adapters look the third up among their effort
+    levels and send it.
 
     Raises:
         KeyError: When a required key is missing.
-        TypeError: When the context length or a price is not a number.
-        ValueError: When one is negative, infinite, ``NaN`` or too
-            large for a float.
+        TypeError: When the context length or a price is not a number,
+            or ``alias_of``, ``fallback`` or ``thinking`` is not a string.
+        ValueError: When one is negative, infinite, ``NaN`` or outside
+            the price range.
     """
     for key in _CUSTOM_MODEL_DEFAULTS:
         _require_number(key, entry[key])
     for key in _PER_1M_PRICE_FIELDS:
         if entry.get(key) is not None:
             _require_number(key, entry[key])
+    for key in ("alias_of", "fallback", "thinking"):
+        if entry.get(key) is not None and not isinstance(entry[key], str):
+            raise TypeError(f"{key} must be a string, got {entry[key]!r}")
     return ModelInfo(
         context_length=entry["context_length"],
         input_price_per_million=entry["input_price_per_1M"],
@@ -740,27 +763,28 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
     )
 
 
-# Catalog prices a ``prompt_tiers`` entry may replace (USD per 1M tokens).
-PROMPT_TIER_PRICE_FIELDS = (
-    "input_price_per_1M",
-    "output_price_per_1M",
-    "cache_read_price_per_1M",
-    "cache_write_price_per_1M",
-    "cache_write_1h_price_per_1M",
-    "audio_input_price_per_1M",
-    "audio_output_price_per_1M",
+# Catalog prices a ``prompt_tiers`` entry may replace (USD per 1M tokens):
+# all but the image output price, which no listing tiers.
+PROMPT_TIER_PRICE_FIELDS = tuple(
+    field for field in _PER_1M_PRICE_FIELDS if field != "image_output_price_per_1M"
 )
 
 
+# The range of a positive catalog price (USD per 1M tokens) and of a
+# context length; zero is free.  Costs multiply and divide prices (a
+# rule's multiple of the input price, the cached-audio rate ``audio *
+# cache_read / input``), so a figure near either end of the float range
+# overflows to ``inf`` there and every cost of the entry is ``NaN``
+# (``0 tokens * inf``).  The catalog's own prices span 0.002 to 120.
+_MIN_PRICE = 1e-12
+_MAX_PRICE = 1e12
+
+
 def _is_price(value: Any) -> bool:
-    """Return True when *value* is a JSON number that converts to a finite, non-negative float."""
+    """Return True when *value* is a JSON number that is zero or within the price range."""
     if not isinstance(value, int | float) or isinstance(value, bool):
         return False
-    try:
-        price = float(value)
-    except OverflowError:  # a JSON integer such as 10**400
-        return False
-    return 0.0 <= price < float("inf")
+    return value == 0 or _MIN_PRICE <= value <= _MAX_PRICE
 
 
 def _parse_prompt_tiers(raw: Any) -> tuple[PromptTier, ...]:
@@ -865,14 +889,7 @@ _ALIAS_MIRRORED_FIELDS = (
     "emb",
     "gen",
     "dec",
-    "input_price_per_1M",
-    "output_price_per_1M",
-    "cache_read_price_per_1M",
-    "cache_write_price_per_1M",
-    "cache_write_1h_price_per_1M",
-    "audio_input_price_per_1M",
-    "audio_output_price_per_1M",
-    "image_output_price_per_1M",
+    *_PER_1M_PRICE_FIELDS,
     "prompt_tiers",
 )
 
@@ -2253,6 +2270,14 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
     by the bundled entry of its stripped form, as the :func:`model`
     factory keeps that name for the adapter that bills under it.
 
+    A name with no entry of its own that :func:`_strip_thinking_alias`
+    maps to another (``codex/gpt-6-astra-xhigh``, an effort alias the
+    catalog does not list) is that base model: every adapter sends the
+    base id, so the run is sized and billed by the base's entry.  The
+    base's ``thinking`` level is left out, as the catalog lists no
+    level for the alias (a custom entry seeded from it must not ask
+    for the base's).
+
     Args:
         model_name: Name of the model (with or without provider prefix).
 
@@ -2264,29 +2289,36 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
         return info
     bare = bedrock_catalog_name(model_name) or _strip_provider_prefix(model_name)
     info = MODEL_INFO.get(bare)
-    if info is None or bare != model_name:
-        my_models = _read_my_models()
-        key = model_name if model_name in my_models else bare
-        entry = my_models.get(key) if info is None or key == model_name else None
-        if entry is not None:
-            try:
-                built: ModelInfo | None = _build_model_info_entry(entry)
-            except (KeyError, TypeError, ValueError):
-                built = None
-            if built is not None:
-                # Same normalization the import-time catalog gets, so a
-                # hot-added custom model bills cache hits at the
-                # provider's discount instead of the full input price
-                # until the next restart.
-                _normalize_entry(key, built)
-                if key == model_name:
-                    # An entry registered under the name itself holds the
-                    # prices that name pays (a seeded ``bedrock/`` entry is
-                    # scaled already).
-                    return built
-                info = built
-        if info is None:
+    my_models = _read_my_models()
+    key = model_name if model_name in my_models else bare
+    entry = my_models.get(key) if info is None or key == model_name else None
+    if entry is not None:
+        try:
+            built: ModelInfo | None = _build_model_info_entry(entry)
+        except (KeyError, TypeError, ValueError):
+            built = None
+        if built is not None:
+            # Same normalization the import-time catalog gets, so a
+            # hot-added custom model bills cache hits at the
+            # provider's discount instead of the full input price
+            # until the next restart.
+            _normalize_entry(key, built)
+            if key == model_name:
+                # An entry registered under the name itself holds the
+                # prices that name pays (a seeded ``bedrock/`` entry is
+                # scaled already).
+                return built
+            info = built
+    if info is None:
+        # A registered entry that cannot be built stays unknown.
+        base = model_name if entry is not None else _strip_thinking_alias(model_name)
+        if base == model_name:
             return None
+        info = _lookup_model_info(base)
+        if info is not None and info.thinking is not None:
+            info = copy.copy(info)
+            info.thinking = None
+        return info
     # Resolved through the ``claude-*`` key: a geographic or in-region
     # Bedrock profile pays Bedrock's premium over that entry.
     return _scaled_prices(info, bedrock_price_factor(model_name))
@@ -3120,3 +3152,21 @@ def get_cache_discount(model_name: str) -> float | None:
     if info is None or not info.input_price_per_1M or info.cache_read_price_per_1M is None:
         return None
     return info.cache_read_price_per_1M / info.input_price_per_1M
+
+
+def get_cache_write_ratio(model_name: str) -> float | None:
+    """Return how many cache reads one cache write of the model costs, or ``None``.
+
+    Args:
+        model_name: Name of the model (with or without provider prefix).
+
+    Returns:
+        ``cache_write_price_per_1M / cache_read_price_per_1M`` (50 for
+        Claude Fable 5.2 and 5.1, 25 for Opus and Sonnet 5.5, 12.5 for the
+        other Claude models), or ``None`` for an unknown model or one
+        without both prices.
+    """
+    info = _lookup_model_info(model_name)
+    if info is None or not info.cache_read_price_per_1M or info.cache_write_price_per_1M is None:
+        return None
+    return info.cache_write_price_per_1M / info.cache_read_price_per_1M

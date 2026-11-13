@@ -244,7 +244,10 @@ class TestOwnerLiveness:
 
         The OS recycling of a dead owner's pid cannot be forced, so the
         stamp is built the way a recycled pid presents itself: the pid of
-        a live stranger, with the identity of the real (other) owner.
+        a live stranger, with the identity of the real (other) owner, in
+        the bounded form the product stores (this process's command line
+        is longer than one argument may be when the run names a thousand
+        test ids).
         """
         branch, wt_dir = self._create_worktree()
         stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
@@ -254,7 +257,8 @@ class TestOwnerLiveness:
             assert real_owner_identity != process_identity(stranger.pid)
             for key, value in (
                 ("kiss-owner-pid", str(stranger.pid)),
-                ("kiss-owner-identity", f"{stranger.pid}:{real_owner_identity}"),
+                ("kiss-owner-identity",
+                 f"{stranger.pid}:{GitWorktreeOps._bounded_identity(real_owner_identity)}"),
             ):
                 subprocess.run(
                     ["git", "-C", str(self.repo), "config",
@@ -291,6 +295,42 @@ class TestOwnerLiveness:
         finally:
             owner.kill()
             owner.wait(timeout=30)
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
+
+    @posix_only("the limit on one argument is the POSIX kernel's")
+    def test_owner_with_a_long_command_line_is_stamped_and_recognised(self) -> None:
+        """A process with a command line above 128 KB still owns the worktree it creates.
+
+        The stamp held the whole command line as one ``git config``
+        argument: past the kernel's limit for one argument git could
+        not start, the owner was not recorded and ``create`` failed.
+        The stamp is bounded now, and the live owner still matches it.
+        """
+        branch = GitWorktreeOps.new_task_branch(self.repo)
+        wt_dir = self.repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
+        code = (
+            "import sys, time; from pathlib import Path\n"
+            "from kiss.agents.sorcar.git_worktree import GitWorktreeOps\n"
+            "repo, branch, wt_dir = sys.argv[1:4]\n"
+            "print(GitWorktreeOps.create(Path(repo), branch, Path(wt_dir)), flush=True)\n"
+            "time.sleep(60)\n"
+        )
+        command = [sys.executable, "-c", code, str(self.repo), branch, str(wt_dir)]
+        command += ["x" * 1000] * 200  # 200 KB of arguments, each one small
+        with subprocess.Popen(command, stdout=subprocess.PIPE, text=True) as owner:
+            try:
+                assert owner.stdout is not None
+                assert owner.stdout.readline().strip() == "True"
+                stamp = subprocess.run(
+                    ["git", "-C", str(self.repo), "config",
+                     f"branch.{branch}.kiss-owner-identity"],
+                    capture_output=True, text=True, check=True,
+                ).stdout
+                assert stamp.startswith(f"{owner.pid}:") and len(stamp) < 8192
+                assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+                assert wt_dir.is_dir()
+            finally:
+                owner.kill()
         assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
 
     @posix_only("the identity probe is `ps`, which the test shims; Windows reads kernel32")

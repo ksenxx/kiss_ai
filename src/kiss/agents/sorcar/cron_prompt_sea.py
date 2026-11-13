@@ -44,22 +44,6 @@ minute goes to Bash(background=true) + bash_job(wait).
 """
 
 
-def cron_run_system_prompt(system_prompt: str) -> str:
-    """Return the run's system prompt: the lite base (in place of the full one) plus the cron rules.
-
-    A suffix the daemon appended after the base (``system_prompt``
-    setting, SEA layers) is kept.  A prompt that does not start with
-    the full ``SYSTEM.md`` (a caller-supplied base) is returned with
-    the cron rules appended.
-
-    Args:
-        system_prompt: The assembled system prompt of the run.
-    """
-    if system_prompt.startswith(SYSTEM_PROMPT):
-        return SYSTEM_PROMPT_LITE + CRON_RUN_RULES + system_prompt[len(SYSTEM_PROMPT):]
-    return system_prompt + CRON_RUN_RULES
-
-
 class CronPromptSea(BaseSea):
     """The SEA a scheduled cron prompt job runs as (not a slash command)."""
 
@@ -75,7 +59,17 @@ class CronPromptSea(BaseSea):
         return settings | {"auto_classify": False}
 
     def system_prompt(self, system_prompt: str) -> str:
-        """Return the short system prompt of a scheduled run (:func:`cron_run_system_prompt`)."""
-        return cron_run_system_prompt(system_prompt)
+        """Return the short system prompt of a scheduled run: the lite base plus the cron rules.
 
+        The lite base replaces the full ``SYSTEM.md``; a suffix the
+        daemon appended after the base (``system_prompt`` setting, SEA
+        layers) is kept.  A prompt that does not start with the full
+        ``SYSTEM.md`` (a caller-supplied base) is returned with the
+        cron rules appended.
 
+        Args:
+            system_prompt: The assembled system prompt of the run.
+        """
+        if system_prompt.startswith(SYSTEM_PROMPT):
+            return SYSTEM_PROMPT_LITE + CRON_RUN_RULES + system_prompt[len(SYSTEM_PROMPT):]
+        return system_prompt + CRON_RUN_RULES

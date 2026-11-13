@@ -7,12 +7,17 @@
 from __future__ import annotations
 
 import contextlib
+import gc
 import io
+import os
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
+import warnings
 from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
@@ -22,6 +27,7 @@ from kiss.tests.agents.sorcar.test_history_date_range import (
     _restore,
     _set_timestamp,
 )
+from kiss.tests.conftest import posix_only
 
 
 def _task(
@@ -69,9 +75,7 @@ class TestBackfillSubtaskCosts(unittest.TestCase):
         self.db_path = str(th._DB_PATH)
 
     def tearDown(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.db_dir, ignore_errors=True)
 
@@ -154,11 +158,18 @@ class TestBackfillSubtaskCosts(unittest.TestCase):
         th._save_task_extra({"parent_task_id": b}, a)
         _llm_call(a, 1.0, 40)
         _llm_call(b, 1.0, 40)
-        # Malformed, non-object and non-numeric events contribute nothing.
+        # Malformed, non-object and non-numeric events contribute nothing, and neither
+        # does a number no total can hold (NaN, an infinity, an integer beyond a float).
         th._append_chat_event({"type": "llm_call", "cost": "n/a"}, tiny)
         th._get_db().executemany(
             "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, 0)",
-            [(tiny, 98, '{"type": "llm_call", "cost": 1'), (tiny, 99, '["llm_call", 1]')],
+            [
+                (tiny, 98, '{"type": "llm_call", "cost": 1'),
+                (tiny, 99, '["llm_call", 1]'),
+                (tiny, 100, '{"type": "llm_call", "cost": NaN, "input_tokens": Infinity}'),
+                (tiny, 101, '{"type": "llm_call", "cost": "-inf", "output_tokens": 1e999}'),
+                (tiny, 102, '{"type": "llm_call", "cache_read": 1' + "0" * 400 + "}"),
+            ],
         )
         th._get_db().commit()
 
@@ -196,6 +207,31 @@ class TestBackfillSubtaskCosts(unittest.TestCase):
         for bad in ("0", "-1", "nan"):
             with self.assertRaises(SystemExit):
                 self._run("--min-shortfall", bad)
+
+    def test_a_running_grandchild_does_not_hold_its_grandparent_back(self) -> None:
+        """Only a task's direct sub-tasks must have settled: a later fold counts once.
+
+        What the grandchild folds into its finished parent when it ends is added to
+        every finished ancestor in the same transaction, the repaired root included.
+        """
+        root = _task("Stopped before its sub-task was charged", 0.0, 0)
+        child = _task("Finished long ago", 4.0, 40, parent=root)
+        grand = _task("Still running", 5.0, 50, parent=child, finished=False)
+        code, lines = self._run("--apply")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            lines[1:],
+            [
+                "1 task short by $4.0000 in total; "
+                "1 skipped as running or ended in the last 10 minutes",
+                "updated 1 row (+$4.0000)",
+            ],
+        )
+        self.assertEqual((_row(root), _row(child)), ((4.0, 40), (4.0, 40)))
+        th._save_task_extra({"cost": 6.0, "tokens": 60, "endTs": 1_790_000_000_000}, grand)
+        th._add_late_task_usage(child, 60, 6.0, 1)  # the daemon's fold into a finished row
+        self.assertEqual((_row(root), _row(child)), ((10.0, 100), (10.0, 100)))
+        self.assertEqual(self._run("--apply")[1][0], "0 tasks short by $0.0000 in total")
 
     def test_rows_changed_after_planning_are_skipped(self) -> None:
         parent = _task("Parent", 0.0, 0)
@@ -248,6 +284,30 @@ class TestBackfillSubtaskCosts(unittest.TestCase):
         self.assertEqual(_row(first), (0.0, 0))
         self.assertEqual(_row(second), (0.0, 0))
 
+    @posix_only("limits the file size with bash's ulimit")
+    def test_a_write_the_disk_refuses_fails_with_the_cause(self) -> None:
+        """An I/O error in the transaction is what the run dies of, every row as it was.
+
+        SQLite has rolled the transaction back by itself by then, so the script's own
+        ``ROLLBACK`` failed in turn (``cannot rollback - no transaction is active``) and
+        took the place of the cause.  The write-ahead log may grow to 64 KiB here, less
+        than the repaired pages need.
+        """
+        parents = []
+        for number in range(300):
+            parents.append(_task(f"Parent {number}", 0.0, 0))
+            _task("Child", 2.0, 20, parent=parents[-1])
+        th._close_thread_db()
+        done = subprocess.run(
+            ["bash", "-c", 'ulimit -f 64; exec "$@"', "bash", sys.executable, "-m",
+             "kiss.scripts.backfill_subtask_costs", "--db", self.db_path, "--apply"],
+            capture_output=True, text=True, check=False, timeout=120,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stderr.splitlines()[-1], "sqlite3.OperationalError: disk I/O error")
+        self.assertEqual({_row(parent) for parent in parents}, {(0.0, 0)})
+
     def test_dry_run_with_nothing_to_repair(self) -> None:
         parent = _task("Parent", 5.0, 50)
         _task("Child", 2.0, 20, parent=parent)
@@ -260,6 +320,29 @@ class TestBackfillSubtaskCosts(unittest.TestCase):
         self.assertEqual(code, 1)
         code = script.main(["--db", str(Path(self.db_dir) / "missing.db"), "--apply"])
         self.assertEqual(code, 1)
+        # A file that is no database opens and then fails: its connection is closed too.
+        garbage = Path(self.db_dir) / "garbage.db"
+        garbage.write_bytes(b"not a database " * 100)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.assertEqual(script.main(["--db", str(garbage)]), 1)
+            gc.collect()  # an unclosed connection warns when it is collected
+        # The collection also finds what earlier tests of the process left (a socket):
+        # only a database connection is this script's.
+        unclosed = [str(w.message) for w in caught if "sqlite3.Connection" in str(w.message)]
+        self.assertEqual(unclosed, [])
+
+    def test_a_path_that_reads_as_uri_syntax_names_the_database(self) -> None:
+        """URI punctuation in a legal host path never changes which database is opened."""
+        name = "kiss#home %41" if os.name == "nt" else "kiss#home ?mode=ro %41"
+        home = Path(self.db_dir) / name
+        _redirect(str(home))
+        self.db_path = str(th._DB_PATH)
+        parent = _task("Parent", 0.0, 0)
+        _task("Child", 2.0, 20, parent=parent)
+        self.assertEqual(self._run("--apply")[0], 0)
+        self.assertEqual(_row(parent), (2.0, 20))
+        self.assertEqual(sorted(p.name for p in Path(self.db_dir).iterdir()), [".kiss", home.name])
 
 
 if __name__ == "__main__":

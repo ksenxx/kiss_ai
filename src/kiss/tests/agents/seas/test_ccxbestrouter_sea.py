@@ -19,7 +19,7 @@ from kiss.agents.seas.ccxbestrouter import ccxbestrouter_sea
 from kiss.agents.seas.ccxbestrouter.ccxbestrouter_sea import CcxbestrouterSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_apply import apply_sea
-from kiss.core.models.model_info import MODEL_INFO
+from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias, is_known_model
 from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import (
     assert_no_removed_getters,
@@ -32,14 +32,17 @@ _SEA_PATH = Path(ccxbestrouter_sea.__file__).resolve()
 
 
 def test_models_are_the_claude_code_and_codex_catalog_entries() -> None:
-    """Opus 5.5 and Fable 5.2 through Claude Code, Astra through Codex, all in the catalog."""
+    """Opus 5.5 and Fable 5.2 through Claude Code, Astra at xhigh effort through Codex."""
     assert ccxbestrouter_sea.SIMPLE_MODEL == "cc/claude-opus-5-5-medium"
     assert ccxbestrouter_sea.PRIMARY_MODEL == "cc/claude-fable-5-2-max"
-    assert ccxbestrouter_sea.REVIEW_MODEL == "codex/gpt-6-astra"
+    assert ccxbestrouter_sea.REVIEW_MODEL == "codex/gpt-6-astra-xhigh"
+    # The reviewer is an effort alias the catalog does not list: it is known to the
+    # catalog lookup as the entry it runs as, ``codex/gpt-6-astra``.
+    assert is_known_model(ccxbestrouter_sea.REVIEW_MODEL)
     for model in (
         ccxbestrouter_sea.SIMPLE_MODEL,
         ccxbestrouter_sea.PRIMARY_MODEL,
-        ccxbestrouter_sea.REVIEW_MODEL,
+        _strip_thinking_alias(ccxbestrouter_sea.REVIEW_MODEL),
     ):
         assert model in MODEL_INFO, model
         assert MODEL_INFO[model].is_function_calling_supported, model
@@ -60,18 +63,21 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
         "Use 'cc/claude-opus-5-5-medium' for simple questions and queries.",
         "Use 'cc/claude-fable-5-2-max' model for all other tasks, including "
         "software development and analysis and writing.",
-        "Use codex/gpt-6-astra through "
-        "`run_agent(model=\"codex/gpt-6-astra\", tool_profile=\"review\", "
+        "Use codex/gpt-6-astra-xhigh through "
+        "`run_agent(model=\"codex/gpt-6-astra-xhigh\", tool_profile=\"review\", "
         "wait=\"false\")` for a thorough read-only review and debugging of the other model's "
         "work,",
-        "Use at most 75% of the task budget in codex/gpt-6-astra,",
+        "Use at most 75% of the task budget in codex/gpt-6-astra-xhigh,",
         "Use the model names literally without hallucinating new model names.",
     ):
         assert phrase in flat, phrase
     # The reviewer is the Codex model on purpose: the "(not codex)" warning is gone.
     assert "not codex" not in protocol
     assert f"'{bestrouter_sea.SIMPLE_MODEL}'" not in protocol
-    assert f"'{bestrouter_sea.PRIMARY_MODEL}'" not in protocol and " gpt-6-astra " not in protocol
+    assert f"'{bestrouter_sea.PRIMARY_MODEL}'" not in protocol
+    # The reviewer is unquoted and wraps onto a new line: only the flat text shows a leak.
+    assert f" {bestrouter_sea.REVIEW_MODEL} " in " ".join(bestrouter_sea.SYSTEM_PROMPT.split())
+    assert f" {bestrouter_sea.REVIEW_MODEL} " not in flat
     # Same working rules as the bestrouter, word for word.
     rules = protocol.split("Working rules:", 1)[1]
     assert rules == bestrouter_sea.SYSTEM_PROMPT.split("Working rules:", 1)[1]

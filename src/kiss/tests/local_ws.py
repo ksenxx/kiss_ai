@@ -36,6 +36,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from kiss.agents.sorcar import local_endpoint
+from kiss.core import tls_certs
 
 _DEFAULT_MAX_SIZE = 64 * 1024 * 1024
 
@@ -252,14 +253,36 @@ async def open_remote_connection(
     return ws
 
 
+def _generate_self_signed_cert(
+    cert_path: Path,
+    key_path: Path,
+) -> None:
+    """Generate a locally-signed TLS cert/key pair at *cert_path*/*key_path*.
+
+    Creates (or reuses) the machine-local CA beside the certificate
+    (``ca.pem`` / ``ca-key.pem`` in ``cert_path.parent``) and issues a
+    server certificate signed by it covering ``localhost``, the
+    hostname, ``127.0.0.1`` and ``::1`` (see
+    :mod:`kiss.core.tls_certs`).  For the test fixtures that build
+    throwaway servers; the daemon itself goes through
+    ``web_server._create_ssl_context``, which also adds the LAN IPs.
+
+    Args:
+        cert_path: Where to write the PEM-encoded certificate.
+        key_path: Where to write the PEM-encoded private key.
+    """
+    ca_cert, ca_key = tls_certs.ensure_local_ca(cert_path.parent)
+    tls_certs.issue_server_cert(
+        cert_path, key_path, ca_cert, ca_key, *tls_certs.server_cert_names(),
+    )
+
+
 def make_test_tls(tmp_dir: Path) -> tuple[Path, Path, Path]:
     """Issue a throwaway server certificate under *tmp_dir*.
 
     Returns ``(certfile, keyfile, ca_file)``; the CA beside the
     certificate is what a local client pins.
     """
-    from kiss.server.web_server import _generate_self_signed_cert
-
     certfile, keyfile = tmp_dir / "cert.pem", tmp_dir / "key.pem"
     _generate_self_signed_cert(certfile, keyfile)
     return certfile, keyfile, tmp_dir / "ca.pem"

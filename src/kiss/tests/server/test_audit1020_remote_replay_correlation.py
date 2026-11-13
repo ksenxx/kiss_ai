@@ -39,9 +39,14 @@ from websockets.sync.client import ClientConnection
 
 from kiss.agents.sorcar import machines as mach
 from kiss.server.remote_tabs import RemoteTab
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import find_free_port
-from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.tests.local_ws import (
+    LocalReader,
+    LocalWriter,
+    _generate_self_signed_cert,
+    open_local_connection,
+)
 
 TAB = "tab-shared"
 Conn = tuple[LocalReader, LocalWriter]
@@ -51,8 +56,12 @@ class TestRemoteReplayCorrelation(IsolatedAsyncioTestCase):
     """One local daemon with two clients, one remote daemon seeded with a chat."""
 
     async def asyncSetUp(self) -> None:
+        # Cleanups, each registered as its resource starts, not asyncTearDown:
+        # unittest skips the tear-down when the set-up fails.
         self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         mach.save_machines([])
+        self.addCleanup(mach.save_machines, [])
         from kiss.tests.remote_daemon import start_remote_daemon
 
         remote_home = Path(self.tmpdir) / "remote-home"
@@ -75,6 +84,7 @@ class TestRemoteReplayCorrelation(IsolatedAsyncioTestCase):
                 },
             ],
         )
+        self.addCleanup(self.remote.stop)
         with sqlite3.connect(remote_home / "history.db", timeout=10) as db:
             db.execute(
                 "UPDATE task_history SET parent_task_id = 'seeded-1', is_side_channel = 1"
@@ -91,11 +101,15 @@ class TestRemoteReplayCorrelation(IsolatedAsyncioTestCase):
             url_file=Path(self.tmpdir) / "remote-url.json",
             local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
+        # Registered before the start: one that fails part-way is stopped too.
+        self.addAsyncCleanup(self.server.stop_async)
         await self.server.start_async()
         self.conn_a = await open_local_connection(self.server)
+        self.addCleanup(self.conn_a[1].close)
         await self._fence(self.conn_a)
         known = set(self.server._printer._conn_endpoints)
         self.conn_b = await open_local_connection(self.server)
+        self.addCleanup(self.conn_b[1].close)
         await self._fence(self.conn_b)
         (self.conn_b_id,) = set(self.server._printer._conn_endpoints) - known
         self.observer: ClientConnection | None = None
@@ -115,12 +129,6 @@ class TestRemoteReplayCorrelation(IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         if self.observer is not None:
             self.observer.close()
-        self.conn_a[1].close()
-        self.conn_b[1].close()
-        await self.server.stop_async()
-        self.remote.stop()
-        mach.save_machines([])
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _send(self, conn: Conn, cmd: dict[str, Any]) -> None:
         conn[1].write(json.dumps(cmd).encode("utf-8") + b"\n")

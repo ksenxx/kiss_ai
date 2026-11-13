@@ -19,14 +19,24 @@
   agent state registered as active.  The steps are nested
   ``try``/``finally`` regions now, and the idempotent retirement is
   retried once.
+* A Stop raised as the retirement itself was entered, before its
+  first statement, skipped it whole: the finish hook never ran, so
+  the bridge-created state stayed registered as an active task of
+  the thread, which the Stop's watchdog went on interrupting, and
+  the recording stayed live.  The retirement and its finish hook are
+  each called again at once when a Stop cuts the call short.
 
-The Stops are the server's real ``inject_keyboard_interrupt``; the
-locks are the real ones, held by the test thread so the worker waits
-on them.  Real history database and printer; nothing is mocked.
+The Stops are the server's real ``inject_keyboard_interrupt`` (the
+one at the retirement's entry through the watchdog's guarded
+``inject_if_owned``); the locks are the real ones, held by the test
+thread so the worker waits on them.  Real history database and
+printer; nothing is mocked.
 """
 
 from __future__ import annotations
 
+import functools
+import io
 import logging
 import sqlite3
 import threading
@@ -38,11 +48,16 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent, _retire_printer_task
 from kiss.core.locked import locked_call
+from kiss.core.print_to_console import ConsolePrinter
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.task_runner import inject_keyboard_interrupt
+from kiss.server.task_runner import (
+    _state_owns_thread,
+    inject_if_owned,
+    inject_keyboard_interrupt,
+)
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -210,6 +225,41 @@ def test_second_stop_in_the_finish_hook_completes_the_cleanup(home: IsolatedKiss
     assert rows[task_id][1] > 0
 
 
+@pytest.mark.parametrize(
+    "entered",
+    [_retire_printer_task, JsonPrinter.agent_task_finished],
+    ids=["the retirement", "its finish hook"],
+)
+def test_second_stop_raised_as_the_retirement_is_entered_still_retires_the_run(
+    home: IsolatedKissHome, entered: Any
+) -> None:
+    """A Stop raised at a call's entry, before its first statement, skips no part of the call."""
+    agent = ChatSorcarAgent("audit1111-stop-at-the-entry")
+    printer = CapturePrinter()
+    worker = _Worker(agent, printer, home.repo, _on_task_id_allocated=_stop_in_own_thread)
+    entry = Pause(entered.__code__, lambda frame_locals: True)
+    with entry:
+        worker.thread.start()
+        assert entry.paused.wait(30), worker.errors
+        task_id = agent.last_task_id
+        state = agent_state.get(task_id)
+        assert state is not None and not state.server_owned
+        # The worker is held at the call's entry: the watchdog's Stop is raised right there.
+        still_owns = functools.partial(_state_owns_thread, state, worker.thread)
+        assert inject_if_owned(worker.thread, still_owns) == 1
+        entry.release()
+        worker.join()
+    assert [type(exc) for exc in worker.errors] == [KeyboardInterrupt]
+
+    assert agent_state.get(task_id) is None
+    assert task_id not in printer._recordings
+    assert task_id not in printer._retired_recordings
+    assert worker.binding_after == [CALLER_BINDING]
+    rows = {row[0]: row[1:] for row in _task_rows(home)}
+    assert rows[task_id][0] == "Task interrupted"
+    assert rows[task_id][1] > 0
+
+
 class _RecordingStaysLive(CapturePrinter):
     """A printer whose recording cannot be retired: the failure is logged, never hidden."""
 
@@ -237,3 +287,70 @@ def test_a_failing_stop_recording_is_logged_and_the_cleanup_completes(
     rows = {row[0]: row[1:] for row in _task_rows(home)}
     assert rows[task_id][0] == "Task interrupted"
     assert rows[task_id][1] > 0
+
+
+class _FinishHookFails(CapturePrinter):
+    """A printer whose finish hook fails: the failure is logged, and a Stop still goes on."""
+
+    def agent_task_finished(self, agent: Any, task_id: Any) -> None:
+        raise RuntimeError("the task could not be retired")
+
+
+@pytest.mark.parametrize("stop_at_its_entry", [False, True], ids=["first call", "repeated call"])
+def test_a_failing_finish_hook_is_logged_and_the_cleanup_completes(
+    home: IsolatedKissHome, caplog: pytest.LogCaptureFixture, stop_at_its_entry: bool
+) -> None:
+    """The finish hook's own error is logged, on its first call or on the call a Stop repeats."""
+    agent = ChatSorcarAgent("audit1111-finish-hook-fails")
+    printer = _FinishHookFails()
+    worker = _Worker(agent, printer, home.repo, _on_task_id_allocated=_stop_in_own_thread)
+    entry = Pause(
+        _FinishHookFails.agent_task_finished.__code__, lambda frame_locals: stop_at_its_entry,
+    )
+    with caplog.at_level(logging.WARNING, logger="kiss.agents.sorcar.chat_sorcar_agent"), entry:
+        worker.thread.start()
+        if stop_at_its_entry:
+            assert entry.paused.wait(30), worker.errors
+            assert worker.thread.ident is not None
+            inject_keyboard_interrupt(worker.thread.ident)
+            entry.release()
+        worker.join()
+    assert [type(exc) for exc in worker.errors] == [KeyboardInterrupt]
+    task_id = agent.last_task_id
+    logged = [
+        r.exc_info[0] for r in caplog.records
+        if r.getMessage() == f"agent_task_finished({task_id!r}) raised" and r.exc_info
+    ]
+    # One per call that got into the hook: the Stop at the entry of the first
+    # call has the hook, and then the whole retirement, called once more.
+    assert logged == [RuntimeError] * (2 if stop_at_its_entry else 1)
+    # The remaining cleanup steps still ran.
+    assert task_id not in printer._recordings
+    assert worker.binding_after == [CALLER_BINDING]
+    rows = {row[0]: row[1:] for row in _task_rows(home)}
+    assert rows[task_id][0] == "Task interrupted"
+    assert rows[task_id][1] > 0
+
+
+def test_a_printer_without_the_bridge_hooks_is_retired_without_them(
+    home: IsolatedKissHome, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The console printer has no finish hook and no recording: the cleanup asks for neither."""
+    agent = ChatSorcarAgent("audit1111-console-printer")
+    with caplog.at_level(logging.WARNING, logger="kiss.agents.sorcar"):
+        with pytest.raises(KeyboardInterrupt):
+            agent.run(
+                prompt_template="check the arithmetic",
+                model_name=STANDIN_MODEL,
+                work_dir=str(home.repo),
+                web_tools=False,
+                use_memory=False,
+                max_budget=1,
+                printer=ConsolePrinter(file=io.StringIO()),
+                tool_profile="review",
+                _on_task_id_allocated=_stop_in_own_thread,
+            )
+    assert [r.getMessage() for r in caplog.records if "raised" in r.getMessage()] == []
+    assert [(result, end_ts > 0) for _id, result, end_ts in _task_rows(home)] == [
+        ("Task interrupted", True),
+    ]

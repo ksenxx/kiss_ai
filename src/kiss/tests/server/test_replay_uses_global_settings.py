@@ -395,6 +395,12 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
         )
 
         sub_tab_ids = {f"{parent_tab}__sub_{sid}" for sid in sub_ids}
+        # The history click only offers the sub-agent transcripts; each
+        # tab fetches its own when opened.
+        for sid in sub_ids:
+            server._replay_session(
+                chat_id=chat_id, tab_id=f"{parent_tab}__sub_{sid}", task_id=sid,
+            )
         with lock:
             sub_task_events = [
                 e for e in events

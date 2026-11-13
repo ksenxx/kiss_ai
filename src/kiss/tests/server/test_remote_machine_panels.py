@@ -149,7 +149,6 @@ class TestRemoteMachinePanels(RemoteMachineCase):
         self.assertEqual(apps.get("error", ""), "")
         self.assertIs(apps["forwarded"], True)
         self.assertIsInstance(apps["apps"], list)
-        self.assertIn("checkedAt", apps)
         # The local reply is this daemon's own: not forwarded.
         mine = await self._ask({"type": "getSpendReport"}, "spendReport")
         self.assertNotIn("forwarded", mine)

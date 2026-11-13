@@ -20,7 +20,7 @@ import string
 import time
 import uuid
 from pathlib import Path
-from typing import IO, Any
+from typing import Any
 
 import yaml
 from yaml.nodes import ScalarNode
@@ -62,20 +62,19 @@ def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
 _KissDumper.add_representer(str, _str_presenter)
 
 
-def dump_yaml(data: Any, stream: IO[str] | None = None, **kwargs: Any) -> Any:
+def dump_yaml(data: Any, **kwargs: Any) -> str:
     """Serialize *data* to YAML with KISS's human-readable string style.
 
     Args:
         data: The object to serialize.
-        stream: Optional destination stream; when ``None`` the YAML is
-            returned as a string.
         **kwargs: Extra options forwarded to :func:`yaml.dump` (e.g.
             ``indent``, ``sort_keys``).
 
     Returns:
-        The YAML string when *stream* is ``None``, otherwise ``None``.
+        The YAML string.
     """
-    return yaml.dump(data, stream, Dumper=_KissDumper, **kwargs)
+    dumped: str = yaml.dump(data, Dumper=_KissDumper, **kwargs)
+    return dumped
 
 
 def seed_file_atomically(path: Path, content: str) -> None:
@@ -100,13 +99,9 @@ def seed_file_atomically(path: Path, content: str) -> None:
     if path.exists():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, staged = _open_staging_file(path, 0o600)
+    staged = _staging_path(path)
     try:
-        # A buffered file object (rather than a bare os.write, whose
-        # partial-write count would have to be handled) guarantees the
-        # whole payload is on disk before the link publishes it.
-        with os.fdopen(fd, "wb") as f:
-            f.write(content.encode("utf-8"))
+        _write_staged(staged, content.encode("utf-8"), 0o600)
         os.link(staged, path)
     except FileExistsError:
         logger.debug("Exception caught", exc_info=True)
@@ -118,7 +113,7 @@ def seed_file_atomically(path: Path, content: str) -> None:
         # already in place, so a staging name that outlives the budget
         # is left behind rather than reported as a failed seed.
         with contextlib.suppress(PermissionError):
-            unlink_waiting_for_holders(Path(staged))
+            unlink_waiting_for_holders(staged)
 
 
 def atomic_write_text(
@@ -127,6 +122,7 @@ def atomic_write_text(
     mode: int | None = None,
     create_mode: int = 0o600,
     errors: str = "strict",
+    follow_symlink: bool = True,
 ) -> None:
     """Write *content* to *target* so readers never see a partial file.
 
@@ -136,6 +132,13 @@ def atomic_write_text(
     then fills the file incrementally, so a concurrent reader — the
     trajectory visualizer, another daemon — can
     observe an empty or half-written document.
+
+    A *target* that is a symlink to a regular file is written where it
+    really lives: renamed over the link, the new content would replace
+    the link and leave the file it names (a ``config.json`` kept in a
+    dotfiles checkout) with its old content.  Any other link (dangling,
+    looping, to a directory) is replaced, and so is every link when
+    *follow_symlink* is false.
 
     Permission semantics, in priority order:
 
@@ -168,7 +171,14 @@ def atomic_write_text(
         errors: The UTF-8 encoding's error handler; ``"surrogateescape"``
             writes back unchanged the undecodable bytes of a file read
             with that handler.
+        follow_symlink: ``False`` replaces a symlinked *target* instead
+            of writing the file it names: for a caller whose writes must
+            stay inside one directory (memory pages and tombstones).
     """
+    if follow_symlink and os.path.islink(target):
+        real = os.path.realpath(target)
+        if os.path.isfile(real):
+            target = Path(real)
     target.parent.mkdir(parents=True, exist_ok=True)
     preserved: int | None = mode
     if preserved is None:
@@ -179,20 +189,18 @@ def atomic_write_text(
     # the process-global (and thread-racy) os.umask() probe.  An existing
     # file is staged privately; its bits are applied only once the
     # content is complete, just before publication.
-    fd, tmp = _open_staging_file(target, create_mode if preserved is None else 0o600)
+    tmp = _staging_path(target)
     try:
-        # A buffered file object rather than a bare os.write, whose
-        # POSIX-legal short return count would otherwise be ignored and
-        # then published as a permanently truncated file.
-        with os.fdopen(fd, "wb") as staged:
-            staged.write(content.encode("utf-8", errors))
+        _write_staged(
+            tmp, content.encode("utf-8", errors), create_mode if preserved is None else 0o600
+        )
         # Applied to the staged file only: os.replace moves the inode,
         # mode included, so a second chmod on the target would be a no-op.
         if preserved is not None:
             _try_chmod(tmp, preserved)
         replace_waiting_for_readers(tmp, target)
     except BaseException:
-        Path(tmp).unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
         raise
 
 
@@ -326,7 +334,7 @@ def read_bytes_waiting_for_writer(path: Path) -> bytes:
 
 
 def _publish_in_flight(path: Path) -> bool:
-    """Whether a staged ``.<name>-*`` file sits next to *path*.
+    """Whether a staged file of *path* (:func:`_staging_prefix`) sits next to it.
 
     :func:`atomic_write_text` stages under that name and publishes with
     ``os.replace``; the sibling exists exactly while a write is between
@@ -340,7 +348,7 @@ def _publish_in_flight(path: Path) -> bool:
         ``True`` when such a sibling exists (``False`` when the directory
         itself cannot be listed).
     """
-    prefix = f".{path.name}-"
+    prefix = _staging_prefix(path)
     try:
         return any(name.startswith(prefix) for name in os.listdir(path.parent))
     except OSError:
@@ -417,38 +425,56 @@ def rmtree_force(path: str | Path) -> None:
     shutil.rmtree(root, onexc=functools.partial(_make_writable_and_retry, root, set()))
 
 
-def _open_staging_file(target: Path, create_mode: int) -> tuple[int, str]:
-    """Exclusively create a unique sibling staging file for *target*.
+def _staging_prefix(target: Path) -> str:
+    """Return ``.<name>-``, the start of the name of every staging file of *target*.
 
-    Like ``tempfile.mkstemp`` but with a caller-chosen creation mode
-    (``mkstemp`` hardwires ``0o600``), so the kernel derives the final
-    bits from the process umask at creation time.  The one staging
-    primitive of this module: every atomic write and seed uses it.
+    The name is cut, at a character, so that the prefix and the 32 hex
+    digits :func:`_staging_path` appends fit the 255 bytes a file name
+    may have: the whole name plus 34 characters refused a target whose
+    own name is legal but longer than 221 bytes.
+    """
+    name = os.fsencode(target.name)[:221].decode("utf-8", "ignore")
+    return f".{name}-"
+
+
+def _staging_path(target: Path) -> Path:
+    """Return a unique sibling name under which *target*'s new content is staged.
+
+    :func:`_staging_prefix` and 128 random bits.  Only the name is
+    chosen here.  The caller creates the file with :func:`_write_staged`
+    inside the ``try`` that removes it, so an exception raised as the
+    file is created still finds its name.
+    """
+    return target.parent / (_staging_prefix(target) + uuid.uuid4().hex)
+
+
+def _write_staged(staged: Path, data: bytes, create_mode: int) -> None:
+    """Create the staging file *staged* holding *data*.
+
+    The one staging primitive of this module: every atomic write and
+    seed uses it.  Like ``tempfile.mkstemp`` the file is created
+    exclusively, but with a caller-chosen creation mode (``mkstemp``
+    hardwires ``0o600``), so the kernel derives the final bits from the
+    process umask at creation time.
+
+    The opener is a C callable, so no bytecode runs between the
+    descriptor's creation and the file object that owns and closes it.
+    A task's Stop is a ``KeyboardInterrupt`` raised in its thread as a
+    blocking call returns: a bare ``os.open`` here handed it a
+    descriptor that nothing closed any more.  The file object is
+    buffered rather than a bare ``os.write``, whose POSIX-legal short
+    return count would be published as a permanently truncated file.
 
     Args:
-        target: The destination the staging file will be renamed onto.
+        staged: A name from :func:`_staging_path`.
+        data: The complete content.
         create_mode: Mode bits passed to ``os.open`` (umask applies).
-
-    Returns:
-        ``(fd, path)`` of the newly created staging file.
-
-    Raises:
-        FileExistsError: If no unique name was found (never in
-            practice: 128-bit random suffixes).
     """
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
-    for _ in range(10):
-        tmp = str(target.parent / f".{target.name}-{uuid.uuid4().hex}")
-        try:
-            return os.open(tmp, flags, create_mode), tmp
-        except FileExistsError:  # pragma: no cover — 128-bit collision
-            continue
-    raise FileExistsError(  # pragma: no cover — unreachable in practice
-        f"could not create a staging file for {target}"
-    )
+    with open(staged, "xb", opener=functools.partial(os.open, mode=create_mode)) as file:
+        file.write(data)
 
 
-def _try_chmod(path: str, mode: int) -> None:
+def _try_chmod(path: str | Path, mode: int) -> None:
     """Apply *mode* to *path*, ignoring filesystems that refuse it."""
     try:
         os.chmod(path, mode)
@@ -753,5 +779,4 @@ def finish(
     suggestion = str(suggested_next_task).strip() if suggested_next_task else ""
     if suggestion:
         result["suggested_next_task"] = suggestion
-    dumped: str = dump_yaml(result, sort_keys=False)
-    return dumped
+    return dump_yaml(result, sort_keys=False)

@@ -16,6 +16,7 @@ const {
   installFakeTimers,
   openNextSocket,
   settle,
+  unlock,
   frames,
   ok,
   fail,
@@ -48,13 +49,6 @@ function reconnect(tab, n) {
   openNextSocket(tab.sockets, tab.timers, n);
 }
 
-/** Type *pwd* into the tab's dialog and press OK; wait for the frame. */
-async function submitPassword(tab, pwd) {
-  tab.window.document.getElementById('auth-modal-input').value = pwd;
-  tab.window.document.getElementById('auth-modal-ok').click();
-  await settle();
-}
-
 async function run() {
   // 1. Two tabs: the typo of tab A is not replayed by tab B's reconnect.
   {
@@ -65,7 +59,7 @@ async function run() {
     a.sockets[0].fireMessage({type: 'auth_required'});
     b.sockets[0].fireOpen();
     b.sockets[0].fireMessage({type: 'auth_required'});
-    await submitPassword(a, 'typo');
+    await unlock(a.window.document, 'typo');
     try {
       assert.deepStrictEqual(frames(a.sockets[0]).at(-1), {
         type: 'auth',
@@ -117,7 +111,7 @@ async function run() {
     // The right password: stored on auth_ok, and B's next reconnect
     // uses it.
     a.sockets[1].fireMessage({type: 'auth_required'});
-    await submitPassword(a, 'right');
+    await unlock(a.window.document, 'right');
     try {
       assert.strictEqual(storage.getItem(KEY), null, 'still pending');
       a.sockets[1].fireMessage({type: 'auth_ok'});
@@ -161,7 +155,7 @@ async function run() {
     reconnect(tab, 0);
     // Still CONNECTING when the user presses OK: the typed password
     // waits for this socket's onopen.
-    await submitPassword(tab, 'typed-late');
+    await unlock(tab.window.document, 'typed-late');
     try {
       assert.deepStrictEqual(tab.sockets[1].sent, [], 'nothing sent yet');
       assert.strictEqual(storage.getItem(KEY), null);
@@ -194,7 +188,7 @@ async function run() {
     reconnect(tab, 2);
     tab.sockets[3].fireOpen();
     tab.sockets[3].fireClose();
-    await submitPassword(tab, 'after-drop');
+    await unlock(tab.window.document, 'after-drop');
     try {
       assert.strictEqual(storage.getItem(KEY), null);
       assert.strictEqual(tab.sockets.length, 5, 'Enter reconnects at once');
@@ -208,7 +202,6 @@ async function run() {
     }
     tab.window.close();
   }
-  process.exit(0);
 }
 
 run().catch(err => fail('unexpected error', err));

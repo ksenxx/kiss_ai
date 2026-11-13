@@ -7,6 +7,7 @@
 
 import base64
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -14,31 +15,33 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 # The Anthropic SDK (>= 1.0) speaks HTTP through ``httpx2``, the
 # maintained fork of httpx, and rejects ``httpx`` objects (Timeout, clients)
 # at construction time; the exceptions it raises are httpx2's as well.
 import httpx2
-from anthropic import Anthropic, APITimeoutError
+from anthropic import Anthropic, APITimeoutError, transform_schema
 from anthropic.lib.bedrock import AnthropicBedrock
 from anthropic.resources.messages import Messages
+from pydantic import TypeAdapter
 
 from kiss.core import stop_signal, user_config
 from kiss.core.brand import HOME_DIR
 from kiss.core.kiss_error import KISSError, ModelRefusalError, OutputCapError
 from kiss.core.locked import locked_call
 from kiss.core.models.model import (
-    _AUDIO_FORMAT_TO_MIME,
     FRAMEWORK_ONLY_CONFIG_KEYS,
     Attachment,
     Model,
     ThinkingCallback,
     TokenCallback,
+    _audio_format_to_mime,
     _get_attr_or_key,
     accepted_request_params,
     checked_nonempty,
+    import_provider_module,
     iter_assistant_tool_calls,
     merge_system_texts,
     normalize_content_blocks,
@@ -54,6 +57,7 @@ from kiss.core.models.model import (
 from kiss.core.models.stream_abort import (
     CONNECT_TIMEOUT,
     RequestAbortWatchdog,
+    make_pool_abortable,
     stop_error,
     stop_or_stall_error,
 )
@@ -184,12 +188,6 @@ def _last_assistant_tool_use_ids(messages: list[Any]) -> list[str]:
         if isinstance(message, dict) and message.get("role") == "assistant":
             return [call_id for _name, call_id in iter_assistant_tool_calls(message) if call_id]
     return []
-
-
-def _is_tool_use(block: Any) -> bool:
-    """Return whether a raw response content block (SDK object or dict) is a ``tool_use``."""
-    block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
-    return block_type == "tool_use"
 
 
 def cache_creation_tokens(usage: Any) -> tuple[int, int]:
@@ -348,6 +346,22 @@ def _uses_adaptive_thinking(profile: ClaudeProfile) -> bool:
     return family == "opus" and major == 4 and minor is not None and minor >= 6
 
 
+def _checks_thinking_prefix(profile: ClaudeProfile) -> bool:
+    """Return whether the model binds a thinking block to the messages before it.
+
+    ``profile`` is the ``(info, version)`` pair of :func:`_claude_profile`.
+    Claude 5.1 and later (Fable and Mythos 5.1 and 5.2, Opus, Sonnet and
+    Haiku 5.5) sign each thinking block over the system prompt, the tools
+    and the messages before it.  Sent back after any of those changed, the
+    block fails the check: the API drops it or, on Claude Fable 5.2,
+    answers 400 ("The block is bound to a different conversation").  A
+    name outside the version grammar is taken for an earlier model, as the
+    legacy ``claude-3`` names are.
+    """
+    _info, version = profile
+    return version is not None and (version[1], version[2] or 0) >= (5, 1)
+
+
 def _supports_extended_thinking(profile: ClaudeProfile) -> bool:
     """Return True if the Claude model should send the ``thinking`` param.
 
@@ -426,7 +440,7 @@ def _openai_part_to_anthropic_block(part: dict[str, Any]) -> dict[str, Any] | No
     if part_type == "input_audio":
         audio = part.get("input_audio") or {}
         fmt = audio.get("format", "")
-        mime_type = _AUDIO_FORMAT_TO_MIME.get(fmt, f"audio/{fmt}" if fmt else "audio/mpeg")
+        mime_type = _audio_format_to_mime(fmt)
         try:
             audio_bytes = base64.b64decode(audio.get("data", ""))
         except (ValueError, TypeError):
@@ -560,13 +574,13 @@ def context_edits(thinking: bool = True) -> list[dict[str, Any]]:
 
     The retained context holds the model's reasoning for the last
     ``Config.reasoning_keep_turns`` turns (``clear_thinking_20251015``; the
-    agent starts a turn every ``Config.reasoning_turn_steps`` steps) and the
-    inputs and results of the last ``Config.context_edit_keep_tool_uses``
-    tool calls once the input passes ``Config.context_edit_trigger_tokens``
-    (``clear_tool_uses_20250919`` with ``clear_tool_inputs``, applied only
-    when it clears ``Config.context_edit_clear_at_least`` tokens, the price
-    of the cache write it causes).  The thinking edit comes first, as the
-    API requires.  Empty when both settings are 0.
+    agent starts a turn every ``Config.reasoning_turn_steps`` steps).  Empty
+    when the setting is 0.  Old tool calls are not cleared by the server:
+    the boundary of its ``clear_tool_uses`` edit moved by a result or two
+    between requests, and each move re-wrote the cached prefix without
+    freeing anything (312 times on 2026-11-11, 55 million tokens written
+    again), so the agent clears them in its own conversation
+    (:meth:`AnthropicModel.clears_tool_uses_in_bulk`).
 
     Args:
         thinking: Whether the request's thinking is enabled or adaptive;
@@ -575,26 +589,12 @@ def context_edits(thinking: bool = True) -> list[dict[str, Any]]:
     """
     from kiss.core.config import DEFAULT_CONFIG
 
-    edits: list[dict[str, Any]] = []
-    if thinking and DEFAULT_CONFIG.reasoning_keep_turns > 0:
-        edits.append({
-            "type": "clear_thinking_20251015",
-            "keep": {"type": "thinking_turns", "value": DEFAULT_CONFIG.reasoning_keep_turns},
-        })
-    if DEFAULT_CONFIG.context_edit_trigger_tokens > 0:
-        trigger = DEFAULT_CONFIG.context_edit_trigger_tokens
-        clearing: dict[str, Any] = {
-            "type": "clear_tool_uses_20250919",
-            "trigger": {"type": "input_tokens", "value": trigger},
-            "keep": {"type": "tool_uses", "value": DEFAULT_CONFIG.context_edit_keep_tool_uses},
-            "clear_tool_inputs": True,
-        }
-        if DEFAULT_CONFIG.context_edit_clear_at_least > 0:
-            clearing["clear_at_least"] = {
-                "type": "input_tokens", "value": DEFAULT_CONFIG.context_edit_clear_at_least,
-            }
-        edits.append(clearing)
-    return edits
+    if not thinking or DEFAULT_CONFIG.reasoning_keep_turns <= 0:
+        return []
+    return [{
+        "type": "clear_thinking_20251015",
+        "keep": {"type": "thinking_turns", "value": DEFAULT_CONFIG.reasoning_keep_turns},
+    }]
 
 
 def applied_context_edits(source: Any) -> list[dict[str, Any]]:
@@ -697,6 +697,29 @@ def _system_param(system_instruction: str, enable_cache: bool) -> str | list[dic
     if tail.strip():
         blocks.append({"type": "text", "text": tail})
     return blocks
+
+
+def _well_formed(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return the request *kwargs* with their text repaired to well-formed Unicode.
+
+    ``json.loads`` turns a ``"\\ud83d"`` escape (a model's own tool
+    argument, a tool result) into a lone surrogate, which no UTF-8
+    request body can carry: the SDK raises ``UnicodeEncodeError`` while
+    building the body, before anything is sent, and would for every
+    later request, since the text stays in the conversation.  The repair
+    is the OpenAI-compatible adapters' (a split pair joined, a lone half
+    as U+FFFD), imported on first use so that a process using Claude
+    alone does not load the OpenAI SDK.
+
+    Args:
+        kwargs: The ``messages`` request keyword arguments.
+
+    Returns:
+        The repaired copy.
+    """
+    openai_adapter = import_provider_module("kiss.core.models.openai_compatible_model")
+    repaired: dict[str, Any] = openai_adapter._well_formed(kwargs)
+    return repaired
 
 
 def _has_cache_breakpoint(kwargs: dict[str, Any]) -> bool:
@@ -885,13 +908,39 @@ def _bedrock_credentials() -> tuple[str, str, str, str]:
     )
 
 
-def _unset_blank_bedrock_token() -> None:
-    """Remove an EMPTY exported ``AWS_BEARER_TOKEN_BEDROCK``; run under the key store's lock."""
+def _key_pair_bedrock_client(
+    credentials: Sequence[str], timeout: httpx2.Timeout
+) -> AnthropicBedrock:
+    """Build the Bedrock client that signs with *credentials*; run under the key store's lock.
+
+    The constructor (and ``with_options``, which builds a copy through
+    it) re-reads AWS_BEARER_TOKEN_BEDROCK from the environment when no
+    api_key is passed and treats an EMPTY exported value as a token:
+    it refuses the key pair next to it and sends ``Authorization:
+    Bearer`` with nothing behind it.  An empty key is unset by KISS's
+    own rules (``DEFAULT_CONFIG`` reads it as ""), so it is unset for
+    the SDK too.  The check, the deletion and the constructor's read run
+    under the key store's lock, which the settings panel holds while it
+    exports a token it just saved: outside it, the empty value could be
+    replaced by that token between the check and the deletion, and the
+    new token deleted with it, or picked up by the constructor.
+    """
     if os.environ.get("AWS_BEARER_TOKEN_BEDROCK") == "":
         del os.environ["AWS_BEARER_TOKEN_BEDROCK"]
+    access_key, secret_key, session_token, region = credentials
+    return AnthropicBedrock(
+        aws_access_key=access_key or None,
+        aws_secret_key=secret_key or None,
+        aws_session_token=session_token or None,
+        aws_region=region,
+        timeout=timeout,
+        max_retries=_MAX_RETRIES,
+    )
 
 
-def _bedrock_client(bearer_token: str, timeout: httpx2.Timeout) -> AnthropicBedrock:
+def _bedrock_client(
+    bearer_token: str, credentials: Sequence[str], timeout: httpx2.Timeout
+) -> AnthropicBedrock:
     """Build the Anthropic SDK's Amazon Bedrock client.
 
     A bearer token (``AWS_BEARER_TOKEN_BEDROCK``) is the client's
@@ -902,40 +951,22 @@ def _bedrock_client(bearer_token: str, timeout: httpx2.Timeout) -> AnthropicBedr
 
     Args:
         bearer_token: The Bedrock API key (bearer token), or ``""``.
+        credentials: The ``(access key, secret key, session token,
+            region)`` the caller read (:func:`_bedrock_credentials`).
         timeout: The per-request httpx timeout.
 
     Returns:
         An ``anthropic.AnthropicBedrock`` instance (SigV4 signing with the
         key pair needs ``boto3``, which the SDK imports at request time).
     """
-    access_key, secret_key, session_token, region = _bedrock_credentials()
     if bearer_token:
         return AnthropicBedrock(
             api_key=bearer_token,
-            aws_region=region,
+            aws_region=credentials[3],
             timeout=timeout,
             max_retries=_MAX_RETRIES,
         )
-    # The constructor (and ``with_options``, which builds a copy through
-    # it) re-reads AWS_BEARER_TOKEN_BEDROCK from the environment when no
-    # api_key is passed and treats an EMPTY exported value as a token:
-    # it refuses the key pair next to it and sends ``Authorization:
-    # Bearer`` with nothing behind it.  An empty key is unset by KISS's
-    # own rules (``DEFAULT_CONFIG`` reads it as ""), so it is unset for
-    # the SDK too.  The check and the deletion run under the key store's
-    # lock, which the settings panel holds while it exports a token it
-    # just saved: read outside it, the empty value could be replaced by
-    # that token between the check and the deletion, and the new token
-    # deleted with it.
-    locked_call(user_config._config_lock, _unset_blank_bedrock_token)
-    return AnthropicBedrock(
-        aws_access_key=access_key or None,
-        aws_secret_key=secret_key or None,
-        aws_session_token=session_token or None,
-        aws_region=region,
-        timeout=timeout,
-        max_retries=_MAX_RETRIES,
-    )
+    return locked_call(user_config._config_lock, _key_pair_bedrock_client, credentials, timeout)
 
 
 class AnthropicModel(Model):
@@ -1049,37 +1080,103 @@ class AnthropicModel(Model):
         thinking, _max_tokens = self._thinking_and_max_tokens()
         return context_edits((thinking or {}).get("type") in ("enabled", "adaptive"))
 
-    def server_side_context_editing(self) -> bool:
-        """Return whether the requests carry the server-side context edits (:func:`context_edits`).
-
-        True on the Anthropic API when the configuration asks for a tool-use
-        clearing, or for a thinking clearing on a request whose thinking is
-        on; never on Bedrock, which rejects the field.
-        """
-        return bool(self._context_edits())
-
     def keeps_reasoning_turns(self) -> bool:
         """Return whether the requests clear the thinking of all but the last turns.
 
-        True when the requests carry the thinking edit: the context edits go
-        out (:meth:`server_side_context_editing`), ``Config.reasoning_keep_turns``
-        is positive and the request's thinking is on.  The agent then starts
-        a new turn every ``Config.reasoning_turn_steps`` steps.
+        True when the requests carry the thinking edit (:meth:`_context_edits`):
+        on the Anthropic API, with ``Config.reasoning_keep_turns`` positive and
+        the request's thinking on.  The agent then starts a new turn every
+        ``Config.reasoning_turn_steps`` steps.
         """
-        return any(edit["type"] == "clear_thinking_20251015" for edit in self._context_edits())
+        return bool(self._context_edits())
 
-    def _build_client(self) -> Anthropic | AnthropicBedrock:
-        """Return a new SDK client for the current key, workspace id and backend."""
+    def clears_tool_uses_in_bulk(self) -> bool:
+        """Return whether the agent clears this model's old tool calls rarely and in bulk.
+
+        True on the Anthropic API while ``Config.context_edit_trigger_tokens``
+        is positive.  The requests read their prefix from the prompt cache,
+        and an edit of an earlier message makes the provider write the rest
+        of the conversation again, so the agent edits the stored conversation
+        only once the context passes the trigger, and then all at once
+        (:meth:`KISSAgent._maybe_clear_tool_uses`).  It does not ask the
+        provider for its ``clear_tool_uses`` edit, whose boundary moved
+        between requests (:func:`context_edits`).  Bedrock, which never had
+        that edit, keeps the thresholds of the Compaction settings.
+        """
+        from kiss.core.config import DEFAULT_CONFIG
+
+        return not self.bedrock and DEFAULT_CONFIG.context_edit_trigger_tokens > 0
+
+    def keeps_newest_reasoning(self) -> bool:
+        """Whether a clear leaves the newest reply's thinking: on a model before Claude 5.1.
+
+        Such a model signs a thinking block over the block alone, and the
+        API requires the blocks of the reply that the pending tool results
+        answer.
+        """
+        return not _checks_thinking_prefix(_claude_profile(self._catalog_model_name))
+
+    def drop_stale_reasoning(self) -> int:
+        """Remove the old thinking blocks with the tool outputs an edit stubbed; return how many.
+
+        The agent calls this after it stubbed old tool outputs and arguments
+        in the conversation, so the reasoning goes in the same re-write of
+        the prompt cache: kept, it is read again on every later call and
+        raises the size the context falls back to after each clear (93k,
+        100k, 139k, 163k in one session of 2026-11-11, which then handed
+        off).  On a model that binds a thinking block to the messages
+        before it (:func:`_checks_thinking_prefix`) every ``thinking`` and
+        ``redacted_thinking`` block goes: the API accepts a conversation
+        with all of them removed and the model reasons afresh on its next
+        turn, whereas one stale block is a 400 on Claude Fable 5.2.  An
+        earlier model keeps the blocks of its newest reply, which the API
+        requires at the start of the assistant message that the pending
+        tool results answer.
+        """
+        replies = [
+            message for message in self.conversation
+            if message.get("role") == "assistant" and isinstance(message.get("content"), list)
+        ]
+        if self.keeps_newest_reasoning():
+            replies = replies[:-1]
+        dropped = 0
+        for message in replies:
+            content = message["content"]
+            kept = [
+                block for block in content
+                if not (isinstance(block, dict)
+                        and block.get("type") in ("thinking", "redacted_thinking"))
+            ]
+            dropped += len(content) - len(kept)
+            message["content"] = kept
+        return dropped
+
+    def _build_client(self, inputs: tuple[str, ...]) -> Anthropic | AnthropicBedrock:
+        """Return a new SDK client for *inputs*, the settings :meth:`initialize` read.
+
+        Its pool can be aborted (:func:`make_pool_abortable`), so the
+        request watchdogs also end a request whose connection is still
+        being set up: its endpoint's address not looked up yet, or its
+        TCP or TLS handshake unanswered.
+
+        Args:
+            inputs: The API key, then the workspace id, or on Bedrock the
+                AWS credentials and region (:func:`_bedrock_credentials`).
+        """
         timeout = httpx2.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT)
+        api_key, *settings = inputs
+        client: Anthropic | AnthropicBedrock
         if self.bedrock:
-            return _bedrock_client(self.api_key, timeout)
-        workspace_id = _workspace_id()
-        return Anthropic(
-            api_key=self.api_key,
-            timeout=timeout,
-            max_retries=_MAX_RETRIES,
-            default_headers={"anthropic-workspace-id": workspace_id} if workspace_id else None,
-        )
+            client = _bedrock_client(api_key, settings, timeout)
+        else:
+            client = Anthropic(
+                api_key=api_key,
+                timeout=timeout,
+                max_retries=_MAX_RETRIES,
+                default_headers={"anthropic-workspace-id": settings[0]} if settings[0] else None,
+            )
+        make_pool_abortable(client._client)
+        return client
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initializes the conversation with an initial user prompt.
@@ -1101,13 +1198,16 @@ class AnthropicModel(Model):
         # daemon startup and ./rsorcar ships to remote installs.
         #
         # The client is built once and reused across runs; see
-        # Model._reuse_client.
+        # Model._reuse_client.  The settings are read once, and the client
+        # built from that very reading: read again by the builder, a save
+        # in between left one setting's client under the other's reuse key.
+        # The key store's lock keeps a save from tearing the AWS fields.
         inputs = (
-            (self.api_key, *_bedrock_credentials())
+            (self.api_key, *locked_call(user_config._config_lock, _bedrock_credentials))
             if self.bedrock
             else (self.api_key, _workspace_id())
         )
-        self._reuse_client(inputs, self._build_client)
+        self._reuse_client(inputs, functools.partial(self._build_client, inputs))
         content: str | list[dict[str, Any]] = prompt
         if attachments:
             blocks = _attachments_to_blocks(attachments)
@@ -1323,9 +1423,8 @@ class AnthropicModel(Model):
 
         if "thinking" in kwargs:
             _add_beta(kwargs, "interleaved-thinking-2025-05-14")
-        # The keep-K policy, applied by the server (a client-side edit of an
-        # earlier message would invalidate every later thinking block on
-        # Claude 5.1 and later).  Bedrock rejects the field.
+        # The keep-K reasoning policy, applied by the server.  Bedrock
+        # rejects the field.
         edits = self._context_edits()
         if edits:
             _add_beta(kwargs, CONTEXT_MANAGEMENT_BETA)
@@ -1384,20 +1483,6 @@ class AnthropicModel(Model):
 
         return kwargs
 
-    def _append_assistant_message(self, blocks: list[dict[str, Any]], content: str) -> None:
-        """Append the assistant response to the conversation when non-empty.
-
-        Prefers the normalized *blocks* over the plain *content* string and
-        skips the append entirely when both are empty.
-
-        Args:
-            blocks: Normalized content blocks from the response.
-            content: Text extracted from the response blocks.
-        """
-        msg_content: list[dict[str, Any]] | str = blocks if blocks else content
-        if msg_content:
-            self.conversation.append({"role": "assistant", "content": msg_content})
-
     def _create_message(self, kwargs: dict[str, Any]) -> Any:
         """Create a message, streaming tokens to the callback when set.
 
@@ -1445,20 +1530,24 @@ class AnthropicModel(Model):
         )
         stream = None
         try:
-            # `get_final_message()` only drains the already-exhausted
-            # iterator and returns the in-memory snapshot, so it is safe
-            # after the watchdog wrapper has closed the response.
             with contextlib.ExitStack() as stack:
                 with RequestAbortWatchdog(
                     self.client._client,
                     headers_due - time.monotonic(),
                     "anthropic-header-abort-watchdog",
                 ):
-                    stream = stack.enter_context(self.client.messages.stream(**kwargs))
+                    try:
+                        stream = stack.enter_context(self.client.messages.stream(**kwargs))
+                    except UnicodeEncodeError:
+                        # The body could not be encoded, so nothing was
+                        # sent (see _well_formed).
+                        stream = stack.enter_context(
+                            self.client.messages.stream(**_well_formed(kwargs))
+                        )
                 events = stack.enter_context(
                     self._watched_events(stream, "anthropic-stream-abort-watchdog")
                 )
-                saw_message_stop = False
+                final: Any = None
                 raw_tool_inputs: dict[int, str] = {}
                 for event in events:
                     # The SDK accumulates message_start / message_delta
@@ -1466,8 +1555,19 @@ class AnthropicModel(Model):
                     # if the stream fails before message_stop.
                     self._rejected_response = stream.current_message_snapshot
                     if event.type == "message_stop":
-                        saw_message_stop = True
-                    elif event.type == "message_delta":
+                        # The terminal event: the snapshot is the whole
+                        # message, so nothing after it is read.  Reading
+                        # on to the end of the body let a connection that
+                        # went silent here trip the stall watchdog, and
+                        # the retry billed the finished turn again.
+                        # The OpenAI transports stop at their terminal
+                        # event in the same way.  The price: a body not
+                        # read to its end closes the connection instead
+                        # of returning it to the pool, so the next
+                        # request opens a new one.
+                        final = stream.current_message_snapshot
+                        break
+                    if event.type == "message_delta":
                         # The server's context edits ride on the final delta.
                         self.last_context_edits = applied_context_edits(event)
                     elif (
@@ -1494,7 +1594,7 @@ class AnthropicModel(Model):
                             self._invoke_token_callback(getattr(delta, "text", ""))
                     elif event.type == "content_block_stop":
                         self._close_thinking_if_open()
-                if not saw_message_stop:
+                if final is None:
                     # The body ended (EOF) before the message's terminal
                     # event: a gateway can close the stream cleanly before
                     # the model is done, and the SDK's snapshot then holds
@@ -1508,7 +1608,6 @@ class AnthropicModel(Model):
                         "Anthropic stream ended without a message_stop event, so its "
                         "text and any tool-call arguments may be incomplete."
                     )
-                final = stream.get_final_message()
                 _check_streamed_tool_inputs(raw_tool_inputs, final, self.model_name)
                 self._rejected_response = None
                 return final
@@ -1596,7 +1695,11 @@ class AnthropicModel(Model):
 
         stop_reason = getattr(response, "stop_reason", None)
         raw_blocks = list(getattr(response, "content", None) or [])
-        if stop_reason == "max_tokens" and raw_blocks and _is_tool_use(raw_blocks[-1]):
+        if (
+            stop_reason == "max_tokens"
+            and raw_blocks
+            and _get_attr_or_key(raw_blocks[-1], "type") == "tool_use"
+        ):
             # The cap stopped generation inside the last block, whose
             # ``input`` is a partial parse; every tool_use block before it
             # was completed before the model moved on.  Decided on the raw
@@ -1636,7 +1739,8 @@ class AnthropicModel(Model):
                     }
                 )
 
-        self._append_assistant_message(blocks, content)
+        if blocks:
+            self.conversation.append({"role": "assistant", "content": blocks})
         return function_calls, content, response
 
     def keep_prompt_cache_warm(
@@ -1688,6 +1792,18 @@ class AnthropicModel(Model):
         thinking = kwargs.get("thinking") or {}
         budget = thinking.get("budget_tokens", 0) if thinking.get("type") == "enabled" else 0
         kwargs["max_tokens"] = max(KEEP_ALIVE_MAX_TOKENS, budget + 1)
+        # ``output_format`` (a type the SDK parses the reply into) is a
+        # parameter of ``messages.stream`` only, which sends it as
+        # ``output_config.format``.  ``messages.create`` has no such
+        # parameter (TypeError on every ping), and the format is part of
+        # what the cache is keyed on, so the ping sends the same field.
+        output_format = kwargs.pop("output_format", None)
+        if output_format is not None:
+            schema = transform_schema(TypeAdapter(output_format).json_schema())
+            kwargs["output_config"] = {
+                **kwargs.get("output_config", {}),
+                "format": {"type": "json_schema", "schema": schema},
+            }
         # The ping's own bound replaces a per-request ``timeout`` the
         # model_config may carry (the SDK accepts that key, so it survives
         # into ``kwargs``): passed as a second keyword it would raise
@@ -1700,10 +1816,14 @@ class AnthropicModel(Model):
         # when the task is stopped (the keep-alive thread carries the
         # task's stop event).  Nothing else sends through the client while
         # a ping is in flight: the agent thread is inside the tool call.
+        create = self.client.with_options(max_retries=0).messages.create
         with RequestAbortWatchdog(
             self.client._client, KEEP_ALIVE_TIMEOUT_SECONDS, "anthropic-keepalive-abort-watchdog"
         ):
-            return self.client.with_options(max_retries=0).messages.create(**kwargs)
+            try:
+                return create(**kwargs)
+            except UnicodeEncodeError:  # nothing was sent, as in _create_message
+                return create(**_well_formed(kwargs))
 
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]

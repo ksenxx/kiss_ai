@@ -13,9 +13,8 @@
 //  - `tabs_state` reconciliation adopts every registry tab, and a
 //    snapshot without a tab drops it (closed elsewhere) while the chat
 //    on screen stays;
-//  - sub-agent tabs: an own chat's sub-agent gets an internal tab, a
-//    foreign chat's sub-agent is ignored, a parentless spawn (a
-//    run_agent sub-task) is adopted.
+//  - sub-agent tabs: an own chat's sub-agent gets an internal tab and a
+//    parentless spawn (a run_agent sub-task) is adopted.
 //
 // The old host-side messages this suite also covered (`panelTitle`,
 // `openChatFromHistory`, `openSettings`, the editor-tabs toggle) were

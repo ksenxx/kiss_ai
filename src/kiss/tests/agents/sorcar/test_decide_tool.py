@@ -19,9 +19,10 @@ from __future__ import annotations
 import json
 import os
 import threading
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
@@ -39,7 +40,9 @@ from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.decisions_model import DecisionsModel
 from kiss.core.models.model_info import calculate_cost, model
+from kiss.tests.lock_injection import inject
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
+from kiss.tests.server.pause import Pause
 
 LIVE_ANSWERS: dict[str, Any] = {
     "is_bug": {"type": "noul", "noul": 0.97},
@@ -85,6 +88,9 @@ class _DecisionsHandler(BaseHTTPRequestHandler):
     """A ``/alpha/decisions`` endpoint; the ``state`` string picks the scenario."""
 
     requests: list[dict[str, Any]] = []
+    #: A ``held-charged:<cost>`` request is answered once this is set (15 s at most);
+    #: :func:`_decisions_server` sets it, a test clears it to hold a reply.
+    release = threading.Event()
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, D102
         return
@@ -103,6 +109,11 @@ class _DecisionsHandler(BaseHTTPRequestHandler):
                 "model": "typesafe/jev-1.13-20260917",
                 "usage": {"input_tokens": 123, "output_tokens": 0, "cost": 0.0123},
             })
+        elif body.get("state", "").startswith("held-charged:"):
+            _DecisionsHandler.release.wait(15)
+            cost = float(body["state"].split(":")[1])
+            usage = {"input_tokens": int(100 * cost), "output_tokens": 0, "cost": cost}
+            self._send(200, {"model": "typesafe/jev-1.13-20260917", "usage": usage})
         else:
             self._send(
                 200,
@@ -127,13 +138,15 @@ class _DecisionsHandler(BaseHTTPRequestHandler):
 @contextmanager
 def _decisions_server() -> Iterator[str]:
     """Serve :class:`_DecisionsHandler` on a free port; yield the API root."""
-    server = HTTPServer(("127.0.0.1", 0), _DecisionsHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _DecisionsHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     _DecisionsHandler.requests = []
+    _DecisionsHandler.release.set()
     try:
         yield f"http://127.0.0.1:{server.server_port}/api"
     finally:
+        _DecisionsHandler.release.set()  # a reply a failed test left held
         server.shutdown()
 
 
@@ -185,6 +198,61 @@ def test_parse_questions_choice_list_becomes_id_mapping() -> None:
     assert parsed["kind"]["criteria"] == {"a": "a", "b": "b"}
 
 
+def test_questions_short_of_a_closing_brace_are_refused_not_completed() -> None:
+    """A text short of a closing brace is refused as written, before any request.
+
+    Review of 2026-11-11 (S6, finding 1): completing such a text with
+    braces at its end nested the second question of ``interior`` in the
+    first, and the first was asked alone.  Each of the 33 ``decide``
+    calls the task history shows refused lacked one closing brace at its
+    end: the refusal now says so, and a question nested in another one
+    (``interior`` with the brace added at its end) is refused as well.
+    So is a text nested past the JSON decoder's depth.
+    """
+    interior = ('{"first":{"type":"noul","instructions":"First?","second":'
+                '{"type":"noul","instructions":"Second?"}}')
+    ends_open = (". The text ends there, before its JSON does: a closing brace is probably "
+                 "missing (every question, every criteria object and the questions object "
+                 "itself needs its own).")
+    as_object: Any = json.loads(QUESTIONS_JSON)
+    with _decisions_server() as base_url:
+        decide = make_decide_tool(None, model_config={"base_url": base_url, "api_key": "test-key"})
+        for text in (interior, QUESTIONS_JSON[:-1], QUESTIONS_JSON[:-2], QUESTIONS_JSON[:-3]):
+            assert decide(STATE, text) == (
+                "Error: questions is not valid JSON: Expecting ',' delimiter: line 1 column "
+                f"{len(text) + 1} (char {len(text)}){ends_open}")
+        assert decide(STATE, interior + "}") == (
+            "Error: Question 'first' takes only 'type', 'instructions' and 'criteria', not "
+            "'second' (another question nested in it? Then the closing brace of 'first' is "
+            "missing before it)")
+        assert decide(STATE, as_object) == (
+            "Error: questions is not valid JSON: the JSON object must be str, bytes or "
+            "bytearray, not dict")
+        # Text nested past the decoder's depth: its RecursionError is no ValueError and
+        # used to escape the tool.
+        deep = "[" * 100_000
+        for text in (deep, '{"q": {"type": "noul", "instructions": "x", "criteria": ' + deep):
+            out = decide(STATE, text)
+            assert out.startswith("Error: questions is not valid JSON: ")
+            assert out.endswith(" while decoding a JSON array from a unicode string")
+        assert _DecisionsHandler.requests == []
+    # A fault before the end is shown by the text it follows; one at the very start of the
+    # text by the decoder's message alone.
+    for text, fault in (
+        ('{"q": {"type": "noul" "instructions": "x"}}',
+         "Expecting ',' delimiter: line 1 column 23 (char 22). Decoding stopped after "
+         "'{\"q\": {\"type\": \"noul\" '."),
+        ('{"q": {"type": "noul", "instructions": "x"}}}',
+         "Extra data: line 1 column 45 (char 44). Decoding stopped after "
+         "': {\"type\": \"noul\", \"instructions\": \"x\"}}'."),
+        ("not json", "Expecting value: line 1 column 1 (char 0)"),
+        ("  ", "Expecting value: line 1 column 3 (char 2)"),
+    ):
+        with pytest.raises(KISSError) as excinfo:
+            parse_questions(text)
+        assert excinfo.value.args[0] == f"questions is not valid JSON: {fault}"
+
+
 @pytest.mark.parametrize(
     ("questions", "fragment"),
     [
@@ -194,6 +262,7 @@ def test_parse_questions_choice_list_becomes_id_mapping() -> None:
         ('{"q": "noul"}', "must be a JSON object"),
         ('{"q": {"type": "yesno", "instructions": "x"}}', "expected one of noul, choice, score"),
         ('{"q": {"instructions": "x"}}', "expected one of noul, choice, score"),
+        ('{"q": {"kind": "noul", "instructions": "x", "note": 1}}', "not 'kind', 'note' ("),
         ('{"q": {"type": "noul"}}', "non-empty 'instructions'"),
         ('{"q": {"type": "noul", "instructions": "  "}}', "non-empty 'instructions'"),
         ('{"q": {"type": "choice", "instructions": "x"}}', "choice question 'q' needs"),
@@ -385,6 +454,87 @@ def test_decide_tool_rejects_malformed_questions_before_any_request() -> None:
         result = decide(STATE, '{"q": {"type": "maybe", "instructions": "x"}}')
     assert result.startswith("Error: Question 'q' has type 'maybe'")
     assert _DecisionsHandler.requests == []
+
+
+class _Spend:
+    """An ``on_usage`` callback that keeps what it was called with."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[float, int]] = []
+
+    def __call__(self, cost: float, tokens: int) -> None:
+        self.calls.append((cost, tokens))
+
+
+def _call(
+    decide: Callable[[str, str], str], state: str, replies: list[str], entered: threading.Event
+) -> None:
+    """Thread target: one call of the tool, its reply (or the Stop that ended it) kept."""
+    try:
+        entered.set()
+        replies.append(decide(state, QUESTIONS_JSON))
+    except KeyboardInterrupt:
+        replies.append("stopped")
+
+
+def _requests(count: int, seconds: float) -> bool:
+    """Whether the server has received *count* requests, waiting *seconds* at most."""
+    deadline = time.monotonic() + seconds
+    while len(_DecisionsHandler.requests) < count and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return len(_DecisionsHandler.requests) >= count
+
+
+def _any_entry(frame_locals: dict[str, Any]) -> bool:
+    """A :class:`Pause` predicate: hold the first thread to enter, whatever its locals."""
+    return True
+
+
+def test_concurrent_calls_of_one_tool_each_keep_their_own_charged_reply() -> None:
+    """Audit 2026-11-10 (B/S3-F3): the tool's one model keeps one charged-but-rejected reply
+    at a time, and of two calls at once one could overwrite the other's before it was read
+    back, losing its cost.  The calls of one tool take turns."""
+    spend, entered = _Spend(), threading.Event()
+    replies: list[str] = []
+    stopped: list[str] = []
+    with _decisions_server() as base_url:
+        decide = make_decide_tool(
+            None, model_config={"base_url": base_url, "api_key": "test-key"}, on_usage=spend
+        )
+        # two charged replies without answers, the first call held as it is about to read its
+        # own back: the second waits for it instead of putting its reply in the same place
+        one, two = (
+            threading.Thread(target=_call, args=(decide, f"held-charged:{cost}", replies, entered))
+            for cost in (1, 2)
+        )
+        with Pause(DecisionsModel.take_partial_usage_response.__code__, _any_entry) as pause:
+            one.start()
+            assert pause.paused.wait(15)
+            two.start()
+            two.join(2)
+        one.join(15)
+        two.join(15)
+        assert [reply[:6] for reply in replies] == ["Error:"] * 2
+        assert sorted(spend.calls) == [(1.0, 100), (2.0, 200)]
+        # while a call is unanswered, malformed questions are refused at once and charge
+        # nothing, and a Stop reaches a call waiting for its turn, which then holds nothing
+        _DecisionsHandler.release.clear()
+        first = threading.Thread(target=_call, args=(decide, "held-charged:4", replies, entered))
+        first.start()
+        assert _requests(3, 15)
+        assert decide(STATE, "not json").startswith("Error:") and len(spend.calls) == 2
+        entered.clear()
+        waiter = threading.Thread(target=_call, args=(decide, STATE, stopped, entered))
+        waiter.start()
+        assert entered.wait(15)
+        time.sleep(0.2)  # time to reach the wait for its turn; the Stop is caught wherever it lands
+        inject(waiter)
+        waiter.join(15)
+        _DecisionsHandler.release.set()
+        first.join(15)
+        assert stopped == ["stopped"] and decide(STATE, QUESTIONS_JSON).startswith("{")
+    assert sorted(spend.calls)[0] == (1.722e-05, 481) and sorted(spend.calls)[3] == (4.0, 400)
+    assert len(spend.calls) == 4
 
 
 def test_make_decide_tool_refuses_non_decisions_model() -> None:

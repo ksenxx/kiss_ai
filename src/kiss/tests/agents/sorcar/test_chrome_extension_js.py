@@ -5,7 +5,11 @@ The sources under test are extracted from the shipped extension
 (``chrome_extension/background.js``), never copied, so this suite breaks
 when the extension's behavior changes. The background.js template literals
 are unescaped the way V8 unescapes them before the code reaches the page
-(``\\\\`` -> ``\\``; the sources use no other escapes).
+(``\\\\`` -> ``\\``; the sources use no other escapes).  The snapshot is
+called the way the worker calls it, with the id of the bridge's command
+(the test page counts the calls, as the bridge numbers its commands); the
+name of the connection, the last argument of all three sources, is left
+out: these tests have a single connection.
 """
 from __future__ import annotations
 
@@ -46,13 +50,16 @@ TEST_PAGE = """<!doctype html><html><head><title>Snapshot Test Page</title></hea
 
 
 def _extract(name: str) -> str:
-    """Pull one JS source constant out of background.js, V8-unescaped."""
+    """Pull one JS source constant out of background.js, V8-unescaped, its shared source inlined."""
     match = re.search(rf"const {name} = `([^`]+)`;", BACKGROUND_JS.read_text(encoding="utf-8"))
     assert match, f"{name} not found in background.js"
-    return match.group(1).replace("\\\\", "\\")
+    source = match.group(1).replace("\\\\", "\\")
+    if "${KISS_TARGET_JS}" in source:
+        source = source.replace("${KISS_TARGET_JS}", _extract("KISS_TARGET_JS"))
+    return source
 
 
-SNAPSHOT_JS = _extract("KISS_SNAPSHOT_JS")
+SNAPSHOT_JS = f"({_extract('KISS_SNAPSHOT_JS')})(window.kissId = (window.kissId || 0) + 1)"
 CLICK_JS = _extract("KISS_CLICK_JS")
 TYPE_JS = _extract("KISS_TYPE_JS")
 
@@ -287,11 +294,91 @@ def test_type_text_sets_value_and_fires_framework_events(page) -> None:
 
 
 def test_type_text_replaces_contenteditable(page) -> None:
+    page.evaluate(
+        """window.__edits = [];
+        document.querySelector('[contenteditable]').addEventListener(
+          'input', (e) => window.__edits.push(e.target.textContent));"""
+    )
     snap = page.evaluate(SNAPSHOT_JS)
     uid = _uid_of(snap, "edit me")
     page.evaluate(f"({TYPE_JS})({uid}, {json.dumps('replaced text')})")
     actual = page.evaluate("document.querySelector('[contenteditable]').textContent")
     assert actual == "replaced text"
+    # An empty text clears the editor, and its input listeners hear of that
+    # too (an editor's model is kept by them): each replacement is one edit.
+    assert page.evaluate(f"({TYPE_JS})({uid}, '')") == f"typed 0 chars into [{uid}] <div>"
+    assert page.evaluate("document.querySelector('[contenteditable]').textContent") == ""
+    assert page.evaluate("window.__edits") == ["replaced text", ""]
+
+
+def test_native_controls_are_listed_whatever_their_tabindex_or_role(page) -> None:
+    """A button or field stays clickable and editable with ``tabindex=-1`` or a layout role.
+
+    A negative tabindex only takes an element out of the Tab order (every
+    button but one of a roving-tabindex toolbar has it), and a date
+    picker's days are ``<button role="gridcell">``: neither makes a
+    native control something the agent cannot press, nor an element the
+    page gave a click handler (a table's clickable row).
+    """
+    page.evaluate(
+        """const box = document.createElement('div');
+        box.id = 'native-box';
+        box.innerHTML = '<button tabindex="-1">Roving toolbar button</button>'
+          + '<input tabindex="-1" placeholder="Unfocusable field">'
+          + '<button role="gridcell">Day fourteen</button>'
+          + '<div role="row" onclick="void 0">Clickable row</div>'
+          + '<div tabindex="-1" role="dialog">Dialog panel</div>';
+        document.body.appendChild(box);"""
+    )
+    snap = page.evaluate(SNAPSHOT_JS)
+    page.evaluate("document.getElementById('native-box').remove()")
+    assert '<button> "Roving toolbar button"' in snap
+    assert '<input type=text> "Unfocusable field"' in snap
+    assert '<button role=gridcell> "Day fourteen"' in snap
+    assert '<div role=row> "Clickable row"' in snap
+    assert "Dialog panel" not in snap
+
+
+def test_every_editing_host_is_listed_and_typed_into(page) -> None:
+    """``contenteditable`` with no value or ``plaintext-only`` is an editor like ``true``."""
+    page.evaluate(
+        """const box = document.createElement('div');
+        box.id = 'editors';
+        box.innerHTML = '<div contenteditable>Blank attribute editor</div>'
+          + '<div contenteditable="plaintext-only" id="plain">Plaintext editor</div>'
+          + '<div contenteditable="true"><input id="nested" placeholder="Nested field"'
+          + ' value="old value"></div>'
+          + '<div contenteditable="false">Read-only block</div>';
+        document.body.appendChild(box);"""
+    )
+    snap = page.evaluate(SNAPSHOT_JS)
+    assert '<div> "Blank attribute editor"' in snap
+    assert "Read-only block" not in snap
+    uid = _uid_of(snap, "Plaintext editor")
+    page.evaluate(f"({TYPE_JS})({uid}, {json.dumps('typed plainly')})")
+    assert page.evaluate("document.getElementById('plain').textContent") == "typed plainly"
+    # A field inside an editor is a field: its value is replaced, not typed into.
+    page.evaluate(f"({TYPE_JS})({_uid_of(snap, 'Nested field')}, {json.dumps('new value')})")
+    assert page.evaluate("document.getElementById('nested').value") == "new value"
+    page.evaluate("document.getElementById('editors').remove()")
+
+
+def test_click_reports_an_element_whose_value_is_a_number(page) -> None:
+    """The click's report does not fail once the click is made (``progress.value`` is a number)."""
+    page.evaluate(
+        """const bar = document.createElement('progress');
+        bar.id = 'bar';
+        bar.value = 0.5;
+        bar.setAttribute('onclick', '');  // what makes the snapshot list it
+        window.__bar_clicks = 0;
+        bar.addEventListener('click', () => { window.__bar_clicks += 1; });
+        document.body.appendChild(bar);"""
+    )
+    snap = page.evaluate(SNAPSHOT_JS)
+    uid = _uid_of(snap, "<progress>")
+    assert page.evaluate(f"({CLICK_JS})({uid})") == f'clicked [{uid}] <progress> "0.5"'
+    assert page.evaluate("window.__bar_clicks") == 1
+    page.evaluate("document.getElementById('bar').remove()")
 
 
 def test_type_text_rejects_non_text_elements(page) -> None:
@@ -308,15 +395,25 @@ def test_shadow_dom_elements_are_listed_clicked_and_typed(page) -> None:
         document.body.appendChild(host);
         const root = host.attachShadow({ mode: 'open' });
         root.innerHTML = '<button id="sh">Shadow action</button>'
-          + '<input type="text" placeholder="Shadow field">';
+          + '<input type="text" placeholder="Shadow field">'
+          + '<div contenteditable="true">Shadow editor</div>';
         window.__shadow_clicked = false;
         root.getElementById('sh').addEventListener('click', () => {
           window.__shadow_clicked = true;
-        });"""
+        });
+        // What a framework rooted outside the component hears: a person's
+        // pointer, mouse and input events all cross the shadow boundary.
+        window.__outside = [];
+        for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'input']) {
+          document.addEventListener(t, (e) => {
+            if (e.target === host) window.__outside.push(t);
+          });
+        }"""
     )
     snap = page.evaluate(SNAPSHOT_JS)
     click_uid = _uid_of(snap, "Shadow action")
     type_uid = _uid_of(snap, "Shadow field")
+    editor_uid = _uid_of(snap, "Shadow editor")
     page.evaluate(f"({CLICK_JS})({click_uid})")
     assert page.evaluate("window.__shadow_clicked") is True
     page.evaluate(f"({TYPE_JS})({type_uid}, {json.dumps('deep text')})")
@@ -324,3 +421,11 @@ def test_shadow_dom_elements_are_listed_clicked_and_typed(page) -> None:
         "document.getElementById('shadow-host').shadowRoot.querySelector('input').value"
     )
     assert value == "deep text"
+    assert page.evaluate("window.__outside") == [
+        "pointerdown", "mousedown", "pointerup", "mouseup", "click", "input",
+    ]
+    page.evaluate(f"({TYPE_JS})({editor_uid}, {json.dumps('deep edit')})")
+    edited = page.evaluate(
+        "document.getElementById('shadow-host').shadowRoot.querySelector('div').textContent"
+    )
+    assert edited == "deep edit"

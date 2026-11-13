@@ -56,11 +56,8 @@ from kiss.core import user_config
 from kiss.core.processes import pid_alive
 from kiss.server import agent_state, autocomplete
 from kiss.server.server import AgentServer
-from kiss.server.web_server import (
-    RemoteAccessServer,
-    _generate_self_signed_cert,
-)
-from kiss.tests.local_ws import open_local_connection
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.conftest import EntryGate, find_free_port
 
@@ -125,10 +122,9 @@ class _DaemonHarness(IsolatedAsyncioTestCase):
         )
         self._saved_budget = config_module.DEFAULT_CONFIG.max_budget
 
-        self._saved_db = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved_db = (th._DB_PATH, th._KISS_DIR)
         th._KISS_DIR = self.kiss_home
         th._DB_PATH = self.kiss_home / "history.db"
-        th._db_conn = None
 
         certfile = self.tmpdir / "cert.pem"
         keyfile = self.tmpdir / "key.pem"
@@ -149,9 +145,8 @@ class _DaemonHarness(IsolatedAsyncioTestCase):
             await self.server.stop_async()
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
-        if th._db_conn is not None:
-            th._db_conn.close()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_db
+        th._close_thread_db()
+        th._DB_PATH, th._KISS_DIR = self._saved_db
         config_module.DEFAULT_CONFIG.max_budget = self._saved_budget
         user_config.CONFIG_DIR, user_config.CONFIG_PATH = self._saved_cfg
         if self._saved_env is None:

@@ -10,8 +10,8 @@ alone, the agent reads the prompt as under-specified and asks what to
 do with the file (the system prompt tells it to ask rather than guess),
 so :func:`with_open_directive` appends an explicit instruction to such
 a prompt: open the path with the platform opener and stop.  The
-task-history row, the tab title and the frequent-tasks table still
-show the raw path the user typed, because
+task-history row and the tab title still show the raw path the user
+typed, because
 :class:`~kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent` records
 those before the directive is added.  A run under a custom base system
 prompt (a SEA with its own ``system_prompt()``, such as the
@@ -33,8 +33,9 @@ def bare_path(prompt: str, work_dir: str) -> Path | None:
     The prompt qualifies when, after stripping surrounding whitespace
     and one pair of matching quotes, it names an existing file or
     directory: ``~`` is expanded and a relative path is resolved
-    against *work_dir*.  Existence is the whole test — an instruction,
-    a paragraph or a mistyped path is not a path on disk.
+    against *work_dir*.  Whitespace inside the quotes is part of the
+    name.  Existence is the whole test — an instruction, a paragraph
+    or a mistyped path is not a path on disk.
 
     Args:
         prompt: The raw task text as the user submitted it.
@@ -45,7 +46,7 @@ def bare_path(prompt: str, work_dir: str) -> Path | None:
     """
     text = prompt.strip()
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
-        text = text[1:-1].strip()
+        text = text[1:-1]
     if not text:
         return None
     try:
@@ -54,6 +55,8 @@ def bare_path(prompt: str, work_dir: str) -> Path | None:
             return None
         return path.resolve()
     except RuntimeError:  # ``~nosuchuser/...``: no home directory to expand
+        return None
+    except ValueError:  # a NUL byte in the ``~user`` part: the user lookup rejects the name
         return None
     except OSError:  # Python 3.13 ``exists`` raises on over-long or unreadable paths
         return None

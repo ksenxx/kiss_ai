@@ -52,6 +52,7 @@ from playwright.sync_api import sync_playwright
 
 from kiss.agents.sorcar import persistence as th
 from kiss.server.server import AgentServer
+from kiss.tests.persistence_helpers import close_db
 
 _MEDIA_DIR = (
     Path(__file__).resolve().parents[3]
@@ -319,7 +320,7 @@ def _history_event_for_persisted_result(result: str) -> dict[str, Any]:
     """
     tmp = tempfile.mkdtemp(prefix="kiss-history-cancel-test-")
     orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
-    th._close_db()
+    close_db()
     th._DB_PATH = Path(tmp) / "history.db"  # type: ignore[attr-defined]
     try:
         server = AgentServer()
@@ -345,7 +346,7 @@ def _history_event_for_persisted_result(result: str) -> dict[str, Any]:
                     return dict(event)
         raise AssertionError("getHistory did not broadcast a history event")
     finally:
-        th._close_db()
+        close_db()
         th._DB_PATH = orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(tmp, ignore_errors=True)
 

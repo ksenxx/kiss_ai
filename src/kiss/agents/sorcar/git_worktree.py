@@ -11,16 +11,15 @@ Provides :class:`GitWorktree` (frozen dataclass for worktree state),
 
 from __future__ import annotations
 
+import _thread
 import contextlib
 import enum
-import errno
-import fnmatch
+import hashlib
 import logging
 import os
 import re
 import shlex
 import shutil
-import stat
 import subprocess
 import tempfile
 import threading
@@ -28,7 +27,7 @@ import time
 import urllib.parse
 import uuid
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,10 +38,12 @@ from kiss.core.html_to_markdown import html_to_markdown
 from kiss.core.kiss_error import KISSError
 from kiss.core.locked import _race_delay, locked_call
 from kiss.core.processes import (
+    _STOP_POLL_SECONDS,
+    IS_WINDOWS,
     pid_alive,
-    popen_process_group,
     process_identity,
     run_capped,
+    start_process_group,
     terminate_process_group,
 )
 
@@ -56,22 +57,21 @@ logger = logging.getLogger(__name__)
 PROCESS_LOCK_TIMEOUT_SECONDS = 300.0
 
 
-def _lock_across_processes(handle: IO[Any], timeout: float) -> None:
-    """Take the flock on *handle*, waiting at most *timeout* seconds.
+def _lock_across_processes(handle: IO[Any]) -> None:
+    """Take the flock on *handle*, waiting at most :data:`PROCESS_LOCK_TIMEOUT_SECONDS`.
 
     The bounded wait polls (see :func:`kiss.core.file_lock.lock_exclusive`),
     so an injected Stop reaches the waiting task thread too.
 
     Args:
         handle: The open lock file.
-        timeout: The most seconds to wait for another process.
 
     Raises:
-        KISSError: When another process still holds the lock after
-            *timeout* seconds.
+        KISSError: When another process still holds the lock after the
+            bound.
     """
     try:
-        lock_exclusive(handle, timeout=timeout)
+        lock_exclusive(handle, timeout=PROCESS_LOCK_TIMEOUT_SECONDS)
     except TimeoutError as exc:
         raise KISSError(
             f"{handle.name}: {exc}; another Sorcar process (a daemon or a CLI run)"
@@ -98,7 +98,7 @@ def _file_lock(handle: IO[Any]) -> Iterator[None]:
     Raises:
         KISSError: When another process keeps the lock past the bound.
     """
-    _lock_across_processes(handle, PROCESS_LOCK_TIMEOUT_SECONDS)
+    _lock_across_processes(handle)
     try:
         yield
     finally:
@@ -163,9 +163,7 @@ def _reclaim_lock_held(held: dict[str, weakref.ref[_ReclaimLockToken]], key: str
 
 
 @contextmanager
-def _reclaim_process_lock(
-    repo: Path, timeout: float = PROCESS_LOCK_TIMEOUT_SECONDS,
-) -> Iterator[None]:
+def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     """Hold the cross-process orphan-reclaim lock for *repo*.
 
     ``repo_lock`` is a ``threading.RLock`` — it serialises reclaim
@@ -201,14 +199,13 @@ def _reclaim_process_lock(
 
     Args:
         repo: Git repo root path.
-        timeout: The most seconds to wait for another process's hold;
-            the default is the production bound.
 
     Yields:
         Nothing; the lock is held for the duration of the block.
 
     Raises:
-        KISSError: When another process keeps the lock past *timeout*.
+        KISSError: When another process keeps the lock past
+            :data:`PROCESS_LOCK_TIMEOUT_SECONDS`.
     """
     # The outer hold is registered under the repo path as well as the
     # lock path, so the nested takes of a setup (reclaim, sweep, create)
@@ -242,7 +239,7 @@ def _reclaim_process_lock(
     # both together; running the finally withdraws both in order.
     token = _ReclaimLockToken(handle)
     try:
-        _lock_across_processes(handle, timeout)
+        _lock_across_processes(handle)
         held[lock_path] = held[repo_key] = weakref.ref(token)
         yield
     finally:
@@ -430,13 +427,71 @@ def repo_lock(repo: Path) -> threading.RLock:
     (``_do_merge``, ``discard``) that re-acquire the same lock on the
     same thread.  Cross-thread acquisitions still block as expected.
 
+    A repository has one lock, whichever of its checkouts *repo* is
+    (the main one, a linked worktree, the git dir itself, a path
+    below one): see :func:`_repo_lock_key`.
+
     Args:
-        repo: Git repo root path.
+        repo: A checkout of the repository.
 
     Returns:
-        A :class:`threading.RLock` specific to the resolved repo path.
+        The :class:`threading.RLock` of that repository.
     """
-    return locked_call(_repo_locks_guard, _repo_lock_for, str(repo.resolve()))
+    return locked_call(_repo_locks_guard, _repo_lock_for, _repo_lock_key(repo))
+
+
+def repo_locks(repos: Iterable[Path]) -> list[threading.RLock]:
+    """Return the :func:`repo_lock` of each repository in *repos*, in the order to take them.
+
+    A thread that holds several repositories' locks at once takes them
+    in this order, the one of the names they go by
+    (:func:`_repo_lock_key`), and each of them once.  The order of the
+    checkout paths is not one: two checkouts of a repository share its
+    lock, so two threads that reach the same two repositories through
+    differently named checkouts would take the two locks in opposite
+    orders, and each would wait for the one the other holds.
+
+    Args:
+        repos: A checkout of each repository; several of one are one lock.
+
+    Returns:
+        The locks, to be acquired first to last.
+    """
+    keys = sorted({_repo_lock_key(repo) for repo in repos})
+    return [locked_call(_repo_locks_guard, _repo_lock_for, key) for key in keys]
+
+
+def _repo_lock_key(checkout: Path) -> str:
+    """Name the repository *checkout* is in by the git dir its checkouts share.
+
+    Read from the files git itself goes by (``.git``, ``HEAD``,
+    ``commondir``, ``objects``), upwards from *checkout* as git looks,
+    and not asked of git: the name must not change while a lock is
+    held, and git's answer can (a config it cannot parse fails every
+    command).  A path in no repository names itself.
+    """
+    path = checkout.resolve()
+    for directory in (path, *path.parents):
+        # A checkout's git dir is ``.git``, or what a ``.git`` file points to (a linked
+        # worktree's, a git dir kept apart); *directory* may be a git dir itself.
+        pointer = (_path_in(directory / ".git") or ".git").removeprefix("gitdir: ")
+        for git_dir in (directory / pointer, directory):
+            # A linked worktree's git dir names the one all checkouts share.
+            shared = git_dir / (_path_in(git_dir / "commondir") or ".")
+            if os.path.lexists(git_dir / "HEAD") and os.path.isdir(shared / "objects"):
+                return str(shared.resolve())
+    return str(path)
+
+
+def _path_in(file: Path) -> str | None:
+    """Return the path *file* holds, or ``None`` when there is no such file to read.
+
+    As git reads it: less every line end at the end of the file, then up to a NUL.
+    """
+    try:
+        return os.fsdecode(file.read_bytes()).rstrip("\r\n").partition("\0")[0]
+    except OSError:  # missing, a directory, unreadable
+        return None
 
 
 def _repo_lock_for(key: str) -> threading.RLock:
@@ -448,6 +503,10 @@ def _repo_lock_for(key: str) -> threading.RLock:
 
 
 _GIT_TIMEOUT_SECONDS: float = 300.0
+
+#: The longest a :func:`_git` whose cleanup a Stop cut short waits for the
+#: thread that finishes it (:func:`_end_git`: two five-second graces at most).
+_GIT_END_SECONDS: float = 30.0
 
 
 def _git_command(
@@ -517,17 +576,21 @@ def _git(
     cannot start at all (``OSError``, e.g. an argument over the
     kernel's single-argument limit; ``ValueError`` for a NUL byte in
     an argument) is likewise returned as a failed ``CompletedProcess``
-    (returncode 1) instead of raising.  Output is decoded by
+    instead of raising: returncode 127, the "command not found"
+    convention, because 1 is a verdict of ``git grep``, ``git diff
+    --quiet`` and ``git merge-tree``.  Output is decoded by
     :func:`_git_text`: the paths of a ``-z`` or ``rev-parse`` command
     byte for byte.
 
-    An exception raised while waiting (the runner's Stop delivers
+    An exception raised once git runs (the runner's Stop delivers
     ``KeyboardInterrupt`` to the task thread at any bytecode) stops git
     and its whole process group before propagating: the caller's
     rollback assumes git is finished, and a ``git commit`` left running
     behind a slow hook would otherwise land minutes later, on top of
     whatever the user has staged since.  ``SIGTERM`` first, so git
-    removes its lock files; ``SIGKILL`` when it lingers.
+    removes its lock files; ``SIGKILL`` when it lingers.  Its pipes are
+    closed with it.  A further Stop does not end this early: see the
+    ``finally`` below.
 
     Args:
         *args: Git sub-command and arguments (without the leading ``git``).
@@ -545,21 +608,47 @@ def _git(
         full_env.update(env)
     verbatim = "-z" in args or args[:1] == ("rev-parse",)
     # Before git starts: text that cannot be encoded (a lone surrogate)
-    # or a Stop landing here must not leave git waiting for its stdin.
+    # must not leave a git behind.
     given = None if input is None else input.encode("utf-8", "surrogateescape")
+    # The Popen is held from before the spawn, which runs inside the
+    # ``try``: a Stop raised as the spawning call returns reaches the
+    # ``finally`` with git in hand (see :func:`start_process_group`).
+    proc: subprocess.Popen[bytes] = object.__new__(subprocess.Popen)
+    reading = False  # ``communicate`` entered: on Windows its reader threads own the pipes
+    ended = threading.Lock()  # held until :func:`_end_git` has run to its end
+    ended.acquire()
+    # Git reads *input* from a file, not from a pipe ``communicate`` feeds:
+    # that takes its input in one call (POSIX registers stdin only for the
+    # call that passes it, and a second call that passes it is refused),
+    # and the wait below is taken in slices.  :func:`_end_git` closes it.
+    source: IO[bytes] | None = None
     try:
-        proc = popen_process_group(
-            cmd,
-            stdin=None if input is None else subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=full_env,
-        )
-    except (OSError, ValueError) as exc:
-        logger.warning("git %s could not start: %s", args[:1], exc)
-        return subprocess.CompletedProcess(cmd, 1, "", f"git could not start: {exc}")
-    try:
-        out, err = proc.communicate(input=given, timeout=_GIT_TIMEOUT_SECONDS)
+        try:
+            if given is not None:
+                source = tempfile.TemporaryFile()
+                source.write(given)
+                source.seek(0)
+            start_process_group(
+                proc, cmd, stdin=source, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=full_env,
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning("git %s could not start: %s", args[:1], exc)
+            return subprocess.CompletedProcess(cmd, 127, "", f"git could not start: {exc}")
+        reading = True
+        # In slices, like :func:`~kiss.core.processes.run_process_group`: an
+        # injected Stop is raised between two of them, never inside one
+        # wait for a git that writes nothing (a ``commit`` running its hooks).
+        deadline = time.monotonic() + _GIT_TIMEOUT_SECONDS
+        while True:
+            try:
+                out, err = proc.communicate(
+                    timeout=min(deadline - time.monotonic(), _STOP_POLL_SECONDS),
+                )
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    raise
         return subprocess.CompletedProcess(
             cmd, proc.returncode, _git_text(out, verbatim), _git_text(err, verbatim),
         )
@@ -570,10 +659,10 @@ def _git(
             out, err = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:  # pragma: no cover - defensive
             # Only a descendant that left the process group (its own
-            # setsid) can still hold the pipes; git itself is dead, so
-            # reap it and give up on its output.
+            # setsid) can still hold the pipes: give up on its output.
+            # A git that outlived its ``SIGKILL`` is not waited for
+            # here; the ``finally`` stops it once more, with a bound.
             out, err = b"", b""
-            proc.wait()
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=124,
@@ -582,13 +671,85 @@ def _git(
             or f"git {args[0] if args else ''} timed out"
             f" after {_GIT_TIMEOUT_SECONDS}s",
         )
-    except BaseException:
-        # ``communicate`` may already have reaped the child (an interrupt
-        # delivered after it returned): signalling its pgid then could
-        # hit a recycled process group, so only a live child is stopped.
-        if proc.poll() is None:
+    finally:  # however the call ends, a Stop raised while the timeout is handled included
+        try:
+            _end_git(proc, source, reading, ended)
+        except BaseException as stop:
+            # One more Stop cut the cleanup short (the stop watchdog injects
+            # twice, a tool-panel Stop may follow).  It starts over on a
+            # thread of its own, into which no Stop is injected, and this
+            # thread waits for it in one C call, which an injected exception
+            # cannot leave early.  CPython raises one only after a call
+            # returns, at a loop's jump back or on entering a Python
+            # function: none can come before the call that starts the
+            # thread, nor, the handler of a Stop raised as that call returns
+            # making no call, between it and the wait.  The newest Stop
+            # propagates once git is ended.
+            newest = stop
+            try:
+                _thread.start_new_thread(_end_git, (proc, source, reading, ended))
+            except RuntimeError:  # no thread to be had: here, where a Stop can cut it again
+                _end_git(proc, source, reading, ended)
+            except BaseException as again:
+                newest = again
+            ended.acquire(True, _GIT_END_SECONDS)
+            raise newest
+
+
+class _GitStepError(Exception):
+    """A step of several that only count together failed; what failed is logged."""
+
+
+def _git_step(repo: Path, env: dict[str, str], *args: str, input: str | None = None) -> str:
+    """Run one git step on the scratch index *env* names and return what it printed.
+
+    Raises:
+        _GitStepError: git failed; its error is logged.
+    """
+    result = _git(*args, cwd=repo, env=env, input=input)
+    if result.returncode != 0:
+        logger.warning("git %s failed in %s: %s", " ".join(args), repo, result.stderr.strip())
+        raise _GitStepError
+    return result.stdout
+
+
+def _leading_dirs(path: str) -> list[str]:
+    """Return the directories the repository-relative *path* lies in, outermost first."""
+    return [path[:end] for end, char in enumerate(path) if char == "/"]
+
+
+def _end_git(
+    proc: subprocess.Popen[bytes], source: IO[bytes] | None, reading: bool, ended: threading.Lock,
+) -> None:
+    """Stop git's process group, if it still runs, and close its pipes and its input.
+
+    The cleanup of :func:`_git`.  Running it again after a run that was
+    cut short is safe: a reaped git is not signalled, a closed file
+    stays closed.
+
+    Args:
+        proc: The ``Popen`` that :func:`_git` held from before the spawn.
+        source: The file git read its standard input from, if any.
+        reading: Whether ``communicate`` was entered.
+        ended: The lock :func:`_git` holds; released once the cleanup is
+            complete.
+    """
+    if source is not None:  # git has its own descriptor
+        with contextlib.suppress(OSError):
+            source.close()
+    if getattr(proc, "pid", None) is not None:  # None: no git was spawned
+        # No ``poll()``: git may have exited with its group still running.
+        if proc.returncode is None:  # once reaped, its group id may be a stranger's
             terminate_process_group(proc)  # SIGTERM first: git removes its .lock files
-        raise
+        # The pipes go with git (a raised error's traceback holds this
+        # ``Popen``).  A close under a Windows reader thread's read would
+        # park this one; one that fails is not raised.
+        if not (IS_WINDOWS and reading):
+            for pipe in filter(None, (proc.stdout, proc.stderr)):
+                with contextlib.suppress(OSError):
+                    pipe.close()
+    if ended.locked():  # not in the repeat of a run that a Stop cut after its release
+        ended.release()
 
 
 def _git_text(data: bytes, verbatim: bool) -> str:
@@ -609,7 +770,6 @@ def _git_stdout_head(
     *args: str,
     cwd: str | Path,
     max_bytes: int,
-    timeout: float = _GIT_TIMEOUT_SECONDS,
 ) -> tuple[str, bool]:
     """Run a git command and return at most *max_bytes* of its stdout.
 
@@ -627,25 +787,26 @@ def _git_stdout_head(
         *args: Git sub-command and arguments (without the leading ``git``).
         cwd: Working directory for the git command (required).
         max_bytes: Maximum number of stdout bytes to read.
-        timeout: Seconds after which a git that is still running is
-            killed and its partial output reported as truncated.
 
     Returns:
         ``(text, truncated)``: the decoded stdout (cut back to the last
         complete line when truncated) and whether it is incomplete,
         either because more output existed or because git was killed
-        by the timeout.  ``("", False)`` when git could not start (no
-        ``git`` on the PATH): the caller takes its "no output" path,
-        as it does for a :func:`_git` that failed to start.
+        after :data:`_GIT_TIMEOUT_SECONDS`.  ``("", False)`` when git
+        could not start (no ``git`` on the PATH): the caller takes its
+        "no output" path, as it does for a :func:`_git` that failed to
+        start.
     """
     cmd, env = _git_command(args, cwd)
     try:
-        out = run_capped(cmd, limit=max_bytes, timeout=timeout, env=env, last_full_line=True)
+        out = run_capped(
+            cmd, limit=max_bytes, timeout=_GIT_TIMEOUT_SECONDS, env=env, last_full_line=True,
+        )
     except (OSError, ValueError) as exc:
         logger.warning("git %s could not start: %s", args[:1], exc)
         return "", False
     if out.timed_out:
-        logger.warning("git %s timed out after %ss", args, timeout)
+        logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
     return out.stdout.decode("utf-8", "replace"), out.truncated or out.timed_out
 
 
@@ -699,69 +860,19 @@ _WORKTREE_SUBDIR = ".kiss-worktrees"
 _WORKTREE_SLUG_PREFIX = "kiss_wt-"
 _WORKTREE_BRANCH_PREFIX = "kiss/wt-"
 
-# Path components whose files are never rescued from a dying worktree
-# (see :meth:`GitWorktreeOps.rescue_ignored_files`): regenerable
-# build/cache/venv artifacts.  A copied virtualenv would carry broken
-# absolute interpreter paths, and caches are recreated on demand.
-_RESCUE_SKIP_COMPONENTS = frozenset({
-    ".git",
-    _WORKTREE_SUBDIR,
-    ".venv",
-    "venv",
-    "node_modules",
-    "__pycache__",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".tox",
-    ".nox",
-    ".cache",
-    ".DS_Store",
-})
+OWN_ENVIRONMENT_BLOCKER = """\
+This worktree has no Python environment of its own. It shares the main checkout's:
+{environment}
 
-# Basename glob patterns (``fnmatch``) whose files are never rescued
-# either: regenerable build artifacts that do not live under a skipped
-# directory.  Without this list every worktree that rebuilt one of
-# them (pytest-cov's ``.coverage`` data, stray ``*.pyc``) differed
-# from the main-tree copy and landed a ``<stem>.kiss-rescued-<ns><ext>``
-# sibling on each teardown.
-_RESCUE_SKIP_PATTERNS = (
-    ".coverage",
-    ".coverage.*",
-    "*.pyc",
-    "*.pyo",
-    "*.tsbuildinfo",
-)
+Run that environment's programs on the worktree's sources, for example
+    PYTHONPATH={worktree}/src:{worktree}/projects {environment}/bin/pytest ...
+(a `uv run PROGRAM` typed directly into the Bash tool is rewritten that way).
 
-
-def _rescue_skipped(rel: str) -> bool:
-    """Whether the ignored worktree file *rel* is a regenerable artifact.
-
-    True when any path component is in :data:`_RESCUE_SKIP_COMPONENTS`
-    or the basename matches one of :data:`_RESCUE_SKIP_PATTERNS`; such
-    files are left to die with the worktree instead of being rescued
-    (see :meth:`GitWorktreeOps.rescue_ignored_files`).
-
-    Args:
-        rel: Path of the file relative to the worktree root.
-    """
-    parts = Path(rel).parts
-    if any(p in _RESCUE_SKIP_COMPONENTS for p in parts):
-        return True
-    name = parts[-1] if parts else rel
-    return any(fnmatch.fnmatch(name, pat) for pat in _RESCUE_SKIP_PATTERNS)
-
-
-# Repo-local (info/exclude) ignore pattern covering every collision
-# sibling the rescue can generate — ``<stem>.kiss-rescued-<ns><ext>``
-# and ``<name>.kiss-rescued-<ns>`` alike.  Extension preservation alone
-# cannot keep every original rule matching (``model.tar.gz`` →
-# ``model.tar.kiss-rescued-<ns>.gz`` no longer matches ``*.tar.gz``,
-# and no sibling of ``.env`` can match the exact-name ``.env`` rule),
-# so this pattern is the actual keep-it-ignored guarantee (see
-# :meth:`GitWorktreeOps.rescue_ignored_files`).
-_RESCUE_SIBLING_MARKER = ".kiss-rescued-"
-_RESCUE_EXCLUDE_PATTERN = f"*{_RESCUE_SIBLING_MARKER}*"
+This file is not an environment on purpose: uv refuses to build or use one here,
+in every form (bash -c, scripts, make), so every test run of this worktree is on
+one Python. Do not delete or replace it.
+"""
+"""The text of the ``.venv`` file of a worktree (:meth:`GitWorktreeOps.block_own_environment`)."""
 
 
 def _same_path(left: Path, right: Path) -> bool:
@@ -782,139 +893,6 @@ def _same_path(left: Path, right: Path) -> bool:
         return left.resolve() == right.resolve()
     except OSError:  # pragma: no cover — unreadable path components
         return left == right
-
-
-def _same_bytes(left: Path, right: int) -> bool:
-    """Return True when the two regular files hold identical bytes.
-
-    Read now, chunk by chunk, with no cache: ``filecmp.cmp`` (even with
-    ``shallow=False``) remembers its verdict per path, size and mtime,
-    so a file rewritten with different bytes of the same length and a
-    preserved timestamp (an archive extraction, ``copy2``) kept
-    comparing equal to what it replaced.
-
-    Args:
-        left: First file.
-        right: Second file, as an open descriptor (the rescue reaches
-            its destination relative to a pinned directory descriptor,
-            never by pathname); read from its current offset and left
-            open.
-
-    Raises:
-        OSError: When either file cannot be read.
-    """
-    if os.stat(left).st_size != os.fstat(right).st_size:
-        return False
-    with open(left, "rb") as a, open(right, "rb", closefd=False) as b:
-        while True:
-            chunk_a = a.read(1 << 20)
-            chunk_b = b.read(1 << 20)
-            if chunk_a != chunk_b:
-                return False
-            if not chunk_a:
-                return True
-
-
-def _copy_to_fd(src: Path, fd: int, name: str, dir_fd: int | None) -> os.stat_result:
-    """Write *src*'s bytes, permission bits and timestamps to *fd* and close it.
-
-    The rescue's replacement for ``shutil.copystat`` on the destination
-    it holds as a descriptor.  The timestamps go through the descriptor
-    where ``os.utime`` takes one; where it does not (native Windows)
-    they go through *name* once the write handle is closed, because
-    NTFS stamps a written file again when that handle closes.
-
-    Args:
-        src: The regular file to copy.
-        fd: A writable descriptor of the empty destination; closed on
-            return, also when the copy fails.
-        name: The destination as the landing names it (see
-            :func:`_rescue_name`).
-        dir_fd: The descriptor of the destination's directory, or None
-            when *name* is the whole path.
-
-    Returns:
-        The ``stat`` of the destination taken from *fd* before it is
-        closed; its identity (``st_dev``, ``st_ino``) tells the file
-        apart from any other found at the same name later.
-
-    Raises:
-        OSError: When reading *src* or writing *fd* fails.
-    """
-    with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
-        shutil.copyfileobj(inp, out)
-        out.flush()
-        st = os.fstat(inp.fileno())
-        os.fchmod(fd, stat.S_IMODE(st.st_mode))
-        if os.utime in os.supports_fd:
-            os.utime(fd, ns=(st.st_atime_ns, st.st_mtime_ns))
-        created = os.fstat(fd)
-    if os.utime not in os.supports_fd:
-        os.utime(name, ns=(st.st_atime_ns, st.st_mtime_ns), dir_fd=dir_fd)
-    return created
-
-
-#: Whether the rescue can pin a destination directory with a descriptor:
-#: ``O_DIRECTORY`` and ``O_NOFOLLOW`` exist and every operation of the
-#: landing takes ``dir_fd`` (Linux, macOS, the BSDs).  Where they do not
-#: (native Windows) the landing is by pathname, with the containment
-#: checked again after it (see :meth:`GitWorktreeOps._land_by_pathname`).
-_RESCUE_DIR_FD = (
-    hasattr(os, "O_DIRECTORY")
-    and hasattr(os, "O_NOFOLLOW")
-    and {os.open, os.mkdir, os.lstat, os.readlink, os.symlink, os.link, os.unlink}
-    <= os.supports_dir_fd
-)
-
-#: ``O_NOFOLLOW`` where the platform has it; the pathname landing of
-#: native Windows has no such flag and relies on the ``lstat`` before.
-_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-
-
-def _rescue_name(path: Path, dir_fd: int | None) -> str:
-    """Return how the landing names *path* in its file operations.
-
-    Args:
-        path: A destination in the directory the landing writes to.
-        dir_fd: That directory's descriptor, or None for the pathname
-            landing.
-
-    Returns:
-        The last component of *path*, relative to *dir_fd*, or the
-        whole path when there is no descriptor.
-    """
-    return path.name if dir_fd is not None else os.fspath(path)
-
-
-def _make_rescue_dir_by_pathname(repo: Path, parent: Path) -> None:
-    """Create *parent* under *repo* one component at a time, refusing any link.
-
-    The pathname landing's counterpart of
-    :meth:`GitWorktreeOps._open_rescue_dir`: every component below
-    *repo* must be a real directory, not a symlink, a junction or another
-    reparse point, so the landing can neither leave the repository nor
-    land through an alias of the worktree being rescued from (whose
-    "identical" file would then be the source itself).
-
-    Args:
-        repo: The main repository root.
-        parent: The destination directory, *repo* itself or below it.
-
-    Raises:
-        OSError: ``ELOOP`` for a link component, ``ENOTDIR`` for a
-            component that is not a directory, or what ``mkdir`` raised.
-    """
-    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    path = repo
-    for part in parent.relative_to(repo).parts:
-        path = path / part
-        with contextlib.suppress(FileExistsError):
-            os.mkdir(path)
-        st = os.lstat(path)
-        if stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & reparse:
-            raise OSError(errno.ELOOP, "a rescue destination ancestor is a link", str(path))
-        if not stat.S_ISDIR(st.st_mode):
-            raise OSError(errno.ENOTDIR, "a rescue destination ancestor is no directory", str(path))
 
 
 def strip_worktree_suffix(path: str) -> str:
@@ -950,10 +928,10 @@ def strip_worktree_suffix(path: str) -> str:
 def _worktree_parts(path: str) -> tuple[list[str], int]:
     """Split *path* on either separator and locate its worktree segment.
 
-    The single scanner behind :func:`strip_worktree_suffix`,
-    :func:`inside_kiss_worktree` and :func:`kiss_worktree_root`, so
-    the three agree on every spelling (including ``\\``-separated
-    paths read back from storage written on Windows).
+    The single scanner behind :func:`strip_worktree_suffix` and
+    :func:`inside_kiss_worktree`, so the two agree on every spelling
+    (including ``\\``-separated paths read back from storage written
+    on Windows).
 
     Args:
         path: An absolute or relative filesystem path string.
@@ -1018,6 +996,53 @@ def _under_symlink(root: Path, rel: str) -> bool:
         if path.is_symlink():
             return True
     return False
+
+
+#: The message of the stash entry a repository's merge pushed
+#: (:meth:`GitWorktreeOps.stash_if_dirty`), while that entry is the merge's
+#: to give back: what tells it from the user's entries, wherever their own
+#: ``git stash`` moves it.  One merge runs per repository at a time
+#: (``repo_lock``), and each access is one dict operation.
+_merge_stash_labels: dict[Path, str] = {}
+
+#: What the conflicted merge of a repository wrote, from
+#: :meth:`GitWorktreeOps.begin_conflicted_merge` until it is committed or
+#: taken back: the tree, conflict markers included, and the paths left
+#: unmerged.  Kept here because any git command of the merge agent may
+#: drop ``AUTO_MERGE``.  One merge runs per repository at a time
+#: (``repo_lock``), and each access is one dict operation.
+_conflicted_merges: dict[Path, tuple[str, list[str]]] = {}
+
+#: How often :meth:`GitWorktreeOps._drop_stash` goes for an entry that the
+#: user's stash commands keep moving.
+_STASH_DROP_ATTEMPTS = 3
+
+#: What a checkout's git directory holds while a merge, a rebase (or ``am``),
+#: a cherry-pick or a revert is under way in it, one commit or a sequence.
+_OPERATION_STATE = (
+    "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "rebase-merge", "rebase-apply",
+)
+
+
+def _stash_entry(repo: Path, label: str) -> tuple[str, int] | None:
+    """Find the stash entry of *repo* whose message ends with *label*.
+
+    Args:
+        repo: Git repo root path.
+        label: The message a :meth:`GitWorktreeOps.stash_if_dirty` pushed under.
+
+    Returns:
+        ``(sha, position)``, the entry being ``stash@{position}`` right
+        now; ``("", -1)`` when the stash does not hold it; None when git
+        could not list the stash.
+    """
+    listed = _git("stash", "list", "--format=%H %gs", cwd=repo)
+    if listed.returncode != 0:
+        return None
+    for position, line in enumerate(listed.stdout.splitlines()):
+        if line.endswith(label):
+            return line.partition(" ")[0], position
+    return "", -1
 
 
 class GitWorktreeOps:
@@ -1266,10 +1291,16 @@ class GitWorktreeOps:
     def stage_all(wt_dir: Path) -> None:
         """Stage all changes in the worktree (``git add -A``).
 
+        A refused ``git add`` (an embedded repository with no commit,
+        an unreadable file, a held ``index.lock``) stages nothing and is
+        logged: the caller's "nothing to commit" names no cause.
+
         Args:
             wt_dir: Worktree directory.
         """
-        _git("add", "-A", cwd=wt_dir)
+        result = _git("add", "-A", cwd=wt_dir)
+        if result.returncode != 0:
+            logger.warning("git add -A failed in %s: %s", wt_dir, result.stderr.strip())
 
     @staticmethod
     def commit_all(wt_dir: Path, message: str) -> bool:
@@ -1388,10 +1419,9 @@ class GitWorktreeOps:
         ``--untracked-files=normal`` overrides a user's
         ``status.showUntrackedFiles=no`` (common in dotfile repos and
         large monorepos).  Callers decide from this output whether a
-        tree is clean, and the ``stash push --include-untracked`` and
-        ``git clean -fd`` that follow act on untracked files whatever
-        that setting says: hidden files were left out of the stash,
-        then deleted by the clean.
+        tree is clean: a merge that read a tree with hidden untracked
+        files as clean skipped the ``stash push --include-untracked``
+        that keeps them out of its way.
         """
         return _git("status", "--porcelain", "--untracked-files=normal", cwd=wt_dir)
 
@@ -1422,28 +1452,25 @@ class GitWorktreeOps:
         return result.returncode != 0
 
     @staticmethod
-    def staged_diff(
-        wt_dir: Path,
-        max_bytes: int = COMMIT_MESSAGE_DIFF_LIMIT_BYTES,
-    ) -> str:
+    def staged_diff(wt_dir: Path) -> str:
         """Return the staged diff text, bounded for use in an LLM prompt.
 
-        At most *max_bytes* of the patch are ever read (see
-        :func:`_git_stdout_head`).  When the patch is larger, the result
-        starts with a truncation note carrying the ``--shortstat``
-        totals (files changed, insertions, deletions over ALL changes),
-        then the head of the ``--stat`` file list (bounded to a quarter
-        of *max_bytes*), then the head of the patch.  The model thus
-        always sees the full scope even when the file list itself is
-        too long to enumerate.
+        At most :data:`COMMIT_MESSAGE_DIFF_LIMIT_BYTES` of the patch are
+        ever read (see :func:`_git_stdout_head`).  When the patch is
+        larger, the result starts with a truncation note carrying the
+        ``--shortstat`` totals (files changed, insertions, deletions
+        over ALL changes), then the head of the ``--stat`` file list
+        (bounded to a quarter of that cap), then the head of the patch.
+        The model thus always sees the full scope even when the file
+        list itself is too long to enumerate.
 
         Args:
             wt_dir: Worktree directory (must have staged changes).
-            max_bytes: Cap on the patch text.
 
         Returns:
             The diff text, or empty string if no staged changes.
         """
+        max_bytes = COMMIT_MESSAGE_DIFF_LIMIT_BYTES
         patch, truncated = _git_stdout_head("diff", "--cached", cwd=wt_dir, max_bytes=max_bytes)
         if not truncated:
             return patch.strip()
@@ -1470,19 +1497,48 @@ class GitWorktreeOps:
             The stderr string describes why the checkout failed (e.g.
             dirty working tree, missing branch, an ignored file where
             *branch* tracks one: ``--no-overwrite-ignore`` keeps git
-            from silently replacing it).
+            from silently replacing it).  No checkout is attempted
+            while a git operation of the user's is under way (see
+            :meth:`operation_in_progress`): it would take ``HEAD`` off
+            a rebase they paused.
         """
+        if GitWorktreeOps.operation_in_progress(repo):
+            return (False, "a merge, rebase, cherry-pick or revert is under way")
         result = _git("checkout", "--no-overwrite-ignore", branch, cwd=repo)
         if result.returncode == 0:
             return (True, "")
         return (False, result.stderr.strip())
 
     @staticmethod
+    def operation_in_progress(repo: Path) -> bool:
+        """Whether a merge, rebase, cherry-pick or revert is under way in *repo*.
+
+        It is the user's, and a task merge keeps out of it: ``git
+        stash`` would end it (its reset takes ``MERGE_HEAD`` and the
+        like away), a commit made now would be taken for its own, and
+        the cleanup of a conflicted merge (``cherry-pick --quit``)
+        would forget the picks still to come.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            True when one is, also when git could not name the
+            checkout's git directory.
+        """
+        git_dir = _git("rev-parse", "--absolute-git-dir", cwd=repo)
+        return git_dir.returncode != 0 or any(
+            os.path.lexists(os.path.join(git_dir.stdout.removesuffix("\n"), name))
+            for name in _OPERATION_STATE
+        )
+
+    @staticmethod
     def stash_if_dirty(repo: Path) -> bool | None:
         """Stash uncommitted changes if the working tree or index is dirty.
 
         Uses ``git stash push --include-untracked`` so both staged and
-        unstaged changes (including new files) are saved.
+        unstaged changes (including new files) are saved, under a
+        message of its own: :meth:`stash_pop` finds the entry by it.
 
         Args:
             repo: Git repo root path.
@@ -1490,74 +1546,258 @@ class GitWorktreeOps:
         Returns:
             True if a stash entry was created, False if the tree was
             clean, None if the tree is dirty but ``git stash push``
-            failed or created no entry (the tree is still dirty).
+            failed, created no entry, or was not run because a git
+            operation of the user's is under way (see
+            :meth:`operation_in_progress`): the tree is still dirty.
         """
         if not GitWorktreeOps.has_uncommitted_changes(repo):
             return False
-        before = GitWorktreeOps.stash_ref(repo)
-        result = _git(
-            "stash",
-            "push",
-            "--include-untracked",
-            "-m",
-            "kiss: auto-stash before merge",
-            cwd=repo,
-        )
+        if GitWorktreeOps.operation_in_progress(repo):
+            logger.warning("a git operation is under way in %s; not stashing its changes", repo)
+            return None
+        label = f"kiss: auto-stash before merge {uuid.uuid4().hex[:12]}"
+        _merge_stash_labels[repo] = label
+        result = _git("stash", "push", "--include-untracked", "-m", label, cwd=repo)
         if result.returncode != 0:
             return None
-        after = GitWorktreeOps.stash_ref(repo)
-        return True if after and after != before else None
+        return True if GitWorktreeOps.stash_ref(repo) else None
 
     @staticmethod
     def stash_ref(repo: Path) -> str:
-        """Return the SHA ``refs/stash`` points at, or ``""`` when there is no stash.
+        """Return the SHA of the stash entry a :meth:`stash_if_dirty` of *repo* pushed.
 
-        A caller that compares the value from before a
-        :meth:`stash_if_dirty` with the current one knows whether that
-        call created an entry even when it never returned (the
-        runner's Stop can interrupt it after ``git stash push``
-        completed).
+        ``""`` when the stash holds no such entry; one that is gone
+        from the stash is forgotten.  A caller that compares the value
+        from before a :meth:`stash_if_dirty` with the current one knows
+        whether that call created an entry even when it never returned
+        (the runner's Stop can interrupt it after ``git stash push``
+        completed).  The SHA ``refs/stash`` points at would not tell:
+        the user's own ``git stash`` moves it too.
 
         Args:
             repo: Git repo root path.
         """
-        return _git("rev-parse", "-q", "--verify", "refs/stash", cwd=repo).stdout.strip()
+        label = _merge_stash_labels.get(repo)
+        if label is None:
+            return ""
+        found = _stash_entry(repo, label)
+        if found == ("", -1):
+            _merge_stash_labels.pop(repo, None)
+        return found[0] if found else ""
 
     @staticmethod
-    def stash_pop(repo: Path) -> bool:
-        """Pop the latest stash entry, preserving the staging state.
+    def stash_pop(repo: Path, branch: str = "", baseline: str | None = None) -> bool:
+        """Give back what the last :meth:`stash_if_dirty` of *repo* stashed.
 
-        Tries ``git stash pop --index`` first so that files that were
-        staged before the stash stay staged after the pop.  If
-        ``--index`` fails (e.g. the merge changed a file that was in
-        the index), falls back to plain ``git stash pop`` which
-        restores all changes as unstaged — but ONLY when the failed
-        ``--index`` attempt left the working tree untouched.  A failed
-        ``--index`` pop can partially apply the stash (e.g. tracked
-        changes applied while an untracked-file restore failed, or a
-        conflicted merge) while keeping the stash entry; blindly
-        re-applying the same stash on top of that state risks a
-        double-apply, so in that case the stash is left for the caller
-        to surface to the user.
+        The entry is that call's own, not the top of the stash: the
+        user's ``git stash`` takes none of the merge's locks and can
+        push an entry of theirs during the merge.  After a merge of
+        *branch*, the untracked files it superseded are not given back
+        (see :meth:`_stash_without_superseded`).
+
+        Tries ``git stash apply --index`` first so that files that were
+        staged before the stash stay staged.  If ``--index`` fails
+        (e.g. the merge changed a file that was in the index), falls
+        back to a plain ``git stash apply`` which restores all changes
+        as unstaged — but ONLY when the failed ``--index`` attempt left
+        the working tree untouched.  A failed ``--index`` apply can
+        partially apply the stash (e.g. tracked changes applied while
+        an untracked-file restore failed, or a conflicted merge);
+        blindly re-applying the same stash on top of that state risks
+        a double-apply, so in that case the stash is left for the
+        caller to surface to the user.  An applied entry is dropped.
 
         Args:
             repo: Git repo root path.
+            branch: The task branch a successful merge just applied,
+                ``""`` when none did.
+            baseline: That branch's baseline commit SHA, or ``None``.
 
         Returns:
-            True if the pop succeeded, False on conflict or error.
+            True if the changes are back or that call stashed none,
+            False on conflict or error, also when the entry is no
+            longer in the stash or the files *branch* superseded
+            could not be told: nothing of it is applied then.
         """
-        before = GitWorktreeOps._status(repo)
-        result = _git("stash", "pop", "--index", cwd=repo)
-        if result.returncode == 0:
+        label = _merge_stash_labels.get(repo)
+        if label is None:
             return True
-        after = GitWorktreeOps._status(repo)
-        if before.returncode != 0 or after.returncode != 0 or after.stdout != before.stdout:
-            # The tree changed, or a status failed so nothing proves it
-            # did not (two identical failure reports are not proof):
-            # never risk a double-apply.
+        found = _stash_entry(repo, label)
+        if not found or not found[0]:
             return False
-        result = _git("stash", "pop", cwd=repo)
-        return result.returncode == 0
+        entry = applied = found[0]
+        if branch and baseline:
+            copy = GitWorktreeOps._stash_without_superseded(repo, entry, branch, baseline)
+            if copy is None:
+                return False
+            applied = copy
+        before = GitWorktreeOps._status(repo)
+        if _git("stash", "apply", "--index", applied, cwd=repo).returncode != 0:
+            after = GitWorktreeOps._status(repo)
+            if before.returncode != 0 or after.returncode != 0 or after.stdout != before.stdout:
+                # The tree changed, or a status failed so nothing proves it
+                # did not (two identical failure reports are not proof):
+                # never risk a double-apply.
+                return False
+            if _git("stash", "apply", applied, cwd=repo).returncode != 0:
+                return False
+        GitWorktreeOps._drop_stash(repo, label, entry)
+        _merge_stash_labels.pop(repo, None)
+        return True
+
+    @staticmethod
+    def _stash_without_superseded(
+        repo: Path, entry: str, branch: str, baseline: str,
+    ) -> str | None:
+        """Return *entry*, or a copy of it without the untracked files *branch* superseded.
+
+        The baseline commit of a task holds a copy of every file that
+        was untracked when the task began.  One the task then changed,
+        renamed or deleted is the task's from its merge on: ``git stash
+        apply`` refuses the stashed copy where the merge now tracks the
+        file (and gives nothing of the entry back), and puts a deleted
+        one back.  Such a copy is left out while it still is the
+        baseline's, blob and mode; one the user changed since, and
+        every other untracked file, stays in.  The copy is a stash
+        commit no ref holds: the caller applies it and drops *entry*
+        only once that worked.
+
+        Args:
+            repo: Git repo root path.
+            entry: SHA of the merge's stash commit.
+            branch: The task branch that was merged.
+            baseline: Its baseline commit SHA.
+
+        Returns:
+            The SHA to apply: *entry* itself when it holds no such
+            file; ``None`` when git failed on the way: which of its
+            files the task superseded is then unknown, and the whole
+            entry would put back one the task deleted.
+        """
+        untracked = f"{entry}^3"  # ``stash push --include-untracked`` always writes it
+        names = ("diff", "--name-only", "-z", "--no-renames")
+        stashed = GitWorktreeOps._tree_records(repo, untracked)
+        in_baseline = GitWorktreeOps._tree_records(repo, baseline)
+        added = _git(*names, "--diff-filter=A", f"{baseline}^", baseline, cwd=repo)
+        changed = _git(*names, baseline, branch, cwd=repo)
+        if (
+            stashed is None or in_baseline is None
+            or added.returncode != 0 or changed.returncode != 0
+        ):
+            return None
+        # Stashed as the baseline has it, untracked when the task began (the
+        # baseline added it) and changed by the task.
+        superseded = (
+            {record.partition("\t")[2] for record in stashed & in_baseline}
+            & set(added.stdout.split("\0"))
+            & set(changed.stdout.split("\0"))
+        )
+        if not superseded:
+            return entry
+        with tempfile.TemporaryDirectory() as scratch:
+            env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
+            try:
+                _git_step(repo, env, "read-tree", untracked)
+                _git_step(
+                    repo, env, "update-index", "--force-remove", "-z", "--stdin",
+                    input="\0".join(superseded),
+                )
+                tree = _git_step(repo, env, "write-tree").strip()
+                kept = _git_step(repo, env, "commit-tree", tree, "-m", "untracked files").strip()
+                return _git_step(
+                    repo, env, "commit-tree", f"{entry}^{{tree}}", "-p", f"{entry}^1",
+                    "-p", f"{entry}^2", "-p", kept, "-m", "kiss: stash without superseded files",
+                ).strip()
+            except _GitStepError:
+                return None
+
+    @staticmethod
+    def _tree_records(repo: Path, tree: str) -> set[str] | None:
+        """Return the ``git ls-tree -r`` records of the files in *tree*.
+
+        A record is ``<mode> <type> <sha><TAB><path>``: two trees hold
+        the same file, blob and mode, when they share its record.
+
+        Args:
+            repo: Git repo root path.
+            tree: A tree-ish.
+
+        Returns:
+            The records; ``None`` when git failed.
+        """
+        listed = _git("ls-tree", "-r", "-z", tree, cwd=repo)
+        return set(filter(None, listed.stdout.split("\0"))) if listed.returncode == 0 else None
+
+    @staticmethod
+    def _drop_stash(repo: Path, label: str, entry: str) -> None:
+        """Remove the merge's stash entry *entry*, already applied, from the stash.
+
+        ``git stash drop`` takes a position, and the user's ``git
+        stash`` moves every position between a look at the list and
+        the drop.  Git names the commit it dropped: one that is not
+        *entry* is stored back, on top under its message, and the drop
+        is tried again.  An entry that keeps escaping stays listed.
+
+        Until it is stored back, the user's entry is in no ref.  So the
+        work runs on a thread of its own, into which no Stop is
+        injected, and this thread waits for it in one C call, which an
+        injected exception cannot leave early (as in :func:`_git`).
+
+        Args:
+            repo: Git repo root path.
+            label: The message *entry* was pushed under.
+            entry: SHA of the merge's stash commit.
+        """
+        done = threading.Lock()
+        done.acquire()
+        stop: BaseException | None = None
+        try:
+            _thread.start_new_thread(
+                GitWorktreeOps._drop_stash_unstopped, (repo, label, entry, done),
+            )
+        except RuntimeError:  # no thread to be had: here, where a Stop can cut it
+            GitWorktreeOps._drop_stash_unstopped(repo, label, entry, done)
+        except BaseException as raised:  # a Stop as the call returned: the thread runs
+            stop = raised
+        done.acquire()
+        if stop is not None:
+            raise stop
+
+    @staticmethod
+    def _drop_stash_unstopped(repo: Path, label: str, entry: str, done: threading.Lock) -> None:
+        """:meth:`_drop_stash`'s work; releases *done* when it ends."""
+        try:
+            for _ in range(_STASH_DROP_ATTEMPTS):
+                found = _stash_entry(repo, label)
+                if found is None:
+                    continue
+                if not found[0]:
+                    return  # the user took it out
+                dropped = _git("stash", "drop", f"stash@{{{found[1]}}}", cwd=repo)
+                sha = re.search(r"\b[0-9a-f]{40,64}\b", dropped.stdout)
+                if sha is None:
+                    continue  # nothing was dropped: the position no longer exists
+                if sha[0] == entry:
+                    return
+                logger.warning(
+                    "git stash drop in %s removed %s, pushed since the stash was listed; "
+                    "storing it back", repo, sha[0],
+                )
+                subject = _git("show", "-s", "--format=%s", sha[0], cwd=repo).stdout.strip()
+                stored = _git("stash", "store", "-m", subject, sha[0], cwd=repo)
+                if stored.returncode != 0:
+                    logger.error(
+                        "the stash entry %s of %s could not be stored back (%s); "
+                        "recover it with 'git stash store %s'",
+                        subject, repo, stored.stderr.strip(), sha[0],
+                    )
+                    return
+            logger.warning(
+                "the stash entry %s of %s is applied but is still in the stash; "
+                "remove it with 'git stash drop'", entry, repo,
+            )
+        finally:
+            done.release()
 
     @staticmethod
     def _merge_commit_message(
@@ -1627,10 +1867,10 @@ class GitWorktreeOps:
 
         Shared tail of :meth:`squash_merge_branch` and
         :meth:`squash_merge_from_baseline`: when the merge staged any
-        changes, commit them with the message from
-        :meth:`_merge_commit_message`; on commit failure (e.g. a
-        rejecting pre-commit hook), reset hard and report
-        :attr:`MergeResult.MERGE_FAILED`.
+        changes, commit them (:meth:`_commit_merge`); on commit failure
+        (e.g. a rejecting pre-commit hook) the merge is taken back by
+        git's own check of each file (:meth:`_undo_merge`), not by a
+        hard reset: an editor may have saved any tracked file meanwhile.
 
         Args:
             repo: Git repo root path.
@@ -1642,13 +1882,22 @@ class GitWorktreeOps:
                 or ``None``.
 
         Returns:
-            :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.MERGE_FAILED`.
+            :attr:`MergeResult.SUCCESS`; :attr:`MergeResult.MERGE_FAILED`
+            when the commit failed and the merge was taken back;
+            :attr:`MergeResult.CONFLICT` when it could not be: what is
+            left of it stays in the tree for the user to settle, and no
+            merge agent is run on it (see
+            :func:`~kiss.agents.sorcar.merge_conflict_resolver.resolve_merge_conflict`).
         """
         if not GitWorktreeOps.has_staged_changes(repo):
             return MergeResult.SUCCESS
-        return GitWorktreeOps._commit_merge(
+        if GitWorktreeOps._commit_merge(
             repo, branch, user_prompt=user_prompt, task_result=task_result,
-        )
+        ):
+            return MergeResult.SUCCESS
+        if GitWorktreeOps._undo_merge(repo, branch):
+            return MergeResult.MERGE_FAILED
+        return MergeResult.CONFLICT
 
     @staticmethod
     def _commit_merge(
@@ -1656,21 +1905,21 @@ class GitWorktreeOps:
         branch: str,
         user_prompt: str | None = None,
         task_result: str | None = None,
-    ) -> MergeResult:
+    ) -> bool:
         """Commit a staged merge whose index the caller has verified is non-empty.
 
-        The tail of :meth:`_commit_staged_merge`, also used directly by
-        :meth:`finish_conflicted_merge`, which has already checked the
-        index: one ``git diff --cached --quiet`` per merge commit instead
-        of three.
+        The commit of :meth:`_commit_staged_merge`, also used directly
+        by :meth:`finish_conflicted_merge`, which has already checked
+        the index: one ``git diff --cached --quiet`` per merge commit
+        instead of three.
+
+        Returns:
+            Whether the merge was committed.
         """
         msg = GitWorktreeOps._merge_commit_message(
             repo, branch, user_prompt=user_prompt, task_result=task_result,
         )
-        if not GitWorktreeOps._git_commit(repo, msg):
-            _git("reset", "--hard", "HEAD", cwd=repo)
-            return MergeResult.MERGE_FAILED
-        return MergeResult.SUCCESS
+        return GitWorktreeOps._git_commit(repo, msg)
 
     @staticmethod
     def squash_merge_branch(
@@ -1687,9 +1936,9 @@ class GitWorktreeOps:
         prompt and result appended when provided and not already
         present in that message.
 
-        On conflict, resets to a clean state with ``git reset --hard``;
-        likewise when interrupted between the apply and its commit
-        (see :meth:`squash_merge_from_baseline`).
+        On conflict, and when interrupted between the apply and its
+        commit, what the merge applied is taken back (see
+        :meth:`_undo_merge`).
 
         Args:
             repo: Git repo root path.
@@ -1700,33 +1949,255 @@ class GitWorktreeOps:
                 commit message, or ``None``.
 
         Returns:
-            :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
+            :attr:`MergeResult.SUCCESS`, :attr:`MergeResult.CONFLICT`, or
+            :attr:`MergeResult.MERGE_FAILED` when the commit failed.
         """
-        if GitWorktreeOps._refused_for_ignored_files(repo, branch, None):
+        return GitWorktreeOps._apply_and_commit(repo, branch, None, user_prompt, task_result)
+
+    @staticmethod
+    def _apply_and_commit(
+        repo: Path,
+        branch: str,
+        baseline: str | None,
+        user_prompt: str | None,
+        task_result: str | None,
+    ) -> MergeResult:
+        """Apply *branch* onto HEAD (see :meth:`_apply_branch`) and commit what that staged.
+
+        Returns:
+            :attr:`MergeResult.SUCCESS`, :attr:`MergeResult.MERGE_FAILED`
+            when the commit failed, or :attr:`MergeResult.CONFLICT`
+            with what the merge applied taken back (see
+            :meth:`_undo_merge`; :meth:`_commit_merge` for a commit
+            that failed and could not be reset); a merge the main
+            tree's ignored files, an index without a tree (unmerged
+            entries of the user's own) or a git operation of theirs
+            refuse is not attempted.
+        """
+        if GitWorktreeOps._refused_for_ignored_files(repo, branch, baseline):
             return MergeResult.CONFLICT
-        before = GitWorktreeOps.status_porcelain(repo)
+        index_before = GitWorktreeOps._index_tree(repo)
+        if index_before is None:
+            logger.warning("the index of %s holds no tree; not merging %s", repo, branch)
+            return MergeResult.CONFLICT
         try:
-            result = _git("merge", "--squash", branch, cwd=repo)
-            if result.returncode != 0:
-                logger.warning(
-                    "squash merge failed: %s",
-                    result.stderr.strip(),
+            conflicted = GitWorktreeOps._apply_branch(repo, branch, baseline)
+            if conflicted == []:
+                return GitWorktreeOps._commit_staged_merge(
+                    repo, branch, user_prompt=user_prompt, task_result=task_result,
                 )
-                _git("reset", "--hard", "HEAD", cwd=repo)
-                return MergeResult.CONFLICT
-            return GitWorktreeOps._commit_staged_merge(
-                repo, branch, user_prompt=user_prompt, task_result=task_result,
-            )
+            if conflicted:  # ``None``: git applied nothing, the tree is as the user has it
+                GitWorktreeOps._undo_merge(repo, branch)
+            return MergeResult.CONFLICT
         except BaseException:
-            # A Stop landing after the squash applied but before its
-            # commit (``_git`` has stopped the git child by now) would
-            # leave the agent's changes staged on the user's branch with
-            # a ``SQUASH_MSG``; ``reset --hard`` undoes both.  After a
-            # completed commit the tree matches *before* and nothing
-            # is touched.
-            if GitWorktreeOps.status_porcelain(repo) != before:
-                _git("reset", "--hard", "HEAD", cwd=repo)
+            GitWorktreeOps._undo_if_applied(repo, branch, index_before)
             raise
+
+    @staticmethod
+    def _undo_if_applied(repo: Path, branch: str, index_before: str) -> None:
+        """Take back what an interrupted merge of *branch* applied, if anything.
+
+        A Stop landing after the merge applied but before its commit
+        (``_git`` has stopped the git child by now) would leave the
+        agent's changes staged on the user's branch.  What git did is
+        unknown here: an index that still holds *index_before*, the
+        tree from before the merge, says it applied nothing.
+        """
+        if GitWorktreeOps._index_tree(repo) != index_before:
+            GitWorktreeOps._undo_merge(repo, branch)
+
+    @staticmethod
+    def _index_tree(repo: Path) -> str | None:
+        """Return the SHA of the tree the index of *repo* holds.
+
+        ``None`` when it holds none (unmerged entries: a merge stopped
+        on conflicts there) or git failed.
+        """
+        result = _git("write-tree", cwd=repo)
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    @staticmethod
+    def _undo_merge(repo: Path, branch: str) -> bool:
+        """Take back a ``merge --squash`` / ``cherry-pick --no-commit`` that ended in no commit.
+
+        The files the merge wrote go back to ``HEAD`` by git's own
+        check of each (:meth:`_move_written_files`), from the tree the
+        merge wrote: ``AUTO_MERGE``, conflict markers included, or the
+        tree of *branch* where git recorded none (a fast-forward:
+        ``merge --squash`` of a branch ahead of ``HEAD``).  Then the
+        index is reset, and the merge's ``MERGE_MSG`` / ``SQUASH_MSG``
+        with it; what the user staged meanwhile is an unstaged edit
+        from then on.  A file that no longer is what the merge wrote
+        (an editor that saves a file takes none of the merge's locks)
+        is never reset: the checkout then stays as it is, conflicts
+        included, for the user to settle, and an index that holds them
+        refuses the next merge.  So it does when the index cannot be
+        reset (a git command of the user's holds it): the files are
+        put back.  There is no ``cherry-pick --abort``: ``--no-commit``
+        starts no sequence.
+
+        Args:
+            repo: Git repo root path, with the merge applied.
+            branch: The branch that was merged.
+
+        Returns:
+            Whether the merge was taken back; when not, a warning says
+            what the checkout holds.
+        """
+        if GitWorktreeOps._take_back(repo, GitWorktreeOps._written_tree(repo, branch), "HEAD"):
+            return True
+        logger.warning(
+            "the merge applied to %s is not taken back, or not wholly:\n%s",
+            repo, GitWorktreeOps.status_porcelain(repo),
+        )
+        return False
+
+    @staticmethod
+    def _written_tree(repo: Path, branch: str) -> str:
+        """Return the tree the merge of *branch* that git just applied wrote.
+
+        The id of the tree ``AUTO_MERGE`` names (a later git command
+        drops the name), or *branch* where git recorded none.
+        """
+        auto_merge = _git("rev-parse", "-q", "--verify", "AUTO_MERGE^{tree}", cwd=repo)
+        return auto_merge.stdout.strip() if auto_merge.returncode == 0 else branch
+
+    @staticmethod
+    def _take_back(repo: Path, written: str, head: str) -> bool:
+        """Move the working files from tree *written* to commit *head*, then the index.
+
+        The files go by git's own check of each
+        (:meth:`_move_written_files`); they are put back when the
+        index then cannot be reset.
+
+        Returns:
+            Whether files and index hold *head*.
+        """
+        if GitWorktreeOps._move_written_files(repo, written, head):
+            if _git("reset", "-q", head, cwd=repo).returncode == 0:
+                return True
+            GitWorktreeOps._move_written_files(repo, head, written)
+        return False
+
+    @staticmethod
+    def _tree_with_files(repo: Path, tree: str, paths: list[str]) -> str | None:
+        """Return *tree* with each of *paths* as the working tree holds it now.
+
+        The file's content, or no entry where no file is.  Built in an
+        index of its own.
+
+        Returns:
+            The id of that tree, or ``None`` when git failed (logged):
+            it cannot take what one of the paths holds.
+        """
+        with tempfile.TemporaryDirectory() as scratch:
+            env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
+            try:
+                _git_step(repo, env, "read-tree", tree)
+                _git_step(
+                    repo, env, "update-index", "--add", "--remove", "-z", "--stdin",
+                    input="".join(f"{path}\0" for path in paths),
+                )
+                return _git_step(repo, env, "write-tree").strip()
+            except _GitStepError:
+                return None
+
+    @staticmethod
+    def _move_written_files(repo: Path, written: str, target: str) -> bool:
+        """Turn the working files of tree *written* into those of tree *target*, unless one changed.
+
+        Git's own check of each file decides, as late as git itself
+        looks before it writes (``read-tree -m -u``), in an index of
+        its own that holds *written*: a file the two trees differ in
+        that is no longer what *written* holds (it was saved since, or
+        git cannot read it to tell) refuses the whole move, and nothing
+        is written; so does a file found where the move creates one
+        (:meth:`_guarded_tree`).  Only a write that fails after that
+        check (a required filter, the disk) stops git half-way, with
+        the files it replaced so far.  That index starts as a copy of
+        the index of *repo*, date included: its stat data tells an
+        untouched file without reading it, and its date which of them
+        to read anyway (one written within the same second).  The index
+        of *repo* is not touched, nor is a file both trees hold alike,
+        whatever it holds now.
+
+        Args:
+            repo: Git repo root path.
+            written: The tree-ish the working files were written from.
+            target: The tree-ish they are to hold.
+
+        Returns:
+            Whether the files were moved; when not, what refused is logged.
+        """
+        index = _git("rev-parse", "--git-path", "index", cwd=repo)
+        with tempfile.TemporaryDirectory() as scratch:
+            env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
+            with contextlib.suppress(OSError):  # without the copy every file is read
+                shutil.copy2(repo / index.stdout.removesuffix("\n"), env["GIT_INDEX_FILE"])
+            try:
+                _git_step(repo, env, "read-tree", "--reset", written)
+                _git_step(repo, env, "update-index", "-q", "--refresh")
+                source = GitWorktreeOps._guarded_tree(repo, env, written, target)
+                _git_step(repo, env, "read-tree", "-m", "-u", source, target)
+            except _GitStepError:
+                return False
+        return True
+
+    @staticmethod
+    def _guarded_tree(repo: Path, env: dict[str, str], written: str, target: str) -> str:
+        """Return *written* as a tree whose move to *target* writes over no file git ignores.
+
+        ``read-tree -m -u`` refuses to create a file where it finds one
+        git does not track, unless git ignores that one: it is written
+        over, or removed with the directory a file takes the place of.
+        So each path the move creates gets a placeholder, in the index
+        *env* names and in the tree returned: a symbolic link no file
+        on disk is.  Git then checks the path like any tracked file,
+        as it writes, and whatever it finds there refuses the move.  A
+        submodule is left to git's own rule: its checkout may be there.
+        A path that takes the place of files the move removes (a file
+        for a directory or the reverse, a name in another case) cannot
+        hold a placeholder beside them: what git does not track there
+        is listed before the move instead, and refuses it.
+
+        Raises:
+            _GitStepError: git failed, or such a listing is not empty.
+        """
+        fields = _git_step(
+            repo, env, "diff", "--raw", "-z", "--no-renames", "--diff-filter=AD",
+            written, target, "--",
+        ).split("\0")
+        changes = list(zip(fields[::2], fields[1::2]))  # (":<modes> <ids> <A or D>", path)
+        removed = {path.casefold() for change, path in changes if change.endswith("D")}
+        replaced = removed.union(*map(_leading_dirs, removed))
+        placeholders: list[str] = []
+        clashing: list[str] = []
+        for change, path in changes:
+            if change.endswith("A") and change.split()[1] != "160000":
+                folded = path.casefold()
+                clash = folded in replaced or not removed.isdisjoint(_leading_dirs(folded))
+                (clashing if clash else placeholders).append(path)
+        if clashing:
+            others = _git_step(
+                repo, env, "--literal-pathspecs", "ls-files", "--others", "--directory",
+                "--no-empty-directory", "-z", "--", *clashing,
+            )
+            if others:
+                logger.warning(
+                    "the files of %s are not moved: git does not track %s",
+                    repo, others.replace("\0", " ").strip(),
+                )
+                raise _GitStepError
+        if not placeholders:
+            return written
+        blob = _git_step(
+            repo, env, "hash-object", "-w", "--stdin", input="kiss: git wrote no file here\n",
+        ).strip()
+        _git_step(
+            repo, env, "update-index", "-z", "--index-info",
+            input="".join(f"120000 {blob}\t{path}\0" for path in placeholders),
+        )
+        return _git_step(repo, env, "write-tree").strip()
 
     @staticmethod
     def _diff_name_only(repo: Path, *flags: str) -> list[str]:
@@ -1995,6 +2466,84 @@ class GitWorktreeOps:
         for rel in wanted:
             os.symlink((repo / rel).resolve(), wt_dir / rel)
         return wanted
+
+    @staticmethod
+    def block_own_environment(repo: Path, wt_dir: Path) -> bool:
+        """Put ``.venv`` files in *wt_dir*, so no second Python environment grows there.
+
+        A worktree shares the main checkout's environment
+        (``<repo>/.venv``).  A ``uv run`` or ``uv sync`` the Bash tool
+        does not see as one (``bash -c "uv run …"``, a script, a
+        Makefile) used to build the worktree an environment of its own,
+        on whatever Python uv found newest: on 2026-11-11 a full test
+        run and 43 helpers ran on Python 3.14.7 while the fixers ran on
+        the project's 3.13.5.  uv refuses a project environment path
+        that is a file ("cannot be used because expected directory but
+        found a file") in every form and never replaces it, so one
+        Python per worktree holds without reading any command; a call
+        that names the main environment (``UV_PROJECT_ENVIRONMENT``, as
+        the ``check`` script does) is unaffected.  A link to the main
+        environment would not do: every such ``uv run`` syncs first and
+        re-points the environment's editable install at the worktree.
+
+        The file says where the environment is.  It goes into the
+        worktree's root and into every directory that holds a tracked
+        ``pyproject.toml``: uv run from or at such a directory (``cd
+        sub``, ``--directory sub``, ``--project sub``) would build
+        ``sub/.venv``.  Like the ``node_modules`` links the files are
+        kept out of ``git add -A`` through ``info/exclude``, written
+        first, and only a file git then ignores is written: a
+        ``.gitignore`` that un-ignores the name (``!.venv``) wins over
+        ``info/exclude``, and the file, committed with the task's work
+        and merged, would replace the main checkout's environment.
+        There the blocker is a directory instead: its own ``.gitignore``
+        of ``*`` keeps git from staging anything in it whatever the
+        repository's rules say, uv refuses a directory that is no
+        environment as it refuses a file ("not a valid Python
+        environment"), and the text is its ``bin``, a file, so that
+        ``python -m venv`` builds nothing there either.
+
+        Args:
+            repo: Git repo root path (the main checkout).
+            wt_dir: The new worktree's root.
+
+        Returns:
+            Whether a blocker was written.  None is when the main checkout
+            has no ``.venv``: there is no environment to share, so a
+            uv run in the worktree, typed (which
+            :func:`~kiss.agents.sorcar.useful_tools.uv_in_worktree`
+            then leaves as written) or not, builds the worktree's own,
+            its one Python.  A directory that already has something at
+            that path gets none.
+
+        Raises:
+            OSError: If ``info/exclude`` or a file cannot be written.
+        """
+        environment = repo / ".venv"
+        if not environment.is_dir():
+            return False
+        tracked = _git("ls-files", "-z", "--", ":(glob)**/pyproject.toml", cwd=wt_dir)
+        projects = {Path(), *(Path(entry).parent for entry in tracked.stdout.split("\0") if entry)}
+        free = [
+            (project / ".venv").as_posix() for project in sorted(projects)
+            if not os.path.lexists(wt_dir / project / ".venv")
+        ]
+        if not free:
+            return False
+        GitWorktreeOps._append_info_line(repo, "exclude", ".venv")
+        # Asked before writing: a file git would not ignore is never there for ``git add -A``.
+        ignored = _git(
+            "check-ignore", "-z", "--stdin", cwd=wt_dir, input="\0".join(free),
+        ).stdout.split("\0")
+        text = OWN_ENVIRONMENT_BLOCKER.format(environment=environment, worktree=wt_dir)
+        for path in free:
+            blocker = wt_dir / path
+            if path not in ignored:
+                blocker.mkdir()
+                (blocker / ".gitignore").write_text("*\n", encoding="utf-8")
+                blocker = blocker / "bin"
+            blocker.write_text(text, encoding="utf-8")
+        return True
 
     @staticmethod
     def ensure_scratch_merge_driver(repo: Path) -> None:
@@ -2286,6 +2835,21 @@ class GitWorktreeOps:
                     marker.unlink()
 
     @staticmethod
+    def _bounded_identity(identity: str) -> str:
+        """Return *identity* in at most 4096 characters, unchanged when it already fits.
+
+        A :func:`process_identity` holds the whole command line and the
+        stamp is one ``git config`` argument, which the kernel caps at
+        128 KB.  A longer identity keeps its head and ends in a digest
+        of the whole; applying this twice changes nothing, so both
+        sides of the comparison in :meth:`_live_peer_owner` pass through it.
+        """
+        if len(identity) <= 4096:
+            return identity
+        digest = hashlib.sha256(identity.encode(errors="replace")).hexdigest()
+        return f"{identity[: 4096 - 72]} sha256:{digest}"
+
+    @staticmethod
     def save_owner_pid(repo: Path, branch: str) -> bool:
         """Record this process as the live owner of *branch*'s worktree.
 
@@ -2312,7 +2876,8 @@ class GitWorktreeOps:
         """
         identity = process_identity(os.getpid())
         if identity is not None and not GitWorktreeOps._save_branch_config(
-            repo, branch, "kiss-owner-identity", f"{os.getpid()}:{identity}",
+            repo, branch, "kiss-owner-identity",
+            f"{os.getpid()}:{GitWorktreeOps._bounded_identity(identity)}",
             "owner identity",
         ):
             return False
@@ -2370,7 +2935,9 @@ class GitWorktreeOps:
         if stamped is None or not stamped.startswith(prefix):
             return owner_pid
         current = process_identity(owner_pid)
-        return owner_pid if current is None or current == stamped[len(prefix):] else None
+        bounded = GitWorktreeOps._bounded_identity
+        same = current is None or bounded(current) == bounded(stamped[len(prefix):])
+        return owner_pid if same else None
 
     @staticmethod
     def load_spare_marker(repo: Path, branch: str) -> bool:
@@ -2383,36 +2950,6 @@ class GitWorktreeOps:
         return GitWorktreeOps._load_branch_config(
             repo, branch, "kiss-spare",
         ) == "1"
-
-    @staticmethod
-    def list_ignored_files(wt_dir: Path) -> list[str] | None:
-        """Return the git-ignored untracked files present in *wt_dir*.
-
-        Uses ``git ls-files --others --ignored --exclude-standard -z``
-        so paths are byte-exact (no C-quoting) and files inside
-        ignored directories are listed individually.
-
-        Args:
-            wt_dir: Git working directory to inspect.
-
-        Returns:
-            Relative paths of ignored files, or ``None`` on git
-            failure — callers that must fail closed (preserve a
-            worktree rather than destroy possibly-unenumerable
-            content) can tell "git failed" apart from "no ignored
-            files".
-        """
-        result = _git(
-            "ls-files", "--others", "--ignored", "--exclude-standard",
-            "-z", cwd=wt_dir,
-        )
-        if result.returncode != 0:
-            logger.warning(
-                "git ls-files failed in %s: %s",
-                wt_dir, result.stderr.strip(),
-            )
-            return None
-        return [f for f in result.stdout.split("\0") if f]
 
     @staticmethod
     def spare_has_content(repo: Path, branch: str, wt_dir: Path) -> bool:
@@ -2535,497 +3072,6 @@ class GitWorktreeOps:
         return not GitWorktreeOps._branch_is_expendable(repo, branch)
 
     @staticmethod
-    def rescue_ignored_files(wt_dir: Path, repo: Path) -> tuple[int, bool]:
-        """Copy task-created git-ignored files from *wt_dir* into *repo*.
-
-        Auto-commit cannot capture files matched by ``.gitignore``
-        (``git add -A`` skips them), and every worktree teardown ends
-        in ``git worktree remove --force`` — so a task whose output
-        includes ignored files (a dataset downloaded into an ignored
-        ``data/`` directory, a generated ``*.csv``, a ``.env`` it
-        wrote, ...) would silently lose them, even though the same
-        task run WITHOUT a worktree would have left them on disk.
-        Call this immediately before removing a worktree whose work is
-        being kept (merge, auto-release, reclaim, automatic
-        empty-branch discard).
-
-        Safety rules (gpt-5.6-sol review hardening):
-
-        * A destination that already exists in *repo* (file, dir, or
-          symlink) is NEVER overwritten — the user's own ignored state
-          (``.env``, ``.venv``, local configs) always wins.  When the
-          existing destination's bytes already equal the worktree's,
-          nothing is lost and the file is skipped; when they differ,
-          the worktree's version is landed NEXT TO it under a
-          ``<stem>.kiss-rescued-<ns><ext>`` sibling name so neither copy is
-          lost.  Because a sibling name can stop matching the ignore
-          rule that covered the original (compound suffixes, exact
-          names), a :data:`_RESCUE_EXCLUDE_PATTERN` entry is appended
-          (idempotently) to the destination's local
-          ``info/exclude`` BEFORE anything is landed, so no sibling
-          can ever be swept up by a later ``git add -A``.  When that
-          exclusion cannot be written, the rescue still proceeds
-          (preserving the only copy outranks ignore hygiene) and each
-          landed sibling is verified with ``git check-ignore``,
-          warning about any that are no longer ignored.
-        * Landing is atomic: a private copy is hard-linked into place
-          (``os.link`` fails on an existing path and never follows a
-          symlink), so a racing main-tree writer can neither be
-          truncated nor redirected through a just-created leaf
-          symlink, and a crash can never leave a partial destination
-          that a later rescue would mistake for the user's file.  On
-          filesystems refusing the link, an ``O_CREAT | O_EXCL`` copy
-          is used instead.  The landed file never shares the worktree
-          file's inode: a failed rescue preserves the worktree, and an
-          alias would carry every later edit of one tree into the other.
-        * The nearest EXISTING ancestor of every destination must
-          resolve inside *repo* — a main-tree directory symlink
-          pointing elsewhere must not let the rescue write outside
-          the repository.  The landing itself happens relative to a
-          descriptor of the destination directory reached from *repo*
-          without following any symlink, so an ancestor swapped for a
-          symlink during the rescue fails the landing instead of
-          redirecting it, and nothing is ever unlinked by a pathname
-          whose ancestors may have changed.  A platform without such
-          descriptors (native Windows, :data:`_RESCUE_DIR_FD`) lands
-          by pathname and checks the containment again afterwards,
-          removing a copy an ancestor swapped meanwhile carried
-          outside, and only a copy proven to be its own.
-        * Paths with a component in :data:`_RESCUE_SKIP_COMPONENTS`
-          (``__pycache__``, ``.venv``, ``node_modules``, ...) or a
-          basename matching :data:`_RESCUE_SKIP_PATTERNS` (``.coverage``,
-          ``.coverage.*``, ``*.pyc``, ...; deliberately
-          not ``.coverage*``, which would discard a ``.coveragerc``)
-          are skipped: they are
-          regenerable build/cache artifacts, and a copied virtualenv
-          would carry broken absolute paths anyway.
-        * The rescue FAILS CLOSED: enumeration failure, any file
-          that could not be landed, or an ignored NESTED REPOSITORY
-          (git lists it as one directory entry it never descends
-          into) makes the returned flag ``False``, and callers must
-          then PRESERVE the worktree instead of removing it —
-          proceeding would destroy the only copy.
-
-        Args:
-            wt_dir: The worktree directory about to be removed.
-            repo: The main repository root to rescue files into.
-
-        Returns:
-            ``(rescued, ok)`` — the number of files landed, and
-            whether every ignored file is now safe (landed, already
-            identical in *repo*, or a skipped regenerable artifact).
-        """
-        if _same_path(wt_dir, repo):
-            return (0, True)
-        ignored = GitWorktreeOps.list_ignored_files(wt_dir)
-        if ignored is None:
-            logger.warning(
-                "cannot enumerate ignored files in %s; preserving worktree",
-                wt_dir,
-            )
-            return (0, False)
-        candidates = [rel for rel in ignored if not _rescue_skipped(rel)]
-        # The exclusion must be in place BEFORE anything lands: a
-        # collision sibling is auto-commit bait from the instant it
-        # exists (see _RESCUE_EXCLUDE_PATTERN).
-        exclude_ok = not candidates or (
-            GitWorktreeOps._ensure_rescue_sibling_excluded(repo)
-        )
-        rescued = 0
-        ok = True
-        repo_resolved = repo.resolve()
-        for rel in candidates:
-            src = wt_dir / rel
-            dst = repo / rel
-            if src.is_dir() and not src.is_symlink():
-                # git lists an ignored NESTED REPOSITORY as one directory
-                # entry (``data/clone/``) and never descends into it;
-                # nothing here lands a directory, so declaring it safe
-                # would delete the only copy with the worktree.
-                logger.warning(
-                    "Cannot rescue nested repository %s; preserving worktree", src,
-                )
-                ok = False
-                continue
-            try:
-                if not GitWorktreeOps._rescue_dst_contained(dst, repo_resolved):
-                    logger.warning(
-                        "Refusing to rescue %s: destination %s "
-                        "escapes the repository through a symlinked "
-                        "ancestor", src, dst,
-                    )
-                    ok = False
-                    continue
-                landed = GitWorktreeOps._land_rescued_file(src, dst, repo)
-                if landed is not None:
-                    rescued += 1
-                    if not exclude_ok and _RESCUE_SIBLING_MARKER in landed.name:
-                        GitWorktreeOps._warn_unignored_sibling(repo, landed)
-            except OSError as exc:
-                logger.warning(
-                    "Failed to rescue ignored file %s into %s: %s",
-                    src, repo, exc, exc_info=True,
-                )
-                ok = False
-        if rescued:
-            logger.info(
-                "Rescued %d git-ignored file(s) from %s into %s",
-                rescued, wt_dir, repo,
-            )
-        return (rescued, ok)
-
-    @staticmethod
-    def _ensure_rescue_sibling_excluded(repo: Path) -> bool:
-        """Install the local ignore rule for rescue-sibling names in *repo*.
-
-        Appends :data:`_RESCUE_EXCLUDE_PATTERN` (idempotently, under
-        the per-repo and file locks of ``_append_info_line``) to the
-        destination repository's ``<git_common_dir>/info/exclude`` —
-        the same file ``git rev-parse --git-path info/exclude``
-        resolves to, correct for linked worktrees and submodules whose
-        ``.git`` is a file, and never a tracked file of the user's
-        repo.  The rescue only ever lands files git IGNORES, so every
-        collision sibling must stay ignored too, or the next
-        auto-commit's ``git add -A`` would commit it as a tracked
-        artifact; this pattern is that guarantee, since
-        extension-preserving sibling naming alone cannot keep
-        compound-suffix (``*.tar.gz``) or exact-name (``.env``) rules
-        matching.
-
-        Args:
-            repo: The rescue destination repository root.
-
-        Returns:
-            True when the pattern is present (just installed or
-            already there); False when it could not be written — the
-            caller then falls back to verifying each landed sibling
-            with ``git check-ignore``.
-        """
-        try:
-            GitWorktreeOps._append_info_line(
-                repo, "exclude", _RESCUE_EXCLUDE_PATTERN,
-            )
-            return True
-        except OSError:
-            logger.warning(
-                "Cannot install the %s rescue-sibling exclusion in "
-                "%s's info/exclude; falling back to per-file "
-                "check-ignore verification",
-                _RESCUE_EXCLUDE_PATTERN, repo, exc_info=True,
-            )
-            return False
-
-    @staticmethod
-    def _warn_unignored_sibling(repo: Path, landed: Path) -> None:
-        """Warn when the landed collision sibling *landed* is not ignored.
-
-        Only reached when the :data:`_RESCUE_EXCLUDE_PATTERN`
-        exclusion could not be written: the sibling then relies solely
-        on its preserved extension matching the original ignore rule,
-        which holds for simple suffixes (``*.log``) but fails for
-        compound suffixes (``*.tar.gz``) and exact names (``.env``).
-        The rescue still proceeds either way — preserving the only
-        copy of task output outranks ignore hygiene — but an unignored
-        sibling is auto-commit bait, so it must at least be reported.
-
-        Args:
-            repo: The rescue destination repository root.
-            landed: The just-landed ``.kiss-rescued-`` sibling path.
-        """
-        if GitWorktreeOps.is_ignored(repo, landed):
-            return
-        logger.warning(
-            "Rescued sibling %s is NOT git-ignored (the rescue "
-            "exclusion could not be installed); a later `git add -A` "
-            "may commit it", landed,
-        )
-
-    @staticmethod
-    def _rescue_dst_contained(dst: Path, repo_resolved: Path) -> bool:
-        """Whether writing *dst* stays inside the repository *repo_resolved*.
-
-        The nearest EXISTING ancestor of *dst* must resolve (symlinks
-        followed) to *repo_resolved* or a directory under it; otherwise
-        a symlinked directory in the main tree (``data -> /elsewhere``)
-        would carry the rescue outside the repository.
-
-        Args:
-            dst: The (possibly not yet existing) destination path.
-            repo_resolved: The already resolved repository root that
-                must contain the write.
-
-        Returns:
-            True when the write cannot escape the repository.
-        """
-        try:
-            probe = dst.parent
-            while not probe.exists():
-                if probe == probe.parent:  # pragma: no cover — fs root
-                    return False
-                probe = probe.parent
-            resolved = probe.resolve()
-            return resolved == repo_resolved or (
-                repo_resolved in resolved.parents
-            )
-        except OSError:  # pragma: no cover — unreadable path
-            return False
-
-    @staticmethod
-    def _open_rescue_dir(repo: Path, parent: Path) -> int:
-        """Open *parent*, the directory of a rescue destination under *repo*.
-
-        Descends from *repo* one path component at a time, creating a
-        missing component and opening each with ``O_NOFOLLOW`` relative
-        to the previous descriptor, so the returned descriptor names a
-        directory reached from the repository root without following
-        any symlink.  A landing relative to it cannot leave the
-        repository through a symlinked ancestor, whether present before
-        the rescue or swapped in during it, and an ancestor renamed
-        afterwards moves the directory (the landed file with it) rather
-        than changing what the descriptor names.  Only for platforms
-        with these operations (:data:`_RESCUE_DIR_FD`).
-
-        Args:
-            repo: The main repository root.
-            parent: The destination directory, *repo* itself or below it.
-
-        Returns:
-            A read-only directory descriptor the caller closes.
-
-        Raises:
-            OSError: When a component is a symlink (``ELOOP``) or not a
-                directory, or cannot be created or opened.
-        """
-        fd = os.open(repo, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            for part in parent.relative_to(repo).parts:
-                try:
-                    os.mkdir(part, dir_fd=fd)
-                except FileExistsError:
-                    pass
-                child = os.open(
-                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd,
-                )
-                os.close(fd)
-                fd = child
-        except BaseException:
-            os.close(fd)
-            raise
-        return fd
-
-    @staticmethod
-    def _land_rescued_file(src: Path, dst: Path, repo: Path) -> Path | None:
-        """Place *src* at *dst*, under *repo*, without overwriting or following links.
-
-        Every check and write is relative to a descriptor of *dst*'s
-        directory that :meth:`_open_rescue_dir` reached from *repo*
-        without following a symlink, so a symlinked or swapped ancestor
-        can neither carry the landing outside the repository nor make
-        the cleanup of a failed landing unlink another directory's
-        file; a platform without such descriptors lands through
-        :meth:`_land_by_pathname`.  Symlink sources are recreated with ``os.symlink``
-        (atomic, fails on an existing name).  Regular files are copied
-        to a temporary file in that directory and the copy is
-        hard-linked into place (atomic); when the filesystem refuses
-        the link, an ``O_CREAT | O_EXCL`` exclusive-create copy is used.
-        An existing destination with identical bytes counts as already
-        safe; one with different bytes gets the worktree's version
-        landed under a ``<stem>.kiss-rescued-<ns><ext>`` sibling so
-        neither copy is lost.
-
-        Args:
-            src: The worktree file to preserve.
-            dst: The main-repo destination path, under *repo*.
-            repo: The main repository root.
-
-        Returns:
-            The path the file was landed at (*dst* itself or a
-            collision sibling), or None when the file was already safe
-            (identical or non-file source) and nothing was landed.
-
-        Raises:
-            OSError: When the file could not be landed at all — an
-                ancestor of *dst* is a symlink, the landing left the
-                repository, or the write failed (the caller marks the
-                rescue failed and the worktree is preserved).
-        """
-        if not src.is_symlink() and not src.is_file():
-            return None
-        if not _RESCUE_DIR_FD:
-            return GitWorktreeOps._land_by_pathname(src, dst, repo)
-        dir_fd = GitWorktreeOps._open_rescue_dir(repo, dst.parent)
-        try:
-            landed = GitWorktreeOps._land_in_dir(src, dst, dir_fd)
-        finally:
-            os.close(dir_fd)
-        return None if landed is None else landed[0]
-
-    @staticmethod
-    def _land_by_pathname(src: Path, dst: Path, repo: Path) -> Path | None:
-        """Place *src* at *dst* by pathname: the landing without directory descriptors.
-
-        Native Windows has no ``O_DIRECTORY``, ``O_NOFOLLOW`` or
-        ``dir_fd``, so the destination directory cannot be pinned and
-        every operation resolves the ancestors of *dst* afresh.  This
-        creates the missing ancestors one at a time and refuses any
-        that is a link (:func:`_make_rescue_dir_by_pathname`), lands
-        the file with :meth:`_land_in_dir`, and then checks that the
-        landed path still names the file just created (its ``lstat``
-        identity is the write descriptor's) and still lies inside
-        *repo*.  When an ancestor was swapped between these pathname
-        operations the landing fails and nothing is unlinked by
-        pathname (that name may resolve to an unrelated file by then):
-        a stray copy is the lesser harm, and the worktree keeps the
-        only sure copy.
-        Swapping a directory for a symlink takes a privilege ordinary
-        Windows processes lack, which bounds what the windows between
-        these pathname operations expose.
-
-        Args:
-            src: The worktree symlink or regular file to preserve.
-            dst: The main-repo destination path, under *repo*.
-            repo: The main repository root.
-
-        Returns:
-            The path the file was landed at (*dst* itself or a
-            collision sibling), or None when an identical copy was
-            already there.
-
-        Raises:
-            OSError: When the write failed, or an ancestor was swapped
-                during the landing.
-        """
-        _make_rescue_dir_by_pathname(repo, dst.parent)
-        landed = GitWorktreeOps._land_in_dir(src, dst, None)
-        if landed is None:
-            return None
-        path, created = landed
-        try:
-            ours = os.path.samestat(os.lstat(path), created)
-        except FileNotFoundError:
-            ours = False
-        if ours and GitWorktreeOps._rescue_dst_contained(path, repo.resolve()):
-            return path
-        raise OSError(
-            f"the destination {path} no longer names the copy the rescue "
-            "landed inside the repository: an ancestor was swapped during "
-            "the rescue"
-        )
-
-    @staticmethod
-    def _land_in_dir(
-        src: Path, dst: Path, dir_fd: int | None,
-    ) -> tuple[Path, os.stat_result] | None:
-        """Land *src*, a symlink or regular file, at *dst* in the directory *dir_fd* pins.
-
-        The landing of :meth:`_land_rescued_file`, every operation of it
-        relative to *dir_fd*: *dst* and its collision sibling are named
-        by their last component only.  With *dir_fd* None (the pathname
-        landing of :meth:`_land_by_pathname`) they are named by their
-        whole path instead.
-
-        Args:
-            src: The worktree symlink or regular file to preserve.
-            dst: The destination path, in the directory *dir_fd* pins.
-            dir_fd: The descriptor of *dst*'s directory, or None.
-
-        Returns:
-            The path the file was landed at (*dst* itself or a
-            collision sibling) with the ``stat`` of the landed file
-            (from its own descriptor; ``lstat`` for a symlink), or None
-            when an identical copy was already there.
-
-        Raises:
-            OSError: When the write failed.
-        """
-        link_target = os.readlink(src) if src.is_symlink() else None
-        name = _rescue_name(dst, dir_fd)
-        try:
-            existing = os.lstat(name, dir_fd=dir_fd)
-        except FileNotFoundError:
-            existing = None
-        if existing is not None:
-            if link_target is not None:
-                if stat.S_ISLNK(existing.st_mode) and (
-                    os.readlink(name, dir_fd=dir_fd) == link_target
-                ):
-                    return None
-            elif stat.S_ISREG(existing.st_mode):
-                fd = os.open(name, os.O_RDONLY | _O_NOFOLLOW, dir_fd=dir_fd)
-                try:
-                    if _same_bytes(src, fd):
-                        return None
-                finally:
-                    os.close(fd)
-            dst = GitWorktreeOps._rescued_sibling(dst)
-            name = _rescue_name(dst, dir_fd)
-        if link_target is not None:
-            os.symlink(link_target, name, dir_fd=dir_fd)
-            return dst, os.lstat(name, dir_fd=dir_fd)
-        # The linked inode is a private copy, never *src* itself: a
-        # failed rescue preserves the worktree, and a main-tree file
-        # sharing the worktree file's inode would show every later
-        # edit of either side on the other.
-        tmp = _rescue_name(dst.parent / f"{_RESCUE_SIBLING_MARKER}{uuid.uuid4().hex}", dir_fd)
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
-        try:
-            created = _copy_to_fd(src, fd, tmp, dir_fd)
-            try:
-                os.link(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-                return dst, created
-            except FileExistsError:
-                # A racing writer created dst between the check and the
-                # link; its file wins, ours lands beside it.
-                sibling = GitWorktreeOps._rescued_sibling(dst)
-                os.link(
-                    tmp, _rescue_name(sibling, dir_fd),
-                    src_dir_fd=dir_fd, dst_dir_fd=dir_fd,
-                )
-                return sibling, created
-            except FileNotFoundError:
-                # The temporary copy is gone from its directory: an
-                # ancestor changed under a pathname landing.
-                raise
-            except OSError:
-                # Filesystem without hard-link support: exclusive-create
-                # copy (never overwrites; on POSIX never follows a symlink).
-                fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644, dir_fd=dir_fd)
-                try:
-                    created = _copy_to_fd(src, fd, name, dir_fd)
-                except BaseException:
-                    os.unlink(name, dir_fd=dir_fd)
-                    raise
-                return dst, created
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(tmp, dir_fd=dir_fd)
-
-    @staticmethod
-    def _rescued_sibling(dst: Path) -> Path:
-        """Return a unique ``<stem>.kiss-rescued-<ns><ext>`` sibling of *dst*.
-
-        Used when *dst* already exists with different content: the
-        user's file keeps its name, the worktree's version is
-        preserved beside it instead of being silently dropped.
-
-        The marker goes BEFORE the extension (``app.log`` becomes
-        ``app.kiss-rescued-<ns>.log``) so non-git tooling keyed on the
-        extension — and single-suffix ``.gitignore`` rules like
-        ``*.log`` — still recognize the sibling.  Extensionless names
-        (``.env``, ``README``) keep the old ``<name>.kiss-rescued-<ns>``
-        shape.  Naming alone is NOT what keeps the sibling ignored:
-        compound-suffix (``*.tar.gz``) and exact-name (``.env``) rules
-        cannot survive any rename, so
-        :meth:`_ensure_rescue_sibling_excluded` installs the
-        :data:`_RESCUE_EXCLUDE_PATTERN` local exclusion — matching
-        every shape produced here — before the rescue lands anything.
-        """
-        return dst.with_name(
-            f"{dst.name.removesuffix(dst.suffix)}"
-            f"{_RESCUE_SIBLING_MARKER}{time.time_ns()}{dst.suffix}"
-        )
-
-    @staticmethod
     def _remove_path(path: Path) -> None:
         """Remove *path* whatever it is (symlink, dir, file, or absent).
 
@@ -3110,10 +3156,10 @@ class GitWorktreeOps:
                 # Mirroring its working tree (minus .git) into the new
                 # worktree's uninitialized gitlink directory would flatten
                 # it into files git never sees there: edits to them reach
-                # neither status, nor auto-commit, nor the ignored-file
-                # rescue, and the finalizer would remove the worktree with
-                # their only copy.  Refuse the snapshot instead; the
-                # caller falls back to running in the user's checkout.
+                # neither status nor auto-commit, and the finalizer would
+                # remove the worktree with their only copy.  Refuse the
+                # snapshot instead; the caller falls back to running in
+                # the user's checkout.
                 index_entry = _git("ls-files", "--stage", "-z", "--", fname, cwd=repo)
                 if index_entry.stdout.startswith("160000 "):
                     raise OSError(
@@ -3259,12 +3305,8 @@ class GitWorktreeOps:
             repo: Git repo root path.
             baseline: The worktree's baseline commit SHA.
         """
-        head = _git("rev-parse", "HEAD", cwd=repo)
         parent = _git("rev-parse", f"{baseline}^", cwd=repo)
-        if head.returncode != 0 or parent.returncode != 0:
-            return []
-        head_sha = head.stdout.strip()
-        if head_sha and head_sha == parent.stdout.strip():
+        if parent.returncode == 0 and GitWorktreeOps.head_sha(repo) == parent.stdout.strip():
             return ["-X", "theirs"]
         return []
 
@@ -3348,13 +3390,17 @@ class GitWorktreeOps:
         - ``-X theirs`` is a hunk-level tie-breaker that resolves these
           spurious conflicts in favour of the branch tip (= the agent's
           intent), and is a NO-OP for hunks that already auto-merge.
+        - Hunks cannot settle a file the task changed as a whole when
+          ``HEAD`` lacks its baseline copy (it was untracked) or holds
+          another one (it was dirty): such a path gets the branch
+          tip's entry (see :meth:`_settle_baseline_conflicts`).
 
         When ``HEAD != baseline^`` (the user committed independent
-        work on main between WT creation and merge), ``-X theirs`` is
-        deliberately NOT added: any conflict in that case is a real
-        cross-branch divergence between the user's main commits and
-        the agent's branch tip, and silently letting the branch win
-        would destroy the user's intentional commits.
+        work on main between WT creation and merge), neither is done:
+        any conflict in that case is a real cross-branch divergence
+        between the user's main commits and the agent's branch tip,
+        and silently letting the branch win would destroy the user's
+        intentional commits.
 
         Args:
             repo: Git repo root path.
@@ -3367,7 +3413,8 @@ class GitWorktreeOps:
                 commit message, or ``None``.
 
         Returns:
-            :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
+            :attr:`MergeResult.SUCCESS`, :attr:`MergeResult.CONFLICT`, or
+            :attr:`MergeResult.MERGE_FAILED` when the commit failed.
         """
         log_result = _git(
             "rev-list",
@@ -3386,39 +3433,7 @@ class GitWorktreeOps:
         count = log_result.stdout.strip()
         if count == "0":
             return MergeResult.SUCCESS
-        if GitWorktreeOps._refused_for_ignored_files(repo, branch, baseline):
-            return MergeResult.CONFLICT
-        squashed = GitWorktreeOps._squashed_commit(repo, branch, baseline)
-        if squashed is None:
-            return MergeResult.CONFLICT
-
-        cherry_pick_args = [
-            "cherry-pick", "--no-commit",
-            *GitWorktreeOps._theirs_option(repo, baseline),
-            squashed,
-        ]
-        before = GitWorktreeOps.status_porcelain(repo)
-        try:
-            result = _git(*cherry_pick_args, cwd=repo)
-            if result.returncode != 0:
-                logger.warning(
-                    "squash merge from baseline failed: %s",
-                    result.stderr.strip(),
-                )
-                GitWorktreeOps._abort_cherry_pick(repo, before)
-                return MergeResult.CONFLICT
-            return GitWorktreeOps._commit_staged_merge(
-                repo, branch, user_prompt=user_prompt, task_result=task_result,
-            )
-        except BaseException:
-            # The runner's stop (``KeyboardInterrupt``) lands at the
-            # first bytecode after whichever git call is in flight; one
-            # landing after the pick but before its commit would leave
-            # the half-squash staged in the main index.  Undo it before
-            # propagating; after a completed commit the tree matches
-            # *before* again and this is a no-op.
-            GitWorktreeOps._abort_cherry_pick(repo, before)
-            raise
+        return GitWorktreeOps._apply_and_commit(repo, branch, baseline, user_prompt, task_result)
 
     @staticmethod
     def merge_has_content_conflict(
@@ -3432,8 +3447,9 @@ class GitWorktreeOps:
         This re-checks with ``git merge-tree --write-tree``, which
         merges in memory without touching the index or the working
         tree, using the same merge base (*baseline* when given, as the
-        cherry-pick of ``baseline..branch`` does) and the same
-        ``-X theirs`` choice as :meth:`squash_merge_from_baseline`.
+        cherry-pick of ``baseline..branch`` does), the same
+        ``-X theirs`` choice as :meth:`squash_merge_from_baseline` and
+        its rule for what that leaves (:meth:`_baseline_induced`).
 
         Args:
             repo: Git repo root path (HEAD is the merge target).
@@ -3443,50 +3459,138 @@ class GitWorktreeOps:
 
         Returns:
             True only when git exits 1 (merge completed with
-            conflicts); False when the merge is clean or git failed.
+            conflicts) over a path the merge would not settle; False
+            when the merge is clean or git failed.
         """
-        args = ["merge-tree", "--write-tree"]
+        args = ["merge-tree", "--write-tree", "--name-only", "-z"]
+        theirs: list[str] = []
         if baseline:
-            args.append(f"--merge-base={baseline}")
-            args.extend(GitWorktreeOps._theirs_option(repo, baseline))
-        return _git(*args, "HEAD", branch, cwd=repo).returncode == 1
+            theirs = GitWorktreeOps._theirs_option(repo, baseline)
+            args += [f"--merge-base={baseline}", *theirs]
+        result = _git(*args, "HEAD", branch, cwd=repo)
+        if result.returncode != 1:
+            return False
+        # ``<tree>\0<conflicted path>\0...\0\0<messages>``
+        conflicted = result.stdout.split("\0\0", 1)[0].split("\0")[1:]
+        return not (
+            baseline and theirs and conflicted
+            and GitWorktreeOps._baseline_induced(repo, branch, baseline, conflicted)
+        )
 
     @staticmethod
-    def _abort_cherry_pick(repo: Path, before: str) -> None:
-        """Undo a failed cherry-pick, verifying the abort actually worked.
+    def _baseline_induced(repo: Path, branch: str, baseline: str, conflicted: list[str]) -> bool:
+        """Whether *branch* changed every path of *conflicted* since *baseline*.
 
-        ``git cherry-pick --abort`` restores the pre-pick state when a
-        sequencer is in progress, but it fails outright when there is
-        nothing to abort — e.g. the pick was refused up front, or the
-        sequencer state was already cleared.  Its return code must not
-        be discarded: on failure the main tree can be left with a
-        partially-applied index while the caller reports
-        :attr:`MergeResult.CONFLICT`, and ``_do_merge`` deliberately
-        does not pop the user's stash on CONFLICT because it assumes
-        the tree is clean enough for a manual merge.
+        While ``HEAD == baseline^`` (see :meth:`_theirs_option`),
+        ``HEAD`` differs from the merge base by the user's dirty state
+        alone and no path holds a competing commit: a path the task
+        changed conflicts only over that state, and the branch tip's
+        entry settles it.  A path the task did not change is git's own
+        (``name~side``, where a file and a directory clash) and
+        nothing settles it.
+        """
+        changed = GitWorktreeOps._diff_name_only(repo, "--no-renames", baseline, branch)
+        return set(conflicted) <= set(changed)
 
-        When the abort fails AND the tree no longer matches *before*,
-        the sequencer state is discarded (``--quit``) and the tree is
-        reset — the same guarantee :meth:`squash_merge_branch` already
-        gives on its conflict path.  When nothing changed there is
-        nothing to undo, so the user's own uncommitted work is left
-        exactly as it was.
+    @staticmethod
+    def _settle_baseline_conflicts(
+        repo: Path, branch: str, baseline: str, conflicted: list[str],
+    ) -> list[str]:
+        """Give the paths a pick left unmerged while ``HEAD == baseline^`` *branch*'s entries.
+
+        ``-X theirs`` settles hunks, not a path one side lacks: a file
+        that was untracked when the task began and that the task then
+        edited or renamed is modify/delete against ``HEAD``, a dirty
+        file the task deleted likewise.  Each such path gets the
+        branch tip's entry, mode and deletion included, in the index;
+        nothing is touched unless all of them are
+        :meth:`_baseline_induced`.  The working files follow by git's
+        own check of each (:meth:`_move_written_files`, from the tree
+        the pick wrote, ``AUTO_MERGE``): one saved since the pick
+        wrote it keeps what it holds, settled in the index alone.
+        Once they followed, ``AUTO_MERGE`` names the settled tree: the
+        one :meth:`_undo_merge` takes back if the commit fails.
 
         Args:
-            repo: Git repo root path.
-            before: ``status_porcelain`` output captured immediately
-                before the cherry-pick.
+            repo: Git repo root path, with the pick applied.
+            branch: The task branch being merged.
+            baseline: Its baseline commit SHA.
+            conflicted: The paths the pick left unmerged.
+
+        Returns:
+            The paths still unmerged; empty when all are settled.
         """
-        if _git("cherry-pick", "--abort", cwd=repo).returncode == 0:
-            return
-        if GitWorktreeOps.status_porcelain(repo) == before:
-            return
+        if not GitWorktreeOps._baseline_induced(repo, branch, baseline, conflicted):
+            return conflicted
+        if _git(
+            "--literal-pathspecs", "reset", "-q", branch,
+            "--pathspec-from-file=-", "--pathspec-file-nul",
+            cwd=repo, input="\0".join(conflicted),
+        ).returncode != 0:
+            return GitWorktreeOps.unresolved_paths(repo) or conflicted
+        # To the tree the index holds now; without one (git failed) nothing moves.
+        settled = _git("write-tree", cwd=repo).stdout.strip()
+        if GitWorktreeOps._move_written_files(repo, "AUTO_MERGE", settled):
+            _git("update-ref", "AUTO_MERGE", settled, cwd=repo)
+        return GitWorktreeOps.unresolved_paths(repo)
+
+    @staticmethod
+    def _apply_branch(repo: Path, branch: str, baseline: str | None) -> list[str] | None:
+        """Apply *branch* onto HEAD without committing.
+
+        With a *baseline* the agent's net change (``baseline..branch``)
+        is ONE ``cherry-pick --no-commit`` of the
+        :meth:`_squashed_commit`, with ``-X theirs`` and
+        :meth:`_settle_baseline_conflicts` when :meth:`_theirs_option`
+        allows them; without one, ``git merge --squash``.  Either
+        runs without ``rerere``: a recorded resolution it replays
+        into a conflicted file is not what the merge wrote there (see
+        :meth:`_undo_merge`), and staged by
+        ``rerere.autoupdate`` it leaves git failed with a merge
+        applied and nothing unmerged.  And either merges with
+        ``ort``, whatever ``pull.twohead`` names: the strategy the
+        pick and :meth:`merge_has_content_conflict` use anyway, and
+        the one that records what it wrote (``AUTO_MERGE``).
+
+        Args:
+            repo: Git repo root path, checked out on the target branch.
+            branch: The task branch to merge in.
+            baseline: The worktree's baseline commit SHA, or ``None`` for
+                a legacy worktree.
+
+        Returns:
+            The repository-relative paths left unmerged; an empty list
+            when the change applied cleanly and is staged; ``None``
+            when nothing was applied: git failed for a reason other
+            than conflicts, or was not run because a git operation of
+            the user's is under way (:meth:`operation_in_progress`).
+        """
+        if GitWorktreeOps.operation_in_progress(repo):
+            logger.warning("a git operation is under way in %s; not merging %s", repo, branch)
+            return None
+        theirs: list[str] = []
+        if baseline:
+            squashed = GitWorktreeOps._squashed_commit(repo, branch, baseline)
+            if squashed is None:
+                return None
+            theirs = GitWorktreeOps._theirs_option(repo, baseline)
+            args = ["cherry-pick", "--no-commit", *theirs, squashed]
+        else:
+            args = ["merge", "--squash", branch]
+        result = _git("-c", "rerere.enabled=false", "-c", "pull.twohead=ort", *args, cwd=repo)
+        if result.returncode == 0:
+            return []
+        conflicted = GitWorktreeOps.unresolved_paths(repo)
+        if baseline and theirs and conflicted:
+            conflicted = GitWorktreeOps._settle_baseline_conflicts(
+                repo, branch, baseline, conflicted,
+            )
+            if not conflicted:
+                return []
         logger.warning(
-            "cherry-pick --abort failed and the tree changed; "
-            "discarding sequencer state and resetting %s", repo,
+            "applying %s onto HEAD of %s failed: %s", branch, repo, result.stderr.strip(),
         )
-        _git("cherry-pick", "--quit", cwd=repo)
-        _git("reset", "--hard", "HEAD", cwd=repo)
+        return conflicted or None
 
     @staticmethod
     def _squashed_commit(repo: Path, branch: str, baseline: str) -> str | None:
@@ -3517,65 +3621,54 @@ class GitWorktreeOps:
 
     @staticmethod
     def begin_conflicted_merge(
-        repo: Path, branch: str, baseline: str | None, before: str,
+        repo: Path, branch: str, baseline: str | None,
     ) -> list[str] | None:
         """Apply *branch* onto HEAD, leaving conflicts in the tree to resolve.
 
         The conflict-resolution counterpart of
         :meth:`squash_merge_from_baseline` / :meth:`squash_merge_branch`,
         run after one of those returned :attr:`MergeResult.CONFLICT` and
-        restored a clean tree.  Nothing is committed: with a *baseline*
-        the agent's net change (``baseline..branch``) is applied as ONE
-        three-way merge — a synthetic squashed commit with the branch's
-        tree and *baseline* as parent, cherry-picked with ``--no-commit``
-        (and the same ``-X theirs`` rule as the clean path) — so the
-        resolver sees a single set of conflicts instead of a stopped
-        multi-commit sequencer; without a baseline ``git merge --squash``
-        is used.
+        took its merge back.  Nothing is committed: the change is
+        applied as on the clean path (see :meth:`_apply_branch`), with
+        a *baseline* as ONE three-way merge, so the resolver sees a
+        single set of conflicts instead of a stopped multi-commit
+        sequencer.  What the merge wrote is noted for
+        :meth:`abort_conflicted_merge` and the marker check of
+        :meth:`finish_conflicted_merge`; a merge that is interrupted
+        as it is applied is taken back here (:meth:`_undo_merge`).
 
         Args:
             repo: Git repo root path, checked out on the target branch.
             branch: The task branch to merge in.
             baseline: The worktree's baseline commit SHA, or ``None`` for
                 a legacy worktree.
-            before: :meth:`status_porcelain` of *repo* taken just before
-                the call (the caller needs it for its own
-                :meth:`abort_conflicted_merge`, so the walk is not
-                repeated here); restores the tree on failure.
 
         Returns:
             The repository-relative paths left unmerged (the resolver's
             work list); an empty list when the merge applied cleanly
-            and is staged; ``None`` when git failed for a reason other
-            than conflicts (or the merge would overwrite ignored files,
-            see :meth:`ignored_collisions`), in which case the tree has
-            been restored.
+            and is staged; ``None`` when nothing was applied: git
+            failed for a reason other than conflicts, the merge would
+            overwrite ignored files (see :meth:`ignored_collisions`),
+            the index holds unmerged entries (the user's own, or a
+            merge :meth:`_undo_merge` left in place), or a git
+            operation of the user's is under way.
         """
         if GitWorktreeOps._refused_for_ignored_files(repo, branch, baseline):
             return None
-        if baseline:
-            squashed = GitWorktreeOps._squashed_commit(repo, branch, baseline)
-            if squashed is None:
-                return None
-            args = [
-                "cherry-pick", "--no-commit",
-                *GitWorktreeOps._theirs_option(repo, baseline),
-                squashed,
-            ]
-        else:
-            args = ["merge", "--squash", branch]
-        result = _git(*args, cwd=repo)
-        if result.returncode == 0:
-            return []
-        conflicted = GitWorktreeOps.unresolved_paths(repo)
-        if not conflicted:
-            logger.warning(
-                "applying %s for conflict resolution failed without "
-                "conflicts: %s", branch, result.stderr.strip(),
-            )
-            GitWorktreeOps.abort_conflicted_merge(repo, before, "")
+        index_before = GitWorktreeOps._index_tree(repo)
+        if index_before is None:
             return None
-        return conflicted
+        try:
+            conflicted = GitWorktreeOps._apply_branch(repo, branch, baseline)
+            if conflicted is not None:
+                _conflicted_merges[repo] = GitWorktreeOps._written_tree(repo, branch), conflicted
+            return conflicted
+        except BaseException:
+            # No resolver has worked on the merge: a file that is no longer
+            # what it wrote is the user's, and ``_undo_merge`` keeps it.
+            _conflicted_merges.pop(repo, None)
+            GitWorktreeOps._undo_if_applied(repo, branch, index_before)
+            raise
 
     @staticmethod
     def unresolved_paths(repo: Path) -> list[str]:
@@ -3586,16 +3679,15 @@ class GitWorktreeOps:
     def paths_with_conflict_markers(repo: Path, paths: list[str]) -> list[str]:
         """Return those of *paths* whose staged content still has conflict markers.
 
-        Only the ``<<<<<<<`` and ``>>>>>>>`` marker lines are checked
-        (seven or more characters, so a ``conflict-marker-size``
-        attribute above the default is covered too): a bare ``=======``
+        Only the ``<<<<<<<`` and ``>>>>>>>`` marker lines are checked,
+        of the length git wrote them with (:meth:`_marker_sizes`) or
+        longer, as those of a nested conflict are.  A bare ``=======``
         line is also a Markdown setext underline, so matching it would
         flag legitimately resolved files.  The paths are literal
-        pathspecs, so a name containing pathspec magic cannot break the
-        query, and a ``git grep`` failure (any exit code other than the
-        0 = matches / 1 = no matches pair) reports every path as
-        unresolved: this check guards a branch deletion, so it fails
-        closed.
+        pathspecs, so a name containing pathspec magic cannot break
+        the query, and a git failure (:meth:`_grep`) reports every
+        path as unresolved: this check guards a branch deletion, so it
+        fails closed.
 
         Args:
             repo: Git repo root path.
@@ -3608,19 +3700,80 @@ class GitWorktreeOps:
         """
         if not paths:
             return []
-        result = _git(
-            "grep", "-l", "-z", "--cached", "-E", "-e", "^(<{7,}|>{7,})( |$)",
-            "--", *(f":(literal){p}" for p in paths), cwd=repo,
-        )
-        if result.returncode == 1:
-            return []
-        if result.returncode != 0:
+        found: list[str] = []
+        try:
+            sizes = GitWorktreeOps._marker_sizes(repo, paths)
+            by_size: dict[int, list[str]] = {}
+            for path in paths:
+                by_size.setdefault(sizes.get(path, 7), []).append(path)
+            for size, sized in by_size.items():
+                marked = GitWorktreeOps._grep(
+                    repo, "-l", "--cached", "-e", f"^(<{{{size},}}|>{{{size},}})( |$)",
+                    "--", *(f":(literal){p}" for p in sized),
+                )
+                found += [f for f in marked.split("\0") if f]
+        except _GitStepError:
             logger.warning(
-                "git grep for conflict markers failed (%s); treating %s as "
-                "unresolved", result.stderr.strip(), paths,
+                "the check for conflict markers failed; treating %s as unresolved", paths,
             )
             return list(paths)
-        return [f for f in result.stdout.split("\0") if f]
+        return found
+
+    @staticmethod
+    def _marker_sizes(repo: Path, paths: list[str]) -> dict[str, int]:
+        """Return the length of the conflict markers git wrote into each of *paths*.
+
+        Read off the tree the conflicted merge of *repo* wrote
+        (:meth:`begin_conflicted_merge` took note of it): the shortest
+        length at which a ``<<<`` line, a ``===`` line and a ``>>>``
+        line follow one another there, whatever the two sides are
+        named (git says ``HEAD``, a merge driver of the user's names
+        its temporary files).  The path's ``conflict-marker-size``
+        attribute decided that length as git merged; nothing read
+        afterwards tells what it said then.  A path without such
+        lines, or with no merge noted, is left out: git's default of
+        seven is checked there.
+
+        Raises:
+            _GitStepError: git failed; its error is logged.
+        """
+        merge = _conflicted_merges.get(repo)
+        if merge is None:
+            return {}
+        written = merge[0]
+        lines = GitWorktreeOps._grep(
+            repo, "-a", "-o", "-e", "^(<+|>+)( |$)", "-e", "^=+[[:space:]]*$", written,
+            "--", *(f":(literal){p}" for p in paths),
+        )
+        runs: dict[str, list[str]] = {}
+        # ``<tree>:<path>\0<the match>\n`` a line, in the file's order.
+        for name, run in re.findall(r"(?s)(.*?)\0(<+|=+|>+)[^\n]*\n", lines):
+            runs.setdefault(name.removeprefix(f"{written}:"), []).append(run)
+        sizes: dict[str, int] = {}
+        for path, found in runs.items():
+            for size in sorted({len(run) for run in found if run[0] == "<"}):
+                rest = iter(found)  # ``in`` reads on from the run found last
+                if all(mark * size in rest for mark in "<=>"):
+                    sizes[path] = size
+                    break
+        return sizes
+
+    @staticmethod
+    def _grep(repo: Path, *args: str) -> str:
+        """Run ``git grep -z -E`` with *args* and return what it printed, bare of decoration.
+
+        Raises:
+            _GitStepError: git failed (any exit code other than the
+                0 = matches / 1 = no matches pair); its error is logged.
+        """
+        result = _git(
+            "grep", "--no-color", "--no-line-number", "--no-column", "-z", "-E", *args,
+            cwd=repo,
+        )
+        if result.returncode not in (0, 1):
+            logger.warning("git grep failed in %s: %s", repo, result.stderr.strip())
+            raise _GitStepError
+        return result.stdout
 
     @staticmethod
     def finish_conflicted_merge(
@@ -3655,8 +3808,10 @@ class GitWorktreeOps:
         Returns:
             :attr:`MergeResult.SUCCESS` when committed,
             :attr:`MergeResult.MERGE_FAILED` when the commit itself
-            failed (tree reset), and :attr:`MergeResult.CONFLICT` when
-            the resolution is refused — the caller restores the tree.
+            failed, and :attr:`MergeResult.CONFLICT` when the
+            resolution is refused.  Unless committed, the merge is
+            still applied: the caller takes it back
+            (:meth:`abort_conflicted_merge`).
         """
         if GitWorktreeOps.head_sha(repo) != head_before:
             logger.warning(
@@ -3670,37 +3825,69 @@ class GitWorktreeOps:
             return MergeResult.CONFLICT
         if not GitWorktreeOps.has_staged_changes(repo):
             return MergeResult.CONFLICT
-        # ``--no-commit`` leaves no sequencer state, but a resolver that
-        # ran ``git cherry-pick --continue`` half-way may have; either
-        # way ``--quit`` is harmless and keeps the index.
+        # ``--no-commit`` leaves no sequencer state and the user had
+        # none when the merge began (:meth:`operation_in_progress`):
+        # one found now is the resolver's (a ``git cherry-pick
+        # --continue`` half-way), and ``--quit`` keeps the index.
         _git("cherry-pick", "--quit", cwd=repo)
-        return GitWorktreeOps._commit_merge(
+        if GitWorktreeOps._commit_merge(
             repo, branch, user_prompt=user_prompt, task_result=task_result,
-        )
+        ):
+            _conflicted_merges.pop(repo, None)
+            return MergeResult.SUCCESS
+        return MergeResult.MERGE_FAILED
 
     @staticmethod
-    def abort_conflicted_merge(repo: Path, before: str, head_before: str) -> None:
-        """Restore the tree after a conflicted merge that was not completed.
+    def abort_conflicted_merge(repo: Path, before: str, head_before: str) -> bool:
+        """Take back a conflicted merge that was not completed, and nothing but the merge.
 
-        Drops any sequencer state, resets the branch, index and tracked
-        files to *head_before* (undoing any commit the resolver made on
-        its own — see :meth:`finish_conflicted_merge`), and — when the
-        tree was clean before the attempt (the merge path stashes the
-        user's changes first) — removes the untracked files the merge
-        or the resolver left behind.  A tree that was already dirty
-        keeps its untracked files: they may be the user's.
+        Drops any sequencer state (the resolver's: the user had none
+        when the merge began, see :meth:`operation_in_progress`) and
+        puts the branch back on *head_before* (undoing any commit the
+        resolver made on its own — see :meth:`finish_conflicted_merge`).
+        The paths the merge wrote (:meth:`begin_conflicted_merge` took
+        note of them) then go back to *head_before* whatever they hold
+        by now, since the resolver worked there, and the index with
+        them.  Every other file stays as it is, tracked or not: the
+        user's editor takes none of the merge's locks, and a file it
+        saved during the resolution cannot be told from one the
+        resolver left behind.  What stays is logged.
 
         Args:
             repo: Git repo root path.
             before: ``status_porcelain`` output captured before
                 :meth:`begin_conflicted_merge`.
             head_before: ``HEAD`` SHA captured before it; ``""`` (HEAD
-                unreadable) resets to the current HEAD.
+                unreadable) stands for the current HEAD.
+
+        Returns:
+            Whether the merge is taken back (also when none is in
+            place: :meth:`begin_conflicted_merge` applied nothing, or
+            took its own merge back).  When not, the merge stays in
+            the files and the index for the user to settle: git
+            refused to write (a file changed as it looked, or one
+            appeared where the merge had deleted one).
         """
         _git("cherry-pick", "--quit", cwd=repo)
-        _git("reset", "--hard", head_before or "HEAD", cwd=repo)
-        if not before:
-            _git("clean", "-fd", cwd=repo)
+        merge = _conflicted_merges.pop(repo, None)
+        taken_back = True
+        if merge is not None:
+            written, conflicted = merge
+            head = head_before or "HEAD"
+            _git("reset", "--soft", head, cwd=repo)
+            # A path the merge deleted is none of these: a file there is not the merge's.
+            paths = GitWorktreeOps._diff_name_only(
+                repo, "--no-renames", "--diff-filter=d", head, written, "--",
+            )
+            now = GitWorktreeOps._tree_with_files(repo, written, paths + conflicted)
+            taken_back = now is not None and GitWorktreeOps._take_back(repo, now, head)
+        kept = GitWorktreeOps.status_porcelain(repo)
+        if kept != before:
+            logger.warning(
+                "the tree of %s differs from the one before the conflicted merge; "
+                "nothing more is removed, it may be the user's:\n%s", repo, kept,
+            )
+        return taken_back
 
     @staticmethod
     def cleanup_partial(repo: Path, branch: str, wt_dir: Path) -> None:
@@ -4213,22 +4400,6 @@ class GitWorktreeOps:
                         # are retried.
                         GitWorktreeOps.save_preserve_marker(repo, branch)
                     continue
-                # The dead task's git-ignored output (auto-commit
-                # cannot capture it) would be destroyed with the
-                # directory below.  Rescue fails closed: when a file
-                # could not be landed, the worktree is preserved (its
-                # branch is already merged, so a later reclaim retries
-                # harmlessly).
-                _, rescue_ok = GitWorktreeOps.rescue_ignored_files(
-                    wt_dir, repo,
-                )
-                if not rescue_ok:
-                    logger.warning(
-                        "Reclaim of orphan worktree %s: ignored-file "
-                        "rescue failed; preserving the worktree",
-                        wt_dir,
-                    )
-                    continue
                 GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
                 reclaimed += 1
         return reclaimed
@@ -4245,13 +4416,13 @@ class _WorktreeCleanupOutcome(enum.Enum):
 
     COMMITTED_AND_REMOVED = "committed_and_removed"
     PRESERVED_COMMIT_FAILED = "preserved_commit_failed"
-    PRESERVED_RESCUE_FAILED = "preserved_rescue_failed"
 
 
 _PRECOMMIT_FIX_LINES = (
     "    # fix pre-commit issues, then:\n"
     "    git commit --no-verify\n"
 )
+
 
 def inside_kiss_worktree(path: Path | str) -> bool:
     """Whether *path* lies inside a ``<repo>/.kiss-worktrees/kiss_wt-*`` worktree.
@@ -4263,22 +4434,6 @@ def inside_kiss_worktree(path: Path | str) -> bool:
         True when a worktree segment is part of the path.
     """
     return _worktree_parts(str(path))[1] >= 0
-
-
-def kiss_worktree_root(path: Path | str) -> Path | None:
-    """The ``<repo>/.kiss-worktrees/kiss_wt-*`` directory *path* lies in.
-
-    Args:
-        path: A filesystem path (need not exist).
-
-    Returns:
-        The worktree directory, or ``None`` when *path* is not inside a
-        KISS worktree.
-    """
-    parts, i = _worktree_parts(str(path))
-    if i < 0:
-        return None
-    return Path("/".join(parts[: i + 2]))
 
 
 def _path_inside(path: Path, root: Path) -> Path | None:
@@ -4326,45 +4481,6 @@ def _manual_merge_cmd(wt: GitWorktree) -> str:
         )
         return f'git cherry-pick --no-commit "$({squashed})"'
     return f"git merge --squash {shlex.quote(wt.branch)}"
-
-
-def _rescue_failed_warning(wt: GitWorktree) -> str:
-    """User warning for a worktree kept because ignored output was unrescuable.
-
-    Args:
-        wt: The preserved worktree.
-
-    Returns:
-        The warning text.
-    """
-    return (
-        f"Git-ignored files created by the task in branch "
-        f"'{wt.branch}' could not be copied into the main "
-        f"repository, so its worktree directory {wt.wt_dir} was "
-        f"kept — it holds the only copy of those files. Recover "
-        f"them there."
-    )
-
-
-def _rescue_ignored_files(wt: GitWorktree) -> bool:
-    """Copy *wt*'s git-ignored task output into its main repository.
-
-    Wraps :meth:`GitWorktreeOps.rescue_ignored_files` so a filesystem
-    failure inside the rescue is logged and reported as a failed
-    rescue instead of escaping into a teardown path.
-
-    Args:
-        wt: The worktree about to be removed.
-
-    Returns:
-        True when every ignored file was landed (or none existed).
-    """
-    try:
-        _, rescue_ok = GitWorktreeOps.rescue_ignored_files(wt.wt_dir, wt.repo_root)
-    except Exception:  # pragma: no cover — filesystem failure
-        logger.warning("Ignored-file rescue failed for %s", wt.wt_dir, exc_info=True)
-        return False
-    return rescue_ok
 
 
 def _merge_fix_steps(wt: GitWorktree, fix_lines: str) -> str:

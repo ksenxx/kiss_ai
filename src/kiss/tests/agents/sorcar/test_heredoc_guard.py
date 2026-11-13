@@ -92,6 +92,11 @@ def test_heredoc_may_create_but_not_rewrite_a_file(work: Path) -> None:
         ("case a in a) cat > notes.md <<EOF\nnew\nEOF\n;; esac", notes),
         # a pipe at the end of the heredoc line goes on after the body
         ("cat <<EOF |\nnew\nEOF\ntee notes.md", notes),
+        # piped into the text a shell or ``eval`` runs, the copy reaches what the commands of
+        # that text write, or pass on (audit 2026-11-10 S10-F1, the direction left open then)
+        ("cat <<EOF | bash -c 'tee notes.md' > /dev/null\nnew\nEOF", notes),
+        ("cat <<EOF | eval 'tee notes.md' > /dev/null\nnew\nEOF", notes),
+        ("cat <<EOF | sh -c 'cat' | tee notes.md\nnew\nEOF", notes),
     ):
         # Since 2026-10-31 a single copy into a file not shown names the Read
         # and Write to make after the verdict; the file is not touched.
@@ -100,6 +105,8 @@ def test_heredoc_may_create_but_not_rewrite_a_file(work: Path) -> None:
     assert (work / "my notes.md").read_text() == "old\n"
     assert (work / "new.txt").read_text() == "fresh\n"
     assert not (work / "fresh.txt").exists()  # nothing of a refused command ran
+    out = tools.Bash("cat <<EOF | bash -c 'tee piped.txt' > /dev/null\nfresh\nEOF", "create")
+    assert "REFUSED" not in out and (work / "piped.txt").read_text() == "fresh\n"
 
 
 def test_cd_moves_where_relative_targets_resolve(work: Path) -> None:
@@ -113,8 +120,9 @@ def test_cd_moves_where_relative_targets_resolve(work: Path) -> None:
     assert tools.Bash("cd sub\ncat >> log.txt <<'EOF'\ntwo\nEOF", "append") == _refusal(log)
     assert tools.Bash("{ cd sub; cat >> log.txt <<'EOF'\ntwo\nEOF\n}", "group") == (
         _refusal(log))
+    # the ``..`` is the filesystem's to resolve (audit 2026-11-10 S10-F6): the path keeps it
     assert tools.Bash(f"cd {work}/sub; cat > ../notes.md <<'EOF'\nx\nEOF", "rewrite") == (
-        _refusal(work / "notes.md"))
+        _refusal(f"{work}/sub/../notes.md"))
     assert tools.Bash('cd "sub dir" && cat > x.md <<EOF\nnew\nEOF', "quoted").startswith(
         _refusal(work / "sub dir" / "x.md"))
     # A cd in a subshell, a pipeline or the background leaves this shell where it was.
@@ -244,7 +252,8 @@ def test_an_exec_sink_is_the_file_its_shell_opened_where_it_opened_it(work: Path
     for command, verdict in (
         # the file opened in the work dir, whatever directory the copy runs in
         ("exec > notes.md; cd sub; cat <<'EOF'\nnew\nEOF", _refusal(notes)),
-        ("cd sub; exec > ../notes.md; cd ..; cat <<'EOF'\nnew\nEOF", _refusal(notes)),
+        ("cd sub; exec > ../notes.md; cd ..; cat <<'EOF'\nnew\nEOF",
+         _refusal(f"{work}/sub/../notes.md")),
         # a sink opened in a directory only the shell knows stays unknown after a known cd
         (f'cd "$D"; exec > notes.md; cd {work}/sub; cat <<\'EOF\'\nnew\nEOF',
          _unresolved("notes.md")),
@@ -339,7 +348,8 @@ def test_guard_reads_commands_as_bash_does(tmp_path: Path) -> None:
         "if true; then cat > notes.md <<EOF\nx\nEOF\nfi": _refusal(notes),
         "cat 0<<EOF > notes.md\nx\nEOF": _refusal(notes),
         'cat > "no\\"tes.md" <<EOF\nx\nEOF\ncat > "no\\\ntes.md" <<EOF\nx\nEOF': _refusal(notes),
-        "cd -P sub && cat > ../notes.md <<EOF\nx\nEOF": _refusal(notes),
+        # a physical cd ends where the symbolic links lead (audit 2026-11-10 S10-F7)
+        "cd -P sub && cat > ../notes.md <<EOF\nx\nEOF": _unresolved("../notes.md"),
         "cd && cat > notes.md <<EOF\nx\nEOF": _unresolved("notes.md"),
         "cat > notes.md <<EOF\nno terminator": _refusal(notes),
         "(cat <<EOF) | tee notes.md\nx\nEOF": _refusal(notes),
