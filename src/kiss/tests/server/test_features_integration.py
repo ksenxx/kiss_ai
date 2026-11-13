@@ -3,7 +3,8 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests for: API key deletion and the Chrome bridge toggle
-through the daemon's saveConfig handler.
+through the daemon's saveConfig handler, and the toggle's label in the
+Settings sheet of a live page.
 
 The core-only methods (budget limit, custom endpoint, config persistence,
 key save/overwrite lifecycle) moved to
@@ -20,14 +21,20 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import sync_playwright
 
+from kiss.core.brand import PRODUCT_NAME
 from kiss.core.user_config import API_KEY_ENV_VARS
+from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.core.test_features_integration import (  # noqa: F401
     _restore_default_config,
 )
+from kiss.tests.webapp.test_remote_tab_settings_button import _start_live_server
 
 
 class TestApiKeySetupAndDeletion:
@@ -128,3 +135,76 @@ class TestChromeBridgeToggle:
         finally:
             ChromeBridge.shutdown()
         assert not (extension_dir() / CONFIG_FILE_NAME).exists()
+
+    @pytest.mark.timeout(180)
+    def test_the_label_says_how_to_install_the_extension_and_its_steps_work(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The label's own first step, taken in a live page, yields the folder and name it gives."""
+        from kiss.agents.sorcar.chrome_bridge import CONFIG_FILE_NAME, ChromeBridge, extension_dir
+
+        # Not the product's usual home, and no extension installed in it yet.
+        home = tmp_path / "home"
+        home.mkdir()
+        # Opted out of the Tips window, which opens over a new home's first page.
+        (home / "TIPS_DISABLED").write_text("opt-out\n")
+        monkeypatch.setenv("KISS_HOME", str(home))
+        ChromeBridge.shutdown()
+        ready, done = threading.Event(), threading.Event()
+        state: dict[str, object] = {}
+        server = threading.Thread(
+            target=_start_live_server, args=(tmp_path, ready, done, state), daemon=True
+        )
+        server.start()
+        try:
+            assert ready.wait(30) and "error" not in state, state
+            with sync_playwright() as p:
+                browser = p.chromium.launch(args=["--ignore-certificate-errors"])
+                try:
+                    page = browser.new_page(ignore_https_errors=True)
+                    url = f"https://127.0.0.1:{state['port']}/"
+                    goto_retrying_network_change(page, url, wait_until="domcontentloaded")
+                    page.wait_for_selector("#more-btn", state="attached")
+                    page.wait_for_timeout(200)
+                    page.click("#more-btn")
+                    page.click("#settings-btn")
+                    page.wait_for_selector("#settings-panel.open", state="attached")
+                    label = page.locator("label:has(#cfg-chrome-bridge)")
+                    label.scroll_into_view_if_needed()
+                    # The folder is this daemon's own, wherever its home is.
+                    page.wait_for_function(
+                        "folder => document.getElementById('cfg-chrome-extension-dir')"
+                        ".textContent === folder",
+                        arg=str(extension_dir()),
+                    )
+                    assert " ".join(label.inner_text().split()) == (
+                        "Drive my Chrome: tick this box and close Settings. Then, in Chrome on "
+                        f"the computer that runs {PRODUCT_NAME}, open chrome://extensions, turn "
+                        'on Developer mode, click "Load unpacked" and select the folder '
+                        f"{home / 'chrome_extension'}. "
+                        f'It is listed there as "{PRODUCT_NAME} Bridge". Leave Developer mode '
+                        "on: without it Chrome switches the extension off."
+                    )
+                    assert label.get_attribute("title") == (
+                        f'Ticked: the bridge that the "{PRODUCT_NAME} Bridge" extension connects '
+                        "to runs from daemon start. Clear: an agent's first use of your Chrome "
+                        "starts it."
+                    )
+                    assert not extension_dir().exists()
+                    page.check("#cfg-chrome-bridge")  # "tick this box"
+                    page.click("#settings-panel-close")  # "and close Settings"
+                    deadline = time.monotonic() + 30
+                    while not (extension_dir() / CONFIG_FILE_NAME).exists():
+                        assert time.monotonic() < deadline, "the save started no bridge"
+                        time.sleep(0.05)
+                finally:
+                    browser.close()
+            # The folder the label named holds the extension, under the name the label gave.
+            manifest = json.loads((home / "chrome_extension" / "manifest.json").read_text())
+            assert manifest["name"] == f"{PRODUCT_NAME} Bridge"
+            worker = manifest["background"]["service_worker"]
+            assert (home / "chrome_extension" / worker).is_file()
+        finally:
+            done.set()
+            server.join(timeout=30)
+            ChromeBridge.shutdown()

@@ -21,14 +21,7 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 
-const {makePage, send, click} = harness;
-
-function startRunningTask(win, posted) {
-  const tabId = posted.find(m => m.type === 'ready').tabId;
-  win._testApi.hideWelcome();
-  send(win, {type: 'status', running: true, tabId});
-  return tabId;
-}
+const {makePage, send, click, startRunningTask} = harness;
 
 function stopBtn(win) {
   return win.document.getElementById('stop-btn');

@@ -36,10 +36,12 @@ import sys
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
 from kiss.core.remote_password import password_accepted
+from kiss.scripts import running_tasks
 from kiss.tests.conftest import IS_WINDOWS, posix_only
 
 _ROOT = Path(__file__).resolve().parents[4]
@@ -371,6 +373,12 @@ class RemoteConfigTest(unittest.TestCase):
             [".config.lock", "config.json"])
 
 
+def _bytes_read() -> int:
+    """Return the bytes this process has read so far, from disk or cache (``rchar`` of /proc)."""
+    fields = dict(line.split(": ") for line in Path("/proc/self/io").read_text().splitlines())
+    return int(fields["rchar"])
+
+
 class RunningTasksTest(unittest.TestCase):
     """A deploy restarts the web app, so it has to see a task running."""
 
@@ -432,6 +440,53 @@ class RunningTasksTest(unittest.TestCase):
         self.assertEqual(self._count("60")[0], 0)
         self.assertEqual(self._count("0")[0], 0)
 
+    def test_an_older_event_stored_last_does_not_hide_the_heartbeat(self) -> None:
+        """A task's newest event is the one stamped last, not the one stored last.
+
+        An event is stamped when the agent queues it.  A batch the database refused waits
+        in the journal and is stored behind events queued after it, so the last row of a
+        task can be twenty minutes old while the task is writing.  Read as the heartbeat,
+        that row said nothing was running, and the deploy restarted the web app under it.
+        """
+        self._make([("LIVE", 0, 2.0)])
+        con = sqlite3.connect(self.db)
+        con.execute(
+            "INSERT INTO events(task_id, seq, event_json, timestamp)"
+            " VALUES ('LIVE', 1, '{}', ?)", (time.time() - 1200,))
+        con.commit()
+        con.close()
+
+        for mode in ((), ("--unfinished",)):
+            count, output = self._count("300", *mode)
+            self.assertEqual(count, 1, mode)
+            self.assertLess(int(output.splitlines()[1].split()[1]), 60, mode)
+
+    @unittest.skipUnless(os.path.exists("/proc/self/io"), "counts the bytes this process reads")
+    def test_the_events_of_finished_tasks_are_not_read(self) -> None:
+        """The probe reads the events of the tasks without an end time, nothing more.
+
+        Joined with every event ever written it read the whole history -- an event's
+        timestamp sits behind its payload -- and was still at it after five minutes on
+        a 15 GB database, which is no answer for a deploy.  The finished task here
+        holds 16 MiB of events; both answers come after reading less than one.
+        """
+        self._make([("LIVE", 0, 2.0), ("CRASHED", 0, 90000.0), ("FINISHED", 1700000000, 9.0)])
+        con = sqlite3.connect(self.db)
+        con.execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 64)"
+            " INSERT INTO events(task_id, seq, event_json, timestamp)"
+            " SELECT 'FINISHED', i, hex(zeroblob(131072)), i + 0.5 FROM n")
+        con.execute("UPDATE task_history SET result = 'done'")
+        con.commit()
+        con.close()
+
+        before = _bytes_read()
+        for probe in (running_tasks.running_tasks, running_tasks.unfinished_tasks):
+            answer = probe(str(self.db), 300)
+            assert answer is not None
+            self.assertEqual([task for task, _ in answer], ["LIVE"])
+        self.assertLess(_bytes_read() - before, 1 << 20)
+
     def test_a_machine_with_no_history_has_nothing_running(self) -> None:
         """A first deploy: no database, and therefore nothing to lose."""
         self.assertEqual(self._count("300")[0], 0)
@@ -441,6 +496,22 @@ class RunningTasksTest(unittest.TestCase):
         self.db.write_bytes(b"not a database")
 
         self.assertEqual(self._count("300")[0], 0)
+
+    def test_a_path_that_reads_as_uri_syntax_names_the_database(self) -> None:
+        """URI punctuation in a legal host path never changes which database is opened.
+
+        Cut at the ``#``, the script answered for another file (``0`` for a
+        database holding a running task) and created it when it was missing.
+        """
+        name = "kiss#home %41" if os.name == "nt" else "kiss#home ?mode=rw %41"
+        home = self.tmp / name
+        home.mkdir()
+        self.db = home / "history.db"
+        self._make([("BUSY", 0, 2.0)])
+
+        self.assertEqual(self._count("300")[0], 1)
+        self.assertEqual(self._count("300", "--unfinished")[0], 1)
+        self.assertEqual([p.name for p in self.tmp.iterdir()], [home.name])
 
     def test_a_database_that_cannot_be_read_is_not_reported_as_idle(self) -> None:
         """"I could not look" must not read as "nothing is running"."""
@@ -534,6 +605,37 @@ class RunningTasksTest(unittest.TestCase):
         self.assertEqual(self._count("300")[0], 1)
         # No heartbeat window at all still holds back the rows that will change.
         self.assertEqual(self._count("0", "--unfinished")[0], 2)
+
+    def test_the_question_is_asked_of_what_the_database_has(self) -> None:
+        """A history without the ``result`` column, then without events, still answers.
+
+        The query names only the columns and tables that are there, and is given
+        only the values it names: the heartbeat alone decides on a history from
+        before the placeholder, and nothing can be running without events.
+        """
+        now = time.time()
+        con = sqlite3.connect(self.db)
+        con.executescript(
+            "CREATE TABLE task_history (id TEXT PRIMARY KEY, timestamp REAL, end_ts INTEGER);"
+            "CREATE TABLE events (task_id TEXT, seq INTEGER, event_json TEXT, timestamp REAL);"
+        )
+        con.executemany(
+            "INSERT INTO task_history VALUES (?, ?, ?)",
+            [("LIVE", now, 0), ("CRASHED", now, 0), ("FINISHED", now, 1700000000)])
+        con.executemany(
+            "INSERT INTO events VALUES (?, 0, '{}', ?)",
+            [("LIVE", now - 2), ("CRASHED", now - 90000), ("FINISHED", now - 1)])
+        con.commit()
+
+        for mode in ((), ("--unfinished",)):
+            count, output = self._count("300", *mode)
+            self.assertEqual((count, output.splitlines()[1].split()[0]), (1, "LIVE"), mode)
+
+        con.execute("DROP TABLE events")
+        con.commit()
+        con.close()
+        for mode in ((), ("--unfinished",)):
+            self.assertEqual(self._count("300", *mode)[0], 0, mode)
 
 
 class FingerprintTest(unittest.TestCase):
@@ -637,6 +739,17 @@ class FingerprintTest(unittest.TestCase):
 
         self.assertNotEqual(self._fingerprint(), before)
 
+    def test_a_path_that_reads_as_uri_syntax_names_the_database(self) -> None:
+        """URI punctuation in a legal host path never changes which database is opened."""
+        before = self._fingerprint()
+        name = "kiss#home %41" if os.name == "nt" else "kiss#home ?mode=rw %41"
+        home = self.tmp / name
+        home.mkdir()
+        self.db = self.db.rename(home / "history.db")
+
+        self.assertEqual(self._fingerprint(), before)
+        self.assertEqual([p.name for p in self.tmp.iterdir()], [home.name])
+
     def test_a_database_it_cannot_read_is_not_an_answer(self) -> None:
         """An empty answer must never read as "nothing changed"."""
         self.db.write_bytes(b"not a database")
@@ -645,6 +758,32 @@ class FingerprintTest(unittest.TestCase):
 
         self.assertEqual(done.returncode, 1)
         self.assertEqual(done.stdout.strip(), "")
+
+    def test_a_database_without_a_column_it_reads_is_not_an_answer(self) -> None:
+        """A missing column is not the text of its own name.
+
+        SQLite reads a double-quoted name that matches no column as a
+        string, so the sums came back 0 and the newest moment
+        ``timestamp``: an answer, from a database no sync can use.
+        """
+        for missing in ("id", "steps", "tokens", "timestamp"):
+            with self.subTest(missing=missing):
+                self.db.unlink()
+                con = sqlite3.connect(self.db)
+                for table, columns in (("task_history", ("id", "steps", "tokens", "task")),
+                                       ("events", ("task_id", "timestamp"))):
+                    kept = ", ".join(c for c in columns if c != missing)
+                    con.execute(f"CREATE TABLE {table} ({kept})")
+                con.execute("INSERT INTO task_history(task) VALUES ('a task')")
+                con.execute("INSERT INTO events(task_id) VALUES ('T1')")
+                con.commit()
+                con.close()
+
+                done = _run(sys.executable, str(_FINGERPRINT), str(self.db))
+
+                self.assertEqual(done.returncode, 1, done.stdout)
+                self.assertEqual(done.stdout.strip(), "")
+                self.assertIn(f"no such column: {missing}", done.stderr)
 
     def test_the_wrong_number_of_arguments_is_a_usage_error(self) -> None:
         """A blank line would compare equal to another blank line."""
@@ -743,6 +882,19 @@ class CarryOverTablesTest(unittest.TestCase):
 
         self.assertEqual(self._models(self.new), {"claude-opus-5": 5})
 
+    def test_a_path_that_reads_as_uri_syntax_names_the_replaced_database(self) -> None:
+        """Cut at the ``#``, the backup could not be opened and its tallies were dropped."""
+        name = "kiss#home %41" if os.name == "nt" else "kiss#home ?mode=rw %41"
+        home = self.tmp / name
+        home.mkdir()
+        self.old = home / "old.db"
+        self._make(self.old, {"claude-opus-5": 40})
+        self._make(self.new, {})
+
+        self._carry()
+
+        self.assertEqual(self._models(self.new), {"claude-opus-5": 40})
+
     def test_a_missing_file_changes_nothing(self) -> None:
         """The remote may have had no database at all."""
         self._make(self.new, {"claude-opus-5": 5})
@@ -813,31 +965,46 @@ class CarryOverTablesTest(unittest.TestCase):
         could not be merged from, so the sync never carried the deletion
         here; the replacement would otherwise bring the task back from
         this machine's copy.  The record comes over with the other
-        unsynced tables, and is carried out on the new database.
+        unsynced tables, and is carried out on the new database -- on
+        what the server never saw as well: a task of the deleted chat
+        older than the deletion, and the sub-tasks of a deleted task.
+        One of those that began after the deletion is recorded as
+        deleted a millisecond after it began, whatever this machine's
+        clock says (one began an hour from now).  What a chat's row said
+        of a deleted task goes with it; the title the user typed stays.
         """
         self._make(self.old, {})
         self._make(self.new, {})
+        ahead = time.time() + 3600
         con = sqlite3.connect(self.old)
         con.execute("INSERT INTO deleted_tasks VALUES ('T', 2000.0)")
+        con.execute("INSERT INTO deleted_tasks VALUES ('E1', 2000.0)")
         con.execute("INSERT INTO deleted_chats VALUES ('C', 2000.0)")
         con.commit()
         con.close()
         con = sqlite3.connect(self.new)
-        tasks = (("T", "C", 1000.0), ("NEW", "C", 3000.0), ("K", "", 1.0))
-        for task_id, chat_id, timestamp in tasks:
+        tasks = (("T", "C", 1000.0, ""), ("UNSEEN", "C", 1500.0, ""),
+                 ("SUB", "S", 1600.0, "UNSEEN"), ("NEW", "C", 3000.0, ""),
+                 ("LATE", "L", 2500.0, "T"), ("LATE-SUB", "L", 2600.0, "LATE"),
+                 ("AHEAD", "L", ahead, "E1"), ("AHEAD-SUB", "L", ahead + 1, "AHEAD"),
+                 ("E1", "E", 1000.0, ""), ("K", "", 1.0, ""))
+        for task_id, chat_id, timestamp, parent in tasks:
             con.execute(
-                "INSERT INTO task_history(id, timestamp, task, chat_id) VALUES (?, ?, ?, ?)",
-                (task_id, timestamp, f"task {task_id}", chat_id))
+                "INSERT INTO task_history(id, timestamp, task, chat_id, parent_task_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (task_id, timestamp, f"task {task_id}", chat_id, parent))
             con.execute(
                 "INSERT INTO events(task_id, seq, event_json, timestamp)"
                 " VALUES (?, 0, '{}', ?)", (task_id, timestamp))
-        con.execute("INSERT INTO chat_summaries(chat_id, summary) VALUES ('C', 's')")
+        con.executemany(
+            "INSERT INTO chat_summaries(chat_id, summary, last_launched, last_finished,"
+            " user_summary) VALUES (?, 's', 1000000, 1100000, ?)", [("C", ""), ("E", "Mine")])
         con.commit()
         con.close()
 
         done = self._carry()
 
-        self.assertIn("1 deleted task(s) removed", done.stdout)
+        self.assertIn("8 deleted task(s) removed", done.stdout)
         con = sqlite3.connect(f"file:{self.new}?mode=ro", uri=True)
         try:
             self.assertEqual(
@@ -846,14 +1013,108 @@ class CarryOverTablesTest(unittest.TestCase):
             self.assertEqual(
                 [r[0] for r in con.execute("SELECT task_id FROM events ORDER BY task_id")],
                 ["K", "NEW"])
-            self.assertEqual(con.execute("SELECT id FROM deleted_tasks").fetchall(), [("T",)])
+            self.assertEqual(
+                con.execute("SELECT id, deleted_ts FROM deleted_tasks ORDER BY id").fetchall(),
+                [("AHEAD", ahead + 0.001), ("AHEAD-SUB", ahead + 1 + 0.001), ("E1", 2000.0),
+                 ("LATE", 2500.0 + 0.001), ("LATE-SUB", 2600.0 + 0.001), ("SUB", 2000.0),
+                 ("T", 2000.0), ("UNSEEN", 2000.0)])
             # The chat is still in use (NEW is younger than the deletion): its row stays.
-            self.assertEqual(con.execute("SELECT chat_id FROM chat_summaries").fetchall(),
-                             [("C",)])
+            self.assertEqual(
+                con.execute(
+                    "SELECT chat_id, summary, last_launched, last_finished, user_summary"
+                    " FROM chat_summaries ORDER BY chat_id").fetchall(),
+                [("C", "", 0, 0, ""), ("E", "", 0, 0, "Mine")])
         finally:
             con.close()
         # A second run changes nothing.
         self.assertIn("0 row(s) restored, 0 counter(s) raised", self._carry().stdout)
+
+    def test_the_titles_typed_over_the_chats_come_back(self) -> None:
+        """A title is the user's own words: no sync moves it, nothing recomputes it.
+
+        It goes back over the chat's row (the generated summary stays), or
+        into a row of its own for a chat whose tasks have not written one
+        yet -- and nowhere for a chat the new database no longer has.
+        """
+        self._make(self.old, {})
+        self._make(self.new, {})
+        con = sqlite3.connect(self.old)
+        con.executemany(
+            "INSERT INTO chat_summaries(chat_id, summary, user_summary) VALUES (?, 'old', ?)",
+            [("EMPTY", "typed here"), ("OTHER", "typed here too"), ("ROWLESS", "no row yet"),
+             ("DELETED", "of a deleted chat"), ("UNTITLED", "")])
+        con.commit()
+        con.close()
+        con = sqlite3.connect(self.new)
+        con.executemany(
+            "INSERT INTO task_history(id, timestamp, task, chat_id) VALUES (?, 1.0, 't', ?)",
+            [(chat, chat) for chat in ("EMPTY", "OTHER", "ROWLESS", "UNTITLED")])
+        con.executemany(
+            "INSERT INTO chat_summaries(chat_id, summary, user_summary) VALUES (?, 'new', ?)",
+            [("EMPTY", ""), ("OTHER", "typed elsewhere"), ("UNTITLED", "typed elsewhere")])
+        con.execute("INSERT INTO deleted_chats VALUES ('DELETED', 2000.0)")
+        con.commit()
+        con.close()
+
+        self.assertIn("3 row(s) restored, 0 counter(s) raised", self._carry().stdout)
+
+        con = sqlite3.connect(f"file:{self.new}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT chat_id, summary, user_summary FROM chat_summaries ORDER BY chat_id"
+            ).fetchall()
+        finally:
+            con.close()
+        self.assertEqual(rows, [
+            ("EMPTY", "new", "typed here"), ("OTHER", "new", "typed here too"),
+            ("ROWLESS", "", "no row yet"), ("UNTITLED", "new", "typed elsewhere")])
+        self.assertIn("0 row(s) restored, 0 counter(s) raised", self._carry().stdout)
+
+    def test_a_database_from_before_titles_has_none_to_give(self) -> None:
+        """Its older schema is skipped, not tripped over: the tallies still come back."""
+        self._make(self.old, {"claude-opus-5": 3})
+        self._make(self.new, {})
+        con = sqlite3.connect(self.old)
+        con.execute("DROP TABLE chat_summaries")
+        con.execute("CREATE TABLE chat_summaries (chat_id TEXT PRIMARY KEY, summary TEXT)")
+        con.commit()
+        con.close()
+
+        self._carry()
+
+        self.assertEqual(self._models(self.new), {"claude-opus-5": 3})
+
+    def test_reading_the_replaced_database_leaves_only_a_wal_that_holds_rows(self) -> None:
+        """The empty -wal and the -shm a reader makes are debris; a -wal with rows is not.
+
+        ``history.db`` is in WAL mode.  The second carry-over is held at
+        its first write, the old database attached, while a writer commits
+        to it: the row is in a -wal that was not there when it started.
+        """
+        self._make(self.old, {})
+        self._make(self.new, {})
+        con = sqlite3.connect(self.old)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.close()
+        self._carry()
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["new.db", "old.db"])
+        lock = sqlite3.connect(self.new, isolation_level=None)
+        lock.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            carrying = pool.submit(self._carry)
+            try:
+                deadline = time.monotonic() + 60
+                while not os.path.exists(f"{self.old}-wal") and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                con = sqlite3.connect(self.old)
+                con.execute("INSERT INTO model_usage(model, count) VALUES ('gpt-5.6-sol', 7)")
+                con.commit()
+                con.close()
+            finally:
+                lock.close()
+        carrying.result()
+        self.assertEqual(self._models(self.old), {"gpt-5.6-sol": 7})
+        self.assertEqual(self._models(self.new), {"gpt-5.6-sol": 7})
 
     def test_a_carry_over_that_fails_says_so(self) -> None:
         """Reporting success would leave the counters only in the backup."""
@@ -866,10 +1127,29 @@ class CarryOverTablesTest(unittest.TestCase):
             self.new.chmod(0o644)
 
         self.assertEqual(done.returncode, 1)
+        # A new database that is not there is not one to make up.
+        missing = self.tmp / "missing.db"
+        for arguments in ((str(self.old), str(missing)), ("--apply-deletions", str(missing))):
+            done = _run(sys.executable, str(_CARRY_OVER), *arguments)
+            self.assertEqual(done.returncode, 1, arguments)
+            self.assertFalse(missing.exists(), arguments)
+        # Nor is a new database that is no database the old one's fault, and a success.
+        self.new.write_text("not a database, however long the text of the file may be")
+        done = _run(sys.executable, str(_CARRY_OVER), str(self.old), str(self.new))
+        self.assertEqual((done.returncode, done.stdout), (1, ""))
+        self.assertIn(f"carry_over_tables: {self.new}: file is not a database", done.stderr)
 
     def test_the_wrong_number_of_arguments_is_a_usage_error(self) -> None:
         """Silence would look like a successful carry-over."""
         self.assertEqual(_run(sys.executable, str(_CARRY_OVER)).returncode, 2)
+        # One database named twice has nothing to carry into itself, and would
+        # wait a minute for the lock its own read-only attachment holds.
+        self._make(self.old, {})
+        started = time.monotonic()
+        done = _run(sys.executable, str(_CARRY_OVER), str(self.old), str(self.old))
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("are the same file", done.stderr)
+        self.assertLess(time.monotonic() - started, 30)
 
 
 @posix_only("drives the bash sync-task-db.sh with a bash ssh stand-in")
@@ -1046,6 +1326,8 @@ class ReplacementNeverLosesTest(unittest.TestCase):
 
         kept = self._backups()
         self.assertEqual(len(kept), 1)
+        # The -wal was folded in: none is kept, and reading the backup left none.
+        self.assertEqual(list(self.remote_kiss.glob("history.db.replaced-*")), kept)
         self.assertEqual(self._tasks(kept[0]), ["R1", "RWAL"])
         self.assertEqual(self._tasks(self.remote_db), ["L1"])
         self.assertFalse((self.remote_kiss / "history.db-wal").exists())

@@ -174,9 +174,11 @@ class WebClipScriptTest(unittest.TestCase):
         now = datetime.datetime.now(datetime.UTC)
         day = datetime.timedelta(days=1)
         signer = self._signer()
+        ec_cert, ec_key = tls_certs.ensure_local_client_pair(self.tls)
         unusable = {
             "garbage key": (good_cert, b"not a key"),
             "ec key": (good_cert, _pem_key(ec.generate_private_key(ec.SECP256R1()))),
+            "ec pair issued by the CA": (ec_cert.read_bytes(), ec_key.read_bytes()),
             "other rsa key": (good_cert, _pem_key(rsa.generate_private_key(65537, 2048))),
             "expiring cert": (_resigned(signer, ca_cert, ca_key, now - day, now + day), good_key),
             "not yet valid cert": (
@@ -195,6 +197,7 @@ class WebClipScriptTest(unittest.TestCase):
             self.assertEqual(done.returncode, 0, (reason, done.stderr))
             serials.append(self._signer().serial_number)
             self.assertEqual(len(set(serials)), len(serials), reason)
+            self.assertIsInstance(self._signer().public_key(), rsa.RSAPublicKey, reason)
             _verified_plist(out, self.tls / tls_certs.CA_CERT_FILE)
 
     def test_url_defaults_to_the_daemon_public_url(self) -> None:
@@ -204,8 +207,12 @@ class WebClipScriptTest(unittest.TestCase):
         self.assertEqual(done.returncode, 2, done.stdout)
         self.assertIn("remote-url.json names no public URL", done.stderr)
         url_file = self.home / "remote-url.json"
-        url_file.write_text('{"local": "http://localhost:8787"}', encoding="utf-8")
-        self.assertEqual(_run(self.home, *args).returncode, 2)
+        # A file that is not the object the daemon writes names no URL either.
+        for nameless in ('{"local": "http://localhost:8787"}', "[]", '{"lan": 5}'):
+            url_file.write_text(nameless, encoding="utf-8")
+            done = _run(self.home, *args)
+            self.assertEqual(done.returncode, 2, (nameless, done.stderr))
+            self.assertIn("remote-url.json names no public URL", done.stderr)
         url_file.write_text('{"lan": ["https://10.0.0.5:8787"]}', encoding="utf-8")
         self.assertEqual(_run(self.home, *args).returncode, 0)
         self.assertEqual(_clip_url(out), "https://10.0.0.5:8787")
@@ -232,8 +239,13 @@ class WebClipScriptTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         renamed = plistlib.loads((self.home / "work-chat-v2.mobileconfig").read_bytes())
         self.assertEqual(renamed["PayloadDisplayName"], "Work/Chat: v2 web clip")
+        no_image = self.home / "text.png"
+        no_image.write_text("not an image", encoding="utf-8")
         for bad in (("--url", "ftp://example.com"), ("--url", "https://"),
-                    ("--url", "https://example.com", "--icon", str(self.home / "missing.png"))):
+                    ("--url", "https://example.com", "--icon", str(self.home / "missing.png")),
+                    ("--url", "https://example.com", "--icon", str(no_image)),
+                    ("--url", "https://example.com", "--icon", str(self.icon),
+                     "--icon-background", "no-colour")):
             done = _run(self.home, *bad)
             self.assertEqual(done.returncode, 2, bad)
             self.assertIn("--url" if bad[1] != "https://example.com" else "--icon", done.stderr)

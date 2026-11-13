@@ -18,7 +18,8 @@ writes the narrative in one tool-less call.
 The trajectory is the executor's ``messages`` list (:attr:`KISSAgent.messages`):
 a ``model`` message records each tool call as a ```` ```python name(k=v) ``` ````
 block and the following ``user`` message carries the results as
-``[name]: text`` paragraphs.
+``[name]: text`` paragraphs, with the length of each result in its
+``result_lengths`` key (a record written before the key existed has none).
 """
 
 from __future__ import annotations
@@ -46,6 +47,8 @@ LAST_SUMMARIES = 3
 LAST_ERRORS = 5
 MAX_WRITTEN_FILES = 40
 _CALL_BLOCK = re.compile(r"```python\n(.*?)\n```", re.S)
+type Span = tuple[int, int]
+"""Start and end of a result in the text of its results message."""
 _ERROR_MARKS = ("Traceback (most recent call last)", "FAILED", "REFUSED")
 
 
@@ -82,18 +85,47 @@ def _parse_call(source: str) -> ToolCall | None:
         return None
     try:
         node = ast.parse("f(" + arguments, mode="eval").body
-    except SyntaxError:
+    # MemoryError, RecursionError: the parser's stack gave out on a deep expression.
+    except (SyntaxError, MemoryError, RecursionError):
         return ToolCall(name or "?")
     if not isinstance(node, ast.Call) or node.args or len(name.split()) != 1:
         return None
     try:
         args = {str(kw.arg): ast.literal_eval(kw.value) for kw in node.keywords if kw.arg}
+        # Printed once here: an integer past the interpreter's digit limit
+        # evaluates (``0x...``) and raises ValueError when a title is made of it.
+        repr(args)
     except (ValueError, TypeError, RecursionError):
         args = {}
     return ToolCall(name, args)
 
 
-def _result_spans(names: list[str], text: str) -> list[tuple[int, int]] | None:
+def _recorded_run(calls: list[ToolCall], text: str, lengths: Any) -> tuple[int, list[Span]] | None:
+    """Return the run of trailing calls the recorded result *lengths* count, with its spans.
+
+    Returns:
+        The index of the run's first call and the span of each of its
+        results in *text*; ``None`` when *lengths* is not the record of
+        these paragraphs: the message has no ``result_lengths``, or the
+        trailing calls are not the ones that ran.
+    """
+    if not isinstance(lengths, list) or not 0 < len(lengths) <= len(calls):
+        return None
+    first = len(calls) - len(lengths)
+    spans: list[Span] = []
+    position = 0
+    for call, length in zip(calls[first:], lengths, strict=True):
+        header = f"\n\n[{call.name}]: " if spans else f"[{call.name}]: "
+        # A length below zero would step back, to an earlier paragraph of the same tool.
+        if not isinstance(length, int) or length < 0 or not text.startswith(header, position):
+            return None
+        start = position + len(header)
+        position = start + length
+        spans.append((start, position))
+    return (first, spans) if position == len(text) else None
+
+
+def _result_spans(names: list[str], text: str) -> list[Span] | None:
     """Return the span of each name's ``[name]: text`` paragraph body in *text*, in order.
 
     ``None`` when a name's paragraph is missing.
@@ -115,27 +147,44 @@ def _result_spans(names: list[str], text: str) -> list[tuple[int, int]] | None:
     return spans
 
 
-def _attach_results(calls: list[ToolCall], text: str) -> list[ToolCall]:
-    """Fill ``call.result`` of *calls* from the ``[name]: text`` paragraphs of *text*.
+def _scanned_run(calls: list[ToolCall], text: str) -> tuple[int, list[Span]] | None:
+    """Return the longest run of trailing calls whose paragraphs all appear in *text*, in order.
+
+    The reading of a record without result lengths.  A result ends where
+    the next call's paragraph first starts, so one that itself holds
+    such a paragraph is cut there.
+
+    Returns:
+        As :func:`_recorded_run`; ``None`` when no run matches.
+    """
+    for first in range(len(calls)):
+        spans = _result_spans([call.name for call in calls[first:]], text)
+        if spans is not None:
+            return first, spans
+    return None
+
+
+def _attach_results(calls: list[ToolCall], message: dict[str, Any]) -> list[ToolCall]:
+    """Fill ``call.result`` of *calls* from the ``[name]: text`` paragraphs of *message*.
 
     The executor appends the reprs of the calls it ran after the model's
     prose, so a prose snippet that parses as a call comes before them
-    and has no paragraph: the results belong to the longest run of
-    trailing calls whose paragraphs all appear in order, and the calls
-    before that run are dropped.  When no run matches (*text* is not a
-    results message), every call is kept without a result.
+    and has no paragraph: the results belong to a run of trailing calls
+    (:func:`_recorded_run`, else :func:`_scanned_run`), and the calls
+    before that run are dropped.  When no run matches (*message* is not
+    a results message), every call is kept without a result.
 
     Returns:
         The calls that ran.
     """
-    for first in range(len(calls)):
-        ran = calls[first:]
-        spans = _result_spans([call.name for call in ran], text)
-        if spans is not None:
-            for call, (start, end) in zip(ran, spans, strict=True):
-                call.result = text[start:end]
-            return ran
-    return calls
+    text = message["content"]
+    run = _recorded_run(calls, text, message.get("result_lengths")) or _scanned_run(calls, text)
+    if run is None:
+        return calls
+    first, spans = run
+    for call, (start, end) in zip(calls[first:], spans, strict=True):
+        call.result = text[start:end]
+    return calls[first:]
 
 
 def parse_tool_calls(messages: list[dict[str, Any]]) -> list[ToolCall]:
@@ -155,7 +204,7 @@ def parse_tool_calls(messages: list[dict[str, Any]]) -> list[ToolCall]:
             parsed = (_parse_call(block) for block in _CALL_BLOCK.findall(content))
             pending = [call for call in parsed if call is not None]
         elif message.get("role") == "user" and pending:
-            calls.extend(_attach_results(pending, content))
+            calls.extend(_attach_results(pending, message))
             pending = []
     return calls + pending
 
@@ -164,7 +213,8 @@ def _python_symbols(path: Path) -> list[str]:
     """Return the top-level function and class names of a Python file (``[]`` if unparsable)."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, SyntaxError, ValueError):
+    # MemoryError, RecursionError: the parser's stack gave out on deep source.
+    except (OSError, SyntaxError, ValueError, MemoryError, RecursionError):
         return []
     names: list[str] = []
     for node in tree.body:

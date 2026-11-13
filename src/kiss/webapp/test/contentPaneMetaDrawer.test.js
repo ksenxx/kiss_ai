@@ -43,15 +43,18 @@ const {
   loadMainCss,
   MEDIA,
   ofType,
+  captureTimers,
+  fireCapturedTimers,
   recordTimers,
   fireTimers,
   installXtermStub,
+  storageSnapshot,
 } = require('./simplify2_harness');
 const {installTokenisedCss, cssRule} = require('./designTokens');
 
 /**
  * A fresh page.  `storage` is the localStorage contents of the page
- * instance this one reloads (see storageOf); `denyStorage` makes every
+ * instance this one reloads (storageSnapshot); `denyStorage` makes every
  * localStorage access throw, as a browser with storage blocked does.
  */
 function makePage(opts) {
@@ -105,14 +108,17 @@ function openChatAndFile(win) {
   return fileTab;
 }
 
-/** Everything a page left in localStorage, for the page that reloads it. */
-function storageOf(win) {
-  const items = {};
-  for (let i = 0; i < win.localStorage.length; i++) {
-    const k = win.localStorage.key(i);
-    items[k] = win.localStorage.getItem(k);
-  }
-  return items;
+/** The daemon's answer to an "open to the side" of /ws/aside.md. */
+function openAsideInBackground(win) {
+  send(win, {
+    type: 'fileContent',
+    tabId: 'a1',
+    path: '/ws/aside.md',
+    name: 'aside.md',
+    content: '# Aside',
+    version: 'v1',
+    background: true,
+  });
 }
 
 const FOLD_KEY = 'kiss-content-pane-folded';
@@ -252,15 +258,9 @@ test('the workspace views catch up on task news once the panel is back', () => {
   const statusBefore = ofType(posted, 'gitStatus').length;
   // Any timer the page arms on the news is run by hand, so no
   // wall-clock wait decides whether a deferred reload would have shown.
-  const armed = [];
-  const realSetTimeout = win.setTimeout;
-  win.setTimeout = function (cb, ms, ...args) {
-    armed.push(() => cb(...args));
-    return 0;
-  };
+  const armed = captureTimers(win);
   send(win, {type: 'tasks_updated'});
-  win.setTimeout = realSetTimeout;
-  while (armed.length) armed.shift()();
+  fireCapturedTimers(win, armed);
   assert.strictEqual(
     ofType(posted, 'listDir').length,
     before,
@@ -539,15 +539,7 @@ test('a file, a browser or a terminal opening slides the panel off', async () =>
   // answers with the tab's own id, hides it the same way; one opened
   // "to the side" (background) does not take the pane, so it leaves
   // the panel alone.
-  send(win, {
-    type: 'fileContent',
-    tabId: 'a1',
-    path: '/ws/aside.md',
-    name: 'aside.md',
-    content: '# Aside',
-    version: 'v1',
-    background: true,
-  });
+  openAsideInBackground(win);
   assert.ok(
     !hasClass(win, 'meta-hidden'),
     'a background open leaves the panel',
@@ -731,15 +723,7 @@ test('the hide button folds the pane away; the show tab or the next open unfolds
   // Folded, a file opened in the background stays out of sight; one
   // opened to be seen unfolds the pane and slides the panel off it.
   click(win, hideBtn);
-  send(win, {
-    type: 'fileContent',
-    tabId: 'a1',
-    path: '/ws/aside.md',
-    name: 'aside.md',
-    content: '# Aside',
-    version: 'v1',
-    background: true,
-  });
+  openAsideInBackground(win);
   assert.ok(
     hasClass(win, 'content-pane-folded'),
     'a background open keeps the fold',
@@ -833,7 +817,7 @@ function sendBrowserSnapshot(win) {
 
 /** Reload `win`: a fresh page with its localStorage, chat and browser tabs. */
 function reload(win) {
-  const next = makePage({storage: storageOf(win)});
+  const next = makePage({storage: storageSnapshot(win)});
   win.close();
   addBrowserAndTerminal(next.win);
   send(next.win, {
@@ -899,15 +883,7 @@ test('the fold is remembered across reloads in localStorage', () => {
 
   // A file opened in the background after the reload stays behind the
   // fold; the show tab unfolds the pane and forgets the fold.
-  send(win, {
-    type: 'fileContent',
-    tabId: 'a1',
-    path: '/ws/aside.md',
-    name: 'aside.md',
-    content: '# Aside',
-    version: 'v1',
-    background: true,
-  });
+  openAsideInBackground(win);
   assert.ok(
     hasClass(win, 'content-pane-folded'),
     'a background open keeps the fold',

@@ -25,6 +25,7 @@ actually runs; nothing is mocked.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -167,7 +168,7 @@ def test_finish_conflicted_merge_checks_the_index_once(repo: Path, git_log: Path
     _run(repo, "commit", "-qam", "user edit")
     head_before = _run(repo, "rev-parse", "HEAD").strip()
     assert GitWorktreeOps.squash_merge_branch(repo, "task") == MergeResult.CONFLICT
-    assert GitWorktreeOps.begin_conflicted_merge(repo, "task", None, "") == ["f.txt"]
+    assert GitWorktreeOps.begin_conflicted_merge(repo, "task", None) == ["f.txt"]
     (repo / "f.txt").write_text("a\nB-both\nc\n")
     _run(repo, "add", "f.txt")
     git_log.unlink(missing_ok=True)
@@ -191,6 +192,20 @@ def test_commit_staged_still_reports_nothing_staged(repo: Path) -> None:
     _run(repo, "add", "g.txt")
     assert GitWorktreeOps.commit_staged(repo, "g") is True
     assert _run(repo, "log", "-1", "--format=%s").strip() == "g"
+
+
+def test_commit_all_logs_why_nothing_was_staged(
+    repo: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A ``git add -A`` git refused is on record, not only the False it leads to."""
+    (repo / "fresh").mkdir()
+    _run(repo / "fresh", "init", "-q")  # no commit yet: git refuses to add the whole tree
+    (repo / "g.txt").write_text("g\n")
+    with caplog.at_level(logging.WARNING, logger="kiss.agents.sorcar.git_worktree"):
+        assert GitWorktreeOps.commit_all(repo, "g") is False
+    assert "git add -A failed" in caplog.text
+    assert "does not have a commit checked out" in caplog.text
+    assert GitWorktreeOps.status_porcelain(repo) == "?? fresh/\n?? g.txt"
 
 
 def test_merge_commit_rejected_by_hook_resets_the_tree(repo: Path) -> None:

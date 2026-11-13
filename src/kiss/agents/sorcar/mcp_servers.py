@@ -19,7 +19,9 @@ Implements MCP server management with Claude Code compatibility:
   "args": [...], "env": {...}}`` for local servers or ``{"type":
   "http"|"sse", "url": ..., "headers": {...}}`` for remote ones
   (``type`` defaults to ``stdio`` when ``command`` is present, else
-  ``http`` — matching Claude Code's leniency).
+  ``http`` — matching Claude Code's leniency).  A local server of a
+  project file runs in ``<work_dir>``, so its entry may name the
+  project's files by relative path; each project gets its own.
 
 * **Tools** — every tool of every configured server is exposed to the
   agent as a function named ``<server>_<tool>`` whose signature and
@@ -51,9 +53,11 @@ from __future__ import annotations
 import asyncio
 import atexit
 import concurrent.futures
+import contextlib
 import functools
 import hashlib
 import inspect
+import itertools
 import json
 import keyword
 import logging
@@ -61,12 +65,18 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Iterable
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Iterable, Iterator
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.mcp_tool_search import (
+    ServerTools,
+    make_deferred_tools,
+    split_by_budget,
+    upfront_tool_chars,
+)
 from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
 from kiss.core import tool_interrupt
 from kiss.core.config import kiss_home
@@ -134,6 +144,18 @@ class MCPServerConfig:
         env: Extra environment variables for stdio servers.
         url: Endpoint URL for http/sse servers (empty otherwise).
         headers: Extra HTTP headers for http/sse servers.
+        cwd: Working directory of a stdio server: the project whose
+            config file names it, so a relative path in its entry means
+            that project's file.  Empty for a user-level server, which
+            every project shares and which runs in the daemon's
+            directory.  It follows from where the entry was read, so
+            it is not part of the entry (:meth:`to_json`).
+        always_load: The entry's ``alwaysLoad`` key: ``True`` puts the
+            server's tool definitions in every model request, ``False``
+            defers them behind the tool search, ``None`` (no key) does
+            as ``True`` unless the user set a budget for the upfront
+            definitions, which then decides by size
+            (:func:`~kiss.agents.sorcar.mcp_tool_search.split_by_budget`).
     """
 
     name: str
@@ -143,6 +165,8 @@ class MCPServerConfig:
     env: tuple[tuple[str, str], ...] = ()
     url: str = ""
     headers: tuple[tuple[str, str], ...] = ()
+    cwd: str = ""
+    always_load: bool | None = None
 
     def to_json(self) -> dict[str, Any]:
         """Return the Claude-Code-compatible JSON dict for this server."""
@@ -157,6 +181,8 @@ class MCPServerConfig:
             out["url"] = self.url
             if self.headers:
                 out["headers"] = dict(self.headers)
+        if self.always_load is not None:
+            out["alwaysLoad"] = self.always_load
         return out
 
 
@@ -166,8 +192,17 @@ def user_mcp_config_path() -> Path:
 
 
 def project_mcp_config_path(work_dir: str) -> Path:
-    """Return the project-level MCP config file (``.kiss/mcp.json``)."""
-    return Path(work_dir) / ".kiss" / "mcp.json"
+    """Return the project-level MCP config file (``<work_dir>/.kiss/mcp.json``).
+
+    The user's home directory is no project: ``~/.kiss`` is the stock
+    brand's global home (a leftover under any other brand), and the
+    file of a task working there is the live user-level one, as
+    :func:`~kiss.agents.sorcar.skills.discover_skills` has it.
+    """
+    project = Path(work_dir)
+    if project.resolve() == Path.home().resolve():
+        return user_mcp_config_path()
+    return project / ".kiss" / "mcp.json"
 
 
 def claude_project_mcp_config_path(work_dir: str) -> Path:
@@ -217,6 +252,7 @@ def _parse_server_entry(name: str, raw: Any) -> MCPServerConfig | None:
     args = raw.get("args") or []
     env = raw.get("env") or {}
     headers = raw.get("headers") or {}
+    always_load = raw.get("alwaysLoad")
     return MCPServerConfig(
         name=name,
         transport=transport,
@@ -227,6 +263,7 @@ def _parse_server_entry(name: str, raw: Any) -> MCPServerConfig | None:
         url=url,
         headers=tuple((str(k), str(v)) for k, v in headers.items())
         if isinstance(headers, dict) else (),
+        always_load=always_load if isinstance(always_load, bool) else None,
     )
 
 
@@ -255,7 +292,8 @@ def load_mcp_servers(work_dir: str) -> dict[str, MCPServerConfig]:
 
     Load order (low → high precedence; later wins on a name clash):
     user (``$KISS_HOME/mcp.json``), Claude Code project (``.mcp.json``),
-    native project (``.kiss/mcp.json``).
+    native project (:func:`project_mcp_config_path`).  A stdio server
+    of a project file runs in *work_dir* (:attr:`MCPServerConfig.cwd`).
 
     Args:
         work_dir: The project directory whose servers to include.
@@ -263,9 +301,14 @@ def load_mcp_servers(work_dir: str) -> dict[str, MCPServerConfig]:
     Returns:
         Mapping of server name → :class:`MCPServerConfig`.
     """
-    servers = _load_config_file(user_mcp_config_path())
-    servers.update(_load_config_file(claude_project_mcp_config_path(work_dir)))
-    servers.update(_load_config_file(project_mcp_config_path(work_dir)))
+    user = user_mcp_config_path()
+    servers = _load_config_file(user)
+    cwd = os.path.abspath(work_dir)
+    for path in (claude_project_mcp_config_path(work_dir), project_mcp_config_path(work_dir)):
+        if path == user:
+            continue  # the home directory's: read above, as the user's
+        for name, cfg in _load_config_file(path).items():
+            servers[name] = replace(cfg, cwd=cwd) if cfg.transport == "stdio" else cfg
     return servers
 
 
@@ -275,7 +318,7 @@ def save_mcp_server(cfg: MCPServerConfig, scope: str, work_dir: str) -> Path:
     Args:
         cfg: The server configuration to save.
         scope: ``"user"`` (``$KISS_HOME/mcp.json``) or ``"project"``
-            (``<work_dir>/.kiss/mcp.json``).
+            (:func:`project_mcp_config_path`).
         work_dir: The project directory (used for project scope).
 
     Returns:
@@ -315,8 +358,8 @@ def save_mcp_server(cfg: MCPServerConfig, scope: str, work_dir: str) -> Path:
 def remove_mcp_server(name: str, work_dir: str) -> list[Path]:
     """Remove server *name* from every writable MCP config file.
 
-    No product command removes a server yet; the config tests exercise
-    it as the write path's counterpart of :func:`save_mcp_server`.
+    The write path's counterpart of :func:`save_mcp_server`; its caller
+    is ``connectors/enable.py disable``, outside ``src/``.
 
     Args:
         name: The server name to remove.
@@ -409,6 +452,11 @@ class FileTokenStorage:
         self.path = mcp_auth_dir() / _token_file_name(server_name, server_url)
         self._lock_path = self.path.with_suffix(".lock")
         self.server_url = server_url
+        # What a refresh by this storage's provider replaces (see put):
+        # the stored tokens as it last read or wrote them, while it
+        # holds the refresh lock.
+        self._seen_tokens: Any = None
+        self._refreshing = False
 
     def _read(self) -> dict[str, Any]:
         """Read the stored JSON payload (empty dict when absent/bad)."""
@@ -459,7 +507,9 @@ class FileTokenStorage:
         """
         from mcp.shared.auth import OAuthToken
 
-        token = self._load(self._read(), "tokens", OAuthToken)
+        data = self._read()
+        self._seen_tokens = data.get("tokens")
+        token = self._load(data, "tokens", OAuthToken)
         if token is None:
             return None
         deadline = self.refresh_deadline()
@@ -475,6 +525,42 @@ class FileTokenStorage:
         """
         expires_at = self._read().get("expires_at")
         return expires_at - 60 if isinstance(expires_at, (int, float)) else None
+
+    @contextlib.asynccontextmanager
+    async def refreshing(self, timeout: float = _LOCK_TIMEOUT_S) -> AsyncIterator[None]:
+        """Hold the stored grant's refresh lock: one provider of it refreshes at a time.
+
+        Every connection to the server, in this and in any other kiss
+        process, and the sign-in keep a copy of the grant, and a rotating
+        refresh token is good for one refresh: the holder re-reads the
+        store and refreshes only what is still stale there.  A lock file
+        of its own (:meth:`put` takes the write lock itself), probed
+        rather than waited for: it is held across the refresh request,
+        by a provider on the caller's own event loop too, and a cancel
+        between two probes holds nothing.  Nothing is locked (and no
+        lock file made) while no grant is stored.
+
+        Args:
+            timeout: The most seconds to wait for another holder.
+
+        Raises:
+            TimeoutError: When another holder kept the lock for *timeout*.
+        """
+        lock_path = self.path.with_suffix(".refresh.lock")
+        deadline = time.monotonic() + timeout
+        while self.path.exists():
+            with exclusive_file_lock(lock_path, blocking=False) as held:
+                if held:
+                    self._refreshing = True
+                    try:
+                        yield
+                    finally:
+                        self._refreshing = False
+                    return
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"{lock_path} still locked after {timeout:g}s")
+            await asyncio.sleep(0.05)
+        yield
 
     def get_oauth_metadata(self) -> Any:
         """Return the authorization server metadata saved at sign-in, if any."""
@@ -494,18 +580,28 @@ class FileTokenStorage:
         """
         self.put("oauth_metadata", metadata.model_dump(mode="json", exclude_none=True))
 
-    def put(self, key: str, value: Any) -> None:
+    def put(self, key: str, value: Any, refreshed: bool = False) -> None:
         """Replace *key* in the stored JSON under the inter-process lock.
 
         Args:
             key: Top-level key to set (``"tokens"``, ``"client_info"`` or
                 ``"oauth_metadata"``).
             value: Its already-serialized JSON value, or ``None`` to forget it.
+            refreshed: Whether *value* is the tokens a refresh was
+                answered with.  They replace only the tokens this
+                storage last read or wrote: a grant removed
+                (:meth:`clear`) or replaced (a new sign-in) while the
+                refresh was at the server is not the one refreshed, and
+                stays as it is.
         """
         with exclusive_file_lock(self._lock_path, timeout=_LOCK_TIMEOUT_S):
             data = self._read()
+            if refreshed and data.get("tokens") != self._seen_tokens:
+                logger.info("%s changed during a refresh: its answer is dropped", self.path)
+                return
             data[key] = value
             if key == "tokens":
+                self._seen_tokens = value
                 expires_in = (value or {}).get("expires_in")
                 data["expires_at"] = (
                     time.time() + expires_in if isinstance(expires_in, (int, float)) else None
@@ -518,16 +614,34 @@ class FileTokenStorage:
         ``expires_at`` (absolute, seconds) is recorded next to them so
         :meth:`get_tokens` can tell an expired access token apart.
 
-        The read-modify-write runs on a worker thread: it blocks on an
-        inter-process lock that another kiss process can hold for
-        minutes (an interactive OAuth login waits on a human), and this
-        coroutine runs on the manager's single shared event loop, which
-        also carries every other server's transport and every in-flight
-        tool call.
+        The read-modify-write runs on a worker thread: it waits for an
+        inter-process lock and writes a file, and this coroutine runs on
+        the manager's single shared event loop, which also carries every
+        other server's transport and every in-flight tool call.  A
+        cancellation is delivered once the thread has ended, not before:
+        the thread cannot be stopped, and a provider cancelled in its
+        refresh would let go of the refresh lock (:meth:`refreshing`)
+        with the store still holding the grant it has just used up.
         """
-        await asyncio.to_thread(
+        import anyio
+
+        write = asyncio.ensure_future(asyncio.to_thread(
             self.put, "tokens", tokens.model_dump(mode="json", exclude_none=True),
-        )
+            self._refreshing,
+        ))
+        cancelled: BaseException | None = None
+        # Shielded from the scope of the transport's tasks, which cancels
+        # them again on every pass of the loop; asyncio cancels once.
+        with anyio.CancelScope(shield=True):
+            while not write.done():
+                try:
+                    await asyncio.wait([write])
+                except asyncio.CancelledError as e:
+                    cancelled = e
+        error = write.exception()
+        failure = cancelled or error
+        if failure is not None:
+            raise failure
 
     async def get_client_info(self) -> Any:
         """Return the stored OAuth client registration, if any (the SDK's coroutine form)."""
@@ -558,8 +672,9 @@ class FileTokenStorage:
         """Delete the stored token file for this server.
 
         Taken under the same inter-process lock as :meth:`put`, so a
-        concurrent read-modify-write (a token refresh in this or another
-        kiss process) cannot land its stale copy on top of the deletion.
+        concurrent read-modify-write cannot land its stale copy on top
+        of the deletion; a refresh answered after it stores nothing
+        (see :meth:`put`).
 
         Returns:
             ``True`` when a file was deleted, ``False`` when absent.
@@ -579,35 +694,41 @@ _LOGIN_HINT = (
 )
 
 
-async def _refuse_login(*_: Any) -> Any:
-    """Refuse to start or await a browser OAuth flow during an agent run."""
-    raise RuntimeError(_LOGIN_HINT)
+async def _refuse_login(conn: _Connection, *_: Any) -> Any:
+    """Refuse the browser OAuth flow *conn* needs during an agent run, and end *conn*.
+
+    Without the sign-in the connection can send nothing more, so it is
+    stopped here, the hint its error, whatever its transport makes of
+    the exception: a request's POST ends the transport with it, but
+    the SDK's streamable HTTP client logs and drops the one a
+    notification's POST or its GET stream meets.
+    """
+    refusal = RuntimeError(_LOGIN_HINT)
+    conn.error = describe_exception(refusal)
+    conn.stop.set()
+    raise refusal
 
 
-def build_oauth_provider(cfg: MCPServerConfig) -> Any:
-    """Build the OAuth provider used to authenticate to a remote server.
+def build_oauth_provider(conn: _Connection) -> Any:
+    """Build the OAuth provider *conn* authenticates to its remote server with.
 
     The provider reuses the tokens stored by :class:`FileTokenStorage`
     and refreshes them at the token endpoint recorded at sign-in.  It
     never starts an interactive login: an agent run must not block
-    waiting for a human at a browser, so both handlers refuse and
-    point at the sign-in tool (:mod:`kiss.agents.sorcar.mcp_oauth`).
+    waiting for a human at a browser, so both handlers refuse, end the
+    connection and point at the sign-in tool
+    (:mod:`kiss.agents.sorcar.mcp_oauth`).
 
     Args:
-        cfg: The remote server configuration.
+        conn: The connection to a remote server.
 
     Returns:
         An ``httpx.Auth`` instance (``OAuthClientProvider``).
     """
     from kiss.agents.sorcar.mcp_oauth import build_provider
 
-    provider = build_provider(cfg, _refuse_login, _refuse_login)
-    # The SDK loads a stored token without a deadline and holds it valid
-    # until a request fails, which starts the (refused) full sign-in
-    # although a refresh token is at hand; the stored deadline makes it
-    # refresh first.
-    provider.context.token_expiry_time = provider.context.storage.refresh_deadline()
-    return provider
+    refuse = functools.partial(_refuse_login, conn)
+    return build_provider(conn.config, refuse, refuse)
 
 
 @dataclass
@@ -632,6 +753,17 @@ class _Connection:
     #: (:func:`_cancel_unless_unwinding`, the straggler reaper's cancel).
     loop_task: asyncio.Task[Any] | None = None
     unwinding: bool = False
+    #: The tool calls running on the session, each call's task with its
+    #: caller's future: failed when the maintainer ends
+    #: (:func:`_fail_calls`).  Touched on the manager loop only.
+    calls: dict[asyncio.Task[Any], concurrent.futures.Future[Any]] = field(default_factory=dict)
+
+
+def _failed_connection(config: MCPServerConfig, error: str) -> _Connection:
+    """Return the record of a connection to *config* that was never started: *error* says why."""
+    conn = _Connection(config=config, error=error)
+    conn.ready.set()
+    return conn
 
 
 def _child_errlog() -> Any:
@@ -662,6 +794,56 @@ def _fallback_errlog() -> Any:
         return open(os.devnull, "w")  # noqa: SIM115
 
 
+class _PostFailed(BaseExceptionGroup[Exception]):
+    """The failure of an SSE transport's POST, raised so that its writer cannot swallow it.
+
+    The SDK's SSE writer catches ``Exception``; this group is not one,
+    so it ends the writer's task and, through the transport's task
+    group, the task that owns the transport.
+    """
+
+
+@functools.cache
+def _sse_http_client_factory() -> Any:
+    """Return the factory of an SSE transport's HTTP client: a POST that fails ends the transport.
+
+    The client's messages go out as POSTs, sent in turn by one writer
+    task.  The SDK's writer logs the first that fails (a network error,
+    a refused sign-in, an error status) and stops, its reader left
+    running: the connection looks alive and can send nothing more, and
+    the request that POST carried waits for an answer nobody was asked
+    for (a handshake until its deadline, a tool call for
+    :data:`CALL_TIMEOUT`).  Raised as :class:`_PostFailed`, the failure
+    ends the transport instead, as a failed request ends a streamable
+    HTTP one: the owner is cancelled where it waits and gets the POST's
+    own error (:func:`describe_exception`).
+
+    Defined on first use: httpx is imported only once a remote server is used.
+    """
+    import httpx
+
+    class SSEHttpClient(httpx.AsyncClient):
+        """An ``httpx.AsyncClient`` whose failed POST raises :class:`_PostFailed`."""
+
+        async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+            """Send *request* as ``httpx.AsyncClient.send`` does.
+
+            Raises:
+                _PostFailed: When *request* is a POST that failed: the
+                    client raised, or the response it ended with (auth
+                    and redirects done) is not a success.
+            """
+            if request.method != "POST":
+                return await super().send(request, **kwargs)
+            try:
+                return (await super().send(request, **kwargs)).raise_for_status()
+            except Exception as exc:
+                raise _PostFailed("the SSE transport's POST failed", [exc]) from None
+
+    # ``follow_redirects`` as in the SDK's own factory, ``create_mcp_http_client``.
+    return functools.partial(SSEHttpClient, follow_redirects=True)
+
+
 async def _enter_transport(stack: Any, config: MCPServerConfig, auth: Any) -> tuple:
     """Open *config*'s transport on *stack* and return ``(read, write)``."""
     if config.transport == "stdio":
@@ -671,6 +853,7 @@ async def _enter_transport(stack: Any, config: MCPServerConfig, auth: Any) -> tu
             command=config.command,
             args=list(config.args),
             env={**os.environ, **dict(config.env)},
+            cwd=config.cwd or None,
         )
         # ``stdio_client``'s ``errlog`` default is a *default argument*, so
         # the SDK binds whatever ``sys.stderr`` was at import time and hands
@@ -689,7 +872,10 @@ async def _enter_transport(stack: Any, config: MCPServerConfig, auth: Any) -> tu
         from mcp.client.sse import sse_client
 
         read, write = await stack.enter_async_context(
-            sse_client(config.url, headers=dict(config.headers) or None, auth=auth)
+            sse_client(
+                config.url, headers=dict(config.headers) or None, auth=auth,
+                httpx_client_factory=_sse_http_client_factory(),
+            )
         )
         return read, write
     from mcp.client.streamable_http import streamablehttp_client
@@ -718,7 +904,9 @@ async def _park_until_stopped(
     sync tool handler cannot answer the ping, and failing it would tear
     the session down under a valid call, failing that call with
     "Connection closed" (a dead server is caught by the call's own
-    timeout).
+    timeout).  A server that answers the ping "Method not found" (one
+    written outside the SDKs, without ``ping``) is alive: failing it
+    would kill and respawn it every interval, losing its state.
 
     Args:
         conn: The connection being maintained.
@@ -729,6 +917,9 @@ async def _park_until_stopped(
         Exception: Whatever the failed ping raises, so the caller can
             record the error and unwind the transport.
     """
+    from mcp import McpError
+    from mcp.types import METHOD_NOT_FOUND
+
     while True:
         try:
             await asyncio.wait_for(conn.stop.wait(), timeout=health_interval)
@@ -740,6 +931,9 @@ async def _park_until_stopped(
                 await asyncio.wait_for(session.send_ping(), timeout=health_interval)
             except TimeoutError:
                 if not conn.in_flight:
+                    raise
+            except McpError as exc:
+                if exc.error.code != METHOD_NOT_FOUND:
                     raise
 
 
@@ -844,8 +1038,47 @@ async def _maintain_connection(
         logger.debug("MCP connection %s failed", conn.config.name, exc_info=True)
     finally:
         conn.session = None
+        # Before ``finished``: a shutdown waiting on it stops the loop.
+        _fail_calls(conn)
         conn.ready.set()
         conn.finished.set()
+
+
+def _fail_calls(conn: _Connection) -> None:
+    """Fail the tool calls still running on *conn*, whose maintainer is ending (on the loop).
+
+    No answer can reach them any more.  The SDK answers its pending
+    requests when the server closes the transport, but not when the
+    session is unwound under them (an HTTP transport ended by a refused
+    OAuth sign-in, a disconnect), and a call is a task of its own,
+    outside the transport's cancel scope: it waited out its read
+    timeout (:data:`CALL_TIMEOUT`).  Each caller gets the connection's
+    error at once.  No call is sent again: its tool may have run.
+    """
+    why = conn.error or "connection closed"
+    for task, future in conn.calls.items():
+        task.cancel()
+        if future.set_running_or_notify_cancel():
+            future.set_exception(ConnectionError(why))
+    conn.calls.clear()
+
+
+def _transport_closed(exc: Exception) -> bool:
+    """Whether the tool-call failure *exc* says the session's transport has closed.
+
+    A call sent on a closed transport fails with one of anyio's stream
+    errors; one in flight as it closes is answered by the SDK itself,
+    with its ``CONNECTION_CLOSED`` error.  The message is compared too:
+    a server may use that code (JSON-RPC's first free one) for an error
+    of its own, which must not cost it a restart.
+    """
+    import anyio
+    from mcp import McpError
+    from mcp.types import CONNECTION_CLOSED
+
+    if isinstance(exc, McpError):
+        return exc.error.code == CONNECTION_CLOSED and exc.error.message == "Connection closed"
+    return isinstance(exc, (anyio.ClosedResourceError, anyio.BrokenResourceError))
 
 
 def _release_lease(conn: _Connection) -> None:
@@ -855,18 +1088,25 @@ def _release_lease(conn: _Connection) -> None:
 
 
 def _start_call(
-    future: concurrent.futures.Future[Any], session: Any, tool: str, arguments: dict[str, Any],
+    future: concurrent.futures.Future[Any],
+    conn: _Connection,
+    session: Any,
+    tool: str,
+    arguments: dict[str, Any],
 ) -> None:
     """Loop-thread side of :meth:`MCPManager.call_tool`: run the call, its outcome in *future*.
 
     The caller made *future* before it queued this callback, so it holds
     the call's handle wherever a Stop interrupts the submission: a
     *future* cancelled before this runs never starts the call, one
-    cancelled later cancels the call's task.
+    cancelled later cancels the call's task.  The call is *conn*'s
+    until it is settled: a connection that ends first fails it
+    (:func:`_fail_calls`).
 
     Args:
         future: The caller's handle on the call.
-        session: The leased connection's MCP session.
+        conn: The leased connection.
+        session: Its MCP session, as leased.
         tool: The MCP tool name.
         arguments: The tool arguments.
     """
@@ -875,8 +1115,9 @@ def _start_call(
     task = asyncio.get_running_loop().create_task(
         session.call_tool(tool, arguments, read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT)),
     )
+    conn.calls[task] = future
     future.add_done_callback(functools.partial(_cancel_task, task))
-    task.add_done_callback(functools.partial(_settle, future))
+    task.add_done_callback(functools.partial(_settle, conn, future))
 
 
 def _cancel_unless_unwinding(conn: _Connection) -> None:
@@ -900,8 +1141,15 @@ def _cancel_task(task: asyncio.Task[Any], future: concurrent.futures.Future[Any]
         task.get_loop().call_soon_threadsafe(task.cancel)
 
 
-def _settle(future: concurrent.futures.Future[Any], task: asyncio.Task[Any]) -> None:
-    """Done callback of a call's *task*: hand its outcome to the caller's *future*."""
+def _settle(
+    conn: _Connection, future: concurrent.futures.Future[Any], task: asyncio.Task[Any],
+) -> None:
+    """Done callback of a call's *task*: hand its outcome to the caller's *future*.
+
+    Unless *conn* ended first and failed the call (:func:`_fail_calls`).
+    """
+    if conn.calls.pop(task, None) is None:
+        return
     if task.cancelled():
         future.cancel()
     elif future.set_running_or_notify_cancel():
@@ -1069,17 +1317,19 @@ class MCPManager:
     def _connection_for(self, key: str, config: MCPServerConfig) -> _Connection:
         """Return the live connection under *key*, starting one when there is none (locked)."""
         if self._shut_down:
-            conn = _Connection(config=config)
-            conn.error = "manager shut down"
-            conn.ready.set()
-            return conn
+            return _failed_connection(config, "manager shut down")
         self._configs[key] = config
         existing = self._connections.get(key)
         if existing is not None and existing.error == "":
             existing.last_used = time.monotonic()
             return existing
-        auth = build_oauth_provider(config) if config.transport in ("http", "sse") else None
         conn = _Connection(config=config)
+        try:
+            auth = build_oauth_provider(conn) if config.transport in ("http", "sse") else None
+        except Exception as exc:
+            # The SDK's provider refuses a $KISS_MCP_CLIENT_METADATA_URL that is
+            # not HTTPS as it is built: this server's failure, not the batch's.
+            return _failed_connection(config, describe_exception(exc))
         self._connections[key] = conn
         try:
             conn.task = asyncio.run_coroutine_threadsafe(
@@ -1325,10 +1575,12 @@ class MCPManager:
             if conn is None or session is None:
                 why = (conn.error if conn is not None else "") or "never connected"
                 return f"Error: MCP server {display!r} is not connected ({why})"
-            self._loop.call_soon_threadsafe(_start_call, future, session, tool, arguments)
+            self._loop.call_soon_threadsafe(_start_call, future, conn, session, tool, arguments)
             try:
                 result = tool_interrupt.result_interruptible(future, CALL_TIMEOUT + 5)
             except Exception as exc:
+                if _transport_closed(exc):
+                    locked_call(self._lock, self._retire_closed, conn)
                 # The outer deadline's ``TimeoutError`` carries no text.
                 why = str(exc) or (
                     f"no answer within {CALL_TIMEOUT + 5:g}s" if isinstance(exc, TimeoutError)
@@ -1351,6 +1603,24 @@ class MCPManager:
             for leased_conn in leases:
                 locked_call(self._lock, _release_lease, leased_conn)
         return _result_text(result)
+
+    def _retire_closed(self, conn: _Connection) -> None:
+        """Take *conn*, whose transport closed under a call, out of the pool (locked).
+
+        The server died, and its session stays set until the next idle
+        health ping: every call until then would be handed it.  Out of
+        the pool, the next call rebuilds the server (:meth:`_reconnect`).
+        The failed call is not sent again: its tool may have run.
+        """
+        key = _connection_key(conn.config)
+        if self._connections.get(key) is not conn:
+            return  # another call leased on the same dead session got here first
+        del self._connections[key]
+        conn.error = conn.error or "connection closed"
+        self._loop.call_soon_threadsafe(conn.stop.set)
+        # Owned until its transport has unwound, as an evicted one is.
+        self._orphans.append(conn)
+        self._forget_when_done(conn, conn.task)
 
     def _reconnect(self, server: str) -> _Connection | None:
         """Rebuild the connection for *server* from its remembered config.
@@ -1452,16 +1722,27 @@ class MCPManager:
         atexit.unregister(self.shutdown)
 
 
+def _block_text(block: Any) -> str:
+    """Return what the model reads of one content block of a tool result.
+
+    A text block's text, or the text of an embedded resource (how a
+    server hands over a file: GitHub's ``get_file_contents``).  Any
+    other block (an image, audio, a binary resource, a resource link)
+    is a placeholder naming its type and, when it has one, its URI.
+    """
+    resource = getattr(block, "resource", None)
+    for holder in (block, resource):
+        text = getattr(holder, "text", None)
+        if text is not None:
+            return str(text)
+    uri = getattr(block, "uri", None) or getattr(resource, "uri", None)
+    kind = getattr(block, "type", "content")
+    return f"[{kind} content omitted: {uri}]" if uri else f"[{kind} content omitted]"
+
+
 def _result_text(result: Any) -> str:
     """Flatten a ``CallToolResult`` into the string given to the model."""
-    parts: list[str] = []
-    for block in getattr(result, "content", None) or []:
-        text = getattr(block, "text", None)
-        if text is not None:
-            parts.append(str(text))
-        else:
-            block_type = getattr(block, "type", "content")
-            parts.append(f"[{block_type} content omitted]")
+    parts = [_block_text(block) for block in getattr(result, "content", None) or []]
     structured = getattr(result, "structuredContent", None)
     if structured and not parts:
         parts.append(json.dumps(structured))
@@ -1490,10 +1771,14 @@ def _connection_key(config: MCPServerConfig) -> str:
     agents/projects that both configure a conventional name such as
     ``github`` — with different commands, URLs, or headers — get two
     isolated connections instead of silently sharing (and hijacking)
-    one.
+    one.  So do two projects whose files hold the same stdio entry:
+    each runs its own child, in its own directory.  ``alwaysLoad`` is
+    left out: it says how the server's tools are offered, not which
+    server it is, and changing it must not restart the connection.
     """
-    canonical = json.dumps(config.to_json(), sort_keys=True)
-    digest = hashlib.sha256(f"{config.name}\n{canonical}".encode()).hexdigest()[:16]
+    canonical = json.dumps(replace(config, always_load=None).to_json(), sort_keys=True)
+    identity = f"{config.name}\n{canonical}\n{config.cwd}"
+    digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
     return f"{config.name}#{digest}"
 
 
@@ -1550,6 +1835,12 @@ def _json_schema_to_annotation(declared: dict[str, Any]) -> type:
 #: JSON-schema ``type`` names every provider's tool declaration accepts.
 _JSON_TYPES = frozenset(_JSON_TO_PY) | {"null"}
 
+#: The size of a tool's declaration, in nodes and references followed, at
+#: which its references stop being followed: definitions shared down a
+#: chain of models multiply (twenty models that each name the next one
+#: twice declare the last a million times).
+_MAX_DECLARED_NODES = 5000
+
 
 def _local_ref_target(ref: str, root: dict[str, Any]) -> Any:
     """The node the local JSON pointer *ref* (``#/$defs/Name``) names in *root*.
@@ -1571,8 +1862,51 @@ def _local_ref_target(ref: str, root: dict[str, Any]) -> Any:
     return node
 
 
+def _schema_parts(
+    prop: Any, root: dict[str, Any], resolving: frozenset[str], size: Iterator[int],
+) -> Iterator[tuple[dict[str, Any], frozenset[str]]]:
+    """Yield *prop* and every node it is declared by, each with the references on its path.
+
+    A node is everything its parts are: itself, then the target of its
+    local ``$ref`` (pydantic, so FastMCP, emits a nested model as
+    ``{"$ref": "#/$defs/Name"}``), then each member of its ``allOf``,
+    every one of them followed by its own parts (an alias, a
+    composition of references) before the next.  A reference is on the
+    path of what it leads to only, not of the parts beside it: the
+    same model named twice in a node is declared twice.  A reference
+    already on the path (a self-referencing model, a cycle of aliases)
+    gives its target's type only, as does every reference of a
+    declaration that has grown to ``_MAX_DECLARED_NODES``.  Walked with
+    a stack of its own: a chain of aliases may be longer than the
+    interpreter's stack is deep.
+
+    Args:
+        prop: The schema node; anything but a mapping has no parts.
+        root: The tool's whole ``inputSchema``, where ``$ref`` targets live.
+        resolving: The references on the path to this node.
+        size: Counts the tool's declaration: each ``next`` is its size
+            so far, and adds one to it.
+    """
+    pending = [(prop, resolving)]
+    while pending:
+        node, path = pending.pop()
+        if not isinstance(node, dict):
+            continue
+        yield node, path
+        parts: list[tuple[Any, frozenset[str]]] = []
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            target = _local_ref_target(ref, root)
+            if isinstance(target, dict):
+                followed = ref not in path and next(size) < _MAX_DECLARED_NODES
+                parts.append((target if followed else {"type": target.get("type")}, path | {ref}))
+        if isinstance(node.get("allOf"), list):
+            parts += [(member, path) for member in node["allOf"]]
+        pending += reversed(parts)
+
+
 def _declared_schema(
-    prop: Any, root: dict[str, Any], resolving: frozenset[str] = frozenset(),
+    prop: Any, root: dict[str, Any], resolving: frozenset[str], size: Iterator[int],
 ) -> dict[str, Any]:
     """Reduce one MCP ``inputSchema`` node to the keywords every provider accepts.
 
@@ -1580,13 +1914,14 @@ def _declared_schema(
     string ``enum`` and ``required``, and recurses into ``properties``,
     ``items`` and the union members of ``anyOf`` and ``oneOf``, both
     declared as ``anyOf`` (the one union keyword Gemini's declaration
-    schema knows; the model picks a member either way).  A local
-    ``$ref`` (pydantic, so FastMCP, emits a nested model as
-    ``{"$ref": "#/$defs/Name"}``) is replaced by its target, the
-    keywords next to it (a description) winning, and so on while the
-    target is a reference itself (an alias); a reference already being
-    resolved (a self-referencing model, a cycle of aliases) stops at the
-    target's type.  Every other keyword (``$schema``, ``$defs``,
+    schema knows; the model picks a member either way).  The node is
+    read through its parts (:func:`_schema_parts`: itself, its local
+    ``$ref``, its ``allOf`` members): the first part to carry a keyword
+    gives it (a description next to a reference wins over the
+    target's), and ``properties`` and ``required`` are joined, the
+    first part to name a property declaring it: a validator applies
+    every part, so an argument any of them requires must be declared.
+    Every other keyword (``$schema``, ``$defs``,
     ``additionalProperties``, ``title``, ``default``, ``format``,
     bounds, ...) is left out: Gemini's declaration schema rejects
     keywords it does not know, and the model needs the argument
@@ -1596,51 +1931,63 @@ def _declared_schema(
     otherwise, as every provider wants a typed node.
 
     Args:
-        prop: The schema node (a property, ``items`` or union member).
+        prop: The schema node (the root, a property, ``items`` or a
+            union member).
         root: The tool's whole ``inputSchema``, where ``$ref`` targets live.
         resolving: The references on the path to this node.
+        size: Counts the tool's declaration (see :func:`_schema_parts`).
 
     Returns:
         The reduced JSON schema of the node.
     """
-    if not isinstance(prop, dict):
-        return {"type": "string"}
-    while isinstance(ref := prop.get("$ref"), str):
-        target = _local_ref_target(ref, root)
-        if not isinstance(target, dict):
-            break
-        source = {"type": target.get("type")} if ref in resolving else target
-        prop = {**source, **{k: v for k, v in prop.items() if k != "$ref"}}
-        resolving |= {ref}
+    next(size)
+    # Each keyword with the path of the part it was read from: what it
+    # holds (a property, the items, a union member) is reduced on that path.
+    first: dict[str, tuple[Any, frozenset[str]]] = {}
+    props: dict[str, tuple[Any, frozenset[str]]] | None = None
+    required: list[Any] | None = None
+    for part, path in _schema_parts(prop, root, resolving, size):
+        for key, value in part.items():
+            first.setdefault(key, (value, path))
+            if key == "properties" and isinstance(value, dict):
+                props = props or {}
+                for name, child in value.items():
+                    props.setdefault(str(name), (child, path))
+            elif key == "required" and isinstance(value, list):
+                required = [*(required or ()), *value]
+    absent: tuple[Any, frozenset[str]] = (None, resolving)
     out: dict[str, Any] = {}
-    kind = prop.get("type")
+    kind = first.get("type", absent)[0]
     if isinstance(kind, list):
         members = [{"type": k} for k in kind if k in _JSON_TYPES]
         if members:
             out["anyOf"] = members
     elif kind in _JSON_TYPES:
         out["type"] = kind
-    if isinstance(prop.get("description"), str):
-        out["description"] = prop["description"]
-    enum = prop.get("enum")
+    description = first.get("description", absent)[0]
+    if isinstance(description, str):
+        out["description"] = description
+    enum = first.get("enum", absent)[0]
     if isinstance(enum, list) and enum and all(isinstance(v, str) for v in enum):
         out["enum"] = enum
-    props = prop.get("properties")
-    if isinstance(props, dict):
+    if props is not None:
         out["properties"] = {
-            str(k): _declared_schema(v, root, resolving) for k, v in props.items()
+            name: _declared_schema(child, root, via, size) for name, (child, via) in props.items()
         }
-        required = prop.get("required")
-        if isinstance(required, list):
-            out["required"] = [r for r in required if isinstance(r, str) and r in props]
-    if "items" in prop:
-        out["items"] = _declared_schema(prop["items"], root, resolving)
+        if required is not None:
+            named = (r for r in required if isinstance(r, str) and r in props)
+            out["required"] = list(dict.fromkeys(named))
+    if "items" in first:
+        items, via = first["items"]
+        out["items"] = _declared_schema(items, root, via, size)
     union = [
-        member for key in ("anyOf", "oneOf") if isinstance(prop.get(key), list)
-        for member in prop[key]
+        (member, via)
+        for alternatives, via in (first.get("anyOf", absent), first.get("oneOf", absent))
+        if isinstance(alternatives, list)
+        for member in alternatives
     ]
     if union:
-        out["anyOf"] = [_declared_schema(member, root, resolving) for member in union]
+        out["anyOf"] = [_declared_schema(member, root, via, size) for member, via in union]
     if not out.keys() & {"type", "anyOf"}:
         out["type"] = "object" if "properties" in out else "array" if "items" in out else "string"
     return out
@@ -1716,22 +2063,20 @@ def make_mcp_tool_wrapper(
     """
     tool_name = str(tool.name)
     full_name = f"{_sanitize(server)}_{_sanitize(tool_name)}"
-    schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
-    props = schema.get("properties")
-    if not isinstance(props, dict):
-        props = {}
-    required_raw = schema.get("required")
-    required = set(required_raw) if isinstance(required_raw, list) else set()
+    root = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
+    # The root is reduced like any node: it may name its arguments by
+    # reference or composition too.
+    schema = _declared_schema(root, root, frozenset(), itertools.count())
+    required = schema.get("required", ())
 
     params: list[inspect.Parameter] = []
     param_map: dict[str, tuple[str, bool]] = {}
     declared_props: dict[str, Any] = {}
     declared_required: list[str] = []
     used_names: set[str] = set()
-    for prop_name in props:
+    for prop_name, declared in schema.get("properties", {}).items():
         is_required = prop_name in required
-        py_name = _python_param_name(str(prop_name), used_names)
-        declared = _declared_schema(props[prop_name], schema)
+        py_name = _python_param_name(prop_name, used_names)
         declared_props[py_name] = declared
         if is_required:
             declared_required.append(py_name)
@@ -1798,6 +2143,17 @@ def _bounded_tool_name(base: str, counter: int = 0) -> str:
     return base + suffix
 
 
+def _claim_tool_name(base: str, taken: set[str]) -> str:
+    """Return *base*, or its first numbered variant not in *taken*, and add it to *taken*."""
+    name = _bounded_tool_name(base)
+    counter = 2
+    while name in taken:
+        name = _bounded_tool_name(base, counter)
+        counter += 1
+    taken.add(name)
+    return name
+
+
 # Names of the agent's built-in tools ("cron_job" is built in only to
 # cron sessions dispatched via run_agent(agent="cron", ...), whose agent
 # SEA's tools() supplies it).  A synthesized MCP tool name colliding with any of
@@ -1833,6 +2189,15 @@ def make_mcp_tools(
     ``mcp_permissions`` wildcard rules, and wraps the survivors as
     kiss tool functions named ``<server>_<tool>``.
 
+    Every tool returned is part of every model request.  The user can
+    have servers deferred instead, one by one (``"alwaysLoad": false``)
+    or by size (the ``mcp_upfront_tool_chars`` budget;
+    :func:`~kiss.agents.sorcar.mcp_tool_search.split_by_budget`): the
+    wrappers of a deferred server are not returned, and the tools that
+    stand in for them
+    (:func:`~kiss.agents.sorcar.mcp_tool_search.make_deferred_tools`),
+    ``mcp_tool_search`` and ``mcp_tool_call`` first, are returned last.
+
     Args:
         work_dir: The project directory whose MCP servers to expose.
         taken_names: Tool names already in use by the agent; a
@@ -1847,7 +2212,7 @@ def make_mcp_tools(
         return []
     rules = load_permission_rules("mcp_permissions")
     manager = MCPManager.instance()
-    tools: list[Any] = []
+    offered: list[ServerTools] = []
     taken = set(taken_names)
     connections = manager.connect_all(servers.values())
     for (name, config), conn in zip(servers.items(), connections, strict=True):
@@ -1862,6 +2227,7 @@ def make_mcp_tools(
             )
             continue
         key = _connection_key(config)
+        wrappers: list[Any] = []
         for tool in conn.tools:
             try:
                 wrapper = make_mcp_tool_wrapper(
@@ -1883,13 +2249,15 @@ def make_mcp_tools(
             # before it can reserve a suffix another tool would get.
             if skill_permission(base, rules) == "deny":
                 continue
-            full_name = _bounded_tool_name(base)
-            counter = 2
-            while full_name in taken:
-                full_name = _bounded_tool_name(base, counter)
-                counter += 1
-            taken.add(full_name)
-            wrapper.__name__ = full_name
-            wrapper.__qualname__ = full_name
-            tools.append(wrapper)
+            wrapper.__name__ = wrapper.__qualname__ = _claim_tool_name(base, taken)
+            wrappers.append(wrapper)
+        if wrappers:
+            offered.append(ServerTools(name, config.always_load, wrappers))
+    tools, deferred = split_by_budget(offered, upfront_tool_chars())
+    if deferred:
+        # Named after every server tool, so a server's own
+        # ``mcp_tool_search`` keeps its name and these get the suffix.
+        search_name = _claim_tool_name("mcp_tool_search", taken)
+        call_name = _claim_tool_name("mcp_tool_call", taken)
+        tools += make_deferred_tools(deferred, search_name, call_name)
     return tools

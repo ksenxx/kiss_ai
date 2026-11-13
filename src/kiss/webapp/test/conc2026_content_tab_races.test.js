@@ -38,6 +38,7 @@ const {
   waitFor,
   sleep,
   click,
+  stubDesktop,
   stubMonaco,
 } = require('./simplify2_harness');
 const {
@@ -47,13 +48,10 @@ const {
   makeRunner,
 } = require('./ui_antipattern_harness');
 
-// The page harness of workspaceScopedTabs.test.js plus a fake Monaco
-// rich enough for the EDITABLE content-tab path: renderCodeContent needs
-// getModel/onDidChangeModelContent, saveContentTab needs
-// getAlternativeVersionId/getValue, revealPendingContentLine needs
-// getLineCount/setPosition/revealLineInCenter/getDomNode. Each created
-// editor is recorded (with its initial value) and exposes _type(text) so
-// a test can make the tab dirty like a real keystroke would.
+// The shared chat page with the harness's fake Monaco (stubMonaco), which
+// serves the EDITABLE content-tab path.  Each created editor is recorded
+// (with its initial value) and exposes _type(text) so a test can make
+// the tab dirty like a real keystroke would.
 function makePage() {
   let created;
   const {win, posted} = makeSharedPage({
@@ -151,9 +149,9 @@ async function testForeignScopeErrorMustNotSwallowReload() {
   // The tab's own reload reply arrives (the daemon echoes the
   // request's token): it MUST replace the editor text with the disk
   // content (a fresh editor holding 'v2 on disk').
-  // Today the foreign error already cleared contentReloadRequested, so
-  // this reply takes the dirty-guard branch and only reveals a line —
-  // the explicit reload silently does nothing.
+  // Before the fix the foreign error had already cleared
+  // contentReloadRequested, so this reply took the dirty-guard branch and
+  // only revealed a line: the explicit reload silently did nothing.
   send(win, {
     type: 'fileContent',
     tabId: 'a1',
@@ -322,8 +320,209 @@ async function testSaveSupersedesPendingReload() {
   win.close();
 }
 
+async function testReloadReplyLeavesTheUserWhereTheyAre() {
+  // "Reload from disk" may answer late (a slow tunnel, a forwarded
+  // machine, a big file).  Its reply repaints the file's tab where it
+  // is: a user who went back to the chat meanwhile stays there.
+  let created;
+  const {win, posted} = makeSharedPage({
+    bodyClass: 'remote-chat',
+    beforeScripts: w => {
+      created = stubMonaco(w);
+    },
+  });
+  const api = win._testApi;
+  const file = {type: 'fileContent', path: '/w/a.txt', name: 'a.txt'};
+  send(win, {
+    type: 'tabs_state',
+    tabs: [{tabId: 'chat-B', title: 'chat B', chatId: 'cB'}],
+  });
+  api.switchToTab('chat-B');
+  send(win, {...file, content: 'hello', version: 'v1', tabId: 'chat-B'});
+  await sleep(0);
+  const tab = api.openTabs().find(t => t.isContentTab);
+  assert.strictEqual(
+    api.getActiveTabId(),
+    tab.id,
+    'precondition: the file is on screen (stacked)',
+  );
+  click(win, win.document.querySelector('.content-refresh-btn'));
+  const req = posted.filter(m => m.type === 'openFile').pop();
+  assert.strictEqual(String(req.token).indexOf('reload:'), 0);
+  // The user goes back to the chat before the reply arrives.
+  api.switchToTab('chat-B');
+  send(win, {
+    ...file,
+    content: 'hello again',
+    version: 'v2',
+    tabId: req.tabId,
+    token: req.token,
+  });
+  await sleep(0);
+  assert.strictEqual(api.getActiveTabId(), 'chat-B', 'not pulled to the file');
+  assert.strictEqual(
+    created[created.length - 1].value,
+    'hello again',
+    'the reload itself took: the tab holds the text from disk',
+  );
+  win.close();
+
+  // Split layout: the user picked another file in the content pane.
+  const split = makeSharedPage({
+    bodyClass: 'remote-chat',
+    beforeScripts: w => {
+      stubDesktop(w, true);
+      stubMonaco(w);
+    },
+  });
+  const shown = () =>
+    split.win.document
+      .querySelector('#content-tab-list .chat-tab.active')
+      .getAttribute('aria-label');
+  send(split.win, {...file, content: 'hello', version: 'v1'});
+  await sleep(0);
+  click(split.win, split.win.document.querySelector('.content-refresh-btn'));
+  const again = split.posted.filter(m => m.type === 'openFile').pop();
+  send(split.win, {
+    type: 'fileContent',
+    path: '/w/b.txt',
+    name: 'b.txt',
+    content: 'other',
+    version: 'v1',
+  });
+  await sleep(0);
+  assert.strictEqual(shown(), 'b.txt', 'precondition: the other file is shown');
+  send(split.win, {
+    ...file,
+    content: 'hello again',
+    version: 'v2',
+    tabId: again.tabId,
+    token: again.token,
+  });
+  await sleep(0);
+  assert.strictEqual(shown(), 'b.txt', 'the pane keeps the file picked since');
+  split.win.close();
+}
+
+function saves(posted) {
+  return posted.filter(m => m && m.type === 'saveFile');
+}
+
+/**
+ * Click the content tab's close button.  Returns the "unsaved changes"
+ * question, null when the tab closed without one.
+ */
+function closeContentTabStrip(win) {
+  click(
+    win,
+    win.document.querySelector('.chat-tab.content-tab .chat-tab-close'),
+  );
+  return win.document.querySelector('[data-notification-id^="close-dirty-"]');
+}
+
+// W1 audit 2026-11-12: a save in flight means the disk is about to hold
+// the text sent.  An undo back to the text the file was opened with read
+// as "nothing to save" meanwhile (Monaco's version id is the saved one
+// again): the tab closed without a question, the disk took the saved
+// text and the text the user went back to was gone.
+async function testUndoDuringASaveKeepsTheTabDirty() {
+  const ctx = makePage();
+  const {win, posted} = ctx;
+  const {editor} = await openDirtyContentTab(ctx);
+  click(win, win.document.querySelector('.content-save-btn'));
+  const first = saves(posted)[0];
+  assert.strictEqual(first.content, 'v1 edited');
+  editor._undo();
+  assert.strictEqual(editor.getModel().getValue(), 'v1 on disk');
+
+  const question = closeContentTabStrip(win);
+  assert.strictEqual(
+    contentTabStrips(win).length,
+    1,
+    'BUG - the tab closed while its save was in flight',
+  );
+  assert.ok(question, 'the close asks first');
+  assert.ok(win.document.querySelector('.chat-tab-dirty'), 'and shows the dot');
+  // The close waits for the save in flight.  Its reply makes the text
+  // the user went back to the unsaved one, so the close asks again.
+  click(win, toastButton(question, 'Save and close'));
+  assert.strictEqual(saves(posted).length, 1, 'one save at a time');
+  send(win, {
+    type: 'fileSaved',
+    token: first.token,
+    ok: true,
+    version: 'ver-2',
+  });
+  assert.strictEqual(contentTabStrips(win).length, 1, 'not on disk yet');
+  const again = win.document.querySelector(
+    '[data-notification-id^="close-dirty-"]',
+  );
+  assert.ok(again, 'the close asks again');
+  click(win, toastButton(again, 'Save and close'));
+  const second = saves(posted)[1];
+  assert.strictEqual(second.content, 'v1 on disk');
+  assert.strictEqual(second.version, 'ver-2', 'on top of the first save');
+  send(win, {
+    type: 'fileSaved',
+    token: second.token,
+    ok: true,
+    version: 'ver-3',
+  });
+  assert.strictEqual(contentTabStrips(win).length, 0, 'saved, then closed');
+  win.close();
+}
+
+// The reply says what the disk holds.  A refused save wrote nothing: the
+// text the user went back to is the disk's again and the tab closes
+// without a question.  A save whose reply never came may have been
+// written: no text is known to be the disk's, and the close asks.
+async function testUndoneTextAfterARefusedOrALostSave() {
+  const refused = makePage();
+  const {editor} = await openDirtyContentTab(refused);
+  click(refused.win, refused.win.document.querySelector('.content-save-btn'));
+  editor._undo();
+  send(refused.win, {
+    type: 'fileSaved',
+    token: saves(refused.posted)[0].token,
+    ok: false,
+    error: 'disk full',
+  });
+  assert.strictEqual(
+    closeContentTabStrip(refused.win),
+    null,
+    'nothing unsaved',
+  );
+  assert.strictEqual(contentTabStrips(refused.win).length, 0);
+  refused.win.close();
+
+  const lost = makePage();
+  send(lost.win, {type: 'daemonStatus', connected: true});
+  const typed = await openDirtyContentTab(lost);
+  click(lost.win, lost.win.document.querySelector('.content-save-btn'));
+  typed.editor._undo();
+  send(lost.win, {type: 'daemonStatus', connected: false});
+  assert.ok(
+    closeContentTabStrip(lost.win),
+    'BUG - the tab closed although its save may have been written',
+  );
+  assert.strictEqual(contentTabStrips(lost.win).length, 1);
+  lost.win.close();
+}
+
 (async () => {
   const {test, report} = makeRunner();
+  await test(
+    'an undo during a save keeps the tab dirty',
+    testUndoDuringASaveKeepsTheTabDirty,
+  );
+  await test(
+    'the undone text after a refused or a lost save',
+    testUndoneTextAfterARefusedOrALostSave,
+  );
+  await test(
+    'a late reload reply leaves the user where they are',
+    testReloadReplyLeavesTheUserWhereTheyAre,
+  );
   await test(
     'a foreign-scope error does not swallow the reload',
     testForeignScopeErrorMustNotSwallowReload,

@@ -24,7 +24,10 @@ replay carries ``running:false``); these tests pin the running half:
 * a tab whose owner is busy only through a worktree merge (no run) is
   reported ``running:false``: a merge is not a run, the page shows no
   spinner for it, and a stale ``running:true`` from a missed task end
-  used to survive the reconnect.
+  used to survive the reconnect;
+* a tab the registry binds to no chat (a new chat, a run not published
+  yet, what a lost machine left of its own) has no replay to defer: its
+  state is told by itself, where the ``ready`` used to say nothing.
 
 The tests drive the real ``RemoteAccessServer`` over a real WebSocket
 connection, with real ``kiss.server.agent_state`` registry entries and
@@ -45,6 +48,7 @@ from websockets.asyncio.client import connect
 from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
@@ -65,7 +69,6 @@ class TestDeferredReplayResendsRunning(IsolatedAsyncioTestCase):
 
         self._saved_persistence = (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         )
         self._persistence_dir = Path(
@@ -73,7 +76,6 @@ class TestDeferredReplayResendsRunning(IsolatedAsyncioTestCase):
         )
         _persistence._KISS_DIR = self._persistence_dir
         _persistence._DB_PATH = self._persistence_dir / "history.db"
-        _persistence._db_conn = None
 
         self.port = find_free_port()
         self._orig_config = None
@@ -104,10 +106,9 @@ class TestDeferredReplayResendsRunning(IsolatedAsyncioTestCase):
 
         import kiss.agents.sorcar.persistence as _persistence
 
-        _persistence._close_db()
+        close_db()
         (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved_persistence
 
@@ -191,6 +192,31 @@ class TestDeferredReplayResendsRunning(IsolatedAsyncioTestCase):
         fg = _tab_frames(events, "tab-fg")
         self.assertEqual([f["type"] for f in fg], ["status", "task_events"])
         self.assertFalse(fg[0]["running"])
+
+    async def test_a_tab_bound_to_no_chat_is_told_its_run_state(self) -> None:
+        """A registry tab with no chat to replay gets its running state all the same."""
+        server = self.server._agent_server
+        server._registry_update_tab("tab-idle", title="new chat", create=True)
+        # A run admitted and not published yet: its state is registered
+        # before the registry binds the tab to the run's chat.
+        agent_state.register(agent_state.AgentState(
+            "admitted", chat_id="chat-admitted", tab_id="tab-admitted",
+            server_owned=True, is_task_active=True,
+        ))
+        server._registry_update_tab("tab-admitted", title="admitted", create=True)
+
+        events = await self._ready_replies({"type": "ready", "tabId": "tab-idle"})
+
+        idle = _tab_frames(events, "tab-idle")
+        self.assertEqual([f["type"] for f in idle], ["status"], idle)
+        self.assertFalse(idle[0]["running"])
+        admitted = _tab_frames(events, "tab-admitted")
+        self.assertEqual([f["type"] for f in admitted], ["status"], admitted)
+        self.assertTrue(admitted[0]["running"])
+        self.assertTrue(admitted[0].get("attached"))
+        # Neither lost a machine: no binding is told, and the machine a
+        # new chat was opened for stays picked on the page.
+        self.assertEqual([e for e in events if e.get("type") == "tabMachine"], [])
 
     async def test_two_runs_in_one_chat_attach_the_tab_to_its_own_run(self) -> None:
         """A tab running beside a sibling run of the same chat is reported running."""

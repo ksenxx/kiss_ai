@@ -14,8 +14,8 @@ in-flight agent task — the bug that turned a multi-step task into
 Wire protocol
 =============
 
-The daemon publishes its URL and a local token in
-``~/.kiss/sorcar-local.json`` (see ``kiss.agents.sorcar.local_endpoint``).
+The daemon publishes its URL and a local token in ``sorcar-local.json``
+in its state directory (see ``kiss.agents.sorcar.local_endpoint``).
 The probe connects to that URL, authenticates as a local client and
 speaks the daemon's JSON protocol:
 
@@ -45,9 +45,13 @@ Exit codes
 Environment
 ===========
 
-* ``KISS_SORCAR_LOCAL`` — override the endpoint file path (default
-  ``~/.kiss/sorcar-local.json``).  Used by the integration test in
-  ``test_check_active_tasks_script.py`` to point at a per-test daemon.
+* ``KISS_SORCAR_LOCAL`` — the endpoint file to probe.  ``install.sh``
+  and ``reinstall-kiss-web-when-idle.sh`` name one per state directory
+  they ask.  Default: ``sorcar-local.json`` in the state directory of
+  the app this interpreter belongs to (``kiss.core.config.kiss_home``:
+  ``$KISS_HOME``, else the home of the app's brand, ``~/.kiss`` for
+  the stock one); under an interpreter without the app, in
+  ``$KISS_HOME``, else ``~/.kiss``.
 * ``KISS_ACTIVE_TASKS_TIMEOUT`` — connect+read timeout in seconds
   (default ``2.0``; ``5.0`` on Windows, where a refused loopback
   connect is only reported after ~2 s of SYN retransmits and would
@@ -68,8 +72,25 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_ENDPOINT_FILE = Path.home() / ".kiss" / "sorcar-local.json"
 DEFAULT_TIMEOUT = 5.0 if sys.platform == "win32" else 2.0
+
+
+def _default_endpoint_file() -> Path:
+    """Return the endpoint file of the daemon this interpreter's app runs.
+
+    The app knows its state directory, which a white-label brand names
+    after itself (``~/.s10s``).  An interpreter that cannot import the
+    app (a bare ``python3``) cannot know the brand: ``$KISS_HOME``, else
+    the stock ``~/.kiss``.
+    """
+    try:
+        from kiss.core.config import kiss_home
+    except ImportError:
+        env = os.environ.get("KISS_HOME")
+        home = Path(env) if env else Path.home() / ".kiss"
+    else:
+        home = kiss_home()
+    return home / "sorcar-local.json"
 
 
 def _classify_message(msg: object) -> str:
@@ -142,10 +163,7 @@ def _probe_active_tasks(
         from websockets.exceptions import ConnectionClosed, InvalidHandshake
         from websockets.sync.client import connect
     except ImportError as exc:
-        return 1, (
-            f"kiss-web probe cannot import websockets ({exc}); refusing to "
-            "kill — set KISS_FORCE_RESTART=1 to override."
-        )
+        return 1, f"kiss-web probe cannot import websockets ({exc}); refusing to kill."
     # The daemon serves loopback without TLS (``ws://``); ``ssl=`` is
     # only valid, and only needed, for a ``wss://`` endpoint.
     ssl_ctx: ssl.SSLContext | None = None
@@ -164,8 +182,7 @@ def _probe_active_tasks(
                 if remaining <= 0:
                     return 1, (
                         f"kiss-web probe at {url} timed out waiting for "
-                        "activeTasksResponse; refusing to kill — set "
-                        "KISS_FORCE_RESTART=1 to override."
+                        "activeTasksResponse; refusing to kill."
                     )
                 try:
                     raw = ws.recv(timeout=remaining)
@@ -184,8 +201,7 @@ def _probe_active_tasks(
                         return 1, (
                             f"kiss-web daemon at {url} predates the "
                             "activeTasksQuery handler; its tasks are "
-                            "unknown.  Refusing to kill — set "
-                            "KISS_FORCE_RESTART=1 to override."
+                            "unknown.  Refusing to kill."
                         )
                     return 0, (
                         f"kiss-web daemon at {url} predates the "
@@ -202,14 +218,12 @@ def _probe_active_tasks(
     except ConnectionClosed:
         return 1, (
             f"kiss-web probe at {url} closed before sending "
-            "activeTasksResponse; refusing to kill — set "
-            "KISS_FORCE_RESTART=1 to override."
+            "activeTasksResponse; refusing to kill."
         )
     except (TimeoutError, OSError, InvalidHandshake) as exc:
         return 1, (
             f"kiss-web probe at {url} failed "
-            f"({exc.__class__.__name__}: {exc}); refusing to kill — set "
-            "KISS_FORCE_RESTART=1 to override."
+            f"({exc.__class__.__name__}: {exc}); refusing to kill."
         )
 
     assert isinstance(msg, dict)  # _classify_message returns "response" only for dicts.
@@ -227,8 +241,7 @@ def _probe_active_tasks(
             print(restart_pending_file)
         return 1, (
             f"kiss-web has {count} in-flight task(s): "
-            f"{', '.join(tabs) if tabs else '<unnamed>'}.  Refusing to kill — "
-            "set KISS_FORCE_RESTART=1 to override."
+            f"{', '.join(tabs) if tabs else '<unnamed>'}.  Refusing to kill."
         )
     return 0, f"kiss-web is idle (count=0) at {url}; safe to kill."
 
@@ -237,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
     """Run the probe and write a status line to stderr."""
     del argv  # No CLI args; configured via environment variables.
     env = os.environ.get("KISS_SORCAR_LOCAL")
-    endpoint_file = Path(env) if env else DEFAULT_ENDPOINT_FILE
+    endpoint_file = Path(env) if env else _default_endpoint_file()
     try:
         timeout = float(os.environ.get(
             "KISS_ACTIVE_TASKS_TIMEOUT", str(DEFAULT_TIMEOUT),

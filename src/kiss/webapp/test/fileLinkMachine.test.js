@@ -5,8 +5,6 @@
 
 'use strict';
 
-/* global require, console */
-
 // File links of a tab bound to a registered machine (main.js against
 // the real chat.html):
 //   * a `path:line` link of a bound tab keeps the machine stamp on its
@@ -63,7 +61,7 @@ function makeDomPage() {
     ],
   });
   send(win, {type: 'tabMachine', tabId: BOX_TAB, machine: 'box'});
-  return {win, posted, close: () => win.close()};
+  return {win, posted};
 }
 
 function answer(win, check) {
@@ -104,7 +102,7 @@ function testBoundTabLineSuffixKeepsTheMachine() {
   assert.strictEqual(open.path, 'src/box.py');
   assert.strictEqual(open.line, 12);
   assert.strictEqual(open.machine, 'box');
-  wv.close();
+  wv.win.close();
   console.log('  ok - a path:line link of a bound tab opens on its machine');
 }
 
@@ -133,7 +131,7 @@ function testHomeTabSendsNoMachine() {
   const open = wv.posted.filter(m => m.type === 'openFile')[0];
   assert.ok(open);
   assert.ok(!('machine' in open), 'the openFile carries no machine');
-  wv.close();
+  wv.win.close();
   console.log('  ok - a tab of this machine sends no machine stamp');
 }
 
@@ -209,7 +207,7 @@ function testLinksFollowTheBindingNotTheDropDown() {
   const open = wv.posted.filter(m => m.type === 'openFile')[0];
   assert.ok(open);
   assert.strictEqual(open.machine, 'box', 'the openFile goes to the box');
-  wv.close();
+  wv.win.close();
   console.log(
     '  ok - links follow the machine the task ran on, not the drop-down',
   );
@@ -245,7 +243,7 @@ function testHomeTabLinksIgnoreADropDownPick() {
   const open = wv.posted.filter(m => m.type === 'openFile')[0];
   assert.ok(open);
   assert.ok(!('machine' in open), 'the openFile stays on this machine');
-  wv.close();
+  wv.win.close();
   console.log("  ok - a home tab's links ignore the drop-down pick");
 }
 

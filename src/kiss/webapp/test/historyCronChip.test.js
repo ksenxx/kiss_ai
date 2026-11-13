@@ -13,11 +13,12 @@
 // needs both Cron and Errored on).
 
 const assert = require('assert');
-const {send, makeRemoteChatPage} = require('./simplify2_harness');
+const {makeRemoteChatPage, ofType} = require('./simplify2_harness');
 const {
   historyRows,
   visibleTitles,
   sendHistory,
+  sendHistoryPage,
   finishedSession: session,
 } = require('./history_helpers');
 
@@ -121,14 +122,14 @@ function testAFirstPageOfOnlyCronRowsFetchesTheNextPage() {
   for (let i = 1; i <= 50; i += 1) {
     cronPage.push(session(100 + i, 'tick ' + i, {is_cron: true}));
   }
-  const before = posted.filter(m => m && m.type === 'getHistory').length;
+  const before = ofType(posted, 'getHistory').length;
   sendHistory(win, posted, cronPage);
   assert.deepStrictEqual(visibleTitles(win), [], 'every row of the page is hidden');
   assert.ok(
     !win.document.querySelector('.sidebar-empty-filter'),
     'no "No tasks match" while more pages may follow',
   );
-  const requests = posted.filter(m => m && m.type === 'getHistory');
+  const requests = ofType(posted, 'getHistory');
   assert.strictEqual(requests.length, before + 1, 'the next page is requested');
   assert.strictEqual(requests[requests.length - 1].offset, 50, 'at offset 50');
   assert.ok(
@@ -137,16 +138,10 @@ function testAFirstPageOfOnlyCronRowsFetchesTheNextPage() {
   );
   // The next page holds a plain task: it shows, and nothing further is
   // requested once the pages run short.
-  const second = [session(200, 'a real task')];
-  send(win, {
-    type: 'history',
-    sessions: second,
-    offset: 50,
-    generation: requests[requests.length - 1].generation,
-  });
+  sendHistoryPage(win, posted, 50, [session(200, 'a real task')]);
   assert.deepStrictEqual(visibleTitles(win), ['a real task']);
   assert.strictEqual(
-    posted.filter(m => m && m.type === 'getHistory').length,
+    ofType(posted, 'getHistory').length,
     before + 1,
     'a short page ends the paging',
   );
@@ -162,11 +157,11 @@ function testAFilledListDoesNotPageOnItsOwn() {
   for (let i = 1; i <= 50; i += 1) {
     page.push(session(300 + i, 'task ' + i, {is_cron: i % 2 === 0}));
   }
-  const before = posted.filter(m => m && m.type === 'getHistory').length;
+  const before = ofType(posted, 'getHistory').length;
   sendHistory(win, posted, page);
   assert.strictEqual(visibleTitles(win).length, 25, 'half the rows show');
   assert.strictEqual(
-    posted.filter(m => m && m.type === 'getHistory').length,
+    ofType(posted, 'getHistory').length,
     before,
     'a list taller than its viewport waits for a scroll',
   );

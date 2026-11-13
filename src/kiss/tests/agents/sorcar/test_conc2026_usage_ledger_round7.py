@@ -34,7 +34,7 @@ immutable view with a single store):
 * Finding 5 — every 200-record compaction copied the whole historical
   key set (``base.keys | folded``), making maintenance quadratic
   (640k events took 25.5s).  The folded dedup state is now a leveled
-  max-seq-per-source map with geometric merging — O(n log n) total.
+  set of sources with geometric merging — O(n log n) total.
 
 All tests drive the real classes with real threads, a real loopback
 HTTP model server where a model call is involved, and real injected
@@ -56,11 +56,9 @@ import pytest
 
 from kiss.agents.sorcar.relentless_agent import _COMPACTION_THRESHOLD, RelentlessAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.task_classifier import (
-    classify_task,
-    clear_classification_cache,
-)
+from kiss.agents.sorcar.task_classifier import classify_task
 from kiss.core.kiss_agent import KISSAgent
+from kiss.tests.conftest import clear_classification_cache
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     IsolatedKissHome,
@@ -471,8 +469,8 @@ def test_compaction_maintenance_is_near_linear() -> None:
 
     Round-6 measured the old design at 2.76 us/event for 80k events
     and 39.87 us/event (25.5 s total) for 640k — the per-fold copy of
-    the whole historical key set is quadratic.  The leveled max-seq
-    map merges geometrically, so the same 640k-unique-key flood must
+    the whole historical key set is quadratic.  The leveled source
+    set merges geometrically, so the same 640k-unique-key flood must
     finish in a small constant multiple of the 80k per-event cost and
     far under the old wall-clock time.
     """
@@ -522,33 +520,3 @@ def test_one_shot_flood_leaves_no_dedup_residue() -> None:
     view = ledger.view
     assert view.seen.levels == ()
     assert len(ledger.records) - view.fold_index < _COMPACTION_THRESHOLD
-
-
-def test_per_source_sequences_dedup_across_folds() -> None:
-    """Retries of folded generations dedup; new generations count.
-
-    The bounded dedup design stores one MAX seq per source; this pins
-    its contract end to end: generations committed in order, folded,
-    then retried (same source, same seq, same values) count once, and
-    a later generation still counts.
-    """
-    agent = RelentlessAgent("seq-dedup")
-    agent._attribute_usage(1.0, 10, 1, key="reclaim:x", seq=0)
-    agent._attribute_usage(2.0, 20, 2, key="reclaim:x", seq=1)
-    # Force a fold over both generations.
-    for _ in range(_COMPACTION_THRESHOLD):
-        agent._attribute_usage(0.0, 1, 0)
-    ledger = agent._usage_ledger_object()
-    assert ledger.view.seen.get("reclaim:x") == 1
-    expected = (3.0, 30 + _COMPACTION_THRESHOLD, 3)
-    assert agent.usage_snapshot() == expected
-    # Retries of the folded generations are no-ops.
-    agent._attribute_usage(1.0, 10, 1, key="reclaim:x", seq=0)
-    agent._attribute_usage(2.0, 20, 2, key="reclaim:x", seq=1)
-    assert agent.usage_snapshot() == expected
-    # The next generation counts exactly once, retry included.
-    agent._attribute_usage(4.0, 40, 4, key="reclaim:x", seq=2)
-    agent._attribute_usage(4.0, 40, 4, key="reclaim:x", seq=2)
-    assert agent.usage_snapshot() == (
-        expected[0] + 4.0, expected[1] + 40, expected[2] + 4,
-    )

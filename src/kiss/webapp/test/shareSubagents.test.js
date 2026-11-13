@@ -29,38 +29,21 @@ const {
   send,
   stubRaf,
   readyTabId,
+  withTeardown,
 } = require('./simplify2_harness');
-const {makeRunner} = require('./ui_antipattern_harness');
-const {
-  click,
-  shareWithTasks,
-  makeSharePage: makeShareWindow,
-} = require('./share_helpers');
+const {makeRunner, key} = require('./ui_antipattern_harness');
+const {click, shareWithTasks, makeSharePage} = require('./share_helpers');
+const {trackWindow, closeWindows} = require('./workdir_helpers');
 
-const runner = makeRunner();
-const {report} = runner;
-
-// Every chat / share window the running test opened; closed after it.
-const openWindows = [];
-
-/** Run one test through the shared runner, then close its windows. */
-async function test(name, fn) {
-  await runner.test(name, fn);
-  while (openWindows.length) openWindows.pop().close();
-}
+const {test: runTest, report} = makeRunner();
+// Each test's windows are closed once it has settled.
+const test = withTeardown(runTest, closeWindows);
 
 /** A chat page (main.js) with synchronous animation frames. */
 function makePage() {
   const wv = makeChatPage({beforeScripts: stubRaf});
-  openWindows.push(wv.win);
+  trackWindow(wv.win);
   return wv;
-}
-
-/** The exported page *bodyHtml* with share.js running in it. */
-function makeSharePage(bodyHtml) {
-  const win = makeShareWindow(bodyHtml);
-  openWindows.push(win);
-  return win;
 }
 
 /**
@@ -161,16 +144,6 @@ function sectionByTask(win, taskId) {
 function fanoutPanel(win, root) {
   return (root || win.document).querySelector(
     '.tc-run-parallel[data-rp-subagents]',
-  );
-}
-
-function key(win, el, name) {
-  el.dispatchEvent(
-    new win.KeyboardEvent('keydown', {
-      key: name,
-      bubbles: true,
-      cancelable: true,
-    }),
   );
 }
 

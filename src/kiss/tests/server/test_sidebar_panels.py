@@ -34,6 +34,7 @@ import asyncio
 import concurrent.futures
 import datetime
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -69,9 +70,23 @@ def _expire_apps_cache() -> None:
     probed within the TTL; resetting only ``_apps_checked_at`` would then
     serve that cached answer stamped ``checked_at == 0``.
     """
-    sidebar_panels._apps_attempted_at = 0.0
+    sidebar_panels._apps_attempted_at = -math.inf
     sidebar_panels._apps_checked_at = 0.0
     sidebar_panels._apps_cache = []
+
+
+def _step_wall_clock_back(seconds: float) -> None:
+    """Stage a backward step of the wall clock, which a test cannot move.
+
+    Every wall-clock time the panels recorded then lies *seconds* ahead
+    of the clock, as after an NTP correction or the resume of a VM whose
+    clock ran ahead.  Found by value (an epoch time near now), so a time
+    kept on the monotonic clock stays where it is.
+    """
+    now = time.time()
+    for name, value in list(vars(sidebar_panels).items()):
+        if name.endswith("_at") and isinstance(value, float) and abs(value - now) < 86400.0:
+            setattr(sidebar_panels, name, value + seconds)
 
 
 class _StoreTestCase(unittest.TestCase):
@@ -134,6 +149,23 @@ class TestCronJobsReport(_StoreTestCase):
         self.assertFalse(paused["enabled"])
         self.assertNotIn("_next", paused)
 
+    def test_a_job_whose_stored_time_cannot_be_read_is_still_listed(self) -> None:
+        # The scheduler disables a job whose next run it cannot read and
+        # keeps it in the store, time and all, with the reason in its
+        # summary: the panel goes on listing it, and the other jobs.
+        now = time.time()
+        cron_agent.save_jobs([
+            {"id": "broken", "schedule": "every 5m", "command": "date", "enabled": False,
+             "next_run_at": "tomorrow", "last_run_at": [now], "last_status": "error"},
+            {"id": "endless", "schedule": "every 5m", "command": "date",
+             "next_run_at": float("inf"), "last_run_at": float("nan")},
+            {"id": "fine", "schedule": "every 5m", "command": "date", "next_run_at": now + 300},
+        ])
+        rows = sidebar_panels.cron_jobs_report()
+        self.assertEqual([r["id"] for r in rows], ["fine", "endless", "broken"])
+        self.assertEqual([(r["nextRunAt"], r["lastRunAt"]) for r in rows[1:]], [(0, 0), (0, 0)])
+        self.assertEqual(rows[2]["lastStatus"], "error")
+
     def test_empty_store(self) -> None:
         cron_agent.save_jobs([])
         self.assertEqual(sidebar_panels.cron_jobs_report(), [])
@@ -190,9 +222,7 @@ class _SpendDbTestCase(unittest.TestCase):
         self.saved_db = _redirect(self.db_dir)
 
     def tearDown(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved_db)
         shutil.rmtree(self.db_dir, ignore_errors=True)
 
@@ -392,6 +422,14 @@ class TestAppsStatus(_StoreTestCase):
         self.assertGreater(sidebar_panels._apps_checked_at, first)
         self.assertIs({a["name"]: a for a in apps}["brave"]["authenticated"], False)
 
+        # So does one after the wall clock stepped back, which leaves
+        # that probe an hour in the future: the key that came back shows.
+        self.write_brave_key()
+        _step_wall_clock_back(3600.0)
+        apps, checked_at = sidebar_panels.apps_status(refresh=True)
+        self.assertIs({a["name"]: a for a in apps}["brave"]["authenticated"], True)
+        self.assertLess(checked_at, (time.time() + 60) * 1000)
+
 
 class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
     """``getCronJobs`` / ``getAppsStatus`` get direct replies over a local connection.
@@ -457,7 +495,7 @@ class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
         self.write_brave_key()
         (event,) = self._ask({"type": "getAppsStatus", "refresh": True})
         self.assertEqual(event["type"], "appsStatus")
-        self.assertGreater(event["checkedAt"], 0)
+        self.assertGreater(sidebar_panels._apps_checked_at, 0)
         by_name = {a["name"]: a for a in event["apps"]}
         self.assertIs(by_name["brave"]["authenticated"], True)
 
@@ -469,9 +507,7 @@ class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
             _spent("claude-fable-5-1", 0.75, 500, noon)
             (event,) = self._ask({"type": "getSpendReport"})
         finally:
-            if th._db_conn is not None:
-                th._db_conn.close()
-                th._db_conn = None
+            th._close_thread_db()
             _restore(saved_db)
             shutil.rmtree(db_dir, ignore_errors=True)
         self.assertEqual(event, {

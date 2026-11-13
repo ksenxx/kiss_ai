@@ -46,7 +46,7 @@ function pageWithRunningTask() {
   return page;
 }
 
-async function testMarkup() {
+function testMarkup() {
   const {win} = makePage();
   const settingsPanel = win.document.getElementById('settings-panel');
   assert.ok(settingsPanel, '#settings-panel must exist');
@@ -118,6 +118,16 @@ async function testDoubleClickThenOk() {
     true,
     'second click must NOT close or re-stack the floating dialog',
   );
+  // The task ends while the box is up: a further click still belongs to
+  // the open box, or it would reset at once and OK would reset again.
+  send(win, {
+    type: 'status',
+    tabId: win._testApi.getActiveTabId(),
+    running: false,
+  });
+  clickInWindow(win, 'cfg-server-reset-btn');
+  assert.strictEqual(isFloatingModalOpen(win), true, 'the box stays open');
+  assert.strictEqual(resets(posted).length, 0, 'the open box still asks');
   clickInWindow(win, 'server-reset-confirm-ok');
   await waitFor(() => !isFloatingModalOpen(win), 'OK must close the dialog');
   assert.strictEqual(
@@ -153,7 +163,7 @@ async function testCancelThenOkPostsOneReset() {
 }
 
 async function main() {
-  await testMarkup();
+  testMarkup();
   await testOkPostsOneReset();
   await testStoppedTaskResetsAtOnce();
   await testDoubleClickThenOk();

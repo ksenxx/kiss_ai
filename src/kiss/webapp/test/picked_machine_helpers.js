@@ -4,9 +4,8 @@
 // add your name here
 //
 // Shared fixture of the suites that drive a chat tab picked onto a
-// registered machine (atPickerOnPickedMachine.test.js,
-// gitCommitAndVoiceOnPickedMachine.test.js): the machine registry and
-// a page whose daemon knows its own folder, picked onto gpu-box.
+// registered machine: the machine registry (MACHINES) and a page whose
+// daemon knows its own folder, picked onto gpu-box (bootOnGpuBox).
 
 'use strict';
 

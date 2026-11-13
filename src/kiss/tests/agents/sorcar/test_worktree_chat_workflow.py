@@ -30,20 +30,17 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    th._close_thread_db()
+    (th._DB_PATH, th._KISS_DIR) = saved
 
 
 def _make_repo(path: Path) -> Path:
@@ -182,7 +179,7 @@ class TestWorktreeWorkflow:
         """After merge, HEAD is the original branch."""
         agent = self._agent()
         agent.run(prompt_template="task1", work_dir=str(self.repo))
-        original = agent._original_branch
+        original = agent.worktrees[0].original_branch
         assert original is not None
 
         agent.merge()
@@ -238,7 +235,7 @@ class TestWorktreeWorkflow:
         """After discard, HEAD is back on original branch."""
         agent = self._agent()
         agent.run(prompt_template="task1", work_dir=str(self.repo))
-        original = agent._original_branch
+        original = agent.worktrees[0].original_branch
         assert original is not None
 
         agent.discard()

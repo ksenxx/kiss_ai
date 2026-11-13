@@ -7,11 +7,9 @@
 // `padding: var(--space-0-5) 0` or `color: var(--status-ok)` comes back
 // from getComputedStyle unresolved (or empty for shorthands).  Suites
 // that read computed font sizes, spacing, radii, z-index or status colours from
-// media/main.css load the stylesheet through inlineDesignTokens(), which
+// media/main.css load the stylesheet through installTokenisedCss(), which
 // substitutes the design-token values defined in main.css's :root, so
 // the assertions keep checking the concrete values a browser applies.
-
-/* global require, module */
 
 'use strict';
 

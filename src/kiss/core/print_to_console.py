@@ -24,12 +24,6 @@ from kiss.core.printer import (
     truncate_result,
 )
 
-_NOTIFICATION_STYLES = {
-    "error": ("yellow", "✕ ERROR"),
-    "warning": ("yellow", "⚠ WARNING"),
-    "info": ("yellow", "ℹ INFO"),
-}
-
 
 class _PrinterThreadState(threading.local):
     """Per-thread streaming state for :class:`ConsolePrinter`.
@@ -164,10 +158,12 @@ class ConsolePrinter(Printer):
         self._thread_state.block_type = value
 
     @staticmethod
-    def _format_result_content(raw: str) -> Group | Markdown:
+    def _format_result_content(raw: str) -> tuple[Group | Markdown, str]:
+        """Return the body of the result panel and its border style, red for a failed result."""
+        border_style = "bold green"
         data = parse_result_yaml(raw)
         if data is None:
-            return Markdown(raw)
+            return Markdown(raw), border_style
         parts: list[Any] = []
         if data.get("is_continue"):
             parts.append(Text("Status: Continue", style="bold yellow"))
@@ -175,12 +171,13 @@ class ConsolePrinter(Printer):
         elif data.get("success") is False:
             parts.append(Text("Status: FAILED", style="bold red"))
             parts.append(Text(""))
+            border_style = "bold red"
         parts.append(html_to_rich(str(data["summary"])))
         suggestion = data.get("suggested_next_task")
         if suggestion:
             parts.append(Text(""))
             parts.append(Text(f"Suggested next: {suggestion}", style="bold cyan"))
-        return Group(*parts)
+        return Group(*parts), border_style
 
     def _flush_newline(self) -> None:
         if self._mid_line:
@@ -243,10 +240,14 @@ class ConsolePrinter(Printer):
         if type == "bash_stream":
             if not self._bash_streamed:
                 self._flush_newline()
+                # Opened before the command has an outcome: a failure is
+                # named on the closing rule (_print_tool_result).
                 self._console.rule("RESULT", style="green", align="center")
-            self._console.file.write(str(content))
+            chunk = str(content)
+            self._console.file.write(chunk)
             self._console.file.flush()
-            self._mid_line = not str(content).endswith("\n")
+            if chunk:  # an empty chunk moved no cursor, as in _stream_delta
+                self._mid_line = not chunk.endswith("\n")
             self._bash_streamed = True
             return
         if type == "tool_call":
@@ -275,24 +276,6 @@ class ConsolePrinter(Printer):
                 self._flush_newline()
                 self._console.print(text, style="dim", highlight=False)
             return
-        if type == "notification":
-            severity = str(kwargs.get("severity", "info")).lower()
-            border, label = _NOTIFICATION_STYLES.get(severity, _NOTIFICATION_STYLES["info"])
-            message = str(content) if content is not None else ""
-            parts: list[Any] = [Text(message, style="yellow")]
-            progress_message = kwargs.get("progress_message") or ""
-            if progress_message:
-                parts.append(Text(str(progress_message), style="yellow dim"))
-            self._flush_newline()
-            self._console.print(
-                Panel(
-                    Group(*parts),
-                    title=f"[bold]{label}[/bold]",
-                    border_style=border,
-                    padding=(0, 1),
-                )
-            )
-            return
         if type == "result":
             cost, _exact = cost_fields(
                 kwargs.get("cost", "N/A"), kwargs.get("cost_usd"), self.budget_offset
@@ -305,15 +288,17 @@ class ConsolePrinter(Printer):
             )
 
     def _print_result_panel(self, raw: Any, subtitle: str) -> None:
-        """Render the green "Result" panel of a ``result`` event."""
+        """Render the "Result" panel of a ``result`` event: green, red for a failed result."""
         self._flush_newline()
-        body = self._format_result_content(str(raw)) if raw else "(no result)"
+        body, border_style = (
+            self._format_result_content(str(raw)) if raw else ("(no result)", "bold green")
+        )
         self._console.print(
             Panel(
                 body,
                 title="Result",
                 subtitle=subtitle,
-                border_style="bold green",
+                border_style=border_style,
                 padding=(1, 2),
             )
         )

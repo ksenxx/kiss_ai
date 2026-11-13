@@ -35,7 +35,7 @@ SIMPLE_MODEL = "openrouter/anthropic/claude-opus-5.5-medium"
 PRIMARY_MODEL = "openrouter/anthropic/claude-fable-5.2-max"
 """The model for every other task: Claude Fable 5.2 at max effort via OpenRouter."""
 
-REVIEW_MODEL = "openrouter/openai/gpt-6-astra"
+REVIEW_MODEL = "openrouter/openai/gpt-6-astra-xhigh"
 """The model that reviews and debugs the primary model's work: GPT-6 Astra via OpenRouter."""
 
 SYSTEM_PROMPT = routing_prompt("orbestrouter", SIMPLE_MODEL, PRIMARY_MODEL, REVIEW_MODEL)

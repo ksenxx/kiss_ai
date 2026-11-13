@@ -45,11 +45,13 @@ from typing import Any
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.anthropic_model import (
     PRICE_MODIFIER_FIELDS,
+    _attachments_to_blocks,
     _effort_level_for,
     cache_creation_tokens,
     price_modifier_factor,
 )
 from kiss.core.models.model import (
+    Attachment,
     CLITextModel,
     ThinkingCallback,
     TokenCallback,
@@ -182,7 +184,9 @@ def claude_auth_status(timeout: float = 20.0) -> dict[str, Any]:
 def _iter_stream_json_events(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
     """Yield parsed stream-json events, unwrapping ``stream_event`` wrappers.
 
-    Blank lines and lines that are not valid JSON are skipped.
+    Blank lines, lines that are not valid JSON and lines whose JSON is
+    not an object (progress noise such as ``42`` or ``"starting"``) are
+    skipped.
 
     Args:
         lines: An iterable of JSON strings (one event per line).
@@ -192,9 +196,10 @@ def _iter_stream_json_events(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
         their inner event.
     """
     for event in _iter_jsonl(lines):
-        if event.get("type") == "stream_event":
-            event = event.get("event", {})
-        yield event
+        if isinstance(event, dict) and event.get("type") == "stream_event":
+            event = event.get("event")
+        if isinstance(event, dict):
+            yield event
 
 
 def _find_consecutive_tool_calls_end(content: str) -> int:
@@ -485,6 +490,23 @@ def _merge_usage(target: dict[str, Any], usage: dict[str, Any], add: bool) -> No
                 target[key] = value
 
 
+def _fill_missing_usage(usage: dict[str, Any], streamed: dict[str, Any]) -> None:
+    """Give *usage* each field of *streamed* that it lacks, in place.
+
+    A field is lacking when it is absent or ``null``; the nested
+    ``cache_creation`` split is filled field by field the same way.
+
+    Args:
+        usage: The ``usage`` of a terminal ``result`` event.
+        streamed: The total :func:`_merge_usage` summed from the stream.
+    """
+    for key, value in streamed.items():
+        if usage.get(key) is None:
+            usage[key] = value
+        elif key == "cache_creation" and isinstance(usage[key], dict):
+            _fill_missing_usage(usage[key], value)
+
+
 @contextlib.contextmanager
 def _system_prompt_file(system_instruction: str | None) -> Iterator[str | None]:
     """Hold *system_instruction* in a private temp file for the duration of the block.
@@ -505,6 +527,37 @@ def _system_prompt_file(system_instruction: str | None) -> Iterator[str | None]:
         yield path
     finally:
         os.unlink(path)
+
+
+def _cli_input(prompt: str, attachments: dict[str, Attachment]) -> tuple[list[str], str]:
+    """Return the input flags and the stdin text that carry one turn to the CLI.
+
+    A prompt alone is plain text.  With attachments the turn is one
+    ``--input-format stream-json`` line: a user message holding each
+    attachment's label and its ``image`` / ``document`` block, then the
+    prompt.  The CLI forwards a block to the API, with a note of its own
+    in place of an image it cannot decode.
+
+    Args:
+        prompt: The prompt text.
+        attachments: The images and PDFs to hand over, by label.
+
+    Returns:
+        The arguments to add to the command line, and the text for stdin.
+    """
+    if not attachments:
+        return [], prompt
+    content: list[dict[str, Any]] = []
+    for label, attachment in attachments.items():
+        content.append({"type": "text", "text": label})
+        content.extend(_attachments_to_blocks([attachment]))
+    content.append({"type": "text", "text": prompt})
+    message = {
+        "type": "user",
+        "message": {"role": "user", "content": content},
+        "parent_tool_use_id": None,
+    }
+    return ["--input-format", "stream-json"], json.dumps(message) + "\n"
 
 
 class ClaudeCodeModel(CLITextModel):
@@ -528,6 +581,7 @@ class ClaudeCodeModel(CLITextModel):
 
     _cli_model_name = "ClaudeCodeModel"
     _cli_logger = logger
+    _attachment_types = ("image/", "application/pdf")
 
     def __init__(
         self,
@@ -676,14 +730,17 @@ class ClaudeCodeModel(CLITextModel):
             tuple[str, Any]: (generated_text, parsed_json_response).
 
         Raises:
-            KISSError: If the CLI could not be started or exited with a
-                failure status.
+            KISSError: If the CLI could not be started, exited with a
+                failure status, ended without its ``result`` event or
+                reported an error in it (the last three do not apply to
+                a turn cut at its tool call).
             TimeoutError: If the CLI produced no complete turn before the
                 deadline.  Retryable, unlike ``KISSError``.
             KeyboardInterrupt: If the user stopped the task mid-turn.
         """
-        prompt = self._build_prompt()
+        input_args, stdin_text = _cli_input(*self._prompt_and_attachments())
         self._stopped_for_tool_calls = False
+        self._rejected_response = None
         self._partial_usage = {}
         self._open_message_usage = {}
         self._request_usages = []
@@ -693,16 +750,40 @@ class ClaudeCodeModel(CLITextModel):
 
         with (
             _system_prompt_file(self.system_instruction_text()) as system_prompt_file,
-            self._cli_turn(self._build_cli_args(system_prompt_file), "Claude Code CLI") as proc,
+            self._cli_turn(
+                self._build_cli_args(system_prompt_file) + input_args, "Claude Code CLI"
+            ) as proc,
         ):
-            proc.send_prompt(prompt)
+            proc.send_prompt(stdin_text)
             content, result_json = self._parse_stream_events(
                 proc.lines(), stop_on_tool_calls=stop_on_tool_calls
             )
             if not self._stopped_for_tool_calls:
                 try:
                     proc.raise_for_exit()
+                    # A clean exit (or a CLI still winding down) finished
+                    # the turn only with its terminal ``result``: without
+                    # one the text so far may be cut short (the same plain
+                    # ``KISSError`` the API transports raise for a stream
+                    # without its terminal event), and one that reports
+                    # an error carries the CLI's message, not an answer.
+                    if result_json.get("type") != "result":
+                        raise KISSError(
+                            "Claude Code CLI ended without a result event, so its "
+                            "answer may be incomplete."
+                        )
+                    if result_json.get("is_error"):
+                        raise KISSError(
+                            "Claude Code CLI reported an error "
+                            f"(result subtype {result_json.get('subtype')!r})."
+                        )
                 except KISSError as e:
+                    if result_json.get("type") == "result":
+                        # Billed like a turn that returned: what the
+                        # result reports, which _stamp_billing completed
+                        # from the stream's messages (so not those again).
+                        self._partial_usage = {}
+                        self._rejected_response = result_json
                     # In -p mode the CLI reports an auth failure as its
                     # *result* on stdout (stderr is empty): surface it,
                     # with the way out when the subscription switch is on.
@@ -716,23 +797,26 @@ class ClaudeCodeModel(CLITextModel):
         self.conversation.append({"role": "assistant", "content": content})
         return content, result_json
 
-    def _cli_env(self) -> dict[str, str] | None:
+    def _cli_env(self) -> dict[str, str]:
         """The child environment: see :func:`claude_subscription_env`.
 
         Called once per launch, so this is where the turn's billing is
-        decided for good: an inherited environment that holds an API
-        key variable makes the turn API spend, whatever the switch says
-        afterwards.  The same reading of the switch decides whether a
-        failure of this turn carries :data:`SUBSCRIPTION_HINT`.
+        decided for good: an environment that holds an API key variable
+        makes the turn API spend, whatever the switch says afterwards.
+        With the switch off it is a copy of the daemon's environment
+        taken here, and the billing is read from that same copy, so a
+        key saved or deleted during the launch cannot split the two.
+        The same reading of the switch decides whether a failure of
+        this turn carries :data:`SUBSCRIPTION_HINT`.
 
         A turn launched with ``--effort`` runs without
         :data:`_EFFORT_ENV_VAR`, which would otherwise outrank the flag.
         """
         env = claude_subscription_env()
         self._use_subscription = env is not None
-        self._api_billed = env is None and any(os.environ.get(v) for v in _API_KEY_ENV_VARS)
+        env = environ_without(()) if env is None else env
+        self._api_billed = any(env.get(v) for v in _API_KEY_ENV_VARS)
         if self._effort_level() is not None:
-            env = environ_without((_EFFORT_ENV_VAR,)) if env is None else env
             env.pop(_EFFORT_ENV_VAR, None)
         return env
 
@@ -746,7 +830,8 @@ class ClaudeCodeModel(CLITextModel):
         :data:`SUBSCRIPTION_HINT`.
 
         Args:
-            error: The exit-status error from ``raise_for_exit``.
+            error: What :meth:`generate` found wrong with the turn (its
+                exit status, or its ``result``).
             result_json: The turn's final ``result`` event (may be empty).
 
         Returns:
@@ -756,7 +841,8 @@ class ClaudeCodeModel(CLITextModel):
         detail = result_json.get("result") if result_json.get("is_error") else ""
         if not isinstance(detail, str) or not detail.strip():
             return error
-        message = f"{error}\n{detail.strip()}"
+        # ``args[0]``: ``str(error)`` would prefix "KISS Error:" a second time.
+        message = f"{error.args[0]}\n{detail.strip()}"
         if self._use_subscription:
             message = f"{message}\n{SUBSCRIPTION_HINT}"
         return KISSError(message)
@@ -787,9 +873,10 @@ class ClaudeCodeModel(CLITextModel):
 
         Returns:
             ``{"usage": {...}}`` when partial usage was observed, else
-            the completed response the base class staged (a turn whose
-            post-generation cleanup raised), else ``None``.  The stored
-            value is cleared so it is never counted twice.
+            the turn's ``result`` when one was staged (a turn that failed
+            after it, or whose post-generation cleanup raised), else
+            ``None``.  The stored value is cleared so it is never counted
+            twice.
         """
         self._close_open_message()
         if not self._partial_usage:
@@ -814,7 +901,8 @@ class ClaudeCodeModel(CLITextModel):
         ``content_block_stop`` events emitted by the CLI with
         ``--include-partial-messages``.
 
-        A ``result`` event is used as the authoritative final content.
+        The ``result`` event ends the turn; its text is the content only
+        of a turn that streamed none.
 
         When *stop_on_tool_calls* is ``True``, the parser watches for
         complete ``{"tool_calls": [...]}`` JSON blocks (or a native
@@ -833,8 +921,12 @@ class ClaudeCodeModel(CLITextModel):
 
         Returns:
             Tuple of ``(content, result_json)`` where *content* is the text
-            from the first assistant message and *result_json* is the parsed
-            ``result`` event dict (or ``{}`` if none was received).
+            of every assistant message (cut at the end of the tool call
+            when one stopped the parse) and *result_json* is the parsed
+            ``result`` event dict, its ``usage`` completed from the
+            stream's messages (:meth:`_stamp_billing`); without one,
+            ``{"usage": ...}`` summed from the stream's messages (``{}``
+            when they reported none).
         """
         content = ""
         thinking_content = ""
@@ -1040,22 +1132,24 @@ class ClaudeCodeModel(CLITextModel):
                 if not found_tool_calls and not content.strip():
                     # Fallback only: the terminal ``result`` carries just
                     # the last assistant message, so it never replaces
-                    # text already streamed.
-                    content = event.get("result", content)
+                    # text already streamed.  It may hold no text at all
+                    # (an error subtype, a JSON ``null``).
+                    result_text = event.get("result")
+                    if isinstance(result_text, str):
+                        content = result_text
 
         if found_tool_calls and not self._stopped_for_tool_calls:
             content = content[:last_tc_end]
             self._stopped_for_tool_calls = True
 
-        if self._stopped_for_tool_calls and not result_json:
-            # The turn ended at the KISS tool_calls block, before the
-            # terminal ``result`` event, and the child is killed at once;
-            # the per-message usage folded above (including the message
-            # cut short) keeps the token accounting.
-            self._close_open_message()
-            if self._partial_usage:
-                result_json = {"usage": self._partial_usage}
-        if result_json:
+        # The terminal ``result`` does not always report the turn's usage:
+        # the turn ended at the KISS tool_calls block and the child was
+        # killed at once, the stream ended without one (the CLI exited, or
+        # the line did not decode), or its ``usage`` is missing or partial.
+        # The per-message usage folded above (including a message cut
+        # short) then keeps the token accounting (see _stamp_billing).
+        self._close_open_message()
+        if result_json or self._partial_usage:
             self._stamp_billing(result_json)
 
         self._last_thinking_content = thinking_content
@@ -1067,20 +1161,24 @@ class ClaudeCodeModel(CLITextModel):
         ``api_billed`` (an API key paid, decided at launch), ``model``
         (the API model id the stream named, if any) and ``requests``
         (the API requests the CLI made in the turn, counted from
-        ``message_start`` and finished messages; at least 1).  The price modifiers the API
-        reported per message (``speed``, ``inference_geo``, folded into
-        the per-message total by :func:`_merge_usage`) are copied into a
-        ``usage`` that lacks them: the CLI's terminal ``result`` sums the
-        counters and names only the LAST message's modifiers (its usage
-        reducer copies ``speed`` / ``inference_geo`` from the newest
-        message), which say nothing about the earlier messages.
+        ``message_start`` and finished messages; at least 1).  Each field
+        the stream's messages reported (the counters and the price
+        modifiers ``speed`` and ``inference_geo``, summed per message by
+        :func:`_merge_usage`) is copied into a ``usage`` that lacks it,
+        so a ``result`` whose usage is missing, empty or partial still
+        bills what was observed.  A field the ``result`` does report
+        stands: it sums the counters and names only the LAST message's
+        modifiers (its usage reducer copies ``speed`` / ``inference_geo``
+        from the newest message), which say nothing about the earlier
+        messages.
         ``request_usages`` lists each finished message's own usage, so
         the per-request long-context tier and modifiers can be priced.
         A later settings change or turn cannot reprice a response that
         carries these.
 
         Args:
-            response: A response dict with the turn's ``usage``.
+            response: The turn's terminal ``result`` event, or a response
+                dict holding what ``usage`` is known of the turn.
 
         Returns:
             The same dict.
@@ -1092,11 +1190,11 @@ class ClaudeCodeModel(CLITextModel):
         # A completed message_delta snapshot without a message_start is a
         # request too.
         response["requests"] = max(1, self._request_count, len(self._request_usages))
-        usage = response.get("usage")
-        if isinstance(usage, dict):
-            for field in PRICE_MODIFIER_FIELDS:
-                if field not in usage and field in self._partial_usage:
-                    usage[field] = self._partial_usage[field]
+        if self._partial_usage:
+            usage = response.get("usage")
+            if not isinstance(usage, dict):
+                usage = response["usage"] = {}
+            _fill_missing_usage(usage, self._partial_usage)
         response["request_usages"] = list(self._request_usages)
         return response
 

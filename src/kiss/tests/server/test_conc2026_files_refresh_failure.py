@@ -110,7 +110,6 @@ class TestFilesRefreshFailure(unittest.TestCase):
 
         self._saved_db = (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         )
         kiss_dir = Path(self.tmpdir) / ".kiss"
@@ -118,7 +117,6 @@ class TestFilesRefreshFailure(unittest.TestCase):
         self.db_path = kiss_dir / "history.db"
         _persistence._KISS_DIR = kiss_dir
         _persistence._DB_PATH = self.db_path
-        _persistence._db_conn = None
 
         self.printer = MemoryPrinter()
         self.server = AgentServer(self.printer)
@@ -132,11 +130,9 @@ class TestFilesRefreshFailure(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.registry.stop()
-        if _persistence._db_conn is not None:
-            _persistence._db_conn.close()
+        _persistence._close_thread_db()
         (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved_db
         shutil.rmtree(self.tmpdir, ignore_errors=True)

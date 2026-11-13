@@ -135,6 +135,23 @@ def test_rescans_stay_linear(text: str) -> None:
     assert shown == text
 
 
+@pytest.mark.parametrize(
+    ("opener", "lines", "closer"),
+    [
+        ('<invoke name="Write">\n<parameter name="content">', 20_000, "</parameter>\n</invoke>"),
+        ('{"tool_calls": [{"name": "Write", "arguments": {"content": "', 40_000, '"}}]}'),
+    ],
+    ids=["invoke-block", "json-block"],
+)
+def test_a_held_call_costs_linear_time(opener: str, lines: int, closer: str) -> None:
+    """A call that writes a large file, streamed in small tokens, is held without
+    copying (or searching) the whole block again for every token: CPU seconds, not minutes."""
+    text = "ok\n" + opener + "line of file content with some words in it\\n" * lines + closer
+    started = time.thread_time()
+    assert _stream(text, 4) == "ok\n"
+    assert time.thread_time() - started < 10.0
+
+
 def test_a_stop_as_the_filter_is_entered_leaves_no_tool_bearing_state() -> None:
     """A Stop landing as ``__enter__`` returns must still restore the adapter.
 

@@ -42,6 +42,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, TypeGuard
 from urllib.parse import urlparse
 
@@ -52,6 +53,7 @@ from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import (
     IS_WINDOWS,
     SIGKILL,
+    exited_unreaped,
     kill_process_tree,
     popen_process_group,
     signal_unreaped_child,
@@ -109,6 +111,27 @@ _AX_TREE_MAX_CHARS = 50000
 # and then blocks the input call forever; a watchdog kills Chromium at
 # this deadline so the pending call raises instead of hanging the task.
 _INPUT_WATCHDOG_SECS = _PAGE_READ_TIMEOUT_MS / 1000 + 5.0
+
+# How long after the input watchdog's deadline the Node driver is killed as
+# well.  The watchdog's recovery ends the pending call only through a
+# driver that still reports it: Chromium's exit (SIGTERM, then SIGKILL two
+# seconds later) or a Browser-tab page the daemon stopped or closed (12 s
+# of timed steps once it holds its launch lock).  A stalled driver
+# reports neither.
+_INPUT_DRIVER_GRACE_SECS = 15.0
+
+# How long a Browser-tab page whose hung script was stopped gets before it
+# is asked whether it answers.  A task the stopped handler had queued is
+# due at once: a read sent sooner could be answered just before that task
+# hangs the page again.
+_STOPPED_SCRIPT_SETTLE_MS = 300
+
+# The driver's deadlines for an action (click, hover, screenshot) and for
+# a browser launch or connect: Playwright's defaults, passed with each
+# request so that the deadline ``WebUseTool._driver_call`` keeps on this
+# side is the same number.
+_ACTION_TIMEOUT_MS = 30000
+_LAUNCH_TIMEOUT_MS = 180000
 
 # Longest wait for another kiss process to finish its browser launch under
 # ``<profile>.lock`` (``WebUseTool._profile_lock``).  A legitimate holder
@@ -221,15 +244,57 @@ INTERACTIVE_ROLES = {
     "treeitem",
 }
 
-_ROLE_LINE_RE = re.compile(r"^(\s*)-\s+('?)([\w]+)\s*(.*)")
+# The interactive roles ARIA names by what they contain.  What the others
+# contain is their value: a text field's text, a list box's options.
+_NAMED_BY_CONTENT = INTERACTIVE_ROLES - {"textbox", "searchbox", "combobox", "slider", "spinbutton"}
+# The roles whose content is part of the name of such an element around
+# them (the others, a figure or a group, keep theirs to themselves), as
+# Playwright computes names (``allowsNameFromContent`` of its roleUtils),
+# with the two an AI-mode snapshot has for text and for a plain container.
+_NAMING_ROLES = frozenset(
+    "text generic button cell checkbox columnheader gridcell heading link menuitem"
+    " menuitemcheckbox menuitemradio option radio row rowheader switch tab tooltip treeitem"
+    " caption code contentinfo definition deletion emphasis insertion list listitem mark"
+    " paragraph region rowgroup strong subscript superscript table term time".split()
+)
 
-_NAME_RE = re.compile(r'"((?:\\.|[^"\\])*)"')
+# One line of Playwright's ``mode="ai"`` ARIA snapshot: its indentation,
+# the quote YAML puts around a key that needs one, the node's role
+# (``/url`` on the line of a property of the node above), its accessible
+# name (a JSON string, or bare when it starts and ends with a slash), its
+# bracketed attributes and, after a colon, its text.  A bare colon ends
+# the line of a node whose children follow.
+_SNAPSHOT_LINE_RE = re.compile(
+    r"""^( *)- ('?)(/?\w+)( (?:"(?:[^"\\]|\\.)*"|/(?:.*?/)?))?((?: \[[^\]]*\])*)\2(:(?: .*)?)?$""",
+    re.MULTILINE,
+)
 _NAME_UNESCAPE_RE = re.compile(r'\\(["\\])')
+# What makes YAML, and so Playwright, put a node's key in single quotes.
+_QUOTED_KEY_RE = re.compile(r":\s|\s#|[{}`]")
+
+# The reference such a snapshot gives an element among its attributes:
+# ``aria-ref=<ref>`` selects that very DOM node, or nothing once the node
+# has left the page.
+_REF_RE = re.compile(r" \[ref=(\w+)\]")
+# The attributes only such a snapshot has.
+_AI_ATTRS_RE = re.compile(r" \[(?:ref=\w+|cursor=pointer|active|aria-hidden)\]")
+
+# How long a read of the tree waits for the page's iframes: the AI-mode
+# snapshot reads them too and, when this runs out, returns without the
+# ones that have not answered.  A page that is itself busy by then is
+# given the usual ``_PAGE_READ_TIMEOUT_MS`` (``WebUseTool._aria_snapshot``).
+_FRAMES_TIMEOUT_MS = 2000
+
+# What the agent is told to do about an element id it can no longer use.
+_READ_AGAIN = "Call get_page_content() to read the page again and use the IDs it shows."
 
 _SCROLL_DELTA = {"down": (0, 300), "up": (0, -300), "right": (300, 0), "left": (-300, 0)}
 
 
 _CLOSE_WATCHDOG_SECS = 15.0
+# How long a new driver may take to answer its handshake before it is
+# killed: ``start()`` returns only once it has.
+_DRIVER_START_SECS = 30.0
 # How long ``playwright.stop()`` may run before the driver is killed: the
 # stop waits for the driver's stdout to close, which a driver that no
 # longer drains its pipe (suspended, wedged) never does.
@@ -256,7 +321,23 @@ def _wait_pid_exit(pid: int, timeout: float) -> bool:
     return not _pid_alive(pid)  # pragma: no cover — timing-dependent
 
 
-def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
+def _unwatched(send: Callable[..., Any], *args: Any) -> Any:
+    """Send at once: the ``act`` of a caller that is no watchdog (see :class:`_Watchdog`)."""
+    return send(*args)
+
+
+def _send_signal(pidfd: int, pid: int, sig: int) -> bool:
+    """Send *sig* through *pidfd*, or to the bare *pid* where there is none; True once sent."""
+    if pidfd >= 0 and sys.platform == "linux":
+        signal.pidfd_send_signal(pidfd, sig)
+    else:
+        os.kill(pid, sig)
+    return True
+
+
+def _terminate_pid_escalating(
+    pid: int, identity: str | None, act: Callable[..., Any] = _unwatched
+) -> None:
     """Kill *pid* with SIGTERM then SIGKILL, verifying identity before EACH signal.
 
     Fails closed: signals are sent only when the process's current
@@ -275,6 +356,8 @@ def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
     Args:
         pid: Process id to terminate.
         identity: Identity string recorded when the PID was captured.
+        act: A watchdog's :meth:`_Watchdog.act`: each signal goes through
+            it, and none is sent once the watchdog's operation has ended.
     """
     pidfd = -1
     pidfd_open = getattr(os, "pidfd_open", None)
@@ -303,10 +386,8 @@ def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
                 return
             logger.warning("Killing leaked Chromium (pid %d) with signal %d", pid, sig)
             try:
-                if pidfd >= 0 and sys.platform == "linux":
-                    signal.pidfd_send_signal(pidfd, sig)
-                else:
-                    os.kill(pid, sig)
+                if not act(_send_signal, pidfd, pid, sig):
+                    return  # the watchdog's operation has ended: the browser is the next call's
             except OSError:  # died between the check and the signal
                 return
             if _wait_pid_exit(pid, 2.0):
@@ -347,6 +428,7 @@ def _watchdog_kill(
     identity: str | None,
     operation: str = "graceful browser close",
     deadline_secs: float = _CLOSE_WATCHDOG_SECS,
+    act: Callable[..., Any] = _unwatched,
 ) -> None:
     """Watchdog timer body: kill a Chromium whose driver call hung.
 
@@ -358,6 +440,7 @@ def _watchdog_kill(
         identity: Identity string recorded at PID capture time.
         operation: Human-readable name of the hung operation, for the log.
         deadline_secs: The deadline that expired, for the log.
+        act: The watchdog's :meth:`_Watchdog.act`, for the signals.
     """
     logger.warning(
         "%s is hung after %.0fs; killing Chromium (pid %d) directly",
@@ -365,7 +448,7 @@ def _watchdog_kill(
         deadline_secs,
         pid,
     )
-    _terminate_pid_escalating(pid, identity)
+    _terminate_pid_escalating(pid, identity, act)
 
 
 def _driver_is_dead(playwright: Any) -> bool:
@@ -396,7 +479,7 @@ def _driver_is_dead(playwright: Any) -> bool:
     return proc is not None and proc.returncode is not None
 
 
-def _kill_driver_process(playwright: Any) -> int | None:
+def _kill_driver_process(playwright: Any, act: Callable[..., Any] = _unwatched) -> int | None:
     """Send SIGKILL to the Node driver behind a sync *playwright*; return the pid to reap.
 
     The driver is this process's child and is signalled only while it
@@ -404,7 +487,8 @@ def _kill_driver_process(playwright: Any) -> int | None:
     asyncio's ``Process.kill`` signals the bare pid, which, once the
     loop's child watcher has reaped the driver, may belong to another
     process.  On Windows the kill goes through the process handle and
-    there is nothing to reap.
+    there is nothing to reap.  A watchdog sends the signal through its
+    *act* (:meth:`_Watchdog.act`): not at all once its operation ended.
 
     Returns:
         The driver's pid while it is this process's unreaped child
@@ -420,17 +504,20 @@ def _kill_driver_process(playwright: Any) -> int | None:
     if proc.returncode is not None:
         return None
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        proc.kill()
+        act(proc.kill)
         return None
     try:
-        return pid if signal_unreaped_child(pid, SIGKILL) else None
+        return pid if act(signal_unreaped_child, pid, SIGKILL) else None
     except OSError:  # no descriptor for the pidfd: the driver stays rather than a stranger risked
         logger.warning("Could not kill the Playwright driver (pid %d)", pid, exc_info=True)
         return None
 
 
 def _kill_driver(
-    playwright: Any, deadline_secs: float, operation: str = "Raw input to the attached Chrome"
+    playwright: Any,
+    deadline_secs: float,
+    operation: str = "Raw input to the attached Chrome",
+    act: Callable[..., Any] = _unwatched,
 ) -> None:
     """Watchdog timer body: kill the Node driver whose call hung.
 
@@ -441,17 +528,19 @@ def _kill_driver(
     fails the blocked call instead (its request dies with the driver's
     pipe), and :func:`_driver_is_dead` lets the next call discard the
     driver and relaunch, or say how to reconnect; a Chromium the driver
-    launched exits with it (its remote-debugging pipe closes).
+    launched exits with it (its remote-debugging pipe closes).  It is
+    also the deadline of a navigation and the failsafe of raw input.
 
     Args:
         playwright: The sync Playwright whose driver to kill.
         deadline_secs: The deadline that expired, for the log.
         operation: Human-readable name of the hung operation, for the log.
+        act: The watchdog's :meth:`_Watchdog.act`, for the signal.
     """
     logger.warning(
         "%s is hung after %.0fs; killing the Playwright driver", operation, deadline_secs
     )
-    _kill_driver_process(playwright)
+    _kill_driver_process(playwright, act)
 
 
 def _stop_playwright(playwright: Any) -> None:
@@ -474,17 +563,20 @@ def _stop_playwright(playwright: Any) -> None:
     Args:
         playwright: The sync Playwright to stop.
     """
-    watchdog = threading.Timer(
+    watchdog = _Watchdog(
         _DRIVER_STOP_SECS,
         _kill_driver,
         args=(playwright, _DRIVER_STOP_SECS, "Stopping the Playwright driver"),
     )
-    watchdog.daemon = True
     try:
         _under_timer(watchdog, playwright.stop)
-        return
     except Exception:  # noqa: BLE001 - greenlet.error off the starting thread
         logger.warning("Stopping the Playwright driver failed; killing it", exc_info=True)
+        _end_driver(playwright)
+
+
+def _end_driver(playwright: Any) -> None:
+    """Kill the Node driver behind *playwright* and reap it, as nothing else will."""
     pid = _kill_driver_process(playwright)
     if pid is None:
         return
@@ -499,10 +591,51 @@ def _stop_playwright(playwright: Any) -> None:
     logger.warning("Killed Playwright driver (pid %d) did not exit", pid)
 
 
-def _under_timer(timer: threading.Timer, operation: Callable[[], Any]) -> Any:
-    """Run *operation* with the watchdog *timer* armed; cancel it however the operation ends.
+class _Watchdog(threading.Timer):
+    """A timer that acts for one operation, and only until that operation has ended.
 
-    The timer starts inside the ``try`` whose ``finally`` cancels it, so
+    ``cancel()`` does not stop a timer whose thread is already in its
+    body, and a recovery handed to the daemon's loop runs later still:
+    each used to kill the driver or the browser, or stop the script,
+    of whatever ran next.  *recover* therefore gets ``act=`` :meth:`act`
+    and sends every signal through it, under the lock :meth:`end`
+    takes: nothing is signalled for an operation that has ended.
+    Nothing that can block runs under that lock (messages are logged
+    outside it), so an operation that has ended waits for a signal
+    under way and for nothing else.  ``acted`` tells, once the
+    operation has ended, whether a signal was sent for it.
+    """
+
+    def __init__(self, secs: float, recover: Callable[..., Any], args: tuple[Any, ...]) -> None:
+        super().__init__(secs, recover, args, {"act": self.act})
+        self.daemon = True
+        self._deciding = threading.Lock()
+        self._ended = False
+        self.acted = False
+
+    def end(self) -> None:
+        """Mark the operation ended, then cancel the timer."""
+        with self._deciding:
+            self._ended = True
+        self.cancel()
+
+    def act(self, send: Callable[..., Any], *args: Any) -> Any:
+        """Run ``send(*args)``, which must not block, unless the operation has ended.
+
+        Returns:
+            What *send* returned, or None once the operation has ended.
+        """
+        with self._deciding:
+            if self._ended:
+                return None
+            self.acted = True
+            return send(*args)
+
+
+def _under_timer(timer: _Watchdog, operation: Callable[[], Any]) -> Any:
+    """Run *operation* with the watchdog *timer* armed; end it however the operation ends.
+
+    The timer starts inside the ``try`` whose ``finally`` ends it, so
     a Stop (the ``ToolCallInterrupted`` the daemon injects into the task
     thread asynchronously) that lands once the timer's thread exists can
     only unwind through the cancel.  A context manager cannot promise
@@ -512,8 +645,8 @@ def _under_timer(timer: threading.Timer, operation: Callable[[], Any]) -> Any:
     then killed the browser or driver of whatever ran next.
 
     Args:
-        timer: The watchdog to arm; cancelled on return (a no-op once
-            it fired).
+        timer: The watchdog to arm; ended on return (cancelled, and
+            refused its signals once it has fired).
         operation: The guarded call.
 
     Returns:
@@ -523,7 +656,7 @@ def _under_timer(timer: threading.Timer, operation: Callable[[], Any]) -> Any:
         timer.start()
         return operation()
     finally:
-        timer.cancel()
+        timer.end()
 
 
 def _kill_driver_unless_done(
@@ -849,16 +982,19 @@ def _install_chromium(
 ) -> None:
     """Install Playwright's Chromium with a Stop-interruptible wait.
 
-    ``Popen.wait(timeout=...)`` polls the child from Python in sleeps of
-    at most 50 ms, so a Stop injected into the task thread lands within
-    one of them; ``subprocess.run`` waits in one ``select`` call that
+    The wait polls the child from Python in sleeps of 50 ms, so a Stop
+    injected into the task thread lands within one of them;
+    ``subprocess.run`` waits in one ``select`` call that
     only output, the child's exit or the deadline ends, which deferred a
     Stop for up to ``_CHROMIUM_INSTALL_SECS`` while a download stalled.
     The installer runs in its own process group (Job Object on Windows)
     and the whole group is killed when the wait ends early or times out:
     the ``python -m playwright`` launcher only spawns the Node CLI that
     does the download, so killing the launcher alone left that CLI
-    running and holding the browser-cache lock.  Output is discarded as
+    running and holding the browser-cache lock.  The launcher is watched
+    without being reaped and reaped only once the wait is over: a Stop
+    landing after the reap kills nothing, its pid (the group's id)
+    being free for a stranger's group by then.  Output is discarded as
     before (``capture_output`` never surfaced it).
 
     Args:
@@ -874,14 +1010,18 @@ def _install_chromium(
         command = [sys.executable, "-m", web_stealth.playwright_package(), "install", "chromium"]
     installer = popen_process_group(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        installer.wait(timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while not exited_unreaped(installer):
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(command, timeout)
+            time.sleep(0.05)
     except BaseException:
-        # The launcher is alive or an unreaped zombie here, so its pid
+        # Nothing above reaps the launcher: alive or a zombie, its pid
         # (the group id) cannot have been recycled.
         kill_process_tree(installer)
         installer.wait()
         raise
-    if installer.returncode:
+    if installer.wait():
         raise RuntimeError(f"{' '.join(command)} exited with status {installer.returncode}")
 
 
@@ -951,47 +1091,160 @@ def _profile_lock_state(profile_dir: str) -> tuple[int | None, bool]:
     return pid, pid is not None and _pid_alive(pid)
 
 
-def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str]]]:
-    result_lines: list[str] = []
-    elements: list[dict[str, str]] = []
-    counter = 0
-    # Running occurrence tallies (this runs on every accessibility-tree
-    # render; rescanning the accumulated element list per element would
-    # be O(n^2) on large pages).
-    pair_counts: Counter[tuple[str, str]] = Counter()
-    role_counts: Counter[str] = Counter()
-    for line in snapshot.splitlines():
-        m = _ROLE_LINE_RE.match(line)
-        if not m:
-            result_lines.append(line)
+def _scalar_text(scalar: str) -> str:
+    """The text of a snapshot scalar (a name, a node's text): unescaped when double-quoted."""
+    return _NAME_UNESCAPE_RE.sub(r"\1", scalar[1:-1]) if scalar.startswith('"') else scalar
+
+
+def _spelled_name(nodes: list[tuple[str, ...]], position: int) -> str:
+    """The name that the descendants of a snapshot node spell, as it follows a role.
+
+    Playwright leaves an element's name out of an AI-mode snapshot when
+    its descendants spell all of it (a link around a heading).  The name
+    is put together again from them: a descendant's own name or, of one
+    that has none and a role of :data:`_NAMING_ROLES`, its text and what
+    its descendants spell in turn.  What is hidden from the
+    accessibility tree is no part of it.
+
+    Args:
+        nodes: The lines of the snapshot (:data:`_SNAPSHOT_LINE_RE`).
+        position: The index of the node's line.
+
+    Returns:
+        A space and the name as a JSON string; ``""`` when the
+        descendants spell nothing, or more than Playwright itself prints
+        as a name (900 characters).
+    """
+    indent = len(nodes[position][0])
+    words: list[str] = []
+    passed_over: int | None = None  # indentation of the node whose descendants do not count
+    for index in range(position + 1, len(nodes)):
+        spaces, quote, role, name, attrs, colon = nodes[index]
+        if len(spaces) <= indent:
+            break
+        if passed_over is not None and len(spaces) > passed_over:
             continue
-        indent, quote, role, rest = m.group(1), m.group(2), m.group(3), m.group(4)
-        if role not in INTERACTIVE_ROLES:
-            result_lines.append(line)
+        passed_over = None
+        if " [aria-hidden]" in attrs or not (name or role in _NAMING_ROLES):
+            passed_over = len(spaces)
+        elif name:
+            words.append(_scalar_text(name[1:].replace("''", "'") if quote else name[1:]))
+            passed_over = len(spaces)
+        else:
+            words.append(_scalar_text(colon[2:]))
+    spelled = " ".join(filter(None, words))
+    return f" {json.dumps(spelled, ensure_ascii=False)}" if 0 < len(spelled) <= 900 else ""
+
+
+def _inner_reference(nodes: list[tuple[str, ...]], position: int) -> str:
+    """The reference of the first node inside a snapshot node that the pointer can reach.
+
+    An element the pointer cannot reach itself (no box of its own, no
+    pointer events) can hold a node that it can, a link around a
+    positioned image: pressing that node presses the element.  What lies
+    inside another interactive element or an iframe is not looked at:
+    pressing it presses that one.
+
+    Args:
+        nodes: The lines of the snapshot (:data:`_SNAPSHOT_LINE_RE`).
+        position: The index of the node's line.
+
+    Returns:
+        The reference, or ``""`` when the node holds none.
+    """
+    indent = len(nodes[position][0])
+    passed_over: int | None = None  # indentation of the node whose descendants do not count
+    for spaces, _quote, role, _name, attrs, _colon in nodes[position + 1 :]:
+        if len(spaces) <= indent:
+            break
+        if passed_over is not None and len(spaces) > passed_over:
             continue
-        counter += 1
-        name_match = _NAME_RE.match(rest)
-        name = _NAME_UNESCAPE_RE.sub(r"\1", name_match.group(1)) if name_match else ""
-        if quote:
-            name = name.replace("''", "'")
-        # Record which occurrence of this (role, name) pair — and of the
-        # bare role — this element is, in snapshot (document) order, so
-        # resolving an ID targets *this* element rather than the first
-        # visible one that happens to share its role and name.
-        occurrence = pair_counts[(role, name)]
-        role_occurrence = role_counts[role]
-        pair_counts[(role, name)] += 1
-        role_counts[role] += 1
-        elements.append(
-            {
-                "role": role,
-                "name": name,
-                "occurrence": str(occurrence),
-                "role_occurrence": str(role_occurrence),
-            }
-        )
-        result_lines.append(f"{indent}- [{counter}] {quote}{role} {rest}".rstrip())
-    return "\n".join(result_lines), elements
+        passed_over = None
+        if role in INTERACTIVE_ROLES or role == "iframe":
+            passed_over = len(spaces)
+            continue
+        ref = _REF_RE.search(attrs)
+        if ref:
+            return ref.group(1)
+    return ""
+
+
+def _number_interactive_elements(snapshot: str) -> tuple[str, list[str]]:
+    """Turn Playwright's ``mode="ai"`` ARIA snapshot into the tree the agent reads.
+
+    The tree is the page as its accessibility tree has it, a line per
+    node, the way Playwright's plain snapshot prints it.  What this
+    snapshot adds for a model that acts through Playwright itself is
+    left out: the nodes it marks as hidden from the accessibility tree
+    though visible on screen (``[aria-hidden]``), the documents of the
+    iframes, the ``generic`` containers (what they hold moves up a
+    level) and the references.  The name it leaves to an element's
+    descendants is put back (:func:`_spelled_name`).  An interactive
+    element is given an id, ``[N]``, when the snapshot has a reference
+    for it.  Playwright gives none to an element the pointer cannot
+    reach (no box of its own, no pointer events): its id is then that
+    of a node inside it that the pointer can reach
+    (:func:`_inner_reference`).  An element that holds none, an option
+    of a closed list, is shown without an id, since nothing else
+    selects one element and no other.
+
+    A hidden container around a single element is not in the snapshot
+    (Playwright folds it into the element), so that element is shown:
+    nothing tells it from one that is not hidden.
+
+    Args:
+        snapshot: The snapshot, as Playwright returned it.
+
+    Returns:
+        The tree, and the reference behind each id: that of ``[N]`` at
+        index ``N - 1``.
+    """
+    nodes: list[tuple[str, ...]] = _SNAPSHOT_LINE_RE.findall(snapshot)
+    shown: list[tuple[int, str]] = []  # the tree's lines, each with the width of its indentation
+    refs: list[str] = []
+    left_out: int | None = None  # indentation of the node whose descendants are not shown
+    unwrapped: list[int] = []  # indentation of the generic nodes around the current line
+    for position, (spaces, quote, role, name, attrs, colon) in enumerate(nodes):
+        indent = len(spaces)
+        if left_out is not None and indent > left_out:
+            continue
+        left_out = None
+        while unwrapped and unwrapped[-1] >= indent:
+            unwrapped.pop()
+        pad = spaces[2 * len(unwrapped) :]
+        if " [aria-hidden]" in attrs:
+            left_out = indent
+            continue
+        ref = _REF_RE.search(attrs)
+        if role == "generic":
+            if colon == ":":
+                unwrapped.append(indent)
+            elif colon or (name and ref):  # its text: its name, when it is on screen to say it
+                text = colon or ":" + (name.replace("''", "'") if quote else name)
+                shown.append((len(pad), f"{pad}- text{text}"))
+            continue
+        reference = ""
+        if role in INTERACTIVE_ROLES:
+            reference = ref.group(1) if ref else _inner_reference(nodes, position)
+        number = ""
+        if reference:
+            refs.append(reference)
+            number = f"[{len(refs)}] "
+            if not name and role in _NAMED_BY_CONTENT:
+                name = _spelled_name(nodes, position)
+                if _QUOTED_KEY_RE.search(name):
+                    quote, name = "'", name.replace("'", "''")
+        if role == "iframe":
+            left_out, colon = indent, ""
+        attrs = _AI_ATTRS_RE.sub("", attrs)
+        shown.append((len(pad), f"{pad}- {number}{quote}{role}{name}{attrs}{quote}{colon}"))
+    # A node all of whose children were left out has none: its line ends without the colon.
+    widths_after = [width for width, _ in shown[1:]] + [0]
+    tree = "\n".join(
+        line[:-1] if line.endswith(":") and width >= after else line
+        for (width, line), after in zip(shown, widths_after)
+    )
+    return tree, refs
 
 
 class WebUseTool:
@@ -1031,8 +1284,12 @@ class WebUseTool:
         work_dir: str | None = None,
         ephemeral: bool = False,
         live_browser: Any = None,
+        private_dir: str | None = None,
     ) -> None:
         self._live_browser = live_browser
+        # A sub-agent's private folder, deleted when the sub-agent ends:
+        # where its files that would go to the work dir's tmp/ go instead.
+        self._private_dir = private_dir
         # True while the session lives in the Browser tab (show_browser);
         # _live_tab is the id of the tab this tool opened there.
         self._live = False
@@ -1049,6 +1306,9 @@ class WebUseTool:
         # next switch are deleted on the other side too.
         self._carried_cookies: list[Any] = []
         self._carried_storage: tuple[str, set[str]] = ("", set())
+        # The session of a show_browser() that could not open its browser,
+        # until a browser of this tool launches and takes it.
+        self._stranded_session: _Session | None = None
         # A throwaway profile (sub-agents): the directory is created by the
         # first launch, not here, so a tool that never opens a page leaves
         # nothing behind when its process dies without ``close()``.
@@ -1065,7 +1325,8 @@ class WebUseTool:
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
-        self._elements: list[dict[str, str]] = []
+        # The reference of the element behind each id of the last tree read.
+        self._elements: list[str] = []
         # Pages whose renderer-crash handler is armed (:meth:`_adopt_page`).
         self._crash_wired: weakref.WeakSet[Any] = weakref.WeakSet()
         self._browser_pid: int | None = None
@@ -1440,22 +1701,34 @@ class WebUseTool:
         and returns the page's target id; this tool connects a second
         Playwright client to the same browser and picks that page.  A tab
         the user closed, or a browser that exited, is replaced by a fresh
-        tab on the next call.  A tab this client fails to pick up and
-        adopt as its own, or stops picking up because a Stop landed (the
-        connect can take seconds), is closed again so it does not linger
-        blank in front of the user, and a page adopted halfway is
-        dropped with it.  The tab is taken inside that clean-up: once
+        tab on the next call, and so is one whose page crashed: that tab
+        is still open, so it is closed here, once the new one exists (the
+        browser exits with its last tab).  A tab this client fails to
+        pick up and adopt as its own, or stops picking up because a Stop
+        landed (the connect can take seconds), is closed again so it does
+        not linger blank in front of the user, and a page adopted halfway
+        is dropped with it.  The tab is taken inside that clean-up: once
         ``open_for_agent`` has returned, the service's own clean-up no
         longer runs.
         """
-        if self._playwright is None:
-            self._playwright = web_stealth.playwright_api().sync_playwright().start()
+        playwright = self._ensure_playwright()
         tab = page = None
+        crashed = self._live_tab_id()
         try:
             tab = self._live_browser.open_for_agent()
+            if crashed is not None:
+                self._live_browser.close(crashed)  # a no-op for a tab that is gone
             if not self._live_connected(tab.cdp_url):
                 self._disconnect_live()
-                self._browser = self._playwright.chromium.connect_over_cdp(tab.cdp_url)
+                self._browser = self._driver_call(
+                    partial(
+                        playwright.chromium.connect_over_cdp,
+                        tab.cdp_url,
+                        timeout=_LAUNCH_TIMEOUT_MS,
+                    ),
+                    _LAUNCH_TIMEOUT_MS,
+                    "Connecting to the Browser tab",
+                )
                 self._browser.on("disconnected", self._on_browser_lost)
                 self._live_cdp_url = tab.cdp_url
             self._context = self._browser.contexts[0]
@@ -1530,9 +1803,11 @@ class WebUseTool:
         Following a popup (:meth:`_check_for_new_tab`) moves ``_page`` to
         a page the daemon announced on its own; its tab id is looked up
         from the page's target id when first needed (closing it, or
-        interrupting a hung script).
+        interrupting a hung script).  The target id read at adoption
+        still names the tab once the page is gone: a popup that crashed
+        before the lookup is closed through it.
         """
-        if self._live_tab is None and self._page is not None:
+        if self._live_tab is None and (self._live_target or self._page is not None):
             try:
                 target = self._live_target or self._target_id(self._page)
                 self._live_tab = self._live_browser.tab_for_target(target)
@@ -1559,6 +1834,10 @@ class WebUseTool:
             # the driver died; disconnecting through it would never return.
             self._discard_dead_driver(close_live_tab=close_tab)
             return
+        if close_tab and self._page is None and self._live_tab_id() is not None:
+            # The page crashed (or went with its browser: a no-op then);
+            # only the daemon's service can still close its tab.
+            self._live_browser.close(self._live_tab)
         self._live_tab = None
         self._live_target = None
         self._disconnect_live()
@@ -1641,19 +1920,16 @@ class WebUseTool:
             return
         pid = self._browser_pid
         identity = self._browser_identity
-        watchdog: threading.Timer | None = None
+        watchdog: _Watchdog | None = None
         if self._context is not None or self._browser is not None:
             if _killable_live_pid(pid):
-                watchdog = threading.Timer(
-                    _CLOSE_WATCHDOG_SECS, _watchdog_kill, args=(pid, identity)
-                )
+                watchdog = _Watchdog(_CLOSE_WATCHDOG_SECS, _watchdog_kill, args=(pid, identity))
             else:
-                watchdog = threading.Timer(
+                watchdog = _Watchdog(
                     _CLOSE_WATCHDOG_SECS,
                     _kill_driver,
                     args=(self._playwright, _CLOSE_WATCHDOG_SECS, "Graceful browser close"),
                 )
-            watchdog.daemon = True
         try:
             if watchdog is not None:
                 watchdog.start()
@@ -1687,7 +1963,7 @@ class WebUseTool:
                     )
         finally:
             if watchdog is not None:
-                watchdog.cancel()
+                watchdog.end()
         self._kill_browser_process()
         self._on_browser_lost()
 
@@ -1705,7 +1981,11 @@ class WebUseTool:
         on a dead driver returns at once (its transport already finished);
         off the starting thread :func:`_stop_playwright` reaps it, and
         a driver that is alive but no longer answers is killed by its
-        bounded stop.
+        bounded stop.  A Stop landing on the way still stops the driver,
+        which stays ``self._playwright`` until that stop has returned,
+        as the browser's pid stays recorded until its kill has
+        (:meth:`_kill_browser_process`): what a Stop leaves undone,
+        :meth:`close` finds.
 
         Args:
             close_live_tab: In the Browser tab, also close this tool's tab
@@ -1715,30 +1995,35 @@ class WebUseTool:
             why: What the driver did, for the log.
         """
         logger.warning("Playwright driver %s; discarding it and relaunching on the next call", why)
-        playwright, self._playwright = self._playwright, None
+        playwright = self._playwright
         live_tab, self._live_tab = self._live_tab, None
         target, self._live_target = self._live_target, None
-        if self._live and close_live_tab:
-            try:
-                if live_tab is None and target is not None:
-                    # A popup followed just before the driver died: the
-                    # daemon knows the tab by the target id read at adoption
-                    # -- from the moment its own client has attached to the
-                    # popup, which may still be under way.
-                    deadline = time.monotonic() + _LIVE_TAB_LOOKUP_SECS
-                    while (
-                        live_tab := self._live_browser.tab_for_target(target)
-                    ) is None and time.monotonic() < deadline:
-                        time.sleep(0.05)
-                if live_tab is None:
-                    logger.warning("The Browser tab of the dead driver's page is unknown; it stays")
-                else:
-                    self._live_browser.close(live_tab)
-            except Exception:  # noqa: BLE001 - closed by the user meanwhile
-                logger.debug("Could not close the Browser tab's page", exc_info=True)
-        self._kill_browser_process()
-        self._on_browser_lost()
-        _stop_playwright(playwright)
+        try:
+            if self._live and close_live_tab:
+                try:
+                    if live_tab is None and target is not None:
+                        # A popup followed just before the driver died: the
+                        # daemon knows the tab by the target id read at
+                        # adoption -- from the moment its own client has
+                        # attached to the popup, which may still be under way.
+                        deadline = time.monotonic() + _LIVE_TAB_LOOKUP_SECS
+                        while (
+                            live_tab := self._live_browser.tab_for_target(target)
+                        ) is None and time.monotonic() < deadline:
+                            time.sleep(0.05)
+                    if live_tab is None:
+                        logger.warning(
+                            "The Browser tab of the dead driver's page is unknown; it stays"
+                        )
+                    else:
+                        self._live_browser.close(live_tab)
+                except Exception:  # noqa: BLE001 - closed by the user meanwhile
+                    logger.debug("Could not close the Browser tab's page", exc_info=True)
+            self._kill_browser_process()
+        finally:
+            self._on_browser_lost()
+            _stop_playwright(playwright)
+            self._playwright = None
 
     def _kill_browser_process(self) -> None:
         """Ensure the recorded Chromium OS process is dead, escalating to signals.
@@ -1749,15 +2034,16 @@ class WebUseTool:
         this, a close whose driver call raised (wedged connection,
         cross-thread greenlet error) silently leaked the Chromium process —
         the root cause of long-horizon tasks accumulating open browsers.
+        The pid stays recorded until the process is known to be gone or
+        killed: a Stop landing in the wait leaves it to the next call.
         """
         pid = self._browser_pid
         identity = self._browser_identity
+        if _killable_live_pid(pid) and not _wait_pid_exit(pid, 2.0):
+            logger.warning("Chromium (pid %d) survived graceful close", pid)
+            _terminate_pid_escalating(pid, identity)
         self._browser_pid = None
         self._browser_identity = None
-        if not _killable_live_pid(pid) or _wait_pid_exit(pid, 2.0):
-            return
-        logger.warning("Chromium (pid %d) survived graceful close", pid)
-        _terminate_pid_escalating(pid, identity)
 
     def _capture_browser_pid(self) -> None:
         """Record the OS PID of the just-launched Chromium main process.
@@ -1809,7 +2095,8 @@ class WebUseTool:
             # user.
             self._discard_dead_driver(close_live_tab=True)
         if self._live:
-            # The user closed the tab (or the browser exited): open a new one.
+            # The user closed the tab (or it crashed, or the browser exited):
+            # open a new one.
             self._attach_live()
             return
         if self._page is not None and self._context is not None:
@@ -1847,15 +2134,12 @@ class WebUseTool:
         atexit.unregister(self.close)
         atexit.register(self.close)
         self._close_browser_only()
-        api = web_stealth.playwright_api()
 
         # A launch that shows no window never raises one, so there is no
         # focus to save and restore.
         prev_app = None if self._headless else _get_frontmost_app()
         try:
-            if self._playwright is None:
-                self._playwright = api.sync_playwright().start()
-            launcher = self._playwright.chromium
+            launcher = self._ensure_playwright().chromium
             # "No window" is implemented as a headed Chromium on a private
             # Xvfb display when one can be started: headless mode is the
             # first thing bot-protection scripts detect.  Real headless
@@ -1914,6 +2198,7 @@ class WebUseTool:
                 self._close_browser_only()
                 _install_chromium()
                 self._launch_browser(launcher, kwargs)
+            self._resume_stranded_session()
         except Exception:  # pragma: no cover — Playwright init failure
             # Only the half-launched browser goes; the driver, the atexit
             # hook and an ephemeral profile stay for the next attempt.
@@ -2016,17 +2301,31 @@ class WebUseTool:
             if effective_dir:
                 Path(effective_dir).mkdir(parents=True, exist_ok=True)
                 self._clean_singleton_locks(effective_dir)
-                self._context = launcher.launch_persistent_context(
-                    effective_dir, **kwargs, **self._context_args()
+                launch = partial(
+                    launcher.launch_persistent_context,
+                    effective_dir,
+                    **kwargs,
+                    **self._context_args(),
+                    timeout=_LAUNCH_TIMEOUT_MS,
                 )
+                self._context = self._driver_call(launch, _LAUNCH_TIMEOUT_MS, "Browser launch")
                 self._capture_browser_pid()
-                page = self._context.pages[0] if self._context.pages else self._context.new_page()
+                page = self._context.pages[0] if self._context.pages else self._new_page()
             else:
-                self._browser = launcher.launch(**kwargs)
+                launch = partial(launcher.launch, **kwargs, timeout=_LAUNCH_TIMEOUT_MS)
+                self._browser = self._driver_call(launch, _LAUNCH_TIMEOUT_MS, "Browser launch")
                 self._capture_browser_pid()
-                self._context = self._browser.new_context(**self._context_args())
-                page = self._context.new_page()
-        self._context.route(_ACCOUNTS_GOOGLE_URL_RE, _abort_route)
+                self._context = self._driver_call(
+                    partial(self._browser.new_context, **self._context_args()),
+                    _ACTION_TIMEOUT_MS,
+                    "Opening a browser context",
+                )
+                page = self._new_page()
+        self._driver_call(
+            partial(self._context.route, _ACCOUNTS_GOOGLE_URL_RE, _abort_route),
+            _ACTION_TIMEOUT_MS,
+            "Installing a route",
+        )
         self._context.on("close", self._on_browser_lost)
         self._adopt_page(page)
         self._settle_fresh_window()
@@ -2259,8 +2558,12 @@ class WebUseTool:
         connection with the way back.  The driver is also what goes when
         no browser pid is known (its capture at launch timed out, a
         tolerated failure): the Chromium it launched exits with it.
+        Every recovery that leaves the driver alone needs it to end the
+        call, so a failsafe kills the driver
+        :data:`_INPUT_DRIVER_GRACE_SECS` after the deadline; it is the
+        only bound of a Browser-tab page whose tab id is unknown.
 
-        The watchdog is armed and cancelled by :func:`_under_timer`: a
+        The watchdogs are armed and ended by :func:`_under_timer`: a
         ``with`` block cannot guarantee the cancel against a Stop.
 
         Args:
@@ -2273,32 +2576,142 @@ class WebUseTool:
         Returns:
             *operation*'s result.
         """
+        failsafe_secs = deadline_secs + _INPUT_DRIVER_GRACE_SECS
+        failsafe = _Watchdog(
+            failsafe_secs, _kill_driver, args=(self._playwright, failsafe_secs, "Raw browser input")
+        )
+        guarded = partial(_under_timer, failsafe, operation)
         if self._attached_url is not None:
-            timer = threading.Timer(
-                deadline_secs, _kill_driver, args=(self._playwright, deadline_secs)
-            )
+            timer = _Watchdog(deadline_secs, _kill_driver, args=(self._playwright, deadline_secs))
         elif self._live:
             # The browser is the user's: the daemon's service stops the
-            # hung script (and closes only that tab if it stays wedged).
+            # hung script (and closes only that tab if it stays wedged,
+            # which is this thread's to see once the call is back).
             tab_id = self._live_tab_id()
             if tab_id is None:
-                return operation()
-            timer = threading.Timer(deadline_secs, self._live_browser.interrupt, args=(tab_id,))
+                return guarded()
+            timer = _Watchdog(deadline_secs, self._live_browser.interrupt, args=(tab_id,))
+            result = _under_timer(timer, guarded)
+            if timer.acted:
+                self._close_tab_left_wedged(tab_id)
+            return result
         elif not _killable_live_pid(self._browser_pid):
-            timer = threading.Timer(
+            timer = _Watchdog(
                 deadline_secs,
                 _kill_driver,
                 args=(self._playwright, deadline_secs, "Raw browser input"),
             )
         else:
             pid, identity = self._browser_pid, self._browser_identity
-            timer = threading.Timer(
+            timer = _Watchdog(
                 deadline_secs,
                 _watchdog_kill,
                 args=(pid, identity, "Raw browser input", deadline_secs),
             )
-        timer.daemon = True
-        return _under_timer(timer, operation)
+        return _under_timer(timer, guarded)
+
+    def _close_tab_left_wedged(self, tab_id: str) -> None:
+        """Have the Browser tab *tab_id* closed unless its page answers, its script stopped.
+
+        The service stopped the script that hung a raw input call
+        (:meth:`_input_hang_watchdog`), and the call came back.  The
+        page may not have: a task the stopped handler had queued hangs
+        it again.  The service closes a page that stays wedged only
+        while the hung call lasts (afterwards it cannot tell that task
+        from the script of this tool's next call, whose page a close
+        must not take), so whenever the stop freed the call first the
+        wedged tab stayed open for good.  On this thread the next call
+        has not begun: what was queued gets
+        :data:`_STOPPED_SCRIPT_SETTLE_MS` to start, and a page that
+        does not answer a read after that is lost; only its tab goes.
+
+        The service closes the tab on its own loop, where the close
+        may wait its turn until this tool's next call is under way:
+        the tool gives the tab up first, so that call opens a fresh
+        one instead of running on a page about to be closed.
+
+        Raises:
+            RuntimeError: The page did not answer; its tab is being closed.
+        """
+        self._pause(_STOPPED_SCRIPT_SETTLE_MS)
+        try:
+            self._require_responsive_renderer()
+        except (TimeoutError, web_stealth.playwright_api().TimeoutError) as exc:
+            self._detach_live(close_tab=False)
+            self._live_browser.close(tab_id)
+            raise RuntimeError(
+                "The page stayed unresponsive after its hung script was stopped; "
+                "its Browser tab is being closed."
+            ) from exc
+
+    def _ensure_playwright(self) -> Any:
+        """The Playwright driver (``self._playwright``), started first when there is none."""
+        if self._playwright is None:
+            self._start_playwright()
+        return self._playwright
+
+    def _start_playwright(self) -> Any:
+        """Start a Playwright driver, keep it as ``self._playwright`` and return it.
+
+        ``start()`` returns once the driver it spawned has answered the
+        handshake.  One that has not within :data:`_DRIVER_START_SECS` is
+        killed (:func:`_kill_driver`), which fails the start instead of
+        waiting for good.  A start that does not return (that failure,
+        or a Stop) leaves a driver no Playwright object owns and no
+        ``close()`` could find: it is ended here.
+        """
+        manager = web_stealth.playwright_api().sync_playwright()
+        # Until the handshake there is no Playwright object: the driver's
+        # process hangs off the manager, where ``_kill_driver`` finds it.
+        starting = SimpleNamespace(_impl_obj=manager)
+        timer = _Watchdog(
+            _DRIVER_START_SECS,
+            _kill_driver,
+            args=(starting, _DRIVER_START_SECS, "Starting the Playwright driver"),
+        )
+        try:
+            self._playwright = _under_timer(timer, manager.start)
+        except BaseException:
+            _end_driver(starting)
+            raise
+        return self._playwright
+
+    def _driver_call(self, call: Callable[[], Any], timeout_ms: float, operation: str) -> Any:
+        """Run *call*, a request to the driver, ended on this side if the driver stalls.
+
+        The driver enforces a request's timeout, and answers a request
+        that has none within moments; one that no longer answers does
+        neither, and the sync call waited on it for good.  Such a driver
+        is killed a round trip after *timeout_ms* (:func:`_kill_driver`),
+        which fails the pending call with its usual error; the next tool
+        call relaunches.
+
+        Args:
+            call: The sync API call.
+            timeout_ms: The request's timeout in milliseconds, the one
+                the driver was given with it (how long a request without
+                one may take at most).
+            operation: Human-readable name of the request, for the log.
+
+        Returns:
+            What *call* returned.
+        """
+        secs = timeout_ms / 1000 + _CDP_CALL_TIMEOUT_SECS
+        timer = _Watchdog(secs, _kill_driver, args=(self._playwright, secs, operation))
+        return _under_timer(timer, call)
+
+    def _pause(self, ms: float) -> None:
+        """Wait *ms* milliseconds while the page's events keep being handled."""
+        self._driver_call(partial(self._page.wait_for_timeout, ms), ms, "A pause")
+
+    def _new_page(self) -> Any:
+        """Open a tab in the context (a request without a timeout of its own)."""
+        return self._driver_call(self._context.new_page, _ACTION_TIMEOUT_MS, "Opening a tab")
+
+    def _goto(self, url: str, wait_until: str = "domcontentloaded") -> Any:
+        """Open *url* in the active tab within the navigation's 30 s; return its response."""
+        goto = partial(self._page.goto, url, wait_until=wait_until, timeout=30000)
+        return self._driver_call(goto, 30000, "Navigation")
 
     def _move_mouse_to(self, x: float, y: float) -> None:
         """Move the pointer to (*x*, *y*) along a curved, decelerating path.
@@ -2337,7 +2750,9 @@ class WebUseTool:
         own timeout also covers the navigation it starts, and a slow
         form submission must not be submitted again at the centre.  The
         real click is issued once.  An element without a rendered box is
-        clicked the plain way straight away.
+        clicked the plain way straight away.  Every one of these requests,
+        the click and the hover themselves included, ends on this side
+        when the driver stalls (:meth:`_driver_call`).
 
         Args:
             locator: Playwright locator of the element.
@@ -2360,16 +2775,25 @@ class WebUseTool:
         if position is not None:
             try:
                 if hover_only:
-                    locator.hover(position=position, timeout=5000)
+                    self._driver_call(
+                        partial(locator.hover, position=position, timeout=5000), 5000, "Hover"
+                    )
                     return
-                locator.click(position=position, trial=True, timeout=5000)
+                self._driver_call(
+                    partial(locator.click, position=position, trial=True, timeout=5000),
+                    5000,
+                    "Click",
+                )
             except api.TimeoutError:
                 logger.debug("point not hittable; falling back to centre click", exc_info=True)
                 position = None
         if hover_only:
-            locator.hover()
+            action = partial(locator.hover, timeout=_ACTION_TIMEOUT_MS)
         else:
-            locator.click(position=position, delay=press_ms)
+            action = partial(
+                locator.click, position=position, delay=press_ms, timeout=_ACTION_TIMEOUT_MS
+            )
+        self._driver_call(action, _ACTION_TIMEOUT_MS, "Hover" if hover_only else "Click")
 
     def _glide_onto(self, locator: Any) -> dict[str, float] | None:
         """Scroll *locator* into view and glide the pointer onto it.
@@ -2382,8 +2806,16 @@ class WebUseTool:
             ``click(position=...)``), or ``None`` when the element has no
             rendered box.
         """
-        locator.scroll_into_view_if_needed(timeout=_PAGE_READ_TIMEOUT_MS)
-        box = locator.bounding_box(timeout=_PAGE_READ_TIMEOUT_MS)
+        self._driver_call(
+            partial(locator.scroll_into_view_if_needed, timeout=_PAGE_READ_TIMEOUT_MS),
+            _PAGE_READ_TIMEOUT_MS,
+            "Scrolling an element into view",
+        )
+        box = self._driver_call(
+            partial(locator.bounding_box, timeout=_PAGE_READ_TIMEOUT_MS),
+            _PAGE_READ_TIMEOUT_MS,
+            "Reading an element's box",
+        )
         if not box or box["width"] < 1 or box["height"] < 1:  # pragma: no cover
             # scroll_into_view_if_needed already waited for visibility;
             # only an element removed between the two calls lands here.
@@ -2391,7 +2823,7 @@ class WebUseTool:
         ox = box["width"] * random.uniform(0.35, 0.65)
         oy = box["height"] * random.uniform(0.35, 0.65)
         self._input_hang_watchdog(lambda: self._move_mouse_to(box["x"] + ox, box["y"] + oy))
-        self._page.wait_for_timeout(random.randint(40, 160))
+        self._pause(random.randint(40, 160))
         return {"x": ox, "y": oy}
 
     def _idle_mouse(self) -> None:
@@ -2433,7 +2865,11 @@ class WebUseTool:
         if frame is None:
             return None
         try:
-            box = frame.get_by_role("checkbox").first.bounding_box(timeout=1500)
+            box = self._driver_call(
+                partial(frame.get_by_role("checkbox").first.bounding_box, timeout=1500),
+                1500,
+                "Reading an element's box",
+            )
         except web_stealth.playwright_api().Error:
             # Still in the spinner phase, or the frame is being replaced.
             logger.debug("Turnstile checkbox not ready", exc_info=True)
@@ -2504,13 +2940,30 @@ class WebUseTool:
         (shown,) = self._read_page(self._page, web_stealth.RECAPTCHA_PUZZLE_OPEN_JS)
         return bool(shown)
 
+    def _release_mouse(self) -> None:
+        """Let go of the mouse button after a press that a Stop or an error cut short.
+
+        The button must not stay down for whatever uses the page next.
+        The release is raw input like the press, so it has a watchdog of
+        its own: a page that does not take it within a round trip is
+        ended like any page that hangs raw input
+        (:meth:`_input_hang_watchdog`).  A failure (the page closed, the
+        watchdog ended it) is logged and ignored: the caller re-raises
+        what cut the press short.
+        """
+        try:
+            self._input_hang_watchdog(self._page.mouse.up, _CDP_CALL_TIMEOUT_SECS)
+        except Exception:  # noqa: BLE001 - the page closed, or the watchdog ended it
+            logger.debug("Could not release the mouse button", exc_info=True)
+
     def _press_at(self, box: dict[str, float], hold_secs: float) -> None:
         """Press the element *box* like a person and keep it down for *hold_secs*.
 
         A curved approach to the middle of the box, a short pause, then
         the button goes down and, while held, the pointer drifts as a
         resting hand does — all by pointer coordinates because the
-        element is in a cross-origin frame.
+        element is in a cross-origin frame.  A Stop or an error during
+        the hold lets the button go too (:meth:`_release_mouse`).
 
         Args:
             box: Box to press, in main-frame viewport pixels
@@ -2524,14 +2977,18 @@ class WebUseTool:
         def hold() -> None:
             self._move_mouse_to(x, y)
             self._page.wait_for_timeout(random.randint(200, 600))
-            self._page.mouse.down()
-            release_at = time.monotonic() + hold_secs
-            while True:
-                self._page.wait_for_timeout(random.randint(60, 140))
-                if time.monotonic() >= release_at:
-                    break
-                self._page.mouse.move(*web_stealth.hold_tremor(x, y), steps=2)
-            self._page.mouse.up()
+            try:
+                self._page.mouse.down()
+                release_at = time.monotonic() + hold_secs
+                while True:
+                    self._page.wait_for_timeout(random.randint(60, 140))
+                    if time.monotonic() >= release_at:
+                        break
+                    self._page.mouse.move(*web_stealth.hold_tremor(x, y), steps=2)
+                self._page.mouse.up()
+            except BaseException:
+                self._release_mouse()
+                raise
 
         self._input_hang_watchdog(hold, _INPUT_WATCHDOG_SECS + hold_secs)
         logger.info("pressed the challenge widget for %.1fs on %s", hold_secs, self._page.url)
@@ -2551,7 +3008,10 @@ class WebUseTool:
         interstitial that gives way to another vendor's page (AWS WAF's
         token challenge, then its CAPTCHA puzzle) gets that page's own,
         possibly shorter, wait from then on, and a widget that answers
-        the press with a puzzle (:meth:`_puzzle_open`) ends the wait.  A
+        the press with a puzzle (:meth:`_puzzle_open`) ends the wait.
+        Presses are counted per vendor for the whole wait
+        (:func:`web_stealth.widget_presses`), so two pages that keep
+        handing over to each other run out of them.  A
         Google "unusual traffic" page is not waited on: it rates the
         network's IP, not the browser, so the same query is opened on
         Bing; a semanticscholar.org page kept behind AWS WAF's puzzle (the
@@ -2574,18 +3034,18 @@ class WebUseTool:
         started = time.monotonic()
         deadline = started + wait_secs
         box_seen_at: float | None = None
-        presses = 0
+        presses: Counter[str] = Counter()
         while (
             vendor is not None and not vendor.startswith("Google") and time.monotonic() < deadline
         ):
             box = None
-            if presses < web_stealth.widget_presses(vendor):
+            if presses[vendor] < web_stealth.widget_presses(vendor):
                 box = self._challenge_widget(vendor)
             if box is None:
                 box_seen_at = None
             elif box_seen_at is None:
                 box_seen_at = time.monotonic()
-            reaction = _WIDGET_RETRY_SECS if presses else _WIDGET_REACTION_SECS
+            reaction = _WIDGET_RETRY_SECS if presses[vendor] else _WIDGET_REACTION_SECS
             if (
                 box is not None
                 and box_seen_at is not None
@@ -2596,12 +3056,12 @@ class WebUseTool:
                 # no pointer history, is what the vendors ignore.  The
                 # verdict then takes a few seconds.
                 self._press_at(box, web_stealth.press_hold_secs(vendor))
-                presses += 1
+                presses[vendor] += 1
                 box_seen_at = None
                 deadline = max(deadline, time.monotonic() + wait_secs)
             else:
                 self._idle_mouse()
-            self._page.wait_for_timeout(random.randint(500, 900))
+            self._pause(random.randint(500, 900))
             previous, vendor = vendor, self._challenge_vendor()
             if vendor is not None and vendor != previous:
                 # One interstitial replaced by another's (AWS WAF's token
@@ -2611,8 +3071,8 @@ class WebUseTool:
                 deadline = min(deadline, time.monotonic() + wait_secs)
                 # ... and its own widget: the presses spent on the previous
                 # page's box (Turnstile's, cleared into Stack Overflow's
-                # reCAPTCHA page) are not this page's.
-                presses = 0
+                # reCAPTCHA page) are not this page's, and a page that
+                # comes back gets none of its own back.
                 box_seen_at = None
             if vendor is not None and self._puzzle_open(vendor):
                 logger.info("the widget on %s opened a puzzle", self._page.url)
@@ -2622,7 +3082,7 @@ class WebUseTool:
             return ""
         fallback = web_stealth.search_fallback_url(self._page.url)
         if vendor.startswith("Google") and fallback is not None:
-            self._page.goto(fallback, wait_until="domcontentloaded", timeout=30000)
+            self._goto(fallback)
             self._wait_for_stable()
             return (
                 "Note: Google answered with its 'unusual traffic' page. It rates this "
@@ -2637,8 +3097,13 @@ class WebUseTool:
             crossref_url, terms = content
             puzzle_url = self._page.url
             try:
-                self._page.goto(crossref_url, wait_until="domcontentloaded", timeout=30000)
-                shown = int(self._page.evaluate(web_stealth.CROSSREF_RENDER_JS, terms))
+                # Retried like the page itself: other jobs' Docker veth
+                # links come and go on this box, and one such change
+                # aborted half of the Crossref lookups of 12 Nov 2026.
+                self._goto_retrying_network_change(crossref_url)
+                # Bounded like every other page read, not a bare ``evaluate``.
+                render = f"(terms) => [({web_stealth.CROSSREF_RENDER_JS})(terms)]"
+                shown = int(self._read_page(self._page, render, terms)[0])
                 if shown < 0:
                     raise ValueError("the answer is not Crossref's works list")
             except Exception as exc:  # noqa: BLE001 — best effort; the puzzle is reported then
@@ -2651,9 +3116,7 @@ class WebUseTool:
                 back: str | None = None
                 for attempt in range(2):
                     try:
-                        response = self._page.goto(
-                            puzzle_url, wait_until="domcontentloaded", timeout=30000
-                        )
+                        response = self._goto_retrying_network_change(puzzle_url)
                     except Exception as reopen_exc:  # noqa: BLE001 — reported, not hidden
                         back = type(reopen_exc).__name__
                     else:
@@ -2664,7 +3127,7 @@ class WebUseTool:
                         if back is None:
                             break
                     if not attempt:
-                        self._page.wait_for_timeout(500)
+                        self._pause(500)
                 if back is not None:
                     logger.info("Reopening %s failed: %s", puzzle_url, back)
                     return (
@@ -2734,15 +3197,19 @@ class WebUseTool:
         """Whether the user can see the page: the Browser tab, a window, their own Chrome."""
         return self._live or not self._headless or self._attached_url is not None
 
-    def _aria_snapshot(self) -> str:
-        """The ARIA snapshot of the current page's body, as a bounded page read."""
-        locator = self._page.locator("body")
+    def _aria_snapshot(self, timeout_ms: int) -> str:
+        """Playwright's ``mode="ai"`` ARIA snapshot of the current page, as a bounded page read.
+
+        It gives every element the pointer can reach a reference that
+        selects that very DOM node, and replaces the references of the
+        snapshot before it.
+
+        Args:
+            timeout_ms: How long the page gets to answer.
+        """
+        body = self._page.locator("body")._impl_obj
         return str(
-            _page_read(
-                self._page,
-                locator._impl_obj.aria_snapshot(timeout=_PAGE_READ_TIMEOUT_MS),
-                _PAGE_READ_TIMEOUT_MS,
-            )
+            _page_read(self._page, body.aria_snapshot(timeout=timeout_ms, mode="ai"), timeout_ms)
         )
 
     def _get_ax_tree(self) -> str:
@@ -2755,16 +3222,25 @@ class WebUseTool:
         rather than be swapped for a fresh blank tab here, which would
         report the action as a success on an empty page.  The next tool
         call recovers through :meth:`_ensure_browser`.
+
+        The tree and the reference behind each of its ids are one
+        snapshot of the page (:func:`_number_interactive_elements`).
         """
         header = f"Page: {self._page_title(self._page)}\nURL: {self._page.url}\n\n"
-        snapshot = self._aria_snapshot()
-        if not snapshot:
-            self._elements = []
+        # The snapshot replaces the references the page holds, those of another
+        # document included: a read that fails leaves no ids to be taken for its own.
+        self._elements = []
+        try:
+            snapshot = self._aria_snapshot(_FRAMES_TIMEOUT_MS)
+        except web_stealth.playwright_api().TimeoutError:
+            # Not an iframe that kept the snapshot waiting: the page itself is busy.
+            snapshot = self._aria_snapshot(_PAGE_READ_TIMEOUT_MS)
+        tree, self._elements = _number_interactive_elements(snapshot)
+        if not tree:
             return header + "(empty page)"
-        numbered, self._elements = _number_interactive_elements(snapshot)
-        if len(numbered) > _AX_TREE_MAX_CHARS:
-            numbered = numbered[:_AX_TREE_MAX_CHARS] + "\n... [truncated]"
-        return header + numbered
+        if len(tree) > _AX_TREE_MAX_CHARS:
+            tree = tree[:_AX_TREE_MAX_CHARS] + "\n... [truncated]"
+        return header + tree
 
     def _wait_for_stable(self) -> None:
         try:
@@ -2784,45 +3260,33 @@ class WebUseTool:
             self._adopt_page(pages[-1])
 
     def _resolve_locator(self, element_id: int) -> Any:
+        """The locator of the element the last tree showed as ``[element_id]``.
+
+        It selects the DOM node the id stands for (the element or, for
+        one the pointer cannot reach, the node inside it that it can),
+        wherever the page has moved it since, and nothing once that node
+        has left the page: the id is then refused, never handed to a
+        neighbour, and the agent reads the page again.
+
+        Raises:
+            ValueError: The last tree has no such id, or its element is gone.
+        """
         element_id = int(element_id)
-        if element_id < 1 or element_id > len(self._elements):
-            snapshot = self._aria_snapshot()
-            if snapshot:
-                _, self._elements = _number_interactive_elements(snapshot)
-            if element_id < 1 or element_id > len(self._elements):
-                raise ValueError(f"Element with ID {element_id} not found.")
-        entry = self._elements[element_id - 1]
-        role = entry["role"]
-        name = entry["name"]
-        if name:
-            locator = self._page.get_by_role(role, name=name, exact=True)
-            occurrence = int(entry.get("occurrence", "0"))
-        else:
-            # get_by_role(role) matches named and unnamed elements alike,
-            # so an unnamed element's index counts every element of the
-            # role in snapshot order.
-            locator = self._page.get_by_role(role)
-            occurrence = int(entry.get("role_occurrence", "0"))
+        if not 1 <= element_id <= len(self._elements):
+            raise ValueError(f"Element with ID {element_id} not found. {_READ_AGAIN}")
+        locator = self._page.locator(f"aria-ref={self._elements[element_id - 1]}")
         self._require_responsive_renderer()
-        n = self._input_hang_watchdog(locator.count)
-        if n == 0:  # pragma: no cover — race between snapshot and DOM
-            raise ValueError(f"Element with ID {element_id} not found on page.")
-        if n == 1:
-            return locator
-        if occurrence < n:
-            # Both the aria snapshot and get_by_role() enumerate the
-            # accessibility tree in document order, so the recorded
-            # occurrence picks the exact element this ID was assigned
-            # to — not merely the first visible role/name match.
-            return locator.nth(occurrence)
-        for i in range(n):  # pragma: no branch — first visible element always found
-            try:
-                if locator.nth(i).is_visible():
-                    return locator.nth(i)
-            except Exception:  # pragma: no cover — Playwright is_visible rarely throws
-                logger.debug("Exception caught", exc_info=True)
-                continue
-        return locator.first  # pragma: no cover — all elements invisible is rare
+        try:
+            found = self._input_hang_watchdog(locator.count)
+        except web_stealth.playwright_api().Error as exc:
+            if "aria-ref" not in str(exc):
+                raise
+            found = 0  # the reference is of a document the tab has left
+        if not found:
+            raise ValueError(
+                f"Element with ID {element_id} has changed since the page was read. {_READ_AGAIN}"
+            )
+        return locator
 
     def _try_ensure_browser(self, context: str) -> str | None:
         """Start the browser if needed; return an error string on failure.
@@ -2895,10 +3359,15 @@ class WebUseTool:
         error by itself; this tool does the same, up to two more times a
         second apart, so a transient event does not cost the agent a step.
         Any other error, or a third failure, propagates unchanged.
+
+        The navigation's timeout is enforced by the driver: one that no
+        longer answers is killed a round trip after it
+        (:meth:`_driver_call`), which fails the pending call; the
+        next tool call relaunches.
         """
         for attempt in range(_NETWORK_CHANGE_ATTEMPTS):
             try:
-                return self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                return self._goto(url)
             except web_stealth.playwright_api().Error as exc:
                 if (
                     "net::ERR_NETWORK_CHANGED" not in str(exc)
@@ -2928,12 +3397,12 @@ class WebUseTool:
 
             if action == "hover":
                 self._human_click(locator, hover_only=True)
-                self._page.wait_for_timeout(300)
+                self._pause(300)
                 return self._get_ax_tree()
 
             pages_before = self._context.pages
             self._human_click(locator)
-            self._page.wait_for_timeout(500)
+            self._pause(500)
             self._wait_for_stable()
             self._adopt_new_tab(pages_before)
             return self._settled_tree()
@@ -2977,7 +3446,7 @@ class WebUseTool:
 
             self._input_hang_watchdog(type_chunks, deadline)
             if press_enter:
-                self._page.wait_for_timeout(500)
+                self._pause(500)
                 self._wait_for_stable()
                 self._adopt_new_tab(pages_before)
                 return self._settled_tree()
@@ -3002,7 +3471,7 @@ class WebUseTool:
             self._require_responsive_renderer()
             pages_before = self._context.pages
             self._input_hang_watchdog(lambda: self._page.keyboard.press(key))
-            self._page.wait_for_timeout(300)
+            self._pause(300)
             # Enter on a focused link or form submits: the key may have
             # navigated (or opened a tab), and onto an interstitial.
             self._adopt_new_tab(pages_before)
@@ -3046,7 +3515,7 @@ class WebUseTool:
                     self._page.wait_for_timeout(random.randint(60, 180))
 
             self._input_hang_watchdog(wheel, deadline)
-            self._page.wait_for_timeout(300)
+            self._pause(300)
             return self._get_ax_tree()
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
@@ -3076,7 +3545,16 @@ class WebUseTool:
             # parent repo, or mkdir() would resurrect a zombie worktree.
             path = resolve_tool_path(file_path, self.work_dir)
             path.parent.mkdir(parents=True, exist_ok=True)
-            self._page.screenshot(path=str(path), full_page=False)
+            self._driver_call(
+                partial(
+                    self._page.screenshot,
+                    path=str(path),
+                    full_page=False,
+                    timeout=_ACTION_TIMEOUT_MS,
+                ),
+                _ACTION_TIMEOUT_MS,
+                "Screenshot",
+            )
             return f"Screenshot saved to {path}"
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
@@ -3341,6 +3819,37 @@ class WebUseTool:
         # space (source line breaks, &nbsp;, white-space:pre runs) reads
         # as one space on both sides, so "Changes saved" matches
         # "Changes\nsaved" in the source and "Changes&nbsp;saved" alike.
+        # Text under a CSS text-transform is matched in both spellings:
+        # as the page wrote it (what the accessibility tree shows) and
+        # as it is displayed (a screenshot, the text-only content), the
+        # case mapped as Chromium maps it, which is not as
+        # String.toUpperCase does: upper and lower case in the language
+        # computed for the element (-webkit-locale: a lang attribute or
+        # the page's Content-Language), tailored for Turkish, Azeri,
+        # Greek and Lithuanian only, with Georgian left without upper
+        # case; for capitalize, the first letter of each word of a line
+        # to title case, one UTF-16 unit at a time (a digraph and a
+        # Greek letter with an iota subscript have a title case of
+        # their own; a letter with no title case of one unit stays, as
+        # ß does).  Text a stylesheet draws before or after an element
+        # (the strings and attr() values of a ::before or ::after
+        # `content`; no counter, quote mark or alternative text, and no
+        # private-use glyph of an icon font) is read where it is
+        # displayed, and *text* is looked for with it (the accessibility
+        # tree, a screenshot) and without it (the page's own text).
+        # Reading those two styles of every element costs more than the
+        # rest of a poll (139 ms against 39 on a page of 28,000
+        # elements, 64 against 36 on an MDN page of 5,000), so the
+        # rules of the style sheets are read first and then only the
+        # elements that the selectors of the rules that draw text find
+        # (34 ms on that MDN page).  Reading the rules costs about a
+        # microsecond each: 18 ms a poll for the 12,000 of a Stack
+        # Overflow page and for the 26,000 of a GitHub one.  Every
+        # element is read only where the selectors cannot tell: with a
+        # sheet of another origin, whose rules a page cannot read, a
+        # nested or scoped rule, one for a ::part(), a keyframe that
+        # sets `content`, more than 500 such rules, and in a shadow
+        # tree that has any.
         # Chromium's innerText is not used: it lists every option of a
         # collapsed <select>, skips SVG and does not cross shadow roots.
         # The rebuild reads the layout of every text node, so a cheap
@@ -3348,8 +3857,11 @@ class WebUseTool:
         # raw letters in rendered order (hidden parts deleted), so a
         # needle whose letters are not such a subsequence cannot be on
         # screen.  Letters are compared as code points (an emoji is one
-        # letter on both sides).  Polled every 100 ms rather than per
-        # frame.
+        # letter on both sides) without case or accents, which is what
+        # a text-transform changes: folded to lower case and then to
+        # upper, so a letter and its other case fold alike whichever
+        # way the transform went (ß and SS, ẞ and ß).  Polled every
+        # 100 ms rather than per frame.
         predicate = (
             "([text, disappear]) => {"
             " const parentOf = (n) =>"  # flat-tree parent: the <slot> a slotted node renders in
@@ -3375,6 +3887,8 @@ class WebUseTool:
             " const visible = (el) =>"  # visibility is inherited: the element's own value decides
             "   !!el && !/^(hidden|collapse)$/.test(styleOf(el).visibility) && !isSkipped(el);"
             " const boxed = (el) => visible(el) && el.getClientRects().length > 0;"
+            " const laidOut = (el) => !!el && (el.getClientRects().length > 0"
+            "   || (styleOf(el).display === 'contents' && laidOut(parentOf(el))));"
             " const blocks = new Map();"
             " const blockOf = (el) => {"  # the nearest element that starts its own line
             "   if (!el) return null;"
@@ -3382,21 +3896,135 @@ class WebUseTool:
             "     blocks.set(el, /^(inline|contents|ruby)/.test(styleOf(el).display)"
             "       ? blockOf(parentOf(el)) || el : el);"
             "   return blocks.get(el); };"
-            " const nodes = [];"  # text nodes, <br>s, fields and menus in rendered order
+            # A `content` that draws no text: none, or strings of what shows no character
+            # (the private-use glyphs of an icon font, a zero-width space).
+            " const noText = /^(none|normal|(\"[\\p{Co}\\p{Cf}]*\" *)+(\\/.*)?)?$/u;"
+            " const textRules = new Map();"  # sheet: the selectors of its rules that draw text
+            " const scan = (rules, found) => {"
+            "   for (let i = 0, count = rules.length; i < count; i++) {"
+            "     const rule = rules[i], selector = rule.selectorText, inner = rule.cssRules;"
+            "     if (inner && inner.length) scan(inner, found);"  # @media, @keyframes, nesting
+            "     if (selector === undefined) {"
+            "       if (rule.styleSheet) found.push(...rulesOf(rule.styleSheet));"  # @import
+            # A keyframe and the declarations nested in a rule have no selector of their own;
+            # the rule of a @position-try or a @font-face has no `content`.
+            "       if (rule.style && !noText.test(rule.style.content || '')) found.push('&');"
+            "     } else if (/::(before|after)/.test(selector)"
+            "         && !noText.test(rule.style.content))"
+            "       found.push(selector);"
+            "   } };"
+            " const rulesOf = (sheet) => {"
+            "   if (!textRules.has(sheet)) {"
+            "     const found = [];"
+            "     textRules.set(sheet, found);"
+            "     try { scan(sheet.cssRules, found); }"
+            "     catch (e) { found.push('&'); }"  # another origin's sheet: its rules are unknown
+            "   }"
+            "   return textRules.get(sheet); };"
+            " const rulesIn = (root) =>"
+            "   [...root.styleSheets, ...root.adoptedStyleSheets].flatMap(rulesOf);"
+            " const targets = new Set();"  # the elements that a rule of the document may draw by
+            # Where a selector does not find the elements of its rule (the base of a nested
+            # one, a ::part()), every element is read; and past 500 rules, where a query for
+            # each costs as much.
+            " const selectors = rulesIn(document);"
+            " let everywhere = selectors.length > 500 || selectors.some((selector) => {"
+            "   let unknown = false;"
+            # The selector without its ::before or ::after; an escape and a string are no syntax.
+            "   const base = selector.replace(/\\\\[^]|\"(?:[^\"\\\\]|\\\\[^])*\""
+            "|(^|[\\s>+~,])?::(?:before|after)(?=,|$)|(::|&|:scope)/g,"
+            "     (all, lead, other) => {"
+            "       unknown ||= !!other;"
+            "       if (other || /^[\\\\\"]/.test(all)) return all;"
+            "       return lead === undefined ? '' : lead + '*'; });"
+            "   if (unknown) return true;"
+            "   try { for (const el of document.querySelectorAll(base)) targets.add(el); }"
+            "   catch (e) { return true; }"
+            "   return false; }) ? 1 : 0;"
+            # Whether an element renders a ::before and ::after: no replaced element or control,
+            # but an image that failed, a date, time or file input, a restyled checkbox or radio.
+            " const hasPseudos = (el) => !(el instanceof HTMLElement) ? false"
+            "   : el.tagName === 'IMG'"
+            "     ? el.complete && !el.naturalWidth && !!(el.currentSrc || el.alt)"
+            "   : el.tagName === 'INPUT'"
+            "     ? /^(file|date|datetime-local|month|time|week)$/.test(el.type)"
+            "       || (/^(checkbox|radio)$/.test(el.type) && styleOf(el).appearance === 'none')"
+            "   : !/^(AUDIO|BR|CANVAS|COL|COLGROUP|EMBED|IFRAME|METER|OBJECT|PROGRESS|SELECT"
+            "|TEXTAREA|VIDEO|WBR)$/.test(el.tagName);"
+            " const stringsOf = (content) => {"  # of a computed `content`, up to its alt text
+            "   let out = '', depth = 0;"
+            "   for (const [token, string] of"
+            "       content.matchAll(/\"((?:[^\"\\\\]|\\\\[^])*)\"|[()\\/]/g)) {"
+            "     if (token === '(') depth++;"
+            "     else if (token === ')') depth--;"
+            "     else if (depth) continue;"  # in a url() or a counter()
+            "     else if (token === '/') break;"
+            "     else out += string.replace(/\\\\([0-9a-f]{1,6}) ?|\\\\([^])/gi,"
+            "       (all, hex, ch) => hex ? String.fromCodePoint(parseInt(hex, 16)) : ch);"
+            "   }"
+            "   return out; };"
+            # Text nodes, <br>s, fields, menus and what a sheet draws, in rendered order.
+            " const nodes = [];"
+            " const addDrawn = (el, which) => {"  # what a sheet draws before or after el, if text
+            "   const style = getComputedStyle(el, which);"
+            "   const text = stringsOf(style.content).replace(/\\p{Co}/gu, '');"
+            "   if (/^\\p{Cf}*$/u.test(text)) return;"
+            "   const drawn = {by: el, text};"
+            "   styles.set(drawn, style);"
+            "   nodes.push(drawn); };"
             " const visit = (n) => {"
             "   if (n.nodeType === 3) { nodes.push(n); return; }"
             "   if (n.nodeType !== 1) return;"
+            # The rules of its shadow tree may draw by it, in the tree and by what it slots.
+            "   const inside = n.shadowRoot && rulesIn(n.shadowRoot).length ? 1 : 0;"
+            "   everywhere += inside;"
+            "   const read = (everywhere || targets.has(n)) && hasPseudos(n);"
+            "   if (read) addDrawn(n, '::before');"
             "   if (n.tagName === 'BR' || isField(n) || isMenu(n)) nodes.push(n);"
             "   if (n.shadowRoot) walk(n.shadowRoot);"  # its light DOM shows through <slot>s only
             "   else if (n.tagName === 'SLOT' && n.getRootNode() instanceof ShadowRoot)"
             "     n.assignedNodes({flatten: true}).forEach(visit);"
-            "   else walk(n); };"
+            "   else walk(n);"
+            "   if (read) addDrawn(n, '::after');"
+            "   everywhere -= inside; };"
             " const walk = (root) => { for (const c of root.childNodes) visit(c); };"
             " const labelOf = (n) => n.nodeType === 3 ? n.data"
+            "   : n.by ? n.text"
             "   : isField(n) ? n.value || ''"
             "   : isMenu(n) && n.selectedIndex >= 0 ? n.options[n.selectedIndex].label : '';"
+            " const titleOf = (c) => {"  # the title case of one UTF-16 unit
+            "   const p = c.charCodeAt(0);"
+            "   if (p >= 0x1C4 && p <= 0x1CC)"  # the digraphs DŽ, LJ and NJ: Dž, Lj, Nj
+            "     return String.fromCharCode(p - (p - 0x1C4) % 3 + 1);"
+            "   if (p >= 0x1F1 && p <= 0x1F3) return '\\u01F2';"  # DZ: Dz
+            "   if (p >= 0x10D0 && p <= 0x10FF) return c;"  # Georgian
+            "   const up = c.toUpperCase();"
+            "   if (up.length === 1) return up;"
+            "   if (p >= 0x1F80 && p <= 0x1FA7 && p % 16 < 8)"  # Greek with an iota subscript
+            "     return String.fromCharCode(p + 8);"
+            "   if (p === 0x1FB3 || p === 0x1FC3 || p === 0x1FF3)"
+            "     return String.fromCharCode(p + 9);"
+            "   return c; };"
+            " let words;"
+            " const shownOf = (s, el, before) => {"  # *s* as el's text-transform displays it
+            "   const how = styleOf(el).textTransform;"
+            "   const upper = /uppercase/.test(how);"
+            "   if (upper || /lowercase/.test(how)) {"
+            "     const tailored = /^\"(tr|az|el|lt)[\"_@-]/i.exec(styleOf(el).webkitLocale);"
+            "     const lang = tailored ? tailored[1] : 'und';"
+            "     return upper ? s.toLocaleUpperCase(lang)"
+            "       .replace(/[\\u1C90-\\u1CBF]/g, (c) => c.toLowerCase())"
+            "       : s.toLocaleLowerCase(lang);"
+            "   }"
+            "   if (!/capitalize/.test(how)) return s;"
+            "   words = words || new Intl.Segmenter(undefined, {granularity: 'word'});"
+            "   let out = '';"  # *before*, the line's last character, may continue a word
+            "   for (const w of words.segment(before + s.replace(/\\u00a0/g, ' ')))"
+            "     out += w.index ? titleOf(w.segment[0]) + w.segment.slice(1) : w.segment.slice(1);"
+            "   return out; };"
             " const squash = (s) => s.replace(/\\s+/g, ' ').trim();"
-            " const letters = (s) => Array.from(s.replace(/\\s+/g, ''));"
+            " const letters = (s) => Array.from(s.toLowerCase().toUpperCase()"
+            "   .normalize('NFD').replace(/\\p{M}|\\s/gu, ''));"
             " const subsequence = (needle, hay) => {"
             "   let i = 0;"
             "   for (const ch of hay) if (ch === needle[i] && ++i === needle.length) return true;"
@@ -3407,24 +4035,41 @@ class WebUseTool:
             " const needle = squash(text);"
             " let found = false;"
             " if (document.body) {"
-            "   walk(document.body);"
+            "   const top = document.documentElement;"  # a sheet may draw by the root element too
+            "   const readTop = everywhere || targets.has(top);"
+            "   if (readTop) addDrawn(top, '::before');"
+            "   visit(document.body);"
+            "   if (readTop) addDrawn(top, '::after');"
             "   if (subsequence(letters(needle), letters(nodes.map(labelOf).join('')))) {"
-            "     let out = '', prev = null;"
+            # Two readings, with and without what a sheet draws: each as written and as
+            # displayed, with the last character displayed, which may continue a word.
+            "     const full = {out: [], shown: [], last: ' ', box: null};"
+            "     const plain = {out: [], shown: [], last: ' ', box: null};"
+            "     const add = (to, n, box, holder) => {"
+            "       if (to.box !== null && box !== to.box) {"
+            "         to.out.push(' '); to.shown.push(' '); to.last = ' '; }"
+            "       const shown = shownOf(labelOf(n), holder, to.last);"
+            "       to.out.push(labelOf(n)); to.shown.push(shown);"
+            "       to.last = shown.slice(-1) || to.last;"
+            "       to.box = box; };"
+            "     const anyDrawn = nodes.some((n) => n.by);"
             "     for (const n of nodes) {"
-            "       let box;"
+            "       let box = n, holder = n;"
             "       if (n.nodeType === 3) {"
-            "         const holder = parentOf(n);"
+            "         holder = parentOf(n);"
             "         if (!visible(holder) || folded(n, holder) || !rendered(n)) continue;"
             "         box = blockOf(holder);"
-            "       } else {"
-            "         if (!boxed(n)) continue;"
-            "         box = n;"
-            "       }"
-            "       if (prev !== null && box !== prev) out += ' ';"
-            "       out += labelOf(n);"
-            "       prev = box;"
+            "       } else if (n.by) {"
+            "         const style = styleOf(n);"
+            "         if (style.display === 'none' || /^(hidden|collapse)$/.test(style.visibility)"
+            "             || isSkipped(n.by) || !laidOut(n.by)) continue;"
+            "         if (/^(inline|contents|ruby)/.test(style.display)) box = blockOf(n.by);"
+            "       } else if (!boxed(n)) continue;"
+            "       add(full, n, box, holder);"
+            "       if (anyDrawn && !n.by) add(plain, n, box, holder);"
             "     }"
-            "     found = squash(out).includes(needle);"
+            "     found = [full.out, full.shown, plain.out, plain.shown].some((parts) =>"
+            "       squash(parts.join('')).includes(needle));"
             "   }"
             " }"
             " return disappear ? !found : found; }"
@@ -3475,10 +4120,13 @@ class WebUseTool:
             self._detach_live(close_tab=False)
             self._live = False
         self._close_browser_only()
-        if self._playwright is None:
-            self._playwright = web_stealth.playwright_api().sync_playwright().start()
         try:
-            browser = self._playwright.chromium.connect_over_cdp(cdp_url, timeout=15000)
+            playwright = self._ensure_playwright()
+            browser = self._driver_call(
+                partial(playwright.chromium.connect_over_cdp, cdp_url, timeout=15000),
+                15000,
+                "Attaching to Chrome",
+            )
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error attaching to Chrome at {cdp_url}: {e}"
@@ -3505,6 +4153,9 @@ class WebUseTool:
         # with several contexts still behaves.
         self._context = pages[-1].context
         self._attached_url = cdp_url
+        # The user's Chrome took over: a session stranded by a failed
+        # show_browser() is not brought back after it.
+        self._stranded_session = None
         try:
             self._adopt_page(pages[-1])
             return self._get_ax_tree()
@@ -3609,9 +4260,10 @@ class WebUseTool:
             # Started by this very call (daemon setting off, or a CLI run):
             # the extension finds the new config on its next retry.
             bridge.wait_for_extension(_BRIDGE_CONNECT_WAIT_SECS)
-        # Bounded like wait_for: a Stop cannot interrupt the wait, and a
-        # deadline already past would drop the extension's connection while
-        # the user's Chrome still runs the action.
+        # Bounded like wait_for (the agent's timeout must not park the task
+        # for hours), and never under a second: a deadline already past
+        # would drop the extension's connection while the user's Chrome
+        # still runs the action.
         wait_secs = min(max(float(timeout), 1.0), _WAIT_FOR_MAX_SECS)
         try:
             result = bridge.call(action, args, timeout=wait_secs)
@@ -3622,7 +4274,7 @@ class WebUseTool:
         return _format_bridge_result(action, result)
 
     def _save_bridge_shot(self, data_url: Any) -> str:
-        """Decode a screenshot data URL from the bridge into ./tmp/ and return its path."""
+        """Decode a screenshot data URL from the bridge into a file and return its path."""
         import base64
 
         if not isinstance(data_url, str) or not data_url.startswith("data:image/png;base64,"):
@@ -3635,8 +4287,11 @@ class WebUseTool:
         except Exception as e:  # noqa: BLE001 - a buggy/compromised extension must not crash the tool
             return f"Error: the extension returned an undecodable screenshot payload: {e}"
         # ns: no same-second collisions.  Under the task's work dir like
-        # screenshot(), not the daemon's CWD.
-        out = resolve_tool_path(f"tmp/chrome-shot-{time.time_ns()}.png", self.work_dir)
+        # screenshot(), not the daemon's CWD; a sub-agent's goes to its
+        # private folder, so that it leaves nothing in the work tree.
+        name = f"chrome-shot-{time.time_ns()}.png"
+        out = (Path(self._private_dir, name) if self._private_dir
+               else resolve_tool_path(f"tmp/{name}", self.work_dir))
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(png)
         return f"Screenshot saved to {out} ({out.stat().st_size} bytes)."
@@ -3650,6 +4305,7 @@ class WebUseTool:
         Returns:
             "Browser closed." (always, even if nothing was open)."""
         self._close_browser_only(keep_live_tab=True)
+        self._stranded_session = None
         if self._playwright:
             _stop_playwright(self._playwright)
         self._playwright = None
@@ -3671,6 +4327,7 @@ class WebUseTool:
         Returns:
             "Browser closed. It will relaunch automatically on the next web tool call."."""
         self._close_browser_only()
+        self._stranded_session = None
         return "Browser closed. It will relaunch automatically on the next web tool call."
 
     def show_browser(self, visible: bool = True) -> str:
@@ -3708,7 +4365,10 @@ class WebUseTool:
         already = shown if visible else not shown and self._attached_url is None
         if already and alive:
             return f"Browser is already {state}."
-        session = self._capture_session() if alive else None
+        # With no browser to capture from, the session an earlier failed
+        # switch left behind is still the one to carry.
+        session = self._capture_session() if alive else self._stranded_session
+        self._stranded_session = None
         self._close_browser_only()
         self._live = visible and self._live_browser is not None
         self._headless = not visible or self._live
@@ -3716,7 +4376,12 @@ class WebUseTool:
         if err is not None:
             if self._live:
                 self._detach_live(close_tab=True)
-                self._live, self._headless = False, True
+            # Browsing goes on headless: a window that cannot open (no X
+            # server) would fail every later tool call the same way.  The
+            # browser the session was captured from is closed: the session
+            # waits for the headless one the next tool call launches.
+            self._live, self._headless = False, True
+            self._stranded_session = session
             return err
         self._restore_session(session)
         if session is not None and session.url:
@@ -3724,6 +4389,25 @@ class WebUseTool:
         if self._live:
             return "Browser is now visible in the Browser tab."
         return f"Browser is now {state}."
+
+    def _resume_stranded_session(self) -> None:
+        """Move the session of a failed ``show_browser()`` into the browser just launched.
+
+        The switch closed the browser it captured the session from before
+        the other one failed to open; without this the headless browser
+        that takes over starts on a blank page, logged out.  A page that
+        cannot be reopened is logged: the tool call that launched the
+        browser goes on with the cookies restored.
+        """
+        session, self._stranded_session = self._stranded_session, None
+        if session is None:
+            return
+        self._restore_session(session)
+        if session.url:
+            try:
+                self._goto(session.url)
+            except Exception:  # noqa: BLE001 - unreachable right now
+                logger.debug("Could not reopen the page of a failed switch", exc_info=True)
 
     def _capture_session(self) -> _Session:
         """Return what to carry into the browser that takes over the session.
@@ -3784,6 +4468,8 @@ class WebUseTool:
         nothing is deleted either, nor when the jar could not be read
         (the user's own Chrome, a browser that did not answer): an empty
         capture is not a logout, and that switch carries no cookies.
+        Nor does a switch whose import failed: only cookies the
+        destination took can later die there.
 
         Args:
             session: What :meth:`_capture_session` returned.
@@ -3791,9 +4477,7 @@ class WebUseTool:
         if session is None:
             self._carried_cookies, self._carried_storage = [], ("", set())
             return
-        if session.cookies is None:
-            self._carried_cookies = []
-        else:
+        if session.cookies is not None:
             alive = {_cookie_key(c) for c in session.cookies}
             for cookie in self._carried_cookies:
                 if _cookie_key(cookie) not in alive:
@@ -3801,7 +4485,7 @@ class WebUseTool:
                         self._delete_cookie(cookie)
                     except Exception:  # noqa: BLE001 - the page's CDP session did not answer
                         logger.debug("Could not drop a dead cookie after relaunch", exc_info=True)
-            self._carried_cookies = session.cookies
+        self._carried_cookies = []
         if session.cookies:
             try:
                 # Bounded like the capture: the Browser tab's browser may
@@ -3809,6 +4493,8 @@ class WebUseTool:
                 _cdp_call(self._context, self._context._impl_obj.add_cookies(session.cookies))
             except Exception:  # noqa: BLE001 - a malformed cookie, or not answering
                 logger.debug("Could not restore cookies after relaunch", exc_info=True)
+            else:
+                self._carried_cookies = session.cookies
         self._restore_local_storage(session)
 
     def _delete_cookie(self, cookie: dict[str, Any]) -> None:
@@ -3855,7 +4541,7 @@ class WebUseTool:
         if not session.origin or not (session.local_storage or removed):
             return
         try:
-            self._page.goto(session.url, wait_until="commit")
+            self._goto(session.url, wait_until="commit")
             [written] = self._read_page(
                 self._page, _RESTORE_STORAGE_JS, [session.origin, session.local_storage, removed]
             )

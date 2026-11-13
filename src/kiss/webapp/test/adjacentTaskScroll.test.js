@@ -9,10 +9,12 @@ const assert = require('assert');
 const {
   makePage,
   send,
+  clickTab,
   readyTabId,
   fakeGeometry,
   wheel,
   getAdjacent,
+  historyTaskPage,
 } = require('./simplify2_harness');
 
 // A page past the welcome screen whose transcript is scrollable (the
@@ -23,21 +25,6 @@ function setupPage() {
   win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
   fakeGeometry(O, {sh: 3000, ch: 500});
-  return {win, posted, tabId, O};
-}
-
-function setupWithHistoryTask() {
-  const {win, posted, tabId, O} = setupPage();
-  send(win, {
-    type: 'task_events',
-    tabId,
-    chat_id: 'chat-abc',
-    task_id: '42',
-    task: 'My old task',
-    events: [
-      {type: 'system_output', text: 'hello\n'},
-    ],
-  });
   return {win, posted, tabId, O};
 }
 
@@ -119,7 +106,7 @@ function testTaskEventsWithoutTitle() {
 }
 
 function testPrevRequestRenderAndChain() {
-  const {win, posted, tabId, O} = setupWithHistoryTask();
+  const {win, posted, tabId, O} = historyTaskPage();
   O.scrollTop = 0;
   wheel(win, O, -50, 10);
   let adj = getAdjacent(posted);
@@ -152,7 +139,7 @@ function testPrevRequestRenderAndChain() {
 }
 
 function testNextAtBottom() {
-  const {win, posted, O} = setupWithHistoryTask();
+  const {win, posted, O} = historyTaskPage();
   O.scrollTop = O.scrollHeight - O.clientHeight;
   wheel(win, O, 50, 10);
   const adj = getAdjacent(posted);
@@ -164,7 +151,7 @@ function testNextAtBottom() {
 }
 
 function testShortPrevTaskDoesNotBlockChaining() {
-  const {win, posted, tabId, O} = setupWithHistoryTask();
+  const {win, posted, tabId, O} = historyTaskPage();
   O.scrollTop = 0;
   wheel(win, O, -50, 10);
   let adj = getAdjacent(posted);
@@ -208,7 +195,7 @@ function testShortPrevTaskDoesNotBlockChaining() {
 }
 
 function testShortNextTaskDoesNotBlockChaining() {
-  const {win, posted, tabId, O} = setupWithHistoryTask();
+  const {win, posted, tabId, O} = historyTaskPage();
   O.scrollTop = O.scrollHeight - O.clientHeight;
   wheel(win, O, 50, 10);
   let adj = getAdjacent(posted);
@@ -242,7 +229,7 @@ function testShortNextTaskDoesNotBlockChaining() {
 }
 
 function testGenuineEndOfChatStillLatches() {
-  const {win, posted, tabId, O} = setupWithHistoryTask();
+  const {win, posted, tabId, O} = historyTaskPage();
   O.scrollTop = 0;
   wheel(win, O, -50, 10);
   let adj = getAdjacent(posted);
@@ -274,7 +261,7 @@ function testGenuineEndOfChatStillLatches() {
 }
 
 function testEmptyTitleTaskStillChains() {
-  const {win, posted, tabId, O} = setupWithHistoryTask();
+  const {win, posted, tabId, O} = historyTaskPage();
   O.scrollTop = 0;
   wheel(win, O, -50, 10);
   send(win, {
@@ -308,7 +295,7 @@ function testEmptyTitleTaskStillChains() {
 }
 
 function testTerminalOnlyTrajectoryRendersPlaceholder() {
-  const {win, posted, tabId, O} = setupWithHistoryTask();
+  const {win, posted, tabId, O} = historyTaskPage();
   O.scrollTop = 0;
   wheel(win, O, -50, 10);
   send(win, {
@@ -338,6 +325,89 @@ function testTerminalOnlyTrajectoryRendersPlaceholder() {
   console.log('PASS terminal-only trajectory renders placeholder + chains');
 }
 
+// The thread's edges are the first and the last task whose events are
+// in the transcript, whichever tab is on screen as they arrive.
+function testThreadEdgesFollowTheRun() {
+  const asked = posted => getAdjacent(posted).map(m => [m.direction, m.taskId]);
+  // A run that replaces a task starts a new thread: a tab switch before
+  // its first id-bearing event must not leave the thread on the
+  // replaced task (the reader would skip it, and never reach the run).
+  let {win, posted, tabId, O} = historyTaskPage();
+  send(win, {type: 'setTaskText', text: 'My new task', tabId});
+  send(win, {type: 'clear', tabId});
+  send(win, {type: 'status', running: true, tabId});
+  win._testApi.createNewTab();
+  clickTab(win, tabId);
+  send(win, {type: 'system_output', text: 'working\n', tabId, taskId: '43'});
+  O.scrollTop = 0;
+  wheel(win, O, -50, 10);
+  assert.deepStrictEqual(
+    asked(posted),
+    [['prev', '43']],
+    'the thread starts in the run on screen, not in the task it replaced',
+  );
+  // The run's snapshot, taken before its row existed, names no task:
+  // the transcript it replays is still the tab's task after a switch.
+  send(win, {type: 'task_events', tabId, task: 'My new task', task_id: null});
+  win._testApi.createNewTab();
+  clickTab(win, tabId);
+  O.scrollTop = 0;
+  wheel(win, O, -50, 10);
+  assert.deepStrictEqual(
+    asked(posted)[1],
+    ['prev', '43'],
+    'a transcript that names no task is read on from its tab\u2019s task',
+  );
+  win.close();
+
+  // A run of several <task> blocks streams on from row to row with no
+  // `clear`: the thread starts in its first row and ends in its last
+  // (fetching on from the first would splice the later rows again).
+  const row = (tab, id) => ({
+    type: 'task_settings',
+    tabId: tab,
+    taskId: id,
+    settings: {task_id: id},
+  });
+  for (const away of ['never', 'as the run moves on', 'the whole run']) {
+    ({win, posted, tabId, O} = setupPage());
+    if (away === 'the whole run') win._testApi.createNewTab();
+    send(win, {type: 'setTaskText', text: 'two tasks', tabId});
+    send(win, {type: 'clear', tabId});
+    send(win, {type: 'status', running: true, tabId});
+    send(win, row(tabId, '51'));
+    if (away === 'as the run moves on') win._testApi.createNewTab();
+    send(win, row(tabId, '52'));
+    if (away !== 'never') clickTab(win, tabId);
+    send(win, {type: 'task_done', tabId, taskId: '52'});
+    send(win, {type: 'status', running: false, tabId});
+    O.scrollTop = O.scrollHeight - O.clientHeight;
+    wheel(win, O, 50, 10);
+    // The chat ends there: the daemon's answer names no task.
+    send(win, {
+      type: 'adjacent_task_events',
+      tabId,
+      direction: 'next',
+      adjacent_to: '52',
+      task: '',
+      task_id: null,
+      events: [],
+    });
+    O.scrollTop = 0;
+    wheel(win, O, -50, 10);
+    assert.deepStrictEqual(
+      asked(posted),
+      [
+        ['next', '52'],
+        ['prev', '51'],
+      ],
+      'the thread of a run of two tasks, its tab away ' + away,
+    );
+    win.close();
+  }
+  console.log('PASS the thread edges follow the run on screen');
+}
+
 testEarlyPromptPoisoning();
 testNoEmptyTaskIdRequest();
 testTaskEventsWithoutTitle();
@@ -348,4 +418,5 @@ testShortNextTaskDoesNotBlockChaining();
 testGenuineEndOfChatStillLatches();
 testEmptyTitleTaskStillChains();
 testTerminalOnlyTrajectoryRendersPlaceholder();
+testThreadEdgesFollowTheRun();
 console.log('All adjacentTaskScroll tests passed');

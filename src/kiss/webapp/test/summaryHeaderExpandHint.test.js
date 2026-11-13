@@ -216,19 +216,19 @@ function testHintStyledDimmerThanLabel() {
   console.log('  ok - hint is styled distinctly from the header label');
 }
 
-function runTests() {
-  testHintRenderedNextToSummaryLabel();
-  testHintHiddenWhenExpandedRestoredOnRecollapse();
-  testNonSummaryToolPanelsHaveNoHint();
-  testReplayPathRendersHint();
-  testEverySummaryPanelGetsItsOwnHint();
-  testHintExcludedFromCopyPayload();
-  testHintStyledDimmerThanLabel();
-}
+const TESTS = [
+  testHintRenderedNextToSummaryLabel,
+  testHintHiddenWhenExpandedRestoredOnRecollapse,
+  testNonSummaryToolPanelsHaveNoHint,
+  testReplayPathRendersHint,
+  testEverySummaryPanelGetsItsOwnHint,
+  testHintExcludedFromCopyPayload,
+  testHintStyledDimmerThanLabel,
+];
 
 try {
-  runTests();
-  console.log('\n7 passed, 0 failed');
+  for (const t of TESTS) t();
+  console.log(`\n${TESTS.length} passed, 0 failed`);
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

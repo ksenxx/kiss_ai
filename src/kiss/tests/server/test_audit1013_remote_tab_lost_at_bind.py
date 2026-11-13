@@ -42,13 +42,13 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 from kiss.agents.sorcar import machines as mach
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.agents.sorcar.test_audit1012_sorcar_core_machine_link_send import (
     _AUTH_OK,
     _consume_client_frame,
 )
 from kiss.tests.conftest import find_free_port
-from kiss.tests.local_ws import make_test_tls, open_local_connection
+from kiss.tests.local_ws import _generate_self_signed_cert, make_test_tls, open_local_connection
 from kiss.tests.server.remote_tabs_probe import machine_of
 
 _ROUNDS = 40

@@ -26,24 +26,17 @@ const {
   stubRaf,
   readyTabId,
   pickMachine,
+  withTeardown,
+  statusMetrics,
 } = require('./simplify2_harness');
 
 const {makeRunner} = require('./ui_antipattern_harness');
-const {
-  click,
-  shareWithTasks,
-  makeSharePage: makeShareWindow,
-} = require('./share_helpers');
+const {click, shareWithTasks, makeSharePage} = require('./share_helpers');
+const {trackWindow, closeWindows} = require('./workdir_helpers');
 
-const runner = makeRunner();
-const report = runner.report;
-const openWindows = [];
-
-/** Run one test through the shared runner, then close its windows. */
-async function test(name, fn) {
-  await runner.test(name, fn);
-  while (openWindows.length) openWindows.pop().close();
-}
+const {test: runTest, report} = makeRunner();
+// Each test's windows are closed once it has settled.
+const test = withTeardown(runTest, closeWindows);
 
 function makePage(opts) {
   const wv = makeChatPage({
@@ -52,17 +45,9 @@ function makePage(opts) {
     // exercises the same hljs/marked paths the page runs.
     extraScripts:
       opts && opts.highlight ? ['highlight.min.js', 'marked.min.js'] : [],
-    sourceUrl: 'share-main.js',
   });
-  openWindows.push(wv.win);
+  trackWindow(wv.win);
   return wv;
-}
-
-/** Open an exported page and track it for per-test teardown. */
-function makeSharePage(bodyHtml) {
-  const win = makeShareWindow(bodyHtml);
-  openWindows.push(win);
-  return win;
 }
 
 // The export size limit main.js enforces (SHARE_MAX_HTML_JSON_BYTES: 56
@@ -310,6 +295,61 @@ async function run() {
     );
   });
 
+  // Audit 2026-11-11 (W1): the reply names only the tab, and the tab
+  // may have moved on to another chat while the page was written (a
+  // run from another surface rebinds it).  The result of chat A's
+  // export used to be written into chat B's transcript.
+  await test('share_done after the tab moved to another chat writes no banner', () => {
+    const TASKS = [{task: 'list the files', task_id: 'task-a', events: []}];
+    const outputText = wv => wv.win.document.getElementById('output').textContent;
+    for (const reply of [
+      {ok: true, path: '/w/reports/chat-a.html'},
+      {ok: false, error: 'disk full'},
+    ]) {
+      const wv = makePage();
+      const TAB = runSmallTask(wv, 'chat-a', 'task-a');
+      const msg = shareWithTasks(wv, TASKS);
+      assert.ok(msg && msg.chatId === 'chat-a', 'setup: chat A is exported');
+      send(wv.win, {
+        type: 'task_events',
+        tabId: TAB,
+        chat_id: 'chat-b',
+        task_id: 'task-b',
+        task: 'task b',
+        extra: '{}',
+        events: [{type: 'text_delta', text: 'chat b output'}, {type: 'text_end'}],
+      });
+      assert.ok(outputText(wv).includes('chat b output'), 'setup: chat B on screen');
+      send(wv.win, Object.assign({type: 'share_done', tabId: msg.tabId}, reply));
+      assert.ok(
+        !outputText(wv).includes('chat-a.html') &&
+          !outputText(wv).includes('Share failed'),
+        "BUG: chat A's share result was written into chat B's transcript",
+      );
+      if (!reply.ok) {
+        const toasts = Array.from(
+          wv.win.document.querySelectorAll('.kiss-notification-message'),
+          t => t.textContent,
+        );
+        assert.ok(
+          toasts.some(t => t.includes('Share failed: disk full')),
+          'the failure still raises its toast; got ' + JSON.stringify(toasts),
+        );
+      }
+    }
+    // The same export answered while its chat is still on screen.
+    const wv = makePage();
+    runSmallTask(wv, 'chat-a', 'task-a');
+    const msg = shareWithTasks(wv, TASKS);
+    send(wv.win, {
+      type: 'share_done',
+      tabId: msg.tabId,
+      ok: true,
+      path: '/w/reports/chat-a.html',
+    });
+    assert.ok(outputText(wv).includes('chat-a.html'), 'the banner is written');
+  });
+
   await test('share_done for another tab never writes into this transcript', () => {
     const wv = makePage();
     runSmallTask(wv, 'chat-3', 'task-3');
@@ -478,34 +518,22 @@ async function run() {
     const header = panel.querySelector('.collapse-header');
     assert.ok(header, 'the panel must keep its collapse header');
     const wasCollapsed = panel.classList.contains('collapsed');
-    click(header);
-    assert.strictEqual(
-      panel.classList.contains('collapsed'),
-      !wasCollapsed,
-      'a header click must toggle the collapsed state',
-    );
-    if (panel.classList.contains('collapsed')) {
-      // The first panel is the Bash call; its preview is its
-      // description alone ("Bash List files").
-      const prev = panel.querySelector('.collapse-preview');
+    // The first panel is the Bash call: collapsed, its preview is its
+    // description alone ("Bash List files"); expanded, it shows none.
+    // Two clicks visit both states, whichever the export starts in.
+    for (const collapsed of [!wasCollapsed, wasCollapsed]) {
+      click(header);
       assert.strictEqual(
-        prev.textContent,
-        'List files',
-        'a collapsed Bash panel must preview its description',
+        panel.classList.contains('collapsed'),
+        collapsed,
+        'a header click must toggle the collapsed state',
       );
-    }
-    click(header);
-    assert.strictEqual(
-      panel.classList.contains('collapsed'),
-      wasCollapsed,
-      'a second click must restore the original state',
-    );
-    const prev = panel.querySelector('.collapse-preview');
-    if (!panel.classList.contains('collapsed')) {
       assert.strictEqual(
-        prev.textContent,
-        '',
-        'an expanded panel must show no preview',
+        panel.querySelector('.collapse-preview').textContent,
+        collapsed ? 'List files' : '',
+        collapsed
+          ? 'a collapsed Bash panel must preview its description'
+          : 'an expanded panel must show no preview',
       );
     }
   });
@@ -868,9 +896,18 @@ async function run() {
   await test('the live view survives a shared replay untouched', () => {
     const wv = makePage();
     const win = wv.win;
-    runSmallTask(wv, 'chat-live', 'task-l2');
-    const statusSteps = win.document.getElementById('status-steps');
-    const stepsBefore = statusSteps ? statusSteps.textContent : '';
+    const TAB = runSmallTask(wv, 'chat-live', 'task-l2');
+    // The live task's own numbers are on the status row.
+    send(win, {
+      type: 'usage_info',
+      tabId: TAB,
+      taskId: 'task-l2',
+      total_tokens: 1234,
+      cost: 0.5,
+      total_steps: 3,
+    });
+    const statusBefore = statusMetrics(win);
+    assert.strictEqual(statusBefore.steps, 'Steps: 3', 'setup: the live count');
     const outputBefore = win.document.getElementById('output').innerHTML;
     shareWithTasks(wv, [
       {
@@ -883,8 +920,16 @@ async function run() {
             command: 'whoami',
             ts: Date.now(),
           },
-          {type: 'step_count', count: 42},
-          {type: 'result', text: 'done', success: true},
+          // The replayed task's own numbers: its result paints them on
+          // the status row the replay borrows.
+          {
+            type: 'result',
+            text: 'done',
+            success: true,
+            total_tokens: 99999,
+            cost: 9,
+            step_count: 42,
+          },
         ],
       },
       {task: 'list the files', task_id: 'task-l2', events: []},
@@ -894,9 +939,9 @@ async function run() {
       outputBefore,
       "the replay of another task must not touch the screen's panels",
     );
-    assert.strictEqual(
-      statusSteps ? statusSteps.textContent : '',
-      stepsBefore,
+    assert.deepStrictEqual(
+      statusMetrics(win),
+      statusBefore,
       "the replay must not walk the live task's status numbers",
     );
   });
@@ -1007,6 +1052,27 @@ async function run() {
       msg.html.indexOf('pwd') > secondAt,
       "the live panels land in the starting task's OWN section",
     );
+  });
+
+  await test('W3 audit 2026-11-12: a list older than the task on screen leaves that task its own section', () => {
+    // The daemon listed the chat's tasks before the task on screen
+    // started: the list ends in an older task that recorded nothing,
+    // which is not the task on screen mid-write (the ids differ).
+    const wv = makePage();
+    runSmallTask(wv, 'chat-late', 'task-new');
+    const msg = shareWithTasks(wv, [
+      {task: 'quiet older task', task_id: 'task-old', events: []},
+    ]);
+    const sections = Array.from(
+      makeSharePage(msg.html).document.querySelectorAll('.share-task'),
+      s => s.textContent,
+    );
+    assert.strictEqual(sections.length, 2, 'the older task, then the one on screen');
+    assert.ok(sections[0].includes('quiet older task'));
+    assert.ok(sections[0].includes('(no output recorded)'));
+    assert.ok(!sections[0].includes('ls -la'), "not another task's output");
+    assert.ok(sections[1].includes('list the files'));
+    assert.ok(sections[1].includes('ls -la'));
   });
 
   await test('a chat whose tasks recorded no output still exports', () => {

@@ -43,7 +43,8 @@ import re
 import sqlite3
 import sys
 import time
-from contextlib import closing
+from collections.abc import Iterable
+from contextlib import closing, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,15 +59,19 @@ from kiss.core.memoryfield.index import (
     hashed_embedding,
 )
 from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, slugify
-from kiss.core.utils import atomic_write_text
+from kiss.core.utils import atomic_write_text, ensure_html
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = kiss_home() / "history.db"
 DEFAULT_PROBE_MODEL = "claude-fable-5-1"
 RECALL_KS = (1, 3, 5)
+_PAGE_BODY_BYTES = MAX_PAGE_BYTES - 700  # the rest of a page's bytes is left for its frontmatter
+_RRF_CONSTANT = 60  # the smoothing constant of reciprocal rank fusion, from the original paper
 
-_FAILURE_PREFIXES = ("Task failed", "Task interrupted")
+# The last is the HTML summary of a run that raised outside its agent
+# loop (``SorcarAgent.run``), as the row stores it.
+_FAILURE_PREFIXES = ("Task failed", "Task interrupted", "<p>Task failed with error:")
 _FAILURE_EXACT = frozenset(
     {
         "Agent Failed Abruptly",
@@ -159,22 +164,26 @@ def load_past_tasks(db_path: Path, limit: int, min_result_chars: int = 300) -> l
     return tasks
 
 
-def task_page_body(task: PastTask, max_bytes: int = MAX_PAGE_BYTES - 700) -> str:
+def task_page_body(task: PastTask) -> str:
     """Render a past task as a Markdown page body that fits the embedding limit.
+
+    A result that is not HTML (a row older than ``finish``'s HTML guarantee)
+    is read as the Markdown it is, the way ``finish`` reads a summary: taken
+    for HTML, its lines would collapse into one and a tag it only mentions
+    (``<head>`` in a code span) would hide the rest.
 
     Args:
         task: The past task.
-        max_bytes: Budget for the body; the remainder of :data:`MAX_PAGE_BYTES`
-            is left for frontmatter.
     """
     date = datetime.fromtimestamp(task.timestamp, UTC).strftime("%Y-%m-%d")
     request = task.task.strip()
-    result = html_to_markdown(task.result)
+    result = html_to_markdown(ensure_html(task.result))
     header = f"# Task ({date})\n\n"
     body = f"{header}{request}\n\n# Result\n\n{result}\n"
     data = body.encode("utf-8")
-    if len(data) > max_bytes:
-        body = data[:max_bytes].decode("utf-8", errors="ignore").rstrip() + "\n\n[truncated]\n"
+    if len(data) > _PAGE_BODY_BYTES:
+        cut = data[:_PAGE_BODY_BYTES].decode("utf-8", errors="ignore")
+        body = cut.rstrip() + "\n\n[truncated]\n"
     return body
 
 
@@ -192,8 +201,7 @@ def build_memory_from_tasks(memory: MemoryDir, tasks: list[PastTask]) -> list[st
     """
     wanted = {task.page_name: task for task in tasks}
     existing = set(memory.page_names())
-    for name in existing - wanted.keys():
-        memory.delete(name)
+    _delete_pages(memory, existing - wanted.keys())
     for name, task in wanted.items():
         if name in existing:
             continue
@@ -204,6 +212,17 @@ def build_memory_from_tasks(memory: MemoryDir, tasks: list[PastTask]) -> list[st
             extra={"source": f"history.db task_history {task.task_id}"},
         )
     return list(wanted)
+
+
+def _delete_pages(memory: MemoryDir, names: Iterable[str]) -> None:
+    """Delete the pages *names* of the evaluation corpus *memory*.
+
+    A page that is gone already is one that another evaluation of the same
+    corpus directory, cleaning up at the same time, deleted first.
+    """
+    for name in names:
+        with suppress(FileNotFoundError):
+            memory.delete(name)
 
 
 class KeywordIndex:
@@ -247,18 +266,17 @@ class KeywordIndex:
         self.conn.close()
 
 
-def reciprocal_rank_fusion(rankings: list[list[str]], k: int, constant: int = 60) -> list[str]:
+def reciprocal_rank_fusion(rankings: list[list[str]], k: int) -> list[str]:
     """Fuse several ranked lists with reciprocal rank fusion.
 
     Args:
         rankings: Ranked page-name lists from different retrievers.
         k: Number of fused results to return.
-        constant: RRF smoothing constant (60 is the value from the original paper).
     """
     scores: dict[str, float] = {}
     for ranking in rankings:
         for rank, name in enumerate(ranking, start=1):
-            scores[name] = scores.get(name, 0.0) + 1.0 / (constant + rank)
+            scores[name] = scores.get(name, 0.0) + 1.0 / (_RRF_CONSTANT + rank)
     ordered = sorted(scores.items(), key=operator.itemgetter(1), reverse=True)
     return [name for name, _ in ordered[:k]]
 
@@ -338,7 +356,8 @@ def llm_probes(memory: MemoryDir, names: list[str], model_name: str) -> list[Pro
         model = create_model(model_name)
         model.initialize(PROBE_PROMPT.format(page=page.raw[:6000]))
         text, _ = model.generate()
-        query = text.strip().strip('"').splitlines()[0].strip() if text.strip() else ""
+        lines = text.strip().splitlines()
+        query = lines[0].strip().strip('"').strip() if lines else ""
         if not query:
             logger.warning("Empty probe for %s; skipped", name)
             continue
@@ -378,7 +397,6 @@ def cached_llm_probes(memory: MemoryDir, names: list[str], args: argparse.Namesp
         logger.info("Probe cache %s does not match this run; regenerating", cache_path)
     sample = random.Random(args.seed).sample(names, min(args.llm_probes, len(names)))
     generated = llm_probes(memory, sample, args.probe_model)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(
         cache_path,
         json.dumps({"meta": meta, "probes": [asdict(p) for p in generated]}, indent=1),
@@ -594,8 +612,7 @@ def main(argv: list[str] | None = None) -> int:
     tasks = load_past_tasks(args.db, args.limit, args.min_result_chars)
     memory = MemoryDir(args.memory_dir)
     if args.rebuild:
-        for name in memory.page_names():
-            memory.delete(name)
+        _delete_pages(memory, memory.page_names())
     before = set(memory.page_names())
     names = build_memory_from_tasks(memory, tasks)
     logger.info(
@@ -648,8 +665,10 @@ def main(argv: list[str] | None = None) -> int:
         }
 
     in_families = duplicate_family_count(families)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
+    # Published atomically, like the probe cache: evaluations sharing ``--out``
+    # leave one whole report.  The mode of a new report is ``Path.write_text``'s.
+    atomic_write_text(
+        args.out,
         json.dumps(
             {
                 "generated_at": datetime.now(UTC).isoformat(),
@@ -666,7 +685,8 @@ def main(argv: list[str] | None = None) -> int:
             },
             indent=1,
             default=str,
-        )
+        ),
+        create_mode=0o666,
     )
     print(
         f"\nCorpus: {len(names)} pages from {args.db} "

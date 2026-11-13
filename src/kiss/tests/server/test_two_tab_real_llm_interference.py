@@ -32,7 +32,7 @@ Hypotheses (each verified by one test method):
 
 * **H4 — ``task_done`` carries the owning ``tabId``.**  The
   end-of-task lifecycle event must be tagged with the originating tab
-  so that the frontend's "Running …" / "Done (…)" label flips on the
+  so that the frontend's "Running …" / "Xm Ys" label flips on the
   right tab only.
 """
 
@@ -281,9 +281,9 @@ def _restore_persistence(server: AgentServer, saved: tuple) -> None:
     ``ask_user_question`` answer, say) is stopped the way the UI's Stop
     does, then its thread is joined, and only then is the DB closed
     through :func:`restore_persistence` (which stops the ``kiss-event-writer``
-    thread before closing).  A raw ``ps._db_conn.close()`` closes whichever
-    connection was created last by ANY thread, so it segfaulted the
-    writer thread mid-batch when a task overran its join timeout.
+    thread before closing).  Closing the connection created last by ANY
+    thread, as this teardown once did, segfaulted the writer thread
+    mid-batch when a task overran its join timeout.
     """
     for state in agent_state.snapshot():
         thread = state.task_thread
@@ -525,7 +525,7 @@ class TestTwoTabRealLLMTaskDoneRoutedToOwningTab(_TwoTabFixture):
         with its own ``tabId``, and never with the peer's.
 
         The frontend uses ``task_done`` to flip the "Running …" header
-        of the chat page to "Done (Xm Ys)".  Mis-routing would
+        of the chat page to the time the task took.  Mis-routing would
         either leave a running task labelled "Running …" forever or
         flip the wrong tab's label.
         """

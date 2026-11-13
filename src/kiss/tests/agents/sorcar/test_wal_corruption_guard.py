@@ -36,34 +36,34 @@ import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.persistence_helpers import close_db
 
 
 def _redirect(tmpdir: str):
     """Redirect the DB to a temp dir and reset the singleton connection."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore(saved):
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    (th._DB_PATH, th._KISS_DIR) = saved
 
 
 class TestWalCorruptionGuard:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         th._flush_chat_events()
-        th._close_db()
+        close_db()
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self):
         os.chmod(Path(self.tmpdir) / ".kiss", 0o700)
         th._flush_chat_events()
-        th._close_db()
+        close_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -198,7 +198,7 @@ class TestWalCorruptionGuard:
         """
         self._seed_task()
         db_path = str(th._DB_PATH)
-        th._close_db()
+        close_db()
         gc.collect()
         os.unlink(db_path)
         Path(db_path + "-wal").write_bytes(b"stale garbage, not a real WAL")

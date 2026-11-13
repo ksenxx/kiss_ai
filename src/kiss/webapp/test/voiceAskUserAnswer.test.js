@@ -6,45 +6,34 @@
 'use strict';
 
 const assert = require('assert');
-const {
-  makePage: makeChatPage,
-  send,
-  stubRaf,
-  answering,
-  byId,
-} = require('./simplify2_harness');
+const {send, answering, byId} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {
   makeVoicePage,
   micBtn,
   startPipeline,
   wake,
+  dictate,
 } = require('./voice_page_helpers');
 const {test, report} = makeRunner();
-
-function stubVoiceConfig(win) {
-  stubRaf(win);
-  win.__VOICE__ = {};
-  win.localStorage.setItem('kissVoiceEnabled', '1');
-}
 
 // Every page built; closed after the run so node exits on its own.
 const windows = [];
 
-function makePage() {
-  const page = makeChatPage({
-    beforeScripts: stubVoiceConfig,
-    extraScripts: ['voice.js'],
-  });
+// A chat page with the voice pipeline live: voice.js types only the
+// transcript of a round it posted, so each test dictates a real one.
+async function makePage() {
+  const page = makeVoicePage();
   windows.push(page.win);
+  await startPipeline(page);
   return page;
 }
 
 const taskInput = win => byId(win, 'task-input');
 
 async function main() {
-  await test('a pending question puts the composer into answer mode', () => {
-    const {win} = makePage();
+  await test('a pending question puts the composer into answer mode', async () => {
+    const {win} = await makePage();
     send(win, {type: 'askUser', question: 'Which color?'});
     assert.ok(answering(win), 'body.ask-answering must be set');
     assert.strictEqual(
@@ -53,12 +42,13 @@ async function main() {
     );
   });
 
-  await test('speech while a question is pending is sent as the userAnswer', () => {
-    const {win, posted} = makePage();
+  await test('speech while a question is pending is sent as the userAnswer', async () => {
+    const page = await makePage();
+    const {win, posted} = page;
     send(win, {type: 'askUser', question: 'Which color?'});
     const tabId = win._testApi.getActiveTabId();
     posted.length = 0;
-    send(win, {type: 'voiceSpeech', text: 'blue', speaker: 1, language: 'fr'});
+    dictate(page, 'blue', {speaker: 1, language: 'fr'});
     const answers = posted.filter(m => m.type === 'userAnswer');
     assert.strictEqual(answers.length, 1, JSON.stringify(posted));
     assert.strictEqual(
@@ -85,12 +75,13 @@ async function main() {
   // tab') and, after a question closed, by 'after askUserDone later speech
   // goes back to the task input path' below.
 
-  await test('an empty translation never answers and keeps the question open', () => {
-    const {win, posted} = makePage();
+  await test('an empty translation never answers and keeps the question open', async () => {
+    const page = await makePage();
+    const {win, posted} = page;
     send(win, {type: 'askUser', question: 'Which color?'});
     taskInput(win).value = 'precious draft';
     posted.length = 0;
-    send(win, {type: 'voiceSpeech', text: '   ', speaker: 1});
+    dictate(page, '   ', {speaker: 1});
     assert.strictEqual(
       posted.filter(
         m =>
@@ -105,12 +96,13 @@ async function main() {
     assert.strictEqual(taskInput(win).value, 'precious draft');
   });
 
-  await test('spoken answer merges with a typed draft in the composer', () => {
-    const {win, posted} = makePage();
+  await test('spoken answer merges with a typed draft in the composer', async () => {
+    const page = await makePage();
+    const {win, posted} = page;
     send(win, {type: 'askUser', question: 'Which color?'});
     taskInput(win).value = 'partial';
     posted.length = 0;
-    send(win, {type: 'voiceSpeech', text: 'and blue', speaker: 2});
+    dictate(page, 'and blue', {speaker: 2});
     const answers = posted.filter(m => m.type === 'userAnswer');
     assert.strictEqual(answers.length, 1, JSON.stringify(posted));
     assert.strictEqual(
@@ -119,21 +111,20 @@ async function main() {
     );
   });
 
-  await test('speech without a speaker answers with the raw text', () => {
-    const {win, posted} = makePage();
+  await test('speech without a speaker answers with the raw text', async () => {
+    const page = await makePage();
+    const {win, posted} = page;
     send(win, {type: 'askUser', question: 'Which color?'});
     posted.length = 0;
-    send(win, {type: 'voiceSpeech', text: 'plain answer'});
+    dictate(page, 'plain answer');
     const answers = posted.filter(m => m.type === 'userAnswer');
     assert.strictEqual(answers.length, 1, JSON.stringify(posted));
     assert.strictEqual(answers[0].answer, 'plain answer');
   });
 
   await test('the wake word focuses the composer while a question is pending', async () => {
-    const page = makeVoicePage();
-    windows.push(page.win);
+    const page = await makePage();
     const {win} = page;
-    await startPipeline(page);
     send(win, {type: 'askUser', question: 'Which color?'});
     // The user has gone on to another control by the time they speak.
     micBtn(win).focus();
@@ -147,26 +138,28 @@ async function main() {
     assert.ok(answering(win), 'the question stays open');
   });
 
-  await test('after askUserDone later speech goes back to the task input path', () => {
-    const {win, posted} = makePage();
+  await test('after askUserDone later speech goes back to the task input path', async () => {
+    const page = await makePage();
+    const {win, posted} = page;
     send(win, {type: 'askUser', question: 'Which color?'});
     send(win, {type: 'askUserDone'});
     assert.ok(!answering(win));
     assert.strictEqual(taskInput(win).placeholder, '');
     posted.length = 0;
-    send(win, {type: 'voiceSpeech', text: 'next task', speaker: 1});
+    dictate(page, 'next task', {speaker: 1});
     const submits = posted.filter(m => m.type === 'submit');
     assert.strictEqual(submits.length, 1, JSON.stringify(posted));
     assert.strictEqual(submits[0].prompt, 'Speaker #1 says that: next task');
     assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 0);
   });
 
-  await test('answering by voice clears the pending question for the tab', () => {
-    const {win, posted} = makePage();
+  await test('answering by voice clears the pending question for the tab', async () => {
+    const page = await makePage();
+    const {win, posted} = page;
     send(win, {type: 'askUser', question: 'Which color?'});
-    send(win, {type: 'voiceSpeech', text: 'blue', speaker: 1});
+    dictate(page, 'blue', {speaker: 1});
     posted.length = 0;
-    send(win, {type: 'voiceSpeech', text: 'now run tests', speaker: 1});
+    dictate(page, 'now run tests', {speaker: 1});
     assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 0);
     assert.strictEqual(posted.filter(m => m.type === 'submit').length, 1);
   });

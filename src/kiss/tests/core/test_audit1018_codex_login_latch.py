@@ -14,7 +14,6 @@ it (until the test ends it), driven through the settings commands of
   get the code;
 * a request while that CLI is still alive is answered with the same
   code, at once, and starts no CLI;
-* a request carrying ``fresh: true`` ends that CLI and starts a new one;
 * once the CLI has exited, a request starts a new one;
 * ``getClaudeCodeStatus`` / ``getCodexStatus`` answer their sender.
 """
@@ -133,28 +132,6 @@ def test_a_login_in_flight_answers_every_sender_with_one_cli(slow_codex: _SlowCo
     assert third["connId"] == "c3"
     assert third["code"] == "CODE-RUN1"
     assert slow_codex.run_count() == 1
-
-
-def test_a_fresh_request_ends_the_login_alive_and_starts_another(
-    slow_codex: _SlowCodex,
-) -> None:
-    server = _Server()
-    server._cmd_start_codex_login({"connId": "c1"})
-    (first,) = server.replies("codexLogin", 1)
-    assert first["code"] == "CODE-RUN1"
-    server._cmd_start_codex_login({"connId": "c2", "fresh": True})
-    (second,) = server.replies("codexLogin", 2)[1:]
-    assert second["connId"] == "c2"
-    assert second["code"] == "CODE-RUN2"
-    assert slow_codex.run_count() == 2
-    # The first CLI was ended (its reaper is done); the second is the
-    # login alive, so a plain request gets its code.
-    reapers = [t for t in threading.enumerate() if t.name == "codex-device-login"]
-    assert len(reapers) == 1
-    server._cmd_start_codex_login({"connId": "c3"})
-    (third,) = server.replies("codexLogin", 3)[2:]
-    assert third["code"] == "CODE-RUN2"
-    assert slow_codex.run_count() == 2
 
 
 def test_a_request_after_the_cli_exited_starts_a_new_login(slow_codex: _SlowCodex) -> None:

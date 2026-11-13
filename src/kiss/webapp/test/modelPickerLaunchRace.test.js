@@ -11,7 +11,9 @@ const {
   send,
   stubRaf,
   clickTab,
+  lastMsg,
 } = require('./simplify2_harness');
+const {typeAndEnter} = require('./attachment_helpers');
 
 function makePage(templateModel, seededState) {
   return makeChatPage({
@@ -104,14 +106,52 @@ function testModelsEventPropagatesIntoTabState() {
   );
 }
 
+// A reconnect's `ready` is answered with the daemon's model list too.
+// The page stamps it like a getModels (`generation`, which the daemon
+// echoes), so the answer to a ready sent BEFORE the user's pick cannot
+// hand the tab the old default back.
+function testReconnectReplyKeepsTheModelPickedSince() {
+  const {win, posted} = makePage('model-a');
+  const models = ['model-a', 'model-b'].map(name => {
+    return {name, inp: 1, out: 1, uses: 0, vendor: 'v'};
+  });
+  send(win, {type: 'daemonStatus', connected: true});
+  send(win, {type: 'models', models, selected: 'model-a'});
+  send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
+  send(win, {type: 'daemonStatus', connected: true});
+  const ready = lastMsg(posted, 'ready');
+  assert.ok(ready.generation > 0, 'BUG: the reconnect ready is not stamped');
+  win._testApi.endLaunch();
+  win.document.getElementById('model-btn').click();
+  Array.from(win.document.querySelectorAll('#model-list .model-item'))
+    .find(el => el.textContent.includes('model-b'))
+    .click();
+  // The daemon read its default before the pick: its late answer.
+  send(win, {
+    type: 'models',
+    models,
+    selected: 'model-a',
+    generation: ready.generation,
+  });
+  assert.strictEqual(
+    pickerText(win),
+    'model-b',
+    "BUG: the reconnect's late model list replaced the user's pick",
+  );
+  typeAndEnter(win, 'run with my model');
+  assert.strictEqual(lastMsg(posted, 'submit').model, 'model-b');
+  win.close();
+  console.log('  ok - a reconnect reply keeps the model picked since');
+}
+
 // A hand-picked model surviving a tab switch and a models refresh is
 // pinned by modelPickerAgentOverride.test.js.
 
 try {
   testModelsEventPropagatesIntoTabState();
   testRestoredTabInheritsTemplateModelOnLaunch();
-  console.log('\n2 passed, 0 failed');
-  process.exit(0);
+  testReconnectReplyKeepsTheModelPickedSince();
+  console.log('\n3 passed, 0 failed');
 } catch (err) {
   console.error('FAIL:', err && err.message ? err.message : err);
   process.exit(1);

@@ -27,8 +27,10 @@ itself writes.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -171,12 +173,41 @@ def test_home_target_resolves_and_new_files_still_run(
     assert (home / "fresh.txt").read_text() == "again\n"
     copy = heredoc_copy("cat > ~ <<'EOF'\nx\nEOF", "/w")
     assert copy is not None and copy.path == str(home)
-    # a quoted tilde is a directory named ~; one with an expansion stays unresolved
-    copy = heredoc_copy('cat > "~/x" <<\'EOF\'\nx\nEOF', "/w")
-    assert copy is not None and copy.path == "/w/~/x"
-    for target in ("~/$X", "~/*.md", "~user/x"):
+    # a quoted tilde is a directory named ~, also when only the slash after it is quoted
+    # (bash expands no tilde-prefix that holds a quoted character); one with an
+    # expansion, a brace expansion included, stays unresolved
+    work = tmp_path / "w"
+    (work / "~").mkdir(parents=True)
+    for target in ('"~/x"', '~"/x"', "~'/x'", "~\\/x"):
+        command = f"cat > {target} <<'EOF'\nx\nEOF"
+        copy = heredoc_copy(command, str(work))
+        assert copy is not None and copy.path == f"{work}/~/x", target
+        subprocess.run(["bash", "-c", command], cwd=work, check=True)
+        assert (work / "~" / "x").read_text() == "x\n" and not (home / "x").exists(), target
+        (work / "~" / "x").unlink()
+    for target in ("~/$X", "~/*.md", "~user/x", "~/t{a,b}", "~/t{1..2}"):
         copy = heredoc_copy(f"cat > {target} <<'EOF'\nx\nEOF", "/w")
         assert copy is not None and copy.path is None, target
+    # bash refuses ``~/t{a,b}`` as an ambiguous redirect: no Write of a file so named
+    braces = home / "t{a,b}"
+    braces.write_text("old\n")
+    tools.Read(str(braces))
+    out = tools.Bash("cat > ~/t{a,b} <<'EOF'\nnew\nEOF", "braces")
+    assert out == HEREDOC_UNRESOLVED_VERDICT.format(path="~/t{a,b}")
+    assert braces.read_text() == "old\n"
+    # a ``..`` after a symbolic link is the filesystem's to resolve: bash opens the
+    # file beside the directory the link names, not the one beside the link
+    outside = tmp_path / "outside"
+    (outside / "sub").mkdir(parents=True)
+    (home / "link").symlink_to(outside / "sub")
+    (home / "target").write_text("beside the link\n")
+    (outside / "target").write_text("beside its directory\n")
+    tools.Read(str(home / "target"))
+    tools.Read(str(outside / "target"))
+    out = tools.Bash("cat > ~/link/../target <<'EOF'\nREPLACED\nEOF", "through a link")
+    assert out.startswith("Applied as"), out
+    assert (home / "target").read_text() == "beside the link\n"
+    assert (outside / "target").read_text() == "REPLACED\n"
 
 
 def test_variable_target_stays_refused(tools: UsefulTools, tmp_path: Path) -> None:
@@ -251,7 +282,9 @@ PYTHON_TWO_REPLACES = (
 )
 
 
-def test_python_replace_rewrite_is_applied_as_edit(tools: UsefulTools, tmp_path: Path) -> None:
+def test_python_replace_rewrite_is_applied_as_edit(
+    tools: UsefulTools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = tmp_path / "a.py"
     source.write_text("x = 1\ny = 2\nz = 3\n")
     call = edit_call(str(source), [("x = 1", "x = 10", True), ("y = 2", "y = 20", True)])
@@ -263,7 +296,12 @@ def test_python_replace_rewrite_is_applied_as_edit(tools: UsefulTools, tmp_path:
     out = tools.Bash(PYTHON_TWO_REPLACES, "rewrite")
     assert out.startswith(f"Applied as {call}: Successfully replaced 2 occurrence(s)"), out
     assert source.read_text() == "x = 10\ny = 20\nz = 3\n"
-    # str.replace replaces every occurrence, so the Edit does too
+    # str.replace replaces every occurrence, so the Edit does too.  The command names
+    # ``python``, which not every host has, and the Edit is made only where bash finds
+    # the program: one is put on PATH.
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "python").symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(tmp_path / "bin"), os.environ["PATH"])))
     source.write_text("a a\n")
     command = (
         "python - <<'EOF'\ns = open('a.py').read()\ns = s.replace('a', 'b')\n"
@@ -637,9 +675,9 @@ def test_tool_panel_stop_during_the_grace_kills_the_command(
     thread.join(timeout=30)
     assert not thread.is_alive() and outcome == {"interrupted": True}, outcome
     deadline = time.monotonic() + 5
-    while job.process.poll() is None and time.monotonic() < deadline:
+    while job.returncode() is None and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert job.process.poll() is not None and not tools._jobs
+    assert job.returncode() is not None and not tools._jobs
 
 
 def test_stop_ends_the_grace_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

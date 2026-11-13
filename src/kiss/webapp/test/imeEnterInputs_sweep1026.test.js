@@ -18,6 +18,7 @@ const {
   makePage: buildPage,
   send,
   ofType,
+  plain,
   stubRaf,
   typeInto,
 } = require('./simplify2_harness');
@@ -83,7 +84,7 @@ function testHistoryRenameBox() {
   }
   key(win, input, 'Enter');
   assert.deepStrictEqual(
-    JSON.parse(JSON.stringify(ofType(posted, 'setChatSummary'))),
+    plain(ofType(posted, 'setChatSummary')),
     [{type: 'setChatSummary', chatId: 'A', summary: 'ログイン修正'}],
     'a plain Enter renames',
   );

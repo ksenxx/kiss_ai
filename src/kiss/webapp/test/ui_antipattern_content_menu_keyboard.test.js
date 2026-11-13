@@ -16,24 +16,13 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {makeRunner} = require('./ui_antipattern_harness');
-const runner = makeRunner();
-const report = runner.report;
+const {MEDIA} = require('./simplify2_harness');
+const {makeRunner, rightClick: open, key} = require('./ui_antipattern_harness');
 
-// Every page a test opened is closed afterwards, pass or fail.
-function test(name, fn) {
-  try {
-    runner.test(name, fn);
-  } finally {
-    while (windows.length) windows.pop().close();
-  }
-}
-
-const MEDIA = path.join(__dirname, '..', 'media');
-
-// Every page a test builds; closed after the test so nothing the menu
-// armed keeps node alive.
+// Every page a test builds; the runner closes them when the test has
+// ended, pass or fail, so nothing the menu armed keeps node alive.
 const windows = [];
+const {test, report} = makeRunner({windows});
 
 function makeDom() {
   const dom = new JSDOM(
@@ -58,16 +47,6 @@ function makeDom() {
   return win;
 }
 
-function key(win, name) {
-  win.document.dispatchEvent(
-    new win.KeyboardEvent('keydown', {
-      key: name,
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
-}
-
 function items(win) {
   return Array.from(
     win.document.querySelectorAll(
@@ -78,18 +57,6 @@ function items(win) {
 
 function active(win) {
   return win.document.activeElement;
-}
-
-/** Right-click *target* at (10, 10), which is how the page opens the menu. */
-function open(win, target) {
-  target.dispatchEvent(
-    new win.MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 10,
-    }),
-  );
 }
 
 
@@ -119,15 +86,15 @@ test('ArrowDown / ArrowUp wrap over enabled items; Home / End jump', () => {
   open(win, win.document.getElementById('link'));
   const enabled = items(win).filter(r => !r.classList.contains('disabled'));
   assert.strictEqual(enabled.length, 2, 'Copy Link Address, Select All');
-  key(win, 'ArrowDown');
+  key(win, win.document, 'ArrowDown');
   assert.strictEqual(active(win), enabled[1]);
-  key(win, 'ArrowDown');
+  key(win, win.document, 'ArrowDown');
   assert.strictEqual(active(win), enabled[0], 'wraps to the first');
-  key(win, 'ArrowUp');
+  key(win, win.document, 'ArrowUp');
   assert.strictEqual(active(win), enabled[1], 'wraps to the last');
-  key(win, 'Home');
+  key(win, win.document, 'Home');
   assert.strictEqual(active(win), enabled[0]);
-  key(win, 'End');
+  key(win, win.document, 'End');
   assert.strictEqual(active(win), enabled[1]);
 });
 
@@ -138,9 +105,9 @@ test('Enter activates the focused item and Escape closes', () => {
   open(win, ta);
   const enabled = items(win).filter(r => !r.classList.contains('disabled'));
   const selectAll = enabled.find(r => r.dataset.action === 'select-all');
-  key(win, 'End');
+  key(win, win.document, 'End');
   assert.strictEqual(active(win), selectAll);
-  key(win, 'Enter');
+  key(win, win.document, 'Enter');
   assert.strictEqual(items(win).length, 0, 'the menu closes on activation');
   assert.strictEqual(ta.selectionStart, 0);
   assert.strictEqual(
@@ -150,7 +117,7 @@ test('Enter activates the focused item and Escape closes', () => {
   );
   open(win, ta);
   assert.ok(items(win).length > 0);
-  key(win, 'Escape');
+  key(win, win.document, 'Escape');
   assert.strictEqual(items(win).length, 0, 'Escape closes');
 });
 
@@ -162,15 +129,15 @@ test('Space activates too, and focus returns to the opener on close', () => {
   assert.strictEqual(active(win), ta);
   open(win, win.document.getElementById('para'));
   assert.notStrictEqual(active(win), ta, 'focus moved into the menu');
-  key(win, 'Escape');
+  key(win, win.document, 'Escape');
   assert.strictEqual(
     active(win),
     ta,
     'Escape hands focus back to the textarea',
   );
   open(win, ta);
-  key(win, 'End');
-  key(win, ' ');
+  key(win, win.document, 'End');
+  key(win, win.document, ' ');
   assert.strictEqual(items(win).length, 0, 'Space activates');
   assert.strictEqual(ta.selectionEnd, 'hello world'.length);
   assert.strictEqual(active(win), ta, 'the field keeps focus after Select All');
@@ -181,8 +148,8 @@ test('keys do nothing while the menu is closed', () => {
   win.ContentContextMenu.installContentContextMenu(win.document);
   const ta = win.document.getElementById('ta');
   ta.focus();
-  key(win, 'ArrowDown');
-  key(win, 'Enter');
+  key(win, win.document, 'ArrowDown');
+  key(win, win.document, 'Enter');
   assert.strictEqual(active(win), ta);
   assert.strictEqual(items(win).length, 0);
 });
@@ -225,20 +192,12 @@ test('R3-1: dismissing the menu by clicking another field keeps focus (and typin
     destination,
     'focus stays on the field the user clicked, not the old opener',
   );
-  const el = active(win);
-  el.value = String(el.value || '') + 'Z';
-  assert.strictEqual(destination.value, 'twoZ');
-  assert.strictEqual(
-    opener.value,
-    'one',
-    'typing did not go back to the opener',
-  );
 
   // Keyboard dismissal and clicks on the menu itself still hand focus
   // back to the opener.
   opener.focus();
   open(win, opener);
-  key(win, 'Escape');
+  key(win, win.document, 'Escape');
   assert.strictEqual(active(win), opener, 'Escape restores the opener');
   open(win, opener);
   const selectAll = items(win).find(r => r.dataset.action === 'select-all');

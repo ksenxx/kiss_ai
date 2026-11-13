@@ -34,8 +34,8 @@ import kiss.core.user_config as vc
 from kiss.server.web_server import (
     _MAX_LINE_BYTES,
     RemoteAccessServer,
-    _generate_self_signed_cert,
 )
+from kiss.tests.local_ws import _generate_self_signed_cert
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 MALFORMED_WORK_DIRS: tuple[Any, ...] = (123, ["x"], {"x": 1}, True)

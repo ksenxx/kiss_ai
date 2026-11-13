@@ -27,7 +27,8 @@ from websockets.asyncio.client import connect
 
 import kiss.core.user_config as vc
 from kiss.core.brand import PRODUCT_NAME
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.local_ws import _generate_self_signed_cert
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 

@@ -33,6 +33,7 @@ on the planned command without a daemon.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 import ipaddress
 import json
@@ -44,20 +45,24 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
+from urllib.parse import urlsplit
 
 import pytest
 
 from kiss.agents.sorcar import machines as mach
 from kiss.agents.sorcar.local_endpoint import LOCAL_ENDPOINT_ENV
 from kiss.core import user_config as vc
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.core.config import kiss_home
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import find_free_port
-from kiss.tests.local_ws import open_local_connection
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 from kiss.tests.remote_daemon import start_remote_daemon
 from kiss.tests.server.parallel_agent_harness import restore_env
 from kiss.tests.server.remote_tabs_probe import machine_of
@@ -160,6 +165,29 @@ def _restore_config(saved: str | None) -> None:
         vc._config_path().write_text(saved)
 
 
+def _machine_state() -> tuple[list[mach.Machine], dict[str, str], str | None]:
+    """The registry, the host names learnt of its machines and the text of their file."""
+    hosts_file = kiss_home() / mach.HOSTS_FILE
+    return (
+        mach.load_machines(), dict(mach._hosts),
+        hosts_file.read_text() if hosts_file.exists() else None,
+    )
+
+
+def _restore_machine_state(
+    registry: list[mach.Machine], hosts: dict[str, str], hosts_text: str | None,
+) -> None:
+    """Put back what :func:`_machine_state` returned."""
+    mach.save_machines(registry)
+    mach._hosts.clear()
+    mach._hosts.update(hosts)
+    hosts_file = kiss_home() / mach.HOSTS_FILE
+    if hosts_text is None:
+        hosts_file.unlink(missing_ok=True)
+    else:
+        hosts_file.write_text(hosts_text)
+
+
 def _remote_rows(home: Path) -> list[tuple[str, str]]:
     """The ``(task, parent_task_id)`` rows of the remote daemon's history."""
     with sqlite3.connect(home / "history.db") as db:
@@ -180,21 +208,27 @@ class TwoDaemonsCase(IsolatedAsyncioTestCase):
         # The real path: the daemon canonicalises the work dir, and on
         # macOS mkdtemp's /var/... is a symlink to /private/var/...
         self.tmpdir = os.path.realpath(tempfile.mkdtemp())
-        mach.save_machines([])
+        # Cleanups, not asyncTearDown, stop what the set-up starts and put
+        # back the machines, the config and the endpoint variable, each
+        # registered as its resource starts: unittest skips the tear-down
+        # when the set-up fails, and the model server such a set-up left
+        # serving kept pytest from exiting.  The test starts from no
+        # machine and no host name learnt.
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.addCleanup(_restore_machine_state, *_machine_state())
+        _restore_machine_state([], {}, None)
         _DelegatingModel.script = _default_script("box")
         _DelegatingModel.calls = 0
         _DelegatingModel.tool_results = []
         _DelegatingModel.requests = []
         self.model_port = find_free_port()
         self.model_server = HTTPServer(("127.0.0.1", self.model_port), _DelegatingModel)
-        self.model_thread = asyncio.get_running_loop().run_in_executor(
-            None, self.model_server.serve_forever,
-        )
+        self.addCleanup(self.model_server.server_close)
+        threading.Thread(target=self.model_server.serve_forever, daemon=True).start()
+        self.addCleanup(self.model_server.shutdown)
         endpoint = f"http://127.0.0.1:{self.model_port}/v1"
         self.model = "gpt-4o-mini"
         config = {"custom_endpoint": endpoint, "custom_api_key": "k", "max_budget": 100}
-        # Cleanups, not asyncTearDown, restore the config and the endpoint
-        # variable: unittest skips the tear-down when the set-up fails.
         self.addCleanup(
             _restore_config,
             vc._config_path().read_text() if vc._config_path().exists() else None,
@@ -204,6 +238,7 @@ class TwoDaemonsCase(IsolatedAsyncioTestCase):
             start_remote_daemon, Path(self.tmpdir) / "remote-home", password="pw-remote",
             config=config,
         )
+        self.addCleanup(self.remote.stop)
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
@@ -217,22 +252,16 @@ class TwoDaemonsCase(IsolatedAsyncioTestCase):
             keyfile=str(keyfile), url_file=Path(self.tmpdir) / "remote-url.json",
             local_endpoint_file=endpoint_file,
         )
+        # Registered before the start: one that fails part-way is stopped too.
+        self.addAsyncCleanup(self.server.stop_async)
         await self.server.start_async()
         self.reader, self.writer = await open_local_connection(self.server)
+        self.addCleanup(self.writer.close)
         added = await self._ask({
             "type": "machineAction", "action": "add", "name": "box",
             "address": self.remote.url, "machinePassword": "pw-remote",
         }, "machines")
         self.assertEqual(added["error"], "")
-
-    async def asyncTearDown(self) -> None:
-        self.writer.close()
-        await self.server.stop_async()
-        self.remote.stop()
-        self.model_server.shutdown()
-        await self.model_thread
-        mach.save_machines([])
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _send(self, cmd: dict[str, Any]) -> None:
         self.writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
@@ -502,6 +531,46 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
         self.assertNotIn(api_tab, published)
         self.assertEqual(machine_of(self.server._server_api.remote_tabs, api_tab), "")
 
+    async def test_a_top_level_api_run_on_a_machine_survives_a_dropped_connection(self) -> None:
+        """The caller's connection to this daemon drops mid-run: its reconnect gets the run back.
+
+        The reconnect resumes the run's tab under a replay id of its own
+        and waits for the transcript and the ``replayDone`` that carry
+        it, as it does for a run of this daemon.
+        """
+        from kiss.agents.sorcar import daemon_client, local_endpoint
+        from kiss.tests.agents.sorcar.test_daemon_client_reconnect_2026_10_31 import _TcpRelay
+
+        _DelegatingModel.script = [_finish(CHILD_SUMMARY, pause=5.0)]
+        endpoint = local_endpoint.read_endpoint(Path(self.tmpdir) / "sorcar-local.json")
+        assert endpoint is not None
+        port = urlsplit(endpoint.url).port
+        assert port is not None
+        relay = _TcpRelay(port)
+        self.addCleanup(relay.close)
+        relay_file = Path(self.tmpdir) / "relay-endpoint.json"
+        local_endpoint.write_endpoint(relay_file, dataclasses.replace(
+            endpoint, url=endpoint.url.replace(f":{port}", f":{relay.port}"),
+        ))
+        running = asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(
+                daemon_client.run, "Top-level on box", machine="box", model=self.model,
+                endpoint_file=relay_file, reconnect_seconds=15.0,
+            ),
+        )
+        # The machine's task is in its model call, so the caller has the
+        # run's first frames (its chat among them) when the link drops.
+        for _ in range(300):
+            if _DelegatingModel.calls:
+                break
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(1.0)
+        relay.cut()
+        result = await running
+        self.assertTrue(result.success)
+        self.assertIn(CHILD_SUMMARY, result.text)
+        self.assertEqual(relay.accepted, 2)
+
     async def test_two_sub_agents_on_the_machine_keep_their_own_tabs(self) -> None:
         """Siblings on one machine: each stream relays its own run's new_tab, not the other's."""
         _DelegatingModel.script = [
@@ -633,7 +702,8 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
         )
         self.assertTrue(tool_result, f"no run_agent result among {_DelegatingModel.tool_results}")
         self.assertIn("success: false", tool_result)
-        self.assertIn("Task failed with error:", tool_result)
+        # An HTML summary, as every sub-agent result is.
+        self.assertIn("<p>Task failed with error:", tool_result)
         self.assertIn("not-a-dir", tool_result)
         # The failure is the sub-task's terminal result event on its tab
         # too: live when the tab's ``resumeSession`` reached the box
@@ -654,7 +724,9 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
         child_results = [ev for ev in transcript if ev.get("type") == "result"]
         self.assertEqual(len(child_results), 1, child_results)
         self.assertFalse(child_results[0].get("success", True))
-        self.assertIn("Task failed with error:", json.dumps(child_results[0]))
+        # In ``summary``, which a surface renders as HTML: as ``text``
+        # alone its tags would be shown escaped.
+        self.assertIn("<p>Task failed with error:", str(child_results[0].get("summary")))
         self.assertIn(
             ("subagentDone", child),
             [(m["type"], m.get("tabId") or m.get("tab_id")) for m in seen],
@@ -702,7 +774,7 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
             _DelegatingModel.calls = 0
             _DelegatingModel.tool_results = []
             # A local call falls under the same-family rule: the task asks
-            # for the sub-agent (fanout_guard.same_family_conflict).
+            # for the sub-agent (fanout_guard.same_model_conflict).
             seen, child = await self._delegate(
                 tab, prompt="Delegate to a sub-agent on this machine",
             )
@@ -733,6 +805,90 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
         )
         self.assertIn("'nowhere' is not a registered machine (registered: box)", tool_result)
         self.assertEqual(_remote_rows(self.remote.home), [])
+
+
+def test_a_two_daemons_test_leaves_the_machine_state_as_found() -> None:
+    """A :class:`TwoDaemonsCase` test starts from no machine and puts back what it found.
+
+    Registering ``box`` teaches the local daemon the box's host name
+    (this host's), in memory and in ``machine_hosts.json``; left behind,
+    a later test's machine named ``box`` was taken for the one on this
+    host.
+    """
+
+    class _Registered(TwoDaemonsCase):
+        async def test_only_box_is_known(self) -> None:
+            self.assertEqual([m.name for m in mach.load_machines()], ["box"])
+            self.assertEqual(mach._hosts, {"box": mach.local_machine_name()})
+
+    found = _machine_state()
+    earlier = mach.Machine(name="earlier", url="https://127.0.0.1:1", password="x")
+    mach.save_machines([earlier])
+    mach.note_host(earlier, "earlier-host")
+    before = _machine_state()
+    try:
+        result = unittest.TestResult()
+        _Registered("test_only_box_is_known").run(result)
+        assert (result.errors + result.failures, _machine_state()) == ([], before)
+    finally:
+        _restore_machine_state(*found)
+
+
+def _listening(port: int) -> bool:
+    """Whether something accepts connections on loopback *port*."""
+    with socket.socket() as probe:
+        probe.settimeout(5)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _run_failing_set_up(case: TwoDaemonsCase) -> None:
+    """Run *case*, whose set-up fails at a daemon's start; check what it leaves behind."""
+    threads = set(threading.enumerate())
+    result = unittest.TestResult()
+    case.run(result)
+    (error,) = result.errors
+    assert "remote daemon exited with" in error[1] and not result.failures
+    # A thread that is no daemon thread is what kept pytest from exiting.
+    assert not [t for t in threading.enumerate() if t not in threads and not t.daemon]
+    assert not _listening(case.model_port)
+    assert not os.path.exists(case.tmpdir)
+
+
+def test_a_two_daemons_set_up_that_fails_stops_what_it_started() -> None:
+    """A :class:`TwoDaemonsCase` set-up that fails part-way leaves nothing running.
+
+    unittest skips the tear-down then.  The scripted model, served on a
+    thread of the event loop's executor, went on serving: the test took
+    the five minutes asyncio gives that executor's threads to end, and
+    pytest printed its summary and never exited.  A box that cannot
+    start fails the set-up once the model is up; a second daemon told to
+    bind the box's port fails it once everything is.
+    """
+
+    class _NeverRuns(TwoDaemonsCase):
+        async def test_never_runs(self) -> None:
+            self.fail("the set-up was to fail")
+
+    class _BoxCannotStart(_NeverRuns):
+        async def asyncSetUp(self) -> None:
+            # No standard library there: the box's interpreter exits at once.
+            self.addCleanup(restore_env, "PYTHONHOME", os.environ.get("PYTHONHOME"))
+            os.environ["PYTHONHOME"] = os.devnull
+            await super().asyncSetUp()
+
+    class _BoxPortTaken(_NeverRuns):
+        async def asyncSetUp(self) -> None:
+            await super().asyncSetUp()
+            await asyncio.to_thread(
+                start_remote_daemon, Path(self.tmpdir) / "second-home", port=self.remote.port,
+            )
+
+    box_less = _BoxCannotStart("test_never_runs")
+    _run_failing_set_up(box_less)
+    assert not hasattr(box_less, "remote")
+    complete = _BoxPortTaken("test_never_runs")
+    _run_failing_set_up(complete)
+    assert complete.remote.process.poll() is not None and not _listening(complete.server.port)
 
 
 # What the dispatcher decides for a run on a machine, checked on the

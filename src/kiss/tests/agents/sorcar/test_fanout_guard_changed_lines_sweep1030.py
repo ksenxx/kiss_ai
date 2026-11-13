@@ -64,6 +64,45 @@ def test_untracked_files_count_like_git_numstat(tmp_path: Path) -> None:
     assert fanout_guard.changed_lines(str(repo)) == 6
 
 
+def test_only_the_work_dir_subtree_counts_staged_or_not(tmp_path: Path) -> None:
+    """Review of 2026-11-11 (S6, finding 3): tracked changes counted repository-wide and
+    untracked files under the work dir only, so staging a file outside it changed the count."""
+    repo = _repo(tmp_path)
+    (repo / "inside").mkdir()
+    (repo / "inside" / "kept.py").write_text("kept\n")
+    (repo / "tracked.py").write_text("one\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "base")
+    inside = str(repo / "inside")
+    (repo / "outside.py").write_text("line one\nline two\n")
+    (repo / "tracked.py").write_text("one\ntwo\nthree\n")
+    assert (fanout_guard.changed_lines(inside), fanout_guard.changed_lines(str(repo))) == (0, 4)
+    _git(repo, "add", "outside.py")
+    assert (fanout_guard.changed_lines(inside), fanout_guard.changed_lines(str(repo))) == (0, 4)
+    (repo / "inside" / "kept.py").write_text("kept\nmore\n")
+    (repo / "inside" / "new.py").write_text("a\nb\nc\n")
+    assert (fanout_guard.changed_lines(inside), fanout_guard.changed_lines(str(repo))) == (4, 8)
+    _git(repo, "add", ".")
+    assert (fanout_guard.changed_lines(inside), fanout_guard.changed_lines(str(repo))) == (4, 8)
+
+
+def test_a_repository_without_a_commit_counts_its_staged_files(tmp_path: Path) -> None:
+    """Audit of 2026-11-12 (B4): before the first commit ``HEAD`` names nothing, the diff
+    against it failed unnoticed, and a staged file counted none: a new project's review
+    lost its budget as its files were staged."""
+    repo = tmp_path / "repo"
+    (repo / "inside").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    (repo / "new.py").write_text("a\nb\nc\n")
+    (repo / "inside" / "kept.py").write_text("kept\n")
+    inside = str(repo / "inside")
+    assert (fanout_guard.changed_lines(inside), fanout_guard.changed_lines(str(repo))) == (1, 4)
+    _git(repo, "add", ".")
+    assert (fanout_guard.changed_lines(inside), fanout_guard.changed_lines(str(repo))) == (1, 4)
+    (repo / "new.py").write_text("a\nb\nc\nd\n")  # an unstaged line on a staged file
+    assert fanout_guard.changed_lines(str(repo)) == 5
+
+
 def test_a_file_past_git_big_file_threshold_counts_none(tmp_path: Path) -> None:
     """git diffs a file bigger than core.bigFileThreshold as binary: it is not read either."""
     repo = _repo(tmp_path)

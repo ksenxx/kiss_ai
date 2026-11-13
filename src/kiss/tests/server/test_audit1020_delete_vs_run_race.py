@@ -31,12 +31,14 @@ from __future__ import annotations
 import shutil
 import tempfile
 import threading
+import time
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar import sea_commands
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
+from kiss.server.commands import _CommandsMixin
 from kiss.tests.server.conftest import (
     EntryGate,
     clear_agent_states,
@@ -53,6 +55,23 @@ def _count(sql: str, *params: object) -> int:
     return int(row[0])
 
 
+class _AfterClock(EntryGate):
+    """An :class:`EntryGate` that parks the thread once ``time.time()`` returned in the function."""
+
+    def __call__(self, frame: Any, event: str, arg: Any) -> None:
+        if event == "c_return" and arg is time.time and frame.f_code is self.code:
+            self.reached.set()
+            self.release.wait(30)
+
+
+def _next_tick() -> float:
+    """A wall-clock reading strictly later than the one taken on entry."""
+    start, deadline = time.time(), time.monotonic() + 5
+    while (now := time.time()) <= start:
+        assert time.monotonic() < deadline, "the wall clock does not advance"
+    return now
+
+
 class TestDeleteVersusStartingRun:
     def setup_method(self) -> None:
         clear_agent_states()
@@ -66,9 +85,7 @@ class TestDeleteVersusStartingRun:
         if self.gate is not None:
             self.gate.release.set()
         clear_agent_states()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -182,3 +199,32 @@ class TestDeleteVersusStartingRun:
         assert _count("SELECT COUNT(*) FROM task_history") == 1
         assert [e["type"] for e in events] == ["notice"]
         assert server._history_deletes == 0
+
+    def test_an_earlier_delete_storing_last_does_not_move_the_cut_back(self) -> None:
+        """The first delete has read the clock; the second must not get its cut in before it."""
+        older, _ = th._add_task("older prompt")
+        newer, _ = th._add_task("newer prompt")
+        th._add_task("kept prompt")
+        server, events = make_capturing_server()
+        self.gate = _AfterClock(_CommandsMixin._delete_history.__code__)
+        first = self.gate.start(server._cmd_delete_task, {"taskId": older})
+        second = threading.Thread(
+            target=server._cmd_delete_task, args=({"taskId": newer},), daemon=True,
+        )
+        assert self.gate.reached.wait(30), "the first delete never read the clock"
+        threading.setprofile(None)  # only ``first`` carries the gate
+        held = _next_tick()  # a page's watermark: after the first delete's time ...
+        _next_tick()  # ... and before the second's
+        second.start()
+        second.join(0.5)  # over before the release only when the cut is stored without the lock
+        self.gate.release.set()
+        first.join(timeout=30)
+        second.join(timeout=30)
+        assert not first.is_alive() and not second.is_alive()
+
+        server._get_input_history("c1", since=held)
+
+        reply = [e for e in events if e["type"] == "inputHistory"][-1]
+        assert "since" not in reply and reply["tasks"] == ["kept prompt"], (
+            f"BUG: a list older than the last deletion was refreshed with a delta: {reply}"
+        )

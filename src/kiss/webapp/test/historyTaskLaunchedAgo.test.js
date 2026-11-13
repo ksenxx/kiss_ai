@@ -26,11 +26,20 @@ const {
   captureTimers,
   loadRemoteCss,
 } = require('./simplify2_harness');
-const {loadHistory, makeSession, historyRows} = require('./history_helpers');
+const {
+  loadHistory,
+  makeSession,
+  historyRows,
+  freezeClock,
+} = require('./history_helpers');
 
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
+// The pages' clock stays at this instant, and the tests date their sessions
+// from it (`win.Date.now()`): a label's age is then the fixture's, however
+// long after it the page renders.
+const FROZEN_NOW_MS = 1_700_500_000_000;
 
 /**
  * Build a chat page under jsdom.  When *captureTimeouts* is set, every
@@ -42,6 +51,7 @@ function makePage(captureTimeouts) {
   const {win, posted} = makeChatPage({
     beforeScripts(win) {
       loadRemoteCss(win);
+      freezeClock(win, FROZEN_NOW_MS);
       if (captureTimeouts) timeouts = captureTimers(win);
     },
   });
@@ -54,7 +64,7 @@ function makePage(captureTimeouts) {
 
 function testUnitLadder() {
   const {win} = makePage();
-  const now = Date.now();
+  const now = win.Date.now();
   // One session per rung. Identify each row by chat, independent of
   // the history renderer's running-first/chronological section order.
   const cases = [
@@ -129,7 +139,7 @@ function testUnitLadder() {
 
 function testTimestampSources() {
   const {win} = makePage();
-  const now = Date.now();
+  const now = win.Date.now();
   loadHistory(win, [
     makeSession({
       id: 'chat-a',
@@ -208,7 +218,9 @@ function testTimestampSources() {
 
 function testFutureClockSkew() {
   const {win} = makePage();
-  loadHistory(win, [makeSession({startTs: Date.now() + 5 * MINUTE_MS})]);
+  loadHistory(win, [
+    makeSession({startTs: win.Date.now() + 5 * MINUTE_MS}),
+  ]);
   assert.strictEqual(
     historyRows(win)[0].querySelector('.sidebar-item-launched').textContent,
     'just now',
@@ -224,7 +236,7 @@ function testFutureClockSkew() {
 
 function testPeriodicRefresh() {
   const {win, timeouts} = makePage(true);
-  const now = Date.now();
+  const now = win.Date.now();
   loadHistory(win, [
     makeSession({startTs: now - 45 * 1000}), // "just now" at render time
   ]);

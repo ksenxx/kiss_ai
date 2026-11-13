@@ -73,9 +73,7 @@ class TestFailedTaskResultEventPersisted:
     def teardown_method(self):
         agent_state.agent_states.clear()
         th._flush_chat_events()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -210,9 +208,7 @@ class TestTaskRunnerFailureResultPersistedE2E:
     def teardown_method(self):
         agent_state.agent_states.clear()
         th._flush_chat_events()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

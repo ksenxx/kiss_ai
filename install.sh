@@ -1661,10 +1661,11 @@ COMPILE_KEEP_SOURCE=(
     # and by hatchling for the project version.
     "src/kiss/core/_version.py"
     # kiss.scripts.sync_db ships its own source (``__file__``) and these
-    # two modules' to the remote machine it synchronizes the database with.
+    # three modules' to the remote machine it synchronizes the database with.
     "src/kiss/scripts/sync_db.py"
     "src/kiss/agents/sorcar/chat_summary.py"
     "src/kiss/agents/sorcar/history_columns.py"
+    "src/kiss/scripts/carry_over_tables.py"
     # The /sync_history_and_memory SEA ships this module's source with its
     # memory_delta.py to the remote (peer_sync.MERGE_PAGES_PATH), and
     # scripts/sync-memory.sh runs it as a script.
@@ -1740,7 +1741,7 @@ copy_app_files() {
 # A white-label brand keeps its own versions of these frontend files in
 # the checkout's ``.brand/`` directory; the app gets them in place of the
 # stock files.
-BRAND_OVERLAY_FILES=(brand.json brand.css kiss-icon.svg kiss-icon.png thumbnail.jpeg welcome-logo.png welcome-logo-dark.png)
+BRAND_OVERLAY_FILES=(brand.json brand.css kiss-icon.svg kiss-icon.png welcome-logo.png welcome-logo-dark.png)
 BRAND_MEDIA_REL="src/kiss/webapp/media"
 
 copy_brand_overlay() {

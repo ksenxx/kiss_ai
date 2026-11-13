@@ -35,6 +35,7 @@ from kiss.agents.sorcar import persistence as th
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.server.web_server import Payload, WebPrinter
+from kiss.tests.persistence_helpers import close_db
 
 OWNER_TAB = "owner-tab"
 
@@ -45,7 +46,7 @@ class TestHistoryAwaitingAnswer(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="kiss-history-ask-test-")
         self.orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
-        th._close_db()
+        close_db()
         th._DB_PATH = Path(self.tmp) / "history.db"  # type: ignore[attr-defined]
         self.printer = WebPrinter()
         self.server = AgentServer(printer=self.printer)
@@ -72,7 +73,7 @@ class TestHistoryAwaitingAnswer(unittest.TestCase):
         self.done.wait(timeout=2.0)
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
-        th._close_db()
+        close_db()
         th._DB_PATH = self.orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(self.tmp, ignore_errors=True)
 

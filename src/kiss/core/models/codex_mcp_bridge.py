@@ -76,6 +76,10 @@ STOP_WAIT_SECONDS = 5.0
 
 ToolExecutor = Callable[[dict[str, Any]], tuple[str, str]]
 
+# What a Stop raises in the task thread: the daemon's forced Stop (or a
+# Ctrl+C), and the per-panel Stop of the tool call an inline agent runs as.
+_STOPS = (KeyboardInterrupt, tool_interrupt.ToolCallInterrupted)
+
 # The reply of a call the bridge refused because it is closing.
 _REFUSED = {"error": "KISSError: the KISS tool bridge is closed"}
 
@@ -99,8 +103,12 @@ def _read_request_line(sock: socket.socket, deadline: float) -> bytes:
         deadline: When to give up.
 
     Returns:
-        The line with its newline, or ``b""`` when the client hung up,
-        went past the deadline or the size cap first.
+        The line with its newline, or ``b""`` when the client hung up or
+        went past the size cap or, between two receives, the deadline.
+
+    Raises:
+        TimeoutError: A receive got no byte by the deadline: the handler
+            fails and its socket is closed (:meth:`_BridgeServer.handle_error`).
     """
     timeout = sock.gettimeout()
     line = bytearray()
@@ -152,19 +160,6 @@ def _send_line(sock: socket.socket, payload: dict[str, Any]) -> None:
     sock.sendall(json.dumps(payload).encode("utf-8") + b"\n")
 
 
-def _function_schemas(tools_schema: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return the ``{"name", "description", "parameters"}`` dicts of an OpenAI tools schema.
-
-    Args:
-        tools_schema: Tools in the OpenAI ``{"type": "function", "function": {...}}``
-            layout produced by ``Model._build_openai_tools_schema``.
-
-    Returns:
-        The inner function descriptions, in order.
-    """
-    return [tool["function"] for tool in tools_schema]
-
-
 class _BridgeServer(socketserver.ThreadingTCPServer):
     """Loopback TCP server that answers tool-list and tool-call requests.
 
@@ -179,7 +174,9 @@ class _BridgeServer(socketserver.ThreadingTCPServer):
     def __init__(self, tools_schema: list[dict[str, Any]], execute: ToolExecutor):
         super().__init__(("127.0.0.1", 0), _BridgeHandler)
         self.token = secrets.token_hex(32)
-        self.tools = _function_schemas(tools_schema)
+        # The ``{"name", "description", "parameters"}`` of each tool, out of
+        # its OpenAI ``{"type": "function", "function": {...}}`` wrapper.
+        self.tools = [tool["function"] for tool in tools_schema]
         self.tool_names = frozenset(tool["name"] for tool in self.tools)
         self.execute = execute
         self.execute_lock = threading.Lock()
@@ -334,10 +331,10 @@ class ToolBridge:
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="kiss-mcp-bridge", daemon=True
         )
-        # A Stop that landed in :meth:`_close`, re-raised once it is done, and
-        # the bounded wait's deadline: on the instance so that they survive
-        # a step's retry (see :meth:`_close`).
-        self._forced_stop: KeyboardInterrupt | None = None
+        # A Stop that ended the block or landed in :meth:`_close` (re-raised
+        # once it is done), and the bounded wait's deadline: on the instance
+        # so that they survive a step's retry (see :meth:`_close`).
+        self._forced_stop: BaseException | None = None
         self._stop_deadline: float | None = None
 
     @property
@@ -374,7 +371,7 @@ class ToolBridge:
 
         Returns:
             ``-c key=value`` pairs for ``mcp_servers.kiss``; the values
-            are JSON-encoded, which is valid TOML for strings and arrays.
+            are TOML literals (:func:`toml_value`).
             ``default_tools_approval_mode="approve"`` pre-approves every
             call: ``codex exec`` runs with ``approval_policy=never`` and
             would otherwise refuse the call instead of asking.
@@ -408,30 +405,39 @@ class ToolBridge:
     def __enter__(self) -> "ToolBridge":
         try:
             self._thread.start()
-        except BaseException:
+        except BaseException as e:
             # A task-thread Stop (``KeyboardInterrupt`` injected with
             # ``PyThreadState_SetAsyncExc``) lands at the next check
             # point, which can be inside ``start()`` after the OS
             # thread was spawned: ``__exit__`` never runs for an
             # ``__enter__`` that raised, so the listener would serve
             # for good.  Close it on the way out.
-            self._close()
+            self._close(e)
             raise
         return self
 
     def __exit__(self, *exc_info: object) -> None:
-        self._close()
+        self._close(exc_info[1])
 
-    def _close(self) -> None:
-        """Stop the listener, refuse late calls, then wait for the calls still executing.
+    def _close(self, leaving: object) -> None:
+        """Refuse late calls, stop the listener, then wait for the calls still executing.
 
-        A handler accepted before the listener stopped may still be
+        *leaving* is the exception ending the block, if any.  A Stop among
+        them (a per-panel Stop of the inline agent, a Ctrl+C: neither
+        sets the task's stop event) bounds the wait like one landing
+        here; Python re-raises it itself once this returns.
+
+        The refusal comes first: the listener takes up to its poll
+        interval to stop, and a call queued behind a tool that returns
+        meanwhile must not start its own tool after the block.  A
+        handler accepted before the listener stopped may still be
         reading its request line; it is not in ``running`` yet, so the
         refusal, set under the same lock the registration takes, is
         what keeps it from running a tool after the block.
 
-        A Stop (an injected ``KeyboardInterrupt``) landing while the
-        listener shuts down, the refusal is set or the wait begins must
+        A Stop (an injected ``KeyboardInterrupt`` or
+        ``ToolCallInterrupted``) landing while the
+        refusal is set, the listener shuts down or the wait begins must
         still interrupt and await the calls already executing, or a
         long tool would keep working on its daemon thread after the run
         returned.  A ``finally`` is not enough: the exception lands at
@@ -442,18 +448,20 @@ class ToolBridge:
         every step is done.
         """
         steps = [
+            self._refuse_new_calls,
             self._stop_listener,
             self._server.server_close,
-            self._refuse_new_calls,
             self._wait_for_calls,
         ]
         while steps:
             try:
+                if self._forced_stop is None and isinstance(leaving, _STOPS):
+                    self._forced_stop = leaving
                 steps[0]()
                 del steps[0]
-            except KeyboardInterrupt as e:
+            except _STOPS as e:
                 self._forced_stop = e
-        if self._forced_stop is not None:
+        if self._forced_stop is not None and self._forced_stop is not leaving:
             raise self._forced_stop
 
     def _stop_listener(self) -> None:
@@ -482,9 +490,10 @@ class ToolBridge:
         marked the bridge closing first, a queued call is refused the
         moment it is first in line (:meth:`_BridgeServer.serve_call`).
 
-        A ``KeyboardInterrupt`` raised in this thread meanwhile (the
-        daemon's forced Stop, injected a second after the stop event;
-        a Ctrl+C) is a Stop too: :meth:`_close` holds it as
+        A ``KeyboardInterrupt`` or ``ToolCallInterrupted`` raised in this
+        thread meanwhile, or ending the block (the daemon's forced Stop,
+        injected a second after the stop event; a Ctrl+C; the per-panel
+        Stop of an inline agent) is a Stop too: :meth:`_close` holds it as
         ``_forced_stop`` and retries the wait, now a bounded one, so it
         cannot cut the wait short and leave an interrupted tool working
         after the run has returned.

@@ -26,15 +26,27 @@ const {
   newDom,
 } = require('./simplify2_harness');
 
-const {test, report} = require('./ui_antipattern_harness').makeRunner();
-const {all} = require('./ui_antipattern_harness');
+const {
+  makeRunner,
+  all,
+  forbidNativeDialogs,
+} = require('./ui_antipattern_harness');
 const {
   todayNoonSec,
+  dayLabel,
+  freezeClock,
   groupedSession: session,
   sendHistoryPage: sendHistory,
   listShape,
   historyRow: firstRow,
 } = require('./history_helpers');
+
+const {test, report} = makeRunner();
+
+// The page's clock stays at the noon the fixture rows are dated from, so
+// a run that crosses midnight still files them under Today / Yesterday,
+// and a running row's duration does not depend on how long a render takes.
+const todayNoon = todayNoonSec();
 
 function makePage() {
   return makeChatPage({
@@ -43,13 +55,9 @@ function makePage() {
       stubRaf(win);
       fakeMatchMedia(win, true);
       stubClipboard(win);
-      // Native dialogs are gone from main.js; any call is a regression.
-      win.prompt = () => {
-        throw new Error('window.prompt must not be called');
-      };
-      win.confirm = () => {
-        throw new Error('window.confirm must not be called');
-      };
+      freezeClock(win, todayNoon * 1000);
+      // Native dialogs are gone from main.js; a call fails the test.
+      forbidNativeDialogs(win);
     },
     extraScripts: [
       'marked.min.js',
@@ -143,7 +151,6 @@ async function main() {
   // ---- History grouping ----
 
   const DAY = 86400;
-  const todayNoon = todayNoonSec();
 
   /** Fresh rows for the two-chat page, including every identical refresh. */
   function page1() {
@@ -168,17 +175,6 @@ async function main() {
       ...page1(),
     ]);
     return {win, posted, rowBefore};
-  }
-
-  // The separator label of a day that is neither today nor yesterday:
-  // the year is shown only for a day outside the current year, so a
-  // fixture that falls in another year (three days ago on January 2,
-  // January 2026 in any later year) expects it too.
-  function dayLabel(tsSec) {
-    const d = new Date(tsSec * 1000);
-    const opts = {weekday: 'short', month: 'short', day: 'numeric'};
-    if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
-    return d.toLocaleDateString(undefined, opts);
   }
 
   function groups(win) {
@@ -222,7 +218,7 @@ async function main() {
   await test('History: tasks grouped by chat, chats by latest task, day separators', async () => {
     const {win, posted} = makePage();
     const threeDaysAgo = todayNoon - 3 * DAY;
-    const label = dayLabel(threeDaysAgo);
+    const label = dayLabel(threeDaysAgo, todayNoon);
     sendHistory(win, posted, 0, [
       session('A', 'a2', todayNoon),
       session('B', 'b2', todayNoon - 600),
@@ -640,7 +636,7 @@ async function main() {
     // path must keep the node (so clicks/focus survive) but refresh the
     // metrics text so the duration keeps ticking.  This is the shape of
     // every running row and of completed rows lacking a recorded end.
-    const startTs = Date.now() - 59000;
+    const startTs = win.Date.now() - 59000;
     const page1 = () => [
       session('A', 'a1', todayNoon, {is_running: true, startTs}),
       session('B', 'b1', todayNoon - 600),
@@ -649,7 +645,7 @@ async function main() {
     const rowBefore = firstRow(win);
     const metricsEl = rowBefore.querySelector('.running-item-metrics');
     const textBefore = metricsEl.textContent;
-    assert.ok(/00:00:59|00:01:0\d/.test(textBefore), textBefore);
+    assert.ok(/00:00:59/.test(textBefore), textBefore);
     const realNow = win.Date.now;
     win.Date.now = () => realNow() + 60000;
     try {
@@ -668,7 +664,7 @@ async function main() {
         textBefore,
         'the duration must be recomputed in place',
       );
-      assert.ok(/00:01:59|00:02:0\d/.test(textAfter), textAfter);
+      assert.ok(/00:01:59/.test(textAfter), textAfter);
     } finally {
       win.Date.now = realNow;
     }
@@ -1220,10 +1216,6 @@ async function main() {
       // At the deadline the timer refetches; the daemon's (contrary)
       // value now rules because the overlay has expired.
       win.Date.now = () => realNow() + 11000;
-      // The tasks_updated above was this tick's refresh; a second one
-      // in the same tick folds into the end-of-tick refetch, so let the
-      // tick end before the timer fires.
-      await sleep(0);
       const asked = ofType(posted, 'getHistory').length;
       fire();
       assert.ok(
@@ -1289,9 +1281,6 @@ async function main() {
       // At A's deadline the timer refetches; A's overlay has expired
       // (daemon value rules) while B's still holds.
       win.Date.now = () => T + 10200;
-      // Same tick as timers[0]'s refresh: let it end so this one is not
-      // folded into its end-of-tick refetch.
-      await sleep(0);
       const asked = ofType(posted, 'getHistory').length;
       timers[2].fn();
       assert.ok(
@@ -1677,9 +1666,8 @@ async function main() {
 
   await test('History: epoch 0 is a date, a missing timestamp is "Undated"; other years show the year', async () => {
     const {win, posted} = makePage();
-    const lastYear = new Date();
+    const lastYear = new Date(todayNoon * 1000);
     lastYear.setFullYear(lastYear.getFullYear() - 1);
-    lastYear.setHours(12, 0, 0, 0);
     const lastYearTs = Math.floor(lastYear.getTime() / 1000);
     const missing = session('C', 'c1', 0);
     delete missing.timestamp;
@@ -1741,7 +1729,7 @@ async function main() {
         'one local day after the zone change',
       );
       assert.deepStrictEqual(listShape(win).slice(0, 3), [
-        'sep:' + dayLabel(t1),
+        'sep:' + dayLabel(t1, todayNoon),
         'chat:B[task b1]',
         'chat:C[task c1]',
       ]);

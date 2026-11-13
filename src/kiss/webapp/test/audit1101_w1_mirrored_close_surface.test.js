@@ -71,6 +71,23 @@ async function runChatWithBackgroundFile(ctx) {
   });
   send(win, {type: 'text_end', tabId: 'a1', taskId: 't1'});
   send(win, {
+    type: 'task_settings',
+    tabId: 'a1',
+    taskId: 't1',
+    settings: {task_id: 't1', chat_id: 'chat-1', model: 'closed-model'},
+  });
+  send(win, {
+    type: 'usage_info',
+    tabId: 'a1',
+    taskId: 't1',
+    total_tokens: 1234,
+    cost: 0.5,
+    total_steps: 3,
+  });
+  assert.strictEqual(byId(win, 'meta-task-id').textContent, 't1');
+  assert.strictEqual(byId(win, 'meta-model').textContent, 'closed-model');
+  assert.match(byId(win, 'status-tokens').textContent, /^Tokens: /);
+  send(win, {
     type: 'fileContent',
     tabId: 'a1',
     path: '/ws/a/notes.txt',
@@ -124,6 +141,25 @@ async function testStackedMirroredCloseOntoAFileClearsTheChatSurface() {
       'none',
       'nothing is running: no Stop button',
     );
+    // Audit 2026-11-11 (W1): the Task Info rows and the usage numbers
+    // described the closed chat's task; they leave with it.
+    assert.notStrictEqual(
+      byId(win, 'meta-task-id').textContent,
+      't1',
+      "BUG - the closed chat's task id must leave Task Info",
+    );
+    assert.notStrictEqual(
+      byId(win, 'meta-model').textContent,
+      'closed-model',
+      "BUG - the closed chat's model must leave Task Info",
+    );
+    assert.strictEqual(
+      byId(win, 'status-tokens').textContent +
+        byId(win, 'status-budget').textContent +
+        byId(win, 'status-steps').textContent,
+      '',
+      "BUG - the closed chat's usage numbers must leave the status row",
+    );
     // A chat opened afterwards starts clean.
     send(win, {
       type: 'tabs_state',
@@ -170,8 +206,9 @@ async function testSplitMirroredCloseKeepsThePlaceholderChat() {
       !output(win).textContent.includes('transcript of closed chat'),
       "the closed chat's transcript left #output",
     );
+    const welcome = byId(win, 'welcome');
     assert.ok(
-      output(win).textContent.includes('Welcome to'),
+      output(win).contains(welcome) && welcome.style.display !== 'none',
       'the placeholder shows its welcome screen',
     );
     assert.strictEqual(byId(win, 'stop-btn').style.display, 'none');

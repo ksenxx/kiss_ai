@@ -47,7 +47,7 @@ import tempfile
 import time
 import types
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -109,7 +109,8 @@ def fingerprints(memory_dir: Path) -> dict[str, str]:
         tombstone beside a live page of the same name is left out: it is
         the stale remains of an interrupted deletion, which the merge
         ignores when it sees the page -- sent on its own it would read as
-        a deletion.
+        a deletion.  An entry an agent removes between its listing and
+        its reading is left out too (:func:`_fingerprint`).
     """
     rules = merge_module()
     found: dict[str, str] = {}
@@ -122,16 +123,24 @@ def fingerprints(memory_dir: Path) -> dict[str, str]:
     ]:
         for entry in sorted(memory.iterdir()):
             if rules.is_page(entry):
-                found[prefix + entry.name] = _digest(entry)
+                _fingerprint(entry, prefix + entry.name, found)
         for name, (tombstone, _) in rules.tombstones(memory).items():
             if f"{prefix}{name}.md" not in found:
-                found[f"{prefix}{rules.TOMBSTONES_DIR}/{name}"] = _digest(tombstone)
+                _fingerprint(tombstone, f"{prefix}{rules.TOMBSTONES_DIR}/{name}", found)
     return found
 
 
-def _digest(path: Path) -> str:
-    """Return the sha1 hex digest of a file's bytes."""
-    return hashlib.sha1(path.read_bytes()).hexdigest()  # noqa: S324 - content id, not security
+def _fingerprint(path: Path, key: str, found: dict[str, str]) -> None:
+    """Record the sha1 hex digest of a file's bytes in *found* under *key*, unless the file is gone.
+
+    The memory is read while agents use it: a page listed a moment ago
+    may have been deleted since, and a tombstone removed because its
+    page was written again.  Such an entry is left out, as if the memory
+    had been listed a moment later; raising for it failed the machine's
+    whole sync.
+    """
+    with suppress(FileNotFoundError):
+        found[key] = hashlib.sha1(path.read_bytes()).hexdigest()  # noqa: S324 - content id
 
 
 def differing(mine: dict[str, str], theirs: dict[str, str]) -> set[str]:
@@ -147,10 +156,19 @@ def differing(mine: dict[str, str], theirs: dict[str, str]) -> set[str]:
 def pack(memory_dir: Path, entries: list[str], out: BinaryIO) -> int:
     """Write the named pages and tombstones of *memory_dir* to *out* as a gzip'd tar.
 
-    An entry that is not a valid relative path, or that is gone by the
-    time it is read (a page deleted since the fingerprints were taken),
-    is left out; modification times travel, the merge compares them for
-    pages that carry the same ``updated`` stamp.
+    An entry that is not a valid relative path, or that is not there
+    when it is read (a page of the other machine only, or one deleted
+    since the fingerprints were taken), is left out; modification times
+    travel, the merge compares them for pages that carry the same
+    ``updated`` stamp.
+
+    Each entry is opened once and travels as what that one file holds:
+    its bytes, their count and its modification time.  An agent
+    replaces or deletes a page at any moment, by an atomic rename, so
+    whether the page is there and how long it is are not asked of the
+    path beforehand, as ``TarFile.add`` does: the answer could be the
+    replaced page's, and a longer new page then arrived cut short while
+    a shorter or a deleted one aborted the stream.
 
     Args:
         memory_dir: The memory.
@@ -164,9 +182,21 @@ def pack(memory_dir: Path, entries: list[str], out: BinaryIO) -> int:
     with tarfile.open(fileobj=out, mode="w|gz") as archive:
         for entry in sorted(set(entries)):
             path = memory_dir / entry
-            if not ENTRY_RE.match(entry) or path.is_symlink() or not path.is_file():
+            if (
+                not ENTRY_RE.match(entry)
+                or path.is_symlink()
+                or (path.exists() and not path.is_file())  # a directory, a pipe
+            ):
                 continue
-            archive.add(path, arcname=entry, recursive=False)
+            try:
+                with open(path, "rb") as handle:
+                    modified = os.fstat(handle.fileno()).st_mtime
+                    data = handle.read()
+            except (FileNotFoundError, NotADirectoryError):  # not there, or no longer
+                continue
+            member = tarfile.TarInfo(entry)
+            member.size, member.mtime = len(data), modified
+            archive.addfile(member, io.BytesIO(data))
             written += 1
     return written
 

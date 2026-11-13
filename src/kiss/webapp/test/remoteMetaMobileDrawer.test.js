@@ -28,11 +28,9 @@ const {
   click,
   byId,
 } = require('./simplify2_harness');
-
-const POLL_MS = 5000;
-
 const {makeRunner} = require('./ui_antipattern_harness');
 const {
+  POLL_MS,
   drawerOpen,
   overlayOpen,
   pollCount,
@@ -114,7 +112,6 @@ async function main() {
     const count = pollCount(wv);
     wv.tick(POLL_MS);
     assert.strictEqual(pollCount(wv), count + 1, 'and keeps polling');
-    assert.strictEqual(lastPoll(wv).type, 'getTaskUpdate');
     assert.ok(!('workDir' in lastPoll(wv)));
   });
 

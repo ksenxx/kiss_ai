@@ -3,7 +3,7 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// Four main.js races / stale-state bugs, each driven through the real
+// Five main.js races / stale-state bugs, each driven through the real
 // chat.html + api.js + main.js in jsdom (nothing mocked):
 //
 //  1. a finishing task must not pull the keyboard out of a content
@@ -39,10 +39,7 @@ const {
   closeSettings,
   typeInto,
 } = require('./settings_helpers');
-
-function activeTabId(win) {
-  return win._testApi.getActiveTabId();
-}
+const {activeTabId} = require('./subagent_tab_helpers');
 
 function openFile(win, tabId, name) {
   send(win, {

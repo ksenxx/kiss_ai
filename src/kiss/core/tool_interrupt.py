@@ -55,6 +55,7 @@ call's interrupt between the nested calls
 from __future__ import annotations
 
 import ctypes
+import functools
 import itertools
 import logging
 import threading
@@ -62,6 +63,7 @@ import time
 from concurrent.futures import Future
 
 from kiss.core.locked import locked
+from kiss.core.processes import inject_outside_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +119,9 @@ def inject_async_exception(tid: int, exc_type: type[BaseException]) -> int:
     the process cannot change how the arguments are marshalled.  When
     the call reports the exception was set in more than one thread state
     (``rc > 1``), the injection is undone as CPython's documentation
-    requires.
+    requires.  A thread that is starting a child process gets the
+    exception once the child is started
+    (:func:`kiss.core.processes.inject_outside_spawn`).
 
     Args:
         tid: The target thread's ``ident``.
@@ -128,7 +132,9 @@ def inject_async_exception(tid: int, exc_type: type[BaseException]) -> int:
         longer names a live thread, ``1`` on success (values above 1
         have already been rolled back here).
     """
-    rc = int(_SET_ASYNC_EXC(ctypes.c_ulong(tid), ctypes.py_object(exc_type)))
+    rc = inject_outside_spawn(
+        tid, functools.partial(_SET_ASYNC_EXC, ctypes.c_ulong(tid), ctypes.py_object(exc_type))
+    )
     if rc > 1:  # pragma: no cover — rare: exception set in multiple states
         _SET_ASYNC_EXC(ctypes.c_ulong(tid), None)
     return rc
@@ -150,6 +156,10 @@ class ToolCallToken:
             thread the process starts.
         event: Set when the call is interrupted; blocking tools poll it.
         interrupted: ``True`` once a Stop was accepted for this call.
+        armed: ``True`` once the watchdog that forces that Stop has
+            started.  A Stop cut short in between (its sender was
+            stopped itself) leaves the call ``interrupted`` and not
+            ``armed``; the next Stop starts the watchdog.
         injected: ``True`` once :class:`ToolCallInterrupted` has been
             injected into ``thread_ident`` for this call.
         injecting: ``True`` while the interrupting side is between its
@@ -160,9 +170,16 @@ class ToolCallToken:
             that never injects.
         parent: The call this one was registered under (the thread's
             running call at the time, still in progress), or ``None``.
+        response: ``(agent, step)``: the id of the agent that made the
+            call and the number of the model response the call came in,
+            which the calls of one response share.  The step is ``None``
+            for a call a model ran inside its own turn, whose responses
+            the agent does not see apart; both are ``None`` on a token
+            no agent stamped.
     """
 
     __slots__ = (
+        "armed",
         "call_id",
         "closing",
         "event",
@@ -171,6 +188,7 @@ class ToolCallToken:
         "interrupted",
         "name",
         "parent",
+        "response",
         "thread",
         "thread_ident",
     )
@@ -182,10 +200,12 @@ class ToolCallToken:
         self.thread_ident = threading.get_ident()
         self.event = threading.Event()
         self.interrupted = False
+        self.armed = False
         self.injected = False
         self.injecting = False
         self.closing = False
         self.parent: ToolCallToken | None = None
+        self.response: tuple[int | None, int | None] = (None, None)
 
 
 # Serializes the interrupting side only; the tool's own thread never
@@ -532,7 +552,9 @@ def interrupt_tool_call(
     leaving the Codex tool bridge calls this during its own Stop, when
     a ``KeyboardInterrupt`` can land on it at any check point; the
     watchdog takes the lock only after its grace period, so arming it
-    under the lock cannot deadlock.
+    under the lock cannot deadlock.  A Stop cut short that way is
+    completed by the next one: every step is repeated, and
+    :func:`_signal` skips only a watchdog that has started.
 
     Args:
         thread_ident: The ``ident`` of the task thread.
@@ -555,10 +577,6 @@ def interrupt_tool_call(
         return False
     if tool_name and token.name != tool_name:
         return False
-    if token.interrupted:
-        # Already signalled; a second click must not arm a second
-        # watchdog.
-        return True
     # The mark is stored before the registry is read below: a call
     # registering itself under this one meanwhile (at any depth) stores
     # its registry entry before it reads the marks of the calls it is
@@ -568,9 +586,10 @@ def interrupt_tool_call(
     # A call nested in the interrupted one (the thread's registered
     # call, down from the interrupted one through ``parent``) is what
     # runs now: it is signalled too, so the Stop lands in it and the
-    # interrupted call ends once it returns.  One signalled already —
-    # by its own panel (its watchdog is armed) or because it started
-    # interrupted (the agent does not run it) — is left as it is.
+    # interrupted call ends once it returns.  One whose watchdog is
+    # armed (by its own panel, or by an earlier Stop on this call) is
+    # left as it is; one that started interrupted (the agent does not
+    # run it: it ends at once) gets a watchdog that finds it closed.
     nested: list[ToolCallToken] = []
     running = _RUNNING.get(token.thread_ident)
     while running is not None and running is not token:
@@ -578,21 +597,22 @@ def interrupt_tool_call(
         running = running.parent
     if running is token:
         for call in nested:
-            if not call.interrupted:
-                _signal(call)
+            _signal(call)
     return True
 
 
 def _signal(call: ToolCallToken) -> None:
-    """Mark *call* interrupted, set its event and arm its watchdog.  Called under the lock."""
+    """Mark *call* interrupted, set its event and arm its watchdog.  Called under the lock.
+
+    ``armed`` is stored once the watchdog runs, never before: a Stop cut
+    short around that store costs a second watchdog, which finds the
+    call injected or closing and does nothing; one stored early would
+    leave a call no later Stop can force.
+    """
     call.interrupted = True
     call.event.set()
-    logger.info(
-        "Interrupting tool call %s (#%d) on thread %s",
-        call.name,
-        call.call_id,
-        call.thread_ident,
-    )
+    if call.armed:
+        return  # a repeated Stop must not arm a second watchdog
     try:
         threading.Thread(
             target=_inject_after_grace,
@@ -610,3 +630,11 @@ def _signal(call: ToolCallToken) -> None:
             call.name,
             exc_info=True,
         )
+        return
+    call.armed = True
+    logger.info(
+        "Interrupting tool call %s (#%d) on thread %s",
+        call.name,
+        call.call_id,
+        call.thread_ident,
+    )

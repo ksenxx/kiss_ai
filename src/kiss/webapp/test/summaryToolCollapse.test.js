@@ -212,16 +212,24 @@ function testDescriptionFullyVisibleWhileCollapsedViaCss() {
 
 function testCollapsePreviewSuppressedForSummary() {
   const {win} = makePage();
+  loadMainCss(win);
   sendToolPanels(win, 6);
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
   const p = summaryPanels(win)[0];
-  const prev = p.querySelector('.tc-h .collapse-preview');
+  const prev = p.querySelector(':scope > .tc-h > .collapse-preview');
   assert.ok(prev, 'addCollapse still installs the preview span');
   assert.strictEqual(
     (prev.textContent || '').trim(),
     '',
     'the ellipsised header preview must stay empty for summary panels ' +
       '(the description is already fully visible below the header)',
+  );
+  assert.ok(p.classList.contains('collapsed'), 'the summary is folded');
+  assert.strictEqual(
+    win.getComputedStyle(prev).display,
+    'none',
+    'a folded summary hides its empty preview instead of leaving it a ' +
+      'gap in the header',
   );
   win.close();
   console.log('  ok - header collapse-preview suppressed for summary');

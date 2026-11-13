@@ -26,6 +26,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ from kiss.server.server import AgentServer
 from kiss.tests.conftest import executor_of
 from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.conftest import init_repo
+from kiss.tests.server.pause import Pause
 
 
 def _model_picks(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -293,10 +295,9 @@ class _ServerTestCase(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-modelpick-")
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        self._saved_db = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved_db = (th._DB_PATH, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         self._saved_config = (
             vars(user_config).get("CONFIG_DIR"),
             vars(user_config).get("CONFIG_PATH"),
@@ -318,9 +319,8 @@ class _ServerTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
-        if th._db_conn is not None:
-            th._db_conn.close()
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved_db
+        th._close_thread_db()
+        (th._DB_PATH, th._KISS_DIR) = self._saved_db
         saved_dir, saved_path = self._saved_config
         # The module resolves these lazily when unset, so an absent
         # original must be deleted rather than pinned to a stale value.
@@ -470,6 +470,29 @@ class TestAgentOverrideAndRestore(_ServerTestCase):
 
         self.assertEqual(self.picks(), [])
 
+    def _note_state_lock_free(self, _locals: dict[str, Any]) -> bool:
+        """Pause matcher that never holds: can another thread take ``STATE_LOCK`` right now?"""
+        with ThreadPoolExecutor(max_workers=1) as other:
+            free = other.submit(agent_state.STATE_LOCK.acquire, timeout=2).result()
+            if free:
+                other.submit(agent_state.STATE_LOCK.release).result()
+        self._lock_free.append(free)
+        return False
+
+    def test_a_finishing_task_reads_the_saved_model_outside_the_state_lock(self) -> None:
+        """The event loop takes ``STATE_LOCK`` for every opening connection:
+        a slow ``config.json`` read made under it stalled every client."""
+        self._lock_free: list[bool] = []
+
+        # A tab without a pick of its own falls back to the saved model.
+        with Pause(_load_last_model.__code__, self._note_state_lock_free):
+            worker = self._start_task("tab-run", _QuietAgent())
+            worker.join(timeout=120)
+        self.assertFalse(worker.is_alive(), "task worker never finished")
+
+        self.assertTrue(self._lock_free, "the finishing task never read the saved model")
+        self.assertNotIn(False, self._lock_free, "the saved model was read under STATE_LOCK")
+
     def test_a_tab_the_daemon_no_longer_knows_still_gets_its_picker_back(
         self,
     ) -> None:
@@ -477,7 +500,7 @@ class TestAgentOverrideAndRestore(_ServerTestCase):
         back a model rather than left on the agent's."""
         self.server.printer._model_override_tabs.add("tab-gone")
 
-        self.server._restore_user_model_pick("tab-gone")
+        self.server._restore_user_model_pick("tab-gone", _load_last_model())
 
         picks = self.picks()
         self.assertEqual([p["tabId"] for p in picks], ["tab-gone"])

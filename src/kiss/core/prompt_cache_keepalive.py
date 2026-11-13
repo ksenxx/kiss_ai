@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 from kiss.core import stop_signal
@@ -128,8 +129,11 @@ class PromptCacheKeepAlive:
     *cache_touched_at* (the start of the request that last touched the
     cache), later ones the same interval after the previous ping.  The
     thread stops as soon as the body finishes, after a ping fails, when
-    the model reports that it needs no keep-alive (``None``), or after
-    *max_pings*.  ``__exit__`` joins the thread, so the body's caller may
+    the model reports that it needs no keep-alive (``None``), after
+    *max_pings*, or when *may_ping* refuses the next one: it is asked
+    before each ping, on the ping thread, with the responses so far
+    (which the caller bills only after the body, so its budget has to
+    count them here).  ``__exit__`` joins the thread, so the body's caller may
     wait for a ping already in flight (bounded by the model's ping
     deadline, 30 s for Anthropic with retries off; typically 1-3 s),
     which keeps the model object single-threaded again once the body is
@@ -158,6 +162,7 @@ class PromptCacheKeepAlive:
         tools_schema: list[dict[str, Any]] | None,
         cache_touched_at: float,
         max_pings: int | None = None,
+        may_ping: Callable[[list[Any]], bool] | None = None,
     ) -> None:
         self.responses: list[Any] = []
         self.last_ping_at: float | None = None
@@ -168,6 +173,7 @@ class PromptCacheKeepAlive:
         # Read at call time so tests can shorten the module defaults.
         self._interval = KEEP_ALIVE_INTERVAL_SECONDS
         self._max_pings = KEEP_ALIVE_MAX_PINGS if max_pings is None else max_pings
+        self._may_ping = may_ping
         self._stop = threading.Event()
         self._owner_stop = stop_signal.get_thread_stop_event()
         self._thread = threading.Thread(
@@ -214,6 +220,8 @@ class PromptCacheKeepAlive:
             if self._stop.wait(max(0.0, next_ping_at - time.time())):
                 return
             if self._owner_stop is not None and self._owner_stop.is_set():
+                return
+            if self._may_ping is not None and not self._may_ping(self.responses):
                 return
             started = time.time()
             try:

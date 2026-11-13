@@ -30,7 +30,7 @@ const {
   installFakeWebSocket,
   installFakeTimers,
   openNextSocket,
-  settle,
+  unlock,
   frames,
   submitCount,
 } = require('./transport_page_helpers');
@@ -156,10 +156,7 @@ async function main() {
       const next = openNextSocket(sockets, page.timers, 0);
       next.fireOpen();
       next.fireMessage({type: 'auth_required'});
-      window.document.getElementById('auth-modal-input').value =
-        'NewPassword000000000';
-      window.document.getElementById('auth-modal-ok').click();
-      await settle(); // the dialog resolves a promise before the auth frame goes out
+      await unlock(window.document, 'NewPassword000000000');
       transport.postMessage({type: 'getConfig'}); // posted while socket 2 awaits auth_ok
       next.fireMessage({type: 'auth_ok'});
       assert.deepStrictEqual(frames(next).slice(1), [

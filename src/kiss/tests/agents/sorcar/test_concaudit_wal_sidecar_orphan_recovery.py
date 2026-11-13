@@ -46,20 +46,20 @@ from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
 from kiss.tests.conftest import posix_only
+from kiss.tests.persistence_helpers import close_db
 
 
 def _redirect(tmpdir: str):
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore(saved):
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    (th._DB_PATH, th._KISS_DIR) = saved
 
 
 def _unlink_sidecars(db_path: Path) -> None:
@@ -87,12 +87,12 @@ class TestWalSidecarOrphanRecovery:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         th._flush_chat_events()
-        th._close_db()
+        close_db()
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self):
         th._flush_chat_events()
-        th._close_db()
+        close_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

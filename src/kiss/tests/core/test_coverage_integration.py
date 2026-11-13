@@ -36,12 +36,6 @@ class TestKISSAgentErrors(TestCase):
         assert "budget exceeded" in str(ctx.exception)
 
 
-class TestFinalizeStreamResponseErrors(TestCase):
-    def test_raises_on_empty(self) -> None:
-        with pytest.raises(KISSError, match="empty"):
-            OpenAICompatibleModel._finalize_stream_response(None, None)
-
-
 class TestOpenAICompatibleModelEmbedding:
     def test_get_embedding_failure(self) -> None:
         from kiss.core.kiss_error import KISSError

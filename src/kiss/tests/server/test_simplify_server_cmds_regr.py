@@ -243,3 +243,22 @@ def test_get_history_coerces_legacy_int_row_ids() -> None:
     int_session = by_title[f"task-int-{tag}"]
     assert str_session["task_id"] == tid_str
     assert int_session["task_id"] == str(int_id)
+
+
+def test_get_history_offset_beyond_sqlite_range_is_answered() -> None:
+    """A JSON integer has no size limit, SQLite's ``OFFSET`` has 64 bits.
+
+    Such an offset used to escape the handler as an ``OverflowError``,
+    leaving the pager without its ``history`` reply.
+    """
+    persistence._add_task(f"task-offset-{uuid.uuid4().hex}", "")
+    server, printer = _make_server()
+
+    server._handle_command({"type": "getHistory", "offset": 10**30, "connId": "h2"})
+    (past_the_end,) = [e for e in printer.events if e["type"] == "history"]
+    assert past_the_end["sessions"] == []
+
+    printer.events.clear()
+    server._handle_command({"type": "getHistory", "offset": -(10**30), "connId": "h2"})
+    (first_page,) = [e for e in printer.events if e["type"] == "history"]
+    assert first_page["sessions"]

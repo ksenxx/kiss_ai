@@ -2,9 +2,9 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Data behind the right sidebar's "Schedule", "Apps" and "Spend" subpanels.
+"""Data behind the right sidebar's global subpanels.
 
-The chat page's task-info panel stacks three global subpanels under
+The chat page's task-info panel stacks five global subpanels under
 the per-task ones:
 
 * **Schedule** lists the scheduled cron jobs
@@ -93,21 +93,30 @@ _MACHINES_REPLY_SECONDS = (
 
 _apps_lock = threading.Lock()
 _apps_cache: list[dict[str, Any]] = []
-# When the cached statuses were probed, and when the last probe (which
-# may have failed) finished: a failed probe also counts as fresh for
-# the TTL, so callers queued behind it share its outcome instead of
-# each starting another probe.
+# When the cached statuses were probed (epoch seconds, for the caller),
+# and when the last probe (which may have failed) finished: a failed
+# probe also counts as fresh for the TTL, so callers queued behind it
+# share its outcome instead of each starting another probe.  The
+# latter is a ``time.monotonic()`` reading, as every time a cache here
+# is aged by: a wall clock that steps back (an NTP correction) would
+# keep the cache fresh for the length of the step, Refresh included.
 _apps_checked_at = 0.0
-_apps_attempted_at = 0.0
+_apps_attempted_at = -math.inf
 
 
 def _epoch_ms(timestamp: Any) -> int:
-    """Return *timestamp* (epoch seconds) in epoch milliseconds, 0 when unset.
+    """Return *timestamp* (epoch seconds) in epoch milliseconds, 0 when unset or unreadable.
 
     Times travel as epoch numbers, never zone-less local strings: the
     browser showing them may sit in another time zone than the daemon.
+    A stored time that is no finite number is none: the scheduler keeps
+    a job it disabled as malformed in the store with the time it could
+    not read, and the panel still lists that job and the others.
     """
-    return int(float(timestamp or 0) * 1000)
+    try:
+        return int(float(timestamp or 0) * 1000)
+    except (TypeError, ValueError, OverflowError):  # text, a list, NaN, Infinity
+        return 0
 
 
 def cron_jobs_report() -> list[dict[str, Any]]:
@@ -217,17 +226,17 @@ def apps_status(refresh: bool = False) -> tuple[list[dict[str, Any]], int]:
         before the first successful probe).
     """
     global _apps_cache, _apps_checked_at, _apps_attempted_at
-    requested_at = time.time()
+    requested_at = time.monotonic()
     with _apps_lock:
-        age = time.time() - _apps_attempted_at
+        age = time.monotonic() - _apps_attempted_at
         # A probe that finished while this caller waited for the lock
         # already answers a refresh request.
         if age >= APPS_STATUS_TTL_SECONDS or (refresh and _apps_attempted_at < requested_at):
             apps = probe_statuses()
-            _apps_attempted_at = time.time()
+            _apps_attempted_at = time.monotonic()
             if apps:
                 _apps_cache = apps
-                _apps_checked_at = _apps_attempted_at
+                _apps_checked_at = time.time()
         return list(_apps_cache), _epoch_ms(_apps_checked_at)
 
 
@@ -236,7 +245,10 @@ _machines_lock = threading.Lock()
 # the label, which is put on when the report is served, since a history
 # fetch may have taught the daemon the host name meanwhile).
 _machines_cache: list[tuple[machines.Machine, dict[str, Any]]] = []
+# When that ping finished: in epoch seconds for the caller, and on the
+# monotonic clock the cache is aged by (see ``_apps_attempted_at``).
 _machines_checked_at = 0.0
+_machines_pinged_at = -math.inf
 
 
 def _resolve_ip(host: str) -> str:
@@ -325,8 +337,8 @@ def machines_report(
         address), and the epoch-millisecond time of the ping they came
         from.
     """
-    global _machines_cache, _machines_checked_at
-    requested_at = time.time()
+    global _machines_cache, _machines_checked_at, _machines_pinged_at
+    requested_at = time.monotonic()
     with _machines_lock:
         registered = machines.load_machines()
         ttl = (
@@ -335,12 +347,13 @@ def machines_report(
             else MACHINES_STATUS_TTL_SECONDS
         )
         if (
-            time.time() - _machines_checked_at >= ttl
-            or (refresh and _machines_checked_at < requested_at)
+            time.monotonic() - _machines_pinged_at >= ttl
+            or (refresh and _machines_pinged_at < requested_at)
             or [machine for machine, _row in _machines_cache] != registered
         ):
             with ThreadPoolExecutor(max_workers=max(1, len(registered))) as pool:
                 _machines_cache = list(pool.map(_machine_row, registered))
+            _machines_pinged_at = time.monotonic()
             _machines_checked_at = time.time()
         name = machines.local_machine_name()
         local = {
@@ -371,7 +384,7 @@ def machine_action(action: str, name: str, address: str = "", password: str = ""
     Returns:
         ``""`` on success, else the error text for the user.
     """
-    global _machines_checked_at
+    global _machines_pinged_at
     try:
         if action == "add":
             machines.add_machine(name.strip(), address.strip(), password)
@@ -383,7 +396,7 @@ def machine_action(action: str, name: str, address: str = "", password: str = ""
     except machines.MachineError as exc:
         return str(exc)
     with _machines_lock:
-        _machines_checked_at = 0.0
+        _machines_pinged_at = -math.inf
     return ""
 
 

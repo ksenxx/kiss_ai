@@ -127,8 +127,9 @@ def test_batch_edit_reports_use_final_line_numbers(tmp_path: Path) -> None:
     assert f"{2:5d} | l3a\n{3:5d} | l3b\n{4:5d} | l3c" in reports[1]
     assert final[1:4] == ["l3a", "l3b", "l3c"]
     assert reports[2].startswith("edit 3 (1 occurrence(s)); lines 1-4 after the edit:\n")
-    assert reports[3].startswith("edit 4 (1 occurrence(s)); lines 19-25 after the edit:\n")
-    assert f"{22:5d} | LAST" in reports[3]
+    # The file ends at line 22: the header names no line after it (review 2026-11-11 S4r3).
+    assert reports[3].startswith("edit 4 (1 occurrence(s)); lines 19-22 after the edit:\n")
+    assert reports[3].endswith(f"\n{22:5d} | LAST")
     assert final[21] == "LAST" and len(final) == 22
 
 
@@ -196,7 +197,7 @@ def test_batch_edit_replace_all_shifts_reports_once_per_occurrence_above(
     assert result.startswith("Successfully replaced 4 occurrence(s)"), result
     reports = _reports(result)
     # TARGET was line 4; the two occurrences above it each added a line: now line 6.
-    assert reports[0].startswith("edit 1 (1 occurrence(s)); lines 3-9 after the edit:\n")
+    assert reports[0].startswith("edit 1 (1 occurrence(s)); lines 3-8 after the edit:\n")
     assert f"{6:5d} | hit" in reports[0]
     assert reports[1].startswith("edit 2 (3 occurrence(s)); lines 1-5 after the edit:\n")
     assert target.read_text(encoding="utf-8") == "y\ny\nmid\ny\ny\nhit\ny\ny\n"

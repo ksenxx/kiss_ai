@@ -15,8 +15,8 @@ connection's ``connId`` so no other surface sees it):
 
 * ``terminalOpen {tab_id, cols, rows}`` starts a shell for the tab in
   the command's work dir, or re-attaches a shell that outlived a
-  dropped connection.  Answered by ``terminalOpened {tab_id, shell,
-  cwd, attached}``, or ``terminalError {tab_id, text}``.
+  dropped connection.  Answered by ``terminalOpened {tab_id,
+  attached}``, or ``terminalError {tab_id, text}``.
 * ``terminalInput {tab_id, data}`` writes keystrokes/pastes to the pty.
 * ``terminalResize {tab_id, cols, rows}`` sets the pty window size.
 * ``terminalClose {tab_id}`` hangs the shell up.
@@ -114,8 +114,6 @@ class _Session:
     conn_id: str
     pid: int
     fd: int
-    shell: str
-    cwd: str
     decoder: codecs.IncrementalDecoder = field(
         default_factory=lambda: codecs.getincrementaldecoder("utf-8")(errors="replace")
     )
@@ -169,6 +167,8 @@ class TerminalService:
         # is between its fork and its session's registration.
         self._spawn_lock = threading.Lock()
         self._openings: list[_Opening] = []
+        # Set by ``shutdown``: no shell is started from then on.
+        self._closed = False
 
     # ------------------------------------------------------------------
     # Commands
@@ -197,6 +197,8 @@ class TerminalService:
         # reach an open that is waiting its turn or forking.
         opening = _Opening(tab_id, conn_id)
         with self._lock:
+            if self._closed:
+                return  # the daemon is stopping: nothing would hang the shell up
             self._openings.append(opening)
         try:
             self._start(opening, work_dir, cols, rows)
@@ -356,17 +358,22 @@ class TerminalService:
                     self._detach_locked(session)
 
     def shutdown(self) -> None:
-        """Hang up every shell, the ones still opening included (the daemon is stopping)."""
+        """Hang up every shell, the ones still opening included (the daemon is stopping).
+
+        No shell is started from here on: an ``open`` that arrives
+        behind this one is dropped, so the shells hung up here are the
+        last, and the wait below ends when they are gone.
+        """
         with self._lock:
+            self._closed = True
             for opening in self._openings:
                 opening.cancelled = True
-            sessions = list(self._sessions.values())
-            for session in sessions:
+            for session in self._sessions.values():
                 self._hang_up(session)
         deadline = time.monotonic() + _HANGUP_TIMEOUT + 1.0
         while time.monotonic() < deadline:
             with self._lock:
-                if not any(s.tab_id in self._sessions for s in sessions):
+                if not self._sessions:
                     return
             time.sleep(0.05)
 
@@ -444,10 +451,7 @@ class TerminalService:
         # lock), and subprocesses close every fd above 2 at exec.
         os.set_inheritable(fd, False)
         os.set_blocking(fd, False)
-        session = _Session(
-            tab_id=tab_id, conn_id=conn_id, pid=pid, fd=fd,
-            shell=argv[0], cwd=cwd,
-        )
+        session = _Session(tab_id=tab_id, conn_id=conn_id, pid=pid, fd=fd)
         # The initial size is set here, on the master, not by the child
         # before its exec: a child scheduled late (a loaded machine) would
         # apply the opening size AFTER a resize or re-attach the parent
@@ -677,13 +681,7 @@ class TerminalService:
 
     def _emit_opened(self, session: _Session, attached: bool) -> None:
         self._emit(
-            {
-                "type": "terminalOpened",
-                "tab_id": session.tab_id,
-                "shell": os.path.basename(session.shell),
-                "cwd": session.cwd,
-                "attached": attached,
-            },
+            {"type": "terminalOpened", "tab_id": session.tab_id, "attached": attached},
             session.conn_id,
         )
 

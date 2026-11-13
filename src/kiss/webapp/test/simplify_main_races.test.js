@@ -20,7 +20,7 @@
 //   reported to the daemon under its root chat,
 // * an Edit diff of thousands of lines renders without freezing.
 
-/* global require, process, setImmediate */
+/* global require, setImmediate */
 'use strict';
 
 const assert = require('assert');
@@ -70,8 +70,9 @@ async function openDirtyTab(ctx) {
     // The reconnect re-lists the folders listed before (the root), not
     // the one whose listing was lost.
     const relisted = h.ofType(posted, 'listDir').slice(before);
-    assert.ok(
-      relisted.every(m => m.path === h.WD),
+    assert.deepStrictEqual(
+      relisted.map(m => m.path),
+      [h.WD],
       'only the root is re-listed',
     );
     const afterReconnect = h.ofType(posted, 'listDir').length;
@@ -299,14 +300,24 @@ async function openDirtyTab(ctx) {
     assert.strictEqual(win._testApi.getActiveTabId(), 'b1', 'b1 stays');
     win._testApi.switchToTab(result.id);
     assert.strictEqual(h.all(win, '.chat-tab.content-tab').length, 1);
-    // The result tab is on screen; the `ready` sent after an outage
-    // names the chat it belongs to.
+    // The result tab is on screen, reached from b1: the `ready` sent
+    // after an outage names b1, the chat a swipe back returns to.
+    h.send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
+    h.send(win, {type: 'daemonStatus', connected: true, reconnecting: true});
+    assert.strictEqual(
+      lastOfType(posted, 'ready').tabId,
+      'b1',
+      'ready names the chat the result was reached from',
+    );
+    // With b1 closed the result stands for the chat that owns it.
+    sendTabsState(win, [{tabId: 'a1', workDir: h.WD, chatId: 'chat-1'}]);
+    assert.ok(!win._testApi.openTabs().some(t => t.id === 'b1'), 'b1 closed');
     h.send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
     h.send(win, {type: 'daemonStatus', connected: true, reconnecting: true});
     assert.strictEqual(
       lastOfType(posted, 'ready').tabId,
       req.tabId,
-      'the result tab is owned by the chat that asked, not the one on screen',
+      'the result tab is owned by the chat that asked',
     );
     win.close();
   });

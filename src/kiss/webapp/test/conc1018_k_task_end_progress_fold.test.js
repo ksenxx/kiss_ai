@@ -8,7 +8,7 @@
 /* global require, console */
 
 // A task-end event takes down a `worktree_progress` line that outlived
-// its operation (actionProgressTerminalPaths.test.js) and folds the
+// its operation (actionProgressRendered.test.js) and folds the
 // transcript's event panels into one Trajectory panel.  The line must
 // go BEFORE the fold: folded first, it is counted into the Trajectory
 // preview ("2 events") and then removed from under it, so the collapsed

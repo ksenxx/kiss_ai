@@ -13,28 +13,35 @@ bundled tree is clean: that is the gate ``uv run check`` runs.
 
 from __future__ import annotations
 
+import json
 import os
+import sys
+import textwrap
 import threading
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from kiss.agents.seas.base.base_sea import ALLOW
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_cli import main
-from kiss.agents.sorcar.sea_commands import load_sea
+from kiss.agents.sorcar.sea_commands import bundled_commands, load_sea, own_settings
 from kiss.agents.sorcar.sea_commands import sea_settings as sea_settings_of
 from kiss.agents.sorcar.sea_lint import (
+    PROSE_FILES,
     Finding,
     bundled_seas,
     default_targets,
     fix_sea,
     lint_all,
+    lint_prose,
     lint_sea,
     registered_commands,
 )
 from kiss.agents.sorcar.sea_settings import SeaError, declares_channel, declares_hidden
 from kiss.core.utils import replace_waiting_for_readers
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 
 DESCRIPTION = """
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -50,7 +57,7 @@ def write_sea(folder: Path, body: str, name: str = "demo") -> Path:
     sea_dir = folder / name
     sea_dir.mkdir(parents=True, exist_ok=True)
     path = sea_dir / f"{name}_sea.py"
-    path.write_text(body, encoding="utf-8")
+    path.write_text(body, encoding="utf-8", newline="")
     return path
 
 
@@ -65,9 +72,9 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[P
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("KISS_HOME", str(home))
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
     yield home
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
 
 
 def test_renamed_and_removed_keys_are_fixable_and_fix_rewrites_them(tmp_path: Path) -> None:
@@ -193,6 +200,48 @@ def test_fix_keeps_prefixes_quotes_and_locks_and_skips_nested_dicts(tmp_path: Pa
     }
 
 
+@pytest.mark.parametrize("eol", ["\r\n", "\r"])
+def test_fix_counts_the_lines_of_a_script_as_python_does(tmp_path: Path, eol: str) -> None:
+    """A script whose lines end in ``\\r\\n`` or a lone ``\\r`` is rewritten as its ``\\n`` twin
+    is, the reported line numbers included, and keeps its line endings."""
+    body = DESCRIPTION + (
+        "\n    def settings(self, settings):\n        return settings | {\n"
+        "            'classify_tasks': False,\n            'is_parallel': (False),\n        }\n"
+    )
+    unix = write_sea(tmp_path, body, "unix")
+    other = write_sea(tmp_path, "", "other")
+    other.write_bytes(body.replace("\n", eol).encode("utf-8"))
+    notes = [line.removeprefix(str(unix)) for line in fix_sea(unix)]
+    assert notes == [":10: 'classify_tasks' -> 'auto_classify'", ":10: drop 'is_parallel'"]
+    assert [line.removeprefix(str(other)) for line in fix_sea(other)] == notes
+    assert other.read_bytes() == unix.read_bytes().replace(b"\n", eol.encode())
+
+
+def test_fix_renames_a_key_spelled_with_adjacent_or_escaped_literals(tmp_path: Path) -> None:
+    """A renamed key whose source is not the key's own text (adjacent literals, an escape)
+    is replaced as a whole literal, so the fix never reports a rename it did not make."""
+    path = write_sea(
+        tmp_path,
+        DESCRIPTION
+        + (
+            """
+    def settings(self, settings):
+        return settings | {
+            "model_" "name": "gpt-4o-mini", "classify\\x5ftasks": True,
+            'locked': ['model_'
+                       'name', "classify_" r"tasks"],
+        }
+"""
+        ),
+    )
+    assert codes(lint_all([path])) == ["renamed-key"] * 4
+    assert len(fix_sea(path)) == 4
+    assert lint_all([path]) == [] and fix_sea(path) == []
+    assert sea_settings_of(path) == {  # settings validation returns ``locked`` sorted
+        "model": "gpt-4o-mini", "auto_classify": True, "locked": ["auto_classify", "model"],
+    }
+
+
 def test_settings_dicts_are_those_that_reach_the_return(tmp_path: Path) -> None:
     """Only a dict literal whose entries end up in the returned settings is a settings dict.
 
@@ -281,6 +330,134 @@ def test_settings_dicts_are_those_that_reach_the_return(tmp_path: Path) -> None:
     assert 'config = config | {"auto_classify": False}' in text
     assert lint_all([reassigned]) == []
     assert sea_settings_of(reassigned)["model"] == "gpt-5"
+
+
+def test_a_function_named_settings_that_is_no_method_is_not_read(tmp_path: Path) -> None:
+    """Only a ``settings`` method of a class declares settings; a function of that name at
+    module level or nested in a method is the script's own helper.
+
+    The dict a helper returns is data: ``--fix`` renamed the key the SEA's method looks up
+    in it, which broke a working script at load time, and a ``hidden`` written there hid the
+    command (audit 2026-11-10, B/S9-F4).  Both helpers stay byte for byte as they are; the
+    class's method is read, also where an ``if`` of the class body defines it.
+    """
+    path = write_sea(
+        tmp_path,
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+def settings():
+    return {"model_name": "gpt-4o-mini", "hidden": True}
+
+class Sea(BaseSea):
+    def description(self):
+        def settings():
+            return {"model_name": "a test SEA"}
+        return settings()["model_name"]
+
+    if BaseSea:
+        def settings(self, current):
+            return current | {"model": settings()["model_name"], "classify_tasks": False}
+""",
+    )
+    assert [line.split(": ", 1)[1] for line in fix_sea(path)] == [
+        "'classify_tasks' -> 'auto_classify'",
+    ]
+    text = path.read_text(encoding="utf-8")
+    assert 'return {"model_name": "gpt-4o-mini", "hidden": True}' in text
+    assert 'return {"model_name": "a test SEA"}' in text
+    assert lint_all([path]) == [] and not declares_hidden(path)
+    assert sea_settings_of(path) == {"model": "gpt-4o-mini", "auto_classify": False}
+    assert load_sea(path).description() == "a test SEA"
+
+
+def test_a_function_that_is_no_method_is_no_hook_and_a_mixin_is_read(tmp_path: Path) -> None:
+    """A function named ``tool_call_hook`` at module level or nested in a method is the
+    script's helper: ``--fix`` turned the literal it returns into a verdict.  It stays byte
+    for byte as it is, while the mixin the SEA class derives from is read, however the class
+    statement reaches it.
+    """
+    path = write_sea(
+        tmp_path,
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+def tool_call_hook(name):
+    return "module helper"
+
+class Defaults:
+    def settings(self, current):
+        return current | {"classify_tasks": False}
+
+class Sea(Defaults, BaseSea):
+    def description(self):
+        def tool_call_hook():
+            return "nested helper"
+
+        return tool_call_hook()
+""",
+    )
+    assert codes(lint_all([path])) == ["renamed-key"]
+    assert [line.split(": ", 1)[1] for line in fix_sea(path)] == [
+        "'classify_tasks' -> 'auto_classify'",
+    ]
+    text = path.read_text(encoding="utf-8")
+    assert 'return "module helper"' in text and 'return "nested helper"' in text
+    assert lint_all([path]) == [] and not declares_hidden(path)
+    assert sea_settings_of(path) == {"auto_classify": False}
+    assert load_sea(path).description() == "nested helper"
+    # A mixin reaches the SEA class through an alias, a call, a decorator, an attribute or a
+    # subscript as well as by name: every class of the file is read, wherever it is.
+    for index, (prelude, base, postlude) in enumerate([
+        ("Alias = Defaults", "Alias", ""),
+        ("def mixed(cls):\n    return cls", "mixed(Defaults)", ""),
+        ("class Outer:\n    Inner = Defaults", "Outer.Inner", ""),
+        ("try:\n    from no_such_module import Mixin\nexcept ImportError:\n    Mixin = Defaults",
+         "Mixin", ""),
+        ("def swap(cls):\n    return Defaults\n\n@swap\nclass Other:\n    pass", "Other", ""),
+        ("import colorsys\ncolorsys.Mixin = Defaults", "colorsys.Mixin", "del colorsys.Mixin"),
+        ("from typing import Annotated", 'Annotated[Defaults, "metadata"]', ""),
+        ("class Marker:\n    pass\n\ndef mixed(cls):\n    class Wrapped(Defaults, cls):\n"
+         "        pass\n    return Wrapped\n\n@mixed", "Marker", ""),
+    ]):
+        indirect = write_sea(tmp_path, f"""from kiss.agents.seas.base.base_sea import BaseSea
+
+class Defaults:
+    def settings(self, current):
+        return current | {{"hidden": True}}
+
+{prelude}
+
+class Sea({base}, BaseSea):
+    def description(self):
+        return "a test SEA"
+
+{postlude}
+""", f"indirect{index}")
+        assert declares_hidden(indirect) and sea_settings_of(indirect) == {"hidden": True}, base
+
+
+def test_a_script_nested_deeper_than_the_recursion_limit_is_read(tmp_path: Path) -> None:
+    """A long ``elif`` chain (in ``settings`` and at module level), a long ``+`` chain and a
+    ``settings`` built from a long ``|`` chain all run, so the registry and the linter read
+    them: neither recurses on the depth of the script, which Python bounds far above its own
+    recursion limit."""
+    count = sys.getrecursionlimit() + 100
+    elifs = "if N == 0:\n    pass\n" + "elif N == 0:\n    pass\n" * count
+    path = write_sea(
+        tmp_path,
+        DESCRIPTION
+        + "\n    def settings(self, settings):\n"
+        + textwrap.indent(elifs, " " * 8)
+        + "        return settings"
+        + " | {'classify_tasks': False}" * count
+        + " | {'hidden': True}\n\n"
+        + f"N = {' + '.join(['1'] * count)}\n{elifs}",
+    )
+    assert declares_hidden(path)
+    assert codes(lint_all([path])) == ["renamed-key"] * count
+    assert len(fix_sea(path)) == count and lint_all([path]) == []
+    assert sea_settings_of(path) == {"auto_classify": False, "hidden": True}
 
 
 def test_fix_publishes_the_rewrite_atomically_under_a_concurrent_loader(tmp_path: Path) -> None:
@@ -671,6 +848,41 @@ class Sea(WorkerSea):
     assert not findings[0].fixable
 
 
+def test_a_base_whose_settings_cannot_run_twice_is_not_broken(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A base class whose ``settings`` refuses a second call on the instance passes the run's
+    evaluation, so the script lints clean: the ``redundant-key`` comparison, which runs the
+    bases' methods once more, is skipped without a word, and the next script is still linted.
+    """
+    parent = write_sea(
+        tmp_path,
+        DESCRIPTION
+        + """
+    def settings(self, settings):
+        if getattr(self, "asked", False):
+            raise RuntimeError("settings is read once per run")
+        self.asked = True
+        return settings
+""",
+        "parent",
+    )
+    once = write_sea(
+        tmp_path,
+        "from kiss.agents.sorcar.sea_commands import sea_class\n\n"
+        f"class Once(sea_class({str(parent)!r})):\n    pass\n",
+        "once",
+    )
+    redundant = write_sea(
+        tmp_path,
+        DESCRIPTION.replace("BaseSea", "WorkerSea")
+        + "\n    def settings(self, settings):\n        return settings | {'use_memory': False}\n",
+        "redundant",
+    )
+    assert [(f.path, f.code) for f in lint_all([once, redundant])] == [(redundant, "redundant-key")]
+    assert not caplog.records
+
+
 def test_unknown_model_and_lock_without_value(tmp_path: Path) -> None:
     path = write_sea(
         tmp_path,
@@ -797,6 +1009,71 @@ class Child(sea_class({str(literal)!r})):
     assert "recomputed" in commands and "rehidden" in commands and "relisted" not in commands
     assert lint_all([recomputed]) == [] and lint_all([relisted]) == []
     assert codes(lint_all([rehidden])) == ["hidden-not-literal"]
+    # The names of a chained assignment hold the one dict: what ``update``
+    # and ``|=`` write through two of them is in what the third returns
+    # (an attribute among the targets and a bare annotation change nothing).
+    chained = write_sea(
+        folder, DESCRIPTION + """
+    def settings(self, settings):
+        first = second = third = self.fourth = {}
+        third: dict
+        first.update({'hidden': True})
+        second |= {'classify_tasks': False}
+        return settings | third
+""", "chained"
+    )
+    sea_commands.refresh_registry()
+    assert declares_hidden(chained) and "chained" not in sea_commands.list_commands()
+    assert [line.split(": ", 1)[1] for line in fix_sea(chained)] == [
+        "'classify_tasks' -> 'auto_classify'",
+    ]
+    assert sea_settings_of(chained) == {"hidden": True, "auto_classify": False}
+    # A name read before anything was assigned to it (the method's
+    # parameter) is one dict too: what ``update`` writes through a name
+    # assigned from it is in what the parameter returns.
+    aliased = write_sea(
+        folder, DESCRIPTION + """
+    def settings(self, settings):
+        mine = settings
+        mine.update({'hidden': True})
+        return settings
+""", "aliased"
+    )
+    sea_commands.refresh_registry()
+    assert sea_settings_of(aliased)["hidden"] is True and declares_hidden(aliased)
+    assert "aliased" not in sea_commands.list_commands() and lint_all([aliased]) == []
+    # The registry reads every ``settings`` method of the file (the source does not say
+    # which classes the SEA class folds): the literal of a helper class hides the script
+    # although its settings do not return it, and the linter names the line.
+    helper = write_sea(
+        folder, DESCRIPTION + """
+    def settings(self, settings):
+        return settings
+
+class Widget:
+    def settings(self, settings):
+        return {'hidden': True}
+""", "helper"
+    )
+    sea_commands.refresh_registry()
+    assert "hidden" not in sea_settings_of(helper) and declares_hidden(helper)
+    assert "helper" not in sea_commands.list_commands()
+    findings = lint_all([helper])
+    assert codes(findings) == ["hidden-not-returned"]
+    assert findings[0].message.startswith("line 13: ")  # the helper's literal
+    # ... as does a literal on a path that the run does not take (a computed key beside it
+    # is no literal entry and is passed over).
+    branch = write_sea(
+        folder, DESCRIPTION + """
+    def settings(self, settings):
+        if settings.get('model') == 'no such model':
+            return settings | {'hidden': True, 'max_' + 'steps': 1}
+        return settings
+""", "branch"
+    )
+    sea_commands.refresh_registry()
+    assert "branch" not in sea_commands.list_commands()
+    assert codes(lint_all([branch])) == ["hidden-not-returned"]
 
 
 @pytest.mark.parametrize(
@@ -837,6 +1114,58 @@ def test_a_script_is_read_in_the_source_encoding_import_reads(
     )
     assert lint_all([path]) == [] and declares_hidden(path)
     assert sea_settings_of(path) == {"hidden": True, "auto_classify": False}
+
+
+def test_fix_inserts_its_import_below_the_leading_comments(tmp_path: Path) -> None:
+    """The import ``--fix`` adds goes below the comments a script starts with.
+
+    Ahead of them (a script whose first statement is no import) it took
+    line 1 from the shebang and pushed a line-2 ``coding`` cookie to line
+    3, where ``import`` does not look for one: the saved latin-1 script no
+    longer compiled.  A decorator stays on the statement it decorates.
+    """
+    header = b"#!/usr/bin/env python3\n# coding: latin-1\n"
+    path = write_sea(tmp_path, "", "latin")
+    path.write_bytes(header + '''LABEL = "caf\xe9"
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return LABEL
+
+    def tool_call_hook(self, name, args):
+        return None
+'''.encode("latin-1"))
+    assert fix_sea(path) == [f"{path}:3: import ALLOW", f"{path}:11: None -> ALLOW"]
+    assert path.read_bytes().startswith(
+        header + b'from kiss.agents.seas.base.base_sea import ALLOW\nLABEL = "caf\xe9"\n'
+    )
+    sea = load_sea(path)  # compiled from the file's bytes, as ``import`` compiles them
+    assert sea.description() == "caf\xe9" and sea.tool_call_hook("Bash", {}) == ALLOW
+    assert lint_all([path]) == [] and fix_sea(path) == []
+    decorated = write_sea(tmp_path, '''#!/usr/bin/env python3
+# The first statement is a decorated class.
+
+@object.__new__
+class Marker:
+    pass
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return "a test SEA"
+
+    def tool_call_hook(self, name, args):
+        return "no"
+''', "decorated")
+    assert fix_sea(decorated) == [
+        f"{decorated}:4: import refuse", f"{decorated}:14: 'no' -> refuse('no')",
+    ]
+    assert decorated.read_text(encoding="utf-8").startswith(
+        "#!/usr/bin/env python3\n# The first statement is a decorated class.\n\n"
+        "from kiss.agents.seas.base.base_sea import refuse\n@object.__new__\nclass Marker:\n"
+    )
+    assert lint_all([decorated]) == []
 
 
 def test_stale_docstring_and_home_literal(tmp_path: Path) -> None:
@@ -907,13 +1236,16 @@ def test_broken_scripts(tmp_path: Path) -> None:
 """, "badkind"
     )
     missing = tmp_path / "missing" / "missing_sea.py"
-    findings = lint_all([syntax, raises, unknown, removed, missing])
-    assert codes(findings) == ["broken"] * 5
+    # A ``~user`` that names no user is kept as written, as a shell keeps it: no such file.
+    nobody = Path("~no-such-user-for-sea-lint/x_sea.py")
+    findings = lint_all([syntax, raises, unknown, removed, missing, nobody])
+    assert codes(findings) == ["broken"] * 6
     assert "cannot parse" in findings[0].message
     assert "boom" in findings[1].message
     assert "unknown key 'colour'" in findings[2].message
     assert "key 'inherit' was removed: a channel never inherits" in findings[3].message
     assert "cannot parse" in findings[4].message
+    assert findings[5].path == nobody.resolve() and "cannot parse" in findings[5].message
     # A ``kind`` no base class answers to is still a removed key: the
     # entry is dropped and the class is left as it is.
     findings = lint_all([badkind])
@@ -949,6 +1281,58 @@ class Sea(BaseSea):
     # script (loadable by path or as a base class) needs no description().
     assert codes(lint_all([silent])) == ["no-description"]
     assert lint_sea(silent, command=None) == []
+
+
+def test_a_prose_claim_is_checked_against_the_bundled_command(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """A user's ``/sh`` shadowing the bundled one does not make a true page stale."""
+    bundled = bundled_commands()["sh"]
+    root = tmp_path / "root"
+    page = root / PROSE_FILES[0]
+    page.parent.mkdir(parents=True)
+    claim = json.dumps(own_settings(load_sea(bundled)))
+    page.write_text(f"`/sh` declares `{claim}`.\n", encoding="utf-8")
+    assert lint_prose(root) == []
+    folder = tmp_path / "seas"
+    shadow = write_sea(folder, DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'use_memory': False}
+""", "sh")
+    (isolated_home / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
+    sea_commands.refresh_registry()
+    assert sea_commands.get_command("sh") == shadow != bundled
+    assert lint_prose(root) == []
+
+
+def test_a_bundled_script_is_linted_against_the_bundled_commands(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """What ``SEAS.md`` registers does not change the findings of a bundled script.
+
+    A user's ``/bestrouter`` that is no model picker made the bundled
+    ``/write``, whose model is the bundled picker of that name, an
+    ``unknown-model`` finding, and a user's ``/write`` took the bundled
+    script's command name (its ``no-description`` check) away.  A user's
+    own script is still checked against the registry its run reads.
+    """
+    write = bundled_commands()["write"]
+    assert sea_settings_of(write)["model"] == "bestrouter"
+    folder = tmp_path / "seas"
+    mine = write_sea(folder, DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'model': 'bestrouter'}
+""", "mine")
+    (isolated_home / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
+    sea_commands.refresh_registry()
+    assert lint_all([write, mine]) == []
+    shadows = [write_sea(folder, DESCRIPTION, name) for name in ("bestrouter", "write")]
+    sea_commands.refresh_registry()
+    assert [sea_commands.get_command(name) for name in ("bestrouter", "write")] == shadows
+    assert sea_commands.model_sea("bestrouter") is None
+    assert [(f.path, f.code) for f in lint_all([write, mine])] == [(mine, "unknown-model")]
+    assert sea_commands.model_sea("bestrouter", bundled=True) == bundled_commands()["bestrouter"]
+    assert registered_commands()[write] == "write" == registered_commands()[shadows[1]]
 
 
 def test_cli_folder_paths_fix_and_exit_codes(

@@ -26,6 +26,7 @@ import pytest
 
 from kiss.server.autocomplete import _AutocompleteMixin, _ghost_suffix
 from kiss.server.json_printer import JsonPrinter, _coalesce_events
+from kiss.server.server import _coalesced_replay_events
 
 
 class _AC(_AutocompleteMixin):
@@ -221,6 +222,24 @@ class TestCoalesceEvents:
             {"type": "text_delta", "text": "ab"},
             {"type": "tool_call", "name": "Bash"},
             {"type": "text_delta", "text": "c"},
+        ]
+
+    def test_delta_whose_text_is_not_a_string_is_kept_apart(self) -> None:
+        """A stored delta with a ``null`` text ends the run of deltas instead of raising.
+
+        ``"".join`` raised ``TypeError`` on it, and the chat holding the
+        event could not be replayed.
+        """
+        events = [
+            {"type": "text_delta", "text": "a"},
+            {"type": "text_delta", "text": None},
+            {"type": "text_delta", "text": "b"},
+            {"type": "text_delta", "text": "c"},
+        ]
+        assert _coalesced_replay_events(events) == [
+            {"type": "text_delta", "text": "a"},
+            {"type": "text_delta", "text": None},
+            {"type": "text_delta", "text": "bc"},
         ]
 
     def test_empty_list(self) -> None:

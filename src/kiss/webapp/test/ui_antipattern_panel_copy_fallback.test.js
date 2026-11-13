@@ -15,11 +15,9 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {sleep, click, recordTimers} = require('./simplify2_harness');
+const {MEDIA, settle, click, recordTimers} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 // Every page built; closed at the end so nothing keeps node alive after
 // the last assertion.
@@ -74,7 +72,7 @@ async function main() {
       return true;
     };
     click(win, btn);
-    await sleep(5);
+    await settle();
     assert.deepStrictEqual(
       copied,
       ['panel body text'],
@@ -91,7 +89,7 @@ async function main() {
     );
     win.document.execCommand = () => false;
     click(win, btn);
-    await sleep(5);
+    await settle();
     assert.ok(btn.classList.contains('copy-failed'), btn.className);
     assert.ok(!btn.classList.contains('copied'));
     assert.ok(isCross(btn), 'a cross replaces the copy icon');
@@ -124,7 +122,7 @@ async function main() {
       throw new Error('not allowed');
     };
     click(win, btn);
-    await sleep(5);
+    await settle();
     assert.ok(btn.classList.contains('copy-failed'), btn.className);
     assert.ok(isCross(btn));
   });
@@ -132,7 +130,7 @@ async function main() {
   await test('a successful writeText still shows the check mark and a "Copied" title', async () => {
     const {win, btn} = makePage(() => Promise.resolve());
     click(win, btn);
-    await sleep(5);
+    await settle();
     assert.ok(isCheck(btn));
     assert.strictEqual(btn.title, 'Copied');
     assert.ok(!btn.classList.contains('copy-failed'));

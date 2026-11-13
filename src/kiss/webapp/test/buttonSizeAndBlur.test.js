@@ -87,8 +87,9 @@ function testInputFooterButtonsAreBigger() {
     assertAtLeast(svg.getAttribute('width'), 16, '#' + id + ' svg width');
     assertAtLeast(svg.getAttribute('height'), 16, '#' + id + ' svg height');
   }
-  const uploadSvg = cssRule(win, '#upload-btn svg');
-  assert.ok(uploadSvg, 'main.css must size #upload-btn svg');
+  // The upload icon sits in the "..." menu: whichever rule sizes it there
+  // (`.more-item-icon svg` today) must keep it at 16px or more.
+  const uploadSvg = win.getComputedStyle(doc.querySelector('#upload-btn svg'));
   assertAtLeast(uploadSvg.width, 16, '#upload-btn svg CSS width');
   win.close();
   console.log('  ok - input-footer buttons are bigger');
@@ -163,7 +164,6 @@ function testCloseButtonsAreBigger() {
 }
 
 function clickAndAssertBlurred(win, el, what) {
-  if (el.tabIndex < 0) el.tabIndex = 0;
   el.focus();
   assert.strictEqual(
     win.document.activeElement,

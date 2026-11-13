@@ -18,9 +18,20 @@ const {
   stubRaf,
   clickTab,
   answering,
+  readyTabId,
+  typeInto,
+  ofType,
 } = require('./simplify2_harness');
-const {makeRunner} = require('./ui_antipattern_harness');
-const {paste, settle} = require('./attachment_helpers');
+const {makeRunner, key, pickTabMenuItem} = require('./ui_antipattern_harness');
+const {paste, settle, typeAndSend} = require('./attachment_helpers');
+const {tabEl} = require('./subagent_tab_helpers');
+const {
+  VOICE_CFG,
+  voicePageState,
+  stubVoiceSurface,
+  startPipeline,
+  dictate,
+} = require('./voice_page_helpers');
 
 const pages = [];
 
@@ -31,16 +42,22 @@ function placeholderAndRaf(win) {
   stubRaf(win);
 }
 
-function makePage(withMarked) {
+// `voice` (a voicePageState) puts the page over the stubbed voice surface,
+// for a test that dictates.
+function makePage(withMarked, voice) {
   const {win, posted, getState} = makeChatPage({
-    beforeScripts: placeholderAndRaf,
+    beforeScripts(win) {
+      placeholderAndRaf(win);
+      if (!voice) return;
+      stubVoiceSurface(win, voice);
+      win.__VOICE__ = Object.assign({}, VOICE_CFG);
+    },
     extraScripts: withMarked ? ['marked.min.js', 'voice.js'] : ['voice.js'],
   });
   pages.push(win);
+  if (voice) Object.assign(voice, {win, posted});
 
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const tab = ready.tabId;
+  const tab = readyTabId(posted);
   send(win, {type: 'clear', chat_id: 'chat-q', tabId: tab});
   send(win, {type: 'status', running: true, tabId: tab, startTs: Date.now()});
   send(win, {type: 'daemonStatus', connected: true});
@@ -59,10 +76,7 @@ function askQuestionCall(win, tab, question) {
 }
 
 function pressEnter(win) {
-  const inp = win.document.getElementById('task-input');
-  inp.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
-  );
+  key(win, win.document.getElementById('task-input'), 'Enter');
 }
 
 const runner = makeRunner();
@@ -156,7 +170,7 @@ test('Enter in the composer posts the text as the userAnswer, not a prompt', () 
   posted.length = 0;
   inp.value = '  main  ';
   pressEnter(win);
-  const answers = posted.filter(m => m.type === 'userAnswer');
+  const answers = ofType(posted, 'userAnswer');
   assert.deepStrictEqual(
     answers.map(a => [a.answer, a.tabId]),
     [['main', tab]],
@@ -205,9 +219,9 @@ test('Enter in the composer posts the text as the userAnswer, not a prompt', () 
   posted.length = 0;
   inp.value = 'now run the tests';
   pressEnter(win);
-  assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 0);
+  assert.strictEqual(ofType(posted, 'userAnswer').length, 0);
   assert.strictEqual(
-    posted.filter(m => m.type === 'appendUserMessage').length,
+    ofType(posted, 'appendUserMessage').length,
     1,
     JSON.stringify(posted),
   );
@@ -220,7 +234,7 @@ test('an empty composer sends nothing while a question is pending', () => {
   posted.length = 0;
   win.document.getElementById('task-input').value = '   ';
   pressEnter(win);
-  assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 0);
+  assert.strictEqual(ofType(posted, 'userAnswer').length, 0);
   assert.ok(answering(win), 'the question stays open');
 });
 
@@ -238,9 +252,15 @@ test('askUserDone from another client clears the pending mark and answer mode', 
   assert.ok(!panel.querySelector('.tc-question-hint'));
 });
 
-test('a replayed answered question shows question and answer, never pending', () => {
+// The answer was given on another surface and its askUserDone was
+// missed: the tool result alone retires the question still pending here.
+test('the answer of a pending question shows under it and ends answer mode', () => {
   const {win, tab} = makePage(true);
   askQuestionCall(win, tab, 'Which branch?');
+  send(win, {type: 'askUser', question: 'Which branch?', tabId: tab});
+  const panel = win.document.querySelector('#output .tc-question');
+  assert.ok(panel.classList.contains('tc-question-pending'));
+  assert.ok(answering(win));
   send(win, {
     type: 'tool_result',
     tool_name: 'ask_user_question',
@@ -248,7 +268,6 @@ test('a replayed answered question shows question and answer, never pending', ()
     tabId: tab,
     ts: Date.now(),
   });
-  const panel = win.document.querySelector('#output .tc-question');
   assert.ok(
     panel
       .querySelector('.tc-question-body')
@@ -298,7 +317,7 @@ test('askUser before any tool call panel still enters answer mode', () => {
   posted.length = 0;
   win.document.getElementById('task-input').value = 'fine';
   pressEnter(win);
-  assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 1);
+  assert.strictEqual(ofType(posted, 'userAnswer').length, 1);
 });
 
 test('the question of a background tab is answered from that tab, not the one on screen', () => {
@@ -320,11 +339,11 @@ test('the question of a background tab is answered from that tab, not the one on
   inp.value = 'a prompt for the other tab';
   pressEnter(win);
   assert.strictEqual(
-    posted.filter(m => m.type === 'userAnswer').length,
+    ofType(posted, 'userAnswer').length,
     0,
     'typing on the other tab is a prompt: ' + JSON.stringify(posted),
   );
-  assert.strictEqual(posted.filter(m => m.type === 'submit').length, 1);
+  assert.strictEqual(ofType(posted, 'submit').length, 1);
 
   // Switching to the asking tab: its panel is pending and the composer
   // answers it.
@@ -336,13 +355,15 @@ test('the question of a background tab is answered from that tab, not the one on
   inp.value = 'yes';
   pressEnter(win);
   assert.deepStrictEqual(
-    posted.filter(m => m.type === 'userAnswer').map(a => [a.answer, a.tabId]),
+    ofType(posted, 'userAnswer').map(a => [a.answer, a.tabId]),
     [['yes', tab]],
   );
 });
 
-test('a file tab is never in answer mode; back on the chat tab it is again', () => {
-  const {win, posted, tab} = makePage(true);
+test('a file tab is never in answer mode; back on the chat tab it is again', async () => {
+  const voice = voicePageState();
+  const {win, posted, tab} = makePage(true, voice);
+  await startPipeline(voice);
   askQuestionCall(win, tab, 'Owner question?');
   send(win, {type: 'askUser', question: 'Owner question?', tabId: tab});
   assert.ok(answering(win));
@@ -362,10 +383,10 @@ test('a file tab is never in answer mode; back on the chat tab it is again', () 
   // Voice dictation while the file tab is up switches back to the chat
   // and answers there.
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'from the file tab'});
+  dictate(voice, 'from the file tab');
   assert.strictEqual(win._testApi.getActiveTabId(), tab);
   assert.deepStrictEqual(
-    posted.filter(m => m.type === 'userAnswer').map(a => [a.answer, a.tabId]),
+    ofType(posted, 'userAnswer').map(a => [a.answer, a.tabId]),
     [['from the file tab', tab]],
     JSON.stringify(posted),
   );
@@ -382,9 +403,9 @@ test('opening a file tab and coming back keeps the question answerable', () => {
     tabId: tab,
   });
   const fileTab = win._testApi.getActiveTabId();
-  // On the phone layout the file tab is listed next to the chat only while
-  // it is the one on screen; back on the chat the strip shows the chat
-  // alone, so the chat is picked from the Chats panel.
+  // On the phone layout the file screen's strip lists the file tabs and
+  // the chat screen's the chat alone, so the chat is picked from the
+  // Chats panel.
   clickTab(win, tab);
   askQuestionCall(win, tab, 'Q?');
   send(win, {type: 'askUser', question: 'Q?', tabId: tab});
@@ -394,15 +415,15 @@ test('opening a file tab and coming back keeps the question answerable', () => {
   assert.strictEqual(win._testApi.getActiveTabId(), fileTab);
   assert.ok(!answering(win), 'answer mode is off on the file tab');
   // ... and closing the asking chat while its file tab is up leaves
-  // nothing to answer. With the file tab up the strip lists the chat
-  // next to it.
-  const chatEl = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tab)}]`,
+  // nothing to answer. With the file tab up the strip lists the file
+  // alone: its menu closes every other tab.
+  const fileEl = tabEl(win, fileTab);
+  assert.ok(fileEl, 'the file tab is on its strip');
+  pickTabMenuItem(win, fileEl, 'Close Others');
+  assert.ok(
+    !win._testApi.openTabs().some(t => t.id === tab),
+    'the asking chat is closed',
   );
-  assert.ok(chatEl, 'the chat is on the group strip next to its file tab');
-  const closeBtn = chatEl.querySelector('.chat-tab-close');
-  assert.ok(closeBtn, 'the chat tab has a close button');
-  closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.strictEqual(win._testApi.getActiveTabId(), fileTab, 'file tab stays');
   assert.ok(!answering(win));
   assert.strictEqual(
@@ -421,14 +442,14 @@ test('a prompt typed before the question is parked, not sent as the answer', () 
   posted.length = 0;
   pressEnter(win);
   assert.strictEqual(
-    posted.filter(m => m.type === 'userAnswer').length,
+    ofType(posted, 'userAnswer').length,
     0,
     'an empty composer sends nothing',
   );
   inp.value = 'eu-west';
   pressEnter(win);
   assert.deepStrictEqual(
-    posted.filter(m => m.type === 'userAnswer').map(a => a.answer),
+    ofType(posted, 'userAnswer').map(a => a.answer),
     ['eu-west'],
   );
   assert.strictEqual(
@@ -450,9 +471,9 @@ test('an answer being typed when another client answers is kept, above the parke
   assert.strictEqual(inp.value, 'half an ans\nold prompt');
   posted.length = 0;
   pressEnter(win);
-  assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 0);
+  assert.strictEqual(ofType(posted, 'userAnswer').length, 0);
   assert.strictEqual(
-    posted.filter(m => m.type === 'appendUserMessage').length,
+    ofType(posted, 'appendUserMessage').length,
     1,
     'without a question the text is a prompt again',
   );
@@ -499,9 +520,9 @@ test('a question answered elsewhere while away is retired by its replayed result
   );
   posted.length = 0;
   pressEnter(win);
-  assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 0);
+  assert.strictEqual(ofType(posted, 'userAnswer').length, 0);
   assert.strictEqual(
-    posted.filter(m => m.type === 'appendUserMessage').length,
+    ofType(posted, 'appendUserMessage').length,
     1,
     'the message is a prompt again',
   );
@@ -535,6 +556,9 @@ test('a question answered elsewhere while away is retired by its replayed result
   // one.  Its replayed answer belongs to the earlier call, not to the
   // question being answered here: answer mode, the typed answer and
   // the parked prompt all stand, and only the last panel is pending.
+  // (The daemon re-announces the open question under the id it was
+  // asked with; another id is another ask, whose composer starts
+  // empty: askAnswerNamesQuestionId_wave3.test.js.)
   send(win, {
     type: 'task_events',
     tabId: tab,
@@ -559,7 +583,7 @@ test('a question answered elsewhere while away is retired by its replayed result
       },
     ],
   });
-  send(win, {type: 'askUser', question: 'Region?', questionId: 'q3', tabId: tab});
+  send(win, {type: 'askUser', question: 'Region?', questionId: 'q2', tabId: tab});
   assert.ok(answering(win), 'BUG - the earlier call\'s answer retired the open question');
   assert.strictEqual(inp.value, 'eu', 'the typed answer stands');
   const panels = win.document.querySelectorAll('.tc-question');
@@ -593,7 +617,7 @@ test('a replacement question keeps the parked prompt and the old answer draft', 
   posted.length = 0;
   inp.value = 'answer 2';
   pressEnter(win);
-  const answers = posted.filter(m => m.type === 'userAnswer');
+  const answers = ofType(posted, 'userAnswer');
   assert.deepStrictEqual(
     answers.map(a => [a.answer, a.questionId]),
     [['answer 2', 'q2']],
@@ -620,7 +644,7 @@ test('a background tab parks its prompt too and shows it again once answered', (
   inp.value = 'yes';
   pressEnter(win);
   assert.deepStrictEqual(
-    posted.filter(m => m.type === 'userAnswer').map(a => a.answer),
+    ofType(posted, 'userAnswer').map(a => a.answer),
     ['yes'],
   );
   assert.strictEqual(inp.value, 'draft for the first tab');
@@ -703,7 +727,7 @@ test('a send that waits for an attachment keeps its route', async () => {
   inp.value = 'the answer';
   pressEnter(win);
   assert.deepStrictEqual(
-    posted.filter(m => m.type === 'userAnswer').map(a => a.answer),
+    ofType(posted, 'userAnswer').map(a => a.answer),
     ['the answer'],
   );
   assert.ok(win.document.querySelector('.file-chip'), 'the photo chip stays');
@@ -715,9 +739,8 @@ test('the send button answers too', () => {
   askQuestionCall(win, tab, 'Button?');
   send(win, {type: 'askUser', question: 'Button?', tabId: tab});
   posted.length = 0;
-  win.document.getElementById('task-input').value = 'clicked';
-  win.document.getElementById('send-btn').click();
-  assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 1);
+  typeAndSend(win, 'clicked');
+  assert.strictEqual(ofType(posted, 'userAnswer').length, 1);
 });
 
 test('a question is never folded by the streaming collapse pass, answered or not', () => {
@@ -775,16 +798,11 @@ test('a question is never folded by the streaming collapse pass, answered or not
 test('answers stay out of the prompt history, and history recall is off while answering', () => {
   const {win, posted, tab} = makePage(true);
   const inp = win.document.getElementById('task-input');
-  function key(k) {
-    inp.dispatchEvent(
-      new win.KeyboardEvent('keydown', {key: k, bubbles: true}),
-    );
-  }
   // A prompt in the history first.
   inp.value = 'previous task prompt';
   pressEnter(win);
   send(win, {type: 'askUser', question: 'Q?', tabId: tab});
-  key('ArrowUp');
+  key(win, inp, 'ArrowUp');
   assert.strictEqual(
     inp.value,
     '',
@@ -793,10 +811,10 @@ test('answers stay out of the prompt history, and history recall is off while an
   inp.value = 'secret answer';
   pressEnter(win);
   assert.deepStrictEqual(
-    posted.filter(m => m.type === 'userAnswer').map(a => a.answer),
+    ofType(posted, 'userAnswer').map(a => a.answer),
     ['secret answer'],
   );
-  key('ArrowUp');
+  key(win, inp, 'ArrowUp');
   assert.strictEqual(
     inp.value,
     'previous task prompt',
@@ -816,7 +834,7 @@ test('the Send button works for an answer while a photo is still converting', as
   inp.value = 'yes';
   sendBtn.click();
   assert.deepStrictEqual(
-    posted.filter(m => m.type === 'userAnswer').map(a => a.answer),
+    ofType(posted, 'userAnswer').map(a => a.answer),
     ['yes'],
   );
   assert.ok(
@@ -829,8 +847,7 @@ test('the clear button reflects the parked prompt that comes back', () => {
   const {win, tab} = makePage(true);
   const inp = win.document.getElementById('task-input');
   const clearBtn = win.document.getElementById('input-clear-btn');
-  inp.value = 'next prompt';
-  inp.dispatchEvent(new win.Event('input', {bubbles: true}));
+  typeInto(win, inp, 'next prompt');
   assert.notStrictEqual(clearBtn.style.display, 'none');
   send(win, {type: 'askUser', question: 'Q?', tabId: tab});
   assert.strictEqual(clearBtn.style.display, 'none', 'empty answer box');

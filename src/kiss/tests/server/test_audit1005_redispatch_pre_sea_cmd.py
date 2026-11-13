@@ -43,6 +43,7 @@ from kiss.agents.sorcar import sea_commands
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import AgentServer
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 from kiss.tests.server.conftest import clear_tab_states
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
@@ -110,14 +111,14 @@ def _isolate(tmp_path: Path) -> Iterator[Path]:
         (home.kiss_home / "SEAS.md").write_text(
             str(tmp_path / "seas") + "\n", encoding="utf-8",
         )
-        sea_commands._reset_for_tests()
+        reset_sea_registry()
         sea_commands.refresh_registry()
         assert sea_commands.get_command(_COMMAND) is not None
         clear_tab_states(_TAB)
         yield marker
     finally:
         clear_tab_states(_TAB)
-        sea_commands._reset_for_tests()
+        reset_sea_registry()
         home.cleanup()
 
 

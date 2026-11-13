@@ -21,12 +21,16 @@ is pinned here with real processes and real files:
 
 from __future__ import annotations
 
+import contextlib
+import os
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -123,3 +127,49 @@ def test_lock_released_after_block_and_after_exception() -> None:
             f"waiter took {acquired_at[0] - released_at:.2f}s to acquire the released lock"
         )
         assert lock_path.exists(), "the lock file must never be deleted"
+
+
+def _stop_once_created(lock_path: Path) -> Callable:
+    """Build a trace function that stops ``exclusive_file_lock`` as *lock_path* appears."""
+    code = exclusive_file_lock.__wrapped__.__code__  # type: ignore[attr-defined]
+
+    def tracer(frame: Any, event: str, arg: Any) -> Callable | None:
+        if frame.f_code is not code:
+            return None
+        frame.f_trace_opcodes = True
+        if event == "opcode" and lock_path.exists():
+            # Before the first instruction after the opening call: where that
+            # call's check point delivers a task's Stop.  Raising unsets the hook.
+            raise KeyboardInterrupt
+        return tracer
+
+    return tracer
+
+
+def _descriptors_of(path: Path) -> list[int]:
+    """This process's open descriptors of the file at *path*."""
+    wanted, found = os.stat(path), []
+    for name in os.listdir("/dev/fd"):
+        with contextlib.suppress(OSError):  # the listing's own descriptor is closed by now
+            if os.path.samestat(os.fstat(int(name)), wanted):
+                found.append(int(name))
+    return found
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/fd"), reason="lists descriptors through /dev/fd")
+@pytest.mark.filterwarnings("ignore:unclosed file:ResourceWarning")  # closed by its owner
+def test_stop_as_the_lock_file_is_opened_closes_its_descriptor(tmp_path: Path) -> None:
+    """A Stop between the lock file's ``os.open`` and the ``try`` that closed it leaked it."""
+    lock_path = tmp_path / "x.lock"
+    previous = sys.gettrace()
+    sys.settrace(_stop_once_created(lock_path))
+    try:
+        with pytest.raises(KeyboardInterrupt), exclusive_file_lock(lock_path):
+            pass
+    finally:
+        sys.settrace(previous)
+    assert _descriptors_of(lock_path) == []
+    assert lock_path.stat().st_mode & 0o077 == 0, "a lock file is private to the user"
+    with exclusive_file_lock(lock_path, blocking=False) as locked:
+        assert locked and len(_descriptors_of(lock_path)) == 1
+    assert _descriptors_of(lock_path) == []

@@ -4,8 +4,8 @@
 # add your name here
 """Keep the README prose of the 2026-11-04 docs sync in step with the code.
 
-The root README, ``src/kiss/server/README.md`` and ``src/kiss/SYSTEM.md``
-describe the router SEAs' models, the Browser tab's fallback to the
+The root README, ``src/kiss/server/README.md``, ``src/kiss/SYSTEM.md`` and
+``src/kiss/TIPS.md`` describe the router SEAs' models, the Browser tab's fallback to the
 bundled Chromium, the coding gate of 2026-11-04 (verifier reuse, one
 review per run with a deadline, the round rule, the independent reading
 of the task, the merge rule), the shell-change reader
@@ -22,6 +22,7 @@ from pathlib import Path
 
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.bestrouter import bestrouter_sea
+from kiss.agents.seas.ccxbestrouter import ccxbestrouter_sea
 from kiss.agents.seas.coding import coding_sea
 from kiss.agents.seas.orautorouter import orautorouter_sea
 from kiss.agents.seas.orbestrouter import orbestrouter_sea
@@ -39,6 +40,7 @@ _SERVER_README = (_REPO_ROOT / "src" / "kiss" / "server" / "README.md").read_tex
 #: The server README with every run of white space as one blank, for quotes that wrap.
 _SERVER_README_FLAT = re.sub(r"\s+", " ", _SERVER_README)
 _SYSTEM_PROMPT = (_REPO_ROOT / "src" / "kiss" / "SYSTEM.md").read_text(encoding="utf-8")
+_TIPS = (_REPO_ROOT / "src" / "kiss" / "TIPS.md").read_text(encoding="utf-8")
 _KISS_AGENT_SOURCE = (_REPO_ROOT / "src" / "kiss" / "core" / "kiss_agent.py").read_text(
     encoding="utf-8")
 _GATE_SOURCE = (_REPO_ROOT / "src" / "kiss" / "agents" / "sorcar" / "coding_gate.py").read_text(
@@ -64,13 +66,16 @@ def _defined(name: str, source: str) -> bool:
 
 
 def test_readmes_name_the_router_models() -> None:
-    """Both READMEs name the routers' simple, primary, review and routing models."""
+    """Both READMEs name the routers' models, and the tips window the bestrouter's."""
     for readme in (_ROOT_README, _SERVER_README):
         for name in (
             autorouter_sea.ROUTER_MODEL,
             bestrouter_sea.SIMPLE_MODEL,
             bestrouter_sea.PRIMARY_MODEL,
             bestrouter_sea.REVIEW_MODEL,
+            ccxbestrouter_sea.SIMPLE_MODEL,
+            ccxbestrouter_sea.PRIMARY_MODEL,
+            ccxbestrouter_sea.REVIEW_MODEL,
             orautorouter_sea.ROUTER_MODEL,
             orbestrouter_sea.SIMPLE_MODEL,
             orbestrouter_sea.PRIMARY_MODEL,
@@ -83,6 +88,13 @@ def test_readmes_name_the_router_models() -> None:
         orbestrouter_sea.SIMPLE_MODEL)
     assert "runs every task on" not in _ROOT_README
     assert "claude-opus-5-5-max` (pre-run" not in _ROOT_README
+    tip = next(
+        line for line in _TIPS.splitlines() if line.startswith("**What `bestrouter` does.**")
+    )
+    for name in (
+        bestrouter_sea.SIMPLE_MODEL, bestrouter_sea.PRIMARY_MODEL, bestrouter_sea.REVIEW_MODEL
+    ):
+        assert f"`{name}`" in tip, name
 
 
 def test_server_readme_names_the_browser_fallback() -> None:
@@ -98,8 +110,8 @@ def test_server_readme_names_the_browser_fallback() -> None:
 def test_server_readme_names_the_gate_additions() -> None:
     """Verifier reuse, the merge rule, fingerprints and HEAD following are described."""
     for name in (
-        "verifier_decides", "verifier_command", "verifier_passed_at", "MERGE_CAP_NOTE",
-        "MERGED_WITH_FINDINGS", "MERGED_CAVEATS", "deliver_merge_caveats", "REVIEW_PREVIOUS",
+        "verifier_decides", "verifier_command", "MERGE_CAP_NOTE",
+        "MERGED_WITH_FINDINGS", "MERGED_CAVEATS", "deliver_merge_caveats",
         "follow_head", "moved_head", "HEAD_MOVING", "custom_tools", "evidence_report",
         "unanswered_verdict", "refusable", "refusal", "MAX_GATE_ROUNDS", "MAX_VERIFIER_REFUSALS",
         "deliver_with_findings", "DELIVERED_CAVEATS", "UNVERIFIED_CAVEAT",

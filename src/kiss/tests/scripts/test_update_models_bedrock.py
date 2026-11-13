@@ -191,6 +191,51 @@ def test_existing_entry_follows_a_twin_price_change() -> None:
     ]
 
 
+def test_mirrors_follow_a_twin_repaired_or_retested_in_the_same_run() -> None:
+    """Both mirrors copy the twin as this run leaves it, not the snapshot it started from.
+
+    The twin's zero price and context are repaired from OpenRouter in the same
+    ``compute_changes`` pass.  The pass ``main`` runs after the probes and retests then picks
+    up a retested ``fc``, and the probed ``fc`` of a twin that is itself new this run,
+    without leaving a second record behind.
+    """
+    current = {
+        "claude-opus-4-6": _claude_entry(0.0, 0.0, context_length=0),
+        _GLOBAL_OPUS: _claude_entry(0.0, 0.0, context_length=0),
+    }
+    openrouter = {
+        "openrouter/anthropic/claude-opus-4.6": {
+            "context_length": 300000,
+            "input_price_per_1M": 7.0,
+            "output_price_per_1M": 35.0,
+        }
+    }
+    bedrock = _listing(_US_OPUS, _GLOBAL_OPUS, _US_HAIKU)
+    # The Anthropic listing: a twin new this run.
+    listed: dict[str, dict] = {"claude-haiku-4-5-20251001": {}}
+    updates, new_models = compute_changes(current, openrouter, {}, {}, listed, {}, bedrock=bedrock)
+    repaired = {"context_length": 300000, "input_price_per_1M": 7.0, "output_price_per_1M": 35.0}
+    changes = {upd["name"]: upd["changes"] for upd in updates}
+    assert changes == {"claude-opus-4-6": repaired, _GLOBAL_OPUS: repaired}
+    us_opus = _by_name(new_models)[_US_OPUS]
+    assert {field: us_opus[field] for field in repaired} == {
+        "context_length": 300000,
+        "input_price_per_1M": 7.7,
+        "output_price_per_1M": 38.5,
+    }
+
+    changes["claude-opus-4-6"]["fc"] = False  # what a retest of the twin records
+    _by_name(new_models)["claude-haiku-4-5-20251001"]["fc"] = False  # and a probe of a new one
+    _add_bedrock_candidates(bedrock, current, openrouter, updates, new_models)
+    assert len(updates) == 2
+    assert {upd["name"]: upd["changes"] for upd in updates} == {
+        "claude-opus-4-6": {**repaired, "fc": False},
+        _GLOBAL_OPUS: {**repaired, "fc": False},
+    }
+    mirrors = [(nm["name"], nm["fc"]) for nm in new_models if nm["source"] == "bedrock"]
+    assert mirrors == [(_US_HAIKU, False), (_US_OPUS, False)]
+
+
 def test_existing_entry_without_a_twin_is_left_alone() -> None:
     """A hand-priced entry of an unknown Claude model keeps its prices."""
     current = {_US_CLAUDE_3: _claude_entry(0.25, 1.25)}
@@ -478,6 +523,65 @@ def test_main_repairs_a_thinking_only_drift(tmp_path: Path, monkeypatch, capsys)
     data = json.loads(target.read_text(encoding="utf-8"))
     assert data[_US_OPUS]["thinking"] == "high"
     assert data[f"{_US_OPUS}-max"]["alias_of"] == _US_OPUS
+
+
+def test_main_carries_a_retested_twin_to_its_mirror_in_the_same_run(tmp_path: Path) -> None:
+    """The real updater: a retest that clears the twin's flags clears its mirror's in that run.
+
+    boto3 and the Anthropic SDK talk to one loopback endpoint, which lists the Bedrock
+    profile of Opus 4.6 and answers 404 to everything else: the twin's probes.
+    """
+    import subprocess
+    import sys
+
+    from kiss.tests.scripts.test_update_models_responses_api import (
+        _RETEST_CHILD,
+        _http_status_server,
+        _keyless_env,
+    )
+
+    twin = {
+        "context_length": 200000,
+        "input_price_per_1M": 5.0,
+        "output_price_per_1M": 25.0,
+        "fc": True,
+        "emb": False,
+        "gen": True,
+    }
+    mirror = {**twin, "input_price_per_1M": 5.5, "output_price_per_1M": 27.5}
+    catalog = {"claude-opus-4-6": twin, _US_OPUS: mirror}
+    target = tmp_path / "MODEL_INFO.json"
+    target.write_text(json.dumps(catalog), encoding="utf-8")
+    profiles = {"inferenceProfileSummaries": [{"inferenceProfileId": _US_OPUS[len("bedrock/") :]}]}
+    replies = {
+        "/listing": (200, b"{}"),
+        "/foundation-models?byProvider=Anthropic": (200, b'{"modelSummaries": []}'),
+        "/inference-profiles?type=SYSTEM_DEFINED&maxResults=1000": (
+            200,
+            json.dumps(profiles).encode(),
+        ),
+    }
+    child = _RETEST_CHILD.replace(
+        "mod.main()", 'mod.ANTHROPIC_MODELS_URL = endpoint + "/listing"\nmod.main()'
+    )
+    command = [sys.executable, "-c", child, "--model-info", str(target), "--test-existing"]
+    with _http_status_server(404, replies) as endpoint:
+        env = {
+            **_keyless_env(tmp_path / "home", target),
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "ANTHROPIC_BASE_URL": endpoint,
+            "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
+            "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "AWS_REGION": "us-east-1",
+            "AWS_ENDPOINT_URL_BEDROCK": endpoint,
+            "AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "credentials"),
+            "AWS_CONFIG_FILE": str(tmp_path / "config"),
+        }
+        subprocess.run([*command, endpoint], env=env, check=True, timeout=300)
+    cleared = {"fc": False, "gen": False}
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        name: {**entry, **cleared} for name, entry in catalog.items()
+    }
 
 
 @pytest.mark.skipif(not _LIVE_CREDENTIALS, reason="no Bedrock credentials in the environment")

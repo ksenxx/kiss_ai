@@ -201,6 +201,41 @@ class TestSteeringMessageRouting:
         assert st.queued_followup_tasks == []
         assert st.pending_user_messages == ["<task>too late</task>"]
 
+    @pytest.mark.parametrize("ending", ["launcher closed", "sub-agent", "stopped"])
+    def test_message_after_the_last_step_of_a_run_nothing_follows_is_refused(
+        self, ending: str,
+    ) -> None:
+        """Queued, it would be echoed and then dropped at teardown: the page gets the draft back.
+
+        The refusal names the message (``promptIds``), which is not
+        among the prompts taken from the tab.
+        """
+        server, events = _make_server()
+        st = self._active_state(f"route-late-{ending}")
+        st.followup_queue_closed = True
+        if ending == "launcher closed":
+            st.frontend_closed = True
+        elif ending == "sub-agent":
+            st.parent_task_id = "calling-task"
+        else:
+            st.stop_event = threading.Event()
+            st.stop_event.set()
+        viewer = f"{st.tab_id}-viewer"
+        server.printer.subscribe_tab(st.task_id, viewer)
+
+        server._cmd_append_user_message(
+            {"tabId": viewer, "prompt": "also update the README", "promptId": "late-1"},
+        )
+
+        assert st.pending_user_messages == []
+        told = [
+            (e.get("code"), e.get("tabId"), e.get("promptIds"))
+            for e in events
+            if e["type"] in ("prompt", "error")
+        ]
+        assert told == [("prompt_refused", viewer, ["late-1"])]
+        assert server._prompts_taken_from(viewer) == {}
+
 
 class _QueueScriptedAgent(ChatSorcarAgent):
     """Real agent subclass whose ``run`` returns a scripted ``finish()``.

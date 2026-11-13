@@ -39,6 +39,7 @@ const {
 } = require('./simplify2_harness');
 const {
   all,
+  key,
   showSection,
   menuItem,
   rightClick,
@@ -72,9 +73,7 @@ function click(win, el) {
 }
 
 function closeMenu(win) {
-  win.document.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}),
-  );
+  key(win, win.document, 'Escape');
 }
 
 /** The Explorer row for path *p*, which must be listed. */
@@ -92,13 +91,7 @@ function renameInExplorer(win, posted, p, newName) {
   assert.ok(input, 'the rename box');
   input.value = newName;
   posted.length = 0;
-  input.dispatchEvent(
-    new win.KeyboardEvent('keydown', {
-      key: 'Enter',
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
+  key(win, input, 'Enter');
   const sent = ofType(posted, 'fsAction');
   assert.strictEqual(sent.length, 1, 'one rename sent');
   assert.strictEqual(sent[0].action, 'rename');
@@ -808,15 +801,10 @@ const tests = [
   ],
 ];
 
-const {test, report} = makeRunner();
+// The runner closes the pages a test built when it has ended.
+const {test, report} = makeRunner({windows: openWindows});
 
 (async () => {
-  for (const [name, fn] of tests) {
-    try {
-      await test(name, fn);
-    } finally {
-      while (openWindows.length) openWindows.pop().close();
-    }
-  }
+  for (const [name, fn] of tests) await test(name, fn);
   report('audit1019_w2_forms_focus_fs_machine');
 })();

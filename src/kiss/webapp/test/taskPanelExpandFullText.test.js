@@ -11,8 +11,14 @@ const {
   send,
   loadRemoteCss,
   isDisplayed,
+  openRunningTask,
+  readyTabId,
 } = require('./simplify2_harness');
-const {spawnSubagent} = require('./subagent_tab_helpers');
+const {
+  spawnSubagent,
+  runParallelPanel,
+  openSubTabIds,
+} = require('./subagent_tab_helpers');
 
 const LONG_TASK = Array.from(
   {length: 12},
@@ -47,19 +53,18 @@ function taskTextCs(win) {
   return win.getComputedStyle(el);
 }
 
-function showTaskPanel(win, posted, task) {
+function showTaskPanel(win, posted) {
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
   send(win, {
     type: 'task_events',
     events: [],
-    task: task,
+    task: LONG_TASK,
     tabId: ready.tabId,
     chat_id: 'chat-taskpanel',
   });
   const panel = win.document.querySelector('#output .task-panel');
   assert.ok(panel, 'the transcript must open with the task panel');
-  return ready.tabId;
 }
 
 function assertFullTextPanel(win, why) {
@@ -96,7 +101,7 @@ function assertFullTextPanel(win, why) {
 
 function testTaskPanelOpensTheTranscript() {
   const {win, posted} = makePage();
-  showTaskPanel(win, posted, LONG_TASK);
+  showTaskPanel(win, posted);
   const d = win.document;
   const output = d.getElementById('output');
   const panel = output.querySelector('.task-panel');
@@ -138,7 +143,7 @@ function testTaskPanelOpensTheTranscript() {
 // one click away again.
 function testTaskPanelFoldsLikeAnyPanel() {
   const {win, posted} = makePage();
-  showTaskPanel(win, posted, LONG_TASK);
+  showTaskPanel(win, posted);
   const panel = win.document.querySelector('#output .task-panel');
   const header = panel.querySelector('.collapse-header');
   header.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
@@ -395,12 +400,75 @@ function testTrajectoryPanelsSkipChevronPass() {
   win.close();
 }
 
+// An older task spliced into the thread is no reason to fold the tab's
+// own panels.  They can be open while the tab does not run: the daemon
+// refused a Stop ("No running task to stop"), which ends the tab's
+// running look without the fold a task's end brings.  The older task
+// loaded above them (here one with the very same text) leaves them as
+// the reader sees them; the tab's own next event folds them.
+function testNeighbourSpliceLeavesOwnPanelsAlone() {
+  const {win, posted} = makePage();
+  openRunningTask(win, posted, 'Fix the bug');
+  const tabId = readyTabId(posted);
+  send(win, {
+    type: 'tool_call',
+    name: 'run_parallel',
+    tabId,
+    extras: {tasks: JSON.stringify(['sub 1'])},
+  });
+  spawnSubagent({win, posted}, tabId, 'sub-task-1', 'sub 1', 0);
+  const fanOut = runParallelPanel(win);
+  assert.ok(
+    fanOut && !fanOut.classList.contains('collapsed'),
+    'a fan-out is born open',
+  );
+  send(win, {type: 'stop_ack', accepted: false, tabId});
+  assert.ok(
+    !fanOut.classList.contains('collapsed'),
+    'a refused stop folds nothing',
+  );
+
+  send(win, {
+    type: 'adjacent_task_events',
+    direction: 'prev',
+    task: 'Fix the bug',
+    task_id: '41',
+    events: [
+      {type: 'tool_call', name: 'Bash', command: 'echo old'},
+      {type: 'tool_result', name: 'Bash', content: 'old'},
+    ],
+  });
+  assert.ok(
+    win.document.querySelector(
+      '#output > .adjacent-task[data-task-id="41"] > .trajectory.collapsed',
+    ),
+    'the older task arrives with its panels folded behind its Trajectory',
+  );
+  assert.ok(
+    !fanOut.classList.contains('collapsed') && isDisplayed(win, fanOut),
+    "the tab's own open panel stays as the reader left it",
+  );
+  assert.strictEqual(
+    openSubTabIds(win).length,
+    1,
+    'and its sub-agent tab stays open',
+  );
+
+  send(win, {type: 'usage_info', tabId});
+  assert.ok(
+    fanOut.classList.contains('collapsed'),
+    "the tab's own next event folds its panel: its task is over",
+  );
+  win.close();
+}
+
 function runTests() {
   const tests = [
     testTaskPanelOpensTheTranscript,
     testTaskPanelFoldsLikeAnyPanel,
     testChevronPassWorksWithoutButton,
     testTrajectoryPanelsSkipChevronPass,
+    testNeighbourSpliceLeavesOwnPanelsAlone,
   ];
   for (let i = 0; i < tests.length; i++) {
     tests[i]();

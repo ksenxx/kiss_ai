@@ -22,6 +22,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     _run_agent,
     available_channels,
     resolve_agent,
+    sub_task_prompt,
 )
 from kiss.agents.sorcar.useful_tools import (
     UsefulTools,
@@ -52,6 +53,22 @@ class TestRewrite:
             f"Edit {wt}/src/a.py, run `ls {wt}`; keep {repo}/.kiss-worktrees/kiss_wt-other/b "
             f"and {wt}/c and {repo}2/d (a different directory)."
         )
+
+    def test_the_shared_environment_keeps_its_path(self, worktree) -> None:
+        """A brief that names the main checkout's ``.venv`` reaches the sub-agent as written:
+        the worktree has no environment of its own, and the Bash guard lets that path through."""
+        repo, wt = worktree
+        text = (
+            f"Interpreter: {repo}/.venv/bin/python. Run PYTHONPATH={repo}/src "
+            f"{repo}/.venv/bin/pytest {repo}/tests; `ls {repo}/.venv`, not {repo}/.venv2/x."
+        )
+        out = sub_task_prompt(text, wt, True, "")
+        assert out == rewrite_parent_repo_paths(text, wt) == (
+            f"Interpreter: {repo}/.venv/bin/python. Run PYTHONPATH={wt}/src "
+            f"{repo}/.venv/bin/pytest {wt}/tests; `ls {repo}/.venv`, not {wt}/.venv2/x."
+        )
+        command = f"PYTHONPATH={wt}/src {repo}/.venv/bin/pytest {wt}/tests"
+        assert _bash_parent_repo_guard(command, wt) is None
 
     def test_no_worktree_means_no_change(self, worktree, tmp_path: Path) -> None:
         repo, _wt = worktree

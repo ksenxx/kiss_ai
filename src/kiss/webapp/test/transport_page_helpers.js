@@ -70,7 +70,9 @@ function fail(msg, err) {
  * Eval the shim into *win* and fire DOMContentLoaded: the shim defers
  * app-bound dispatches until the parser finishes so none are lost while
  * main.js is still being fetched, and jsdom keeps `document.readyState`
- * at 'loading' until a later macrotask.
+ * at 'loading' until the code that built the page yields (its own
+ * DOMContentLoaded fires in a microtask), while the suites drive the
+ * shim synchronously.
  */
 function bootShim(win) {
   win.__BRAND__ = {productName: 'KISS Sorcar', shortName: 'KISS'};
@@ -243,6 +245,21 @@ function installFakeTimers(win, opts) {
   return timers;
 }
 
+/** Run every live interval `installFakeTimers` recorded in *intervals*. */
+function runTicks(intervals) {
+  for (const t of intervals) if (!t.cleared) t.fn();
+}
+
+/** The message line of the server-loading overlay. */
+function overlayText(win) {
+  return win.document.getElementById('kiss-server-loading-msg').textContent;
+}
+
+/** The overlay's action button ("Retry now"). */
+function retryButton(win) {
+  return win.document.getElementById('kiss-server-loading-action');
+}
+
 /** The recorded timers that are neither cleared nor fired yet. */
 function pendingTimers(timers) {
   return timers.filter(t => !t.cleared && !t.ran);
@@ -267,6 +284,17 @@ function openNextSocket(sockets, timers, n) {
   return sockets[n + 1];
 }
 
+/**
+ * Type *text* into the password dialog of *doc* and press Unlock.  The
+ * dialog hands the password on through a promise: the shim has acted on
+ * it (the auth frame, or a reconnect) once this resolves.
+ */
+async function unlock(doc, text) {
+  doc.getElementById('auth-modal-input').value = text;
+  doc.getElementById('auth-modal-ok').click();
+  await settle();
+}
+
 /** How many `submit` frames went out over every socket. */
 function submitCount(sockets) {
   return sockets.flatMap(frames).filter(f => f.type === 'submit').length;
@@ -274,6 +302,7 @@ function submitCount(sockets) {
 
 module.exports = {
   submitCount,
+  unlock,
   newDom,
   newAuthDom,
   ok,
@@ -286,6 +315,9 @@ module.exports = {
   waitForSocket,
   makeWebappClient,
   installFakeTimers,
+  runTicks,
+  overlayText,
+  retryButton,
   pendingTimers,
   fireTimer,
   openNextSocket,

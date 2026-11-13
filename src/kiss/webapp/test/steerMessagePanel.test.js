@@ -148,9 +148,9 @@ function testMessagePanelNeverAutoFolded() {
     });
     events.push({
       type: 'tool_result',
-      name: 'Bash',
-      output: 'y',
-      success: true,
+      tool_name: 'Bash',
+      content: 'y',
+      is_error: false,
     });
     events.push({type: 'prompt', text: 'steer ' + i, steer: true});
   }
@@ -168,10 +168,6 @@ function testMessagePanelNeverAutoFolded() {
   assert.strictEqual(msgs.length, 2, 'both replayed messages render');
   for (const m of msgs) {
     assert.ok(!m.classList.contains('collapsed'), 'a replayed message is open');
-    assert.ok(
-      !m.classList.contains('chv-hidden'),
-      'and not hidden by the digest',
-    );
     assert.strictEqual(
       m.querySelector('.task-panel-h').firstChild.textContent,
       'Message',

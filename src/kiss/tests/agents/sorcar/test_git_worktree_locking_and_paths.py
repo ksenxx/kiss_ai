@@ -13,8 +13,12 @@ Covers audit findings:
 * **R5** — ``_append_info_line``'s read-then-append was guarded only by
   an in-process lock, so two Sorcar PROCESSES duplicated the entry in
   ``info/exclude`` / ``info/attributes``.
-* **I2** — the failed-cherry-pick cleanup discarded
-  ``cherry-pick --abort``'s return code.
+* **I2** — the cleanup of a failed merge: what git applied is taken
+  back, what the user saved meanwhile is left alone (up to the moment
+  git itself writes the files), and no merge is attempted into a git
+  operation of their own (a cherry-pick sequence, a merge, a rebase).
+* **LOCKKEY** — ``repo_lock`` is one lock per repository, whichever of
+  its checkouts names it.
 * **I3** — ``.splitlines()`` + ``.strip()`` on git-emitted paths and on
   git-config values.
 * **D1** — ``reclaim_orphaned_worktrees`` re-staged before ``commit_all``
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -36,8 +41,10 @@ import time
 import unittest
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 from kiss.agents.sorcar.git_worktree import (
+    GitWorktree,
     GitWorktreeOps,
     MergeResult,
     _git,
@@ -45,7 +52,11 @@ from kiss.agents.sorcar.git_worktree import (
     _race_delay,
     repo_lock,
 )
+from kiss.agents.sorcar.merge_conflict_resolver import resolve_merge_conflict
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.tests.conftest import posix_only
+from kiss.tests.lock_injection import inject
+from kiss.tests.server.pause import Pause
 
 _RACE_DELAY_ENV = "KISS_RACE_DELAY"
 
@@ -80,6 +91,58 @@ def _make_repo(path: Path) -> Path:
     _run("add", "-A", cwd=path)
     _run("commit", "-m", "initial", cwd=path)
     return path
+
+
+def _launched_resolver(parent_agent: object, prompt: str, repo: Path) -> None:
+    """Stand-in for the merge agent: record that it was launched on *repo*."""
+    (repo / ".git" / "resolver-launched").touch()
+
+
+def _settling_resolver(parent_agent: object, prompt: str, repo: Path) -> None:
+    """Stand-in for the merge agent: settle the conflict in ``f.txt`` and stage it."""
+    (repo / "f.txt").write_text("settled\n")
+    _run("add", "f.txt", cwd=repo)
+
+
+class SaveBeforeGitWrites:
+    """A :class:`Pause` matcher on ``_git``: an editor saves *path* as git is asked to write files.
+
+    Once, on the entry of the first git command that writes working
+    files (``reset --merge`` / ``--hard``, ``read-tree -u``, ``restore``,
+    ``rm``, ``checkout``): after every look the merge itself takes at
+    the tree, so only git's own check of the file can see the save.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.saved = False
+
+    def __call__(self, frame_locals: dict[str, Any]) -> bool:
+        args = frame_locals.get("args", ())
+        if not self.saved and (
+            args[:2] in (("reset", "--merge"), ("reset", "--hard"))
+            or (args[:1] == ("read-tree",) and "-u" in args)
+            or {"restore", "rm", "checkout"} & set(args)
+        ):
+            self.saved = True
+            with self.path.open("a") as file:
+                file.write("saved since\n")
+        return False
+
+
+class _Merge(threading.Thread):
+    """Squash-merges ``kiss/wt-a`` into *repo* and keeps whatever that raised."""
+
+    def __init__(self, repo: Path) -> None:
+        super().__init__(daemon=True)
+        self.repo = repo
+        self.raised: BaseException | None = None
+
+    def run(self) -> None:
+        try:
+            GitWorktreeOps.squash_merge_branch(self.repo, "kiss/wt-a")
+        except BaseException as exc:
+            self.raised = exc
 
 
 def _append_worker(repo_str: str, barrier, iterations: int) -> None:
@@ -144,6 +207,56 @@ class RemoveTakesRepoLockTest(unittest.TestCase):
         with repo_lock(self.repo):
             GitWorktreeOps.remove(self.repo, self.wt_dir)
         self.assertFalse(self.wt_dir.exists())
+
+    def test_every_checkout_of_a_repository_takes_the_same_lock(self) -> None:
+        """A linked worktree, and a checkout whose git dir is kept apart, name one lock."""
+        self.assertIs(repo_lock(self.wt_dir), repo_lock(self.repo))
+        # A ``.git`` file is read as git reads it. A carriage return in the git dir's name
+        # is part of the name; the line ends after the path, however many, are not; the
+        # path ends at a NUL.
+        meta_name = "meta" if os.name == "nt" else "me\rta"
+        apart, meta, linked = self.tmp / "apart", self.tmp / meta_name, self.tmp / "linked"
+        unseen = self.tmp / "unseen"
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main", f"--separate-git-dir={meta}", str(apart)],
+            capture_output=True, check=True,
+        )
+        identity = ("-c", "user.name=T", "-c", "user.email=t@t.com")
+        _run(*identity, "commit", "--allow-empty", "-m", "initial", cwd=apart)
+        _run("worktree", "add", "-q", "-b", "side", str(linked), cwd=apart)
+        _run("worktree", "add", "-q", "-b", "unseen", str(unseen), cwd=apart)
+        with (linked / ".git").open("ab") as pointer:
+            pointer.write(b"\r\n")
+        pointer_path = unseen / ".git"
+        named = pointer_path.read_bytes().removesuffix(b"\n")
+        with pointer_path.open("r+b") as pointer:
+            pointer.write(named + b"\0not read\n")
+            pointer.truncate()
+        lock = repo_lock(apart)
+        self.assertIs(repo_lock(linked), lock)
+        self.assertIs(repo_lock(meta), lock)
+        self.assertIsNot(repo_lock(self.repo), lock)
+        # Each path is locked as the repository git itself finds from it: a worktree's
+        # own git dir, and a ``.git`` that is no git dir, which git looks past.
+        stray = self.repo / ".kiss-worktrees" / "stray"
+        (stray / ".git").mkdir(parents=True)
+        for path in (self.repo / ".git" / "worktrees" / "kiss_wt-a", stray, linked, unseen):
+            shared = subprocess.run(
+                ["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                capture_output=True, check=True,
+            ).stdout  # as bytes: read as text, the carriage return in the name is a line end
+            self.assertIs(repo_lock(path), repo_lock(Path(os.fsdecode(shared)[:-1])), path)
+        # So does a path below a checkout, as git looks upwards; one in no repository
+        # (below a ``.git`` file that names no path, even) is locked by itself.
+        self.assertIs(repo_lock(self.repo / "below" / "it"), repo_lock(self.repo))
+        (self.tmp / ".git").write_bytes(b"gitdir: \0")
+        self.assertIs(repo_lock(self.tmp / "gone"), repo_lock(self.tmp / "gone"))
+        self.assertIsNot(repo_lock(self.tmp / "gone"), repo_lock(self.repo))
+        # The repository is told from its files, not asked of a git that can fail (a
+        # config it cannot parse): no checkout, locked before or not, takes another lock.
+        (meta / "config").write_text("[broken\n")
+        self.assertIs(repo_lock(linked), lock)
+        self.assertIs(repo_lock(unseen), lock)
 
     def test_remove_refuses_the_main_working_tree(self) -> None:
         """The main tree is never removed, even under the new lock."""
@@ -309,7 +422,7 @@ class GitOutputParsingTest(unittest.TestCase):
 
 
 class FailedCherryPickCleanupTest(unittest.TestCase):
-    """I2: a failed baseline merge must not leave a half-applied tree."""
+    """I2: a failed merge leaves neither a half-applied tree nor a reset user edit."""
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss_e_i2_"))
@@ -407,29 +520,666 @@ class FailedCherryPickCleanupTest(unittest.TestCase):
         )
         self._assert_no_pick_in_progress()
 
-    def test_abort_helper_restores_a_partially_applied_index(self) -> None:
-        """When ``--abort`` fails and the tree changed, state is reset."""
-        before = GitWorktreeOps.status_porcelain(self.repo)
-        (self.repo / "g.txt").write_text("half-applied\n")
-        _run("add", "g.txt", cwd=self.repo)
-        self.assertNotEqual(
-            GitWorktreeOps.status_porcelain(self.repo), before,
+    def _while_git_merges_f(self, script: str) -> None:
+        """Make git run the ``sh`` *script*, in the repo root, when it merges ``f.txt``.
+
+        A merge driver runs while git computes the merge, after the
+        caller's look at the tree and before git's own: what the
+        script writes is what an editor saves at that moment.  The
+        script's exit status is the driver's verdict (non-zero: a
+        conflict in ``f.txt``).
+        """
+        driver = self.tmp / "driver.sh"
+        driver.write_text(script)
+        _run("config", "merge.editor.driver", f"sh {shlex.quote(str(driver))}", cwd=self.repo)
+        with (self.repo / ".git" / "info" / "attributes").open("a") as attributes:
+            attributes.write("f.txt merge=editor\n")
+
+    def _assert_only_edit(self, name: str, content: str, status: str = "M") -> None:
+        """Assert the tree differs from HEAD by the *content* of *name* alone (unstaged: ``M``)."""
+        self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), f"{status} {name}")
+        self.assertEqual((self.repo / name).read_text(), content)
+        self._assert_no_pick_in_progress()
+        self.assertFalse((self.repo / ".git" / "SQUASH_MSG").exists())
+
+    @posix_only("the merge driver is a sh script")
+    def test_an_edit_saved_while_git_merges_survives_the_refusal(self) -> None:
+        """Git refuses to merge over a file saved after the caller's check: nothing is reset."""
+        baseline = self._make_branch()
+        self._while_git_merges_f("echo UNSAVED USER WORK > g.txt\n")
+
+        result = GitWorktreeOps.squash_merge_from_baseline(self.repo, "kiss/wt-a", baseline)
+
+        self.assertEqual(result, MergeResult.CONFLICT)
+        self._assert_only_edit("g.txt", "UNSAVED USER WORK\n")
+        # The conflict resolver's re-application is refused the same way.
+        self.assertIsNone(GitWorktreeOps.begin_conflicted_merge(self.repo, "kiss/wt-a", baseline))
+        self._assert_only_edit("g.txt", "UNSAVED USER WORK\n")
+
+    @posix_only("the hook is a sh script")
+    def test_an_edit_saved_as_git_squash_merges_survives_the_refusal(self) -> None:
+        """The same for a worktree without a baseline (``git merge --squash``).
+
+        Staged too (``M `` in the first status column): an index that
+        changed is no proof that the merge applied anything.
+        """
+        self._make_branch()
+        for stage, status in (("", "M"), ("git add g.txt", "M ")):
+            with self.subTest(stage=stage):
+                self._save_g_as_git_squash_merges(stage)
+
+                result = GitWorktreeOps.squash_merge_branch(self.repo, "kiss/wt-a")
+
+                self.assertEqual(result, MergeResult.CONFLICT)
+                self._assert_only_edit("g.txt", "UNSAVED USER WORK\n", status)
+                self.assertIsNone(
+                    GitWorktreeOps.begin_conflicted_merge(self.repo, "kiss/wt-a", None),
+                )
+                self._assert_only_edit("g.txt", "UNSAVED USER WORK\n", status)
+                _run("reset", "--hard", cwd=self.repo)
+                (self.repo / ".git" / "saved").unlink()
+
+    def _save_g_as_git_squash_merges(self, then: str) -> None:
+        """Make an editor save ``g.txt`` and run the ``sh`` line *then*, once per merge.
+
+        ``git merge`` records ORIG_HEAD before it looks at the tree: what
+        the hook writes then (once, ``.git/saved``: ``git reset`` records
+        ORIG_HEAD too) is a save right after the caller's check.
+        """
+        hook = self.repo / ".git" / "hooks" / "reference-transaction"
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = prepared ] && [ ! -e .git/saved ] && grep -q " ORIG_HEAD$"; then\n'
+            f"    : > .git/saved\n    echo UNSAVED USER WORK > g.txt\n    {then}\nfi\n"
+        )
+        hook.chmod(0o755)
+
+    @posix_only("the hook is a sh script")
+    def test_a_stop_landing_on_a_merge_git_never_applied_resets_nothing(self) -> None:
+        """Unstaged, the index is as it was; staged, the file is not what a merge wrote."""
+        self._make_branch()
+        lingering = self.repo / ".git" / "lingering"
+        for stage, status in (("", "M"), ("git add g.txt", "M ")):
+            with self.subTest(stage=stage):
+                self._save_g_as_git_squash_merges(f"{stage}\n    : > .git/lingering\n    sleep 0.3")
+                merger = _Merge(self.repo)
+                merger.start()
+                while not lingering.exists():
+                    self.assertTrue(merger.is_alive(), repr(merger.raised))
+                    time.sleep(0.002)
+
+                self.assertEqual(inject(merger), 1)  # the runner's Stop, while git lingers
+                merger.join(timeout=30)
+
+                self.assertIsInstance(merger.raised, KeyboardInterrupt)
+                self._assert_only_edit("g.txt", "UNSAVED USER WORK\n", status)
+                _run("reset", "--hard", cwd=self.repo)
+                lingering.unlink()
+                (self.repo / ".git" / "saved").unlink()
+
+    @posix_only("the merge driver is a sh script")
+    def test_a_conflicting_merge_is_taken_back_around_an_edit_saved_meanwhile(self) -> None:
+        """The cleanup of an applied merge keeps an edit to a file the merge did not touch."""
+        (self.repo / "u.txt").write_text("u\n")
+        _run("add", "u.txt", cwd=self.repo)
+        _run("commit", "-m", "a file no branch touches", cwd=self.repo)
+        baseline = self._make_branch()
+        (self.repo / "f.txt").write_text("a-main\n")  # a competing commit: the conflict is real
+        _run("commit", "-am", "main moves on", cwd=self.repo)
+        self._while_git_merges_f("echo saved meanwhile > u.txt\nexit 1\n")
+
+        for mode in (baseline, None):
+            with self.subTest(baseline=mode):
+                result = GitWorktreeOps.squash_merge(self.repo, "kiss/wt-a", mode)
+
+                self.assertEqual(result, MergeResult.CONFLICT)
+                self._assert_only_edit("u.txt", "saved meanwhile\n")
+                self.assertEqual((self.repo / "f.txt").read_text(), "a-main\n")
+                self.assertEqual((self.repo / "g.txt").read_text(), "x\n")
+                # No merge agent is run around the edit: its cleanup would reset it.
+                wt = GitWorktree(self.repo, "kiss/wt-a", "main", self.tmp / "removed", mode)
+                self.assertEqual(
+                    resolve_merge_conflict(None, wt, None, None, run_agent=_launched_resolver),
+                    MergeResult.CONFLICT,
+                )
+                self.assertFalse((self.repo / ".git" / "resolver-launched").exists())
+                self._assert_only_edit("u.txt", "saved meanwhile\n")
+
+    @posix_only("the smudge filter is a sh command")
+    def test_a_file_saved_since_the_merge_wrote_it_is_never_reset(self) -> None:
+        """Be it a merged file (``e.txt``) or a conflicted one (``f.txt``): the merge stays."""
+        (self.repo / "e.txt").write_text("e\n")
+        (self.repo / "u.txt").write_text("u\n")
+        _run("add", "e.txt", "u.txt", cwd=self.repo)
+        _run("commit", "-m", "a file the branch edits and one it does not", cwd=self.repo)
+        baseline = self._make_branch()
+        _run("checkout", "kiss/wt-a", cwd=self.repo)
+        (self.repo / "e.txt").write_text("e-agent\n")
+        _run("commit", "-am", "agent 3", cwd=self.repo)
+        _run("checkout", "main", cwd=self.repo)
+        (self.repo / "f.txt").write_text("a-main\n")
+        _run("commit", "-am", "main moves on", cwd=self.repo)
+        (self.repo / ".git" / "info" / "attributes").write_text("g.txt filter=late\n")
+
+        for mode in (baseline, None):
+            for saved in ("e.txt", "f.txt"):
+                with self.subTest(baseline=mode, saved=saved):
+                    # A smudge filter runs as git writes ``g.txt``, after it wrote
+                    # ``e.txt`` and ``f.txt``: once per merge, an editor saves
+                    # *saved* and a file the merge does not touch.
+                    _run(
+                        "config", "filter.late.smudge",
+                        "sh -c 'cat; test -e .git/late || { : > .git/late; "
+                        f"echo saved since >> {saved}; echo saved since > u.txt; }}'",
+                        cwd=self.repo,
+                    )
+
+                    result = GitWorktreeOps.squash_merge(self.repo, "kiss/wt-a", mode)
+
+                    self.assertEqual(result, MergeResult.CONFLICT)
+                    # No merge agent is launched on top of it, nor its cleanup.
+                    wt = GitWorktree(self.repo, "kiss/wt-a", "main", self.tmp / "removed", mode)
+                    self.assertEqual(
+                        resolve_merge_conflict(None, wt, None, None, run_agent=_launched_resolver),
+                        MergeResult.CONFLICT,
+                    )
+                    self.assertFalse((self.repo / ".git" / "resolver-launched").exists())
+                    self.assertTrue((self.repo / saved).read_text().endswith("saved since\n"))
+                    self.assertEqual((self.repo / "u.txt").read_text(), "saved since\n")
+                    self.assertEqual(GitWorktreeOps.unresolved_paths(self.repo), ["f.txt"])
+                    _run("reset", "--hard", cwd=self.repo)
+                    (self.repo / ".git" / "late").unlink()
+
+    def test_a_file_saved_right_before_the_merge_is_taken_back_is_never_reset(self) -> None:
+        """After every look the merge takes at it, be it conflicted (``f.txt``) or merged."""
+        baseline = self._make_branch()
+        (self.repo / "f.txt").write_text("a-main\n")
+        _run("commit", "-am", "main moves on", cwd=self.repo)
+
+        for mode in (baseline, None):
+            for name in ("f.txt", "g.txt"):
+                with self.subTest(baseline=mode, saved=name):
+                    with Pause(_git.__code__, SaveBeforeGitWrites(self.repo / name)):
+                        result = GitWorktreeOps.squash_merge(self.repo, "kiss/wt-a", mode)
+
+                    self.assertEqual(result, MergeResult.CONFLICT)
+                    self.assertTrue((self.repo / name).read_text().endswith("saved since\n"))
+                    # The merge stays in place around the save, whole.
+                    self.assertEqual(GitWorktreeOps.unresolved_paths(self.repo), ["f.txt"])
+                    self.assertTrue((self.repo / "g.txt").read_text().startswith("g-agent\n"))
+                    _run("reset", "--hard", cwd=self.repo)
+
+    @posix_only("the filters are sh scripts that read the command line of their git")
+    def test_a_file_git_cannot_compare_is_never_reset(self) -> None:
+        """A look at the tree that fails says nothing about it: the merge stays.
+
+        A smudge filter saves ``f.txt`` as git writes ``g.txt``; from then
+        on the required clean filter of ``f.txt`` fails every git command
+        that reads the file, but the listing of the unmerged paths.
+        """
+        baseline = self._make_branch()
+        (self.repo / "f.txt").write_text("a-main\n")
+        _run("commit", "-am", "main moves on", cwd=self.repo)
+        clean = self.tmp / "clean.sh"
+        clean.write_text(
+            'if [ -e .git/late ] && ! ps -o args= -p "$PPID" | grep -q -e --diff-filter=U; then\n'
+            "    exit 1\nfi\nexec cat\n"
+        )
+        save = "sh -c 'cat; test -e .git/late || { : > .git/late; echo saved since >> f.txt; }'"
+        for key, value in (
+            ("late.smudge", save),
+            ("broken.clean", f"exec sh {shlex.quote(str(clean))}"),
+            ("broken.smudge", "cat"),
+            ("broken.required", "true"),
+        ):
+            _run("config", f"filter.{key}", value, cwd=self.repo)
+        attributes = self.repo / ".git" / "info" / "attributes"
+
+        for mode in (baseline, None):
+            with self.subTest(baseline=mode):
+                attributes.write_text("f.txt filter=broken\ng.txt filter=late\n")
+
+                result = GitWorktreeOps.squash_merge(self.repo, "kiss/wt-a", mode)
+
+                self.assertEqual(result, MergeResult.CONFLICT)
+                self.assertTrue((self.repo / "f.txt").read_text().endswith("saved since\n"))
+                attributes.write_text("")  # no filter runs for the cleanup
+                _run("reset", "--hard", cwd=self.repo)
+                (self.repo / ".git" / "late").unlink()
+
+    @posix_only("the hook is a sh script")
+    def test_a_rollback_git_cannot_finish_is_a_conflict_no_merge_agent_is_run_on(self) -> None:
+        """The hook that rejects the commit breaks the checkout of ``f.txt``: git stops half-way.
+
+        The tree it leaves is reported as a conflict, not as a merge
+        that was taken back, with what git failed at and what is left;
+        no merge agent applies the branch to it again; nor is the
+        agent's own rejected commit reported as taken back.
+        """
+        baseline = self._make_branch()
+        hook = self.repo / ".git" / "hooks" / "pre-commit"
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text(
+            "#!/bin/sh\n"
+            "echo 'f.txt filter=gone' > .git/info/attributes\n"
+            "git config filter.gone.required true\n"
+            "git config filter.gone.clean cat\n"
+            "git config filter.gone.smudge false\n"
+            "exit 1\n"
+        )
+        hook.chmod(0o755)
+
+        for mode in (baseline, None):
+            with self.subTest(baseline=mode):
+                with self.assertLogs("kiss.agents.sorcar.git_worktree", "WARNING") as logs:
+                    result = GitWorktreeOps.squash_merge(self.repo, "kiss/wt-a", mode)
+
+                self.assertEqual(result, MergeResult.CONFLICT)
+                left = GitWorktreeOps.status_porcelain(self.repo)
+                self.assertNotEqual(left, "")
+                self.assertIn("smudge filter gone failed", "\n".join(logs.output))
+                self.assertIn(left, "\n".join(logs.output))
+                wt = GitWorktree(self.repo, "kiss/wt-a", "main", self.tmp / "removed", mode)
+                self.assertEqual(
+                    resolve_merge_conflict(None, wt, None, None, run_agent=_launched_resolver),
+                    MergeResult.CONFLICT,
+                )
+                self.assertFalse((self.repo / ".git" / "resolver-launched").exists())
+                self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), left)
+                (self.repo / ".git" / "info" / "attributes").write_text("")
+                _run("reset", "--hard", cwd=self.repo)
+
+        (self.repo / "f.txt").write_text("a-main\n")
+        _run("commit", "--no-verify", "-am", "main moves on", cwd=self.repo)
+        wt = GitWorktree(self.repo, "kiss/wt-a", "main", self.tmp / "removed", baseline)
+        self.assertEqual(
+            resolve_merge_conflict(None, wt, None, None, run_agent=_settling_resolver),
+            MergeResult.CONFLICT,
         )
 
-        GitWorktreeOps._abort_cherry_pick(self.repo, before)
+    @posix_only("the hook is a sh script")
+    def test_a_rejected_commit_resets_no_file_saved_since_the_merge_wrote_it(self) -> None:
+        """The hook that rejects the commit stands for the editor too: it saves a file first.
 
-        self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), before)
-        self.assertEqual((self.repo / "g.txt").read_text(), "x\n")
+        A file the merge did not touch keeps the save while the merge is
+        taken back around it; one the merge wrote keeps it as well, and
+        the merge stays in place.
+        """
+        (self.repo / "u.txt").write_text("u\n")
+        _run("add", "u.txt", cwd=self.repo)
+        _run("commit", "-m", "a file the task leaves alone", cwd=self.repo)
+        baseline = self._make_branch()
+        hook = self.repo / ".git" / "hooks" / "pre-commit"
+        hook.parent.mkdir(exist_ok=True)
 
-    def test_abort_helper_keeps_unrelated_dirty_state(self) -> None:
-        """Nothing changed by the pick means nothing to undo."""
-        (self.repo / "f.txt").write_text("user-edit\n")
+        for mode in (baseline, None):
+            for saved, result in (
+                ("u.txt", MergeResult.MERGE_FAILED), ("g.txt", MergeResult.CONFLICT),
+            ):
+                hook.write_text(f"#!/bin/sh\necho saved since > {saved}\nexit 1\n")
+                hook.chmod(0o755)
+                with self.subTest(saved=saved, baseline=mode):
+                    self.assertEqual(
+                        GitWorktreeOps.squash_merge(self.repo, "kiss/wt-a", mode), result,
+                    )
+                    self.assertEqual((self.repo / saved).read_text(), "saved since\n")
+                    self.assertEqual(
+                        GitWorktreeOps.has_staged_changes(self.repo),
+                        result == MergeResult.CONFLICT,
+                    )
+                    _run("reset", "--hard", cwd=self.repo)
+            # The squash merge that follows is no fast-forward.
+            (self.repo / "u.txt").write_text(f"main moved on after {mode}\n")
+            _run("commit", "--no-verify", "-am", "main moves on", cwd=self.repo)
+
+    @posix_only("the hook is a sh script")
+    def test_a_file_saved_where_the_task_deleted_one_survives_a_rejected_commit(self) -> None:
+        """Whether git ignores the file or not: it stays, and the merge around it.
+
+        Taking the merge back means writing the deleted file again, and
+        git writes over a file it ignores without a word.  The save is
+        the rejecting hook's, or lands as git is asked to write.
+        """
+        (self.repo / ".gitignore").write_text("*.log\n")
+        for name in ("d.txt", "d.log"):
+            (self.repo / name).write_text("tracked\n")
+        _run("add", "-f", "-A", cwd=self.repo)
+        _run("commit", "-m", "two files, one of them ignored", cwd=self.repo)
+        baseline = self._make_branch()
+        _run("checkout", "kiss/wt-a", cwd=self.repo)
+        _run("rm", "-q", "d.txt", "d.log", cwd=self.repo)
+        _run("commit", "-m", "agent deletes both", cwd=self.repo)
+        _run("checkout", "main", cwd=self.repo)
+        hook = self.repo / ".git" / "hooks" / "pre-commit"
+        hook.parent.mkdir(exist_ok=True)
+
+        for mode in (baseline, None):
+            for name in ("d.txt", "d.log"):
+                for late in (False, True):
+                    saves = "" if late else f"echo saved since > {name}\n"
+                    hook.write_text(f"#!/bin/sh\n{saves}exit 1\n")
+                    hook.chmod(0o755)
+                    save = SaveBeforeGitWrites(self.repo / name)
+                    save.saved = not late
+                    with self.subTest(baseline=mode, saved=name, late=late):
+                        with Pause(_git.__code__, save):
+                            result = GitWorktreeOps.squash_merge(self.repo, "kiss/wt-a", mode)
+
+                        self.assertEqual(result, MergeResult.CONFLICT)
+                        self.assertEqual((self.repo / name).read_text(), "saved since\n")
+                        self.assertTrue(GitWorktreeOps.has_staged_changes(self.repo))
+                    _run("reset", "--hard", cwd=self.repo)
+
+    @posix_only("the hook is a sh script")
+    def test_a_rejected_commit_takes_replaced_shapes_back_but_for_a_file_saved_inside(self) -> None:
+        """A directory the merge made of a file goes again, unless a file git ignores is in it.
+
+        The task turns the file ``f.txt`` into a directory and the
+        directory ``shape/`` into a file; taken back, git removes the
+        directory ``f.txt/`` with whatever it ignores in there.
+        """
+        (self.repo / ".gitignore").write_text("*.log\n")
+        (self.repo / "shape").mkdir()
+        (self.repo / "shape" / "old.txt").write_text("old\n")
+        _run("add", "-A", cwd=self.repo)
+        _run("commit", "-m", "shapes", cwd=self.repo)
+        _run("checkout", "-b", "kiss/wt-a", cwd=self.repo)
+        (self.repo / "g.txt").write_text("g-baseline\n")
+        _run("commit", "-am", "baseline", cwd=self.repo)
+        baseline = _run("rev-parse", "HEAD", cwd=self.repo).stdout.strip()
+        _run("rm", "-q", "shape/old.txt", "f.txt", cwd=self.repo)
+        (self.repo / "shape").write_text("a file now\n")
+        (self.repo / "f.txt").mkdir()
+        (self.repo / "f.txt" / "new.txt").write_text("a directory now\n")
+        _run("add", "-A", cwd=self.repo)
+        _run("commit", "-m", "replace shapes", cwd=self.repo)
+        _run("checkout", "main", cwd=self.repo)
+        hook = self.repo / ".git" / "hooks" / "pre-commit"
+        hook.parent.mkdir(exist_ok=True)
+
+        for mode in (baseline, None):
+            for saves, expected in (
+                ("", MergeResult.MERGE_FAILED),
+                ("echo saved since > f.txt/notes.log\n", MergeResult.CONFLICT),
+            ):
+                hook.write_text(f"#!/bin/sh\n{saves}exit 1\n")
+                hook.chmod(0o755)
+                with self.subTest(baseline=mode, saves=saves):
+                    result = GitWorktreeOps.squash_merge(self.repo, "kiss/wt-a", mode)
+
+                    self.assertEqual(result, expected)
+                    if saves:
+                        self.assertEqual(
+                            (self.repo / "f.txt" / "notes.log").read_text(), "saved since\n",
+                        )
+                        self.assertTrue(GitWorktreeOps.has_staged_changes(self.repo))
+                    else:
+                        self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), "")
+                        self.assertEqual((self.repo / "f.txt").read_text(), "a\n")
+                        self.assertEqual((self.repo / "shape" / "old.txt").read_text(), "old\n")
+                _run("reset", "--hard", cwd=self.repo)
+
+    @posix_only("the hook is a sh script")
+    def test_a_submodule_the_task_removed_is_back_after_a_rejected_commit(self) -> None:
+        """Its checkout is still there, and git's own rule for it holds: nothing is in the way."""
+        sub = _make_repo(self.tmp / "sub")
+        self.assertEqual(
+            _git(
+                "-c", "protocol.file.allow=always", "submodule", "add", str(sub), "sub",
+                cwd=self.repo,
+            ).returncode,
+            0,
+        )
+        _run("commit", "-m", "a submodule", cwd=self.repo)
+        _run("checkout", "-b", "kiss/wt-a", cwd=self.repo)
+        _run("rm", "-q", "--cached", "sub", cwd=self.repo)
+        _run("commit", "-m", "agent removes the submodule", cwd=self.repo)
+        _run("checkout", "main", cwd=self.repo)
+        hook = self.repo / ".git" / "hooks" / "pre-commit"
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+
+        result = GitWorktreeOps.squash_merge_branch(self.repo, "kiss/wt-a")
+
+        self.assertEqual(result, MergeResult.MERGE_FAILED)
+        self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), "")
+        self.assertEqual((self.repo / "sub" / "f.txt").read_text(), "a\n")
+
+    @posix_only("the hook is a sh script")
+    def test_a_save_staged_since_the_merge_wrote_the_index_is_never_reset(self) -> None:
+        """Taking the merge back unstages what the user staged since and leaves its files alone.
+
+        When the index cannot be reset (a git command of the user's holds
+        it), the merge stays in place, whole.
+        """
+        (self.repo / "u.txt").write_text("u\n")
+        _run("add", "u.txt", cwd=self.repo)
+        _run("commit", "-m", "a file no branch touches", cwd=self.repo)
+        baseline = self._make_branch()
+        (self.repo / "f.txt").write_text("a-main\n")
+        _run("commit", "-am", "main moves on", cwd=self.repo)
+        hook = self.repo / ".git" / "hooks" / "post-index-change"
+        hook.parent.mkdir(exist_ok=True)
+        for users_git, status, kept in (
+            (
+                "echo staged since > u.txt; echo new > new.txt; git add u.txt new.txt",
+                "M u.txt\n?? new.txt",
+                {"u.txt": "staged since\n", "new.txt": "new\n"},
+            ),
+            (": > .git/index.lock", "UU f.txt\nM  g.txt", {}),
+        ):
+            # git runs this hook once it has written the index: after the one
+            # that holds the merge (``AUTO_MERGE``), the user's git runs, once.
+            hook.write_text(
+                "#!/bin/sh\n"
+                "if [ -e .git/AUTO_MERGE ] && [ ! -e .git/saved ]; then\n"
+                f"    : > .git/saved\n    {users_git}\nfi\n"
+            )
+            hook.chmod(0o755)
+            for mode in (baseline, None):
+                with self.subTest(users_git=users_git, baseline=mode):
+                    result = GitWorktreeOps.squash_merge(self.repo, "kiss/wt-a", mode)
+
+                    self.assertEqual(result, MergeResult.CONFLICT)
+                    (self.repo / ".git" / "index.lock").unlink(missing_ok=True)
+                    self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), status)
+                    for name, content in kept.items():
+                        self.assertEqual((self.repo / name).read_text(), content)
+                    _run("reset", "--hard", cwd=self.repo)
+                    _run("clean", "-fdq", cwd=self.repo)
+                    (self.repo / ".git" / "saved").unlink()
+
+    def test_a_submodule_the_merge_moved_is_no_save(self) -> None:
+        """Its checkout lags the index after any merge, and no reset writes it: taken back."""
+        sub = _make_repo(self.tmp / "sub")
+        self.assertEqual(
+            _git(
+                "-c", "protocol.file.allow=always", "submodule", "add", str(sub), "sub",
+                cwd=self.repo,
+            ).returncode,
+            0,
+        )
+        _run("commit", "-m", "a submodule", cwd=self.repo)
+        _run("checkout", "-b", "kiss/wt-a", cwd=self.repo)
+        # The clone ``submodule add`` made has no identity of its own: a host
+        # without a global one (a fresh CI or VM user) cannot commit in it.
+        _run("config", "user.email", "t@t.com", cwd=self.repo / "sub")
+        _run("config", "user.name", "T", cwd=self.repo / "sub")
+        (self.repo / "sub" / "f.txt").write_text("moved\n")
+        _run("commit", "-am", "the submodule moves on", cwd=self.repo / "sub")
+        (self.repo / "f.txt").write_text("a-agent\n")
+        _run("commit", "-am", "agent moves the submodule and edits f", cwd=self.repo)
+        _run("checkout", "main", cwd=self.repo)
+        _run("checkout", "HEAD~1", cwd=self.repo / "sub")
+        (self.repo / "f.txt").write_text("a-main\n")
+        _run("commit", "-am", "main moves on", cwd=self.repo)
+
+        result = GitWorktreeOps.squash_merge_branch(self.repo, "kiss/wt-a")
+
+        self.assertEqual(result, MergeResult.CONFLICT)
+        self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), "")
+        self.assertEqual(
+            GitWorktreeOps.begin_conflicted_merge(self.repo, "kiss/wt-a", None), ["f.txt"],
+        )
+
+    def test_a_conflict_is_taken_back_whatever_strategy_the_user_merges_with(self) -> None:
+        """Only ``ort`` writes the ``AUTO_MERGE`` that tells a save from what the merge wrote."""
+        self._make_branch()
+        (self.repo / "f.txt").write_text("a-main\n")
+        _run("commit", "-am", "main moves on", cwd=self.repo)
+        _run("config", "pull.twohead", "resolve", cwd=self.repo)
+
+        result = GitWorktreeOps.squash_merge_branch(self.repo, "kiss/wt-a")
+
+        self.assertEqual(result, MergeResult.CONFLICT)
+        self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), "")
+
+    def test_a_resolution_rerere_would_replay_stays_a_conflict(self) -> None:
+        """Replayed and staged (``rerere.autoupdate``), git fails with a merge and no conflict."""
+        baseline = self._make_branch()
+        (self.repo / "f.txt").write_text("a-main\n")
+        _run("commit", "-am", "main moves on", cwd=self.repo)
+        _run("config", "rerere.enabled", "true", cwd=self.repo)
+        _run("config", "rerere.autoupdate", "true", cwd=self.repo)
+        # The user resolved this very conflict once, and rerere recorded it.
+        _git("merge", "--squash", "kiss/wt-a", cwd=self.repo)
+        (self.repo / "f.txt").write_text("resolved once\n")
+        _run("commit", "-am", "resolved once", cwd=self.repo)
+        _run("reset", "--hard", "HEAD~1", cwd=self.repo)
+
+        for mode in (baseline, None):
+            with self.subTest(baseline=mode):
+                result = GitWorktreeOps.squash_merge(self.repo, "kiss/wt-a", mode)
+
+                self.assertEqual(result, MergeResult.CONFLICT)
+                self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), "")
+                # The resolver gets the conflict as the merge wrote it.
+                self.assertEqual(
+                    GitWorktreeOps.begin_conflicted_merge(self.repo, "kiss/wt-a", mode),
+                    ["f.txt"],
+                )
+                self.assertTrue((self.repo / "f.txt").read_text().startswith("<<<<<<<"))
+                _run("reset", "--hard", cwd=self.repo)
+
+    def test_a_conflicting_merge_leaves_the_users_cherry_pick_sequence_alone(self) -> None:
+        """Neither the merge nor its resolver touches a sequence the user is in the middle of."""
+        _run("checkout", "-b", "side", cwd=self.repo)
+        (self.repo / "g.txt").write_text("side 1\n")
+        _run("commit", "-am", "side 1", cwd=self.repo)
+        (self.repo / "h.txt").write_text("side 2\n")
+        _run("add", "h.txt", cwd=self.repo)
+        _run("commit", "-m", "side 2", cwd=self.repo)
+        _run("checkout", "main", cwd=self.repo)
+        baseline = self._make_branch()
+        (self.repo / "f.txt").write_text("a-main\n")
+        (self.repo / "g.txt").write_text("g-main\n")
+        _run("commit", "-am", "main moves on", cwd=self.repo)
+        # The user's pick of ``side 1`` stops on g.txt; they settle it by
+        # hand and commit, with ``side 2`` still to come.
+        picked = subprocess.run(
+            ["git", "-C", str(self.repo), "cherry-pick", "side~1", "side"], capture_output=True,
+        )
+        self.assertNotEqual(picked.returncode, 0)
+        (self.repo / "g.txt").write_text("settled by hand\n")
+        _run("commit", "-am", "side 1, settled by hand", cwd=self.repo)
+        head = _run("rev-parse", "HEAD", cwd=self.repo).stdout
+        self.assertTrue((self.repo / ".git" / "sequencer").is_dir())
+
+        result = GitWorktreeOps.squash_merge_from_baseline(self.repo, "kiss/wt-a", baseline)
+
+        self.assertEqual(result, MergeResult.CONFLICT)
+        # Nor is the conflict handed to the merge agent: the cleanup after it
+        # (``cherry-pick --quit``) would forget the pick still to come.
+        wt = GitWorktree(self.repo, "kiss/wt-a", "main", self.tmp / "removed", baseline)
+        resolved = resolve_merge_conflict(None, wt, None, None, run_agent=_launched_resolver)
+        self.assertEqual(resolved, MergeResult.CONFLICT)
+        self.assertFalse((self.repo / ".git" / "resolver-launched").exists())
+        self.assertEqual(_run("rev-parse", "HEAD", cwd=self.repo).stdout, head)
+        self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), "")
+        _run("cherry-pick", "--continue", cwd=self.repo)
+        self.assertEqual((self.repo / "h.txt").read_text(), "side 2\n")
+
+    def test_the_users_merge_in_progress_is_not_stashed_away(self) -> None:
+        """``git stash`` resets the tree and ``MERGE_HEAD`` with it: no merge would be left."""
+        _run("checkout", "-b", "other", cwd=self.repo)
+        (self.repo / "g.txt").write_text("g-other\n")
+        _run("commit", "-am", "other", cwd=self.repo)
+        _run("checkout", "main", cwd=self.repo)
+        (self.repo / "f.txt").write_text("a-main\n")
+        _run("commit", "-am", "main moves on", cwd=self.repo)
+        _run("merge", "--no-commit", "other", cwd=self.repo)
+        self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), "M  g.txt")
+
+        self.assertIsNone(GitWorktreeOps.stash_if_dirty(self.repo))
+
+        self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), "M  g.txt")
+        self.assertTrue((self.repo / ".git" / "MERGE_HEAD").exists())
+        self.assertEqual(_run("stash", "list", cwd=self.repo).stdout, "")
+
+    @posix_only("the sequence editor is a sed command")
+    def test_a_rebase_the_user_paused_is_not_checked_out_of(self) -> None:
+        """Clean and with ``HEAD`` detached: nothing to stash, and a checkout would end it."""
+        baseline = self._make_branch()
+        _run("branch", "upstream", cwd=self.repo)
+        for branch, name in (("main", "mine.txt"), ("upstream", "theirs.txt")):
+            _run("checkout", branch, cwd=self.repo)
+            (self.repo / name).write_text("new\n")
+            _run("add", name, cwd=self.repo)
+            _run("commit", "-m", f"{branch} moves on", cwd=self.repo)
+        _run("checkout", "main", cwd=self.repo)
+        # ``rebase -i`` stops after the first commit for the user to edit it.
+        subprocess.run(
+            ["git", "-C", str(self.repo), "rebase", "-i", "upstream"],
+            env={**os.environ, "GIT_SEQUENCE_EDITOR": "sed -i.bak 1s/^pick/edit/"},
+            capture_output=True, check=True,
+        )
+        head = _run("rev-parse", "HEAD", cwd=self.repo).stdout
+        self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), "")
+        wt = GitWorktree(self.repo, "kiss/wt-a", "main", self.tmp / "removed", baseline)
+
+        result, *_ = SorcarAgent("merge")._do_merge(wt)
+
+        self.assertEqual(result, MergeResult.CHECKOUT_FAILED)
+        self.assertEqual(_run("rev-parse", "HEAD", cwd=self.repo).stdout, head)
+        self.assertIsNone(GitWorktreeOps.current_branch(self.repo))
+        subprocess.run(
+            ["git", "-C", str(self.repo), "rebase", "--continue"],
+            env={**os.environ, "GIT_EDITOR": "true"}, capture_output=True, check=True,
+        )
+        self.assertEqual(GitWorktreeOps.current_branch(self.repo), "main")
+        self.assertEqual((self.repo / "theirs.txt").read_text(), "new\n")
+        self.assertEqual((self.repo / "mine.txt").read_text(), "new\n")
+
+    def test_a_merge_onto_an_index_with_unmerged_entries_is_not_attempted(self) -> None:
+        """The user's own conflict in the main tree is no base for a merge and is left as is."""
+        baseline = self._make_branch()
+        _run("checkout", "-b", "other", cwd=self.repo)
+        (self.repo / "g.txt").write_text("g-other\n")
+        _run("commit", "-am", "other", cwd=self.repo)
+        _run("checkout", "main", cwd=self.repo)
+        (self.repo / "g.txt").write_text("g-main\n")
+        _run("commit", "-am", "main moves on", cwd=self.repo)
+        merged = subprocess.run(
+            ["git", "-C", str(self.repo), "merge", "other"], capture_output=True,
+        )
+        self.assertNotEqual(merged.returncode, 0)
         before = GitWorktreeOps.status_porcelain(self.repo)
+        self.assertEqual(before, "UU g.txt")
+        conflict = (self.repo / "g.txt").read_text()
 
-        GitWorktreeOps._abort_cherry_pick(self.repo, before)
-
-        self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), before)
-        self.assertEqual((self.repo / "f.txt").read_text(), "user-edit\n")
+        for mode in (baseline, None):
+            with self.subTest(baseline=mode):
+                self.assertEqual(
+                    GitWorktreeOps.squash_merge(self.repo, "kiss/wt-a", mode), MergeResult.CONFLICT,
+                )
+                self.assertIsNone(
+                    GitWorktreeOps.begin_conflicted_merge(self.repo, "kiss/wt-a", mode),
+                )
+                self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), before)
+                self.assertEqual((self.repo / "g.txt").read_text(), conflict)
+                self.assertTrue((self.repo / ".git" / "MERGE_HEAD").exists())
 
     def test_a_merge_never_overwrites_what_the_main_tree_ignores(self) -> None:
         """Ignored main-tree files at paths the branch starts tracking are kept.
@@ -483,9 +1233,9 @@ class FailedCherryPickCleanupTest(unittest.TestCase):
             with self.subTest(baseline=mode):
                 result = GitWorktreeOps.squash_merge(self.repo, "kiss/wt-a", mode)
                 self.assertEqual(result, MergeResult.CONFLICT)
-                self.assertIsNone(GitWorktreeOps.begin_conflicted_merge(
-                    self.repo, "kiss/wt-a", mode, "",
-                ))
+                self.assertIsNone(
+                    GitWorktreeOps.begin_conflicted_merge(self.repo, "kiss/wt-a", mode),
+                )
                 self.assertEqual((self.repo / ".env").read_text(), "SECRET=local\n")
                 self.assertEqual((self.repo / "build").read_text(), "ignored file\n")
                 self.assertEqual(

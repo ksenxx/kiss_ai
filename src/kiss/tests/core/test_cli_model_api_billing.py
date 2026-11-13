@@ -23,6 +23,7 @@ Run with::
 import json
 import logging
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -917,12 +918,22 @@ def test_codex_default_model_late_failure_keeps_a_concurrent_success(
     assert calls == ["slow", "fast"], "served from the cache"
 
 
+@pytest.mark.parametrize(
+    ("callee", "error"),
+    [
+        (threading.Thread.start, RuntimeError("can't start new thread")),
+        (queue.Queue.__init__, KeyboardInterrupt("stop")),
+    ],
+    ids=["reader-cannot-start", "stop-at-the-line-queue"],
+)
 def test_codex_default_model_ends_the_app_server_when_its_reader_cannot_start(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, callee: Any, error: BaseException
 ) -> None:
     """A ``Thread.start`` that fails once the app-server is spawned (no
     thread left) still kills and reaps the server: the spawn is owned by
-    the resolver's cleanup before any fallible step runs."""
+    the resolver's cleanup before any fallible step runs.  A Stop raised
+    where the resolver makes its line queue (it was made between the
+    spawn and that cleanup) leaves no server running either."""
     monkeypatch.setattr(codex_model, "_default_model_cache", {})
     _install_app_server(tmp_path, monkeypatch, "hang")
     spawned: list[subprocess.Popen[str]] = []
@@ -932,26 +943,26 @@ def test_codex_default_model_ends_the_app_server_when_its_reader_cannot_start(
             spawned.append(arg)
         elif (
             event == "call"
-            and frame.f_code is threading.Thread.start.__code__
+            and frame.f_code is callee.__code__
             and frame.f_back is not None
             and frame.f_back.f_code is codex_model._query_default_model.__code__
         ):
             sys.setprofile(None)
-            raise RuntimeError("can't start new thread")
+            raise error
 
     sys.setprofile(fail_the_reader_start)
     try:
-        with pytest.raises(RuntimeError, match="can't start new thread"):
+        with pytest.raises(type(error), match=str(error)):
             codex_model.codex_default_model(dict(os.environ))
     finally:
         sys.setprofile(None)
-    (server,) = spawned
-    try:
-        assert server.poll() is not None, "the app-server nobody reads must be ended"
-    finally:
-        if server.poll() is None:
-            processes.kill_process_tree(server)
-            server.wait()
+    for server in spawned:  # none when the Stop was raised before the spawn
+        try:
+            assert server.poll() is not None, "the app-server nobody reads must be ended"
+        finally:
+            if server.poll() is None:
+                processes.kill_process_tree(server)
+                server.wait()
 
 
 def test_codex_default_model_is_none_without_a_runnable_cli(

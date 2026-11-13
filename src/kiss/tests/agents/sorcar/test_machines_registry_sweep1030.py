@@ -155,7 +155,7 @@ def test_a_status_check_of_a_removed_ssh_machine_opens_no_forward(
         assert status.endswith(
             "is unreachable: ssh ksen@far.example.org: the machine registry changed, try again"
         ), status
-        assert far.ssh not in mach._tunnels
+        assert mach._tunnels == {}
         assert not pidfile.exists(), "an ssh forward was started for the removed login"
     finally:
         mach.close_tunnels()

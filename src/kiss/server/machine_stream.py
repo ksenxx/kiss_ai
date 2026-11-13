@@ -86,8 +86,9 @@ class MachineStream:
         underneath, which ends the stream as a lost connection.
 
         Raises:
-            MachineError: When the socket is gone or the daemon did not
-                accept the command in time.
+            MachineError: When the socket is gone, the daemon did not
+                accept the command in time or the write could not start
+                (the socket is closed then: a failed send ends the stream).
         """
         dropped = self._dropped_fields(cmd)
         frame = {k: v for k, v in cmd.items() if k not in dropped}
@@ -100,6 +101,9 @@ class MachineStream:
             local_endpoint.send(self._ws, json.dumps(frame), timeout=REQUEST_TIMEOUT)
         except (ConnectionClosed, OSError) as exc:
             raise MachineError(f"{self.machine.name}: the connection is lost: {exc}") from exc
+        except RuntimeError as exc:  # thread exhaustion: the write's helper thread did not start
+            self._close_socket()
+            raise MachineError(f"{self.machine.name}: the command was not sent: {exc}") from exc
 
     def close(self) -> None:
         """Close the socket; the relay thread then ends without an error."""

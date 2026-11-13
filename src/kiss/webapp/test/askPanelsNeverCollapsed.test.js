@@ -19,19 +19,31 @@
 //
 // Only the user folds them, by clicking their header.  The share export
 // is built from the same replay path, so the exported page shows them
-// open too.  Every scenario runs once per panel kind (the KINDS table).
+// open too.  A task that has ended moves all its event panels, these two
+// included, into its Trajectory panel (foldTrajectory), which starts
+// folded: they are open inside it, and it is the only folded panel they
+// may stand under.  Every scenario runs once per panel kind (the KINDS
+// table).
 
 'use strict';
 
 const assert = require('assert');
 const {JSDOM} = require('jsdom');
-const {makePage, send, stubRaf} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  stubRaf,
+  settle,
+  click,
+  byId,
+  lastMsg,
+} = require('./simplify2_harness');
 
 // One event-loop turn before closing: the theme MutationObserver that a
 // tab switch queues must run while the document still exists, so
 // win.close() tears down a quiet window.
 async function closeQuietly(win) {
-  await new Promise(r => setTimeout(r, 0));
+  await settle();
   win.close();
 }
 
@@ -162,19 +174,36 @@ function panelIn(kind, root) {
   return panels[0];
 }
 
-function assertOpenAndOnScreen(kind, panel, where) {
+/**
+ * The panel is open and no pass hid it: no summary adopted it and no
+ * folded panel stands above it, except the Trajectory of a task that
+ * has `ended`.
+ */
+function assertOpen(kind, panel, where, ended) {
   assert.ok(
     !panel.classList.contains('collapsed'),
     'BUG: the ' + kind.label + ' panel was auto-collapsed ' + where,
   );
   assert.ok(
-    !panel.classList.contains('chv-hidden'),
-    'BUG: the ' + kind.label + ' panel was hidden by the digest ' + where,
-  );
-  assert.ok(
     !panel.closest('.summary-sub'),
     'BUG: the ' + kind.label + ' panel was swallowed by a summary ' + where,
   );
+  const hider = panel.parentElement.closest('.collapsed');
+  if (ended) {
+    assert.ok(
+      hider && hider.classList.contains('trajectory'),
+      'the ' +
+        kind.label +
+        ' panel of an ended task is in its Trajectory ' +
+        where,
+    );
+  } else {
+    assert.strictEqual(
+      hider,
+      null,
+      'BUG: the ' + kind.label + ' panel is under a folded panel ' + where,
+    );
+  }
   kind.assertExtra(panel, where);
 }
 
@@ -193,12 +222,10 @@ async function testReplayOfFinishedTaskKeepsPanelOpen(kind) {
     Array.from(tools).every(p => p.classList.contains('collapsed')),
     'plain replayed tool panels are folded',
   );
-  assertOpenAndOnScreen(kind, panelIn(kind, out), 'on a finished-task replay');
+  assertOpen(kind, panelIn(kind, out), 'on a finished-task replay', true);
   await closeQuietly(win);
   console.log(
-    '  ok - a finished-task replay keeps the ' +
-      kind.label +
-      ' open and visible',
+    '  ok - a finished-task replay keeps the ' + kind.label + ' open',
   );
 }
 
@@ -219,7 +246,7 @@ async function testReplayOfRunningTaskKeepsPanelOpen(kind) {
     events: events,
   });
   const out = win.document.getElementById('output');
-  assertOpenAndOnScreen(kind, panelIn(kind, out), 'on a mid-run replay');
+  assertOpen(kind, panelIn(kind, out), 'on a mid-run replay');
   for (let i = 0; i < 3; i++) {
     send(win, {
       type: 'tool_call',
@@ -235,7 +262,7 @@ async function testReplayOfRunningTaskKeepsPanelOpen(kind) {
     });
   }
   send(win, {type: 'tool_call', name: 'Bash', command: 'pwd', tabId: tab});
-  assertOpenAndOnScreen(kind, panelIn(kind, out), 'after the run streamed on');
+  assertOpen(kind, panelIn(kind, out), 'after the run streamed on');
   await closeQuietly(win);
   console.log(
     '  ok - a mid-run replay keeps the ' +
@@ -278,11 +305,7 @@ async function testBackgroundTabRestoreKeepsPanelOpen(kind) {
   const out = win.document.getElementById('output');
   const prompt = out.querySelector('.ev.prompt');
   assert.ok(prompt.classList.contains('collapsed'), 'the prompt echo folds');
-  assertOpenAndOnScreen(
-    kind,
-    panelIn(kind, out),
-    'when a background tab came back',
-  );
+  assertOpen(kind, panelIn(kind, out), 'when a background tab came back');
   await closeQuietly(win);
   console.log(
     '  ok - restoring a background tab keeps the ' + kind.label + ' open',
@@ -315,7 +338,7 @@ async function testSummaryToolLeavesPanelOnTranscript(kind) {
     'the summary adopts the tool panels on both sides of the ' + kind.label,
   );
   const panel = panelIn(kind, out);
-  assertOpenAndOnScreen(kind, panel, 'when a summary adopted its neighbours');
+  assertOpen(kind, panel, 'when a summary adopted its neighbours');
   assert.strictEqual(
     panel.previousElementSibling,
     summary,
@@ -327,7 +350,7 @@ async function testSummaryToolLeavesPanelOnTranscript(kind) {
   );
 }
 
-async function testReplayedSummaryLeavesPanelVisible(kind) {
+async function testReplayedSummaryLeavesPanelOpen(kind) {
   // The same on a finished replay, where the chevron pass also hides
   // every plain panel and re-collapses the summary.
   const {win} = makePage({beforeScripts: stubRaf});
@@ -354,11 +377,9 @@ async function testReplayedSummaryLeavesPanelVisible(kind) {
     kind.promptsUnderSummary,
     'the prompt echoes fold under the summary',
   );
-  assertOpenAndOnScreen(kind, panelIn(kind, out), 'on a replay with a summary');
+  assertOpen(kind, panelIn(kind, out), 'on a replay with a summary', true);
   await closeQuietly(win);
-  console.log(
-    '  ok - a replayed summary leaves the ' + kind.label + ' visible',
-  );
+  console.log('  ok - a replayed summary leaves the ' + kind.label + ' open');
 }
 
 async function testShareExportKeepsPanelOpen(kind) {
@@ -376,12 +397,8 @@ async function testShareExportKeepsPanelOpen(kind) {
   });
   send(win, {type: 'result', text: 'done', tabId: tab, taskId: 'task-1'});
   send(win, {type: 'status', running: false, tabId: tab});
-  win.document
-    .getElementById('share-btn')
-    .dispatchEvent(
-      new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-    );
-  const req = posted.filter(m => m.type === 'shareChatTasks').pop();
+  click(win, byId(win, 'share-btn'));
+  const req = lastMsg(posted, 'shareChatTasks');
   assert.ok(req, 'share asks the daemon for the chat tasks');
   // The on-screen task is exported as it stands; an earlier task of the
   // chat is rebuilt from its persisted events -- the replay path the
@@ -400,7 +417,7 @@ async function testShareExportKeepsPanelOpen(kind) {
     ],
     truncated: false,
   });
-  const msg = posted.filter(m => m.type === 'shareChat').pop();
+  const msg = lastMsg(posted, 'shareChat');
   assert.ok(msg, 'the share_tasks reply produces a shareChat command');
   const page = new JSDOM(
     '<!doctype html><html><body>' + msg.html + '</body></html>',
@@ -418,7 +435,7 @@ async function testShareExportKeepsPanelOpen(kind) {
     tools.every(p => p.classList.contains('collapsed')),
     'exported tool panels are folded',
   );
-  assertOpenAndOnScreen(kind, panel, 'in the share export');
+  assertOpen(kind, panel, 'in the share export', true);
   await closeQuietly(win);
   console.log('  ok - the share export shows the ' + kind.label + ' open');
 }
@@ -443,7 +460,7 @@ const tests = [
   testReplayOfRunningTaskKeepsPanelOpen,
   testBackgroundTabRestoreKeepsPanelOpen,
   testSummaryToolLeavesPanelOnTranscript,
-  testReplayedSummaryLeavesPanelVisible,
+  testReplayedSummaryLeavesPanelOpen,
   testShareExportKeepsPanelOpen,
   testUserStillFoldsByHand,
 ];

@@ -20,12 +20,28 @@ const WD = '/ws/repo';
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
 
-// Every native dialog a page of makePage called, as `window.prompt` /
-// `window.confirm`.  The guards throw, but a throw inside a DOM listener
-// never reaches the test (jsdom reports it on its console and the
-// dispatch returns normally), so makeRunner fails the test from this
-// ledger as well.
+// Every native dialog a page guarded by forbidNativeDialogs called, as
+// `window.prompt` / `window.confirm`.  The guards throw, but a throw
+// inside a DOM listener never reaches the test (jsdom reports it on its
+// console and the dispatch returns normally), so makeRunner fails the
+// test from this ledger as well.
 const nativeDialogCalls = [];
+
+/**
+ * Make `w.prompt` / `w.confirm` record the call for makeRunner and throw:
+ * the page ships its own dialogs and a native one would block the whole
+ * page, so any call is a defect.
+ */
+function forbidNativeDialogs(w) {
+  w.prompt = function () {
+    nativeDialogCalls.push('window.prompt');
+    throw new Error('window.prompt must not be called');
+  };
+  w.confirm = function () {
+    nativeDialogCalls.push('window.confirm');
+    throw new Error('window.confirm must not be called');
+  };
+}
 
 /**
  * Build a page.  `win.prompt` / `win.confirm` throw: nothing may call
@@ -52,16 +68,7 @@ function makePage(opts) {
         value: {writeText: () => Promise.resolve()},
         configurable: true,
       });
-      // The page ships its own dialogs; a native prompt/confirm would block
-      // the whole page.  Any call is a defect.
-      w.prompt = function () {
-        nativeDialogCalls.push('window.prompt');
-        throw new Error('window.prompt must not be called');
-      };
-      w.confirm = function () {
-        nativeDialogCalls.push('window.confirm');
-        throw new Error('window.confirm must not be called');
-      };
+      forbidNativeDialogs(w);
       created = harness.stubMonaco(w);
     },
   });
@@ -145,6 +152,14 @@ function toastButton(el, label) {
 
 function toastInput(el) {
   return el.querySelector('.kiss-notification-input');
+}
+
+/**
+ * The notification id of the "already exists" question for *name* in the
+ * folder *dest* on *machine* ('' is this machine), as main.js keys it.
+ */
+function overwriteId(machine, dest, name) {
+  return 'fs-overwrite:' + JSON.stringify([machine, dest, name]);
 }
 
 /** Deliver the config reply that pins the workspace (*wd*, default WD). */
@@ -238,6 +253,23 @@ function runMenuItem(win, row, label) {
   click(win, item);
 }
 
+/** Right-click tab *tabNode* of the strip and run its menu item *label*. */
+function pickTabMenuItem(win, tabNode, label) {
+  rightClick(win, tabNode);
+  const item = all(win, '#tab-context-menu .tab-ctx-item').find(
+    el => el.textContent === label,
+  );
+  if (!item) throw new Error("no tab-menu item '" + label + "'");
+  click(win, item);
+}
+
+/** The scoped transcript fetches (`resumeSession`) posted for tabs *ids*. */
+function scopedFetches(posted, ids) {
+  return ofType(posted, 'resumeSession').filter(
+    m => m.scoped === true && ids.includes(m.tabId),
+  );
+}
+
 /**
  * Open an editable content tab for /shared/notes.txt owned by chat tab
  * a1 and type into it, so the tab is dirty.  Returns the editor stub.
@@ -278,11 +310,28 @@ function contentTabStrips(win) {
  * A synchronous `fn` is recorded before `test` returns, so a suite that
  * calls `test(...)` back to back and then `report(...)` without awaiting
  * counts every test.  An async `fn` returns a promise the suite must
- * await before `report`.
+ * await before `report`, which exits 1 while one is still running: its
+ * failure would arrive after the totals and leave the exit status 0.
+ * A test still running when the process ends fails it as well: a promise
+ * that never settles keeps nothing on the event loop, so the suite
+ * awaiting it would end with status 0 and no totals.
+ *
+ * `opts.windows` is an array the suite pushes every page it builds onto:
+ * the runner closes and removes them when a test has ended, pass or fail,
+ * and no other test is still running (an async one runs until its promise
+ * has settled), so a page is never closed under a test that uses it and
+ * nothing a page armed keeps node alive after the last test.
  */
-function makeRunner() {
+function makeRunner(opts) {
+  const windows = (opts && opts.windows) || [];
   let passed = 0;
+  // Names of the async tests whose promise has not settled yet.
+  const running = [];
   const failures = [];
+  function closeWindows() {
+    if (running.length) return;
+    while (windows.length) windows.pop().close();
+  }
   function pass(name) {
     // A forbidden native dialog called from a listener while the test
     // ran is the test's failure, whatever its own assertions said.
@@ -291,14 +340,19 @@ function makeRunner() {
       fail(name, new Error(`${calls} must not be called (native dialog)`));
       return;
     }
+    closeWindows();
     passed++;
     console.log(`  \u2713 ${name}`);
   }
   function fail(name, e) {
     nativeDialogCalls.length = 0;
+    closeWindows();
     failures.push({name, error: e});
     console.log(`  \u2717 ${name}`);
     console.log(`      ${e.stack || e.message}`);
+  }
+  function settle(name) {
+    running.splice(running.indexOf(name), 1);
   }
   function test(name, fn) {
     let result;
@@ -309,18 +363,39 @@ function makeRunner() {
       return undefined;
     }
     if (result && typeof result.then === 'function') {
+      running.push(name);
       return result.then(
-        () => pass(name),
-        e => fail(name, e),
+        () => {
+          settle(name);
+          pass(name);
+        },
+        e => {
+          settle(name);
+          fail(name, e);
+        },
       );
     }
     pass(name);
     return undefined;
   }
   function report(title) {
+    if (running.length) {
+      console.log(`\n${title}: ${running.length} async test(s) still running`);
+      process.exit(1);
+    }
     console.log(`\n${title}: ${passed} passed, ${failures.length} failed`);
     if (failures.length) process.exit(1);
   }
+  // A status that already says failure (`report`'s exit, a crash) stands.
+  function failRunningAtExit(code) {
+    if (code !== 0 || !running.length) return;
+    console.log(
+      `\n${running.length} async test(s) still running at exit: ` +
+        running.join(', '),
+    );
+    process.exitCode = 1;
+  }
+  process.on('exit', failRunningAtExit);
   /** How many tests failed so far (a probe for a runner under test). */
   function failed() {
     return failures.length;
@@ -334,6 +409,7 @@ module.exports = {
   SHA_B,
   commit,
   makePage,
+  forbidNativeDialogs,
   send,
   sleep,
   click,
@@ -349,10 +425,13 @@ module.exports = {
   toast,
   toastButton,
   toastInput,
+  overwriteId,
   openExplorer,
   explorerRow,
   openScm,
   runMenuItem,
+  pickTabMenuItem,
+  scopedFetches,
   openDirtyContentTab,
   contentTabStrips,
   makeRunner,

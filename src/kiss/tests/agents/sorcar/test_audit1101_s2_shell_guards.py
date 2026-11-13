@@ -10,6 +10,10 @@ swallowed the rest of the text and backtracked through it: a 20 kB
 no-op took seconds.  The blanks after a separator now stop at the next
 newline, which is a separator of its own, so the set of commands
 matched is unchanged.
+
+A backquote starts a command too, and a word, an assignment's value and
+a directory prefix ran across it: each backquote of a run rescanned the
+rest of the text.  They stop at a backquote as at the other separators.
 """
 
 from __future__ import annotations
@@ -32,6 +36,13 @@ def test_guards_stay_linear_on_newline_heavy_commands() -> None:
         "; \n" * 6_667,
         " \n" * 9_999 + "true",
         ("a\n" + " " * 100 + "\n") * 196,
+        "printf '%s' '" + "`" * 20_000 + "'",
+        "`/" * 10_000,
+        "`A=" * 6_666,
+        "`rm " * 5_000,
+        "`sudo " * 3_333,
+        "`bash -c " * 2_222,
+        "`pip " * 4_000,
     ):
         started = time.monotonic()
         assert destructive_command_guard(command, "/work") is None
@@ -48,6 +59,10 @@ def test_commands_after_newlines_and_blanks_are_still_matched() -> None:
         "true &&\n\n  sudo -n rm -rf /work",
         "X=1 \\\n rm -rf '/work'",
         "echo a\r\nkill -9 -1",
+        "echo `kill -1`",
+        "X=`date` rm -rf /work",
+        "sudo -u `whoami` rm -rf /",
+        "echo `date`; `rm -rf /work`",
     ):
         assert destructive_command_guard(command, "/work") == DESTRUCTIVE_VERDICT, command
     for command in (
@@ -60,4 +75,6 @@ def test_commands_after_newlines_and_blanks_are_still_matched() -> None:
     # A quoted mention after a separator is refused as before; a pid after ``-1`` exempts it.
     assert destructive_command_guard("echo 'a;\n kill -1'", "/work") == DESTRUCTIVE_VERDICT
     assert destructive_command_guard("kill -1 1234\n", "/work") is None
+    assert destructive_command_guard("kill -1 `cat server.pid`", "/work") is None
     assert lift_install_timeout("echo install\n", 30) == 30
+    assert lift_install_timeout("pip install `cat requirements.txt`", 30) == INSTALL_TIMEOUT_SECONDS

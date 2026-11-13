@@ -14,10 +14,14 @@ stash are never touched, and nothing is committed.  A restore makes
 those files match the snapshot again: files changed or deleted since
 are rewritten from it, files created since are deleted, and ignored
 files (build output, ``tmp/``, virtualenvs) are left as they are.
+A saved snapshot is the target of a ref of its own under
+``refs/kiss-checkpoints/``, which keeps ``git gc`` from collecting it
+for as long as its checkpoint lasts.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
@@ -25,12 +29,14 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from kiss.agents.sorcar.git_worktree import _REPO_SCOPED_GIT_ENV
 from kiss.core import tool_interrupt
-from kiss.core.processes import popen_process_group, terminate_process_group
+from kiss.core.processes import start_process_group, terminate_process_group
 
 CHECKPOINT_NAME = re.compile(r"[A-Za-z0-9_-]{1,40}")
 """The labels ``checkpoint`` accepts (the coding SEA's rule)."""
@@ -45,6 +51,15 @@ _KILL_GRACE_SECONDS = 2.0
 _LISTED_PATHS = 10
 _GITLINK = "160000"
 """The tree-entry mode of a submodule (or an embedded repository)."""
+_REFS = "refs/kiss-checkpoints"
+"""Where the refs that keep saved snapshots from ``git gc`` are, a directory per task."""
+_DIR_FD = (
+    hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and hasattr(os, "fwalk")
+    and {os.open, os.unlink, os.rmdir, os.rename} <= os.supports_dir_fd
+)
+"""Whether deletions and renames can go through directory descriptors (not on native Windows)."""
 
 
 class CheckpointError(Exception):
@@ -68,6 +83,7 @@ def _git(
     root: Path,
     *args: str,
     index: Path | None = None,
+    is_git_dir: bool = False,
     stdin: str = "",
     stop_event: threading.Event | None = None,
 ) -> str:
@@ -92,6 +108,9 @@ def _git(
         root: The directory git runs in.
         args: The git subcommand and its arguments.
         index: A private index file (``GIT_INDEX_FILE``) instead of the real one.
+        is_git_dir: Whether *root* is the repository's git directory itself:
+            git is then told so (``GIT_DIR``) rather than left to find out,
+            which ``safe.bareRepository=explicit`` forbids in a bare one.
         stdin: Text fed to the command.
         stop_event: The task's stop event, or ``None``.
 
@@ -103,20 +122,27 @@ def _git(
     env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
     if index is not None:
         env["GIT_INDEX_FILE"] = str(index)
+    if is_git_dir:
+        env["GIT_DIR"] = str(root)
     with (tempfile.TemporaryFile() as given, tempfile.TemporaryFile() as out,
           tempfile.TemporaryFile() as err):
         given.write(os.fsencode(stdin))
         given.seek(0)
+        # The Popen is held from before the spawn, which runs inside the
+        # ``try``: a Stop raised as the spawning call returns reaches the
+        # handler with git in hand (see :func:`start_process_group`).
+        process: subprocess.Popen[bytes] = object.__new__(subprocess.Popen)
         try:
-            process = popen_process_group(
-                ["git", "-C", str(root), *args], stdin=given, stdout=out, stderr=err, env=env,
-            )
-        except OSError as error:
-            raise CheckpointError(f"git {args[0]} failed: {error}") from error
-        try:
+            try:
+                start_process_group(
+                    process, ["git", "-C", str(root), *args],
+                    stdin=given, stdout=out, stderr=err, env=env,
+                )
+            except OSError as error:
+                raise CheckpointError(f"git {args[0]} failed: {error}") from error
             ended = _wait_for_git(process, stop_event)
         except BaseException:
-            if process.poll() is None:
+            if getattr(process, "pid", None) is not None and process.poll() is None:
                 terminate_process_group(process, _KILL_GRACE_SECONDS)
             raise
         if ended:
@@ -206,9 +232,46 @@ def snapshot(work_dir: str, stop_event: threading.Event | None = None) -> Snapsh
         if real_index.is_file():
             shutil.copy2(real_index, index)
             _clear_skip_bits(root, index, stop_event)
-        _git(root, "add", "--all", "--", ".", index=index, stop_event=stop_event)
+        add = ("add", "--all", "--", ".")
+        try:
+            _git(root, *add, index=index, stop_event=stop_event)
+        except CheckpointError:
+            # One embedded repository with no commit checked out fails the
+            # whole ``git add``.  Its files are left alone like any other
+            # embedded repository's, and the rest of the tree is saved.
+            try:
+                unborn = _unborn_repositories(root, index, stop_event)
+            except CheckpointError:
+                unborn = []  # a Stop, or the listing failed too: the error stays ``git add``'s
+            if not unborn:
+                raise
+            _git(root, *add, *(f":(exclude,literal){path}" for path in unborn),
+                 index=index, stop_event=stop_event)
         tree = _git(root, "write-tree", index=index, stop_event=stop_event).strip()
     return Snapshot(root, tree)
+
+
+def _unborn_repositories(
+    root: Path, index: Path, stop_event: threading.Event | None,
+) -> list[str]:
+    """Return the untracked embedded repositories under *root* with no commit checked out.
+
+    ``git add`` records an embedded repository as the commit it has
+    checked out and refuses the whole tree for one that has none (a
+    fresh ``git init``).  Git lists a repository it does not look into
+    as one untracked entry ending in ``/``.
+    """
+    others = _git(root, "ls-files", "--others", "--exclude-standard", "-z", index=index,
+                  stop_event=stop_event)
+    unborn: list[str] = []
+    for path in others.split("\0"):
+        if path.endswith("/"):
+            try:
+                _git(root / path, "rev-parse", "--verify", "--quiet", "HEAD",
+                     stop_event=stop_event)
+            except CheckpointError:
+                unborn.append(path.removesuffix("/"))
+    return unborn
 
 
 def _clear_skip_bits(root: Path, index: Path, stop_event: threading.Event | None) -> None:
@@ -233,13 +296,14 @@ def plan_restore(
     current: Snapshot,
     keep: Path,
     stop_event: threading.Event | None = None,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     """Return what making *target*'s working tree match it again rewrites and deletes.
 
     Nothing is changed.  Submodules (and embedded repositories) are
-    left alone: a snapshot holds only the commit they point at, not
-    their files.  A file to write back that would replace something
-    neither snapshot holds (see :func:`_obstacle`) stops the plan.
+    left alone: a snapshot holds only the commit they point at (nothing
+    of one that has no commit yet), not their files.  A file to write
+    back where something neither snapshot holds is in its way (see
+    :func:`_obstacle`) stops the plan.
 
     Args:
         target: The snapshot to return to.
@@ -248,8 +312,9 @@ def plan_restore(
         stop_event: The task's stop event, which ends a running git command.
 
     Returns:
-        The paths to rewrite from *target* and the paths to delete,
-        relative to the working tree's top level.
+        The paths to rewrite from *target*, those of them *current* has
+        no file at, and the paths to delete, relative to the working
+        tree's top level.
 
     Raises:
         CheckpointError: When git cannot compare the trees or something
@@ -289,12 +354,13 @@ def plan_restore(
         raise CheckpointError(
             f"nothing was changed: {'; '.join(reasons)}. A rollback replaces only files "
             "a checkpoint holds: move these away first.")
-    return rewrite, delete
+    return rewrite, missing, delete
 
 
 def apply_restore(
     target: Snapshot,
     rewrite: list[str],
+    missing: list[str],
     delete: list[str],
     keep: Path,
     stop_event: threading.Event | None = None,
@@ -302,11 +368,18 @@ def apply_restore(
     """Carry out a :func:`plan_restore`: delete *delete*, then write *rewrite* from *target*.
 
     Directories left empty by a deletion are removed, except *keep*.
-    A Stop ends the restore before its next deletion or git command.
+    Nothing but what the current snapshot holds is removed: the files
+    of *delete*, the file at each path of *rewrite* not in *missing*
+    (see :func:`_replace`), and empty directories.  Git never writes
+    with ``--force``, which clears a directory with all it holds: what
+    came into a file's way after the plan (an ignored file a build
+    wrote meanwhile) stays and fails the restore.  A Stop ends the
+    restore before its next deletion, replacement or git command.
 
     Args:
         target: The snapshot to return to.
         rewrite: The paths to write back from it.
+        missing: Those of *rewrite* the current snapshot has no file at.
         delete: The paths to delete.
         keep: A directory never removed (the agent's work dir).
         stop_event: The task's stop event, which ends a running git
@@ -316,26 +389,106 @@ def apply_restore(
         CheckpointError: When a file cannot be deleted, git cannot
             write the files or a Stop ends the restore.
     """
-    keep = keep.resolve()
+    keep, root = keep.resolve(), target.root
     for path in delete:
         _raise_if_stopped(stop_event, f"deleting {path}")
-        _delete(target.root, path, keep)
+        _delete(root, path, keep)
     if rewrite:
+        absent = set(missing)
         with tempfile.TemporaryDirectory(prefix="kiss-rollback-") as scratch:
             index = Path(scratch) / "index"
-            _git(target.root, "read-tree", target.tree, index=index, stop_event=stop_event)
-            _git(target.root, "checkout-index", "--force", "-z", "--stdin", index=index,
-                 stdin="".join(f"{path}\0" for path in rewrite), stop_event=stop_event)
+            _git(root, "read-tree", target.tree, index=index, stop_event=stop_event)
+            held = [path for path in rewrite if path not in absent]
+            write = missing + _replace(root, held, index, stop_event)
+            for path in missing:
+                _remove_empty_directories(root, path, stop_event)
+            if write:
+                _checkout(root, index, write, stop_event)
+
+
+def _checkout(
+    root: Path, index: Path, paths: list[str], stop_event: threading.Event | None,
+    *options: str,
+) -> None:
+    """Have git write the files *paths* of *index* where nothing is (no ``--force``)."""
+    _git(root, "checkout-index", *options, "-z", "--stdin", index=index,
+         stdin="".join(f"{path}\0" for path in paths), stop_event=stop_event)
+
+
+def _replace(
+    root: Path, paths: list[str], index: Path, stop_event: threading.Event | None,
+) -> list[str]:
+    """Put the files *paths* of *index* in place of the files there; return those left to write.
+
+    Git writes them into a directory of their own first (:func:`_staged`),
+    then one ``rename`` moves each over its old file: the path holds the
+    old file or the new one at any moment, a Stop included, and a
+    directory put there since the plan is not replaced.  A file that
+    cannot be moved (nothing was staged, its directory is gone, the git
+    directory is on another filesystem) has its old file deleted and
+    is returned, for git to write where nothing is.
+    """
+    if not paths:
+        return []
+    unmoved: list[str] = []
+    with _staged(root, paths, index, stop_event) as stage:
+        for path in paths:
+            _raise_if_stopped(stop_event, f"rewriting {path}")
+            if stage is None or not _rename_over(stage / path, root, path):
+                _delete(root, path, (root / path).parent)  # its directories all stay
+                unmoved.append(path)
+    return unmoved
+
+
+@contextlib.contextmanager
+def _staged(
+    root: Path, paths: list[str], index: Path, stop_event: threading.Event | None,
+) -> Iterator[Path | None]:
+    """Have git write the files *paths* of *index* into a directory of their own; yield it.
+
+    The directory is in the git directory (out of the working tree and,
+    almost always, on its filesystem) and is removed at the end.
+    ``None`` is yielded, and nothing written, where no file can be moved
+    over another through a directory descriptor (native Windows) or the
+    git directory takes no new directory (it is read-only).
+    """
+    stage: tempfile.TemporaryDirectory[str] | None = None
+    if _DIR_FD:  # pragma: no branch — false on native Windows only
+        git_dir = _git(root, "rev-parse", "--absolute-git-dir", stop_event=stop_event)
+        with contextlib.suppress(OSError):
+            stage = tempfile.TemporaryDirectory(
+                prefix="kiss-rollback-", dir=git_dir.removesuffix("\n"),
+                ignore_cleanup_errors=True)
+    if stage is None:
+        yield None
+        return
+    with stage as directory:
+        _checkout(root, index, paths, stop_event, f"--prefix={directory}/")
+        yield Path(directory)
+
+
+def _rename_over(staged: Path, root: Path, path: str) -> bool:
+    """Move *staged* over the file *path* under *root*; return whether it was moved.
+
+    Through descriptors, as in :func:`_delete`.  A ``rename`` replaces a
+    file and never a directory.
+    """
+    *dirs, name = path.split("/")
+    with contextlib.suppress(OSError), _directories(root, dirs) as fds:
+        os.rename(staged, name, dst_dir_fd=fds[-1])
+        return True
+    return False
 
 
 def _obstacle(root: Path, path: str, deleted: set[str], keep: Path) -> tuple[str, str] | None:
-    """Return ``(obstacle, why)`` when writing *path* back would destroy what no snapshot holds.
+    """Return ``(obstacle, why)`` when something no snapshot holds is where *path* goes back.
 
-    ``checkout-index --force`` clears whatever is in a written file's
-    way: a directory at its path, with everything in it, or a file where
-    one of its directories goes.  That is safe only for the files the
-    rollback deletes anyway (the current snapshot holds them); an ignored
-    file, or the work dir, in the way is an obstacle.
+    The restore clears a written file's way of the files the rollback
+    deletes (the current snapshot holds them) and of empty directories,
+    and of nothing else: an ignored file, or the work dir, at its path
+    or where one of its directories goes would fail the restore
+    half-way, so it is an obstacle that stops the rollback before it
+    changes anything.
 
     Args:
         root: The working tree's top level.
@@ -346,7 +499,11 @@ def _obstacle(root: Path, path: str, deleted: set[str], keep: Path) -> tuple[str
     parts = path.split("/")
     for depth in range(1, len(parts)):
         leading = "/".join(parts[:depth])
-        if _is_file(root / leading) and leading not in deleted:
+        if _is_file(root / leading):
+            if leading in deleted:
+                # The rollback deletes it first: what a link there leads to
+                # is neither in the way nor the working tree's.
+                return None
             return leading, (f"{leading} is now a file git ignores, where the checkpoint "
                              f"has the directory of {path}")
     where = root / path
@@ -373,11 +530,127 @@ def _is_file(path: Path) -> bool:
 def _delete(root: Path, path: str, keep: Path) -> None:
     """Delete the file *path* under *root* and the directories it leaves empty, but not *keep*.
 
+    Each directory on the way is opened from its parent's descriptor
+    without following a link, and the file and the directories are
+    removed through those descriptors: a directory swapped for a link
+    since the rollback was planned fails the deletion instead of
+    taking it to a file outside the working tree.
+
     Raises:
         CheckpointError: When the file cannot be deleted.
     """
+    if not _DIR_FD:  # pragma: no cover — Windows-only branch
+        _delete_by_name(root, path, keep)
+        return
+    *dirs, name = path.split("/")
+    try:
+        with _directories(root, dirs) as fds:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=fds[-1])
+            with contextlib.suppress(OSError):
+                for depth in range(len(dirs), 0, -1):
+                    if root.joinpath(*dirs[:depth]) == keep:
+                        break
+                    os.rmdir(dirs[depth - 1], dir_fd=fds[depth - 1])
+    except FileNotFoundError:
+        return  # a directory of the file is gone, and the file with it
+    except OSError as error:
+        raise CheckpointError(f"cannot delete {path}: {error}") from error
+
+
+@contextlib.contextmanager
+def _directories(root: Path, dirs: list[str]) -> Iterator[list[int]]:
+    """Open *root* and each of *dirs* below it, from its parent's descriptor, following no link.
+
+    Yields the descriptors, *root*'s first; they are closed at the end.
+    """
+    # For its path alone where that can be asked (Linux): a deletion
+    # searches and writes a directory, and needs no leave to read it.
+    flags = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
+    fds: list[int] = []
+    try:
+        fds.append(os.open(root, flags))
+        for part in dirs:
+            fds.append(os.open(part, flags, dir_fd=fds[-1]))
+        yield fds
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def _remove_empty_directories(
+    root: Path, path: str, stop_event: threading.Event | None,
+) -> None:
+    """Remove the directory at *path* under *root* when it holds nothing but directories.
+
+    What the deletions leave of a directory where a file goes back: git
+    tracks no empty directory, so no snapshot holds one and no deletion
+    pruned it.  Only ``rmdir`` is used, through descriptors as in
+    :func:`_delete`: a directory that holds anything else stays, and so
+    does what is at *path* in place of a directory, where git then
+    refuses to write the file.
+
+    Raises:
+        CheckpointError: When a Stop ends the removal, before its next directory.
+    """
+    if not _DIR_FD:  # pragma: no cover — Windows-only branch
+        _remove_empty_directories_by_name(root, path, stop_event)
+        return
+    *dirs, name = path.split("/")
+    with contextlib.suppress(OSError), _directories(root, dirs) as fds:
+        for _where, subdirs, _files, fd in os.fwalk(name, topdown=False, dir_fd=fds[-1]):
+            for subdir in subdirs:
+                _raise_if_stopped(stop_event, f"rewriting {path}")
+                os.rmdir(subdir, dir_fd=fd)
+        _raise_if_stopped(stop_event, f"rewriting {path}")
+        os.rmdir(name, dir_fd=fds[-1])
+
+
+def _remove_empty_directories_by_name(  # pragma: no cover — Windows-only
+    root: Path, path: str, stop_event: threading.Event | None,
+) -> None:
+    """:func:`_remove_empty_directories` by pathname, for native Windows.
+
+    Each directory is checked to be no link, as in :func:`_delete_by_name`,
+    before it is listed and again right before it is removed.  A link at
+    *path*, in it or on the way to it, or a file in it, found while
+    listing ends the removal before anything is removed; a link put in
+    afterwards ends it at the next directory, and only one put in
+    between that last check and the removal is still followed.
+    """
+    found: list[Path] = []
+    pending = [root / path]
+    with contextlib.suppress(OSError):
+        while pending:
+            directory = pending.pop()
+            _refuse_links(root, directory)
+            found.append(directory)
+            pending.extend(directory.iterdir())
+        for directory in reversed(found):
+            _raise_if_stopped(stop_event, f"rewriting {path}")
+            _refuse_links(root, directory)
+            directory.rmdir()
+
+
+def _refuse_links(root: Path, directory: Path) -> None:  # pragma: no cover — Windows-only
+    """Raise ``NotADirectoryError`` when *directory*, or one it is in below *root*, is a link."""
+    for step in (directory, *directory.parents):
+        if step == root:
+            break
+        if step.is_symlink() or step.is_junction():
+            raise NotADirectoryError(f"{step} is a link")
+
+
+def _delete_by_name(root: Path, path: str, keep: Path) -> None:  # pragma: no cover — Windows-only
+    """:func:`_delete` by pathname, for native Windows, where a directory cannot be opened.
+
+    The directories on the way are checked to be no links (a symlink, a
+    junction) right before the deletion; only one put there between
+    that check and the deletion is still followed.
+    """
     target = root / path
     try:
+        _refuse_links(root, target.parent)
         target.unlink(missing_ok=True)
     except OSError as error:
         raise CheckpointError(f"cannot delete {path}: {error}") from error
@@ -399,7 +672,15 @@ def _listing(paths: list[str]) -> str:
 
 
 class Checkpoints:
-    """The checkpoints of one task, by name: what the ``checkpoint``/``rollback`` tools use."""
+    """The checkpoints of one task, by name: what the ``checkpoint``/``rollback`` tools use.
+
+    A saved snapshot is a tree nothing in the repository refers to, which
+    the next ``git gc`` would collect.  Each one is therefore the target
+    of a ref of its own under :data:`_REFS`, in a directory of this
+    instance's: made before the snapshot gets its name, deleted when
+    another snapshot takes the name, and with all that are left by
+    :meth:`close`.
+    """
 
     def __init__(self, stop_event: threading.Event | None = None) -> None:
         """Start with no checkpoints.
@@ -409,6 +690,66 @@ class Checkpoints:
         """
         self.saved: dict[str, Snapshot] = {}
         self.stop_event = stop_event
+        self._namespace = f"{_REFS}/{uuid.uuid4().hex}"
+        # Checkpoint name -> the git directory and the ref keeping its snapshot.
+        self._refs: dict[str, tuple[Path, str]] = {}
+        # Every git directory a ref was asked for, noted before git is asked (a
+        # Stop may end git after it made the ref): where close() looks for them.
+        self._git_dirs: set[Path] = set()
+
+    def _keep(self, name: str, kept: Snapshot) -> tuple[Path, str] | None:
+        """Give *kept* a ref of its own, then make it checkpoint *name*.
+
+        The ref is made through the repository's common git directory,
+        which is still there when the working tree is not (a worktree
+        ``commit_and_merge`` removed), so it can be deleted then too.
+        It names the tree itself, not a commit of it: a walk of the
+        history, ``git log --all`` included, meets nothing new.
+
+        Returns:
+            The git directory and the ref of the snapshot *name* stood
+            for until now, for :meth:`_release`; ``None`` without one.
+
+        Raises:
+            CheckpointError: When git cannot make the ref or a Stop ends
+                it; *name* then stands for what it did before.
+        """
+        common = _git(kept.root, "rev-parse", "--git-common-dir", stop_event=self.stop_event)
+        git_dir = kept.root / common.removesuffix("\n")
+        ref = f"{self._namespace}/{uuid.uuid4().hex}"
+        self._git_dirs.add(git_dir)
+        _git(git_dir, "update-ref", ref, kept.tree, is_git_dir=True, stop_event=self.stop_event)
+        replaced = self._refs.get(name)
+        self.saved[name], self._refs[name] = kept, (git_dir, ref)
+        return replaced
+
+    def _release(self, replaced: tuple[Path, str] | None) -> None:
+        """Delete the ref of a snapshot no checkpoint stands for any more.
+
+        A ref git does not delete now (a Stop, a repository that is gone,
+        no descriptor left for git's files) is left to :meth:`close`: what
+        the caller did stands, and is not failed by this.
+        """
+        if replaced is not None:
+            git_dir, ref = replaced
+            with contextlib.suppress(CheckpointError, OSError):
+                _git(git_dir, "update-ref", "-d", ref, is_git_dir=True, stop_event=self.stop_event)
+
+    def close(self) -> None:
+        """Forget every checkpoint and delete the refs that kept them from ``git gc``.
+
+        For the end of the task, whose Stop does not keep the refs from
+        being deleted.  Refs git cannot delete (their repository is gone,
+        no descriptor is left for git's files) stay behind, for another
+        call: nothing is raised for them.
+        """
+        self.saved.clear()
+        self._refs.clear()
+        for git_dir in self._git_dirs:
+            with contextlib.suppress(CheckpointError, OSError):
+                refs = _git(git_dir, "for-each-ref", "--format=delete %(refname)",
+                            self._namespace, is_git_dir=True)
+                _git(git_dir, "update-ref", "--stdin", is_git_dir=True, stdin=refs)
 
     def save(self, name: str, work_dir: str) -> str:
         """Snapshot *work_dir*'s git working tree as *name*; return the tool result.
@@ -423,9 +764,10 @@ class Checkpoints:
             return f"Error: {BEFORE_ROLLBACK!r} is saved by rollback itself; pick another name."
         try:
             saved = snapshot(work_dir, self.stop_event)
+            replaced = self._keep(name, saved)
         except CheckpointError as error:
             return f"Error: checkpoint {name!r} not saved: {error}"
-        self.saved[name] = saved
+        self._release(replaced)
         short = saved.tree[:12]
         return (f"Saved checkpoint {name!r} of {saved.root} (git tree {short}; "
                 f"`git show {short}:<path>` prints a file as it was).")
@@ -455,9 +797,14 @@ class Checkpoints:
             if current.tree == target.tree:
                 return f"Nothing to roll back: the files already match checkpoint {name!r}."
             keep = Path(work_dir)
-            rewritten, deleted = plan_restore(target, current, keep, self.stop_event)
-            self.saved[BEFORE_ROLLBACK] = current
-            apply_restore(target, rewritten, deleted, keep, self.stop_event)
+            rewritten, missing, deleted = plan_restore(target, current, keep, self.stop_event)
+            replaced = self._keep(BEFORE_ROLLBACK, current)
+            try:
+                apply_restore(target, rewritten, missing, deleted, keep, self.stop_event)
+            finally:
+                # Not before: a rollback to BEFORE_ROLLBACK restores from the
+                # very snapshot it replaces, which needs its ref until then.
+                self._release(replaced)
         except CheckpointError as error:
             return f"Error: rollback to {name!r} failed: {error}"
         return (f"Rolled {target.root} back to checkpoint {name!r}: rewrote "

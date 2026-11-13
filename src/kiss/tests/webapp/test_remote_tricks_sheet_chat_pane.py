@@ -4,7 +4,7 @@
 # add your name here
 # ruff: noqa: F811  (module fixtures imported from
 #   kiss.tests.server.test_explorer_scm_commands are used by param name)
-"""End-to-end browser tests for two desktop remote page details.
+"""End-to-end browser tests for three remote page details.
 
 * The Inject promptlet sheet (``#tricks-panel``, opened by the
   composer's "Inject promptlet" button) rises INSIDE the chat pane: it
@@ -19,6 +19,8 @@
   shorter than the 22px row and 10px gap before that), and a
   collapsed section drops the gap: it costs its header row plus the
   separator and nothing else.
+* On a phone the closed History drawer and the closed promptlet sheet
+  are out of the Tab order, not merely slid off screen.
 
 Every test drives a REAL headless Chromium (Playwright) against a REAL
 :class:`RemoteAccessServer` over ``wss://`` whose work dir is a REAL
@@ -35,6 +37,7 @@ from kiss.tests.server.test_explorer_scm_commands import (
 from kiss.tests.webapp.test_content_pane_drawer import _open_file
 from kiss.tests.webapp.test_workspace_sections import (
     _open_page,
+    _open_page_mobile,
     browser,  # noqa: F401  (module fixture used by param name)
 )
 
@@ -141,6 +144,50 @@ def test_promptlet_sheet_stays_in_the_chat_pane_beside_an_open_file(browser, har
         assert page.locator("#tricks-panel.open").count() == 1
         page.locator("#tricks-overlay").click(position={"x": 10, "y": 10})
         page.wait_for_selector("#tricks-panel:not(.open)", state="attached", timeout=5000)
+    finally:
+        context.close()
+
+
+# [focus is back on the starting button, the focused control of a closed drawer or null]
+_CLOSED_DRAWER_STOP_JS = """
+() => { const el = document.activeElement, drawer = el.closest('#sidebar, #tricks-panel');
+  return [el.id === 'more-btn', drawer && !drawer.classList.contains('open') ? el.id : null]; }
+"""
+
+
+def _closed_drawer_tab_stops(page) -> list[str]:
+    """The controls of a closed drawer that Tab stops on in one round of the page."""
+    page.locator("#more-btn").focus()
+    stops = []
+    for _ in range(200):
+        page.keyboard.press("Tab")
+        back, stop = page.evaluate(_CLOSED_DRAWER_STOP_JS)
+        if back:
+            break
+        if stop:
+            stops.append(stop)
+    return stops
+
+
+def test_closed_drawers_are_out_of_the_tab_order(browser, harness):
+    """Closed, the History drawer and the promptlet sheet had only slid off screen and
+    Tab stopped on their invisible controls; open, their fields take the focus at once."""
+    context, page, _ = _open_page_mobile(browser, harness)
+    try:
+        assert _closed_drawer_tab_stops(page) == []
+        for opener, field, closer in (
+            ("#menu-btn", "history-search", "#sidebar-close"),
+            ("#tricks-btn", "tricks-search", "#tricks-panel-close"),
+        ):
+            page.locator(opener).click()
+            page.locator("#" + field).focus()
+            assert page.evaluate("document.activeElement.id") == field
+            page.locator(closer).click()
+            page.wait_for_function(
+                f"getComputedStyle(document.getElementById('{field}')).visibility === 'hidden'",
+                timeout=30000,
+            )
+            assert _closed_drawer_tab_stops(page) == []
     finally:
         context.close()
 

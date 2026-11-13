@@ -18,6 +18,9 @@ const {
   ok,
   fail,
 } = require('./transport_page_helpers');
+const {freezeClock} = require('./history_helpers');
+
+const FROZEN_NOW_MS = 1_700_000_000_000;
 
 const MEDIA = path.resolve(__dirname, '..', 'media');
 
@@ -67,7 +70,12 @@ function buildDom(opts) {
     });
     jsdomOpts.virtualConsole = vc;
   }
-  return new JSDOM(html, jsdomOpts);
+  const dom = new JSDOM(html, jsdomOpts);
+  // The shim's overlay escalation, lockout and reload budgets are windows
+  // of the page's clock: every page reads a frozen one (a scenario that
+  // needs time to pass moves it itself), and fixtures date from it.
+  freezeClock(dom.window, FROZEN_NOW_MS);
+  return dom;
 }
 
 function wireOverlayContract(window) {
@@ -509,9 +517,6 @@ async function run() {
     Object.defineProperty(s1, 'onopen', {
       set() {
         throw new Error('handler nulling blocked');
-      },
-      get() {
-        return null;
       },
     });
     s1.close = function () {
@@ -1070,7 +1075,9 @@ async function run() {
     s1.fireOpen();
     // Dies before it authenticates; the user keeps working meanwhile.
     s1.fireClose();
-    api.postMessage({type: 'saveMyModel', name: 'second outage'});
+    // A replayable command: once-only ones (saveMyModel among them) are
+    // held for the pong instead of joining a re-sent batch.
+    api.postMessage({type: 'closeTab', tabId: 'second outage'});
     // The backoff grows with every failed attempt; a wake-up listener
     // short-circuits it.
     window.dispatchEvent(new window.Event('focus'));
@@ -1085,7 +1092,7 @@ async function run() {
       );
       assert.deepStrictEqual(
         types(s2),
-        ['auth', 'saveConfig', 'saveMyModel', 'ping'],
+        ['auth', 'saveConfig', 'closeTab', 'ping'],
         'every command queued during the outages goes out in order, then the probe',
       );
       // Dies before the pong: the batch is owed to the next connection.
@@ -1096,7 +1103,7 @@ async function run() {
       s3.fireMessage({type: 'auth_ok'});
       assert.deepStrictEqual(
         types(s3),
-        ['auth', 'saveConfig', 'saveMyModel', 'ping'],
+        ['auth', 'saveConfig', 'closeTab', 'ping'],
         'an unconfirmed batch is sent again',
       );
       s3.fireMessage({type: 'pong'});
@@ -1473,9 +1480,9 @@ async function run() {
       window.sessionStorage.setItem(
         STAMPS,
         JSON.stringify([
-          Date.now() - 31000,
-          Date.now() - 31000,
-          Date.now() - 31000,
+          FROZEN_NOW_MS - 31000,
+          FROZEN_NOW_MS - 31000,
+          FROZEN_NOW_MS - 31000,
         ]),
       );
       newDocumentGuard();
@@ -2395,8 +2402,8 @@ async function run() {
   // the new password with ``remotePasswordChanged`` (the frames that
   // carry it, its stored copy, malformed notices, an empty password and
   // a loopback page are transportFramePassword.test.js's).  A storage
-  // that throws must not stop a password-authenticated page adopting a
-  // new password, nor dropping a cleared one (remote access turned off).
+  // that throws must not stop a page that holds a password adopting a
+  // new one, nor dropping a cleared one (remote access turned off).
   {
     const {window, sockets} = page();
     window.localStorage.setItem('sorcar-remote-pwd', 'old-pw');

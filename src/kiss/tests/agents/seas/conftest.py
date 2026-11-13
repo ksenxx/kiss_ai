@@ -62,6 +62,19 @@ unknown" unless the identity is exported.
 """
 
 
+def _overrides_git(key: str) -> bool:
+    """Whether the environment variable *key* is one a launching shell exports to steer git.
+
+    Each outranks what a disposable repository is given: an identity, config
+    (``GIT_CONFIG_COUNT`` entries override the repository's own), the hooks
+    ``GIT_TEMPLATE_DIR`` puts into every ``git init``, the repository itself (``GIT_DIR``).
+    :func:`git` inherits none of them and :func:`hermetic_git_env` unsets them.
+    ``GIT_CEILING_DIRECTORIES`` is not one: the test session sets it, to keep git's search
+    for a repository inside the temporary roots.
+    """
+    return key.startswith("GIT_") and key != "GIT_CEILING_DIRECTORIES"
+
+
 def runnable_candidates(tiers: Tiers, tier: str) -> list[str]:
     """Return the models of *tiers*[*tier*] whose provider credential is configured, in order."""
     available = set(get_available_models())
@@ -93,13 +106,9 @@ def git(
         check: Raise :exc:`subprocess.CalledProcessError` on a non-zero exit (default).
         timeout: Seconds after which the call fails with :exc:`subprocess.TimeoutExpired`.
     """
-    # An identity exported by the launching shell would override the
-    # repository's own ``user.*`` config; only *env* may set one.
-    inherited = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))
-    }
+    # What the launching shell exported for git would override the
+    # repository's own identity, config and hooks; only *env* may set it.
+    inherited = {key: value for key, value in os.environ.items() if not _overrides_git(key)}
     result = run_process_group(
         ["git", "-C", str(repo), *args],
         timeout,
@@ -160,8 +169,11 @@ def remote_and_clones(root: Path, *names: str) -> list[Path]:
 
 
 def hermetic_git_env(env: pytest.MonkeyPatch) -> None:
-    """Export :data:`HERMETIC_GIT_WITH_IDENTITY` through *env* for the SEA (or daemon) under
-    test, which spawns git with the process environment; *env*'s undo restores it."""
+    """Unset what the launching shell exported for git (:func:`_overrides_git`) and export
+    :data:`HERMETIC_GIT_WITH_IDENTITY` through *env* for the SEA (or daemon) under test, which
+    spawns git with the process environment; *env*'s undo restores both."""
+    for key in [key for key in os.environ if _overrides_git(key)]:
+        env.delenv(key)
     for key, value in HERMETIC_GIT_WITH_IDENTITY.items():
         env.setenv(key, value)
 

@@ -28,6 +28,7 @@ from websockets.asyncio.client import connect
 
 from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import _AUTH_FAIL_MAX, RemoteAccessServer
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
@@ -38,13 +39,12 @@ class TestLockedLoopbackBrowser(IsolatedAsyncioTestCase):
         import kiss.agents.sorcar.persistence as _persistence
 
         self._saved_persistence = (
-            _persistence._DB_PATH, _persistence._db_conn, _persistence._KISS_DIR,
+            _persistence._DB_PATH, _persistence._KISS_DIR,
         )
         self._persistence_dir = Path(tempfile.mkdtemp(prefix="kiss_lockout_"))
         self.addCleanup(shutil.rmtree, self._persistence_dir, True)
         _persistence._KISS_DIR = self._persistence_dir
         _persistence._DB_PATH = self._persistence_dir / "history.db"
-        _persistence._db_conn = None
 
         self.port = find_free_port()
         self._orig_config = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
@@ -64,9 +64,9 @@ class TestLockedLoopbackBrowser(IsolatedAsyncioTestCase):
             CONFIG_PATH.unlink()
         import kiss.agents.sorcar.persistence as _persistence
 
-        _persistence._close_db()
+        close_db()
         (
-            _persistence._DB_PATH, _persistence._db_conn, _persistence._KISS_DIR,
+            _persistence._DB_PATH, _persistence._KISS_DIR,
         ) = self._saved_persistence
 
     def _url(self) -> str:

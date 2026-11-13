@@ -36,7 +36,9 @@ const PROBE = `
 `;
 
 function runProbe() {
-  return spawnSync(process.execPath, ['-e', PROBE], {
+  // With this process's V8 flags (run-all.js's): they are what keeps a
+  // jsdom node process from hanging at exit.
+  return spawnSync(process.execPath, [...process.execArgv, '-e', PROBE], {
     encoding: 'utf8',
     timeout: 20000,
   });

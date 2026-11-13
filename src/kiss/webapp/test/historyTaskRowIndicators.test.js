@@ -12,7 +12,12 @@ const {
   sendEmptyWorkDir,
   rowsByTitle,
 } = require('./simplify2_harness');
-const {freezeClockAndStyle, makeRow} = require('./history_helpers');
+const {
+  freezeClockAndStyle,
+  makeRow,
+  historyRows,
+  openChatsPanel,
+} = require('./history_helpers');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
@@ -20,17 +25,6 @@ function makePage() {
   return makeHarnessPage({
     beforeScripts: win => freezeClockAndStyle(win, FROZEN_NOW_MS),
   });
-}
-
-function openBurgerMenu(win) {
-  const btn = win.document.getElementById('menu-btn');
-  assert.ok(btn, 'burger menu button (#menu-btn) must exist');
-  btn.click();
-}
-
-function rows(win) {
-  const list = win.document.getElementById('history-list');
-  return list.querySelectorAll('.sidebar-item');
 }
 
 function indicatorOf(row) {
@@ -44,7 +38,7 @@ function indicatorOf(row) {
 function testRunningTaskShowsAtTopAfterBurgerOpen() {
   const {win, posted} = makePage();
 
-  openBurgerMenu(win);
+  openChatsPanel(win);
   sendEmptyWorkDir(win);
   const getHist = posted.find(m => m && m.type === 'getHistory');
   assert.ok(
@@ -76,7 +70,7 @@ function testRunningTaskShowsAtTopAfterBurgerOpen() {
     generation: getHist.generation,
   });
 
-  const r = rows(win);
+  const r = historyRows(win);
   assert.strictEqual(r.length, 2, 'both rows must render');
   const firstText = r[0].querySelector('.sidebar-item-text');
   assert.ok(firstText, 'first row must have a text span');
@@ -95,7 +89,7 @@ function testRunningTaskShowsAtTopAfterBurgerOpen() {
 
 function testFinishedTaskShowsSolidGreenCircle() {
   const {win, posted} = makePage();
-  openBurgerMenu(win);
+  openChatsPanel(win);
   sendEmptyWorkDir(win);
   const getHist = posted.find(m => m && m.type === 'getHistory');
   assert.ok(getHist, 'burger menu open must post getHistory');
@@ -226,7 +220,7 @@ function testFinishedTaskShowsSolidGreenCircle() {
 
 function testIndicatorsAreVerticallyCenteredInTaskPanels() {
   const {win, posted} = makePage();
-  openBurgerMenu(win);
+  openChatsPanel(win);
   sendEmptyWorkDir(win);
   const getHist = posted.find(m => m && m.type === 'getHistory');
   assert.ok(getHist, 'burger menu open must post getHistory');
@@ -283,7 +277,8 @@ function testIndicatorsAreVerticallyCenteredInTaskPanels() {
     .getPropertyValue('--space-1-5')
     .trim();
   assert.ok(padTop, '--space-1-5 is defined on the page');
-  rows(win).forEach(row => {
+  assert.strictEqual(historyRows(win).length, 3, 'the three task rows render');
+  historyRows(win).forEach(row => {
     const title = row.querySelector('.sidebar-item-text').textContent;
     const indicator = indicatorOf(row);
     assert.ok(indicator, `row ${title} must render a status indicator`);

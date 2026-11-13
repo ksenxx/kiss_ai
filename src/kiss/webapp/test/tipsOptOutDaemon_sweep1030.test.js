@@ -20,7 +20,12 @@ const fs = require('fs');
 const path = require('path');
 const {newDom, MEDIA} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {loadTipsPage, openOptOutBox, closeTips} = require('./tips_helpers');
+const {
+  loadTipsPage,
+  tipsHost,
+  openOptOutBox,
+  closeTips,
+} = require('./tips_helpers');
 const {test, report} = makeRunner();
 
 const TIPS = ['# One\n\nfirst', '# Two\n\nsecond'];
@@ -32,11 +37,7 @@ test('the page-load opt-out of the daemon ticks the box in a browser without one
     version: '1.0',
     optOut: true,
   });
-  assert.strictEqual(
-    win.document.body.querySelector('kiss-tips-panel'),
-    null,
-    'the tips stay closed on load',
-  );
+  assert.strictEqual(tipsHost(win), null, 'the tips stay closed on load');
   assert.strictEqual(win.localStorage.getItem('kissTipsOptOut'), null);
   assert.strictEqual(openOptOutBox(win).checked, true);
 });

@@ -148,6 +148,7 @@ def test_close_tab_with_marker_failure_survives_same_daemon_reclaim(env: _Env) -
     wt_dir, branch = wt.wt_dir, wt.branch
 
     lock = env.repo / ".git" / "kiss-preserve"
+    lock.rmdir()  # empty: the worktree setup removed its own marker
     lock.write_text("")
     try:
         env.server._close_tab(tab_id)
@@ -215,6 +216,7 @@ def test_deferred_disposal_with_marker_failure_keeps_state(env: _Env) -> None:
     assert agent._wt is wt
 
     lock = env.repo / ".git" / "kiss-preserve"
+    lock.rmdir()  # empty: the worktree setup removed its own marker
     lock.write_text("")
     try:
         # The task ends: the runner drops the lifecycle flag and disposes.
@@ -268,6 +270,7 @@ def test_concurrent_close_during_teardown_is_deferred_not_duplicated(env: _Env) 
     agent._retire_previous_worktree = blocking_preserve  # type: ignore[method-assign]
 
     lock = env.repo / ".git" / "kiss-preserve"
+    lock.rmdir()  # empty: the worktree setup removed its own marker
     lock.write_text("")
     try:
         first = threading.Thread(target=env.server._close_tab, args=(tab_id,), daemon=True)

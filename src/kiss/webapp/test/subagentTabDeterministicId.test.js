@@ -29,8 +29,6 @@
 // driving a fake WebSocket), so the frames the daemon would see are
 // exactly the ones the assertions inspect.
 
-/* global require, console */
-
 'use strict';
 
 const assert = require('assert');

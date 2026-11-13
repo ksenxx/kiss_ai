@@ -3,7 +3,6 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-/* global require, console, process */
 'use strict';
 
 // End-to-end (jsdom, real media/main.js + api.js) regressions for the
@@ -39,16 +38,23 @@ const {
 } = require('./simplify2_harness');
 const {clickClose} = require('./subagent_tab_helpers');
 const {installAudio} = require('./speech_helpers');
+const {freezeClock} = require('./history_helpers');
+
+const FROZEN_NOW_MS = 1_700_500_000_000;
 
 // `desktop` adds remote-desktop to the body, as the page does on a wide
 // screen.  Intervals are recorded, not run, so a test fires a poll tick
-// by hand.
+// by hand.  The page's clock stands still: the close shield lapses 5 s
+// after the close, so on the host's clock a stalled run would lift it
+// under a test that expects it up (testCloseShieldExpiresAfterTtl moves
+// the clock itself).
 function makePage(desktop) {
   let intervals;
   const {win, posted} = buildPage({
     bodyClass: 'remote-chat' + (desktop ? ' remote-desktop' : ''),
     beforeScripts: w => {
       stubRaf(w);
+      freezeClock(w, FROZEN_NOW_MS);
       intervals = fakeIntervals(w).intervals;
       fakeMatchMedia(w, true);
     },
@@ -402,8 +408,7 @@ function testCloseShieldExpiresAfterTtl() {
   win._testApi.endLaunch();
   const snap = {type: 'tabs_state', tabs: [entry('t1'), entry('t2')]};
   send(win, {...snap, acks: []});
-  const realNow = win.Date.now;
-  let now = realNow();
+  let now = FROZEN_NOW_MS;
   win.Date.now = () => now;
   closeTabViaUi(win, 't2');
   now += 60000;
@@ -428,7 +433,6 @@ function testCloseShieldExpiresAfterTtl() {
     ['t1', 't2'],
     'REGRESSION: a close shield older than 5 s must not hide a listed tab',
   );
-  win.Date.now = realNow;
   win.close();
   console.log('PASS the close shield expires after 5 s');
 }

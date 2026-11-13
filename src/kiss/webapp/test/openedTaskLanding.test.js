@@ -46,15 +46,11 @@ function rowHeight(el) {
   return ROW_H;
 }
 
-/** Install the layout model into `win` before the page scripts run. */
-function stubLayout(win) {
-  stackOutputLayout(win, rowHeight, VIEW_H);
-}
-
-function setupPage() {
+/** A page laid out by `heightOf` (see stackOutputLayout). */
+function setupPage(heightOf = rowHeight) {
   const {win, posted} = makePage({
     bodyClass: 'remote-chat',
-    beforeScripts: stubLayout,
+    beforeScripts: win => stackOutputLayout(win, heightOf, VIEW_H),
     sourceUrl: 'opened-task-landing-main.js',
   });
   const tabId = readyTabId(posted);
@@ -137,6 +133,13 @@ function isRunning(win, tabId) {
   return tab.isRunning;
 }
 
+/** The text of the active tab's entry on the strip. */
+function activeLabel(win) {
+  const label = win.document.querySelector('#tab-list .chat-tab.active');
+  assert.ok(label, 'the strip shows the active tab');
+  return label.textContent;
+}
+
 function taskPanel(O) {
   const panel = O.querySelector('.task-panel');
   assert.ok(panel, 'the transcript starts with its task panel');
@@ -205,13 +208,22 @@ function testRunningReplayLandsAtEnd() {
 // neighbouring task was spliced in above it (the panel is then not the
 // first row), and the tab label names that task.
 function testSwitchToFinishedTabLandsOnOwnTaskPanel() {
-  const {win, tabId, O} = setupPage();
+  // The older task fills the viewport, so a reader at its top is
+  // looking at it and the tab label says so.
+  const {win, tabId, O} = setupPage(el =>
+    el.classList.contains('adjacent-task') ? VIEW_H : rowHeight(el),
+  );
   replay(win, tabId, '42', 'Own task');
   const older = spliceOlderTask(win, tabId);
   assert.strictEqual(O.firstElementChild, older, 'spliced in above');
   const olderHeight = older.getBoundingClientRect().height;
   // Lose the position: read the older task, then leave the tab.
   O.scrollTop = 0;
+  O.dispatchEvent(new win.Event('scroll'));
+  assert.ok(
+    activeLabel(win).includes('Older task'),
+    'the tab label names the task being read; got ' + activeLabel(win),
+  );
   const {second} = twoTabs(win);
   assert.strictEqual(win._testApi.getActiveTabId(), second);
   clickTab(win, tabId);
@@ -226,11 +238,9 @@ function testSwitchToFinishedTabLandsOnOwnTaskPanel() {
     0,
     'the older task ends where the viewport begins',
   );
-  const label = win.document.querySelector('#tab-list .chat-tab.active');
-  assert.ok(label, 'the strip shows the active tab');
   assert.ok(
-    label.textContent.includes('Own task'),
-    'the tab label names the own task; got ' + label.textContent,
+    activeLabel(win).includes('Own task'),
+    'the tab label names the own task again; got ' + activeLabel(win),
   );
   win.close();
   console.log('  ok - switching to a finished tab lands on its task panel');
@@ -262,12 +272,18 @@ function testSwitchToRunningTabLandsAtEnd() {
 
 // --------------------------------------------------------------------
 // Switching to a fresh chat on its welcome screen keeps the welcome
-// screen at the top: there is no transcript to land.
+// screen at the top: there is no transcript to land, and the offset
+// the tab before it was scrolled to does not carry over.
 function testSwitchToWelcomeTabStaysAtTop() {
-  const {win, tabId, O} = setupPage();
+  // A welcome screen taller than the viewport: its end is not its top.
+  const {win, tabId, O} = setupPage(el =>
+    el.id === 'welcome' ? 2 * VIEW_H : rowHeight(el),
+  );
   replay(win, tabId, '42', 'Own task');
   const {second} = twoTabs(win);
   clickTab(win, tabId);
+  O.scrollTop = 77;
+  O.dispatchEvent(new win.Event('scroll'));
   clickTab(win, second);
   assert.strictEqual(win._testApi.getActiveTabId(), second);
   assert.strictEqual(O.querySelector('.task-panel'), null, 'no task panel');
@@ -333,6 +349,25 @@ function testHistoryClickOnFinishedTaskLandsOnTaskPanel() {
 }
 
 // --------------------------------------------------------------------
+// A history click on a task spliced in above the tab's own lands on
+// that task, not on the tab's own task panel.
+function testHistoryClickOnSplicedTaskLandsOnIt() {
+  const {win, tabId, O} = setupPage();
+  replay(win, tabId, '42', 'Own task');
+  const older = spliceOlderTask(win, tabId);
+  O.scrollTop = bottomOf(O);
+  O.dispatchEvent(new win.Event('scroll'));
+  clickHistoryRow(win, 41, 'Older task');
+  assert.strictEqual(
+    older.getBoundingClientRect().top,
+    0,
+    'the spliced-in task starts at the top of the viewport',
+  );
+  win.close();
+  console.log('  ok - a history click on a spliced-in task lands on it');
+}
+
+// --------------------------------------------------------------------
 // A replay the page asked for lands afresh.  The reader left a finished
 // tab landed below a spliced-in older task (a position away from the
 // bottom, which engages the scroll lock a reconnect replay honours);
@@ -392,6 +427,12 @@ function testUnrelatedReplayKeepsTheRequestPending() {
   replay(win, tabId, '43', 'Newer task');
   assertLandedOnTaskPanel(O, 'requested replay after a reconnect replay');
   assert.strictEqual(O.scrollTop, 0, 'the new task panel is the first row');
+  // The request is spent: a reconnect replay of that task keeps the
+  // position the reader has moved to since.
+  O.scrollTop = 150;
+  O.dispatchEvent(new win.Event('scroll'));
+  replay(win, tabId, '43', 'Newer task');
+  assert.strictEqual(O.scrollTop, 150, 'an answered request lands only once');
   win.close();
   console.log('  ok - an unrelated replay keeps the request pending');
 }
@@ -532,6 +573,7 @@ testReconnectReplaySettlesStaleRunningFlag();
 testDeferredReconnectResendsRunningToBackgroundTab();
 testHistoryClickOnRunningTaskLandsAtEnd();
 testHistoryClickOnFinishedTaskLandsOnTaskPanel();
+testHistoryClickOnSplicedTaskLandsOnIt();
 testRequestedReplayLandsAfresh();
 testUnrelatedReplayKeepsTheRequestPending();
 testNewTaskDropsThePendingRequest();

@@ -31,6 +31,7 @@ def test_voice_comes_between_model_and_usage_out() -> None:
     assert usage == {"model": "no-such-model-xyz", "budget_used": 0.0, "total_tokens_used": 0}
 
 
+@pytest.mark.live_api
 @requires_openai
 def test_the_voice_reaches_the_audio_model() -> None:
     assert synthesize_talk_audio("Hi.", voice="alloy") is not None

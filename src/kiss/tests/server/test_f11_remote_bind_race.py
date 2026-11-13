@@ -12,7 +12,9 @@ each bumped the counter once after both had taken their snapshot, so
 each found it moved and stood down: neither bound the tab and both
 commands vanished.  Now a bind detaches the old stream inside its first
 critical section and snapshots the counter after that, so the loser of
-the race finds the winner's stream and joins it.
+the race finds the winner's stream and joins it.  Nor does the winner's
+taking the tab over stand down a bind the daemon expects but whose
+thread has not run (``expect_bind``): only a command's unbind does.
 
 Two real daemons (``box`` and ``box2`` name the same remote daemon) and
 the local daemon's real ``RemoteTabs``; which thread takes the lock
@@ -45,9 +47,13 @@ class TestConcurrentRebindsToOneMachine(RemoteTabsHarness):
             first = await asyncio.to_thread(remote_tabs._bind, tab, "box", cmd, "first")
             assert first is not None
             self.assertEqual(machine_of(remote_tabs, tab), "box")
+            # Each bind is expected before either thread runs, as dispatched commands' are.
+            racing = [dict(cmd), dict(cmd)]
+            for raced in racing:
+                remote_tabs.expect_bind(tab, raced)
             results = await asyncio.gather(
-                asyncio.to_thread(remote_tabs._bind, tab, "box2", cmd, "race a"),
-                asyncio.to_thread(remote_tabs._bind, tab, "box2", cmd, "race b"),
+                asyncio.to_thread(remote_tabs._bind, tab, "box2", racing[0], "race a"),
+                asyncio.to_thread(remote_tabs._bind, tab, "box2", racing[1], "race b"),
             )
             self.assertTrue(
                 all(result is not None for result in results),
@@ -60,3 +66,4 @@ class TestConcurrentRebindsToOneMachine(RemoteTabsHarness):
             self.assertEqual(machine_of(remote_tabs, tab), "")
         self.assertEqual(remote_tabs._unbinds, {})
         self.assertEqual(remote_tabs._connecting, {})
+        self.assertEqual(remote_tabs._expected, {})

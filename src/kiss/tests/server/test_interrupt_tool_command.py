@@ -328,6 +328,82 @@ class TestInterruptToolCommand(unittest.TestCase):
         self.assertIn("task_done", types)
         self.assertNotIn("task_stopped", types)
 
+    def test_interrupted_question_closes_before_the_next_one_opens(self) -> None:
+        """An ``askUserDone`` names no question: sent late, it closes the next one."""
+        server = _make_server()
+        events, lock = _capture(server)
+        second_asked = threading.Event()
+        deliver = server.printer.broadcast
+
+        def hold_ack_until_second_question(event: dict[str, Any]) -> None:
+            # The command thread, held between its interrupt and what it
+            # sends next for as long as the task thread needs to ask again.
+            if event.get("type") == "tool_interrupt_ack":
+                second_asked.wait(5)
+            deliver(event)
+            if event.get("question") == "Second?":
+                second_asked.set()
+
+        server.printer.broadcast = hold_ack_until_second_question
+
+        def ask_twice() -> str:
+            try:
+                server._ask_user_question("First?")
+            except ToolCallInterrupted:
+                pass
+            # The agent's next step: another question, its own tool call.
+            return _run_tool(
+                "ask_user_question", lambda: server._ask_user_question("Second?"),
+            )
+
+        state, thread, started, box = _start_task(
+            server, "it-task-9", "it-tab-9", "ask_user_question", ask_twice,
+        )
+        self.assertTrue(started.wait(10))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not state.pending_ask_question:
+            time.sleep(0.01)
+        server.printer.subscribe_tab("it-task-9", "it-tab-9")
+        server._cmd_interrupt_tool({"tabId": "it-tab-9", "toolName": "ask_user_question"})
+        self.assertTrue(second_asked.is_set(), "the task never asked again")
+        with lock:
+            asks = [
+                (e["type"], e.get("question"))
+                for e in events
+                if e.get("type") in ("askUser", "askUserDone")
+            ]
+        self.assertEqual(
+            asks, [("askUser", "First?"), ("askUserDone", None), ("askUser", "Second?")],
+        )
+        self.assertEqual(state.pending_ask_question, "Second?")
+        server._cmd_user_answer({"tabId": "it-tab-9", "answer": "blue"})
+        thread.join(30)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(box["tool_result"], "blue")
+
+    def test_question_of_an_already_stopped_call_is_never_shown(self) -> None:
+        """A Stop accepted before the question opens finds nothing to close: none may open."""
+        server = _make_server()
+        events, lock = _capture(server)
+        stopped = threading.Event()
+
+        def ask_after_stop() -> str:
+            stopped.wait(10)
+            return str(server._ask_user_question("Too late?"))
+
+        _state, thread, started, box = _start_task(
+            server, "it-task-10", "it-tab-10", "ask_user_question", ask_after_stop,
+        )
+        self.assertTrue(started.wait(10))
+        server._cmd_interrupt_tool({"tabId": "it-tab-10", "toolName": "ask_user_question"})
+        stopped.set()
+        thread.join(30)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(box["tool_result"], USER_INTERRUPTED_MESSAGE)
+        with lock:
+            asks = [e["type"] for e in events if e.get("type") in ("askUser", "askUserDone")]
+        self.assertEqual(asks, [], "a question was left open on every surface")
+
     def test_task_stop_still_wins_while_waiting_for_an_answer(self) -> None:
         """The whole-task Stop keeps its KeyboardInterrupt semantics."""
         server = _make_server()

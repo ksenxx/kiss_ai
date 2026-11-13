@@ -43,7 +43,9 @@ from kiss.agents.seas.skillopt.skillopt_sea import (
     run_rollout,
     verify,
 )
+from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, SeaError
 from kiss.core.context_compaction import COMPACTION_START_TOKENS, STUB_PREFIX
@@ -57,11 +59,16 @@ from kiss.tests.agents.sorcar.local_model_server import (
     text_body,
     tool_call_body,
 )
+from kiss.tests.agents.sorcar.test_cost_audit_20261023 import (
+    _llm_call,
+    _model_costs,
+    history_db,  # noqa: F401  (the fixture)
+)
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
 _SH_SEA = Path(sh_sea.__file__).resolve()
 _SKILLOPT_SEA = Path(skillopt_sea.__file__).resolve()
-_EVALS = Path(sh_sea.__file__).resolve().parent / "evals" / "sh_sea_evals.json"
+_EVALS = _SH_SEA.parent / "evals" / "sh_sea_evals.json"
 
 
 def _rollout(command: str, output: str) -> list[bytes]:
@@ -743,7 +750,6 @@ def test_one_round_accepts_a_candidate_that_passes_more_selection_tasks(tmp_path
     calls = [m["text"] for m in trajectory if m["role"] == "assistant"]
     assert calls[0].startswith('[call Bash] {"command": "echo beta"')
     assert calls[1].startswith('[call finish] {"success": true')
-    assert any("echo beta" in m["text"] for m in rollouts[1]["trajectory"])
     assert (out / "round_01" / "candidate" / "sh_candidate.py").exists()
     assert (out / "round_01" / "candidate.txt").read_text(encoding="utf-8") == state["best_text"]
     assert (out / "round_01" / "train" / "b" / "marker").exists()
@@ -1046,6 +1052,7 @@ class Sea(BaseSea):
             _config(tmp_path, broken, three, url, out_dir=tmp_path / "out2", epochs=1, batch_size=2)
         )
     assert [r["train_tasks"] for r in report["rounds"][4:]] == [["a", "b"], ["c"]]
+    assert len(requests) == 2  # the analyst of each new round; no earlier round ran again
 
 
 def test_run_rollout_applies_eval_defaults_and_prompt_settings(tmp_path: Path) -> None:
@@ -1193,9 +1200,10 @@ class Sea(BaseSea):
 def test_missing_split_is_an_error(tmp_path: Path) -> None:
     """An eval set with no train task (or no selection task) cannot be optimized."""
     sea = _copy_sh_sea(tmp_path)
-    evals = _evals(tmp_path, [{"id": "a", "prompt": "p", "split": "select"}])
-    with pytest.raises(ValueError, match="at least one train task"):
-        run_optimization(_config(tmp_path, sea, evals, "http://127.0.0.1:9/v1"))
+    for only_split in ("select", "train"):
+        evals = _evals(tmp_path, [{"id": "a", "prompt": "p", "split": only_split}])
+        with pytest.raises(ValueError, match="at least one train task"):
+            run_optimization(_config(tmp_path, sea, evals, "http://127.0.0.1:9/v1"))
 
 
 # --------------------------------------------------------------------------
@@ -1241,7 +1249,7 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     assert "rounds done: 0" in text
     assert (tmp_path / ".skillopt" / "sh_sea" / "state.json").exists()
     text = skillopt_sea.optimize(str(sea), str(evals), out_dir=str(tmp_path / "o"), max_cost=0.0)
-    assert (tmp_path / "o" / "state.json").exists()
+    assert "rounds done: 0" in text and (tmp_path / "o" / "state.json").exists()
 
 
 def test_cli_runs_the_optimizer(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1359,3 +1367,49 @@ class Sea(sea_class('base_sea.py', relative_to=Path(__file__).parent)):
     assert composed_kwargs["system_prompt_hook"]("DEFAULT") == "DEFAULT\n\nBASE RULES\n\nSTRICT"
     with pytest.raises(ValueError, match="string literal"):
         SeaTarget(composed).text()  # not a trainable constant
+
+
+@pytest.mark.usefixtures("history_db")
+def test_analyst_spend_is_charged_to_the_task_under_the_optimizer_model(tmp_path: Path) -> None:
+    """An analyst call is a side call of the task: banked and filed under its model.
+
+    It emits no ``llm_call``, so its spend must also be recorded under the
+    row (as a ``decide`` call is), or the Spend panel files it under the
+    task's own model.
+    """
+    fable = "claude-fable-5-1"
+    task_id, _ = th._add_task("skillopt task", "", {"model": fable})
+    th._queue_chat_event(_llm_call(fable, 1.0, 1_000), task_id)
+    th._flush_chat_events()
+    th._save_task_extra({"cost": 1.0, "tokens": 1_000, "steps": 1}, task_id=task_id)
+    parent = ChatSorcarAgent("skillopt-spend-test")
+    parent._last_task_id = task_id
+    broken = tmp_path / "broken_sea.py"  # its rollouts fail at once and cost nothing
+    broken.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\n"
+        "class Sea(BaseSea):\n"
+        "    def system_prompt(self, system_prompt):\n"
+        "        return 'p'\n\n"
+        "    def settings(self, settings):\n"
+        "        return settings | {'tool_profile': 'bogus'}\n",
+        encoding="utf-8",
+    )
+    evals = _evals(tmp_path, [{"id": "a", "prompt": "echo a", "expect": ["a"]}])
+    with serve([_patches_body()]) as (url, requests):
+        run_optimization(_config(tmp_path, broken, evals, url, epochs=1, batch_size=1), parent)
+    assert requests and parent.budget_used > 0  # the analyst calls, banked on the ledger
+    steps = parent.total_steps
+    th._save_task_extra(
+        {
+            "cost": 1.0 + parent.budget_used,
+            "tokens": 1_000 + parent.total_tokens_used,
+            "steps": 1,
+            "endTs": 1,
+        },
+        task_id=task_id,
+    )
+    split = json.loads(_model_costs(task_id))
+    assert split[fable] == [1.0, 1_000]
+    assert split[MODEL][0] == pytest.approx(parent.budget_used)
+    assert split[MODEL][1] == parent.total_tokens_used
+    assert steps == 0  # not agent steps

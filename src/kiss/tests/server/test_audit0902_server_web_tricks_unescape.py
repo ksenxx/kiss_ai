@@ -115,7 +115,8 @@ class TestAutocompleteTrickCompletionUnescaped(_TricksEnv):
     def test_completions_and_ghost_are_unescaped(self) -> None:
         printer = _RecordingPrinter()
         server = AgentServer(printer=printer)  # type: ignore[arg-type]
-        server._complete("Replace <<x")
+        server._complete_seq_latest[""] = 1
+        server._complete("Replace <<x", 1)
         by_type = {e["type"]: e for e in printer.events}
         completions = by_type["completions"]["completions"]
         trick_items = [c for c in completions if c["type"] == "trick"]

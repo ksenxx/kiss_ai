@@ -8,12 +8,12 @@ Every :class:`~kiss.server.server.AgentServer` constructor starts a
 daemon thread named ``orphan-task-sweep`` that rewrites the
 ``"Agent Failed Abruptly"`` sentinel of tasks killed with their owning
 process (``persistence._recover_orphaned_tasks``).  The sweep runs on
-its own per-thread SQLite connection, and ``persistence._get_db()``
-also publishes that connection in the module-global ``_db_conn``.
+its own per-thread SQLite connection, which was often the process's
+newest one: the one test teardowns used to close.
 
 Roughly 150 test files across ``tests/agents/sorcar`` and
 ``tests/webapp`` construct a server in ``setUp`` and then, in
-``tearDown``, close ``persistence._db_conn`` and delete the temporary
+``tearDown``, closed that connection and deleted the temporary
 KISS_HOME.  When the sweep is still inside ``db.execute(...)`` at that
 moment, the C-level ``pysqlite_connection_execute`` call dereferences a
 freed connection and the whole interpreter dies with SIGSEGV — a crash
@@ -48,7 +48,6 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.server import AgentServer
@@ -76,14 +75,13 @@ class TestOrphanSweepJoinedBeforeTearDown(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved: tuple[Any, Any, Any] = (
-            th._DB_PATH, th._db_conn, th._KISS_DIR,
+        self.saved: tuple[Path, Path] = (
+            th._DB_PATH, th._KISS_DIR,
         )
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         stale = time.time() - 600
         th._get_db().executemany(
             "INSERT INTO task_history (task, timestamp, result) "
@@ -102,9 +100,8 @@ class TestOrphanSweepJoinedBeforeTearDown(unittest.TestCase):
                 (RECOVERED,),
             ).fetchone()[0]
         finally:
-            if th._db_conn is not None:
-                th._db_conn.close()
-            th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+            th._close_thread_db()
+            th._DB_PATH, th._KISS_DIR = self.saved
             shutil.rmtree(self.tmpdir, ignore_errors=True)
         self.assertEqual(
             still_sweeping, [],

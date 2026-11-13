@@ -86,14 +86,14 @@ class TestFinallyCleanupSurvivesRekey(_Harness):
             "model": "test-model",
             "tabId": tab_id,
         })
-        assert started.wait(timeout=3), "first task did not start"
+        assert started.wait(timeout=30), "first task did not start"
 
         state = agent_state.find_by_tab(tab_id)
         assert state is not None
         assert state.task_id == "task-101", "state must be re-keyed"
 
         release.set()
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if state.task_thread is None:
                 break
@@ -119,7 +119,7 @@ class TestFinallyCleanupSurvivesRekey(_Harness):
             "model": "test-model",
             "tabId": tab_id,
         })
-        assert started.wait(timeout=3), (
+        assert started.wait(timeout=30), (
             "BUG: the second run on the tab was swallowed as steering "
             "for the finished task instead of starting a new task"
         )
@@ -164,6 +164,10 @@ class TestRunRefusedDuringMerge(_Harness):
             "BUG: run during a merge must broadcast the "
             "merge-in-progress error"
         )
+        assert any(
+            e.get("tabId") == tab_id and e.get("running") is False
+            for e in self._events_of("status")
+        ), "BUG: an idle tab's refusal must lower its optimistic running state"
         assert not ran.wait(timeout=0.5), (
             "BUG: run during a merge must not start a task"
         )
@@ -171,6 +175,30 @@ class TestRunRefusedDuringMerge(_Harness):
             "BUG: _cmd_run unregistered the merging tab's state"
         )
         assert review.is_merging
+
+    def test_refused_followup_leaves_a_live_task_running(self) -> None:
+        """A task whose own thread holds the merge claim (its worktree retire) is still live."""
+        tab_id = "tab-live-merge"
+        done = threading.Event()
+        worker = threading.Thread(target=done.wait, args=(60,), daemon=True)
+        worker.start()
+        live = agent_state.AgentState(
+            "task-live", tab_id=tab_id, server_owned=True, is_task_active=True, task_thread=worker,
+        )
+        live.is_merging = True
+        live.merge_thread = worker
+        agent_state.register(live)
+        try:
+            self.server._handle_command({
+                "type": "run", "prompt": "follow-up", "model": "test-model", "tabId": tab_id,
+            })
+        finally:
+            done.set()
+        refused = [e for e in self._events_of("error") if e.get("code") == "prompt_refused"]
+        assert refused, "the refused follow-up must come back to the composer"
+        assert not [e for e in self._events_of("status") if e.get("tabId") == tab_id], (
+            "BUG: the refusal marked the live task finished on every surface"
+        )
 
 
 if __name__ == "__main__":

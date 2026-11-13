@@ -130,12 +130,6 @@ class TestOpenAICompatibleModelInitialize:
         assert content[-1]["type"] == "text"
 
 
-class TestFinalizeStreamResponse:
-    def test_with_last_chunk(self) -> None:
-        result = OpenAICompatibleModel._finalize_stream_response(None, "last")
-        assert result == "last"
-
-
 class TestExtractTokenCounts:
     def test_with_usage(self) -> None:
         class FakeUsage:

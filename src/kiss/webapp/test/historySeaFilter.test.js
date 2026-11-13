@@ -7,9 +7,10 @@
 
 // End-to-end test of the History panel's SEA (agent script) filter: the
 // <select id="hf-sea"> lists the agent scripts of the loaded rows, each
-// row carries its SEA as data-sea and a label, and choosing an option
-// hides the rows that were run by another script (or, with "None", the
-// rows that were run by any script).
+// row carries its SEA as data-sea (the strip under its header does not
+// name it), and choosing an option hides the rows that were run by
+// another script (or, with "None", the rows that were run by any
+// script).
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
@@ -58,7 +59,7 @@ function testMarkupAndDefault() {
   console.log('  ok - SEA select markup and default');
 }
 
-function testOptionsBuiltFromRowsAndRowsLabelled() {
+function testOptionsBuiltFromRowsAndRowsStamped() {
   const {win} = makePage();
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
   assert.deepStrictEqual(
@@ -70,32 +71,21 @@ function testOptionsBuiltFromRowsAndRowsLabelled() {
   const bySea = {};
   rows.forEach(r => {
     const title = r.querySelector('.sidebar-item-text').textContent;
-    const label = r.querySelector('.sidebar-item-sea');
-    bySea[title] = {
-      sea: r.dataset.sea,
-      label: label ? label.textContent : null,
-    };
+    bySea[title] = r.dataset.sea;
+    // The strip under the row's header does not name the script.
+    const strip = r.querySelector('.sidebar-item-actions').textContent;
+    assert.ok(!/write_paper_sea|cron_agent/.test(strip), title + ': ' + strip);
   });
-  assert.deepStrictEqual(bySea['paper task'], {
-    sea: 'write_paper_sea',
-    label: 'write_paper_sea',
-  });
-  assert.deepStrictEqual(bySea['second paper task'], {
-    sea: 'write_paper_sea',
-    label: 'write_paper_sea',
-  });
-  assert.deepStrictEqual(bySea['cron task'], {
-    sea: 'cron_agent',
-    label: 'cron_agent',
-  });
-  assert.deepStrictEqual(bySea['plain task'], {sea: '', label: null});
-  assert.deepStrictEqual(bySea['legacy row without sea field'], {
-    sea: '',
-    label: null,
+  assert.deepStrictEqual(bySea, {
+    'paper task': 'write_paper_sea',
+    'plain task': '',
+    'cron task': 'cron_agent',
+    'second paper task': 'write_paper_sea',
+    'legacy row without sea field': '',
   });
   assert.strictEqual(visibleTitles(win).length, 5, 'All shows every row');
   win.close();
-  console.log('  ok - options built from rows, rows carry data-sea and label');
+  console.log('  ok - options built from rows, rows carry data-sea');
 }
 
 function testSelectingSeaFiltersRows() {
@@ -212,7 +202,7 @@ function testSelectionSurvivesRefreshWithoutThatSea() {
 
 function runTests() {
   testMarkupAndDefault();
-  testOptionsBuiltFromRowsAndRowsLabelled();
+  testOptionsBuiltFromRowsAndRowsStamped();
   testSelectingSeaFiltersRows();
   testSeaFilterCombinesWithStatusChips();
   testSelectionSurvivesRefreshWithoutThatSea();

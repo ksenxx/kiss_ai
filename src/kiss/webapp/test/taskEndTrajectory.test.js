@@ -88,10 +88,7 @@ function assertFolded(root, why) {
   }
   assert.ok(
     after.every(
-      el =>
-        !el.classList.contains('ev') ||
-        el.classList.contains('rc') ||
-        el.classList.contains('adjacent-task'),
+      el => !el.classList.contains('ev') || el.classList.contains('rc'),
     ),
     why + ': the result follows the Trajectory',
   );

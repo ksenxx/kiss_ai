@@ -85,7 +85,7 @@ def count_words(text: str) -> str:
 
 @pytest.fixture
 def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_history: None) -> Path:
-    """A fake KISS checkout whose ``seas/`` folder holds the editable ``demo`` SEA.
+    """A fake KISS checkout whose ``seas/`` folder holds the editable ``tunedemo`` SEA.
 
     ``export_sea_evals`` and the acceptance test read every persisted
     ``tunedemo`` run, so the test starts with none (``empty_history``).
@@ -102,7 +102,7 @@ def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_history: Non
 def persist_run(
     task: str, result: str, success: bool, cost: float, duration_s: float, **extra: Any
 ) -> str:
-    """Persist a finished ``demo`` run (the daemon records the SEA in the ``sea`` column)."""
+    """Persist a finished ``tunedemo`` run (the daemon records the SEA in the ``sea`` column)."""
     text = f"success: {'true' if success else 'false'}\nsummary: {result}"
     now_ms = int(time.time() * 1000)
     columns: dict[str, Any] = {

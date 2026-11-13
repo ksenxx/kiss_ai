@@ -28,7 +28,7 @@ You can ask a question about the current task by prefixing the question with the
 
 **What `autorouter` does.** Frontier models cost 40 to 100 times more per token than small models, while most agent tokens go to exploration, file reads, test output, and mechanical edits that a small model handles as well. `autorouter` splits the task into units of work that each have a mechanical acceptance check, classifies every unit into a `small`, `medium`, or `frontier` tier with the cheap non-generative `decide` tool, dispatches each unit to the cheapest model of that tier that your installation can run, verifies the result through the acceptance check, and escalates one tier up on a verified failure. Its objective is cost per accepted task, not cost per token. Every routing decision is appended to the ledger `~/{{HOME_DIR}}/MODEL_DECISIONS.md`, and `/rsi7d all` refreshes the router's per-model cost, speed, and reliability evidence from your own task history into `~/{{HOME_DIR}}/AUTOROUTER.md`, which the router reads on every run.
 
-**What `bestrouter` does.** It answers simple questions and queries on `claude-opus-5-5-medium` and runs every other task, including software development, on `claude-fable-5-1-max`, then dispatches `gpt-6-astra` through a non-blocking `run_agent` for a read-only review and debugging pass over that work, on at most 75% of the task budget. Use it when quality matters more than cost; it needs both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` set in Settings.
+**What `bestrouter` does.** It answers simple questions and queries on `claude-opus-5-5-medium` and runs every other task, including software development, on `claude-fable-5-2-max`, then dispatches `gpt-6-astra-xhigh` through a non-blocking `run_agent` for a read-only review and debugging pass over that work, on at most 75% of the task budget. Use it when quality matters more than cost; it needs both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` set in Settings.
 
 Any SEA whose `register_as_model()` returns `True` appears in the model picker the same way, so you can write your own router.
 
@@ -71,7 +71,7 @@ See the commit messages at https://github.com/ksenxx/kiss_ai which include the p
 - Add the following text to your prompt:
 
 ```
-claude-fable-5-1 model be used for all tasks, including software development. Use gpt-6-astra (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 75% of the task budget in gpt-6-astra for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
+claude-fable-5-2-max model be used for all tasks, including software development. Use gpt-6-astra-xhigh (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 75% of the task budget in gpt-6-astra-xhigh for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
 ```
 
 # Tip

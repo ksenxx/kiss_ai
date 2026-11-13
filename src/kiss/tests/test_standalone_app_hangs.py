@@ -19,6 +19,8 @@ import json
 import os
 import signal
 import stat
+import subprocess
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -90,8 +92,7 @@ def test_stuck_probes_time_out(stuck_bin: Path, tmp_path: Path) -> None:
     )
     assert windows is None
     activated = _stuck_probe(
-        stuck_bin, "open", standalone_app.macos_activate_running, bundle, in_use=True,
-        timeout=TIMEOUT,
+        stuck_bin, "open", standalone_app.macos_activate_running, bundle, timeout=TIMEOUT
     )
     assert activated is False
 
@@ -125,6 +126,24 @@ def test_unanswering_ps_is_not_nothing_running(
     assert standalone_app.write_macos_launcher(apps, BRAND, icon, exe, state, None) is None
     assert not exe_copy.exists() and not (bundle / "Contents" / "Frameworks").exists()
     assert (bundle / "Contents" / "MacOS" / "launcher").exists()
+
+
+def test_a_wait_that_never_elapses_is_a_usage_error(tmp_path: Path) -> None:
+    """``--wait nan`` and ``--wait inf`` are refused instead of waited out.
+
+    A NaN deadline is never reached and an infinite one never comes:
+    with no URL file in the state directory ``kiss-app`` polled for it
+    for good.  The command runs in a child, which this test's own
+    deadline kills if it does.
+    """
+    env = {**os.environ, "KISS_HOME": str(tmp_path)}  # no remote-url.json there
+    for wait in ("nan", "inf"):
+        refused = subprocess.run(
+            [sys.executable, "-m", "kiss.server.standalone_app", "--wait", wait],
+            capture_output=True, text=True, env=env, timeout=120,
+        )
+        assert refused.returncode == 2, refused.stderr
+        assert "--wait: SECS must be a finite number" in refused.stderr
 
 
 def test_silent_playwright_driver_cannot_hang_the_browser_lookup(

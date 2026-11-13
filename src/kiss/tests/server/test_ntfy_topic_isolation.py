@@ -40,7 +40,7 @@ from unittest import IsolatedAsyncioTestCase, mock
 from kiss.core.user_config import save_config
 from kiss.server.web_server import RemoteAccessServer, _get_machine_topic
 from kiss.tests.conftest import posix_only
-from kiss.tests.server._ntfy_emulator import NtfyServerContext
+from kiss.tests.server._ntfy_emulator import NtfyServerContext, unroutable_base_url
 from kiss.tests.server.conftest import find_free_port
 
 
@@ -156,10 +156,8 @@ class TestTunnelRestartPostsToInjectedEndpoint(IsolatedAsyncioTestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
         shutil.rmtree(self._kiss_home, ignore_errors=True)
 
-    @posix_only("the fake cloudflared is a #! shell script")
-    async def test_post_lands_on_emulator_not_production_topic(self) -> None:
-        """The restart-path post reaches the injected emulator on the
-        isolated (non-production) topic."""
+    async def _restart_dead_tunnel(self) -> None:
+        """Run the watchdog's tunnel check on a dead tunnel, a script ``cloudflared`` on PATH."""
         cf = os.path.join(self._tmpdir, "cloudflared")
         with open(cf, "w") as f:
             f.write(
@@ -183,6 +181,12 @@ class TestTunnelRestartPostsToInjectedEndpoint(IsolatedAsyncioTestCase):
             self.server._active_url,
             "https://isolation-e2e.trycloudflare.com",
         )
+
+    @posix_only("the fake cloudflared is a #! shell script")
+    async def test_post_lands_on_emulator_not_production_topic(self) -> None:
+        """The restart-path post reaches the injected emulator on the
+        isolated (non-production) topic."""
+        await self._restart_dead_tunnel()
         self.assertEqual(len(self.ntfy.posts), 1)
         topic, body, _headers = self.ntfy.posts[0]
         self.assertEqual(
@@ -192,6 +196,19 @@ class TestTunnelRestartPostsToInjectedEndpoint(IsolatedAsyncioTestCase):
         )
         self.assertEqual(topic, _get_machine_topic())
         self.assertNotEqual(topic, _production_default_home_topic())
+
+    @posix_only("the fake cloudflared is a #! shell script")
+    async def test_post_ntfy_did_not_take_is_made_by_a_later_check(self) -> None:
+        """ntfy unreachable while the tunnel URL is published: the post is
+        not recorded as made, and a later watchdog check delivers it, once."""
+        self.server._ntfy_base_url = unroutable_base_url()
+        await self._restart_dead_tunnel()
+        self.assertEqual(self.ntfy.posts, [])
+        self.server._ntfy_base_url = self.ntfy.base_url
+        await self.server._check_and_restart_tunnel()
+        await self.server._check_and_restart_tunnel()
+        self.assertEqual(len(self.ntfy.posts), 1)
+        self.assertIn("https://isolation-e2e.trycloudflare.com", self.ntfy.posts[0][1])
 
 
 if __name__ == "__main__":

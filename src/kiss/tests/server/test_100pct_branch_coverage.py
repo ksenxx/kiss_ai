@@ -13,28 +13,20 @@ tests/agents/third_party_agents.
 
 Targets remaining uncovered branches in:
   json_printer.py (_format_tool_call, peek_recording)
-  server.py (merge-conflict/changed-files/result-summary paths)
+  server.py (changed-files/result-summary paths)
 
 No mocks, patches, fakes, or test doubles.
 """
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
-
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import AgentServer
-from kiss.tests.agents.sorcar.test_100pct_branch_coverage import (
-    _redirect_db,
-    _restore_db,
-)
 from kiss.tests.conftest import seed_worktree
-from kiss.tests.server.worktree_helpers import merge_conflict, worktree_changed_files
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 
 def _register_worktree_state(tab_id: str) -> AgentState:
@@ -81,17 +73,6 @@ class TestFormatToolCallBranches:
 class TestAgentServerUncoveredBranches:
     """Cover remaining uncovered branches in AgentServer."""
 
-    def test_conflict_of_no_branches(self) -> None:
-        """_conflict_of returns False when no wt_branch."""
-        server = AgentServer()
-        state = _register_worktree_state("0")
-        try:
-            assert state.agent is not None
-            seed_worktree(state.agent, None)
-            assert merge_conflict(server, "0") is False
-        finally:
-            agent_state.unregister(state.task_id, state)
-
     def test_get_worktree_changed_files_no_branches(self) -> None:
         """The changed-files listing is [] when no branches."""
         server = AgentServer()
@@ -102,69 +83,6 @@ class TestAgentServerUncoveredBranches:
             assert worktree_changed_files(server, "0") == []
         finally:
             agent_state.unregister(state.task_id, state)
-
-    def test_conflict_of_dirty_worktree(self, tmp_path: Path) -> None:
-        """_conflict_of detects dirty files that overlap with merge."""
-        saved = _redirect_db(str(tmp_path))
-        try:
-            repo = tmp_path / "repo"
-            repo.mkdir()
-            subprocess.run(
-                ["git", "init", "-b", "main"],
-                cwd=repo, capture_output=True, check=True,
-            )
-            subprocess.run(
-                ["git", "config", "user.email", "t@t.com"],
-                cwd=repo, capture_output=True,
-            )
-            subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
-            (repo / "f.txt").write_text("content")
-            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
-
-            subprocess.run(["git", "checkout", "-b", "test-branch"], cwd=repo, capture_output=True)
-            (repo / "f.txt").write_text("branch content")
-            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "mod"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "checkout", "main"], cwd=repo, capture_output=True)
-
-            (repo / "f.txt").write_text("dirty local change")
-
-            wt_dir = repo / ".kiss-worktrees" / "test-wt"
-            subprocess.run(
-                ["git", "worktree", "add", "-b", "test-wt", str(wt_dir)],
-                cwd=repo, capture_output=True, check=True,
-            )
-            (wt_dir / "f.txt").write_text("worktree content")
-            subprocess.run(["git", "add", "-A"], cwd=wt_dir, capture_output=True)
-            subprocess.run(
-                ["git", "commit", "-m", "wt mod"], cwd=wt_dir, capture_output=True,
-            )
-
-            server = AgentServer()
-            state = _register_worktree_state("0")
-            assert state.agent is not None
-            seed_worktree(state.agent, GitWorktree(
-                repo_root=repo, branch="test-wt",
-                original_branch="main",
-                wt_dir=wt_dir,
-            ))
-            server.work_dir = str(repo)
-
-            try:
-                assert merge_conflict(server, "0") is True
-            finally:
-                agent_state.unregister(state.task_id, state)
-                # The server's orphan sweep commits on the redirected
-                # database from its own thread; ``_restore_db`` closes
-                # that very connection, and closing a sqlite3 handle
-                # another thread is mid-commit on crashes the process.
-                sweep = server._orphan_sweep_thread
-                if sweep is not None:
-                    sweep.join(timeout=30)
-                    assert not sweep.is_alive(), "orphan sweep did not finish"
-        finally:
-            _restore_db(saved)
 
 class TestBrowserPrinterPeekRecording:
     """Cover peek_recording for empty/non-existent recording."""

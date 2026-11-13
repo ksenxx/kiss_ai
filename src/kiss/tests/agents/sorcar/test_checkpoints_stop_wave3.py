@@ -63,26 +63,59 @@ def test_a_stop_between_planning_and_applying_a_rollback_changes_nothing(tmp_pat
     target = snapshot(str(repo), stop)
     (repo / "a.txt").write_text("v2\n")
     (repo / "new.txt").write_text("new\n")
-    rewrite, delete = plan_restore(target, snapshot(str(repo), stop), repo, stop)
-    assert (rewrite, delete) == (["a.txt"], ["new.txt"])
+    rewrite, missing, delete = plan_restore(target, snapshot(str(repo), stop), repo, stop)
+    assert (rewrite, missing, delete) == (["a.txt"], [], ["new.txt"])
     stop.set()
     with pytest.raises(CheckpointError, match="^deleting new.txt was stopped$"):
-        apply_restore(target, rewrite, delete, repo, stop)
+        apply_restore(target, rewrite, missing, delete, repo, stop)
     # Nothing to delete: the rewrite is not started either.
     with pytest.raises(CheckpointError, match="^git read-tree was stopped$"):
-        apply_restore(target, rewrite, [], repo, stop)
+        apply_restore(target, rewrite, missing, [], repo, stop)
     assert (repo / "a.txt").read_text() == "v2\n"
     assert (repo / "new.txt").read_text() == "new\n"
 
 
 class _StopAtFirstDeletion:
-    """A :class:`Pause` matcher: set *stop* when the first file is about to be deleted."""
+    """A :class:`Pause` matcher: set *stop* as the first file is about to be deleted or replaced."""
 
     def __init__(self, stop: threading.Event) -> None:
         self.stop = stop
 
     def __call__(self, frame_locals: dict[str, Any]) -> bool:
         self.stop.set()
+        return False
+
+
+class _StopAtCheck:
+    """A :class:`Pause` matcher on ``_raise_if_stopped``: set *stop* at the *nth* check of *step*.
+
+    The check is entered with the Stop not yet set and finds it set: *step* ends right there.
+    """
+
+    def __init__(self, stop: threading.Event, step: str, nth: int) -> None:
+        self.stop, self.step, self.left = stop, step, nth
+
+    def __call__(self, frame_locals: dict[str, Any]) -> bool:
+        if frame_locals["step"] == self.step:
+            self.left -= 1
+            if self.left == 0:
+                self.stop.set()
+        return False
+
+
+class _StopBeforeSecondRewrite:
+    """Set *stop* when a second file is about to be rewritten, regardless of ordering."""
+
+    def __init__(self, stop: threading.Event) -> None:
+        self.stop = stop
+        self.seen: set[str] = set()
+
+    def __call__(self, frame_locals: dict[str, Any]) -> bool:
+        step = frame_locals["step"]
+        if step.startswith("rewriting ") and step not in self.seen:
+            if self.seen:
+                self.stop.set()
+            self.seen.add(step)
         return False
 
 
@@ -104,3 +137,42 @@ def test_a_stop_during_a_rollback_ends_it_before_the_next_file(tmp_path: Path) -
     stop.clear()
     assert tools.rollback("before-rollback").startswith("Rolled ")
     assert (repo / "n1.txt").read_text() == "1\n"
+    # The same between two files it replaces: exactly one has reached its old text.
+    assert tools.checkpoint("three").startswith("Saved checkpoint 'three'")
+    (repo / "n1.txt").write_text("1 changed\n")
+    (repo / "n2.txt").write_text("2 changed\n")
+    between_files = _StopBeforeSecondRewrite(stop)
+    with Pause(checkpoints._raise_if_stopped.__code__, between_files):
+        out = tools.rollback("three")
+    assert out.startswith("Error: rollback to 'three' failed: rewriting ")
+    assert out.endswith(" was stopped")
+    restored = [
+        path.read_text() if path.exists() else None
+        for path in (repo / "n1.txt", repo / "n2.txt")
+    ]
+    if checkpoints._DIR_FD:
+        assert sum(text in {"1\n", "2\n"} for text in restored) == 1
+        assert sum(text in {"1 changed\n", "2 changed\n"} for text in restored) == 1
+    else:
+        # Native Windows cannot rename staged files over open paths. The fallback removes
+        # one old file before reaching the next, then writes replacements in one checkout.
+        assert sum(text is None for text in restored) == 1
+        assert sum(text in {"1 changed\n", "2 changed\n"} for text in restored) == 1
+    assert not list((repo / ".git").glob("kiss-rollback-*"))  # where the new files waited
+    stop.clear()
+    assert tools.rollback("before-rollback").startswith("Rolled ")
+    assert (repo / "n1.txt").read_text() == "1 changed\n"
+    # The same between two of the empty directories left where a file goes back.
+    assert tools.checkpoint("four").startswith("Saved checkpoint 'four'")
+    for name in ("n1.txt", "n2.txt"):
+        (repo / name).unlink()
+        (repo / name / "a").mkdir(parents=True)
+        (repo / name / "b").mkdir()
+    second = _StopAtCheck(stop, "rewriting n1.txt", 2)
+    with Pause(checkpoints._raise_if_stopped.__code__, second):
+        out = tools.rollback("four")
+    assert out == "Error: rollback to 'four' failed: rewriting n1.txt was stopped"
+    assert [len(list((repo / name).iterdir())) for name in ("n1.txt", "n2.txt")] == [1, 2]
+    stop.clear()
+    assert tools.rollback("four").startswith("Rolled ")
+    assert (repo / "n2.txt").read_text() == "2 changed\n"

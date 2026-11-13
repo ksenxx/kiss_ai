@@ -32,8 +32,8 @@ Usage:
     python3 db_fingerprint.py DATABASE
 
 Nothing is printed and the exit status is 1 when the database cannot be
-read or does not have the columns a sync needs, so that a caller cannot
-mistake "I could not look" for "nothing changed".  It is stdlib-only and
+read or lacks a column read here, so that a caller cannot mistake "I
+could not look" for "nothing changed".  It is stdlib-only and
 self-contained so that it can be piped straight into a remote ``python3``
 over ssh.
 """
@@ -44,22 +44,23 @@ import hashlib
 import os
 import sqlite3
 import sys
+from pathlib import Path
 
-TASK_QUERY = (
-    'SELECT count(*), COALESCE(SUM("steps"), 0), COALESCE(SUM("tokens"), 0)'
-    " FROM task_history"
-)
+# The column names are bare on purpose: SQLite reads a double-quoted name
+# that matches no column as a string, and a missing column would then be
+# summarised instead of refused.
+TASK_QUERY = "SELECT count(*), COALESCE(SUM(steps), 0), COALESCE(SUM(tokens), 0) FROM task_history"
 # Three scalar subqueries rather than one aggregate query: SQLite answers a
 # lone count(*) from the index's page counts and a lone MAX(rowid) with one
 # seek, but a SELECT that aggregates both loops over every row.
 EVENT_QUERY = (
     "SELECT (SELECT count(*) FROM events),"
     " COALESCE((SELECT MAX(rowid) FROM events), 0),"
-    ' COALESCE((SELECT "timestamp" FROM events ORDER BY rowid DESC LIMIT 1), 0)'
+    " COALESCE((SELECT timestamp FROM events ORDER BY rowid DESC LIMIT 1), 0)"
 )
 # Ordered by the primary key, so that the digest describes what the rows say
 # and not the order sqlite happens to return them in.
-DIGEST_QUERY = 'SELECT * FROM task_history ORDER BY "id"'
+DIGEST_QUERY = "SELECT * FROM task_history ORDER BY id"
 DIGEST_LENGTH = 16
 
 
@@ -89,11 +90,11 @@ def fingerprint(database: str) -> str:
         The seven fields separated by spaces.
 
     Raises:
-        sqlite3.Error: If the database cannot be read, or lacks the
-            tables and columns a sync moves.
+        sqlite3.Error: If the database cannot be read, or lacks a table
+            or column read here.
     """
-    path = os.path.expanduser(database)
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=60.0)
+    uri = f"{Path(os.path.expanduser(database)).absolute().as_uri()}?mode=ro"
+    con = sqlite3.connect(uri, uri=True, timeout=60.0)
     try:
         tasks = con.execute(TASK_QUERY).fetchone()
         events = con.execute(EVENT_QUERY).fetchone()

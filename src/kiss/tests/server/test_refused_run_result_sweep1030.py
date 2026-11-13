@@ -57,7 +57,9 @@ _PARKING_SCRIPT = textwrap.dedent(
     """
 )
 
-_REFUSAL = "No model available.  Set at least one API key in the environment."
+# The start of both refusal texts: the rest depends on whether another
+# model is usable on this machine (``test_no_model_available.py`` pins both).
+_REFUSAL = "No model available"
 
 
 class TestNoModelRefusalReachesViewers(TestCase):
@@ -98,7 +100,7 @@ class TestNoModelRefusalReachesViewers(TestCase):
             for ev in list(self.printer.emitted)
             if ev.get("type") == "result"
             and ev.get("tabId") == tab_id
-            and ev.get("text") == _REFUSAL
+            and str(ev.get("text")).startswith(_REFUSAL)
         ]
 
     def test_viewer_attached_during_setup_gets_the_refusal_and_it_is_recorded(self) -> None:
@@ -150,6 +152,6 @@ class TestNoModelRefusalReachesViewers(TestCase):
         recorded = [
             ev
             for ev in self.printer.peek_recording_for_task(provisional_id)
-            if ev.get("type") == "result" and ev.get("text") == _REFUSAL
+            if ev.get("type") == "result" and str(ev.get("text")).startswith(_REFUSAL)
         ]
         self.assertEqual(len(recorded), 1, "BUG: a replay of the refused run has no explanation")

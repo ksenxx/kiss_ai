@@ -29,6 +29,7 @@ const {
   openSettings,
   closeSettings,
   statusLine,
+  typeInto,
 } = require('./settings_helpers');
 
 function testSubpanelLayoutAndDefaults(agent) {
@@ -125,9 +126,7 @@ function testConfigLoadAndSave(agent) {
     'a user edit survives a configData repaint',
   );
 
-  const token = byId(win, `cfg-key-${agent.tokenKey}`);
-  token.value = 'tok-new';
-  token.dispatchEvent(new win.Event('input', {bubbles: true}));
+  typeInto(win, `cfg-key-${agent.tokenKey}`, 'tok-new');
   closeSettings(win);
   const msg = lastMsg(posted, 'saveConfig');
   assert.ok(msg, 'closing the panel saves the form');

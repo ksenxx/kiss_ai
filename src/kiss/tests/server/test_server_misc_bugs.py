@@ -43,6 +43,7 @@ from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.file_index import FileIndex
 from kiss.server.server import AgentServer
+from kiss.tests.persistence_helpers import close_db
 
 
 class TestGitignoreRootAnchoredEntry(unittest.TestCase):
@@ -86,7 +87,7 @@ class _TempDbTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.mkdtemp(prefix="kiss-server-misc-")
         self._orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
-        th._close_db()
+        close_db()
         th._DB_PATH = Path(self._tmp) / "history.db"  # type: ignore[attr-defined]
 
         self.server = AgentServer()
@@ -104,7 +105,7 @@ class _TempDbTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
-        th._close_db()
+        close_db()
         th._DB_PATH = self._orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(self._tmp, ignore_errors=True)
 
@@ -182,6 +183,38 @@ class TestRunningTaskNotMarkedFailed(_TempDbTestCase):
         by_task = {s["title"]: s for s in sessions}
         self.assertTrue(by_task["codex task"]["failed"], "an in-process error reads as a success")
         self.assertFalse(by_task["codex task"]["is_running"])
+
+    def test_every_row_of_a_running_chat_says_so(self) -> None:
+        """A finished task of a chat that is running is listed as one (``chat_running``).
+
+        A click on it must open the chat on its running task; the row
+        of that task may not be on the page (a search lists the tasks
+        that match), so each row says it for its chat.
+        """
+        older, chat_id = th._add_task("older task")
+        th._save_task_result("success: done", older)
+        running, _ = th._add_task("running task", chat_id=chat_id)
+        th._add_task("another chat")
+
+        release = threading.Event()
+        worker = threading.Thread(target=release.wait, daemon=True)
+        worker.start()
+        try:
+            agent_state.register(agent_state.AgentState(
+                str(running), chat_id=chat_id, tab_id="tab", server_owned=True,
+                task_thread=worker, is_task_active=True,
+            ))
+            self.server._handle_command({"type": "getHistory"})
+        finally:
+            release.set()
+            worker.join(timeout=5)
+
+        with self._lock:
+            sessions = next(e for e in reversed(self.events) if e["type"] == "history")["sessions"]
+        self.assertEqual(
+            {s["title"]: s["chat_running"] for s in sessions},
+            {"older task": True, "running task": True, "another chat": False},
+        )
 
 
 class TestSubtaskFailureStepCount(_TempDbTestCase):

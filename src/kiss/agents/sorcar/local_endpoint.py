@@ -24,15 +24,18 @@ with a non-default ``KISS_HOME`` (tests, side-by-side installs).
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
+import queue
 import secrets
+import socket
 import ssl
 import threading
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -219,8 +222,13 @@ def connect(
 
     Reads the endpoint file, opens the TLS WebSocket (permessage-deflate
     declined: it saves nothing on loopback) and completes the ``auth``
-    handshake with the local token.  The returned connection is ready
-    for catalog commands.
+    handshake with the local token.  The daemon is dialled directly,
+    whatever proxy the environment names (``http_proxy``, ...): it is
+    on this machine, where no proxy reaches it.  The returned
+    connection is ready for catalog commands.  The dial is made on a
+    helper thread (:func:`dial_off_thread`): a Stop of the calling
+    task ends the wait within :data:`_STOP_WAKE_SECONDS` and never
+    lands in the handshake.
 
     Args:
         endpoint_file: The endpoint file to read; ``None`` means
@@ -249,6 +257,17 @@ def connect(
             f"Cannot connect to the sorcar daemon: no endpoint file at {path} "
             "— start it with `kiss-web`."
         )
+    return dial_off_thread(functools.partial(_dial, endpoint, open_timeout, max_size, parts))
+
+
+def _dial(
+    endpoint: LocalEndpoint, open_timeout: float, max_size: int | None, parts: bool,
+) -> ClientConnection:
+    """Open the WebSocket to *endpoint* and complete the local ``auth`` handshake.
+
+    The blocking part of :func:`connect`, which documents the arguments
+    and the ``ConnectionError`` raised.
+    """
     try:
         ws = _ws_connect(
             endpoint.url,
@@ -257,6 +276,7 @@ def connect(
             close_timeout=2.0,
             compression=None,
             max_size=max_size,
+            proxy=None,
         )
     except (OSError, InvalidHandshake, InvalidURI) as exc:
         raise ConnectionError(
@@ -276,8 +296,8 @@ def connect(
             f"local auth handshake: {exc}"
         ) from exc
     except BaseException:
-        # A Stop's KeyboardInterrupt (a client runs on the task thread):
-        # the socket is nobody's until it is returned, so nothing else
+        # Anything else (no thread left for ``send``'s writer): the
+        # socket is nobody's until it is returned, so nothing else
         # would close it, and its threads would keep answering the
         # daemon's pings.
         ws.close()
@@ -291,14 +311,174 @@ def connect(
     return ws
 
 
+_STOP_WAKE_SECONDS = 0.2
+"""Seconds between two wakes of a wait for a call on another thread (:func:`_await`)."""
+
+
+def dial_off_thread(
+    dial: Callable[[], ClientConnection], timeout: float | None = None,
+) -> ClientConnection:
+    """Return the connection *dial* opens, dialled on a thread that no Stop reaches.
+
+    A task is stopped by raising ``KeyboardInterrupt`` asynchronously
+    in its thread.  Raised inside ``websockets``' ``connect`` it skips
+    that library's cleanup, which catches ``Exception`` only, and the
+    socket stays open.  CPython 3.14 can also raise it right after a
+    ``with lock:`` acquire returns, before the block that releases the
+    lock is entered: landing in the receive of the ``auth`` reply, it
+    left the frame assembler's mutex held, and the ``close()`` meant
+    to clean up waited for that mutex for good.
+
+    So *dial* runs on a helper thread, and the caller waits on a
+    ``queue.SimpleQueue``, whose ``get`` takes no Python-level lock
+    (:func:`_await`).  A caller unwound before it holds the connection
+    leaves it to the helper thread, which closes it once *dial*
+    returns it; one unwound after it told the helper thread it holds
+    the connection hangs it up itself (:func:`hang_up`).
+
+    Args:
+        dial: Opens and returns a connection, bounded by its own
+            timeouts.
+        timeout: Seconds to wait for *dial* at most, for one whose own
+            timeouts leave something out (the lookup of a host name
+            takes none); ``None`` waits until it ends.
+
+    Returns:
+        The connection *dial* returned.
+
+    Raises:
+        TimeoutError: When *dial* has not ended after *timeout*
+            seconds.  The helper thread closes what it opens later.
+        BaseException: Whatever *dial* raised.
+    """
+    outcome: queue.SimpleQueue[ClientConnection | BaseException] = queue.SimpleQueue()
+    taken: queue.SimpleQueue[bool] = queue.SimpleQueue()
+    result: ClientConnection | BaseException | None = None
+    try:
+        threading.Thread(
+            target=_hand_over, args=(dial, outcome, taken),
+            name="sorcar-local-connect", daemon=True,
+        ).start()
+        result = _await(outcome, timeout)
+        if isinstance(result, BaseException):
+            raise result
+        # The answer and the return stay inside the ``try``: a Stop is
+        # raised at the check that follows a call, here the ``put``'s,
+        # and none follows a ``return``.
+        taken.put(True)
+        return result
+    except BaseException:
+        taken.put(False)
+        if isinstance(result, ClientConnection):
+            hang_up(result)
+        raise
+
+
+def hang_up(ws: ClientConnection) -> None:
+    """Shut *ws*'s connection down: no closing handshake, none of the socket's own locks.
+
+    From any thread, whatever state the socket is in.  A read in
+    flight on the socket ends with ``ConnectionClosed``; the socket's
+    receive thread reads the end of the stream and closes the socket.
+    """
+    with suppress(OSError):  # closed already
+        ws.socket.shutdown(socket.SHUT_RDWR)
+
+
+def call_off_thread[T](call: Callable[[], T], timeout: float) -> T:
+    """Return ``call()``, run on a thread of its own and given up on after *timeout* seconds.
+
+    For a call that no timeout bounds and no Stop interrupts, a name
+    lookup above all: the resolver takes no timeout, comes before any
+    socket one could run on, and holds a Stop of the calling task until
+    it has given up.  The caller waits as :func:`dial_off_thread`'s
+    does; a call that overruns ends on its daemon thread, its outcome
+    dropped.
+
+    Raises:
+        TimeoutError: When *call* has not ended after *timeout* seconds.
+        RuntimeError: When the thread cannot be started (out of threads).
+        BaseException: Whatever *call* raised.
+    """
+    outcome: queue.SimpleQueue[T | BaseException] = queue.SimpleQueue()
+    threading.Thread(
+        target=_settle, args=(call, outcome), name="sorcar-off-thread", daemon=True,
+    ).start()
+    result = _await(outcome, timeout)
+    if isinstance(result, BaseException):
+        raise result
+    return result
+
+
+def _settle[T](call: Callable[[], T], outcome: queue.SimpleQueue[T | BaseException]) -> None:
+    """Queue what *call* returns or raises on *outcome*: thread body of :func:`call_off_thread`."""
+    try:
+        outcome.put(call())
+    except BaseException as exc:  # re-raised on the caller's thread
+        outcome.put(exc)
+
+
+def _await[T](outcome: queue.SimpleQueue[T], timeout: float | None = None) -> T:
+    """Return the next item of *outcome*, waking every :data:`_STOP_WAKE_SECONDS`.
+
+    A wake is where a Stop injected into the waiting thread is raised,
+    without waiting for the daemon's answer.  The loop has a frame of
+    its own so that the handler of :func:`dial_off_thread` does not
+    depend on how the compiler covers loop jumps: CPython 3.13 leaves
+    the back edge of a ``while <condition>:`` loop outside the
+    exception table of a ``try`` around it, and a Stop raised there
+    skipped that handler.  Raised here, it reaches the handler through
+    the call.
+
+    Raises:
+        TimeoutError: When *outcome* is still empty after *timeout*
+            seconds (``None``: no limit).
+    """
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        wait = _STOP_WAKE_SECONDS
+        if deadline is not None:
+            wait = max(0.0, min(wait, deadline - time.monotonic()))
+        try:
+            return outcome.get(timeout=wait)
+        except queue.Empty:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("timed out") from None
+
+
+def _hand_over(
+    dial: Callable[[], ClientConnection],
+    outcome: queue.SimpleQueue[ClientConnection | BaseException],
+    taken: queue.SimpleQueue[bool],
+) -> None:
+    """Queue what *dial* returns or raises on *outcome*; close a connection nobody took.
+
+    Thread body of :func:`dial_off_thread`, whose caller answers a
+    queued connection on *taken*: ``True`` when it holds the
+    connection, ``False`` when it was unwound first.
+    """
+    try:
+        ws = dial()
+    except BaseException as exc:  # re-raised on the caller's thread
+        outcome.put(exc)
+        return
+    outcome.put(ws)
+    if not taken.get():
+        ws.close()
+
+
 def send(ws: ClientConnection, text: str, *, timeout: float = 10.0) -> None:
     """Send *text* on *ws*, giving up after *timeout* seconds.
 
     The synchronous ``websockets`` client writes with no deadline, so a
     daemon that has stopped reading (frozen, or swapped out) would block
     the caller for good.  The write runs on a helper thread; when it has
-    not finished in time the socket is closed underneath it, which
-    unblocks the write and makes every later use of *ws* fail fast.
+    not ended in time the socket is closed underneath it, which ends
+    the write and makes every later use of *ws* fail fast.  A write
+    that ended whole as the deadline passed left the frame with the
+    daemon, and the call returns (on a socket closed by then, which the
+    caller's next read reports); one that failed, or has still not
+    ended a second *timeout* after the close, is the timeout.
     An interrupt that lands while waiting (a Stop) closes the socket
     the same way before it propagates.
 
@@ -308,35 +488,53 @@ def send(ws: ClientConnection, text: str, *, timeout: float = 10.0) -> None:
         timeout: Seconds to wait for the write to complete.
 
     Raises:
-        ConnectionError: When the write times out.
+        ConnectionError: When the write timed out: the daemon does not
+            have the frame.
         ConnectionClosed: When the daemon closed the connection.
     """
-    failure: list[BaseException] = []
-
-    def _write() -> None:
-        try:
-            ws.send(text)
-        except BaseException as exc:  # re-raised on the caller's thread
-            failure.append(exc)
-
-    worker = threading.Thread(target=_write, name="sorcar-local-send", daemon=True)
-    worker.start()
+    ended: list[BaseException | None] = []
+    worker = threading.Thread(
+        target=_write, args=(ws, text, ended), name="sorcar-local-send", daemon=True,
+    )
     try:
+        worker.start()
         worker.join(timeout)
+        late = not ended
+        if late:
+            # Judged by the write, not by its thread: one still alive
+            # may have written the frame.  The close ends a blocked
+            # write at once; the second wait is for a writer that has
+            # yet to get a core, and finds the socket closed when it does.
+            ws.close_socket()
+            worker.join(timeout)
     except BaseException:
-        # A Stop's KeyboardInterrupt lands here: the writer holds the
-        # connection's protocol mutex while it is blocked, so the
-        # caller's cleanup ``close()`` would wait behind it for good.
+        # A Stop's KeyboardInterrupt from the moment the writer exists:
+        # it holds the connection's protocol mutex while blocked, so
+        # the caller's cleanup ``close()`` would wait for good.
         ws.close_socket()
         raise
-    if worker.is_alive():
-        ws.close_socket()
+    failure = ended[0] if ended else TimeoutError("the write has not ended")
+    if failure is None:
+        return
+    if late:
         raise ConnectionError(
             f"The sorcar daemon did not accept a {len(text)}-byte command "
             f"within {timeout:g} seconds"
-        )
-    if failure:
-        raise failure[0]
+        ) from failure
+    raise failure
+
+
+def _write(ws: ClientConnection, text: str, ended: list[BaseException | None]) -> None:
+    """Write *text* on *ws* and append to *ended* the error of the write, ``None`` when whole.
+
+    Thread body of :func:`send`.
+    """
+    try:
+        ws.send(text)
+    except BaseException as exc:  # re-raised on the caller's thread
+        ended.append(exc)
+    else:
+        ended.append(None)
 
 
 def recv_auth_reply(ws: ClientConnection, *, timeout: float) -> object:

@@ -362,6 +362,7 @@ def test_xhigh_split_dry_run_does_not_write(
     assert target.read_text() == "{}\n", (
         "dry_run=True must not modify the file even for xhigh splits"
     )
+    assert list(tmp_path.iterdir()) == [target], "a dry run takes no catalog lock: no sidecar"
 
 
 def test_xhigh_sibling_preserves_fc_emb_gen_flags(
@@ -461,16 +462,17 @@ def test_update_with_xhigh_when_base_entry_missing_in_data(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A retest-update on a model whose JSON entry doesn't yet exist must
-    still produce both the base ``thinking='high'`` entry and the
+    """A retest-update applied while the catalog file does not exist yet
+    must still produce both the base ``thinking='high'`` entry and the
     ``-xhigh`` sibling, seeded from ``current``.
 
-    Covers the legacy path where MODEL_INFO.json was hand-curated and a
-    model only lives in the in-memory ``MODEL_INFO`` (not in the JSON
-    file yet), and ``--test-existing`` discovers it accepts xhigh.
+    Only a missing catalog file is seeded: an existing catalog that lacks
+    the entry lost it to another updater, and the update is skipped (see
+    ``test_stale_update_does_not_resurrect_a_model_another_updater_retired``).
     """
     target = tmp_path / "MODEL_INFO.json"
     _redirect_model_info(monkeypatch, target)
+    target.unlink()
 
     import kiss.scripts.update_models as mod
 

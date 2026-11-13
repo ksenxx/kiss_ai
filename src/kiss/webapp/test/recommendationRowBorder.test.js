@@ -39,7 +39,7 @@ const MACHINES = [
   },
 ];
 
-/** Boot a chat page with the given body attributes and the real CSS. */
+/** Boot a chat page with the remote webapp's real CSS. */
 function makePage() {
   const {win} = makeSharedPage({
     extraScripts: ['marked.min.js'],
@@ -48,7 +48,6 @@ function makePage() {
       fakeIntervals(win);
       win.ResizeObserver = class {
         observe() {}
-        disconnect() {}
       };
       fakeMatchMedia(win, true);
       loadRemoteCss(win);

@@ -303,6 +303,62 @@ def test_paste_asked_for_in_a_hidden_field_does_not_land_in_the_focused_control(
         assert page.evaluate("window.__inputs") == ["url=" + pasted]
 
 
+# The real clipboard, each read answered only when the test calls
+# ``window.__release()``: the wait of a browser that asks the user first.
+# No real read lasts across the test's input: headless Chromium refuses an
+# ungranted one at once and answers a granted one before the next key.
+_HOLD_READS = """() => {
+  const real = navigator.clipboard;
+  Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {
+    readText: () => new Promise(resolve => {
+      window.__release = async () => resolve(await real.readText());
+    }),
+  }});
+}"""
+
+
+@pytest.mark.timeout(180)
+def test_paste_answered_after_the_native_selection_moved_does_not_land() -> None:
+    """A paste the clipboard answers late stays out of a ``number`` /
+    ``email`` input whose selection moved meanwhile (B/W1-F1).  Those
+    inputs do not tell their selection (the offsets are null), so the text
+    landed at the new caret: a key or a pointer pressed since counts as a
+    move, and so does other selected text.  A paste chosen with the
+    keyboard is not undone by that very key and lands at the caret.  An
+    input in a contenteditable host is the field it is: the same there,
+    and no Paste on a read-only one (the host made it pass for writable)."""
+    moves: dict[str, Callable[[Page, str], object]] = {
+        "key": lambda page, field: page.keyboard.press("Home"),
+        "pointer": lambda page, field: page.click(field, position={"x": 4, "y": 8}),
+        "script": lambda page, field: page.locator(field).evaluate("el => el.select()"),
+    }
+    nested = '<input id="nested" type="number" value="12"><input id="ro" value="abc" readonly>'
+    with _page() as page:
+        page.evaluate("() => navigator.clipboard.writeText('7')")
+        page.evaluate(_HOLD_READS)
+        page.evaluate("html => { document.getElementById('ce').innerHTML = html; }", nested)
+        for field, value in (("#num", "12"), ("#mail", "a@b"), ("#nested", "12")):
+            for name, move in moves.items():
+                page.click(field)
+                page.keyboard.press("End")
+                _menu(page, field, "paste")
+                move(page, field)
+                page.evaluate("() => window.__release()")
+                assert _value(page, field) == value, (field, name)
+            page.click(field)
+            page.keyboard.press("End")
+            page.click(field, button="right")
+            page.keyboard.press("Enter")
+            page.evaluate("() => window.__release()")
+            assert _value(page, field) == value + "7", field
+        page.click("#ro", button="right")
+        rows = page.locator("#sorcar-content-context-menu .sorcar-ctx-item")
+        assert rows.evaluate_all("rows => rows.map(row => row.dataset.action)") == [
+            "copy",
+            "select-all",
+        ]
+
+
 @pytest.mark.timeout(180)
 def test_select_all_then_copy_puts_the_native_selection_text_on_the_clipboard() -> None:
     """The menu's Select All then Copy copies the selection as Chromium

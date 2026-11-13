@@ -12,6 +12,7 @@ with real values.
 """
 
 import json
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
@@ -410,6 +411,31 @@ def test_bare_collection_annotations_are_advertised_as_object_and_array() -> Non
     assert props["rows"] == {"type": "array", "description": "Its rows."}
 
 
+def test_variadic_parameters_are_not_advertised_as_arguments() -> None:
+    """``*paths`` and ``**options`` take no argument under their own name.
+
+    Both were advertised as required string parameters.  A schema-following
+    model sends them, and ``tool(paths=...)`` is a ``TypeError`` (beside
+    ``**options`` it lands there, under the wrong name).
+    """
+
+    def search(query: str, *paths: str, limit: int = 5, **options: str) -> str:
+        """Search.
+
+        Args:
+            query: What to look for.
+            limit: The most results to return.
+        """
+        return query
+
+    parameters = _ConcreteModel("m")._function_to_openai_tool(search)["function"]["parameters"]
+    assert list(parameters["properties"]) == ["query", "limit"]
+    assert parameters["required"] == ["query"]
+    prompt = _build_text_based_tools_prompt({"search": search})
+    assert "- query (str)" in prompt and "- limit (int)" in prompt
+    assert "paths" not in prompt and "options" not in prompt
+
+
 def test_function_to_openai_tool_resolves_pep563_string_annotations() -> None:
     """PEP 563 string annotations resolve to real JSON-schema types.
 
@@ -471,6 +497,13 @@ def test_python_type_to_json_schema_variants() -> None:
     assert conv(dict) == {"type": "object"}
     assert conv(dict[str, int]) == {"type": "object"}
     assert conv(object) == {"type": "string"}
+    # Every collection is an array or an object, not only ``list`` and ``dict``:
+    # advertised as a string, the tool was handed one and iterated its characters.
+    assert conv(Sequence[str]) == {"type": "array", "items": {"type": "string"}}
+    assert conv(tuple[int, ...]) == {"type": "array", "items": {"type": "integer"}}
+    assert conv(tuple[int, str]) == conv(set) == {"type": "array"}
+    assert conv(Mapping[str, int]) == {"type": "object"}
+    assert conv(bytes) == {"type": "string"}  # a sequence, but not of JSON values
 
 
 def test_add_message_and_usage_info() -> None:

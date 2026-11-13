@@ -12,6 +12,7 @@
 'use strict';
 
 const assert = require('assert');
+const {spawnSync} = require('child_process');
 const h = require('./ui_antipattern_harness');
 
 const {test, report} = h.makeRunner();
@@ -20,6 +21,23 @@ const FILE_ENTRIES = [
   {name: 'foo.py', path: h.WD + '/foo.py', isDir: false},
   {name: 'src', path: h.WD + '/src', isDir: true},
 ];
+
+/**
+ * Run *body* in a child node process that has a runner's `test` and
+ * `report` (and the harness as `h`) in scope: the runner sets the exit
+ * status of its process.  With this process's V8 flags (run-all.js's):
+ * they are what keeps a jsdom node process from hanging at exit.
+ */
+function runProbe(body) {
+  const probe =
+    `const h = require(${JSON.stringify(require.resolve('./ui_antipattern_harness'))});` +
+    'const {test, report} = h.makeRunner();' +
+    body;
+  return spawnSync(process.execPath, [...process.execArgv, '-e', probe], {
+    encoding: 'utf8',
+    timeout: 60000,
+  });
+}
 
 async function main() {
   await test('Delete asks in-page with Delete / Keep, safe button focused', () => {
@@ -134,8 +152,7 @@ async function main() {
     });
     const t = h.toast(
       win,
-      'fs-overwrite:' +
-        JSON.stringify(['', actions[0].dest, actions[0].dest.split('/').pop()]),
+      h.overwriteId('', actions[0].dest, actions[0].dest.split('/').pop()),
     );
     assert.ok(t, 'the exists reply asks in-page');
     assert.strictEqual(
@@ -168,9 +185,7 @@ async function main() {
       error: 'x',
       exists: true,
     });
-    const id =
-      'fs-overwrite:' +
-      JSON.stringify(['', first.dest, first.dest.split('/').pop()]);
+    const id = h.overwriteId('', first.dest, first.dest.split('/').pop());
     h.click(win, h.toastButton(h.toast(win, id), 'Keep existing'));
     assert.strictEqual(h.toast(win, id), null);
     assert.strictEqual(h.ofType(posted, 'fsAction').length, 1);
@@ -436,6 +451,58 @@ async function main() {
     inner.test('(expected to pass) a plain click', () => h.click(win, btn));
     assert.strictEqual(inner.failed(), 1, 'the ledger was cleared per test');
     win.close();
+  });
+
+  // An async test still running when report() is called is not in the
+  // totals yet: the failure it reports afterwards used to leave the exit
+  // status 0.  report() exits the process, so the probe is a child.
+  await test('report() fails while an async test is still running', () => {
+    const res = runProbe(
+      "test('late', () => h.sleep(20).then(() => { throw new Error('late'); }));" +
+        "report('probe');",
+    );
+    assert.strictEqual(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stdout, /probe: 1 async test\(s\) still running/);
+    assert.doesNotMatch(res.stdout, /at exit/, 'report() said so already');
+  });
+
+  // A test whose promise never settles leaves the event loop empty, so
+  // the suite awaiting it never reaches report(): the process used to end
+  // with status 0 and no totals.  A test that settled, here by a
+  // rejection, is not one of the running ones.
+  await test('a test still running when the process ends fails it', () => {
+    const res = runProbe(
+      '(async () => {' +
+        " await test('rejected', () => Promise.reject(new Error('no')));" +
+        " await test('pending', () => new Promise(() => {}));" +
+        " report('probe'); })();",
+    );
+    assert.strictEqual(res.status, 1, res.stdout + res.stderr);
+    assert.match(
+      res.stdout,
+      /\n1 async test\(s\) still running at exit: pending\n$/,
+    );
+  });
+
+  // The pages a suite records in `windows` are the runner's to close: a
+  // failed test must not leave its page (and what it armed) behind, and
+  // an async test keeps its page until its promise has settled, also
+  // when another test ends meanwhile.
+  await test('the runner closes the recorded pages after a test, pass or fail, never under a running one', () => {
+    const res = runProbe(
+      'const closed = [];' +
+        'const pages = [];' +
+        'const page = name => pages.push({close: () => closed.push(name)});' +
+        'const r = h.makeRunner({windows: pages});' +
+        "r.test('passes', () => { page('a'); });" +
+        "r.test('fails', () => { page('b'); throw new Error('boom'); });" +
+        "const pending = r.test('async', () => { page('c'); return Promise.resolve(); });" +
+        "r.test('overlaps', () => { page('d'); });" +
+        "console.log('early: ' + closed.join(','));" +
+        "pending.then(() => console.log('late: ' + closed.join(',') + '; left: ' + pages.length));",
+    );
+    assert.match(res.stdout, /^early: a,b$/m, res.stdout + res.stderr);
+    assert.match(res.stdout, /^late: a,b,d,c; left: 0$/m, res.stdout + res.stderr);
   });
 
   report('ui_antipattern_dialogs');

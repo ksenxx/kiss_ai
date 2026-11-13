@@ -75,6 +75,7 @@ one is dropped instead of published.
 
 from __future__ import annotations
 
+import dis
 import functools
 import importlib.abc
 import importlib.machinery
@@ -96,10 +97,15 @@ from typing import Any, cast
 
 from kiss.agents.seas.base.base_sea import BaseSea, ChannelSea
 from kiss.agents.sorcar.sea_settings import (
+    _MID_IMPORT,
     SEA_BASES,
+    SOURCE_REVISION,
     SeaError,
     declares_hidden,
     execute_python_file,
+    expand_user,
+    file_revision,
+    file_stamp,
     imported_revision,
     is_stop,
     parsed_sea,
@@ -126,7 +132,7 @@ BASE_FOLDER = "base"
 # character class, and _split_slash_command / :func:`get_command` would
 # refuse it downstream anyway.
 _COMMAND_NAME_CHARS = r"[A-Za-z0-9_-]+"
-_COMMAND_NAME_RE = re.compile(rf"^{_COMMAND_NAME_CHARS}$")
+_COMMAND_NAME_RE = re.compile(rf"^{_COMMAND_NAME_CHARS}\Z")  # ``$`` would pass "name\n"
 # A prompt that invokes a command: ``/<name>`` at the very first character,
 # then whitespace (or the end) and the sub-task text.
 _SLASH_RE = re.compile(rf"/({_COMMAND_NAME_CHARS})(?:\s+(.*))?\Z", re.S)
@@ -186,9 +192,11 @@ _scan_numbers = itertools.count(1)
 _published_scan = 0
 
 # What the ``register_as_model()`` verdict cache watches of a
-# dependency of a SEA: the (mtime_ns, size, inode) of a file, or the
-# script a ``sea_class("name")`` command name resolves to.
-_Reading = tuple[int, int, int] | Path | None
+# dependency of a SEA: the (mtime_ns, size, inode) of a file, the
+# script a ``sea_class("name")`` command name resolves to, or whether
+# a module binds a name (``(module, name)``) a failed load missed.
+_Watched = Path | str | tuple[str, str]
+_Reading = tuple[int, int, int] | Path | bool | None
 
 # ``register_as_model()`` verdict per SEA script, keyed by path and
 # stamped with the (mtime_ns, size, inode) of the script and of every
@@ -196,7 +204,7 @@ _Reading = tuple[int, int, int] | Path | None
 # replacement of any of them is re-read, and with the script every
 # command name its load resolved to (:func:`_reading`).  Guarded by
 # ``_lock``.
-_model_sea_cache: dict[Path, tuple[dict[Path | str, _Reading], bool]] = {}
+_model_sea_cache: dict[Path, tuple[dict[_Watched, _Reading], bool]] = {}
 
 # ``bases``: while :func:`_registers_as_model` loads a SEA on this
 # thread, the dict every :func:`sea_class` call of that load records
@@ -209,39 +217,73 @@ _model_sea_cache: dict[Path, tuple[dict[Path | str, _Reading], bool]] = {}
 # stamped before it runs; read when the load fails, so a parent that
 # breaks the child's first ``from parent import Parent`` is re-read
 # once repaired (a load that succeeds is stamped from its class's
-# bases instead, :func:`_base_stamps`).
+# bases instead, :func:`_base_stamps`).  A module no finder finds is
+# recorded under its name: no file names it, so a load that fails
+# after looking for one is not cached.
 _picker_load = threading.local()
 
 
 class _PickerImports(importlib.abc.MetaPathFinder):
     """Records, on ``sys.meta_path``, the files a model-picker load imports the ordinary way.
 
-    Asked for every module not yet in ``sys.modules``; finds nothing
-    itself (the regular finders follow), but notes the file the path
-    finder resolves the name to, with its revision as it is before the
-    module runs, in the ``imported`` map of the picker load running on
-    this thread (``_picker_load``), if any.
+    Asked for every module not yet in ``sys.modules``.  Outside a
+    picker load it finds nothing (the regular finders follow).  During
+    the picker load running on this thread (``_picker_load``) it asks
+    the finders that follow it, in their order, and answers with the
+    first spec one of them gives: what the import would have found,
+    each finder asked once (one that answers a name a single time
+    still serves it).  The file of that spec is noted in the load's
+    ``imported`` map, with its revision as it is before the module
+    runs; a name none of them resolves is noted as such.
+
+    Such a name is passed on (``None``), so the import asks those
+    finders a second time before it gives up.  The search cannot be
+    ended here instead: ``importlib.util.find_spec()`` answers
+    ``None`` for a module that is not there, and code that probes for
+    an optional module that way must load in the picker as it does
+    anywhere else.
     """
 
     def find_spec(
         self, fullname: str, path: Any, target: Any = None
     ) -> importlib.machinery.ModuleSpec | None:
-        """Note the ``.py`` file *fullname* resolves to on *path*; find nothing."""
+        """Give the spec the finders after this one find for *fullname* on *path*, noting
+        its ``.py`` file, or note that none of them finds the module.
+
+        Raises:
+            ImportError: The one a later finder refuses the name with.
+        """
         imported = getattr(_picker_load, "imported", None)
-        if imported is not None:
-            spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-            if spec is not None and spec.origin is not None and spec.origin.endswith(".py"):
-                # The revision alone (a ``stat``), not :func:`parsed_sea`:
-                # a load's first ``import`` of a library would otherwise
-                # parse and memoise every module of it.
-                file = Path(spec.origin)
-                try:
-                    stat = file.stat()
-                except OSError:
-                    imported[file] = None
-                else:
-                    imported[file] = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
-        return None
+        if imported is None:
+            return None
+        # Every later finder, not the path finder alone: that one knows no built-in
+        # module and none that a library's own finder serves, so the first import of
+        # one in the process (``traceback`` imports ``_suggestions`` to format the first
+        # ``ImportError``) was noted as a module not found, and the failed load was not
+        # cached.
+        finders = list(sys.meta_path)
+        spec = None
+        for finder in finders[finders.index(self) + 1 :] if self in finders else finders:
+            find = getattr(finder, "find_spec", None)
+            if find is None:
+                continue
+            try:
+                spec = find(fullname, path, target)
+            except ImportError:  # refused: as absent as a module nobody finds
+                imported[fullname] = None
+                raise
+            if spec is not None:
+                break
+        if spec is None:
+            imported[fullname] = None
+        elif spec.origin is not None and spec.origin.endswith(".py"):
+            # What the verdict cache watches of a file (:func:`_reading`:
+            # an ``access`` and a ``stat``), not :func:`parsed_sea`: a
+            # load's first ``import`` of a library would otherwise
+            # parse and memoise every module of it.
+            file = Path(spec.origin)
+            imported[file] = _reading(file)
+        return spec
 
 
 sys.meta_path.insert(0, _PickerImports())
@@ -436,8 +478,8 @@ def _read_seas_md_folders() -> list[Path]:
         idx = re.search(r"\s#", line)
         folder_text = line[: idx.start()] if idx else line
         folder_text = folder_text.strip()
-        if not folder_text:
-            continue
+        if not folder_text or "\0" in folder_text:
+            continue  # no path holds a NUL byte (what a file a crash cut short is filled with)
         expanded = os.path.expandvars(os.path.expanduser(folder_text))
         candidate = Path(expanded)
         if not candidate.is_absolute():
@@ -486,7 +528,7 @@ def _publish(scan: int, merged: dict[str, Path]) -> list[str]:
     rescan older than the one last published is dropped.  A changed
     snapshot is delivered under ``_notify_lock`` (order:
     ``_notify_lock`` -> ``_lock``), one delivery at a time, each
-    skipped when a later snapshot was published meanwhile
+    ended as soon as a later snapshot is published
     (:func:`_notify`), so snapshots reach subscribers in publish
     order; a rescan with nothing to deliver never waits for a
     delivery.  ``_lock`` itself is released before the callbacks run
@@ -516,10 +558,11 @@ def _notify(snapshot: list[str], callbacks: list[Callable[[list[str]], None]]) -
     """Deliver *snapshot* to *callbacks* unless a later one was published since; the caller
     holds ``_notify_lock``.  The later one's rescan delivers its own snapshot after this
     lock is released; this one, delivered after it, would leave every subscriber on the
-    older list."""
-    if not locked_call(_lock, _is_last_broadcast, snapshot):
-        return
+    older list.  Checked before each callback: one that rescans (the lock is reentrant)
+    has delivered the later snapshot to them all by the time it returns."""
     for cb in callbacks:
+        if not locked_call(_lock, _is_last_broadcast, snapshot):
+            return
         try:
             cb(list(snapshot))
         except Exception:  # pragma: no cover - subscribers own errors
@@ -663,6 +706,11 @@ def _split_slash_command(prompt: str) -> tuple[str, str] | None:
     return match.group(1), (match.group(2) or "").strip()
 
 
+_LOADED_STAMP = "_loaded_stamp"
+"""Name, in the namespace of a SEA :func:`load_sea` returned, of the revision of the text it
+ran from (:func:`~kiss.agents.sorcar.sea_settings.source_revision`)."""
+
+
 def load_sea(sea_path: Path) -> BaseSea:
     """Execute the SEA file at *sea_path* and return an instance of the SEA class it defines.
 
@@ -671,7 +719,12 @@ def load_sea(sea_path: Path) -> BaseSea:
     every call observes its current contents); the SEA class is the
     one subclass of :class:`BaseSea` the file itself defines (an
     imported base class does not count).  The instance's ``path`` is
-    *sea_path*.
+    *sea_path*.  The revision of the text that ran is kept with the
+    instance (``_LOADED_STAMP``): the loader reads the file once, when
+    its turn to run it has come, and names the bytes it ran, so what
+    :func:`run_picked_hook` runs under a revision is the text of that
+    revision, whatever the file held while the load waited for
+    another load of the same script and whatever it holds since.
 
     Args:
         sea_path: Absolute path of the SEA ``.py`` file.
@@ -686,11 +739,12 @@ def load_sea(sea_path: Path) -> BaseSea:
             re-raised unchanged instead.
     """
     namespace = execute_python_file(str(sea_path))
-    classes = [
-        value for value in namespace.values()
+    # Keyed by identity: a second name for the class (``Main = Sea``) is not a second class.
+    classes = list({
+        id(value): value for value in namespace.values()
         if isinstance(value, type) and issubclass(value, BaseSea) and value is not BaseSea
         and value.__module__ == namespace["__name__"]
-    ]
+    }.values())
     if len(classes) != 1:
         names = ", ".join(cls.__name__ for cls in classes) or "none"
         raise SeaError(
@@ -706,6 +760,7 @@ def load_sea(sea_path: Path) -> BaseSea:
             f"SEA {str(sea_path)!r}: {classes[0].__name__}() raised: {safe_message(exc)}"
         ) from exc
     sea.path = sea_path
+    vars(sea)[_LOADED_STAMP] = namespace[SOURCE_REVISION]
     return sea
 
 
@@ -729,7 +784,7 @@ def sea_class(spec: str, relative_to: str | Path = "") -> type[BaseSea]:
             ``.py`` file, or the file is broken (:func:`load_sea`).
     """
     if spec.endswith(".py") or "/" in spec or "\\" in spec:
-        path = Path(spec).expanduser()
+        path = Path(expand_user(spec))
         if not path.is_absolute() and relative_to:
             path = Path(relative_to) / path
         _note_picker_base(path)
@@ -762,11 +817,23 @@ def _note_picker_base(base: Path | str, resolved: Path | None = None) -> None:
         bases[base] = resolved
 
 
-def _reading(base: Path | str) -> _Reading:
-    """Return what the verdict cache watches of *base* now: a file's revision stamp, or the
-    script the command name resolves to (``None`` when it is not registered)."""
+def _reading(base: _Watched) -> _Reading:
+    """Return what the verdict cache watches of *base* now: a file's revision stamp, the
+    script the command name resolves to (``None`` when it is not registered), or whether
+    the module ``sys.modules`` holds under ``base[0]`` binds the name ``base[1]``.
+
+    A file that cannot be read is ``None`` whatever its stamp: a
+    ``chmod`` that makes it readable changes no stamp, and the load
+    that failed on it is to run again.  A file costs an ``access`` and
+    a ``stat``, never a parse
+    (:func:`~kiss.agents.sorcar.sea_settings.parsed_sea`, whose memo
+    would also keep answering for a file that has become unreadable):
+    a failed load watches every library module it imported.
+    """
     if isinstance(base, Path):
-        return parsed_sea(base).stamp
+        return file_stamp(base) if os.access(base, os.R_OK) else None
+    if isinstance(base, tuple):
+        return base[1] in getattr(sys.modules.get(base[0]), "__dict__", ())
     return _registered_path(base)
 
 
@@ -898,7 +965,7 @@ def _call(method: Callable[..., Any], *args: Any, log: bool = True) -> Any:
     so nothing (the model picker's verdict cache included) records it
     as broken.  The failure is logged with its traceback unless *log* is
     ``False`` (a probe whose failure is an ordinary outcome,
-    :func:`own_settings`).
+    :func:`own_settings` and :func:`inherited_settings`).
     """
     try:
         return method(*args)
@@ -967,12 +1034,17 @@ def inherited_settings(sea: BaseSea) -> dict[str, Any]:
     """Return what the SEA's base classes write in ``settings``, over ``{}``, base first.
 
     The values a key of :func:`own_settings` repeats when it equals one
-    of these (the linter's ``redundant-key`` finding).
+    of these (the linter's ``redundant-key`` finding).  A tooling probe
+    like it: a method that cannot run again on the instance raises
+    :exc:`SeaError`, unlogged.
     """
     methods = _chain([sea], "settings")
     if "settings" in vars(type(sea)):
         methods.pop()  # the chain ends with the SEA's own class
-    return _fold_methods(methods, {}, _check_dict)
+    record: dict[str, Any] = {}
+    for method in methods:
+        record = _check_dict(_label(method), _call(method, record, log=False))
+    return record
 
 
 def is_channel(seas: list[BaseSea]) -> bool:
@@ -1228,12 +1300,14 @@ def _check_text(label: str, value: Any) -> str:
 
     A ``str`` subclass from an untrusted script is copied into an exact
     ``str`` (its own methods may raise), so later ``strip()``/joins
-    cannot run script code.
+    cannot run script code.  ``str()`` alone is no copy: it returns
+    whatever the subclass's ``__str__`` does, the instance itself
+    included, so ``str.__str__`` copies its result.
     """
     if not isinstance(value, str):
         raise _reject(label, value, "a string")
     try:
-        return str(value)
+        return str.__str__(str(value))
     except BaseException as exc:  # noqa: BLE001 — an untrusted str subclass may raise
         if is_stop(exc):
             raise
@@ -1269,26 +1343,90 @@ def _check_tools(label: str, value: Any) -> list[Callable[..., Any]]:
 PICKED_HOOK_TIMEOUT_SECONDS = 15.0
 """How long :func:`run_picked_hook` waits for ``on_picked_as_model()`` before moving on."""
 
+_PickedHook = tuple[str, str, str | None]
+"""A picked hook: the model name, the work directory and the revision of the text the SEA
+ran from (``_LOADED_STAMP``; ``None`` for a SEA :func:`load_sea` did not load)."""
 
-def _log_picked_hook(model: str, work_dir: str, sea: BaseSea | None) -> None:
-    """Run ``on_picked_as_model(work_dir)`` of *sea*, else of the SEA registered as *model*; log it.
+_picked_hooks: dict[_PickedHook, threading.Thread] = {}
+"""The thread each picked hook is reserved for, until the hook is over (:func:`run_picked_hook`).
 
-    Runs on the hook thread, so a ``sea`` of ``None`` costs the caller
-    no registry lookup; a given ``sea`` runs as it was loaded, whether
-    or not the registry still lists it when the thread gets to it.
+Guarded by ``_lock``.  A thread is entered before it is started and runs the hook only
+while the entry is its own; an entry whose thread is not alive counts for nothing."""
+
+
+def _log_picked_hook(hook: _PickedHook, sea: BaseSea | None) -> None:
+    """Run ``on_picked_as_model(work_dir)`` of *sea*, else of the SEA the model names; log it.
+
+    The body of the thread *hook* is reserved for, so a ``sea`` of
+    ``None`` costs the caller no script load; a given ``sea`` runs as
+    it was loaded, whether or not the registry still lists it when the
+    thread gets to it.  A thread whose entry is no longer its own (a
+    later pick replaced it before it got going) runs nothing.  The
+    thread gives up its entry once the hook is over.  A script that
+    loaded as another revision than the one its pick was keyed by
+    (edited, or registered anew, in between) is picked again as it
+    loaded: its hook runs under the revision that was executed, where
+    the next pick finds it, and whoever waits for this thread waits
+    for that run.
     """
+    model, work_dir, revision = hook
     try:
+        if locked_call(_lock, _picked_hooks.get, hook) is not threading.current_thread():
+            return
         if sea is None:
             sea_path = model_sea(model)
             if sea_path is None:
                 return
             sea = load_sea(sea_path)
-        note = _call(_method(sea, "on_picked_as_model"), work_dir)
+        if vars(sea).get(_LOADED_STAMP) == revision:
+            note = _call(_method(sea, "on_picked_as_model"), work_dir)
+            if note:
+                logger.info("SEA %s picked as model: %s", model, note)
+            return
     except SeaError:
         logger.warning("SEA %s: on_picked_as_model() failed", model, exc_info=True)
         return
-    if note:
-        logger.info("SEA %s picked as model: %s", model, note)
+    finally:
+        locked_call(_lock, _end_picked_hook, hook)
+    run_picked_hook(model, work_dir, sea=sea)
+
+
+def _end_picked_hook(hook: _PickedHook) -> None:
+    """Remove the entry of *hook* if it is this thread's; the caller holds ``_lock``."""
+    if _picked_hooks.get(hook) is threading.current_thread():
+        del _picked_hooks[hook]
+
+
+def _picked_hook_thread(hook: _PickedHook, sea: BaseSea | None) -> threading.Thread:
+    """Return the thread *hook* is reserved for: the one running it, else a new one, started.
+
+    The caller holds ``_lock``.  The thread is entered before it is
+    started: a Stop landing in ``Thread.start()``, which waits for the
+    new thread to get going, would otherwise leave a running hook that
+    no pick finds, and every pick would start another.  The thread
+    needs ``_lock`` to see that the entry is its own, so it runs
+    nothing before its pick has left here.  A start that is refused
+    takes its entry back.  One that a Stop interrupted leaves it,
+    because nothing tells whether the thread exists: a thread that
+    does not is not alive, so no pick shares it and the next one
+    replaces it, as it replaces one that has yet to get going, which
+    then finds the entry is not its own.
+
+    Raises:
+        RuntimeError: The process is out of threads.
+    """
+    thread = _picked_hooks.get(hook)
+    if thread is None or not thread.is_alive():
+        thread = threading.Thread(
+            target=_log_picked_hook, args=(hook, sea), name="sea-picked-hook", daemon=True
+        )
+        _picked_hooks[hook] = thread
+        try:
+            thread.start()
+        except RuntimeError:
+            del _picked_hooks[hook]
+            raise
+    return thread
 
 
 def run_picked_hook(
@@ -1302,34 +1440,52 @@ def run_picked_hook(
     The hook is a model-picker SEA's chance to act on being chosen as a
     tab's model — ``autorouter`` makes sure its weekly ``/rsi7d autorouter``
     cron job is scheduled.  The daemon calls it when the user picks the SEA
-    (``selectModel``) and once per run whose model is the SEA.  Hooks
-    from concurrent picks may overlap: a hook that must not race gets
-    its atomicity from what it calls (``cron_job("ensure")`` for
-    autorouter).  Whatever the hook returns is logged; a hook that
-    raises is logged and never fails the caller, one that blocks is
-    abandoned on its daemon thread after
+    (``selectModel``) and once per run whose model is the SEA.  A pick
+    whose hook is still running from an earlier pick of the same model,
+    directory and script revision shares that run instead of starting
+    another, so a hook that never returns holds one thread, not one per
+    pick.  The revision is that of the text the SEA ran from (a digest
+    of the bytes its load executed), not the one the file has when it
+    is picked: the hook of a script fixed since runs beside the stuck
+    hook of its old text, whichever was loaded or picked first, and a
+    script saved again unchanged is the same hook.  The text is the
+    picked script's own: a fix in a file its class derives from is no
+    new revision of it.  Hooks of picks from different directories may
+    overlap: a hook that must not race gets its atomicity from what it
+    calls (``cron_job("ensure")`` for autorouter).  Whatever the hook
+    returns is logged; a hook that raises is logged and never fails the
+    caller, one that blocks is abandoned on its daemon thread after
     :data:`PICKED_HOOK_TIMEOUT_SECONDS`, and a thread that cannot start
-    is logged too, because the task the user typed does not depend on it.
+    is logged too, because the task the user typed does not depend on
+    it.
 
     Args:
         model: The picked model name, a SEA command name
-            (:func:`model_sea` maps it to the file; a real model name runs nothing).
+            (:func:`model_sea` maps it to the file; a real model name
+            runs nothing, and one that is no command starts no thread).
         work_dir: The tab's or run's work directory, passed to the hook.
-        wait: Block up to :data:`PICKED_HOOK_TIMEOUT_SECONDS` for the hook
-            (a run wants its side effects in place before it starts);
-            ``False`` returns at once (the picker handler must not stall
-            the daemon's command loop).
+        wait: Block up to :data:`PICKED_HOOK_TIMEOUT_SECONDS` for the hook,
+            the shared run included (a run wants its side effects in
+            place before it starts); ``False`` returns at once (the
+            picker handler must not stall the daemon's command loop).
         sea: The already-loaded SEA (a run loads the file once and
             shares it; its hook runs even when the registry drops the
             entry meanwhile); ``None`` resolves *model* through
             :func:`model_sea` and loads the file, on the hook thread.
+            Only the registry (filled first when it is still empty, as
+            :func:`model_sea` fills it) and the bytes of the registered
+            script are read here, for the revision its text has now.
     """
-    thread = threading.Thread(
-        target=_log_picked_hook, args=(model, work_dir, sea),
-        name="sea-picked-hook", daemon=True,
-    )
+    if sea is None:
+        list_commands()  # populate the registry on a cold start
+        path = _registered_path(model)
+        if path is None:
+            return
+        revision = file_revision(path)
+    else:
+        revision = vars(sea).get(_LOADED_STAMP)
     try:
-        thread.start()
+        thread = locked_call(_lock, _picked_hook_thread, (model, work_dir, revision), sea)
     except RuntimeError:  # the process is out of threads
         logger.warning("SEA %s: on_picked_as_model() not run", model, exc_info=True)
         return
@@ -1347,8 +1503,14 @@ def run_picked_hook(
         )
 
 
-def _registers_as_model(sea_path: Path) -> bool:
+def _registers_as_model(
+    sea_path: Path, reads: list[dict[_Watched, _Reading]] | None = None
+) -> bool:
     """Return whether the SEA at *sea_path* defines ``register_as_model()`` returning ``True``.
+
+    *reads*, when given, receives the maps the call records what it
+    reads in, as it fills them: what :meth:`_ModelCheck.outdated`
+    compares while the call is still running.
 
     The verdict is cached per file stamp (the revision
     :func:`~kiss.agents.sorcar.sea_settings.parsed_sea` read, so both
@@ -1369,30 +1531,52 @@ def _registers_as_model(sea_path: Path) -> bool:
     agents with heavy dependencies among them) on each picker refresh
     would be slow for nothing.  A script that cannot be read, fails to
     import or whose method raises is logged and treated as not
-    registered, so one broken SEA cannot break the model picker.
+    registered, so one broken SEA cannot break the model picker.  A
+    load that missed a name of a module because the module, or its
+    submodule of that name, was still being imported (``from module
+    import name`` or ``module.name``, in the script or in a base
+    :func:`sea_class` loads for it; ``import`` hands a module over
+    half-initialised when its thread waits for a module this thread
+    imports) is not cached, whether that import is still under way,
+    has bound the name since or (``from module import name``, the
+    statement's own failure, :func:`_import_raised`) has failed since,
+    the module gone from ``sys.modules`` and its source no part of
+    what this thread ran (:func:`_ran_source_of`; a module this thread
+    was importing itself is the file's failure): the next lookup
+    loads again.  Nor is a failed load that looked for a module
+    no finder found (:class:`_PickerImports`): no file
+    names such a module, so nothing would re-read the verdict once it
+    is created or installed.  A name missed in a module imported
+    before the load is watched itself: the verdict is re-read once
+    that module binds it.
     """
     parsed = parsed_sea(sea_path)
-    if parsed.stamp is None:
+    # ``parsed_sea`` memoises a revision it has read, so it still answers
+    # for a script that has lost its read permission since; ``_reading`` does not.
+    if parsed.stamp is None or _reading(sea_path) is None:
         logger.warning("SEA %s: cannot be read", sea_path)
         return False
     cached = locked_call(_lock, _model_sea_cache.get, sea_path)
-    if cached is not None and all(
-        _reading(base) == reading for base, reading in cached[0].items()
-    ):
+    if cached is not None and _verdict_holds(cached):
         return cached[1]
     verdict = False
-    stamps: dict[Path | str, _Reading] = {sea_path: parsed.stamp}
+    stamps: dict[_Watched, _Reading] = {sea_path: parsed.stamp}
     if parsed.mentions_register_as_model or parsed.bases.difference(SEA_BASES):
         outer = getattr(_picker_load, "bases", None), getattr(_picker_load, "imported", None)
-        asked: dict[Path | str, _Reading] = {}
-        imported: dict[Path | str, _Reading] = {}
+        asked: dict[_Watched, _Reading] = {}
+        imported: dict[_Watched, _Reading] = {}
+        if reads is not None:
+            reads += [stamps, asked, imported]
         _picker_load.bases, _picker_load.imported = asked, imported
+        sea: BaseSea | None = None
         try:
             # A base imported the ordinary way (``from parent import
             # Parent``) is re-executed before the child runs, else the
             # child would derive from its old class under its new stamp.
-            for base in cached[0] if cached is not None else ():
-                if isinstance(base, Path):
+            # Only one that changed: a failed load also watches every
+            # library module it imported, which must not run twice.
+            for base, reading in cached[0].items() if cached is not None else ():
+                if isinstance(base, Path) and _reading(base) != reading:
                     refresh_imported_module(base)
             sea = load_sea(sea_path)
             _refresh_bases(sea)
@@ -1403,15 +1587,58 @@ def _registers_as_model(sea_path: Path) -> bool:
                 sea = load_sea(sea_path)
             stamps.update(_base_stamps(sea))
             verdict = _call(_method(sea, "register_as_model")) is True
-        except SeaError:
+        except SeaError as exc:
+            cause, errors = exc.__cause__, [exc]
+            while isinstance(cause, SeaError) and all(cause is not error for error in errors):
+                errors.append(cause)  # a base's failed load (a script's own chain may loop)
+                cause = cause.__cause__
+            left = False
+            if isinstance(cause, ImportError) and isinstance(cause.name, str):
+                module, name = sys.modules.get(cause.name), cause.name_from
+                left = (
+                    module is None
+                    and _import_raised(cause)
+                    and not _ran_source_of(cause.name, [*errors, cause])
+                )
+            elif isinstance(cause, AttributeError) and inspect.ismodule(cause.obj):
+                module, name = cause.obj, cause.name
+            else:
+                module = name = None
+            # ``from module import name`` or ``module.name`` missed the name while the module,
+            # or its submodule of that name, was still being imported: it still is, or the
+            # name is bound since, or the module has left ``sys.modules`` (*left*): the import,
+            # another thread's, has failed.  Not the file's failure, so not cached.  (The
+            # exception may be the script's own: only strings are looked up.)
+            spec = getattr(module, "__spec__", None)
+            if isinstance(name, str) and (
+                left
+                or getattr(spec, "_initializing", False)
+                or name in getattr(spec, "_uninitialized_submodules", ())
+                or name in getattr(module, "__dict__", ())
+            ):
+                return False
             logger.warning("SEA %s: register_as_model() failed", sea_path, exc_info=True)
+            # The load looked for a module that was not found (recorded under its name):
+            # no file names it, so its creation or install would go unread.  Not cached.
+            if any(isinstance(base, str) for base in imported):
+                return False
             # A base may be what broke (a parent mid-edit, or not yet
             # written): keep watching every base this load asked for
-            # or imported and every one the last verdict depended on,
-            # so its repair is re-read.
+            # or imported, every one the last verdict depended on and,
+            # once the script loaded, every one its class derives from
+            # (what failed may be the re-execution of one imported
+            # before this load), so its repair is re-read.
             for base in cached[0] if cached is not None else ():
                 stamps.setdefault(base, _reading(base))
             stamps.update(imported)
+            if sea is not None:
+                stamps.update(_base_stamps(sea))
+            # The name was missed in a module imported before this load, whose file
+            # nothing above names: re-read once that module binds it (re-executed
+            # for another SEA).
+            owner = getattr(module, "__name__", None)
+            if isinstance(owner, str) and isinstance(name, str):
+                stamps[owner, name] = False
         finally:
             _picker_load.bases, _picker_load.imported = outer
         # Each base as it was read, not as it is now: one edited while
@@ -1422,7 +1649,45 @@ def _registers_as_model(sea_path: Path) -> bool:
     return verdict
 
 
-def _base_stamps(sea: BaseSea) -> dict[Path | str, _Reading]:
+def _verdict_holds(cached: tuple[dict[_Watched, _Reading], bool]) -> bool:
+    """Whether the cached verdict *cached* still holds: all it was read from reads the same."""
+    return all(_reading(base) == reading for base, reading in cached[0].items())
+
+
+def _import_raised(error: ImportError) -> bool:
+    """Whether a ``from module import name`` statement raised *error* itself: its traceback
+    ends at that statement's instruction, not at a ``raise``.
+
+    An ``ImportError`` a script raises of its own may name any module, one that was never
+    in ``sys.modules`` as well as one that left it; that failure is the file's.
+    """
+    tb = error.__traceback__
+    while tb is not None and tb.tb_next is not None:
+        tb = tb.tb_next
+    return tb is not None and tb.tb_frame.f_code.co_code.startswith(
+        bytes([dis.opmap["IMPORT_FROM"]]), tb.tb_lasti
+    )
+
+
+def _ran_source_of(module: str, errors: Iterable[BaseException]) -> bool:
+    """Whether the thread *errors* (a failure and its causes) were raised on was running the
+    source of *module* then: one of their tracebacks holds a frame of that module.
+
+    Tells an import of this thread's own that failed on a name the module had not bound yet
+    (a circular import: the file's failure) from a module handed over half-initialised by
+    another thread's import.  What ran after the failure was raised is not on a traceback:
+    ``traceback`` imports the module an ``ImportError`` names to format it for the log.
+    """
+    for error in errors:
+        tb = error.__traceback__
+        while tb is not None:
+            if tb.tb_frame.f_globals.get("__name__") == module:
+                return True
+            tb = tb.tb_next
+    return False
+
+
+def _base_stamps(sea: BaseSea) -> dict[_Watched, _Reading]:
     """Return the revision of every SEA file the class of *sea* derives from, as its class ran.
 
     The revision the base's module was re-executed from
@@ -1432,16 +1697,21 @@ def _base_stamps(sea: BaseSea) -> dict[Path | str, _Reading]:
     revision matches it, so the next query re-reads) for a base whose
     module was re-executed again since the class derived from it; the
     file's revision now for one never re-executed (the bundled bases).
+    The revision is read before the class is looked up: a re-execution
+    publishes its module first and its revision last, so one landing
+    between the two reads fails the lookup instead of lending the old
+    class its revision.
     """
-    stamps: dict[Path | str, _Reading] = {}
+    stamps: dict[_Watched, _Reading] = {}
     for cls in type(sea).__mro__[1:]:
         file = _file_of(cls)
         if file is None or not issubclass(cls, BaseSea):
             continue
+        revision = imported_revision(file) or _reading(file)
         if getattr(sys.modules.get(cls.__module__), cls.__name__, None) is not cls:
             stamps[file] = None
         else:
-            stamps.setdefault(file, imported_revision(file) or parsed_sea(file).stamp)
+            stamps.setdefault(file, revision)
     return stamps
 
 
@@ -1470,21 +1740,160 @@ def _superseded(cls: type) -> bool:
     )
 
 
+MODEL_CHECK_TIMEOUT_SECONDS = 15.0
+"""How long :func:`model_seas` waits for one SEA's import and ``register_as_model()``."""
+
+
+class _ModelCheck(threading.Thread):
+    """Decides on a thread of its own whether a script is a model-picker entry.
+
+    Deciding it runs the script (:func:`_registers_as_model`), and the
+    daemon lists the picker on a thread no Stop reaches: run there, a
+    script that does not return would hold that thread for good, and
+    one more with every later listing.
+
+    Attributes:
+        sea_path: The script.
+        deadline: The ``time.monotonic()`` until which a listing waits
+            for the verdict.
+        verdict: The verdict; ``False`` until the thread has ended.
+        reads: The maps the check records what it reads in, as it fills
+            them (:func:`_registers_as_model`).
+    """
+
+    def __init__(self, sea_path: Path) -> None:
+        super().__init__(name="sea-model-check", daemon=True)
+        self.sea_path = sea_path
+        self.deadline = time.monotonic() + MODEL_CHECK_TIMEOUT_SECONDS
+        self.verdict = False
+        self.reads: list[dict[_Watched, _Reading]] = []
+
+    def run(self) -> None:
+        """Decide the verdict, then give up the script's entry in ``_model_checks``.
+
+        A check that finds the entry is not its own (replaced before it
+        got going, :func:`_model_check`) decides nothing.
+        """
+        try:
+            if locked_call(_lock, _model_checks.get, self.sea_path) is self:
+                self.verdict = _registers_as_model(self.sea_path, self.reads)
+        except BaseException:  # noqa: BLE001 — a Stop the script raised itself: none lands here
+            logger.warning("SEA %s: register_as_model() failed", self.sea_path, exc_info=True)
+        finally:
+            locked_call(_lock, _end_model_check, self)
+
+    def outdated(self) -> bool:
+        """Return whether a file the check has read so far, or a command name it resolved,
+        reads differently now: the check decides on a script that is no longer the one on
+        disk, its own or one its class derives from.
+
+        A reading no file matches by design is not compared (``None``:
+        a base that was missing, or re-executed since the class derived
+        from it; the revision of a module still being imported): it
+        differs at every listing, and each would start a thread.
+        """
+        return any(
+            _reading(base) != reading
+            for reads in list(self.reads)
+            for base, reading in reads.copy().items()
+            if reading is not None and reading != _MID_IMPORT
+        )
+
+
+_model_checks: dict[Path, _ModelCheck] = {}
+"""The check of each script that is being decided for :func:`model_seas`; guarded by ``_lock``."""
+
+
+def _end_model_check(check: _ModelCheck) -> None:
+    """Remove the entry of *check* if it is still its own; the caller holds ``_lock``."""
+    if _model_checks.get(check.sea_path) is check:
+        del _model_checks[check.sea_path]
+
+
+def _model_check(sea_path: Path, stale: _ModelCheck | None) -> _ModelCheck:
+    """Return the check of *sea_path*: the one running unless it is *stale* (the one the
+    caller found outdated), else a new one, started.
+
+    The caller holds ``_lock``.  Entered before it is started and taken
+    back when the start is refused, as a picked hook's thread is
+    (:func:`_picked_hook_thread`): the thread needs ``_lock`` to see
+    that the entry is its own, so one whose start a Stop interrupted
+    runs nothing once the next listing has replaced it.
+
+    Raises:
+        RuntimeError: The process is out of threads.
+    """
+    check = _model_checks.get(sea_path)
+    if check is None or check is stale or not check.is_alive():
+        check = _ModelCheck(sea_path)
+        _model_checks[sea_path] = check
+        try:
+            check.start()
+        except RuntimeError:
+            del _model_checks[sea_path]
+            raise
+    return check
+
+
+def _listed_as_model(sea_path: Path) -> bool:
+    """Return whether the script at *sea_path* is a model-picker entry, for :func:`model_seas`.
+
+    The cached verdict of :func:`_registers_as_model` while it holds.
+    Otherwise the script's :class:`_ModelCheck` decides, shared by every
+    listing that asks meanwhile and waited for until its deadline: a
+    script whose import or ``register_as_model()`` does not return is
+    logged and not listed, holds one thread however many listings ask,
+    and is listed once it has answered.  A check is given up for a new
+    one only once something it read has changed
+    (:meth:`_ModelCheck.outdated`): the repaired script is listed
+    though the old check never returns.  A listing made by the script
+    itself, from the code its check runs, does not wait for that check;
+    a process out of threads lists nothing it has not decided yet.
+    """
+    cached = locked_call(_lock, _model_sea_cache.get, sea_path)
+    if cached is not None and _verdict_holds(cached):
+        return cached[1]
+    check = locked_call(_lock, _model_checks.get, sea_path)
+    if check is threading.current_thread():
+        return False
+    stale = check if check is not None and check.outdated() else None  # reads files: unlocked
+    try:
+        check = locked_call(_lock, _model_check, sea_path, stale)
+    except RuntimeError:  # the process is out of threads
+        logger.warning(
+            "SEA %s: register_as_model() not run; not offered as a model", sea_path, exc_info=True
+        )
+        return False
+    # Sliced so a Stop of the calling thread lands between slices instead of after the wait.
+    while check.is_alive() and time.monotonic() < check.deadline:
+        check.join(0.2)
+    if check.is_alive():
+        logger.warning(
+            "SEA %s: register_as_model() still running after %.0f s; not offered as a model",
+            sea_path, MODEL_CHECK_TIMEOUT_SECONDS,
+        )
+        return False
+    return check.verdict
+
+
 def model_seas() -> dict[str, Path]:
     """Return the registered SEAs that are model-picker entries, by command name.
 
     A SEA is a model-picker entry when its ``register_as_model()``
     returns ``True``.  The daemon offers each entry in the model picker
     under its command name; a task run with such a pick goes through
-    the SEA (``task_runner._resolve_sea_model``).
+    the SEA (``task_runner._resolve_sea_model``).  A SEA that takes
+    longer than :data:`MODEL_CHECK_TIMEOUT_SECONDS` to answer is left
+    out until it has (:func:`_listed_as_model`), so one that never
+    does cannot keep the picker from listing the others.
 
     Returns:
         ``{command_name: absolute_sea_path}``, sorted by name.
     """
-    return {name: path for name, path in registered_entries() if _registers_as_model(path)}
+    return {name: path for name, path in registered_entries() if _listed_as_model(path)}
 
 
-def model_sea(name: str) -> Path | None:
+def model_sea(name: str, bundled: bool = False) -> Path | None:
     """Return the script of the model-picker SEA *name*, or ``None``.
 
     Reads the registry snapshot only: a *name* that is no registered
@@ -1497,15 +1906,23 @@ def model_sea(name: str) -> Path | None:
     Args:
         name: The model-picker value, e.g. ``"autorouter"`` or
             ``"gpt-6-astra"``.
+        bundled: Look *name* up among the commands the package ships
+            (:func:`bundled_commands`) instead of the registry: what
+            ``sea lint`` asks about a bundled script, whose findings
+            must not depend on what ``SEAS.md`` registers.
 
     Returns:
-        The absolute SEA path when *name* is a registered command whose
-        ``register_as_model()`` returns ``True``, else ``None``.
+        The absolute SEA path when *name* is a registered (or, with
+        *bundled*, a bundled) command whose ``register_as_model()``
+        returns ``True``, else ``None``.
     """
     if not name:
         return None
-    list_commands()  # populate the registry on a cold start
-    path = _registered_path(name)
+    if bundled:
+        path = bundled_commands().get(name)
+    else:
+        list_commands()  # populate the registry on a cold start
+        path = _registered_path(name)
     if path is None or not _registers_as_model(path):
         return None
     return path
@@ -1655,7 +2072,7 @@ def sea_check(name: str, sea_path: Path) -> str:
     lines = [
         f"/{name}: {check.description}",
         "classes: " + " > ".join(classes),
-        "settings: " + json.dumps(settings, sort_keys=True, default=str),
+        f"settings: {_settings_text(settings)}",
         f"model: {model}",
         "tools added: " + (", ".join(_tool_name(tool) for tool in check.tools) or "none"),
         "methods defined: " + (", ".join(defined) or "none"),
@@ -1664,6 +2081,21 @@ def sea_check(name: str, sea_path: Path) -> str:
     if "description" not in vars(type(seas[-1])):
         lines.append("note: description() comes from a base class")
     return "\n".join(lines)
+
+
+def _settings_text(settings: dict[str, Any]) -> str:
+    """Return *settings* as JSON with sorted keys, for the ``check`` report.
+
+    A value json cannot write (a ``model_config`` whose keys mix types
+    and so cannot be sorted, an object whose ``__str__`` raises) is
+    named in place of the text: the report is never an exception.
+    """
+    try:
+        return json.dumps(settings, sort_keys=True, default=str)
+    except BaseException as exc:  # noqa: BLE001 — an untrusted value may raise anything
+        if is_stop(exc):
+            raise
+        return f"not JSON ({safe_message(exc)})"
 
 
 def _tool_name(tool: Any) -> str:
@@ -1887,19 +2319,3 @@ def _watcher_loop(interval: float, stop: threading.Event) -> None:
             refresh_registry()
         except Exception:  # pragma: no cover - watcher must never die
             logger.debug("SEA registry rescan failed", exc_info=True)
-
-
-def _reset_for_tests() -> None:
-    """Drop all in-memory state (registry, subscribers, watcher).
-
-    Test-only helper: pytest fixtures use this to isolate SEA-command
-    behaviour across tests without leaking a subscriber that fires on
-    a later, unrelated rescan.
-    """
-    global _last_broadcast
-    stop_registry_watcher()
-    with _lock:
-        _registry.clear()
-        _subscribers.clear()
-        _model_sea_cache.clear()
-        _last_broadcast = ()

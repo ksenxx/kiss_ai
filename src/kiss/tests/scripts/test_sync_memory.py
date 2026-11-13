@@ -18,12 +18,15 @@ index is the real one, so what is checked is what a deploy does.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import stat
 import subprocess
 import sys
+import time
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -32,7 +35,8 @@ import pytest
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.memoryfield.index import VectorIndex, hashed_embedding
 from kiss.core.memoryfield.pages import MemoryDir
-from kiss.tests.conftest import posix_only
+from kiss.scripts import merge_memory_pages
+from kiss.tests.conftest import is_root, posix_only
 
 ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = ROOT / "scripts" / "sync-memory.sh"
@@ -637,6 +641,11 @@ def test_merge_skips_everything_that_is_not_a_page(tmp_path: Path) -> None:
     (src / "sub.md").mkdir()
     (src / "sub.md" / "nested.md").write_text("in a sub-directory")
     (src / "link.md").symlink_to(src / "good-page.md")
+    # A name ending in a newline is no page name to the memory (``fullmatch``), so not here either:
+    # as a page, as a domain memory or as a tombstone.
+    (src / "newline\n.md").write_text("a name the memory refuses")
+    write(src / "domain\n", "page", "in a directory the memory refuses", "2026-09-20T10:00:00Z")
+    tombstone(src, "gone\n", "2026-09-20T10:00:00Z")
     result = merge(src, dst)
     assert result.returncode == 0, result.stderr
     assert result.stdout == "added 1 updated 0 kept 0 conflicts 0 removed 0\n"
@@ -795,6 +804,126 @@ def test_merge_waits_for_an_agent_writing_the_memory(tmp_path: Path) -> None:
     assert sorted(p.name for p in dst.iterdir()) == ["dom", "dom.lock", "note.md"]
 
 
+def test_merge_into_an_alias_takes_the_locks_memory_dir_takes(tmp_path: Path) -> None:
+    """``MemoryDir`` names its lock after the resolved directory, and so must the script.
+
+    Reached through a symlink, an agent's delete holds ``<resolved>.lock``.  A
+    script locking ``<alias>.lock`` ran between the delete's two halves --
+    tombstone published, page not yet unlinked -- and dropped the tombstone as
+    stale: the delete then left neither, and the next sync brought the page back.
+    """
+    src, dst, alias = tmp_path / "src", tmp_path / "dst", tmp_path / "alias"
+    write(src, "note", "incoming", "2026-01-02T00:00:00Z")
+    write(dst, "note", "old", "2026-01-01T00:00:00Z")
+    alias.symlink_to(dst, target_is_directory=True)
+    with MemoryDir(alias)._mutation_lock():  # an agent in the middle of deleting the page
+        tombstone(dst, "note", "2026-01-03T00:00:00Z")
+        script = merge_in_background(src, alias)
+        with pytest.raises(subprocess.TimeoutExpired):
+            script.wait(0.5)
+        (dst / "note.md").unlink()
+    stdout, stderr = script.communicate(timeout=30)
+    assert script.returncode == 0, stderr
+    assert stdout == "added 0 updated 0 kept 1 conflicts 0 removed 0\n"
+    assert MemoryDir(dst).page_names() == [] and (dst / ".tombstones" / "note").is_file()
+    # Two domain memories that are symlinks to one directory: the lock is the one
+    # beside the directory they point to, and the script takes it once.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for name in ("dom", "twin"):
+        (dst / name).symlink_to(elsewhere, target_is_directory=True)
+        write(src / name, f"in-{name}", "deep", "2026-01-02T00:00:00Z")
+    with MemoryDir(alias / "dom")._mutation_lock():
+        script = merge_in_background(src, alias)
+        with pytest.raises(subprocess.TimeoutExpired):
+            script.wait(0.5)
+    stdout, stderr = script.communicate(timeout=30)
+    assert script.returncode == 0, stderr
+    assert stdout == "added 2 updated 0 kept 1 conflicts 0 removed 0\n"
+    assert sorted(p.name for p in elsewhere.iterdir()) == ["in-dom.md", "in-twin.md"]
+
+
+def locked_by_another_process(lock: Path) -> bool:
+    """Probe *lock* once, without waiting: True while a merge holds it."""
+    with exclusive_file_lock(lock, blocking=False) as free:
+        return not free
+
+
+@pytest.mark.parametrize(
+    ("domains", "held_first"),
+    [
+        # Domains ``a`` and ``z`` lead to the same two directories, the other way round.
+        ({"dst1": {"a": "one", "m": "zzz", "z": "two"}, "dst2": {"a": "two", "z": "one"}},
+         ("one", "two")),
+        # Each memory is a domain memory of the other: here the memories' own locks cross.
+        ({"dst1": {"m": "zzz", "z": "dst2"}, "dst2": {"z": "dst1"}}, ("dst1", "dst2")),
+    ],
+)
+def test_two_merges_take_the_locks_they_share_in_one_order(
+    tmp_path: Path, domains: dict[str, dict[str, str]], held_first: tuple[str, str]
+) -> None:
+    """Two merges into different memories that reach two directories under swapped names.
+
+    Locked in the order of the names, each merge held one of the two and waited
+    for the other, until one of them gave up after 60 s and failed.  ``zzz``,
+    locked here, stops the first merge between the two locks it shares until
+    the second merge has taken its first.
+    """
+    for dst, targets in domains.items():
+        for name, target in targets.items():
+            for directory in (tmp_path / target, tmp_path / dst):
+                directory.mkdir(exist_ok=True)
+            (tmp_path / dst / name).symlink_to(tmp_path / target, target_is_directory=True)
+            write(tmp_path / f"src-{dst}" / name, f"{dst}-{name}", "page", "2026-01-02T00:00:00Z")
+    merges: list[subprocess.Popen[str]] = []
+    try:
+        with exclusive_file_lock(tmp_path / "zzz.lock", timeout=5.0):
+            for dst, held in zip(domains, held_first):
+                merges.append(merge_in_background(tmp_path / f"src-{dst}", tmp_path / dst))
+                while not locked_by_another_process(tmp_path / f"{held}.lock"):
+                    assert merges[-1].poll() is None, merges[-1].communicate()
+                    time.sleep(0.01)
+        outputs = [script.communicate(timeout=30) for script in merges]
+    finally:
+        for script in merges:
+            script.kill()
+    assert outputs == [
+        (f"added {len(targets)} updated 0 kept 0 conflicts 0 removed 0\n", "")
+        for targets in domains.values()
+    ]
+
+
+def descriptors_on(path: Path) -> list[int]:
+    """This process's descriptors open on the file at *path*, compared by device and inode."""
+    target = path.stat()
+    found = []
+    for name in os.listdir("/dev/fd"):
+        with suppress(OSError):  # the listing's own descriptor is closed by now
+            if os.path.samestat(os.fstat(int(name)), target):
+                found.append(int(name))
+    return found
+
+
+def test_a_failed_unlock_still_releases_the_other_locks(tmp_path: Path) -> None:
+    """A merge lets go of every lock it took even when releasing one of them fails.
+
+    The domain lock, taken last, has its descriptor closed under the block, so
+    its unlock fails with ``EBADF``; the memory's own lock was then left held
+    and open.  The Windows case this was found in cannot run here: a merge
+    that timed out on its second lock unlocked a byte range it never took,
+    ``msvcrt.locking`` raised and both descriptors stayed open; reaching
+    ``msvcrt`` on POSIX takes a stand-in module, which is a test double.
+    """
+    memory = tmp_path / "memories"
+    (memory / "dom").mkdir(parents=True)
+    own, domain = Path(f"{memory}.lock"), memory / "dom.lock"
+    with pytest.raises(OSError) as failed, merge_memory_pages.memory_locks(memory, ["dom"]):
+        [descriptor] = descriptors_on(domain)
+        os.close(descriptor)
+    assert failed.value.errno == errno.EBADF
+    assert descriptors_on(own) == [] and not locked_by_another_process(own)
+
+
 def test_merge_usage_error(tmp_path: Path) -> None:
     """The wrong number of arguments is refused with the usage line."""
     result = subprocess.run(
@@ -803,7 +932,7 @@ def test_merge_usage_error(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "Usage: merge_memory_pages.py [--tolerance SECONDS] SOURCE_DIR DEST_DIR" in result.stderr
     # A tolerance that is not a number, or is negative, is a usage error too.
-    for bad in ("soon", "-1"):
+    for bad in ("soon", "-1", "nan"):
         result = subprocess.run(
             [sys.executable, str(MERGE), "--tolerance", bad, str(tmp_path), str(tmp_path)],
             capture_output=True,
@@ -812,6 +941,20 @@ def test_merge_usage_error(tmp_path: Path) -> None:
         )
         assert result.returncode == 2, bad
         assert "Usage:" in result.stderr
+    # A destination that cannot be a memory is one line of error, not a traceback.
+    source, blocker = tmp_path / "source", tmp_path / "a-file"
+    source.mkdir()
+    blocker.write_text("")
+    result = subprocess.run(
+        [sys.executable, str(MERGE), str(source), str(blocker)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert result.stderr.startswith("merge_memory_pages.py: "), result.stderr
+    assert len(result.stderr.splitlines()) == 1, result.stderr
 
 
 def test_merge_tolerance_turns_close_calls_into_conflicts(tmp_path: Path) -> None:
@@ -948,8 +1091,41 @@ def test_merge_reconciles_a_page_beside_its_own_tombstone(tmp_path: Path) -> Non
     assert sorted(p.name for p in (src / ".tombstones").iterdir()) == ["then-deleted"]
 
 
+@pytest.mark.skipif(is_root(), reason="root ignores directory permission bits")
+def test_merge_that_cannot_publish_keeps_the_page_or_its_tombstone(tmp_path: Path) -> None:
+    """A deletion or a revival that fails half-way leaves the page or its tombstone behind.
+
+    Neither of the two is the one state a later sync cannot tell from "never
+    existed": the stale copy of a third machine would bring the deleted page back.
+    """
+    src, dst, stale = tmp_path / "src", tmp_path / "dst", tmp_path / "stale"
+    write(stale, "note", "stale copy", "2026-09-18T10:00:00Z")
+    # An incoming deletion whose tombstone cannot be written: the page is not removed.
+    write(dst, "note", "old", "2026-09-19T10:00:00Z")
+    tombstone(src, "note", "2026-09-20T10:00:00Z")
+    (dst / ".tombstones").mkdir(mode=0o500)
+    assert merge(src, dst).returncode != 0
+    assert MemoryDir(dst).page_names() == ["note"]
+    os.chmod(dst / ".tombstones", 0o700)
+    assert merge(src, dst).stdout == "added 0 updated 0 kept 0 conflicts 0 removed 1\n"
+    assert merge(stale, dst).stdout == "added 0 updated 0 kept 1 conflicts 0 removed 0\n"
+    # An incoming page newer than the deletion that cannot be written: the tombstone stays.
+    write(src, "note", "written again", "2026-09-21T10:00:00Z")
+    os.chmod(dst, 0o500)
+    try:
+        assert merge(src, dst).returncode != 0
+    finally:
+        os.chmod(dst, 0o700)
+    assert (dst / ".tombstones" / "note").read_text() == "2026-09-20T10:00:00Z\n"
+    assert merge(stale, dst).stdout == "added 0 updated 0 kept 1 conflicts 0 removed 0\n"
+    assert MemoryDir(dst).page_names() == []
+
+
 def test_merge_writes_no_tombstone_through_a_symlinked_directory(tmp_path: Path) -> None:
-    """A ``.tombstones`` that is a symlink holds no tombstones and receives none."""
+    """A ``.tombstones`` that is a symlink holds no tombstones and receives none.
+
+    A deletion that cannot be recorded there is not carried out: the page stays.
+    """
     src, dst = tmp_path / "src", tmp_path / "dst"
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -961,7 +1137,7 @@ def test_merge_writes_no_tombstone_through_a_symlinked_directory(tmp_path: Path)
     tombstone(src, "never-here", "2026-09-20T10:00:00Z")
     result = merge(src, dst)
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "added 0 updated 0 kept 0 conflicts 0 removed 1\n"
-    assert MemoryDir(dst).page_names() == []
+    assert result.stdout == "added 0 updated 0 kept 0 conflicts 0 removed 0\n"
+    assert MemoryDir(dst).page_names() == ["gone"]
     assert (elsewhere / "gone").read_text() == "unrelated file\n"
     assert sorted(p.name for p in elsewhere.iterdir()) == ["gone"]

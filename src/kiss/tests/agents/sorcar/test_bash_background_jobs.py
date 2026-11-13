@@ -11,18 +11,15 @@ job's status and log tail (``tail``), blocks until it exits (``wait``), or
 kills its whole process group (``kill``).  Every test drives the real
 tool objects against real shell processes; nothing is mocked.
 
-Not covered here: the ``_kill_job_group`` branch that skips the
-orphan-group kill because the exited shell's pid is alive again (pid
-recycled by an unrelated process) needs the kernel to hand that exact
-pid out once more.  A Stop or a failure landing between the job's
-spawn and its registration is covered by
-``test_concaudit_f2_bash_setup_failure.py``.
+A Stop or a failure landing between the job's spawn and its
+registration is covered by ``test_concaudit_f2_bash_setup_failure.py``.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -32,8 +29,8 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.useful_tools import UsefulTools, _kill_process_group
-from kiss.core.processes import pid_alive
+from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.processes import exited_unreaped, kill_process_tree, pid_alive
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
     end_tool_call,
@@ -213,7 +210,7 @@ class TestBashJob:
         child_pid_file = tmp_path / "daemon.pid"
         job_id, pid, _log = _start(tools, f"sleep 60 & echo $! > {child_pid_file}")
         _wait_for_text(child_pid_file, "\n")
-        _wait_pid_dead(pid)
+        assert "exited with code 0" in tools.bash_job(job_id, action="wait", timeout_seconds=10)
         child_pid = int(child_pid_file.read_text().strip())
         assert pid_alive(child_pid)
         report = tools.bash_job(job_id, action="kill")
@@ -225,28 +222,50 @@ class TestBashJob:
     def test_kill_reaches_descendants_of_a_shell_that_exits_during_the_kill(
         self, tmp_path: Path,
     ) -> None:
-        # The kill finds the shell running, then the shell exits (and the
-        # watcher reaps it) before the group is signalled: the daemonized
-        # child is still in the group named after the shell's pid and
-        # must not outlive the kill.
+        # The kill finds the shell running, then the shell exits before
+        # the group is signalled: the daemonized child is still in the
+        # group named after the shell's pid and must not outlive the kill.
+        # Nothing reaps the shell meanwhile: reaped (as the watcher did
+        # while the calling thread was about to signal), its pid may name
+        # a stranger's group by the time of the signal (B/S13-F5).
         tools = UsefulTools(work_dir=str(tmp_path))
         child_pid_file = tmp_path / "daemon.pid"
         job_id, pid, _log = _start(tools, f"sleep 60 & echo $! > {child_pid_file}; sleep 1")
         _wait_for_text(child_pid_file, "\n")
         child_pid = int(child_pid_file.read_text().strip())
         report: list[str] = []
-        with Pause(_kill_process_group.__code__, lambda f: f["process"].pid == pid) as pause:
+        shell = tools._jobs[job_id].process
+        with Pause(kill_process_tree.__code__, lambda f: f["proc"] is shell) as pause:
             killer = threading.Thread(
                 target=lambda: report.append(tools.bash_job(job_id, action="kill")), daemon=True
             )
             killer.start()
             assert pause.paused.wait(10), "the kill never reached the group signal"
-            _wait_pid_dead(pid)
+            deadline = time.monotonic() + 10
+            while not exited_unreaped(shell) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.5)  # longer than any other thread took to reap an exited shell
+            assert shell.returncode is None, "the shell was reaped under a pending group signal"
             assert pid_alive(child_pid)
             pause.release()
             killer.join(20)
         assert report and "exited with code 0" in report[0], report
         _wait_pid_dead(child_pid)
+
+    def test_a_status_read_during_the_reap_reports_the_exit(self, tmp_path: Path) -> None:
+        # The watcher is held inside its reap, after ``waitpid`` and before
+        # ``Popen`` records the status: the shell is no child to ask about
+        # any more, and the status the watcher published first is the
+        # answer (the job read as "running" there).
+        tools = UsefulTools(work_dir=str(tmp_path))
+        job_id, _pid, _log = _start(tools, "while [ ! -f go ]; do sleep 0.05; done; exit 3")
+        shell = tools._jobs[job_id].process
+        recording = subprocess.Popen._handle_exitstatus.__code__  # type: ignore[attr-defined]
+        with Pause(recording, lambda f: f["self"] is shell) as pause:
+            (tmp_path / "go").touch()
+            assert pause.paused.wait(10), "the watcher never reaped the shell"
+            assert shell.returncode is None
+            assert "exited with code 3" in tools.bash_job(job_id)
 
     def test_tail_reads_only_the_end_of_a_large_log(self, tmp_path: Path) -> None:
         tools = UsefulTools(work_dir=str(tmp_path))
@@ -330,9 +349,13 @@ class TestBashJob:
         # The tail is cut to what fits under max_output_chars, whole lines only.
         narrow = tools.bash_job(job_id, tail_lines=100, max_output_chars=400)
         assert len(narrow) <= 400 and narrow.endswith("\n99\n100\n") and "\n1\n" not in narrow
-        # A cap smaller than the header itself leaves only a truncated header.
+        # A cap smaller than the header cuts what follows the status line, never the status:
+        # the coding gate reads the job's exit from it (the Bash result's defect of the cross
+        # finding of B2 and B4, 2026-11-12, in the job report).
+        status = f"Job {job_id}: exited with code 0\n"
         tiny = tools.bash_job(job_id, tail_lines=100, max_output_chars=60)
-        assert len(tiny) <= 60 and "truncated" in tiny
+        assert len(tiny) == 60 and tiny.startswith(status + "Command: seq 1 100\n"), tiny
+        assert tools.bash_job(job_id, tail_lines=100, max_output_chars=1) == status
         log_path.unlink()
         assert "(log unreadable:" in tools.bash_job(job_id)
 

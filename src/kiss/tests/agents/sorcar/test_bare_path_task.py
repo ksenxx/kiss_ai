@@ -60,6 +60,15 @@ class TestBarePath:
         assert bare_path(f'  "{target}"\n', "/") == target.resolve()
         assert bare_path(f"'{target}'", "/") == target.resolve()
 
+    def test_whitespace_inside_quotes_belongs_to_the_name(self, tmp_path: Path) -> None:
+        """Quotes delimit the name exactly: ``" notes.md"`` is not ``notes.md``."""
+        padded = tmp_path / " notes.md"
+        padded.write_text("padded")
+        plain = tmp_path / "notes.md"
+        plain.write_text("plain")
+        assert bare_path('" notes.md"', str(tmp_path)) == padded.resolve()
+        assert bare_path(' "notes.md" ', str(tmp_path)) == plain.resolve()
+
     def test_mismatched_quotes_are_not_stripped(self, tmp_path: Path) -> None:
         """``"path'`` is not a quoted path, and no such file exists."""
         target = tmp_path / "f.md"
@@ -80,6 +89,12 @@ class TestBarePath:
     def test_unknown_user_tilde(self) -> None:
         """``~nosuchuser/...`` cannot be expanded and is not a path."""
         assert bare_path("~kiss-no-such-user-3f9a/f.md", "/") is None
+
+    def test_tilde_user_with_nul_byte(self, tmp_path: Path) -> None:
+        """A NUL byte in the ``~user`` part is not a path; the user lookup must not raise."""
+        assert bare_path("~\x00", "/") is None
+        assert bare_path("~a\x00b/f.md", str(tmp_path)) is None
+        assert with_open_directive("~\x00", str(tmp_path)) == "~\x00"
 
     def test_relative_path_against_work_dir(self, tmp_path: Path) -> None:
         """A relative path is looked up in the run's work dir."""

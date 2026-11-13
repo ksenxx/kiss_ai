@@ -160,6 +160,80 @@ def test_popup_closed_during_attach_is_not_announced_and_not_kept(service: Any) 
     assert hit, "no round closed the popup while it was being attached"
 
 
+def _left_open(printer: _Printer) -> set[str]:
+    """The tabs the surfaces were last told are open."""
+    left: set[str] = set()
+    with printer.lock:
+        for event in printer.events:
+            if event["type"] == "openBrowserTab":
+                left.add(event["tab_id"])
+            elif event["type"] == "closeBrowserTab":
+                left.discard(event["tab_id"])
+    return left
+
+
+async def _attach_in_flight(_svc: BrowserTabService, page: Page) -> None:
+    """Return while the service's attachment of *page* waits for its last reply.
+
+    The CDP session attached here is queued right behind the service's
+    own, so when it is there the service's ``Target.getTargetInfo`` is
+    on its way.
+    """
+    await page.context.new_cdp_session(page)
+
+
+async def _attach_complete(svc: BrowserTabService, page: Page) -> None:
+    """Return in the step the service's attachment of *page* completes.
+
+    Started from the ``page`` event, this waits for the attachment ahead
+    of the open that created the page, so it resumes before that open.
+    """
+    await svc._by_page[id(page)].attached.wait()
+
+
+async def _tear_down_at(moment: Any, svc: BrowserTabService, page: Page) -> None:
+    """Tear the browser down at *moment* of *page*'s attachment, as a daemon shutdown does."""
+    await moment(svc, page)
+    await svc._teardown(announce=True)
+
+
+async def _open_torn_down_at(moment: Any, svc: BrowserTabService, opener: Page) -> None:
+    """Have surface ``c2`` open a tab whose browser is torn down at *moment* of its attachment."""
+    teardowns: list[asyncio.Future[None]] = []
+
+    def tear_down(page: Page) -> None:
+        teardowns.append(asyncio.ensure_future(_tear_down_at(moment, svc, page)))
+
+    opener.context.once("page", tear_down)
+    await svc._open_reporting("about:blank", "c2")
+    await teardowns[0]
+
+
+@pytest.mark.parametrize("moment", [_attach_in_flight, _attach_complete])
+def test_tab_torn_down_around_its_attach_is_not_left_open(service: Any, moment: Any) -> None:
+    """A teardown that withdraws a tab is the last the surfaces hear of it.
+
+    A daemon shutdown withdraws every tab, tells every surface it is
+    closed and only then has the browser exit, so a page stays open for
+    a moment after its tab is gone.  An attachment that completes in
+    that moment, or an open resuming behind one that completed just
+    before it, must not announce the tab: nothing would close it again.
+    The open is refused instead.  A round whose open is answered before
+    the teardown starts proves nothing, hence the rounds.
+    """
+    svc, printer = service
+    for _ in range(_MAX_ROUNDS):
+        opener_rec, loop = _open_opener(svc)
+        asyncio.run_coroutine_threadsafe(
+            _open_torn_down_at(moment, svc, opener_rec.page), loop
+        ).result(120)
+        assert _left_open(printer) == set()
+        assert svc.open_events() == []
+        if printer.of_type("browserError"):
+            break
+    assert [(e["connId"], e["tab_id"]) for e in printer.of_type("browserError")] == [("c2", "")]
+
+
 def test_closing_the_only_tab_still_shuts_the_browser_down(service: Any) -> None:
     """The control: a popup that lives long enough is announced and closed normally."""
     svc, printer = service

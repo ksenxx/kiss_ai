@@ -134,6 +134,11 @@ def test_generate_and_accept() -> None:
     # No password configured: only the empty password passes.
     assert password_accepted("", "")
     assert not password_accepted("anything", "")
+    # A JSON frame may carry a lone surrogate, which has no UTF-8 form:
+    # a wrong guess like any other, not a UnicodeEncodeError that left
+    # the peer without a reply and the guess out of the failure count.
+    assert not password_accepted("\ud83d", pw)
+    assert password_accepted("pw\ud83d", "pw\ud83d")
 
 
 def test_ensure_password_purges_the_retired_hash_key(

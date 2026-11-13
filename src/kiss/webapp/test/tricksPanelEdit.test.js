@@ -22,7 +22,7 @@ const {
   typeInto: input,
   promptletRows: rows,
 } = require('./simplify2_harness');
-const {key} = require('./ui_antipattern_harness');
+const {key, IME_FORMS} = require('./ui_antipattern_harness');
 
 function texts(doc) {
   return rows(doc).map(el => {
@@ -313,7 +313,7 @@ function runPanel() {
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
   ta = editor(rows(doc)[0]);
   input(win, ta, '変換中');
-  for (const init of [{isComposing: true}, {keyCode: 229}]) {
+  for (const init of IME_FORMS) {
     const composingEnter = new win.KeyboardEvent('keydown', {
       key: 'Enter',
       bubbles: true,
@@ -334,11 +334,10 @@ function runPanel() {
     'composition keys post nothing',
   );
   key(win, ta, 'Enter');
-  assert.deepStrictEqual(editsPosted(posted)[3], {
-    type: 'editTrick',
-    text: 'Line one\nLine two',
-    newText: '変換中',
-  });
+  // The row's two-line edit is not answered yet: the composed text is
+  // shown, and sent once the daemon says what the row holds.
+  assert.strictEqual(texts(doc)[0], '変換中');
+  assert.strictEqual(editsPosted(posted).length, 3, 'one edit at a time');
   // The daemon answers each edit in order (the two-line one, then the
   // composed one); another window then puts the two-line text back.
   for (const first of ['Line one\nLine two', '変換中', 'Line one\nLine two']) {
@@ -346,6 +345,11 @@ function runPanel() {
       type: 'tricksData',
       tricks: [first, 'Mine two, edited', 'Bundled alpha', 'Bundled beta'],
       userCount: 2,
+    });
+    assert.deepStrictEqual(editsPosted(posted)[3], {
+      type: 'editTrick',
+      text: 'Line one\nLine two',
+      newText: '変換中',
     });
   }
   assert.strictEqual(editsPosted(posted).length, 4);
@@ -735,12 +739,10 @@ function runPanel() {
   assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
 
   // --- the same row saved twice before the daemon answers (the second
-  // edit is of the text the first one shows), both refused: the first
-  // draft reopens its editor on the stored promptlet; the second waits
-  // intact (no input holds it: the single-line Add box would strip its
-  // newlines) and takes that editor once the first is done with it --
-  // cancelled, or saved and accepted, the row reading the accepted
-  // text then.
+  // edit waits for the first one's answer, then names the text the row
+  // holds on disk, not the one it showed), both refused: the first
+  // draft, which the user replaced, is offered nowhere; the second
+  // reopens its editor on the stored promptlet, intact, with its reason.
   const stored = ['Mine A', 'Mine B5', 'Bundled gamma'];
   const same = ['Same A\n## Context\nA', 'Same B\n## Context\nB'];
   const values = () =>
@@ -749,32 +751,24 @@ function runPanel() {
     send(win, error);
     send(win, {type: 'tricksData', tricks, userCount, connId: 'c1'});
   };
-  function saveRowTwiceRefused() {
-    for (const draft of same) {
-      click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
-      input(win, editor(rows(doc)[0]), draft);
-      click(win, rows(doc)[0].querySelector('.tricks-edit-save'));
-    }
-    assert.deepStrictEqual(
-      editsPosted(posted)
-        .slice(-2)
-        .map(e => [e.text, e.newText]),
-      [
-        [stored[0], same[0]],
-        [same[0], same[1]],
-      ],
-    );
-    refuse(stored.slice());
-    refuse(stored.slice());
-    assert.ok(rows(doc)[0].classList.contains('editing'), "A's editor reopens");
-    assert.strictEqual(editor(rows(doc)[0]).value, same[0], 'with A');
-    assert.ok(
-      !values().some(v => v.includes('Same B')),
-      'B waits: no input holds it, intact or mangled',
-    );
+  const before = editsPosted(posted).length;
+  for (const draft of same) {
+    click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
+    input(win, editor(rows(doc)[0]), draft);
+    click(win, rows(doc)[0].querySelector('.tricks-edit-save'));
   }
-  saveRowTwiceRefused();
-  key(win, editor(rows(doc)[0]), 'Escape');
+  assert.strictEqual(editsPosted(posted).length, before + 1, 'one at a time');
+  refuse(stored.slice());
+  assert.deepStrictEqual(
+    editsPosted(posted)
+      .slice(before)
+      .map(e => [e.text, e.newText]),
+    [
+      [stored[0], same[0]],
+      [stored[0], same[1]],
+    ],
+  );
+  refuse(stored.slice());
   assert.ok(rows(doc)[0].classList.contains('editing'), "B's editor reopens");
   assert.strictEqual(editor(rows(doc)[0]).value, same[1], 'B, intact');
   assert.strictEqual(doc.activeElement, editor(rows(doc)[0]));
@@ -785,22 +779,10 @@ function runPanel() {
     "with B's reason",
   );
   key(win, editor(rows(doc)[0]), 'Escape');
-  assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
-  // A fixed and accepted instead: B's editor reopens on the row that
-  // reads the accepted text now.
-  saveRowTwiceRefused();
-  input(win, editor(rows(doc)[0]), 'Same A, fixed');
-  key(win, editor(rows(doc)[0]), 'Enter');
-  assert.deepStrictEqual(editsPosted(posted).at(-1), {
-    type: 'editTrick',
-    text: 'Mine A',
-    newText: 'Same A, fixed',
-  });
-  stored[0] = 'Same A, fixed';
-  send(win, {type: 'tricksData', tricks: stored.slice(), userCount: 2});
-  assert.ok(rows(doc)[0].classList.contains('editing'), "B's editor reopens");
-  assert.strictEqual(editor(rows(doc)[0]).value, same[1], 'B, intact');
-  key(win, editor(rows(doc)[0]), 'Escape');
+  assert.ok(
+    !values().some(v => v.includes('Same')),
+    'A is offered nowhere, B no more',
+  );
 
   // --- a refused draft whose promptlet is gone meanwhile: a one-line
   // draft goes to the empty Add box with its reason; a multi-line one
@@ -810,7 +792,7 @@ function runPanel() {
   click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
   input(win, editor(rows(doc)[1]), same[1]);
   key(win, editor(rows(doc)[1]), 'Enter');
-  refuse(['Same A, fixed', 'Bundled gamma'], 1);
+  refuse([stored[0], 'Bundled gamma'], 1);
   assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
   assert.strictEqual(addBox.value, '', 'the Add box is no place for it');
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
@@ -840,4 +822,189 @@ function runPanel() {
   console.log('tricksPanelEdit.test.js passed');
 }
 
+// A row changed again (saved, or deleted) before the daemon answered
+// its rename is not named by the text it shows: the daemon may refuse
+// that rename as a duplicate of ANOTHER row, which the follow-up would
+// then change instead.  The follow-up waits for the answer and names
+// the text the row holds on disk.
+function runRowChangedBeforeItsAnswer() {
+  const editors = p => p.doc.querySelectorAll('.tricks-edit-input').length;
+  for (const followUp of ['edit', 'delete']) {
+    const p = panelOf(['Original A', 'Existing B']);
+    p.save(0, 'Existing B');
+    if (followUp === 'edit') p.save(0, 'Replacement C');
+    else p.del(0);
+    const shown = followUp === 'edit' ? ['Replacement C'] : [];
+    const answer = shown.concat('Existing B');
+    assert.deepStrictEqual(texts(p.doc), answer);
+    assert.deepStrictEqual(
+      p.sent(),
+      ['Original A > Existing B'],
+      'BUG: the ' + followUp + ' went out under the text of another row',
+    );
+    // The daemon refuses the duplicate and sends the list on disk: the
+    // follow-up goes out now, for the row the user changed.
+    p.refuse(['Original A', 'Existing B']);
+    assert.deepStrictEqual(p.sent().slice(1), [
+      followUp === 'edit' ? 'Original A > Replacement C' : 'delete Original A',
+    ]);
+    // The row shows the follow-up again, before and after its answer;
+    // the refused text, which the other row reads, is offered nowhere.
+    assert.deepStrictEqual(texts(p.doc), answer);
+    p.list(answer);
+    assert.deepStrictEqual(texts(p.doc), answer, 'the other row is untouched');
+    assert.strictEqual(editors(p), 0);
+    assert.strictEqual(p.doc.getElementById('tricks-add-input').value, '');
+    p.win.close();
+  }
+
+  // A follow-up still being typed when the answer arrives stays in the
+  // editor of its own row, and is saved for it.  Refused, that row
+  // holds its old text (the one it showed meanwhile is the other
+  // row's); accepted, the new one, wherever the list has it now.
+  for (const [saved, refused, at] of [
+    ['Existing B', true, 0],
+    ['Renamed A', false, 1],
+  ]) {
+    const p = panelOf(['Original A', 'Existing B']);
+    p.save(0, saved);
+    click(p.win, rows(p.doc)[0].querySelector('.sidebar-item-edit'));
+    input(p.win, editor(rows(p.doc)[0]), 'Replacement C');
+    if (refused) p.refuse(['Original A', 'Existing B']);
+    else p.list(['Added elsewhere', 'Renamed A', 'Existing B']);
+    const followed = editor(rows(p.doc)[at]);
+    assert.ok(followed, 'BUG: the open editor moved to another row');
+    key(p.win, followed, 'Enter');
+    assert.deepStrictEqual(p.sent().slice(1), [
+      (refused ? 'Original A' : 'Renamed A') + ' > Replacement C',
+    ]);
+    p.win.close();
+  }
+
+  // An edit awaiting its answer stays with its row while the rows
+  // around it are deleted, and leaves with it: the row saved or deleted
+  // next is still the one named, and the row moving up is not it.
+  let p = panelOf(['A', 'B', 'C', 'D']);
+  p.save(1, 'B2');
+  p.del(0);
+  p.del(2);
+  p.save(0, 'B3');
+  p.del(0);
+  p.save(0, 'C2');
+  assert.deepStrictEqual(p.sent(), ['B > B2', 'delete A', 'delete D', 'C > C2']);
+  p.list(['B2', 'C2']);
+  assert.deepStrictEqual(p.sent().slice(4), ['delete B2']);
+  assert.deepStrictEqual(texts(p.doc), ['C2']);
+  p.win.close();
+
+  // A refused draft that waited for the editor is not put on a row the
+  // user deleted since (the delete waited for that row's later edit).
+  p = panelOf(['A', 'B']);
+  p.save(0, 'Draft X');
+  click(p.win, rows(p.doc)[1].querySelector('.sidebar-item-edit'));
+  p.refuse(['A', 'B']);
+  p.save(0, 'U');
+  p.del(0);
+  p.list(['U', 'B']);
+  assert.deepStrictEqual(p.sent().slice(1), ['A > U', 'delete U']);
+  assert.deepStrictEqual(texts(p.doc), ['B']);
+  assert.strictEqual(editors(p), 0, 'BUG: the draft is on another row');
+  p.win.close();
+
+  // A draft refused after the user changed its row again is offered
+  // nowhere (W3 audit 2026-11-12): saved from a reopened editor, it
+  // would overwrite the row's newer text.  The row saved again before
+  // the answer: the newer text goes out in its place, once ...
+  const addBox = q => q.doc.getElementById('tricks-add-input').value;
+  p = panelOf(['A', 'B']);
+  p.save(0, 'X');
+  p.save(0, 'Y');
+  p.refuse(['A', 'B']);
+  assert.strictEqual(editors(p), 0, 'BUG: the replaced draft is back');
+  p.list(['Y', 'B']);
+  assert.deepStrictEqual(p.sent(), ['A > X', 'A > Y']);
+  assert.deepStrictEqual(texts(p.doc), ['Y', 'B']);
+  p.win.close();
+  // ... or after it, from the editor the refused draft waited for ...
+  p = panelOf(['A', 'B']);
+  p.save(0, 'X');
+  click(p.win, rows(p.doc)[0].querySelector('.sidebar-item-edit'));
+  input(p.win, editor(rows(p.doc)[0]), 'Z');
+  p.refuse(['A', 'B']);
+  key(p.win, editor(rows(p.doc)[0]), 'Enter');
+  p.list(['Z', 'B']);
+  assert.deepStrictEqual(texts(p.doc), ['Z', 'B'], 'BUG: the replaced draft is back');
+  p.win.close();
+  // ... or the row deleted while the draft waited for another row's editor.
+  p = panelOf(['A', 'B']);
+  p.save(0, 'X');
+  click(p.win, rows(p.doc)[1].querySelector('.sidebar-item-edit'));
+  p.refuse(['A', 'B']);
+  p.del(0);
+  key(p.win, editor(rows(p.doc)[0]), 'Escape');
+  assert.deepStrictEqual(texts(p.doc), ['B']);
+  assert.strictEqual(addBox(p), '', 'BUG: the draft of a deleted promptlet is back');
+  p.win.close();
+
+  // The row gone from the answer's list (deleted from another window):
+  // a waiting edit still goes out, for the daemon to refuse and its
+  // draft to come back; a waiting delete has nothing left to delete,
+  // nor a draft to give back.  A row put back to its stored text needs
+  // no second edit.  The refused X is offered nowhere.
+  for (const [second, gone, sent, back] of [
+    ['Y', true, ['A > X', 'A > Y'], 'Y'],
+    [null, true, ['A > X'], ''],
+    ['A', false, ['A > X'], ''],
+  ]) {
+    p = panelOf(['A', 'B']);
+    p.save(0, 'X');
+    if (second) p.save(0, second);
+    else p.del(0);
+    p.refuse(gone ? ['B'] : ['A', 'B']);
+    assert.deepStrictEqual(p.sent(), sent);
+    assert.strictEqual(editors(p), 0);
+    assert.strictEqual(addBox(p), '');
+    if (back) p.refuse(['B']);
+    assert.strictEqual(addBox(p), back);
+    p.win.close();
+  }
+}
+
+/**
+ * A promptlets sheet listing *stored* (all the user's own), with the
+ * user's and the daemon's moves as one-liners; `sent` lists the edits
+ * and deletes posted so far, as "text > newText" and "delete text".
+ */
+function panelOf(stored) {
+  const {win, posted} = makePage();
+  const doc = win.document;
+  const list = tricks =>
+    send(win, {type: 'tricksData', tricks: tricks.slice(), userCount: tricks.length});
+  list(stored);
+  doc.getElementById('tricks-btn').click();
+  return {
+    win,
+    doc,
+    list,
+    refuse(tricks) {
+      send(win, {type: 'error', command: 'editTrick', text: 'Refused'});
+      list(tricks);
+    },
+    save(row, text) {
+      click(win, rows(doc)[row].querySelector('.sidebar-item-edit'));
+      input(win, editor(rows(doc)[row]), text);
+      key(win, editor(rows(doc)[row]), 'Enter');
+    },
+    del(row) {
+      click(win, rows(doc)[row].querySelector('.sidebar-item-delete'));
+      click(win, rows(doc)[row].querySelector('.sidebar-confirm-yes'));
+    },
+    sent: () =>
+      posted
+        .filter(m => /^(edit|delete)Trick$/.test(m.type))
+        .map(m => (m.newText ? m.text + ' > ' + m.newText : 'delete ' + m.text)),
+  };
+}
+
+runRowChangedBeforeItsAnswer();
 runPanel();

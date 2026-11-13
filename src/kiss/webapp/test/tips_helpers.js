@@ -39,7 +39,7 @@ function tipsHost(win) {
  * panel is mounted on document.body or it has no shadow root.
  */
 function panelParts(win) {
-  const host = win.document.body.querySelector('kiss-tips-panel');
+  const host = tipsHost(win);
   assert.ok(host, 'kiss-tips-panel must be mounted on document.body');
   const root = host.shadowRoot;
   assert.ok(root, 'kiss-tips-panel must use shadow DOM');
@@ -57,16 +57,15 @@ function panelParts(win) {
 /** Open the tips from the Tips button and return the opt-out checkbox. */
 function openOptOutBox(win) {
   win.document.getElementById('tips-btn').click();
-  const host = win.document.body.querySelector('kiss-tips-panel');
+  const host = tipsHost(win);
   assert.ok(host, 'the Tips button opens the tips window');
   return host.shadowRoot.querySelector('.tips-optout-input');
 }
 
 /** Close the open tips window with its close button. */
 function closeTips(win) {
-  const host = win.document.body.querySelector('kiss-tips-panel');
-  host.shadowRoot.querySelector('.tips-close').click();
-  assert.strictEqual(win.document.body.querySelector('kiss-tips-panel'), null);
+  tipsHost(win).shadowRoot.querySelector('.tips-close').click();
+  assert.strictEqual(tipsHost(win), null);
 }
 
 const THREE_TIPS = [

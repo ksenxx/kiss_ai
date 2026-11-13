@@ -29,6 +29,7 @@
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
 const {typeInto, waitFor, persistedDrafts} = require('./simplify2_harness');
+const {barButtons} = require('./worktree_bar_helpers');
 
 const {test, report} = h.makeRunner();
 
@@ -43,11 +44,6 @@ function switchWorkDir(win, dir) {
 
 function dirtyQuestion(win) {
   return win.document.querySelector('[data-notification-id^="close-dirty-"]');
-}
-
-/** The id of the overwrite question for `name` pasted into `dest` on `machine`. */
-function overwriteId(machine, dest, name) {
-  return 'fs-overwrite:' + JSON.stringify([machine, dest, name]);
 }
 
 function closeControl(win) {
@@ -259,7 +255,7 @@ async function main() {
     });
     const first = h.toast(
       win,
-      overwriteId('', actions[0].dest, actions[0].dest.split('/').pop()),
+      h.overwriteId('', actions[0].dest, actions[0].dest.split('/').pop()),
     );
     assert.ok(first, 'first question open');
     h.send(win, {
@@ -270,7 +266,7 @@ async function main() {
     });
     const second = h.toast(
       win,
-      overwriteId('', actions[1].dest, actions[1].dest.split('/').pop()),
+      h.overwriteId('', actions[1].dest, actions[1].dest.split('/').pop()),
     );
     assert.ok(
       second
@@ -289,7 +285,7 @@ async function main() {
     assert.strictEqual(
       h.toast(
         win,
-        overwriteId('', actions[1].dest, actions[1].dest.split('/').pop()),
+        h.overwriteId('', actions[1].dest, actions[1].dest.split('/').pop()),
       ),
       null,
     );
@@ -303,7 +299,7 @@ async function main() {
     assert.strictEqual(
       h.toast(
         win,
-        overwriteId('', actions[0].dest, actions[0].dest.split('/').pop()),
+        h.overwriteId('', actions[0].dest, actions[0].dest.split('/').pop()),
       ),
       null,
     );
@@ -333,8 +329,8 @@ async function main() {
         exists: true,
       });
     }
-    const first = h.toast(win, overwriteId('', actions[0].dest, 'foo.py'));
-    const second = h.toast(win, overwriteId('', actions[0].dest, 'bar.py'));
+    const first = h.toast(win, h.overwriteId('', actions[0].dest, 'foo.py'));
+    const second = h.toast(win, h.overwriteId('', actions[0].dest, 'bar.py'));
     assert.ok(first && second, 'both questions are open at once');
     assert.ok(
       first
@@ -415,14 +411,14 @@ async function main() {
       3,
       'both machines, and the @-named file, await their answer',
     );
-    const localPrompt = h.toast(win, overwriteId('', local.dest, 'a.txt'));
+    const localPrompt = h.toast(win, h.overwriteId('', local.dest, 'a.txt'));
     const remotePrompt = h.toast(
       win,
-      overwriteId('gpu-box', remote.dest, 'a.txt'),
+      h.overwriteId('gpu-box', remote.dest, 'a.txt'),
     );
     assert.ok(localPrompt && remotePrompt);
     assert.ok(
-      h.toast(win, overwriteId('', localAt.dest, 'a.txt@gpu-box')),
+      h.toast(win, h.overwriteId('', localAt.dest, 'a.txt@gpu-box')),
       "the @-named file's own question",
     );
     const n = h.ofType(posted, 'fsAction').length;
@@ -457,7 +453,7 @@ async function main() {
     h.send(win, {type: 'fsResult', token: action.token, error: 'exists', exists: true});
     assert.deepStrictEqual(errors, [], 'no selector error');
     const question = Array.from(win.document.querySelectorAll('.kiss-notification')).find(
-      el => el.dataset.notificationId === overwriteId('', action.dest, name),
+      el => el.dataset.notificationId === h.overwriteId('', action.dest, name),
     );
     assert.ok(question, 'the question is up');
     h.click(win, h.toastButton(question, 'Replace'));
@@ -484,11 +480,12 @@ async function main() {
     win.close();
   });
 
-  await test('R1-4 a dialog whose opener is gone hands focus to the visible tab', async () => {
+  await test('R1-4 a dialog opened from a tab entry gets its opener back after the strip repaints', async () => {
     // On the mobile remote a file tab replaces the chat and hides the
-    // composer (body.content-tab-open), so the fallback is the active
-    // tab-strip entry, never the hidden textarea.  (The desktop remote
-    // splits the window instead and keeps the composer on screen.)
+    // composer (body.content-tab-open).  The question's opener is the
+    // file's close control on the strip.  A repaint of the strip while
+    // the question is open keeps that control (a tab keeps its node),
+    // so the focus goes back to it, never to the hidden textarea.
     const ctx = h.makePage({narrow: true});
     const {win, posted} = ctx;
     await h.openDirtyContentTab(ctx);
@@ -496,7 +493,7 @@ async function main() {
     control.focus();
     h.key(win, control, 'Enter');
     const t = dirtyQuestion(win);
-    // A Save-bar save re-renders the tab strip: the opener is replaced.
+    // A Save-bar save repaints the tab strip: the dirty mark goes.
     h.click(win, win.document.querySelector('.content-save-btn'));
     const saves = h.ofType(posted, 'saveFile');
     h.send(win, {
@@ -505,21 +502,46 @@ async function main() {
       ok: true,
       version: 'v2',
     });
-    assert.ok(!control.isConnected, 'precondition: the old control is gone');
+    assert.strictEqual(
+      win.document.querySelector('#tab-list .chat-tab-dirty'),
+      null,
+      'precondition: the strip was repainted',
+    );
     assert.ok(
       win.document.body.classList.contains('content-tab-open'),
       'precondition: the composer is hidden behind the file tab',
     );
     h.click(win, h.toastButton(t, 'Keep editing'));
-    const activeTab = win.document.querySelector('#tab-list .chat-tab.active');
-    assert.ok(
-      activeTab,
-      'precondition: the file tab is the active strip entry',
-    );
     assert.strictEqual(
       win.document.activeElement,
-      activeTab,
-      'the visible active tab, not the hidden composer or body',
+      control,
+      'the control the question was opened from',
+    );
+    win.close();
+  });
+
+  await test('R1-4 a dialog whose opener left the strip hands focus to the visible tab', async () => {
+    // Leaving the file for its chat takes the file's entry, the
+    // question's opener, off the mobile strip.  Back on the file the
+    // composer is hidden again: the answer hands the focus to the
+    // active strip entry, never to the hidden textarea or the body.
+    const ctx = h.makePage({narrow: true});
+    const {win} = ctx;
+    await h.openDirtyContentTab(ctx);
+    const control = closeControl(win);
+    control.focus();
+    h.key(win, control, 'Enter');
+    const fileId = win._testApi.getActiveTabId();
+    win._testApi.switchToTab('a1');
+    assert.ok(!control.isConnected, 'precondition: the opener is gone');
+    win._testApi.switchToTab(fileId);
+    const keep = h.toastButton(dirtyQuestion(win), 'Keep editing');
+    keep.focus(); // as the press of a real click does
+    h.click(win, keep);
+    assert.strictEqual(
+      win.document.activeElement,
+      win.document.querySelector('#tab-list .chat-tab.active'),
+      'the visible active tab',
     );
     win.close();
   });
@@ -555,9 +577,7 @@ async function main() {
     const {win, posted} = h.makePage();
     const tabId = win._testApi.getActiveTabId();
     h.send(win, {type: 'worktree_done', tabId, branch: 'kiss_wt-42'});
-    const discard = Array.from(
-      win.document.querySelectorAll('.wt-bar .wt-btns .wt-btn'),
-    ).find(b => b.textContent === 'Discard');
+    const discard = barButtons(win).find(b => b.textContent === 'Discard');
     h.click(win, discard);
     const ask = win.document.querySelector('.wt-bar .wt-confirm');
     assert.ok(!ask.hidden, 'precondition: the question is shown');
@@ -911,6 +931,565 @@ async function main() {
       "the second run's own acknowledgment retires it",
     );
     idle.win.close();
+  });
+
+  // ---- 2026-11-10 C09-F1: a prompt an outage left unacknowledged -------
+
+  /** A page on an announced connection, as the transport always is. */
+  function connectedPage() {
+    const page = h.makePage();
+    h.send(page.win, {type: 'daemonStatus', connected: true});
+    page.tabId = page.win._testApi.getActiveTabId();
+    page.inp = h.byId(page.win, 'task-input');
+    return page;
+  }
+  function sendPrompt(page, text) {
+    typeInto(page.win, page.inp, text);
+    h.click(page.win, h.byId(page.win, 'send-btn'));
+  }
+  /** The connection drops and comes back; `owed` is still on its way. */
+  function outage(page, owed) {
+    h.send(page.win, {type: 'daemonStatus', connected: false, reconnecting: true});
+    h.send(page.win, {type: 'daemonStatus', connected: true, unconfirmed: owed || []});
+  }
+  /**
+   * The daemon's resync of a chat-bound tab showing `task` (id 7 unless
+   * given), with the prompts it took from the tab when it names them.
+   */
+  function resync(page, task, events, taskId, promptsTaken) {
+    const tabId = page.tabId;
+    h.send(page.win, {type: 'tabs_state', tabs: [{tabId, title: task, chatId: 'c1'}]});
+    h.send(page.win, {type: 'status', running: false, tabId});
+    h.send(page.win, {
+      type: 'task_events',
+      tabId,
+      task,
+      task_id: taskId || 7,
+      chat_id: 'c1',
+      events: events || [],
+      promptsTaken,
+    });
+  }
+  const chatIds = win =>
+    win._testApi
+      .openTabs()
+      .filter(t => !t.isContentTab && !t.isSubagentTab)
+      .map(t => t.id);
+
+  await test('C09-F1: a prompt that ran during the outage stops waiting for its echo', () => {
+    const page = connectedPage();
+    const {win, tabId, inp} = page;
+    sendPrompt(page, 'first prompt');
+    outage(page);
+    assert.strictEqual(drafts(win)[tabId], 'first prompt', 'in doubt: kept');
+    // Its task may be running: "+" leaves the chat open until the
+    // daemon has reported on it.
+    h.click(win, h.byId(win, 'new-chat-btn'));
+    assert.ok(chatIds(win).includes(tabId), 'not retired while in doubt');
+    win._testApi.switchToTab(tabId);
+    resync(page, 'first prompt');
+    assert.strictEqual(inp.value, '', 'it ran: nothing comes back');
+    assert.strictEqual(drafts(win)[tabId], undefined, 'no draft for a reload');
+    // The next refusal is the next prompt's.
+    sendPrompt(page, 'second prompt');
+    h.send(win, {type: 'error', code: 'prompt_refused', text: 'busy', tabId});
+    assert.strictEqual(inp.value, 'second prompt');
+    win.close();
+
+    // A follow-up the running task took is in its transcript.
+    const steer = connectedPage();
+    h.send(steer.win, {type: 'status', running: true, tabId: steer.tabId});
+    sendPrompt(steer, 'steer message');
+    assert.strictEqual(h.ofType(steer.posted, 'appendUserMessage').length, 1);
+    outage(steer);
+    resync(steer, 'main task', [
+      {type: 'prompt', steer: true, text: 'steer message'},
+    ]);
+    assert.strictEqual(steer.inp.value, '');
+    assert.strictEqual(drafts(steer.win)[steer.tabId], undefined);
+    steer.win.close();
+  });
+
+  await test('C09-F1: a prompt the outage lost comes back into the composer', () => {
+    // The transcript shows another task.  The prompt was echoed, so it
+    // is the daemon's until the daemon's word says otherwise.
+    const page = connectedPage();
+    sendPrompt(page, 'lost prompt');
+    h.send(page.win, {type: 'setTaskText', text: 'lost prompt', tabId: page.tabId});
+    outage(page);
+    assert.strictEqual(drafts(page.win)[page.tabId], undefined);
+    resync(page, 'older task', [{type: 'prompt', text: 'lost prompt'}]);
+    assert.strictEqual(page.inp.value, 'lost prompt');
+    page.win.close();
+
+    // The daemon has no chat for the tab: no task was ever admitted.
+    const fresh = connectedPage();
+    sendPrompt(fresh, 'never arrived');
+    outage(fresh);
+    h.send(fresh.win, {
+      type: 'tabs_state',
+      tabs: [{tabId: fresh.tabId, title: 'new chat'}],
+    });
+    assert.strictEqual(fresh.inp.value, '', 'a stream may have the tab');
+    // Nor has a machine's stream the tab (the bindings follow the
+    // registry in the daemon's answer to `ready`).
+    h.send(fresh.win, {type: 'tabMachines', machines: {}});
+    assert.strictEqual(fresh.inp.value, 'never arrived');
+    // Its state is known again: "+" no longer has to hold it open.
+    h.click(fresh.win, h.byId(fresh.win, 'new-chat-btn'));
+    assert.ok(!chatIds(fresh.win).includes(fresh.tabId), 'retired by "+"');
+    fresh.win.close();
+
+    // A newer prompt from the tab: the lost one is not offered back.
+    const moved = connectedPage();
+    sendPrompt(moved, 'old prompt');
+    outage(moved);
+    sendPrompt(moved, 'newer prompt');
+    resync(moved, 'older task');
+    assert.strictEqual(moved.inp.value, '');
+    assert.strictEqual(drafts(moved.win)[moved.tabId], 'newer prompt');
+    moved.win.close();
+  });
+
+  await test('W3 audit 2026-11-12: what the tab already showed is no answer to a lost prompt', () => {
+    // The chat's previous task read the same.  Replayed after the
+    // outage, that task says nothing of the new run; a new task does.
+    for (const [replayedId, back] of [
+      [7, 'continue'],
+      [8, ''],
+    ]) {
+      const page = connectedPage();
+      resync(page, 'continue');
+      sendPrompt(page, 'continue');
+      assert.strictEqual(h.ofType(page.posted, 'submit').length, 1);
+      outage(page);
+      resync(page, 'continue', [], replayedId);
+      assert.strictEqual(page.inp.value, back, 'replayed task ' + replayedId);
+      page.win.close();
+    }
+    // A follow-up reading like its task and like an earlier follow-up:
+    // only one more message in that task's transcript is its own.
+    const goOn = {type: 'prompt', steer: true, text: 'go on'};
+    for (const [replayed, back] of [
+      [[goOn], 'go on'],
+      [[goOn, goOn], ''],
+    ]) {
+      const page = connectedPage();
+      resync(page, 'go on', [goOn]);
+      h.send(page.win, {type: 'status', running: true, tabId: page.tabId});
+      sendPrompt(page, 'go on');
+      assert.strictEqual(h.ofType(page.posted, 'appendUserMessage').length, 1);
+      outage(page);
+      resync(page, 'go on', replayed);
+      assert.strictEqual(page.inp.value, back, replayed.length + ' replayed');
+      page.win.close();
+    }
+    // The same text sent twice before the first is answered: what the
+    // first left in the transcript, echoed in time or not, is no answer
+    // to the second.  A first that did not run (refused, or lost in an
+    // earlier outage: the user drops the draft handed back) leaves the
+    // next message to the second.
+    const sendTwice = (page, type) => {
+      sendPrompt(page, 'go on');
+      sendPrompt(page, 'go on');
+      assert.strictEqual(h.ofType(page.posted, type).length, 2);
+    };
+    const messages = page => {
+      h.send(page.win, {type: 'status', running: true, tabId: page.tabId});
+      sendTwice(page, 'appendUserMessage');
+    };
+    const tell = (page, ev) => h.send(page.win, Object.assign({tabId: page.tabId}, ev));
+    const firstOfTwo = {
+      echoed: page => {
+        messages(page);
+        tell(page, goOn);
+      },
+      unanswered: messages,
+      refused: page => {
+        messages(page);
+        tell(page, {type: 'error', code: 'prompt_refused', text: 'no'});
+      },
+      lost: page => {
+        messages(page);
+        outage(page, [{tabId: page.tabId, type: 'appendUserMessage'}]);
+        resync(page, 'do it');
+      },
+      // Lost, and the second sent before the transcript settles it.
+      unsettled: page => {
+        h.send(page.win, {type: 'status', running: true, tabId: page.tabId});
+        sendPrompt(page, 'go on');
+        outage(page);
+        sendPrompt(page, 'go on');
+        assert.strictEqual(h.ofType(page.posted, 'appendUserMessage').length, 2);
+      },
+      // From an idle tab: the first starts task 8, which takes the
+      // second as a message.
+      'a run': page => {
+        sendTwice(page, 'submit');
+        tell(page, {type: 'setTaskText', text: 'go on'});
+        tell(page, {type: 'clear'});
+      },
+      // Likewise, with no word from the daemon before the outage.  A new
+      // task without the message is the first's as far as the page can
+      // tell (the second may have started it, the first's being over):
+      // the draft is offered again rather than dropped.
+      'a blind run': page => sendTwice(page, 'submit'),
+    };
+    for (const [first, replayedMessages, back] of [
+      ['echoed', 1, 'go on'],
+      ['echoed', 2, ''],
+      ['unanswered', 1, 'go on'],
+      ['refused', 1, ''],
+      ['lost', 1, ''],
+      ['unsettled', 1, 'go on'],
+      ['unsettled', 2, ''],
+      ['a run', 0, 'go on'],
+      ['a run', 1, ''],
+      ['a blind run', 0, 'go on'],
+      ['a blind run', 1, ''],
+    ]) {
+      const page = connectedPage();
+      resync(page, 'do it');
+      firstOfTwo[first](page);
+      typeInto(page.win, page.inp, '');
+      outage(page);
+      const [task, id] = first.endsWith('run') ? ['go on', 8] : ['do it', 7];
+      resync(page, task, Array(replayedMessages).fill(goOn), id);
+      assert.strictEqual(page.inp.value, back, first + ', ' + replayedMessages + ' replayed');
+      page.win.close();
+    }
+    // Sent before the tab's transcript is on the page: a tab bound to
+    // its chat that shows no task yet (a reloaded page), or one whose
+    // replay the page has asked for.  Nothing tells the prompt from what
+    // that transcript held already: it comes back, whatever the replay
+    // shows.
+    const awaitingTranscript = {
+      bound: page =>
+        h.send(page.win, {
+          type: 'tabs_state',
+          tabs: [{tabId: page.tabId, title: 'do it', chatId: 'c1'}],
+        }),
+      'asked for': page => {
+        h.send(page.win, {type: 'replay_deferred', tabId: page.tabId, chatId: 'c1', taskId: 7});
+        assert.strictEqual(h.ofType(page.posted, 'resumeSession').length, 1);
+      },
+    };
+    for (const [state, replayed] of [
+      ['bound', [goOn]],
+      ['bound', [goOn, goOn]],
+      ['asked for', [goOn]],
+    ]) {
+      const page = connectedPage();
+      awaitingTranscript[state](page);
+      sendPrompt(page, 'go on');
+      assert.strictEqual(h.ofType(page.posted, 'submit').length, 1);
+      typeInto(page.win, page.inp, '');
+      outage(page);
+      resync(page, 'do it', replayed);
+      assert.strictEqual(page.inp.value, 'go on', state + ', ' + replayed.length + ' replayed');
+      page.win.close();
+    }
+    // A prompt offered again may have run all the same: this one went
+    // out while a replay was asked for, and the late transcript shows it.
+    // The same text sent after it still expects that message, which is
+    // no answer to it.
+    const twice = connectedPage();
+    const running = () => h.send(twice.win, {type: 'status', running: true, tabId: twice.tabId});
+    resync(twice, 'do it');
+    running();
+    awaitingTranscript['asked for'](twice);
+    sendPrompt(twice, 'go on');
+    resync(twice, 'do it');
+    running();
+    sendPrompt(twice, 'go on');
+    assert.strictEqual(h.ofType(twice.posted, 'appendUserMessage').length, 2);
+    outage(twice, [{tabId: twice.tabId, type: 'appendUserMessage'}]);
+    resync(twice, 'do it', [goOn]);
+    assert.strictEqual(twice.inp.value, 'go on', 'the first is offered again');
+    typeInto(twice.win, twice.inp, '');
+    outage(twice);
+    resync(twice, 'do it', [goOn]);
+    assert.strictEqual(twice.inp.value, 'go on', "the first's message is no answer to the second");
+    twice.win.close();
+    // A follow-up typed into a run whose id has not arrived yet, reading
+    // like the run's own text: a follow-up never starts a task.
+    const early = connectedPage();
+    sendPrompt(early, 'build it');
+    h.send(early.win, {type: 'setTaskText', text: 'build it', tabId: early.tabId});
+    h.send(early.win, {type: 'clear', tabId: early.tabId});
+    h.send(early.win, {type: 'status', running: true, tabId: early.tabId});
+    sendPrompt(early, 'build it');
+    assert.strictEqual(h.ofType(early.posted, 'appendUserMessage').length, 1);
+    outage(early);
+    resync(early, 'build it');
+    assert.strictEqual(early.inp.value, 'build it');
+    early.win.close();
+  });
+
+  // ---- 2026-11-12 R2-F1: the daemon names the prompt it answers --------
+
+  /** The ids the page sent its prompts under, oldest first. */
+  const promptIds = page =>
+    page.posted
+      .filter(m => m.type === 'submit' || m.type === 'appendUserMessage')
+      .map(m => m.promptId);
+  /** A frame of the daemon for the page's tab. */
+  const tell = (page, ev) => h.send(page.win, Object.assign({tabId: page.tabId}, ev));
+  const refuse = (page, ids) =>
+    tell(page, {type: 'error', code: 'prompt_refused', text: 'no', promptIds: ids});
+
+  await test('R2-F1: a tab on a machine, and a sub-agent tab, wait for the transcript of a lost prompt', () => {
+    // The registry never holds a remote chat's id: the machine's
+    // transcript says whether the prompt ran, as a local chat's does.
+    // A tab whose stream is gone gets none.
+    for (const [streamKept, replayed, back] of [
+      [true, 'run on box', ''],
+      [true, 'earlier task', 'run on box'],
+      [false, null, 'run on box'],
+    ]) {
+      const page = connectedPage();
+      const {win, tabId, inp} = page;
+      h.send(win, {type: 'configData', config: {}, machine: ''});
+      h.send(win, {
+        type: 'machines',
+        machines: [{name: 'box', host: 'box.example', reachable: true, kind: 'ssh'}],
+        checkedAt: 1,
+      });
+      tell(page, {type: 'tabMachine', machine: 'box'});
+      sendPrompt(page, 'run on box');
+      assert.strictEqual(h.ofType(page.posted, 'submit')[0].machine, 'box');
+      outage(page);
+      h.send(win, {type: 'tabs_state', tabs: [{tabId, title: 'earlier'}]});
+      h.send(win, {type: 'tabMachines', machines: streamKept ? {[tabId]: 'box'} : {}});
+      if (replayed) {
+        assert.strictEqual(inp.value, '', 'the stream has the tab');
+        tell(page, {type: 'status', running: false});
+        tell(page, {
+          type: 'task_events',
+          task: replayed,
+          task_id: 9,
+          chat_id: 'remote-chat',
+          events: [],
+        });
+      }
+      assert.strictEqual(inp.value, back, streamKept + ', ' + replayed);
+      win.close();
+    }
+    // A sub-agent's tab is in no registry and on no machine either, yet
+    // the daemon replays it with its chat: a message typed into it is
+    // settled by that transcript, not by the bindings.
+    for (const [taken, back] of [
+      [true, ''],
+      [false, 'look at the tests'],
+    ]) {
+      const page = connectedPage();
+      const {win, tabId, inp} = page;
+      tell(page, {type: 'status', running: true});
+      h.send(win, {type: 'new_tab', task_id: 'child', parent_tab_id: tabId, taskId: ''});
+      const subTab = tabId + '__sub_child';
+      win._testApi.switchToTab(subTab);
+      sendPrompt(page, 'look at the tests');
+      const sent = h.ofType(page.posted, 'appendUserMessage');
+      assert.deepStrictEqual(
+        sent.map(m => m.tabId),
+        [subTab],
+      );
+      outage(page);
+      h.send(win, {type: 'tabs_state', tabs: [{tabId, title: 'parent', chatId: 'c1'}]});
+      h.send(win, {type: 'tabMachines', machines: {}});
+      assert.strictEqual(inp.value, '', 'its transcript is still to come');
+      h.send(win, {
+        type: 'task_events',
+        tabId: subTab,
+        task: 'child task',
+        task_id: 'child',
+        chat_id: 'c1',
+        events: [],
+        promptsTaken: taken ? [sent[0].promptId] : undefined,
+      });
+      assert.strictEqual(inp.value, back, 'taken: ' + taken);
+      win.close();
+    }
+  });
+
+  await test('R2-F1: the prompts the daemon took settle a lost prompt', () => {
+    // Two identical runs sent blind.  The first started task 8 and the
+    // second was lost, or both ran and the second started task 9: the
+    // transcripts differ in the id alone, the prompts taken tell.
+    for (const [taskId, secondRan, back] of [
+      [8, false, 'go on'],
+      [9, true, ''],
+    ]) {
+      const page = connectedPage();
+      resync(page, 'do it');
+      sendPrompt(page, 'go on');
+      sendPrompt(page, 'go on');
+      typeInto(page.win, page.inp, '');
+      outage(page);
+      const [first, second] = promptIds(page);
+      assert.ok(first && second && first !== second, 'each prompt has its id');
+      resync(page, 'go on', [], taskId, secondRan ? [first, second] : [first]);
+      assert.strictEqual(page.inp.value, back, 'task ' + taskId);
+      page.win.close();
+    }
+    // A follow-up lost while another surface typed the same text into
+    // the task: the transcript holds one more message reading the same,
+    // which is not this page's.  A daemon that still names a prompt it
+    // took before the follow-up went out (the run's, at its `clear` or
+    // in a transcript, or an earlier message's) has run ever since and
+    // would name the follow-up had it taken it.  One that names none of
+    // those (it started since, or names no prompt) leaves the
+    // transcript to decide: a message recorded there under an id is
+    // that prompt's (whatever the daemon still remembers), one
+    // recorded under none may be this one.
+    const goOn = {type: 'prompt', steer: true, text: 'go on'};
+    const named = {
+      clear: page => {
+        tell(page, {type: 'setTaskText', text: 'do it', promptIds: ['earlier']});
+        tell(page, {type: 'clear', promptIds: ['earlier']});
+      },
+      echo: page => tell(page, {type: 'prompt', steer: true, text: 'hm', promptIds: ['earlier']}),
+      transcript: page => resync(page, 'do it', [], 7, ['earlier']),
+      nowhere: () => {},
+    };
+    for (const [before, taken, back, recordedAs] of [
+      ['clear', ['earlier', 'theirs'], 'go on'],
+      ['echo', ['earlier', 'theirs'], 'go on'],
+      ['transcript', ['earlier', 'theirs'], 'go on'],
+      ['clear', ['earlier', 'theirs', 'MINE'], ''],
+      ['clear', ['theirs'], ''],
+      ['clear', undefined, ''],
+      ['nowhere', ['earlier', 'theirs'], ''],
+      ['clear', undefined, 'go on', 'theirs'],
+      ['clear', undefined, '', 'MINE'],
+      ['clear', ['earlier', 'theirs'], '', 'MINE'],
+    ]) {
+      const page = connectedPage();
+      named[before](page);
+      tell(page, {type: 'status', running: true});
+      sendPrompt(page, 'go on');
+      assert.strictEqual(h.ofType(page.posted, 'appendUserMessage').length, 1);
+      outage(page);
+      const id = name => (name === 'MINE' ? promptIds(page)[0] : name);
+      const message = recordedAs ? Object.assign({promptIds: [id(recordedAs)]}, goOn) : goOn;
+      resync(page, 'do it', [message], 7, taken && taken.map(id));
+      assert.strictEqual(page.inp.value, back, [before, taken, recordedAs].join(', '));
+      page.win.close();
+    }
+  });
+
+  await test("R2-F1: an answer that names its prompt is that prompt's alone", () => {
+    // A run echoed again after its `clear` (an agent script moved it to
+    // another chat): the echo is not the same-text follow-up's.
+    const page = connectedPage();
+    sendPrompt(page, 'build it');
+    const run = promptIds(page);
+    tell(page, {type: 'setTaskText', text: 'build it', promptIds: run});
+    tell(page, {type: 'clear', promptIds: run});
+    tell(page, {type: 'status', running: true});
+    sendPrompt(page, 'build it');
+    tell(page, {type: 'setTaskText', text: 'build it', promptIds: run});
+    tell(page, {type: 'clear', promptIds: run});
+    assert.strictEqual(drafts(page.win)[page.tabId], 'build it', 'the follow-up still waits');
+    refuse(page, [promptIds(page)[1]]);
+    assert.strictEqual(page.inp.value, 'build it');
+    page.win.close();
+
+    // The messages a finished task left become one run.  Its answers
+    // name them all: started, none of them waits; refused, they come
+    // back as the prompt the daemon made of them.
+    for (const [started, back] of [
+      [true, ''],
+      [false, 'first note\n\nsecond note'],
+    ]) {
+      const late = connectedPage();
+      tell(late, {type: 'status', running: true});
+      sendPrompt(late, 'first note');
+      sendPrompt(late, 'second note');
+      const ids = promptIds(late);
+      tell(late, {type: 'setTaskText', text: 'first note\n\nsecond note', promptIds: ids});
+      if (started) tell(late, {type: 'clear', promptIds: ids});
+      else refuse(late, ids);
+      assert.strictEqual(late.inp.value, back);
+      assert.strictEqual(drafts(late.win)[late.tabId], back || undefined);
+      late.win.close();
+    }
+
+    // A file opened instead of a task, and a refusal, name a prompt
+    // that is not the oldest one waiting.
+    const two = connectedPage();
+    sendPrompt(two, 'older prompt');
+    sendPrompt(two, 'notes.txt');
+    sendPrompt(two, 'newer prompt');
+    const [older, opened, newer] = promptIds(two);
+    assert.strictEqual(h.ofType(two.posted, 'submit').length, 3);
+    tell(two, {type: 'promptOpened', promptId: opened});
+    refuse(two, [newer]);
+    assert.strictEqual(two.inp.value, 'newer prompt');
+    typeInto(two.win, two.inp, '');
+    assert.strictEqual(drafts(two.win)[two.tabId], 'older prompt', 'the oldest still waits');
+    refuse(two, [older]);
+    assert.strictEqual(two.inp.value, 'older prompt');
+    two.win.close();
+  });
+
+  await test('C09-F1: a prompt the transport still owes keeps waiting', () => {
+    const page = connectedPage();
+    const {win, tabId} = page;
+    sendPrompt(page, 'sent before the drop');
+    sendPrompt(page, 'held by the transport');
+    outage(page, [
+      null,
+      {type: 'submit', tabId: 'other', prompt: 'held by the transport'},
+      {type: 'submit', tabId, prompt: 'held by the transport'},
+    ]);
+    resync(page, 'sent before the drop');
+    assert.strictEqual(page.inp.value, '');
+    assert.strictEqual(drafts(win)[tabId], 'held by the transport');
+    h.send(win, {type: 'setTaskText', text: 'held by the transport', tabId});
+    h.send(win, {type: 'clear', tabId});
+    assert.strictEqual(drafts(win)[tabId], undefined, 'answered as usual');
+    win.close();
+  });
+
+  await test("C09-F1: a background tab's transcript is fetched at once", () => {
+    const page = connectedPage();
+    const {win, posted, tabId, inp} = page;
+    h.send(win, {
+      type: 'tabs_state',
+      tabs: [
+        {tabId, title: 'A', chatId: 'c1'},
+        {tabId: 'second', title: 'B', chatId: 'c2'},
+      ],
+    });
+    sendPrompt(page, 'left behind');
+    win._testApi.switchToTab('second');
+    outage(page);
+    const before = h.ofType(posted, 'resumeSession').length;
+    h.send(win, {type: 'replay_deferred', tabId: 'second', chatId: 'c2'});
+    h.send(win, {type: 'replay_deferred', tabId, chatId: 'c1'});
+    assert.deepStrictEqual(
+      h
+        .ofType(posted, 'resumeSession')
+        .slice(before)
+        .map(m => [m.tabId, m.scoped]),
+      [
+        ['second', true],
+        [tabId, true],
+      ],
+      'the tab on screen, and the one with a prompt in doubt',
+    );
+    h.send(win, {
+      type: 'task_events',
+      tabId,
+      task: 'older task',
+      task_id: 3,
+      chat_id: 'c1',
+      events: [],
+    });
+    win._testApi.switchToTab(tabId);
+    assert.strictEqual(inp.value, 'left behind');
+    win.close();
   });
 
   report('ui_antipattern_review_fixes');

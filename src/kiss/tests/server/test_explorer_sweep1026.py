@@ -1,9 +1,9 @@
 """Explorer git commands after the 2026-10-26 sweep.
 
-1. ``git_action`` on a linked worktree locks the repository's MAIN
-   worktree, the key every other mutation (the worktree merge
-   transaction, auto-commit) locks, instead of the linked worktree's
-   own path, which nothing else ever locked.
+1. ``git_action`` takes the repository's lock, the one every other
+   mutation (the worktree merge transaction, auto-commit) takes from
+   any checkout of the repository, instead of a lock of the linked
+   worktree's own path, which nothing else ever took.
 2. ``gitShow`` / ``gitFileAt`` / ``gitFileDiff`` / ``gitCompare`` stream
    git's output and stop at ``GIT_SHOW_MAX_BYTES``: a huge blob or
    patch costs the daemon the cap, not its whole size (it used to be
@@ -28,7 +28,8 @@ from types import CodeType
 
 import pytest
 
-from kiss.agents.sorcar.git_worktree import _repo_locks, repo_lock
+from kiss.agents.sorcar import git_worktree
+from kiss.agents.sorcar.git_worktree import repo_lock
 from kiss.server import explorer
 from kiss.server.explorer import (
     GIT_SHOW_MAX_BYTES,
@@ -38,6 +39,16 @@ from kiss.server.explorer import (
     git_file_diff,
     git_show,
 )
+from kiss.tests.conftest import posix_only
+
+#: Holds the flock on the file named on the command line until its stdin has a line.
+_HOLD_FLOCK = """\
+import fcntl, sys
+lock = open(sys.argv[1], "a+")
+fcntl.flock(lock, fcntl.LOCK_EX)
+print("held", flush=True)
+sys.stdin.readline()
+"""
 
 _ENV = {
     "GIT_AUTHOR_NAME": "t",
@@ -82,7 +93,7 @@ def _utf8_len(text: str) -> int:
 
 
 class TestGitActionLock:
-    """``git_action`` serialises with the repository's main-worktree lock."""
+    """``git_action`` serialises with the repository's lock, from any of its checkouts."""
 
     def test_action_in_linked_worktree_waits_for_the_main_worktree_lock(
         self, repo: Path, tmp_path: Path,
@@ -124,9 +135,6 @@ class TestGitActionLock:
                 stable = stable + 1 if line == lock_line else 0
             assert stable == 20, "git_action is not waiting for the lock"
             assert result == {}
-            # The one lock held is the main worktree's, so that is the one
-            # it waits for; the linked worktree's was never even created.
-            assert str(linked.resolve()) not in _repo_locks
         finally:
             release.set()
             action.join(10)
@@ -135,6 +143,113 @@ class TestGitActionLock:
         assert _git(linked, "rev-parse", "HEAD") == sha
         assert _git(linked, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"  # detached
         assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+
+    @pytest.mark.parametrize(
+        ("layout", "holder", "actor"),
+        [
+            ("separate", "main", "linked"),
+            ("separate", "linked", "main"),
+            ("bare", "two", "one"),
+            ("separate", "main", "main"),
+            ("separate", "main", "main/.kiss-worktrees/kiss_wt-1"),
+            pytest.param(
+                "symlinked", "repo", "repo/.kiss-worktrees/kiss_wt-1",
+                marks=posix_only("the worktrees folder is a symlink"),
+            ),
+        ],
+    )
+    def test_action_waits_for_a_transaction_in_any_checkout_of_the_repository(
+        self, repo: Path, tmp_path: Path, layout: str, holder: str, actor: str,
+    ) -> None:
+        """An action waits for a transaction of its repository, whatever its worktree list names.
+
+        The lock was that of the first row of ``git worktree list``, which
+        is not the main checkout of every repository: of one made with
+        ``--separate-git-dir`` git lists the metadata directory, a bare one
+        has none, and a git before 2.36 gave no list to read.  The lock
+        then was one no transaction holds, and the action ran in the
+        middle of a merge.  A repository has one ``repo_lock``, whichever
+        of its checkouts names it, and a transaction holds it around its
+        git steps: the action waits for that lock alone.
+
+        Nor is the lock found by a folder's name.  Git names a worktree by
+        where its files are: with ``.kiss-worktrees`` a symlink to a folder
+        elsewhere, two levels above the task's worktree is the folder that
+        one is in, not the task's checkout, and its lock is one the task's
+        repository never holds.
+        """
+        if layout == "separate":
+            _git(tmp_path, "init", "-q", "-b", "main", "--separate-git-dir", "meta", "main")
+            (tmp_path / "main" / "a.txt").write_text("one\n")
+            _commit(tmp_path / "main", "first")
+            for branch, where in ("side", "../linked"), ("task", ".kiss-worktrees/kiss_wt-1"):
+                _git(tmp_path / "main", "worktree", "add", "-q", where, "-b", branch)
+        elif layout == "symlinked":
+            kept = tmp_path / "storage" / ".kiss-worktrees"
+            kept.mkdir(parents=True)
+            (repo / ".kiss-worktrees").symlink_to(kept, target_is_directory=True)
+            _git(repo, "worktree", "add", "-q", ".kiss-worktrees/kiss_wt-1", "-b", "task")
+        else:
+            _git(tmp_path, "clone", "-q", "--bare", str(repo), "bare.git")
+            for name in ("one", "two"):
+                added = str(tmp_path / name)
+                _git(tmp_path / "bare.git", "worktree", "add", "-q", added, "-b", name)
+        sha = _git(tmp_path / actor, "rev-parse", "HEAD")
+        held = threading.Event()
+        release = threading.Event()
+
+        def transaction() -> None:
+            with repo_lock(tmp_path / holder):
+                held.set()
+                release.wait(30)
+
+        result: dict[str, object] = {}
+
+        def run_action() -> None:
+            result.update(git_action(str(tmp_path / actor), "createTag", sha, "v1"))
+
+        merging = threading.Thread(target=transaction, daemon=True)
+        merging.start()
+        assert held.wait(10)
+        action = threading.Thread(target=run_action, daemon=True)
+        action.start()
+        try:
+            action.join(1.0)
+            assert action.is_alive() and result == {}, "the action ran inside the transaction"
+            assert _git(tmp_path / actor, "tag", "--list") == ""
+        finally:
+            release.set()
+            action.join(30)
+            merging.join(10)
+        assert result.get("ok") is True, result
+        assert _git(tmp_path / actor, "tag", "--list") == "v1"
+
+    @posix_only("the other process holds a fcntl.flock")
+    def test_a_repository_another_process_keeps_is_reported_busy(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Another process's transaction is waited for too; one that outlasts the wait is an error.
+
+        Not an exception: the reply names the busy repository, and the
+        action runs once the other process is done.
+        """
+        monkeypatch.setattr(git_worktree, "PROCESS_LOCK_TIMEOUT_SECONDS", 0.5)
+        sha = _git(repo, "rev-parse", "HEAD")
+        peer = subprocess.Popen(
+            [sys.executable, "-c", _HOLD_FLOCK, str(repo / ".git" / "kiss-reclaim.lock")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        assert peer.stdin is not None and peer.stdout is not None
+        try:
+            assert peer.stdout.readline().strip() == "held"
+            busy = git_action(str(repo), "createTag", sha, "v1")
+            assert "still using this repository" in str(busy.get("error")), busy
+            assert _git(repo, "tag", "--list") == ""
+        finally:
+            peer.stdin.write("\n")
+            peer.stdin.close()
+            peer.wait(timeout=10)
+        assert git_action(str(repo), "createTag", sha, "v1").get("ok") is True
 
 
 def _innermost_line(thread: threading.Thread, code: CodeType) -> int | None:
@@ -296,6 +411,32 @@ class TestExistenceChecks:
         assert git_compare(str(repo), "nope", sha) == {"error": "Unknown revision: nope"}
         same = git_compare(str(repo), sha, sha)
         assert same["text"] == "" and same["truncated"] is False
+
+    def test_git_compare_shows_gits_own_diff_despite_an_external_diff_tool(
+        self, repo: Path,
+    ) -> None:
+        """``git diff`` (unlike ``git show``) runs ``diff.external`` unless told not to."""
+        base = _git(repo, "rev-parse", "HEAD")
+        (repo / "a.txt").write_text("two\n", newline="\n")
+        sha = _commit(repo, "second")
+        _git(repo, "config", "diff.external", "echo EXTERNAL-TOOL-RAN")
+        text = git_compare(str(repo), base, sha)["text"]
+        assert "EXTERNAL-TOOL-RAN" not in text
+        assert "-one\n+two\n" in text
+
+    def test_a_revision_followed_by_a_newline_is_not_a_revision(self, repo: Path) -> None:
+        sha = _git(repo, "rev-parse", "HEAD")
+        assert git_show(str(repo), sha + "\n", "") == {"error": f"Not a commit id: {sha}\n"}
+        assert git_compare(str(repo), "main\n", sha) == {"error": "Not a revision: main\n"}
+
+    def test_a_path_with_a_nul_byte_is_an_error_reply(self, repo: Path) -> None:
+        """``subprocess`` and ``os.open`` raise ``ValueError`` for it, not ``OSError``."""
+        sha = _git(repo, "rev-parse", "HEAD")
+        assert list(git_show(str(repo), sha, "p\0q")) == ["error"]
+        assert list(git_file_at(str(repo), sha, "p\0q")) == ["error"]
+        for commit in (sha, ""):
+            reply = git_file_diff(str(repo), commit, "p\0q")
+            assert reply == {"error": "Not a repository path: p\0q"}
 
     def test_git_show_of_an_unknown_commit(self, repo: Path) -> None:
         unknown = "0123456789abcdef0123456789abcdef01234567"

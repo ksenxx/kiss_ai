@@ -23,7 +23,9 @@ doubles:
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import os
 import shutil
 import subprocess
 import tempfile
@@ -46,6 +48,8 @@ from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.server import agent_state
 from kiss.server.merge_flow import _MergeFlowMixin
 from kiss.server.server import AgentServer
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
+from kiss.tests.conftest import posix_only
 from kiss.tests.server.conftest import run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
@@ -80,6 +84,7 @@ def _make_repo(path: Path) -> Path:
     for key, value in (("user.email", "t@t.com"), ("user.name", "T")):
         subprocess.run(["git", "-C", str(path), "config", key, value], check=True)
     (path / "f.txt").write_text("a\nb\nc\n")
+    (path / "user.txt").write_text("a file no task touches\n")
     subprocess.run(["git", "-C", str(path), "add", "."], check=True)
     subprocess.run(["git", "-C", str(path), "commit", "-qm", "initial"], check=True)
     return path
@@ -102,6 +107,41 @@ def _raising_runner(parent_agent: Any, prompt: str, repo: Path) -> None:
 
 def _interrupted_runner(parent_agent: Any, prompt: str, repo: Path) -> None:
     raise KeyboardInterrupt
+
+
+def _idle_runner_beside_an_editor(parent_agent: Any, prompt: str, repo: Path) -> None:
+    """The user's editor saves a new file and a tracked one while the merge agent gives up."""
+    for name in ("new-user-notes.txt", "user.txt"):
+        (repo / name).write_text("saved during the resolution\n")
+
+
+def _interrupted_runner_beside_an_editor(parent_agent: Any, prompt: str, repo: Path) -> None:
+    """The same files are saved, then the merge agent is stopped."""
+    _idle_runner_beside_an_editor(parent_agent, prompt, repo)
+    raise KeyboardInterrupt
+
+
+def _rejected_runner_beside_an_editor(parent_agent: Any, prompt: str, repo: Path) -> None:
+    """The same files are saved; a hook then rejects the commit of the agent's resolution."""
+    _idle_runner_beside_an_editor(parent_agent, prompt, repo)
+    _resolving_runner(parent_agent, prompt, repo)
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(exist_ok=True)
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+
+
+def _committing_runner_beside_an_editor(parent_agent: Any, prompt: str, repo: Path) -> None:
+    """The same files are saved; the agent then commits all there is on its own."""
+    _idle_runner_beside_an_editor(parent_agent, prompt, repo)
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-qm", "rogue commit", cwd=repo)
+
+
+def _fifo_leaving_runner(parent_agent: Any, prompt: str, repo: Path) -> None:
+    """The agent leaves a FIFO where the conflicted file was: nothing git takes for a file."""
+    (repo / "f.txt").unlink()
+    os.mkfifo(repo / "f.txt")
 
 
 def _stash_dropping_interrupted_runner(parent_agent: Any, prompt: str, repo: Path) -> None:
@@ -215,6 +255,35 @@ class TestResolveMergeConflictThroughMerge:
         assert (self.repo / "f.txt").read_text() == "a\nB-user\nc\n"
         assert _git("stash", "list", cwd=self.repo).stdout == ""
 
+    @pytest.mark.parametrize(
+        ("runner", "ending"),
+        [
+            (_idle_runner_beside_an_editor, contextlib.nullcontext()),
+            pytest.param(
+                _rejected_runner_beside_an_editor, contextlib.nullcontext(),
+                marks=posix_only("the hook is a sh script"),
+            ),
+            (_interrupted_runner_beside_an_editor, pytest.raises(KeyboardInterrupt)),
+        ],
+        ids=["unresolved", "rejected", "stopped"],
+    )
+    def test_a_file_the_user_saves_during_the_resolution_survives_its_abort(
+        self, runner: Any, ending: Any,
+    ) -> None:
+        """C10-F8: the abort swept a tree that was clean before with ``git clean -fd``.
+
+        An editor takes none of the merge's locks, and a file it saved
+        while the agent ran was deleted as the resolver's; a tracked
+        one the merge never wrote was reset with the merge's own."""
+        with ending:
+            self.agent.merge(conflict_resolver=self._resolver(runner))
+
+        for name in ("new-user-notes.txt", "user.txt"):
+            assert (self.repo / name).read_text() == "saved during the resolution\n"
+        assert GitWorktreeOps.status_porcelain(self.repo) == "M user.txt\n?? new-user-notes.txt"
+        assert (self.repo / "f.txt").read_text() == "a\nB-user\nc\n"
+        assert self._branch_exists()
+
     def test_interrupt_with_unrestorable_stash_records_a_warning(self) -> None:
         (self.repo / "notes.txt").write_text("uncommitted user notes\n")
 
@@ -239,6 +308,46 @@ class TestResolveMergeConflictThroughMerge:
         assert (self.repo / "f.txt").read_text() == "a\nB-user\nc\n"
         assert GitWorktreeOps.status_porcelain(self.repo) == ""
         assert _git("show", f"{self.wt.branch}:f.txt", cwd=self.repo).stdout == "a\nB-agent\nc\n"
+
+    @pytest.mark.parametrize(
+        ("runner", "status", "saved"),
+        [
+            (
+                _idle_runner_beside_an_editor,
+                "UU f.txt\nD  user.txt\n?? new-user-notes.txt\n?? user.txt",
+                ["new-user-notes.txt", "user.txt"],
+            ),
+            (
+                _committing_runner_beside_an_editor,
+                "M  f.txt\nA  new-user-notes.txt\nM  user.txt",
+                ["new-user-notes.txt", "user.txt"],
+            ),
+            pytest.param(
+                _fifo_leaving_runner, "UU f.txt\nD  user.txt", [], marks=posix_only("a FIFO"),
+            ),
+        ],
+        ids=["saved where the task deleted", "and committed by the agent", "a fifo"],
+    )
+    def test_a_merge_git_refuses_to_take_back_stays_for_the_user_to_settle(
+        self, runner: Any, status: str, saved: list[str],
+    ) -> None:
+        """A file saved where the task deleted one is not the merge's to write over.
+
+        Nor does git take a FIFO for the content of a file.  The merge
+        then stays in the files and the index, on the commit it began
+        on, and no save is lost."""
+        (self.wt.wt_dir / "user.txt").unlink()
+        assert GitWorktreeOps.commit_all(self.wt.wt_dir, "agent deletes user.txt")
+        head = _git("rev-parse", "HEAD", cwd=self.repo).stdout.strip()
+
+        msg = self.agent.merge(conflict_resolver=self._resolver(runner))
+
+        assert "Merge conflict detected" in msg
+        assert self._branch_exists()
+        assert _git("rev-parse", "HEAD", cwd=self.repo).stdout.strip() == head
+        assert GitWorktreeOps.status_porcelain(self.repo) == status
+        for name in saved:
+            assert (self.repo / name).read_text() == "saved during the resolution\n"
 
     def test_unapplicable_branch_skips_the_runner(self) -> None:
         calls: list[str] = []
@@ -410,7 +519,7 @@ class TestMergeSea:
         assert "stage the resolved files with `git add`" in sea.prompt("finish merge X")
 
     def test_merge_is_a_registered_slash_command(self) -> None:
-        sea_commands._reset_for_tests()
+        reset_sea_registry()
         try:
             sea_commands.refresh_registry()
             path = sea_commands.get_command("merge")
@@ -421,7 +530,7 @@ class TestMergeSea:
             hit = sea_commands.slash_command_task("/merge finish the merge")
             assert hit == ("finish the merge", path)
         finally:
-            sea_commands._reset_for_tests()
+            reset_sea_registry()
 
 
 #: Marks the task prompt so the stand-in endpoint recognises the task agent.

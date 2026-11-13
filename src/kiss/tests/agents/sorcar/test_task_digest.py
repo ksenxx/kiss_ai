@@ -198,6 +198,28 @@ def test_overview_of_a_running_task_with_children() -> None:
     assert tail.rstrip().endswith("run_entry(task_id, index) returns one entry in full.")
 
 
+def test_overview_lists_a_child_row_with_text_in_its_number_columns() -> None:
+    """A sub-agent row whose ``cost`` and ``end_ts`` hold text is listed, as a running one.
+
+    SQLite's dynamic typing lets a foreign tool store text there.
+    ``float("n/a")`` raised out of the parent's whole overview (and its
+    ``/ask`` context), and a text ``end_ts`` read as finished although
+    the row's own header (``end_ms``) says running (sweep 2026-11-11).
+    """
+    from kiss.agents.sorcar import persistence
+
+    task_id = _persist("Run the benchmark", [])
+    child = _persist("Run the tests", [], extra={"subagent": {"parent_task_id": task_id}})
+    db = persistence._get_db()
+    db.execute("UPDATE task_history SET cost = 'n/a', end_ts = 'soon' WHERE id = ?", (child,))
+    db.commit()
+
+    (line,) = [ln for ln in task_digest.overview(task_id).splitlines() if child in ln]
+    assert line.startswith(f"[{child}] steps=0, cost=$0.00, started "), line
+    assert line.endswith(", running"), line
+    assert "Status: running" in task_digest.overview(child)
+
+
 def test_overview_of_a_finished_task_without_children_or_summaries() -> None:
     """A finished task shows its result and end time; empty sections say ``(none)``."""
     start = _NOW_MS - 3_700_000
@@ -360,6 +382,17 @@ def test_event_time_prefers_ts_and_falls_back_to_the_row_timestamp() -> None:
     assert task_digest._event_ms({"ts": "12.7"}) == 12
     assert task_digest._event_ms({"ts": "not-an-int", "_timestamp": 5.0}) == 0
     assert task_digest._event_ms({"ts": None, "_timestamp": "bad"}) == 0
+    # A number that is no time (a foreign writer's Infinity, an integer no float
+    # holds) counts as no time, and one past the calendar is shown as unknown:
+    # neither takes the overview or the /ask context down.
+    for unusable in (float("inf"), float("-inf"), 10**400):
+        assert task_digest._event_ms({"ts": unusable}) == 0
+        assert task_digest._event_ms({"_timestamp": unusable}) == 0
+    endless = _persist("p", [{"type": "tool_call", "name": "Bash", "ts": float("inf")}])
+    assert "Last event" not in task_digest.overview(endless)
+    assert "== Task ==" in task_digest.context(endless)
+    far = _persist("p", [{"type": "tool_call", "name": "Bash", "ts": 1e300}])
+    assert "Last event: unknown (0 min 0 s ago)" in task_digest.overview(far)
     unstamped = _persist("p", [{"type": "tool_call", "name": "Bash"}])
     assert "Last event: " in task_digest.overview(unstamped)
     assert task_digest.load_task("missing") is None

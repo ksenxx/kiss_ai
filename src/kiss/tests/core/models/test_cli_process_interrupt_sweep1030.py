@@ -40,10 +40,11 @@ from typing import Any
 
 import pytest
 
-from kiss.core import processes
+from kiss.core import processes, stop_signal
 from kiss.core.models import model as model_module
 from kiss.core.models.model import _CLIProcess
 from kiss.tests.conftest import posix_only
+from kiss.tests.server.pause import Pause, Pauses
 
 _set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
 _set_async_exc.argtypes = (ctypes.c_ulong, ctypes.py_object)
@@ -210,7 +211,11 @@ def test_an_interrupt_as_the_turn_enters_the_with_block_kills_the_child() -> Non
 
     ``with _CLIProcess(...) as proc:`` never reaches ``__exit__`` when the
     interrupt lands before the block is entered, so the turn itself must
-    own the supervisor from the moment it exists.
+    own the supervisor from the moment it exists.  The constructor's own
+    returns are swept through the turn too: a Stop landing before the
+    spawn finds the supervisor registered but half built, and must reach
+    the caller as itself, not as the ``AttributeError`` of closing it
+    (audit C4, F3; the sweep lets only ``KeyboardInterrupt`` by).
     """
     from kiss.core.models.claude_code_model import ClaudeCodeModel
 
@@ -221,22 +226,30 @@ def test_an_interrupt_as_the_turn_enters_the_with_block_kills_the_child() -> Non
         with cli_model._cli_turn(_CHILD, "probe"):
             pass
 
-    assert _sweep_returns(turn, ("_cli_turn",)) == []
+    assert _sweep_returns(turn, ("_cli_turn", "__init__")) == []
 
 
-def test_a_child_spawned_after_the_constructor_gave_up_is_ended_by_the_helper() -> None:
-    """A Stop whose grace runs out while the spawn is still in progress leaves no orphan.
+@pytest.mark.parametrize("gives_up_on", ["forced Stop", "Stop", "deadline"])
+def test_a_child_spawned_after_the_constructor_gave_up_is_ended_by_the_helper(
+    gives_up_on: str,
+) -> None:
+    """A start given up while the spawn is still in progress leaves no orphan.
 
     The constructor used to wait the grace for the spawn helper and then
     leave with nothing: a child the helper returned afterwards went into
     a list nobody read again, alive behind three open pipes, and the
     supervisor was already marked closed.  The helper must end the child
     it returns once the constructor has given the start up.
+
+    The constructor must give up by itself too (audit C4, F1): it waited
+    for the spawn untimed, so a spawn that hung held the task thread past
+    the cooperative Stop and past ``model_config["timeout"]``, which must
+    end the turn as a Stop and as the retryable stall error.
     """
     from kiss.core.models.claude_code_model import ClaudeCodeModel
 
     cli_model = ClaudeCodeModel("cc/opus")
-    cli_model.model_config = {"timeout": 60}
+    cli_model.model_config = {"timeout": 0.5 if gives_up_on == "deadline" else 60}
     spawn_held = threading.Event()
     release_spawn = threading.Event()
     helpers: list[threading.Thread] = []
@@ -249,7 +262,7 @@ def test_a_child_spawned_after_the_constructor_gave_up_is_ended_by_the_helper() 
         if event == "call":
             helpers.append(threading.current_thread())
             spawn_held.set()
-            assert release_spawn.wait(timeout=60), "the test never released the spawn"
+            release_spawn.wait(timeout=20)  # a constructor that waits this out fails below
         elif event == "return":
             spawned.append(arg)
 
@@ -260,19 +273,23 @@ def test_a_child_spawned_after_the_constructor_gave_up_is_ended_by_the_helper() 
             assert spawn_held.wait(timeout=30), "the helper never reached the spawn"
             raise KeyboardInterrupt("Stop while the spawn is in progress")
 
-    interrupted = False
+    ended: BaseException | None = None
+    # The cooperative Stop is requested the moment the spawn is held.
+    stop_signal.set_thread_stop_event(spawn_held if gives_up_on == "Stop" else None)
     threading.setprofile(hold_the_spawn)
-    sys.setprofile(stop_as_the_helper_starts)
+    sys.setprofile(stop_as_the_helper_starts if gives_up_on == "forced Stop" else None)
     try:
         with cli_model._cli_turn(_CHILD, "probe"):
             pass
-    except KeyboardInterrupt:
-        interrupted = True
+    except (KeyboardInterrupt, TimeoutError) as error:
+        ended = error
     finally:
         sys.setprofile(None)
         threading.setprofile(None)
+        stop_signal.set_thread_stop_event(None)
         release_spawn.set()
-    assert interrupted
+    expected = TimeoutError if gives_up_on == "deadline" else KeyboardInterrupt
+    assert isinstance(ended, expected), f"the constructor waited the held spawn out: {ended!r}"
     (helper,) = helpers
     helper.join(timeout=30)
     (child,) = spawned
@@ -483,3 +500,74 @@ def test_a_stop_inside_the_stdout_reader_start_does_not_hang_cleanup(tmp_path: P
     assert not worker.is_alive()
     assert returned_while_the_grandchild_held_stdout, "cleanup blocked closing the held pipe"
     assert isinstance(outcome.get("error"), KeyboardInterrupt)
+
+
+@pytest.mark.parametrize("after_the_reap", [False, True], ids=["before-the-kill", "after-the-reap"])
+def test_a_second_stop_during_the_start_abort_still_ends_the_child(after_the_reap: bool) -> None:
+    """A Stop cutting the constructor's own abort short leaves the child to the turn's close.
+
+    The first Stop lands once the stdout reader has started, the second
+    inside the abort that follows: before its kill, or once it has reaped
+    the child.  The supervisor used to count as closed before that abort
+    ran, so the close ``_cli_turn`` makes was a no-op and the child lived
+    on behind its pipes.  After the reap nothing may be signalled again:
+    the pid may be a stranger's by then.
+    """
+    from kiss.core.models.claude_code_model import ClaudeCodeModel
+
+    supervisors: list[_CLIProcess] = []
+    late_signals: list[int] = []
+    ended: list[BaseException] = []
+
+    def stderr_reader(frame_locals: dict[str, Any]) -> bool:
+        """Hold the start of the second reader: the stdout one already runs."""
+        supervisors.append(frame_locals["self"])
+        return bool(frame_locals["suffix"] == "stderr")
+
+    def reaped(frame_locals: dict[str, Any]) -> bool:
+        """Hold the abort's liveness check of the stdout reader: the child is reaped by then."""
+        return bool(frame_locals["self"].name == "cli-stdout-drain")
+
+    def signalled(frame_locals: dict[str, Any]) -> bool:
+        """Record a signal sent once the child is reaped; holds nothing."""
+        if frame_locals["self"]._proc.returncode is not None:
+            late_signals.append(frame_locals["self"]._proc.returncode)
+        return False
+
+    def turn() -> None:
+        try:
+            with ClaudeCodeModel("cc/opus")._cli_turn(_CHILD, "probe"):
+                pass
+        except KeyboardInterrupt as stop:
+            ended.append(stop)
+
+    first = Pause(_CLIProcess._start_reader.__code__, stderr_reader)
+    second = (
+        Pause(threading.Thread.is_alive.__code__, reaped)
+        if after_the_reap
+        else Pause(_CLIProcess._abort_start.__code__, lambda frame_locals: True)
+    )
+    task = threading.Thread(target=turn, daemon=True)
+    with Pauses(first, second, Pause(_CLIProcess._signal_tree.__code__, signalled)):
+        task.start()
+        for pause in (first, second):
+            assert pause.paused.wait(30), "the start never got there"
+            _set_async_exc(task.ident or 0, ctypes.py_object(KeyboardInterrupt))
+            pause.release()
+        task.join(60)
+    assert ended and not task.is_alive(), "the turn did not end with the Stop"
+    child = supervisors[0]._proc
+    assert child.stdin is not None and child.stdout is not None and child.stderr is not None
+    drains = [t for t in threading.enumerate() if t.name.startswith("cli-std")]
+    try:
+        assert child.returncode is not None, "the child was left running, or a zombie"
+        assert [pipe.closed for pipe in (child.stdin, child.stdout, child.stderr)] == [True] * 3
+        assert not any(thread.is_alive() for thread in drains), "a drain thread was left"
+        if os.name != "nt":
+            assert not late_signals, "the group was signalled after the child was reaped"
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=30)
+        for pipe in (child.stdin, child.stdout, child.stderr):
+            pipe.close()

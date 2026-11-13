@@ -334,6 +334,24 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     )
     out = run_agent("say hi", "ntfy", options="{not json")
     assert out.startswith("Error: options must be a JSON object, got '{not json': ")
+    # A long text is shown by its first 80 characters, as ``tasks`` is: the
+    # refusal used to carry the whole text back (50,119 characters for this one).
+    unterminated = '{"work_dir": "' + "x" * 50_000
+    assert run_agent("say hi", "ntfy", options=unterminated) == (
+        f"Error: options must be a JSON object, got {unterminated[:80]!r}: "
+        "Unterminated string starting at: line 1 column 14 (char 13)"
+    )
+    long_array = "[" + "1, " * 20_000 + "1]"
+    assert run_agent("say hi", "ntfy", options=f"  {long_array}\n") == (
+        f"Error: options must be a JSON object, got {long_array[:80]!r}."
+    )
+    # Text nested past the decoder's depth is refused like any other that is
+    # no JSON object: the decoder's RecursionError is no ValueError and used
+    # to escape the tool.
+    deep = "[" * 100_000
+    out = run_agent("say hi", "ntfy", options=deep)
+    assert out.startswith(f"Error: options must be a JSON object, got {deep[:80]!r}: ")
+    assert out.endswith(" while decoding a JSON array from a unicode string")
     out = run_agent("say hi", "ntfy", options='{"tools": "x.py"}')
     assert out.startswith(
         "Error: options has an unknown key 'tools'; known keys: work_dir, chat_id, "

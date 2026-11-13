@@ -643,11 +643,69 @@ function testUnacknowledgedAnswerComesBackInTheComposer() {
   console.log('PASS an unacknowledged answer comes back in the composer');
 }
 
+// Tab t1 of a page just loaded is asked 'Go on?' under *questionId*:
+// the composer, which is its answer box now.
+function askedGoOn(win, questionId) {
+  send(win, {type: 'daemonStatus', connected: true});
+  send(win, {
+    type: 'tabs_state',
+    tabs: [{tabId: 't1', chatId: 'c1', title: 't1', workDir: ''}],
+  });
+  send(win, {type: 'askUser', tabId: 't1', question: 'Go on?', questionId});
+  return win.document.getElementById('task-input');
+}
+
+// The daemon names each ask with an id.  A reloaded page gives a saved
+// answer (typed, or sent and never confirmed) back to the ask it was
+// written for only: the same words under another id are a later
+// question, asked after the first was answered while the page was away.
+function testSavedAnswerComesBackToItsOwnAskOnly() {
+  for (const sent of [false, true]) {
+    const first = makePage();
+    askedGoOn(first.win, 'ask-1').value = 'yes to the first';
+    if (sent) clickSend(first.win);
+    first.win.dispatchEvent(new first.win.Event('pagehide'));
+    const persisted = first.getState();
+    first.win.close();
+    for (const [questionId, answer] of [
+      ['ask-1', 'yes to the first'],
+      ['ask-2', ''],
+    ]) {
+      const page = makePage(persisted);
+      assert.strictEqual(
+        askedGoOn(page.win, questionId).value,
+        answer,
+        `BUG: ${questionId}, the answer of ask-1 ${sent ? 'sent' : 'typed'}`,
+      );
+      page.win.close();
+    }
+  }
+  // The page code before the ids saved {question, answer}, also for an
+  // ask that had an id: a page reloaded into this code gives such an
+  // answer back to the pending question of the same words, as it did
+  // then -- into the composer, never sent by itself, and saved again.
+  const old = makePage({
+    askDrafts: {t1: {question: 'Go on?', answer: 'typed before the update'}},
+  });
+  assert.strictEqual(
+    askedGoOn(old.win, 'ask-1').value,
+    'typed before the update',
+    'BUG: an answer saved before the update is lost',
+  );
+  assert.ok(!old.posted.some(m => m.type === 'userAnswer'));
+  assert.deepStrictEqual(askDraftsOf(old.win, old.getState), [
+    ['t1', 'Go on?', 'typed before the update'],
+  ]);
+  old.win.close();
+  console.log('PASS a saved answer comes back to its own ask only');
+}
+
 async function main() {
   testReconnectingKeepsAppVisibleUnderBanner();
   testUnacknowledgedPromptComesBackAsDraft();
   testBackgroundTabUnackedValuesArePersisted();
   testUnacknowledgedAnswerComesBackInTheComposer();
+  testSavedAnswerComesBackToItsOwnAskOnly();
   testPlainDisconnectStillHidesApp();
   testColdStartIgnoresNonBooleanReconnecting();
   testSendHeldBackWhileDaemonDown();

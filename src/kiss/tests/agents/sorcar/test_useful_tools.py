@@ -5,12 +5,14 @@
 """Tests for useful_tools.py module."""
 
 import errno
+import inspect
 import json
 import os
 import pathlib
 import re
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -33,7 +35,8 @@ from kiss.agents.sorcar.useful_tools import (
 from kiss.core import tool_interrupt
 from kiss.core.processes import pid_alive
 from kiss.core.tool_verdict import ToolRedirect
-from kiss.tests.conftest import host_sed_is_gnu
+from kiss.tests.conftest import host_sed_is_gnu, is_root, posix_only
+from kiss.tests.server.pause import Pause
 
 
 @pytest.fixture
@@ -130,6 +133,17 @@ class TestAdversarial:
             pass
         assert not alive, f"Child {child_pid} survived KeyboardInterrupt!"
 
+def _texts(root: Path, names: tuple[str, ...]) -> list[str]:
+    """Return the text of each file of *names* under *root*."""
+    return [(root / name).read_text() for name in names]
+
+
+def _bash_exit(command: str, cwd: Path) -> int:
+    """Return the exit code of *command* run by the host's bash in *cwd*."""
+    return subprocess.run(["bash", "-c", command], cwd=cwd, timeout=60, capture_output=True,
+                          stdin=subprocess.DEVNULL).returncode
+
+
 class TestBugs:
     """Tests that expose bugs in useful_tools.py."""
 
@@ -173,6 +187,268 @@ class TestBugs:
             result = ut.Read(typo)
             assert result.startswith(f"Error: File not found: {typo}."), result
             assert close in result and "Did you mean" in result, result
+
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="the Windows volume rejects this 255-byte component",
+    )
+    def test_write_and_edit_take_a_file_name_of_the_full_length(self, temp_test_dir):
+        """Write and Edit reach a file whose name is as long as the file system allows.
+
+        The sibling temporary file carried the file's name plus 38
+        characters, so a name over 217 bytes answered ``File name too
+        long`` although the file itself is legal.
+        """
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        path = temp_test_dir / ("n" * 251 + ".txt")
+        assert ut.Write(str(path), "a = 1\n").startswith("Successfully wrote")
+        assert ut.Edit(str(path), "a = 1", "a = 2").startswith("Successfully replaced 1")
+        assert path.read_text() == "a = 2\n"
+        assert os.listdir(temp_test_dir) == [path.name]
+
+    @pytest.mark.skipif(is_root(), reason="root writes a read-only file")
+    @posix_only("the rename over a read-only file is refused on Windows")
+    def test_write_and_edit_refuse_a_read_only_file(self, temp_test_dir):
+        """A file made read-only is refused, as the shell's ``>`` refuses it.
+
+        The rename of a sibling temporary file over it takes the
+        directory's permission only, so both tools replaced the file.
+        Review 2026-11-11 S4-3: a ``sed -i`` does replace it that way,
+        so it runs as written, not as the ``Edit`` that is refused.
+        """
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        path = temp_test_dir / "locked.txt"
+        path.write_text("a = 1\n")
+        path.chmod(0o444)
+        ut.Read(str(path))
+        assert "Permission denied" in ut.Edit(str(path), "a = 1", "a = 2")
+        assert "Permission denied" in ut.Write(str(path), "a = 3\n")
+        assert path.read_text() == "a = 1\n"
+        assert os.listdir(temp_test_dir) == ["locked.txt"]
+        in_place = "sed -i" if host_sed_is_gnu() else "sed -i ''"
+        assert ut.Bash(f"{in_place} 's/a = 1/a = 2/' locked.txt", "sed renames") == ""
+        assert path.read_text() == "a = 2\n"
+
+    def test_write_and_edit_reach_a_file_that_is_a_mount_point(self, temp_test_dir):
+        """A file bound over another is written in place, as the shell's ``>`` writes it.
+
+        Review 2026-11-11 S4r3 (X2): the rename of the sibling temporary
+        file over a mount point is refused as busy, and only a
+        ``PermissionError`` sent the write down the in-place path, so
+        ``Write`` and ``Edit`` answered "Device or resource busy" for a
+        single file bound into a sandbox or a container.  The file is
+        bound for real, in a throwaway mount namespace.  Any other
+        failure of the temporary file still leaves the old text: on a
+        full file system an in-place write would have emptied the file.
+        """
+        in_namespace = ["unshare", "-Urm"]
+        if (
+            shutil.which("unshare") is None
+            or subprocess.run([*in_namespace, "true"], capture_output=True).returncode
+        ):
+            pytest.skip("no unprivileged namespaces here")
+        (temp_test_dir / "source.txt").write_text("a = 1\n")
+        (temp_test_dir / "bound.txt").write_text("under the mount\n")
+        (temp_test_dir / "full").mkdir()
+        script = (
+            "import os, subprocess, sys\n"
+            "from kiss.agents.sorcar.useful_tools import UsefulTools\n"
+            "mounts = (['--bind', 'source.txt', 'bound.txt'],\n"
+            "          ['-t', 'tmpfs', '-o', 'size=64k', 'tmpfs', 'full'])\n"
+            "if any(subprocess.run(['mount', *mount]).returncode for mount in mounts):\n"
+            "    sys.exit(3)\n"
+            "tools = UsefulTools(work_dir='.')\n"
+            "tools.Read('bound.txt')\n"
+            "print(tools.Edit('bound.txt', 'a = 1', 'a = 2'))\n"
+            "print(tools.Write('bound.txt', 'a = 3\\n'))\n"
+            "print(tools.Write('full/kept.txt', 'kept\\n'))\n"
+            "print(tools.Write('full/kept.txt', 'x' * 1_000_000))\n"
+            "print(os.listdir('full'), open('full/kept.txt').read().split())\n"
+        )
+        run = subprocess.run(
+            [*in_namespace, sys.executable, "-c", script], cwd=temp_test_dir,
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        )
+        if run.returncode == 3:
+            pytest.skip("nothing can be mounted here")
+        said = run.stdout.splitlines()
+        assert said[0].startswith("Successfully replaced 1"), run.stdout + run.stderr
+        assert [line[:18] for line in said[-4:-2]] == ["Successfully wrote"] * 2, run.stdout
+        assert "No space left on device" in said[-2] and said[-1] == "['kept.txt'] ['kept']"
+        assert (temp_test_dir / "source.txt").read_text() == "a = 3\n"
+        assert (temp_test_dir / "bound.txt").read_text() == "under the mount\n"
+        assert sorted(os.listdir(temp_test_dir)) == ["bound.txt", "full", "source.txt"]
+
+    @posix_only("the names Windows refuses are others")
+    def test_a_rewrite_of_a_name_the_system_refuses_runs_as_written(self, temp_test_dir):
+        """A ``sed -i`` or python rewrite becomes an ``Edit`` only where the system finds its file.
+
+        Review 2026-11-11 S4r2: ``Path.resolve`` drops a ``..`` along with
+        a name that is no directory, so ``sed -i s/a/b/ nosub/../f`` (sed:
+        no such file) changed ``f``; a name the system refuses (too long,
+        a lone surrogate, in a directory it may not search) raised
+        ``OSError`` / ``UnicodeEncodeError`` out of ``Bash``.
+        """
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        path = temp_test_dir / "f"
+        path.write_text("a\n")
+        (temp_test_dir / "g").write_text("a\n")
+        locked = temp_test_dir / "locked"
+        locked.mkdir()
+        (locked / "f").write_text("a\n")
+        ut.Read(str(path))
+        sed = ("sed -i" if host_sed_is_gnu() else "sed -i ''") + " 's/a/b/' "
+        python = (
+            "python3 - <<'EOF'\ns = open({0}).read()\ns = s.replace('a', 'b')\n"
+            "open({0}, 'w').write(s)\nEOF"
+        )
+        cases = [
+            (sed + "nosub/../f", "No such file or directory"),
+            (sed + "g/../f", "Not a directory"),
+            (python.format("'nosub/../f'"), "No such file or directory"),
+            (sed + "p" * 5000, "File name too long"),
+            (python.format(repr("p" * 5000)), "File name too long"),
+            (python.format("'\\ud800'"), "surrogates not allowed"),
+            (sed + "\ud800", "surrogates not allowed"),
+        ]
+        if not is_root():
+            cases.append((sed + "locked/f", "Permission denied"))
+        locked.chmod(0)
+        try:
+            for command, said in cases:
+                out = ut.Bash(command, "fails as written")
+                assert out.startswith("Error") and said in out, out
+                assert path.read_text() == "a\n"
+        finally:
+            locked.chmod(0o700)
+        applied = ut.Bash(python.format("'locked/../f'"), "a real directory")
+        assert applied.startswith("Applied as Edit(") and path.read_text() == "b\n", applied
+
+    @posix_only("a symbolic link, and the cd of the host's bash")
+    def test_a_rewrite_after_a_cd_is_applied_only_where_bash_walks_to_the_directory(
+        self, temp_test_dir,
+    ):
+        """``cd DIR && <rewrite>`` becomes a ``Write``/``Edit`` only where bash's ``cd`` gets there.
+
+        Review 2026-11-11 S4r3: the ``cd`` was judged by its normalised
+        path, so after ``cd nosub/..`` (bash: no such directory, nothing
+        runs) the rewrite was applied, and after ``cd link/../gone/../both``,
+        which bash enters through the link, the ``both`` beside the link
+        was edited.  Bash drops a ``..`` only after a directory.
+        """
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        names = ("f", "sub/h", "both/f", "other/both/f", "other/gone/f", "other/sub/f")
+        for name in names:
+            path = temp_test_dir / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("a\n")
+            ut.Read(str(path))
+        (temp_test_dir / "link").symlink_to("other/sub")
+        sed = ("sed -i" if host_sed_is_gnu() else "sed -i ''") + " 's/a/b/' {0}"
+        python = (
+            "python3 - <<'EOF'\ns = open('{0}').read()\ns = s.replace('a', 'b')\n"
+            "open('{0}', 'w').write(s)\nEOF"
+        )
+        rewrites = (sed, sed + " && echo ran > out", python, "cat > {0} <<'EOF'\nb\nEOF",
+                    "tee -a {0} <<'EOF' > /dev/null\nb\nEOF")
+        for operand, target in (("nosub/..", "f"), ("f/..", "f"), ("nosub/../sub", "h")):
+            refusal = useful_tools.CD_VERDICT.format(cwd=f"{temp_test_dir}/{operand}")
+            for rewrite in rewrites:
+                command = f"cd {operand} && " + rewrite.format(target)
+                assert ut.Bash(command, "the cd fails") == refusal, command
+                assert _bash_exit(command, temp_test_dir) != 0, command
+                assert _texts(temp_test_dir, names) == ["a\n"] * 6, command
+                assert os.listdir(temp_test_dir / "sub") == ["h"], command
+        through_the_link = ("link/../gone/../both", "link/../gone")
+        for operand in through_the_link:
+            out = ut.Bash(f"cd {operand} && " + sed.format("f"), "only bash knows where")
+            assert out == useful_tools.CD_LINK_VERDICT.format(
+                cwd=f"{temp_test_dir}/{operand}"), out
+            assert _texts(temp_test_dir, names) == ["a\n"] * 6, operand
+        for operand in through_the_link:  # bash enters the directory beyond the link
+            assert _bash_exit(f"cd {operand} && " + sed.format("f"), temp_test_dir) == 0
+        assert _texts(temp_test_dir, names) == ["a\n", "a\n", "a\n", "b\n", "b\n", "a\n"]
+        applied = ut.Bash(f"cd sub/.. && {sed.format('f')} && echo ran > out", "bash walks it")
+        assert applied.startswith("Applied as Edit(") and (temp_test_dir / "out").exists(), applied
+        applied = ut.Bash("cd link/../both && cat > f <<'EOF'\nb\nEOF", "beside the link")
+        assert applied.startswith("Applied as Write("), applied
+        assert _texts(temp_test_dir, names) == ["b\n", "a\n", "b\n", "b\n", "b\n", "a\n"]
+        # Two operands: bash 4.4 and later fail the cd, an older one enters the first.
+        command = "cd sub extra && " + sed.format("h")
+        assert not ut.Bash(command, "as written").startswith("Applied"), command
+        edited = (temp_test_dir / "sub" / "h").read_text() == "b\n"
+        assert edited == (_bash_exit(command, temp_test_dir) == 0)
+
+    def test_a_command_that_cannot_be_spawned_is_an_error_on_every_launch_path(
+        self, temp_test_dir,
+    ):
+        """A command ``Popen`` refuses (a lone surrogate or a NUL byte) is answered.
+
+        Windows accepts a lone surrogate in its native command-line string,
+        so that case is exercised only where the OS encoder rejects it.
+        The job starter caught ``OSError`` only, so its ``ValueError``
+        left ``Bash`` for a background call and for a foreground one over
+        the detach grace (the default), and each failed start left its
+        empty log.
+        """
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        commands = ("echo a\0b",) if sys.platform == "win32" else ("echo \ud800", "echo a\0b")
+        for command in commands:
+            for out in (
+                ut.Bash(command, "over the detach grace"),
+                ut.Bash(command, "under the detach grace", timeout_seconds=60),
+                ut.Bash(command, "as a job", background=True),
+                ut.Bash(command, "as a job at the deadline", on_timeout="background"),
+            ):
+                assert out.startswith("Error: "), out
+        assert ut._jobs == {} and os.listdir(temp_test_dir / "tmp" / "bash_jobs") == []
+
+    def test_bash_reads_no_input_from_the_process_that_runs_it(self, temp_test_dir):
+        """A command that reads its input gets end of file, as a background job does.
+
+        The foreground shell inherited the stdin of the process running
+        the tool: under an open pipe, or the terminal of the CLI,
+        ``cat``, ``ssh`` or a prompt waited for input until the timeout.
+        """
+        script = (
+            "import sys\n"
+            "from kiss.agents.sorcar.useful_tools import UsefulTools\n"
+            "tools = UsefulTools(work_dir=sys.argv[1])\n"
+            "print(tools.Bash('cat; echo done', 'reads its input', timeout_seconds=20))\n"
+        )
+        read_end, write_end = os.pipe()  # never written: its reader waits
+        try:
+            run = subprocess.run(
+                [sys.executable, "-c", script, str(temp_test_dir)],
+                stdin=read_end, capture_output=True, text=True, timeout=120,
+                env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+            )
+        finally:
+            os.close(read_end)
+            os.close(write_end)
+        assert run.stdout.strip() == "done", run.stdout + run.stderr
+
+    @posix_only("a file has no group on Windows")
+    def test_write_and_edit_keep_the_group_of_the_file(self, temp_test_dir):
+        """The file a Write or an Edit leaves has the group of the one it replaced.
+
+        The temporary file renamed over it had the group a new file
+        gets, so the file changed group (and owner, for another
+        user's file) with every edit.
+        """
+        groups = [group for group in os.getgroups() if group != temp_test_dir.stat().st_gid]
+        if not groups:
+            pytest.skip("the user is in one group")
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        path = temp_test_dir / "shared.txt"
+        path.write_text("a = 1\n")
+        os.chown(path, -1, groups[0])
+        path.chmod(0o664)
+        ut.Read(str(path))
+        assert ut.Edit(str(path), "a = 1", "a = 2").startswith("Successfully replaced 1")
+        assert ut.Write(str(path), "a = 3\n").startswith("Successfully wrote")
+        assert path.read_text() == "a = 3\n"
+        assert (path.stat().st_gid, path.stat().st_mode & 0o777) == (groups[0], 0o664)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="bash is found by path on Windows")
     def test_bash_runs_bash_not_the_posix_shell(self, temp_test_dir):
@@ -236,6 +512,12 @@ class TestConcurrentEdits:
             if f"{prefix}{i}=1\n" not in text
         ]
         assert lost == [], f"edits undone by a concurrent Edit: {lost}"
+
+
+def _stop_at_entry(frame_locals: dict[str, Any]) -> bool:
+    """Set the Stop of the tools whose method is entered, without holding the thread."""
+    frame_locals["self"].stop_event.set()
+    return False
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only test (signals, bash scripts)")
@@ -356,6 +638,37 @@ class TestStopEvent:
         report = ut.run_commands_parallel(json.dumps([f"touch {marker}", f"touch {marker}"]))
         assert report.count(NOT_STARTED) == 2, report
         assert not marker.exists(), "a command ran after the task was stopped"
+
+    def test_stop_before_a_bash_launch_starts_no_command(self, temp_test_dir):
+        """A Bash call starts nothing and leaves no job once a Stop precedes its launch (X-STOP-1).
+
+        Each launch path spawned its shell before the thread owning it looked at the Stop: under
+        load the command ran first, and the paths that start a job returned it as running.
+        """
+        stopped = f"Error (exit code -1):\n{NOT_STARTED}"
+        stop_event = threading.Event()
+        stop_event.set()
+        ut = UsefulTools(stop_event=stop_event, work_dir=str(temp_test_dir))
+        launches: list[dict[str, Any]] = [{}, {"timeout_seconds": 30}, {"background": True},
+                                          {"until": "x"}, {"on_timeout": "background"}]
+        for options in launches:
+            assert ut.Bash("touch started.marker", "touch", **options) == stopped, options
+        panel = UsefulTools(work_dir=str(temp_test_dir))  # the tool panel's Stop raises
+        token = tool_interrupt.new_tool_call("Bash")
+        tool_interrupt.register_tool_call(token)
+        try:
+            tool_interrupt.interrupt_tool_call(token.thread_ident, call_id=token.call_id)
+            with pytest.raises(tool_interrupt.ToolCallInterrupted):
+                panel.Bash("touch started.marker", "touch", background=True)
+        finally:
+            tool_interrupt.unregister_tool_call(token)
+        assert not any(temp_test_dir.iterdir()) and not ut._jobs and not panel._jobs
+        # A Stop that lands as a long sleep's wait on the running job starts: no rest either.
+        waiting = UsefulTools(stop_event=threading.Event(), work_dir=str(temp_test_dir))
+        waiting.Bash("sleep 30", "job", background=True)
+        with Pause(UsefulTools._wait_for_job.__code__, _stop_at_entry):
+            assert waiting.Bash("sleep 40; touch started.marker", "rest") == stopped
+        assert not (temp_test_dir / "started.marker").exists() and len(waiting._jobs) == 1
 
     def test_stop_kills_a_background_jobs_orphans_after_its_shell_exited(self, temp_test_dir):
         """A job's descendant that outlives the job's shell is killed by a later task Stop (A10-6).
@@ -485,7 +798,7 @@ class TestBashUntil:
         before = time.monotonic()
         out = ut._poll_until(
             "echo nope", re.compile("never"), 30, before + 1.2, 8000, str(temp_test_dir),
-        )
+        ).text
         assert 1.1 <= time.monotonic() - before < 5
         assert re.search(
             rf"did not match after 1 run\(s\) and {self.SECONDS}: the call's deadline "
@@ -532,6 +845,9 @@ class TestBashUntil:
         assert not (temp_test_dir / "ran").exists()
         out = ut.Bash("touch ran", "bad", until="(")
         assert out.startswith("Error: until is not a valid regular expression: missing )")
+        # A NUL cannot reach the search child as a program argument: every run "did not match".
+        out = ut.Bash("touch ran", "bad", until="x|\x00", poll_seconds=1, timeout_seconds=2)
+        assert out == "Error: until is not a valid regular expression: embedded null byte"
         assert not (temp_test_dir / "ran").exists()
         # ...before a shell rewrite of a file is applied as the Edit it stands for.
         f = temp_test_dir / "f.txt"
@@ -588,11 +904,18 @@ class TestBashUntil:
 _REWRITE_FILES = (str(useful_tools.__file__), os.path.dirname(str(pathlib.__file__)))
 
 
-def _run_injecting_at(run: Callable[[], str], nth: int) -> int:
+def _in_tool_code(frame: Any) -> bool:
+    """Whether *frame* runs the tool's own code or ``pathlib`` (the in-place ``write_text``)."""
+    return bool(frame.f_code.co_filename.startswith(_REWRITE_FILES))
+
+
+def _run_injecting_at(
+    run: Callable[[], str], nth: int, counted: Callable[[Any], bool] = _in_tool_code,
+) -> int:
     """Run *run* raising ``KeyboardInterrupt`` at its *nth* line event on this thread.
 
-    Only the line events of the tool's own code and of ``pathlib`` (the
-    in-place ``write_text``) count: a trace event comes BEFORE its line
+    Only the line events of the frames *counted* accepts count, by
+    default the tool's own code and ``pathlib``: a trace event comes BEFORE its line
     runs, so an injection at the first line of a ``finally`` body skips
     that body, which a real injection (delivered after a call returns)
     cannot do to the lock helper's release.  ``nth`` past the last event
@@ -605,7 +928,7 @@ def _run_injecting_at(run: Callable[[], str], nth: int) -> int:
 
     def tracer(frame: Any, event: str, arg: Any) -> Any:
         nonlocal count
-        if event == "line" and frame.f_code.co_filename.startswith(_REWRITE_FILES):
+        if event == "line" and counted(frame):
             count += 1
             if count == nth:
                 raise KeyboardInterrupt(f"injected Stop at line event {nth}")
@@ -630,7 +953,8 @@ def _swap_for_fifo_at_open(
 ) -> None:
     """Run *run* on this thread, replacing *path* with a FIFO right before its *nth* ``open``.
 
-    The swap happens in a profile hook at the ``c_call`` of an open
+    The swap happens in a profile hook, on this thread and on the one
+    the tool reads or writes the file on, at the ``c_call`` of an open
     (``io.open`` or ``os.open``) whose calling frame holds *path* as its
     ``resolved`` (the tool's own helpers) or ``self`` (``pathlib``),
     after every ``is_file`` check *run* made and before the open takes
@@ -662,11 +986,13 @@ def _swap_for_fifo_at_open(
                 outcome["reader"] = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
 
     sys.setprofile(hook)
+    threading.setprofile(hook)
     try:
         outcome["result"] = run()
     except BaseException as e:  # noqa: BLE001 — reported to the test
         outcome["exc"] = e
     finally:
+        threading.setprofile(None)
         sys.setprofile(None)
 
 
@@ -705,6 +1031,81 @@ class TestInterruptedWrites:
             assert text in (old, new), f"check point {nth}/{total} left {text[:30]!r}..."
             assert [p.name for p in temp_test_dir.iterdir()] == [path.name], (
                 f"check point {nth}/{total} left a stray file"
+            )
+
+    @pytest.mark.parametrize("tool", ["Read", "Read binary", "Write"])
+    def test_a_stop_at_any_check_point_leaves_no_descriptor_open(
+        self, temp_test_dir: Path, tool: str,
+    ) -> None:
+        """Injected at every line event of a file tool in turn, a Stop leaves the file closed.
+
+        The file was opened to a bare descriptor that only a local
+        variable knew until a ``with`` took it over: a Stop between the
+        two left it open for the life of the daemon (B/S13-F2).  A
+        failing ``fstat`` leaked it the same way; it cannot be produced
+        without a test double, as it never fails on a descriptor just opened.
+        """
+        path = temp_test_dir / ("shot.png" if tool == "Read binary" else "text.txt")
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(64) if tool == "Read binary" else b"old\n")
+        os.link(path, temp_test_dir / "other-name")  # a Write then goes in place, through the link
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        ut.Read(str(path))
+
+        def run() -> str:
+            if tool == "Write":
+                return ut.Write(str(path), "new\n")
+            return ut.Read(str(path), force=True)
+
+        def descriptors() -> int:
+            target, count = path.stat(), 0
+            for name in os.listdir("/dev/fd"):
+                with suppress(OSError):  # the listing's own descriptor is closed by now
+                    held = os.fstat(int(name))
+                    count += (held.st_dev, held.st_ino) == (target.st_dev, target.st_ino)
+            return count
+
+        total = _run_injecting_at(run, 0)
+        assert total > 0 and descriptors() == 0
+        for nth in range(1, total + 1):
+            _run_injecting_at(run, nth)
+            assert descriptors() == 0, f"check point {nth}/{total} left the file open"
+
+    def test_a_stop_in_the_start_of_a_file_thread_leaves_no_write_to_come(
+        self, temp_test_dir: Path,
+    ) -> None:
+        """A Stop that takes a Write out of the start of its file thread leaves nothing behind it.
+
+        The file is read and written on a thread of its own (B/S13-F2).
+        Stopped right after that thread was created, the call returned
+        and the thread, which had not begun, wrote the file afterwards,
+        with the file lock released.
+        """
+        path = temp_test_dir / "handed.txt"
+        path.write_text("old\n")
+        os.link(path, temp_test_dir / "other-name")  # the Write goes in place, through the link
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        ut.Read(str(path))
+        lines, first = inspect.getsourcelines(threading.Thread.start)
+        created = first + next(i for i, line in enumerate(lines) if "_started.wait()" in line)
+
+        def thread_created(frame: Any) -> bool:
+            return frame.f_code is threading.Thread.start.__code__ and frame.f_lineno == created
+
+        def run() -> str:
+            return ut.Write(str(path), "new\n")
+
+        total = _run_injecting_at(run, 0, thread_created)
+        assert total > 0 and path.read_text() == "new\n"
+        for nth in range(1, total + 1):
+            path.write_text("old\n")
+            threads = set(threading.enumerate())
+            _run_injecting_at(run, nth, thread_created)
+            at_return = path.read_text()
+            deadline = time.monotonic() + 10
+            while set(threading.enumerate()) - threads and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert path.read_text() == at_return, (
+                f"thread start {nth}/{total}: the write landed after the stopped call returned"
             )
 
     def test_a_stop_reaches_a_write_parked_on_the_held_lock(self, temp_test_dir: Path) -> None:

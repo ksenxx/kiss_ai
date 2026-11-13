@@ -40,6 +40,7 @@ from kiss.server.json_printer import (
     SYSTEM_OUTPUT_CAP_MARKER,
     JsonPrinter,
 )
+from kiss.tests.persistence_helpers import close_db
 
 
 class _CapturingPrinter(JsonPrinter):
@@ -160,16 +161,15 @@ class OversizedRowTest(unittest.TestCase):
     """Legacy rows above the row cap are clipped by SQLite, not loaded."""
 
     def setUp(self) -> None:
-        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved = (th._DB_PATH, th._KISS_DIR)
         self._dir = Path(tempfile.mkdtemp(prefix="kiss_replay_caps_"))
         self.addCleanup(shutil.rmtree, self._dir, True)
         th._KISS_DIR = self._dir
         th._DB_PATH = self._dir / "history.db"
-        th._db_conn = None
 
     def tearDown(self) -> None:
-        th._close_db()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved
+        close_db()
+        th._DB_PATH, th._KISS_DIR = self._saved
 
     def _insert_raw_row(self, task_id: str, event_json: str) -> None:
         db = th._get_db()

@@ -20,14 +20,17 @@ in ``test_cron_concurrent_runs``).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import pytest
@@ -48,7 +51,12 @@ from kiss.agents.sorcar.cron_agent import (
 )
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS
 from kiss.core.config import kiss_home
-from kiss.tests.agents.sorcar.test_audit0903_stop_timeout_lost_result import _TOKEN, _FakeDaemon
+from kiss.tests.agents.sorcar.test_audit0903_stop_timeout_lost_result import (
+    _TOKEN,
+    _FakeDaemon,
+    _StopKillDaemon,
+)
+from kiss.tests.conftest import posix_only
 from kiss.tests.server.pause import Pause
 
 
@@ -214,6 +222,8 @@ def test_cron_never_matches_returns_none() -> None:
 def test_cron_leap_day_found_across_years() -> None:
     # Regression: the scan horizon must cover the gap to the next leap day.
     assert compute_next_run("0 0 29 2 *", _ts(2025, 3, 1)) == _ts(2028, 2, 29)
+    # 2100 is no leap year: the leap day after 2096's is eight years on.
+    assert compute_next_run("0 0 29 2 *", _ts(2097, 1, 1)) == _ts(2104, 2, 29)
 
 
 def test_cron_full_range_dom_is_still_restricted() -> None:
@@ -236,6 +246,10 @@ def test_cron_full_range_dom_is_still_restricted() -> None:
         "5-1 * * * *",
         "a,b * * * *",
         "every 5 weeks",
+        # Digits to str.isdigit() that int() refuses.
+        "² * * * *",
+        "1-² * * * *",
+        "*/² * * * *",
     ],
 )
 def test_invalid_schedules_raise(schedule: str) -> None:
@@ -360,8 +374,9 @@ def test_default_jobs_are_seeded_once_per_home() -> None:
             store.chmod(0o600)
         assert store.read_text() == user_store
         assert not cron_agent._seeded_defaults_path().exists()
-    # A malformed job in the store (``_job_view`` cannot render it) is
-    # a warning, not a daemon-startup exception.
+    # A malformed job in the store (its next run is no time) costs the
+    # defaults nothing: the one it duplicates is refused with a warning,
+    # the other is seeded beside it.
     for job in load_jobs():
         cron_job("remove", job_id=job["id"])
     broken = _create(cron_job(
@@ -371,9 +386,11 @@ def test_default_jobs_are_seeded_once_per_home() -> None:
     jobs = load_jobs()
     jobs[0]["next_run_at"] = "invalid"
     cron_agent.save_jobs(jobs)
-    assert cron_agent.seed_default_jobs() == []
-    assert [j["id"] for j in load_jobs()] == [broken["id"]]
-    cron_job("remove", job_id=broken["id"])
+    assert cron_agent.seed_default_jobs() == [names[1]]
+    odd, morning4 = load_jobs()
+    assert odd["id"] == broken["id"] and morning4["name"] == names[1]
+    for job in (odd, morning4):
+        cron_job("remove", job_id=job["id"])
     # An unwritable store: nothing seeded, nothing raised.
     cron_agent._seeded_defaults_path().unlink(missing_ok=True)
     if sys.platform != "win32":  # chmod cannot make a directory unwritable on Windows
@@ -640,6 +657,12 @@ def test_resume_recomputes_missing_next_run() -> None:
     resumed = load_jobs()[0]
     assert resumed["enabled"] is True
     assert resumed["next_run_at"] is not None
+    # A stored schedule nobody can read (a store edited by hand), or one with
+    # no run left, is the resume's error; the job stays paused.
+    for schedule, error in (("sometimes", "Unsupported schedule"), ("0 0 30 2 *", "never fires")):
+        _set_job_fields(job["id"], enabled=False, next_run_at=None, schedule=schedule)
+        assert error in cron_agent.apply_job_action("resume", job["id"])
+        assert load_jobs()[0]["enabled"] is False and load_jobs()[0]["next_run_at"] is None
 
 
 def test_create_validation_errors() -> None:
@@ -659,6 +682,11 @@ def test_create_validation_errors() -> None:
     assert "never fires" in err(cron_job(
         "create", name="x", schedule="2001-01-01T00:00", command="c",
     ))
+    # A count no float holds is an unsupported schedule, not a crash of the tool.
+    for schedule in ("every " + "9" * 400 + "h", "9" * 400 + "d"):
+        assert "Unsupported schedule" in err(cron_job(
+            "create", name="x", schedule=schedule, command="c",
+        ))
     assert "not a number" in err(cron_job(
         "create", name="x", schedule="every 5m", prompt="p", max_budget="lots",
     ))
@@ -972,6 +1000,13 @@ def test_tick_disables_malformed_job_and_runs_the_rest() -> None:
     assert by_id[bad["id"]]["last_status"] == "error"
     assert "malformed" in by_id[bad["id"]]["last_summary"]
     assert by_id[good["id"]]["last_summary"] == "yes"
+    # The listing still shows every job, a time it cannot render as
+    # stored: the malformed one, and a next run past the calendar's end.
+    far = _create(cron_job("create", name="far", command="echo far", schedule="every 3000000d"))
+    listed = {job["id"]: job for job in yaml.safe_load(cron_job("list"))["jobs"]}
+    assert listed[bad["id"]]["next_run_at"] == "not-a-number"
+    assert listed[far["id"]]["next_run_at"] == far["next_run_at"] > time.time()
+    assert listed[good["id"]]["next_run_at"].endswith(("PST", "PDT"))
 
 
 def test_tick_skips_when_lock_held() -> None:
@@ -1420,6 +1455,10 @@ def test_create_validates_work_dir_and_timeout(tmp_path: Path) -> None:
         )))
 
     assert "not a directory" in create(prompt="p", work_dir=str(tmp_path / "no"))["error"]
+    # Nor is a path that cannot even be looked up: an unknown user's
+    # home, a NUL in the name, a name longer than the file system takes.
+    for unusable in ("~no-such-user-zz/x", "bad\0dir", "a" * 5000):
+        assert "not a directory" in create(prompt="p", work_dir=unusable)["error"]
     assert "not a number" in create(prompt="p", timeout="soon")["error"]
     for bad in ("-5", "nan", "inf"):
         assert "must be a positive number" in create(prompt="p", timeout=bad)["error"]
@@ -1602,7 +1641,7 @@ def test_an_unconfirmed_stop_claims_the_job_until_its_task_row_is_finished(
         assert tick(3.0) == 0
         assert daemon.runs == 1
         assert cron_agent.running_job_ids() == set()
-        refused = cron_agent.start_job(load_jobs()[0])
+        refused = cron_agent.start_job((stored_jobs := load_jobs())[0], stored_jobs)
         assert first in refused and "may still be running" in refused
         refused = yaml.safe_load(cron_job("run_now", job_id=job["id"]))["error"]
         assert first in refused and "may still be running" in refused
@@ -1611,6 +1650,68 @@ def test_an_unconfirmed_stop_claims_the_job_until_its_task_row_is_finished(
         assert tick(4.0) == 1
         assert daemon.runs == 2
         assert load_jobs()[0]["running_task_id"] == second
+    finally:
+        daemon.close()
+
+
+def _stop_once_the_task_is_named(frame: FrameType, event: str, arg: Any) -> Any:
+    """Trace function: the caller's Stop once ``daemon_client.run`` knows the task's row id."""
+    from kiss.agents.sorcar import daemon_client
+
+    if frame.f_code is not daemon_client.run.__code__:
+        return None
+    if event == "line" and getattr(frame.f_locals.get("seen"), "task_id", None):
+        sys.settrace(None)
+        raise KeyboardInterrupt
+    return _stop_once_the_task_is_named
+
+
+@pytest.mark.parametrize("cli", [False, True], ids=["tool", "cli"])
+def test_an_interrupted_in_chat_run_keeps_its_task_as_the_jobs_claim(
+    cli: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    """B/S3-F1: a Stop of an in-chat run leaves the task it did not see end as the job's claim.
+
+    ``daemon_client.run`` answers the Stop with a stop it does not wait
+    for (never confirmed here).  Before, the interruption passed through
+    ``_run_in_chat_job``: no outcome, no claim, and the next tick or
+    "run now" started the job again beside its running task.
+    """
+    from kiss.agents.sorcar import persistence
+
+    first, _ = persistence._add_task("say good morning", "")
+    daemon = _IgnoresStopDaemon([first])
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+    try:
+        job = _create(cron_job(
+            "create", name="morning", prompt="say good morning", schedule="every 1m",
+            in_chat=True, timeout="20",
+        ))
+        sys.settrace(_stop_once_the_task_is_named)
+        try:
+            if cli:
+                _run_cli(monkeypatch, capsys, "--run", job["id"])
+            else:
+                cron_job("run_now", job_id=job["id"])
+        except KeyboardInterrupt:
+            pytest.fail("the Stop passed through the run: no outcome and no claim recorded")
+        finally:
+            sys.settrace(None)
+        assert daemon.wait_for_command("stop")
+        stored = load_jobs()[0]
+        assert stored["last_status"] == "error"
+        assert "MAY STILL BE RUNNING" in stored["last_summary"]
+        assert stored["running_task_id"] == first
+        _set_job_fields(job["id"], next_run_at=1.0)
+        assert tick(2.0) == 0
+        refused = cron_agent.start_job((stored_jobs := load_jobs())[0], stored_jobs)
+        assert first in refused and "may still be running" in refused
+        refused = yaml.safe_load(cron_job("run_now", job_id=job["id"]))["error"]
+        assert first in refused and "may still be running" in refused
+        assert daemon.runs == 1
+        # the stop took effect after all: the row's end frees the job
+        persistence._save_task_extra({"endTs": int(time.time() * 1000)}, first)
+        assert cron_agent._claimed_task_id(load_jobs()[0]) == ""
     finally:
         daemon.close()
 
@@ -1685,7 +1786,7 @@ def test_a_connection_lost_before_the_timeout_claims_the_job_for_the_named_task(
         _set_job_fields(job["id"], next_run_at=2.5)
         assert tick(3.0) == 0
         assert daemon.runs == 1
-        refused = cron_agent.start_job(load_jobs()[0])
+        refused = cron_agent.start_job((stored_jobs := load_jobs())[0], stored_jobs)
         assert task_id in refused and "may still be running" in refused
         persistence._save_task_extra({"endTs": int(time.time() * 1000)}, task_id)
         assert tick(4.0) == 1
@@ -1738,7 +1839,7 @@ def test_an_edit_during_an_unresolved_run_keeps_the_claim_of_its_task(
         assert stored["running_task_id"] == first
         _set_job_fields(job["id"], next_run_at=1.0)
         assert tick(2.0) == 0
-        refused = cron_agent.start_job(load_jobs()[0])
+        refused = cron_agent.start_job((stored_jobs := load_jobs())[0], stored_jobs)
         assert first in refused and "may still be running" in refused
         assert daemon.runs == 1
         persistence._save_task_extra({"endTs": int(time.time() * 1000)}, first)
@@ -1747,6 +1848,96 @@ def test_an_edit_during_an_unresolved_run_keeps_the_claim_of_its_task(
         assert load_jobs()[0]["running_task_id"] == second
     finally:
         daemon.close()
+
+
+#: ``kiss-cron``'s entry point, with the 20-s wait for a stop's confirmation and the
+#: 40-s wait for the stopped runs cut short.
+_CLI_WITH_SHORT_STOP_GRACE = (
+    "import signal\n"
+    "from kiss.agents.sorcar import cron_agent, daemon_client\n"
+    # A pytest worker launched as an asynchronous shell job inherits SIG_IGN.
+    # Establish the interactive CLI precondition this test exercises explicitly.
+    "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+    "daemon_client._STOP_CONFIRM_GRACE_SECONDS = 0.5\n"
+    "cron_agent._STOP_RUNS_GRACE_SECONDS = 10.0\n"
+    "cron_agent.main()\n"
+)
+
+
+@posix_only("the CLI is interrupted with SIGINT")
+@pytest.mark.parametrize(
+    ("confirms", "store_locked"), [(True, False), (False, False), (False, True)],
+    ids=["stop-confirmed", "stop-ignored", "store-locked"],
+)
+@pytest.mark.parametrize(
+    "mode", [["--tick"], ["--daemon", "--interval", "1"]], ids=["tick", "daemon"],
+)
+def test_interrupted_cli_scheduler_stops_the_task_of_its_running_prompt_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: list[str], confirms: bool,
+    store_locked: bool,
+) -> None:
+    """Ctrl-C on ``kiss-cron --tick`` / ``--daemon`` stops a fresh-session prompt job's task.
+
+    The interrupted run only set the job's cancel event: the thread that
+    turns it into the daemon's ``stop`` died with the exiting process,
+    so the task ran on while its scratch directory was removed (review
+    R2 of audit 2026-11-10, S3 F3).  The run now waits, bounded, for the
+    stop: a confirmed one frees the scratch directory, an ignored one
+    keeps it and leaves the task's row on the job as its claim.  The
+    daemon is the module's local-WSS stand-in, the CLI ``kiss-cron``'s
+    entry point.
+
+    ``store-locked`` (review r2 R1): this process holds the store lock
+    until the CLI has exited, so the run's thread is abandoned waiting
+    for it and the store never gets the outcome.  The claim holds all
+    the same, from the kept run directory; ``stop-ignored`` makes that
+    directory read-only, so there the store's claim holds alone.
+    """
+    from kiss.agents.sorcar import persistence
+
+    task_id, _ = persistence._add_task("think hard", "")
+    daemon = _StopKillDaemon() if confirms else _IgnoresStopDaemon([task_id])
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+    job = _create(cron_job(
+        "create", name="slow", prompt="think hard", schedule="every 1h", deliver="none",
+    ))
+    _set_job_fields(job["id"], next_run_at=time.time())
+    with Pause(type(daemon)._handle.__code__, _any_run) as run_arrived:
+        cli = subprocess.Popen(
+            [sys.executable, "-c", _CLI_WITH_SHORT_STOP_GRACE, *mode],
+            env={**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        try:
+            assert run_arrived.paused.wait(60), "the prompt job never reached the daemon"
+            run_arrived.release()
+            if not (confirms or store_locked):
+                next((tmp_path / "cron" / "runs").iterdir()).chmod(0o500)
+            with cron_agent._jobs_lock(blocking=True) if store_locked else contextlib.nullcontext():
+                cli.send_signal(signal.SIGINT)
+                assert cli.wait(timeout=60) == -signal.SIGINT
+            assert daemon.wait_for_command("stop"), "the CLI exited before it stopped its task"
+        finally:
+            cli.kill()
+            cli.wait(timeout=10)
+            daemon.close()
+    stored = load_jobs()[0]
+    kept = list((tmp_path / "cron" / "runs").iterdir())
+    if confirms:
+        assert kept == [] and not stored.get("running_task_id")
+        return
+    assert len(kept) == 1
+    if store_locked:
+        assert not stored.get("last_summary"), "the run's outcome got past the held store lock"
+    else:
+        assert f"scratch directory {kept[0]} is kept" in stored["last_summary"]
+        assert stored["running_task_id"] == task_id
+    # Either way a due tick starts nothing while the task's row is unfinished, and runs
+    # the job (an error: its daemon is gone) once the row has ended.
+    _set_job_fields(job["id"], next_run_at=1.0)
+    assert tick(2.0) == 0, "the job was started again while its task may still be running"
+    persistence._save_task_extra({"endTs": int(time.time() * 1000)}, task_id)
+    assert tick(2.0) == 1
 
 
 def test_cli_create_with_work_dir_flags(
@@ -1953,9 +2144,9 @@ def test_apply_job_action_create_schedules_a_job() -> None:
 def test_apply_job_action_run_now_starts_a_thread_once(tmp_path: Path) -> None:
     """``run_now`` returns at once; the job runs in its own thread; a second start is refused.
 
-    The run is recorded on the stored job (``running_pid``) until it
-    ends, so a start is also refused while another live process runs
-    the job; a dead process's record does not block it.
+    Until the run is over, that is: its end frees the job for the next
+    start (a run in another process is covered in
+    ``test_cron_concurrent_runs``).
     """
     job = _create(cron_job(
         "create", name="slow", command="sleep 1; echo ran now", schedule="every 1d",
@@ -1964,24 +2155,12 @@ def test_apply_job_action_run_now_starts_a_thread_once(tmp_path: Path) -> None:
     cron_job("pause", job_id=job_id)
     assert cron_agent.apply_job_action("run_now", job_id) == ""
     assert job_id in cron_agent.running_job_ids()
-    assert next(j for j in load_jobs() if j["id"] == job_id)["running_pid"] == os.getpid()
     assert cron_agent.apply_job_action("run_now", job_id) == f"job {job_id!r} is already running"
     stored = _wait_for_run(job_id)
     assert stored["last_status"] == "ok"
     assert stored["last_summary"] == "ran now"
     assert stored["enabled"] is False, "a run now does not resume a paused job"
-    assert "running_pid" not in stored
     assert cron_agent.apply_job_action("run_now", "nope") == "no job with id 'nope'"
-
-    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    try:
-        _set_job_fields(job_id, running_pid=other.pid)
-        refused = cron_agent.apply_job_action("run_now", job_id)
-        assert refused == f"job {job_id!r} is already running"
-        assert job_id not in cron_agent.running_job_ids()
-    finally:
-        other.kill()
-        other.wait()
     assert cron_agent.apply_job_action("run_now", job_id) == ""
     assert _wait_for_run(job_id)["last_summary"] == "ran now"
 
@@ -2092,6 +2271,16 @@ def test_repeated_identical_failure_is_delivered_once_and_backs_off(tmp_path: Pa
     assert again["last_delivery"] == ["error: unknown channel 'nowhere'"]
     assert again["failure_streak"] == 0 and again["next_run_at"] < time.time() + 3600
     assert log_path.read_text(encoding="utf-8").count("third-error") == 2
+    # A failure whose one line is longer than the summary the store keeps
+    # of it repeats like any other.
+    _set_job_fields(job["id"], next_run_at=1.0, deliver="local",
+                    command="printf 'long-error %05000d\\n' 0 >&2; exit 6")
+    assert tick(2.0) == 1
+    assert len(load_jobs()[0]["last_summary"]) == cron_agent.MAX_STORED_SUMMARY_CHARS
+    _set_job_fields(job["id"], next_run_at=1.0)
+    assert tick(2.0) == 1
+    assert load_jobs()[0]["failure_streak"] == 1
+    assert log_path.read_text(encoding="utf-8").count("long-error") == 1
 
 
 def test_prompt_job_naming_an_unconnected_connector_does_not_dispatch(

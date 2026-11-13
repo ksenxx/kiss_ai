@@ -44,8 +44,8 @@ function makePage() {
   return {win, tabScrolls};
 }
 
-function entry(tabId, title, workDir) {
-  return snapshotEntry(tabId, title || tabId, 'chat-' + tabId, workDir);
+function entry(tabId, title) {
+  return snapshotEntry(tabId, title || tabId, 'chat-' + tabId);
 }
 
 // The id of the active entry on the group strip, else null (a lone chat

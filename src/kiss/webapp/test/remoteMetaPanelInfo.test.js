@@ -42,9 +42,6 @@
 'use strict';
 
 const assert = require('assert');
-
-const POLL_MS = 5000;
-
 const {
   makePage: makeChatPage,
   click,
@@ -53,9 +50,15 @@ const {
   fakeIntervals,
   fakeMatchMedia,
   readyTabId,
+  rowText,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {polls, lastPoll} = require('./remote_drawer_helpers');
+const {
+  POLL_MS,
+  polls,
+  lastPoll,
+  replyToPoll,
+} = require('./remote_drawer_helpers');
 
 const {test, report} = makeRunner();
 
@@ -77,10 +80,6 @@ function makePage(opts) {
 }
 
 const OPEN_WINDOWS = [];
-
-function rowText(win, id) {
-  return win.document.getElementById(id).textContent;
-}
 
 /** Flip the visible tab's running state via a daemon status event. */
 function setRunning(win, running) {
@@ -127,30 +126,6 @@ function runningPage() {
   });
   setRunning(wv.win, true);
   return wv;
-}
-
-/** A complete taskUpdate reply; *fields* override the defaults. */
-function reply(win, poll, fields) {
-  send(
-    win,
-    Object.assign(
-      {
-        type: 'taskUpdate',
-        tabId: poll.tabId,
-        token: poll.token,
-        taskId: 'task-1',
-        exists: true,
-        sig: 'sig-1',
-        content: '',
-        error: '',
-        running: false,
-        cost: 0,
-        updatedAt: 0,
-        dueAt: 0,
-      },
-      fields,
-    ),
-  );
 }
 
 const EMDASH = '\u2014';
@@ -246,7 +221,7 @@ async function main() {
       assert.strictEqual(content.innerHTML, '');
       assert.ok(!infoVisible(win), 'subpanel starts hidden');
 
-      reply(win, poll, {
+      replyToPoll(win, poll, {
         sig: '100:20',
         content: '# Title\n\npara with **bold** text\n\n- item\n',
         updatedAt: 1700000000000,
@@ -280,7 +255,7 @@ async function main() {
 
       // A reply carrying a stale request token (an old poll answered
       // late) is ignored.
-      reply(win, poll, {
+      replyToPoll(win, poll, {
         token: 'stale-token',
         sig: '999:1',
         content: 'other task',
@@ -289,7 +264,7 @@ async function main() {
 
       // No report any more: the subpanel empties AND hides entirely —
       // the header must not linger over a blank body.
-      reply(win, poll, {exists: false, sig: ''});
+      replyToPoll(win, poll, {exists: false, sig: ''});
       assert.strictEqual(content.innerHTML, '');
       assert.strictEqual(statusText(win), '');
       assert.ok(!infoVisible(win), 'exists:false hides the subpanel');
@@ -297,7 +272,7 @@ async function main() {
       assert.strictEqual(lastPoll(wv).knownSig, '', 'signature dropped');
 
       // And it may reappear with new contents.
-      reply(win, poll, {sig: '200:5', content: 'plain line'});
+      replyToPoll(win, poll, {sig: '200:5', content: 'plain line'});
       assert.ok(content.textContent.includes('plain line'));
       assert.ok(infoVisible(win), 'new content shows the subpanel again');
 
@@ -328,7 +303,7 @@ async function main() {
       const win = wv.win;
       const poll = lastPoll(wv);
       const due = 1700000060000;
-      reply(win, poll, {sig: '0.000:0', dueAt: due});
+      replyToPoll(win, poll, {sig: '0.000:0', dueAt: due});
       const pending = contentEl(win).querySelector('p.meta-info-pending');
       assert.ok(pending, 'first-update paragraph rendered');
       assert.strictEqual(
@@ -348,7 +323,7 @@ async function main() {
       // A finished run supersedes the due time: dueAt then names the
       // NEXT run, which the status line does not show.
       const at = 1700000090000;
-      reply(win, poll, {
+      replyToPoll(win, poll, {
         sig: 'done-1',
         content: '<p>answer</p>',
         updatedAt: at,
@@ -358,7 +333,7 @@ async function main() {
       assert.ok(contentEl(win).textContent.includes('answer'));
 
       // A reply with neither content, run, error nor due time hides it.
-      reply(win, poll, {sig: 'empty-1'});
+      replyToPoll(win, poll, {sig: 'empty-1'});
       assert.ok(!infoVisible(win), 'nothing to show hides the subpanel');
       assert.strictEqual(statusText(win), '');
     },
@@ -375,7 +350,7 @@ async function main() {
       assert.strictEqual(btn.disabled, false, 'button starts enabled');
       assert.ok(!btn.classList.contains('spinning'));
 
-      reply(win, poll, {sig: 'run-1', content: '', running: true});
+      replyToPoll(win, poll, {sig: 'run-1', content: '', running: true});
       const pending = contentEl(win).querySelector('p.meta-info-pending');
       assert.ok(pending, 'pending paragraph rendered');
       assert.strictEqual(
@@ -388,7 +363,7 @@ async function main() {
       assert.ok(btn.classList.contains('spinning'), 'button spins');
 
       // A rerun over an EXISTING report keeps the report on screen.
-      reply(win, poll, {
+      replyToPoll(win, poll, {
         sig: 'run-2',
         content: '<p>first report</p>',
         running: false,
@@ -397,7 +372,7 @@ async function main() {
       assert.ok(contentEl(win).textContent.includes('first report'));
       assert.strictEqual(btn.disabled, false);
       assert.ok(!btn.classList.contains('spinning'));
-      reply(win, poll, {
+      replyToPoll(win, poll, {
         sig: 'run-3',
         content: '<p>first report</p>',
         running: true,
@@ -423,7 +398,7 @@ async function main() {
       const win = wv.win;
       const poll = lastPoll(wv);
       const at = 1700000000000;
-      reply(win, poll, {
+      replyToPoll(win, poll, {
         sig: 'html-1',
         content:
           '  <h2>Report</h2><p>done <b>50%</b></p>' +
@@ -455,7 +430,7 @@ async function main() {
       assert.ok(!btn.classList.contains('spinning'));
 
       // A markdown report is sanitized too.
-      reply(win, poll, {
+      replyToPoll(win, poll, {
         sig: 'md-1',
         content: 'hello <script>window.__pwned = 3;</script>\n',
         updatedAt: at,
@@ -474,7 +449,7 @@ async function main() {
 
     // No report at all yet: the failure is the whole status line and
     // the body says so.
-    reply(win, poll, {sig: 'err-1', error: 'budget exceeded'});
+    replyToPoll(win, poll, {sig: 'err-1', error: 'budget exceeded'});
     assert.strictEqual(statusText(win), 'Last run failed: budget exceeded');
     assert.strictEqual(
       content.querySelector('p.meta-info-pending').textContent,
@@ -486,7 +461,7 @@ async function main() {
     // A failure after an earlier successful run: separator after the
     // time and cost, the earlier report stays on screen.
     const at = 1700000000000;
-    reply(win, poll, {
+    replyToPoll(win, poll, {
       sig: 'err-2',
       content: '<p>earlier report</p>',
       error: 'model timed out',
@@ -501,7 +476,7 @@ async function main() {
     );
 
     // Failure while a rerun is in flight: "Updating…" comes first.
-    reply(win, poll, {
+    replyToPoll(win, poll, {
       sig: 'err-3',
       content: '<p>earlier report</p>',
       error: 'model timed out',
@@ -523,7 +498,7 @@ async function main() {
       const win = wv.win;
       const first = lastPoll(wv);
       assert.strictEqual(first.refresh, false, 'the start poll is normal');
-      reply(win, first, {sig: 'r-1', content: '<p>report</p>'});
+      replyToPoll(win, first, {sig: 'r-1', content: '<p>report</p>'});
 
       const before = polls(wv).length;
       click(win, refreshBtn(win));
@@ -706,7 +681,7 @@ async function main() {
       const win = wv.win;
       const poll = lastPoll(wv);
       const tok = poll.token;
-      reply(win, poll, {
+      replyToPoll(win, poll, {
         sig: '10:4',
         content: '<p>live notes</p>',
         running: true,
@@ -725,7 +700,10 @@ async function main() {
       assert.strictEqual(refreshBtn(win).disabled, false);
       assert.ok(!refreshBtn(win).classList.contains('spinning'));
       // … a poll answered after the end must not resurrect it …
-      reply(win, poll, {sig: '11:9', content: '<p>post-mortem reply</p>'});
+      replyToPoll(win, poll, {
+        sig: '11:9',
+        content: '<p>post-mortem reply</p>',
+      });
       assert.strictEqual(content.innerHTML, '', 'late reply ignored');
       // … and the poll loop stays quiet while idle.
       const idleFrom = polls(wv).length;
@@ -752,7 +730,7 @@ async function main() {
       const tok1 = poll1.token;
       assert.strictEqual(poll1.tabId, TAB1);
       const content = contentEl(win);
-      reply(win, poll1, {sig: 'one:1', content: '<p>tab one notes</p>'});
+      replyToPoll(win, poll1, {sig: 'one:1', content: '<p>tab one notes</p>'});
       assert.ok(content.textContent.includes('tab one notes'));
 
       // Open a second tab (it becomes visible) and run a task in it.
@@ -767,7 +745,7 @@ async function main() {
       assert.strictEqual(poll2.tabId, TAB2, 'poll names the visible tab');
       assert.notStrictEqual(poll2.token, tok1);
       assert.strictEqual(poll2.knownSig, '');
-      reply(win, poll2, {sig: 'two:2', content: '<p>tab two notes</p>'});
+      replyToPoll(win, poll2, {sig: 'two:2', content: '<p>tab two notes</p>'});
       assert.ok(content.textContent.includes('tab two notes'));
 
       // Back to the first tab while BOTH tabs are running: the same
@@ -785,9 +763,9 @@ async function main() {
       assert.strictEqual(poll3.knownSig, '', 'signature reset on switch');
       assert.notStrictEqual(poll3.token, poll2.token, 'new generation');
       // A late reply for tab two must not paint tab one's subpanel.
-      reply(win, poll2, {sig: 'two:3', content: '<p>tab two, later</p>'});
+      replyToPoll(win, poll2, {sig: 'two:3', content: '<p>tab two, later</p>'});
       assert.strictEqual(content.innerHTML, '', 'late other-tab reply ignored');
-      reply(win, poll3, {sig: 'one:4', content: '<p>tab one again</p>'});
+      replyToPoll(win, poll3, {sig: 'one:4', content: '<p>tab one again</p>'});
       assert.ok(content.textContent.includes('tab one again'));
     },
   );
@@ -802,7 +780,10 @@ async function main() {
       const poll1 = lastPoll(wv);
       const tok1 = poll1.token;
       const content = contentEl(win);
-      reply(win, poll1, {sig: 'chat:1', content: '<p>chat tab notes</p>'});
+      replyToPoll(win, poll1, {
+        sig: 'chat:1',
+        content: '<p>chat tab notes</p>',
+      });
       assert.ok(content.textContent.includes('chat tab notes'));
 
       // Open a file view: on the desktop remote's split layout it goes
@@ -845,7 +826,10 @@ async function main() {
       assert.strictEqual(poll.tabId, TAB1, 'polls name the chat tab');
       assert.strictEqual(poll.token, tok1, 'no new generation');
       assert.strictEqual(poll.knownSig, 'chat:1');
-      reply(win, poll, {sig: 'chat:2', content: '<p>chat tab, updated</p>'});
+      replyToPoll(win, poll, {
+        sig: 'chat:2',
+        content: '<p>chat tab, updated</p>',
+      });
       assert.ok(content.textContent.includes('chat tab, updated'));
 
       // Re-showing the file in the content pane and picking the chat

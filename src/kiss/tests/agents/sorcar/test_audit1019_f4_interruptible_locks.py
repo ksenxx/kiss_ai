@@ -53,6 +53,7 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar import git_worktree
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
@@ -155,7 +156,7 @@ def _takers(repo: Path) -> dict[str, Callable[[], object]]:
     agent, wt = _pending_worktree(repo)
     return {
         "_do_merge": functools.partial(agent._do_merge, wt),
-        "_discard_one": functools.partial(agent._discard_one, wt, False),
+        "_discard_one": functools.partial(agent._discard_one, wt),
         "create": functools.partial(
             GitWorktreeOps.create, repo, "kiss/wt-f4b", repo.parent / "wt2",
         ),
@@ -221,22 +222,25 @@ def _end_child(proc: subprocess.Popen[str]) -> None:
 
 
 @posix_only("fcntl.flock held by a child process")
-def test_reclaim_lock_held_by_another_process_raises_after_the_bound(repo: Path) -> None:
+def test_reclaim_lock_held_by_another_process_raises_after_the_bound(
+    repo: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     git_common = _git_common_dir(repo)
     assert git_common is not None
     lock_path = git_common / "kiss-reclaim.lock"
     child = _hold_flock_in_child(lock_path, 30)
+    monkeypatch.setattr(git_worktree, "PROCESS_LOCK_TIMEOUT_SECONDS", 1.0)
     try:
         t0 = time.monotonic()
         with pytest.raises(KISSError, match="kiss-reclaim.lock.*another Sorcar process"):
-            with _reclaim_process_lock(repo, timeout=1.0):
+            with _reclaim_process_lock(repo):
                 pass
         assert 1.0 <= time.monotonic() - t0 < 5.0
     finally:
         _end_child(child)
     # Released by the child: the lock is taken at once and the normal path runs.
     t0 = time.monotonic()
-    with _reclaim_process_lock(repo, timeout=1.0):
+    with _reclaim_process_lock(repo):
         pass
     assert time.monotonic() - t0 < 1.0
 
@@ -266,7 +270,7 @@ time.sleep(float(sys.argv[2]))
 
 @posix_only("setsid and SIGKILL")
 def test_stdout_head_gives_up_on_a_pipe_held_by_a_descendant_in_its_own_session(
-    repo: Path, tmp_path: Path,
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     script = tmp_path / "leader.py"
     script.write_text(_SESSION_LEADER)
@@ -274,10 +278,11 @@ def test_stdout_head_gives_up_on_a_pipe_held_by_a_descendant_in_its_own_session(
     alias = "!" + " ".join(
         shlex.quote(a) for a in (sys.executable, str(script), str(pid_file), "60")
     )
+    monkeypatch.setattr(git_worktree, "_GIT_TIMEOUT_SECONDS", 1.0)
     t0 = time.monotonic()
     try:
         text, truncated = _git_stdout_head(
-            "-c", f"alias.hang={alias}", "hang", cwd=repo, max_bytes=1000, timeout=1.0,
+            "-c", f"alias.hang={alias}", "hang", cwd=repo, max_bytes=1000,
         )
     finally:
         with contextlib.suppress(ProcessLookupError):

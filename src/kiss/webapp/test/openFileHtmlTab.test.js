@@ -26,6 +26,7 @@ const {
   htmlFrames,
   activeFrameDoc,
   stubMonaco,
+  flushMicrotasks,
 } = require('./simplify2_harness.js');
 const {contentTabs} = require('./subagent_tab_helpers');
 
@@ -82,6 +83,8 @@ async function main() {
     'the tab is titled after the file',
   );
   assert.ok(activeFrameDoc(win).includes('<h1>Hello page</h1>'));
+  // An editor is only created once the Monaco loader's promise resolves.
+  await flushMicrotasks();
   assert.strictEqual(created.length, 0, 'no text editor for an html file');
   console.log('  ok - .html opens a rendered content tab');
 

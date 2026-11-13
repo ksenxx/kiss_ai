@@ -6,7 +6,7 @@
 
 A4  ``_get_db()`` read the global ``_db_generation`` twice — once for
     the staleness check and again (after connection creation) when
-    stamping ``tl.gen``.  A concurrent ``_close_db()`` between the two
+    stamping ``tl.gen``.  A concurrent ``close_db()`` between the two
     reads made the thread stamp the *new* generation onto a connection
     created under the *old* one, so the connection survived an
     invalidation it should not have.
@@ -57,6 +57,7 @@ import pytest
 import kiss.agents.sorcar.persistence as th
 import kiss.core.user_config as vc
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+from kiss.tests.persistence_helpers import close_db
 
 _GIT_ID = (
     "-c",
@@ -94,29 +95,28 @@ class _DBSandbox:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
-        th._close_db()
+        close_db()
 
     def teardown_method(self) -> None:
-        th._close_db()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        close_db()
+        th._DB_PATH, th._KISS_DIR = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
 class TestA4GetDbGenerationRace(_DBSandbox):
-    """A4: a connection created concurrently with ``_close_db`` must not survive it."""
+    """A4: a connection created concurrently with ``close_db`` must not survive it."""
 
     def test_connection_created_during_close_is_invalidated(self) -> None:
         """Deterministic interleaving via the real ``_init_tables_lock``.
 
         The worker's first ``_get_db()`` reads the generation for its
         staleness check, opens the SQLite connection, then blocks on
-        ``_init_tables_lock`` (held by the test).  ``_close_db()`` runs
+        ``_init_tables_lock`` (held by the test).  ``close_db()`` runs
         while the worker is blocked, bumping the generation.  Once
         released, the worker finishes and stamps ``tl.gen``.  Its
         *second* ``_get_db()`` must detect the connection as stale and
@@ -137,11 +137,11 @@ class TestA4GetDbGenerationRace(_DBSandbox):
             t.start()
             assert started.wait(5)
             time.sleep(0.3)
-            th._close_db()
+            close_db()
         t.join(10)
         assert not t.is_alive()
         assert results["same"] is False, (
-            "connection created concurrently with _close_db() survived the "
+            "connection created concurrently with close_db() survived the "
             "generation bump — _get_db stamped the post-bump generation"
         )
 

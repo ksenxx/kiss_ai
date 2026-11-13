@@ -37,24 +37,22 @@ const {
   loadMainCss,
   stubClipboard,
   fakeIntervals,
+  pickMachine,
+  ofType,
+  withTeardown,
 } = require('./simplify2_harness');
 
 const {makeRunner} = require('./ui_antipattern_harness');
-const {freezeClock} = require('./history_helpers');
+const {freezeClock, chatTabs} = require('./history_helpers');
+const {trackWindow, closeWindows} = require('./workdir_helpers');
 
 // The page's clock, frozen so "in 5m" / "23m ago" labels and the day
 // keys of the spend grid do not depend on when the suite runs.
 const NOW = Date.UTC(2026, 0, 15, 20, 0, 0);
 
-const runner = makeRunner();
-const report = runner.report;
-const openWindows = [];
-
-/** Run one test through the shared runner, then close its windows. */
-async function test(name, fn) {
-  await runner.test(name, fn);
-  while (openWindows.length) openWindows.pop().close();
-}
+const {test: runTest, report} = makeRunner();
+// Each test's windows are closed once it has settled.
+const test = withTeardown(runTest, closeWindows);
 
 /**
  * Boot a chat page with the given body attributes, its clock frozen at
@@ -89,7 +87,7 @@ function makePage(opts) {
       fakeMatchMedia(win, desktop);
     },
   });
-  openWindows.push(win);
+  trackWindow(win);
   return {win, posted, intervals, observers};
 }
 
@@ -100,6 +98,19 @@ function eq(actual, expected, message) {
 
 function el(win, id) {
   return win.document.getElementById(id);
+}
+
+/** The aria-labels of a subpanel row's buttons, in order. */
+function rowButtonLabels(row) {
+  return Array.from(
+    row.querySelectorAll('.sidebar-panel-row-top > button'),
+    b => b.getAttribute('aria-label'),
+  );
+}
+
+/** The Apps subpanel's Connect button for Slack (null once it is connected). */
+function slackButton(win) {
+  return win.document.querySelector('.app-row[data-app="slack"] button');
 }
 
 function types(posted) {
@@ -460,25 +471,21 @@ async function main() {
       ],
     });
     const rows = Array.from(el(win, 'meta-schedule-list').children);
-    const labels = r =>
-      Array.from(r.querySelectorAll('.sidebar-panel-row-top > button')).map(b =>
-        b.getAttribute('aria-label'),
-      );
-    eq(labels(rows[0]), [
+    eq(rowButtonLabels(rows[0]), [
       'Edit the job',
       'Run the job now',
       'Disable the job',
       'Copy the scheduled task to clipboard',
       'Delete the job',
     ]);
-    eq(labels(rows[1]), [
+    eq(rowButtonLabels(rows[1]), [
       'Edit the job',
       'Run the job now',
       'Disable the job',
       'Copy the scheduled command to clipboard',
       'Delete the job',
     ]);
-    assert.strictEqual(labels(rows[2])[2], 'Enable the job');
+    assert.strictEqual(rowButtonLabels(rows[2])[2], 'Enable the job');
     const button = (r, label) => r.querySelector(`[aria-label="${label}"]`);
     assert.ok(
       button(rows[1], 'Run the job now').disabled,
@@ -886,6 +893,17 @@ async function main() {
     form.elements.kind.value = 'command';
     form.elements.what.value = 'echo night';
     posted.length = 0;
+    // Enter on the Run select works its native picker: it is not
+    // cancelled and saves nothing.
+    const pickerEnter = new win.KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    form.elements.kind.dispatchEvent(pickerEnter);
+    assert.ok(!pickerEnter.defaultPrevented, 'the picker keeps its Enter');
+    eq(posted, []);
+    assert.ok(!form.querySelector('.sidebar-inline-form-save').disabled);
     form.elements.schedule.dispatchEvent(
       new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
     );
@@ -1376,11 +1394,7 @@ async function main() {
       rows[2].dataset.tooltip,
       'IP office \u00b7 port none (tunnel closed)\n\noffice: ssh exited',
     );
-    const labels = r =>
-      Array.from(r.querySelectorAll('.sidebar-panel-row-top > button')).map(b =>
-        b.getAttribute('aria-label'),
-      );
-    eq(labels(rows[1]), [
+    eq(rowButtonLabels(rows[1]), [
       'Copy the machine address to clipboard',
       'Delete the machine',
     ]);
@@ -1676,19 +1690,15 @@ async function main() {
       ['', 'gpu-box'],
       'this machine, then the reachable registered ones',
     );
-    const pick = value => {
-      select.value = value;
-      select.dispatchEvent(new win.Event('change', {bubbles: true}));
-    };
-    pick('gpu-box');
+    pickMachine(win, 'gpu-box');
     assert.ok(select.classList.contains('remote'));
-    pick('');
+    pickMachine(win, '');
     assert.ok(!select.classList.contains('remote'));
     // On a chat that shows a task the pick is also where THAT chat's
     // next task goes: it stands when another surface moves the global
     // pick.
     send(win, {type: 'task_events', task: 'Old task', task_id: 7, events: []});
-    pick('gpu-box');
+    pickMachine(win, 'gpu-box');
     send(win, {type: 'machineChanged', machine: ''});
     assert.strictEqual(select.value, 'gpu-box');
     posted.length = 0;
@@ -1748,38 +1758,35 @@ async function main() {
     // repainted) opened a second connect chat for the same app.
     const {win, posted} = makePage();
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 1});
-    const slackRow = () =>
-      win.document.querySelector('.app-row[data-app="slack"] button');
-    const submits = () => posted.filter(m => m.type === 'submit');
-    slackRow().click();
+    slackButton(win).click();
     assert.strictEqual(
-      submits().length,
+      ofType(posted, 'submit').length,
       1,
       'the first click opens the connect chat',
     );
-    assert.ok(slackRow().disabled, 'the row is disabled while the task runs');
+    assert.ok(slackButton(win).disabled, 'the row is disabled while the task runs');
     assert.strictEqual(
-      slackRow().querySelector('.app-state').textContent,
+      slackButton(win).querySelector('.app-state').textContent,
       'Connecting\u2026',
     );
-    assert.strictEqual(slackRow().title, 'A task is connecting Slack');
+    assert.strictEqual(slackButton(win).title, 'A task is connecting Slack');
     // A scripted activation of the disabled row (a `click()` is a
     // no-op on it) launches nothing either.
-    slackRow().dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+    slackButton(win).dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
     assert.strictEqual(
-      submits().length,
+      ofType(posted, 'submit').length,
       1,
       'REGRESSION: a second click launched another task',
     );
     // The next probe repaints the row still waiting ...
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 2});
-    assert.ok(slackRow().disabled);
+    assert.ok(slackButton(win).disabled);
     assert.strictEqual(
-      slackRow().querySelector('.app-state').textContent,
+      slackButton(win).querySelector('.app-state').textContent,
       'Connecting\u2026',
     );
-    slackRow().click();
-    assert.strictEqual(submits().length, 1);
+    slackButton(win).click();
+    assert.strictEqual(ofType(posted, 'submit').length, 1);
     // ... and the other apps' rows are untouched.
     const matrix = win.document.querySelector(
       '.app-row[data-app="matrix"] button',
@@ -1794,7 +1801,7 @@ async function main() {
       a.name === 'slack' ? Object.assign({}, a, {authenticated: true}) : a,
     );
     send(win, {type: 'appsStatus', apps: connected, checkedAt: 3});
-    assert.strictEqual(slackRow(), null, 'a connected app has no button');
+    assert.strictEqual(slackButton(win), null, 'a connected app has no button');
     assert.strictEqual(
       win.document.querySelector('.app-row[data-app="slack"] .app-state')
         .textContent,
@@ -1802,9 +1809,9 @@ async function main() {
     );
     // Disconnected again later (a revoked token): Connect works again.
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 4});
-    assert.ok(!slackRow().disabled);
-    slackRow().click();
-    assert.strictEqual(submits().length, 2);
+    assert.ok(!slackButton(win).disabled);
+    slackButton(win).click();
+    assert.strictEqual(ofType(posted, 'submit').length, 2);
   });
 
   await test('Apps: a Connect click while the daemon is away launches nothing and Connect works after the reconnect', () => {
@@ -1814,23 +1821,20 @@ async function main() {
     // wait lapsed; it also left the prompt in a new chat's composer.
     const {win, posted} = makePage();
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 1});
-    const slackRow = () =>
-      win.document.querySelector('.app-row[data-app="slack"] button');
-    const submits = () => posted.filter(m => m.type === 'submit');
     send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
     const activeTab = win._testApi.getActiveTabId();
-    slackRow().click();
+    slackButton(win).click();
     assert.strictEqual(
-      submits().length,
+      ofType(posted, 'submit').length,
       0,
       'nothing is submitted while the daemon is away',
     );
     assert.ok(
-      !slackRow().disabled,
+      !slackButton(win).disabled,
       'REGRESSION: the row says Connecting without a task',
     );
     assert.strictEqual(
-      slackRow().querySelector('.app-state').textContent,
+      slackButton(win).querySelector('.app-state').textContent,
       'Connect',
     );
     assert.strictEqual(
@@ -1846,14 +1850,14 @@ async function main() {
     // The reconnect's probe repaints the row enabled, and Connect works.
     send(win, {type: 'daemonStatus', connected: true});
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 2});
-    assert.ok(!slackRow().disabled);
-    slackRow().click();
+    assert.ok(!slackButton(win).disabled);
+    slackButton(win).click();
     assert.strictEqual(
-      submits().length,
+      ofType(posted, 'submit').length,
       1,
       'REGRESSION: Connect stayed dead after the reconnect',
     );
-    assert.ok(slackRow().disabled);
+    assert.ok(slackButton(win).disabled);
   });
 
   await test('refresh buttons re-request; the apps one spins until the reply', () => {
@@ -2056,10 +2060,10 @@ async function main() {
     assert.strictEqual(tipText(win), null);
     hover(win, dated[0]);
     eq(tipText(win), [dayLabel(dayKey(97)) + ' \u00b7 no usage']);
-    if (offset) {
-      hover(win, cols[0].firstElementChild);
-      assert.strictEqual(tipText(win), null);
-    }
+    // The first day, 97 days before the frozen NOW, is a Friday or a
+    // Saturday in every time zone: the first column starts with a blank.
+    hover(win, cols[0].firstElementChild);
+    assert.strictEqual(tipText(win), null);
   });
 
   await test('Spend: the tooltip sits above the cell, below it near the top, and never over it when it can help', () => {
@@ -2318,11 +2322,9 @@ async function main() {
     inp.dispatchEvent(new win.Event('input', {bubbles: true}));
     el(win, 'meta-panel').classList.add('open');
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 1});
-    const chatTabs = () =>
-      win._testApi.openTabs().filter(t => !t.isContentTab && !t.isSubagentTab);
     const firstTab = win._testApi.getActiveTabId();
     eq(
-      chatTabs().map(t => t.id),
+      chatTabs(win).map(t => t.id),
       [firstTab],
     );
     posted.length = 0;
@@ -2351,7 +2353,7 @@ async function main() {
       'the submit names the new chat',
     );
     eq(
-      chatTabs().map(t => t.id),
+      chatTabs(win).map(t => t.id),
       [firstTab, connectTab],
     );
     assert.ok(
@@ -2458,8 +2460,6 @@ async function main() {
       generatedAt: NOW,
       tasks: FIVE_TASKS,
     });
-    const chatTabs = () =>
-      win._testApi.openTabs().filter(t => !t.isContentTab && !t.isSubagentTab);
     const firstTab = win._testApi.getActiveTabId();
     const list = el(win, 'meta-recommendations-list');
     posted.length = 0;
@@ -2470,7 +2470,7 @@ async function main() {
     list.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
     assert.strictEqual(win._testApi.getActiveTabId(), firstTab);
     eq(
-      chatTabs().map(t => t.id),
+      chatTabs(win).map(t => t.id),
       [firstTab],
     );
 
@@ -2480,7 +2480,7 @@ async function main() {
     assert.strictEqual(inp.value, FIVE_TASKS[1], 'the task is in the composer');
     assert.ok(!posted.some(m => m.type === 'submit'), 'nothing is submitted');
     eq(
-      chatTabs().map(t => t.id),
+      chatTabs(win).map(t => t.id),
       [firstTab, newTab],
     );
     assert.ok(
@@ -2588,12 +2588,7 @@ async function main() {
       generatedAt: NOW,
       tasks: FIVE_TASKS,
     });
-    const pick = value => {
-      const select = el(win, 'chat-machine');
-      select.value = value;
-      select.dispatchEvent(new win.Event('change', {bubbles: true}));
-    };
-    return {win, posted, intervals, pick};
+    return {win, posted, intervals};
   }
 
   const jobNames = win =>
@@ -2604,13 +2599,13 @@ async function main() {
     ).map(n => n.textContent);
 
   await test('Machines: picking a machine empties the five subpanels and asks for its data', () => {
-    const {win, posted, pick} = pageShowingThisMachine();
+    const {win, posted} = pageShowingThisMachine();
     eq(jobNames(win), ['Home job']);
     assert.strictEqual(el(win, 'meta-machines-list').children.length, 3);
     assert.strictEqual(appRows(win).length, APPS.length);
     assert.strictEqual(recommendationRows(win).length, FIVE_TASKS.length);
     const from = posted.length;
-    pick('gpu-box');
+    pickMachine(win, 'gpu-box');
     // The previous machine's rows are gone while gpu-box answers.
     eq(jobNames(win), []);
     assert.strictEqual(el(win, 'meta-machines-list').children.length, 0);
@@ -2649,13 +2644,13 @@ async function main() {
     ]);
     // Picking the same machine again asks nothing more.
     const again = posted.length;
-    pick('gpu-box');
+    pickMachine(win, 'gpu-box');
     eq(panelRequests(posted, again), []);
   });
 
   await test("Machines: only the shown machine's replies are painted", () => {
-    const {win, pick} = pageShowingThisMachine();
-    pick('gpu-box');
+    const {win} = pageShowingThisMachine();
+    pickMachine(win, 'gpu-box');
     // This daemon's own reply (a poll answered late, a push) is dropped.
     send(win, {
       type: 'cronJobs',
@@ -2723,7 +2718,7 @@ async function main() {
       "gpu-box's spend is drawn",
     );
     // Back on this machine: the forwarded replies are the ones dropped.
-    pick('');
+    pickMachine(win, '');
     eq(jobNames(win), []);
     send(win, {
       type: 'cronJobs',
@@ -2740,8 +2735,8 @@ async function main() {
   });
 
   await test('Machines: the refresh buttons, the poll and the Schedule actions go to the shown machine', () => {
-    const {win, posted, intervals, pick} = pageShowingThisMachine();
-    pick('gpu-box');
+    const {win, posted, intervals} = pageShowingThisMachine();
+    pickMachine(win, 'gpu-box');
     send(win, {
       type: 'cronJobs',
       forwarded: true,
@@ -2812,8 +2807,8 @@ async function main() {
   });
 
   await test('Machines: a machine that did not answer is reported on each subpanel', () => {
-    const {win, pick} = pageShowingThisMachine();
-    pick('gpu-box');
+    const {win} = pageShowingThisMachine();
+    pickMachine(win, 'gpu-box');
     const error = 'gpu-box did not answer';
     send(win, {
       type: 'cronJobs',
@@ -2882,9 +2877,9 @@ async function main() {
   });
 
   await test("Machines: an app connected from a machine's subpanel, or its recommendation, opens a chat on that machine", () => {
-    const {win, posted, pick} = pageShowingThisMachine();
+    const {win, posted} = pageShowingThisMachine();
     el(win, 'meta-panel').classList.add('open');
-    pick('gpu-box');
+    pickMachine(win, 'gpu-box');
     send(win, {
       type: 'appsStatus',
       forwarded: true,
@@ -2929,8 +2924,8 @@ async function main() {
   });
 
   await test('Machines: a machine change while the daemon is away empties the subpanels; the reconnect asks once', () => {
-    const {win, posted, pick} = pageShowingThisMachine();
-    pick('gpu-box');
+    const {win, posted} = pageShowingThisMachine();
+    pickMachine(win, 'gpu-box');
     send(win, {
       type: 'cronJobs',
       forwarded: true,
@@ -2950,7 +2945,7 @@ async function main() {
       'a new chat follows the global pick',
     );
     eq(jobNames(win), ['GPU job']);
-    pick('');
+    pickMachine(win, '');
     eq(jobNames(win), []);
     assert.strictEqual(
       el(win, 'meta-schedule-status').textContent,
@@ -3049,7 +3044,7 @@ async function main() {
     // Audit 2026-10-18: a change the user did not make (the daemon
     // binding the tab elsewhere, the 30 s poll finding the header on
     // another machine) threw away a job being typed into the add form.
-    const {win, posted, pick} = pageShowingThisMachine();
+    const {win, posted} = pageShowingThisMachine();
     const list = el(win, 'meta-schedule-list');
     const topForm = () =>
       list.firstElementChild &&
@@ -3146,7 +3141,7 @@ async function main() {
     // machine left behind and closes.
     el(win, 'meta-schedule-add').click();
     topForm().elements.name.value = 'Picked';
-    pick('gpu-box');
+    pickMachine(win, 'gpu-box');
     send(win, {
       type: 'cronJobs',
       forwarded: true,
@@ -3176,11 +3171,11 @@ async function main() {
   });
 
   await test('Machines: a connect waiting on one machine does not re-probe another, and only its machine ends the wait', () => {
-    const {win, posted, intervals, pick} = pageShowingThisMachine();
+    const {win, posted, intervals} = pageShowingThisMachine();
     el(win, 'meta-panel').classList.add('open');
     const home = win._testApi.getActiveTabId();
     const poll = intervals.find(i => i.ms === 30000);
-    pick('gpu-box');
+    pickMachine(win, 'gpu-box');
     send(win, {
       type: 'appsStatus',
       forwarded: true,
@@ -3206,7 +3201,7 @@ async function main() {
     // re-probed for gpu-box's wait, and this daemon's connected Slack
     // does not end it.
     win._testApi.switchToTab(home);
-    pick('');
+    pickMachine(win, '');
     const connected = APPS.map(a =>
       a.name === 'slack' ? Object.assign({}, a, {authenticated: true}) : a,
     );
@@ -3246,13 +3241,13 @@ async function main() {
     // refresh of the panels; the next poll must not leave this
     // daemon's rows actionable against that machine.  (The stacked
     // layout: there a content tab outlives its owner chat.)
-    const {win, posted, intervals, pick} = pageShowingThisMachine({
+    const {win, posted, intervals} = pageShowingThisMachine({
       desktop: false,
     });
     el(win, 'meta-panel').classList.add('open');
     const poll = intervals.find(i => i.ms === 30000);
     const home = win._testApi.getActiveTabId();
-    pick('gpu-box');
+    pickMachine(win, 'gpu-box');
     send(win, {
       type: 'machineWorkDirs',
       machine: 'gpu-box',
@@ -3278,7 +3273,7 @@ async function main() {
     assert.ok(report, 'the file opened as a content tab');
     // Its owner is brought home while the report is shown ...
     win._testApi.switchToTab(home);
-    pick('');
+    pickMachine(win, '');
     send(win, {
       type: 'cronJobs',
       jobs: [job({id: 'local-only', name: 'Home job'})],
@@ -3327,13 +3322,13 @@ async function main() {
     // its hidden header).  The drop-down reads this machine while the
     // file is shown; once its chat is closed elsewhere, the file's Task
     // Info describes where a new chat would run: the global pick.
-    const {win, pick} = pageShowingThisMachine({desktop: false});
+    const {win} = pageShowingThisMachine({desktop: false});
     const home = win._testApi.getActiveTabId();
     send(win, {
       type: 'tabs_state',
       tabs: [{tabId: home, chatId: 'c-home', title: 'home', workDir: '/ws'}],
     });
-    pick('gpu-box');
+    pickMachine(win, 'gpu-box');
     send(win, {
       type: 'fileContent',
       tabId: home,
@@ -3412,14 +3407,14 @@ async function main() {
   }
 
   await test("Machines: the subpanel lists the picked machine's own registry; the drop-down keeps this daemon's", () => {
-    const {win, posted, pick} = pageShowingThisMachine();
+    const {win, posted} = pageShowingThisMachine();
     eq(machineNames(win), ['laptop', 'gpu-box', 'office-pc']);
     const options = dropDownOptions(win);
     eq(options, ['laptop', 'gpu-box']);
     const section = el(win, 'meta-machines');
     section.querySelector('.meta-section-toggle').click();
     assert.ok(section.classList.contains('collapsed'), 'folded by the user');
-    pick('gpu-box');
+    pickMachine(win, 'gpu-box');
     send(win, gpuMachines());
     eq(machineNames(win), ['gpu-host', 'lab-pc']);
     assert.ok(
@@ -3479,7 +3474,7 @@ async function main() {
     assert.ok(!el(win, 'meta-machines-refresh').disabled, 'the reply stops it');
     // Back on this machine: its own registry, asked once, unstamped.
     from = posted.length;
-    pick('');
+    pickMachine(win, '');
     eq(machineNames(win), []);
     assert.strictEqual(
       el(win, 'meta-machines-status').textContent,
@@ -3496,8 +3491,8 @@ async function main() {
   });
 
   await test("Machines: a machine added from the subpanel is added to the picked machine's registry", () => {
-    const {win, posted, pick} = pageShowingThisMachine();
-    pick('gpu-box');
+    const {win, posted} = pageShowingThisMachine();
+    pickMachine(win, 'gpu-box');
     send(win, gpuMachines());
     const list = el(win, 'meta-machines-list');
     el(win, 'meta-machines-add').click();
@@ -3539,11 +3534,11 @@ async function main() {
     form.elements.name.value = 'draft';
     form.querySelector('.sidebar-inline-form-save').click();
     assert.ok(form.querySelector('.sidebar-inline-form-save').disabled);
-    pick('');
+    pickMachine(win, '');
     assert.strictEqual(list.querySelectorAll('form').length, 0);
     // A second move before any reply (to gpu-box and back) keeps it too.
-    pick('gpu-box');
-    pick('');
+    pickMachine(win, 'gpu-box');
+    pickMachine(win, '');
     send(win, {type: 'machines', machines: MACHINES, checkedAt: 5});
     form = list.querySelector('form.sidebar-inline-form');
     assert.ok(form, 'the add form is back');

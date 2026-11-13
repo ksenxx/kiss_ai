@@ -18,6 +18,7 @@ from pathlib import Path
 from kiss.agents.sorcar import persistence as th
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.persistence_helpers import close_db
 
 
 def _git(tmpdir: str, *args: str) -> None:
@@ -78,9 +79,7 @@ class TestReplaySessionWithEvents:
         """_replay_session broadcasts task_events when events exist."""
         orig_dir = th._KISS_DIR
         orig_db = th._DB_PATH
-        orig_conn = th._db_conn
         try:
-            th._db_conn = None
             th._KISS_DIR = tmp_path
             th._DB_PATH = tmp_path / "history.db"
 
@@ -113,8 +112,7 @@ class TestReplaySessionWithEvents:
             assert len(ev_list) == 3
             assert ev_list[0].get("type") == "task_settings"
         finally:
-            th._close_db()
-            th._db_conn = orig_conn
+            close_db()
             th._KISS_DIR = orig_dir
             th._DB_PATH = orig_db
 

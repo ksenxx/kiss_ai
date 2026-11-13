@@ -189,10 +189,8 @@ def _start_live_server(
     Stores the bound ephemeral port in ``state['port']`` (or the
     startup exception in ``state['error']``) and sets *ready*.
     """
-    from kiss.server.web_server import (
-        RemoteAccessServer,
-        _generate_self_signed_cert,
-    )
+    from kiss.server.web_server import RemoteAccessServer
+    from kiss.tests.local_ws import _generate_self_signed_cert
 
     certfile = tmp_path / "cert.pem"
     keyfile = tmp_path / "key.pem"

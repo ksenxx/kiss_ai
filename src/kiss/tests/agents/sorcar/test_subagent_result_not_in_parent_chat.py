@@ -44,6 +44,7 @@ import shutil
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
@@ -276,20 +277,17 @@ def _simulate_chat_dispatch(
     return rendered
 
 
-def _redirect(tmpdir: str) -> tuple[Any, Any, Any]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    from pathlib import Path
-
+def _redirect(tmpdir: str) -> tuple[Path, Path]:
+    saved = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return saved
 
 
-def _restore(saved: tuple[Any, Any, Any]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+def _restore(saved: tuple[Path, Path]) -> None:
+    th._DB_PATH, th._KISS_DIR = saved
 
 
 class TestSubagentResultNotInParentChat:
@@ -302,9 +300,7 @@ class TestSubagentResultNotInParentChat:
 
     def teardown_method(self) -> None:
         self.srv.shutdown()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

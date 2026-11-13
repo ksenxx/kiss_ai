@@ -9,8 +9,8 @@ resolving the machine's default browser from real ``.desktop`` files and
 ``$BROWSER``/``$KISS_BROWSER``, the ``browser*`` daemon commands driving
 a real browser through :class:`AgentServer`, the error paths
 (unreachable URL, a "browser" that exits at once), wheel/paste input,
-hiding a viewer, a viewer disconnecting, and shutdown with pages still
-open.
+what a finger's drag would scroll, hiding a viewer, a viewer
+disconnecting, and shutdown with pages still open.
 
 The macOS (``NSWorkspace``) and Windows (registry) probes cannot run on
 a Linux CI host; they are exercised only through their shared helpers.
@@ -21,10 +21,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import concurrent.futures
+import gc
 import http.server
 import os
 import shutil
 import signal
+import socket
 import stat
 import sys
 import threading
@@ -49,8 +51,10 @@ from kiss.server.browser_tab import (
     normalize_url,
 )
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import nproc_limit_lowered_to_one, thread_start_can_be_starved
 from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.pause import Pause, Pauses
+from kiss.tests.server.two_client_harness import TwoClientHarness
 
 _PLAYWRIGHT_CACHE = Path.home() / ".cache" / "ms-playwright"
 
@@ -248,6 +252,18 @@ def test_default_browser_resolution_linux(monkeypatch: pytest.MonkeyPatch, tmp_p
     resolved = db.resolve_browser()
     assert resolved.executable is None and resolved.is_default is False
     assert "firefox" in resolved.note and "cannot be streamed" in resolved.note
+    # The directories above the binary do not name the browser: Firefox in the
+    # home of a user called ``operator`` is not Opera, and is not streamed.
+    operator_home = tmp_path / "operator"
+    operator_home.mkdir()
+    (apps / "ff-home.desktop").write_text(
+        f"[Desktop Entry]\nExec={_fake_binary(operator_home, 'firefox')} %u\n"
+    )
+    desktop_choice.write_text("ff-home.desktop\n")
+    resolved = db.resolve_browser()
+    assert resolved.executable is None and resolved.is_default is False
+    assert "cannot be streamed" in resolved.note
+    desktop_choice.write_text("ff.desktop\n")
     # ... unless a well-known Chromium-family binary is installed.
     brave = _fake_binary(bindir, "brave-browser")
     resolved = db.resolve_browser()
@@ -289,6 +305,13 @@ def test_family_name_and_mac_bundle_helper(tmp_path: Path) -> None:
         == "Microsoft Edge"
     )
     assert db.family_name("/usr/bin/firefox") is None
+    # Only the last component names the browser, whichever separator the path uses.
+    for firefox in (
+        "/home/operator/firefox/firefox",
+        r"C:\Users\operator\AppData\Local\Mozilla Firefox\firefox.exe",
+        "/home/brave/chrome/firefox",
+    ):
+        assert db.family_name(firefox) is None, firefox
     # A minimal .app bundle: Info.plist names the executable.
     app = tmp_path / "Fake.app"
     (app / "Contents" / "MacOS").mkdir(parents=True)
@@ -303,8 +326,11 @@ def test_family_name_and_mac_bundle_helper(tmp_path: Path) -> None:
     exe = _fake_binary(app / "Contents" / "MacOS", binary)
     found = db._mac_app_executable(str(app))
     assert found is not None and Path(found).resolve() == exe.resolve()
-    (app / "Contents" / "Info.plist").write_bytes(b"not a plist")
-    assert db._mac_app_executable(str(app)) is None
+    # An unreadable bundle is skipped: garbage, XML cut short by an update, a non-dict root.
+    xml = b'<?xml version="1.0"?><plist version="1.0">'
+    for unreadable in (b"not a plist", xml + b"<dict>", xml + b"<array/></plist>"):
+        (app / "Contents" / "Info.plist").write_bytes(unreadable)
+        assert db._mac_app_executable(str(app)) is None
     assert db._mac_app_executable(str(tmp_path / "Missing.app")) is None
 
 
@@ -331,6 +357,118 @@ if (window.PublicKeyCredential) {
 </body></html>"""
 
 
+def _strip(name: str, top: int, left: int, style: str = "overflow-x:auto") -> str:
+    """A 300px box *top* px down the page: a 1200px line in it, scrolled *left* px sideways."""
+    return (
+        f"<div id='{name}' style='position:absolute;left:0;top:{top}px;width:300px;height:40px;"
+        f"{style}'><div style='width:1200px;height:20px'></div></div>"
+        f"<script>document.getElementById('{name}').scrollLeft = {left};</script>"
+    )
+
+
+# What the page below embeds: one box.  The test scrolls it sideways in
+# the two frames (/strip) and leaves it alone where a plugin embeds it
+# (/still).  A script of the embedded page cannot scroll it as the page
+# loads: a frame of another site is rendered by a process of its own
+# and is told its size after its page was parsed; until then its boxes
+# may have no layout, and a box without one does not scroll.
+_BOX_PAGE = "<!doctype html><body style='margin:0'>" + _strip("inner", 0, 0) + "</body>"
+# Scrolls that box 80px sideways; where it stands then.
+_SCROLL_BOX_JS = (
+    "(() => { const box = document.getElementById('inner'); box.scrollLeft = 80;"
+    " return box.scrollLeft; })()"
+)
+
+
+def _wide(name: str, root: str, body: str) -> str:
+    """A document 3000px wide titled *name*; *root* and *body* style its two outer elements."""
+    return (
+        f"<!doctype html><html style='{root}'><head><title>{name}</title></head>"
+        f"<body style='margin:0;{body}'><div style='width:3000px;height:20px'></div></body></html>"
+    )
+
+
+_DOCUMENTS = {
+    "/strip": _BOX_PAGE,
+    "/still": _BOX_PAGE,
+    # Reads right to left, as its body says; the body always shows a scrollbar.
+    "/rtl": _wide("rtl", "", "direction:rtl;overflow-y:scroll"),
+    # Its body forbids sideways scrolling; so does the root of the next one.
+    "/hidden": _wide("hidden", "", "overflow-x:hidden"),
+    "/clip": _wide("clip", "overflow-x:clip", "direction:rtl"),
+    # Its body is what scrolls, in a window that has nothing to scroll.
+    "/own": _wide("own", "overflow-y:clip", "overflow:auto;width:300px;height:100px"),
+    # An old page: without a doctype the body stands for the window.
+    "/old": _wide("old", "", "direction:rtl").removeprefix("<!doctype html>"),
+}
+
+# Things a finger can land on, 50px apart down the left side of a
+# document 3000px wide: boxes scrolled sideways or not, one that reads
+# right to left at each of its ends, one that only a script scrolls, one
+# whose lines run from right to left, one whose text runs upwards, one
+# of a fractional width, one in a shadow root, one in a shadow root
+# around a child of the page, one around a shadow root, a shadow root
+# with nothing in it, the box above in a frame of this site (whose
+# border and padding move its page 8px in) and in a frame of another
+# site ({other}: this server under its other name), that box as a
+# plugin embeds it, a text field, and frames the page draws at twice
+# their size, at half of it, zoomed, and from inside a shadow root.
+_FRAME = (
+    "<iframe src='/strip' style='display:block;border:0;width:300px;height:{height}px;{style}'>"
+    "</iframe>"
+)
+_SCROLLERS_PAGE = (
+    "<!doctype html><html><head><title>Scrollers</title></head><body style='margin:0'>"
+    + _strip("scrolled", 0, 100)
+    + _strip("edge", 50, 0)
+    + _strip("rtl-start", 100, 0, "overflow-x:auto;direction:rtl")
+    + _strip("rtl-end", 150, -900, "overflow-x:auto;direction:rtl")
+    + _strip("clipped", 200, 100, "overflow-x:hidden")
+    + _strip("vertical", 650, 0, "overflow-x:auto;writing-mode:vertical-rl")
+    + _strip("upwards", 700, 0, "overflow-x:auto;writing-mode:vertical-lr;direction:rtl")
+    + _strip("fraction", 750, -2000, "overflow-x:auto;direction:rtl;width:300.3px")
+    + _strip("around", 900, 60)
+    + "<div id='empty' style='position:absolute;left:0;top:850px;width:300px;height:40px'></div>"
+    "<script>document.getElementById('empty').attachShadow({{mode: 'open'}});</script>"
+    + "<input id='field' style='position:absolute;left:0;top:800px;width:300px;height:30px'"
+    " value='" + "word " * 200 + "'>"
+    "<script>document.getElementById('field').scrollLeft = 300;</script>"
+    + "<div id='host' style='position:absolute;left:0;top:250px;width:300px;height:40px'></div>"
+    "<div id='slotted' style='position:absolute;left:0;top:300px;width:300px;height:40px'>"
+    "<div style='width:1200px;height:20px'></div></div>"
+    "<script>"
+    "const box = \"<div id='s' style='width:300px;height:40px;overflow-x:auto'>\";"
+    "const host = document.getElementById('host').attachShadow({{mode: 'open'}});"
+    "host.innerHTML = box + \"<div style='width:1200px;height:20px'></div></div>\";"
+    "host.getElementById('s').scrollLeft = 60;"
+    "const slotted = document.getElementById('slotted').attachShadow({{mode: 'open'}});"
+    "slotted.innerHTML = box + '<slot></slot></div>';"
+    "slotted.getElementById('s').scrollLeft = 60;"
+    "const within = document.querySelector('#around > div').attachShadow({{mode: 'open'}});"
+    "within.innerHTML = \"<div style='width:1200px;height:20px'></div>\";"
+    "</script>"
+    "<div style='position:absolute;left:0;top:950px'>"
+    + _FRAME.format(height=40, style="transform:scale(2);transform-origin:0 0")
+    + "</div><div style='position:absolute;left:0;top:1050px'>"
+    + _FRAME.format(height=80, style="transform:scale(.5);transform-origin:0 0")
+    + "</div><div style='position:absolute;left:0;top:1100px'>"
+    + _FRAME.format(height=40, style="zoom:2")
+    + "</div><div id='framed' style='position:absolute;left:0;top:1200px'></div>"
+    "<script>document.getElementById('framed').attachShadow({{mode: 'open'}}).innerHTML = \""
+    + _FRAME.format(height=40, style="")
+    + "\";</script>"
+    "<iframe src='/strip' style='position:absolute;left:0;top:350px;width:300px;height:60px;"
+    "border:5px solid;padding:3px'></iframe>"
+    "<iframe src='http://{other}/strip' style='position:absolute;left:0;top:450px;width:300px;"
+    "height:40px;border:0'></iframe>"
+    "<object data='/still' type='text/html' style='position:absolute;left:0;top:500px;"
+    "width:300px;height:40px'></object>"
+    "<embed src='/still' type='text/html' style='position:absolute;left:0;top:550px;"
+    "width:300px;height:40px'>"
+    "<div style='width:3000px;height:20px'></div></body></html>"
+)
+
+
 class _Page(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         body = (
@@ -339,6 +477,11 @@ class _Page(http.server.BaseHTTPRequestHandler):
         )
         if self.path == "/security-key":
             body = _SECURITY_KEY_PAGE
+        elif self.path in _DOCUMENTS:
+            body = _DOCUMENTS[self.path].encode()
+        elif self.path == "/scrollers":
+            other = self.headers["Host"].replace("127.0.0.1", "localhost")
+            body = _SCROLLERS_PAGE.format(other=other).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(body)))
@@ -371,13 +514,24 @@ def daemon(tmp_path: Path) -> Any:
     web_stealth.stop_virtual_display()
 
 
-def _evaluate(service: BrowserTabService, tab_id: str, expression: str) -> Any:
-    """Read something from the real page (white-box check of an input effect)."""
+@pytest.fixture
+def live_daemon() -> Any:
+    """The tree's live harness: a real daemon on its local endpoint, for real clients."""
+    harness = TwoClientHarness()
+    harness.setUp()
+    yield harness
+    harness.server._agent_server.browser_tabs.shutdown()
+    web_stealth.stop_virtual_display()
+    harness.tearDown()
+
+
+def _evaluate(service: BrowserTabService, tab_id: str, expression: str, frame: Any = None) -> Any:
+    """Read something from the real page, or from *frame* of it (white-box check of an effect)."""
     import asyncio  # noqa: PLC0415
 
-    rec = service._pages[tab_id]
+    target = frame or service._pages[tab_id].page
     assert service._loop is not None
-    return asyncio.run_coroutine_threadsafe(rec.page.evaluate(expression), service._loop).result(10)
+    return asyncio.run_coroutine_threadsafe(target.evaluate(expression), service._loop).result(10)
 
 
 @pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
@@ -494,10 +648,221 @@ def test_browser_commands_end_to_end(daemon: Any, page_server: str) -> None:
     service.shutdown()
     assert _events(printer, "closeBrowserTab", tab_id=tab_id)
     assert service._context is None and service.open_events() == []
+    errors = len(_events(printer, "browserError"))
     service.open("http://127.0.0.1:9/", "c1")
     service.viewer_gone("c1")
     time.sleep(0.2)
     assert len(_events(printer, "openBrowserTab")) == 2  # the pair from the first open only
+    assert len(_events(printer, "browserError")) == errors  # quietly: no error for it either
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+def test_a_finger_is_told_whether_a_drag_to_the_right_would_scroll_the_page(
+    daemon: Any, page_server: str,
+) -> None:
+    """A ``touch`` input event asks what is under a finger; the page's viewers get the answer.
+
+    ``scrollsLeft`` says that something under the point (the element,
+    an ancestor, a frame around it or the document) scrolls sideways
+    and is not at its left end, or that a plugin draws there, which
+    cannot be asked: a drag to the right there is the page's, not a
+    swipe of the surface showing it.
+    """
+    server, printer = daemon
+    service = server.browser_tabs
+    server._handle_command(
+        {"type": "browserOpen", "url": page_server + "scrollers", "connId": "c1"}
+    )
+    tab_id = _wait(lambda: _events(printer, "openBrowserTab"), "the tab", timeout=60)[0]["tab_id"]
+
+    def show(conn_id: str, visible: bool) -> None:
+        server._handle_command({
+            "type": "browserViewport", "tab_id": tab_id, "width": 500, "height": 1300,
+            "visible": visible, "connId": conn_id,
+        })
+
+    def loaded(title: str) -> None:
+        """Wait for the page titled *title* (the blank one a tab starts on is
+        "complete" too) and its frames: the one of another site loads last."""
+        _wait(lambda: _events(printer, "browserState", tab_id=tab_id, title=title), title)
+        _wait(
+            lambda: _evaluate(service, tab_id, "document.readyState") == "complete",
+            f"the frames of {title}",
+        )
+
+    def touch(y: int) -> str:
+        """Put a finger down 100px in and *y* px down; the id its answer carries."""
+        touch_id = f"touch-{y}-{len(_events(printer, 'browserTouch'))}"
+        server._handle_command({
+            "type": "browserInput", "tab_id": tab_id,
+            "event": {"kind": "touch", "id": touch_id, "x": 100, "y": y},
+        })
+        return touch_id
+
+    def scrolls_left(y: int) -> bool:
+        """What both viewers are told about a finger put down *y* px down."""
+        touch_id = touch(y)
+        told = _wait(
+            lambda: len(found := _events(printer, "browserTouch", id=touch_id)) == 2 and found,
+            f"both viewers told about y={y}",
+        )
+        assert {(e["connId"], e["tab_id"]) for e in told} == {("c1", tab_id), ("c2", tab_id)}
+        answer = told[0]["scrollsLeft"]
+        assert isinstance(answer, bool) and told[1]["scrollsLeft"] is answer
+        return answer
+
+    show("c1", True)
+    show("c2", True)
+    loaded("Scrollers")
+    frames = [f for f in service._pages[tab_id].page.frames if f.url.endswith("/strip")]
+    _wait(
+        lambda: [_evaluate(service, tab_id, _SCROLL_BOX_JS, frame) for frame in frames] == [80] * 6,
+        "the box of each frame scrolled",
+    )
+    # What is under the finger: how far down the page it is (a point on
+    # a box is on the 20px line inside it, 10px down it) and the answer.
+    under_the_finger = {
+        "a box scrolled sideways": (10, True),
+        "a box at its left end": (60, False),
+        "a right-to-left box at its start": (110, True),
+        "a right-to-left box at its left end": (160, False),
+        "a box only a script scrolls": (210, False),
+        "a box in a shadow root": (260, True),
+        "a child of the page in a shadow root's box": (310, True),
+        "the border of a frame": (352, False),
+        "a box in a frame of this site": (368, True),
+        "the last lines of that box": (396, True),
+        "that frame's page under the box": (400, False),
+        "a box in a frame of another site": (460, True),
+        "a page embedded as an object": (510, True),
+        "a page embedded as a plugin": (560, True),
+        "the document at its left end": (600, False),
+        "a box whose lines run from right to left, at its start": (660, True),
+        "a box whose text runs upwards, at its left end": (710, False),
+        "a right-to-left box of a fractional width at its left end": (760, False),
+        "a text field whose text is scrolled": (810, True),
+        "an empty shadow root": (860, False),
+        "a shadow root in a box scrolled sideways": (910, True),
+        "a box in a frame drawn at twice its size": (1010, True),
+        "under the box, in a frame drawn at half its size": (1075, False),
+        "a box in a frame zoomed to twice its size": (1160, True),
+        "a box in a frame in a shadow root": (1210, True),
+        "nothing: a point off the page": (5000, False),
+    }
+    assert {what: scrolls_left(y) for what, (y, _) in under_the_finger.items()} == {
+        what: expected for what, (_, expected) in under_the_finger.items()
+    }
+    # The document scrolled sideways: whatever the finger lands on, a
+    # drag to the right scrolls the page back.
+    server._handle_command({
+        "type": "browserInput", "tab_id": tab_id,
+        "event": {"kind": "mouse", "action": "mouseWheel", "x": 100, "y": 600, "deltaX": 100},
+    })
+    _wait(lambda: _evaluate(service, tab_id, "window.scrollX") == 100, "the document scrolled")
+    assert scrolls_left(600) and scrolls_left(60)
+    # Other documents, each after the script that scrolls it: one that
+    # reads right to left starts at its right end, one that forbids
+    # sideways scrolling moves under no finger, and in one the body is
+    # what scrolls.
+    left_end = "scrollTo(-100000, 0)"
+    documents = {
+        "rtl": {"0": True, left_end: False},
+        "hidden": {"scrollTo(300, 0)": False},
+        "clip": {"0": False},
+        "own": {"document.body.scrollLeft = 300": True, "document.body.scrollLeft = 0": False},
+        "old": {"0": True, left_end: False},
+    }
+    for name, scripts in documents.items():
+        server._handle_command({
+            "type": "browserNavigate", "tab_id": tab_id, "action": "go", "url": page_server + name,
+        })
+        loaded(name)
+        for script, expected in scripts.items():
+            _evaluate(service, tab_id, script)
+            assert scrolls_left(10) is expected, (name, script)
+    # Nobody showing the page: nobody to tell.
+    show("c1", False)
+    show("c2", False)
+    told = len(_events(printer, "browserTouch"))
+    touch(10)
+    time.sleep(0.5)
+    assert len(_events(printer, "browserTouch")) == told
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+def test_closing_a_tab_whose_address_bar_navigation_is_in_flight_reports_no_error(
+    daemon: Any, page_server: str,
+) -> None:
+    """The navigation a close aborts is no failure: no surface gets an error for the gone tab."""
+    server, printer = daemon
+    # Accepts and never answers: a navigation to it stays in flight.
+    hung = socket.socket()
+    hung.bind(("127.0.0.1", 0))
+    hung.listen(8)
+    hung.settimeout(30)
+    held: list[socket.socket] = []
+    try:
+        server._handle_command({"type": "browserOpen", "url": page_server, "connId": "c1"})
+        loaded = _wait(lambda: _events(printer, "browserState", title="Tall"), "page", timeout=60)
+        tab_id = loaded[0]["tab_id"]
+        server._handle_command({
+            "type": "browserNavigate", "tab_id": tab_id, "action": "go",
+            "url": f"http://127.0.0.1:{hung.getsockname()[1]}/",
+        })
+        held.append(hung.accept()[0])  # the navigation reached the server
+        server._handle_command({"type": "browserClose", "tab_id": tab_id})
+        _wait(lambda: _events(printer, "closeBrowserTab", tab_id=tab_id), "close")
+        time.sleep(1.0)  # the aborted navigation fails as the page closes
+        assert _events(printer, "browserError") == []
+    finally:
+        for conn in held:
+            conn.close()
+        hung.close()
+
+
+def _unclosed_event_loops() -> list[Any]:
+    """Every event loop object alive in this process that is not closed."""
+    return [
+        obj for obj in gc.get_objects()
+        if issubclass(type(obj), asyncio.AbstractEventLoop) and not obj.is_closed()
+    ]
+
+
+@pytest.mark.skipif(not thread_start_can_be_starved(), reason="requires enforced RLIMIT_NPROC")
+def test_an_open_whose_loop_thread_cannot_start_is_refused_to_its_asker(daemon: Any) -> None:
+    """No thread for the private loop: the asker is told (its ``openId`` echoed), no loop leaks."""
+    server, printer = daemon
+    service = server.browser_tabs
+    before = _unclosed_event_loops()
+    with nproc_limit_lowered_to_one():
+        server._handle_command({
+            "type": "browserOpen", "url": "http://127.0.0.1:9/", "connId": "c1", "openId": "o1",
+        })
+    refusals = _events(printer, "browserError", connId="c1")
+    assert [(e["tab_id"], e["openId"]) for e in refusals] == [("", "o1")]
+    assert "thread" in refusals[0]["text"]
+    assert service._loop is None and service._thread is None
+    # The loop no thread will ever run is closed there and then: left
+    # open, its selector and self-pipe stay until a collection finds it.
+    leaked = [loop for loop in _unclosed_event_loops() if not any(loop is b for b in before)]
+    assert leaked == []
+
+
+def test_commands_for_no_tab_start_no_browser_loop(daemon: Any) -> None:
+    """Only an open starts the service's thread: nothing else has a tab to act on before it."""
+    server, _printer = daemon
+    service = server.browser_tabs
+    for cmd in (
+        {"type": "browserViewport", "tab_id": "browser__1", "visible": False, "connId": "c1"},
+        {"type": "browserFrameAck", "tab_id": "browser__1", "connId": "c1"},
+        {"type": "browserNavigate", "tab_id": "browser__1", "action": "reload"},
+        {"type": "browserInput", "tab_id": "browser__1", "event": {"kind": "text", "text": "x"}},
+        {"type": "browserClose", "tab_id": "browser__1"},
+    ):
+        server._handle_command(cmd)
+    service.interrupt("browser__1")
+    service.viewer_gone("c1")
+    assert service._loop is None and service._thread is None
 
 
 @pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
@@ -704,9 +1069,21 @@ def _attaching_new_page(local: dict[str, Any]) -> bool:
     return local.get("is_new") is True and "cdp" not in local
 
 
+def _coroutine_name(task: asyncio.Task[Any] | None) -> str:
+    """The qualified name of the coroutine *task* runs (``""`` for no task)."""
+    return getattr(task.get_coro() if task is not None else None, "__qualname__", "")
+
+
+def _entered_by_page_event(local: dict[str, Any]) -> bool:
+    """``_register`` entered by the context's own ``page`` registration (a task of its own)."""
+    return _coroutine_name(asyncio.current_task()).endswith("._register")
+
+
 @pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.parametrize("held_at", [_attaching_new_page, _entered_by_page_event])
 def test_an_open_cancelled_while_its_page_attaches_leaves_no_page_behind(
-    daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
+    live_daemon: TwoClientHarness, page_server: str, monkeypatch: pytest.MonkeyPatch,
+    held_at: Callable[[dict[str, Any]], bool],
 ) -> None:
     """An open cancelled during the page's attach closes that page instead of losing it.
 
@@ -720,19 +1097,27 @@ def test_an_open_cancelled_while_its_page_attaches_leaves_no_page_behind(
     that point: the loop is held when the new page's ``_register``
     resumes with its CDP session, and the cancel is queued before it
     goes on.  Afterwards the browser holds the first tab alone.
+
+    Held instead where the ``page`` event registers the new page, the
+    cancel lands earlier, while the open still awaits ``new_page()``:
+    the open then had no page to close, and the tab the page event
+    announced stayed open on every surface.
+
+    The surfaces are two real clients of a real daemon: what each was
+    told to open and to close is read off its own connection.
     """
-    server, printer = daemon
-    service = server.browser_tabs
+    service = live_daemon.server._agent_server.browser_tabs
+    surfaces = [live_daemon.open_client(name) for name in ("a", "b")]
     monkeypatch.setenv("KISS_HEADLESS", "1")
     assert service.open_for_user(page_server) is True
-    first = _events(printer, "openBrowserTab")[0]["tab_id"]
+    first = live_daemon.wait_event(surfaces[0], "openBrowserTab")["tab_id"]
     loop = service._loop
     context = service._context
     assert loop is not None and context is not None
     # The first tab, plus the blank page a persistent context starts with.
     pages_before = set(context.pages)
 
-    attaching = Pause(BrowserTabService._register.__code__, _attaching_new_page)
+    attaching = Pause(BrowserTabService._register.__code__, held_at)
     with attaching:
         task = _task_on(loop, service._open(page_server, ""))
         assert attaching.paused.wait(30), "the new page never reached its attach"
@@ -741,17 +1126,22 @@ def test_an_open_cancelled_while_its_page_attaches_leaves_no_page_behind(
     assert asyncio.run_coroutine_threadsafe(_cancelled(task), loop).result(30) is True
 
     _wait(lambda: set(context.pages) == pages_before or None, "the unwanted page to close")
-    assert set(service._pages) == {first}
+    _wait(lambda: set(service._pages) == {first} or None, "the unwanted page to be forgotten")
     with service._lock:
         assert set(service._by_page) == {id(service._pages[first].page)}
-    # A blank tab the page event's registration announced meanwhile
-    # was closed again on every surface.
-    stray = {e["tab_id"] for e in _events(printer, "openBrowserTab")} - {first}
-    assert stray <= {e["tab_id"] for e in _events(printer, "closeBrowserTab")}
-    assert not _events(printer, "closeBrowserTab", tab_id=first)
     # The browser is intact: the next open lands in it.
     assert service.open_for_user(page_server) is True
     assert service._context is context and len(context.pages) == len(pages_before) + 1
+    (second,) = set(service._pages) - {first}
+    # A connection gets its frames in the daemon's order: once it is
+    # told to focus the new tab, a blank tab the page event's
+    # registration announced meanwhile was closed again there, and
+    # the first tab was not.
+    for surface in surfaces:
+        live_daemon.wait_event(surface, "openBrowserTab", tab_id=second, focus=True)
+        opened = {e["tab_id"] for e in surface.of_type("openBrowserTab")}
+        closed = {e["tab_id"] for e in surface.of_type("closeBrowserTab")}
+        assert opened - closed == {first, second}, (surface.name, opened, closed)
 
 
 def _browser_pid(profile_dir: Path) -> int:
@@ -773,16 +1163,6 @@ def _browser_pid(profile_dir: Path) -> int:
             pids.append(int(proc.name))
     assert len(pids) == 1, pids
     return pids[0]
-
-
-def _coroutine_name(task: asyncio.Task[Any] | None) -> str:
-    """The qualified name of the coroutine *task* runs (``""`` for no task)."""
-    return getattr(task.get_coro() if task is not None else None, "__qualname__", "")
-
-
-def _entered_by_page_event(local: dict[str, Any]) -> bool:
-    """``_register`` entered by the context's own ``page`` registration (a task of its own)."""
-    return _coroutine_name(asyncio.current_task()).endswith("._register")
 
 
 def _entered_by_open(local: dict[str, Any]) -> bool:

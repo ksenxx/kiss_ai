@@ -41,6 +41,7 @@ Contract verified here:
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections.abc import Generator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -336,6 +337,60 @@ class TestReasoningEffortPreservedWithTools:
         req = _last_request()
         assert req["path"].endswith("/responses")
         assert req["body"]["reasoning"]["effort"] == effort
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            {"reasoning": {"effort": "low"}},
+            {"reasoning_effort": None, "reasoning": {"effort": "low"}},
+        ],
+        ids=["native", "native-beside-a-null-portable-key"],
+    )
+    def test_native_reasoning_effort_is_sent_on_either_endpoint(
+        self, capture_server: str, caplog: pytest.LogCaptureFixture, config: dict[str, Any]
+    ) -> None:
+        """``reasoning.effort`` only silenced the catalog default on this transport: it was
+        dropped as an unsupported key, so no effort was sent and no tool turn delegated.
+
+        A null ``reasoning_effort`` beside it is no setting, as on ``/responses``: kept, it
+        made one worker ask for no effort on a plain turn and for ``low`` on a tool turn.
+        """
+        m = _make_model(capture_server, "gpt-5.5", config)
+        m.initialize("hi")
+        with caplog.at_level(logging.WARNING):
+            m.generate()
+        req = _last_request()
+        assert req["path"].endswith("/chat/completions")
+        assert req["body"]["reasoning_effort"] == "low"
+        assert "reasoning" not in req["body"]
+        assert "does not support" not in caplog.text
+        m.generate_and_process_with_tools({"echo": echo})
+        req = _last_request()
+        assert req["path"].endswith("/responses")
+        assert req["body"]["reasoning"]["effort"] == "low"
+
+    def test_reasoning_effort_outranks_the_native_spelling(
+        self, capture_server: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """As on the Responses transport; what else ``reasoning`` holds is no Chat parameter."""
+        config = {"reasoning_effort": "high", "reasoning": {"effort": "low", "summary": "auto"}}
+        m = _make_model(capture_server, "gpt-5.5", config)
+        m.initialize("hi")
+        with caplog.at_level(logging.WARNING):
+            m.generate()
+        body = _last_request()["body"]
+        assert body["reasoning_effort"] == "high"
+        assert "reasoning" not in body
+        assert "key(s) reasoning;" in caplog.text
+
+    def test_null_native_effort_sends_no_effort(self, capture_server: str) -> None:
+        """``reasoning.effort: null`` names no level: none is sent, not even the catalog's."""
+        m = _make_model(capture_server, "gpt-5.5", {"reasoning": {"effort": None}})
+        m.initialize("hi")
+        m.generate()
+        body = _last_request()["body"]
+        assert "reasoning_effort" not in body
+        assert "reasoning" not in body
 
     def test_conversation_stays_chat_format(self, capture_server: str) -> None:
         """The assistant turn is stored in Chat-Completions shape."""

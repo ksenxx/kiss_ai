@@ -26,6 +26,8 @@ import threading
 import time
 from typing import Any
 
+import pytest
+
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.tests.core.models.openai_sse_harness import (
     Reply,
@@ -80,7 +82,7 @@ class _HoldAfterUsage:
 
 
 class TestStallAfterUsageChunk:
-    """The turn is complete once ``finish_reason`` and usage have arrived."""
+    """The turn is complete once ``finish_reason`` and usage sent with or after it arrived."""
 
     def test_answer_and_usage_survive_a_silent_tail(self) -> None:
         """No ``TimeoutError``, one request, usage billed from the usage chunk."""
@@ -109,22 +111,49 @@ class TestStallAfterUsageChunk:
         counts = model.extract_input_output_token_counts_from_response(response)
         assert counts == (7, 7, 4, 0)
 
-    def test_usage_on_the_finish_chunk_also_ends_the_turn(self) -> None:
-        """Providers that put usage on the finish chunk itself get the same break."""
-        release = threading.Event()
-
-        def responder(_request: Request) -> Reply:
-            """Content, then one chunk carrying both ``finish_reason`` and usage."""
-            return Reply(
-                sse_chunks=[
+    @pytest.mark.parametrize(
+        ("chunks", "billed"),
+        [
+            pytest.param(
+                [
                     _chunk([{"index": 0, "delta": {"role": "assistant", "content": "x"}}]),
                     _chunk(
                         [{"index": 0, "delta": {"content": "y"}, "finish_reason": "stop"}],
                         usage={"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
                     ),
                 ],
-                hold=release,
-            )
+                (2, 2, 0, 0),
+                id="usage-on-the-finish-chunk",
+            ),
+            pytest.param(
+                [
+                    _chunk(
+                        [{"index": 0, "delta": {"role": "assistant", "content": "x"}}],
+                        usage={"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+                    ),
+                    _chunk([{"index": 0, "delta": {"content": "y"}, "finish_reason": "stop"}]),
+                    _chunk(
+                        [], usage={"prompt_tokens": 3, "completion_tokens": 9, "total_tokens": 12}
+                    ),
+                ],
+                (3, 9, 0, 0),
+                id="running-usage-then-usage-after-the-finish-chunk",
+            ),
+        ],
+    )
+    def test_usage_with_or_after_the_finish_reason_ends_the_turn(
+        self, chunks: list[bytes], billed: tuple[int, int, int, int]
+    ) -> None:
+        """The usage sent with or after ``finish_reason`` ends the turn and is its bill.
+
+        Usage on an earlier chunk is a running count: leaving at the bare
+        finish chunk because of it billed (3, 1) and never read the (3, 9).
+        """
+        release = threading.Event()
+
+        def responder(_request: Request) -> Reply:
+            """Send *chunks*, then hold the socket."""
+            return Reply(sse_chunks=chunks, hold=release)
 
         with ScriptedOpenAIServer(responder) as server:
             try:
@@ -143,4 +172,4 @@ class TestStallAfterUsageChunk:
                 release.set()
         assert text == "xy"
         assert elapsed < _STALL
-        assert model.extract_input_output_token_counts_from_response(response)[:2] == (2, 2)
+        assert model.extract_input_output_token_counts_from_response(response) == billed

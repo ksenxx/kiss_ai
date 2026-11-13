@@ -16,12 +16,10 @@ whole daemon stopped dispatching commands.  ``kiss.server.speech``'s
 (its docstring says so); the fix reuses it.
 
 Tested for real: a local TCP server that accepts the connection and
-never sends a byte.  ``web_server.VOICE_MODEL_URL`` and
-``web_server.VOICE_MODEL_CACHE`` are documented, supported module
-attribute overrides (see ``_voice_model_cache_path``'s docstring and
-``test_wave2_webserver_bugs.py``); the per-read timeout is the
-``KISS_VOICE_DOWNLOAD_TIMEOUT`` environment override read at call
-time by ``speech.download_timeout_seconds``.
+never sends a byte.  ``web_server.VOICE_MODEL_URL`` is pointed at it,
+the archive lives in a ``KISS_HOME`` of the test's own, and the
+per-read timeout is the ``KISS_VOICE_DOWNLOAD_TIMEOUT`` environment
+override read at call time by ``speech.download_timeout_seconds``.
 """
 
 from __future__ import annotations
@@ -29,16 +27,21 @@ from __future__ import annotations
 import http.server
 import os
 import socket
+import ssl
 import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
+
+import pytest
 
 import kiss.server.web_server as ws
 from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.server import speech
+from kiss.tests.local_ws import make_test_tls
 
 
 def _trickle(listener: socket.socket, head: bytes, tail: bytes, stop: threading.Event) -> None:
@@ -71,21 +74,17 @@ class TestVoiceModelDownloadTimeout(unittest.TestCase):
 
     def setUp(self) -> None:
         self._saved_url = ws.VOICE_MODEL_URL
-        self._saved_cache = getattr(ws, "VOICE_MODEL_CACHE", None)
         self._saved_timeout = os.environ.get("KISS_VOICE_DOWNLOAD_TIMEOUT")
         self._saved_total = os.environ.get("KISS_VOICE_DOWNLOAD_TOTAL_TIMEOUT")
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        ws.VOICE_MODEL_CACHE = Path(self._tmp.name) / "model.tar.gz"
+        self.enterContext(pytest.MonkeyPatch.context()).setenv("KISS_HOME", self._tmp.name)
+        self.cache = ws._voice_model_cache_path()
+        self.cache.parent.mkdir()
         os.environ["KISS_VOICE_DOWNLOAD_TIMEOUT"] = "1"
 
     def tearDown(self) -> None:
         ws.VOICE_MODEL_URL = self._saved_url
-        if self._saved_cache is None:
-            if hasattr(ws, "VOICE_MODEL_CACHE"):
-                del ws.VOICE_MODEL_CACHE
-        else:
-            ws.VOICE_MODEL_CACHE = self._saved_cache
         if self._saved_timeout is None:
             os.environ.pop("KISS_VOICE_DOWNLOAD_TIMEOUT", None)
         else:
@@ -134,9 +133,9 @@ class TestVoiceModelDownloadTimeout(unittest.TestCase):
             "connection while holding _voice_model_lock",
         )
         self.assertEqual(result, [None])
-        self.assertFalse(ws.VOICE_MODEL_CACHE.exists())
+        self.assertFalse(self.cache.exists())
         # The lock was released: a follow-up caller is not convoyed.
-        _assert_download_lock_released(ws.VOICE_MODEL_CACHE)
+        _assert_download_lock_released(self.cache)
 
     def test_slow_trickle_download_hits_the_total_deadline(self) -> None:
         """Review finding 3: a peer sending one byte before every
@@ -192,8 +191,8 @@ class TestVoiceModelDownloadTimeout(unittest.TestCase):
             "while holding _voice_model_lock",
         )
         self.assertEqual(result, [None])
-        self.assertFalse(ws.VOICE_MODEL_CACHE.exists())
-        _assert_download_lock_released(ws.VOICE_MODEL_CACHE)
+        self.assertFalse(self.cache.exists())
+        _assert_download_lock_released(self.cache)
 
     def test_trickled_http_framing_hits_the_total_deadline(self) -> None:
         """The deadline covers the status line, the headers and a chunk's size line too.
@@ -201,16 +200,21 @@ class TestVoiceModelDownloadTimeout(unittest.TestCase):
         ``urlopen`` reads the headers, and ``read1`` a chunked body's
         size lines, in as many socket reads as the peer makes of them:
         a byte before every per-read timeout used to keep the download
-        running past its total deadline, with the lock held.
+        running past its total deadline, with the lock held.  So did an
+        HTTPS proxy's reply to ``CONNECT``, which ``connect()`` reads
+        before it returns the socket to register.
         """
         os.environ["KISS_VOICE_DOWNLOAD_TIMEOUT"] = "1"
         os.environ["KISS_VOICE_DOWNLOAD_TOTAL_TIMEOUT"] = "0.5"
         stop_sending = threading.Event()
         self.addCleanup(stop_sending.set)
+        environ = self.enterContext(pytest.MonkeyPatch.context())
         slow = b"x" * 200  # a byte every 0.05 s: 10 s of framing, 20 deadlines' worth
+        proxy_reply = b"HTTP/1.1 200 Connection established\r\n"
         for at_once, trickled in (
             (b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n", b"X-Slow: " + slow + b"\r\n\r\n"),
             (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", b"5;ext=" + slow + b"\r\n"),
+            (proxy_reply, b"X-Proxy: " + slow + b"\r\n\r\n"),
         ):
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.addCleanup(listener.close)
@@ -221,9 +225,13 @@ class TestVoiceModelDownloadTimeout(unittest.TestCase):
                 target=_trickle, args=(listener, at_once, trickled, stop_sending), daemon=True,
             ).start()
             url = f"http://127.0.0.1:{port}/model.tar.gz"
+            if at_once is proxy_reply:  # the listener is the proxy the environment names
+                environ.setenv("https_proxy", f"http://127.0.0.1:{port}")
+                environ.setenv("no_proxy", "")
+                url = "https://model.invalid/model.tar.gz"
             started = time.monotonic()
             with self.assertRaises(TimeoutError):
-                speech._download_url_to_file(url, ws.VOICE_MODEL_CACHE)
+                speech._download_url_to_file(url, self.cache)
             self.assertLess(time.monotonic() - started, 5.0, trickled[:8])
 
     def test_a_socket_registered_after_the_deadline_is_shut_down_too(self) -> None:
@@ -253,7 +261,7 @@ class TestVoiceModelDownloadTimeout(unittest.TestCase):
             ).start()
             listeners.append(listener)
         # The watch of a download whose deadline fired before its connection registered.
-        watched = speech._WatchedHandler()
+        watched = speech._WatchedHandler(time.monotonic() + 60)
         watched.expire()
         started = time.monotonic()
         with self.assertRaises(OSError):  # a URLError or a RemoteDisconnected
@@ -268,9 +276,59 @@ class TestVoiceModelDownloadTimeout(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             speech._download_url_to_file(
                 f"http://127.0.0.1:{listeners[1].getsockname()[1]}/model.tar.gz",
-                ws.VOICE_MODEL_CACHE,
+                self.cache,
             )
         self.assertLess(time.monotonic() - started, 5.0)
+
+    def test_a_stalled_tls_handshake_or_connect_ends_at_the_total_deadline(self) -> None:
+        """The deadline covers a TLS handshake and a connect, not only what follows them.
+
+        A connection registered its socket with the deadline's watch
+        once ``connect()`` had returned, which for HTTPS is after the
+        handshake: a peer that accepted and then trickled its handshake
+        kept the download (and the lock its caller holds) for a whole
+        per-read timeout, whatever the deadline.  So did a connect nobody
+        answers, once for every address of the host.
+        """
+        os.environ["KISS_VOICE_DOWNLOAD_TIMEOUT"] = "5"
+        os.environ["KISS_VOICE_DOWNLOAD_TOTAL_TIMEOUT"] = "0.5"
+        stop_sending = threading.Event()
+        self.addCleanup(stop_sending.set)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        # The header of a 16 KiB TLS record, then its bytes one by one: 10 s of handshake.
+        threading.Thread(
+            target=_trickle,
+            args=(listener, b"", b"\x16\x03\x03\x40\x00" + b"x" * 200, stop_sending),
+            daemon=True,
+        ).start()
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            speech._download_url_to_file(
+                f"https://127.0.0.1:{listener.getsockname()[1]}/model.tar.gz", self.cache,
+            )
+        self.assertLess(time.monotonic() - started, 3.0, "the handshake outlived the deadline")
+        # A connect nobody answers: the listener's queue of one is full, so the
+        # kernel drops what else arrives (Linux; another system may answer it).
+        full = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(full.close)
+        full.bind(("127.0.0.1", 0))
+        full.listen(0)
+        self.addCleanup(socket.create_connection(full.getsockname()).close)
+        try:
+            socket.create_connection(full.getsockname(), 0.3).close()
+        except TimeoutError:
+            pass
+        else:
+            self.skipTest("a full listen queue does not stall a connect here")
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            speech._download_url_to_file(
+                f"http://127.0.0.1:{full.getsockname()[1]}/model.tar.gz", self.cache,
+            )
+        self.assertLess(time.monotonic() - started, 3.0, "the connect outlived the deadline")
 
     def test_total_deadline_env_rejects_nonfinite_values(self) -> None:
         """``inf`` / ``1e999`` must not disable the total deadline —
@@ -315,10 +373,28 @@ class TestVoiceModelDownloadTimeout(unittest.TestCase):
         ws.VOICE_MODEL_URL = f"http://127.0.0.1:{port}/model.tar.gz"
 
         got = ws._ensure_voice_model()
-        self.assertEqual(got, ws.VOICE_MODEL_CACHE)
-        self.assertEqual(ws.VOICE_MODEL_CACHE.read_bytes(), payload)
+        self.assertEqual(got, self.cache)
+        self.assertEqual(self.cache.read_bytes(), payload)
         # Cached: a second call returns without re-downloading.
-        self.assertEqual(ws._ensure_voice_model(), ws.VOICE_MODEL_CACHE)
+        self.assertEqual(ws._ensure_voice_model(), self.cache)
+        # Over TLS the watched connection does the handshake itself (it registers
+        # the socket first): with the trust and the name the stock one checks.
+        certfile, keyfile, ca_file = make_test_tls(Path(self._tmp.name))
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(certfile, keyfile)
+        https = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+        self.addCleanup(https.server_close)
+        https.socket = tls.wrap_socket(https.socket, server_side=True)
+        threading.Thread(target=https.serve_forever, daemon=True).start()
+        self.addCleanup(https.shutdown)
+        url = f"https://127.0.0.1:{https.server_address[1]}/model.tar.gz"
+        fetched = Path(self._tmp.name) / "fetched"
+        with self.assertRaises(urllib.error.URLError) as untrusted:
+            speech._download_url_to_file(url, fetched)
+        self.assertIsInstance(untrusted.exception.reason, ssl.SSLCertVerificationError)
+        self.enterContext(pytest.MonkeyPatch.context()).setenv("SSL_CERT_FILE", str(ca_file))
+        speech._download_url_to_file(url, fetched)
+        self.assertEqual(fetched.read_bytes(), payload)
 
 
 if __name__ == "__main__":

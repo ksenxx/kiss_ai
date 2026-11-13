@@ -240,3 +240,49 @@ def test_every_alias_costs_exactly_like_its_base(
             f"{alias_name} cost {alias_cost} != base {base_name} cost {base_cost} "
             f"for profile {profile}"
         )
+
+
+def test_an_unlisted_xhigh_alias_is_sized_and_priced_as_its_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``codex/gpt-6-astra-xhigh`` has no catalog entry and every adapter runs it as
+    ``codex/gpt-6-astra`` (:func:`_strip_thinking_alias`), so the lookup that sizes and
+    prices a run answers with that entry: the run otherwise has no context window and
+    fails at its first ``calculate_cost``.  A Bedrock profile pays its premium once.  The
+    base's effort level is not the alias's (the catalog lists none for it), so a custom
+    entry seeded from the alias carries none.  A name registered under itself keeps its
+    own entry, and one whose entry cannot be built stays unknown, under its harbor
+    spelling too."""
+    registry = tmp_path / "MY_MODELS.json"
+    monkeypatch.setattr(mi, "USER_MY_MODELS_PATH", registry)
+    bases = [
+        n for n, info in MODEL_INFO.items() if not info.alias_of and f"{n}-xhigh" not in MODEL_INFO
+    ]
+    assert {"codex/gpt-6-astra", "claude-opus-4-6"} <= set(bases)
+    usage = (250_000, 1_000, 1_000, 1_000, 1_000)
+    for base in bases:
+        alias = f"{base}-xhigh"
+        assert _strip_thinking_alias(alias) == base
+        assert mi.get_max_context_length(alias) == mi.get_max_context_length(base), alias
+        assert calculate_cost(alias, *usage) == calculate_cost(base, *usage), alias
+    profile = "bedrock/us.anthropic.claude-opus-4-6-v1:0"
+    assert profile not in MODEL_INFO
+    premium = 1.1 * calculate_cost("claude-opus-4-6", 10_000, 0)
+    assert calculate_cost(profile, 10_000, 0) == pytest.approx(premium)
+    assert calculate_cost(f"{profile}-xhigh", 10_000, 0) == pytest.approx(premium)
+    opus = MODEL_INFO["claude-opus-4-6"]
+    assert opus.thinking
+    assert mi.save_custom_model("claude-opus-4-6-xhigh", endpoint="http://r/v1") is None
+    seeded = json.loads(registry.read_text())["claude-opus-4-6-xhigh"]
+    assert seeded["context_length"] == opus.context_length
+    assert seeded["input_price_per_1M"] == opus.input_price_per_1M
+    assert "thinking" not in seeded
+    fields = {"context_length": 8192, "input_price_per_1M": 7, "output_price_per_1M": 9}
+    unbuildable = {**fields, "input_price_per_1M": "7"}
+    registry.write_text(
+        json.dumps({"codex/gpt-6-astra-xhigh": fields, "claude-opus-4-6-xhigh": unbuildable})
+    )
+    assert mi.get_max_context_length("codex/gpt-6-astra-xhigh") == 8192
+    assert calculate_cost("codex/gpt-6-astra-xhigh", 1_000_000, 0) == 7
+    assert not mi.is_known_model("claude-opus-4-6-xhigh")
+    assert not mi.is_known_model("anthropic/claude-opus-4-6-xhigh")

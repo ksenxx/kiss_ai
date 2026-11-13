@@ -115,6 +115,10 @@ function pick(win, model) {
   );
   assert.ok(item, 'the picker offers ' + model);
   click(win, item);
+  assert.ok(
+    !byId(win, 'model-dropdown').classList.contains('open'),
+    'a pick closes the list',
+  );
 }
 
 /** The `machine` field of every `type` message posted since index *from*. */
@@ -234,6 +238,9 @@ test('an open picker follows a pick made on another surface', () => {
   assert.deepStrictEqual(listed(), ['gpu-a', 'gpu-b', 'gpu-c']);
   assert.strictEqual(label(win), 'gpu-a');
   assert.deepStrictEqual(machinesOf(posted, from, 'getModels'), ['gpu-box']);
+  // gpu-box's answer to that request repaints the open list.
+  gpuModels(win, 'gpu-a', GPU_MODELS.slice(0, 2));
+  assert.deepStrictEqual(listed(), ['gpu-a', 'gpu-b']);
   win.close();
 });
 
@@ -318,6 +325,21 @@ test("an agent's model stays with the machine its task runs on", () => {
   pickMachine(win, 'gpu-box');
   assert.strictEqual(label(win), 'gpu-a');
   send(win, {type: 'modelPick', tabId: tabId, model: 'gpu-c', source: 'agent'});
+  assert.strictEqual(label(win), 'gpu-c');
+  win.close();
+});
+
+test('a hand pick belongs to its machine: the next machine restores as usual', () => {
+  const {win} = pickerPage();
+  const tabId = win._testApi.getActiveTabId();
+  pick(win, 'laptop-b');
+  // The tab's task goes to gpu-box: the picker takes that machine's
+  // default, which nobody picked by hand, so its restore counts.
+  send(win, {type: 'tabMachine', tabId: tabId, machine: 'gpu-box'});
+  gpuModels(win, 'gpu-a');
+  assert.strictEqual(label(win), 'gpu-a');
+  send(win, {type: 'modelPick', tabId: tabId, model: 'gpu-b', source: 'agent'});
+  send(win, {type: 'modelPick', tabId: tabId, model: 'gpu-c', source: 'restore'});
   assert.strictEqual(label(win), 'gpu-c');
   win.close();
 });
@@ -412,6 +434,31 @@ test('the open settings sheet follows the drop-down, saving its edits where they
   from = posted.length;
   pickMachine(win, 'gpu-box');
   assert.deepStrictEqual(machinesOf(posted, from, 'getConfig'), []);
+  win.close();
+});
+
+test('the move drops an unsaved custom-model edit and the update status first', () => {
+  const {win, posted} = pickerPage();
+  click(win, byId(win, 'settings-btn'));
+  send(win, {type: 'configData', config: {}, apiKeys: {}, machine: 'laptop'});
+  send(win, {
+    type: 'myModelsData',
+    models: [{name: 'm', endpoint: 'http://model/v1', api_key: '', headers: ''}],
+  });
+  edit(win, 'cfg-custom-endpoint', 'http://typed/v1');
+  click(win, win.document.querySelector('.custom-model-edit-btn'));
+  assert.strictEqual(byId(win, 'cfg-custom-endpoint').value, 'http://model/v1');
+  click(win, byId(win, 'cfg-update-btn'));
+  const status = byId(win, 'settings-update-status');
+  assert.strictEqual(status.textContent, 'Updating…');
+
+  pickMachine(win, 'gpu-box');
+  assert.strictEqual(
+    lastMsg(posted, 'saveConfig').config.custom_endpoint,
+    'http://typed/v1',
+    "the edit's loaded endpoint is not saved as the user's",
+  );
+  assert.strictEqual(status.hidden, true, 'the status line is of the machine left');
   win.close();
 });
 
@@ -571,4 +618,3 @@ test("a file tab's settings and picker stay on the machine the file is on", () =
 });
 
 report('machineScopedPicker');
-process.exit(0);

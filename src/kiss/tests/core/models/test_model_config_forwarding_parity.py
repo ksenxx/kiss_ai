@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from typing import Any
 
 import anthropic
@@ -54,6 +54,8 @@ from kiss.tests.core.models.openai_sse_harness import (
     Reply,
     Request,
     ScriptedOpenAIServer,
+    chat_chunk,
+    responses_event,
 )
 
 _ANTHROPIC_MODEL = "claude-parity-under-test"
@@ -119,6 +121,40 @@ def _responses_reply(request: Request) -> Reply:
     )
 
 
+def _chat_stream_reply(request: Request) -> Reply:
+    """Answer a streamed Chat Completions call with one short assistant message."""
+    return Reply(
+        sse_chunks=[
+            chat_chunk(
+                {
+                    "id": "chatcmpl-parity",
+                    "object": "chat.completion.chunk",
+                    "model": _OPENAI_MODEL,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+                }
+            ),
+            b"data: [DONE]\n\n",
+        ]
+    )
+
+
+def _responses_stream_reply(request: Request) -> Reply:
+    """Answer a streamed Responses call with the terminal event of :func:`_responses_reply`."""
+    completed = {"response": _responses_reply(request).json_body}
+    return Reply(sse_chunks=[responses_event("response.completed", completed)])
+
+
+def _discard_token(token: str) -> None:
+    """Token callback whose only effect is that the adapter streams."""
+
+
 @pytest.fixture
 def gemini_endpoint() -> Generator[tuple[str, GeminiScript]]:
     """A real local Gemini endpoint for one test."""
@@ -146,42 +182,48 @@ def anthropic_request_body(config: dict[str, Any]) -> dict[str, Any]:
         return server.requests[-1]
 
 
-def openai_chat_request_body(config: dict[str, Any]) -> dict[str, Any]:
+def openai_chat_request_body(config: dict[str, Any], streamed: bool = False) -> dict[str, Any]:
     """Run one real Chat Completions turn and return the request body.
 
     Args:
         config: The ``model_config`` to hand the adapter.
+        streamed: Give the adapter a token callback, which makes it stream.
 
     Returns:
         The JSON body the local ``/v1/chat/completions`` endpoint received.
     """
-    with ScriptedOpenAIServer(_chat_reply) as server:
+    with ScriptedOpenAIServer(_chat_stream_reply if streamed else _chat_reply) as server:
         model = OpenAICompatibleModel(
             _OPENAI_MODEL,
             base_url=server.base_url,
             api_key="test-key",
             model_config=config,
+            token_callback=_discard_token if streamed else None,
         )
         model.initialize("Say ok.")
         model.generate()
         return server.requests[-1].body
 
 
-def openai_responses_request_body(config: dict[str, Any]) -> dict[str, Any]:
+def openai_responses_request_body(
+    config: dict[str, Any], streamed: bool = False
+) -> dict[str, Any]:
     """Run one real Responses turn and return the request body.
 
     Args:
         config: The ``model_config`` to hand the adapter.
+        streamed: Give the adapter a token callback, which makes it stream.
 
     Returns:
         The JSON body the local ``/v1/responses`` endpoint received.
     """
-    with ScriptedOpenAIServer(_responses_reply) as server:
+    with ScriptedOpenAIServer(_responses_stream_reply if streamed else _responses_reply) as server:
         model = OpenAICompatibleModel2(
             _OPENAI_MODEL,
             base_url=server.base_url,
             api_key="test-key",
             model_config=config,
+            token_callback=_discard_token if streamed else None,
         )
         model.initialize("Say ok.")
         model.generate()
@@ -333,6 +375,13 @@ class TestUnsupportedParameterIsAnnouncedNotCrashed:
             body = openai_responses_request_body(dict(self._UNKNOWN))
         self._assert_reported(body, caplog)
 
+    def test_responses_background_mode(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A ``background`` job is handed back unfinished and nothing polls for it."""
+        with caplog.at_level(logging.WARNING):
+            body = openai_responses_request_body({"background": True})
+        assert "background" not in body
+        assert "background" in caplog.text
+
     def test_gemini(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -345,3 +394,39 @@ class TestUnsupportedParameterIsAnnouncedNotCrashed:
                 monkeypatch, gemini_endpoint, dict(self._UNKNOWN)
             )
         self._assert_reported(body, caplog)
+
+
+class TestStreamOptionsRideOnAStreamOnly:
+    """``stream_options`` reaches a streamed request, and no other."""
+
+    _OPTIONS = {"stream_options": {"include_obfuscation": False}}
+
+    def test_chat_stream_keeps_the_callers_options(self) -> None:
+        """The stream's own ``include_usage`` replaced the caller's dict."""
+        body = openai_chat_request_body(dict(self._OPTIONS), streamed=True)
+        assert body["stream_options"] == {"include_obfuscation": False, "include_usage": True}
+
+    def test_responses_stream_keeps_the_callers_options(self) -> None:
+        """The Responses API declares this one option, so it is forwarded."""
+        body = openai_responses_request_body(dict(self._OPTIONS), streamed=True)
+        assert body["stream_options"] == {"include_obfuscation": False}
+
+    @pytest.mark.parametrize(
+        "request_body",
+        [openai_chat_request_body, openai_responses_request_body],
+        ids=["chat", "responses"],
+    )
+    def test_non_streamed_request_carries_none(
+        self, request_body: Callable[[dict[str, Any]], dict[str, Any]]
+    ) -> None:
+        """OpenAI answers ``stream_options`` without ``stream`` with HTTP 400."""
+        assert "stream_options" not in request_body(dict(self._OPTIONS))
+
+
+def test_chat_completions_sends_no_null_tools() -> None:
+    """A turn without tools shipped ``"tools": null``, outside the API's contract."""
+    with ScriptedOpenAIServer(_chat_reply) as server:
+        model = OpenAICompatibleModel(_OPENAI_MODEL, base_url=server.base_url, api_key="test-key")
+        model.initialize("Say ok.")
+        model.generate_and_process_with_tools({})
+        assert "tools" not in server.requests[-1].body

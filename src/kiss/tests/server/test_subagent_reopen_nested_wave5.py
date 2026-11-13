@@ -22,34 +22,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
-import subprocess
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection
 
 from kiss.tests.server.test_ready_replay_conn_scoped import _seed_subagent_row
 from kiss.tests.server.test_web_server_tab_mirroring import TabMirroringBase
-
-_WEBAPP_TEST_DIR = Path(__file__).resolve().parents[2] / "webapp" / "test"
-
-# Plays the frames on stdin into a fresh page showing the tab argv[1];
-# prints the sub-agent tabs it shows and the tabs it asked the daemon
-# to close (a close is mirrored to every surface).
-_PAGE_SCRIPT = r"""
-const {makePreloadedPage, send} = require(process.argv[2] + '/simplify2_harness');
-const {openSubTabIds} = require(process.argv[2] + '/subagent_tab_helpers');
-const page = makePreloadedPage(process.argv[1]);
-for (const ev of JSON.parse(require('fs').readFileSync(0, 'utf8'))) send(page.win, ev);
-process.stdout.write(JSON.stringify({
-  shown: openSubTabIds(page.win),
-  closed: page.posted.filter(m => m.type === 'closeTab').map(m => m.tabId),
-}));
-page.close();
-"""
+from kiss.tests.server.two_client_harness import page_after
 
 
 @dataclass(frozen=True)
@@ -114,10 +95,17 @@ class TestNestedSubagentReopenIsShared(TabMirroringBase):
             "type": "resumeSession", "taskId": task_id, "tabId": tab_id, **extra,
         })
 
-    async def _shown(self, ws: ClientConnection, tab_id: str) -> dict[str, Any]:
-        """Wait for sub-agent *tab_id*'s announcement and transcript on *ws*; return the first."""
+    async def _shown(
+        self, ws: ClientConnection, tab_id: str, transcript: str = "task_events",
+    ) -> dict[str, Any]:
+        """Wait for sub-agent *tab_id*'s announcement and *transcript* frame on *ws*.
+
+        *transcript* is ``task_events`` for the tab's own resume and
+        ``replay_deferred`` for the offer its parent's replay sends.
+        Returns the announcement.
+        """
         frames = await self._frames_until(
-            ws, Frame("openSubagentTab", tab_id, "tab_id"), Frame("task_events", tab_id),
+            ws, Frame("openSubagentTab", tab_id, "tab_id"), Frame(transcript, tab_id),
         )
         return next(ev for ev in frames if Frame("openSubagentTab", tab_id, "tab_id").matches(ev))
 
@@ -128,7 +116,7 @@ class TestNestedSubagentReopenIsShared(TabMirroringBase):
         await self._send(ws, {"type": "openTab", "tabId": "tab-p", "title": "new chat"})
         self.assertIsNotNone(await self._wait_for_snapshot_with(ws, present={"tab-p"}))
         await self._send(ws, {"type": "resumeSession", "chatId": chat_id, "tabId": "tab-p"})
-        await self._shown(ws, child_tab)
+        await self._shown(ws, child_tab, "replay_deferred")
         return ws
 
     async def _reopen(
@@ -170,27 +158,13 @@ class TestNestedSubagentReopenIsShared(TabMirroringBase):
 
     async def test_a_new_page_shows_the_reopened_child_and_grandchild(self) -> None:
         """The real page fed a new surface's replay shows both tabs and closes nothing."""
-        if shutil.which("node") is None:
-            self.skipTest("node is not available on PATH")
         _ws_a, _child_id, child_tab, grand_tab = await self._both_reopened()
         frames = await self._replay_of_new_surface(
             "tab-p", Frame("replay_deferred", grand_tab),
         )
-        page = await asyncio.to_thread(
-            subprocess.run,
-            [
-                "node", "--no-maglev", "--no-concurrent-sparkplug",
-                "-e", _PAGE_SCRIPT, "tab-p", str(_WEBAPP_TEST_DIR),
-            ],
-            input=json.dumps(frames),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            cwd=str(_WEBAPP_TEST_DIR.parent),
-        )
-        self.assertEqual(page.returncode, 0, page.stderr)
         self.assertEqual(
-            json.loads(page.stdout), {"shown": [child_tab, grand_tab], "closed": []},
+            await asyncio.to_thread(page_after, "tab-p", frames),
+            {"shown": [child_tab, grand_tab], "closed": []},
         )
 
     async def test_fetching_the_child_reannounces_the_reopened_grandchild(self) -> None:
@@ -205,7 +179,7 @@ class TestNestedSubagentReopenIsShared(TabMirroringBase):
         fetched = await self._frames_until(ws_b, Frame("replay_deferred", grand_tab))
         # A expands the parent's panel again (a broadcast reopening of the child).
         await self._resume(ws_a, child_id, child_tab, parentTabId="tab-p", reopen=True)
-        expanded = await self._frames_until(ws_a, Frame("task_events", grand_tab))
+        expanded = await self._frames_until(ws_a, Frame("replay_deferred", grand_tab))
 
         for frames in (fetched, expanded):
             self.assertEqual(

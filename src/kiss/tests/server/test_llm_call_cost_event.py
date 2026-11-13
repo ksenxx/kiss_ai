@@ -34,7 +34,7 @@ class _ScriptedModel:
     serves_tools_natively = False  # no native tool set is built for it
     native_tools_exposed = Model.native_tools_exposed  # the base no-op
     # The context policies of the base model: none applies.
-    server_side_context_editing = Model.server_side_context_editing
+    clears_tool_uses_in_bulk = Model.clears_tool_uses_in_bulk
     keeps_reasoning_turns = Model.keeps_reasoning_turns
     compacts_whole_turns = Model.compacts_whole_turns
 
@@ -84,7 +84,6 @@ def _agent(model: _ScriptedModel, printer: JsonPrinter | None) -> KISSAgent:
     agent = KISSAgent("LlmCallTest")
     agent.model = model  # type: ignore[assignment]
     agent.model_name = model.model_name
-    agent.verbose = False
     agent.printer = printer  # type: ignore[assignment]
     agent.is_agentic = True
     agent.max_steps = 5
@@ -212,9 +211,7 @@ class TestObservedCallCosts:
         os.environ["KISS_HOME"] = str(th._KISS_DIR)
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         restore_persistence(self.saved)
         if self.saved_home is None:
             os.environ.pop("KISS_HOME", None)

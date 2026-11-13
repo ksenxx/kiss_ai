@@ -29,7 +29,9 @@ from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
 import kiss.core.user_config as vc
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.local_ws import _generate_self_signed_cert
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 _PY_SOURCE = 'def greet(name):\n    return "hello " + name\n'
@@ -55,12 +57,11 @@ class _ServerHarness:
         # the paths tests compare differ from the ones they created.
         self.tmpdir = os.path.realpath(tempfile.mkdtemp(prefix="kiss-content-tab-"))
         tmp = Path(self.tmpdir)
-        self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved_persistence = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = tmp / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         self._saved_cfg = (vc.CONFIG_DIR, vc.CONFIG_PATH)
         vc.CONFIG_DIR = tmp / "config"
         vc.CONFIG_PATH = vc.CONFIG_DIR / "config.json"
@@ -112,8 +113,8 @@ class _ServerHarness:
             self.loop.call_soon_threadsafe(self.loop.stop)
             self._thread.join(timeout=30)
             self.loop.close()
-            th._close_db()
-            th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
+            close_db()
+            th._DB_PATH, th._KISS_DIR = self._saved_persistence
             vc.CONFIG_DIR, vc.CONFIG_PATH = self._saved_cfg
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 

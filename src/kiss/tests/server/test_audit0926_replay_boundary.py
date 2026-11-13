@@ -335,6 +335,9 @@ class TestReplayBoundary(TabMirroringBase):
         state = agent_state.find_by_tab(launcher)
         assert state is not None and state.task_thread is not None
         task_thread = state.task_thread
+        # A scoped replay refreshes a tab some surface shows: the viewer
+        # is the chat's registry tab (opening it displaced the launcher).
+        vs._registry_update_tab(viewer, chat_id=chat_id, create=True)
 
         def run() -> None:
             (tmp / "release").write_text("1", encoding="utf-8")
@@ -718,6 +721,48 @@ class TestReplayBoundary(TabMirroringBase):
         self.assertEqual(_text(view), "HEAD FINAL", view)
         results = [ev for ev in view if ev.get("type") == "result"]
         self.assertEqual([ev.get("text") for ev in results], ["all done"])
+
+    async def test_run_given_its_row_before_the_attach_is_replayed_under_it(self) -> None:
+        """A run gets its history row between B's row read and its attach.
+
+        The chat's latest row, read first, is the finished task before
+        the run.  The replay names the run's own row: sent without it,
+        the page keeps the finished task's id and reads the thread back
+        from there, past that task.
+        """
+        assert self.server is not None
+        vs = self.server._agent_server
+        _, chat_id = th._add_task("finished task")
+        ws_a = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._send(ws_a, {"type": "openTab", "tabId": "tab-t", "title": "new chat"})
+        await self._send(ws_a, {"type": "resumeSession", "chatId": chat_id, "tabId": "tab-t"})
+        self.assertIsNotNone(await self._wait_for_event(
+            ws_a, "task_events", pred=lambda ev: ev.get("tabId") == "tab-t",
+        ))
+        # What a run in tab-t registers on admission (``_cmd_run``).
+        run = AgentState("provisional-key", chat_id=chat_id, tab_id="tab-t", is_task_active=True)
+        agent_state.register(run)
+        ws_b, conn_b = await self._connect_b()
+        row: list[str] = []
+
+        def allocate_row() -> None:
+            task_id, _ = th._add_task("the run's task", chat_id=chat_id)
+            agent_state.rekey(run, str(task_id))
+            row.append(str(task_id))
+
+        def replay() -> None:
+            sys.settrace(_hook("_attach_viewer_to_running_chat", "call", allocate_row))
+            try:
+                vs._replay_session(chat_id, "tab-t", conn_id=conn_b)
+            finally:
+                sys.settrace(None)
+
+        await asyncio.to_thread(replay)
+        replays = [ev for ev in await self._drain(ws_b) if ev.get("type") == "task_events"]
+        agent_state.agent_states.clear()
+        self.assertEqual([(str(ev.get("task_id")), ev.get("task")) for ev in replays],
+                         [(row[0], "the run's task")])
 
     async def test_i3_many_runs_retired_before_attach_to_oldest(
         self,

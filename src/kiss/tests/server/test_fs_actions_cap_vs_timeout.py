@@ -13,15 +13,21 @@ a timeout.  The race window is a few bytecodes wide, so the test runs a
 real child many times with a tiny thread switch interval and deadlines
 spread around the time the child needs to pass the cap; before the fix
 it tripped about 1 run in 300.
+
+``fs_actions.find_in_folder`` lists the capped output one row per line
+git printed: only git's own terminator ends a row.
 """
 
 from __future__ import annotations
 
 import sys
+import tempfile
 import time
 import unittest
+from pathlib import Path
 
 from kiss.core.processes import run_capped
+from kiss.server.fs_actions import compare_files, find_in_folder
 
 # A child that writes 300 kB to stdout: the same interpreter (bare, no
 # site), so the test needs no ``sh``, ``head`` or ``/dev/zero``.
@@ -56,6 +62,34 @@ class TestCapVersusTimeout(unittest.TestCase):
                 runs += 1
         finally:
             sys.setswitchinterval(saved)
+
+
+class TestFindInFolderRows(unittest.TestCase):
+    """``find_in_folder`` counts and lists the lines git printed."""
+
+    def test_a_line_break_character_inside_a_match_stays_in_its_row(self) -> None:
+        """A form feed, U+2028 or a lone CR in a matched line starts no second row."""
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "a.txt").write_bytes(b"one needle\x0cafter\r\nneedle\rtwo\n")
+            Path(root, "b.js").write_text('s = "needle\u2028tail";\n', encoding="utf-8")
+            reply = find_in_folder(root, "needle")
+        self.assertEqual(reply["count"], 3)
+        self.assertEqual(
+            reply["text"],
+            'a.txt:1:one needle\x0cafter\na.txt:2:needle\rtwo\nb.js:1:s = "needle\u2028tail";\n',
+        )
+
+    def test_a_non_ascii_file_name_is_shown_as_it_is_spelled(self) -> None:
+        """Not as git quotes it by default (``"h\\303\\251llo.txt"``), in a search or a diff."""
+        with tempfile.TemporaryDirectory() as root:
+            one, other = Path(root, "héllo.txt"), Path(root, "日本語.txt")
+            one.write_text("needle\n", encoding="utf-8")
+            other.write_text("other\n", encoding="utf-8")
+            found = find_in_folder(root, "needle")
+            diff = compare_files(str(one), str(other))
+        self.assertEqual(found["text"], "héllo.txt:1:needle\n")
+        self.assertIn("héllo.txt", diff["text"])
+        self.assertIn("日本語.txt", diff["text"])
 
 
 if __name__ == "__main__":

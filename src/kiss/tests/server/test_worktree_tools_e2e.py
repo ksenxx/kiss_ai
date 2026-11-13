@@ -49,6 +49,7 @@ from kiss.tests.server.parallel_agent_harness import (
     tool_call_response,
 )
 from kiss.tests.server.test_autocommit_wire_toggle import _FakeCredentials
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 _MARKER = "WORKTREE-TOOLS-E2E"
 REFUSED_WRITE = "Call create_worktree() first"
@@ -185,9 +186,9 @@ class TestUnmergedWorktreeIsPresentedToTheUser(_ScriptedRun):
         self.assertIn(REFUSED_FINISH, self.requests[3])
 
         (done,) = self.printer.events_of_type("worktree_done")
-        self.assertEqual(done["changedFiles"], ["g.txt"])
+        self.assertEqual(worktree_changed_files(self.server, "wt-tools-tab"), ["g.txt"])
         current = run_git(self.repo, "branch", "--show-current").stdout.strip()
-        self.assertEqual(done["originalBranch"], current)
+        self.assertEqual(GitWorktreeOps.load_original_branch(self.repo, done["branch"]), current)
         # Untouched checkout, change only on the task branch.
         self.assertFalse((self.repo / "g.txt").exists())
         branches = run_git(
@@ -277,7 +278,7 @@ class TestSequentialRunsOnOneTab(_ScriptedRun):
         self.assertTrue(GitWorktreeOps.load_preserve_marker(self.repo, second["branch"]))
         done = self.printer.events_of_type("worktree_done")
         self.assertEqual([d["branch"] for d in done], [first["branch"], second["branch"]])
-        self.assertEqual(done[1]["changedFiles"], ["second.txt"])
+        self.assertEqual(worktree_changed_files(self.server, "wt-tools-tab"), ["second.txt"])
 
 
 class TestFailedMergeKeepsTheWorktreeUsable(_ScriptedRun):
@@ -460,8 +461,8 @@ class TestPreserveMarkerDoesNotWaitForRepoLocks(unittest.TestCase):
         self.assertLess(written_at, released_at[0])
 
 
-class TestEmptyWorktreeIsDiscardedWithRescue(_ScriptedRun):
-    """Ignored-only output is rescued and the empty branch dropped at task end."""
+class TestEmptyWorktreeIsDiscarded(_ScriptedRun):
+    """A worktree with only git-ignored output is dropped at task end, output and branch."""
 
     script = [
         tool_call_response("create_worktree", {}),
@@ -478,7 +479,8 @@ class TestEmptyWorktreeIsDiscardedWithRescue(_ScriptedRun):
             (result["action"], result["success"], result["branch"], result["tabId"]),
             ("discard", True, created["branch"], "wt-tools-tab"),
         )
-        self.assertEqual((self.repo / "tmp" / "out.txt").read_text(), "report\n")
+        self.assertFalse((self.repo / "tmp" / "out.txt").exists())
+        self.assertEqual(list((self.repo / ".kiss-worktrees").iterdir()), [])
         self.assertEqual(run_git(self.repo, "branch", "--list", "kiss/wt-*").stdout.strip(), "")
         self.assertEqual(self.printer.events_of_type("worktree_done"), [])
 

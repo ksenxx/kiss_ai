@@ -12,32 +12,7 @@
 'use strict';
 
 const assert = require('assert');
-const {
-  makePage,
-  send,
-  readyTabId,
-  fakeGeometry,
-  getAdjacent,
-} = require('./simplify2_harness');
-
-function setup() {
-  const {win, posted} = makePage();
-  const tabId = readyTabId(posted);
-  win._testApi.hideWelcome();
-  const O = win.document.getElementById('output');
-  fakeGeometry(O, {sh: 3000, ch: 500});
-  send(win, {
-    type: 'task_events',
-    tabId,
-    chat_id: 'chat-t',
-    task_id: '42',
-    task: 'My old task',
-    events: [
-      {type: 'system_output', text: 'hello\n'},
-    ],
-  });
-  return {win, posted, tabId, O};
-}
+const {getAdjacent, historyTaskPage} = require('./simplify2_harness');
 
 function touchEvent(win, type, y) {
   // jsdom has no Touch/TouchEvent constructors; the handlers only read
@@ -59,7 +34,7 @@ function touchSequence(win, O, deltas) {
 }
 
 function testTouchPrevAtTop() {
-  const {win, posted, O} = setup();
+  const {win, posted, O} = historyTaskPage();
   O.scrollTop = 0;
   touchSequence(win, O, Array(10).fill(-50));
   const adj = getAdjacent(posted);
@@ -71,7 +46,7 @@ function testTouchPrevAtTop() {
 }
 
 function testTouchNextAtBottom() {
-  const {win, posted, O} = setup();
+  const {win, posted, O} = historyTaskPage();
   O.scrollTop = 2500; // scrollTop + clientHeight == scrollHeight
   touchSequence(win, O, Array(10).fill(50));
   const adj = getAdjacent(posted);
@@ -82,7 +57,7 @@ function testTouchNextAtBottom() {
 }
 
 function testOffEdgeTouchFetchesNothing() {
-  const {win, posted, O} = setup();
+  const {win, posted, O} = historyTaskPage();
   // A touch scroll that is not at an edge is ordinary scrolling: no
   // neighbour is fetched, whatever the direction. (Scrolling NEAR an
   // edge prefetches through the scroll event, not the touch handler.)

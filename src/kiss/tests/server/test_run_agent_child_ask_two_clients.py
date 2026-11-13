@@ -122,10 +122,18 @@ class RunAgentChildAskTwoClientsTest(TwoClientHarness):
                     return str(child["task_id"])
         return None
 
-    def _watch_child(self, client: Client, task_id: str, parent_tab: str) -> str:
-        """Subscribe *client* to the child's stream, as a page does on ``new_tab``."""
+    def _watch_child(
+        self, client: Client, task_id: str, parent_tab: str, reopen: bool = False,
+    ) -> str:
+        """Subscribe *client* to the child's stream, as a page does on ``new_tab``.
+
+        With *reopen*, as its fan-out panel does when the user expands
+        it: only that opens a tab the user closed again.
+        """
         sub_tab = f"{parent_tab}__sub_{task_id}"
-        client.send({"type": "resumeSession", "taskId": task_id, "tabId": sub_tab})
+        client.send({
+            "type": "resumeSession", "taskId": task_id, "tabId": sub_tab, "reopen": reopen,
+        })
         return sub_tab
 
     def _open_deferred_tab(self, client: Client, tab_id: str) -> None:
@@ -210,7 +218,7 @@ class RunAgentChildAskTwoClientsTest(TwoClientHarness):
             )
             for cl in (a, b, c)
         }
-        self._watch_child(a, child_id, a.tab_id)
+        self._watch_child(a, child_id, a.tab_id, reopen=True)
         for client in (a, b, c):
             self.wait_for(
                 partial(self._more_than, client, "openSubagentTab", "tab_id",

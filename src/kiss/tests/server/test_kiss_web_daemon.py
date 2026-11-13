@@ -19,13 +19,15 @@ import urllib.request
 from unittest import IsolatedAsyncioTestCase
 
 from kiss.core.brand import PRODUCT_NAME
+from kiss.core.config import remote_url_file
 from kiss.server.web_server import (
-    _URL_FILE,
     RemoteAccessServer,
     _remove_url_file,
     _save_url_file,
 )
 from kiss.tests.server.conftest import no_verify_ssl
+
+_URL_FILE = remote_url_file()  # under the session's KISS_HOME, which the test conftest sets
 
 
 class TestDaemonUrlFileLifecycle(IsolatedAsyncioTestCase):

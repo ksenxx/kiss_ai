@@ -73,7 +73,7 @@ HASHED_EMBEDDING_DIMS = 1024
 # plain content hash, so a pre-format process sees rows written by current
 # code as unchanged and the two versions never rebuild the index back and
 # forth.  Bump this whenever the mapping changes.
-EMBEDDING_INPUT_FORMAT = "2"
+EMBEDDING_INPUT_FORMAT = "3"  # empty inputs now embed the filename instead
 
 # Columns added to the ``pages`` table after its first release, with the
 # definition used both in CREATE TABLE and in the ALTER TABLE migration
@@ -572,6 +572,7 @@ class VectorIndex:
 
         :func:`embedding_text` (title, summary and Markdown body — no
         volatile frontmatter), truncated to :data:`MAX_PAGE_BYTES` of UTF-8.
+        :meth:`sync` embeds a page for which this is blank as its name.
 
         Args:
             raw: Complete page text including frontmatter.
@@ -688,7 +689,11 @@ class VectorIndex:
                     restats.append((key, filename, digest))
                 continue
             raw = data.decode("utf-8", errors="replace")
-            pending.append((filename, digest, raw, key, self.embedding_input(raw)))
+            # An embeddings API rejects an empty input and, with it, the whole
+            # batch: one empty page file would fail every sync.  A page with
+            # nothing to embed is embedded as its name, which is its title.
+            text = self.embedding_input(raw)
+            pending.append((filename, digest, raw, key, text if text.strip() else name))
 
         stale = sorted(stored.keys() - on_disk)
         report = SyncReport(added=0, updated=0, removed=0, unchanged=unchanged)

@@ -74,7 +74,7 @@ def _parent(repo: str) -> SorcarAgent:
     parent.model_name = PARENT_MODEL
     parent._launch_model_name = PARENT_MODEL
     # Its task asks for sub-agents, so children on its own model family are
-    # not refused (``fanout_guard.same_family_conflict``).
+    # not refused (``fanout_guard.same_model_conflict``).
     parent.task_description = "PARENT run the sub-agents"
     parent.max_budget = 4.0
     parent.budget_used = 1.0
@@ -267,6 +267,17 @@ def test_run_config_line_shortens_long_values() -> None:
     assert "work_dir(empty->" + "x" * 37 + "...)" in line
     assert "budget=$2.00" in line
     assert run_config_line({"inherited": []}).endswith("inherited=none pinned=none")
+
+
+def test_run_config_line_renders_a_malformed_record_instead_of_raising() -> None:
+    """A ``pinned`` entry that is not ``[before, after]``, or an ``inherited`` that is
+    not a list of keys (a payload read back from another version), reads as none."""
+    for bad in (None, "x", "xy", [1, 2, 3], 5):
+        line = run_config_line({"pinned": {"model": bad, "work_dir": ["a", "b"]}})
+        assert line.endswith("pinned=work_dir(a->b)"), (bad, line)
+    assert run_config_line({"pinned": {"model": None}}).endswith("pinned=none")
+    for bad in (True, 5, "model"):
+        assert "inherited=none " in run_config_line({"inherited": bad}), bad
 
 
 def test_note_pinned_reduces_dicts_to_their_keys_and_skips_unasked() -> None:

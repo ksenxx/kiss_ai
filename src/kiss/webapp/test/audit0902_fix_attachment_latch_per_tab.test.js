@@ -31,7 +31,29 @@ const {
   failDecode,
   chipPending,
 } = require('./attachment_helpers');
-const {clickTab} = require('./simplify2_harness');
+const {clickTab, send} = require('./simplify2_harness');
+
+/**
+ * Watch the next FileReader the page builds.  The page's only reader is
+ * the one blobToBase64 opens for a pasted file, once isHeifFile has
+ * looked at its header, so the first one built after a paste is that
+ * file's.  Returns a predicate that turns true at the reader's
+ * `loadend`: the read is observed, not waited out, so a check does not
+ * depend on how long the FileReader takes.
+ */
+function watchNextRead(win) {
+  const RealFileReader = win.FileReader;
+  let read = false;
+  win.FileReader = function () {
+    win.FileReader = RealFileReader;
+    const reader = new RealFileReader();
+    reader.addEventListener('loadend', () => {
+      read = true;
+    });
+    return reader;
+  };
+  return () => read;
+}
 
 async function main() {
   // The sourceURL is what the .coverage.js gate of this suite keys on.
@@ -101,26 +123,12 @@ async function main() {
   // The wait ends while A is on screen with a draft in its composer: the
   // continuation must send nothing at all (C's prompt, or A's draft in
   // its place, with A's empty attachment list) and leave A's draft alone.
-  // The reader's completion is observed, not waited out, so the check
-  // does not depend on how long the FileReader takes.
   win._testApi.createNewTab();
   const tabC = win._testApi.getActiveTabId();
   const png3 = new win.File([new Uint8Array([137, 80, 78, 71, 1])], 'c.png', {
     type: 'image/png',
   });
-  // The page's only FileReader is the one blobToBase64 opens for the
-  // pasted file, once isHeifFile has looked at its header: the first
-  // reader built after the paste is c.png's.
-  const RealFileReader = win.FileReader;
-  let cRead = false;
-  win.FileReader = function () {
-    win.FileReader = RealFileReader;
-    const reader = new RealFileReader();
-    reader.addEventListener('loadend', () => {
-      cRead = true;
-    });
-    return reader;
-  };
+  const cRead = watchNextRead(win);
   paste(win, png3);
   typeAndEnter(win, 'prompt for C');
   clickTab(win, tabA);
@@ -128,8 +136,7 @@ async function main() {
   const inp = win.document.getElementById('task-input');
   inp.value = 'UNSENT A DRAFT';
   const sentBefore = submits(posted).length;
-  await settle(() => cRead);
-  assert.strictEqual(win.FileReader, RealFileReader, "c.png's reader ran");
+  await settle(cRead);
   assert.strictEqual(
     submits(posted).length,
     sentBefore,
@@ -170,6 +177,40 @@ async function main() {
   assert.strictEqual(bursts[0].tabId, tabA);
   assert.strictEqual(bursts[0].attachments.length, 1);
   assert.strictEqual(bursts[0].attachments[0].name, 'b.png');
+
+  // Audit 2026-11-11 (W1): a tab closed on another surface during the
+  // wait and listed again under the same id is another tab.  The parked
+  // submit compared ids only, so it sent the draft typed into the new
+  // tab (without the photo it had waited for) and emptied its composer.
+  const regA = {tabId: 'reg-a', chatId: 'chat-reg-a', title: 'a'};
+  const regB = {tabId: 'reg-b', chatId: 'chat-reg-b', title: 'b'};
+  send(win, {type: 'tabs_state', tabs: [regA, regB]});
+  win._testApi.switchToTab('reg-a');
+  assert.strictEqual(win._testApi.getActiveTabId(), 'reg-a');
+  const png4 = new win.File([new Uint8Array([137, 80, 78, 71, 2])], 'd.png', {
+    type: 'image/png',
+  });
+  const dRead = watchNextRead(win);
+  paste(win, png4);
+  typeAndEnter(win, 'parked prompt');
+  const sentParked = submits(posted).length;
+  send(win, {type: 'tabs_state', tabs: [regB]});
+  assert.ok(
+    !win._testApi.openTabs().some(t => t.id === 'reg-a'),
+    'setup: the waiting tab was closed elsewhere',
+  );
+  send(win, {type: 'tabs_state', tabs: [regA, regB]});
+  win._testApi.switchToTab('reg-a');
+  assert.strictEqual(win._testApi.getActiveTabId(), 'reg-a');
+  inp.value = 'DRAFT OF THE NEW TAB';
+  await settle(dRead);
+  assert.strictEqual(
+    submits(posted).length,
+    sentParked,
+    "BUG: a closed tab's parked submit sent the draft of the tab that took its id: " +
+      JSON.stringify(submits(posted).slice(sentParked).map(m => m.prompt)),
+  );
+  assert.strictEqual(inp.value, 'DRAFT OF THE NEW TAB', 'the new draft stays');
   win.close();
   console.log(
     'audit0902_fix_attachment_latch_per_tab: all tests passed',

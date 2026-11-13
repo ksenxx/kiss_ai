@@ -15,6 +15,7 @@ const assert = require('assert');
 const {
   makePage,
   send,
+  click,
   stubRaf,
   startRunningTask,
   shareTranscript,
@@ -77,12 +78,12 @@ function testImagesRenderInToolPanel() {
   );
 
   // Click-to-zoom toggles the full-size class both ways.
-  img.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  click(win, img);
   assert.ok(
     img.classList.contains('tr-img-full'),
     'clicking the image must expand it to natural size',
   );
-  img.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  click(win, img);
   assert.ok(
     !img.classList.contains('tr-img-full'),
     'clicking again must restore the capped preview',

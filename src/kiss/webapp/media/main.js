@@ -120,7 +120,7 @@
    */
   function _deactivatePanel(el) {
     _activePanels.delete(el);
-    if (el && el.classList) el.classList.remove('panel-active');
+    el.classList.remove('panel-active');
     if (_activePanels.size === 0 && _activePanelTickIv) {
       clearInterval(_activePanelTickIv);
       _activePanelTickIv = null;
@@ -162,11 +162,9 @@
     span.textContent = fmtElapsedMs(ms);
   }
 
+  /** Show the time since *el*, a panel stamped with data-start-ms, began. */
   function _renderPanelTime(el) {
-    if (!el) return;
-    const startMs = Number(el.dataset.startMs || 0);
-    if (!startMs) return;
-    _renderElapsedLabel(el, Date.now() - startMs);
+    _renderElapsedLabel(el, Date.now() - Number(el.dataset.startMs));
   }
   // panelts-coverage:end
 
@@ -175,7 +173,7 @@
     if (_activePanels.size === 0) return;
     _activePanelTickIv = setInterval(() => {
       for (const el of Array.from(_activePanels)) {
-        if (el && el.isConnected) _renderPanelTime(el);
+        if (el.isConnected) _renderPanelTime(el);
         else _deactivatePanel(el);
       }
     }, 1000);
@@ -595,11 +593,7 @@
     // An error never dismisses itself: the reader may be looking
     // elsewhere when it lands, and a vanished error reads as "nothing
     // happened". The close button stays available.
-    const sticky =
-      !!ev.sticky ||
-      severity === 'error' ||
-      actions.length > 0 ||
-      !!ev.progress;
+    const sticky = !!ev.sticky || severity === 'error' || actions.length > 0;
     if (!toast) {
       toast = document.createElement('article');
       toast.className = 'kiss-notification';
@@ -648,12 +642,6 @@
     message.textContent = ev.message || '';
     content.appendChild(title);
     content.appendChild(message);
-    if (ev.progress && ev.progressMessage) {
-      const progress = document.createElement('div');
-      progress.className = 'kiss-notification-progress-message';
-      progress.textContent = ev.progressMessage;
-      content.appendChild(progress);
-    }
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
     closeBtn.className = 'kiss-notification-close';
@@ -692,12 +680,6 @@
     body.appendChild(content);
     body.appendChild(closeBtn);
     toast.replaceChildren(body);
-    if (ev.progress) {
-      const progressBar = document.createElement('div');
-      progressBar.className = 'kiss-notification-progress';
-      progressBar.setAttribute('aria-hidden', 'true');
-      toast.appendChild(progressBar);
-    }
     if (actions.length > 0) {
       const actionRow = document.createElement('div');
       actionRow.className = 'kiss-notification-actions';
@@ -827,15 +809,21 @@
     if (fallback) fallback.focus();
   }
 
-  /** Escape inside a confirm / prompt toast presses its cancel button
-   *  (not the Escape that drops an IME candidate). */
-  function onDialogToastKey(e) {
+  /** Escape inside the element handling *e* presses the control in it
+   *  that matches *selector* (not the Escape that drops an IME
+   *  candidate). */
+  function pressOnEscape(e, selector) {
     if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
-    const cancel = e.currentTarget.querySelector('[data-dialog-cancel]');
+    const cancel = e.currentTarget.querySelector(selector);
     if (!cancel) return;
     e.preventDefault();
     e.stopPropagation();
     cancel.click();
+  }
+
+  /** Escape inside a confirm / prompt toast presses its cancel button. */
+  function onDialogToastKey(e) {
+    pressOnEscape(e, '[data-dialog-cancel]');
   }
 
   // Inline two-step confirms (.wt-confirm under a post-task action bar,
@@ -845,15 +833,9 @@
   // the sheet's Escape handler, so one Escape folds the question back
   // into its button instead of closing the whole sheet.
 
-  /** Escape inside an inline confirm presses its Keep / Cancel button
-   *  (not the Escape that drops an IME candidate). */
+  /** Escape inside an inline confirm presses its Keep / Cancel button. */
   function onInlineConfirmKey(e) {
-    if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
-    const cancel = e.currentTarget.querySelector('[data-inline-cancel]');
-    if (!cancel) return;
-    e.preventDefault();
-    e.stopPropagation();
-    cancel.click();
+    pressOnEscape(e, '[data-inline-cancel]');
   }
 
   function inlineConfirmIsOpen(el) {
@@ -1043,9 +1025,9 @@
   // shows (see syncModelPickerMachine): every machine's last `models`
   // reply as {models, selected, pickedAt} ('' = this daemon, seeded
   // with the template's model), and the machine whose list `allModels`
-  // is.  Every getModels (and every saveConfig of this daemon, which
-  // the daemon answers with its list too) carries the next
-  // `modelsAsked` as its `generation`, which the reply echoes;
+  // is.  Every getModels (and every ready and saveConfig of this
+  // daemon, which the daemon answers with its list too) carries the
+  // next `modelsAsked` as its `generation`, which the reply echoes;
   // `pickedAt` is the count when the user last picked on that machine
   // (noteMachineModels).
   const machineModels = new Map();
@@ -1179,21 +1161,30 @@
   let pendingTaskText = '';
   let currentTaskId = null;
   // The chat and task the user is looking at — the ones the Task Info
-  // rows describe — as the history list knows them: its row carries
-  // the highlight and its chat panel opens by default.  Set from the
-  // visible tab (reportVisibleTask).  The pending flag asks the next repaint to scroll the row into view.
+  // rows describe — as the history list knows them: its row and its
+  // chat panel carry the highlight.  Set from the visible tab
+  // (reportVisibleTask).  The pending flag asks the next repaint to
+  // scroll the row into view.
   let historyActiveChatId = '';
   let historyActiveTaskId = '';
+  // The machine that chat lives on ('' for this one): a database copied
+  // between machines lists the chat and its tasks once per machine.
+  let historyActiveMachine = '';
   let historyActiveScrollPending = false;
   // Settings of the active tab's OWN current task (model, worktree /
   // parallel modes, budget, start time, chat / task / parent ids) —
   // what the Task Info panel shows while the tab's own task is the one
   // on screen. Mirrors currentTaskName's lifecycle.
   let currentTaskSettings = null;
-  // Settings of every task seen by this window, keyed by task id, so
-  // the Task Info rows can follow the reader across spliced-in
-  // `.adjacent-task` neighbours (see updateVisibleTask).
-  const taskSettingsById = Object.create(null);
+  // Settings of each spliced-in `.adjacent-task` neighbour, keyed by its
+  // container, so the Task Info rows can follow the reader across
+  // neighbours (see updateVisibleTask) and leave with the container.
+  const adjacentTaskSettings = new WeakMap();
+  // The `.adjacent-task` neighbour whose time the Task Info panel's
+  // Time row shows (paintMetaTime) while the panel's rows are lent to
+  // it (updateVisibleTask); null while they describe the tab's own
+  // task. Set wherever the rows are lent or taken back.
+  let metaTimeNeighbour = null;
   let oldestLoadedTaskId = null;
   let newestLoadedTaskId = null;
   let adjacentLoading = false;
@@ -1228,7 +1219,8 @@
   const tabMachinePicks = new Map();
   // Per tab, the machine the daemon bound it to (its `tabMachine`
   // announcements alone, never a pick): where the chat the tab SHOWS
-  // lives.  Not persisted: the daemon announces it again on `ready`.
+  // lives.  Not persisted: the daemon names every binding again on
+  // `ready` (`tabMachines`).
   const tabBoundMachines = new Map();
   // The file tab the user looked at most recently (see editorContext).
   let lastViewedContentTabId = '';
@@ -1239,9 +1231,10 @@
   // So the bar auto-scrolls only when the active tab actually changed
   // since the previous render -- i.e. on a real tab switch.
   let lastScrolledTabId = null;
-  // The chat tab this window represents right now (the active chat, or
-  // the chat that produced the active content tab). A tab that gets
-  // closed can never be left standing here.
+  // The chat tab this window represents right now: the active chat, or
+  // the chat an active content tab was reached from (the one the phone
+  // layout swipes back to). A tab that gets closed can never be left
+  // standing here.
   let reportedChatTabId = '';
 
   let configWorkDir = '';
@@ -1258,33 +1251,58 @@
       pendingTaskId: null,
       // The prompts sent from this tab until the daemon acknowledges
       // them (setTaskText for a run, prompt for a follow-up,
-      // promptOpened for a file path), oldest first, each
-      // {text, attachments, echoed}, and the ask-user answer (with its
-      // question) until askUserDone confirms it.  A connection that
-      // died silently swallows both without any error; persistTabState
+      // promptOpened for a file path), oldest first, each an
+      // unackedPrompt entry ({text, attachments, echoed} plus what the
+      // page showed as it went out), and the ask-user answer (with its
+      // question and its id) until askUserDone confirms it.  A connection
+      // that died silently swallows both without any error; persistTabState
       // carries them over to the reloaded page as drafts so the user
       // can send them again instead of losing them.  The daemon
-      // answers a tab's prompts in the order they were sent and names
-      // none in its answers: each answer is the oldest prompt's it can
+      // names the prompts an answer is about (answeredPrompts); an
+      // older one names none and answers a tab's prompts in the order
+      // they were sent: each such answer is the oldest prompt's it can
       // be for.  A run's prompt is `echoed` (setTaskText) before the
       // daemon decides on it: it stays until the run's `clear` starts
       // it, so that, refused meanwhile, it goes back into the composer.
       unackedPrompts: [],
+      // The newest prompt the daemon said it took from this tab, by
+      // id ('' for none yet): the daemon that still names it after an
+      // outage has run ever since (settleLostPrompt).
+      takenPromptId: '',
+      // The newest of those prompts a connection that died left
+      // unacknowledged (daemonStatus): no answer will come for it any
+      // more, and only the daemon's word on the tab after the outage
+      // says whether it ran (settleLostPrompt).
+      lostPrompt: null,
       unackedAnswer: '',
       unackedQuestion: null,
+      unackedQuestionId: '',
       isRunning: false,
-      // False for a chat adopted from the registry until its replay
-      // (status / task_events) arrives: its task may be running on
-      // another surface, so retireIdleChat() must not close it yet.
+      // False while the daemon's word on the tab's task is owed: for a
+      // chat adopted from the registry until its replay (status /
+      // task_events) arrives, and for a chat on its way into the tab
+      // (openingRequest) until the daemon answers.  Its task may be
+      // running on another surface, so retireIdleChat() must not close
+      // it yet.  Likewise after an outage for a tab with a lostPrompt,
+      // which may have started a run this window never heard of.
       statusKnown: true,
       // {chatId, taskId} while the daemon holds the tab's transcript
       // back (`replay_deferred`); cleared by the replay the first
       // activation requests (requestDeferredReplay).
       replayPending: null,
-      // The task id ('' = the chat's latest task) of a replay the page
-      // asked for (requestReplay), until that replay arrives: it lands
-      // afresh instead of keeping the reading position.
+      // The replay the page asked for (requestReplay), until it
+      // arrives: {taskId, req, at}, the task id asked for ('' = the
+      // chat's latest task), the request and the _subagentClock tick
+      // it went out at.  That replay lands afresh instead of keeping
+      // the reading position.
       replayRequested: null,
+      // The task a history click asked for while the tab's own task
+      // runs, until the thread on screen has been read back to it
+      // (seekSoughtTask); '' when none.
+      soughtTaskId: '',
+      // The _subagentClock tick of the tab's last transcript replay
+      // (0: none yet); see finishedSubagentStands.
+      replayedAt: 0,
       // Raised by the Stop button until the task actually ends, so a
       // stop the agent has not reached yet looks different from a stop
       // that never arrived (see stop_button_delay_2026-08-05.html).
@@ -1304,6 +1322,10 @@
       statusStepsText: '',
       welcomeVisible: true,
       selectedModel: selectedModel,
+      // The user picked selectedModel by hand in this window
+      // (selectModel): a `modelPick` restore, which the daemon may have
+      // computed before the pick reached it, does not replace it.
+      modelPicked: false,
       // The machine whose model selectedModel is (syncModelPickerMachine).
       modelMachine: modelsMachine,
       agentModel: '',
@@ -1331,12 +1353,12 @@
       // matches the file on disk, whether the text has drifted from
       // it, the on-disk version stamp the fileContent reply reported
       // (sent back on save so a file changed underneath is not
-      // silently overwritten), and whether a save is in flight.
+      // silently overwritten), and the token of the save in flight
+      // ('' when none).
       contentDirty: false,
       contentSavedVersionId: 0,
       contentPendingVersionId: 0,
       contentFileVersion: '',
-      contentSaving: false,
       contentSaveToken: '',
       contentSaveTimer: null,
       contentSaveBar: null,
@@ -1406,7 +1428,10 @@
    *   'agent'   - a running agent switched models; show it while the
    *               task lasts without touching the user's own pick.
    *   'restore' - the task ended: drop the override and show the pick
-   *               the user made in that tab again.
+   *               the user made in that tab again -- `model`, unless
+   *               the user picked by hand in this window
+   *               (tab.modelPicked): the event may be older than
+   *               that pick.
    *
    * Either is a model of the machine the tab's task runs on (its
    * binding): a tab whose picker shows another machine -- the chat
@@ -1417,12 +1442,15 @@
     const isAgent = source === 'agent';
     const t = getTab(tabId);
     if (t && tabMachine(tabId) !== tabBoundMachine(tabId)) return;
+    // The model a restore hands the picker back to.
+    let pick = model;
     if (t) {
       if (isAgent) {
         t.agentModel = model;
       } else {
         t.agentModel = '';
-        t.selectedModel = model;
+        if (!t.modelPicked) t.selectedModel = model;
+        pick = t.selectedModel;
       }
     }
     if (tabId !== activeTabId) return;
@@ -1430,7 +1458,7 @@
       agentModel = model;
     } else {
       agentModel = '';
-      selectedModel = model;
+      selectedModel = pick;
     }
     refreshModelLabel();
     if (modelDropdown && modelDropdown.classList.contains('open')) {
@@ -1450,7 +1478,9 @@
   // modelpick-coverage:end
 
   /**
-   * The open tab showing chat *chatId* of *machine* ('' for this one).
+   * The open tab showing chat *chatId* of *machine* ('' for this one),
+   * or the tab that chat is on its way into (openingRequest): one
+   * chat, one tab, also before the daemon has bound it.
    * A chat's copy on another machine (a database copied between them)
    * is another chat, shown in its own tab bound to its machine, so a
    * tab bound elsewhere does not count.  The daemon's binding is what
@@ -1460,12 +1490,15 @@
   function getChatTabOnMachine(chatId, machine) {
     if (chatId === undefined || chatId === null || chatId === '') return null;
     const key = String(chatId);
+    const host = machine || '';
     return (
-      tabs.find(
-        t =>
-          String(t.backendChatId || '') === key &&
-          (tabBoundMachines.get(t.id) || '') === (machine || ''),
-      ) || null
+      tabs.find(t => {
+        const opening = openingRequest(t);
+        return opening
+          ? String(opening.chatId) === key && (opening.machine || '') === host
+          : String(t.backendChatId || '') === key &&
+              (tabBoundMachines.get(t.id) || '') === host;
+      }) || null
     );
   }
 
@@ -1511,7 +1544,6 @@
     ) {
       ev.ts = Math.round(ev._timestamp * 1000);
     }
-    return ev;
   }
   // panelts-coverage:end
 
@@ -1579,6 +1611,9 @@
     tab.welcomeVisible = welcome ? welcome.style.display !== 'none' : true;
     if (welcome && welcome.parentNode === O) O.removeChild(welcome);
     saveLockedSubpanelOffsets();
+    // Reading back to a task (seekSoughtTask) ends with the reader
+    // leaving the transcript.
+    tab.soughtTaskId = '';
     tab.outputFragment = document.createDocumentFragment();
     while (O.firstChild) tab.outputFragment.appendChild(O.firstChild);
     // The thread's pagination anchors and edges describe this
@@ -1638,14 +1673,22 @@
     reportedChatTabId = tabId || '';
   }
 
+  // filechat-coverage:start
   // Closing tabs must never leave a gone tab standing here: it would
   // keep matching commits (and toasts) against a dead chat. When the
   // reported tab is removed and the tab taking its place on screen is a
-  // content tab, point at whichever chat tab survives, or clear it.
+  // content tab, point at the chat a finished sub-agent worked for,
+  // else at whichever chat tab survives, or clear it.
   function reportSurvivingChatTab() {
     if (getTab(reportedChatTabId)) return;
-    reportChatTab(chatTabIdForHost());
+    reportChatTab(
+      nearestOpenAncestorTab(reportedChatTabId) || chatTabIdForHost(),
+    );
+    // A content tab on screen now stands for that chat: Stop is its.
+    const active = getTab(activeTabId);
+    if (active && active.isContentTab) renderContentTabStop();
   }
+  // filechat-coverage:end
 
   /**
    * The chat tab at the root of *tab*'s owner chain: *tab* itself when
@@ -1670,38 +1713,58 @@
    * The id of the CHAT tab that represents this window right now, or
    * '' when no chat tab exists.
    *
-   * The active tab when it is a chat; the owning chat of an active
-   * content tab (a file view keeps the editor with the conversation
-   * that produced it); otherwise any chat tab. Shared by every path
-   * that (re)announces the on-screen chat -- closing tabs and the
-   * `ready` sent after a daemon outage -- so none of them can name a
-   * content tab.
+   * The active tab when it is a chat; for an active content tab the
+   * chat it was reached from (the chat last on screen, which still
+   * stands behind it), else its owning chat (the conversation that
+   * produced it); otherwise any chat tab. Shared by every path that
+   * (re)announces the on-screen chat -- closing tabs, the `ready` sent
+   * after a daemon outage, the phone layout's swipe back from a file
+   * -- so none of them can name a content tab.
    *
    * @returns {string} A chat tab id, or ''.
    */
   function chatTabIdForHost() {
+    const active = getTab(activeTabId);
+    const left = active && active.isContentTab && getTab(reportedChatTabId);
     const chat =
-      rootChatTab(getTab(activeTabId)) ||
-      tabs.find(t => !t.isContentTab) ||
-      null;
+      left || rootChatTab(active) || tabs.find(t => !t.isContentTab) || null;
     return chat ? chat.id : '';
   }
   // readychat-coverage:end
 
+  // filechat-coverage:start
   /**
-   * The tab a chat-scoped composer action (Stop, Share chat, voice)
-   * must target: the active tab, or — when a content tab is on
-   * screen — the chat tab whose work produced it (same resolution Git
-   * Commit uses). Falls back to the active tab id when the owner is
-   * gone, where the action lands on a tab with no conversation and
-   * stays a harmless no-op.
+   * The tab a chat-scoped composer action (Stop, Share chat, voice,
+   * Attach) must target: the active tab, or — when a content tab is
+   * on screen — the chat that tab stands for, the one a swipe back
+   * returns to (chatTabIdForHost(): the chat it was reached from,
+   * which need not be the chat that owns it). Falls back to the
+   * active tab id when no chat tab is left, where the action lands on
+   * a tab with no conversation and stays a harmless no-op.
    *
    * @returns {string} The id of the chat tab the action belongs to.
    */
   function chatTargetTabId() {
+    const active = getTab(activeTabId);
+    return (active && active.isContentTab && chatTabIdForHost()) || activeTabId;
+  }
+
+  /**
+   * The tab whose workspace is on screen: the active tab, or — when a
+   * content tab is on screen — the chat tab whose work produced it
+   * (its owner, which need not be the chat it was reached from: that
+   * one is chatTargetTabId()'s). A view opened from the screen (a
+   * terminal, a browser page) runs where that chat does, and a result
+   * that chat asked for may take the screen. Falls back to the active
+   * tab id when the owner is gone.
+   *
+   * @returns {string} The id of the tab the workspace belongs to.
+   */
+  function ownerChatTabId() {
     const chat = rootChatTab(getTab(activeTabId));
     return chat ? chat.id : activeTabId;
   }
+  // filechat-coverage:end
 
   function restoreTab(tab) {
     // The split layout's content pane keeps whatever it shows across
@@ -1744,6 +1807,7 @@
     // to read the ids from, the repaint reports the tab's own task id
     // to the history list, not the previous tab's.
     currentTaskId = tab.currentTaskId !== undefined ? tab.currentTaskId : null;
+    metaTimeNeighbour = null;
     updateMetaTaskDetails(currentTaskSettings);
     // Its colour is the running state's (startTimer / stopTimer): both
     // callers set that next.
@@ -1765,7 +1829,6 @@
         showWelcomeScreen();
       } else {
         welcome.style.display = 'none';
-        refreshWelcomeLayout();
       }
     }
     selectedModel = tab.selectedModel || '';
@@ -1775,6 +1838,9 @@
     attachErrors = tab.attachErrors || [];
     renderFileChips();
     inp.value = tab.inputValue || '';
+    // The history cursor described the text that just left the screen:
+    // kept, ArrowDown would step "back" from it and wipe this draft.
+    histIdx = -1;
     // The picker and ghost text were computed for the draft that just
     // left the screen. A user switch blurs the textbox and drops them,
     // but a programmatic switch (a background task finishing pulls its
@@ -2434,7 +2500,7 @@
 
   /**
    * The strip entry of *list* holding the keyboard focus, read before
-   * the strip is rebuilt: the tab's id and whether its close control,
+   * the strip is repainted: the tab's id and whether its close control,
    * rather than the tab itself, is focused.  Null when the focus is
    * elsewhere.
    */
@@ -2445,23 +2511,31 @@
   }
 
   /**
-   * Put the keyboard focus back on the rebuilt node of *entry* (see
-   * focusedStripEntry) in *list*: a routine repaint (a status update)
-   * must not drop a keyboard user to the document body.  A focused tab
-   * stays the row's roving Tab stop, as moveTabFocus leaves it.
+   * After a repaint of *list*, *entry* (see focusedStripEntry) keeps
+   * the keyboard focus: a repaint that moved its node took the focus
+   * away, and a keyboard user must not be dropped to the document
+   * body.  A focused tab stays the row's roving Tab stop, as
+   * moveTabFocus leaves it.
    */
   function restoreStripFocus(list, entry) {
     if (!entry) return;
-    const tabEl = Array.from(list.querySelectorAll('[role="tab"]')).find(
-      el => el.dataset.tabId === entry.id,
-    );
-    if (!tabEl) return;
-    const target = entry.close ? tabEl.querySelector('.chat-tab-close') : tabEl;
+    const tabEls = Array.from(list.querySelectorAll('[role="tab"]'));
+    const own = tabEls.find(el => el.dataset.tabId === entry.id);
+    // Its tab left the row (closed from its own close control, say):
+    // the row's selected tab takes over, the composer when none is left.
+    const tabEl =
+      own || tabEls.find(el => el.getAttribute('aria-selected') === 'true');
+    if (!tabEl) {
+      focusInputWithRetry();
+      return;
+    }
+    const onClose = own && entry.close;
+    const target = onClose ? tabEl.querySelector('.chat-tab-close') : tabEl;
     if (!target) return;
-    if (!entry.close) {
-      list
-        .querySelectorAll('[role="tab"]')
-        .forEach(el => el.setAttribute('tabindex', el === tabEl ? '0' : '-1'));
+    if (!onClose) {
+      tabEls.forEach(el =>
+        el.setAttribute('tabindex', el === tabEl ? '0' : '-1'),
+      );
     }
     target.focus({preventScroll: true});
   }
@@ -2481,53 +2555,39 @@
       null;
     const group = new Set(shownRoot ? groupMembers(shownRoot) : []);
     const split = splitLayout();
-    // Desktop content tabs have their own row. On mobile they appear
-    // on the file screen, never in the chat header.
-    const showContentTabs = !split && !!active?.isContentTab;
+    // Desktop content tabs have their own row.  On mobile they are the
+    // file screen's strip, which lists nothing else; the chat and its
+    // sub-agents are the chat screen's.
+    const fileScreen = !split && !!active?.isContentTab;
     const members = tabs.filter(t =>
-      t.isContentTab ? showContentTabs : group.has(t),
+      t.isContentTab ? fileScreen : !fileScreen && group.has(t),
     );
 
-    // The strip only appears when there is something beyond the chat
-    // itself to switch to (a run_parallel fan-out's sub-agent tabs, on
-    // mobile a file the task opened); a single conversation needs no
-    // tab strip.
-    tabBar.style.display = members.length > 1 ? '' : 'none';
+    // The file screen's strip names what is on screen and closes it,
+    // a single file, terminal or browser page included.  The chat
+    // screen's only appears when there is something beyond the chat
+    // itself to switch to (a run_parallel fan-out's sub-agent tabs); a
+    // single conversation needs no tab strip.
+    const shown = fileScreen || members.length > 1;
+    tabBar.style.display = shown ? '' : 'none';
 
     // Chat tabs are proper a11y tabs: keyboard users reach them with
     // Tab, screen readers announce "<title>, tab, selected", and
     // Enter/Space activates them exactly like a click.
     tabList.setAttribute('role', 'tablist');
-    tabList.setAttribute('aria-label', 'Chat tabs');
+    tabList.setAttribute('aria-label', fileScreen ? 'Open files' : 'Chat tabs');
 
     const focused = focusedStripEntry(tabList);
-    tabList.innerHTML = '';
-    // Roving tabindex (WAI-ARIA tabs pattern, manual activation): only
-    // the active tab is a Tab stop; the arrow keys move focus between
-    // tabs (see moveTabFocus) and Enter/Space activate.  If the active
-    // tab is somehow not in the list, the first tab is the stop so the
-    // tablist never becomes keyboard-unreachable.
-    const rovingStopId = members.some(t => t.id === activeTabId)
-      ? activeTabId
-      : members.length > 0
-        ? members[0].id
-        : null;
-    members.forEach(tab => {
-      tabList.appendChild(
-        buildTabElement(tab, {
-          selected: tab.id === activeTabId,
-          focusStop: tab.id === rovingStopId,
-        }),
-      );
-    });
+    renderStrip(tabList, members, activeTabId);
 
-    // A hidden strip (a lone tab in the group) has nothing to scroll.
-    const activeEl =
-      members.length > 1 ? tabList.querySelector('.chat-tab.active') : null;
+    // A hidden strip (a lone chat) has nothing to scroll.
+    const activeEl = shown ? tabList.querySelector('.chat-tab.active') : null;
     if (activeEl && activeTabId !== lastScrolledTabId)
       activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
     lastScrolledTabId = activeTabId;
-    if (members.length > 1) restoreStripFocus(tabList, focused);
+    if (shown) restoreStripFocus(tabList, focused);
+    // The strip went away with the focus in it: the composer takes it.
+    else if (focused) focusInputWithRetry();
 
     renderContentTabBar(split);
   }
@@ -2543,30 +2603,108 @@
     list.setAttribute('role', 'tablist');
     list.setAttribute('aria-label', 'Open files');
     const focused = focusedStripEntry(list);
-    list.innerHTML = '';
     const contentTabs = tabs.filter(t => t.isContentTab);
+    renderStrip(list, split ? contentTabs : [], activeContentTabId);
     const folded = split && contentTabs.length > 0 && contentPaneHidden;
     document.body.classList.toggle('content-pane-folded', folded);
     syncContentPaneOpen(split && contentTabs.length > 0 && !folded);
     if (!split) return;
-    const rovingStopId = contentTabs.some(t => t.id === activeContentTabId)
-      ? activeContentTabId
-      : contentTabs.length > 0
-        ? contentTabs[0].id
-        : null;
-    contentTabs.forEach(tab => {
-      list.appendChild(
-        buildTabElement(tab, {
-          selected: tab.id === activeContentTabId,
-          focusStop: tab.id === rovingStopId,
-        }),
-      );
-    });
     const activeEl = list.querySelector('.chat-tab.active');
     if (activeEl && activeContentTabId !== lastScrolledContentTabId)
       activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
     lastScrolledContentTabId = activeContentTabId;
     restoreStripFocus(list, focused);
+  }
+
+  /**
+   * Show `members`, in order, in the tab row `list`, the tab
+   * `selectedId` highlighted.  A tab keeps its node from one repaint
+   * to the next: the node is brought up to date in place
+   * (morphTabElement) and moves only when the order changed.  The
+   * browser sends a click to the common ancestor of the node pressed
+   * and the node released, so a row rebuilt between the two (a status
+   * update, a new title) would swallow the click on a tab.
+   */
+  function renderStrip(list, members, selectedId) {
+    // Roving tabindex (WAI-ARIA tabs pattern, manual activation): only
+    // the selected tab is a Tab stop; the arrow keys move focus between
+    // tabs (see moveTabFocus) and Enter/Space activate.  If the
+    // selected tab is somehow not in the row, the first tab is the stop
+    // so the tablist never becomes keyboard-unreachable.
+    const rovingStopId = members.some(t => t.id === selectedId)
+      ? selectedId
+      : members.length > 0
+        ? members[0].id
+        : null;
+    // The nodes of the tabs that left go first, so that no node kept
+    // has to move to make room.
+    const shown = new Set(members.map(t => t.id));
+    const kept = new Map();
+    Array.from(list.children).forEach(el => {
+      if (shown.has(el.dataset.tabId)) kept.set(el.dataset.tabId, el);
+      else el.remove();
+    });
+    members.forEach((tab, i) => {
+      let el = buildTabElement(tab, {
+        selected: tab.id === selectedId,
+        focusStop: tab.id === rovingStopId,
+      });
+      const old = kept.get(tab.id);
+      if (old) {
+        morphTabElement(old, el);
+        el = old;
+      }
+      if (list.children[i] !== el) {
+        list.insertBefore(el, list.children[i] || null);
+      }
+    });
+  }
+
+  /**
+   * Bring the tab element `el` up to date with `fresh`, a newly built
+   * element of the same tab (buildTabElement), without replacing `el`
+   * or any part of it the tab still has: they keep their place in the
+   * document, and with it their listeners and a press in progress.
+   */
+  function morphTabElement(el, fresh) {
+    syncAttributes(el, fresh);
+    const parts = Array.from(fresh.children);
+    const wanted = new Set(parts.map(tabPart));
+    const kept = new Map();
+    Array.from(el.children).forEach(part => {
+      if (wanted.has(tabPart(part))) kept.set(tabPart(part), part);
+      else part.remove();
+    });
+    parts.forEach((next, i) => {
+      const part = kept.get(tabPart(next));
+      if (!part) {
+        el.insertBefore(next, el.children[i] || null);
+        return;
+      }
+      syncAttributes(part, next);
+      if (part.textContent !== next.textContent) {
+        part.textContent = next.textContent;
+      }
+    });
+  }
+
+  /**
+   * Which part of a tab element `child` is, told by its first class;
+   * the status icon of a finished task stands where its spinner stood.
+   */
+  function tabPart(child) {
+    const part = child.classList[0];
+    return part === 'chat-tab-status' ? 'chat-tab-spinner' : part;
+  }
+
+  /** Give the element `to` exactly the attributes of `from`. */
+  function syncAttributes(to, from) {
+    Array.from(to.attributes).forEach(a => {
+      if (!from.hasAttribute(a.name)) to.removeAttribute(a.name);
+    });
+    Array.from(from.attributes).forEach(a => {
+      if (to.getAttribute(a.name) !== a.value) to.setAttribute(a.name, a.value);
+    });
   }
 
   /**
@@ -2581,7 +2719,6 @@
    * @param {boolean} open Whether the split layout has a content tab.
    */
   function syncContentPaneOpen(open) {
-    open = !!open;
     if (document.body.classList.contains('content-pane-open') === open) return;
     document.body.classList.toggle('content-pane-open', open);
     if (!open) setMetaPanelHidden(false);
@@ -2745,16 +2882,12 @@
     }
     if (tabId === activeTabId) return;
     saveCurrentTab();
-    // One persist per switch.  The selection it records is a chat: a
-    // content tab taking over the stacked layout is persisted before
-    // it does, so a reload lands back on the chat.
-    if (tab.isContentTab) persistTabState();
     // activateAdjacentTab owns the activation tail (restore, running
     // state, timers, chevron, focus); only the bar render and the
     // selection persistence are this caller's extras.
     activateAdjacentTab(tab);
     renderTabBar();
-    if (!tab.isContentTab) persistTabState();
+    persistTabState();
   }
 
   // Which tab takes over when the tab the user was on is closed.
@@ -2771,9 +2904,12 @@
   // A sub-agent tab or a file the user closed hands over inside its own
   // chat's group (the nearest surviving member, the chat itself
   // included): without a row of chat tabs, landing on an unrelated chat
-  // would be a surprise.  In the split layout the chat pane never shows
-  // a content tab, so only chat tabs are candidates there.  Returns null
-  // when no tab is left (the caller opens a fresh chat tab then).
+  // would be a surprise.  A file that filled the screen in place of the
+  // chat hands over to a file of its group only; otherwise the chat it
+  // was reached from comes back, the one a swipe back returns to.  In
+  // the split layout the chat pane never shows a content tab, so only
+  // chat tabs are candidates there.  Returns null when no tab is left
+  // (the caller opens a fresh chat tab then).
   function pickSuccessorTab(closed, origIdx, agentInitiated) {
     const isChat = t => !t.isContentTab;
     const ok = t => !splitLayout() || isChat(t);
@@ -2783,12 +2919,15 @@
       return nearestTab(origIdx, isChat) || nearestTab(origIdx, ok);
     }
     const owner = parent || tabOwner(closed);
-    if (owner) {
-      const root = rootTabOf(owner);
-      const inGroup = nearestTab(origIdx, t => ok(t) && rootTabOf(t) === root);
-      if (inGroup) return inGroup;
-    }
-    return nearestTab(origIdx, ok);
+    const root = owner ? rootTabOf(owner) : null;
+    const inGroup = root
+      ? nearestTab(origIdx, t => ok(t) && rootTabOf(t) === root)
+      : null;
+    const left =
+      closed.isContentTab && !(inGroup && inGroup.isContentTab)
+        ? getTab(reportedChatTabId)
+        : null;
+    return left || inGroup || nearestTab(origIdx, ok);
   }
 
   /** The tab nearest to index *origIdx* (the slot a tab was just removed
@@ -2804,11 +2943,6 @@
     return null;
   }
 
-  // agentInitiated marks a close the agent performed by itself rather
-  // than one the user asked for; see pickSuccessorTab.
-  // fromServer marks a close applied FROM a daemon broadcast (e.g.
-  // `closeSubagentTab`): it must not be echoed back as a `closeTab`
-  // command, or two clients would bounce the close between each other.
   /**
    * Add to *ids* every tab whose `parentTabId` chain leads to a tab in
    * *ids* (the sub-agent descendants a close takes along).
@@ -2841,6 +2975,11 @@
     return up || null;
   }
 
+  // agentInitiated marks a close the agent performed by itself rather
+  // than one the user asked for; see pickSuccessorTab.
+  // fromServer marks a close applied FROM a daemon broadcast (e.g.
+  // `closeSubagentTab`): it must not be echoed back as a `closeTab`
+  // command, or two clients would bounce the close between each other.
   function closeTab(tabId, agentInitiated, fromServer) {
     const origIdx = tabs.findIndex(t => t.id === tabId);
     if (origIdx < 0) return;
@@ -2869,7 +3008,10 @@
     }
     const activeWasClosed = toClose.has(activeTabId);
     const closed = tabs[origIdx];
-    // The chat a content tab on screen belongs to (its run is what the
+    // Where the successor is looked for: the closed tab's slot among the
+    // tabs that stay (a tab that goes with it may sit before it).
+    const slot = tabs.slice(0, origIdx).filter(t => !toClose.has(t.id)).length;
+    // The chat a content tab on screen stands for (its run is what the
     // surface under the file shows): resolved before the tabs go.
     const shownChatId = chatTargetTabId();
     // A file a closing sub-agent opened stays with the chat: it moves up
@@ -2880,13 +3022,25 @@
       if (!t.isContentTab || !toClose.has(t.ownerTabId)) continue;
       t.ownerTabId = survivingAncestor(t.ownerTabId, toClose) || t.ownerTabId;
     }
+    const closedTabs = [];
     for (const id of toClose) {
       const i = tabs.findIndex(t => t.id === id);
-      if (i >= 0) tabs.splice(i, 1);
+      const gone = i >= 0 ? tabs.splice(i, 1)[0] : null;
+      if (gone) closedTabs.push(gone);
       forgetClosedTabState(id);
-      if (!fromServer) api.closeTab({tabId: id, ack: armCloseShield(id)});
+      if (fromServer) continue;
+      const close = {tabId: id, ack: armCloseShield(id)};
+      // A sub-agent's tab the page closes by itself goes as the daemon
+      // last announced it: a reopening on another surface this page has
+      // not heard of yet keeps the tab (the daemon's _close_tab).  The
+      // tab of this page's own unanswered reopening has none; its close
+      // follows that request and closes what it opens.
+      if (agentInitiated && gone && gone.incarnation !== undefined) {
+        close.incarnation = gone.incarnation;
+      }
+      api.closeTab(close);
     }
-    rpAfterTabsClosed(toClose);
+    rpAfterTabsClosed(closedTabs);
     const shown = getTab(activeTabId);
     if (shown && shown.isContentTab && toClose.has(shownChatId)) {
       // The file stays on screen; the closed chat's timer, spinner and
@@ -2896,9 +3050,7 @@
     }
     if (activeWasClosed) {
       const successor =
-        tabs.length > 0
-          ? pickSuccessorTab(closed, origIdx, agentInitiated)
-          : null;
+        tabs.length > 0 ? pickSuccessorTab(closed, slot, agentInitiated) : null;
       if (!successor) {
         // No tab is left: open a fresh chat here.
         createNewTab();
@@ -2922,14 +3074,16 @@
   /**
    * Blank the chat surface after the chat it showed closed with no chat
    * to take its place: the transcript, the running timer and spinner,
-   * and the module-level task name, id and settings.
+   * the module-level task name, id and settings, and what the Task
+   * Info rows and the usage numbers said of its task.
    */
   function clearChatSurface() {
     O.innerHTML = '';
     setRunningState(false);
     currentTaskName = '';
     currentTaskId = null;
-    currentTaskSettings = null;
+    setTaskSettings(null);
+    clearUsageMetrics();
     setShownTask('');
     if (statusText) {
       statusText.textContent = 'Ready';
@@ -3028,11 +3182,13 @@
    * @param {boolean} hidden True to fold the pane away.
    */
   function setContentPaneHidden(hidden) {
-    hidden = !!hidden;
     if (contentPaneHidden === hidden) return;
     // Nothing to fold without a content tab.
     if (hidden && !tabs.some(t => t.isContentTab)) return;
     storeContentPaneFold(hidden);
+    // An open editor menu hangs off the body, not off the pane: it
+    // leaves the screen with the menu bar it belongs to.
+    if (hidden) closeContentMenu();
     const hideBtn = document.getElementById('content-pane-hide');
     const showBtn = document.getElementById('content-pane-show');
     // Whether focus sat in the pane, read before the render hides it.
@@ -3239,8 +3395,9 @@
    * Put the panes in the state the current layout expects, after the
    * window crossed the desktop breakpoint (applyRemoteDesktop) and at
    * start-up.  Going split: a content tab on screen moves to the
-   * content pane and its owning chat (or the first chat, or a fresh
-   * one) takes the chat pane; otherwise the pane shows the content tab
+   * content pane and the chat it was reached from (else its owning
+   * chat, the first chat, or a fresh one) takes the chat pane;
+   * otherwise the pane shows the content tab
    * last viewed, if it is still open, else any surviving content tab
    * (one opened in the background while stacked, or the neighbour of
    * a browser another surface closed while stacked, records no pane
@@ -3314,15 +3471,24 @@
     // A content tab browses the workspace of the chat it was opened
     // from (sidebarWorkDir), which may differ from the previous tab's.
     refreshSidebarDataViews(false);
-    // The composer's button row stays on screen here. Stop mirrors the
-    // OWNING chat's run — it targets that chat (see chatTargetTabId) —
-    // instead of keeping whatever the previously shown tab left behind.
-    const stopOwner = getTab(chatTargetTabId());
-    stopBtn.style.display =
-      stopOwner && !stopOwner.isContentTab && stopOwner.isRunning
-        ? 'flex'
-        : 'none';
+    // The composer's button row stays on screen here, with Stop for
+    // the chat this tab stands for.
+    renderContentTabStop();
   }
+
+  // filechat-coverage:start
+  /**
+   * A content tab is on screen (stacked surface): show Stop while the
+   * chat it stands for (chatTargetTabId) runs, pulsing for that chat's
+   * pending stop.
+   */
+  function renderContentTabStop() {
+    const chat = getTab(chatTargetTabId());
+    stopBtn.style.display =
+      chat && !chat.isContentTab && chat.isRunning ? 'flex' : 'none';
+    renderStopButton();
+  }
+  // filechat-coverage:end
 
   /** Stacked surfaces: put the chat back in place of the content area. */
   function hideContentArea() {
@@ -3468,26 +3634,29 @@
   // machine instead: terminalOpen carries `machine`, and the daemon
   // (kiss/server/remote_views.py) forwards the tab's commands there.
 
-  function terminalTabCount() {
-    return tabs.filter(t => t.isTerminalTab).length;
-  }
-
   function openTerminalTab() {
     if (!window.TerminalTabView) return;
-    const n = terminalTabCount() + 1;
+    // One above the highest number among the open terminal tabs: their
+    // count would repeat a number once an earlier one is closed.
+    const n =
+      Math.max(
+        0,
+        ...tabs.filter(t => t.isTerminalTab).map(t => t.terminalNumber),
+      ) + 1;
     // The shell starts in the workspace the surface is browsing (the
     // chat's folder), which the side views keep showing for this tab
     // as they do for a file opened from that chat.  For a chat bound
     // to a registered machine (the header's drop-down) the shell runs
     // on that machine, in the chat's folder there (kiss/server/
     // remote_views.py forwards the commands), and the tab names it.
-    const owner = getTab(chatTargetTabId());
+    const owner = getTab(ownerChatTabId());
     const machine = owner ? tabMachine(owner.id) : '';
     const tab = makeTab(
       viewTabTitle(n > 1 ? 'Terminal ' + n : 'Terminal', machine),
     );
     tab.isContentTab = true;
     tab.isTerminalTab = true;
+    tab.terminalNumber = n;
     tab.contentNotAFile = true;
     tab.contentPath = '';
     tab.ownerTabId = owner ? owner.id : '';
@@ -3561,7 +3730,7 @@
       stopTimer();
       removeSpinner();
     }
-    applyChevronState(currentTaskName);
+    applyChevronState();
     focusInputWithRetry();
   }
 
@@ -3581,7 +3750,7 @@
     const pending = chat && chat.replayPending;
     if (!pending) return;
     chat.replayPending = null;
-    const req = {id: pending.chatId, tabId: chat.id, scoped: true};
+    const req = {chatId: pending.chatId, tabId: chat.id, scoped: true};
     if (pending.taskId) req.taskId = pending.taskId;
     requestReplay(req);
   }
@@ -3596,10 +3765,17 @@
    * unasked.  The answer is told by its task id (replayAnswersRequest):
    * a reconnect replay of another task arriving meanwhile neither
    * consumes the request nor lands afresh.  Every caller names an open
-   * tab.
+   * tab.  A chat asked into a tab bound to none leaves the tab's state
+   * unknown until the daemon answers (openingRequest): its task may run.
    */
   function requestReplay(req) {
-    getTab(req.tabId).replayRequested = taskIdStr(req.taskId);
+    const tab = getTab(req.tabId);
+    tab.replayRequested = {
+      taskId: taskIdStr(req.taskId),
+      req: req,
+      at: _subagentClock,
+    };
+    if (req.chatId && !tab.backendChatId) tab.statusKnown = false;
     api.resumeSession(req);
   }
 
@@ -3614,9 +3790,51 @@
    */
   function replayAnswersRequest(tab, ev) {
     const asked = tab.replayRequested;
-    return asked !== null && (asked === '' || asked === taskIdStr(ev.task_id));
+    return (
+      asked !== null &&
+      (asked.taskId === '' || asked.taskId === taskIdStr(ev.task_id))
+    );
   }
   // landing-coverage:end
+
+  /**
+   * The request bringing a chat into *tab* (a history click's
+   * `resumeSession`, see requestReplay) while the tab shows no chat
+   * yet; null when no chat is on its way.  The request is the only
+   * word on the tab's chat until the daemon's answer: a local chat's
+   * tab is bound (tabs_state) before its state is told, a machine's
+   * chat is bound by its transcript alone, which follows the state of
+   * a tab on that machine's stream.  A refusal tells the state of a
+   * tab on no stream: that chat is no longer on its way.
+   */
+  function openingRequest(tab) {
+    const asked = tab.replayRequested;
+    if (!asked || !asked.req.chatId || tab.backendChatId) return null;
+    const onItsMachine =
+      !!asked.req.machine && tabBoundMachines.get(tab.id) === asked.req.machine;
+    return !tab.statusKnown || onItsMachine ? asked.req : null;
+  }
+
+  /**
+   * A history click on task *taskId* of the chat on its way into *tab*
+   * (*opening*, its request): the last click says where the reader
+   * lands.  A running chat is opened at its running task and read back
+   * to the clicked one (soughtTaskId), as when its tab shows it; any
+   * other chat is asked for again, at the clicked task.
+   */
+  function redirectOpening(tab, opening, taskId) {
+    const clicked = taskIdStr(taskId);
+    const asked = taskIdStr(opening.taskId);
+    const runs =
+      asked === '' ||
+      historyLastRunningTaskIds.has(
+        historySessionKey({task_id: asked, machine: opening.machine}),
+      );
+    if (runs) tab.soughtTaskId = clicked === asked ? '' : clicked;
+    else if (clicked !== '' && clicked !== asked) {
+      requestReplay(Object.assign({}, opening, {taskId: taskId}));
+    }
+  }
 
   /**
    * Make Enter and Space on a focusable non-button element (a history
@@ -3689,23 +3907,42 @@
    * that task.  A tab whose transcript the daemon withheld
    * (replayPending) is replayed at the clicked task outright: that
    * explicit resume supersedes the deferred fetch the activation would
-   * send, so one transcript is loaded, not two.  *machine* is the
+   * send, so one transcript is loaded, not two.  A tab whose task is
+   * running stays on that task: replayed at an older one it would be
+   * told that task's end and take the live output into its transcript.
+   * Its thread is read back to the clicked task instead
+   * (seekSoughtTask), once the activation has fetched the transcript
+   * when that was withheld.  *machine* is the
    * remote machine the chat lives on ('' for a local chat): a replay
    * must name it, or the daemon would look the chat up here.
    */
   function resumeExistingChatTab(tab, chatId, taskId, machine) {
+    // The chat is on its way into the tab: this click shows the tab
+    // and says which task the reader lands on.
+    const opening = openingRequest(tab);
+    if (opening) {
+      switchToTab(tab.id);
+      redirectOpening(tab, opening, taskId);
+      return;
+    }
     const hasTaskId = taskId !== undefined && taskId !== null && taskId !== '';
     const deferred = !tab.isContentTab && !!tab.replayPending;
-    if (deferred && hasTaskId) tab.replayPending = null;
+    const readBack = hasTaskId && tab.isRunning;
+    if (deferred && hasTaskId && !readBack) tab.replayPending = null;
     switchToTab(tab.id);
-    if (
+    // This click is what the reader wants now: it ends the search an
+    // earlier one began (for a task of a chat that has finished since).
+    tab.soughtTaskId = readBack ? String(taskId) : '';
+    if (readBack) {
+      if (!deferred) seekSoughtTask();
+    } else if (
       !tab.isContentTab &&
       hasTaskId &&
       (deferred || !scrollChatToTask(taskId))
     ) {
       requestReplay(
         remoteResume(
-          {id: chatId, taskId: taskId, tabId: tab.id},
+          {chatId: chatId, taskId: taskId, tabId: tab.id},
           machine,
           tab.title,
         ),
@@ -3718,7 +3955,6 @@
     tab.contentDirty = false;
     tab.contentSavedVersionId = 0;
     tab.contentPendingVersionId = 0;
-    tab.contentSaving = false;
     tab.contentSaveToken = '';
     tab.contentCloseAfterSave = false;
     clearTimeout(tab.contentSaveTimer);
@@ -3831,7 +4067,7 @@
     // Only a save that is actually in flight closes the tab when its
     // reply lands; a refused one (not connected) has left its reason in
     // the Save bar and the tab stays open with its edits.
-    tab.contentCloseAfterSave = tab.contentSaving === true;
+    tab.contentCloseAfterSave = tab.contentSaveToken !== '';
   }
 
   /**
@@ -4048,7 +4284,8 @@
   // bar above it (a phone has no Ctrl+S). Only a directory listing
   // stays read-only — there is no file to write it back to. The
   // model's alternative version id (which returns to its old value on
-  // undo) tells whether the text still matches what was saved.
+  // undo) tells whether the text still matches what was saved
+  // (contentTabUnsaved).
   function renderCodeContent(tab, holder, text, language, editable) {
     function onMonaco(monaco) {
       if (!holder.isConnected || tab.contentEditor) return;
@@ -4063,13 +4300,9 @@
       tab.contentEditor = editor;
       appendContentMenuBar(tab, holder, editable);
       if (editable) {
-        const model = editor.getModel();
-        tab.contentSavedVersionId = model.getAlternativeVersionId();
+        tab.contentSavedVersionId = contentVersionId(tab);
         editor.onDidChangeModelContent(() => {
-          setContentTabDirty(
-            tab,
-            model.getAlternativeVersionId() !== tab.contentSavedVersionId,
-          );
+          setContentTabDirty(tab, contentTabUnsaved(tab));
         });
       }
       revealPendingContentLine(tab);
@@ -4228,7 +4461,7 @@
           label: 'Save',
           keys: ['Ctrl+S', '\u2318S'],
           edits: true,
-          enabled: tab => tab.contentDirty && !tab.contentSaving,
+          enabled: tab => tab.contentDirty && tab.contentSaveToken === '',
           run: tab => saveContentTab(tab, false),
         },
         '-',
@@ -4485,11 +4718,6 @@
     return action ? action.isSupported() : true;
   }
 
-  /** The platform's label for a menu item's `[win, mac, linux]` keys. */
-  function contentMenuKeyLabel(keys) {
-    return keys ? keyLabel(keys[0], keys[1], keys[2]) : '';
-  }
-
   function runContentMenuItem(item, tab) {
     const editor = contentActionEditor(tab);
     if (!editor) return;
@@ -4533,7 +4761,7 @@
       label.textContent = item.label;
       const key = document.createElement('span');
       key.className = 'content-menu-key';
-      key.textContent = contentMenuKeyLabel(item.keys);
+      key.textContent = item.keys ? keyLabel(...item.keys) : '';
       row.append(check, label, key);
       // Keep the editor focused (and its selection painted) while the
       // pointer is on the menu.
@@ -4856,7 +5084,7 @@
     status.textContent = text;
     status.classList.toggle('error', !!isError);
     bar.querySelector('.content-save-btn').disabled =
-      tab.contentSaving || !tab.contentDirty;
+      tab.contentSaveToken !== '' || !tab.contentDirty;
   }
 
   function setContentTabDirty(tab, dirty) {
@@ -4879,7 +5107,7 @@
   let contentSaveSeq = 0;
   function saveContentTab(tab, force) {
     const editor = tab.contentEditor;
-    if (!editor || tab.contentSaving || !tab.contentPath) return;
+    if (!editor || tab.contentSaveToken !== '' || !tab.contentPath) return;
     if (!tab.contentDirty && !force) return;
     if (!daemonConnected) {
       // The post would never arrive; the tab stays dirty so the user
@@ -4893,7 +5121,6 @@
     }
     const model = editor.getModel();
     contentSaveSeq += 1;
-    tab.contentSaving = true;
     tab.contentSaveToken = tab.id + ':' + contentSaveSeq;
     tab.contentPendingVersionId = model.getAlternativeVersionId();
     // The save supersedes a reload still awaiting its reply: that
@@ -4941,16 +5168,19 @@
 
   /**
    * Give up on the save *tab* is waiting for (its reply timed out or the
-   * connection that carried the request dropped): the tab stays dirty
-   * and the Save button works again, and a straggling reply is ignored
-   * because the token is retired.
+   * connection that carried the request dropped): the Save button works
+   * again, and a straggling reply is ignored because the token is
+   * retired.  The save may have been written all the same, so no text
+   * is known to be the disk's any more: the tab is dirty whatever its
+   * editor holds, until a save is answered.
    */
   function failContentSave(tab, message) {
-    if (!tab.contentSaving) return;
+    if (tab.contentSaveToken === '') return;
     clearTimeout(tab.contentSaveTimer);
-    tab.contentSaving = false;
     tab.contentSaveToken = '';
     tab.contentCloseAfterSave = false;
+    tab.contentSavedVersionId = 0;
+    setContentTabDirty(tab, true);
     setContentSaveStatus(tab, message, true);
   }
 
@@ -4975,7 +5205,11 @@
   // outlives that reopen: the replies of the older requests are stale
   // whenever they arrive (after the new open's too, since another
   // chat's request does not queue behind this one's), and the next
-  // close of the file overwrites it.
+  // close of the file overwrites it.  One record per file ever closed
+  // (some 150 bytes), kept for the page's life on purpose: a reply may
+  // be outstanding across any number of closes, so a forgotten close
+  // would let a late reply reopen its file, and declaring every older
+  // request late instead would drop the reply of a file never closed.
   let fileOpenSeq = 0;
   const closedFileOpens = new Map();
   function fileOpenToken() {
@@ -5002,28 +5236,38 @@
       : 0;
   }
 
+  /**
+   * True when *tab*'s editor may hold text the disk does not: its text
+   * is not the saved one, or a save is in flight.  That save puts the
+   * text it carries on disk whatever the editor shows by then, so an
+   * undo back to the saved text meanwhile is an edit still to save.
+   */
+  function contentTabUnsaved(tab) {
+    return (
+      tab.contentSaveToken !== '' ||
+      contentVersionId(tab) !== tab.contentSavedVersionId
+    );
+  }
+
   function handleFileSaved(ev) {
     // Only the reply to the save still awaited settles a tab; a reply
     // to an earlier, timed-out request finds no taker.
     const tab = tabs.find(t => {
       return t.isContentTab && !!ev.token && t.contentSaveToken === ev.token;
     });
-    if (!tab || !tab.contentEditor) return;
+    if (!tab) return;
     clearTimeout(tab.contentSaveTimer);
-    tab.contentSaving = false;
     tab.contentSaveToken = '';
     const closeAfterSave = tab.contentCloseAfterSave === true;
     tab.contentCloseAfterSave = false;
+    // The reply says what the disk holds: the text sent, or (a refused
+    // save wrote nothing) the saved text as before.
+    if (ev.ok) tab.contentSavedVersionId = tab.contentPendingVersionId;
+    setContentTabDirty(tab, contentTabUnsaved(tab));
     if (ev.ok) {
-      tab.contentSavedVersionId = tab.contentPendingVersionId;
       if (typeof ev.version === 'string') {
         tab.contentFileVersion = ev.version;
       }
-      const model = tab.contentEditor.getModel();
-      setContentTabDirty(
-        tab,
-        model.getAlternativeVersionId() !== tab.contentSavedVersionId,
-      );
       if (!tab.contentDirty) setContentSaveStatus(tab, 'Saved', false);
       // "Save and close": the close waited for this reply.  Edits typed
       // meanwhile keep the tab dirty, so the close asks again.
@@ -5539,16 +5783,14 @@
   }
 
   // mayFocus tells whether this content tab is allowed to become the
-  // active tab. It defaults to true because every caller but one acts on
-  // a user request or a finished task; pass false to open the tab in the
-  // background instead.
+  // active tab: true for a user request or a finished task, false to
+  // open the tab in the background instead.
   //
   // ownerTabId names the tab whose work produced the file; the Explorer
   // and Source Control views keep browsing that owner's folder while
   // the content tab is up. It defaults to the active tab (user-driven
   // opens belong to the conversation on screen).
   function handleFileContent(ev, mayFocus, ownerTabId) {
-    if (mayFocus === undefined) mayFocus = true;
     const owner =
       ownerTabId === undefined || ownerTabId === null || ownerTabId === ''
         ? activeTabId
@@ -5661,12 +5903,15 @@
         renderContentView(existing, ev);
       }
       if (reloadTab) existing.contentReloadRequested = false;
+      // A reload repaints its tab where it is: the user may have moved
+      // on to another tab while the reply was on its way.
+      const focus = mayFocus && !reloadTab;
       // In the split layout a file opened to be seen goes through the
       // pane even when it is the one shown there: the pane may be
       // folded away or under the task-info panel (showInContentPane).
-      if (mayFocus && splitLayout()) switchToTab(existing.id);
+      if (focus && splitLayout()) switchToTab(existing.id);
       else if (shownContentTabId() === existing.id) showContentTab(existing);
-      else if (mayFocus) switchToTab(existing.id);
+      else if (focus) switchToTab(existing.id);
       return;
     }
     const tab = makeTab(ev.name || path || 'file');
@@ -5779,11 +6024,10 @@
     delete readyReportsByTab[reportTabKey(evTabId)];
   }
 
-  // mayFocus defaults to true: a task that reached a terminal event may
-  // put its report on screen. Pass false when the owning work is not the
-  // user's task finishing (see the subagentDone case).
+  // mayFocus is true when a task that reached a terminal event may put
+  // its report on screen, false when the owning work is not the user's
+  // task finishing (see the subagentDone case).
   function openReadyReportTabs(evTabId, mayFocus) {
-    if (mayFocus === undefined) mayFocus = true;
     const key = reportTabKey(evTabId);
     const reps = readyReportsByTab[key];
     delete readyReportsByTab[key];
@@ -6165,6 +6409,12 @@
    *  behind is retired when idle; its composer draft moves along
    *  unless the chat brought forward has a draft of its own. */
   function openNewChat() {
+    // Over a file on a stacked surface the chat the user is on is the
+    // one the file belongs to.  It comes back on screen first: the
+    // composer the file hides holds whatever chat was left for a file,
+    // and only a chat on screen has its draft and attachments there.
+    const owner = rootChatTab(getTab(activeTabId));
+    if (owner && owner.id !== activeTabId) switchToTab(owner.id);
     const left = getTab(activeTabId);
     if (isFreshChat(left)) {
       focusInputWithRetry();
@@ -6212,10 +6462,7 @@
     if (!t) return;
     currentTaskName = t;
     setShownTask(t);
-    if (welcome) {
-      welcome.style.display = 'none';
-      refreshWelcomeLayout();
-    }
+    if (welcome) welcome.style.display = 'none';
     setOwnTaskPanel(O, t);
   }
 
@@ -6262,7 +6509,9 @@
   // The tab SET is server-canonical (the daemon's shared tab registry,
   // mirrored to every client via `tabs_state`), so the only page
   // state persisted locally is what stays client-local by design: the
-  // selected tab and the drawer preferences.
+  // selected chat (a file tab is not restored after a reload, so one
+  // on screen stands for the chat it belongs to) and the drawer
+  // preferences.
   function persistTabState() {
     const active = getTab(activeTabId);
     // Every tab's unsent prompt, keyed by tab id.  The user can reload
@@ -6272,15 +6521,22 @@
     // and the first snapshot after the reload hands them back.  The
     // active tab's draft is what the composer shows, or, when that is
     // empty, the newest prompt the daemon never echoed (see
-    // unackedPrompts; an echoed one is the daemon's already).
+    // unackedPrompts and lostPrompt; an echoed one is the daemon's
+    // already).
     const inputDrafts = {};
     const askDrafts = {};
     tabs.forEach(t => {
+      // A file tab has no draft: the composer it hides on a stacked
+      // surface still holds the text of the chat left, which that chat
+      // keeps itself (saveCurrentTab).
+      if (t.isContentTab) return;
       const typed = t === active ? inp.value : t.inputValue;
       // While the composer is the answer box the prompt is the parked
       // one (enterAnswerMode) and what is typed is the answer.
       const asked = t.askPendingQuestion !== null;
-      const unechoed = t.unackedPrompts.filter(p => !p.echoed);
+      const unechoed = [t.lostPrompt, ...t.unackedPrompts].filter(
+        p => p && !p.echoed,
+      );
       const draft =
         (asked ? t.promptDraft : typed) ||
         (unechoed.length ? unechoed[unechoed.length - 1].text : '');
@@ -6294,10 +6550,14 @@
       const question = asked ? t.askPendingQuestion : t.unackedQuestion;
       if ((answer || asked) && typeof question === 'string') {
         askDrafts[t.id] = {question, answer};
+        // With the daemon's id of that ask, when it gave one: the same
+        // words under another id are a later question.
+        const questionId = asked ? t.askQuestionId : t.unackedQuestionId;
+        if (questionId) askDrafts[t.id].questionId = questionId;
       }
     });
     transport.setState({
-      chatId: activeTabId,
+      chatId: chatTabIdForHost(),
       inputDrafts,
       askDrafts,
       tabMachinePicks: Object.fromEntries(tabMachinePicks),
@@ -6371,9 +6631,13 @@
   }
 
   // Announce a locally created chat tab to the daemon's shared tab
-  // registry so every other client opens the same tab.
+  // registry so every other client opens the same tab.  From here on
+  // the tab is the registry's to keep or drop (inRegistry): once its
+  // open is answered, a snapshot without it removes it, an empty one
+  // included -- that one spares only the never-announced placeholder.
   function registerTab(tab) {
     const ack = newTabAck();
+    tab.inRegistry = true;
     pendingOpenTabs.set(tab.id, {ack, misses: 0});
     api.openTab({
       tabId: tab.id,
@@ -6474,6 +6738,7 @@
       // Once the registry has listed a tab, its removal from a later
       // snapshot means another client closed it.
       tab.inRegistry = true;
+      tab.registryChatId = e.chatId ? String(e.chatId) : '';
       if (e.chatId && String(tab.backendChatId || '') !== String(e.chatId)) {
         tab.backendChatId = String(e.chatId);
       }
@@ -6545,7 +6810,7 @@
         ? inp.value
         : null;
     // A content tab on screen (stacked surface) keeps under it the run
-    // of the chat it belongs to: timer, spinner and the Stop button.
+    // of the chat it stands for: timer, spinner and the Stop button.
     // That chat closing elsewhere must blank the surface, as a local
     // close does (closeTab), or the run lives on under the file with a
     // Stop that targets no task.
@@ -6556,8 +6821,9 @@
     // (content tabs are never in the registry and carry no
     // parentTabId), so there is no editor to dispose.
     removedIds.forEach(forgetClosedTabState);
+    const removedTabs = Array.from(removedIds, getTab);
     tabs = next;
-    if (removedIds.size > 0) rpAfterTabsClosed(removedIds);
+    rpAfterTabsClosed(removedTabs);
     // placeSubagentTabAfterParent splices `tabs`, so walk a copy: each
     // sub-agent is visited once, in its current order, and sibling
     // blocks are rebuilt in that order instead of being shuffled.
@@ -6622,7 +6888,22 @@
     }
     savedActiveTabId = '';
     savedInputDrafts = null;
+    // Nor does a saved machine pick outlive its tab: a tab that closed
+    // while this page was away never closes here (forgetClosedTabState).
+    tabMachinePicks.forEach((pick, id) => {
+      if (!getTab(id)) tabMachinePicks.delete(id);
+    });
     reportSurvivingChatTab();
+    // A chat on its way into a tab since before the last reconnect,
+    // and the registry still binds the tab to none: the request may
+    // have died with the connection, so it is asked again.  A local
+    // chat's tab the daemon binds before it answers; a remote chat's
+    // it never binds here, and a second request only replays the chat
+    // again.
+    tabs.forEach(t => {
+      const lost = openingRequest(t);
+      if (lost && t.replayRequested.at < _reconnectedAt) requestReplay(lost);
+    });
     renderTabBar();
     persistTabState();
   }
@@ -6693,10 +6974,11 @@
   // boot tab right away, and the first snapshot hands each to its tab.
   let savedInputDrafts = null;
   // The ask-user answers persisted the same way, by tab id
-  // ({question, answer}): shown again when the daemon re-asks that same
-  // question after the reload (it re-emits an unanswered question on
-  // every replay), dropped when it asks nothing or something else — the
-  // answer had arrived after all.
+  // ({question, answer, questionId}): shown again when the daemon
+  // re-asks that same question after the reload (it re-emits an
+  // unanswered question on every replay, under the id it was asked
+  // with), dropped when it asks nothing or something else — the answer
+  // had arrived after all.
   let savedAskDrafts = null;
   (function () {
     const saved = bootState;
@@ -6718,6 +7000,7 @@
           savedAskDrafts[id] = {
             question: d.question,
             answer: typeof d.answer === 'string' ? d.answer : '',
+            questionId: typeof d.questionId === 'string' ? d.questionId : '',
           };
         }
       });
@@ -6832,8 +7115,7 @@
    * lands in the status bar lands in the list.  The status span keeps
    * the "Tokens: " style prefix; the bullet item already carries its
    * own label, so stripLabel drops the prefix from the mirrored text.
-   * #status-text also mirrors its inline color (accent while running,
-   * dim when done) onto the Time item.
+   * The Time item has a painter of its own (paintMetaTime).
    */
   function mirrorStatusIntoMetaPanel(srcId, dstId, stripLabel) {
     const src = document.getElementById(srcId);
@@ -6845,8 +7127,13 @@
       dst.textContent = text || '\u2014';
       dst.style.color = src.style.color || '';
     };
-    mirror();
-    new MutationObserver(mirror).observe(src, {
+    watchStatusSpan(src, mirror);
+  }
+
+  /** Call *paint* now and whenever the status-bar span *src* changes. */
+  function watchStatusSpan(src, paint) {
+    paint();
+    new MutationObserver(paint).observe(src, {
       childList: true,
       characterData: true,
       subtree: true,
@@ -6857,7 +7144,31 @@
   mirrorStatusIntoMetaPanel('status-tokens', 'meta-tokens', true);
   mirrorStatusIntoMetaPanel('status-budget', 'meta-cost', true);
   mirrorStatusIntoMetaPanel('status-steps', 'meta-steps', true);
-  mirrorStatusIntoMetaPanel('status-text', 'meta-time', false);
+
+  // donelabel-coverage:start
+  const metaTimeEl = document.getElementById('meta-time');
+
+  /**
+   * Paint the Task Info panel's Time row.
+   *
+   * It shows the status label of the tab's own task (#status-text:
+   * Ready before any task, "Running 2m 5s" while it runs, the time it
+   * took once it is over) in the label's colour (accent while running,
+   * dim when over).  While the panel's rows are lent to a neighbouring
+   * task of the thread (metaTimeNeighbour) it shows the time THAT task
+   * took.
+   */
+  function paintMetaTime() {
+    if (metaTimeNeighbour) {
+      metaTimeEl.textContent = metaTimeNeighbour.dataset.metricTime;
+      metaTimeEl.style.color = 'var(--dim)';
+      return;
+    }
+    metaTimeEl.textContent = statusText.textContent;
+    metaTimeEl.style.color = statusText.style.color;
+  }
+  watchStatusSpan(statusText, paintMetaTime);
+  // donelabel-coverage:end
 
   // metasections-coverage:start
   /** The task-info panel (null on a page without one). */
@@ -7393,11 +7704,7 @@
       setMetaInfoHTML(taskUpdateBodyHTML(content));
       // The update is the polled task's own report: its pictures are
       // files of that task's work dir.
-      loadInlineImages(
-        metaInfoContent,
-        workDirForTab(metaInfoTabId) || '',
-        metaInfoTabId,
-      );
+      loadInlineImages(metaInfoContent, undefined, metaInfoTabId);
     } else {
       let pending = 'No update yet.';
       if (running) pending = 'Preparing the first update\u2026';
@@ -7669,18 +7976,15 @@
   }
 
   /**
-   * Write one #meta-* value's display text ('—' for an empty *text*)
-   * and, optionally, its inline color.
+   * Write one #meta-* value's display text ('—' for an empty *text*).
    *
    * @param {string} id The value span's element id.
    * @param {string} text The display text.
-   * @param {string} [color] Inline CSS color ('' clears it).
    */
-  function setMetaValue(id, text, color) {
+  function setMetaValue(id, text) {
     const el = document.getElementById(id);
     if (!el) return;
     el.textContent = text || '\u2014';
-    if (color !== undefined) el.style.color = color || '';
   }
 
   // sidebarpanels-coverage:start
@@ -8108,7 +8412,8 @@
    * An in-place form under a Schedule or Machines row: one labelled
    * input per field (a textarea for a multi-line one, a select for a
    * choice), then Save and Cancel.  Enter in an input (Ctrl+Enter in
-   * a textarea) saves, Escape cancels.
+   * a textarea) saves, Escape cancels; Enter in a select stays the
+   * picker's own.
    *
    * @param {Array<{key: string, label: string, value: string,
    *     multiline?: boolean, type?: string,
@@ -8150,7 +8455,11 @@
       input.addEventListener('keydown', e => {
         // The Enter that picks an IME candidate is not a submit.
         if (e.isComposing || e.keyCode === 229) return;
-        if (e.key === 'Enter' && (!field.multiline || e.ctrlKey || e.metaKey)) {
+        if (
+          e.key === 'Enter' &&
+          !field.options &&
+          (!field.multiline || e.ctrlKey || e.metaKey)
+        ) {
           e.preventDefault();
           form.dispatchEvent(new Event('submit', {cancelable: true}));
         }
@@ -10105,9 +10414,11 @@
    * @param {boolean} [background] Open the tab without leaving the
    *     current one ("Open to the Side"); the drawer then stays.
    * @param {string} [owner] The chat tab the file is opened for (the
-   *     reply is routed to it); the current one by default.
+   *     reply is routed to it); the current one by default.  A named
+   *     owner that has closed since (a menu left open) opens nothing.
    */
   function openWorkspaceFile(path, workDir, machine, background, owner) {
+    if (owner && !getTab(owner)) return;
     const msg = {
       type: 'openFile',
       path: path,
@@ -10861,6 +11172,15 @@
         if (n !== editing && n !== editingKids) kids.removeChild(n);
       });
       explorerNote(kids, depth, String(ev.error));
+      // The removed rows took the tree's one tab stop with them, and
+      // the focus when a removed row had it: this folder's row takes
+      // both; a name box kept above keeps them.
+      let stop = focusedInKids && focusedInKids.closest('.explorer-row');
+      if (focusedInKids && !focusedInKids.isConnected) {
+        stop = node.row;
+        stop.focus({preventScroll: true});
+      }
+      rovingFocus(explorerTree, '.explorer-row', stop);
       return;
     }
     const entries = Array.isArray(ev.entries) ? ev.entries : [];
@@ -10949,11 +11269,21 @@
         focusedInKids.setSelectionRange(start, end);
     }
     // One tab stop in the tree: the focused row when there is one
-    // (rows re-attached from the fragment kept a stale tabIndex).
-    const focusedRow =
+    // (rows re-attached from the fragment kept a stale tabIndex).  A
+    // focused row whose entry disappeared took the focus out of the
+    // tree with it: this folder's row takes both, as on an error.
+    let focusedRow =
       focusedInKids && focusedInKids.isConnected
         ? focusedInKids.closest('.explorer-row')
         : null;
+    if (
+      focusedInKids &&
+      !focusedInKids.isConnected &&
+      !explorerTree.contains(document.activeElement)
+    ) {
+      focusedRow = node.row;
+      focusedRow.focus({preventScroll: true});
+    }
     rovingFocus(explorerTree, '.explorer-row', focusedRow);
     if (!entries.length && !editing) explorerNote(kids, depth, '(empty)');
     if (ev.truncated) explorerNote(kids, depth, '(more entries not shown)');
@@ -11282,35 +11612,46 @@
       String(scmStatus.token || '') === String(ev.token || '') &&
       scmStatusKey(scmStatus) === scmStatusKey(ev);
     scmStatus = ev;
-    if (repeat) return;
+    // A log that failed is asked again by every status that succeeds,
+    // repeated or not: nothing else replaces the error it left in the
+    // graph while the tree stands still.
+    const failedLog = !ev.error && !!scmLog && !!scmLog.error;
+    if (repeat && !failedLog) return;
     // The poll asks for the status alone, so a commit, checkout or
     // reset made outside a task (a terminal) moves a HEAD under the
     // log on hand: the log is re-asked under the same token and the
     // graph waits for it rather than redrawing the old history.  Not
     // while this generation's log is still on its way: that one
     // walks from the HEAD this status reports.
-    const behind = !scmLogPending && scmLogBehind(ev);
+    const behind = !scmLogPending && (failedLog || scmLogBehind(ev));
     if (behind) sendScmRequest(api.gitLog, scmWorkDir, scmMachine, {limit: 50});
+    if (repeat) return;
     renderScmChanges();
     if (!behind && scmPairComplete()) renderScmGraph();
   }
 
-  /** The worktree HEADs a gitStatus / gitLog reply names, as one key. */
+  /**
+   * The worktree HEADs a gitStatus / gitLog reply names, each with the
+   * branch checked out there ('' when detached), as one key: the
+   * graph's HEAD and branch labels are the log's, so a branch that
+   * moved under an unchanged commit outdates the log like a new HEAD.
+   */
   function scmHeadsKey(reply) {
     const list = Array.isArray(reply.worktrees) ? reply.worktrees : [];
     return list
-      .map(wt => (wt && wt.head ? String(wt.head) : ''))
-      .filter(Boolean)
+      .filter(wt => wt && wt.head)
+      .map(wt => String(wt.head) + '@' + String(wt.branch || ''))
       .sort()
       .join(' ');
   }
 
   /**
-   * Whether the log on hand walks from other HEADs than *status* just
-   * reported (the current worktree's, or another worktree's).
+   * Whether the log on hand walks from other HEADs or branches than
+   * *status* just reported (the current worktree's, or another
+   * worktree's).  A failed log is handleGitStatus's to ask again.
    */
   function scmLogBehind(status) {
-    if (status.error || !scmLog || scmLog.error) return false;
+    if (status.error || !scmLog) return false;
     const cur = scmWorktrees(status)[0];
     if (cur.head && String(scmLog.head || '') !== String(cur.head)) return true;
     return scmHeadsKey(status) !== scmHeadsKey(scmLog);
@@ -12313,7 +12654,8 @@
    * workspace, not the current one's.  *machine* is the registered
    * machine that answered (the daemon stamps its reply), '' / undefined
    * for this machine: the same repository path on two machines is two
-   * results, so each keeps its own tab.
+   * results, so each keeps its own tab.  A result whose tab closed
+   * before the reply came opens nothing.
    */
   function openTextResultTab(
     key,
@@ -12323,6 +12665,7 @@
     ownerTabId,
     machine,
   ) {
+    if (resultOwnerClosed(ownerTabId)) return;
     handleFileContent(
       {
         path: key,
@@ -12352,7 +12695,20 @@
     if (ownerTabId === undefined || ownerTabId === null || ownerTabId === '')
       return true;
     const owner = rootChatTab(getTab(String(ownerTabId)));
-    return !!owner && owner.id === chatTargetTabId();
+    return !!owner && owner.id === ownerChatTabId();
+  }
+
+  /**
+   * Whether the tab that asked for a result closed before its reply
+   * came: such a result opens no tab, as a new file of a closed chat
+   * opens no editor (handleFsResult).
+   *
+   * @param {string|undefined} ownerTabId The request's tab ('' / absent
+   *   for the tab on screen).
+   * @returns {boolean} Whether the owner is gone.
+   */
+  function resultOwnerClosed(ownerTabId) {
+    return !!ownerTabId && !getTab(String(ownerTabId));
   }
 
   /**
@@ -12499,16 +12855,19 @@
     // Both views (may) have changed; one out of sight reloads when shown.
     refreshSidebarDataViews(true);
     // The folder that received the entry opens so the result is seen
-    // (VS Code reveals a pasted / created entry the same way).
+    // (VS Code reveals a pasted / created entry the same way), unless
+    // the tree shows another machine by now: the same path there is
+    // another folder.
     const target =
       request.action === 'copy' || request.action === 'move'
         ? request.dest
         : request.action === 'newFile' || request.action === 'newFolder'
           ? request.path
           : '';
-    const targetNode = target
-      ? explorerDirs.get(explorerKey(request.root || explorerRoot, target))
-      : null;
+    const targetNode =
+      target && String(request.machine || '') === explorerMachine
+        ? explorerDirs.get(explorerKey(request.root || explorerRoot, target))
+        : null;
     if (targetNode && !targetNode.row.classList.contains('expanded')) {
       toggleExplorerDir(targetNode.row, true);
     }
@@ -12831,6 +13190,7 @@
               explorerRowRoot(r) || explorerRoot,
               machine,
               true,
+              tabId,
             );
           });
         },
@@ -12921,7 +13281,8 @@
         id: 'open-to-side',
         label: 'Open to the Side',
         key: keyLabel('Ctrl+Enter', '\u2303Enter'),
-        run: () => openWorkspaceFile(path, root || explorerRoot, machine, true),
+        run: () =>
+          openWorkspaceFile(path, root || explorerRoot, machine, true, tabId),
       });
     }
     items.push({separator: true});
@@ -13287,6 +13648,7 @@
    * same file of the same commit again brings the existing tab forward.
    */
   function openGitDiffTab(ev) {
+    if (resultOwnerClosed(ev.tabId)) return;
     const name = pathBaseName(ev.path);
     const short = String(ev.sha || '').slice(0, 7);
     const parent = String(ev.parent || '').slice(0, 7);
@@ -13476,7 +13838,14 @@
         id: 'open-file',
         label: 'Open File',
         enabled: !deleted,
-        run: () => openWorkspaceFile(absPath, target.workDir, target.machine),
+        run: () =>
+          openWorkspaceFile(
+            absPath,
+            target.workDir,
+            target.machine,
+            false,
+            target.tabId,
+          ),
       },
       {separator: true},
       {
@@ -14004,6 +14373,67 @@
   }
 
   /**
+   * The daemon bound the tab `tabId` to `machine`, or unbound it: every
+   * surface's drop-down shows the same machine for the chat the tab
+   * shows.  A pick the user made here and has not submitted yet stands
+   * (unless it is this very binding): it is where THEIR next task goes.
+   *
+   * @param {string} tabId The tab.
+   * @param {string} machine The registered machine's name, '' for none.
+   */
+  function setTabBoundMachine(tabId, machine) {
+    if (machine) tabBoundMachines.set(tabId, machine);
+    else tabBoundMachines.delete(tabId);
+    if (tabMachinePicks.get(tabId) === machine) tabMachinePicks.delete(tabId);
+    persistTabState();
+    renderChatMachine();
+    // The directory drop-down follows: a chat of a remote machine
+    // opened from CHATS shows that machine's directories.  So do the
+    // Task Info rows (the Machine row names the bound machine; without
+    // task settings the Workdir and Max budget rows show the machine's).
+    showMachineWorkDirs(tabId === activeTabId ? machine : '');
+  }
+
+  /**
+   * The daemon's answer to `ready`: every binding there is.  One this
+   * page holds that is not among them ended while the page was away
+   * (another surface ran a task of this machine in the tab, the machine
+   * was lost), as one it lacks was made then.  What the page held stood
+   * until now: a prompt sent the moment the outage's banner went ran
+   * where its chat lives.
+   *
+   * @param {Object<string, string>} machines The machine's registered
+   *     name by the id of each bound tab.
+   */
+  function setTabBoundMachines(machines) {
+    const tabIds = Array.from(tabBoundMachines.keys()).concat(
+      Object.keys(machines),
+    );
+    for (const tabId of new Set(tabIds)) {
+      const machine = machines[tabId] || '';
+      if (machine !== tabBoundMachine(tabId)) {
+        setTabBoundMachine(tabId, machine);
+      }
+    }
+    // A tab the registry binds to no chat (reconcileTabs, which the
+    // daemon's answer to `ready` runs first) and no machine's stream
+    // has gets no transcript from the daemon: no task was ever admitted
+    // there, so the prompt an outage swallowed never ran.  A sub-agent's
+    // tab is not the registry's: its transcript comes with its chat's.
+    tabs.forEach(t => {
+      if (
+        !t.lostPrompt ||
+        t.isSubagentTab ||
+        t.registryChatId ||
+        machines[t.id]
+      )
+        return;
+      t.statusKnown = true;
+      settleLostPrompt(t, null);
+    });
+  }
+
+  /**
    * The daemon's `machineWorkDirs` reply: remember the machine's
    * directories and default budget, and repaint the drop-down (and
    * the Task Info rows of a chat without task settings) when the
@@ -14475,9 +14905,8 @@
         }
       });
     }
-    const scmBody = scmBodyEl;
-    if (scmBody) {
-      scmBody.addEventListener('click', e => {
+    if (scmBodyEl) {
+      scmBodyEl.addEventListener('click', e => {
         const hdr = e.target.closest('.scm-section-hdr');
         if (hdr) {
           const open = hdr.getAttribute('aria-expanded') !== 'true';
@@ -14490,15 +14919,15 @@
         }
         onScmActivate(e.target);
       });
-      scmBody.addEventListener('contextmenu', onScmContextMenu);
-      scmBody.addEventListener('focusin', e => {
+      scmBodyEl.addEventListener('contextmenu', onScmContextMenu);
+      scmBodyEl.addEventListener('focusin', e => {
         const item = e.target.closest(SCM_ITEMS);
-        if (item) rovingFocus(scmBody, SCM_ITEMS, item);
+        if (item) rovingFocus(scmBodyEl, SCM_ITEMS, item);
       });
-      scmBody.addEventListener('keydown', e => {
+      scmBodyEl.addEventListener('keydown', e => {
         const item = e.target.closest(SCM_ITEMS);
         if (!item) return;
-        if (treeArrowNav(e, scmBody, SCM_ITEMS, item)) return;
+        if (treeArrowNav(e, scmBodyEl, SCM_ITEMS, item)) return;
         if (
           item.classList.contains('scm-worktree-hdr') &&
           (e.key === 'ArrowRight' || e.key === 'ArrowLeft')
@@ -14524,22 +14953,8 @@
     if (!welcome) return;
     welcome.style.display = '';
     if (!O.contains(welcome)) O.appendChild(welcome);
-    refreshWelcomeLayout();
     O.scrollTop = 0;
   }
-
-  function refreshWelcomeLayout() {
-    const ia = document.getElementById('input-area');
-    const app = document.getElementById('app');
-    if (!ia || !app || !welcome) return;
-    if (ia.parentNode === welcome) {
-      const sbar = document.getElementById('sidebar');
-      if (sbar) app.insertBefore(ia, sbar);
-      else app.appendChild(ia);
-    }
-  }
-
-  refreshWelcomeLayout();
 
   /**
    * Record *text* as the task the reader is looking at (the tab's own
@@ -14885,7 +15300,7 @@
    * machine's as its machineWorkDirs reply told them — and shows '—'
    * for the rest.  The info subpanel's poll target follows the same
    * tab (setMetaInfoTarget), keeping the rows and the task update on
-   * the same task.
+   * the same task, and so does the Time row (paintMetaTime).
    *
    * @param {object|null} s A task_settings event's settings payload.
    */
@@ -14925,6 +15340,7 @@
       metaText(s ? s.parent_task_id : ''),
     );
     setMetaOptionalRow('meta-agent-item', 'meta-agent', metaAgentText(s));
+    paintMetaTime();
     setMetaInfoTarget();
   }
   updateMetaTaskDetails(null);
@@ -15000,14 +15416,16 @@
    */
   function setTaskSettings(s) {
     currentTaskSettings = s && typeof s === 'object' ? s : null;
+    metaTimeNeighbour = null;
     updateMetaTaskDetails(currentTaskSettings);
   }
   // taskinfo-coverage:end
 
   // chevron-coverage:start
   /**
-   * Fold the event panels of a finished task whose transcript was
-   * replayed (a reload, a tab switch, a neighbouring task spliced in).
+   * Fold the event panels left open on screen while the tab's task is
+   * not running (a panel that lands after the task's end, a transcript
+   * replayed, a tab switched to).
    *
    * Every plain panel stays on screen, collapsed to its header and
    * preview, so any event of a past task can be opened by a click.
@@ -15016,24 +15434,17 @@
    * (`user-pinned`), the panels a `summary` tool call adopted
    * (`.summary-sub`, shown when the summary panel is opened) and the
    * panels of a finished task's Trajectory (`.trajectory-sub`, folded
-   * by foldTrajectory when the task ended).
-   *
-   * @param {string} taskName Only panels of this task are folded; a
-   *     falsy name folds every task on screen.
+   * by foldTrajectory when the task ended).  A neighbouring task
+   * spliced into the thread has nothing for this pass: its own replay
+   * folded it (renderReplayedEvents), and what was opened in it since
+   * is pinned or shows a picture.
    */
-  function applyChevronState(taskName) {
-    if (!O) return;
+  function applyChevronState() {
+    if (!O || isRunning) return;
     const panels = O.querySelectorAll('.collapsible');
     for (let i = 0; i < panels.length; i++) {
       const p = panels[i];
-      const adjacentContainer = p.closest('.adjacent-task');
-      const inAdjacent = !!adjacentContainer;
-      const inRunning = isRunning && !inAdjacent;
-      const panelTask = inAdjacent
-        ? adjacentContainer.dataset.task || ''
-        : currentTaskName;
-      if (taskName && panelTask !== taskName) continue;
-      if (inRunning || panelNeverFolds(p)) continue;
+      if (panelNeverFolds(p)) continue;
       if (p.closest('.summary-sub') || p.closest('.trajectory-sub')) continue;
       if (p.classList.contains('user-pinned')) continue;
       // Already folded: its preview was built when it collapsed and
@@ -15056,7 +15467,6 @@
         ? 'Expand input panel'
         : 'Collapse input panel';
       inputDrawerBtn.setAttribute('aria-label', inputLabel);
-      inputDrawerBtn.removeAttribute('data-tooltip');
     }
   }
 
@@ -15142,9 +15552,6 @@
   }
 
   function closeLaunchSwitch() {
-    // A tap on the loading overlay or the password prompt is not the user
-    // taking over the chat -- the chat is not even on screen yet.
-    if (!launchStartedAt) return;
     launchSwitchDone = true;
   }
 
@@ -15261,8 +15668,9 @@
    * transcript (saveCurrentTab) after resetAdjacentState rewound them:
    * the neighbours spliced into it came back with it, so the next
    * overscroll fetches the task beyond them, not one already on
-   * screen.  Nothing is put back when the tab's task changed meanwhile
-   * (the anchors described another thread).
+   * screen.  Nothing is put back when they were saved for another task
+   * than the tab's: a transcript whose replay named no task has no
+   * anchors of its own, and is read on from its tab's task.
    * @param {?Object} saved The fragment's `adjacentState`, if any.
    */
   function restoreAdjacentState(saved) {
@@ -15353,6 +15761,25 @@
   }
 
   /**
+   * The settings of task *taskId* as its replayed transcript states
+   * them: those of its last `task_settings` event naming that task
+   * (a sub-agent's nested events name their own), null without one.
+   *
+   * @param {Array<object>} events The task's transcript.
+   * @param {string|number} taskId The task's id.
+   * @returns {object|null} A task_settings payload.
+   */
+  function transcriptTaskSettings(events, taskId) {
+    let settings = null;
+    (events || []).forEach(ev => {
+      const s = ev && ev.type === 'task_settings' ? ev.settings : null;
+      if (s && typeof s === 'object' && taskIdStr(s.task_id) === String(taskId))
+        settings = s;
+    });
+    return settings;
+  }
+
+  /**
    * The element the reader's place is measured against while the thread
    * changes above them: the first transcript child under the loader.
    *
@@ -15381,11 +15808,14 @@
   /**
    * Splice a neighbouring task's transcript into the visible #output.
    *
-   * ownerTabId names the tab the transcript belongs to. It is threaded into
-   * the replay so file links are cached and stamped against that tab rather
-   * than against whichever tab happens to be on screen.
+   * It becomes part of the transcript on screen, so it is replayed as
+   * the active tab's: a reply addressed to another tab showing the same
+   * task (isForActiveTab) must not hand that hidden tab the neighbour's
+   * settings, task id or file links.  *extra* is the `extra` JSON of
+   * the neighbour's history row: the span it records is the time the
+   * Task Info panel shows while the reader is parked on the neighbour.
    */
-  function renderAdjacentTask(direction, task, events, taskId, ownerTabId) {
+  function renderAdjacentTask(direction, task, events, taskId, extra) {
     const anchor = direction === 'prev' ? readerAnchor() : null;
     const anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
     removeAdjacentLoader();
@@ -15418,11 +15848,18 @@
 
     const container = replayDetachedTranscript(
       events,
-      ownerTabId,
+      activeTabId,
       copyFollowupToInput,
     );
     container.dataset.task = taskLabel;
-    if (hasTaskId) container.dataset.taskId = String(taskId);
+    container.dataset.metricTime = recordedTaskTime(extra);
+    if (hasTaskId) {
+      container.dataset.taskId = String(taskId);
+      adjacentTaskSettings.set(
+        container,
+        transcriptTaskSettings(events, taskId),
+      );
+    }
     if (!container.firstChild) {
       const ph = mkEl('div', 'adjacent-task-placeholder');
       ph.textContent = '(no output recorded)';
@@ -15439,9 +15876,6 @@
       O.appendChild(container);
       if (hasTaskId) newestLoadedTaskId = taskId;
     }
-    // Folding the neighbour's panels changes its height, so the
-    // reader's place is restored only once both are done.
-    applyChevronState(taskLabel);
     restoreReaderAnchor(anchor, anchorTop);
     // Splicing the transcript changes what is on screen even when nothing
     // scrolls — a short transcript cannot scroll at all — so the shown
@@ -15916,8 +16350,22 @@
   }
 
   /**
+   * The folder the task of *settings* (a task_settings payload) ran
+   * in: '' without one, and for a file-system root (see isRootDir).
+   */
+  function taskSettingsWorkDir(settings) {
+    const dir = settings && settings.work_dir ? String(settings.work_dir) : '';
+    return isRootDir(dir) ? '' : dir;
+  }
+
+  /**
    * The directory a transcript's relative file paths (links, inline
-   * images) resolve against, as sent with their checkPaths / openFile.
+   * images) resolve against, as sent with their checkPaths / openFile:
+   * the folder the transcript's task ran in, on the machine it ran on.
+   * *workDir* names it when the caller knows it (a replayed
+   * transcript's own task_settings; this function's earlier answer,
+   * which the event renderer hands on).  Without one the transcript is
+   * the tab's current task's.
    *
    * For a tab bound to a registered machine the request is forwarded
    * there unchanged, so the directory must be one of THAT machine: the
@@ -15930,23 +16378,29 @@
    * every relative link of a bound tab stayed inert, or opened to
    * "File not found".
    *
+   * For a tab of this daemon it is the folder the tab's task started
+   * in (its task_settings; the global working directory may have moved
+   * since), else the folder the tab browses.
+   *
    * @param {string} machine The tab's bound machine, '' for this daemon.
-   * @param {string|undefined} workDir The owning task's work dir on
-   *   this daemon; undefined for the active tab's.
+   * @param {string|undefined} workDir The transcript's task's folder on
+   *   that machine, when known: never the folder the tab browses on
+   *   this daemon, which names nothing on a bound machine.
    * @param {string} owner The tab that owns the transcript.
    * @returns {string} The directory to send ('' = the daemon's own).
    */
   function transcriptFileWorkDir(machine, workDir, owner) {
+    if (workDir) return workDir;
+    const tab = getTab(owner);
     if (machine) {
-      const tab = getTab(owner);
       if (tab && tab.workDir && tab.workDirMachine === machine) {
         return tab.workDir;
       }
       return machineDirs(machine).workDir || '';
     }
-    return typeof workDir === 'string'
-      ? workDir
-      : workDirForTab(activeTabId) || '';
+    const settings =
+      owner === activeTabId ? currentTaskSettings : tab && tab.taskSettings;
+    return taskSettingsWorkDir(settings) || workDirForTab(owner) || '';
   }
 
   function verifyFileLinkCandidates(root, workDir, ownerTabId) {
@@ -16644,26 +17098,121 @@
   }
 
   const _rpTabPanel = new Map();
+  // The sub-agent tabs that closed: an announcement of finished history
+  // must not reopen them.  A sub-agent's tab can close and come back
+  // under the same id while its chat stays open, so a record is kept
+  // whatever closed with it.  Page-global and bounded, like
+  // _finishedSubagentTasks: the oldest records are forgotten first.
   const _rpClosedSubagentTabs = new Set();
-  // Task ids of the sub-agents this page saw finish (`subagentDone`).
-  // The daemon decides an `openSubagentTab`'s `isDone` before it
-  // broadcasts (its reply to the page's `resumeSession`), and the child
-  // can finish in between: `subagentDone` then lands first and the
-  // stale announcement would re-open the finished sub-agent as a
-  // running tab that nothing closes again.  Page-global and bounded:
-  // only the newest finishes can still be named by a late announcement,
-  // so the oldest are forgotten first (see rememberFinishedSubagent).
-  const _finishedSubagentTasks = new Set();
+  const CLOSED_SUBAGENT_TABS_MAX = 1000;
+
+  function rememberClosedSubagentTab(tabId) {
+    _rpClosedSubagentTabs.delete(tabId);
+    _rpClosedSubagentTabs.add(tabId);
+    if (_rpClosedSubagentTabs.size > CLOSED_SUBAGENT_TABS_MAX) {
+      _rpClosedSubagentTabs.delete(_rpClosedSubagentTabs.values().next().value);
+    }
+  }
+  // Task ids of the sub-agents this page saw finish (`subagentDone`),
+  // each with the _subagentClock tick of that moment.  The daemon
+  // decides an `openSubagentTab`'s `isDone` before it broadcasts (its
+  // reply to the page's `resumeSession`), and the child can finish in
+  // between: `subagentDone` then lands first and the stale
+  // announcement would re-open the finished sub-agent as a running tab
+  // that nothing closes again.  A record gives way to an announcement
+  // later than its finish (finishedSubagentStands).  Page-global and
+  // bounded: only the newest finishes can still be named by a late
+  // announcement, so the oldest are forgotten first (see
+  // rememberFinishedSubagent).
+  const _finishedSubagentTasks = new Map();
   const FINISHED_SUBAGENTS_MAX = 300;
+  // Orders what this page hears about sub-agents: it ticks at every
+  // finish recorded, transcript replayed (a tab's `replayedAt`) and
+  // reconnect (_reconnectedAt).
+  let _subagentClock = 0;
+  let _reconnectedAt = 0;
+  // The sub-agent tabs that ran when the connection last dropped and
+  // that the daemon has not named since: the `subagentDone` of one of
+  // them may have been missed (askUnconfirmedSubagents).
+  let _unconfirmedSubagentTabs = new WeakSet();
+  // The task that started the sub-agent of each sub-agent tab, as the
+  // daemon's `openSubagentTab` names it (`parent_task_id`).
+  const _subagentParentTask = new WeakMap();
+
+  /**
+   * Ask the daemon about the sub-agent tabs below chat tab *chat* that
+   * ran when the connection dropped, that it has not named since and
+   * that its answer for *chat* will not name.
+   *
+   * Called when the daemon replays task *task* into *chat*, or offers
+   * that replay (`replay_deferred`): it then announces the sub-agents
+   * of *task*, and what runs below them, only.  Nothing else would
+   * tell this page that a sub-agent of another task has finished (the
+   * chat moved on while this page was away, or the sub-agent outlived
+   * its task: a side channel), and its tab would keep its spinner for
+   * ever.  A sub-agent the daemon gave no parent task counts as one of
+   * the task *chat* shows.  The daemon answers each question by name
+   * (`openSubagentTab`, or `subagentDone` for a finished side
+   * channel); a tab that knows no task id has no name to ask by.
+   *
+   * @param {object} chat The chat tab the daemon answers for.
+   * @param {string} task The task that answer stands for ('' for none).
+   */
+  function askUnconfirmedSubagents(chat, task) {
+    const shown = taskIdStr(chat.currentTaskId);
+    for (const t of tabs) {
+      const taskId = taskIdStr(t.currentTaskId);
+      if (!taskId || !_unconfirmedSubagentTabs.has(t)) continue;
+      if (t === chat || rootTabOf(t) !== chat) continue;
+      // The sub-agent tab right below *chat* decides for those below it.
+      let top = t;
+      for (let up = tabOwner(t); up !== chat; up = tabOwner(up)) top = up;
+      if ((_subagentParentTask.get(top) || shown) === task) continue;
+      requestReplay({taskId: taskId, tabId: t.id, scoped: true});
+    }
+  }
 
   function rememberFinishedSubagent(taskId) {
     _finishedSubagentTasks.delete(taskId);
-    _finishedSubagentTasks.add(taskId);
+    _finishedSubagentTasks.set(taskId, ++_subagentClock);
     if (_finishedSubagentTasks.size > FINISHED_SUBAGENTS_MAX) {
-      _finishedSubagentTasks.delete(
-        _finishedSubagentTasks.values().next().value,
-      );
+      _finishedSubagentTasks.delete(_finishedSubagentTasks.keys().next().value);
     }
+  }
+
+  /**
+   * Whether the finish recorded for sub-agent *taskId* still stands
+   * against a live announcement of it under tab *parentId*: nothing
+   * this page heard since proves the daemon decided the announcement
+   * after that finish, so it is the late echo the record is kept for.
+   *
+   * A `subagentDone` is not always a finish: a daemon ends the
+   * sub-agent tabs of a remote machine's stream when the stream ends
+   * (lost, or its chat shown in another tab), while the sub-agents run
+   * on, and the machine announces them again once the chat is opened
+   * again.  That announcement is no echo, and the record gives way,
+   * when the transcript of the tab it is under, or of a tab above it,
+   * was replayed since (the daemon follows a replay with the
+   * sub-agents running below it as of then), or when the page
+   * reconnected since (everything on the new connection answers its
+   * `ready`).
+   *
+   * @param {string} taskId The sub-agent's task id.
+   * @param {string} parentId The open tab the announcement is under.
+   * @returns {boolean} True when the announcement must be dropped.
+   */
+  function finishedSubagentStands(taskId, parentId) {
+    const finishedAt = _finishedSubagentTasks.get(taskId);
+    if (finishedAt === undefined || _reconnectedAt > finishedAt) return false;
+    // Up to the top of the tab's group: rootTabOf ends the walk there
+    // even if the parent links loop.
+    const chat = rootTabOf(getTab(parentId));
+    let up = getTab(parentId);
+    while (up) {
+      if (up.replayedAt > finishedAt) return false;
+      up = up === chat ? null : tabOwner(up);
+    }
+    return true;
   }
 
   /**
@@ -16692,7 +17241,7 @@
       setRunningState(false);
       if (inputContainer) inputContainer.style.display = 'none';
     }
-    _rpClosedSubagentTabs.add(doneTab.id);
+    rememberClosedSubagentTab(doneTab.id);
     closeTab(doneTab.id, true);
   }
   let _rpSyncing = false;
@@ -16710,11 +17259,16 @@
    * detach the rest of the replay into a fragment nobody sees. The
    * replay finishes first, then the tabs close.
    *
+   * The close is the page's own, not one the user asked for
+   * (closeTab's agentInitiated): a sub-agent still running below the
+   * folded one keeps its tab, and the daemon, which mirrors a page's
+   * `closeTab` to every surface, hears of the folded tab only.
+   *
    * @param {string} tabId The sub-agent tab to close.
    */
   function rpCloseSubagentTab(tabId) {
     if (_rpDeferredCloses) _rpDeferredCloses.push(tabId);
-    else closeTab(tabId);
+    else closeTab(tabId, true);
   }
 
   /**
@@ -16722,7 +17276,8 @@
    *
    * The closes are performed as the collapse they came from, not as a
    * close the user asked for, so a sub-agent stays reopenable by
-   * expanding its panel again (see rpAfterTabsClosed).
+   * expanding its panel again (see rpAfterTabsClosed) and one still
+   * running below a closed tab keeps its own (see rpCloseSubagentTab).
    */
   function rpFlushDeferredCloses() {
     const ids = _rpDeferredCloses;
@@ -16730,7 +17285,7 @@
     if (!ids.length) return;
     _rpSyncing = true;
     try {
-      for (const id of ids) closeTab(id);
+      for (const id of ids) closeTab(id, true);
     } finally {
       _rpSyncing = false;
     }
@@ -16931,7 +17486,9 @@
    * for an announcement marked `reopened`: a user expanded its fan-out
    * panel on some surface and asked for it again, so every surface
    * shows it, whatever closed it here -- a hand-close mirrored from
-   * another surface, its finish, or this surface's folded panel.  A
+   * another surface, its finish, or this surface's folded panel.
+   * Likewise for a live announcement that supersedes the finish this
+   * page saw (finishedSubagentStands): that finish closed the tab.  A
    * finished child's folded panel unfolds (and is pinned open) as the
    * reopening one did: a folded panel's sync would close the finished
    * tab again, and that close would reach every surface.
@@ -16975,6 +17532,21 @@
     if (!tab || !newTabId || tab.id === newTabId) return;
     const oldId = tab.id;
     const panel = _rpTabPanel.get(oldId) || null;
+    // Output still waiting for its animation frame is rendered now,
+    // under the id its events came for: the frame holds that id, and
+    // the links it made after the rename would keep it (no later
+    // re-check, reconnect or close of this tab would find them).  The
+    // links made here are restamped with the rest below.
+    const workDir = transcriptFileWorkDir(
+      tabBoundMachine(oldId),
+      undefined,
+      oldId,
+    );
+    const streams =
+      activeTabId === oldId
+        ? [state, llmPanelState]
+        : [tab.streamState, tab.streamLlmPanelState];
+    for (const s of streams) if (s) flushStreamFrames(s, workDir, oldId);
     tab.id = newTabId;
     // Its nested sub-agents and the files it opened follow the rename,
     // so they stay in the chat's group (rootTabOf).
@@ -17191,6 +17763,12 @@
             subagentTabIdFor(panelEl._rpParentTabId, en.taskId),
           );
           subTab.currentTaskId = en.taskId;
+          // The daemon's answer to the reopening below tells the
+          // sub-agent's state.  Until it lands the tab stands as the
+          // page last saw it: one closed while it ran still runs, so
+          // no fold in between closes it (above) and has the daemon
+          // close it on every surface.
+          if (en.running) setTabRunning(subTab, true);
           en.tabId = subTab.id;
           _rpTabPanel.set(subTab.id, panelEl);
           // The parent names the stream a sub-agent of a chat shown
@@ -17213,7 +17791,7 @@
   }
 
   /**
-   * Forget the sub-agent tabs in *closedIds* and, when the user was the
+   * Forget the sub-agent tabs in *closedTabs* and, when the user was the
    * one who closed them, collapse the fan-out panels left with none.
    *
    * The bookkeeping runs even while a collapse is closing tabs
@@ -17222,22 +17800,25 @@
    * still believes is owned by a panel from a chat that no longer
    * exists would be reopened by the next announcement naming it.
    *
-   * @param {Set<string>|Array<string>} closedIds Tab ids just closed.
+   * @param {Array<object>} closedTabs The tabs just closed.
    */
-  function rpAfterTabsClosed(closedIds) {
+  function rpAfterTabsClosed(closedTabs) {
     const panels = new Set();
-    for (const id of closedIds) {
-      const p = _rpTabPanel.get(id);
+    for (const tab of closedTabs) {
+      const p = _rpTabPanel.get(tab.id);
       if (p) {
-        _rpClosedSubagentTabs.add(id);
-        _rpTabPanel.delete(id);
+        rememberClosedSubagentTab(tab.id);
+        _rpTabPanel.delete(tab.id);
         for (const en of p._rpSubagents || []) {
-          if (en.tabId === id) {
+          if (en.tabId === tab.id) {
             en.tabId = '';
             // A close the user asked for (not a collapse folding a
             // finished child) keeps this sub-agent shut until the user
             // expands its panel again, which reopens the whole fan-out.
             en.userClosed = !_rpSyncing;
+            // The page's last word on the sub-agent, for the tab that
+            // expansion opens (syncRunParallelPanel).
+            en.running = tab.isRunning;
           }
         }
         panels.add(p);
@@ -17790,9 +18371,7 @@
     img.classList.add('tr-img-lazy');
     img.dataset.replayTask = String(lazy.taskId || '');
     img.dataset.replayIndex = String(lazy.index);
-    img.dataset.replayOwner = String(
-      ownerTabId === undefined ? activeTabId : ownerTabId,
-    );
+    img.dataset.replayOwner = String(ownerTabId);
     // An exported copy is never on screen; a page without the
     // observer (an old browser) fetches at once.
     if (_shareExportReplay) return;
@@ -18544,15 +19123,18 @@
   }
 
   function handleOutputEvent(ev, target, tState, ownerWorkDir, ownerTabId) {
-    const evWorkDir =
-      typeof ownerWorkDir === 'string'
-        ? ownerWorkDir
-        : workDirForTab(activeTabId) || '';
     // tableak-coverage:start
     // File-link candidates are stamped with the tab that owns this
     // transcript so a later pathsExist reply resolves only its own spans.
     const evOwnerTab = ownerTabId === undefined ? activeTabId : ownerTabId;
     // tableak-coverage:end
+    // The folder this event's task ran in, settled once per event: the
+    // one a replay names (ownerWorkDir), else the owning tab's task's.
+    const evWorkDir = transcriptFileWorkDir(
+      tabBoundMachine(evOwnerTab),
+      ownerWorkDir,
+      evOwnerTab,
+    );
     const t = ev.type;
     switch (t) {
       // The model's thinking tokens stream as plain text straight into
@@ -18936,7 +19518,7 @@
               appendStreamedText(cut, (sep ? '\n' : '') + ev.content);
             }
           }
-          appendResultImages(ev, tState.lastToolCallEl || target, ownerTabId);
+          appendResultImages(ev, tState.lastToolCallEl || target, evOwnerTab);
           break;
         }
         const resultTarget = tState.lastToolCallEl || target;
@@ -18994,7 +19576,7 @@
           addCopyButton(op);
           if (!tState.lastToolCallEl) addPanelTimestamp(op, ev.ts);
           resultTarget.appendChild(op);
-          appendResultImages(ev, resultTarget, ownerTabId);
+          appendResultImages(ev, resultTarget, evOwnerTab);
         }
         break;
       }
@@ -19147,11 +19729,7 @@
         const s =
           ev.settings && typeof ev.settings === 'object' ? ev.settings : null;
         if (!s) break;
-        const sid =
-          s.task_id === undefined || s.task_id === null
-            ? ''
-            : String(s.task_id);
-        if (sid) taskSettingsById[sid] = s;
+        const sid = taskIdStr(s.task_id);
         if (ownerTabId === undefined) {
           // Live event already routed to the tab on screen.
           setTaskSettings(s);
@@ -19178,6 +19756,19 @@
             // share export splices the live DOM into the wrong
             // section.
             if (sid && String(ownerTab.currentTaskId) !== sid) {
+              // Its thread moves on as the visible tab's does (the
+              // adoption in handleEvent).  A hidden transcript with
+              // no saved thread shows the tab's own task alone
+              // (restoreTab).
+              const frag = ownerTab.outputFragment;
+              const thread = frag.adjacentState || {};
+              frag.adjacentState = {
+                taskId: sid,
+                oldest: thread.oldest || ownerTab.currentTaskId || sid,
+                newest: sid,
+                noPrev: !!thread.noPrev,
+                noNext: !!thread.noNext,
+              };
               ownerTab.currentTaskId = sid;
               ownerTab.pendingTaskId = null;
             }
@@ -19492,7 +20083,7 @@
     // an event of ITS stream never asked to collapse.
     if (_tailSweepTabId !== activeTabId) return;
     if (needCollapse) collapseOlderPanels(O, activeTabId);
-    applyChevronState(currentTaskName);
+    applyChevronState();
     autoScrollLatestEventPanel(O.lastElementChild);
     updateVisibleTask();
   }
@@ -19616,7 +20207,7 @@
       Object.assign(currentTaskMetrics, readStatusRow());
     }
     autoScrollLatestEventPanel(autoScrollPanel);
-    applyChevronState(currentTaskName);
+    applyChevronState();
     // visibletask-coverage:start
     // The event may have changed the transcript's shape as well as the
     // status row, so both the panel and the row are re-derived from what
@@ -19777,13 +20368,7 @@
     );
     // visibletask-coverage:end
 
-    handleOutputEvent(
-      ev,
-      target,
-      where.state,
-      tab.workDir || configWorkDir || '',
-      tab.id,
-    );
+    handleOutputEvent(ev, target, where.state, undefined, tab.id);
 
     // visibletask-coverage:start
     returnStatusRow(lent, tab);
@@ -19829,6 +20414,43 @@
     adjacentLoading = true;
     showAdjacentLoader(dir);
     api.getAdjacentTask({tabId: activeTabId, taskId: taskId, direction: dir});
+  }
+
+  /**
+   * Whether the neighbour the adjacent_task_events reply *ev* brings
+   * belongs at an edge of this transcript: the task it is adjacent to
+   * (`adjacent_to`, the taskId of its request) is the one the thread
+   * ends on that way.  Every surface showing the tab holds its own
+   * stretch of the chat's thread; a reply another surface asked for,
+   * or one that outlived the transcript it was asked for, would be
+   * spliced past tasks that could then never be loaded.  A daemon
+   * that does not name the task is taken at its word.
+   *
+   * @param {Object} ev The reply.
+   * @returns {boolean}
+   */
+  function replyFitsThreadEdge(ev) {
+    if (ev.adjacent_to === undefined) return true;
+    const edge =
+      ev.direction === 'prev' ? oldestLoadedTaskId : newestLoadedTaskId;
+    return String(ev.adjacent_to) === String(edge);
+  }
+
+  /**
+   * Read the thread on screen back to the task a history click asked
+   * for (the tab's `soughtTaskId`): scroll to it once it is in the
+   * transcript, until then fetch the task above the oldest one loaded
+   * (a neighbour already on its way is waited for).  Run again by
+   * every answer and by the replay that brings the tab's transcript;
+   * the search ends at the chat's first task.
+   */
+  function seekSoughtTask() {
+    const tab = getTab(activeTabId);
+    if (!tab || !tab.soughtTaskId) return;
+    if (scrollChatToTask(tab.soughtTaskId)) tab.soughtTaskId = '';
+    else if (adjacentLoading) return;
+    else if (canLoadNeighbour('prev')) loadNeighbourTask('prev');
+    else tab.soughtTaskId = '';
   }
 
   /**
@@ -20018,10 +20640,11 @@
     setShownTask(region.task || currentTaskName);
     // taskinfo-coverage:start
     // The Task Info rows follow the shown task: a neighbour's settings
-    // while the reader is parked on it, the tab's own otherwise.
+    // and time while the reader is parked on it, the tab's own otherwise.
+    metaTimeNeighbour = container;
     updateMetaTaskDetails(
       container
-        ? taskSettingsById[container.dataset.taskId || ''] || null
+        ? adjacentTaskSettings.get(container) || null
         : currentTaskSettings,
     );
     // taskinfo-coverage:end
@@ -20118,6 +20741,7 @@
     if (O.querySelector('.adjacent-task[data-task]')) {
       pinnedRegion = null;
       setShownTask(currentTaskName);
+      metaTimeNeighbour = null;
       updateMetaTaskDetails(currentTaskSettings);
       showLiveMetrics();
     }
@@ -20149,7 +20773,6 @@
       for (let i = 0; i < regions.length; i++) {
         if (!regionNeighbour(regions[i])) {
           putTaskRegionAtTop(regions[i]);
-          updateVisibleTask();
           return;
         }
       }
@@ -20159,11 +20782,102 @@
   // landing-coverage:end
 
   let endTs = 0;
+  /**
+   * The status label of a task that is over, and so the Task Info
+   * panel's Time row: the time it took, as "2m 5s" (the units of the
+   * "Running 2m 5s" a running task shows there).
+   */
   function doneLabelFor(startMs, endMs) {
     const ds = Math.max(0, Math.floor((endMs - startMs) / 1000));
     const dm = Math.floor(ds / 60);
-    return 'Done (' + (dm > 0 ? dm + 'm ' : '') + (ds % 60) + 's)';
+    return (dm > 0 ? dm + 'm ' : '') + (ds % 60) + 's';
   }
+  // donelabel-coverage:start
+  /**
+   * The time the task a terminal event ends took, whichever way it
+   * ended (task_done, task_error, task_stopped, task_interrupted).
+   *
+   * The daemon stamps the task's own span on the event. Without it,
+   * the elapsed time is measured from the start the FINISHED tab
+   * recorded -- the module-level t0 is the visible tab's clock, which
+   * is another task's when the event names a background tab.
+   */
+  function endedTaskTime(ev) {
+    let doneT0 = t0;
+    if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+      const rt = getTab(ev.tabId);
+      doneT0 = rt ? rt.t0 : null;
+    }
+    const doneNow = Date.now();
+    return ev.startTs && ev.endTs && ev.endTs >= ev.startTs
+      ? doneLabelFor(ev.startTs, ev.endTs)
+      : doneLabelFor(doneT0 || doneNow, doneNow);
+  }
+
+  /**
+   * The time a task took by the span its history row records (*extra*:
+   * the row's `extra` JSON, `startTs` .. `endTs` in epoch ms), or the
+   * panel's sign for an unknown value when the row records none (its
+   * daemon was killed mid-task, a legacy row).
+   */
+  function recordedTaskTime(extra) {
+    let span = null;
+    try {
+      span = JSON.parse(extra);
+    } catch (_e) {}
+    const start = Number(span && span.startTs);
+    const end = Number(span && span.endTs);
+    return start > 0 && end >= start ? doneLabelFor(start, end) : '\u2014';
+  }
+
+  /**
+   * The status label a `task_events` replay leaves on a tab that is
+   * not running: the time the replayed task took, or Ready for a chat
+   * that has no task -- never the label of the task shown before.
+   */
+  function replayedTaskLabel(ev) {
+    return ev.task_id === undefined || ev.task_id === null
+      ? 'Ready'
+      : recordedTaskTime(ev.extra);
+  }
+
+  /**
+   * The status label of a task that is over by its tab's clock (*start*
+   * .. *end*, epoch ms): the time it took, or the panel's sign for an
+   * unknown value when the page never learned its start or its end.
+   */
+  function clockedTaskTime(start, end) {
+    return start && end > 0 ? doneLabelFor(start, end) : '\u2014';
+  }
+
+  /**
+   * Stop background tab *tab*'s clock: its run ended with no terminal
+   * event this page saw (a start that failed, an end it missed), so
+   * the task took until now, unless its end is already recorded.
+   */
+  function stopTabClock(tab) {
+    if (!(tab.endTs > 0)) tab.endTs = Date.now();
+    tab.statusTextContent = clockedTaskTime(tab.t0, tab.endTs);
+  }
+
+  /**
+   * Show the stopped clock and the status label of chat tab *tab* on
+   * the surface when the surface is lent to it.
+   *
+   * A file view in front of a chat has no task of its own and leaves
+   * the timer, the status row and the Task Info panel describing that
+   * chat (metaInfoChatTabId).  The end of its task is recorded on the
+   * hidden tab, so without this the panel would keep the clock running
+   * and then stop it at the moment the page heard of the end.
+   */
+  function showLentTabTime(tab) {
+    if (tab.id === activeTabId || metaInfoChatTabId() !== tab.id) return;
+    t0 = tab.t0;
+    endTs = tab.endTs;
+    setRunningState(false);
+    statusText.textContent = tab.statusTextContent;
+  }
+  // donelabel-coverage:end
   function formatDurationHms(ms) {
     const total = Math.max(0, Math.floor(Number(ms) / 1000));
     const h = Math.floor(total / 3600);
@@ -20595,11 +21309,6 @@
       pumpTalkQueue();
     };
     job(done);
-  }
-
-  function enqueueTalkPlayback(job) {
-    talkQueue.push(job);
-    pumpTalkQueue();
   }
 
   function playTalkAudio(ev, onDone) {
@@ -21064,22 +21773,17 @@
    * the real one. The answer is not lost -- the daemon persisted it under
    * its own task, so the history view of that task shows it.
    *
-   * Two tests, because the tab's identity lags the new run: a task the
-   * tab already left behind (recorded by the `clear` that started its
-   * replacement, while the tab still carries the old id) is stale, and so
-   * is any task other than the one the tab owns now.
+   * Between a run's `clear` and its first id-bearing event the tab owns
+   * only its claim on the id to come (tabTaskId), so every answer is
+   * stale to it: the one for the task it just left included.
    */
   function isStaleAskAnswer(ev, tab) {
     if (!ev || ev.type !== 'ask_answer') return false;
     if (ev.taskId === undefined || ev.taskId === null || ev.taskId === '') {
       return false;
     }
-    const evTask = String(ev.taskId);
-    if (tab && tab.supersededTaskIds && tab.supersededTaskIds.has(evTask)) {
-      return true;
-    }
     const owned = tabTaskId(tab);
-    return owned !== '' && owned !== evTask;
+    return owned !== '' && owned !== String(ev.taskId);
   }
 
   /**
@@ -21106,10 +21810,33 @@
     const tabId = detail ? detail.tabId : null;
     if (tabId === undefined || tabId === null || tabId === '') return true;
     // An utterance recorded while a content tab was on screen names
-    // the owning CHAT tab (kissVoiceOwner resolves the owner), so the
-    // owner's id counts as "this screen" too while its file is up.
+    // the CHAT tab it stood for (kissVoiceOwner), so that chat's id
+    // counts as "this screen" too while the content tab is up.
     if (String(tabId) === String(chatTargetTabId())) return true;
     return isForActiveTab({tabId: tabId});
+  }
+
+  /**
+   * Whether a chat is on screen for voice.js to write its composer,
+   * once the chat of the utterance a voice event names had its chance
+   * to come back.
+   *
+   * A stacked surface has one composer, and a content tab on screen
+   * hides it.  The utterance belongs to the chat the content tab
+   * stands for (chatTargetTabId), which comes back on screen: the
+   * composer then shows its own draft, or is the answer box of its
+   * question.
+   *
+   * @param {Event} event A `kiss-voice-compose` or `kiss-voice-submit`.
+   * @returns {boolean} False while a content tab stays on screen: no
+   *     chat is left behind it, or the utterance is another
+   *     conversation's.
+   */
+  function showSpeechChat(event) {
+    const target = chatTargetTabId();
+    if (target !== activeTabId && isFromSpeechTab(event)) switchToTab(target);
+    const active = getTab(activeTabId);
+    return !(active && active.isContentTab);
   }
 
   /**
@@ -21118,13 +21845,23 @@
    * voice.js runs in the same page but in its own closure, so it reads the
    * visible tab through this accessor rather than a shared variable. It
    * returns the task id too, so voice can apply the same-task exemption that
-   * isForActiveTab() applies.
+   * isForActiveTab() applies, and what tells the conversation in the tab
+   * from a later one there: its chat ('' until its first task names it)
+   * and the question it is waiting on (null when none; the daemon's id
+   * tells two asks of the same words apart).
    */
   window.kissVoiceOwner = function () {
     // Voice acts on the conversation, so a content tab hands the
-    // utterance to the chat tab whose work produced it.
+    // utterance to the chat tab it stands for.
     const id = chatTargetTabId();
-    return {tabId: id, taskId: tabTaskId(getTab(id))};
+    const tab = getTab(id);
+    return {
+      tabId: id,
+      taskId: tabTaskId(tab),
+      chatId: tab ? String(tab.backendChatId) : '',
+      question: tab ? tab.askPendingQuestion : null,
+      questionId: tab ? tab.askQuestionId : '',
+    };
   };
   // tableak-coverage:end
 
@@ -21142,16 +21879,29 @@
   // beginLaunch) and must not move them off their tab.
   let chatStayedOnScreen = false;
 
+  /**
+   * Bind *tab* to the daemon's chat *chatId*, named by the event that
+   * starts or replays a task in it; a tab with no folder of its own
+   * takes the configured one.  No-op without a tab or a chat id.
+   */
+  function adoptBackendChat(tab, chatId) {
+    if (!tab || !chatId) return;
+    tab.backendChatId = chatId;
+    if (!tab.workDir && configWorkDir) tab.workDir = configWorkDir;
+    persistTabState();
+  }
+
   function handleEvent(ev) {
     const t = ev.type;
     // The daemon echoes every prompt it takes — setTaskText for a run,
     // prompt for a follow-up — to the tab it came from (an unaddressed
     // echo is for the tab on screen, as in the handlers below):
-    // acknowledged.  The echo names no message but carries its text,
-    // and the daemon answers a tab's messages in order: it
-    // acknowledges the oldest waiting message with that text, so an
-    // earlier message's echo leaves a newer one's recovery copy alone,
-    // even one with the same text.  A run's echo comes before the
+    // acknowledged.  The echo names the messages it answers
+    // (answeredPrompts), so another message's echo leaves a recovery
+    // copy alone, even one with the same text.  One that names none
+    // carries the text, and the daemon answers a tab's messages in
+    // order: it acknowledges the oldest waiting message with that
+    // text.  A run's echo comes before the
     // daemon decides on the run: its copy is kept (echoed) until the
     // run's `clear` starts it, or its `prompt` echo queues it as a
     // follow-up, so the refusal that may follow the echo
@@ -21164,12 +21914,16 @@
     if (t === 'setTaskText' || (t === 'prompt' && ev.steer)) {
       const echoed = getTab(ev.tabId || activeTabId);
       const text = String(ev.text || '').trim();
-      const i = echoed
-        ? echoed.unackedPrompts.findIndex(p => p.text === text)
-        : -1;
-      if (i >= 0) {
-        if (t === 'prompt') echoed.unackedPrompts.splice(i, 1);
-        else echoed.unackedPrompts[i].echoed = true;
+      const answered = echoed
+        ? answeredPrompts(echoed, ev.promptIds, p => p.text === text)
+        : [];
+      if (t === 'setTaskText') {
+        answered.forEach(p => {
+          p.echoed = true;
+        });
+      } else if (echoed) {
+        stopWaitingFor(echoed, answered);
+        notePromptsTaken(echoed, ev.promptIds);
       }
     }
     // A prompt that was just the path of an existing file opened that
@@ -21182,9 +21936,16 @@
     if (t === 'promptOpened') {
       const opened = getTab(ev.tabId || activeTabId);
       if (opened) {
-        // A file path gets no echo: the oldest unechoed prompt is it.
-        const i = opened.unackedPrompts.findIndex(p => !p.echoed);
-        if (i >= 0) opened.unackedPrompts.splice(i, 1);
+        // A file path gets no echo: the prompt the answer names is
+        // it, or else the oldest unechoed one.
+        stopWaitingFor(
+          opened,
+          answeredPrompts(
+            opened,
+            ev.promptId ? [ev.promptId] : [],
+            p => !p.echoed,
+          ),
+        );
         if (!opened.currentTaskId) opened.pendingTaskId = null;
       }
       return;
@@ -21204,6 +21965,11 @@
         api.browserFrameAck({tab_id: ev.tab_id});
         const bt = getTab(ev.tab_id);
         if (bt && bt.browserView) bt.browserView.frame(ev);
+        break;
+      }
+      case 'browserTouch': {
+        const bt = getTab(ev.tab_id);
+        if (bt && bt.browserView) bt.browserView.touched(ev);
         break;
       }
       case 'browserState':
@@ -21279,7 +22045,14 @@
           // would show under the Add box as its rejection.  The typed
           // text stays in the box for the user to resend.
           pendingTrickAdd = '';
-          pendingTrickEdits = [];
+          // An edit's text lives nowhere else: it is kept, as refused.
+          failPendingTrickEdits();
+          // A custom-model save likewise: no later refusal is its
+          // answer, and the next list tells whether it landed or
+          // hands its draft back (myModelsData).
+          pendingCustomModelSaves.forEach(p => {
+            p.refused = true;
+          });
           // A "Sign in with ChatGPT" awaiting its device code never
           // gets it: the button works again, and the status poll a
           // code had started ends with the daemon's `codex login`.
@@ -21333,6 +22106,13 @@
           // come in.
           if (daemonWasDown) {
             daemonWasDown = false;
+            // The sub-agents the daemon announces running from here on
+            // run now, whatever finish this page saw before the outage
+            // (finishedSubagentStands).
+            _reconnectedAt = ++_subagentClock;
+            _unconfirmedSubagentTabs = new WeakSet(
+              tabs.filter(t => t.isSubagentTab && t.isRunning),
+            );
             // The `ready` reply's snapshot is authoritative: a close
             // issued before the outage was either processed (the id is
             // gone) or lost with the socket (the tab is back), and a
@@ -21351,18 +22131,43 @@
             // until the daemon answers it -- the daemon decides an
             // open once per token, so a re-sent one brings nothing
             // back (OpenTabOutcome.REPLAYED).
-            const owed = new Set(
-              (Array.isArray(ev.unconfirmed) ? ev.unconfirmed : []).map(
-                f => f && f.ack,
-              ),
-            );
+            const unconfirmed = Array.isArray(ev.unconfirmed)
+              ? ev.unconfirmed
+              : [];
+            const owed = new Set(unconfirmed.map(f => f && f.ack));
             pendingCloseTabs.forEach((shield, id) => {
               if (!owed.has(shield.ack)) pendingCloseTabs.delete(id);
             });
             pendingOpenTabs.forEach((pending, id) => {
               if (!owed.has(pending.ack)) pendingOpenTabs.delete(id);
             });
-            sendReady();
+            // A prompt likewise: one the transport still owes (they
+            // are a tab's newest) goes out on this connection and is
+            // answered as usual.  The others went out on the one that
+            // died, so no answer comes for them any more and they stop
+            // waiting for one; the newest is kept until the daemon's
+            // word on the tab says whether it ran (settleLostPrompt).
+            tabs.forEach(t => {
+              const owedPrompts = unconfirmed.filter(
+                f =>
+                  f &&
+                  f.tabId === t.id &&
+                  (f.type === 'submit' || f.type === 'appendUserMessage'),
+              ).length;
+              const lost = t.unackedPrompts.splice(
+                0,
+                t.unackedPrompts.length - owedPrompts,
+              );
+              if (!lost.length) return;
+              t.lostPrompt = lost[lost.length - 1];
+              t.statusKnown = false;
+            });
+            // A `ready` still owed was announced on a connection that
+            // died before the `pong` of its batch: re-sent with the
+            // batch or held back behind it, it goes out on this one
+            // and asks for this resync.  A second one would have the
+            // daemon resync this window twice.
+            if (!unconfirmed.some(f => f && f.type === 'ready')) sendReady();
           }
           // modelpick-coverage:start
           // While the daemon was away this window may have missed both a
@@ -21398,7 +22203,7 @@
         // A close shows nothing, so it is never gated: the toast it
         // retires was shown while its tab was on screen, and the user
         // may have switched tabs since -- dropping the close would
-        // leave a sticky progress toast on screen for good.
+        // leave a sticky toast on screen for good.
         if (
           !ev.close &&
           ev.tabId !== undefined &&
@@ -21522,11 +22327,18 @@
       }
       case 'share_done': {
         flashShareBtn(!!ev.ok);
+        const sharedChatId = shareExportChatId;
+        shareExportChatId = '';
         // The saved-page banner belongs to the conversation that was
-        // shared; a reply for a background tab must not write into the
+        // shared; a reply for a background tab, or for a tab that has
+        // moved on to another chat meanwhile (as in share_tasks; the
+        // reply names only the tab), must not write into the
         // transcript on screen.  A failure's toast is not transcript:
         // it shows whichever tab is on screen.
-        if (ev.tabId !== undefined && !isForActiveTab(ev)) {
+        if (
+          (ev.tabId !== undefined && !isForActiveTab(ev)) ||
+          (sharedChatId && sharedChatId !== shareChatIdOf(getTab(activeTabId)))
+        ) {
           if (!ev.ok) notifyShareFailed(ev.error, false);
           break;
         }
@@ -21555,11 +22367,7 @@
             span.setAttribute('data-path-candidate', savedPath);
             span.textContent = savedPath;
             banner.appendChild(span);
-            verifyFileLinkCandidates(
-              banner,
-              workDirForTab(activeTabId) || '',
-              activeTabId,
-            );
+            verifyFileLinkCandidates(banner, undefined, activeTabId);
           }
         } else {
           notifyShareFailed(ev.error);
@@ -21605,6 +22413,12 @@
         // runstart-coverage:end
         if (evTab) {
           evTab.statusKnown = true;
+          // donelabel-coverage:start
+          // The clock of the tab on screen is the surface's, stopped below.
+          if (!ev.running && evTab.isRunning && evTab.id !== activeTabId) {
+            stopTabClock(evTab);
+          }
+          // donelabel-coverage:end
           setTabRunning(evTab, !!ev.running);
           // modelpick-coverage:start
           // Belt and braces for the daemon's `modelPick` restore: a task
@@ -21629,6 +22443,8 @@
           activeIsContent &&
           evTab !== null &&
           metaInfoChatTabId() === evTab.id;
+        const onSurface =
+          ev.tabId === undefined || ev.tabId === activeTabId || mirrorsActive;
         // A run's status clears the end of the task before it, or the
         // timer would read the new run as finished at once.  One with
         // no start (the daemon's submit broadcast) starts the clock now,
@@ -21640,15 +22456,17 @@
             evTab.t0 = start || Date.now();
             evTab.endTs = 0;
           }
-          if (
-            (ev.tabId === undefined ||
-              ev.tabId === activeTabId ||
-              mirrorsActive) &&
-            (start || endTs)
-          ) {
+          if (onSurface && (start || endTs)) {
             t0 = start || Date.now();
             endTs = 0;
           }
+          // donelabel-coverage:start
+        } else if (onSurface && isRunning && !(endTs > 0)) {
+          // The run on screen ended with no terminal event this page
+          // saw (a start that failed, an end it missed): its clock
+          // stops now, and setRunningState below shows the time.
+          endTs = Date.now();
+          // donelabel-coverage:end
         }
         if (ev.tabId === undefined || ev.tabId === activeTabId) {
           setRunningState(ev.running);
@@ -21657,11 +22475,10 @@
             if (stTab && stTab.isSubagentTab && inputContainer)
               inputContainer.style.display = 'none';
           }
-          if (ev.running) applyChevronState(currentTaskName);
         } else if (mirrorsActive) {
           // Only the shared surface state (timer, spinner, buttons,
-          // task-info sync); the transcript-shaped work (chevrons,
-          // sub-agent composer) waits for the real tab switch.
+          // task-info sync); the transcript-shaped work (the sub-agent
+          // composer) waits for the real tab switch.
           setRunningState(ev.running);
         }
         // trajectory-coverage:start
@@ -21793,6 +22610,9 @@
           cancelCustomModelEdit();
         }
         renderCustomModels();
+        // The saves an outage left unanswered and this list does not
+        // hold get their drafts back.
+        placeRefusedCustomModelSaves();
         break;
       case 'claudeCodeStatus':
         // The claude login of the machine the settings sheet is for.  A
@@ -21861,7 +22681,18 @@
         window.__MY_TRICKS_COUNT__ =
           typeof ev.userCount === 'number' ? ev.userCount : 0;
         if (editingTrickIndex >= 0) {
-          const at = window.__TRICKS__.indexOf(shown[editingTrickIndex]);
+          // The promptlet is told by the text it holds on disk, never
+          // by the one its row shows while an edit of it is not
+          // answered (pendingTrickEdits): that is the new text, which a
+          // refused rename leaves to ANOTHER row.  It holds the old
+          // text until a list accepts the edit, the new one from then.
+          const edit = pendingTrickEdits.find(
+            e => e.index === editingTrickIndex,
+          );
+          let at = window.__TRICKS__.indexOf(
+            edit ? edit.text : shown[editingTrickIndex],
+          );
+          if (at < 0 && edit) at = window.__TRICKS__.indexOf(edit.newText);
           if (at < 0 || at >= window.__MY_TRICKS_COUNT__) closeTrickEditor();
           else editingTrickIndex = at;
         }
@@ -21927,27 +22758,12 @@
         handleMachineWorkDirs(ev);
         break;
       case 'tabMachine':
-        // The daemon bound (or unbound) a tab to a machine: every
-        // surface's drop-down shows the same machine for the chat the
-        // tab shows.  A pick the user made here and has not submitted
-        // yet stands (unless it is this very binding): it is where
-        // THEIR next task goes.
         if (typeof ev.tabId === 'string' && ev.tabId) {
-          const machine = ev.machine ? String(ev.machine) : '';
-          if (machine) tabBoundMachines.set(ev.tabId, machine);
-          else tabBoundMachines.delete(ev.tabId);
-          if (tabMachinePicks.get(ev.tabId) === machine) {
-            tabMachinePicks.delete(ev.tabId);
-          }
-          persistTabState();
-          renderChatMachine();
-          // The directory drop-down follows: a chat of a remote machine
-          // opened from CHATS shows that machine's directories.  So do
-          // the Task Info rows (the Machine row names the bound
-          // machine; without task settings the Workdir and Max budget
-          // rows show the machine's).
-          showMachineWorkDirs(ev.tabId === activeTabId ? machine : '');
+          setTabBoundMachine(ev.tabId, ev.machine ? String(ev.machine) : '');
         }
+        break;
+      case 'tabMachines':
+        setTabBoundMachines(ev.machines);
         break;
       case 'appsStatus':
         if (panelReplyShown(ev)) renderAppsStatus(ev);
@@ -22049,6 +22865,7 @@
         const askQuestion = ev.question || '';
         const askQuestionId =
           typeof ev.questionId === 'string' ? ev.questionId : '';
+        const sameAsk = askTab.askQuestionId === askQuestionId;
         // Before the duplicate check: a new ask of the same text must
         // still take its own id (a replay re-sends the same one).
         askTab.askQuestionId = askQuestionId;
@@ -22056,9 +22873,10 @@
         // re-emits it on every session replay so clients that connect
         // mid-question also show the modal). Re-initializing would
         // wipe the answer the user is typing here just because
-        // another client reloaded; a genuinely new question always
-        // follows an askUserDone, which resets the state to null.
-        if (askTab.askPendingQuestion === askQuestion) break;
+        // another client reloaded; a genuinely new question follows
+        // an askUserDone, which resets the state to null, or (when
+        // that was missed) carries another id.
+        if (sameAsk && askTab.askPendingQuestion === askQuestion) break;
         // Another question is open here (its close was missed while
         // this surface was away): its answer draft and the prompt
         // parked before it come back first, losslessly, rather than
@@ -22071,8 +22889,14 @@
         const draft = savedAskDrafts && savedAskDrafts[askTab.id];
         // The question this client was already answering when it
         // reloaded comes back in place; only a NEW question pulls the
-        // user over to its tab.
-        const knownQuestion = !!draft && draft.question === askQuestion;
+        // user over to its tab.  The same words under another id are a
+        // new question; an answer saved without an id (by the page code
+        // before the ids, or for an ask that had none) is told by its
+        // words alone.
+        const knownQuestion =
+          !!draft &&
+          draft.question === askQuestion &&
+          (!draft.questionId || draft.questionId === askQuestionId);
         if (draft) {
           // The same question is still open: the answer goes back into
           // the (now empty) composer. A different one means the old
@@ -22100,7 +22924,6 @@
         break;
       }
       case 'talk': {
-        if (ev.muted) break;
         const talkText = ev.text || '';
         if (!talkText) break;
         if (ev.tabId !== undefined && !getTab(ev.tabId)) break;
@@ -22114,9 +22937,10 @@
             }
           }
         }
-        enqueueTalkPlayback(finish => {
+        talkQueue.push(finish => {
           if (!ev.audioB64 || !playTalkAudio(ev, finish)) finish();
         });
+        pumpTalkQueue();
         break;
       }
       case 'error':
@@ -22128,7 +22952,7 @@
           const refusedTab = isAddressed(ev)
             ? findTabByEvt(ev)
             : getTab(activeTabId);
-          if (refusedTab) restoreRefusedPrompt(refusedTab);
+          if (refusedTab) restoreRefusedPrompt(refusedTab, ev.promptIds);
         }
         // A remote chat the daemon could not fetch (the machine is
         // unreachable, say) is not on its way any more.
@@ -22195,8 +23019,11 @@
           clearTab.lastTaskFailed = false;
           clearTab.hasRunTask = true;
           // The run the daemon echoed is on: nothing to put back.
-          const started = clearTab.unackedPrompts.findIndex(p => p.echoed);
-          if (started >= 0) clearTab.unackedPrompts.splice(started, 1);
+          stopWaitingFor(
+            clearTab,
+            answeredPrompts(clearTab, ev.promptIds, p => p.echoed),
+          );
+          notePromptsTaken(clearTab, ev.promptIds);
           // A new run replaces the tab's task: its settings arrive
           // with the run's own task_settings event.
           clearTab.taskSettings = null;
@@ -22210,25 +23037,16 @@
           // run, neither opens anything the user asked for.
           clearTab.replayRequested = null;
           // landing-coverage:end
-          // The tab keeps the replaced task's id until the new run's
-          // first id-bearing event (sendMessage claims a pending id only
-          // for a tab that has none), so a `/ask` answer for the old task
-          // landing in that window would pass the same-task check in
-          // isStaleAskAnswer. Remember the id it is leaving behind.
-          if (clearTab.currentTaskId) {
-            if (!clearTab.supersededTaskIds) {
-              clearTab.supersededTaskIds = new Set();
-            }
-            clearTab.supersededTaskIds.add(String(clearTab.currentTaskId));
-          }
+          // The tab shows no task until the new run's first id-bearing
+          // event names it: left on the replaced task, a tab switch in
+          // between would bring the new transcript back as that task's
+          // (restoreTab).  Meanwhile it awaits the run's id, as a tab
+          // that just submitted does (sendMessage), so a `/ask` answer
+          // for the task it left is stale (isStaleAskAnswer).
+          clearTab.currentTaskId = null;
+          clearTab.pendingTaskId = 'pending:' + clearTab.id;
         }
-        if (ev.chat_id && clearTab) {
-          clearTab.backendChatId = ev.chat_id;
-          if (!clearTab.workDir && configWorkDir) {
-            clearTab.workDir = configWorkDir;
-          }
-          persistTabState();
-        }
+        adoptBackendChat(clearTab, ev.chat_id);
         const evTabId = ev.tabId;
         // The new task replaces this chat's transcript: the fan-out
         // panels in it are about to stop existing, so they must hand
@@ -22248,6 +23066,9 @@
           resetAdjacentState();
           clearOutput();
           resetOutputState();
+          // The replaced task's tokens, cost and steps go with its
+          // transcript: the new run's own usage_info brings its numbers.
+          clearUsageMetrics();
           // The new transcript opens with the task's text (the
           // setTaskText that precedes every run echoed it); the task's
           // events follow it.
@@ -22272,6 +23093,9 @@
             clearTab.welcomeVisible = false;
           }
           saveStreamCtxTo(clearTab, mkStreamCtx(null, clearTab.id));
+          clearTab.statusTokensText = '';
+          clearTab.statusBudgetText = '';
+          clearTab.statusStepsText = '';
         }
         renderTabBar();
         break;
@@ -22388,6 +23212,19 @@
           rdUp = tabOwner(rdUp);
         }
         if (rdUp === rdTab) requestDeferredReplay(getTab(activeTabId));
+        // A prompt an outage swallowed waits for this transcript to
+        // say whether it ran (settleLostPrompt): no reason to wait for
+        // the user to open the tab.
+        else if (rdTab.lostPrompt) requestDeferredReplay(rdTab);
+        // Still withheld: the tab keeps its transcript, and the daemon
+        // announces the sub-agents of the task the offer stands for
+        // only (the tab's pin, or else the chat's latest task), as
+        // that task's replay would (task_events).  An offer that names
+        // no task (a machine's relay of an unpinned chat, which ends
+        // its finished sub-agents itself) asks nothing.
+        const rdTask = ev.taskId || ev.latestTaskId;
+        if (rdTab.replayPending && rdTask !== undefined)
+          askUnconfirmedSubagents(rdTab, taskIdStr(rdTask));
         break;
       }
       case 'task_events': {
@@ -22411,15 +23248,17 @@
         if (teTab) {
           teTab.statusKnown = true;
           teTab.replayPending = null;
+          // The sub-agents the daemon announces running below this
+          // tab from here on run now (finishedSubagentStands).
+          teTab.replayedAt = ++_subagentClock;
+          settleLostPrompt(teTab, ev);
+          notePromptsTaken(teTab, ev.promptsTaken);
         }
-        if (ev.chat_id && teTab) {
-          teTab.backendChatId = ev.chat_id;
-          if (!teTab.workDir && configWorkDir) {
-            teTab.workDir = configWorkDir;
-          }
-          persistTabState();
-        }
+        adoptBackendChat(teTab, ev.chat_id);
         if (teTab && ev.task_id !== undefined && ev.task_id !== null) {
+          // This replay says nothing of the sub-agents of another task
+          // than the one it brings.
+          askUnconfirmedSubagents(teTab, taskIdStr(ev.task_id));
           teTab.currentTaskId = ev.task_id;
           teTab.pendingTaskId = null;
           const rpPanel = _rpTabPanel.get(teTabId);
@@ -22457,10 +23296,14 @@
                 typeof bgExtra.endTs === 'number' && bgExtra.endTs > 0
                   ? bgExtra.endTs
                   : 0;
-              if (teTab.endTs && teTab.t0)
-                teTab.statusTextContent = doneLabelFor(teTab.t0, teTab.endTs);
             } catch (_e) {}
           }
+          // donelabel-coverage:start
+          if (!teTab.isRunning) {
+            teTab.statusTextContent = replayedTaskLabel(ev);
+            showLentTabTime(teTab);
+          }
+          // donelabel-coverage:end
           const frag = document.createDocumentFragment();
           // The replayed transcript opens with its task's text, like
           // the visible tab's replayTaskEvents below.
@@ -22481,6 +23324,12 @@
           // hands the old transcript back WITH its pending links, or
           // the daemon's answer would never make them clickable.
           const teOldLinks = forgetPendingFileLinks(teTabId);
+          // So do the outgoing task's settings: the replayed stream's
+          // own task_settings event brings the tab's new ones, and a
+          // replay that carries none leaves it with none (as the
+          // visible tab's replay does through setTaskSettings(null)).
+          const teOldSettings = teTab.taskSettings;
+          teTab.taskSettings = null;
           // visibletask-coverage:start
           // This transcript belongs to a hidden tab, but it renders
           // through the same renderers as the live stream: the visible
@@ -22517,6 +23366,7 @@
             });
           } catch (e) {
             teTab.outputFragment = teOldFrag;
+            teTab.taskSettings = teOldSettings;
             // What the failed replay registered belongs to the fragment
             // being discarded; the restored transcript gets its own back.
             forgetPendingFileLinks(teTabId);
@@ -22554,14 +23404,12 @@
         if (ev.task) {
           currentTaskName = ev.task;
           pendingTaskText = '';
-          if (ev.task_id !== undefined && ev.task_id !== null)
-            currentTaskId = ev.task_id;
+          // A run without a history row yet names no task (null): its
+          // id comes with its first id-bearing event, as after `clear`.
+          if (ev.task_id !== undefined) currentTaskId = ev.task_id;
           resetAdjacentState();
           setShownTask(ev.task);
-          if (welcome) {
-            welcome.style.display = 'none';
-            refreshWelcomeLayout();
-          }
+          if (welcome) welcome.style.display = 'none';
           updateActiveTabTitle(ev.task);
         } else if (ev.task_id !== undefined && ev.task_id !== null) {
           currentTaskId = ev.task_id;
@@ -22596,12 +23444,19 @@
             }
           } catch (_e) {}
         }
+        // donelabel-coverage:start
+        // A tab that is not running shows the time its replayed task
+        // took (a finished task opened from the history list, a page
+        // reload), where it used to keep the label it had: Ready.
+        if (!isRunning) statusText.textContent = replayedTaskLabel(ev);
+        // donelabel-coverage:end
         // The replay REPLACES the transcript: the replayed stream's own
         // task_settings event (persisted or synthesized server-side)
         // repopulates the info block, so a previous task's settings
         // must not survive a replay that carries none.
         setTaskSettings(null);
         replayTaskEvents(ev.events || [], freshOpen);
+        seekSoughtTask();
         // The replay recomputed the tab's verdict (hasRunTask /
         // lastTaskFailed in streamEnd); repaint the status icon.
         renderTabBar();
@@ -22612,13 +23467,15 @@
         // A neighbouring task's transcript replays into the visible #output,
         // so it must belong to the conversation on screen.
         if (isAddressed(ev) && !isForActiveTab(ev)) break;
+        if (!replyFitsThreadEdge(ev)) break;
         renderAdjacentTask(
           ev.direction,
           ev.task,
           ev.events || [],
           ev.task_id,
-          ev.tabId || activeTabId,
+          ev.extra,
         );
+        seekSoughtTask();
         // tableak-coverage:end
         break;
       case 'setTaskText': {
@@ -22630,10 +23487,7 @@
           // tableak-coverage:end
           if (stt) {
             pendingTaskText = stt;
-            if (welcome) {
-              welcome.style.display = 'none';
-              refreshWelcomeLayout();
-            }
+            if (welcome) welcome.style.display = 'none';
             updateActiveTabTitle(stt);
           }
           // Neither the shown task nor its id or settings change here,
@@ -22677,6 +23531,11 @@
         // popup: the daemon does not know about the slash context,
         // so this guard sits on the response side.
         if (getSlashCtx()) break;
+        // Asked before the user left the composer or pressed Escape:
+        // the suggestion stays away until the next keystroke, like the
+        // picker below (it would otherwise be painted after all, and
+        // the next Tab would insert it).
+        if (acDismissed) break;
         if (ev.suggestion && ev.query === inp.value) {
           updateGhost(ev.suggestion);
         }
@@ -22730,8 +23589,8 @@
           const bgWrTab = getTab(ev.tabId);
           if (bgWrTab) {
             // Keep the Merge / Discard bar on a retryable failure
-            // (deferred discard) and re-arm its buttons — same rule
-            // as the foreground path (handleWorktreeResult).
+            // and re-arm its buttons — same rule as the foreground
+            // path (handleWorktreeResult).
             // retrybar-coverage:start
             if (ev.retryable) {
               setActionBarBtnsDisabled(bgWrTab.worktreeBarEl, false);
@@ -22746,10 +23605,13 @@
         handleWorktreeResult(ev);
         break;
       case 'autocommit_done':
-        // Terminal for any manual Git Commit in flight (the daemon
+        // Terminal for the manual Git Commit in flight (the daemon
         // broadcasts one per request, including refusals), so the
-        // settings button re-arms no matter which tab was targeted.
-        setAutocommitInFlight(false);
+        // settings button re-arms whichever tab is on screen.  The
+        // result of another tab's commit, started on another surface,
+        // ends nothing here: commits run per tab.
+        if (ev.tabId === undefined || ev.tabId === autocommitTabId)
+          setAutocommitInFlight(false);
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgAdTab = getTab(ev.tabId);
           // A pending WORKTREE bar stays: a Git Commit on the main
@@ -22761,26 +23623,14 @@
         handleAutocommitResult(ev);
         break;
       case 'task_done': {
-        // donelabel-coverage:start
-        // The daemon stamps the task's own span on the event. Without
-        // it, the elapsed time is measured from the start the FINISHED
-        // tab recorded -- the module-level t0 is the visible tab's
-        // clock, which is another task's when the event names a
-        // background tab.
-        let doneT0 = t0;
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-          const rt = getTab(ev.tabId);
-          doneT0 = rt ? rt.t0 : null;
-        }
-        const doneNow = Date.now();
-        const doneLabel =
-          ev.startTs && ev.endTs && ev.endTs >= ev.startTs
-            ? doneLabelFor(ev.startTs, ev.endTs)
-            : doneLabelFor(doneT0 || doneNow, doneNow);
-        // donelabel-coverage:end
-        finishTabTask(ev, doneLabel, ev.success === false);
+        finishTabTask(ev, endedTaskTime(ev), ev.success === false);
         // victory-coverage:start
-        if (!ev.subagent && isUsersTaskTab(ev.tabId)) playVictorySound();
+        // The jingle is for the task: the daemon sends its end to the
+        // tab that launched it, which reaches every page, and a copy,
+        // marked `viewer`, to each tab showing the task under another
+        // id.  A copy ends that tab's task like any end, in silence.
+        if (!ev.subagent && !ev.viewer && isUsersTaskTab(ev.tabId))
+          playVictorySound();
         // victory-coverage:end
         // The task may have registered a machine (`/machine add`, on
         // this daemon or on the machine the chat runs on): the report
@@ -22810,13 +23660,9 @@
             saveStreamCtxTo(endTab, endCtx);
           }
         }
-        const label =
-          t === 'task_error'
-            ? 'Error'
-            : t === 'task_interrupted'
-              ? 'Interrupted'
-              : 'Stopped';
-        finishTabTask(ev, label, true);
+        // A task that failed or was stopped is over too: its tab shows
+        // the time it ran, and the failure dot says how it ended.
+        finishTabTask(ev, endedTaskTime(ev), true);
         break;
       }
       case 'new_tab': {
@@ -22864,27 +23710,17 @@
             subagentTabIdFor('', ev.task_id),
           ).id;
         }
-        setTabRunning(getTab(subAgentTabId), true);
+        const spawnedTab = getTab(subAgentTabId);
+        // Never reopened: the daemon counts the reopenings (closeTab).
+        spawnedTab.incarnation = 0;
+        setTabRunning(spawnedTab, true);
         requestReplay({taskId: ev.task_id, tabId: subAgentTabId});
         break;
       }
       case 'openSubagentTab': {
         const subTaskId =
           ev.task_id === undefined || ev.task_id === null ? '' : ev.task_id;
-        // A live announcement for a sub-agent this page already saw
-        // finish lost the race with its subagentDone: drop it (see
-        // _finishedSubagentTasks).  Finished history always says
-        // isDone, so it is unaffected: a deliberate reopening (a
-        // history click, a panel expanded again) opens its tab, and a
-        // page's own replay (a reload, another window) says
-        // closedHistory too and leaves the tab closed (below).
         const subDone = !!ev.isDone;
-        if (
-          !subDone &&
-          subTaskId !== '' &&
-          _finishedSubagentTasks.has(String(subTaskId))
-        )
-          break;
         // Finished history needs its own parent open; a live task takes
         // the nearest open ancestor.
         const announcedParent = subDone
@@ -22894,6 +23730,25 @@
           : nearestOpenAncestorTab(ev.parent_tab_id);
         if (ev.parent_tab_id && !announcedParent) break;
         if (!ev.parent_tab_id && !getTab(ev.tab_id)) break;
+        // A live announcement for a sub-agent this page already saw
+        // finish lost the race with its subagentDone: drop it (see
+        // _finishedSubagentTasks), unless a user asked for the tab
+        // again (`reopened`) or the announcement is later than that
+        // finish (finishedSubagentStands).  Finished history always
+        // says isDone, so it is unaffected: a deliberate reopening (a
+        // history click, a panel expanded again) opens its tab, and a
+        // page's own replay (a reload, another window) says
+        // closedHistory too and leaves the tab closed (below).
+        if (
+          !subDone &&
+          !ev.reopened &&
+          finishedSubagentStands(String(subTaskId), announcedParent)
+        )
+          break;
+        // The sub-agent runs: a finish recorded for it was the end of
+        // its stream, and the close that came with it goes too (below).
+        const revived =
+          !subDone && _finishedSubagentTasks.delete(String(subTaskId));
         const subDesc = (ev.description || 'Sub-agent').trim();
         const subIdx =
           typeof ev.taskIndex === 'number' ? ev.taskIndex + 1 : null;
@@ -22901,18 +23756,30 @@
         const title = titlePrefix + subDesc.substring(0, 40);
         const parentId = announcedParent || '';
         let rpPanel = _rpTabPanel.get(ev.tab_id) || null;
+        // An ancestor's panel looks after a running sub-agent while its
+        // own parent's tab is closed (rpAdoptOpenSubagents).  Announced
+        // below that parent again, the sub-agent goes back to the
+        // parent's panel; registered on the ancestor's, it would make
+        // that panel the parent's (rpRegisterSubagent).
+        if (rpPanel && parentId && rpOwnerTabIdForPanel(rpPanel) !== parentId) {
+          rpPanel._rpSubagents = rpPanel._rpSubagents.filter(
+            en => en.tabId !== ev.tab_id,
+          );
+          _rpTabPanel.delete(ev.tab_id);
+          rpPanel = null;
+        }
         if (!rpPanel && parentId) {
           rpPanel = rpPanelForNewSubagent(parentId, subTaskId, {
             startTs: ev.startTs,
           });
         }
         let subTab = getTab(ev.tab_id);
-        if (ev.reopened)
+        if (ev.reopened || revived)
           rpReopenSubagent(rpPanel, subTaskId, ev.tab_id, subDone);
         // A tab the user closed stays closed, running or finished;
         // finished history closed any other way stays closed too.
         if (!subTab && rpSubagentHandClosed(rpPanel, subTaskId)) {
-          _rpClosedSubagentTabs.add(ev.tab_id);
+          rememberClosedSubagentTab(ev.tab_id);
           break;
         }
         if (subDone && !subTab && _rpClosedSubagentTabs.has(ev.tab_id)) {
@@ -22934,12 +23801,20 @@
         // live surface, so a page's own replay keeps it closed too: the
         // child joins its fan-out panel, which can still reopen it.  A
         // tab still open here missed its subagentDone while this
-        // surface was away: the replay's terminal state closes it now,
-        // as the subagentDone would have.
-        if (subDone && ev.closedHistory) {
+        // surface was away: the daemon's terminal state closes it now,
+        // as the subagentDone would have -- the replay's closed history,
+        // or the first word about a tab that ran when the connection
+        // dropped (_unconfirmedSubagentTabs), unless a user reopened
+        // that tab since.
+        const endedUnseen =
+          !!subTab &&
+          _unconfirmedSubagentTabs.delete(subTab) &&
+          subDone &&
+          !ev.reopened;
+        if (endedUnseen || (subDone && ev.closedHistory)) {
           if (rpPanel) rpRegisterSubagent(rpPanel, parentId, subTaskId, '');
           if (subTab) closeFinishedSubagentTab(subTab);
-          else _rpClosedSubagentTabs.add(ev.tab_id);
+          else rememberClosedSubagentTab(ev.tab_id);
           break;
         }
         // The daemon's terminal state wins over a tab that missed its
@@ -22956,7 +23831,7 @@
             subTab ? subTab.id : '',
           );
           if (subTab) syncRunParallelPanel(rpPanel);
-          else _rpClosedSubagentTabs.add(ev.tab_id);
+          else rememberClosedSubagentTab(ev.tab_id);
           break;
         }
         const needsPlacement = !subTab || !subTab.isSubagentTab;
@@ -22970,6 +23845,9 @@
           placeSubagentTabAfterParent(subTab, parentId);
         }
         subTab.isSubagentTab = true;
+        // What a close this page makes by itself tells the daemon it
+        // closed (closeTab): 0 until a user reopens the finished tab.
+        subTab.incarnation = ev.incarnation || 0;
         // Stamp the sub-agent's task on its tab right away: that task
         // id is this tab's identity for every later announcement (see
         // openSubagentTabForTask).
@@ -22977,6 +23855,8 @@
           subTab.currentTaskId = subTaskId;
           subTab.pendingTaskId = null;
         }
+        if (ev.parent_task_id)
+          _subagentParentTask.set(subTab, String(ev.parent_task_id));
         if (parentId && parentId !== subTab.id) {
           subTab.parentTabId = parentId;
         }
@@ -23000,15 +23880,18 @@
             else inputContainer.style.display = 'none';
           }
           setRunningState(subTab.isRunning);
-          if (subTab.isRunning) applyChevronState(currentTaskName);
         }
         persistTabState();
         break;
       }
       case 'closeSubagentTab': {
         // Another client closed this sub-agent tab; mirror the close.
-        // Applied without echoing `closeTab` back to the daemon (the
-        // origin client already sent it) — see closeTab(fromServer).
+        // The daemon says so as it happens, and again in the replay of
+        // a surface that was away then. The sub-agent may still run:
+        // this is not `subagentDone`, and a later reopening of the tab
+        // opens here too. Applied without echoing `closeTab` back to
+        // the daemon (the origin client already sent it) — see
+        // closeTab(fromServer).
         if (getTab(ev.tab_id)) closeTab(ev.tab_id, true, true);
         break;
       }
@@ -23027,6 +23910,7 @@
           // loop.
           const chatTabs = tabs.filter(t => !t.isContentTab);
           if (chatTabs.length > 1) closeTab(ev.tabId, true, true);
+          else rejTab.inRegistry = false;
         }
         if (ev.text) {
           showNotification({
@@ -23038,17 +23922,17 @@
         break;
       }
       case 'subagentDone': {
+        // A tab the registry lists shows a chat (one resumed into the
+        // sub-agent's tab id): the sub-agent's end is not that tab's.
         const doneTab = getTab(ev.tab_id);
-        if (doneTab) closeFinishedSubagentTab(doneTab);
+        if (doneTab && !doneTab.inRegistry) closeFinishedSubagentTab(doneTab);
         break;
       }
       default:
         // Only types the transcript renderer actually handles may fall
         // through to processOutputEvent. Server messages owned by other
-        // listeners (voice.js's voiceWake / voiceTranscribing /
-        // voiceSpeech / voiceState)
-        // and genuinely unknown types would each cost an O(transcript)
-        // DOM sweep and a spinner reset.
+        // listeners (voice.js's voiceSpeech) and genuinely unknown types
+        // would each cost an O(transcript) DOM sweep and a spinner reset.
         if (!TRANSCRIPT_EVENT_TYPES.has(t)) break;
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgTab = findTabByEvt(ev);
@@ -23083,20 +23967,23 @@
           // tableak-coverage:end
         ) {
           const adoptTab = getTab(activeTabId);
+          // Also when the tab holds the id and the transcript on screen
+          // lost it: the replay of a run without a history row names no
+          // task, and can arrive after the run's first named event.
           if (
             adoptTab &&
-            String(adoptTab.currentTaskId) !== String(ev.taskId)
+            (String(adoptTab.currentTaskId) !== String(ev.taskId) ||
+              currentTaskId === null)
           ) {
             adoptTab.currentTaskId = ev.taskId;
             adoptTab.pendingTaskId = null;
             currentTaskId = ev.taskId;
-            if (
-              (oldestLoadedTaskId === null || oldestLoadedTaskId === '') &&
-              (newestLoadedTaskId === null || newestLoadedTaskId === '')
-            ) {
+            // The thread ends in the task that streams now: a run of
+            // several <task> blocks moves on from row to row with no
+            // `clear`, each row's events following the last one's.
+            newestLoadedTaskId = ev.taskId;
+            if (oldestLoadedTaskId === null || oldestLoadedTaskId === '')
               oldestLoadedTaskId = ev.taskId;
-              newestLoadedTaskId = ev.taskId;
-            }
           }
         }
         if (isUsageOfAnotherTask(ev, getTab(activeTabId))) break;
@@ -23124,9 +24011,9 @@
    * minutes in the post-mortem `stop_button_delay_2026-08-05.html`.
    */
   function renderStopButton() {
-    // On a content tab the button acts on (and pulses for) the OWNING
-    // chat; on a chat tab the target IS the active tab, whose running
-    // state the module flag mirrors.
+    // On a content tab the button acts on (and pulses for) the chat
+    // it stands for; on a chat tab the target IS the active tab, whose
+    // running state the module flag mirrors.
     const tab = getTab(chatTargetTabId());
     const running = tab && tab.id !== activeTabId ? !!tab.isRunning : isRunning;
     const stopping = !!(tab && tab.isStopping) && running;
@@ -23147,13 +24034,14 @@
     const tab = getTab(tabId);
     if (tab) tab.isStopping = stopping;
     // chatTargetTabId is the active tab itself on a chat tab, and the
-    // owning chat on a content tab — whose pending stop the visible
+    // chat a content tab stands for — whose pending stop the visible
     // button is showing.
     if (tabId === activeTabId || tabId === chatTargetTabId()) {
       renderStopButton();
     }
   }
 
+  // filechat-coverage:start
   /**
    * Set a tab's running state, dropping any pending stop along with it.
    *
@@ -23169,7 +24057,10 @@
     tab.isRunning = running;
     if (!running) tab.isStopping = false;
     if (tab.id === activeTabId) renderStopButton();
+    // A content tab on screen stands for this chat: Stop is its.
+    else if (tab.id === chatTargetTabId()) renderContentTabStop();
   }
+  // filechat-coverage:end
 
   function setRunningState(running) {
     // streamtail-coverage:start
@@ -23206,10 +24097,14 @@
     } else {
       stopTimer();
       removeSpinner();
+      // donelabel-coverage:start
+      // A tab that is not running never reads Running: it shows the
+      // time between its clock's start and end, where it used to read
+      // "Done".
       if (statusText.textContent.startsWith('Running')) {
-        statusText.textContent =
-          t0 && endTs > 0 ? doneLabelFor(t0, endTs) : 'Done';
+        statusText.textContent = clockedTaskTime(t0, endTs);
       }
+      // donelabel-coverage:end
     }
   }
 
@@ -23229,7 +24124,8 @@
    * it, and a lone one would leave an empty Trajectory panel behind.
    *
    * @param {object} ev The terminal event (tabId, startTs, endTs).
-   * @param {string} label The status row's text ('Done (3s)', 'Error', ...).
+   * @param {string} label The status row's text: the time the task took
+   *     (endedTaskTime).
    * @param {boolean} failed Whether the tab shows the failure dot.
    */
   function finishTabTask(ev, label, failed) {
@@ -23246,6 +24142,10 @@
     // foreground (the page would bounce onto the tab and straight back
     // off it).  A parentless background task keeps its switch.
     const doneTab = ev.tabId !== undefined ? getTab(ev.tabId) : null;
+    // donelabel-coverage:start
+    // The end is recorded on the tab; a file view in front of it shows it too.
+    if (doneTab) showLentTabTime(doneTab);
+    // donelabel-coverage:end
     const isChild = !!(doneTab && doneTab.isSubagentTab && doneTab.parentTabId);
     if (!isChild) focusFinishedTab(ev.tabId);
     openReadyReportTabs(ev.tabId, !isChild);
@@ -23297,9 +24197,8 @@
   function setReady(label, tabId, doneStartTs, doneEndTs) {
     const hasStart = typeof doneStartTs === 'number' && doneStartTs > 0;
     const hasEnd = typeof doneEndTs === 'number' && doneEndTs > 0;
-    let doneTab = null;
     if (tabId !== undefined) {
-      doneTab = getTab(tabId);
+      const doneTab = getTab(tabId);
       if (doneTab) {
         setTabRunning(doneTab, false);
         if (hasStart) doneTab.t0 = doneStartTs;
@@ -23726,6 +24625,8 @@
     const out = document.createElement('div');
     out.id = 'output';
     let liveUsed = false;
+    // The id of the last task listed ('' for none, or a task without one).
+    let lastTid = '';
     const list = tasks || [];
     // The hidden sub-agent sections all land AFTER the chat's own task
     // sections, so the visible chat reads top to bottom uninterrupted.
@@ -23738,6 +24639,7 @@
           t.task_id === undefined || t.task_id === null
             ? ''
             : String(t.task_id);
+        lastTid = tid;
         const subs = Array.isArray(t.subagents) ? t.subagents : [];
         const byParent = shareSubagentsByParent(subs);
         let body;
@@ -23770,17 +24672,25 @@
       const live = shareLiveTranscript();
       if (live.querySelector('.ev, .llm-panel')) {
         const last = out.lastElementChild;
-        if (last && !last.querySelector('.ev:not(.task-panel), .llm-panel')) {
+        if (
+          last &&
+          !(liveId && lastTid) &&
+          !last.querySelector('.ev:not(.task-panel), .llm-panel')
+        ) {
           // A task the daemon listed without events while the screen
           // is streaming panels is that same task mid-write (its row
           // lands in the database at start, its events follow): the
           // live DOM completes the section instead of duplicating the
-          // task at the end of the page.
+          // task at the end of the page.  Unless both ids are known:
+          // they differ (the loop above matched none), so the list
+          // was made before the task on screen started and ends in an
+          // older task.
           while (live.firstChild) last.appendChild(live.firstChild);
         } else {
-          // The screen shows a task the database does not know at
-          // all (the chat was never persisted). It is the chat's
-          // newest surface, so it closes the page.
+          // The screen shows a task the list does not hold (the chat
+          // was never persisted, or the task started after the list
+          // was made). It is the chat's newest surface, so it closes
+          // the page.
           out.appendChild(
             shareTaskSection(
               currentTaskName,
@@ -23866,6 +24776,7 @@
           'holds only its most recent tasks.',
       );
     }
+    shareExportChatId = chatId;
     api.shareChat({
       tabId: activeTabId,
       chatId: chatId,
@@ -23881,6 +24792,8 @@
   // reply that never comes cannot wedge the button; every end of an
   // export reaches flashShareBtn, which clears it.
   let shareInFlight = null;
+  // The chat the export awaiting its `share_done` was made for.
+  let shareExportChatId = '';
   function setShareInFlight(pending) {
     if (shareInFlight) clearTimeout(shareInFlight);
     shareInFlight = pending
@@ -24220,8 +25133,9 @@
 
   function renderReplayedEvents(container, events, opts) {
     const ownerTabId = opts ? opts.ownerTabId : undefined;
-    const rWorkDir =
-      ownerTabId !== undefined ? workDirForTab(ownerTabId) || '' : undefined;
+    // The folder the replayed task itself ran in; '' when its
+    // transcript records none (the owning tab's task's is used).
+    const rWorkDir = taskSettingsWorkDir(taskSettingsFromEvents(events));
     const ctx = mkStreamCtx(container, ownerTabId);
     ctx.state.suppressReportOpen = true;
     const prevDefer = _deferHighlight;
@@ -24359,7 +25273,7 @@
       landOpenedTranscript();
     }
     Object.assign(currentTaskMetrics, readStatusRow());
-    applyChevronState(currentTaskName);
+    applyChevronState();
   }
 
   /**
@@ -24471,9 +25385,9 @@
    */
   function appendActionResultInto(target, ev) {
     if (!target) return null;
-    const cls = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
+    const cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
     const div = mkEl('div', 'ev ' + cls);
-    div.textContent = (ev && ev.message) || '';
+    div.textContent = ev.message || '';
     target.appendChild(div);
     return div;
   }
@@ -24497,7 +25411,7 @@
    */
   function settleAutocommitDone(target, ev) {
     clearActionProgress(target);
-    if (ev && ev.manual && ev.success) return null;
+    if (ev.manual && ev.success) return null;
     return appendActionResultInto(target, ev);
   }
 
@@ -24573,12 +25487,12 @@
   // The branch(es) a worktree_done names: one per repository the task
   // touched (ev.worktrees), falling back to the single ev.branch.
   function worktreeBranchLabel(ev) {
-    const list = ev && Array.isArray(ev.worktrees) ? ev.worktrees : [];
+    const list = Array.isArray(ev.worktrees) ? ev.worktrees : [];
     const names = list.map(w => w && w.branch).filter(Boolean);
     if (names.length > 1) {
       return 'branches ' + names.map(n => "'" + n + "'").join(', ');
     }
-    const branch = names[0] || (ev && ev.branch);
+    const branch = names[0] || ev.branch;
     return branch ? "branch '" + branch + "'" : '';
   }
 
@@ -24621,14 +25535,14 @@
   function showWorktreeActions(ev) {
     clearWorktreeBar();
     worktreeBar = createWorktreeBar(
-      (ev && ev.tabId) || activeTabId,
+      ev.tabId || activeTabId,
       worktreeBranchLabel(ev),
     );
     attachActionBar(worktreeBar);
   }
 
   function isSilentDiscardMessage(ev) {
-    if (!ev || !ev.success) return false;
+    if (!ev.success) return false;
     const msg = ev.message || '';
     // One paragraph per discarded worktree (a task may have made one
     // in each of several repositories), every one plain.
@@ -24638,12 +25552,12 @@
   }
 
   function handleWorktreeResult(ev) {
-    // A retryable failure (deferred discard: a sub-agent is still
-    // writing into the worktree, or its ignored output could not be
-    // rescued) keeps the Merge / Discard bar — clearing it would strip
-    // the only retry controls while the message says "retry" — and
-    // re-arms its buttons, which the click that sent the action
-    // disarmed.
+    // A retryable failure (a merge that left a worktree pending, a
+    // "Do nothing" whose marker could not be written, a merge or
+    // discard already in progress) keeps the Merge / Discard bar —
+    // clearing it would strip the only retry controls while the
+    // message says "retry" — and re-arms its buttons, which the click
+    // that sent the action disarmed.
     // retrybar-coverage:start
     if (ev.retryable) setActionBarBtnsDisabled(worktreeBar, false);
     else clearWorktreeBar();
@@ -24665,6 +25579,8 @@
   // terminal autocommit_done never arrives, the button re-arms on its
   // own instead of staying wedged forever.
   let autocommitRearmTimer = null;
+  // The tab that commit was asked for; '' while none is in flight.
+  let autocommitTabId = '';
 
   // Run the manual Git Commit: ask the daemon to commit the active
   // chat tab's working tree (autocommitAction), from the settings
@@ -24688,6 +25604,7 @@
     }
     // readychat-coverage:end
     setAutocommitInFlight(true);
+    autocommitTabId = commitTabId;
     // Close the drawer so the transcript's autocommit_done line is
     // visible instead of hidden behind the opaque settings sheet.  Only
     // an open sheet: closing flushes the config form (repopulated by
@@ -24709,6 +25626,7 @@
   }
 
   function setAutocommitInFlight(pending) {
+    if (!pending) autocommitTabId = '';
     if (autocommitRearmTimer) {
       clearTimeout(autocommitRearmTimer);
       autocommitRearmTimer = null;
@@ -24788,6 +25706,9 @@
       // A reconnect keeps the composer history on hand: the daemon
       // sends only what was typed since (see requestInputHistory).
       inputHistorySince: histNewest,
+      // The daemon answers with its model list: stamped like a
+      // getModels, so an answer older than a pick is told apart.
+      generation: ++modelsAsked,
     };
     api.ready(ready);
     reportedChatTabId = chatTabId;
@@ -24828,6 +25749,9 @@
       // Enter/Escape confirming an IME composition belong to the IME
       // (keyCode 229 on engines that report the real key).
       if (e.isComposing || e.keyCode === 229) return;
+      // The key may come before the report of the caret move that
+      // made the popup stale (`selectionchange` is queued).
+      closeStaleAC();
       if (autocomplete.style.display === 'block') {
         const items = autocomplete.querySelectorAll('.ac-item');
         if (e.key === 'ArrowDown') {
@@ -24882,6 +25806,10 @@
         sendMessage();
         return;
       }
+      // Escape dismisses what the daemon has yet to answer too: a
+      // suggestion or picker reply still on its way stays away until
+      // the next keystroke, as after the open picker's Escape above.
+      if (e.key === 'Escape') acDismissed = true;
       if (e.key !== 'Tab') clearGhost();
     });
     let _shiftHeld = false;
@@ -24916,14 +25844,15 @@
       hideAC();
       acDismissed = true;
     });
+    document.addEventListener('selectionchange', closeStaleAC);
     inp.addEventListener('touchstart', handleInputTouchStart, {passive: true});
     inp.addEventListener('touchend', handleInputTouchEnd);
     autocomplete.addEventListener('mousedown', e => {
       e.preventDefault();
     });
     stopBtn.addEventListener('click', () => {
-      // On a content tab the stop must land on the owning chat's run,
-      // not on the file view's id.
+      // On a content tab the stop must land on the run of the chat it
+      // stands for, not on the file view's id.
       const target = chatTargetTabId();
       markStopping(target, true);
       api.stop({tabId: target});
@@ -24932,18 +25861,18 @@
       shareBtn.addEventListener('click', () => {
         if (shareInFlight) return;
         setShareInFlight(true);
-        // A content tab shares the chat that produced it — never the
+        // A content tab shares the chat it stands for — never the
         // file view's own id, whose transcript is empty. The export
         // splices the LIVE screen into the chat's persisted tasks, so
-        // the owner chat comes back on screen first and the whole
-        // existing flow (reply routing included) applies to it.
+        // that chat comes back on screen first and the whole existing
+        // flow (reply routing included) applies to it.
         const activeNow = getTab(activeTabId);
         if (activeNow && activeNow.isContentTab) {
           const target = chatTargetTabId();
           if (target !== activeTabId) switchToTab(target);
           const after = getTab(activeTabId);
           if (after && after.isContentTab) {
-            // The owner is gone: there is no chat here to export.
+            // No chat is left: there is nothing here to export.
             notifyShareFailed('this tab has no chat to share');
             flashShareBtn(false);
             return;
@@ -25003,7 +25932,9 @@
       // which filters by extension rather than by MIME type.  Whichever way
       // the photo arrives, prepareAttachment() converts it to JPEG.
       input.accept = 'image/*,.heic,.heif,application/pdf';
-      const owner = activeTabId;
+      // On a file view the files are for the chat it stands for: the
+      // view has no composer of its own to show or send them from.
+      const owner = chatTargetTabId();
       input.onchange = e => handleFileSelect(e, owner);
       input.click();
     });
@@ -25203,7 +26134,7 @@
       browserBtn.addEventListener('click', () => {
         // The page opens in the browser of the machine the chat's
         // tasks run on (the header's drop-down).
-        const owner = getTab(chatTargetTabId());
+        const owner = getTab(ownerChatTabId());
         api.browserOpen(
           onMachine({url: ''}, owner ? tabMachine(owner.id) : ''),
         );
@@ -25374,7 +26305,8 @@
     // chats (the history drawer), the chat, the open file (a content
     // tab shown in place of the chat) and the task info (the right
     // drawer).  A swipe moves one screen in the finger's direction; the
-    // file screen is skipped while no content tab is open.  The screen
+    // file screen is skipped while no content tab is open, and a swipe
+    // back from it returns to the chat it was reached from.  The screen
     // on view is read from the drawers and the active tab, so the
     // buttons that open the drawers and the tab strip stay in step
     // with the gesture.
@@ -25423,15 +26355,43 @@
         return;
       }
       if (!active || !active.isContentTab) return;
-      const chat = rootChatTab(active) || tabs.find(t => !t.isContentTab);
+      const chat = getTab(chatTabIdForHost());
       if (chat) switchToTab(chat.id);
+    }
+
+    /** The view of the streamed browser page *target* is part of (the
+     *  picture of a browser tab, not its buttons), if any. */
+    function streamedPageAt(target) {
+      return tabs
+        .map(t => t.browserView)
+        .find(v => v && v.el.querySelector('.browser-screen').contains(target));
+    }
+
+    /** The swipe to the right that onMobileSwipe held back on a
+     *  streamed page, now that the daemon says the page had nothing to
+     *  scroll that way: it counts while that page is still on screen. */
+    function onStreamedPageSwipeRight() {
+      if (mobileScreen() === SCREEN_FILE) onMobileSwipe('right');
     }
 
     /** A swipe in *direction* ('left' / 'right') on the phone layout:
      *  one screen along, skipping the file screen when no content tab
-     *  is open.  A sheet or modal over the page keeps the gesture. */
-    function onMobileSwipe(direction) {
+     *  is open.  A sheet or modal over the page keeps the gesture.
+     *  *e* is the touch event that ended it (none for a swipe made in
+     *  a preview iframe, or held back on a streamed page). */
+    function onMobileSwipe(direction, e) {
       if (splitLayout() || sheetOrModalOpen()) return;
+      const page = e && streamedPageAt(e.target);
+      if (page) {
+        // The finger scrolled that page (browserTab.js sends its drag
+        // to the daemon's browser).  A swipe to the right also turns
+        // the screen once the daemon says that nothing under the finger
+        // had anything left to scroll that way.
+        if (direction === 'right') {
+          page.whenDragRightIsFree(onStreamedPageSwipeRight);
+        }
+        return;
+      }
       const step = direction === 'left' ? 1 : -1;
       let next = mobileScreen() + step;
       if (next === SCREEN_FILE && !mobileFileTab()) next += step;
@@ -25479,9 +26439,9 @@
     if (window.MobileSwipe) {
       window.MobileSwipe.install(document, onMobileSwipe, {
         // The composer has its own swipes (accept the ghost suggestion,
-        // cycle the prompt history); the streamed browser screen
-        // forwards drags to the remote page.
-        ignore: '#task-input, .browser-view',
+        // cycle the prompt history); a drag in the browser tab's
+        // address field moves through its text.
+        ignore: '#task-input, .browser-url',
         scrollPositions: editorScrollLefts,
       });
       window.addEventListener('message', onPreviewSwipeMessage);
@@ -26095,11 +27055,14 @@
         e.preventDefault();
         e.stopPropagation();
         inputContainer.classList.remove('drag-over');
-        // Files dropped from the OS attach like pasted ones.
+        // Files dropped from the OS attach like pasted ones; on a file
+        // view (the button row stays up there), to the chat it stands
+        // for.
         const files = e.dataTransfer && e.dataTransfer.files;
         if (!files) return;
+        const chat = getTab(chatTargetTabId());
         Array.from(files).forEach(file => {
-          if (isAttachableFile(file)) readFileAsAttachment(file);
+          if (isAttachableFile(file)) readFileAsAttachment(file, chat);
         });
       });
     }
@@ -26129,23 +27092,14 @@
     });
 
     // tableak-coverage:start
+    // voice.js asks before it types an utterance into the composer
+    // (cancelled while no chat shows one: the words are dropped) and
+    // then to send what it typed.
+    window.addEventListener('kiss-voice-compose', event => {
+      if (!showSpeechChat(event)) event.preventDefault();
+    });
     window.addEventListener('kiss-voice-submit', event => {
-      if (!isFromSpeechTab(event)) return;
-      // A voice submit landing while a content tab is up belongs to
-      // the owning chat: bring it back on screen so sendMessage()
-      // posts under the conversation, never under the file view. The
-      // dictated composer text rides along — the switch would restore
-      // the chat's own saved input over it.
-      const active = getTab(activeTabId);
-      if (active && active.isContentTab) {
-        const spoken = inp.value;
-        const target = chatTargetTabId();
-        if (target !== activeTabId) switchToTab(target);
-        const after = getTab(activeTabId);
-        if (after && after.isContentTab) return;
-        if (spoken.trim()) inp.value = spoken;
-      }
-      sendMessage();
+      if (isFromSpeechTab(event) && showSpeechChat(event)) sendMessage();
     });
     // tableak-coverage:end
   }
@@ -26182,6 +27136,16 @@
   // decoder / FileReader that never calls back would otherwise leave the
   // slot pending -- and the tab's send latched -- for ever.
   const ATTACH_PREPARE_TIMEOUT_MS = 60 * 1000;
+  // A prompt travels with its attachments in ONE frame, of which the
+  // daemon reads at most 64 MiB before it drops the connection: the
+  // budget of a share export (SHARE_MAX_HTML_JSON_BYTES, headroom for
+  // the rest of the request included) is a message's too.
+  const PROMPT_MAX_JSON_BYTES = SHARE_MAX_HTML_JSON_BYTES;
+  // Base64 makes four bytes of every three: what the files may total.
+  const PROMPT_TOO_LARGE =
+    'Too large to send: the attachments may total about ' +
+    Math.floor((PROMPT_MAX_JSON_BYTES * 3) / 4 / (1024 * 1024)) +
+    ' MB';
   // Image formats every supported vision API understands.
   const MODEL_IMAGE_MIME_TYPES = [
     'image/jpeg',
@@ -26235,7 +27199,7 @@
     return mime.startsWith('image/') || mime === 'application/pdf';
   }
 
-  /** True when `data`'s ISO-BMFF header identifies a HEIF/HEIC container. */
+  /** True when `head`, a file's first bytes, is the ISO-BMFF header of a HEIF/HEIC container. */
   function isHeifHeader(head) {
     if (head.length < 12) return false;
     let brand = '';
@@ -26297,6 +27261,11 @@
     try {
       const ctx = canvas.getContext('2d', {alpha: false});
       if (!ctx) throw new Error('this browser cannot convert the image');
+      // JPEG has no transparency: a see-through picture is laid over
+      // white, as a viewer shows it.  Over the black an opaque canvas
+      // starts with, a black drawing would vanish.
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, w, h);
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(bitmap, 0, 0, w, h);
       return await canvasToJpeg(canvas);
@@ -26613,14 +27582,15 @@
       }
       // A conversion that failed leaves its error chip in place: sending the
       // prompt without the photo is exactly the silent loss to avoid.  A tab
-      // switch means this submission no longer matches what the user sees.
+      // switch means this submission no longer matches what the user sees,
+      // and so does a tab closed meanwhile whose id another tab now has.
       // The connection may have dropped during the wait: re-check.  A
       // question that arrived meanwhile parked the prompt (enterAnswerMode)
       // and made the composer the answer box: nothing here is a prompt any
       // more, and the parked text comes back once the question is answered.
       if (
         !ready ||
-        activeTabId !== tab.id ||
+        getTab(activeTabId) !== tab ||
         !daemonConnected ||
         tab.askPendingQuestion !== null
       )
@@ -26631,21 +27601,39 @@
       if (!prompt) return;
     }
 
-    if (histCache[0] !== prompt) {
-      histCache.unshift(prompt);
-    }
     const wireAttachments = attachments
       .filter(a => a.data)
       .map(a => {
         return {name: a.name, mimeType: a.type, data: a.data};
       });
+    // A message that cannot fit in one frame is refused before anything
+    // is sent, recorded or cleared: the text and the files stay, with
+    // the reason on a chip (once; the next send that fits clears it).
+    if (
+      utf8ByteLength(JSON.stringify([prompt, wireAttachments])) >
+      PROMPT_MAX_JSON_BYTES
+    ) {
+      if (!attachErrors.includes(PROMPT_TOO_LARGE)) {
+        attachErrors.push(PROMPT_TOO_LARGE);
+        renderFileChips();
+      }
+      return;
+    }
+    if (histCache[0] !== prompt) {
+      histCache.unshift(prompt);
+    }
+    const unacked = unackedPrompt(tab, prompt, attachments, isRunning);
+    // The user has moved on to this prompt: the one an outage swallowed
+    // is not offered back any more.
+    tab.lostPrompt = null;
 
     // A message added to a running task carries its files too: the
     // daemon shows them to the running agent with the text.
     if (isRunning) {
-      tab.unackedPrompts.push({text: prompt, attachments, echoed: false});
+      tab.unackedPrompts.push(unacked);
       api.appendUserMessage({
         prompt: prompt,
+        promptId: unacked.id,
         tabId: activeTabId,
         attachments: wireAttachments,
       });
@@ -26656,6 +27644,9 @@
     const msg = {
       type: 'submit',
       prompt: prompt,
+      // The daemon names the prompt by it in its answers
+      // (answeredPrompts).
+      promptId: unacked.id,
       model: selectedModel,
       tabId: activeTabId,
       // The machine the tab's tasks run on (the chat header's
@@ -26688,7 +27679,7 @@
     // only it -- a legitimate owner of the output that is about to arrive.
     if (!tab.currentTaskId) tab.pendingTaskId = 'pending:' + tab.id;
     // tableak-coverage:end
-    tab.unackedPrompts.push({text: prompt, attachments, echoed: false});
+    tab.unackedPrompts.push(unacked);
     // Sent: the machine stays the chat's pick until the daemon's
     // binding confirms it (`tabMachine` clears the pick) -- a refused
     // run leaves the pick standing for the retry, and the chat's
@@ -26783,20 +27774,239 @@
   }
 
   /**
+   * The prompts waiting in `tab` (unackedPrompts) that an answer of the
+   * daemon is about: the ones it names (`ids`, the answer's promptIds;
+   * the run the daemon makes of the messages a finished task left
+   * answers them all), or, when it names none (an older daemon's), the
+   * oldest one `inOrder` accepts.
+   *
+   * @param {object} tab The tab the answer is for.
+   * @param {Array<string>|undefined} ids The prompt ids it names.
+   * @param {function(object): boolean} inOrder Whether an answer that
+   *     names no prompt can be an entry's.
+   * @returns {Array<object>} The entries, oldest first.
+   */
+  function answeredPrompts(tab, ids, inOrder) {
+    if (Array.isArray(ids) && ids.length) {
+      return tab.unackedPrompts.filter(p => ids.includes(p.id));
+    }
+    const oldest = tab.unackedPrompts.find(inOrder);
+    return oldest ? [oldest] : [];
+  }
+
+  /** `prompts` (answeredPrompts) got their answer: `tab` waits no more. */
+  function stopWaitingFor(tab, prompts) {
+    prompts.forEach(p => {
+      tab.unackedPrompts.splice(tab.unackedPrompts.indexOf(p), 1);
+    });
+  }
+
+  /**
+   * The daemon took the prompts `ids` from `tab` (a follow-up's echo, a
+   * run's `clear`, a transcript's promptsTaken): the newest is what a
+   * later prompt goes out with as its witness (unackedPrompt).
+   */
+  function notePromptsTaken(tab, ids) {
+    if (Array.isArray(ids) && ids.length) {
+      tab.takenPromptId = String(ids[ids.length - 1]);
+    }
+  }
+
+  /**
    * Put the prompt the daemon refused (error code 'prompt_refused') back
+   * into `tab`'s composer (putPromptBack).
+   *
+   * @param {object} tab The tab the refusal is for.
+   * @param {Array<string>|undefined} ids The prompt ids it names.
+   */
+  function restoreRefusedPrompt(tab, ids) {
+    // A refusal that names no prompt is the oldest waiting one's (the
+    // daemon answers a tab's prompts in order), echoed (a run turned
+    // down after its echo) or not (a run refused unechoed, too long
+    // say, or a follow-up).
+    const refused = answeredPrompts(tab, ids, () => true);
+    if (!refused.length) return;
+    stopWaitingFor(tab, refused);
+    refused.forEach(p => forgetWaitingPrompt(tab, p));
+    // Several at once are the messages a finished task left, refused
+    // as the one run the daemon made of them: they go back as that
+    // run's prompt, joined as the daemon joined them.
+    putPromptBack(tab, {
+      text: refused.map(p => p.text).join('\n\n'),
+      attachments: refused.flatMap(p => p.attachments || []),
+    });
+  }
+
+  /**
+   * `prompt`, which waited for the daemon's answer in `tab`, did not
+   * run (the daemon refused it, or an outage lost it): the prompts
+   * sent after it stop expecting it in a transcript (unackedPrompt's
+   * `ahead`).
+   */
+  function forgetWaitingPrompt(tab, prompt) {
+    tab.unackedPrompts.forEach(p => {
+      p.ahead = p.ahead.filter(q => q !== prompt);
+    });
+  }
+
+  /**
+   * The daemon's word on `tab` after an outage settles the prompt the
+   * dead connection left unacknowledged (tab.lostPrompt).  `replay` is
+   * the tab's transcript (a `task_events` event), or null when the
+   * daemon has no chat for the tab.  The transcript comes with the
+   * prompts the daemon took from the tab since it started
+   * (promptsTaken), and records a message typed into its task under
+   * the message's id (promptIds): a prompt named in either ran.  One
+   * that is not never did,
+   * if the daemon still names the prompt it had taken before this one
+   * went out (the entry's `witness`): it has run ever since, and it
+   * forgets the oldest first.  A daemon that cannot tell (it started
+   * meanwhile, or names no prompts) leaves the transcript's text: a
+   * prompt it shows, as
+   * its task or as a follow-up that task took (replayShowsPrompt), ran;
+   * any other never did and goes back into the composer
+   * (putPromptBack).  A chat with nothing to replay answers with a
+   * `status` alone, the frame that also precedes a transcript: its
+   * prompt stays the reload draft (persistTabState) until the tab's
+   * next transcript or send.
+   */
+  function settleLostPrompt(tab, replay) {
+    const lost = tab.lostPrompt;
+    if (!lost) return;
+    tab.lostPrompt = null;
+    const taken =
+      replay && Array.isArray(replay.promptsTaken) ? replay.promptsTaken : [];
+    const recorded = ((replay && replay.events) || []).some(
+      e => Array.isArray(e.promptIds) && e.promptIds.includes(lost.id),
+    );
+    if (recorded || taken.includes(lost.id)) return;
+    const never = !replay || taken.includes(lost.witness);
+    if (!never && replayShowsPrompt(replay, lost)) return;
+    // Offered again unjudged (its transcript was not on the page as it
+    // went out), the prompt may have run all the same: those sent
+    // after it go on expecting it.
+    if (never || lost.transcriptShown) forgetWaitingPrompt(tab, lost);
+    putPromptBack(tab, lost);
+  }
+
+  /**
+   * The recovery copy of a prompt going out from `tab`, the tab on
+   * screen (an entry of unackedPrompts), under the name the daemon
+   * answers it by (`id`, sent as promptId) and with the newest prompt
+   * the daemon had taken from the tab by then (`witness`, see
+   * settleLostPrompt).  A daemon that names no prompt leaves a
+   * transcript to tell whether this one ran, so the entry also keeps
+   * what one may
+   * show reading the same that is not this prompt's doing: the task on
+   * screen (`taskId`, '' for none and for a run whose id has not
+   * arrived yet), how many of the messages typed into it read the same
+   * (`sameShown`; the neighbours spliced in around it are other tasks,
+   * and a question's "Response" is no message) and the prompts reading
+   * the same that the daemon has not answered yet (`ahead`; each may
+   * still start a task or become one more message, unless
+   * forgetWaitingPrompt learns it did not run).  None of that is known
+   * while the tab's transcript is not on the page (`transcriptShown`:
+   * a replay is on its way, or a tab bound to a chat shows no task
+   * yet, as on a reloaded page).
+   *
+   * @param {object} tab The tab on screen.
+   * @param {string} text The prompt.
+   * @param {Array<object>} files Its attachments.
+   * @param {boolean} followUp Whether it is typed into a running task.
+   * @returns {object} The entry.
+   */
+  function unackedPrompt(tab, text, files, followUp) {
+    const sameShown = Array.from(
+      O.querySelectorAll('.ev.user-msg:not(.tc-question-answer)'),
+    ).filter(
+      p =>
+        !p.closest('.adjacent-task') &&
+        (p.dataset.rawText || '').trim() === text,
+    ).length;
+    return {
+      id: genTabId(),
+      witness: tab.takenPromptId,
+      text,
+      attachments: files,
+      echoed: false,
+      followUp,
+      taskId: currentTaskId ? String(currentTaskId) : '',
+      sameShown,
+      ahead: [tab.lostPrompt, ...tab.unackedPrompts].filter(
+        p => p && p.text === text,
+      ),
+      transcriptShown:
+        !tab.replayRequested &&
+        (!tab.backendChatId || !!O.querySelector(':scope > .ev.task-panel')),
+    };
+  }
+
+  /**
+   * Whether `replay` (a tab's transcript after an outage) shows that
+   * `lost`, the prompt the outage left unacknowledged, ran: the
+   * judgment left when the daemon's own account of the prompts it
+   * took cannot tell (settleLostPrompt).  A message recorded under an
+   * id (promptIds) is another prompt's, this one's being settled
+   * before.  A task's text, and a message recorded under no id (an
+   * older daemon's), has only its text to go by.  The daemon
+   * takes a tab's prompts in order and shows each one that runs once:
+   * as the text of the task it starts, or as a message typed into the
+   * running one.  So the transcript shows this prompt when it holds
+   * more of those, reading the same, than the prompts ahead of it and
+   * what the task then on screen already showed (unackedPrompt)
+   * account for.
+   *
+   * The transcript is one task's.  A run ahead of this prompt whose
+   * task was over before this prompt started the task replayed shows
+   * nowhere in it and is counted all the same: the prompt is offered
+   * again although it ran.  The same frames, but for a task id the
+   * page never saw, replay that run's own task with this prompt lost,
+   * and there dropping the prompt would lose it.  A prompt sent
+   * before the tab's transcript was on the page is offered again too:
+   * nothing tells it from what that transcript held already.
+   *
+   * @param {object} replay The `task_events` event.
+   * @param {object} lost The unackedPrompt entry.
+   * @returns {boolean} Whether the prompt ran.
+   */
+  function replayShowsPrompt(replay, lost) {
+    if (!lost.transcriptShown) return false;
+    const reads = text => String(text || '').trim() === lost.text;
+    // Without an id, the task then on screen was a run whose id had not
+    // arrived, which a message typed into it takes for the one
+    // replayed; a run was sent from a tab showing none.
+    const sameTask =
+      lost.taskId === ''
+        ? lost.followUp
+        : String(replay.task_id) === lost.taskId;
+    // Another task reading the same was started by one of these
+    // prompts, if a run is among them: a message starts none.
+    const started =
+      !sameTask &&
+      reads(replay.task) &&
+      (!lost.followUp || lost.ahead.some(p => !p.followUp));
+    const messages = (replay.events || []).filter(
+      e =>
+        e.type === 'prompt' &&
+        e.steer &&
+        reads(e.text) &&
+        !(Array.isArray(e.promptIds) && e.promptIds.length),
+    ).length;
+    return (
+      (started ? 1 : 0) + messages >
+      lost.ahead.length + (sameTask ? lost.sameShown : 0)
+    );
+  }
+
+  /**
+   * Put `prompt` (an entry of unackedPrompts) that did not run back
    * into `tab`'s composer, text and attachments, so the user can fix or
    * resend it instead of retyping.  A composer the user has already
    * started a new draft in (any text or attachment) is left alone.
    */
-  function restoreRefusedPrompt(tab) {
-    if (!tab) return;
-    // The daemon answers a tab's prompts in order: the refusal is the
-    // oldest waiting one's, echoed (a run turned down after its echo)
-    // or not (a run refused unechoed, too long say, or a follow-up).
-    const refused = tab.unackedPrompts.shift();
-    if (!refused) return;
-    const text = refused.text;
-    const files = refused.attachments || [];
+  function putPromptBack(tab, prompt) {
+    const text = prompt.text;
+    const files = prompt.attachments || [];
     const onScreen = tab.id === activeTabId;
     const parked = onScreen ? attachments : tab.attachments || [];
     if (composerTextOf(tab).trim() || parked.length) return;
@@ -26890,6 +28100,7 @@
     clearAskForMatchingChatTabs(tab);
     tab.unackedAnswer = answer;
     tab.unackedQuestion = question;
+    tab.unackedQuestionId = frame.questionId || '';
   }
 
   /**
@@ -27142,6 +28353,8 @@
     if (tab && (tab.modelMachine || '') !== machine) {
       tab.modelMachine = machine;
       selectedModel = tab.selectedModel = known ? known.selected : '';
+      // The hand pick was a model of the machine left.
+      tab.modelPicked = false;
       if (tabBoundMachine(tab.id) !== machine) agentModel = tab.agentModel = '';
     } else if (!moved) {
       return;
@@ -27168,6 +28381,7 @@
     const picked = getTab(activeTabId);
     if (picked) {
       picked.selectedModel = name;
+      picked.modelPicked = true;
       picked.agentModel = '';
     }
     machineModels.set(modelsMachine, {
@@ -27303,18 +28517,12 @@
     return {delBtn: delBtn, confirmWrap: confirmWrap};
   }
 
-  // Expanded-state store for history task panels. Keyed by a stable
-  // per-task key (not the transient session objects) so that the
-  // expanded/collapsed choice survives backend-driven history
-  // re-renders, which always deliver freshly constructed sessions.
+  // Expanded-state store for history task panels. Keyed by the row's
+  // identity (historySessionKey), not the transient session objects,
+  // so that the expanded/collapsed choice survives backend-driven
+  // history re-renders, which always deliver freshly constructed
+  // sessions.
   const historyExpandedTaskKeys = new Set();
-
-  function historyCollapseKey(session) {
-    if (session.task_id) return 'task:' + session.task_id;
-    return (
-      'chat:' + String(session.id || '') + ':' + String(session.timestamp || 0)
-    );
-  }
 
   // The "Show details" chevron of a task panel and of a chat panel.
   const SIDEBAR_COLLAPSE_SVG =
@@ -27326,7 +28534,7 @@
     '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
 
   function makeSidebarCollapseToggle(itemDiv, session) {
-    const key = historyCollapseKey(session);
+    const key = historySessionKey(session);
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'sidebar-item-collapse';
@@ -27443,39 +28651,6 @@
     if (!isFinite(endMs)) return makeLaunchedAgoLabelFor(taskLaunchMs(session));
     const span = makeLaunchedAgoLabelFor(endMs);
     span.title = 'Finished ' + new Date(endMs).toLocaleString();
-    return span;
-  }
-
-  /**
-   * The task's classification tags ("work · coding"), shown right
-   * after its "3 hours ago" label; null when the row has none (a
-   * task still running, or a daemon predating the `tags` column).
-   */
-  function makeTaskTagsLabel(session) {
-    const raw = typeof session.tags === 'string' ? session.tags : '';
-    const tags = raw
-      .split(',')
-      .map(t => t.trim())
-      .filter(Boolean);
-    if (tags.length === 0) return null;
-    const span = document.createElement('span');
-    span.className = 'sidebar-item-tags';
-    span.textContent = tags.join(' · ');
-    span.title = 'Tags: ' + tags.join(', ');
-    return span;
-  }
-
-  /**
-   * The SEA that ran the task, e.g. "write_paper_sea",
-   * shown with the tags; null for a plain run.
-   */
-  function makeTaskSeaLabel(session) {
-    const sea = typeof session.sea === 'string' ? session.sea.trim() : '';
-    if (!sea) return null;
-    const span = document.createElement('span');
-    span.className = 'sidebar-item-sea';
-    span.textContent = sea;
-    span.title = 'SEA: ' + sea;
     return span;
   }
 
@@ -27759,14 +28934,16 @@
   }
 
   /**
-   * Tell the history list which chat and task the page shows now.
+   * Tell the history list which chat and task the page shows now, and
+   * of which machine: the one the chat tab the Task Info rows describe
+   * is bound to (metaInfoChatTabId).
    *
    * @param {object|null} s The task settings the Task Info rows are
    *   painted from (the tab's own task, or the spliced-in neighbour
    *   the reader scrolled to); without them the active tab's own chat
    *   binding and task id stand in.
-   * @returns {boolean} Whether the shown chat or task changed (the
-   *   highlight was repainted).
+   * @returns {boolean} Whether the shown chat, task or machine changed
+   *   (the highlight was repainted).
    */
   function reportVisibleTask(s) {
     const tab = getTab(activeTabId);
@@ -27775,22 +28952,31 @@
       s && s.task_id !== undefined && s.task_id !== null
         ? s.task_id
         : currentTaskId;
-    return setHistoryActiveTask(chatId, taskIdStr(rawTask));
+    return setHistoryActiveTask(
+      chatId,
+      taskIdStr(rawTask),
+      tabBoundMachine(metaInfoChatTabId()),
+    );
   }
 
   /**
-   * Adopt *chatId* / *taskId* as the task the user is looking at and
-   * repaint the history list: the chat's panel and the task's row take
-   * the highlight, and the row (or, in a folded panel, the chat's
-   * header) scrolls into view.  The fold state is untouched: only the
-   * user folds or unfolds a panel.
+   * Adopt *chatId* / *taskId* of *machine* as the task the user is
+   * looking at and repaint the history list: the chat's panel and the
+   * task's row take the highlight, and the row (or, in a folded panel,
+   * the chat's header) scrolls into view.  The fold state is untouched:
+   * only the user folds or unfolds a panel.
    */
-  function setHistoryActiveTask(chatId, taskId) {
-    if (chatId === historyActiveChatId && taskId === historyActiveTaskId) {
+  function setHistoryActiveTask(chatId, taskId, machine) {
+    if (
+      chatId === historyActiveChatId &&
+      taskId === historyActiveTaskId &&
+      machine === historyActiveMachine
+    ) {
       return false;
     }
     historyActiveChatId = chatId;
     historyActiveTaskId = taskId;
+    historyActiveMachine = machine;
     historyActiveScrollPending = true;
     applyHistoryActiveTask();
     return true;
@@ -27812,13 +28998,19 @@
    * bound to its chat before any task ran), the chat's newest row
    * (rows come newest first).  Null without a chat, and null for a
    * named task whose row is not loaded: another task of the chat must
-   * not pass for it.
+   * not pass for it, nor the chat's copy on another machine.
    */
   function historyActiveRow() {
     if (!historyActiveChatId) return null;
     for (let i = 0; i < historyRenderedRows.length; i++) {
       const s = allHistSessions[i];
-      if (!s || String(s.id || '') !== historyActiveChatId) continue;
+      if (
+        !s ||
+        String(s.id || '') !== historyActiveChatId ||
+        sessionMachine(s) !== historyActiveMachine
+      ) {
+        continue;
+      }
       if (!historyActiveTaskId) return historyRenderedRows[i];
       if (taskIdStr(s.task_id) === historyActiveTaskId)
         return historyRenderedRows[i];
@@ -28043,7 +29235,7 @@
     } else if (s.failed) {
       mark.className = 'sidebar-item-failed status-cross';
       label = 'Task failed';
-    } else if (s.task_id && historyJustCompletedTaskIds.has(s.task_id)) {
+    } else if (historyJustCompletedTaskIds.has(historySessionKey(s))) {
       mark.className = 'sidebar-item-completed status-tick';
       label = 'Task completed';
     } else {
@@ -28141,6 +29333,11 @@
    * Show history row *s* in a tab, as clicking its row does: reveal
    * the tab already bound to its chat (scrolled or replayed to the
    * task), or open a new tab that resumes the chat at the task.
+   * A chat that is running (every row says it for its chat:
+   * `chat_running`) is resumed at its running task whichever
+   * row was clicked, and read back to the clicked one (seekSoughtTask):
+   * resumed at an older task, the tab would still be attached to the
+   * live run, whose output would land in that task's transcript.
    * A task with nothing to resume is shown read-only in a fresh tab.
    * A row of a remote machine is resumed the same way, in a tab the
    * daemon binds to that machine (the resume names the machine; the
@@ -28172,13 +29369,13 @@
       // event is persisted: the server reattaches the live chat on replay.
       openHistoryTaskInNewTab(taskText);
       if (resumable) {
-        requestReplay(
-          remoteResume(
-            {id: s.id, taskId: s.task_id, tabId: activeTabId},
-            machine,
-            taskText,
-          ),
-        );
+        const req = {chatId: s.id, tabId: activeTabId};
+        if (s.task_id && !s.is_running && s.chat_running) {
+          getTab(activeTabId).soughtTaskId = String(s.task_id);
+        } else {
+          req.taskId = s.task_id;
+        }
+        requestReplay(remoteResume(req, machine, taskText));
       }
     }
     retireIdleChat(left, false);
@@ -28647,9 +29844,18 @@
     historyMaybeApplyPending();
   });
 
-  /** Stable identity of a history row (its chat and task). */
+  /**
+   * The identity of a history row, the same across re-renders (each
+   * delivers fresh session objects): its machine ('' for this
+   * daemon's rows; a database copied between machines lists the same
+   * chat and task once per machine) and its task or, for a row
+   * without a task id, its chat and time.
+   */
   function historySessionKey(s) {
-    return String(s.id || '') + '\u241f' + taskIdStr(s.task_id);
+    const row = s.task_id
+      ? 'task:' + s.task_id
+      : 'chat:' + String(s.id || '') + ':' + String(s.timestamp || 0);
+    return sessionMachine(s) + '\n' + row;
   }
 
   /**
@@ -28700,6 +29906,20 @@
       dur +
       when
     );
+  }
+
+  /**
+   * Append to *info*, a history row's details, the line reading *parts*
+   * joined by bullets: a span of class *className* with the same text
+   * as its title.  No parts, no line.
+   */
+  function appendHistoryInfoLine(info, className, parts) {
+    if (parts.length === 0) return;
+    const line = document.createElement('span');
+    line.className = className;
+    line.textContent = parts.join(' • ');
+    line.title = line.textContent;
+    info.appendChild(line);
   }
 
   /**
@@ -28797,11 +30017,10 @@
     if (historyPendingFavorites.size === 0) return;
     const now = Date.now();
     sessions.forEach(s => {
-      if (s.task_id === undefined || s.task_id === null) return;
       // A favourite is a write to the row's own machine's database: a
       // row of another machine with the same task id does not
       // acknowledge it.
-      const key = historyFavoriteKey(s);
+      const key = historySessionKey(s);
       const pending = historyPendingFavorites.get(key);
       if (!pending) return;
       // A parked page is merged AGAIN when it finally lands: judge
@@ -28832,15 +30051,6 @@
       s.is_favorite = pending.value;
       scheduleHistoryFavExpiry(pending.ts + 10000 + 100, now);
     });
-  }
-
-  /**
-   * The key of history row *s* in historyPendingFavorites: its task id,
-   * prefixed with its machine for a row of a remote machine.
-   */
-  function historyFavoriteKey(s) {
-    const machine = sessionMachine(s);
-    return machine ? machine + '\n' + s.task_id : String(s.task_id);
   }
 
   /**
@@ -29016,7 +30226,9 @@
 
     const newRunningTaskIds = new Set();
     allHistSessions.forEach(s => {
-      if (s.is_running && s.task_id) newRunningTaskIds.add(s.task_id);
+      if (s.is_running && s.task_id) {
+        newRunningTaskIds.add(historySessionKey(s));
+      }
     });
     historyLastRunningTaskIds.forEach(id => {
       if (!newRunningTaskIds.has(id)) historyJustCompletedTaskIds.add(id);
@@ -29095,7 +30307,7 @@
           // else refreshes the panel, the daemon's value must still
           // reappear at the bound.
           const ts = Date.now();
-          historyPendingFavorites.set(historyFavoriteKey(s), {value: next, ts});
+          historyPendingFavorites.set(historySessionKey(s), {value: next, ts});
           scheduleHistoryFavExpiry(ts + 10000 + 100, ts);
           applyFavState();
           div.dataset.favorite = next ? '1' : '0';
@@ -29134,13 +30346,11 @@
       }
 
       actions.appendChild(makeSidebarCollapseToggle(div, s));
-      // After the buttons: the task's age, then its tags and SEA.
+      // After the buttons: the task's age, then the machine of a
+      // remote task.  Its tags and SEA are not listed here: the Tag
+      // and SEA filters read them from the row's dataset.
       const launchedAgo = makeLaunchedAgoLabel(s);
       if (launchedAgo) actions.appendChild(launchedAgo);
-      const tagsLabel = makeTaskTagsLabel(s);
-      if (tagsLabel) actions.appendChild(tagsLabel);
-      const seaLabel = makeTaskSeaLabel(s);
-      if (seaLabel) actions.appendChild(seaLabel);
       const machineChip = makeTaskMachineLabel(s);
       if (machineChip) actions.appendChild(machineChip);
       div.appendChild(actions);
@@ -29163,14 +30373,7 @@
         const parLabel = s.is_parallel ? 'parallel' : 'sequential';
         parts.push(modelName, parLabel);
       }
-      if (parts.length > 0) {
-        const workspace = document.createElement('span');
-        workspace.className = 'running-item-workspace';
-        const text = parts.join(' • ');
-        workspace.textContent = text;
-        workspace.title = text;
-        info.appendChild(workspace);
-      }
+      appendHistoryInfoLine(info, 'running-item-workspace', parts);
 
       // The TASK INFO panel's machine, Max budget and Agent rows, as
       // one line: the machine the task ran on (this daemon's name for
@@ -29187,14 +30390,7 @@
       }
       const agentText = metaAgentText(s);
       if (agentText !== '\u2014') settingsParts.push('agent ' + agentText);
-      if (settingsParts.length > 0) {
-        const settingsLine = document.createElement('span');
-        settingsLine.className = 'running-item-settings';
-        const text = settingsParts.join(' • ');
-        settingsLine.textContent = text;
-        settingsLine.title = text;
-        info.appendChild(settingsLine);
-      }
+      appendHistoryInfoLine(info, 'running-item-settings', settingsParts);
 
       const chatId = typeof s.id === 'string' ? s.id : '';
       const taskIdText = taskIdStr(s.task_id);
@@ -30424,25 +31620,25 @@
 
   /**
    * The edits posted as `editTrick` whose `tricksData` answers have
-   * not arrived yet, oldest first ({text, newText, error}: the text
-   * the edited row holds on disk as far as the page knows, the text
-   * it should read, and the daemon's rejection once it came).  The
-   * daemon answers them in order.  A new text lives nowhere else once
-   * its editor is closed: a rejection must not lose it.  A row saved
-   * again before its answer is edited under the text the page shows
-   * (the earlier edit's new text, optimistically): `retargetTrickEdits`
-   * keeps such a record naming what the row holds on disk.
+   * not arrived yet, oldest first ({text, newText, error, index,
+   * next}: the text the edited row holds on disk as far as the page
+   * knows, the text it should read, the daemon's rejection once it
+   * came, the row showing the edit until the list that answers it (-1
+   * for none) and the change that row got meanwhile).  The daemon
+   * answers them in order.  A new text lives nowhere else once its
+   * editor is closed: a rejection must not lose it.  A row changed
+   * again before its answer shows a text the daemon may not hold --
+   * a refused rename leaves the row its old text, and ANOTHER row may
+   * hold the new one: the change waits in `next` (the newer text, ''
+   * for a delete, null for none) for the list that tells which text
+   * names the row (`sendNextTrickChange`).
    */
   let pendingTrickEdits = [];
 
-  /**
-   * The row some pending edits name by *from* holds *to* on disk (an
-   * earlier edit of it was accepted, or refused): they name *to* now.
-   */
-  function retargetTrickEdits(from, to) {
-    pendingTrickEdits.forEach(e => {
-      if (e.text === from) e.text = to;
-    });
+  /** Post `editTrick` for the row at *index*, stored as *text*. */
+  function postTrickEdit(text, newText, index) {
+    pendingTrickEdits.push({text, newText, error: '', index, next: null});
+    api.editTrick({text, newText});
   }
 
   /**
@@ -30454,24 +31650,74 @@
     const edit = pendingTrickEdits.find(e => !e.error);
     if (!edit) return;
     edit.error = text || 'The promptlet could not be edited.';
-    // Refused: the row kept its text.
-    retargetTrickEdits(edit.newText, edit.text);
+  }
+
+  /**
+   * The connection dropped and took the answers of the pending edits
+   * with it.  Each stays as an edit the daemon refused: the next list
+   * on disk tells which were applied after all and hands the others
+   * back as drafts (`settleTrickEdit`), and no later error is taken
+   * for their answer (`relayTrickEditError`).
+   */
+  function failPendingTrickEdits() {
+    pendingTrickEdits.forEach(e => {
+      e.error = e.error || 'Not saved: the server connection dropped.';
+    });
   }
 
   /**
    * `tricksData` arrived (and was painted) while edits were pending:
-   * a list reading an edit's new text settles it; the refused ones
-   * get their drafts back (`placeRefusedTrickEdits`).  Any other list
-   * (another window's change) says nothing about the edits yet.
+   * a list reading an edit's new text in place of the old one accepts
+   * it (the new text beside the old one is another row's); the
+   * refused ones get their drafts back (`placeRefusedTrickEdits`),
+   * unless another row reads the draft already or the user changed
+   * its own row again since (saved from a reopened editor, the draft
+   * would overwrite the row's newer text).  Any other list (another
+   * window's change) says nothing about the edits yet.  The rows of
+   * the answered edits then get the changes that waited for the answer.
    */
   function settleTrickEdit(tricks) {
-    const settled = pendingTrickEdits.filter(
-      e => tricks.indexOf(e.newText) >= 0,
+    const accepted = pendingTrickEdits.filter(
+      e => tricks.indexOf(e.newText) >= 0 && tricks.indexOf(e.text) < 0,
     );
-    pendingTrickEdits = pendingTrickEdits.filter(e => !settled.includes(e));
-    // Accepted: the row reads the new text.
-    settled.forEach(e => retargetTrickEdits(e.text, e.newText));
+    const answered = pendingTrickEdits.filter(
+      e => e.next !== null && (e.error || accepted.includes(e)),
+    );
+    pendingTrickEdits = pendingTrickEdits.filter(
+      e =>
+        !accepted.includes(e) &&
+        !(e.error && (e.next !== null || tricks.indexOf(e.newText) >= 0)),
+    );
+    // The list shows what is on disk: an edit still unanswered is of
+    // the row holding its old text, an answered one of no row.  (A row
+    // has one edit pending at a time: its next change waits in `next`,
+    // and a refused draft still waiting leaves when the row changes
+    // again -- dropRefusedTrickDrafts.)
+    pendingTrickEdits.forEach(e => {
+      e.index = e.error ? -1 : tricks.indexOf(e.text);
+    });
     placeRefusedTrickEdits(tricks);
+    for (const e of answered) {
+      const stored = accepted.includes(e) ? e.newText : e.text;
+      sendNextTrickChange(e, stored, tricks);
+    }
+  }
+
+  /**
+   * *edit* was answered, leaving its row *stored* on disk: the change
+   * that row got meanwhile goes out under that text, and shows again.
+   */
+  function sendNextTrickChange(edit, stored, tricks) {
+    const index = tricks.indexOf(stored);
+    const next = edit.next;
+    edit.next = null;
+    if (!next) {
+      if (index >= 0) deleteTrick(index);
+    } else if (next !== stored) {
+      postTrickEdit(stored, next, index);
+      if (index >= 0) tricks[index] = next;
+      renderTricks(tricks);
+    }
   }
 
   /**
@@ -30510,6 +31756,17 @@
   }
 
   /**
+   * The user changed the promptlet stored as *text* again (saved or
+   * deleted it): a refused draft of it that still waits for a place
+   * (`placeRefusedTrickEdits`) is not what its row should read.
+   */
+  function dropRefusedTrickDrafts(text) {
+    pendingTrickEdits = pendingTrickEdits.filter(
+      e => !(e.error && e.text === text),
+    );
+  }
+
+  /**
    * Post `deleteTrick` for the user-owned promptlet at *index* and drop
    * it from the page's list right away: the daemon removes its section
    * from <brand home>/MY_INJECTION.md and answers every window with a fresh
@@ -30517,14 +31774,28 @@
    */
   function deleteTrick(index) {
     const tricks = window.__TRICKS__ || [];
-    api.deleteTrick({text: tricks[index]});
+    // A row whose edit is not answered yet is deleted once it is
+    // (pendingTrickEdits): the text it shows may name another row.
+    const unanswered = pendingTrickEdits.find(e => e.index === index);
+    if (unanswered) {
+      unanswered.next = '';
+    } else {
+      dropRefusedTrickDrafts(tricks[index]);
+      api.deleteTrick({text: tricks[index]});
+    }
     tricks.splice(index, 1);
+    pendingTrickEdits.forEach(e => {
+      if (e.index === index) e.index = -1;
+      else if (e.index > index) e.index -= 1;
+    });
     // The rows below the deleted one move up: an editor open on one of
     // them follows its promptlet, draft kept, as it does when another
     // window deletes (the `tricksData` handler).  The editor row has
-    // Save / Cancel instead of a Delete button, so the edited promptlet
-    // is never the one deleted here.
-    if (index < editingTrickIndex) editingTrickIndex -= 1;
+    // Save / Cancel instead of a Delete button: the edited promptlet
+    // is the one deleted only when the delete waited for an edit's
+    // answer (sendNextTrickChange), and its editor goes with it.
+    if (index === editingTrickIndex) closeTrickEditor();
+    else if (index < editingTrickIndex) editingTrickIndex -= 1;
     window.__MY_TRICKS_COUNT__ = Math.max(
       0,
       (window.__MY_TRICKS_COUNT__ || 0) - 1,
@@ -30583,8 +31854,16 @@
     const text = newText.trim();
     closeTrickEditor();
     if (text && text !== tricks[index]) {
-      pendingTrickEdits.push({text: tricks[index], newText: text, error: ''});
-      api.editTrick({text: tricks[index], newText: text});
+      // A row saved again before its edit is answered waits for the
+      // answer (pendingTrickEdits): on disk, the text it shows may be
+      // another row's.
+      const unanswered = pendingTrickEdits.find(e => e.index === index);
+      if (unanswered) {
+        unanswered.next = text;
+      } else {
+        dropRefusedTrickDrafts(tricks[index]);
+        postTrickEdit(tricks[index], text, index);
+      }
       tricks[index] = text;
     }
     renderTricks(tricks);
@@ -31013,7 +32292,8 @@
   // save (`refused`) stays here until its draft can be placed: while
   // an edit is open, or the user typed into the boxes since (`typed`,
   // set by the settings sheet's input listener, cleared by the next
-  // save), that newer draft stands and the refused one waits.
+  // save), that newer draft stands and the refused one waits; so
+  // does an Add's while the name box holds another draft.
   let pendingCustomModelSaves = [];
   // The Custom Models boxes: the name, and the three shared with the
   // config form's custom-endpoint fields.
@@ -31284,27 +32564,31 @@
   /**
    * Give the refused saves their drafts back, oldest first: an edit
    * reopens on the model it edited with the refused values (gone
-   * meanwhile: nothing to edit), an Add gets its cleared name back.
-   * A draft that cannot be placed yet waits, never lost: an edit is
-   * open (a draft of its own, never overwritten) or the user typed
-   * into the boxes since (a newer Add draft, say) -- the editor's
-   * Save or Cancel, or the next Add, places it.
+   * meanwhile: nothing to edit), an Add gets the boxes it sent back,
+   * all four.  A draft that cannot be placed yet waits, never lost:
+   * an edit is open (a draft of its own, never overwritten), the user
+   * typed into the boxes since (a newer Add draft, say), or the name
+   * box an Add emptied holds a draft again (an earlier refused Add's)
+   * -- the editor's Save or Cancel, or the next Add, places it.
    */
   function placeRefusedCustomModelSaves() {
     for (const pending of pendingCustomModelSaves.filter(p => p.refused)) {
-      if (customModelEditName !== null || pending.typed) return;
+      const isAdd = pending.originalName === null;
+      if (
+        customModelEditName !== null ||
+        pending.typed ||
+        (isAdd && readCustomModelBoxes().name)
+      )
+        return;
       pendingCustomModelSaves.splice(
         pendingCustomModelSaves.indexOf(pending),
         1,
       );
-      if (pending.originalName === null) {
-        const nameInp = document.getElementById('cfg-custom-model-name');
-        if (nameInp && !nameInp.value) nameInp.value = pending.values.name;
-        continue;
+      if (!isAdd) {
+        const model = myModels.find(m => m && m.name === pending.originalName);
+        if (!model) continue;
+        startCustomModelEdit(model);
       }
-      const model = myModels.find(m => m && m.name === pending.originalName);
-      if (!model) continue;
-      startCustomModelEdit(model);
       writeCustomModelBoxes(pending.values);
     }
   }
@@ -31509,6 +32793,12 @@
       document.getElementById('cfg-chrome-bridge'),
       cfg.chrome_bridge === true,
     );
+    // The folder its label tells the user to load in Chrome is the
+    // answering daemon's own; a daemon older than the field (a
+    // registered machine's) has the product's usual one.
+    const extensionDir = el('cfg-chrome-extension-dir');
+    extensionDir.textContent =
+      cfg.chrome_extension_dir || extensionDir.dataset.default;
     // Claude Code bills the subscription unless the user turned it off
     // (user_config.DEFAULTS.claude_code_use_subscription is true).
     setChecked(
@@ -31719,6 +33009,7 @@
       {recent: 'Recent', frequent: 'Frequent', command: 'Commands'},
       item => (q ? '/' + hlMatch(item.text, q) : '/' + esc(item.text)),
       acceptSlashCommand,
+      getSlashCtx,
     );
   }
 
@@ -31811,7 +33102,36 @@
     acIdx = -1;
   }
 
-  function renderAcDropdown(data, order, labels, itemHtml, onAccept) {
+  // What the open popup completes: the getter of the span the caret
+  // is in (getSlashCtx for a command word, getAtCtx for a mention,
+  // getDraftCtx for the draft its suggestions continue; each null when
+  // the caret is in none) and where that span started as the popup
+  // was painted.
+  let acCtx = null;
+  let acStart = -1;
+
+  /** The draft as the span its suggestions continue: the caret ends it. */
+  function getDraftCtx() {
+    return inp.selectionStart >= inp.value.length ? {start: 0} : null;
+  }
+
+  /**
+   * Close the popup once the caret has left what it completes, for no
+   * such span or for another one (the next mention, say).  The caret
+   * moves without an `input` event (an arrow key, Home, a click in the
+   * draft), and an accepted item would then change text the popup was
+   * not painted for.
+   */
+  function closeStaleAC() {
+    if (autocomplete.style.display !== 'block') return;
+    const ctx = acCtx();
+    if (!ctx || ctx.start !== acStart) hideAC();
+  }
+
+  function renderAcDropdown(data, order, labels, itemHtml, onAccept, getCtx) {
+    const ctx = getCtx();
+    acCtx = getCtx;
+    acStart = ctx ? ctx.start : -1;
     autocomplete.innerHTML = '';
     const groups = {};
     data.forEach(item => {
@@ -31874,6 +33194,7 @@
       {frequent: 'Frequent', file: 'Files', home: 'Home'},
       item => (searchQ ? hlMatch(item.text, searchQ) : _acPathHtml(item.text)),
       insertAtMention,
+      getAtCtx,
     );
   }
 
@@ -31938,7 +33259,7 @@
       hideAC();
       return;
     }
-    if (inp.selectionStart < inp.value.length) {
+    if (!getDraftCtx()) {
       hideAC();
       return;
     }
@@ -31953,6 +33274,7 @@
       },
       item => hlMatch(item.text, inp.value),
       acceptCompletion,
+      getDraftCtx,
     );
   }
 
@@ -31974,10 +33296,7 @@
     // longer launching, so no backend event may switch tabs on its own.
     endLaunch: closeLaunchSwitch,
     hideWelcome: function () {
-      if (welcome) {
-        welcome.style.display = 'none';
-        refreshWelcomeLayout();
-      }
+      if (welcome) welcome.style.display = 'none';
     },
     // How much file-link work is still being retained. Both numbers must
     // come back down; see forgetPendingFileLinks().
@@ -31991,6 +33310,11 @@
     // rememberFinishedSubagent().
     finishedSubagentCount: function () {
       return _finishedSubagentTasks.size;
+    },
+    // How many closed sub-agent tabs the page still remembers; bounded
+    // by rememberClosedSubagentTab().
+    closedSubagentTabCount: function () {
+      return _rpClosedSubagentTabs.size;
     },
     // Every open tab, in tab order, with what the webapp tests compare
     // (test/*.test.js, the Playwright suites under tests/webapp).  The

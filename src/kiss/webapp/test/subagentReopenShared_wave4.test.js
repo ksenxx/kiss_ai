@@ -16,12 +16,22 @@
 // panel's sync would close the finished tab again, on every surface).
 // A surface connecting later gets the reopened finished sub-agent
 // announced `reopened` (not `closedHistory`) and opens it too.
+// The announcement of a reopened finished sub-agent counts the
+// reopening (`incarnation`), and a close the page makes by itself says
+// which one it closed: the daemon drops one that a later reopening has
+// overtaken (server.py `_close_tab`).
+//
+// A `subagentDone` is not always the sub-agent's finish: a daemon ends
+// the sub-agent tabs of a remote machine's stream when that stream
+// ends, while the sub-agents run on (remote_tabs.py `_end_stream`).
+// When the machine announces them running again, a surface that saw
+// those ends opens the tabs as a new surface does.
 //
 // Each surface is a page on the same persisted chat tab `parent-sync`,
 // so the daemon frames name the same tab ids on all of them.
 
 const assert = require('assert');
-const {makePreloadedPage, send} = require('./simplify2_harness');
+const {makePreloadedPage, send, snapshotEntry} = require('./simplify2_harness');
 const {
   togglePanel,
   clickClose,
@@ -223,6 +233,180 @@ test('a reopened sub-agent opens on a surface that has not rendered its fan-out'
   );
   assert.deepStrictEqual(shown(d), [child1]);
   d.close();
+});
+
+test('a close the page makes by itself names the tab as the daemon last announced it', () => {
+  const a = makePreloadedPage(PARENT);
+  const run = bootFanOut(a);
+  const [child1] = run.subTabIds;
+  /** The `closeTab` frames page a posted for child 1 after frame *from*. */
+  const closes = from =>
+    a.posted
+      .slice(from)
+      .filter(m => m.type === 'closeTab' && m.tabId === child1);
+
+  // Child 1 finishes: the tab the fan-out opened was never reopened.
+  let from = a.posted.length;
+  finishFanOut(a.win, [child1]);
+  assert.deepStrictEqual(
+    closes(from).map(m => m.incarnation),
+    [0],
+  );
+
+  // The user expands the panel and folds it before the daemon answers:
+  // that close follows the page's own request and names nothing.
+  const resume = reopenByPanel(a, run.panel, 'sub-task-1');
+  from = a.posted.length;
+  togglePanel(a.win, run.panel);
+  assert.deepStrictEqual(
+    closes(from).map(m => 'incarnation' in m),
+    [false],
+  );
+
+  // Expanded again, the daemon's answer and another surface's later
+  // reopening arrive; a fold then closes the tab as last announced.
+  togglePanel(a.win, run.panel);
+  for (const incarnation of [7, 9]) {
+    send(
+      a.win,
+      announcement(resume.tabId, 'sub-task-1', 0, {
+        isDone: true,
+        reopened: true,
+        incarnation,
+      }),
+    );
+  }
+  from = a.posted.length;
+  togglePanel(a.win, run.panel);
+  assert.deepStrictEqual(
+    closes(from).map(m => m.incarnation),
+    [9],
+  );
+  a.close();
+});
+
+test("a sub-agent's end leaves a tab the registry lists for another chat", () => {
+  const a = makePreloadedPage(PARENT);
+  const [child1, child2] = bootFanOut(a).subTabIds;
+  // Another client resumed a chat into child 1's tab id.
+  send(a.win, {
+    type: 'tabs_state',
+    tabs: [
+      snapshotEntry(PARENT, 'parent', 'chat-parent'),
+      snapshotEntry(child1, 'other chat', 'chat-other'),
+    ],
+  });
+  const from = a.posted.length;
+  finishFanOut(a.win, [child1, child2]);
+  assert.deepStrictEqual(closedSince(a, from), [child2]);
+  assert.deepStrictEqual(shown(a), [child1]);
+  a.close();
+});
+
+test("a sub-agent announced running after its stream's end opens where that end closed its tab", () => {
+  const online = makePreloadedPage(PARENT);
+  const fresh = makePreloadedPage(PARENT);
+  const [child1, child2] = bootFanOut(online).subTabIds;
+  const grand = spawnSubagent(online, child1, 'grand-task', 'grand', 0);
+  const live = [
+    announcement(child1, 'sub-task-1', 0, {isDone: false}),
+    announcement(child2, 'sub-task-2', 1, {isDone: false}),
+    announcement(grand, 'grand-task', 0, {
+      isDone: false,
+      parent_tab_id: child1,
+    }),
+  ];
+  // The machine's stream is lost: its sub-agent tabs end.  An
+  // announcement that was in flight then is a late echo.
+  finishFanOut(online.win, [grand, child1, child2]);
+  send(online.win, live[1]);
+  assert.deepStrictEqual(shown(online), [], 'a late echo opens nothing');
+
+  // The chat is opened in the tab again: the machine replays it to
+  // every surface and announces what still runs below it.
+  const back = [
+    {type: 'status', running: true, tabId: PARENT},
+    {
+      type: 'task_events',
+      tabId: PARENT,
+      task: 'fan out',
+      task_id: 'parent-task',
+      events: [{type: 'tool_call', name: 'run_parallel', tabId: PARENT}],
+    },
+    ...live,
+  ];
+  for (const page of [online, fresh])
+    back.forEach(frame => send(page.win, frame));
+  assert.deepStrictEqual(shown(fresh), [child1, child2, grand].sort());
+  assert.deepStrictEqual(
+    shown(online),
+    shown(fresh),
+    'the surface online through the loss shows the same tabs',
+  );
+
+  // The user closes child 2 and the grandchild finishes: neither
+  // announcement, repeated, opens its tab again.
+  clickClose(online.win, child2);
+  send(online.win, live[1]);
+  finishFanOut(online.win, [grand]);
+  send(online.win, live[2]);
+  assert.deepStrictEqual(shown(online), [child1]);
+  online.close();
+  fresh.close();
+});
+
+test('a chat opened in another tab opens its running sub-agent on every surface', () => {
+  // The machine's chat is opened in another tab while it runs: the
+  // daemon ends the sub-agent tabs under the tab that showed it, and
+  // the machine replays the chat into the other tab.
+  const OTHER = 'parent-other';
+  const moved = OTHER + '__sub_sub-task-1';
+  const online = makePreloadedPage(PARENT);
+  const fresh = makePreloadedPage(PARENT);
+  const frames = [
+    {type: 'tabs_state', tabs: [snapshotEntry(PARENT), snapshotEntry(OTHER)]},
+    ...bootFanOut(online).subTabIds.map(tab_id => ({
+      type: 'subagentDone',
+      tab_id,
+    })),
+    {type: 'task_events', tabId: OTHER, task: 'fan out', events: []},
+    announcement(moved, 'sub-task-1', 0, {
+      isDone: false,
+      parent_tab_id: OTHER,
+    }),
+  ];
+  // Any group's running sub-agent tabs: the strip shows one group's.
+  const running = page =>
+    Array.from(page.win._testApi.openTabs())
+      .filter(t => t.isSubagentTab && t.isRunning)
+      .map(t => t.id);
+  for (const page of [online, fresh])
+    frames.forEach(frame => send(page.win, frame));
+  assert.deepStrictEqual(running(fresh), [moved]);
+  assert.deepStrictEqual(running(online), running(fresh));
+  online.close();
+  fresh.close();
+});
+
+test('a reopening, or a reconnect, opens a sub-agent whose stream ended', () => {
+  const page = makePreloadedPage(PARENT);
+  send(page.win, {type: 'daemonStatus', connected: true});
+  const [child1, child2] = bootFanOut(page).subTabIds;
+  finishFanOut(page.win, [child1, child2]);
+  // A user asks for running child 2 again on another surface.
+  send(
+    page.win,
+    announcement(child2, 'sub-task-2', 1, {isDone: false, reopened: true}),
+  );
+  assert.deepStrictEqual(shown(page), [child2]);
+
+  // The page drops off and comes back: the daemon answers its `ready`
+  // with running child 1, ahead of the parent's transcript.
+  send(page.win, {type: 'daemonStatus', connected: false, reconnecting: true});
+  send(page.win, {type: 'daemonStatus', connected: true});
+  send(page.win, announcement(child1, 'sub-task-1', 0, {isDone: false}));
+  assert.deepStrictEqual(shown(page), [child1, child2].sort());
+  page.close();
 });
 
 report('subagentReopenShared_wave4');

@@ -29,8 +29,10 @@ import json
 import os
 import re
 from collections import Counter
+from fnmatch import fnmatchcase
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -1795,16 +1797,45 @@ def _route_pdfjs(context, decide) -> list[str]:
     """Intercept the pdf.js module and worker downloads; ``decide(route,
     n)`` handles the n-th (1-based) request for a file.  Returns the
     requested file names, one entry per request (a retried module import
-    carries a query string, which is dropped here)."""
+    carries a query string, which is dropped here).
+
+    A request counts when the page makes it, not when it is routed: the
+    viewer aborts a worker download nobody waits for any more, and one
+    aborted before Chromium paused it for interception is never routed
+    (Playwright still reports it, and before it routes any later one)."""
     requests: list[str] = []
 
-    def handler(route):
-        name = route.request.url.rsplit("/", 1)[1].split("?")[0]
-        requests.append(name)
-        decide(route, requests.count(name))
+    def count(request):
+        if fnmatchcase(request.url, _PDFJS_BUILD_GLOB):
+            requests.append(_pdfjs_file(request.url))
 
+    def handler(route):
+        decide(route, requests.count(_pdfjs_file(route.request.url)))
+
+    context.on("request", count)
     context.route(_PDFJS_BUILD_GLOB, handler)
     return requests
+
+
+def _pdfjs_file(url: str) -> str:
+    return url.rsplit("/", 1)[1].split("?")[0]
+
+
+def _answer_from_cdn(route) -> None:
+    """Answer *route* with the CDN's reply as Playwright's own HTTP
+    client downloads it, instead of letting the page download it.
+    Chromium fails every transfer it has in flight with
+    ``net::ERR_NETWORK_CHANGED`` when a network interface of this host
+    comes or goes (see ``goto_retrying_network_change``); Playwright's
+    client is not Chromium's and carries on.  Where that client cannot
+    reach the CDN either (no test stages that), the page is left to try
+    and ``_wait_pdf_rendered`` skips."""
+    try:
+        response = route.fetch()
+    except PlaywrightError:
+        route.continue_()
+    else:
+        route.fulfill(response=response)
 
 
 def _open_report_pdf(page) -> None:
@@ -1825,11 +1856,14 @@ def _pdf_note(page) -> str:
 def test_pdf_viewer_retries_a_dropped_cdn_fetch(browser, harness, worktree):
     """A connection that drops under the first download of pdf.js (the
     module or its worker: a network change, not an HTTP error) is retried
-    once, so the page is drawn instead of the tab saying "Cannot display"."""
+    once, so the page is drawn instead of the tab saying "Cannot display".
+    The drop made here uses up that one retry: a real drop under the
+    retry's download would rightly end in "Cannot display", so Playwright
+    does that download (``_answer_from_cdn``)."""
     context, page, frames = _open_page(browser, harness)
     requests = _route_pdfjs(
         context,
-        lambda route, n: route.abort("connectionfailed") if n == 1 else route.continue_(),
+        lambda route, n: route.abort("connectionfailed") if n == 1 else _answer_from_cdn(route),
     )
     try:
         _open_report_pdf(page)

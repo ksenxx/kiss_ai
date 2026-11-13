@@ -12,7 +12,7 @@ watchdog injects ``KeyboardInterrupt`` asynchronously
 bytecodes of the first call.  The accounting state is an APPEND-ONLY
 ledger of immutable ``_UsageEvent`` records: committing is one atomic
 ``list.append``, duplicates of one session share a retry-stable
-``(source, seq)`` identity and count once on read, and a reset swaps in a fresh
+``source`` identity and count once on read, and a reset swaps in a fresh
 ledger with one ``STORE_ATTR``.  No lock, no compare-and-swap — so no
 injection can leak a lock, no delayed writer can overwrite another
 writer's commit, and no reader can observe a torn triple.
@@ -692,7 +692,7 @@ def test_duplicate_ledger_records_count_once() -> None:
     agent._accumulate_usage(executor)
     key = executor.__dict__["_usage_session_key"]
     # Exactly the record a fast-path-bypassing racer would append.
-    agent._usage_ledger.records.append(_UsageEvent(key, 0, 1.25, 100, 3))
+    agent._usage_ledger.records.append(_UsageEvent(key, 1.25, 100, 3))
     assert agent.usage_snapshot() == (1.25, 100, 3)
     assert len(_session_records(agent, executor)) == 2
 

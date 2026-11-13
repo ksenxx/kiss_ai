@@ -242,7 +242,7 @@ class TestPickerSearch:
         reg.stop()
 
     def test_picker_without_any_home_view(self) -> None:
-        picker = Picker(FileIndex.empty("/nowhere").view(""), None, None)
+        picker = Picker(FileIndex.empty().view(""), None, None)
         assert picker.search("", {}) == []
         assert picker.search("~/x", {}) == []
 

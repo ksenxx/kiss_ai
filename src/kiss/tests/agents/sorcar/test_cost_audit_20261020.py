@@ -148,6 +148,7 @@ def _skip_unless_fast_model_is_api_billed() -> None:
     skip_if_no_api_key_for_model(fast)
 
 
+@pytest.mark.live_api
 def test_commit_message_call_is_charged_to_the_task() -> None:
     """The fast model's commit-message call adds its spend to *bill_to*."""
     _skip_unless_fast_model_is_api_billed()
@@ -175,6 +176,7 @@ def _row_cost(task_id: str) -> float:
     return float(row[0])
 
 
+@pytest.mark.live_api
 @pytest.mark.parametrize("retire", ["new_chat", "retire_for_disposal"])
 def test_retiring_a_pending_worktree_charges_the_finished_task(
     tmp_path: Path, retire: str,
@@ -212,6 +214,7 @@ def test_retiring_a_pending_worktree_charges_the_finished_task(
     assert {"type": "tasks_updated"} in printer.events
 
 
+@pytest.mark.live_api
 def test_retiring_without_a_task_row_changes_nothing(tmp_path: Path) -> None:
     """An agent that never saved a row keeps the spend on its counters only."""
     from kiss.tests.agents.sorcar.test_autocommit_notifications import _setup_worktree_agent
@@ -223,6 +226,7 @@ def test_retiring_without_a_task_row_changes_nothing(tmp_path: Path) -> None:
     assert _agent_usage(agent)[0] > 0
 
 
+@pytest.mark.live_api
 def test_retiring_for_a_running_task_leaves_its_row_to_the_final_save(tmp_path: Path) -> None:
     """A row without an end time is still running: its own final save
     reads the live counters, so the row is not charged here."""

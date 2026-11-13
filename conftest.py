@@ -27,9 +27,12 @@ concurrent UDS sockets and subprocesses, surfacing as
 ``socket.accept()`` calls. Bumping the limit here means every pytest
 invocation — CI, local, parallel splits, IDE — gets the higher cap without
 relying on anyone remembering to run ``ulimit -n 4096`` in their shell.
+
+Every run begins with the interpreter it runs on (:func:`pytest_sessionstart`).
 """
 
 import os
+import platform
 import sys
 
 import pytest
@@ -39,18 +42,12 @@ import pytest
 # the root conftest because ``pytest_plugins`` is only honoured here.
 pytest_plugins = ["kiss.tests.subprocess_reaper"]
 
-# Background spare-worktree refills (kiss.agents.sorcar.worktree_pool)
-# must not run during the test suite: they would write worktrees into
-# temporary repositories that tests assert on and tear down.  Set
-# unconditionally — an inherited shell/CI value like "0" or "" must not
-# defeat the gate.  The pool's own tests re-enable it explicitly.
-os.environ["KISS_DISABLE_WORKTREE_POOL"] = "1"
-
 # Pre-run task classification (kiss.agents.sorcar.task_classifier) must
 # not run during the test suite: it would issue an extra real-LLM call
 # before every Sorcar run and could flip worktree/system-prompt behavior
-# that tests assert on.  Set unconditionally, like the worktree-pool
-# gate; the classifier's own tests re-enable it explicitly.
+# that tests assert on.  Set unconditionally — an inherited shell/CI
+# value like "0" or "" must not defeat the gate.  The classifier's own
+# tests re-enable it explicitly.
 os.environ["KISS_DISABLE_TASK_CLASSIFIER"] = "1"
 
 # Target soft limit for RLIMIT_NOFILE. 4096 comfortably covers the full test
@@ -126,3 +123,23 @@ def pytest_addoption(parser: pytest.Parser, pluginmanager: pytest.PytestPluginMa
         dest="_cov_branch_disabled",
         help="No-op fallback used when pytest-cov is disabled via -p no:cov.",
     )
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Print the interpreter as the first line of the run, also under ``-q``.
+
+    On 2026-11-11 a full run and 43 helpers ran the suite on a stray
+    environment's Python 3.14.7 while the fixers ran on the project's
+    3.13.5, and no output showed it: ``-q``, which the split commands
+    use, drops pytest's own header.  With the line on top of every run,
+    two results from two Pythons can be told apart by reading them.
+
+    Args:
+        session: The session that starts; its terminal reporter writes
+            the line (a process without one, an xdist worker, prints
+            nothing).
+    """
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(f"interpreter: {sys.executable} (Python {platform.python_version()})")

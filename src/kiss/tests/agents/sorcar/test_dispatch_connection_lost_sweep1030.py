@@ -31,7 +31,13 @@ from websockets.asyncio.server import ServerConnection
 from websockets.protocol import State
 
 from kiss.agents.sorcar import cron_agent, daemon_client
-from kiss.agents.sorcar.agent_dispatch import DEFAULT_AGENT_PATH, make_run_agent_tool
+from kiss.agents.sorcar.agent_dispatch import (
+    DEFAULT_AGENT_PATH,
+    kill_jobs_of,
+    live_agent_jobs,
+    make_run_agent_tool,
+)
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.tests.agents.sorcar.test_dispatch_stop_cascade import _RecordingDaemon
 from kiss.tests.agents.sorcar.test_dispatch_timeout import _LocalDaemon
 
@@ -53,6 +59,41 @@ def test_a_daemon_dropping_a_running_sub_task_reports_that_it_may_still_run(
     ), out
     assert "closed the connection" in out
     assert out.endswith("it MAY STILL BE RUNNING (and spending) on the daemon."), out
+
+
+def test_a_sub_task_that_may_still_run_stays_a_live_job_of_its_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit 2026-11-12 (B4): the lost connection ended all that stood for the sub-task.
+
+    The job was finished and forgotten: the caller's finish gate named
+    no job before a merge removed the worktree under a sub-task that
+    may still write there, and the budget it may still spend, which
+    nothing charges any more, was shared out again.
+    """
+    daemon = _RecordingDaemon(mode="drop")
+    monkeypatch.setenv("KISS_HOME", str(tmp_path))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
+    parent = SorcarAgent("lost-parent")
+    parent.max_budget = 10.0
+    parent.budget_used = 0.0
+    parent._current_executor = None
+    run_agent = make_run_agent_tool(str(tmp_path), parent)
+    try:
+        out = run_agent("dropped child", DEFAULT_AGENT_PATH, max_budget="4", timeout="30")
+        assert out.endswith("it MAY STILL BE RUNNING (and spending) on the daemon."), out
+        (job,) = live_agent_jobs(parent)
+        assert job.finished and job.reported and job.result == out
+        refusal = parent._block_finish_with_live_jobs("commit_and_merge", {})
+        assert refusal is not None and job.job_id in refusal
+        # Its $4 stay reserved: the next sub-task's share is half of the $6 left.
+        run_agent("next child", DEFAULT_AGENT_PATH, timeout="30")
+        assert daemon.run_cmd is not None
+        assert float(daemon.run_cmd["maxBudget"]) == pytest.approx(3.0)
+    finally:
+        daemon.close()
+        kill_jobs_of(parent)
 
 
 def test_only_a_failure_after_the_run_was_sent_is_a_lost_connection(tmp_path: Path) -> None:

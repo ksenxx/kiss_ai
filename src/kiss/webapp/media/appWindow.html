@@ -15,7 +15,9 @@
   appWindow.js last saved for it (localStorage, same origin as this
   page), else this window's own.  Should the popup be blocked, this
   window shows the webapp itself.  ?title= names this window while it
-  is on screen.
+  is on screen.  ?url= is opened only when it is a page of this daemon
+  (kiss-app's always is): any site can link here, and a javascript:
+  URL would run as the daemon's page, any other URL leave it.
 
   The page first asks the daemon whether the popup is connected
   already (/api/app-window) and, if so, only closes itself: it is then
@@ -47,7 +49,7 @@
       var params = new URLSearchParams(location.search);
       var url = params.get('url');
       document.title = params.get('title') || '';
-      if (!url) return;
+      if (!url || new URL(url, location.href).origin !== location.origin) return;
 
       function savedBounds() {
         var bounds = null;
@@ -59,6 +61,8 @@
         return bounds && bounds.width > 0 && bounds.height > 0 ? bounds : null;
       }
 
+      // Outer sizes on purpose: the opener is kiss-app's --app window or its popup,
+      // and Chromium sizes a popup of either by its window, not its content area.
       function popupFeatures(bounds) {
         if (!bounds || !(bounds.width > 0) || !(bounds.height > 0)) return 'popup';
         return 'popup,left=' + bounds.left + ',top=' + bounds.top +

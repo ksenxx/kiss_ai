@@ -12,12 +12,14 @@
 // here through real touch events on a jsdom document:
 //
 //   * a fast sideways drag of SWIPE_MIN_PX (60) or more is a swipe,
-//     'left' when the finger moved right to left;
+//     'left' when the finger moved right to left; the touch event
+//     that ended it comes with it;
 //   * a short, slow, or mostly vertical drag is not;
 //   * a touch that starts inside an `ignore` element is not;
 //   * a second finger (pinch) cancels the touch;
 //   * a sideways scroller that moved, or a `scrollPositions()` entry
-//     that changed, means the finger scrolled;
+//     that changed, means the finger scrolled, also when it is back
+//     where it started as the finger lifts;
 //   * a selection made during the touch is a selection;
 //   * touchcancel forgets the touch;
 //   * bootstrapHtml() carries the detector into a preview document and
@@ -63,12 +65,20 @@ function testSwipeRules() {
   const doc = win.document;
   const page = doc.getElementById('page');
   const swipes = [];
-  win.MobileSwipe.install(doc, (dir, e) => swipes.push([dir, e.type]));
+  let ended = null;
+  win.MobileSwipe.install(doc, (dir, e) => {
+    swipes.push(dir);
+    ended = e;
+  });
 
   drag(win, page, 300, 100, 100, 110);
-  assert.deepStrictEqual(swipes, [['left', 'touchend']], 'right-to-left is left');
+  assert.deepStrictEqual(swipes, ['left'], 'right-to-left is left');
+  // main.js reads where the finger went down from the event that ended
+  // the swipe: on a streamed browser page the daemon has a say.
+  assert.strictEqual(ended && ended.type, 'touchend');
+  assert.strictEqual(ended.target, page, 'where the finger went down');
   drag(win, page, 100, 100, 200, 100);
-  assert.deepStrictEqual(swipes[1], ['right', 'touchend'], 'left-to-right is right');
+  assert.strictEqual(swipes[1], 'right', 'left-to-right is right');
 
   drag(win, page, 100, 100, 150, 100);
   assert.strictEqual(swipes.length, 2, 'a 50px drag is too short');
@@ -145,8 +155,23 @@ function testIgnoreAndScrollers() {
   touchEvent(win, 'touchend', inner, [], [point(100, 100)]);
   assert.deepStrictEqual(swipes, ['left'], 'an unscrolled scroller still swipes');
 
-  // A scroll position the DOM cannot report (Monaco) that changed.
+  // Out and back: the scroller (seen by its scroll event) or the
+  // position (seen by a move) is where it started when the finger lifts.
   const plain = doc.getElementById('plain');
+  touchEvent(win, 'touchstart', inner, [point(200, 100)]);
+  wide.scrollLeft += 80;
+  wide.dispatchEvent(new win.Event('scroll'));
+  wide.scrollLeft -= 80;
+  touchEvent(win, 'touchend', inner, [], [point(280, 100)]);
+  wide.dispatchEvent(new win.Event('scroll')); // no finger down: nothing
+  touchEvent(win, 'touchstart', plain, [point(200, 100)]);
+  positions = [80];
+  touchEvent(win, 'touchmove', plain, [point(120, 100)]);
+  positions = [0];
+  touchEvent(win, 'touchend', plain, [], [point(280, 100)]);
+  assert.deepStrictEqual(swipes, ['left'], 'a scroll out and back is a scroll');
+
+  // A scroll position the DOM cannot report (Monaco) that changed.
   touchEvent(win, 'touchstart', plain, [point(300, 100)]);
   positions = [40];
   touchEvent(win, 'touchend', plain, [], [point(100, 100)]);

@@ -21,14 +21,12 @@
 // * body.content-tab-open (a file/page tab in front) keeps the
 //   composer's button row (+ and ...) while hiding the text box and
 //   the chat-only controls (Inject promptlet, model picker, Send);
-// * Stop, Share and a voice submit on a content tab act on the chat
-//   that owns it.
+// * Stop, Share and a voice submit on the file screen act on the chat
+//   the user swiped in from, whichever chat owns the file.
 
 'use strict';
 
 const assert = require('assert');
-
-const POLL_MS = 5000;
 
 const {
   makePage: makeChatPage,
@@ -38,33 +36,54 @@ const {
   fakeMatchMedia,
   click,
   byId,
+  ofType,
+  plain,
+  withTeardown,
 } = require('./simplify2_harness');
 const {installTokenisedCss} = require('./designTokens');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {
+  POLL_MS,
   drawerOpen,
   overlayOpen,
   pollCount,
   lastPoll,
+  replyToPoll,
 } = require('./remote_drawer_helpers');
+const {chatTabs} = require('./history_helpers');
+const {swipeLeftToFileScreen} = require('./subagent_tab_helpers');
+const {
+  VOICE_CFG,
+  voicePageState,
+  stubVoiceSurface,
+  startMic,
+  speakRound,
+} = require('./voice_page_helpers');
+const {trackWindow, closeWindows} = require('./workdir_helpers');
 
-const runner = makeRunner();
-const report = runner.report;
-const openWindows = [];
+const {test: runTest, report} = makeRunner();
+// Each test's windows are closed once it has settled.
+const test = withTeardown(runTest, closeWindows);
 
-/** Run one test through the shared runner, then close its windows. */
-async function test(name, fn) {
-  await runner.test(name, fn);
-  while (openWindows.length) openWindows.pop().close();
-}
-
-function makePage(desktop = false) {
+/**
+ * The remote page.  With *voice* (a voicePageState record) the real
+ * voice.js runs too, over a stubbed microphone, its mic remembered ON.
+ */
+function makePage(desktop = false, voice = null) {
   let timers;
   const {win, posted} = makeChatPage({
     bodyClass: 'remote-chat',
-    extraScripts: ['marked.min.js'],
-    sourceUrl: 'remote-mobile-main.js',
+    extraScripts: ['marked.min.js', 'mobileSwipe.js'].concat(
+      voice ? ['voice.js'] : [],
+    ),
+    // Named for sidebarChatModeDrawerAndComposer.coverage.js.
+    sourceUrl: 'filechat-main.js',
     beforeScripts(win) {
+      if (voice) {
+        stubVoiceSurface(win, voice);
+        win.__VOICE__ = Object.assign({}, VOICE_CFG);
+        win.localStorage.setItem('kissVoiceEnabled', '1');
+      }
       // A phone-sized window (no media query matches, so the task-info
       // panel is a drawer and the history sidebar slides in from the
       // burger), or a desktop-sized one when *desktop* is true.
@@ -72,40 +91,9 @@ function makePage(desktop = false) {
       timers = fakeIntervals(win);
     },
   });
-  openWindows.push(win);
+  trackWindow(win);
+  if (voice) Object.assign(voice, {win, posted});
   return {win, posted, tick: timers.tick, intervals: timers.intervals};
-}
-
-/** A taskUpdate reply answering *poll*, with the given overrides. */
-function reply(win, poll, fields) {
-  send(
-    win,
-    Object.assign(
-      {
-        type: 'taskUpdate',
-        tabId: poll.tabId,
-        token: poll.token,
-        taskId: 'task-1',
-        exists: true,
-        sig: '',
-        content: '',
-        error: '',
-        running: false,
-        cost: 0,
-        updatedAt: 0,
-      },
-      fields,
-    ),
-  );
-}
-
-function chatTabs(win) {
-  // The chat tabs the window holds.  They have no row of their own
-  // (the Chats panel picks them; the strip only lists the group of the
-  // chat on screen), so the tab records are the source.
-  return Array.from(win._testApi.openTabs()).filter(
-    t => !t.isContentTab && !t.isSubagentTab,
-  );
 }
 
 function display(win, id) {
@@ -152,6 +140,47 @@ function burgerAndToggleDisplay(desktop) {
 
 function taskPanelText(win) {
   return win.document.querySelector('#output .task-panel-text').textContent;
+}
+
+/**
+ * The chat on screen opens the file *name*; the user moves on to a new
+ * chat and swipes left: the first chat's file is on the file screen,
+ * reached from the second.  *beforeSwipe(owner, chat)* runs on the
+ * second chat's screen.
+ */
+function swipeToFileOfAnotherChat(win, name, beforeSwipe) {
+  const api = win._testApi;
+  // Past the launch, a running status no longer moves the screen.
+  api.endLaunch();
+  const owner = api.getActiveTabId();
+  send(win, {
+    type: 'fileContent',
+    tabId: owner,
+    name: name,
+    path: '/tmp/' + name,
+    content: name,
+  });
+  const file = api.getActiveTabId();
+  assert.notStrictEqual(file, owner, 'the file tab is in front');
+  api.createNewTab();
+  const chat = api.getActiveTabId();
+  if (beforeSwipe) beforeSwipe(owner, chat);
+  swipeLeftToFileScreen(win);
+  assert.strictEqual(api.getActiveTabId(), file, 'the swipe shows the file');
+  return {owner, chat, file};
+}
+
+/** The tabs the page asked the daemon to stop. */
+function stopsPosted(posted) {
+  return ofType(posted, 'stop').map(m => m.tabId);
+}
+
+/** The daemon's tab registry now lists the chat tabs *ids*. */
+function registryLists(win, ids) {
+  send(win, {
+    type: 'tabs_state',
+    tabs: ids.map(id => ({tabId: id, chatId: '', title: 'new chat'})),
+  });
 }
 
 async function main() {
@@ -231,8 +260,11 @@ async function main() {
         config: {work_dir: '/cfg/dir', max_budget: 42},
         apiKeys: {},
       });
+      // An open drawer with no running task has nothing to poll for.
+      click(win, byId(win, 'meta-drawer-btn'));
       wv.tick(POLL_MS * 2);
       assert.strictEqual(pollCount(wv), 0, 'no task, no poll');
+      click(win, byId(win, 'meta-close'));
       send(win, {type: 'status', running: true});
       wv.tick(POLL_MS * 2);
       assert.strictEqual(pollCount(wv), 0, 'a closed drawer must not poll');
@@ -252,7 +284,7 @@ async function main() {
       // The poll's shape and the reply handling (sig, unchanged,
       // sanitising, exists:false, the refresh button) are the same code
       // as on the docked panel: remoteMetaPanelInfo.test.js.
-      reply(win, poll, {
+      replyToPoll(win, poll, {
         sig: '5:9',
         content: 'working on **it**\n',
         updatedAt: Date.now(),
@@ -323,7 +355,7 @@ async function main() {
     );
     const resume = posted.filter(m => m.type === 'resumeSession').pop();
     assert.ok(resume, 'the fresh tab resumes the chat');
-    assert.strictEqual(resume.id, 'chat-far');
+    assert.strictEqual(resume.chatId, 'chat-far');
     assert.strictEqual(resume.taskId, 7);
     assert.strictEqual(
       taskPanelText(win),
@@ -397,15 +429,15 @@ async function main() {
         'the model picker hides',
       );
       assert.strictEqual(display(win, 'send-btn'), 'none', 'Send hides');
-      // Stop is NOT hidden by the content-tab CSS: while the owning
-      // chat runs, its inline display keeps the button reachable to
-      // stop the task from the file view.
+      // Stop is NOT hidden by the content-tab CSS: while the chat
+      // behind the file runs, its inline display keeps the button
+      // reachable to stop the task from the file view.
       const stop = win.document.getElementById('stop-btn');
       stop.style.display = 'flex';
       assert.strictEqual(
         display(win, 'stop-btn'),
         'flex',
-        'Stop stays reachable when the owner chat runs',
+        'Stop stays reachable when the chat behind the file runs',
       );
       stop.style.display = 'none';
       // A composer hidden with an INLINE display:none (a finished
@@ -431,56 +463,126 @@ async function main() {
   );
 
   await test(
-    'Stop clicked on a content tab stops the OWNING chat, and the ' +
-      "button mirrors that chat's running state",
+    'Stop on the file screen acts on the chat swiped in from, not on ' +
+      "the file's owner: it shows, stops and pulses for that chat's run",
     () => {
       const {win, posted} = makePage();
       const api = win._testApi;
-      const chatId = api.getActiveTabId();
-      send(win, {type: 'status', running: true, tabId: chatId});
-      send(win, {
-        type: 'fileContent',
-        tabId: chatId,
-        name: 'notes_stop.txt',
-        path: '/tmp/notes_stop.txt',
-        content: 'stop target body',
-      });
-      const contentId = api.getActiveTabId();
-      assert.notStrictEqual(contentId, chatId, 'the file tab is in front');
+      const stop = byId(win, 'stop-btn');
+      // The owner runs; the chat the user swipes in from is idle.
+      const {owner, chat, file} = swipeToFileOfAnotherChat(
+        win,
+        'notes_stop.txt',
+        ownerId => send(win, {type: 'status', running: true, tabId: ownerId}),
+      );
       assert.strictEqual(
-        win.document.getElementById('stop-btn').style.display,
+        stop.style.display,
+        'none',
+        "no Stop for the owner's run: the chat swiped in from is idle",
+      );
+      send(win, {type: 'status', running: true, tabId: chat});
+      assert.strictEqual(api.getActiveTabId(), file, 'the file stays');
+      assert.strictEqual(
+        stop.style.display,
         'flex',
-        'Stop shows on the file tab while the owner chat runs',
+        'Stop shows once the chat swiped in from runs',
       );
       posted.length = 0;
-      click(win, byId(win, 'stop-btn'));
-      const stop = posted.find(m => m.type === 'stop');
-      assert.ok(stop, 'the click posts a stop');
-      assert.strictEqual(
-        stop.tabId,
-        chatId,
-        'the stop lands on the owning chat, not on the file view id',
+      click(win, stop);
+      assert.deepStrictEqual(
+        stopsPosted(posted),
+        [chat],
+        'the stop lands on the chat swiped in from',
       );
-      // The owner idle: a later content-tab show hides Stop again.
-      send(win, {type: 'status', running: false, tabId: chatId});
-      send(win, {
-        type: 'fileContent',
-        tabId: chatId,
-        name: 'notes_stop2.txt',
-        path: '/tmp/notes_stop2.txt',
-        content: 'second file',
-      });
+      assert.ok(
+        stop.classList.contains('stopping'),
+        'its pending stop pulses on the file screen',
+      );
+      send(win, {type: 'status', running: false, tabId: chat});
+      assert.strictEqual(stop.style.display, 'none', 'and goes with its run');
+
+      // That chat closes on another surface: the screen is handed to
+      // the file's owner (the chat a swipe back now returns to), whose
+      // run Stop then shows and stops.
+      registryLists(win, [owner, chat]);
+      registryLists(win, [owner]);
+      assert.strictEqual(api.getActiveTabId(), file, 'the file stays');
       assert.strictEqual(
-        win.document.getElementById('stop-btn').style.display,
-        'none',
-        'no Stop on a file tab whose owner chat is idle',
+        stop.style.display,
+        'flex',
+        'Stop shows the run of the chat the screen was handed to',
+      );
+      posted.length = 0;
+      click(win, stop);
+      assert.deepStrictEqual(stopsPosted(posted), [owner]);
+      send(win, {type: 'status', running: false, tabId: owner});
+      assert.strictEqual(stop.style.display, 'none', 'until that run ends');
+      assert.ok(
+        !stop.classList.contains('stopping'),
+        'and its pending stop ends with the run',
+      );
+    },
+  );
+
+  await test(
+    "the file screen's Browser button stays with the file's own chat; " +
+      'with no chat left behind the file there is nothing to stop or share',
+    () => {
+      const {win, posted} = makePage();
+      const browser = byId(win, 'browser-btn');
+      // The file's own chat works on the machine `box`, the chat the
+      // user swipes in from on this one.
+      const {owner, chat, file} = swipeToFileOfAnotherChat(
+        win,
+        'notes_box.txt',
+        ownerId => {
+          send(win, {
+            type: 'machines',
+            machines: [
+              {name: 'here', local: true, status: 'reachable'},
+              {name: 'box', label: 'Box', status: 'reachable'},
+            ],
+            checkedAt: 1,
+          });
+          send(win, {type: 'tabMachine', tabId: ownerId, machine: 'box'});
+        },
+      );
+      click(win, browser);
+      assert.deepStrictEqual(
+        plain(ofType(posted, 'browserOpen')),
+        [{type: 'browserOpen', url: '', machine: 'box'}],
+        "the page opens where the file's own chat works",
+      );
+
+      // Both chats close on another surface while they run.
+      send(win, {type: 'status', running: true, tabId: owner});
+      send(win, {type: 'status', running: true, tabId: chat});
+      registryLists(win, [owner, chat]);
+      registryLists(win, []);
+      assert.strictEqual(win._testApi.getActiveTabId(), file, 'the file stays');
+      assert.strictEqual(chatTabs(win).length, 0, 'setup: no chat is left');
+      assert.strictEqual(byId(win, 'stop-btn').style.display, 'none');
+      posted.length = 0;
+      click(win, byId(win, 'share-btn'));
+      assert.deepStrictEqual(ofType(posted, 'shareChatTasks'), []);
+      assert.ok(
+        Array.from(win.document.querySelectorAll('.kiss-notification')).some(
+          el => el.textContent.includes('this tab has no chat to share'),
+        ),
+        'Share says there is no chat to share',
+      );
+      click(win, browser);
+      assert.deepStrictEqual(
+        plain(ofType(posted, 'browserOpen')),
+        [{type: 'browserOpen', url: ''}],
+        'the page opens on this machine',
       );
     },
   );
 
   await test(
     'Stop on a file opened FROM a file view, and the pending pulse, ' +
-      'follow the chat at the root of the owner chain',
+      'follow the chat the file screen was reached from',
     () => {
       const {win, posted} = makePage();
       const api = win._testApi;
@@ -496,7 +598,8 @@ async function main() {
       const fileA = api.getActiveTabId();
       assert.notStrictEqual(fileA, chatId);
       // Opening a file FROM the file view chains the ownership:
-      // B -> A -> chat. Every chat-scoped action lands on the chat.
+      // B -> A -> chat. The screen still stands for the chat it was
+      // reached from.
       send(win, {
         type: 'fileContent',
         tabId: fileA,
@@ -518,7 +621,7 @@ async function main() {
       assert.strictEqual(
         stopMsg.tabId,
         chatId,
-        'the stop lands on the chat at the root of the owner chain',
+        'the stop lands on the chat the file screen was reached from',
       );
       assert.ok(
         stop.classList.contains('stopping'),
@@ -528,67 +631,62 @@ async function main() {
   );
 
   await test(
-    'Share chat clicked on a content tab exports the OWNING chat: the ' +
-      'chat comes back on screen and the share names its id',
+    'Share chat clicked on the file screen exports the chat swiped in ' +
+      "from, not the file's owner: that chat comes back on screen and " +
+      'the share names its id',
     () => {
       const {win, posted} = makePage();
-      const api = win._testApi;
-      const chatId = api.getActiveTabId();
-      send(win, {
-        type: 'fileContent',
-        tabId: chatId,
-        name: 'notes_share.txt',
-        path: '/tmp/notes_share.txt',
-        content: 'share target body',
-      });
-      assert.notStrictEqual(api.getActiveTabId(), chatId);
+      const {chat} = swipeToFileOfAnotherChat(win, 'notes_share.txt');
       posted.length = 0;
       click(win, byId(win, 'share-btn'));
       assert.strictEqual(
-        api.getActiveTabId(),
-        chatId,
-        'the owning chat is back on screen (the export splices the ' +
-          'LIVE transcript, which only exists there)',
+        win._testApi.getActiveTabId(),
+        chat,
+        'the chat swiped in from is back on screen (the export splices ' +
+          'the LIVE transcript, which only exists there)',
       );
       const share = posted.find(m => m.type === 'shareChatTasks');
       assert.ok(share, "the click asks for the chat's persisted tasks");
-      assert.strictEqual(share.tabId, chatId);
-      assert.strictEqual(share.chatId, chatId);
+      assert.strictEqual(share.tabId, chat);
+      assert.strictEqual(share.chatId, chat);
     },
   );
 
   await test(
-    'a voice submit landing on a content tab posts under the OWNING ' +
-      'chat, never under the file view',
-    () => {
-      const {win, posted} = makePage();
+    'words spoken on the file screen join the draft of the chat swiped ' +
+      "in from and are sent to it, never to the file's owner",
+    async () => {
+      const voice = voicePageState({});
+      const {win, posted} = makePage(false, voice);
       const api = win._testApi;
-      const chatId = api.getActiveTabId();
-      send(win, {
-        type: 'fileContent',
-        tabId: chatId,
-        name: 'notes_voice.txt',
-        path: '/tmp/notes_voice.txt',
-        content: 'voice target body',
-      });
-      assert.notStrictEqual(api.getActiveTabId(), chatId);
-      assert.strictEqual(
-        win.kissVoiceOwner().tabId,
-        chatId,
-        'an utterance started on the file tab is owned by the chat',
+      const input = byId(win, 'task-input');
+      input.value = 'draft of the owner QX1';
+      const {owner, chat} = swipeToFileOfAnotherChat(
+        win,
+        'notes_voice.txt',
+        () => {
+          input.value = 'draft of the chat QX1';
+        },
       );
-      win.document.getElementById('task-input').value = 'voice prompt QX1';
+      await startMic(voice);
+      const round = speakRound(voice);
       posted.length = 0;
-      win.dispatchEvent(new win.CustomEvent('kiss-voice-submit'));
+      send(win, {type: 'voiceSpeech', text: 'spoken QX1', round});
+      assert.deepStrictEqual(
+        ofType(posted, 'submit').map(m => [m.tabId, m.prompt]),
+        [[chat, 'draft of the chat QX1 spoken QX1']],
+      );
       assert.strictEqual(
         api.getActiveTabId(),
-        chatId,
-        'the submit brings the conversation back on screen',
+        chat,
+        'the chat swiped in from is back on screen',
       );
-      const submit = posted.find(m => m.type === 'submit');
-      assert.ok(submit, 'the prompt is submitted');
-      assert.strictEqual(submit.tabId, chatId);
-      assert.strictEqual(submit.prompt, 'voice prompt QX1');
+      api.switchToTab(owner);
+      assert.strictEqual(
+        input.value,
+        'draft of the owner QX1',
+        "the file's owner keeps its draft",
+      );
     },
   );
 

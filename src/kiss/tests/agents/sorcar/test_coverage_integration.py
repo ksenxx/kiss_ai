@@ -25,18 +25,15 @@ class TestTaskHistory(TestCase):
         self.tmpdir = Path(tempfile.mkdtemp())
         kiss_dir = self.tmpdir / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved = (th._DB_PATH, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
 
     def tearDown(self) -> None:
         from kiss.agents.sorcar import persistence as th
 
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
+        th._close_thread_db()
+        (th._DB_PATH, th._KISS_DIR) = self._saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_search_history_empty_query(self) -> None:

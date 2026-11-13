@@ -767,15 +767,39 @@ has fired ("tell me *when* X happens") is
 stored with `until_delivered` (`--until-delivered` on the CLI): the job disables itself
 after its first successfully delivered non-silent result, also when `run_now` triggered
 it, instead of repeating the same news every tick; `run_now` on a job whose run is
-still in progress in the same `kiss-cron` process is refused (the running-job registry
-is process-local, so a `kiss-cron --tick` or `--run` in another process can still
-overlap it). Creating a job whose prompt or command, directory,
-schedule, and delivery targets match a scheduled or paused one is refused with a
-pointer to the existing job (a job that has finished for good — a one-shot that ran or
-an `until_delivered` poll that fired — is not a duplicate, so it can be scheduled
-again). Prompt jobs are unattended: every `run_agent` or `run_parallel` child they start
-inherits the rule never to ask questions or wait for approval; when blocked, the child
-reports the blocker in its summary and finishes. The daemon decides that a run is
+still in progress is refused, in the same `kiss-cron` process (the running-job
+registry) and in another one over the same store: every run holds the job's run
+lock, the file `~/.kiss/cron/locks/<job_id>.lock` (`cron_agent._job_run_lock`),
+taken under the store lock at the launch and held until the run's outcome is
+recorded, so a `kiss-cron --tick` or `--run` in another process leaves the job
+alone while that run lasts (`cron_agent._running_elsewhere` probes the lock). The
+lock is the open file's, so it ends with the process holding it, however that
+process dies, and nothing stale is left on the job; the lock files themselves stay,
+like the output logs. A prompt job's unfinished daemon task is remembered on the job
+(`running_task_id`, `cron_agent._claimed_task_id`), so the job is not launched
+again while that task runs. A run whose thread could not start is recorded on the
+job (`last_status` `error`, `last_summary` `could not start: <error>`) rather than
+left as a silent gap in the log. A command job runs in its own process group with an
+empty stdin (nobody answers an unattended command) and a marker variable
+`KISS_CRON_RUN_<hex>=1` in its environment that no other process has: when the run
+is killed, the descendants that left the process group and the parent chain (a
+`setsid` child of a shell that has exited) are found by that mark in `/proc` and
+killed too (`cron_agent._kill_marked`, Linux only). Ctrl-C in a `kiss-cron --tick`
+or `--daemon` stops the runs in progress rather than abandoning them
+(`cron_agent._stop_runs`): each run thread gets a `KeyboardInterrupt`, on which a
+command job's process tree (in its own process group, out of the terminal's SIGINT)
+is killed and reaped and a prompt job's task is sent Stop, and the process waits up
+to 40 seconds (`_STOP_RUNS_GRACE_SECONDS`) for them before exiting. Creating a job
+whose prompt or command, directory, schedule, and delivery targets match a scheduled
+or paused one is refused with a pointer to the existing job (a job that has finished
+for good — a one-shot that ran or an `until_delivered` poll that fired — is not a
+duplicate, so it can be scheduled again). Resuming a paused job that has no next run
+recomputes one from its schedule; a one-shot that already ran (`one-shot job '<id>'
+already ran; create a new job instead`) and a schedule with no run left (`schedule
+'<schedule>' never fires (in the past?)`) are refused, as is a new job with such a
+schedule. Prompt jobs are unattended: every `run_agent` or `run_parallel` child they
+start inherits the rule never to ask questions or wait for approval; when blocked, the
+child reports the blocker in its summary and finishes. The daemon decides that a run is
 unattended from the task text as submitted (the cron preamble at its start, or the
 child preamble at its end) and stamps the verdict on the agent before any SEA
 `prompt()` rewrites the text, so a scheduled slash command whose SEA replaces its task
@@ -824,10 +848,12 @@ What a prompt job's run is given, and what the scheduler does around it
   bot-authenticated job is never skipped as "not connected". A missing or
   corrupt key file is ignored and the Composio status decides.
 - *Repeated-failure back-off.* A run that fails with the same first non-blank line
-  (whitespace-trimmed) as the previous failed run (a job's run ends `ok`, `silent` or
-  `error`; a timeout is an `error` too) is a repeat: it is not delivered again, the
-  job's `failure_streak` grows, and an enabled job's next run is pushed to at least
-  1 h × 2^(streak − 1) from now, capped at 24 h (`failure_backoff_seconds`). The
+  (whitespace-trimmed, compared within the first 4,000 characters the store keeps of
+  a result, `MAX_STORED_SUMMARY_CHARS`) as the previous failed run (a job's run ends
+  `ok`, `silent` or `error`; a timeout is an `error` too) is a repeat: it is not
+  delivered again, the job's `failure_streak` grows, and an enabled job's next run is
+  pushed to at least 1 h × 2^(streak − 1) from now, capped at 24 h
+  (`failure_backoff_seconds`). The
   back-off is a lower bound, not a new schedule: `next_run_at` becomes the later of
   its current value and now + back-off, so a run already scheduled further out stays
   put, and a broken job pages you once and then retries no more often than hourly,
@@ -889,10 +915,12 @@ starts no LLM session and costs no tokens, whereas a prompt job would start a pa
 session on every tick and post status chatter such as "tick-OK" into the chat. The
 cron agent enforces this: it refuses a prompt job whose text describes a gateway
 tick, and a command job it recognizes as a gateway tick (a `kiss-<channel>` launcher
-with `--channel`) is stored with its messaging-channel delivery targets replaced by
-`none` (a `local` delivery stays), with a note saying why; gateway jobs created before
-this rule existed are normalized the same way when the store is loaded. Ticks that
-served messages or failed are still logged under `~/.kiss/cron/output/<job_id>.md`.
+with `--channel`; the launcher may be bare, prefixed by a path, or looked up as
+`$(command -v kiss-slack)`) is stored with its messaging-channel delivery targets
+replaced by `none` (a `local` delivery stays), with a note saying why; gateway jobs
+created before this rule existed are normalized the same way when the store is
+loaded. Ticks that served messages or failed are still logged under
+`~/.kiss/cron/output/<job_id>.md`.
 
 > Find the chat ID of my Telegram group "Sen family" from the bot's recent updates,
 > then schedule a gateway tick of that chat with pairing every 2 minutes.

@@ -62,6 +62,7 @@ from kiss.core.models.codex_model import CodexModel
 from kiss.core.models.gemini_model import (
     GeminiModel,
     _AbortableStream,
+    _media_block_to_part,
     _ResponseTrackingHttpxClient,
 )
 from kiss.core.models.model import (
@@ -69,6 +70,7 @@ from kiss.core.models.model import (
     _AUDIO_MIME_TO_EXT,
     _AUDIO_MIME_TO_FORMAT,
     Attachment,
+    _audio_format_to_mime,
     _audio_mime_to_format,
 )
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
@@ -424,6 +426,19 @@ class TestCanonicalAudioTables:
         assert part is not None
         assert part["type"] == "input_audio"
         assert part["input_audio"]["format"] == "mp3"
+
+    @pytest.mark.parametrize(
+        ("fmt", "mime_type"),
+        [("mp3", "audio/mpeg"), ("wav", "audio/wav"), ("amr", "audio/amr"), ("", "audio/mpeg")],
+    )
+    def test_an_audio_format_names_its_mime_type(self, fmt: str, mime_type: str) -> None:
+        """A listed format has its canonical MIME type, another ``audio/<format>``, none MP3's."""
+        assert _audio_format_to_mime(fmt) == mime_type
+        part = _media_block_to_part(
+            {"type": "input_audio", "input_audio": {"data": "QUJD", "format": fmt}}
+        )
+        assert part is not None and part.inline_data is not None
+        assert part.inline_data.mime_type == mime_type
 
 
 # ---------------------------------------------------------------------------

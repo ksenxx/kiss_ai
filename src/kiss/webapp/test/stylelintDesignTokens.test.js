@@ -8,8 +8,6 @@
 // Stylelint's Node API with the plugin loaded.  The shipped stylesheets
 // are linted with the repo's .stylelintrc.json by `npm run lint:css`.
 
-/* global require, __dirname, console, process */
-
 'use strict';
 
 const assert = require('assert');
@@ -35,8 +33,8 @@ async function words(code, options) {
 }
 
 // `line:column-endColumn` of every warning, in source order.
-async function ranges(code, options) {
-  const result = await lint(code, options);
+async function ranges(code) {
+  const result = await lint(code);
   return result.warnings.map(w => `${w.line}:${w.column}-${w.endColumn}`);
 }
 

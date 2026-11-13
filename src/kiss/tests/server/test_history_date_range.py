@@ -25,9 +25,12 @@ exactly like ``test_subagent_history_click.py``).
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import threading
+
+import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.server import AgentServer
@@ -63,9 +66,7 @@ class TestHistoryDateRange:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -105,3 +106,29 @@ class TestHistoryDateRange:
         assert len(hist) == 1
         assert [s["title"] for s in hist[0]["sessions"]] == ["beta task"]
         assert hist[0]["dateRange"] == {"min": 100.0, "max": 200.0}
+
+    @pytest.mark.parametrize("column", ["timestamp", "end_ts"])
+    @pytest.mark.parametrize("junk", ["9e999", "-9e999", "'abc'", "x'00ff'"])
+    def test_junk_times_stay_out_of_the_date_range(self, column: str, junk: str) -> None:
+        """An infinity, text or a BLOB in a time column (a foreign tool's write) dates no task.
+
+        The task is still listed, after the dated ones or by its launch time when only
+        its completion time is junk, and the event stays JSON ``JSON.parse`` accepts.
+        """
+        for name, launched in (("first", 100.0), ("corrupt", 150.0), ("last", 200.0)):
+            task_id, _ = th._add_task(name, chat_id=name)
+            _set_timestamp(task_id, launched)
+        db = th._get_db()
+        db.execute(f"UPDATE task_history SET {column} = {junk} WHERE task = 'corrupt'")
+        db.commit()
+
+        server, events = _make_server()
+        server._get_history(query=None, offset=0, generation=0)
+
+        (hist,) = [e for e in events if e.get("type") == "history"]
+        json.dumps(hist, allow_nan=False)
+        assert hist["dateRange"] == {"min": 100.0, "max": 200.0}
+        listed = (
+            ["last", "first", "corrupt"] if column == "timestamp" else ["last", "corrupt", "first"]
+        )
+        assert [s["title"] for s in hist["sessions"]] == listed

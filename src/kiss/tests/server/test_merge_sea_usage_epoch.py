@@ -15,19 +15,20 @@ in the discarded ledger instead of inflating the new task's budget.
 
 from __future__ import annotations
 
+import functools
 import os
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from types import FrameType
+from types import CodeType, FrameType
 from typing import Any
 
 import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.merge_conflict_resolver import run_merge_sea
-from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
+from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage, _live_agent_usage
 from kiss.core.tool_interrupt import inject_async_exception
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
@@ -97,32 +98,34 @@ def test_spend_is_attributed_without_a_reset(home: IsolatedKissHome) -> None:
     assert steps >= 1 and tokens > 0
 
 
-def _stop_as_the_accounting_starts(frame: FrameType, event: str, arg: Any) -> None:
-    """Profile hook: inject the task Stop as the resolver's usage attribution begins."""
+def _stop_as_the_resolver_calls(code: CodeType, frame: FrameType, event: str, arg: Any) -> None:
+    """Profile hook: inject the task Stop as ``run_merge_sea`` calls the function of *code*."""
     if (
-        event == "call" and frame.f_code is _attribute_sub_usage.__code__
+        event == "call" and frame.f_code is code
         and frame.f_back is not None and frame.f_back.f_code is run_merge_sea.__code__
     ):
         sys.setprofile(None)
         inject_async_exception(threading.get_ident(), KeyboardInterrupt)
 
 
+@pytest.mark.parametrize("step", [_live_agent_usage, _attribute_sub_usage])
 def test_a_stop_during_the_accounting_still_closes_the_resolver_tab(
-    home: IsolatedKissHome,
+    home: IsolatedKissHome, step: Callable[..., Any],
 ) -> None:
-    """A Stop landing in the spend attribution must not skip the ``subagentDone`` broadcast.
+    """A Stop landing in the spend accounting must not skip the ``subagentDone`` broadcast.
 
-    The resolver's ``finally`` attributed the spend and only then told
-    the watching surfaces the child was done.  A Stop delivered during
-    the attribution (its shared offset-lock wait is a check point)
-    unwound past the broadcast, and the finished merge tab stayed open
-    with its spinner on every surface.
+    The resolver's ``finally`` read the child's spend, attributed it and
+    only then told the watching surfaces the child was done.  A Stop
+    delivered during either *step* (the attribution's shared offset-lock
+    wait is a check point, the reading a Python call) unwound past the
+    broadcast, and the finished merge tab stayed open with its spinner
+    on every surface.
     """
     standin = StandInModelServer(lambda _req: finish_response("conflict resolved"))
     try:
         parent = _parent_at(standin, home.repo)
         parent.printer = CapturePrinter()
-        sys.setprofile(_stop_as_the_accounting_starts)
+        sys.setprofile(functools.partial(_stop_as_the_resolver_calls, step.__code__))
         try:
             with pytest.raises(KeyboardInterrupt):
                 run_merge_sea(parent, "resolve f.txt", home.repo)

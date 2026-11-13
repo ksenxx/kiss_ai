@@ -27,6 +27,7 @@ import json
 from typing import Any
 
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 from kiss.tests.server.conftest import no_verify_ssl
 from kiss.tests.server.test_plain_http_loopback_and_frame_password import (
@@ -36,7 +37,7 @@ from kiss.tests.server.test_plain_http_loopback_and_frame_password import (
 
 
 class TestSecondRotationEndsTheAllowance(_ServerCase):
-    """P0 -> P1 by session A, then P1 -> P2 by session B: A's P0 frames are refused."""
+    """P0 -> P1 by session A, then P1 -> P2 by session B: A, still at P0, is shut out."""
 
     password = "First-Password-0"
     second_password = "Second-Password-1"
@@ -80,12 +81,14 @@ class TestSecondRotationEndsTheAllowance(_ServerCase):
         await session_b.close()
 
         # The password in force is one A never asked for: A's old
-        # password is as stale as any other session's.
-        await session_a.send(json.dumps({"type": "getConfig", "password": self.password}))
-        reply = await self._recv(session_a)
-        self.assertEqual(reply.get("code"), "auth_failed", reply)
-        self.assertNotEqual(reply.get("type"), "configData", reply)
-        await session_a.close()
+        # password is as stale as any other session's, so A is shut
+        # out without a frame from it and is not told the configuration.
+        frames: list[dict[str, Any]] = []
+        with self.assertRaises(ConnectionClosed):
+            while True:
+                frames.append(await self._recv(session_a))
+        self.assertEqual([frame.get("code") for frame in frames[-1:]], ["auth_failed"], frames)
+        self.assertNotIn("configData", [frame["type"] for frame in frames])
 
 
 if __name__ == "__main__":

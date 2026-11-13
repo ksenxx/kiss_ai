@@ -11,7 +11,11 @@
 //   gate code again instead of the suite, and so on without end;
 // * the suite's output reaches the gate's stdout while the suite runs.
 //   It used to be buffered until the suite exited, so a hung suite killed
-//   with its process group (run-all.js's suite timeout) left no output.
+//   with its process group (run-all.js's suite timeout) left no output;
+// * a target media file rewritten while its suite ran is refused by
+//   name.  The gate used to map the coverage of the text the suite had
+//   eval'd onto the new text, and reported lines the suite ran as
+//   uncovered.
 //
 // Each case runs node in its own process group with TMPDIR in a scratch
 // directory and kills the group when it is done, so a regression (an
@@ -164,6 +168,89 @@ async function testEvalGateRunsTheSuiteOnce() {
   console.log('ok - a gate run with node -e runs the suite once');
 }
 
+async function testAReportCutShortLeavesNoCoverageDirectory() {
+  // The suite passes but leaves a report cut short beside its own, as a
+  // process killed while writing its coverage does.  The gate fails on
+  // it, and used to leave its coverage directory behind.
+  const {dir, env} = scratch({
+    'cut.test.js':
+      "require('fs').writeFileSync(require('path').join(" +
+      "process.env.NODE_V8_COVERAGE, 'cut.json'), '{');\n",
+  });
+  try {
+    const code =
+      `require(${JSON.stringify(GATE)}).runCovered(` +
+      `${JSON.stringify(suiteArg(dir, 'cut.test.js'))}, 'cutgate');`;
+    const res = await runGroup(['-e', code], env);
+    assert.ok(!res.timedOut, `the gate did not finish:\n${res.out}`);
+    assert.strictEqual(res.code, 1, res.out);
+    assert.match(res.out, /SyntaxError/);
+    assert.deepStrictEqual(
+      fs.readdirSync(dir).filter(f => f.includes('-cov-')),
+      [],
+      'the gate removed its coverage directory',
+    );
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+  console.log('ok - a gate failing on a report cut short removes its directory');
+}
+
+/**
+ * Run a gate in a scratch tree of its own: a copy of coverage_gate.js in
+ * `test/`, a fenced `media/target.js`, and a suite that evals the target
+ * under its sourceURL and then runs `afterEval` (source text; `target`
+ * holds the target's path).  Resolves with runGroup's result.
+ */
+async function runTargetGate(afterEval) {
+  const {dir, env} = scratch({});
+  try {
+    const target = path.join(dir, 'media', 'target.js');
+    fs.mkdirSync(path.join(dir, 'media'));
+    fs.mkdirSync(path.join(dir, 'test'));
+    fs.copyFileSync(GATE, path.join(dir, 'test', 'coverage_gate.js'));
+    fs.writeFileSync(
+      target,
+      '// edit-coverage:start\nglobalThis.targetRan = true;\n' +
+        '// edit-coverage:end\n',
+    );
+    fs.writeFileSync(
+      path.join(dir, 'test', 'suite.test.js'),
+      "const fs = require('fs');\n" +
+        `const target = ${JSON.stringify(target)};\n` +
+        "(0, eval)(fs.readFileSync(target, 'utf8') + " +
+        "'\\n//# sourceURL=target.js');\n" +
+        afterEval,
+    );
+    fs.writeFileSync(
+      path.join(dir, 'test', 'gate.js'),
+      "require('./coverage_gate').gateRegions({testFile: 'suite.test.js', " +
+        "mark: 'edit', label: 'edit', " +
+        "targets: [{file: 'target.js', sourceUrl: 'target.js', regions: 1}]});\n",
+    );
+    return await runGroup([path.join(dir, 'test', 'gate.js')], env);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+}
+
+async function testATargetEditedWhileItsSuiteRanIsRefused() {
+  // Untouched, the target passes the gate.
+  const kept = await runTargetGate('');
+  assert.strictEqual(kept.code, 0, kept.out);
+  assert.match(kept.out, /coverage gate passed/);
+  // The suite rewrites the target after eval-ing it, as an editor saving
+  // the file while the suite runs does.
+  const edited = await runTargetGate(
+    "fs.writeFileSync(target, '// a line added mid-run\\n'.repeat(40) + " +
+      "fs.readFileSync(target, 'utf8'));\n",
+  );
+  assert.strictEqual(edited.code, 1, edited.out);
+  assert.match(edited.out, /media\/target\.js changed/);
+  assert.ok(!edited.out.includes('UNCOVERED'), edited.out);
+  console.log('ok - a target edited while its suite ran is refused by name');
+}
+
 async function testHungSuiteOutputStreams() {
   if (process.platform === 'win32') {
     // runCovered runs the suite without a guard or process group there,
@@ -198,7 +285,7 @@ async function testHungSuiteOutputStreams() {
   const res = await runGroup([writeHungGate(dir)], env, /ok - first \d+\n/);
   const guard = /ok - first (\d+)\n/.exec(res.out);
   const pidFile = path.join(dir, 'guard.pid');
-  let closed = false;
+  let closed;
   try {
     assert.ok(
       !res.timedOut,
@@ -240,7 +327,7 @@ async function emptyPidFileScenario() {
   });
   const res = await runGroup([writeHungGate(dir)], env, /ok - empty\n/);
   const pidFile = path.join(dir, 'guard.pid');
-  let closed = false;
+  let closed;
   try {
     assert.ok(!res.timedOut, `the suite did not run:\n${res.out}`);
     assert.strictEqual(fs.readFileSync(pidFile, 'utf8'), '');
@@ -325,6 +412,8 @@ async function main() {
     return;
   }
   await testEvalGateRunsTheSuiteOnce();
+  await testAReportCutShortLeavesNoCoverageDirectory();
+  await testATargetEditedWhileItsSuiteRanIsRefused();
   await testHungSuiteOutputStreams();
   await testEmptyPidFileRetiresNothing();
   await testKillGroupRefusesWhatIsNoPid();

@@ -32,15 +32,18 @@ import json
 import shutil
 import socket
 import tempfile
+import threading
 import time
 from pathlib import Path
+from types import CodeType, FrameType
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 from kiss.agents.sorcar import machines as mach
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.remote_tabs import RemoteTab, RemoteTabs
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import find_free_port
-from kiss.tests.local_ws import open_local_connection
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 from kiss.tests.server.remote_tabs_probe import machine_of
 
 
@@ -199,27 +202,40 @@ class BindDoesNotBlockConnectionTest(IsolatedAsyncioTestCase):
         self.assertEqual(tabs[tab]["title"], "hole again")
         self.assertEqual(machine_of(api.remote_tabs, tab), "")
 
-    async def test_another_connection_s_close_of_the_tab_is_not_held_behind_the_bind(self) -> None:
-        """Only the binding connection's own commands for the tab queue behind its bind.
+    async def _closed_by_another_connection(self, tab: str, step: CodeType, hold: bool) -> float:
+        """Submit *tab* to the machine and close it from a second connection at *step* of the bind.
 
-        A second surface showing the same tab closes it while the bind
-        connects: inline, the two connections never waited for each
-        other (the registry orders them), so the close is applied at
-        once.  The close unbinds the tab, which stands the bind down:
-        its late refusal is not sent, as a ``prompt_refused`` would
-        lower the running state of whatever the tab shows next.
+        The bind's thread is watched by a trace function: the close is
+        sent once it calls *step*, and with *hold* the thread waits
+        there until the close is applied.  Asserts that the close is
+        applied at once and that the binding connection gets no frame
+        for the closed tab afterwards.
+
+        Returns:
+            The seconds from the submit to the end of its route.
         """
-        tab = "tab-hole-other-surface"
         await self._send({"type": "openTab", "tabId": tab, "title": "hole"})
         await self._until("tabs_state")
         reader, writer = await open_local_connection(self.server)
         self.addCleanup(writer.close)
+        reached, release = threading.Event(), threading.Event()
+        if not hold:
+            release.set()
+
+        def at_step(frame: FrameType, event: str, _arg: object) -> None:
+            if event == "call" and frame.f_code is step:
+                reached.set()
+                release.wait(30)
+
+        threading.settrace_all_threads(at_step)
+        self.addCleanup(threading.settrace_all_threads, None)
+        self.addCleanup(release.set)
         started = time.monotonic()
         await self._send({"type": "submit", "tabId": tab, "prompt": "Say hello", "machine": "hole"})
         await self._send({"type": "ping"})
         await self._until("pong")
         api = self.server._server_api
-        self.assertTrue(self._pending(api, tab), "the bind is connecting")
+        self.assertTrue(await asyncio.to_thread(reached.wait, 30), "the bind never got there")
         writer.write(json.dumps({"type": "closeTab", "tabId": tab}).encode("utf-8") + b"\n")
         await writer.drain()
         msg: dict[str, Any] = {}
@@ -234,13 +250,12 @@ class BindDoesNotBlockConnectionTest(IsolatedAsyncioTestCase):
             time.monotonic() - started, mach.REQUEST_TIMEOUT / 2,
             "the other connection's close waited for the bind's connect",
         )
-        self.assertTrue(self._pending(api, tab), "the bind is still connecting")
+        self.assertTrue(self._pending(api, tab), "the bind is still under way")
+        release.set()
+        threading.settrace_all_threads(None)
         await self._wait_route_done(api, tab)
+        took = time.monotonic() - started
         self.assertEqual(machine_of(api.remote_tabs, tab), "")
-        self.assertGreaterEqual(
-            time.monotonic() - started, mach.REQUEST_TIMEOUT / 2,
-            "the machine did not hold the connect: the test exercised nothing",
-        )
         # The frames of the binding connection since the close: the
         # stood-down bind sent nothing for the closed tab.
         await self._send({"type": "ping"})
@@ -256,3 +271,72 @@ class BindDoesNotBlockConnectionTest(IsolatedAsyncioTestCase):
         else:
             raise AssertionError("no pong within 300 frames")
         self.assertEqual(for_tab, [], "the stood-down bind still answered on the closed tab")
+        # Nothing is kept for the tab once no bind connects for it.
+        kept = api.remote_tabs
+        self.assertEqual((kept._connecting, kept._unbinds, kept._expected), ({}, {}, {}))
+        return took
+
+    async def test_another_connection_s_close_of_the_tab_is_not_held_behind_the_bind(self) -> None:
+        """Only the binding connection's own commands for the tab queue behind its bind.
+
+        A second surface showing the same tab closes it while the bind
+        connects: inline, the two connections never waited for each
+        other (the registry orders them), so the close is applied at
+        once.  The close unbinds the tab, which stands the bind down:
+        its late refusal is not sent, as a ``prompt_refused`` would
+        lower the running state of whatever the tab shows next.
+        """
+        took = await self._closed_by_another_connection(
+            "tab-hole-other-surface", RemoteTab.__init__.__code__, hold=False,
+        )
+        self.assertGreaterEqual(
+            took, mach.REQUEST_TIMEOUT / 2,
+            "the machine did not hold the connect: the test exercised nothing",
+        )
+
+    async def test_a_close_before_the_bind_s_thread_ran_stands_it_down_too(self) -> None:
+        """A tab closed after its submit was accepted, before the bind's thread ran, stays closed.
+
+        The bind counted itself as connecting only once its thread
+        ran, so a close landing before that was no unbind to it: it
+        dialed the machine for the closed tab and answered there (the
+        refusal here; a machine that answers had the closed tab
+        published again).  The same submit and close ended differently
+        with the scheduling of two threads.  The bind is expected from
+        the moment its command's dispatch starts, and does not dial.
+        """
+        took = await self._closed_by_another_connection(
+            "tab-hole-closed-early", RemoteTabs._bind.__code__, hold=True,
+        )
+        self.assertLess(took, mach.REQUEST_TIMEOUT / 2, "the stood-down bind dialed the machine")
+
+    async def test_expecting_a_bind_does_not_wait_for_the_lock_a_publication_holds(self) -> None:
+        """The event loop notes a bind without the lock of the remote tabs.
+
+        A publication holds that lock across the registry's write to
+        disk: the loop waiting for it there stalled every connection
+        for as long as the disk took.  The lock is held here as that
+        thread holds it, and the daemon still answers.
+        """
+        api = self.server._server_api
+        held, release = threading.Event(), threading.Event()
+
+        def hold() -> None:
+            with api.remote_tabs._lock:
+                held.set()
+                release.wait(20)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        self.addCleanup(release.set)
+        self.assertTrue(await asyncio.to_thread(held.wait, 10))
+        started = time.monotonic()
+        await self._send({"type": "submit", "tabId": "tab-nowhere", "prompt": "hi", "machine": "-"})
+        await self._send({"type": "ping"})
+        await self._until("pong")
+        self.assertLess(time.monotonic() - started, 10, "the event loop waited for the lock")
+        self.assertTrue(holder.is_alive(), "the lock was not held: the test exercised nothing")
+        release.set()
+        await asyncio.to_thread(holder.join)
+        await self._wait_route_done(api, "tab-nowhere")
+

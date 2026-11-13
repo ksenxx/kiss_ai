@@ -136,6 +136,15 @@ class _Handler(BaseHTTPRequestHandler):
                 " () => { setTimeout(() => { while (true) {} }, 0); while (true) {} });"
                 "</script>"
             )
+        elif self.path == "/hang-wheel":
+            # The same on a wheel event, the whole of a scroll step: the stop of
+            # the handler ends the tool's call, and the queued task hangs the page.
+            body = (
+                "<title>Hang</title><div id='w' style='height:3000px'>tall</div>"
+                "<script>document.getElementById('w').addEventListener('wheel',"
+                " () => { setTimeout(() => { while (true) {} }, 0); while (true) {} },"
+                " {passive: false});</script>"
+            )
         payload = body.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -554,6 +563,45 @@ def test_followed_popup_is_closed_even_after_the_driver_died(tool, service, serv
     assert first in svc._pages and not svc._pages[first].page.is_closed()
 
 
+def _follow_popup_and_crash_it(tool: WebUseTool, service: Any, server: str) -> tuple[str, str]:
+    """Follow ``/form``'s popup and crash it before its tab id was looked up.
+
+    Returns:
+        The tab ids of the page the tool opened and of the crashed popup.
+    """
+    svc, printer = service
+    tool.show_browser()
+    first = tool._live_tab
+    assert first is not None
+    known = set(svc._pages)
+    tool.go_to_url(f"{server}/form")
+    tool.click(2)
+    _wait(lambda: tool._page.url == f"{server}/inert", "popup adopted")
+    popup = _wait(lambda: next(iter(set(svc._pages) - known), None), "popup registered")
+    svc.navigate(popup, "go", "chrome://crash")
+    _wait(lambda: _events(printer, "browserError", tab_id=popup), "crash reported")
+    assert not tool._is_alive()
+    # Only the next call's liveness probe would have looked the tab id up.
+    assert tool._page is None and tool._live_tab is None and tool._live_target is not None
+    return first, popup
+
+
+def test_a_followed_popup_that_crashed_is_closed_on_leaving_and_on_reattach(tool, service, server):
+    """A popup followed and crashed before any other call has no tab id yet,
+    only the target id read when it was adopted: the daemon maps that to the
+    tab without a page.  The crashed tab used to stay open on every surface."""
+    svc, printer = service
+    first, popup = _follow_popup_and_crash_it(tool, service, server)
+    tool.close_browser()
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=popup), "crashed popup closed")
+    assert first in svc._pages and not svc._pages[first].page.is_closed()
+
+    first, popup = _follow_popup_and_crash_it(tool, service, server)
+    assert tool.go_to_url(f"{server}/inert").startswith("Page:")
+    _wait(lambda: popup not in svc._pages, "crashed popup closed for the new tab")
+    assert first in svc._pages and tool._live_tab in svc._pages
+
+
 def test_user_navigation_in_the_tab_is_what_comes_back_headless(tool, service, server):
     """The page the USER navigated to in the tab (not the tool's last ``go_to_url``)
     is the one reopened headless."""
@@ -635,13 +683,57 @@ def test_page_that_stays_wedged_after_interrupt_is_closed_alone(tool, service, s
     started = time.monotonic()
     result = tool.press_key("a")
     assert time.monotonic() - started < wut._INPUT_WATCHDOG_SECS + 30
-    # Whether the interrupt frees the key press (so the tool goes on to
-    # read the page) or the close does, the lost page is reported, never
-    # swapped for a fresh blank tab that makes the press look successful.
+    # Whether the interrupt frees the key press (so the tool finds the page
+    # still wedged and has its tab closed) or the service's close does, the
+    # lost page is reported, never swapped for a fresh blank tab that makes
+    # the press look successful.
     assert result.startswith("Error pressing key 'a'"), result
     _wait(lambda: _events(printer, "closeBrowserTab", tab_id=tab_id), "hung tab closed")
     assert svc._context is not None and len(svc._pages) == 1
     assert tool.go_to_url(f"{server}/inert").startswith("Page:")
+
+
+def test_page_wedged_again_once_its_stopped_call_is_back_is_closed_alone(tool, service, server):
+    """The stop of a hung wheel handler ends the tool's scroll step at once, and the task
+    that handler had queued then hangs the page for good.  The service leaves a page alone
+    once the hung call has ended (what keeps it busy may be the next call's script), so the
+    wedged tab stayed open: the key press of the test above came back first in one run out
+    of five.  The tool, whose next call has not begun, asks the page itself and has only
+    that tab closed; the user's other tab and the browser survive, and the tool recovers."""
+    svc, printer = service
+    svc.open(f"{server}/inert", "user")
+    _wait(lambda: _events(printer, "openBrowserTab"), "user tab")
+    tool.show_browser()
+    tab_id = tool._live_tab
+    tool.go_to_url(f"{server}/hang-wheel")
+    result = tool.scroll("down", 1)
+    assert result.startswith("Error scrolling down: The page stayed unresponsive"), result
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=tab_id), "hung tab closed")
+    assert svc._context is not None and len(svc._pages) == 1
+    assert tool.go_to_url(f"{server}/inert").startswith("Page:")
+
+
+def test_tab_left_wedged_is_given_up_before_its_close_is_carried_out(tool, service, server):
+    """The service closes a tab on its own loop, once the tool's call has returned: a close
+    that waits its turn there (here the lock a tab being opened holds is taken) is carried
+    out while the tool's next call runs.  The tool gives the wedged tab up as it asks for
+    the close, so that next call opens a fresh tab, which the late close does not take."""
+    svc, printer = service
+    tool.show_browser()
+    tab_id = tool._live_tab
+    tool.go_to_url(f"{server}/hang-wheel")
+    asyncio.run_coroutine_threadsafe(svc._launch_lock.acquire(), svc._loop).result(10)
+    try:
+        result = tool.scroll("down", 1)
+        assert result.startswith("Error scrolling down: The page stayed unresponsive"), result
+        assert not _events(printer, "closeBrowserTab", tab_id=tab_id), "the close did not wait"
+        assert (tool._live_tab, tool._page) == (None, None), "the tool kept the tab being closed"
+    finally:
+        svc._loop.call_soon_threadsafe(svc._launch_lock.release)
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=tab_id), "hung tab closed")
+    assert tool.go_to_url(f"{server}/inert").startswith("Page:")
+    assert tool._live_tab_id() not in (None, tab_id)
+    assert tool._page is not None and not tool._page.is_closed()
 
 
 def test_local_storage_is_not_written_to_a_redirect_destination(tool, service, server):
@@ -788,7 +880,8 @@ def test_tab_crashed_while_blank_is_reported_dead_within_the_probe_deadline(tool
     """A renderer crash of the tab while it still shows ``about:blank`` is
     answered by the driver with neither the crash nor its own timeout: the
     probe's loop-side deadline must report the page dead, and the next call
-    gets a fresh tab."""
+    gets a fresh tab.  The crashed tab is closed, there and when the session
+    leaves the Browser tab: it used to stay open on every surface."""
     svc, printer = service
     tool.show_browser()
     tab_id = tool._live_tab
@@ -801,7 +894,12 @@ def test_tab_crashed_while_blank_is_reported_dead_within_the_probe_deadline(tool
     assert tool._page is None and tool._browser is not None
 
     assert tool.go_to_url(f"{server}/inert").startswith("Page:")
-    assert tool._live_tab in svc._pages
+    _wait(lambda: list(svc._pages) == [tool._live_tab], "crashed tab closed for the new one")
+
+    svc.navigate(tool._live_tab, "go", "chrome://crash")
+    _wait(lambda: not tool._is_alive(), "second crash noticed")
+    tool.show_browser(visible=False)
+    _wait(lambda: not svc._pages, "crashed tab closed on leaving the Browser tab")
 
 
 def test_browser_replaced_under_a_pending_reattach_is_adopted_once(tool, service, server):

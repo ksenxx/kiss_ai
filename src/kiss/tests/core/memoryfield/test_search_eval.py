@@ -63,6 +63,27 @@ def test_eval_rejects_unknown_gold_page(tmp_path: Path) -> None:
     assert "Gold pages missing" in result.stdout and "no-such-page" in result.stdout
 
 
+def test_eval_of_an_empty_question_set_says_so(tmp_path: Path) -> None:
+    """No question leaves no recall to compute: the script says so instead of dividing by zero."""
+    questions = write_kb(tmp_path, "web-stealth")
+    for text in ("", "[]\n"):
+        questions.write_text(text)
+        result = run_eval(str(tmp_path), "--questions", str(questions))
+        assert result.returncode == 1
+        assert result.stdout.strip() == f"No questions in {questions}"
+        assert "Traceback" not in result.stderr
+
+
+def test_eval_reads_the_questions_before_anything_is_built(tmp_path: Path) -> None:
+    """A path with no question set is refused before a memory or an index is made for it."""
+    typo = tmp_path / "typo"
+    result = run_eval(str(typo))
+    assert result.returncode == 1
+    assert result.stdout.startswith("Cannot read the questions: [Errno 2] ")
+    assert "Traceback" not in result.stderr
+    assert not typo.exists()
+
+
 def test_eval_on_empty_index_misses(tmp_path: Path) -> None:
     (tmp_path / "q.yaml").write_text(yaml.safe_dump([{"q": "anything", "gold": []}]))
     result = run_eval(str(tmp_path), "--questions", str(tmp_path / "q.yaml"))

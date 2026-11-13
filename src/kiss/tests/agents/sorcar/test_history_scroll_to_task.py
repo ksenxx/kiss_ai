@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
+from kiss.tests.persistence_helpers import close_db
 
 
 class TestResumeSessionWithTaskId:
@@ -23,9 +24,7 @@ class TestResumeSessionWithTaskId:
         """_load_chat_events_by_task_id returns the correct task."""
         orig_dir = th._KISS_DIR
         orig_db = th._DB_PATH
-        orig_conn = th._db_conn
         try:
-            th._db_conn = None
             th._KISS_DIR = tmp_path
             th._DB_PATH = tmp_path / "history.db"
 
@@ -45,7 +44,6 @@ class TestResumeSessionWithTaskId:
 
             assert th._load_chat_events_by_task_id("999999") is None
         finally:
-            th._close_db()
-            th._db_conn = orig_conn
+            close_db()
             th._KISS_DIR = orig_dir
             th._DB_PATH = orig_db

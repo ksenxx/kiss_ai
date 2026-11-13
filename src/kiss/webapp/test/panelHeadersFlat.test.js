@@ -192,7 +192,6 @@ function runTests() {
 try {
   runTests();
   console.log('\npanelHeadersFlat.test.js: all tests passed');
-  process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);
   process.exit(1);

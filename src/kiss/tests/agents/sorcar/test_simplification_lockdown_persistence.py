@@ -9,8 +9,8 @@ behavior of ``persistence.py`` so that the planned simplifications (see
 ``tmp/findings-2.md`` sections A4, A5, A6, A7, A8, A10, A12) cannot silently
 break it.  Locked-down contracts:
 
-1. ``_close_db()`` reconnect path: rows written before and after a
-   ``_close_db()`` are all visible, and the event seq / has_events caches
+1. ``close_db()`` reconnect path: rows written before and after a
+   ``close_db()`` are all visible, and the event seq / has_events caches
    do not leak across the close (seqs stay strictly increasing and unique).
 2. Interleaved ``_queue_chat_event`` + ``_append_chat_event`` for one task
    yields strictly increasing unique seqs with no losses, and
@@ -35,20 +35,20 @@ import time
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.persistence_helpers import close_db
 
 
 def _redirect(tmpdir: str):
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore(saved) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+    th._DB_PATH, th._KISS_DIR = saved
 
 
 def _event_seqs(task_id: str) -> list[int]:
@@ -92,17 +92,17 @@ class _PersistenceTestBase:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self) -> None:
-        th._close_db()
+        close_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
 class TestCloseDbReconnect(_PersistenceTestBase):
-    """(1) ``_close_db()`` reconnect path and cache hygiene."""
+    """(1) ``close_db()`` reconnect path and cache hygiene."""
 
     def test_rows_survive_close_db_and_reconnect(self) -> None:
         th._add_task("before close")
-        th._close_db()
+        close_db()
         th._add_task("after close")
 
         rows = th._load_history()
@@ -114,7 +114,7 @@ class TestCloseDbReconnect(_PersistenceTestBase):
         task_id, _ = th._add_task("seq cache task")
         th._queue_chat_event({"type": "agent_text", "text": "e0"}, task_id)
         th._flush_chat_events()
-        th._close_db()
+        close_db()
         th._append_chat_event(
             {"type": "agent_text", "text": "e1"}, task_id=task_id
         )

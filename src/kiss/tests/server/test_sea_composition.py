@@ -51,6 +51,7 @@ from kiss.agents.sorcar.sea_commands import (
     declared_settings,
     evaluate_sea,
     is_channel,
+    sea_class,
     sea_layers,
     sea_settings,
 )
@@ -66,6 +67,7 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.llm_reply import LLMReply
 from kiss.core.tool_verdict import ALLOW
 from kiss.server import sorcar
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 BASE_SEA = """
@@ -208,13 +210,13 @@ def registry(tmp_path: Path) -> Iterator[Path]:
     seas_md = home / "SEAS.md"
     previous = seas_md.read_text(encoding="utf-8") if seas_md.is_file() else None
     seas_md.write_text(f"{folder}\n", encoding="utf-8")
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
     yield folder
     if previous is None:
         seas_md.unlink(missing_ok=True)
     else:
         seas_md.write_text(previous, encoding="utf-8")
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
 
 
 def test_inheriting_by_command_name_and_by_path_chains_both_classes(registry: Path) -> None:
@@ -302,6 +304,9 @@ class Sea(sea_class('gone.py')):
         match=r"gone_sea.py' failed to import: .*sea_class\('gone.py'\): not an existing Python",
     ):
         sea_layers(gone)
+    # A ``~user`` that names no user is kept as written, as a shell keeps it: no such file.
+    with pytest.raises(SeaError, match=r"sea_class\('~no-such-user/x.py'\): not an existing"):
+        sea_class("~no-such-user/x.py")
     # A channel SEA may inherit from a worker base; a picker base may run
     # under a channel SEA; either way the run is a channel.
     _write(registry / "wbase" / "wbase_sea.py", BASE_SEA)
@@ -720,11 +725,11 @@ class SeaCompositionDaemonTest(DaemonRunApiHarness):
 
     def setUp(self) -> None:
         super().setUp()
-        sea_commands._reset_for_tests()
+        reset_sea_registry()
         self.folder = Path(self.tmpdir) / "user_seas"
 
     def tearDown(self) -> None:
-        sea_commands._reset_for_tests()
+        reset_sea_registry()
         super().tearDown()
 
     def _register(self) -> None:

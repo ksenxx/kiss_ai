@@ -18,7 +18,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {send, settle: flushMicrotasks, click, stubClipboard} = harness;
+const {send, settle, click, stubClipboard} = harness;
 
 // The harness page plus a navigator.clipboard stub that records the
 // last text written; getClipboard() reads it back.
@@ -59,7 +59,7 @@ async function testHtmlSummaryCopiesFormattedText() {
     cost: '$0.02',
   });
   clickCopy(win);
-  await flushMicrotasks();
+  await settle();
   const text = getClipboard();
   assert.ok(text, 'copy button must write to the clipboard');
   assert.ok(
@@ -103,7 +103,7 @@ async function testPlainTextResultStillCopiesItsText() {
     cost: '$0.01',
   });
   clickCopy(win);
-  await flushMicrotasks();
+  await settle();
   const text = getClipboard();
   assert.ok(
     text.includes('plain output line 1\nline 2 <not-a-tag>'),
@@ -123,7 +123,7 @@ async function testFailedStatusLineIsCopiedTooAndChromeIsNot() {
     cost: '$0.01',
   });
   clickCopy(win);
-  await flushMicrotasks();
+  await settle();
   const text = getClipboard();
   assert.ok(
     text.includes('Status: FAILED'),
@@ -156,7 +156,7 @@ async function testEmptyAndImageOnlySummariesNeverCopyRawHtml() {
       cost: '$0.01',
     });
     clickCopy(win);
-    await flushMicrotasks();
+    await settle();
     const text = getClipboard();
     assert.ok(
       !/<[a-z][^>]*>/i.test(text),

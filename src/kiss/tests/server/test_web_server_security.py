@@ -6,7 +6,7 @@
 
 Each test exercises real network sockets, real subprocesses, and the
 real ``RemoteAccessServer`` / ``_authenticate_ws`` / ``_spawn_cloudflared``
-/ ``_generate_self_signed_cert`` / ``_read_url_from_stderr`` code paths
+/ ``tls_certs.issue_server_cert`` / ``_read_url_from_stderr`` code paths
 without mocks or test doubles.  The tests are designed to fail if any
 of the six fixes is reverted, and pass with the fixes applied.
 
@@ -50,11 +50,11 @@ from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws_mod
 from kiss.server.web_server import (
     RemoteAccessServer,
-    _generate_self_signed_cert,
     _parse_quick_tunnel_url,
     _read_url_from_stderr,
 )
 from kiss.tests.conftest import posix_only
+from kiss.tests.local_ws import _generate_self_signed_cert
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
 from kiss.tests.server.conftest import FORWARDED_VISITOR, find_free_port, no_verify_ssl
 

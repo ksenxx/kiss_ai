@@ -167,7 +167,10 @@ function testUserPinnedPanelStaysOpen() {
   assert.ok(!isCollapsed(ps[1]), 'the user reopened panel #2');
   assert.ok(ps[1].classList.contains('user-pinned'));
 
-  for (const ev of events.slice(10)) send(win, {...ev, tabId: tab});
+  events.slice(10).forEach((ev, i) => {
+    send(win, {...ev, tabId: tab});
+    assertStreamFolding(win, `pinned, after event #${i + 11} (${ev.type})`);
+  });
   ps = panels(win);
   assert.strictEqual(ps.length, 7);
   assert.deepStrictEqual(

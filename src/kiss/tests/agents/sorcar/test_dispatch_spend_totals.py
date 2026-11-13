@@ -406,6 +406,9 @@ def test_side_channel_spend_banked_on_a_finishing_child_reaches_the_caller(
     assert live == [{
         "type": "usage_info", "text": "", "taskId": child, "total_tokens": 1110,
         "cost": "$11.7500", "cost_usd": 11.75, "total_steps": 8,
+        # The ledger the totals rest on (the in-flight session excluded), for the
+        # orphan recovery of a task killed before its next step.
+        "banked": [1.75, 110, 3],
     }]
     parent = SorcarAgent("caller")
     _fold_into(

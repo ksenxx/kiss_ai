@@ -23,6 +23,10 @@ Branches not exercised:
 * ``_refuse_login`` as the callback handler in ``mcp_servers``: the SDK
   calls the redirect handler first, and that always raises, so the
   callback handler can never be reached.
+* ``_fail_calls`` in ``mcp_servers`` passing over a call its caller has
+  already cancelled: the cancelled call's task settles within a few
+  turns of the manager loop, and the connection would have to end
+  inside them.
 * ``MCPLoginSession._run``'s no-exception ``error = "sign-in cancelled"``
   branch: it needs a cancel to land after the redirect was consumed but
   before ``initialize`` returns, a window no real client/server exchange
@@ -38,6 +42,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
+import functools
 import json
 import secrets
 import socket
@@ -49,9 +55,10 @@ from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from types import FrameType
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
+import anyio
 import httpx
 import pytest
 import uvicorn
@@ -65,6 +72,7 @@ from mcp.server.auth.provider import (
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.fastmcp import FastMCP
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from starlette.responses import JSONResponse
 
 from kiss.agents.sorcar import mcp_oauth
 from kiss.agents.sorcar.mcp_oauth import (
@@ -82,11 +90,14 @@ from kiss.agents.sorcar.mcp_servers import (
     FileTokenStorage,
     MCPManager,
     MCPServerConfig,
+    _Connection,
     _connection_key,
     build_oauth_provider,
     load_mcp_servers,
+    save_mcp_server,
     user_mcp_config_path,
 )
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.tests.conftest import occupy_loopback_port, wait_for
 
 # ---------------------------------------------------------------------------
@@ -104,6 +115,7 @@ class _MemoryAuthProvider:
 
     def __init__(self) -> None:
         self.refuse = False
+        self.rotate = True  # a refresh issues a new refresh token and voids the old one
         self.expires_in = 3600
         self.clients: dict[str, OAuthClientInformationFull] = {}
         self.registrations = 0
@@ -175,8 +187,15 @@ class _MemoryAuthProvider:
     async def exchange_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: RefreshToken, scopes: list[str]
     ) -> OAuthToken:
-        del self.refresh[refresh_token.token]
-        return self._issue(refresh_token.client_id, scopes or refresh_token.scopes)
+        token = self._issue(refresh_token.client_id, scopes or refresh_token.scopes)
+        if self.rotate:
+            del self.refresh[refresh_token.token]
+            return token
+        # Not rotated (RFC 6749 section 6 leaves it to the server): the one
+        # in use stays good and the response carries none.
+        assert token.refresh_token is not None
+        del self.refresh[token.refresh_token]
+        return token.model_copy(update={"refresh_token": None})
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         return self.access.get(token)
@@ -186,15 +205,59 @@ class _MemoryAuthProvider:
         self.refresh.pop(token.token, None)
 
 
-class _AuthMCPServer:
-    """A FastMCP server with OAuth, running under uvicorn on a thread."""
+class _MovedTokenEndpoint:
+    """An OAuth MCP app whose token endpoint is ``/custom-token``, as its metadata says.
 
-    def __init__(self) -> None:
+    ``/token``, where a client without the metadata sends its refresh,
+    is a 404.  While ``failing`` is set an authorized MCP request (over
+    SSE, a message POST) is answered 503: a sign-in is granted its
+    tokens and the handshake that follows fails.
+    """
+
+    def __init__(self, app: Any, base: str) -> None:
+        self.app, self.base = app, base
+        self.failing = True
+        self.paths: list[str] = []
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        path = scope.get("path", "")
+        self.paths.append(path)
+        if path == "/token":
+            await JSONResponse({"error": "not found"}, 404)(scope, receive, send)
+        elif (
+            path in ("/mcp", "/messages/") and self.failing
+            and b"authorization" in dict(scope["headers"])
+        ):
+            await JSONResponse({"error": "unavailable"}, 503)(scope, receive, send)
+        elif path == "/custom-token":
+            await self.app({**scope, "path": "/token", "raw_path": b"/token"}, receive, send)
+        elif path == "/.well-known/oauth-authorization-server":
+            body = bytearray()
+
+            async def collect(message: Any) -> None:
+                body.extend(message.get("body", b""))
+
+            await self.app(scope, receive, collect)
+            moved = {**json.loads(bytes(body)), "token_endpoint": f"{self.base}/custom-token"}
+            await JSONResponse(moved)(scope, receive, send)
+        else:
+            await self.app(scope, receive, send)
+
+
+class _AuthMCPServer:
+    """A FastMCP server with OAuth, running under uvicorn on a thread.
+
+    *wrap*, when given, is the ASGI app class its app is served through;
+    *transport* is ``"http"`` (streamable HTTP) or ``"sse"``.
+    """
+
+    def __init__(self, wrap: Any = None, transport: str = "http") -> None:
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = int(sock.getsockname()[1])
+        self.transport = transport
         self.base = f"http://127.0.0.1:{port}"
-        self.url = f"{self.base}/mcp"
+        self.url = f"{self.base}/{'mcp' if transport == 'http' else 'sse'}"
         self.provider = _MemoryAuthProvider()
         mcp = FastMCP(
             "authdemo",
@@ -208,9 +271,9 @@ class _AuthMCPServer:
             ),
         )
         mcp.add_tool(_echo)
-        config = uvicorn.Config(
-            mcp.streamable_http_app(), host="127.0.0.1", port=port, log_level="error"
-        )
+        app = mcp.streamable_http_app() if transport == "http" else mcp.sse_app()
+        self.app: Any = wrap(app, self.base) if wrap else app
+        config = uvicorn.Config(self.app, host="127.0.0.1", port=port, log_level="error")
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(target=self._server.run, daemon=True)
 
@@ -275,7 +338,13 @@ def _own_redirect_port(mcp_redirect_port: int) -> Iterator[int]:
 
 
 def _cfg(server: _AuthMCPServer, name: str = "authdemo") -> MCPServerConfig:
-    return MCPServerConfig(name=name, transport="http", url=server.url)
+    return MCPServerConfig(name=name, transport=server.transport, url=server.url)
+
+
+def _twins(server: _AuthMCPServer) -> tuple[MCPServerConfig, MCPServerConfig]:
+    """Two configurations of one server: separate connections sharing one stored grant."""
+    cfg = _cfg(server)
+    return cfg, dataclasses.replace(cfg, headers=(("X-Project", "b"),))
 
 
 def _approve(auth_url: str) -> httpx.Response:
@@ -368,7 +437,7 @@ def test_manager_without_tokens_refuses_interactive_login(
     server: _AuthMCPServer, home: Path
 ) -> None:
     cfg = _cfg(server)
-    auth = build_oauth_provider(cfg)
+    auth = build_oauth_provider(_Connection(config=cfg))
     assert auth.context.client_metadata.token_endpoint_auth_method == "none"
     manager = MCPManager()
     try:
@@ -377,6 +446,22 @@ def test_manager_without_tokens_refuses_interactive_login(
     finally:
         manager.shutdown()
     assert server.provider.access == {}
+    # No stored grant, nothing to refresh: no refresh lock file was made.
+    assert not list((home / "mcp_auth").glob("*.refresh.lock"))
+
+
+async def _second_refresher_gives_up(storage: FileTokenStorage) -> None:
+    async with storage.refreshing():
+        with pytest.raises(TimeoutError, match=r"\.refresh\.lock still locked after 0\.2s"):
+            async with FileTokenStorage("authdemo", storage.server_url).refreshing(timeout=0.2):
+                raise AssertionError("two holders of one grant's refresh lock")
+
+
+def test_a_wedged_refresh_costs_the_next_provider_a_bounded_wait(home: Path) -> None:
+    """A stored grant's refresh lock admits one holder; a waiter gives up at its deadline."""
+    storage = FileTokenStorage("authdemo", "https://mcp.example/mcp")
+    storage.put("tokens", {"access_token": "a", "token_type": "Bearer"})
+    asyncio.run(_second_refresher_gives_up(storage))
 
 
 def test_manager_refreshes_expired_tokens(server: _AuthMCPServer, home: Path) -> None:
@@ -395,13 +480,163 @@ def test_manager_refreshes_expired_tokens(server: _AuthMCPServer, home: Path) ->
     storage.put("tokens", {**tokens, "expires_in": 0})
     manager = MCPManager()
     try:
-        conn = manager.connect(_cfg(server))
-        assert conn.error == ""
+        # The server takes a refresh token once: the two connections
+        # must not each present the one they found in the store.
+        assert [conn.error for conn in manager.connect_all(_twins(server))] == ["", ""]
     finally:
         manager.shutdown()
     new = storage._read()["tokens"]["access_token"]
     assert new != old
     assert new in server.provider.access
+
+
+def test_a_refresh_answered_without_a_refresh_token_keeps_the_stored_one(
+    server: _AuthMCPServer, home: Path,
+) -> None:
+    """A grant survives an authorization server that does not rotate its refresh tokens.
+
+    Such a server leaves ``refresh_token`` out of its refresh response:
+    the one in use stays good (RFC 6749 section 6).  The SDK stored the
+    response whole, so the grant lost its refresh token at the first
+    refresh and the next expiry demanded a new sign-in.
+    """
+    _login(server)
+    server.provider.rotate = False
+    storage = FileTokenStorage("authdemo", server.url)
+    refresh = storage._read()["tokens"]["refresh_token"]
+    for _ in range(2):  # the second expiry is the one that asked for the sign-in
+        tokens = storage._read()["tokens"]
+        old = tokens["access_token"]
+        server.provider.access[old] = server.provider.access[old].model_copy(
+            update={"expires_at": int(time.time()) - 1}
+        )
+        storage.put("tokens", {**tokens, "expires_in": 0})
+        manager = MCPManager()
+        try:
+            assert manager.connect(_cfg(server)).error == ""
+        finally:
+            manager.shutdown()
+        assert storage._read()["tokens"]["access_token"] != old
+        assert storage._read()["tokens"].get("refresh_token") == refresh
+
+
+def _stale_grant(server: _AuthMCPServer) -> FileTokenStorage:
+    """Sign in and mark the stored access token as due for a refresh."""
+    _login(server)
+    storage = FileTokenStorage("authdemo", server.url)
+    storage.put("tokens", {**storage._read()["tokens"], "expires_in": 0})
+    return storage
+
+
+def _flow(server: _AuthMCPServer) -> Any:
+    """A provider's flow for one request to *server*: no sign-in is expected."""
+    cfg = _cfg(server)
+    provider = build_provider(cfg, _no_redirect, _no_callback)
+    return provider.async_auth_flow(httpx.Request("POST", cfg.url))
+
+
+async def _refresh(server: _AuthMCPServer, meanwhile: Any = None) -> None:
+    """Refresh the stored grant, calling *meanwhile* while the refresh is at the server.
+
+    One task drives the flow from its first request to its close, as httpx does.
+    """
+    flow = _flow(server)
+    try:
+        refresh = await flow.__anext__()
+        assert b"grant_type=refresh_token" in refresh.content
+        if meanwhile is not None:
+            meanwhile()
+        async with httpx.AsyncClient(trust_env=False) as client:
+            await flow.asend(await client.send(refresh))
+    finally:
+        await flow.aclose()
+
+
+async def _first_request(server: _AuthMCPServer) -> httpx.Request:
+    """The first request a provider sends for a request to *server*."""
+    flow = _flow(server)
+    try:
+        return cast(httpx.Request, await flow.__anext__())
+    finally:
+        await flow.aclose()
+
+
+def test_a_refresh_replaces_only_the_grant_it_refreshed(
+    server: _AuthMCPServer, home: Path,
+) -> None:
+    """A refresh answered after its grant was removed or replaced stores nothing.
+
+    A new sign-in drops a registration with another redirect URI, grant
+    and all, and stores the grant it ends with; neither waits for a
+    refresh a connection has at the server.  That refresh's answer
+    brought the dropped grant back (its tokens, with no client to
+    refresh them as) and replaced the new sign-in's tokens.
+    """
+    storage = _stale_grant(server)
+    asyncio.run(_refresh(server, storage.clear))
+    assert not storage.path.exists()
+    storage = _stale_grant(server)
+    signed_in = {"access_token": "a", "token_type": "Bearer", "refresh_token": "r"}
+    asyncio.run(_refresh(server, functools.partial(storage.put, "tokens", signed_in)))
+    assert storage._read()["tokens"] == signed_in
+
+
+def _a_token_write_waits() -> bool:
+    """Whether a thread is inside ``FileTokenStorage.put`` (here: waiting for the store's lock)."""
+    frames: list[FrameType | None] = list(sys._current_frames().values())
+    while frames:
+        frame = frames.pop()
+        if frame is not None:
+            if frame.f_code is FileTokenStorage.put.__code__:
+                return True
+            frames.append(frame.f_back)
+    return False
+
+
+async def _refresh_in(scope: anyio.CancelScope, server: _AuthMCPServer) -> None:
+    with scope:
+        await _refresh(server)
+
+
+async def _cancel_a_refresh_at_its_token_write(
+    server: _AuthMCPServer, storage: FileTokenStorage, scoped: bool,
+) -> None:
+    old = storage._read()["tokens"]
+    scope = anyio.CancelScope()
+    with exclusive_file_lock(storage._lock_path):  # as another process writing the store
+        refreshing = asyncio.ensure_future(_refresh_in(scope, server))
+        async with asyncio.timeout(10):
+            while not _a_token_write_waits():
+                await asyncio.sleep(0.01)
+        if scoped:
+            scope.cancel()
+        else:
+            refreshing.cancel()
+        next_provider = asyncio.ensure_future(_first_request(server))
+        done, _ = await asyncio.wait([next_provider], timeout=0.5)
+        assert not done, "a second refresh was sent with the refresh token the first had used"
+    await asyncio.wait([refreshing])
+    assert refreshing.cancelled() is not scoped  # a scope ends its own cancellation
+    request = await next_provider
+    new = storage._read()["tokens"]
+    assert new["refresh_token"] != old["refresh_token"]
+    assert request.headers["Authorization"] == f"Bearer {new['access_token']}"
+
+
+@pytest.mark.parametrize("scoped", [False, True], ids=["by-asyncio", "by-its-anyio-scope"])
+def test_a_refresh_cancelled_at_its_token_write_keeps_the_grant_to_itself(
+    server: _AuthMCPServer, home: Path, scoped: bool,
+) -> None:
+    """The refresh lock covers the write of the refreshed grant, cancelled or not.
+
+    The write runs on a worker thread, which a cancellation (the
+    connection ending: its task cancelled, or the scope of its
+    transport's tasks) leaves running: the cancelled provider let go of
+    the refresh lock with the store still holding the old grant, and
+    the next provider presented the refresh token the server had just
+    taken, which a server that rotates them answers by ending the grant.
+    """
+    asyncio.run(_cancel_a_refresh_at_its_token_write(server, _stale_grant(server), scoped))
 
 
 def test_manager_refreshes_a_token_that_expires_while_connected(
@@ -413,8 +648,8 @@ def test_manager_refreshes_a_token_that_expires_while_connected(
     token as valid until a request fails, so a long-lived connection
     kept sending an access token past its stored ``expires_at``; the
     server's 401 then took the interactive sign-in path, which an agent
-    run refuses, although a refresh token was at hand.  The provider
-    now starts with the stored deadline (less the refresh margin).
+    run refuses, although a refresh token was at hand.  Every request
+    now starts from the stored deadline (less the refresh margin).
     """
     _login(server)
     storage = FileTokenStorage("authdemo", server.url)
@@ -428,19 +663,138 @@ def test_manager_refreshes_a_token_that_expires_while_connected(
         update={"expires_at": int(time.time()) + 3}
     )
     storage.put("tokens", {**tokens, "expires_in": 62})
-    cfg = _cfg(server)
     manager = MCPManager()
     try:
-        conn = manager.connect(cfg)
-        assert conn.error == "", conn.error
+        assert [conn.error for conn in manager.connect_all(_twins(server))] == ["", ""]
         time.sleep(2.5)
-        result = manager.call_tool(_connection_key(cfg), "_echo", {"text": "hi"})
-        assert result == "echo: hi", result
+        # Both hold the old grant in memory: the second to refresh must
+        # find the first one's in the store, not present the used token.
+        for cfg in _twins(server):
+            result = manager.call_tool(_connection_key(cfg), "_echo", {"text": "hi"})
+            assert result == "echo: hi", result
     finally:
         manager.shutdown()
     new = storage._read()["tokens"]["access_token"]
     assert new != old
     assert new in server.provider.access
+
+
+def _end_access_token(server: _AuthMCPServer, storage: FileTokenStorage) -> str:
+    """End the stored access token on the server, ahead of what the store knows; return it."""
+    token = str(storage._read()["tokens"]["access_token"])
+    server.provider.access[token] = server.provider.access[token].model_copy(
+        update={"expires_at": int(time.time()) - 1}
+    )
+    return token
+
+
+def test_a_401_for_a_token_the_store_holds_as_good_is_answered_by_a_refresh(
+    server: _AuthMCPServer, home: Path,
+) -> None:
+    """A grant issued without ``expires_in`` is refreshed when the server stops taking it.
+
+    ``expires_in`` is optional (RFC 6749 section 5.1); without it the
+    server's 401 is the first sign that the access token ended.  That
+    401 went straight to the interactive sign-in, which an agent run
+    refuses, although the refresh token was good.  Met while connecting
+    and in a tool call, by both connections of the grant: the server
+    takes a refresh token once.
+    """
+    _login(server)
+    storage = FileTokenStorage("authdemo", server.url)
+    tokens = storage._read()["tokens"]
+    storage.put("tokens", {k: v for k, v in tokens.items() if k != "expires_in"})
+    assert storage.refresh_deadline() is None
+    first = _end_access_token(server, storage)
+    manager = MCPManager()
+    try:
+        assert [conn.error for conn in manager.connect_all(_twins(server))] == ["", ""]
+        second = _end_access_token(server, storage)
+        assert second != first
+        for cfg in _twins(server):
+            result = manager.call_tool(_connection_key(cfg), "_echo", {"text": "hi"})
+            assert result == "echo: hi", result
+    finally:
+        manager.shutdown()
+    third = storage._read()["tokens"]["access_token"]
+    assert third != second and third in server.provider.access
+
+
+@pytest.mark.parametrize("transport", ["http", "sse"])
+def test_a_call_fails_at_once_when_its_connection_ends_on_a_refused_sign_in(
+    home: Path, transport: str,
+) -> None:
+    """A tool call in flight when its connection ends gets that connection's error.
+
+    The server stops taking the grant, refresh token and all: the
+    call's 401 needs a new sign-in, which a run refuses, and the
+    connection is over.  Over streamable HTTP the refusal ends the
+    transport, and the call, a task of its own, waited out the SDK's
+    300 s read timeout for an answer no one was left to send.  The
+    SDK's SSE client logged the refusal and carried on without its
+    writer: the same wait, on a connection that looked alive.  The
+    call is not sent again: the next one starts over.
+    """
+    server = _AuthMCPServer(transport=transport)
+    server.start()
+    manager = MCPManager()
+    try:
+        _login(server)
+        cfg = _cfg(server)
+        assert manager.connect(cfg).error == ""
+        server.provider.access.clear()
+        server.provider.refresh.clear()
+        started = time.monotonic()
+        result = manager.call_tool(_connection_key(cfg), "_echo", {"text": "hi"})
+        assert time.monotonic() - started < 60, "the call waited for its read timeout"
+        assert result.startswith("Error: MCP tool call failed") and _LOGIN_HINT in result, result
+        assert _LOGIN_HINT in manager.call_tool(_connection_key(cfg), "_echo", {"text": "hi"})
+    finally:
+        manager.shutdown()
+        server.stop()
+
+
+@pytest.mark.parametrize("transport", ["http", "sse"])
+def test_a_grant_keeps_its_token_endpoint_when_the_sign_in_fails_after_it(
+    home: Path, transport: str,
+) -> None:
+    """A grant issued by a sign-in whose handshake then fails is stored with its metadata.
+
+    The authorization server's metadata names the token endpoint
+    (``/custom-token`` here; ``/token``, the client's guess without the
+    metadata, is a 404).  It was stored only once ``initialize`` had
+    succeeded: a sign-in granted its tokens and then answered 503 left a
+    grant whose first refresh went to ``/token`` and ended in a demand
+    for a new sign-in.  Over SSE the 503 answers a POST, which the
+    SDK's writer logged and dropped: the sign-in ended not with it but
+    at its own 660 s deadline.
+    """
+    srv = _AuthMCPServer(_MovedTokenEndpoint, transport)
+    srv.start()
+    manager = MCPManager()
+    try:
+        cfg = _cfg(srv)
+        session = MCPLoginSession.start(cfg)
+        _approve(session.auth_url)
+        assert session.wait(30)
+        assert not session.done and "503" in session.error, session.error
+        storage = FileTokenStorage("authdemo", srv.url)
+        tokens = storage._read()["tokens"]
+        assert tokens["refresh_token"] in srv.provider.refresh
+        metadata = storage.get_oauth_metadata()
+        assert metadata is not None, "the grant was stored without its token endpoint"
+        assert str(metadata.token_endpoint) == f"{srv.base}/custom-token"
+
+        # The server recovers; the access token has expired by then.
+        srv.app.failing = False
+        _end_access_token(srv, storage)
+        storage.put("tokens", {**tokens, "expires_in": 0})
+        assert manager.connect(cfg).error == ""
+        assert "/token" not in srv.app.paths
+        assert storage._read()["tokens"]["access_token"] != tokens["access_token"]
+    finally:
+        manager.shutdown()
+        srv.stop()
 
 
 def test_login_refused_by_user(server: _AuthMCPServer, home: Path) -> None:
@@ -465,9 +819,15 @@ def test_new_session_replaces_running_one(server: _AuthMCPServer, home: Path) ->
     assert first.error == "sign-in cancelled"
     assert MCPLoginSession.active("authdemo") is second
     assert second.auth_url and second.auth_url != first.auth_url
+    # The first sign-in's browser tab redirects to the same fixed port,
+    # once approved and once refused: neither may end the second sign-in.
+    for refuse in (False, True, False):
+        server.provider.refuse = refuse
+        stale = _approve(first.auth_url)
+        assert stale.status_code == 400 and "Sign-in received" not in stale.text
     _approve(second.auth_url)
     assert second.wait(30)
-    assert second.done
+    assert second.done, second.error
 
 
 def test_half_open_redirect_connection_does_not_pin_the_port(
@@ -682,6 +1042,53 @@ def test_browser_tab_that_follows_an_immediate_redirect_does_not_deadlock(
         assert session.opened_in == "browser_tab"
         assert _session_answer(session)["ok"] is True
     finally:
+        set_browser_tab_opener(None)
+
+
+def test_a_session_cancelled_before_its_page_opens_opens_nothing(
+    server: _AuthMCPServer, home: Path,
+) -> None:
+    """A cancelled session's hand-off, still waiting to run, opens no page.
+
+    The page is opened on a thread of its own, which a cancel (a
+    replacement session taking over) can get ahead of: the dead
+    sign-in's page then opened after the replacement's, and every
+    surface switched back to it.  The opener's thread is parked as it
+    enters its body (a profile hook: nothing is replaced) and the
+    session cancelled meanwhile.
+    """
+    from kiss.core.browser_handoff import set_browser_tab_opener
+
+    seen: list[str] = []
+    entered, cancelled = threading.Event(), threading.Event()
+    openers: list[threading.Thread] = []
+
+    def open_tab(url: str) -> bool:
+        seen.append(url)
+        return True
+
+    def park(frame: FrameType, event: str, arg: Any) -> None:
+        if event == "call" and frame.f_code is MCPLoginSession._open_for_user.__code__:
+            openers.append(threading.current_thread())
+            entered.set()
+            cancelled.wait(30)
+
+    set_browser_tab_opener(open_tab)
+    threading.setprofile(park)  # for the threads the session starts
+    try:
+        session = MCPLoginSession.start(_cfg(server), wait_seconds=0)
+        assert entered.wait(30), session.error
+        threading.setprofile(None)
+        session.cancel()
+        cancelled.set()
+        openers[0].join(10)
+        assert not openers[0].is_alive()
+        assert seen == []
+        assert session.wait(10)
+        assert _session_answer(session)["error"].endswith("sign-in cancelled")
+    finally:
+        threading.setprofile(None)
+        cancelled.set()
         set_browser_tab_opener(None)
 
 
@@ -1001,6 +1408,11 @@ def test_resolve_rejects_stdio_and_unknown(home: Path, work_dir: str) -> None:
         resolve_server("local", "", "", work_dir)
     with pytest.raises(ValueError, match="Unknown MCP server 'nope': pass its url"):
         resolve_server("nope", "", "", work_dir)
+    # A new server is a named remote one.  A nameless entry was saved as
+    # given, and so was a "stdio" one, without the URL it was asked for.
+    for name, transport in (("", ""), ("custom", "stdio")):
+        with pytest.raises(ValueError, match="needs a name and transport http or sse"):
+            resolve_server(name, "https://mcp.example.test/mcp", transport, work_dir)
     assert not user_mcp_config_path().exists()
 
 
@@ -1037,11 +1449,42 @@ def test_auth_tools_connect_and_finish(server: _AuthMCPServer, home: Path, work_
     assert json.loads(connect("authdemo"))["ok"] is True
 
 
+def test_finish_answers_for_its_own_projects_server_only(
+    server: _AuthMCPServer, home: Path, tmp_path: Path,
+) -> None:
+    """A sign-in is to a server, a name at a URL: not to every project that uses the name.
+
+    Two projects configure ``shared`` at different URLs.  The sign-in of
+    one was found by the other's ``finish_mcp_server_connect`` under the
+    name alone and reported as its own: its consent page, then
+    "connected", for a server that project never signed in to.
+    """
+    tools = {}
+    for project, url in (("a", "https://other.example/mcp"), ("b", server.url)):
+        work_dir = tmp_path / project
+        work_dir.mkdir()
+        cfg = MCPServerConfig(name="shared", transport="http", url=url)
+        save_mcp_server(cfg, "project", str(work_dir))
+        tools[project] = make_mcp_auth_tools(str(work_dir))
+    (_, finish_a), (connect_b, finish_b) = tools["a"], tools["b"]
+    answer = json.loads(connect_b("shared"))
+    assert answer["status"] == "consent_required"
+    not_mine = {
+        "ok": False,
+        "error": "no sign-in in progress for 'shared'; call connect_mcp_server() first",
+    }
+    assert json.loads(finish_a("shared")) == not_mine
+    _approve(answer["verification_uri"])
+    assert json.loads(finish_b("shared"))["ok"] is True
+    assert json.loads(finish_a("shared")) == not_mine
+
+
 def test_finish_delivers_url_that_arrived_after_connect(
     server: _AuthMCPServer, home: Path, work_dir: str
 ) -> None:
     # Discovery outlasts connect's wait: the session exists (and is the
     # active one) but has no URL yet, so connect would answer "pending".
+    save_mcp_server(_cfg(server), "user", work_dir)  # as connect does for a new server
     session = MCPLoginSession.start(_cfg(server), wait_seconds=0)
     assert MCPLoginSession.active("authdemo") is session
     assert _session_answer(session) == {
@@ -1069,7 +1512,7 @@ def test_finish_delivers_url_that_arrived_after_connect(
     assert session.done
 
 
-def test_auth_tools_errors(home: Path, work_dir: str) -> None:
+def test_auth_tools_errors(home: Path, work_dir: str, monkeypatch: pytest.MonkeyPatch) -> None:
     connect, _finish = make_mcp_auth_tools(work_dir)
     answer = json.loads(connect("nope"))
     assert answer["ok"] is False
@@ -1079,6 +1522,15 @@ def test_auth_tools_errors(home: Path, work_dir: str) -> None:
         answer = json.loads(connect("busy", "https://mcp.example.test/mcp"))
     assert answer["ok"] is False
     assert answer["error"].startswith("cannot bind the redirect port:")
+
+    # A token store that cannot be written (here to keep the client the
+    # environment registers) fails the sign-in; it was reported as a busy port.
+    (home / "mcp_auth").write_text("a file where the token directory goes")
+    monkeypatch.setenv("KISS_MCP_BUSY_CLIENT_ID", "preregistered")
+    answer = json.loads(connect("busy"))
+    assert answer["ok"] is False
+    assert answer["error"].startswith("MCP sign-in to 'busy' failed: ")
+    assert "mcp_auth" in answer["error"]
 
 
 # ---------------------------------------------------------------------------

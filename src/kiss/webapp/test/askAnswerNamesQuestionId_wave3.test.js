@@ -12,9 +12,21 @@
 // late surface's answer to the first would answer the second.  So the
 // page sends back the id of the ask it shows, takes a new ask's id even
 // when its text is the same, and keeps the id across a replay.
+//
+// Every `userAnswer` also names the question it answers, verbatim: two
+// surfaces show the same ask, one answers it, and the agent can ask its
+// next question before the other surface hears of the answer.  The
+// daemon drops an answer whose question is no longer the pending one.
 
 const assert = require('assert');
-const {makePage, send, stubRaf, readyTabId} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  stubRaf,
+  readyTabId,
+  plain,
+  ofType,
+} = require('./simplify2_harness');
 const {typeAndEnter: answer} = require('./attachment_helpers');
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
@@ -32,9 +44,7 @@ function surface() {
 
 /** The page's userAnswer frames as plain objects. */
 function answers(posted) {
-  return JSON.parse(
-    JSON.stringify(posted.filter(m => m.type === 'userAnswer')),
-  );
+  return plain(ofType(posted, 'userAnswer'));
 }
 
 /** Send the ask *id* of the question Q to surface *s*. */
@@ -59,11 +69,29 @@ test('an answer names the id of the ask it answers', () => {
 test('a new ask of the same text takes its id while the old one is still open', () => {
   const s = surface();
   ask(s, 'id-1');
+  const inp = s.win.document.getElementById('task-input');
+  inp.value = 'yes to the first';
   // The old ask was answered on another surface and the agent asked the
-  // same text again before this surface heard the first was answered.
+  // same text again before this surface heard the first was answered:
+  // the transcript it gets back holds both asks, then the open one.
+  send(s.win, {
+    type: 'task_events',
+    tabId: s.tab,
+    task_id: 'task-1',
+    chat_id: 'chat-qid',
+    task: 'two asks',
+    events: [
+      {type: 'tool_call', name: 'ask_user_question', extras: {question: Q}},
+      {type: 'tool_result', content: 'answered elsewhere'},
+      {type: 'tool_call', name: 'ask_user_question', extras: {question: Q}},
+    ],
+  });
   ask(s, 'id-2');
+  // The answer typed for the first ask is not offered to the second.
+  assert.strictEqual(inp.value, '', "BUG: the first ask's answer is offered to the second");
   answer(s.win, 'no');
   assert.strictEqual(answers(s.posted)[0].questionId, 'id-2');
+  assert.strictEqual(answers(s.posted)[0].answer, 'no');
   s.win.close();
 });
 
@@ -92,6 +120,40 @@ test('an ask without an id (an older daemon) is answered without one', () => {
     type: 'userAnswer',
   });
   s.win.close();
+});
+
+test('an answer names the question it answers, verbatim', () => {
+  const Q1 = 'Deploy to **staging** or production?\n  (say which)';
+  const Q2 = 'Run the migrations too?';
+  const a = surface();
+  const b = surface();
+  for (const s of [a, b]) {
+    send(s.win, {type: 'askUser', question: Q1, tabId: s.tab});
+  }
+  answer(a.win, 'staging');
+  assert.deepStrictEqual(answers(a.posted), [
+    {answer: 'staging', question: Q1, tabId: a.tab, type: 'userAnswer'},
+  ]);
+
+  // The daemon delivered A's answer and the agent asked Q2, but B has
+  // not heard yet: B's answer still names Q1, which the daemon no
+  // longer has pending.
+  answer(b.win, 'production');
+  assert.deepStrictEqual(answers(b.posted), [
+    {answer: 'production', question: Q1, tabId: b.tab, type: 'userAnswer'},
+  ]);
+
+  // A answers the next question under that question's name.
+  send(a.win, {type: 'askUser', question: Q2, tabId: a.tab});
+  answer(a.win, 'yes');
+  assert.deepStrictEqual(answers(a.posted)[1], {
+    answer: 'yes',
+    question: Q2,
+    tabId: a.tab,
+    type: 'userAnswer',
+  });
+  a.win.close();
+  b.win.close();
 });
 
 report('askAnswerNamesQuestionId_wave3');

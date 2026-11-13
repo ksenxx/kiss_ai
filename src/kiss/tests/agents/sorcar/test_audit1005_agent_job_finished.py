@@ -52,7 +52,7 @@ def test_wait_false_returns_the_error_when_the_dispatch_already_failed(tmp_path:
 
 
 def test_a_recorded_result_is_never_reported_as_still_running(tmp_path: Path) -> None:
-    job = agent_dispatch.start_agent_job(
+    job = agent_dispatch.new_agent_job(
         "sorcar",
         {
             "name": "sorcar", "prompt": "say hi", "sea_path": DEFAULT_AGENT_PATH,
@@ -61,6 +61,7 @@ def test_a_recorded_result_is_never_reported_as_still_running(tmp_path: Path) ->
         },
         None,
     )
+    agent_dispatch.launch_agent_job(job)
     assert job.running.wait(10)
     # Woken by the event, a caller sees the result at once, whether or
     # not the job's thread has exited yet.

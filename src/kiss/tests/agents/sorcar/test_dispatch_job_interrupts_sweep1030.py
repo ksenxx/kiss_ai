@@ -122,11 +122,12 @@ def test_a_stop_anywhere_in_kill_jobs_of_leaves_every_job_cancelled_or_registere
         line += 1
         owner = object()
         jobs = [
-            agent_dispatch.start_agent_job("sorcar", _job_kwargs(tmp_path), owner)
+            agent_dispatch.new_agent_job("sorcar", _job_kwargs(tmp_path), owner)
             for _ in range(2)
         ]
         try:
             for job in jobs:
+                agent_dispatch.launch_agent_job(job)
                 assert job.running.wait(30), job.job_id
             stop = _StopAtLine(agent_dispatch.kill_jobs_of.__code__, line)
             interrupted = _interrupted(partial(agent_dispatch.kill_jobs_of, owner), stop)

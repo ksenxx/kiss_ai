@@ -301,7 +301,11 @@ asks for something the ledger does not settle: quote the sentence of the stateme
 then say in one sentence how you read it and what the engineer's reading would get \
 wrong (a file, a name, a format, a value, a case, an input left unused). Take the \
 statement literally. Do not restate readings you agree with, do not invent \
-requirements the statement does not make, and do not comment on the approach.
+requirements the statement does not make, and do not comment on the approach. A \
+benefit the statement expects from the change ("would cut context", "lowers latency", \
+"prevents attention degradation") is the user's motivation, not a requirement: do not \
+demand that the work measure or prove it, unless the statement explicitly asks for that \
+measurement or names a target value for it; the requirement is the change itself.
 
 Answer with the single line `NONE` when you read every sentence as the ledger does, \
 otherwise with a numbered list, one item per sentence.
@@ -401,7 +405,11 @@ names as backing the claim, each with the exit code of its last run in this sess
 when it ran, exited 0 and tests that requirement: `echo`, `cat`, a script the engineer \
 wrote themselves, or the words of the statement prove nothing about the work on their \
 own. Do not invent problems: report only a requirement that is not \
-met, not checked, or checked wrongly, each with the evidence that shows it. Take the \
+met, not checked, or checked wrongly, each with the evidence that shows it. A benefit \
+the statement expects from the change ("would cut context", "lowers latency", "prevents \
+attention degradation") is the user's motivation, not a requirement: do not demand that \
+the work measure or prove it, unless the statement explicitly asks for that measurement \
+or names a target value for it; the requirement is the change itself. Take the \
 statement literally (exact names, formats, values, thresholds, edge cases, examples); \
 where the ledger chooses a reading, check the choice against the statement's words. \
 A symptom, scenario or input of the statement that the summary admits is not handled \
@@ -1185,11 +1193,12 @@ class ContainerHarness:
         Args:
             args: Arguments of the ``Bash`` or ``run_commands_parallel`` call.
         """
-        text = json.dumps(args.get("command", args.get("commands", "")))
+        commands = shell_commands(args)  # decoded: a kill may start any line of a command
         with self._lock:
             take = self.processes_before is None
-            self.kill_attempted = self.kill_attempted or bool(KILL_COMMANDS.search(text))
-            self.turn_shell_commands.extend(shell_commands(args))
+            self.kill_attempted = self.kill_attempted or any(
+                KILL_COMMANDS.search(c) for c in commands)
+            self.turn_shell_commands.extend(commands)
         if take:
             snapshot = self.process_snapshot()
             with self._lock:
@@ -2557,11 +2566,11 @@ class ContainerHarness:
                 restores the newest such checkpoint when the run ends badly).
         """
         archive = f"{CHECKPOINT_DIR}/{name}.tar"
-        wd = shlex.quote(self.workdir)
-        command = (f"mkdir -p {CHECKPOINT_DIR} && mb=$(du -sm {wd} | cut -f1)"
+        wd, tar = shlex.quote(self.workdir), shlex.quote(archive)
+        command = (f"mkdir -p {shlex.quote(CHECKPOINT_DIR)} && mb=$(du -sm {wd} | cut -f1)"
                    f" && [ \"$mb\" -le {MAX_CHECKPOINT_MB} ] || {{ echo \"too large: ${{mb}} MB\"; "
-                   f"exit 3; }}; tar -C {wd} -cf {archive}.tmp . && "
-                   f"mv {archive}.tmp {archive}")
+                   f"exit 3; }}; tar -C {wd} -cf {tar}.tmp . && "
+                   f"mv {tar}.tmp {tar}")
         result = self.container_run(["sh", "-c", command], timeout=600, with_stderr=True)
         code = None if result is None else result[0]
         detail = "" if result is None else result[1].decode("utf-8", errors="replace")[-500:]
@@ -2664,7 +2673,7 @@ class ContainerHarness:
             code, detail = 5, "archive altered since it was saved"
         else:
             command = (f"find {wd} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + && "
-                       f"tar -C {wd} -xf {archive}")
+                       f"tar -C {wd} -xf {shlex.quote(archive)}")
             result = self.container_run(["sh", "-c", command], timeout=600, with_stderr=True)
             code = None if result is None else result[0]
             detail = "" if result is None else result[1].decode("utf-8", errors="replace")[-500:]
@@ -2709,7 +2718,8 @@ class ContainerHarness:
                            if name not in READ_ONLY_TOOLS), default=-1)
         for at, ((name, args, changes), text) in enumerate(zip(calls, results, strict=True)):
             with self._lock:
-                for command, code in result_exit_codes(name, args, text, self.background_jobs):
+                for command, code in result_exit_codes(
+                        name, args, text, self.background_jobs, container=True):
                     self.commands_run.append((command, code))
                     del self.commands_run[:-INVENTORY_COMMANDS]
                     self.exit_codes[command.strip()] = code
@@ -2900,8 +2910,11 @@ class ContainerHarness:
     def shell_verdict(self, args: dict[str, Any]) -> str | None:
         """Block commands that would end the trial; lift the timeout of installs and builds.
 
-        A here-document creating a file under the workdir is an edit and
-        meets the ledger gate (:meth:`ledger_verdict`).  The timeout is
+        The commands are read as the tool decodes them
+        (:func:`~kiss.agents.sorcar.evidence_gate.shell_commands`), so an
+        array only its lenient JSON decoder accepts is guarded command by
+        command too.  A here-document creating a file under the workdir is
+        an edit and meets the ledger gate (:meth:`ledger_verdict`).  The timeout is
         raised in place (``args`` is the dict the tool is called with) so a
         package install or compile is never killed half way by ``Bash``'s
         30-second default; a timeout already at or above
@@ -2915,19 +2928,12 @@ class ContainerHarness:
             ``None`` (the call may run), :data:`DESTRUCTIVE_VERDICT` for a
             blocked command or the ledger verdict for a heredoc edit.
         """
+        commands = shell_commands(args)
         if isinstance(args.get("command"), str):
-            commands, default_timeout = [args["command"]], float(DEFAULT_SHELL_TIMEOUT)
+            default_timeout = float(DEFAULT_SHELL_TIMEOUT)
             args.setdefault("timeout_seconds", DEFAULT_SHELL_TIMEOUT)
-        elif isinstance(args.get("commands"), str):
-            try:
-                parsed = json.loads(args["commands"])
-            except ValueError:
-                parsed = [args["commands"]]
-            commands = ([c for c in parsed if isinstance(c, str)] if isinstance(parsed, list)
-                        else [args["commands"]])
-            default_timeout = 1800.0
         else:
-            return None
+            default_timeout = 1800.0
         if any(self.destructive.search(c) for c in commands):
             return DESTRUCTIVE_VERDICT
         if self.finish_gate:  # a heredoc creating a file is an edit: same ledger gate

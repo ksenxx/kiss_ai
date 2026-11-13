@@ -34,6 +34,7 @@ from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import wait_for as wait_for  # re-exported for the server tests
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.conftest import init_repo
 
 # The stand-in server speaks the OpenAI chat-completions wire format,
@@ -343,12 +344,10 @@ class IsolatedKissHome:
         user_config.CONFIG_PATH = self.kiss_home / "config.json"  # type: ignore[attr-defined]
         self._saved_db = (
             persistence._DB_PATH,
-            persistence._db_conn,
             persistence._KISS_DIR,
         )
         persistence._KISS_DIR = self.kiss_home
         persistence._DB_PATH = self.kiss_home / "history.db"
-        persistence._db_conn = None
 
     def write_config(self, **values: Any) -> None:
         """Write *values* into the isolated ``config.json``."""
@@ -363,14 +362,9 @@ class IsolatedKissHome:
         """Restore global state and delete the temp directory."""
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
-        if persistence._db_conn is not None:
-            try:
-                persistence._db_conn.close()
-            except Exception:  # pragma: no cover — cleanup best-effort
-                pass
+        persistence._close_thread_db()
         (
             persistence._DB_PATH,
-            persistence._db_conn,
             persistence._KISS_DIR,
         ) = self._saved_db
         if self._saved_env is None:
@@ -600,8 +594,8 @@ class LocalDaemonTestCase(unittest.TestCase):
         """Join every registered task thread, then drop the registry.
 
         The daemon answers a client before its task thread has finished
-        its bookkeeping (``_record_frequent_task`` and the event writer
-        still use the test's history.db), so the threads are joined before
+        its bookkeeping (the final row write and the event writer still
+        use the test's history.db), so the threads are joined before
         the states are dropped and, later, the DB is closed and the tmpdir
         removed.  A thread still alive after :attr:`task_join_timeout` is
         an error: it is recorded in :attr:`stragglers` so
@@ -640,7 +634,7 @@ class LocalDaemonTestCase(unittest.TestCase):
         # Stops the event writer and invalidates every thread's cached
         # connection first, so ``home.cleanup`` finds no live connection
         # to close raw under another thread.
-        persistence._close_db()
+        close_db()
         self.home.cleanup()
 
     def _shutdown_server(self) -> None:

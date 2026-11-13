@@ -59,6 +59,7 @@ from kiss.agents.sorcar import local_endpoint, persistence, sea_commands
 from kiss.core.config import kiss_home
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     StandInModelServer,
@@ -217,7 +218,7 @@ class TestEarlyReturnRuns(TestCase):
         home.mkdir(parents=True, exist_ok=True)
         seas_md = home / "SEAS.md"
         seas_md.write_text(str(self.tmp / "seas") + "\n", encoding="utf-8")
-        self.addCleanup(sea_commands._reset_for_tests)
+        self.addCleanup(reset_sea_registry)
         self.addCleanup(seas_md.unlink)
         sea_commands.refresh_registry()
         assert sea_commands.get_command("slowhelp") == sea.resolve()
@@ -433,12 +434,15 @@ class TestEarlyReturnRuns(TestCase):
                 })
                 # A late message gets no steering echo (its re-run
                 # echoes it); the submit acknowledgment shows it was
-                # routed before the next one is typed.
+                # received before the next one is typed.
                 self.client.wait_for("setTaskText", tab_id, text=prompt)
-            self.assertEqual(
-                state.pending_user_messages,
-                [plain, f"<task>{task_a}</task>", f"<task>{task_b}</task>"],
-            )
+            # The acknowledgment is sent on receipt, before the message
+            # is queued: wait for the queue itself.
+            queued = [plain, f"<task>{task_a}</task>", f"<task>{task_b}</task>"]
+            deadline = time.monotonic() + 30
+            while state.pending_user_messages != queued and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(state.pending_user_messages, queued)
             self.assertEqual(state.queued_followup_tasks, [])
         finally:
             blocker.rollback()

@@ -20,7 +20,7 @@
 'use strict';
 
 const assert = require('assert');
-const harness = require('./simplify2_harness');
+const {send, clickTab} = require('./simplify2_harness');
 const {
   makeWorkDirPage,
   pendingCounts,
@@ -29,7 +29,6 @@ const {
   findMissing,
 } = require('./file_link_helpers');
 
-const {send, clickTab} = harness;
 const WORK_DIR = '/tmp/kiss-link-cleanup';
 
 function isOpen(win, tabId) {

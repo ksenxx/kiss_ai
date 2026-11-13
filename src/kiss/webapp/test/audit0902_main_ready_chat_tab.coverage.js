@@ -22,6 +22,6 @@ gateRegions({
   mark: 'readychat',
   label: 'ready chat-tab',
   targets: [
-    {file: 'main.js', sourceUrl: 'audit0902-readychat-main.js', minRegions: 2},
+    {file: 'main.js', sourceUrl: 'audit0902-readychat-main.js', minRegions: 4},
   ],
 });

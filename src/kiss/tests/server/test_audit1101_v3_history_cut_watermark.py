@@ -36,6 +36,7 @@ from kiss.tests.agents.sorcar.test_steer_inputs import (
     _restore,
     _set_task_timestamp,
 )
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.pause import Pause
 
 
@@ -50,7 +51,7 @@ class TestHistoryCutWatermark(unittest.TestCase):
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        th._close_db()
+        close_db()
         _restore(self.saved)
         shutil.rmtree(self.tmp, ignore_errors=True)
 

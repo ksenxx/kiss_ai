@@ -209,10 +209,12 @@ def test_shutdown_during_a_pending_open_leaves_no_shell(
     assert session_count(svc) == 0
     assert printer.of_type("terminalOpened") == []
     _wait_until(lambda: _shells_in(work) == [])
-    # The service is reusable after a shutdown (a test harness hangs up
-    # leftover shells that way): a later open starts a shell.
+    # A service shut down starts no more shells (the daemon is stopping
+    # and nothing would hang them up): a later open is dropped, and the
+    # page sends it again to the daemon it reconnects to.
     svc.open("tab-c", "conn", str(work), 80, 24)
-    assert session_count(svc) == 1 and len(_shells_in(work)) == 1
+    assert session_count(svc) == 0 and _shells_in(work) == []
+    assert printer.of_type("terminalOpened") == printer.of_type("terminalError") == []
 
 
 def _pty_masters_of(pid: int) -> list[int]:

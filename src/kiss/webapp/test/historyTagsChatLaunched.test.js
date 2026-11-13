@@ -3,11 +3,12 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// Three additions to the chat page, tested against the real
-// chat.html + main.js + panelCopy.js in JSDOM:
+// The "... ago" labels of the task-history list, tested against the
+// real chat.html + main.js + panelCopy.js in JSDOM:
 //
-//  * every task panel in the task-history list shows its classification
-//    tags ("work · coding") right after its "... ago" age label;
+//  * the strip under every task panel's header ends with the task's
+//    "... ago" age label: the classification tags and the SEA the row
+//    carries for the Tag and SEA filters are not listed there;
 //  * every collapsible chat panel carries a "... ago" line under its
 //    header counting from the chat's newest instant, fed by the daemon's
 //    `chat_last_launched` / `chat_last_finished` stamps (falling back to
@@ -18,8 +19,6 @@
 // (The thoughts panel's llm_call cost is panelCost.test.js.)
 
 'use strict';
-
-/* global require, console, process */
 
 const assert = require('assert');
 const {
@@ -32,9 +31,14 @@ const {
   historyRows: rows,
   loadHistory,
   makeSession: session,
+  freezeClock,
 } = require('./history_helpers');
 
 const HOUR_MS = 3600 * 1000;
+// The pages' clock stays at this instant, and the tests date their sessions
+// from it (`win.Date.now()`): a label's age is then the fixture's, however
+// long after it the page renders.
+const FROZEN_NOW_MS = 1_700_500_000_000;
 
 function makePage() {
   // Every setTimeout the page arms, so a test can fire a long timer
@@ -44,6 +48,7 @@ function makePage() {
     beforeScripts(win) {
       stubRaf(win);
       loadMainCss(win);
+      freezeClock(win, FROZEN_NOW_MS);
       timers = captureTimers(win);
     },
   });
@@ -56,44 +61,25 @@ function groups(win) {
   );
 }
 
-function testTagsAfterLaunched() {
+function testStripEndsWithTheAgeLabel() {
   const {win} = makePage();
-  const now = Date.now();
+  const now = win.Date.now();
   loadHistory(win, [
     session({
       id: 'chat-a',
       task_id: 'task-a',
       startTs: now - 2 * HOUR_MS,
-      tags: 'work,coding, testing ,',
+      tags: 'work,coding',
+      sea: 'write_paper_sea',
     }),
-    session({
-      id: 'chat-b',
-      task_id: 'task-b',
-      startTs: now - HOUR_MS,
-      tags: '',
-    }),
-    session({id: 'chat-c', task_id: 'task-c', startTs: now - HOUR_MS}),
-    session({
-      id: 'chat-d',
-      task_id: 'task-d',
-      startTs: now - HOUR_MS,
-      tags: 42,
-    }),
+    session({id: 'chat-b', task_id: 'task-b', startTs: now - HOUR_MS}),
   ]);
   const list = rows(win);
-  assert.strictEqual(list.length, 4, 'one row per session');
-  const tagged = list[0].querySelector('.sidebar-item-tags');
-  assert.ok(tagged, 'a tagged row renders the tags span');
-  assert.strictEqual(tagged.textContent, 'work · coding · testing');
-  assert.strictEqual(tagged.title, 'Tags: work, coding, testing');
-  const launched = list[0].querySelector('.sidebar-item-launched');
+  assert.strictEqual(list.length, 2, 'one row per session');
+  const strip = list[0].querySelector('.sidebar-item-actions');
+  const launched = strip.querySelector('.sidebar-item-launched');
   assert.strictEqual(
-    launched.nextElementSibling,
-    tagged,
-    'the tags sit immediately after the "... ago" age label',
-  );
-  assert.strictEqual(
-    list[0].querySelector('.sidebar-item-collapse').nextElementSibling,
+    strip.querySelector('.sidebar-item-collapse').nextElementSibling,
     launched,
     'the age label follows the last button of the strip',
   );
@@ -103,25 +89,27 @@ function testTagsAfterLaunched() {
     'the tooltip still spells out the launch instant',
   );
   assert.strictEqual(
-    tagged.parentElement,
-    list[0].querySelector('.sidebar-item-actions'),
-    'the tags live in the action strip like the age label',
+    launched.nextElementSibling,
+    null,
+    'nothing follows the age label: no tags, no SEA name',
   );
-  for (let i = 1; i < 4; i++) {
-    assert.strictEqual(
-      list[i].querySelector('.sidebar-item-tags'),
-      null,
-      `row ${i}: no tags span without usable tags`,
-    );
-    assert.ok(list[i].querySelector('.sidebar-item-launched'));
-  }
+  assert.ok(
+    !/work|coding|write_paper_sea/.test(strip.textContent),
+    strip.textContent,
+  );
+  // The Tag and SEA filters still find the row by both.
+  assert.strictEqual(list[0].dataset.tags, 'work,coding');
+  assert.strictEqual(list[0].dataset.sea, 'write_paper_sea');
+  const plain = list[1].querySelector('.sidebar-item-launched');
+  assert.strictEqual(plain.textContent, '1 hour ago');
+  assert.strictEqual(plain.nextElementSibling, null);
   win.close();
-  console.log('  ok - task rows show their tags after the age label');
+  console.log('  ok - the strip of a task row ends with its age label');
 }
 
 function testChatLastLaunchedLine() {
   const {win} = makePage();
-  const now = Date.now();
+  const now = win.Date.now();
   const stamped = now - 3 * HOUR_MS;
   loadHistory(win, [
     // Newest row first, as the daemon sends them; both rows of chat-a
@@ -224,10 +212,8 @@ function testChatLastLaunchedLine() {
   assert.strictEqual(labelD.dataset.launchTs, '0');
   assert.ok(/^\d+ years ago$/.test(labelD.textContent), labelD.textContent);
 
-  // The chat panel is folded: the line stays visible (it is not part
-  // of the body the chevron folds).
-  const chevron = byChat['chat-a'].querySelector('.history-chat-collapse');
-  if (!byChat['chat-a'].classList.contains('collapsed')) chevron.click();
+  // The chat panel starts folded: the line stays visible (it is not
+  // part of the body the chevron folds).
   assert.ok(byChat['chat-a'].classList.contains('collapsed'), 'chat folded');
   assert.strictEqual(
     win.getComputedStyle(byChat['chat-a'].querySelector('.history-chat-body'))
@@ -279,7 +265,7 @@ function testChatLastLaunchedLine() {
 
 function testChatLineFollowsTheNewestTaskState() {
   const {win} = makePage();
-  const now = Date.now();
+  const now = win.Date.now();
   loadHistory(win, [
     // chat-run: its newest task is still running.  The stamps are
     // from the previous task's finish (the row is recomputed when a
@@ -356,7 +342,7 @@ function testChatLineFollowsTheNewestTaskState() {
 
 function testRefreshSweepRepaintsBothLabels() {
   const {win, timers} = makePage();
-  const now = Date.now();
+  const now = win.Date.now();
   loadHistory(win, [
     session({
       id: 'chat-a',
@@ -390,7 +376,7 @@ function testRefreshSweepRepaintsBothLabels() {
 }
 
 try {
-  testTagsAfterLaunched();
+  testStripEndsWithTheAgeLabel();
   testChatLastLaunchedLine();
   testChatLineFollowsTheNewestTaskState();
   testRefreshSweepRepaintsBothLabels();

@@ -243,7 +243,6 @@ class TestTerminalOpenOverWss(IsolatedAsyncioTestCase):
             opened = await self._recv_type(opener, "terminalOpened")
             self.assertEqual(opened["tab_id"], tab_id)
             self.assertFalse(opened["attached"])
-            self.assertTrue(opened["shell"])
 
             await self._send(opener, {
                 "type": "terminalInput", "tab_id": tab_id, "data": "echo kiss-$((40+2))\n",

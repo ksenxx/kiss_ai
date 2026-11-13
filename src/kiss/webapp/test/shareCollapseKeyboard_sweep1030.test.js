@@ -15,7 +15,7 @@
 // toggle.  Each test failed against the pre-fix share.js.
 
 const assert = require('assert');
-const {makeRunner} = require('./ui_antipattern_harness');
+const {makeRunner, key} = require('./ui_antipattern_harness');
 const {click, makeSharePage} = require('./share_helpers');
 
 const {test, report} = makeRunner();
@@ -28,16 +28,6 @@ function header(title, extra) {
     title +
     (extra || '') +
     '<span class="collapse-preview"></span></div>'
-  );
-}
-
-function key(win, el, name) {
-  el.dispatchEvent(
-    new win.KeyboardEvent('keydown', {
-      key: name,
-      bubbles: true,
-      cancelable: true,
-    }),
   );
 }
 

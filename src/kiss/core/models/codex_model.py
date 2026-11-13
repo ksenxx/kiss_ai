@@ -51,7 +51,6 @@ import subprocess
 import tempfile
 import threading
 import time
-import uuid
 from collections.abc import Callable, Iterable, Iterator
 from typing import IO, TYPE_CHECKING, Any
 
@@ -59,15 +58,16 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.locked import locked
 from kiss.core.models.codex_mcp_bridge import ToolBridge, toml_value
 from kiss.core.models.model import (
+    Attachment,
     CLITextModel,
     ThinkingCallback,
     TokenCallback,
     _iter_jsonl,
     environ_without,
     render_tool_call,
+    text_call_id,
 )
 from kiss.core.processes import (
-    exited_unreaped,
     kill_process_tree,
     popen_process_group,
     run_process_group,
@@ -326,7 +326,7 @@ _device_login_lock = threading.Lock()
 _device_login: "tuple[dict[str, Any], subprocess.Popen[str]] | None" = None
 
 
-def codex_device_login(timeout: float = 60.0, fresh: bool = False) -> dict[str, Any]:
+def codex_device_login(timeout: float = 60.0) -> dict[str, Any]:
     """Start ``codex login --device-auth`` and return what the user must do.
 
     The CLI prints a verification URL and a one-time code, then keeps
@@ -343,12 +343,10 @@ def codex_device_login(timeout: float = 60.0, fresh: bool = False) -> dict[str, 
     alive, its code is the one the user can enter, so a call returns
     that same prompt instead of starting a second CLI (another
     surface's click, a retry); calls serialise, so one made while the
-    earlier CLI is still printing gets its code too.  A call with
-    *fresh* ends the earlier CLI and starts a new one.
+    earlier CLI is still printing gets its code too.
 
     Args:
         timeout: Seconds to wait for the URL and code to appear.
-        fresh: Start a new CLI even while an earlier one is still alive.
 
     Returns:
         ``{"url", "code"}`` or ``{"error"}``.
@@ -358,9 +356,7 @@ def codex_device_login(timeout: float = 60.0, fresh: bool = False) -> dict[str, 
         if _device_login is not None:
             prompt, proc = _device_login
             if proc.poll() is None:
-                if not fresh:
-                    return dict(prompt)
-                kill_process_tree(proc)
+                return dict(prompt)
             _device_login = None
         path = find_codex_executable()
         if path is None:
@@ -483,16 +479,12 @@ def _finish_device_login(
     Its stdout is read to the end meanwhile by the thread
     :func:`codex_device_login` started, so the CLI cannot block on a
     full pipe while it polls for the login; *drain* collects its stderr
-    into *stderr_lines*.  The exit is awaited without reaping and the
-    CLI reaped under the login lock: a ``fresh`` login that saw it alive
-    under that lock kills its process group next, which must still be
-    the CLI's (a reaped pid could already name a stranger's group).
+    into *stderr_lines*.  A login started meanwhile (it saw this CLI
+    exited) has stored its own prompt, which is left alone.
     """
     global _device_login
-    while not exited_unreaped(proc):
-        time.sleep(0.1)
+    proc.wait()
     with _device_login_lock:
-        proc.wait()
         if _device_login is not None and _device_login[1] is proc:
             _device_login = None
     drain.join(timeout=_STDERR_DRAIN_GRACE_SECONDS)
@@ -643,6 +635,10 @@ def _query_default_model(path: str, env: dict[str, str], timeout: float) -> str 
     The server runs until it is killed, which happens in every case.
     """
     deadline = time.monotonic() + timeout
+    # Made before the spawn: no call (where a Stop is raised) may run
+    # between the spawn and the ``try`` whose ``finally`` kills the server.
+    lines: queue.Queue[str | None] = queue.Queue()
+    initialize = {"clientInfo": {"name": "kiss", "title": "kiss", "version": "0"}}
     try:
         proc = popen_process_group(
             [path, "app-server"],
@@ -657,8 +653,6 @@ def _query_default_model(path: str, env: dict[str, str], timeout: float) -> str 
     except OSError:
         return None
     assert proc.stdin is not None and proc.stdout is not None
-    lines: queue.Queue[str | None] = queue.Queue()
-    initialize = {"clientInfo": {"name": "kiss", "title": "kiss", "version": "0"}}
     try:
         # Started inside the try: a reader that cannot start (no thread
         # left) must not leave the server running.
@@ -795,25 +789,54 @@ def _gpt5_token_count(text: str) -> int:
     )
 
 
+@contextlib.contextmanager
+def _image_files(images: list[Attachment]) -> Iterator[list[str]]:
+    """Hold *images* in private temp files for the duration of the block.
+
+    Codex reads an image's format from its bytes, so the names carry none.
+
+    Args:
+        images: The images to hand to ``codex exec -i``, in label order.
+
+    Yields:
+        One path per image, in the same order (no file without images).
+    """
+    if not images:
+        yield []
+        return
+    with tempfile.TemporaryDirectory(prefix="kiss-codex-") as directory:
+        paths = [os.path.join(directory, f"image-{n}") for n in range(1, len(images) + 1)]
+        for path, image in zip(paths, images):
+            with open(path, "wb") as f:
+                f.write(image.data)
+        yield paths
+
+
 class CodexModel(CLITextModel):
     """A model that delegates to the OpenAI Codex CLI for LLM completions.
 
     Model names use the ``codex/`` prefix.  The part after the prefix is
     passed as the ``-m`` flag to the ``codex`` CLI (e.g.
-    ``codex/gpt-5-codex`` → ``-m gpt-5-codex``).  The special name
-    ``codex/default`` invokes the CLI without ``-m``, letting Codex use
-    the model configured for the active ChatGPT account.
+    ``codex/gpt-5-codex`` → ``-m gpt-5-codex``); an effort alias is
+    stripped first and selects the effort instead
+    (``codex/gpt-6-astra-xhigh`` → ``-m gpt-6-astra -c
+    model_reasoning_effort="xhigh"``, see :meth:`_effort_level`).  The
+    special name ``codex/default`` invokes the CLI without ``-m``, letting
+    Codex use the model configured for the active ChatGPT account.
 
     Every turn runs ``codex exec`` locked down to a bare model
     (:data:`CODEX_LOCKDOWN_ARGS`) with KISS's ``system_instruction`` as
-    its instructions file, in :func:`codex_cli_env`.  Tool
-    calling is supported via text-based prompting: tool descriptions
-    are injected into the system prompt and the model's text output is
-    parsed for JSON ``tool_calls`` blocks.  Embeddings are not available.
+    its instructions file, in :func:`codex_cli_env`.  Within a
+    :meth:`native_tools_exposed` block Codex calls the tools itself over
+    MCP; the tools not served there (and every tool outside such a block)
+    use text-based prompting: their descriptions are injected into the
+    system prompt and the model's text output is parsed for JSON
+    ``tool_calls`` blocks.  Embeddings are not available.
     """
 
     _cli_model_name = "CodexModel"
     _cli_logger = logger
+    _attachment_types = ("image/",)
     serves_tools_natively = True
 
     def __init__(
@@ -832,6 +855,9 @@ class CodexModel(CLITextModel):
                 - ``system_instruction`` (str): Replaces Codex's built-in
                   instructions for the turn (``model_instructions_file``).
                 - ``timeout`` (int): Subprocess timeout in seconds (default 300).
+                - ``reasoning_effort`` (str): The effort level to run at,
+                  passed as ``model_reasoning_effort``; outranks the
+                  level of an alias (see :meth:`_effort_level`).
             token_callback: Optional callback invoked with each streamed
                 text token.
             thinking_callback: Optional callback invoked with ``True`` when
@@ -843,9 +869,9 @@ class CodexModel(CLITextModel):
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-        self._cli_model = (
-            model_name[len("codex/") :] if model_name.startswith("codex/") else model_name
-        )
+        from kiss.core.models.model_info import _strip_thinking_alias
+
+        self._cli_model = _strip_thinking_alias(model_name).removeprefix("codex/")
         # The MCP bridge serving the agent's tools, set for the duration
         # of a ``native_tools_exposed`` block.
         self._tool_bridge: ToolBridge | None = None
@@ -957,7 +983,7 @@ class CodexModel(CLITextModel):
             bridge: The bridge whose answered calls are taken.
         """
         for call in bridge.take_served():
-            call_id = f"call_{uuid.uuid4().hex[:8]}"
+            call_id = text_call_id(call.name, call.arguments)
             self.conversation.append(
                 {
                     "role": "assistant",
@@ -986,7 +1012,7 @@ class CodexModel(CLITextModel):
         """The fatal error a bridged KISS tool raised (a limit hit), ending the turn."""
         return self._tool_bridge.error if self._tool_bridge is not None else None
 
-    def _build_cli_args(self, instructions_file: str) -> list[str]:
+    def _build_cli_args(self, instructions_file: str, image_files: Iterable[str] = ()) -> list[str]:
         """Build the ``codex exec`` CLI argument list.
 
         Args:
@@ -994,6 +1020,9 @@ class CodexModel(CLITextModel):
                 :data:`CODEX_INSTRUCTIONS_PREAMBLE` and KISS's system
                 instruction, passed as ``model_instructions_file`` so it
                 replaces Codex's built-in prompt.
+            image_files: Paths of the images the user attached, each
+                passed with ``-i``: Codex sends the N-th ahead of the
+                prompt as ``[Image #N]``, the label the prompt uses.
 
         Returns:
             List of CLI arguments.
@@ -1006,11 +1035,44 @@ class CodexModel(CLITextModel):
         # Without a summary setting (``--ignore-user-config`` drops the
         # user's) the CLI emits no ``reasoning`` items, so no thinking shows.
         args.extend(["-c", 'model_reasoning_summary="detailed"'])
+        effort = self._effort_level()
+        if effort:
+            args.extend(["-c", f"model_reasoning_effort={toml_value(effort)}"])
         if self._tool_bridge is not None:
             args.extend(self._tool_bridge.codex_args(CODEX_MCP_TOOL_TIMEOUT_SECONDS))
         if self._cli_model and self._cli_model != "default":
             args.extend(["-m", self._cli_model])
+        for image_file in image_files:
+            args.extend(["-i", image_file])
         return args
+
+    def _effort_level(self) -> str | None:
+        """Return the reasoning effort this turn runs at, or ``None`` for the CLI default.
+
+        An explicit ``reasoning_effort`` in ``model_config`` (the framework's
+        key, which ``KISSAgent._turn_effort`` sets for one turn) wins.  Else
+        the level of the model name: the catalog entry's ``thinking`` level
+        when the name has one, and ``xhigh`` for the ``-xhigh`` alias the
+        catalog does not list (``codex/gpt-6-astra-xhigh``), which
+        :func:`~kiss.core.models.model_info._strip_thinking_alias` maps to
+        its base model for every lookup.  Read at each launch so a per-turn
+        override is honoured.
+
+        Returns:
+            The level for ``model_reasoning_effort``, or ``None`` when
+            nothing selects one.
+        """
+        from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias
+
+        explicit = self.model_config.get("reasoning_effort")
+        if explicit is not None:
+            return str(explicit)
+        info = MODEL_INFO.get(self.model_name)
+        if info is not None:
+            return info.thinking
+        if _strip_thinking_alias(self.model_name) != self.model_name:
+            return "xhigh"
+        return None
 
     def _cli_env(self) -> dict[str, str] | None:
         """The CLI's environment: the one :meth:`_prepare_turn_env` built.
@@ -1030,7 +1092,7 @@ class CodexModel(CLITextModel):
         ``item.completed`` event of type ``agent_message`` carries the full
         assistant text for that item; the token callback is invoked once
         per such item.  The terminal ``turn.completed`` event provides the
-        usage information.
+        usage information and is what makes the turn a finished one.
 
         Returns:
             tuple[str, Any]: (generated_text, parsed_response).  The
@@ -1038,11 +1100,13 @@ class CodexModel(CLITextModel):
 
         Raises:
             KISSError: If the CLI could not be started, exited with a
-                failure status, or emitted a ``turn.failed`` / ``error``
+                failure status, ended without ``turn.completed``, or
+                emitted a ``turn.failed`` / ``error``
                 event — or, with the subscription switch on, is logged
-                in with an API key (:data:`API_KEY_LOGIN_ERROR`).  When
-                the switch is on, the
-                message ends with :data:`SUBSCRIPTION_HINT`.
+                in with an API key (:data:`API_KEY_LOGIN_ERROR`).  With
+                the switch on, the message of the last two (a failure
+                the CLI reported as an event, the refused login) ends
+                with :data:`SUBSCRIPTION_HINT`.
             TimeoutError: If the CLI produced no complete turn before the
                 deadline.  Retryable, unlike ``KISSError``.
             KeyboardInterrupt: If the user stopped the task mid-turn.
@@ -1052,7 +1116,7 @@ class CodexModel(CLITextModel):
         self._priced_model = self._cli_model
         if self._cli_model == "default" and self._api_billed:
             self._priced_model = codex_default_model(self._turn_env) or self._cli_model
-        prompt = self._build_prompt()
+        prompt, images = self._prompt_and_attachments()
         preamble = CODEX_INSTRUCTIONS_PREAMBLE
         if self._tool_bridge is not None:
             preamble += CODEX_MCP_TOOLS_NOTE
@@ -1061,8 +1125,12 @@ class CodexModel(CLITextModel):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(instructions)
-            args = self._build_cli_args(instructions_file)
-            with self._cli_turn(args, "Codex CLI") as proc:
+            with (
+                _image_files(list(images.values())) as image_files,
+                self._cli_turn(
+                    self._build_cli_args(instructions_file, image_files), "Codex CLI"
+                ) as proc,
+            ):
                 proc.send_prompt(prompt)
                 content, result_json, error_message = self._parse_stream_events(proc.lines())
                 if error_message is not None:
@@ -1074,6 +1142,15 @@ class CodexModel(CLITextModel):
                         )
                     )
                 proc.raise_for_exit()
+                if "usage" not in result_json:
+                    # Stdout ended before ``turn.completed``: the text so
+                    # far may be cut short.  The same plain ``KISSError``
+                    # the API transports raise for a stream without its
+                    # terminal event.
+                    raise KISSError(
+                        "Codex CLI ended without a turn.completed event, so its "
+                        "answer may be incomplete."
+                    )
         finally:
             os.unlink(instructions_file)
             if self._tool_bridge is not None:
@@ -1125,7 +1202,8 @@ class CodexModel(CLITextModel):
         """Append :data:`SUBSCRIPTION_HINT` to *error* when the turn ran with the switch on."""
         if not self._use_subscription:
             return error
-        return KISSError(f"{error}\n{SUBSCRIPTION_HINT}")
+        # ``args[0]``: ``str(error)`` would prefix "KISS Error:" a second time.
+        return KISSError(f"{error.args[0]}\n{SUBSCRIPTION_HINT}")
 
     def _parse_stream_events(self, lines: Iterable[str]) -> tuple[str, dict[str, Any], str | None]:
         """Parse the JSONL event stream from ``codex exec --json``.
@@ -1138,11 +1216,14 @@ class CodexModel(CLITextModel):
             - ``item.completed`` with ``item.type == "agent_reasoning"``:
               text is forwarded via the token callback wrapped in a
               thinking start/end pair.
-            - ``turn.completed``: ``usage`` is recorded in the result.
+            - ``turn.completed``: ``usage`` is recorded in the result,
+              which is how :meth:`generate` knows the turn finished.
             - ``error`` / ``turn.failed``: collected into *error_message*.
 
         Other events (``turn.started``, the start-up notices the locked
-        down CLI emits as ``item.type == "error"`` items) are ignored.
+        down CLI emits as ``item.type == "error"`` items) are ignored, as
+        is a line whose JSON is not an object (progress noise such as
+        ``42`` or ``"starting"``).
 
         Args:
             lines: An iterable of JSON strings (one event per line).
@@ -1166,6 +1247,8 @@ class CodexModel(CLITextModel):
         error_message: str | None = None
 
         for event in _iter_jsonl(lines):
+            if not isinstance(event, dict):
+                continue
             event_type = event.get("type")
 
             if event_type == "thread.started":

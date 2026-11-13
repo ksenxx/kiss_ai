@@ -77,24 +77,18 @@ function main() {
     id: 'progress-1',
     severity: 'info',
     message: 'Installing (1/3)',
-    progress: true,
   });
   send(win, {
     type: 'notification',
     id: 'progress-1',
     severity: 'info',
     message: 'Installing (2/3)',
-    progress: true,
   });
   const progressToasts = win.document.querySelectorAll(
     '.kiss-notification[data-notification-id="progress-1"]',
   );
   assert.strictEqual(progressToasts.length, 1, 'same id: one toast');
   assert.ok(progressToasts[0].textContent.includes('Installing (2/3)'));
-  assert.ok(
-    progressToasts[0].querySelector('.kiss-notification-progress'),
-    'a progress toast shows its progress bar',
-  );
   send(win, {type: 'notification', id: 'progress-1', close: true});
   assert.strictEqual(
     toastById(win, 'progress-1'),

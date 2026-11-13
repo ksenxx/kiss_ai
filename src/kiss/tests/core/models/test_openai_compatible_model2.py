@@ -91,7 +91,7 @@ def _text_response_json(text: str = "ok") -> str:
 
 def _tool_call_response_json(
     name: str = "echo",
-    arguments: str = '{"text": "hello"}',
+    arguments: str | None = '{"text": "hello"}',
     call_id: str = "call_abc",
 ) -> str:
     """Return a minimal /v1/responses JSON body containing a function_call."""
@@ -192,8 +192,13 @@ def _tool_call_stream_sse_body(
     name: str = "echo",
     args_text: str = '{"text":"hello"}',
     call_id: str = "call_xyz",
+    terminal_arguments: dict[str, Any] | None = None,
 ) -> bytes:
-    """Build a complete SSE body that streams a function_call."""
+    """Build a complete SSE body that streams a function_call.
+
+    The terminal item repeats *args_text* unless *terminal_arguments*
+    gives its ``arguments`` field (``{}`` leaves the field out).
+    """
     output_item = {
         "type": "function_call",
         "id": "fc_1",
@@ -225,8 +230,10 @@ def _tool_call_stream_sse_body(
                 },
             )
         )
-    completed_item = dict(output_item)
-    completed_item["arguments"] = args_text
+    completed_item = {key: value for key, value in output_item.items() if key != "arguments"}
+    completed_item.update(
+        {"arguments": args_text} if terminal_arguments is None else terminal_arguments
+    )
     frames.append(
         _stream_sse_event(
             "response.completed",
@@ -254,6 +261,34 @@ def _tool_call_stream_sse_body(
         )
     )
     return b"".join(frames)
+
+
+def _call_added(letter: str, output_index: int) -> dict[str, Any]:
+    """Return the event announcing ``echo`` call ``call_<letter>`` (item ``fc_<letter>``)."""
+    item = {
+        "type": "function_call",
+        "id": f"fc_{letter}",
+        "call_id": f"call_{letter}",
+        "name": "echo",
+    }
+    return {"type": "response.output_item.added", "output_index": output_index, "item": item}
+
+
+def _arguments_delta(letter: str, **identity: Any) -> dict[str, Any]:
+    """Return an argument event carrying ``{"text": <letter>}`` and only the *identity* given."""
+    delta = json.dumps({"text": letter})
+    return {"type": "response.function_call_arguments.delta", "delta": delta, **identity}
+
+
+def _idless_call_event(kind: str, letter: str) -> dict[str, Any]:
+    """Return an ``output_item.<kind>`` event of ``call_<letter>`` with no item id or index.
+
+    The ``done`` event carries the arguments ``{"text": <letter>}``.
+    """
+    item = {"type": "function_call", "call_id": f"call_{letter}", "name": "echo"}
+    if kind == "done":
+        item["arguments"] = json.dumps({"text": letter})
+    return {"type": f"response.output_item.{kind}", "item": item}
 
 
 def _reasoning_stream_sse_body(thinking: str, text: str = "answer") -> bytes:
@@ -867,6 +902,20 @@ class TestToolCallParsing:
         assert fc_items[-1]["name"] == "echo"
         assert content == ""
 
+    def test_function_call_with_null_arguments_is_replayed_with_an_empty_string(
+        self, capture_server: str
+    ) -> None:
+        """A non-streamed call item whose ``arguments`` is null runs with none
+        and is replayed with ``""`` (the API requires the field)."""
+        m = OpenAICompatibleModel2("gpt-4o", base_url=capture_server, api_key="k")
+        m.initialize("hi")
+        _CapturingHandler.next_response_body = _tool_call_response_json(arguments=None).encode()
+        fcs, _content, _resp = m.generate_and_process_with_tools(
+            function_map={"echo": _echo}, tools_schema=_ECHO_TOOL_CHAT_SCHEMA
+        )
+        assert fcs == [{"id": "call_abc", "name": "echo", "arguments": {}}]
+        assert m.conversation[-1]["arguments"] == ""
+
     def test_function_results_become_function_call_output(
         self, capture_server: str
     ) -> None:
@@ -1003,6 +1052,125 @@ class TestStreaming:
                 "arguments": {"text": "streamy"},
             }
         ]
+
+    @pytest.mark.parametrize(
+        ("terminal", "kept"),
+        [({}, {"text": "kept"}), ({"arguments": None}, {"text": "kept"}), ({"arguments": ""}, {})],
+    )
+    def test_sparse_terminal_function_call_keeps_the_streamed_arguments(
+        self, capture_server: str, terminal: dict[str, Any], kept: dict[str, str]
+    ) -> None:
+        """A terminal item without ``arguments`` (or with null) keeps the
+        streamed ones; an explicit empty string is still the item's word."""
+        m = OpenAICompatibleModel2(
+            "gpt-4o", base_url=capture_server, api_key="k", token_callback=lambda t: None
+        )
+        m.initialize("hi")
+        _CapturingHandler.next_response_body = _tool_call_stream_sse_body(
+            args_text='{"text":"kept"}', terminal_arguments=terminal
+        )
+        fcs, _content, _resp = m.generate_and_process_with_tools(
+            function_map={"echo": _echo}, tools_schema=_ECHO_TOOL_CHAT_SCHEMA
+        )
+        assert fcs == [{"id": "call_xyz", "name": "echo", "arguments": kept}]
+        assert m.conversation[-1]["arguments"] == ('{"text":"kept"}' if kept else "")
+
+    @pytest.mark.parametrize(
+        "events",
+        [
+            # The second call's arguments name their item before it is
+            # announced: they joined slot ``len(slots)``, the first call's
+            # once its index is not 0.
+            [
+                _call_added("a", 1),
+                _arguments_delta("a", item_id="fc_a", output_index=1),
+                _arguments_delta("b", item_id="fc_b"),
+                _call_added("b", 2),
+            ],
+            # No identity at all: each fragment opened a slot of its own,
+            # which the next announced call then took over.
+            [
+                _call_added("a", 0),
+                _arguments_delta("a"),
+                _call_added("b", 1),
+                _arguments_delta("b"),
+            ],
+            # Item events whose only identity is the call id: ``done``
+            # opened a second slot, and each call was returned twice.
+            [_idless_call_event(kind, letter) for letter in "ab" for kind in ("added", "done")],
+            # Announced out of order: the anonymous fragment belongs to the
+            # call announced last (index 0), not to the greatest index.
+            [
+                _call_added("b", 1),
+                _call_added("a", 0),
+                _arguments_delta("a"),
+                _arguments_delta("b", item_id="fc_b", output_index=1),
+            ],
+        ],
+        ids=["unannounced-item", "anonymous", "idless-items", "out-of-order"],
+    )
+    def test_call_event_without_output_index_keeps_to_its_call(
+        self, capture_server: str, events: list[dict[str, Any]]
+    ) -> None:
+        """A function-call event without ``output_index`` reaches its own call, and no other."""
+        done = {"type": "response.completed", "response": {"id": "resp_sparse", "output": []}}
+        m = OpenAICompatibleModel2(
+            "gpt-4o", base_url=capture_server, api_key="k", token_callback=lambda t: None
+        )
+        m.initialize("hi")
+        _CapturingHandler.next_response_body = b"".join(
+            _stream_sse_event(event["type"], event) for event in [*events, done]
+        )
+        fcs, _content, _resp = m.generate_and_process_with_tools(
+            function_map={"echo": _echo}, tools_schema=_ECHO_TOOL_CHAT_SCHEMA
+        )
+        assert fcs == [
+            {"id": "call_a", "name": "echo", "arguments": {"text": "a"}},
+            {"id": "call_b", "name": "echo", "arguments": {"text": "b"}},
+        ]
+
+    def test_call_the_terminal_output_omits_is_stored_with_the_turn(
+        self, capture_server: str
+    ) -> None:
+        """A streamed call never given an ``output_index`` and missing from the terminal
+        output is still returned, and stored after the message whose position is known."""
+        added = _call_added("a", 0)
+        del added["output_index"]
+        text = {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0}
+        message = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "calling", "annotations": []}],
+        }
+        events = [
+            {**text, "content_index": 0, "delta": "calling"},
+            added,
+            _arguments_delta("a", item_id="fc_a"),
+            {"type": "response.completed", "response": {"id": "resp_sparse", "output": [message]}},
+        ]
+        m = OpenAICompatibleModel2(
+            "gpt-4o", base_url=capture_server, api_key="k", token_callback=lambda t: None
+        )
+        m.initialize("hi")
+        _CapturingHandler.next_response_body = b"".join(
+            _stream_sse_event(event["type"], event) for event in events
+        )
+        fcs, content, _resp = m.generate_and_process_with_tools(
+            function_map={"echo": _echo}, tools_schema=_ECHO_TOOL_CHAT_SCHEMA
+        )
+        assert fcs == [{"id": "call_a", "name": "echo", "arguments": {"text": "a"}}]
+        assert content == "calling"
+        stored_message, stored_call = m.conversation[-2:]
+        assert stored_message["type"] == "message"
+        assert stored_call == {
+            "type": "function_call",
+            "id": "fc_a",
+            "call_id": "call_a",
+            "name": "echo",
+            "arguments": '{"text": "a"}',
+        }
 
 
 class TestUsageExtraction:

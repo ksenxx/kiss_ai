@@ -410,6 +410,13 @@ class _Injector(threading.Thread):
             sys.setprofile(None)
 
 
+def _stop_as_the_watchdog_is_created(frame: Any, event: str, arg: object) -> None:
+    """A profile hook for a signalling thread: a task Stop (``KeyboardInterrupt``) landing
+    after the call was marked and its event set, before its watchdog starts."""
+    if event == "call" and frame.f_code is threading.Thread.__init__.__code__:
+        raise KeyboardInterrupt
+
+
 class TestRegistry:
     """The running-tool registry and its guards."""
 
@@ -629,6 +636,54 @@ class TestRegistry:
         time.sleep(0.2)
         assert tool_interrupt._INJECT_LOCK.acquire(timeout=1)
         tool_interrupt._INJECT_LOCK.release()
+
+    def test_a_stop_cut_short_before_its_watchdog_is_completed_by_the_next(self) -> None:
+        """A Stop whose sender was itself stopped between the mark and the watchdog's start
+        left the call marked with nothing to force it; every later Stop returned at the mark."""
+        tokens: list[tool_interrupt.ToolCallToken] = []
+        outcomes: list[str] = []
+        over: list[bool] = []  # no Event: the injected thread must hold no lock
+
+        def deaf_tool() -> None:
+            token = new_tool_call("deaf")
+            tokens.append(token)
+            try:
+                register_tool_call(token)
+                for _ in range(6000):  # never looks at its own event
+                    if over:
+                        break
+                    time.sleep(0.005)
+                end_tool_call(token)
+            except ToolCallInterrupted:
+                outcomes.append("interrupted")
+            finally:
+                unregister_tool_call(token)
+
+        def cut_short_stop() -> None:
+            sys.setprofile(_stop_as_the_watchdog_is_created)
+            try:
+                interrupt_tool_call(tokens[0].thread_ident)
+            except KeyboardInterrupt:
+                outcomes.append("sender stopped")
+            finally:
+                sys.setprofile(None)
+
+        worker = threading.Thread(target=deaf_tool, daemon=True)
+        worker.start()
+        try:
+            _wait_for_tool(worker, "deaf")
+            sender = threading.Thread(target=cut_short_stop)
+            sender.start()
+            sender.join(10)
+            token = tokens[0]
+            assert outcomes == ["sender stopped"] and token.interrupted and token.event.is_set()
+            assert interrupt_tool_call(token.thread_ident) is True
+            worker.join(tool_interrupt._INJECT_AFTER_SECONDS + 10)
+            assert outcomes == ["sender stopped", "interrupted"], "the next Stop armed no watchdog"
+            assert running_tool_name(token.thread_ident) is None
+        finally:
+            over.append(True)
+            worker.join(10)
 
 
 def _hold_without_share_delete(path: Path, seconds: float) -> None:

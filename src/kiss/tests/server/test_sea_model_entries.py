@@ -16,7 +16,12 @@ slash command) keep it and only take the model from the pick.
 
 Everything runs on a real local daemon (:class:`DaemonRunApiHarness`); only
 the executor LLM loop is a stub recording the model and system prompt it
-was handed.
+was handed.  Each ``_run`` names a local stand-in model endpoint
+(:class:`StandInModelServer`), so the daemon admits it under any catalog
+model name, a router's included, whichever provider keys the machine has.
+The machine still needs one runnable catalog model (a provider key or a
+vendor CLI): the picker offers the routers only then, and a SEA that names
+no model runs on the default one.
 
 Branches not covered here: which of ``orchestrator_model``'s three
 returns (frontier candidate, best ranked runnable model, keyless default)
@@ -28,15 +33,19 @@ applies instead of forcing each one.
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.autorouter.autorouter_sea import orchestrator_model
 from kiss.agents.seas.bestrouter import bestrouter_sea
+from kiss.agents.seas.brbestrouter import brbestrouter_sea
 from kiss.agents.seas.ccxbestrouter import ccxbestrouter_sea
 from kiss.agents.seas.orautorouter import orautorouter_sea
 from kiss.agents.seas.orbestrouter import orbestrouter_sea
@@ -54,6 +63,9 @@ from kiss.core.models.model_info import (
 from kiss.core.user_config import save_config
 from kiss.server import sorcar
 from kiss.server.autocomplete import ranked_function_calling_models
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
+from kiss.tests.conftest import nproc_limit_lowered_to_one, thread_start_can_be_starved
+from kiss.tests.server.parallel_agent_harness import StandInModelServer, finish_response
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 AUTOROUTER = "autorouter"
@@ -80,12 +92,13 @@ def test_orchestrator_model_is_runnable_whenever_the_picker_offers_autorouter() 
 
 
 def test_bundled_routers_are_the_model_picker_seas() -> None:
-    """The five bundled routers register; no other bundled or third-party SEA does."""
-    sea_commands._reset_for_tests()
+    """The six bundled routers register; no other bundled or third-party SEA does."""
+    reset_sea_registry()
     seas = sea_commands.model_seas()
     assert seas == {
         AUTOROUTER: Path(autorouter_sea.__file__).resolve(),
         BESTROUTER: Path(bestrouter_sea.__file__).resolve(),
+        "brbestrouter": Path(brbestrouter_sea.__file__).resolve(),
         "ccxbestrouter": Path(ccxbestrouter_sea.__file__).resolve(),
         "orautorouter": Path(orautorouter_sea.__file__).resolve(),
         "orbestrouter": Path(orbestrouter_sea.__file__).resolve(),
@@ -116,10 +129,10 @@ def test_bestrouter_protocol_names_its_models_literally() -> None:
         "Use 'claude-opus-5-5-medium' for simple questions and queries.",
         "Use 'claude-fable-5-2-max' model for all other tasks, including software development "
         "and analysis and writing.",
-        "Use gpt-6-astra (not codex) through `run_agent(model=\"gpt-6-astra\", "
+        "Use gpt-6-astra-xhigh (not codex) through `run_agent(model=\"gpt-6-astra-xhigh\", "
         "tool_profile=\"review\", wait=\"false\")` for a thorough read-only review and "
         "debugging of the other model's work,",
-        "Use at most 75% of the task budget in gpt-6-astra",
+        "Use at most 75% of the task budget in gpt-6-astra-xhigh,",
         "ask the model not to invent new problems",
         "Use the model names literally without hallucinating new model names.",
     ):
@@ -142,15 +155,19 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
     """Picker entries and run rewriting of the ``autorouter`` / ``bestrouter`` picks."""
 
     def setUp(self) -> None:
+        # The model endpoint every ``_run`` names; cleanups follow ``tearDown``, so it
+        # outlives the daemon.
+        self.model_server = StandInModelServer(lambda _request: finish_response("agent ok"))
+        self.addCleanup(self.model_server.stop)
         super().setUp()
-        sea_commands._reset_for_tests()
+        reset_sea_registry()
         # Every ``autorouter`` pick schedules a cron job in the test ``$KISS_HOME``:
         # start each test from an empty store and leave none behind.
         save_jobs([])
         self.addCleanup(save_jobs, [])
 
     def tearDown(self) -> None:
-        sea_commands._reset_for_tests()
+        reset_sea_registry()
         super().tearDown()
 
     def _record_runs(self, runs: list[dict[str, Any]]) -> None:
@@ -185,8 +202,8 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         runs: list[dict[str, Any]] = []
         self._record_runs(runs)
         result = sorcar.run(
-            prompt, work_dir=self.repo,
-            endpoint_file=self.endpoint_file, timeout=60, **kwargs,
+            prompt, work_dir=self.repo, endpoint_file=self.endpoint_file, timeout=60,
+            model_config=self.model_server.model_config, **kwargs,
         )
         assert result.success is True, result
         assert len(runs) == 1, runs
@@ -234,14 +251,15 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         sea_commands.refresh_registry()
 
     def test_picker_lists_the_routers_first_with_a_cost_label(self) -> None:
-        """The five entries head the list, in one vendor group, with a label not a price."""
+        """The six entries head the list, in one vendor group, with a label not a price."""
         event = self._models_event()
         assert event["models"], "precondition: at least one runnable model"
         names = [m["name"] for m in event["models"]]
-        assert names[:5] == [
-            AUTOROUTER, BESTROUTER, "ccxbestrouter", "orautorouter", "orbestrouter",
-        ], names[:7]
-        for entry in event["models"][:5]:
+        assert names[:6] == [
+            AUTOROUTER, BESTROUTER, "brbestrouter", "ccxbestrouter", "orautorouter",
+            "orbestrouter",
+        ], names[:8]
+        for entry in event["models"][:6]:
             assert entry["vendor"] == "Router"
             assert entry["inp"] == 0 and entry["out"] == 0
             assert isinstance(entry["cost_label"], str) and entry["cost_label"]
@@ -642,3 +660,113 @@ class Sea(BaseSea):
         assert run["model_name"] == get_default_model()
         assert time.monotonic() - started < 30
         assert any("still running after 0 s" in line for line in logs.output), logs.output
+
+    def _listed(self) -> list[str]:
+        """The names the picker lists, with the checks of this test's scripts still alive after."""
+        names = [m["name"] for m in self._models_event()["models"]]
+        self.checks = [
+            thread for thread in threading.enumerate()
+            if isinstance(thread, sea_commands._ModelCheck)
+            and Path(self.tmpdir).resolve() in thread.sea_path.parents
+        ]
+        return names
+
+    def test_blocking_registration_is_abandoned_and_the_picker_lists_the_rest(self) -> None:
+        """A ``register_as_model()`` that does not return holds the picker for the timeout only.
+
+        The listing answers without the entry; the next one neither waits again nor starts a
+        second thread on the method.  The method is inherited: once the file it is in is
+        repaired, the script is decided anew, itself unchanged, and the answer the abandoned
+        thread gives at last changes nothing.  A method that lists the picker itself does not
+        wait for its own answer, and one that raises a Stop of its own is logged as failed.
+        (Not covered: a check replaced before its thread got going, which takes a Stop landing
+        inside ``Thread.start``; it decides nothing.)
+        """
+        assert AUTOROUTER in self._listed()  # the bundled verdicts are cached from here on
+        answer = Path(self.tmpdir) / "answer"
+        waits = (
+            "        import os, time\n"
+            "        deadline = time.monotonic() + 20\n"
+            f"        while not os.path.exists({str(answer)!r}) and time.monotonic() < deadline:\n"
+            "            time.sleep(0.02)\n"
+        )
+        parent = Path(self.tmpdir) / "parent.py"
+        parent.write_text(
+            "from kiss.agents.seas.base.base_sea import BaseSea\n\n\n"
+            "class Parent(BaseSea):\n"
+            "    def description(self):\n        return 'stuckmodel'\n"
+            f"    def register_as_model(self):\n{waits}        return True\n",
+            encoding="utf-8",
+        )
+        stuck_sea = Path(self.tmpdir) / "user_seas" / "stuckmodel" / "stuckmodel_sea.py"
+        stuck_sea.parent.mkdir(parents=True)
+        stuck_sea.write_text(
+            "from kiss.agents.sorcar.sea_commands import sea_class\n\n\n"
+            f"class Sea(sea_class({str(parent)!r})):\n    pass\n",
+            encoding="utf-8",
+        )
+        self._register_user_seas()
+        original = sea_commands.MODEL_CHECK_TIMEOUT_SECONDS
+        sea_commands.MODEL_CHECK_TIMEOUT_SECONDS = 0.5
+        self.addCleanup(setattr, sea_commands, "MODEL_CHECK_TIMEOUT_SECONDS", original)
+        with self.assertLogs("kiss.sea_commands", level="WARNING") as logs:
+            names = self._listed()
+        assert AUTOROUTER in names and "stuckmodel" not in names
+        assert [line.split("SEA ", 1)[1] for line in logs.output] == [
+            f"{stuck_sea}: register_as_model() still running after 0 s; not offered as a model"
+        ]
+        (stuck,) = self.checks
+        sea_commands.MODEL_CHECK_TIMEOUT_SECONDS = 10.0  # what a second wait would take
+        started = time.monotonic()
+        assert "stuckmodel" not in self._listed()
+        assert time.monotonic() - started < 5
+        assert self.checks == [stuck]
+        parent.write_text(parent.read_text(encoding="utf-8").replace(waits, ""), encoding="utf-8")
+        assert "stuckmodel" in self._listed() and self.checks == [stuck]
+        answer.touch()
+        stuck.join(10)
+        assert "stuckmodel" in self._listed() and self.checks == []
+        self._write_user_sea(
+            "asksitself",
+            "    def register_as_model(self):\n"
+            "        from kiss.agents.sorcar import sea_commands\n"
+            "        return 'asksitself' not in sea_commands.model_seas()\n",
+        )
+        cut_sea = self._write_user_sea(
+            "cutmodel",
+            "    def register_as_model(self):\n"
+            "        from kiss.core.tool_interrupt import ToolCallInterrupted\n"
+            "        raise ToolCallInterrupted('stop')\n",
+        )
+        sea_commands.refresh_registry()
+        with self.assertLogs("kiss.sea_commands", level="WARNING") as logs:
+            names = self._listed()
+        assert "asksitself" in names and "cutmodel" not in names
+        assert {line.split("SEA ", 1)[1].splitlines()[0] for line in logs.output} == {
+            f"{cut_sea}: register_as_model() failed"
+        }
+
+    def test_a_process_out_of_threads_leaves_an_undecided_entry_out(self) -> None:
+        """With no thread to decide it on, a script is logged and left out of the listing, not
+        run on the listing's own thread (which nothing would stop); it is listed once a thread
+        can be had."""
+        if not thread_start_can_be_starved():
+            pytest.skip("RLIMIT_NPROC cannot starve Thread.start on this host")
+        ran = Path(self.tmpdir) / "ran"
+        self._write_user_sea(
+            "nothread",
+            "    def register_as_model(self):\n"
+            f"        open({str(ran)!r}, 'w').close()\n        return True\n",
+        )
+        self._register_user_seas()
+        with (
+            self.assertLogs("kiss.sea_commands", level="WARNING") as logs,
+            nproc_limit_lowered_to_one(),
+        ):
+            names = sea_commands.model_seas()
+        assert "nothread" not in names and not ran.exists()
+        assert any(
+            "nothread_sea.py: register_as_model() not run; not offered as a model" in line
+            for line in logs.output
+        ), logs.output
+        assert "nothread" in sea_commands.model_seas() and ran.exists()

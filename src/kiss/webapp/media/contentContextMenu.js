@@ -12,14 +12,13 @@
 // reach into, so the menu has to live *inside* that document.  This
 // module is therefore written to be usable two ways:
 //
-//   * required/loaded normally by the chat page (parent document), and
+//   * loaded by the chat page (parent document), and
 //   * serialised via `contentContextMenuBootstrapHtml()` into the iframe
 //     `srcdoc` so the sandboxed page installs the very same menu on itself.
 
-/* global module */
 'use strict';
 
-(function (root) {
+(function () {
   const MENU_ID = 'sorcar-content-context-menu';
 
   const MENU_CSS =
@@ -52,7 +51,8 @@
     const tag = String((el && el.tagName) || '').toLowerCase();
     if (tag === 'textarea') return true;
     if (tag !== 'input') return false;
-    const type = String(el.getAttribute('type') || 'text').toLowerCase();
+    // The state, not the attribute: an unknown `type` is a text field.
+    const type = el.type;
     return (
       type === 'text' ||
       type === 'search' ||
@@ -67,9 +67,9 @@
   /** True when text may actually be typed into *el*. */
   function isWritable(el) {
     if (!el) return false;
-    if (el.isContentEditable) return true;
-    if (!isTextField(el)) return false;
-    return !el.disabled && !el.readOnly;
+    // A field first: one in a contenteditable host is not made writable.
+    if (isTextField(el)) return !el.disabled && !el.readOnly;
+    return !!el.isContentEditable;
   }
 
   /**
@@ -81,6 +81,11 @@
    * the user highlighted text inside a field.  A `number` / `email` input
    * has no such offsets (both null), but the document Selection reads
    * what is selected in it while it holds the focus.
+   *
+   * The Selection's own `toString()` gives the text as rendered, selected
+   * whitespace (a code line's indentation) included: what the native Copy
+   * copies.  A Range's would serialise the source instead, the page's
+   * hidden elements and inline `<script>` text included.
    */
   function selectedText(doc, target) {
     const field = target && isTextField(target) ? target : null;
@@ -93,20 +98,9 @@
       if (typeof start === 'number' && typeof end === 'number') {
         return end > start ? String(field.value || '').slice(start, end) : '';
       }
-      return sel && doc.activeElement === field ? selectionText(sel) : '';
+      if (doc.activeElement !== field) return '';
     }
-    return sel ? selectionText(sel) : '';
-  }
-
-  /**
-   * The text of *sel* as rendered: what the user sees highlighted and the
-   * native Copy copies, the selected whitespace (a code line's
-   * indentation) included.  A Range's `toString()` would serialise the
-   * source instead, so a native Select All followed by Copy would hand
-   * over the page's hidden elements and inline `<script>` text.
-   */
-  function selectionText(sel) {
-    return String(sel.toString() || '');
+    return sel ? String(sel.toString() || '') : '';
   }
 
   /**
@@ -168,6 +162,15 @@
     return true;
   }
 
+  /**
+   * Copy *text* to the clipboard through a hidden textarea and
+   * `execCommand('copy')`, the way that works where the async clipboard
+   * is missing or refuses, and hand the focus and the selection back.
+   *
+   * @param {Document} doc The document to copy from.
+   * @param {string} text What to place on the clipboard.
+   * @returns {boolean} Whether the copy command reported success.
+   */
   function copyViaTextarea(doc, text) {
     const ta = doc.createElement('textarea');
     ta.value = text;
@@ -197,7 +200,7 @@
     try {
       ok = !!doc.execCommand('copy');
     } catch (_e) {
-      ok = false;
+      // a refused copy command: ok stays false
     }
     ta.parentNode.removeChild(ta);
     if (focused && focused !== doc.body && focused.isConnected) {
@@ -310,9 +313,7 @@
     let el = node;
     while (el && el.nodeType !== 1) el = el.parentNode;
     while (el && el.nodeType === 1) {
-      const tag = String(el.tagName || '').toLowerCase();
-      if (tag === 'textarea') return el;
-      if (tag === 'input') return el;
+      if (isTextField(el)) return el;
       if (el.isContentEditable) {
         // The editing host, not a formatting child that only inherits
         // the editability: Select All and Paste act on the whole field.
@@ -426,11 +427,14 @@
    * in it, cloned).
    */
   function editState(doc, el) {
-    if (!el.isContentEditable) {
+    if (isTextField(el)) {
       return {
         text: String(el.value || ''),
         start: el.selectionStart,
         end: el.selectionEnd,
+        // All a `number` / `email` input (null offsets) tells of its
+        // selection: the text selected in it, while it holds the focus.
+        selected: doc.activeElement === el ? selectedText(doc, el) : null,
         range: null,
       };
     }
@@ -442,6 +446,7 @@
       text: el.textContent,
       start: null,
       end: null,
+      selected: null,
       range: inside ? live.cloneRange() : null,
     };
   }
@@ -451,6 +456,8 @@
     if (a.text !== b.text || a.start !== b.start || a.end !== b.end) {
       return false;
     }
+    const read = a.selected !== null && b.selected !== null;
+    if (read && a.selected !== b.selected) return false;
     if (!a.range || !b.range) return !a.range && !b.range;
     return (
       a.range.compareBoundaryPoints(a.range.START_TO_START, b.range) === 0 &&
@@ -477,6 +484,25 @@
       return Promise.resolve(false);
     }
     const asked = editState(doc, el);
+    // A `number` / `email` input does not tell where its selection is
+    // (the offsets are null): for one, a key or a pointer the user
+    // presses while the read is pending counts as having moved it.
+    // (Not `selectionchange`: it is queued, and Firefox sends one for the
+    // focus the closing menu handed back to the field after this.)
+    let pressed = false;
+    function unwatch() {
+      doc.removeEventListener('keydown', onPress, true);
+      doc.removeEventListener('pointerdown', onPress, true);
+    }
+    function onPress() {
+      pressed = true;
+      unwatch();
+    }
+    if (asked.start === null && isTextField(el)) {
+      doc.addEventListener('keydown', onPress, true);
+      doc.addEventListener('pointerdown', onPress, true);
+      pending.then(unwatch, unwatch);
+    }
     return pending.then(
       text => {
         // The read was asynchronous (the browser may have asked the user
@@ -487,7 +513,7 @@
         // selection the user made since is not, and the old offsets are
         // nowhere over text the field has changed.
         if (!isWritable(el) || !doc.contains(el)) return false;
-        if (!sameEditState(asked, editState(doc, el))) return false;
+        if (pressed || !sameEditState(asked, editState(doc, el))) return false;
         // Nor is one the user has moved on from: a control focused since
         // (another content tab's chat composer) is where the insertText
         // command would write once focus() on a field the page hides
@@ -825,7 +851,6 @@
     ';' +
     isTextField.toString() +
     isWritable.toString() +
-    selectionText.toString() +
     selectedText.toString() +
     focusedElement.toString() +
     rendered.toString() +
@@ -852,14 +877,10 @@
   const api = {
     installContentContextMenu: installContentContextMenu,
     contentContextMenuBootstrapHtml: contentContextMenuBootstrapHtml,
+    copyViaTextarea: copyViaTextarea,
     menuKeyNav: menuKeyNav,
     clampMenu: clampMenu,
   };
 
-  if (root && typeof root === 'object') {
-    root.ContentContextMenu = api;
-  }
-  if (typeof module !== 'undefined' && module.exports) {
-    module.exports = api;
-  }
-})(typeof window !== 'undefined' ? window : null);
+  window.ContentContextMenu = api;
+})();

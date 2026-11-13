@@ -20,18 +20,20 @@ The daemon is real (local transport, fake PyPI endpoint, a stub
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import time
+import unittest
 from pathlib import Path
 
-from kiss.server.install_problems import NOTICE_DAYS
+from kiss.server.install_problems import NOTICE_DAYS, PROBLEMS_FILE
 from kiss.server.vscode_retired import (
     NOTICE_ID,
     VSCODE_RETIRED_DISMISSED,
     VSCODE_RETIRED_FLAG,
 )
-from kiss.tests.local_ws import LocalWriter
+from kiss.tests.local_ws import LocalReader, LocalWriter
 from kiss.tests.server.test_update_available_check import _UpdateCheckTestBase
 
 INSTALL_SH = """#!/bin/bash
@@ -78,15 +80,18 @@ class TestVscodeRetired(_UpdateCheckTestBase):
         reader, writer = await self._connect_local()
         self._writers.append(writer)
         await self._send_ready(writer, "tab-vscode")
+        return await self._events_until(reader, "tabs_state")
+
+    async def _events_until(self, reader: LocalReader, wanted: str) -> list[dict[str, object]]:
+        """Read *reader*'s events up to and including the first of type *wanted*."""
         events: list[dict[str, object]] = []
         for _ in range(200):
             line = await asyncio.wait_for(reader.readline(), timeout=5.0)
-            self.assertTrue(line, "local connection closed before tabs_state")
-            msg = json.loads(line.decode("utf-8"))
-            events.append(msg)
-            if msg.get("type") == "tabs_state":
+            self.assertTrue(line, f"local connection closed before {wanted}")
+            events.append(json.loads(line.decode("utf-8")))
+            if events[-1].get("type") == wanted:
                 return events
-        raise AssertionError("did not see tabs_state")
+        raise AssertionError(f"did not see {wanted}")
 
     def _notices(self, events: list[dict[str, object]]) -> list[dict[str, object]]:
         return [ev for ev in events if ev.get("id") == NOTICE_ID]
@@ -159,6 +164,101 @@ class TestVscodeRetired(_UpdateCheckTestBase):
         self.assertEqual(self._notices(await self._ready_events()), [])
         (self.home / VSCODE_RETIRED_FLAG).write_text("2026-10-16T00:00:00Z\n")
         self.assertEqual(self._notices(await self._ready_events()), [])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "the scheduling barrier is a named pipe")
+    async def test_a_ready_under_way_does_not_bring_a_dismissed_notice_back(self) -> None:
+        """A ``ready`` that read the markers before the dismissal sends no notice after its close.
+
+        The page recreates a toast it is sent after the ``close``.  The
+        barrier holding window B's ``ready`` between its look at the
+        dismissal marker and its sends is a real named pipe: the
+        bootstrap worker reads ``.install-problems`` right after that
+        look, and opening a pipe blocks until the other end is opened.
+        """
+        (self.home / VSCODE_RETIRED_FLAG).write_text("2026-10-15T00:00:00Z\n")
+        reader_a, writer_a = await self._connect_local()
+        self._writers.append(writer_a)
+        await self._send_ready(writer_a, "tab-a")
+        await self._wait_for_event(reader_a, "tabs_state")
+        pipe = self.home / PROBLEMS_FILE
+        os.mkfifo(pipe)
+        try:
+            reader_b, writer_b = await self._connect_local()
+            self._writers.append(writer_b)
+            await self._send_ready(writer_b, "tab-b")
+            barrier = await self._write_end_once_read(pipe)
+            try:
+                # Window B's ready is parked with the notice in hand; A dismisses it.
+                writer_a.write(
+                    json.dumps({"type": "dismissNotice", "id": NOTICE_ID}).encode("utf-8") + b"\n"
+                )
+                await writer_a.drain()
+                closed = await self._wait_for_event(reader_a, "notification")
+                self.assertIs(closed.get("close"), True)  # the close went out to every window
+            finally:
+                os.close(barrier)  # end of file: no install problems, B's ready goes on
+            # The bootstrap events go out in one step (tipsData, then the
+            # notice): the tabs_state after them ends B's answer.
+            events = await self._events_until(reader_b, "tipsData")
+            events += await self._events_until(reader_b, "tabs_state")
+        finally:
+            # No worker may stay parked on the pipe: both ends, then gone.
+            both_ends = os.open(pipe, os.O_RDWR | os.O_NONBLOCK)
+            pipe.unlink()
+            os.close(both_ends)
+        notices = self._notices(events)
+        for notice in notices:
+            notice.pop("ts", None)
+        self.assertEqual(notices, [{"type": "notification", "id": NOTICE_ID, "close": True}])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "the scheduling barrier is a named pipe")
+    async def test_a_ready_under_way_does_not_send_an_older_promptlet_list_last(self) -> None:
+        """A promptlet another window adds during a ``ready`` stays in that page's Inject panel.
+
+        The panel shows the last ``tricksData`` it was sent.  Window B's
+        ``ready`` is held at the same pipe while window A adds a
+        promptlet, whose list goes to every window.
+        """
+        reader_a, writer_a = await self._connect_local()
+        self._writers.append(writer_a)
+        await self._send_ready(writer_a, "tab-a")
+        await self._wait_for_event(reader_a, "tabs_state")
+        pipe = self.home / PROBLEMS_FILE
+        os.mkfifo(pipe)
+        try:
+            reader_b, writer_b = await self._connect_local()
+            self._writers.append(writer_b)
+            await self._send_ready(writer_b, "tab-b")
+            barrier = await self._write_end_once_read(pipe)
+            try:
+                writer_a.write(
+                    json.dumps({"type": "addTrick", "text": "Added meanwhile."}).encode("utf-8")
+                    + b"\n"
+                )
+                await writer_a.drain()
+                await self._wait_for_event(reader_a, "tricksData")
+            finally:
+                os.close(barrier)
+            events = await self._events_until(reader_b, "tipsData")
+        finally:
+            both_ends = os.open(pipe, os.O_RDWR | os.O_NONBLOCK)
+            pipe.unlink()
+            os.close(both_ends)
+        lists = [ev["tricks"] for ev in events if ev.get("type") == "tricksData"]
+        last = lists[-1]
+        assert isinstance(last, list)
+        self.assertIn("Added meanwhile.", last, lists)
+
+    async def _write_end_once_read(self, pipe: Path) -> int:
+        """Open *pipe* for writing once a reader waits on it; return the descriptor."""
+        deadline = asyncio.get_running_loop().time() + 10
+        while True:
+            try:
+                return os.open(pipe, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError as exc:  # ENXIO: nobody reads it yet
+                self.assertEqual(exc.errno, errno.ENXIO)
+            self.assertLess(asyncio.get_running_loop().time(), deadline, "no ready read the pipe")
+            await asyncio.sleep(0.02)
 
     async def test_dismiss_notice_ignores_other_ids(self) -> None:
         (self.home / VSCODE_RETIRED_FLAG).write_text("2026-10-15T00:00:00Z\n")

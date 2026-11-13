@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from kiss.agents.sorcar.coding_gate import bash_exit_code
 from kiss.agents.sorcar.useful_tools import SPILL_DIR, UsefulTools, _lines_within_budget
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.memoryfield.index import hashed_embedding
@@ -55,6 +56,15 @@ def test_bash_budget_can_be_raised_only_up_to_the_ceiling(tmp_path: Path) -> Non
     failed = tools.Bash("seq 1 20000; exit 3", "fail")
     assert failed.startswith("Error (exit code 3):\n1\n")
     assert "in tmp/tool-out/" in failed
+    # Only the output is cut: the status is whole under any budget (cross finding of B2 and
+    # B4, 2026-11-12: cut with the output, a failed command read as one that passed).
+    for budget in (1, 20, 60):
+        cut = tools.Bash("seq 1 200; exit 7", "fail", max_output_chars=budget)
+        assert cut.startswith("Error (exit code 7):\n1") and bash_exit_code(cut) == "7", cut
+        assert len(cut) == len("Error (exit code 7):\n") + budget
+    late = tools.Bash("seq 1 200; sleep 5", "slow", timeout_seconds=1, max_output_chars=1)
+    assert late == "Error: Command execution timeout after 1s. Output before the timeout:\n1"
+    assert bash_exit_code(late) == "timeout"
 
 
 def test_bash_without_a_work_dir_truncates_without_a_spill(tmp_path: Path) -> None:

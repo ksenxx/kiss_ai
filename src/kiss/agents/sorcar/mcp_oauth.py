@@ -30,12 +30,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import os
 import socket
 import sys
 import threading
 import time
+from collections.abc import AsyncGenerator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
@@ -52,7 +54,7 @@ from kiss.agents.sorcar.mcp_servers import (
 from kiss.core import tool_interrupt
 from kiss.core.brand import PRODUCT_NAME
 from kiss.core.browser_handoff import BROWSER_TAB, open_for_user
-from kiss.core.locked import locked, locked_call
+from kiss.core.locked import locked_call
 
 #: Well-known remote MCP servers: name -> (transport, URL).
 KNOWN_MCP_SERVERS: dict[str, tuple[str, str]] = {
@@ -122,6 +124,111 @@ def seed_preregistered_client(storage: FileTokenStorage, server: str) -> bool:
     return True
 
 
+@functools.cache
+def _provider_class() -> Any:
+    """Return the SDK's OAuth provider, made to share its stored grant.
+
+    Defined on first use: the SDK is imported only once a remote server is used.
+    """
+    from mcp.client.auth import OAuthClientProvider
+
+    class SharedGrantProvider(OAuthClientProvider):
+        """An ``OAuthClientProvider`` over a grant that other providers refresh too.
+
+        The SDK loads the stored grant once and refreshes its own copy.
+        Each request here first re-reads the store (tokens, client and
+        the refresh deadline) under the store's refresh lock, and the
+        SDK's refresh, if still due, runs under that lock.  A refresh
+        answered without a refresh token keeps the one it used.  The
+        authorization server metadata a sign-in discovers is stored
+        ahead of the grant it leads to (:meth:`_keep_metadata`).
+        """
+
+        def __init__(self, storage: FileTokenStorage, **kwargs: Any) -> None:
+            super().__init__(storage=storage, **kwargs)
+            self._store = storage
+            # One request at a time, as under the SDK's own lock, but
+            # taken before the refresh lock: a request queued behind a
+            # slow one must not hold up the grant's other providers.
+            self._flow_lock = asyncio.Lock()
+            # The stored metadata: a refresh goes to its token endpoint.
+            self._metadata = self.context.oauth_metadata = storage.get_oauth_metadata()
+
+        async def async_auth_flow(self, request: Any) -> AsyncGenerator[Any, Any]:
+            """Run the SDK's flow for *request*, refreshing under the store's lock.
+
+            A 401 for an access token the store held as good (its expiry
+            was not recorded, or the server ended it early) is answered
+            once like a recorded expiry: by a refresh and the request
+            again.  Only a 401 after that is the SDK's to answer, with a
+            new sign-in.  The request it answered was refused, not run.
+            """
+            context, store = self.context, self._store
+            async with self._flow_lock:
+                rejected = None  # the access token a 401 answered
+                while True:
+                    flow = super().async_auth_flow(request)
+                    try:
+                        async with store.refreshing():
+                            context.current_tokens = stored = await store.get_tokens()
+                            context.client_info = await store.get_client_info()
+                            context.token_expiry_time = store.refresh_deadline()
+                            if stored and stored.access_token == rejected:
+                                # As good as expired: the SDK refreshes it first.
+                                context.token_expiry_time = time.time() - 1
+                            outgoing = await flow.__anext__()
+                            refreshed = outgoing is not request
+                            while outgoing is not request:  # the refresh round trip
+                                outgoing = await flow.asend((yield outgoing))
+                                await self._keep_refresh_token(stored)
+                        response = yield outgoing
+                        sent = context.current_tokens
+                        if (
+                            response.status_code == 401 and rejected is None
+                            and not refreshed and sent and context.can_refresh_token()
+                        ):
+                            rejected = sent.access_token
+                            continue
+                        outgoing = await flow.asend(response)
+                        while True:
+                            await self._keep_metadata()
+                            outgoing = await flow.asend((yield outgoing))
+                    except StopAsyncIteration:
+                        return
+                    finally:
+                        await flow.aclose()
+
+        async def _keep_refresh_token(self, stored: Any) -> None:
+            """Give a grant refreshed without a refresh token the one of *stored*, its predecessor.
+
+            An authorization server that does not rotate its refresh
+            tokens leaves it out of the refresh response: the one in use
+            stays good (RFC 6749 section 6).  The SDK stores the response
+            whole, and the next expiry would find nothing to refresh
+            with and ask for a new sign-in.
+            """
+            fresh = self.context.current_tokens  # None when the refresh failed
+            if fresh and not fresh.refresh_token and stored and stored.refresh_token:
+                fresh.refresh_token = stored.refresh_token
+                await self._store.set_tokens(fresh)
+
+        async def _keep_metadata(self) -> None:
+            """Store the authorization server metadata once the flow has discovered it.
+
+            Discovery comes before the token request, so no grant is
+            stored without the token endpoint its refresh goes to,
+            however the connection the sign-in runs on ends afterwards
+            (a refresh without it is sent to ``/token`` of the server).
+            On a worker thread, as :meth:`FileTokenStorage.set_tokens`.
+            """
+            metadata = self.context.oauth_metadata
+            if metadata is not None and metadata != self._metadata:
+                self._metadata = metadata
+                await asyncio.to_thread(self._store.set_oauth_metadata, metadata)
+
+    return SharedGrantProvider
+
+
 def build_provider(cfg: MCPServerConfig, redirect_handler: Any, callback_handler: Any) -> Any:
     """Build the MCP SDK OAuth provider for *cfg*.
 
@@ -133,21 +240,16 @@ def build_provider(cfg: MCPServerConfig, redirect_handler: Any, callback_handler
     Returns:
         An ``OAuthClientProvider`` (an ``httpx.Auth``).
     """
-    from mcp.client.auth import OAuthClientProvider
-
     # Bound to the URL: a same-named configuration of another server
     # must not be handed this one's credentials (see FileTokenStorage).
-    storage = FileTokenStorage(cfg.name, cfg.url)
-    provider = OAuthClientProvider(
+    return _provider_class()(
         server_url=cfg.url,
         client_metadata=client_metadata(),
-        storage=storage,
+        storage=FileTokenStorage(cfg.name, cfg.url),
         redirect_handler=redirect_handler,
         callback_handler=callback_handler,
         client_metadata_url=os.environ.get("KISS_MCP_CLIENT_METADATA_URL", "").strip() or None,
     )
-    provider.context.oauth_metadata = storage.get_oauth_metadata()
-    return provider
 
 
 def drop_stale_registration(storage: FileTokenStorage) -> bool:
@@ -187,7 +289,13 @@ class _RedirectHandler(BaseHTTPRequestHandler):
         if parts.path != "/callback":
             self.send_error(404)
             return
-        self.server.query = dict(parse_qsl(parts.query))
+        query = dict(parse_qsl(parts.query))
+        if query.get("state") != self.server.state:
+            # An earlier sign-in's page (the port is fixed), or no OAuth
+            # redirect at all: the session keeps waiting for its own.
+            self.send_error(400, "This sign-in page is out of date")
+            return
+        self.server.query = query
         body = b"Sign-in received. You can close this tab and return to the chat."
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -208,6 +316,9 @@ class _RedirectServer(HTTPServer):
 
     def __init__(self) -> None:
         self.query: dict[str, str] | None = None
+        # The ``state`` of the authorization URL the session opened; only
+        # a redirect that carries it is recorded in ``query``.
+        self.state = ""
         # The browser connection being served, so :meth:`server_close`
         # can end it: the handler's socket timeout is an inactivity
         # timeout, which a connection that keeps sending header bytes
@@ -250,15 +361,14 @@ class MCPLoginSession:
         cfg: The remote server configuration.
     """
 
+    # Written under ``_start_lock`` only, which serialises whole
+    # ``start()`` calls (cancel the previous session, bind the port);
+    # read without a lock, so ``active()`` answers at once.  The lock is
+    # taken through :func:`locked_call` (hence an RLock): the
+    # ``connect_mcp_server`` tools run on the task thread, where the
+    # runner's Stop injection would leak a plain ``with`` (CPython
+    # gh-74174) and refuse every later sign-in.
     _active: MCPLoginSession | None = None
-    # ``_lock`` guards ``_active`` only and is never held across a wait,
-    # so ``active()`` answers at once; ``_start_lock`` serialises whole
-    # ``start()`` calls (cancel the previous session, bind the port).
-    # Both are taken through :func:`locked` / :func:`locked_call`
-    # (hence RLocks): the ``connect_mcp_server`` tools run on the task
-    # thread, where the runner's Stop injection would leak a plain
-    # ``with`` (CPython gh-74174) and refuse every later sign-in.
-    _lock = threading.RLock()
     _start_lock = threading.RLock()
 
     def __init__(self, cfg: MCPServerConfig) -> None:
@@ -288,15 +398,24 @@ class MCPLoginSession:
                 when stored tokens already work).
 
         Returns:
-            The session; check ``auth_url``, ``done`` and ``error``.
+            The session; check ``auth_url``, ``done`` and ``error``.  A
+            sign-in whose token store cannot be prepared is returned
+            ended, with that error, and replaces no running session.
 
         Raises:
+            OSError: When the redirect port cannot be bound.
             ToolCallInterrupted: When the calling tool call was stopped
                 while waiting (checked between slices, as in :meth:`wait`).
         """
         storage = FileTokenStorage(cfg.name, cfg.url)
-        if not seed_preregistered_client(storage, cfg.name):
-            drop_stale_registration(storage)
+        try:
+            if not seed_preregistered_client(storage, cfg.name):
+                drop_stale_registration(storage)
+        except OSError as e:
+            failed = cls(cfg)
+            failed.error = describe_exception(e)
+            failed._finished.set()
+            return failed
         session = locked_call(cls._start_lock, cls._replace_active, cfg)
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline and not session._finished.is_set():
@@ -308,11 +427,8 @@ class MCPLoginSession:
     @classmethod
     def _replace_active(cls, cfg: MCPServerConfig) -> MCPLoginSession:
         """Cancel the active session, if any, and start one for *cfg* (under ``_start_lock``)."""
-        previous = cls._get_active()
+        previous = cls._active
         if previous is not None:
-            # Outside ``_lock``: the previous login thread may sit in
-            # a network call for a while, and ``active()`` must not
-            # stall behind that wait.
             previous.cancel()
             previous.wait(5.0)
         session = cls(cfg)
@@ -323,11 +439,10 @@ class MCPLoginSession:
             # replaces it, so ``active()`` never answers ``None`` in the
             # middle of a replacement; should the bind fail, no caller
             # must find the cancelled session still active.
-            if previous is not None and cls._get_active() is previous:
-                cls._set_active(None)
+            cls._active = None
             raise
         try:
-            cls._set_active(session)
+            cls._active = session
             session._thread.start()
         except BaseException:
             # A Stop landing here (the tool runs on the task thread), or
@@ -336,27 +451,14 @@ class MCPLoginSession:
             session.cancel()
             session.error = "sign-in cancelled"
             session._finished.set()
-            if cls._get_active() is session:
-                cls._set_active(None)
+            cls._active = None
             raise
         return session
 
     @classmethod
-    @locked(_lock)
-    def _get_active(cls) -> MCPLoginSession | None:
-        """Return the active session, whatever server it signs in to."""
-        return cls._active
-
-    @classmethod
-    @locked(_lock)
-    def _set_active(cls, session: MCPLoginSession | None) -> None:
-        """Publish *session* as the active one (``None``: no session)."""
-        cls._active = session
-
-    @classmethod
     def active(cls, name: str) -> MCPLoginSession | None:
         """Return the running session for server *name*, if any."""
-        session = cls._get_active()
+        session = cls._active
         return session if session is not None and session.cfg.name == name else None
 
     def cancel(self) -> None:
@@ -435,8 +537,6 @@ class MCPLoginSession:
             read, write = await _enter_transport(stack, self.cfg, auth)
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
-        if auth.context.oauth_metadata is not None:
-            auth.context.storage.set_oauth_metadata(auth.context.oauth_metadata)
 
     @property
     def ready(self) -> bool:
@@ -472,10 +572,20 @@ class MCPLoginSession:
         """
         if self._cancelled:
             raise RuntimeError("sign-in cancelled")
+        server = self._server
+        assert server is not None
+        server.state = dict(parse_qsl(urlsplit(url).query)).get("state", "")
         self.auth_url = url
         threading.Thread(target=self._open_for_user, args=(url,), daemon=True).start()
 
     def _open_for_user(self, url: str) -> None:
+        """Open the sign-in page *url*, unless the session was cancelled before this thread ran.
+
+        A replacement session may have its own page open by then, which
+        this one would take every surface away from.
+        """
+        if self._cancelled:
+            return
         self.opened_in = open_for_user(url)
         self._url_ready.set()
 
@@ -524,7 +634,8 @@ def resolve_server(name: str, url: str, transport: str, work_dir: str) -> MCPSer
     Raises:
         ValueError: When the server is unknown and no URL was given, the
             configured server is not a remote one, a different URL is
-            given for a configured name, or a new server cannot be saved
+            given for a configured name, a new server has no name or a
+            transport that is no remote one, or it cannot be saved
             because ``$KISS_HOME/mcp.json`` does not parse (see
             :func:`~kiss.agents.sorcar.mcp_servers.save_mcp_server`).
     """
@@ -545,6 +656,12 @@ def resolve_server(name: str, url: str, transport: str, work_dir: str) -> MCPSer
                 f"{', '.join(sorted(KNOWN_MCP_SERVERS))})"
             )
         transport, url = KNOWN_MCP_SERVERS[name]
+    elif not name or transport not in ("", "http", "sse"):
+        # Saved as given, a "stdio" entry would drop the URL and launch no command.
+        raise ValueError(
+            "A new MCP server needs a name and transport http or sse "
+            f"(got name {name!r}, transport {transport!r})"
+        )
     cfg = MCPServerConfig(name=name, transport=transport or "http", url=url)
     save_mcp_server(cfg, "user", work_dir)
     return cfg
@@ -591,7 +708,7 @@ def _session_answer(session: MCPLoginSession) -> dict[str, Any]:
             f"never ask for passwords or 2FA codes. {step_one} 2) Call "
             f"finish_mcp_server_connect({name!r}); if it returns 'pending', wait a "
             "few seconds and call it again. If the user approved on ANOTHER device, "
-            "their browser ends on an unreachable http://localhost:53683/callback?... "
+            f"their browser ends on an unreachable {MCP_REDIRECT_URI}?... "
             "page: ask them to paste that URL and deliver it here with Bash: "
             "curl -s '<pasted URL>' (quoted)."
         ),
@@ -648,8 +765,13 @@ def make_mcp_auth_tools(work_dir: str) -> list[Any]:
             JSON: success, a pending status while the user has not
             approved yet, or an error.
         """
-        session = MCPLoginSession.active(name.strip())
-        if session is None:
+        name = name.strip()
+        session = MCPLoginSession.active(name)
+        # A server is its name at its URL (as its stored grant is): the
+        # same name in another project may be another server, whose
+        # sign-in is not this project's to finish.
+        mine = load_mcp_servers(work_dir).get(name)
+        if session is None or mine is None or mine.url != session.cfg.url:
             return json.dumps({
                 "ok": False,
                 "error": f"no sign-in in progress for {name!r}; call connect_mcp_server() first",

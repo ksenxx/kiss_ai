@@ -14,9 +14,8 @@ make, so two real repository states lost work:
   resolved, the listing was ``[]`` and the still-existing task branch
   was force-deleted;
 * the base commit object is missing while the index and files are
-  readable: ``diff``, ``status`` and ``log`` all fail, the ignored-file
-  rescue succeeds, and the directory holding a modified tracked file
-  is deleted.
+  readable: ``diff``, ``status`` and ``log`` all fail, and the
+  directory holding a modified tracked file is deleted.
 
 A failed query now keeps the worktree pending and presents it to the
 user instead.  Real pieces throughout: real git repositories and
@@ -26,6 +25,7 @@ paths, the real agent-state registry.
 
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -112,7 +112,7 @@ def test_branch_only_work_survives_a_renamed_base_branch(tmp_path: Path) -> None
     assert len(done) == 1
     assert done[0]["tabId"] == "branch-only-tab"
     # The committed work is listed from the branch's own commits.
-    assert done[0]["changedFiles"] == ["only-task-copy.txt"]
+    assert worktree_changed_files(server, "branch-only-tab") == ["only-task-copy.txt"]
 
 
 def test_unreadable_history_keeps_the_worktree_and_its_modified_file(tmp_path: Path) -> None:
@@ -175,7 +175,27 @@ def test_index_only_work_is_listed_and_kept(tmp_path: Path) -> None:
     assert _branch_exists(wt.repo_root, "task-work")
     assert agent.worktrees == [wt], "the worktree is no longer pending"
     done = [e for e in events if e["type"] == "worktree_done"]
-    assert [e["changedFiles"] for e in done] == [["tracked.txt"], ["tracked.txt"]]
+    assert [e["tabId"] for e in done] == ["staged-tab", "staged-tab"]
+
+
+def test_work_of_a_worktree_with_an_unknown_original_branch_is_kept(tmp_path: Path) -> None:
+    """No original branch to compare with: the changes are unknown, the committed work stays."""
+    known = _repo_with_worktree(tmp_path)
+    (known.wt_dir / "only-task-copy.txt").write_text("COMMITTED TASK WORK\n")
+    _git(known.wt_dir, "add", "only-task-copy.txt")
+    _git(known.wt_dir, "commit", "-m", "task work")
+    wt = dataclasses.replace(known, original_branch=None)
+    server, events = _server_with_pending(wt, "unknown-base-tab")
+    agent = agent_state.find_by_tab("unknown-base-tab").agent  # type: ignore[union-attr]
+    assert agent is not None
+
+    presented = server._present_pending_worktree("unknown-base-tab")
+
+    assert (wt.wt_dir / "only-task-copy.txt").read_text() == "COMMITTED TASK WORK\n"
+    assert _branch_exists(wt.repo_root, "task-work"), "the task branch was deleted"
+    assert agent.worktrees == [wt], "the worktree is no longer pending"
+    assert presented is True
+    assert [e["tabId"] for e in events if e["type"] == "worktree_done"] == ["unknown-base-tab"]
 
 
 def test_a_verified_clean_worktree_is_still_auto_discarded(tmp_path: Path) -> None:

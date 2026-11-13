@@ -10,6 +10,10 @@
   ``bytes``: the ``TypeError`` rolled back the finished task's
   ``end_ts`` / ``steps`` / ``cost`` in the daemon's finish save and
   aborted ``backfill_task_metadata``.
+* A finite but absurd time (``1e300``) in the newest task of a chat made
+  ``upsert_chat_summary`` bind an integer SQLite cannot store: the
+  ``OverflowError`` rolled back the finish save of every task of that
+  chat.
 * ``backfill_task_metadata`` scanned a batch's trajectories for secrets
   after the batch's first ``UPDATE`` had opened the write transaction,
   so a live daemon sharing the database could not write during the
@@ -23,6 +27,8 @@ import sqlite3
 from contextlib import closing
 from functools import partial
 from pathlib import Path
+
+import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_summary import summarize_chat
@@ -86,6 +92,46 @@ def test_finish_save_in_a_chat_with_a_blob_task_stores_the_usage_and_summary() -
     expected = summarize_chat(["fix the login bug in the portal", "add a logout button"])
     assert summary == (expected, 1_900_000_000_000)
     assert expected.startswith("fix the login bug")
+
+
+def _set_task_times(task_id: str, times: str) -> None:
+    """Run ``UPDATE task_history SET <times>`` on *task_id*'s row of the live database."""
+    with closing(sqlite3.connect(th._DB_PATH)) as conn, conn:
+        conn.execute(f"UPDATE task_history SET {times} WHERE id = ?", (task_id,))
+
+
+@pytest.mark.parametrize(
+    ("other_task_finishes", "absurd_times", "summary_times"),
+    [
+        (True, "timestamp = 4e9, start_ts = 1.8e12, end_ts = 1e300", (1_800_000_000_000, 0)),
+        (True, "timestamp = 4e9, start_ts = 1.8e12, end_ts = -1e300", (1_800_000_000_000, 0)),
+        (True, "timestamp = 4e9, start_ts = 1e300", (4_000_000_000_000, 0)),
+        (True, "timestamp = 1e300, start_ts = 0", (0, 0)),
+        # -1e300 sorts oldest: it is a chat's newest time only when the chat
+        # has no other task, and the save is then that task's own finish.
+        (False, "timestamp = -1e300, start_ts = 0", (0, 1_900_000_000_000)),
+        # Text was unset before the fix too: the other half of the same guard.
+        (True, "timestamp = 'soon', start_ts = 'soon'", (0, 0)),
+    ],
+)
+def test_finish_save_in_a_chat_whose_newest_task_has_an_absurd_time(
+    other_task_finishes: bool, absurd_times: str, summary_times: tuple[int, int]
+) -> None:
+    """A finite time no SQLite INTEGER holds counts as unset, as text and infinities do."""
+    absurd_id, chat_id = th._add_task("add a logout button")
+    finishing_id = absurd_id
+    if other_task_finishes:
+        finishing_id, _ = th._add_task("fix the login bug in the portal", chat_id=chat_id)
+    _set_task_times(absurd_id, absurd_times)
+    try:
+        th._save_task_extra({"endTs": 1_900_000_000_000}, finishing_id)
+        finished_at = th.task_end_ms(finishing_id)
+        summary = th._chat_summaries([chat_id])[chat_id]
+    finally:
+        # As above: the database outlives this test.
+        _set_task_times(absurd_id, "timestamp = 1e9, start_ts = 0, end_ts = 0")
+    assert finished_at == 1_900_000_000_000
+    assert (summary["last_launched"], summary["last_finished"]) == summary_times
 
 
 def test_backfill_of_blob_task_texts_tags_infers_and_summarises(tmp_path: Path) -> None:

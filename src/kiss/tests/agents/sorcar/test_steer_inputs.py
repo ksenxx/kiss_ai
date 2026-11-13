@@ -25,21 +25,21 @@ import time
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.persistence_helpers import close_db
 
 
-def _redirect(tmpdir: str) -> tuple[Path, object, Path]:
-    """Redirect the persistence DB to a temp dir and reset the singleton."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+def _redirect(tmpdir: str) -> tuple[Path, Path]:
+    """Redirect the persistence DB to a temp dir; return saved state."""
+    saved = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
+    return saved
 
 
-def _restore(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
+def _restore(saved: tuple[Path, Path]) -> None:
+    th._DB_PATH, th._KISS_DIR = saved
 
 
 def _set_task_timestamp(task_id: str, ts: float) -> None:
@@ -100,7 +100,7 @@ class TestSteerInputs:
         self.saved = _redirect(self.tmp)
 
     def teardown_method(self) -> None:
-        th._close_db()
+        close_db()
         _restore(self.saved)
         shutil.rmtree(self.tmp, ignore_errors=True)
 

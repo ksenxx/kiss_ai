@@ -17,7 +17,9 @@ set, ``next_run_at`` advanced) without the job running:
   which makes every ``Thread.start()`` raise ``RuntimeError: can't
   start new thread``: each due job is recorded as "could not start",
   no entry stays in the running registry, and the tick returns the
-  number of jobs it actually started.
+  number of jobs it actually started.  The Schedule subpanel's Run now
+  records the failure the same way and gives the job's run lock back,
+  so the next start fails as the first did, not as "already running".
 
 Everything runs against the real JSON job store under an isolated
 ``KISS_HOME``; no mocks or test doubles.
@@ -127,3 +129,25 @@ def test_tick_records_every_due_job_whose_thread_cannot_start(tmp_path: Path) ->
     # The occurrences were consumed: the job runs again at its next time.
     assert all(_stored(job_id)["next_run_at"] > time.time() for job_id in (first, second))
     assert not (tmp_path / "cron" / "runs").exists()
+
+
+def test_run_now_takes_back_the_claim_of_a_thread_that_cannot_start(tmp_path: Path) -> None:
+    if not thread_start_can_be_starved():
+        pytest.skip("RLIMIT_NPROC cannot starve Thread.start on this host")
+    job_id = _create_due_command_job("unstartable")
+    script = (
+        "import resource\n"
+        "from kiss.agents.sorcar import cron_agent\n"
+        "resource.setrlimit(resource.RLIMIT_NPROC, (1, 1))\n"
+        "for _ in range(2):\n"
+        f"    print(cron_agent.apply_job_action('run_now', {job_id!r}))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "KISS_HOME": str(tmp_path)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    first, second = proc.stdout.splitlines()
+    assert first.startswith("could not start: RuntimeError:") and second == first, proc.stdout
+    assert _stored(job_id)["last_summary"] == first

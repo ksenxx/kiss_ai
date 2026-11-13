@@ -25,7 +25,7 @@ from collections.abc import Generator
 from typing import Any
 
 import pytest
-from google.genai import types
+from google.genai import errors, types
 
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
@@ -261,6 +261,31 @@ class TestGeminiThinkingLevel:
             gemini_endpoint, "gemini-4-argon-high", {"thinking_config": {"thinking_budget": 512}}
         )
         assert sent == {"include_thoughts": True, "thinking_budget": 512}
+
+    def test_model_without_thinking_is_asked_again_without_a_thinking_config(
+        self, gemini_endpoint: GeminiScript
+    ) -> None:
+        """Gemini refuses any ``thinkingConfig``, the default ``include_thoughts``
+        included, for a model that cannot think (``gemini-2.5-flash-image``):
+        the turn is asked again without one, and so is every later turn."""
+        gemini_endpoint.refuse_thinking = "Thinking is not enabled for this model"
+        gemini_endpoint.play([chunk([text_part("Hello.")], finish_reason="STOP")])
+        m = GeminiModel("gemini-2.5-flash-image", api_key="test-key")
+        for prompt in ("Say hello.", "Say hello again."):
+            m.initialize(prompt)
+            assert m.generate()[0] == "Hello."
+        sent = ["thinkingConfig" in r.get("generationConfig", {}) for r in gemini_endpoint.requests]
+        assert sent == [True, False, False]
+
+    def test_another_refusal_of_the_thinking_config_is_not_retried(
+        self, gemini_endpoint: GeminiScript
+    ) -> None:
+        gemini_endpoint.refuse_thinking = "Thinking level HIGH is not supported"
+        m = GeminiModel("gemini-4-argon-high", api_key="test-key")
+        m.initialize("Say hello.")
+        with pytest.raises(errors.ClientError, match="is not supported"):
+            m.generate()
+        assert len(gemini_endpoint.requests) == 1
 
     def test_catalog_ships_gemini_level_aliases(self) -> None:
         for level in ("low", "medium", "high"):

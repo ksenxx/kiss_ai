@@ -9,15 +9,16 @@ Orphan-sweep join guard
 
 Every :class:`~kiss.server.server.AgentServer` constructor starts a
 daemon thread named ``orphan-task-sweep`` that runs SQL on a per-thread
-SQLite connection which ``persistence._get_db()`` also publishes in the
-module-global ``_db_conn`` (see ``_run_orphan_sweep`` in
+SQLite connection (see ``_run_orphan_sweep`` in
 ``kiss/server/server.py``).  About 150 test files construct a server in
-``setUp`` and then, in ``tearDown``, close ``persistence._db_conn`` and
-delete the temporary KISS_HOME.  If the sweep is still inside
-``db.execute(...)`` at that point, the C-level
-``pysqlite_connection_execute`` call dereferences a freed connection and
-the whole interpreter dies with SIGSEGV, taking the entire pytest
-process down with it.
+``setUp`` and then, in ``tearDown``, close their persistence connection
+and delete the temporary KISS_HOME.  Those teardowns used to close the
+connection opened last by any thread, the sweep's included: with the
+sweep still inside ``db.execute(...)``, the C-level
+``pysqlite_connection_execute`` call dereferenced a freed connection and
+the whole interpreter died with SIGSEGV, taking the entire pytest
+process down with it.  A sweep that outlives the teardown still runs on
+against a deleted KISS_HOME.
 
 :func:`pytest_runtest_call` below therefore joins every live sweep
 thread right before each ``unittest.TestCase.tearDown`` body runs — the
@@ -32,9 +33,9 @@ started by non-unittest tests.
 ``IsolatedAsyncioTestCase`` needs the same guard on ``asyncTearDown``:
 CPython's ``_callTearDown`` awaits ``asyncTearDown`` **before** it runs
 the sync ``tearDown``, and the ~60 async server test files close
-``persistence._db_conn`` inside ``asyncTearDown`` — so wrapping only
+their persistence connection inside ``asyncTearDown`` — so wrapping only
 the sync ``tearDown`` joins the sweep *after* the connection is already
-closed, leaving the exact SIGSEGV this guard exists to prevent (seen as
+closed, leaving the exact SIGSEGV this guard was added to prevent (seen as
 the order-dependent crash in large ``tests/webapp`` runs, e.g.
 ``test_per_window_reply_isolation.py`` closing the connection while an
 ``orphan-task-sweep`` thread was inside ``_recover_orphaned_tasks``).
@@ -302,11 +303,17 @@ suppress_error_dialogs()
 # session opts out the way a user does; the tips tests that need the
 # auto-open point KISS_HOME at a home of their own.
 Path(_test_kiss_home, "TIPS_DISABLED").write_text("test session opt-out\n")
-# The daemon polls PyPI at startup and raises a sticky "update available"
-# toast over the top-right of every chat page as soon as a release newer
-# than this checkout is published, so Playwright clicks there failed
-# deterministically whenever the live index was ahead (2026-09-23,
-# 2026-10-02).  The session snoozes it the way "Remind me later" does:
+# No daemon of the session asks PyPI for the latest release: the kill
+# switch of ``web_server._fetch_latest_version`` is set here, and the
+# daemons the tests spawn as subprocesses inherit it.  The update
+# check's own tests lift it and serve a local stub instead.
+os.environ["KISS_DISABLE_UPDATE_CHECK"] = "1"
+# A daemon that knows of a release newer than this checkout raises a
+# sticky "update available" toast over the top-right of every chat
+# page, so Playwright clicks there failed deterministically whenever
+# the live index was ahead (2026-09-23, 2026-10-02).  For the tests
+# that hand a daemon such a release, the session snoozes the toast the
+# way "Remind me later" does:
 # ``web_server._is_update_snoozed`` treats an unparseable
 # ``snoozedLatest`` as covering every release until ``snoozeUntilMs``.
 # The passive settings-button badge still appears, so tests that wait
@@ -315,7 +322,6 @@ Path(_test_kiss_home, "TIPS_DISABLED").write_text("test session opt-out\n")
 Path(_test_kiss_home, ".update-check.json").write_text(
     f'{{"snoozeUntilMs": {int(time.time() + 10 * 365 * 24 * 3600) * 1000}, "snoozedLatest": ""}}\n'
 )
-_th._db_conn = None
 _th._KISS_DIR = Path(_test_kiss_home)
 _th._DB_PATH = _th._KISS_DIR / "history.db"
 
@@ -418,6 +424,21 @@ def executor_of(agent: Any) -> Any:
     return executor
 
 
+def clear_classification_cache() -> None:
+    """Forget every memoised task-classifier verdict, in memory and on disk.
+
+    The classifier never resets its cache (the criteria text is part of
+    the cache key); a test starts from and leaves an empty one with this.
+    """
+    from kiss.agents.sorcar import task_classifier
+
+    with task_classifier._cache_lock:
+        task_classifier._cache = None
+        task_classifier._cache_loaded_from = None
+        with contextlib.suppress(OSError):
+            task_classifier._cache_path().unlink()
+
+
 def find_free_port() -> int:
     """Return a TCP port that is free on 127.0.0.1 right now.
 
@@ -472,9 +493,8 @@ AMBIENT_AWS_ENV_VARS = (
 finds AWS credentials without a config file."""
 
 
-@pytest.fixture(autouse=True)
-def no_ambient_aws_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Hide the developer's ambient AWS credentials from every test.
+def hide_ambient_aws_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Hide the developer's ambient AWS credentials until *monkeypatch* is undone.
 
     ``bedrock_credentials_configured()`` consults boto3's default chain, so
     a real ``~/.aws`` profile, an exported key pair or an IRSA token would
@@ -483,12 +503,31 @@ def no_ambient_aws_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     chain's environment variables are unset and its three file locations
     are pointed at files that do not exist; a test that needs an ambient
     source sets the variables it wants on top of this.
+
+    The config singleton copied the exported variables when it was built,
+    before any test: its copies are emptied too.  They kept Bedrock
+    "configured" for a test that ran before any test of its process had
+    reloaded the config, so the same test passed or failed with its
+    position in the run.
     """
+    from kiss.core import config as config_module
+
     for name in AMBIENT_AWS_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+        if hasattr(config_module.DEFAULT_CONFIG, name):
+            monkeypatch.setattr(config_module.DEFAULT_CONFIG, name, "")
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-aws-credentials"))
     monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-aws-config"))
     monkeypatch.setenv("BOTO_CONFIG", str(tmp_path / "no-boto-config"))
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_aws_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Hide the developer's ambient AWS credentials from every test.
+
+    See :func:`hide_ambient_aws_credentials`.
+    """
+    hide_ambient_aws_credentials(monkeypatch, tmp_path)
 
 
 @pytest.fixture
@@ -907,7 +946,11 @@ collect_ignore = ["run_all_models_test.py"]
 
 
 def join_orphan_sweeps() -> None:
-    """Wait for every live ``orphan-task-sweep`` thread to finish.
+    """Wait for every live ``AgentServer`` startup thread that writes the database.
+
+    Both the ``orphan-task-sweep`` and the ``task-machine-backfill``
+    thread touch the test's temporary home; a teardown that removes it
+    under them makes them log spurious tracebacks after the session.
 
     Returns:
         None. Threads that outlive the timeout are left running: the
@@ -915,7 +958,7 @@ def join_orphan_sweeps() -> None:
         whole session.
     """
     for thread in threading.enumerate():
-        if thread.name == "orphan-task-sweep" and thread.is_alive():
+        if thread.name in ("orphan-task-sweep", "task-machine-backfill") and thread.is_alive():
             thread.join(timeout=_SWEEP_JOIN_TIMEOUT_SECONDS)
 
 
@@ -940,8 +983,8 @@ async def _async_tear_down_after_orphan_sweeps(
 
     ``IsolatedAsyncioTestCase._callTearDown`` awaits ``asyncTearDown``
     BEFORE the sync ``tearDown``, so this is the last moment at which
-    ``persistence._db_conn`` — which many async server fixtures close
-    inside ``asyncTearDown`` — is still guaranteed valid for a sweep.
+    the history database — which many async server fixtures close and
+    delete inside ``asyncTearDown`` — is still guaranteed there for a sweep.
 
     Args:
         tear_down: The ``asyncTearDown`` bound coroutine method this
@@ -1105,6 +1148,38 @@ requires_moonshot_api_key = pytest.mark.skipif(
     not has_moonshot_api_key(),
     reason="MOONSHOT_API_KEY environment variable not set",
 )
+
+
+@pytest.fixture(autouse=True)
+def _offline_memory_embeddings(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hide the developer's ``OPENAI_API_KEY`` from every test that is not a live OpenAI test.
+
+    An agent run with memory on (the default) starts with a recall that
+    embeds the task text through
+    ``kiss.core.memoryfield.index.default_embedder``, which calls
+    OpenAI's embedding API whenever that key is exported and uses the
+    offline hashed embedding otherwise.  The recall swallows its
+    failures, so a test passes either way; without this fixture it would
+    also send the task text out on the developer's key.  A test marked
+    ``live_api`` or gated by :data:`requires_openai_api_key` keeps the
+    key.
+
+    A daemon started by the test copies the keys from the environment
+    into ``DEFAULT_CONFIG`` (``user_config._refresh_config``), which
+    blanks this one there; the undo puts it back with the variable, so
+    a later live test still finds it.
+    """
+    from kiss.core.config import DEFAULT_CONFIG
+
+    node = request.node
+    if node.get_closest_marker("live_api") is not None:
+        return
+    if requires_openai_api_key.mark in node.iter_markers("skipif"):
+        return
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(DEFAULT_CONFIG, "OPENAI_API_KEY", DEFAULT_CONFIG.OPENAI_API_KEY)
 
 
 @pytest.fixture(autouse=True)

@@ -26,17 +26,13 @@ const {
   stubGeometry,
   fakeGeometry,
   bottom,
+  readyTabId,
   startRunningTask,
   twoTabs,
 } = require('./simplify2_harness');
 
 function makePage() {
-  const {win, posted} = makeChatPage({
-    bodyClass: 'remote-chat',
-    sourceUrl: 'autoscroll-main.js',
-    beforeScripts: stubGeometry,
-  });
-  return {win, posted};
+  return makeChatPage({bodyClass: 'remote-chat', beforeScripts: stubGeometry});
 }
 
 /** Start a Bash panel with independently scrollable chat and output bodies. */
@@ -523,18 +519,11 @@ async function testReplayLandsAtEnd() {
   const O = win.document.getElementById('output');
   const geoO = {sh: 4000, ch: 500};
   fakeGeometry(O, geoO);
-  const ready = posted.find(m => m.type === 'ready');
-  win._testApi.hideWelcome();
-  send(win, {
-    type: 'status',
-    running: true,
-    tabId: ready.tabId,
-    startTs: Date.now() - 2000,
-  });
+  const tabId = startRunningTask(win, posted);
   userScroll(win, O, 33);
   send(win, {
     type: 'task_events',
-    tabId: ready.tabId,
+    tabId,
     task: 'replayed task',
     task_id: 7,
     events: [
@@ -609,8 +598,10 @@ async function testReconnectReplayKeepsReadingPosition() {
   await nextFrames(win);
   assert.strictEqual(O.scrollTop, readingAt, 'lock must survive the replay');
 
-  // At the bottom, a replay lands at the end as before.
+  // At the bottom, a replay lands at the end as before: the end of the
+  // rebuilt transcript, which is taller than the one left.
   userScroll(win, O, bottom(geoO));
+  geoO.sh += 300;
   replay();
   await nextFrames(win);
   assert.strictEqual(
@@ -915,13 +906,9 @@ async function testTabRestoreLandsAtEnd() {
 
   userScroll(win, O, 40);
   geoO.sh += 500;
-  const tabEl =
-    win.document.querySelector(
-      '#tab-list ' + '.chat-tab[data-tab-id="sub-tab-1"]',
-    ) ||
-    win.document.querySelector(
-      '#main-tab-list ' + '.chat-tab[data-tab-id="sub-tab-1"]',
-    );
+  const tabEl = win.document.querySelector(
+    '#tab-list .chat-tab[data-tab-id="sub-tab-1"]',
+  );
   assert.ok(tabEl, 'the sub-agent tab must appear in the tab bar');
   tabEl.click();
   assert.ok(
@@ -1017,26 +1004,18 @@ async function testSubpanelLockSurvivesTabSwitch() {
     description: 'background worker',
     task_id: 6,
   });
-  const subTabEl =
-    win.document.querySelector(
-      '#tab-list ' + '.chat-tab[data-tab-id="sub-tab-lock"]',
-    ) ||
-    win.document.querySelector(
-      '#main-tab-list ' + '.chat-tab[data-tab-id="sub-tab-lock"]',
-    );
+  const subTabEl = win.document.querySelector(
+    '#tab-list .chat-tab[data-tab-id="sub-tab-lock"]',
+  );
   assert.ok(subTabEl, 'the sub-agent tab must appear in the tab bar');
   subTabEl.click();
   // Real browsers destroy the scroller of a detached element, silently
   // resetting its scroll offset to 0 (no scroll event fires). jsdom
   // keeps the property, so the reset is simulated here.
   bp.scrollTop = 0;
-  const parentTabEl =
-    win.document.querySelector(
-      '#tab-list ' + '.chat-tab[data-tab-id="' + parentId + '"]',
-    ) ||
-    win.document.querySelector(
-      '#main-tab-list ' + '.chat-tab[data-tab-id="' + parentId + '"]',
-    );
+  const parentTabEl = win.document.querySelector(
+    '#tab-list .chat-tab[data-tab-id="' + parentId + '"]',
+  );
   assert.ok(parentTabEl, 'the parent tab must stay in the tab bar');
   parentTabEl.click();
 
@@ -1158,7 +1137,7 @@ async function testIdleScrollAlsoLocks() {
   const O = win.document.getElementById('output');
   const geo = {sh: 3000, ch: 500};
   fakeGeometry(O, geo);
-  const ready = posted.find(m => m.type === 'ready');
+  const tabId = readyTabId(posted);
   win._testApi.hideWelcome();
 
   // The user browses history while the chat is idle.
@@ -1169,7 +1148,7 @@ async function testIdleScrollAlsoLocks() {
   send(win, {
     type: 'status',
     running: true,
-    tabId: ready.tabId,
+    tabId,
     startTs: Date.now(),
   });
   geo.sh += 100;

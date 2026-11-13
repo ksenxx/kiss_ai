@@ -16,6 +16,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -24,7 +27,7 @@ import docker
 import pytest
 
 from kiss.agents.seas.coding import coding_sea
-from kiss.agents.sorcar.docker_manager import DockerManager
+from kiss.agents.sorcar.docker_manager import STOPPED_MESSAGE, DockerManager
 from kiss.agents.sorcar.shell_guards import (
     DESTRUCTIVE_VERDICT,
     INSTALL_TIMEOUT_SECONDS,
@@ -33,6 +36,7 @@ from kiss.agents.sorcar.shell_guards import (
     refuse_or_lift,
 )
 from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.processes import find_bash
 from kiss.tests.agents.sorcar.docker_test_containers import (
     IMAGE,
     image_container_ids,
@@ -152,6 +156,8 @@ def test_destructive_guard_protects_root_and_work_dir(tmp_path: Path) -> None:
     assert destructive_command_guard(f"rm -rf {tmp_path}", f"{tmp_path}/") == DESTRUCTIVE_VERDICT
     assert destructive_command_guard("rm -rf /", None) == DESTRUCTIVE_VERDICT
     assert destructive_command_guard(f"rm -rf {tmp_path}", None) is None
+    assert destructive_command_guard("rm -rf *", None) is None
+    assert destructive_command_guard(f"rm -rf ../{tmp_path.name}", str(link)) == DESTRUCTIVE_VERDICT
 
 
 @pytest.mark.parametrize("command, refused", [
@@ -190,6 +196,23 @@ def test_destructive_guard_protects_root_and_work_dir(tmp_path: Path) -> None:
     ("kill -1 1234", False), ("nice kill -1 1234", False), ("rm -rf /tmp/w/../other", False),
     ("rm -rf /tmp/w/w", False), ("rm -rf /tmp/w/build", False), ("grep -rn 'kill -1' src", False),
     ("xargs grep 'kill -1'", False), ("command -v rm", False), ("timeout 5 sleep 1", False),
+    # the same commands where a compound command puts them, with the operand quoted,
+    # with the work dir (where every call starts) named from inside it
+    ("{ kill -9 -1; }", True), ("if true; then kill -9 -1; fi", True),
+    ("for i in 1; do kill -9 -1; done", True), ("true || ! kill -9 -1", True),
+    ("if kill -9 -1; then :; fi", True), ("while ! kill -9 -1; do :; done", True),
+    ("until kill -9 -1; do :; done", True), ("if false; then :; elif kill -9 -1; then :; fi", True),
+    ("if false; then :; else rm -rf /; fi", True), ("stop() { kill -9 -1; }; stop", True),
+    ('kill -9 "-1"', True), ("kill -s KILL '-1'", True), ("kill '-1'", True),
+    ("rm -rf ./*", True), ("rm -rf *", True), ('rm -rf "$PWD"', True), ("rm -rf ${PWD}/", True),
+    ("rm -rf $(pwd)/*", True), ("rm -rf `pwd`", True), ("rm -rf ../w", True),
+    ("rm -rf ../w/*", True), ("rm -rf * && cd ..", True), ("ls; { rm -rf *; }", True),
+    ("rm -rf ./build/*", False), ("rm -rf *.o", False), ("rm -rf ../w2", False),
+    ("rm -rf ../other", False), ('kill -9 "$pid"', False), ('kill "-1" 1234', False),
+    ("if true; then kill -15 1234; fi", False), ("echo {} done", False),
+    ("echo x | xargs -I{} kill -9 -1", True), ("rm -rf ${HOME}/x /", True),
+    ("function stop { kill -9 -1; }; stop", True), ("coproc kill -9 -1", True),
+    ("function wipe { rm -rf *; }; wipe", True), ("function hello { echo hi; }; hello", False),
 ])
 def test_destructive_guard_sees_through_command_wrappers(command: str, refused: bool) -> None:
     """Audit 2026-11-07 A12_claude-2: the guard absorbed one ``sudo``/``env`` wrapper and so
@@ -203,6 +226,101 @@ def test_destructive_guard_sees_through_command_wrappers(command: str, refused: 
     verdict = destructive_command_guard(command, "/tmp/w")
     assert (verdict == DESTRUCTIVE_VERDICT) is refused, command
     assert verdict is None or verdict == DESTRUCTIVE_VERDICT
+
+
+@pytest.mark.parametrize("command, refused", [
+    # the cd stays in the work dir, goes above or beside it, or names no literal directory
+    ("cd . && rm -rf *", True), ("cd ./ && rm -rf *", True), ("cd sub/.. && rm -rf ./*", True),
+    ("cd /tmp/w && rm -rf *", True), ("cd ../w && rm -rf *", True), ("cd .. && rm -rf *", True),
+    ("cd /tmp && rm -rf *", True), ("cd /. && rm -rf *", True), ("cd / && rm -rf *", True),
+    ("cd // && rm -rf *", True), ("cd /tmp/w2 && rm -rf ../w", True),
+    ("cd ../w2 && rm -rf ../w *", True), ("cd $PWD && rm -rf *", True),
+    ('cd "$BUILD" && rm -rf *', True), ("cd ~ && rm -rf *", True), ("cd && rm -rf *", True),
+    ("cd - && rm -rf *", True), ("cd -P sub && rm -rf *", True), ("pushd -n sub && rm -rf *", True),
+    ("pushd +1 && rm -rf *", True), ('cd "" && rm -rf *', True), ("cd sub extra && rm -rf *", True),
+    # the cd may not run, may fail, or runs in a child
+    ("true || cd /tmp; rm -rf *", True), ("true || cd sub && rm -rf *", True),
+    ("cd sub; rm -rf *", True), ("pushd sub; rm -rf ./*", True), ("cd sub || rm -rf *", True),
+    ("! cd sub && rm -rf *", True), ("false | cd sub && rm -rf *", True),
+    ("true |& cd sub && rm -rf *", True), ("(cd sub) && rm -rf *", True),
+    ("cd sub & rm -rf *", True), ("sudo cd sub && rm -rf *", True),
+    ("bash -c 'cd sub' && rm -rf *", True), ("true ||\ncd sub && rm -rf *", True),
+    ("ls\ncd sub && rm -rf *", True), ("echo \\; cd sub && rm -rf *", True),
+    ("echo x >& cd sub && rm -rf *", True), ("echo `date` cd sub && rm -rf *", True),
+    ("until cd sub; do rm -rf *; done", True),
+    # another command between the cd and the delete, or the delete after the cd's list
+    ("cd sub && cd .. && rm -rf *", True), ("cd / && cd tmp && rm -rf *", True),
+    ("pushd sub && popd && rm -rf *", True), ("cd sub && env -C .. rm -rf *", True),
+    ("cd sub && rm -rf *; rm -rf *", True), ("cd sub && ls; rm -rf *", True),
+    # a cd named before the one that enters: a function of that name, a cd the shell evaluates
+    ("cd() { :; }; cd sub && rm -rf *", True), ("eval 'cd ..'; cd w && rm -rf *", True),
+    # entered: a literal directory away from the work dir, right before the delete
+    ("cd sub && rm -rf *", False), ("cd ./sub/ && rm -rf ./*", False),
+    ('cd "sub" && rm -rf "$PWD"', False), ("pushd sub && rm -rf ./*", False),
+    ("if cd sub; then rm -rf \"$PWD\"; fi", False), ("mkdir -p sub && cd sub && rm -rf *", False),
+    ("ls; cd sub && rm -rf *", False), ("(cd sub && rm -rf *)", False),
+    ("{ cd sub && rm -rf *; }", False), ("cd sub && rm -rf ../w", False),
+    ("cd /tmp/w/build && rm -rf *", False), ("cd /var/tmp/x && rm -rf *", False),
+    ("cd sub && rm -rf * && cd .. && ls", False),
+])
+def test_delete_from_inside_is_exempt_only_once_a_cd_left_the_work_dir(
+    command: str, refused: bool,
+) -> None:
+    """Review 2026-11-11 S4-2: any ``cd`` or ``pushd`` before a delete named from inside the
+    work dir (``rm -rf *``) exempted it, so ``cd . && rm -rf *``, ``true || cd /tmp; rm -rf *``
+    and ``cd build; rm -rf *`` with no ``build`` emptied the work dir.  The delete is exempt
+    only as a plain ``rm`` right after ``cd DIR &&`` (or ``cd DIR; then``), where the ``cd``
+    starts a command of the shell that runs the ``rm`` and DIR is a literal path that is
+    neither the work dir, nor above it, nor beside it (where ``../<name>`` is the work dir)."""
+    verdict = destructive_command_guard(command, "/tmp/w")
+    assert (verdict == DESTRUCTIVE_VERDICT) is refused, command
+
+
+def test_delete_from_inside_follows_the_links_of_the_entered_directory(tmp_path: Path) -> None:
+    """Audit 2026-11-12 B5/A5: the directory a ``cd`` enters was read from the command's text
+    alone, so ``cd alias && rm -rf *`` through a link back to the work dir emptied it.  It is
+    also taken as the filesystem names it; bash says where each ``cd`` lands (no delete runs)."""
+    bash = find_bash()
+    if bash is None:
+        pytest.skip("Bash is the filesystem oracle")
+    work = tmp_path / "w"
+    (work / "sub").mkdir(parents=True)
+    (tmp_path / "other" / "deep").mkdir(parents=True)
+    (work / "alias").symlink_to(work, target_is_directory=True)
+    (work / "up").symlink_to(tmp_path, target_is_directory=True)
+    (work / "sub" / "back").symlink_to("..", target_is_directory=True)
+    (work / "away").symlink_to(tmp_path / "other", target_is_directory=True)
+    (work / "far").symlink_to(tmp_path / "other" / "deep", target_is_directory=True)
+    (tmp_path / "other" / "x").symlink_to(work, target_is_directory=True)
+    (tmp_path / "other" / "y").symlink_to(work, target_is_directory=True)
+    (work / "y").mkdir()
+    for entered, operand, refused in (
+        ("alias", "*", True), ("up", "*", True), ("sub/back", "./*", True), ("up/w", "*", True),
+        # no ``w/x``: bash falls back to the path as the filesystem takes it, ``other/x``
+        ("far/../x", "*", True),
+        # ``..`` of the directory the link names holds the work dir
+        ("away", "../w", True),
+        ("sub", "*", False), ("alias/sub", "*", False), ("far", "*", False),
+        # ``w/y`` is a directory: bash enters it, and never looks at ``other/y``
+        ("far/../y", "*", False),
+    ):
+        deleted = "../w" if operand == "../w" else "."
+        pwd = "pwd -W" if sys.platform == "win32" else "pwd -P"
+        landed_text = subprocess.run(
+            [bash, "-c", f"cd {entered} && cd -P {deleted} && {pwd}"],
+            cwd=work, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        landed = Path(landed_text).resolve()
+        assert work.resolve().is_relative_to(landed) is refused, (entered, landed)
+        verdict = destructive_command_guard(f"cd {entered} && rm -rf {operand}", str(work))
+        assert (verdict == DESTRUCTIVE_VERDICT) is refused, entered
+    if sys.platform != "win32":
+        # A backslash is a file-name character on POSIX, not a separator.
+        odd = tmp_path / "w\\z"
+        odd.mkdir()
+        (odd / "alias").symlink_to(odd, target_is_directory=True)
+        verdict = destructive_command_guard("cd alias && rm -rf *", str(odd))
+        assert verdict == DESTRUCTIVE_VERDICT
 
 
 def test_guards_stay_linear_on_long_commands() -> None:
@@ -223,7 +341,9 @@ def test_guards_stay_linear_on_long_commands() -> None:
     …``), so each suffix is scanned once per guarded command.  The shell's options
     after its ``-c`` cluster (audit 2026-11-08 S8) end at the first, possibly
     quoted, command name the same way, and the cluster's ``c`` is its first
-    ``c``, so a 48 kB cluster is read once rather than once per split.
+    ``c``, so a 48 kB cluster is read once rather than once per split.  The
+    reserved words a command may follow (audit 2026-11-10 C13-F3) repeat
+    without a rescan either.
     """
     long_commands = [
         "sudo echo " + "rm " * 8000 + "ok",
@@ -252,6 +372,19 @@ def test_guards_stay_linear_on_long_commands() -> None:
         ";/" * 20_000,
         "|" * 40_000,
         "(" * 40_000,
+        "{ " * 20_000,
+        "{" * 40_000,
+        "! " * 20_000,
+        "then " * 8_000,
+        "; if ! " * 5_000,
+        "{ do rm " * 5_000,
+        "; function f { coproc " * 4_000,
+        "rm -rf " + "*x " * 13_000,
+        "cd a; " * 6_000 + "rm -rf *x",
+        "cd a && " * 6_000 + "rm -rf *",
+        "cd a && rm -rf *; " * 3_000,
+        "; cd " + "a/" * 10_000 + "$x && rm -rf *",
+        "kill -9 " + '"-1"x ' * 6_000,
         "a;" * 20_000 + "rm -rf /",
     ]
     for command in long_commands:
@@ -303,7 +436,17 @@ def test_bash_refuses_destructive_commands_without_running_them(tmp_path: Path) 
     # Review 2026-11-08 R7 S7/F2: ``env -u kill -u pkill rm -rf <workdir>`` deletes the
     # work dir through a wrapper whose option values are spelled like guarded commands.
     assert tools.Bash(f"env -u kill -u pkill rm -rf {tmp_path}", "wipe") == DESTRUCTIVE_VERDICT
+    # Audit 2026-11-10 C13-F3: the work dir named from inside it, where the call starts.
+    assert tools.Bash("rm -rf ./*", "wipe") == DESTRUCTIVE_VERDICT
+    # Review 2026-11-11 S4-2: a cd that stays here, may not run or fails exempts no delete
+    # (each of these stays inside tmp_path whatever the guard answers).
+    for command in ("cd . && rm -rf *", "true || cd build; rm -rf *", "cd nosuch; rm -rf *"):
+        assert tools.Bash(command, "wipe") == DESTRUCTIVE_VERDICT, command
     assert keep.read_text() == "keep"
+    # The delete right after a cd into a directory of the work dir runs, there.
+    (tmp_path / "build" / "junk.txt").write_text("junk")
+    assert tools.Bash("cd build && rm -rf * && echo emptied", "allowed").strip() == "emptied"
+    assert not (tmp_path / "build" / "junk.txt").exists() and keep.read_text() == "keep"
     # as_posix: bash would eat the backslashes of a Windows path.
     build = (tmp_path / "build").as_posix()
     assert tools.Bash(f"rm -rf {build} && echo gone", "allowed").strip() == "gone"
@@ -390,6 +533,40 @@ def test_docker_bash_applies_the_guards(cleanup: set[str]) -> None:
                  "fake make")
         out = mgr.Bash("/work/make -j2", "slow build", timeout_seconds=1)
         assert "built" in out and "timed out" not in out, out
+        # Round 2 of audit 2026-11-12 (B5): where the ``cd`` of a delete lands was asked of
+        # this host, which holds no ``/work``: a link of the container back to its work dir
+        # went unseen and the delete emptied it.  The container says where its paths lead.
+        mgr.Bash("mkdir -p /work/sub /other/deep && ln -s /work /work/alias && ln -s / /work/up"
+                 " && ln -s /other /work/away && ln -s /work /other/x", "links")
+        for entered, operand in (("alias", "*"), ("up/work", "./*"), ("away/x", "*"),
+                                 ("away", "../work")):
+            command = f"cd {entered} && rm -rf {operand}"
+            assert destructive_command_guard(command, "/work") is None  # as this host reads it
+            assert mgr.Bash(command, "wipe") == DESTRUCTIVE_VERDICT, command
+            assert DESTRUCTIVE_VERDICT in mgr.run_commands_parallel(json.dumps([command]))
+        assert mgr.Bash("cat /work/keep.txt", "check").strip() == "keep"
+        # A delete entered into a directory of the work dir, or one a link leads out to, runs.
+        mgr.Bash("touch /work/sub/junk /other/deep/junk", "junk")
+        for entered in ("sub", "alias/sub", "away/deep"):
+            assert mgr.Bash(f"cd {entered} && rm -rf * && echo emptied", "ok").strip() == "emptied"
+        assert mgr.Bash("ls /work/sub /other/deep; cat /work/keep.txt", "check").split() == [
+            "/other/deep:", "/work/sub:", "keep"]
+        # An answer nobody got (the task is stopped) runs no delete on a guess: the
+        # command is reported as a stopped one is.
+        mgr.Bash("touch /work/sub/kept", "seed")
+        mgr.stop_event = threading.Event()
+        mgr.stop_event.set()
+        unanswered = mgr.run_bash("cd sub && rm -rf *", "stopped")
+        mgr.stop_event = None
+        assert unanswered.code == "-1" and unanswered.text.startswith(STOPPED_MESSAGE)
+        assert mgr.Bash("ls /work/sub", "check").split() == ["kept"]
+        # An oracle that timed out in a directory whose name reads like that message
+        # is no Stop.
+        mgr.Bash(f"mkdir -p '/work/{STOPPED_MESSAGE}/sub'", "seed")
+        mgr.workdir = f"/work/{STOPPED_MESSAGE}"
+        timed_out = mgr.run_bash("cd sub && rm -f kept", "timeout", timeout_seconds=0)
+        mgr.workdir = "/work"
+        assert timed_out.code == "error" and "timed out" in timed_out.text, timed_out
     finally:
         mgr.close()
     assert not os.path.exists(mgr.host_shared_path or "/nonexistent-kiss-shared")

@@ -29,21 +29,21 @@ from kiss.agents.sorcar import sea_commands
 from kiss.server.commands import sea_commands_event
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import AgentServer
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 
 
 @pytest.fixture
 def history_db(tmp_path: Path) -> Iterator[None]:
     """Point the persistence module at an empty temporary ``history.db``."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    saved = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = tmp_path / ".kiss"
     kiss_dir.mkdir()
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     try:
         yield
     finally:
-        th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
+        th._DB_PATH, th._KISS_DIR = saved
 
 
 def _run(task: str, ts: float, parent_task_id: str = "") -> None:
@@ -159,7 +159,6 @@ def test_event_without_history_has_empty_rankings(history_db: None) -> None:
 def test_event_survives_an_unreadable_history(history_db: None) -> None:
     """A corrupt ``history.db`` costs the ranking, not the command list."""
     th._get_db().close()
-    th._db_conn = None
     th._DB_PATH.write_bytes(b"not a sqlite file" * 64)
     event = sea_commands_event(["gmail", "slack"])
     assert event["commands"] == ["gmail", "slack"]
@@ -169,7 +168,7 @@ def test_event_survives_an_unreadable_history(history_db: None) -> None:
 
 def test_get_sea_commands_handler_ships_the_ranking(history_db: None) -> None:
     """The ``getSeaCommands`` reply carries ``recent`` and ``frequent``."""
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
     try:
         names = sea_commands.refresh_registry()
         assert "slack" in names and "gmail" in names
@@ -186,4 +185,4 @@ def test_get_sea_commands_handler_ships_the_ranking(history_db: None) -> None:
         assert events[0]["recent"] == ["slack", "gmail"]
         assert events[0]["frequent"] == []
     finally:
-        sea_commands._reset_for_tests()
+        reset_sea_registry()

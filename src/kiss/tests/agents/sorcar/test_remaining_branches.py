@@ -35,16 +35,14 @@ class TestPersistenceBranches:
         self._tmpdir = tempfile.mkdtemp()
         kiss_dir = Path(self._tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved = (th._DB_PATH, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         th._invalidate_chat_context_cache()
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
+        th._close_thread_db()
+        (th._DB_PATH, th._KISS_DIR) = self._saved
         th._invalidate_chat_context_cache()
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
@@ -184,15 +182,13 @@ class TestChatSorcarAgentBranches:
         self._tmpdir = tempfile.mkdtemp()
         kiss_dir = Path(self._tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved = (th._DB_PATH, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
+        th._close_thread_db()
+        (th._DB_PATH, th._KISS_DIR) = self._saved
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
@@ -278,34 +274,26 @@ class TestWebUseToolNewTab:
         )
         tool = WebUseTool(headless=True)
         try:
-            tool.go_to_url(f"file://{html_file}")
-            link_id = None
-            for i, el in enumerate(tool._elements):
-                if el["role"] == "link":
-                    link_id = i + 1
-                    break
-            if link_id:
-                result = tool.click(link_id)
-                assert "Error" not in result or "Page:" in result
+            assert '- [1] link "Open New":' in tool.go_to_url(f"file://{html_file}")
+            result = tool.click(1)
+            assert "Error" not in result or "Page:" in result
         finally:
             tool.close()
 
 
 class TestWebUseToolEmptyNameLocator:
-    """Cover _resolve_locator empty name branch (line 192)."""
+    """An element without a name is acted on by its id like any other."""
 
     def test_resolve_locator_empty_name(self, tmp_path: Path) -> None:
-        """Element with empty name uses get_by_role without name."""
+        """A button with no name is numbered and clicked."""
         html_file = tmp_path / "emptyname.html"
-        html_file.write_text('<html><body><button></button></body></html>')
+        html_file.write_text(
+            "<html><body><button onclick=\"document.title='pressed'\"></button></body></html>"
+        )
         tool = WebUseTool(headless=True)
         try:
-            tool.go_to_url(f"file://{html_file}")
-            for i, el in enumerate(tool._elements):
-                if el["role"] == "button" and el["name"] == "":
-                    result = tool.click(i + 1)
-                    assert "Error" not in result or "Page:" in result
-                    break
+            assert tool.go_to_url(f"file://{html_file}").endswith("\n\n- [1] button")
+            assert tool.click(1).startswith("Page: pressed\n")
         finally:
             tool.close()
 
@@ -331,34 +319,26 @@ class TestSorcarAgentAttachmentNoParts:
 
 
 class TestWebUseToolResolveLocatorDuplicateOccurrences:
-    """Duplicate role/name IDs resolve to their exact snapshot occurrences."""
+    """Of two elements of one role and name, an id selects its own."""
 
-    def test_hidden_and_visible_duplicates_keep_distinct_ids(
+    def test_hidden_twin_gets_no_id_and_the_visible_one_is_clicked(
         self, tmp_path: Path,
     ) -> None:
-        """A hidden button ID must not silently redirect to its visible twin."""
+        """A button without a box has no id that could redirect to its visible twin."""
         html_file = tmp_path / "hidden.html"
         html_file.write_text(
             "<html><body>"
             '<button style="position:absolute;width:0;height:0;padding:0;'
             'border:0;overflow:hidden;clip:rect(0,0,0,0)">Submit</button>'
-            "<button>Submit</button>"
+            "<button onclick=\"document.title='visible twin'\">Submit</button>"
             "</body></html>"
         )
         tool = WebUseTool(headless=True)
         try:
-            tool.go_to_url(f"file://{html_file}")
-            button_ids = [
-                i + 1
-                for i, element in enumerate(tool._elements)
-                if element["role"] == "button" and element["name"] == "Submit"
-            ]
-            assert len(button_ids) == 2
-            assert not tool._resolve_locator(button_ids[0]).is_visible()
-            assert tool._resolve_locator(button_ids[1]).is_visible()
-
-            result = tool.click(button_ids[1])
-            assert "Error" not in result
-            assert "Page:" in result
+            tree = tool.go_to_url(f"file://{html_file}")
+            assert tree.endswith('\n\n- button "Submit"\n- [1] button "Submit"'), tree
+            assert tool._resolve_locator(1).is_visible()
+            assert tool.click(1).startswith("Page: visible twin\n")
+            assert "not found" in tool.click(2)
         finally:
             tool.close()

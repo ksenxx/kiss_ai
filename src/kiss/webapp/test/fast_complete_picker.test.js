@@ -12,7 +12,9 @@ const {
   stubRaf,
   recordTimers,
   fireTimers,
+  pickerSections,
 } = require('./simplify2_harness');
+const {setInput} = require('./attachment_helpers');
 
 const openWindows = [];
 
@@ -33,13 +35,6 @@ function openPage() {
   return {win: page.win, posted: page.posted, timers};
 }
 
-function setInput(win, text) {
-  const inp = win.document.getElementById('task-input');
-  inp.value = text;
-  inp.setSelectionRange(text.length, text.length);
-  return inp;
-}
-
 function typeChar(win, ch) {
   const inp = win.document.getElementById('task-input');
   inp.value += ch;
@@ -58,12 +53,6 @@ function visible(win) {
 
 function items(win) {
   return Array.from(picker(win).querySelectorAll('.ac-item'));
-}
-
-function sections(win) {
-  return Array.from(picker(win).querySelectorAll('.ac-section')).map(
-    e => e.textContent,
-  );
 }
 
 const COMPLETIONS = [
@@ -141,6 +130,68 @@ function testCompletionsSuppressedWhenCursorNotAtEnd() {
     false,
     'completions must not appear when the cursor is not at end',
   );
+}
+
+function testPickerFollowsTheCaret() {
+  // W3 audit 2026-11-12: the picker completes what the caret is in or
+  // after.  A caret the user moves away without typing (an arrow key,
+  // a click: the browser reports `selectionchange`, no `input`) closes it.
+  const openers = {
+    draft: win =>
+      send(win, {
+        type: 'completions',
+        completions: [{type: 'task', text: 'abcdefghi'}],
+        query: 'abcdef',
+      }),
+    mention: win =>
+      send(win, {
+        type: 'files',
+        files: [{type: 'file', text: 'util/a.ts'}],
+        prefix: 'util',
+      }),
+    command: (win, inp) => {
+      send(win, {type: 'seaCommands', commands: ['write']});
+      inp.dispatchEvent(new win.Event('input', {bubbles: true}));
+    },
+  };
+  const opened = (kind, draft, caret) => {
+    const {win} = openPage();
+    const inp = setInput(win, draft);
+    inp.setSelectionRange(caret, caret);
+    openers[kind](win, inp);
+    assert.strictEqual(visible(win), true, kind + ': the picker opens');
+    return {win, inp};
+  };
+  for (const [kind, draft, caret, movedTo, stays] of [
+    ['draft', 'abcdef', 6, 2, false],
+    ['draft', 'abcdef', 6, 6, true],
+    ['mention', 'open @util now', 10, 7, true],
+    ['mention', 'open @util now', 10, 14, false],
+    ['command', '/wri now', 4, 2, true],
+    ['command', '/wri now', 4, 0, false],
+    // Another mention or command word is not the one the picker completes.
+    ['mention', '@util and @util', 15, 5, false],
+    ['command', '/wri and /wri', 13, 4, false],
+  ]) {
+    const {win, inp} = opened(kind, draft, caret);
+    inp.setSelectionRange(movedTo, movedTo);
+    win.document.dispatchEvent(new win.Event('selectionchange'));
+    assert.strictEqual(visible(win), stays, kind + ' with the caret at ' + movedTo);
+  }
+  // A key pressed before that report does not act on the picker either:
+  // Tab leaves the draft and the caret as they are.
+  const {win, inp} = opened('draft', 'abcdef', 6);
+  inp.setSelectionRange(2, 2);
+  const tab = new win.KeyboardEvent('keydown', {
+    key: 'Tab',
+    bubbles: true,
+    cancelable: true,
+  });
+  inp.dispatchEvent(tab);
+  assert.strictEqual(inp.value, 'abcdef');
+  assert.strictEqual(inp.selectionStart, 2);
+  assert.strictEqual(visible(win), false);
+  assert.strictEqual(tab.defaultPrevented, false, 'Tab is no longer the picker\'s');
 }
 
 function testClickAcceptsCompletion() {
@@ -345,6 +396,47 @@ function testGhostStillWorks() {
   assert.strictEqual(inp.value, 'fix the bug ');
 }
 
+// Audit 2026-11-11 (W1): a ghost reply still on its way when the user
+// leaves the composer (blur) or dismisses with Escape stays away until
+// the next keystroke, as a completions reply does.  It used to paint
+// the suggestion anyway, and the next Tab inserted it into the draft.
+function testDismissedGhostReplyStaysAway() {
+  for (const dismiss of ['blur', 'Escape']) {
+    const {win, posted, timers} = openPage();
+    for (const ch of 'fix') typeChar(win, ch);
+    fireTimers(timers);
+    const asked = posted.filter(m => m.type === 'complete').pop();
+    assert.ok(asked && asked.query === 'fix', 'setup: the ghost was asked');
+    const inp = win.document.getElementById('task-input');
+    const overlay = win.document.getElementById('ghost-overlay');
+    const keydown = key =>
+      inp.dispatchEvent(
+        new win.KeyboardEvent('keydown', {
+          key,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    if (dismiss === 'blur') inp.dispatchEvent(new win.Event('blur'));
+    else keydown('Escape');
+    send(win, {type: 'ghost', suggestion: ' the bug', query: 'fix'});
+    assert.strictEqual(
+      overlay.textContent,
+      '',
+      'BUG: the late reply painted a suggestion dismissed by ' + dismiss,
+    );
+    keydown('Tab');
+    assert.strictEqual(inp.value, 'fix', 'Tab inserts nothing: ' + dismiss);
+    // The next keystroke makes suggestions live again.
+    typeChar(win, 'e');
+    send(win, {type: 'ghost', suggestion: 's it', query: 'fixe'});
+    assert.ok(
+      overlay.textContent.includes('s it'),
+      'typing brings suggestions back: ' + dismiss,
+    );
+  }
+}
+
 function testTypingRequestsCompletions() {
   const {win, posted, timers} = openPage();
   const inp = win.document.getElementById('task-input');
@@ -389,6 +481,9 @@ function testPickerSurvivesMouseDown() {
   const its = items(win);
   const md = new win.MouseEvent('mousedown', {bubbles: true, cancelable: true});
   its[0].dispatchEvent(md);
+  // A browser blurs the input on an uncancelled mousedown, which hides
+  // the picker; jsdom moves no focus, so the cancel is what is checked.
+  assert.strictEqual(md.defaultPrevented, true);
   assert.strictEqual(visible(win), true);
 }
 
@@ -439,7 +534,7 @@ function testCompletionsIconsPerType() {
     4,
     'each completion type has its own icon',
   );
-  const labels = sections(win);
+  const labels = pickerSections(win);
   assert.ok(labels.includes('History'));
   assert.ok(labels.includes('Frequent'));
   assert.ok(labels.includes('Suggestions'));
@@ -558,6 +653,7 @@ const tests = [
   testCompletionsStaleQueryDropped,
   testCompletionsSuppressedDuringAtMention,
   testCompletionsSuppressedWhenCursorNotAtEnd,
+  testPickerFollowsTheCaret,
   testClickAcceptsCompletion,
   testArrowDownMovesSelection,
   testTabAcceptsCompletion,
@@ -566,6 +662,7 @@ const tests = [
   testEscapeDismissesPicker,
   testEmptyCompletionsHidesPicker,
   testGhostStillWorks,
+  testDismissedGhostReplyStaysAway,
   testTypingRequestsCompletions,
   testCompletionsForEmptyInputDoesNotShow,
   testPickerSurvivesMouseDown,

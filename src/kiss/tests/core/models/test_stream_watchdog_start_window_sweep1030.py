@@ -16,6 +16,10 @@ now started inside the ``try``.
 The interrupt is raised by a line tracer, the same delivery model as
 ``PyThreadState_SetAsyncExc``, at every line ``stop_aware_events`` runs
 before it yields its first event, one run per line.
+
+The tear-down has two steps, the watchdog's disarm and the stream's
+close, and a Stop ending the first used to skip the second: the
+generator was finished, so nothing closed the HTTP response any more.
 """
 
 from __future__ import annotations
@@ -26,7 +30,9 @@ import time
 from types import FrameType
 from typing import Any
 
-from kiss.core.models.stream_abort import stop_aware_events
+import pytest
+
+from kiss.core.models.stream_abort import StreamAbortWatchdog, stop_aware_events
 
 _NAME = "sweep1030-start-window-watchdog"
 # Far beyond the test: an orphaned watchdog would still be polling.
@@ -117,3 +123,25 @@ def test_a_stop_at_any_line_before_the_first_event_leaves_no_watchdog() -> None:
             return
         assert first is None
     raise AssertionError("stop_aware_events never yielded its first event")
+
+
+def _stop_as_the_disarm_returns(frame: FrameType, event: str, arg: Any) -> None:
+    """Profile hook: a Stop lands as ``StreamAbortWatchdog.stop`` returns, its thread gone."""
+    if event == "return" and frame.f_code is StreamAbortWatchdog.stop.__code__:
+        sys.setprofile(None)
+        raise KeyboardInterrupt("injected stop")
+
+
+def test_a_stop_as_the_watchdog_is_disarmed_still_closes_the_stream() -> None:
+    """A Stop that ends the disarm of a stream being closed does not skip the stream's close."""
+    stream = _Stream()
+    events = stop_aware_events(stream, stall_timeout=_STALL, name=_NAME)
+    assert next(events) == "first"
+    sys.setprofile(_stop_as_the_disarm_returns)
+    try:
+        with pytest.raises(KeyboardInterrupt, match="injected stop"):
+            events.close()
+    finally:
+        sys.setprofile(None)
+    assert stream.closed, "the Stop in the disarm skipped the stream's close"
+    assert _no_watchdog_within(5.0)

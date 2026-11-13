@@ -57,10 +57,14 @@ from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.server.web_server import (
     RemoteAccessServer,
-    _generate_self_signed_cert,
     _snapshot_active_tabs,
 )
-from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.tests.local_ws import (
+    LocalReader,
+    LocalWriter,
+    _generate_self_signed_cert,
+    open_local_connection,
+)
 from kiss.tests.server.conftest import (
     find_free_port,
     no_verify_ssl,
@@ -116,8 +120,7 @@ class _ServerHarness(IsolatedAsyncioTestCase):
             await self.server.stop_async()
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

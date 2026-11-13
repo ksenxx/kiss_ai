@@ -10,6 +10,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
+const {toastButton: actionByLabel} = require('./ui_antipattern_harness');
 
 const TOAST_SELECTOR = '[data-notification-id="kiss-update-available"]';
 
@@ -24,12 +25,6 @@ const AVAILABLE = {
 function actionLabels(toast) {
   return Array.from(toast.querySelectorAll('.kiss-notification-action')).map(
     btn => btn.textContent.trim(),
-  );
-}
-
-function actionByLabel(toast, label) {
-  return Array.from(toast.querySelectorAll('.kiss-notification-action')).find(
-    btn => btn.textContent.trim() === label,
   );
 }
 

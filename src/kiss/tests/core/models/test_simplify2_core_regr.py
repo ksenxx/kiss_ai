@@ -29,7 +29,6 @@ from typing import Any
 
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.codex_model import CodexModel
-from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
     calculate_cost,
@@ -176,25 +175,3 @@ def test_codex_prompt_never_carries_the_system_instruction() -> None:
     m = make_cli(CodexModel, model_config={"system_instruction": "be terse"})
     m.initialize("do it")
     assert m._build_prompt() == "do it"
-
-
-def test_cli_attachment_warning_preserves_logger_and_record(caplog: Any) -> None:
-    attachment = Attachment(data=b"x", mime_type="image/png")
-    for cls, logger_name, expected in (
-        (
-            ClaudeCodeModel,
-            "kiss.core.models.claude_code_model",
-            "ClaudeCodeModel does not support attachments; they will be ignored.",
-        ),
-        (
-            CodexModel,
-            "kiss.core.models.codex_model",
-            "CodexModel does not support attachments; they will be ignored.",
-        ),
-    ):
-        caplog.clear()
-        make_cli(cls).initialize("hello", [attachment])
-        record = caplog.records[-1]
-        assert record.name == logger_name
-        assert record.msg == expected
-        assert record.args == ()

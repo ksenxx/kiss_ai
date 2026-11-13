@@ -31,15 +31,27 @@ B2  ``stash_pop`` fell back to a blind plain ``git stash pop`` even
     corruption could be reproduced on current git — git's own refusal
     checks stop the second apply — so the B2 tests lock down both the
     fallback-success path and the partial-application path.)
+
+C10-F6  ``stash_pop`` popped the top of the stash, which is the user's
+    entry once their own ``git stash`` (it takes none of the merge's
+    locks) pushed one during the merge.  It now restores the entry its
+    ``stash_if_dirty`` pushed, found by that push's unique message, so
+    the B2 tests create their stash through ``stash_if_dirty`` too.
 """
 
 from __future__ import annotations
 
 import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
+import pytest
+
+from kiss.agents.sorcar import git_worktree
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+from kiss.tests.server.pause import Pause
 
 _GIT_ID = (
     "-c",
@@ -265,7 +277,7 @@ class TestB2StashPopFallback:
         repo = _init_repo(tmp_path)
         (repo / "f.txt").write_text("v1\n")
         _git(repo, "add", "f.txt")
-        _git(repo, "stash", "push", "-m", "kiss-stash")
+        assert GitWorktreeOps.stash_if_dirty(repo) is True
         (repo / "f.txt").write_text("v1\n")
         _git(repo, "add", "f.txt")
 
@@ -287,7 +299,7 @@ class TestB2StashPopFallback:
         repo = _init_repo(tmp_path)
         (repo / "u.txt").write_text("stashed-untracked\n")
         (repo / "f.txt").write_text("mod\n")
-        _git(repo, "stash", "push", "--include-untracked", "-m", "kiss-stash")
+        assert GitWorktreeOps.stash_if_dirty(repo) is True
         (repo / "u.txt").write_text("in-the-way\n")
 
         assert GitWorktreeOps.stash_pop(repo) is False
@@ -321,7 +333,7 @@ class TestB2StashPopFallback:
         lines[0] = "ONE\n"
         (repo / "f.txt").write_text("".join(lines))
         _git(repo, "add", "f.txt")
-        _git(repo, "stash", "push", "-m", "kiss-stash")
+        assert GitWorktreeOps.stash_if_dirty(repo) is True
         lines[0] = "1\n"
         lines[3] = "FOUR\n"
         (repo / "f.txt").write_text("".join(lines))
@@ -337,13 +349,124 @@ class TestB2StashPopFallback:
         assert _stash_count(repo) == 1, "the plain pop ran without proof the tree was untouched"
         assert (repo / "f.txt").read_text() == "".join(lines)
 
+        # With a status that works, the two snapshots are the proof and the plain pop runs.
+        _git(repo, "config", "--unset", "status.showUntrackedFiles")
+        assert GitWorktreeOps.stash_pop(repo) is True
+        assert _stash_count(repo) == 0
+        lines[0] = "ONE\n"
+        assert (repo / "f.txt").read_text() == "".join(lines)
+
     def test_pop_preserves_index_on_clean_pop(self, tmp_path: Path) -> None:
         """Regression: the happy path still restores staged state."""
         repo = _init_repo(tmp_path)
         (repo / "f.txt").write_text("staged\n")
         _git(repo, "add", "f.txt")
-        _git(repo, "stash", "push", "-m", "kiss-stash")
+        assert GitWorktreeOps.stash_if_dirty(repo) is True
 
         assert GitWorktreeOps.stash_pop(repo) is True
         staged = _git(repo, "diff", "--cached", "--name-only").stdout
         assert "f.txt" in staged
+
+
+def _user_pushes(repo: Path, nth: int) -> None:
+    """The user stashes a new file of theirs: every entry moves one position down."""
+    (repo / "user.txt").write_text(f"the user's draft {nth}\n")
+    _git(repo, "stash", "push", "--include-untracked", "-m", "user", "--", "user.txt")
+
+
+def _user_drops_the_top(repo: Path, nth: int) -> None:
+    """The user drops the top entry, here the merge's own."""
+    _git(repo, "stash", "drop")
+
+
+def _repository_breaks(repo: Path, nth: int) -> None:
+    """Every git command in *repo* fails from now on."""
+    with (repo / ".git" / "config").open("a") as config:
+        config.write("[core]\n\trepositoryformatversion = 99\n")
+
+
+class _AsTheEntryGoes:
+    """``Pause`` matcher: run *action* as the product's ``git stash pop`` or ``drop`` starts.
+
+    That is the instant between the product's look at the stash and the
+    command that removes its entry; *action* runs at the first *times*
+    of them, on whichever thread runs the command (the drop runs on a
+    thread of its own), and never holds it.
+    """
+
+    def __init__(self, action: Callable[[Path, int], None], repo: Path, times: int) -> None:
+        self.action = action
+        self.repo = repo
+        self.left = times
+
+    def __call__(self, local_vars: dict[str, Any]) -> bool:
+        if local_vars["args"][:2] in (("stash", "pop"), ("stash", "drop")) and self.left:
+            self.left -= 1
+            self.action(self.repo, self.left)
+        return False
+
+
+class TestStashPopIdentity:
+    """C10-F6: ``stash_pop`` restores and removes the merge's own entry, no other."""
+
+    @pytest.mark.parametrize(
+        ("action", "times", "left"),
+        [
+            (_user_pushes, 1, ["user"]),
+            (_user_pushes, 3, ["merge", "user", "user", "user"]),
+            (_user_drops_the_top, 1, []),
+            (_repository_breaks, 1, ["merge"]),
+        ],
+        ids=["shifted-once", "shifted-every-time", "taken-by-the-user", "unlistable"],
+    )
+    def test_the_stash_changing_under_the_drop_loses_no_entry(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        action: Callable[[Path, int], None],
+        times: int,
+        left: list[str],
+    ) -> None:
+        """``git stash drop`` takes a position, and the user's stash commands move positions.
+
+        A drop that hit the user's entry is undone (the entry is stored
+        back) and tried again; a drop that found nothing is tried again.
+        The draft is restored either way, and an entry of the merge that
+        could not be dropped stays listed and is named in a warning.
+        """
+        repo = _init_repo(tmp_path)
+        (repo / "notes.txt").write_text("draft A\n")
+        assert GitWorktreeOps.stash_if_dirty(repo) is True
+        config = (repo / ".git" / "config").read_text()
+        hook = _AsTheEntryGoes(action, repo, times)
+        try:
+            with Pause(git_worktree._git.__code__, hook):
+                assert GitWorktreeOps.stash_pop(repo) is True
+        finally:
+            (repo / ".git" / "config").write_text(config)
+
+        assert hook.left == 0
+        assert (repo / "notes.txt").read_text() == "draft A\n"
+        subjects = _git(repo, "stash", "list", "--format=%gs").stdout.splitlines()
+        assert sorted("user" if s.endswith("user") else "merge" for s in subjects) == left
+        assert ("is still in the stash" in caplog.text) == ("merge" in left)
+
+    def test_a_stash_that_cannot_be_listed_is_not_reported_as_restored(
+        self, tmp_path: Path,
+    ) -> None:
+        """Fails closed while git cannot say where the entry is; a second pop finds nothing."""
+        repo = _init_repo(tmp_path)
+        (repo / "notes.txt").write_text("draft A\n")
+        assert GitWorktreeOps.stash_if_dirty(repo) is True
+        config = (repo / ".git" / "config").read_text()
+        _repository_breaks(repo, 0)
+        try:
+            assert GitWorktreeOps.stash_pop(repo) is False
+        finally:
+            (repo / ".git" / "config").write_text(config)
+        assert _stash_count(repo) == 1
+
+        assert GitWorktreeOps.stash_pop(repo) is True
+        assert (repo / "notes.txt").read_text() == "draft A\n"
+        assert _stash_count(repo) == 0
+        assert GitWorktreeOps.stash_pop(repo) is True, "nothing of the merge's is left to restore"

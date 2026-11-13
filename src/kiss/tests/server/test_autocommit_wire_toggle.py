@@ -49,6 +49,7 @@ from kiss.tests.server.parallel_agent_harness import (
     request_text,
     tool_call_response,
 )
+from kiss.tests.server.worktree_helpers import worktree_changed_files
 
 #: Marker put in a run's prompt so the stand-in scripts a worktree run:
 #: ``create_worktree`` → write a file → ``finish`` (never merged).
@@ -271,7 +272,7 @@ class TestPendingWorktreeIsOfferedNotMerged(_WorktreeRunnerHarness):
             len(done), 1, f"expected one worktree_done bar for the tab, got {done}",
         )
         self.assertEqual(done[0].get("branch"), branch)
-        self.assertIn(_PUBLISHED_FILE, done[0].get("changedFiles", []))
+        self.assertIn(_PUBLISHED_FILE, worktree_changed_files(self.server, "k2-tab"))
 
     def test_failed_run_leaves_worktree_pending(self) -> None:
         """A task that reports failure keeps its half-done work pending."""

@@ -130,8 +130,10 @@ _PLACEHOLDER = re.compile(
 #: carry other symbols; a short letters-digits segment (``r1``, ``qwen3``,
 #: ``gpt5``, ``480b``, ``fp8``) is a version mark, not a mix.  (A pass-phrase of
 #: plain words is missed on purpose: prose after ``token:`` is far more
-#: common in a transcript.)
-_SLUG_SEGMENT = rb"(?:[a-z]+|\d+|[a-z]{0,5}\d{1,4}[a-z]{0,2})"
+#: common in a transcript.)  No segment may match two alternatives (a
+#: number of up to four digits is the version mark's alone): a value that
+#: fails after n such segments would be retried in 2**n combinations.
+_SLUG_SEGMENT = rb"(?:[a-z]+|\d{5,}|[a-z]{0,5}\d{1,4}[a-z]{0,2})"
 _SLUG = re.compile(
     rb"[-_. /=]*" + _SLUG_SEGMENT + rb"(?:[-_. /=]+" + _SLUG_SEGMENT + rb")*[-_. /=]*"
 )
@@ -382,18 +384,19 @@ def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str
 
     Every ``tool_call`` event named ``run_agent`` in the parent's events
     carries the dispatched ``agent`` and ``task``; the child row is the
-    parent's earliest not-yet-matched sub-agent whose task text contains
-    that task (channel and cron dispatches prepend a preamble).  Paths
+    parent's earliest not-yet-matched sub-agent, launched no earlier than
+    the call, whose task text contains that task (channel and cron
+    dispatches prepend a preamble).  Paths
     are ignored in the comparison: ``agent_dispatch`` rewrites the
     parent repository's absolute paths to the worktree's before
     dispatch.  Every child takes part in the matching, so a prompt
     dispatched twice to different SEAs pairs up in order, but only
     children whose ``sea`` is still empty are returned.  A call answered
-    by an error created a child only if one was launched between the
-    call and its result (:func:`_failed_dispatch_end`): a dispatch
-    refused before launching (a missing SEA file) must not claim the
-    child of its retry.  Children reached by ``run_parallel`` have no
-    such call and are not returned.
+    by an error created a child only if one was launched before its
+    result (:func:`_failed_dispatch_end`): a dispatch refused before
+    launching (a missing SEA file) must not claim the child of its
+    retry.  Children reached by ``run_parallel`` have no such call and
+    are not returned, an earlier one with the same task text included.
 
     Args:
         db: Open connection to ``history.db``.
@@ -446,7 +449,7 @@ def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str
         for child_id, child_key, child_sea, launched in child_keys:
             if child_id in matched or key not in child_key:
                 continue
-            if answered is not None and not called <= launched <= answered:
+            if launched < called or (answered is not None and launched > answered):
                 continue
             matched.add(child_id)
             if not child_sea:

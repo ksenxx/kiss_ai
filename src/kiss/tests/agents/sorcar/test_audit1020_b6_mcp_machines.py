@@ -230,7 +230,7 @@ def test_superseded_tunnel_is_closed_outside_the_tunnels_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F4: replacing a tunnel mid-login must not hold ``_tunnels_lock`` for the login."""
+    """F4: closing a superseded tunnel mid-login must not hold ``_tunnels_lock`` for the login."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     script = bin_dir / "ssh"
@@ -252,31 +252,40 @@ def test_superseded_tunnel_is_closed_outside_the_tunnels_lock(
             outcomes[remote_port] = exc
 
     def first_ssh_started() -> bool:
-        return login in mach._tunnels and mach._tunnels[login].process is not None
+        tunnel = mach._tunnels.get((login, 8787))
+        return tunnel is not None and tunnel.process is not None
 
-    def tunnel_replaced() -> bool:
-        return mach._tunnels.get(login) is not stale
+    def old_forward_retired() -> bool:
+        return (login, 8787) not in mach._tunnels
+
+    def new_forward_cached() -> bool:
+        return (login, 9797) in mach._tunnels
 
     mach.close_tunnels()
     # tunnel_port opens forwards for registered logins only.
     mach.save_machines([mach.Machine("far", "https://far.example.org:8787", ssh=login)])
     first = threading.Thread(target=opener, args=(8787,), name="opener-8787")
     second = threading.Thread(target=opener, args=(9797,), name="opener-9797")
-    closer = threading.Thread(
-        target=mach.close_tunnels, kwargs={"keep": {login}}, name="close-tunnels",
+    moving = threading.Thread(
+        target=mach.save_machines, name="re-register",
+        args=([mach.Machine("far", "https://far.example.org:9797", ssh=login)],),
     )
+    closer = threading.Thread(
+        target=mach.close_tunnels, kwargs={"keep": {(login, 9797)}}, name="close-tunnels",
+    )
+    threads = (first, second, moving, closer)
     first.start()
     try:
         _wait_for(first_ssh_started, "the first forward never started its ssh")
-        stale = mach._tunnels[login]
-        # The daemon moved (the machine is registered again at its new
-        # port: a forward the registry does not hold is refused, audit
-        # A09): the second opener replaces the tunnel while the first is
-        # still inside its login (which holds the stale tunnel's own
-        # lock, so the replaced tunnel's close must wait).
-        mach.save_machines([mach.Machine("far", "https://far.example.org:9797", ssh=login)])
+        stale = mach._tunnels[login, 8787]
+        # The daemon moved: the machine is registered again at its new
+        # port, which retires the forward to the old one while the first
+        # opener is still inside its login (which holds the stale
+        # tunnel's own lock, so that close must wait).
+        moving.start()
+        _wait_for(old_forward_retired, "the forward to the old port was not retired")
         second.start()
-        _wait_for(tunnel_replaced, "the tunnel was not replaced")
+        _wait_for(new_forward_cached, "the forward to the new port was not cached")
         # Another registry write: it must not queue behind that close.
         # With the close under ``_tunnels_lock`` this returns only once
         # the login ends, which it never does before the release below.
@@ -284,20 +293,18 @@ def test_superseded_tunnel_is_closed_outside_the_tunnels_lock(
         closer.join(10.0)
         assert not closer.is_alive(), "the tunnel cache was held for the old login"
         release.touch()
-        first.join(30.0)
-        second.join(30.0)
-        assert not first.is_alive() and not second.is_alive()
+        for thread in threads:
+            thread.join(30.0)
+        assert not any(thread.is_alive() for thread in threads)
         assert isinstance(outcomes[8787], mach.MachineError)
         assert "the machine registry changed, try again" in str(outcomes[8787])
         assert isinstance(outcomes[9797], int)
         assert stale.process is None and not stale.alive()
-        assert mach._tunnels[login].remote_port == 9797 and mach._tunnels[login].alive()
+        current = mach._tunnels[login, 9797]
+        assert mach._tunnels == {(login, 9797): current} and current.alive()
     finally:
         release.touch()
-        first.join(30.0)
-        second.join(30.0)
-        closer.join(30.0)
+        for thread in threads:
+            if thread.ident is not None:  # started
+                thread.join(30.0)
         mach.save_machines([])
-        stale_left = mach._tunnels.get(login)
-        if stale_left is not None:
-            stale_left.close()

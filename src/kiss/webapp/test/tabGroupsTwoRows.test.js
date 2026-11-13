@@ -7,12 +7,15 @@
 // The file name predates the Chats panel: chats are picked there rather
 // than from a two-row strip, and the strip only groups what is on screen:
 //
-//   * the strip (#tab-list) lists the chat on screen with its sub-agents;
-//   * content tabs share that strip on the mobile file screen, but stay
-//     off the mobile chat screen;
-//   * it appears only when it has more than one entry;
+//   * on the chat screen the strip (#tab-list) lists the chat with its
+//     sub-agents, and appears only when it has more than one entry;
+//   * on the mobile file screen it lists the content tabs and nothing
+//     else, and is on view even for a single one;
 //   * a chat that is not on screen has no entry: it is brought back the
-//     way the Chats panel's pick does it (win._testApi.switchToTab).
+//     way the Chats panel's pick does it (win._testApi.switchToTab);
+//   * a swipe to the right on the streamed browser page turns back to
+//     the chat only once the daemon says that the page had nothing to
+//     scroll that way under the finger.
 //
 // Covered for the remote webapp (phone layout: no matchMedia, so no
 // desktop split).
@@ -25,15 +28,17 @@ const {
   send,
   click,
   clickTab,
+  snapshotEntry,
   tabIds: openIds,
 } = require('./simplify2_harness');
+const {tabEl: stripEl} = require('./subagent_tab_helpers');
 
 function makePage(extraScripts) {
   return makeChatPage({bodyClass: 'remote-chat', extraScripts});
 }
 
-function entry(tabId, title) {
-  return {tabId, chatId: 'chat-' + tabId, title: title || tabId, workDir: ''};
+function entry(tabId) {
+  return snapshotEntry(tabId, tabId, 'chat-' + tabId);
 }
 
 function stripIds(win) {
@@ -49,12 +54,6 @@ function stripActive(win) {
 
 function stripShown(win) {
   return win.document.getElementById('tab-bar').style.display !== 'none';
-}
-
-function stripEl(win, tabId) {
-  return win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id="${tabId}"]`,
-  );
 }
 
 function spawnSubagent(win, parentId, subId, title) {
@@ -132,17 +131,25 @@ function testSubagentsAndFilesFormTheGroupStrip() {
   const fileId = openFile(win, 'a', 'notes.md');
   assert.ok(fileId, 'the file opened as a content tab');
 
-  assert.ok(stripShown(win), 'the strip appears once the group grows');
+  assert.ok(stripShown(win), 'the file screen has its strip');
   assert.deepStrictEqual(
     stripIds(win),
-    ['a', 'a-sub-1', fileId],
-    'the file screen lists the chat, its sub-agent and its file',
+    [fileId],
+    'the file screen lists the file alone: no chat, no sub-agent',
+  );
+  assert.strictEqual(
+    win.document.getElementById('tab-list').getAttribute('aria-label'),
+    'Open files',
   );
   // A file opened for the chat on screen comes forward.
   assert.strictEqual(stripActive(win), fileId, 'the file is on screen');
   assert.ok(stripEl(win, fileId).classList.contains('content-tab'));
-  click(win, stripEl(win, 'a'));
+  clickTab(win, 'a');
   assert.strictEqual(stripActive(win), 'a');
+  assert.strictEqual(
+    win.document.getElementById('tab-list').getAttribute('aria-label'),
+    'Chat tabs',
+  );
   assert.ok(stripEl(win, 'a-sub-1').classList.contains('subagent-tab'));
   assert.deepStrictEqual(
     stripIds(win),
@@ -293,8 +300,13 @@ function testFinishedSubagentsFileMovesUpToTheChat() {
     ['a'],
     "the finished sub-agent's file stays off the mobile chat",
   );
+  assert.strictEqual(
+    win._testApi.openTabs().find(t => t.id === fileId).rootId,
+    'a',
+    'the file now belongs to the chat',
+  );
   clickTab(win, fileId);
-  assert.deepStrictEqual(stripIds(win), ['a', fileId]);
+  assert.deepStrictEqual(stripIds(win), [fileId]);
   // Let queued DOM observers finish before destroying their document.
   queueMicrotask(win.close.bind(win));
   console.log("  ok - a finished sub-agent's file moves up to its chat");
@@ -305,24 +317,14 @@ function testClosingAChatClosesItsSubagentsAndKeepsItsFiles() {
   send(win, {type: 'tabs_state', tabs: [entry('a'), entry('b')]});
   spawnSubagent(win, 'a', 'a-sub-1');
   const fileId = openFile(win, 'a', 'kept.md');
+  // The chat's own entry is on the chat screen.
+  clickTab(win, 'a');
   click(win, stripEl(win, 'a').querySelector('.chat-tab-close'));
   assert.deepStrictEqual(
     openIds(win),
     ['b', fileId],
     "the closed chat's sub-agent went with it; its file stays open",
   );
-  assert.strictEqual(
-    stripActive(win),
-    fileId,
-    'the file the user was reading stays on screen',
-  );
-  assert.deepStrictEqual(
-    stripIds(win),
-    [fileId],
-    'a top-level file is its own group',
-  );
-  assert.ok(!stripShown(win));
-  clickTab(win, 'b');
   assert.strictEqual(stripActive(win), 'b');
   assert.deepStrictEqual(
     stripIds(win),
@@ -332,6 +334,8 @@ function testClosingAChatClosesItsSubagentsAndKeepsItsFiles() {
   assert.ok(!stripShown(win));
   clickTab(win, fileId);
   assert.strictEqual(stripActive(win), fileId);
+  assert.deepStrictEqual(stripIds(win), [fileId]);
+  assert.ok(stripShown(win), 'a lone file shows its strip');
   // Let queued DOM observers finish before destroying their document.
   queueMicrotask(win.close.bind(win));
   console.log(
@@ -342,8 +346,24 @@ function testClosingAChatClosesItsSubagentsAndKeepsItsFiles() {
 // Keyboard navigation along the strip (arrows, Home/End, the roving
 // tabindex, Enter) is pinned by tabBarAccessibility.test.js.
 
+/** One finger dragged across *target* from x = *from* to x = *to*;
+ *  *during* runs before the finger lifts. */
+function drag(win, target, from, to, during) {
+  const at = x => [{clientX: x, clientY: 100}];
+  const fire = (type, touches, changed) => {
+    const e = new win.Event(type, {bubbles: true, cancelable: true});
+    Object.defineProperty(e, 'touches', {value: touches});
+    Object.defineProperty(e, 'changedTouches', {value: changed});
+    target.dispatchEvent(e);
+  };
+  fire('touchstart', at(from), at(from));
+  fire('touchmove', at(to), at(to));
+  if (during) during();
+  fire('touchend', [], at(to));
+}
+
 function testBrowserTabIsListedButOpensInTheBackground() {
-  const {win} = makePage(['browserTab.js']);
+  const {win, posted} = makePage(['browserTab.js', 'mobileSwipe.js']);
   send(win, {type: 'tabs_state', tabs: [entry('a')]});
   spawnSubagent(win, 'a', 'a-sub-1');
   send(win, {
@@ -360,12 +380,54 @@ function testBrowserTabIsListedButOpensInTheBackground() {
   assert.strictEqual(stripActive(win), 'a', 'it opens in the background');
   clickTab(win, 'browser__1');
   assert.strictEqual(stripActive(win), 'browser__1');
-  assert.deepStrictEqual(
-    stripIds(win),
-    ['browser__1'],
-    'owned by no chat, it is its own group',
+  assert.deepStrictEqual(stripIds(win), ['browser__1']);
+  assert.ok(stripShown(win), 'a lone browser tab shows its strip');
+
+  // A drag on the streamed page scrolls the remote page.  A swipe to
+  // the right also turns back to the chat once the daemon says that
+  // nothing under the finger had anything to scroll that way.
+  const page = win.document.querySelector('.browser-screen');
+  /** The daemon's word on the finger last put down on *tabId*'s page. */
+  const answer = (scrollsLeft, tabId) => {
+    const asked = posted
+      .filter(m => m.type === 'browserInput' && m.event.kind === 'touch')
+      .pop();
+    send(win, {
+      type: 'browserTouch',
+      tab_id: tabId || asked.tab_id,
+      id: asked.event.id,
+      scrollsLeft,
+    });
+  };
+  drag(win, page, 100, 300);
+  assert.strictEqual(stripActive(win), 'browser__1', 'no word yet');
+  answer(false, 'browser__404');
+  assert.strictEqual(stripActive(win), 'browser__1', 'word on a closed tab');
+  answer(true);
+  assert.strictEqual(stripActive(win), 'browser__1', 'the page scrolls');
+  drag(win, page, 100, 300);
+  answer(false);
+  assert.strictEqual(stripActive(win), 'a', 'nothing to scroll: the chat');
+  clickTab(win, 'browser__1');
+  drag(win, page, 100, 300, () => answer(false));
+  assert.strictEqual(stripActive(win), 'a', 'said before the finger lifted');
+  clickTab(win, 'browser__1');
+  // The user moved on to the task info before the daemon answered.
+  drag(win, page, 100, 300);
+  click(win, win.document.getElementById('meta-drawer-btn'));
+  answer(false);
+  assert.ok(
+    win.document.getElementById('meta-panel').classList.contains('open'),
+    'a late word leaves the screen the user went to',
   );
-  assert.ok(!stripShown(win));
+  click(win, win.document.getElementById('meta-drawer-btn'));
+  assert.strictEqual(stripActive(win), 'browser__1');
+  drag(win, page, 300, 100, () => answer(false));
+  assert.strictEqual(stripActive(win), 'browser__1', 'leftwards: the page');
+  drag(win, win.document.querySelector('.browser-url'), 100, 300);
+  assert.strictEqual(stripActive(win), 'browser__1', 'the address field');
+  drag(win, win.document.querySelector('.browser-toolbar'), 100, 300);
+  assert.strictEqual(stripActive(win), 'a', 'the toolbar swipes too');
   // Let queued DOM observers finish before destroying their document.
   queueMicrotask(win.close.bind(win));
   console.log("  ok - the daemon's browser tab opens in the background");

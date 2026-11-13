@@ -160,6 +160,8 @@ class TestDeferReplayStaleRunning(TestCase):
     def test_task_ending_inside_deferred_attach_window(self) -> None:
         launcher, viewer, chat_id = "defer-launcher", "defer-viewer", "chat-defer"
         self._start_parked_run(launcher, chat_id)
+        # The viewer is the chat's registry tab: a ``ready`` defers no other.
+        self.server._registry_update_tab(viewer, chat_id=chat_id, create=True)
 
         deferrer = threading.Thread(
             target=self._defer_parked_before_running_broadcast,
@@ -211,6 +213,7 @@ class TestDeferReplayStaleRunning(TestCase):
         already know the tab is idle) must not be re-told.
         """
         viewer, chat_id = "idle-viewer", "chat-idle"
+        self.server._registry_update_tab(viewer, chat_id=chat_id, create=True)
         self.server._defer_replay(chat_id, viewer, None, _RECONNECTING_CONN)
         self.assertEqual(self._statuses_seen_by(viewer, _RECONNECTING_CONN), [False])
         self.assertEqual(self._statuses_seen_by(viewer, _OTHER_CONN), [])

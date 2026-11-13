@@ -85,6 +85,8 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
         # the container is gone: the next model call ends the trial
         with pytest.raises(BudgetExceededError):
             harness.on_llm_call([])
+        # a run killed before that ``finally`` leaves it to end by itself; Docker then removes it
+        assert live.attrs["Args"] == ["3600"] and live.attrs["HostConfig"]["AutoRemove"]
     assert harness.on_tool_call("Bash", {"command": "ls"}) == ALLOW
     assert harness.on_tool_call("ask_user_question", {"question": "?"}) != ALLOW
     assert harness.on_tool_call("talk", {"text": "hi", "language": "en"}) != ALLOW
@@ -94,7 +96,6 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
     # The trial's toolset is the built-ins without ``decide`` (a text
     # classifier, not an oracle for the task's domain) plus the checkpoint
     # tools; neither the module nor the harness carries a removed name.
-    assert not hasattr(coding_sea, "add_to_tools")
     assert_no_removed_getters(coding_sea)
     assert not hasattr(harness, "if_append_basic_tools")
 
@@ -337,6 +338,10 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     assert plain.on_tool_call("run_commands_parallel", {"commands": "kill -9 -1"}) == refuse(
         blocked
     )
+    # the array is read as the tool decodes it (leniently: a lone backslash is
+    # repaired, a raw newline accepted), not as one raw command when strict JSON fails
+    lenient = {"commands": r"""["grep 'a\|b' x.py", "rm -rf /app"]"""}
+    assert plain.on_tool_call("run_commands_parallel", lenient) == refuse(blocked)
     for command in ("kill -9 1234", "rm -rf /app/build", "rm -rf /apps", "rm -rf /tmp/x"):
         assert plain.on_tool_call("Bash", {"command": command}) == ALLOW, command
     # a foreground sleep, long or short, is the Bash tool's business (it waits on
@@ -375,6 +380,9 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     assert plain.on_tool_call("run_commands_parallel",
                               {"commands": '["ls", "cat > /app/x <<EOF\\nx\\nEOF"]'}) == ALLOW
     args = {"commands": '["npm install", "cargo build"]', "timeout_seconds": 120}
+    assert plain.on_tool_call("run_commands_parallel", args) == ALLOW
+    assert args["timeout_seconds"] == 900
+    args = {"commands": r"""["grep 'a\|b' x.py", "pip install numpy"]""", "timeout_seconds": 120}
     assert plain.on_tool_call("run_commands_parallel", args) == ALLOW
     assert args["timeout_seconds"] == 900
     # The tool's own default (1800 s) is already long enough.
@@ -439,6 +447,12 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     assert gated2.on_tool_call("Write", {"file_path": "b.py", "content": ""}) == ledger
     assert gated2.on_tool_call("Write", {"file_path": "/testbed/c.py", "content": ""}) == ALLOW
     assert gated2.on_tool_call("Write", {"file_path": 7, "content": ""}) == ALLOW
+    # a heredoc among run_commands_parallel's commands is an edit too, in an array
+    # only the tool's lenient decoder reads (a lone backslash, raw newlines)
+    gated3 = harness(finish_gate=True, workdir="/testbed")
+    for commands in (r"""["grep 'a\|b' x.py", "cat > app.py <<EOF\nx\nEOF"]""",
+                     '["cat > /testbed/app.py <<EOF\nx\nEOF"]'):
+        assert gated3.on_tool_call("run_commands_parallel", {"commands": commands}) == ledger
     assert plain.on_tool_call("Write", {"file_path": "/app/x", "content": ""}) == ALLOW  # no gate
     events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
     gate_events = [e for e in events
@@ -577,7 +591,9 @@ def _live_container(image: str, setup: str) -> Any:
 
     ``None`` also when *image* is not pulled yet: ``containers.run`` would
     pull it with no deadline, and these tests skip rather than wait on
-    the network.
+    the network.  The caller removes the container in a ``finally``; one
+    whose run was killed before that ends by itself after an hour, and
+    the Docker daemon then removes it.
     """
     client = _docker_client()
     if client is None:
@@ -586,7 +602,9 @@ def _live_container(image: str, setup: str) -> Any:
         client.images.get(image)
     except docker.errors.ImageNotFound:  # type: ignore[attr-defined]
         return None
-    live = client.containers.run(image, "sleep infinity", detach=True)
+    # For each forced removal by a caller dockerd logs "error removing container ... already in
+    # progress": its own auto-removal met the caller's, which goes through.
+    live = client.containers.run(image, "sleep 3600", detach=True, auto_remove=True)
     try:
         exit_code, out = live.exec_run(["sh", "-c", setup])
         assert exit_code == 0, out
@@ -596,9 +614,9 @@ def _live_container(image: str, setup: str) -> Any:
     return live
 
 
-def _wait_until(harness: Any, wanted: str, present: bool, deadline: float = 30.0) -> None:
+def _wait_until(harness: Any, wanted: str, present: bool) -> None:
     """Poll the container's process table until a command starting with *wanted* is (not) there."""
-    end = time.monotonic() + deadline
+    end = time.monotonic() + 30.0
     while True:
         cmds = [cmd for _pid, cmd in harness.process_snapshot().values()]
         if any(cmd.startswith(wanted) for cmd in cmds) == present:
@@ -664,6 +682,13 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         result = shell("kill 999999 2>/dev/null; true")
         assert "still running after your last shell" in result["content"]
         assert "sleep 300" in result["content"]
+        # ... a kill on a later line of the command, or of a parallel command, included
+        assert "sleep 300" in shell("true\nkill 999999 2>/dev/null; true")["content"]
+        parallel = {"commands": '["true\\nkill 999999 2>/dev/null; true"]'}
+        assert harness.on_tool_call("run_commands_parallel", parallel) == ALLOW
+        result = {"role": "tool", "content": "ran"}
+        harness.on_llm_call([result])
+        assert "still running after your last shell" in result["content"]
         # A kill that lands: nothing left to report.
         result = shell("kill $(for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null "
                        "| grep -q '^sleep 300' && echo ${d#/proc/}; done)", "sleep 300")
@@ -746,7 +771,7 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         assert "/app/last.txt (deleted)" in result["content"] and harness.file_snapshot() == {}
         lines = (tmp_path / "trajectory.jsonl").read_text().splitlines()
         events = [json.loads(line) for line in lines]
-        assert [e["event"] for e in events].count("shell_note") == 10
+        assert [e["event"] for e in events].count("shell_note") == 12
     finally:
         live.remove(force=True)
 

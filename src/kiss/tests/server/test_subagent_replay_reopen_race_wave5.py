@@ -84,7 +84,6 @@ class TestReplayCompletionAfterReopen(_DbRedirectBase):
                 "parent_task_id": parent_id,
                 "parent_tab_id": "tab-parent",
                 "conn_id": "conn-new",
-                "transcripts": False,
             },
         )
         held = Pause(
@@ -216,7 +215,7 @@ class TestReplayCompletionAfterReopen(_DbRedirectBase):
         a chat resumed into a child's tab in that window binds the tab
         to the chat.  The old replay must then neither announce the
         child into the tab, nor subscribe the tab to the child, nor
-        follow the chat's transcript with the child's.
+        follow the chat's transcript with the offer of the child's.
         """
         chat_a, chat_b = "chat-A", "chat-B"
         parent_id, _ = th._add_task("parent task", chat_id=chat_a)
@@ -235,7 +234,6 @@ class TestReplayCompletionAfterReopen(_DbRedirectBase):
                 "parent_task_id": parent_id,
                 "parent_tab_id": "tab-parent",
                 "conn_id": "",
-                "transcripts": True,
             },
         )
         held = Pause(
@@ -253,7 +251,7 @@ class TestReplayCompletionAfterReopen(_DbRedirectBase):
             (ev["type"], ev.get("chat_id"))
             for ev in printer.events
             if sub_tab in (ev.get("tab_id"), ev.get("tabId"))
-            and ev["type"] in ("openSubagentTab", "task_events", "subagentDone")
+            and ev["type"] in ("openSubagentTab", "task_events", "replay_deferred", "subagentDone")
         ]
 
         assert frames == [("task_events", chat_b)], frames

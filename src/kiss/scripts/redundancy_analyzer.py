@@ -152,7 +152,7 @@ def _load_lcov_method_items(
 
 
 def analyze_redundancy(
-    coverage_file: str | None = ".coverage",
+    coverage_file: str = ".coverage",
     lcov_files: Iterable[str] | None = None,
 ) -> list[str]:
     """Return a sorted list of test method names safe to remove.
@@ -168,19 +168,17 @@ def analyze_redundancy(
     ----------
     coverage_file:
         Path to the ``coverage.py`` database produced with branch
-        coverage and ``dynamic_context = "test_function"``.  May be
-        ``None`` to skip Python coverage entirely (LCOV-only mode).
+        coverage and ``dynamic_context = "test_function"``.
     lcov_files:
         Optional iterable of LCOV ``.info`` paths produced by external
         coverage tools for ``*.ts``, ``*.js`` and other program files.
     """
-    method_items: dict[str, set[CoverageItem]] = {}
-    if coverage_file is not None:
-        method_items.update(_load_python_method_items(coverage_file))
+    method_items = _load_python_method_items(coverage_file)
     if lcov_files:
         for test, items in _load_lcov_method_items(lcov_files).items():
             method_items.setdefault(test, set()).update(items)
 
+    # The remaining methods that cover each item: a removed one is taken out.
     item_to_methods: dict[CoverageItem, set[str]] = {}
     for method, items in method_items.items():
         for item in items:
@@ -188,24 +186,19 @@ def analyze_redundancy(
 
     remaining = set(method_items)
     redundant: list[str] = []
-
-    changed = True
-    while changed:
-        changed = False
-        candidates = []
-        for method in sorted(remaining):
-            is_redundant = all(
-                len(item_to_methods[item] & remaining) >= 2
-                for item in method_items[method]
-            )
-            if is_redundant:  # pragma: no branch
-                candidates.append(method)
-
-        if candidates:  # pragma: no branch
-            victim = min(candidates, key=lambda m: len(method_items[m]))
-            remaining.discard(victim)
-            redundant.append(victim)
-            changed = True
+    while True:
+        candidates = [
+            method
+            for method in sorted(remaining)
+            if all(len(item_to_methods[item]) >= 2 for item in method_items[method])
+        ]
+        if not candidates:
+            break
+        victim = min(candidates, key=lambda m: len(method_items[m]))
+        remaining.discard(victim)
+        redundant.append(victim)
+        for item in method_items[victim]:
+            item_to_methods[item].discard(victim)
 
     print(f"Total test methods: {len(method_items)}")
     print(f"Redundant (safe to remove): {len(redundant)}")

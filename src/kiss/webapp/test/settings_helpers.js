@@ -10,7 +10,12 @@
 // touch the jsdom window and the harness's `posted` array, so a suite
 // with its own page bootstrap can use them too.
 
-const {click, byId, send} = require('./simplify2_harness');
+const {
+  click,
+  byId,
+  send,
+  typeInto: typeIntoElement,
+} = require('./simplify2_harness');
 
 /** Click the tab bar's settings gear (asserting it is rendered). */
 function openSettings(win) {
@@ -24,9 +29,7 @@ function closeSettings(win) {
 
 /** Set the value of the input `#id` and fire its `input` event. */
 function typeInto(win, id, value) {
-  const node = byId(win, id);
-  node.value = value;
-  node.dispatchEvent(new win.Event('input', {bubbles: true}));
+  typeIntoElement(win, byId(win, id), value);
 }
 
 /** The status line `#cfg-<subpanel>-status` of an agent subpanel. */

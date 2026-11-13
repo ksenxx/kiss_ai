@@ -19,7 +19,6 @@ Unreachable without test doubles, documented rather than mocked: the
 
 import json
 import os
-import signal
 import subprocess
 import sys
 import threading
@@ -287,6 +286,7 @@ def test_turn_failure_names_the_cause_and_the_fix(fake_codex: _FakeCodex, tmp_pa
         _run_turn(tmp_path)
     assert "401 Unauthorized" in str(info.value)
     assert SUBSCRIPTION_HINT in str(info.value)
+    assert str(info.value).count("KISS Error:") == 1
 
 
 def test_turn_failure_with_the_switch_off_has_no_hint(
@@ -500,48 +500,6 @@ def test_device_login_ends_the_cli_when_a_thread_cannot_start(
             processes.kill_process_tree(cli)
             cli.wait()
         _end_device_login()
-
-
-def test_a_fresh_login_signals_the_old_cli_only_while_it_is_unreaped(
-    fake_codex: _FakeCodex,
-) -> None:
-    """The finisher reaps the old CLI only under the login lock, so a
-    ``fresh`` login that saw it alive under that lock kills a group that
-    is still the CLI's: a pid reaped meanwhile could already name a
-    stranger's group.  The CLI exits exactly as the fresh login is about
-    to kill it, and the finisher gets every chance to reap it then."""
-    fake_codex.configure(login_sleep=30)
-    assert "code" in codex_device_login()
-    assert codex_model._device_login is not None
-    old = codex_model._device_login[1]
-    reaped_before_the_kill: list[bool] = []
-
-    def end_the_cli_as_it_is_killed(frame: FrameType, event: str, arg: Any) -> None:
-        if (
-            event == "call"
-            and frame.f_code is processes.kill_process_tree.__code__
-            and frame.f_locals.get("proc") is old
-        ):
-            sys.setprofile(None)
-            os.kill(old.pid, signal.SIGKILL)
-            deadline = time.monotonic() + 5
-            while not processes.exited_unreaped(old) and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert processes.exited_unreaped(old)
-            deadline = time.monotonic() + 0.5
-            while old.returncode is None and time.monotonic() < deadline:
-                time.sleep(0.01)
-            reaped_before_the_kill.append(old.returncode is not None)
-
-    sys.setprofile(end_the_cli_as_it_is_killed)
-    try:
-        prompt = codex_device_login(fresh=True)
-    finally:
-        sys.setprofile(None)
-        _end_device_login()
-    assert "code" in prompt
-    assert reaped_before_the_kill == [False], "the old CLI was reaped before its group kill"
-    assert old.returncode is not None, "the old finisher reaped it once the lock was free"
 
 
 def test_device_login_without_a_banner_is_an_error(fake_codex: _FakeCodex) -> None:

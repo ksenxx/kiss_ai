@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import persistence
+from kiss.tests.persistence_helpers import close_db
 
 # ---------------------------------------------------------------------------
 # Fixture: redirect persistence to a temp DB and reset thread-local caches.
@@ -32,9 +33,9 @@ def temp_db(
 ) -> Generator[Path]:
     db_path = tmp_path / "history.db"
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
-    persistence._close_db()
+    close_db()
     yield db_path
-    persistence._close_db()
+    close_db()
 
 
 def _make_legacy_db(path: Path) -> None:
@@ -246,14 +247,14 @@ def test_migration_logs_dropped_events_with_orphan_task_id(
     conn.close()
 
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
-    persistence._close_db()
+    close_db()
     with caplog.at_level(logging.WARNING):
         persistence._get_db()
     text = " ".join(r.getMessage() for r in caplog.records)
     assert "event" in text.lower() and (
         "dropped" in text.lower() or "orphan" in text.lower()
     )
-    persistence._close_db()
+    close_db()
 
 
 
@@ -272,7 +273,7 @@ def test_migration_rejects_non_uuid_string_parent_in_extra(
     conn.close()
 
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
-    persistence._close_db()
+    close_db()
     db = persistence._get_db()
     row = db.execute(
         "SELECT parent_task_id FROM task_history LIMIT 1"
@@ -280,7 +281,7 @@ def test_migration_rejects_non_uuid_string_parent_in_extra(
     assert row["parent_task_id"] == "", (
         "Non-UUID string parent must NOT be persisted verbatim."
     )
-    persistence._close_db()
+    close_db()
 
 
 
@@ -326,7 +327,7 @@ def test_close_db_concurrent_with_open_is_safe(temp_db: Path) -> None:
     def _closer() -> None:
         try:
             for _ in range(50):
-                persistence._close_db()
+                close_db()
         except BaseException as exc:  # pragma: no cover - failure
             errors.append(exc)
 

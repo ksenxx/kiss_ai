@@ -11,7 +11,7 @@
 //     closeContentTab hands it to the closed file's own owner.  Checked
 //     on both layouts: the desktop remote's split layout, where files
 //     sit on the content pane's row (#content-tab-list), and a stacked
-//     surface, where they share the group strip (#tab-list);
+//     surface, where the file screen's strip (#tab-list) lists them;
 //   * a dialog dismissed over a top-level file in the content pane (its
 //     owning chat was retired, so the file owns itself) hands focus back
 //     to the composer, never to BODY.
@@ -22,7 +22,7 @@ const assert = require('assert');
 const h = require('./ui_antipattern_harness');
 
 /** The tab row a content tab is listed on: the content pane's row in the
- *  split layout, the group strip on a stacked surface. */
+ *  split layout, the file screen's strip on a stacked surface. */
 function contentRow(stacked) {
   return stacked ? '#tab-list' : '#content-tab-list';
 }
@@ -45,9 +45,7 @@ function tabRecord(win, id) {
   return win._testApi.openTabs().find(t => t.id === id);
 }
 
-async function testFileOpenedFromAFileStaysInTheGroupWhenThatFileCloses(
-  stacked,
-) {
+function testFileOpenedFromAFileStaysInTheGroupWhenThatFileCloses(stacked) {
   const label = stacked ? 'stacked' : 'split';
   const ctx = h.makePage({narrow: stacked});
   const {win} = ctx;
@@ -92,8 +90,8 @@ async function testFileOpenedFromAFileStaysInTheGroupWhenThatFileCloses(
   );
   assert.deepStrictEqual(
     rowIds(win, row),
-    stacked ? ['a1', x, y] : [x, y],
-    `${label}: both files on the row`,
+    [x, y],
+    `${label}: both files on the row, and nothing else`,
   );
 
   h.click(
@@ -110,7 +108,7 @@ async function testFileOpenedFromAFileStaysInTheGroupWhenThatFileCloses(
   );
   assert.deepStrictEqual(
     rowIds(win, row),
-    stacked ? ['a1', y] : [y],
+    [y],
     `${label}: y.txt moved up to the chat that x.txt belonged to`,
   );
   win.close();
@@ -178,8 +176,8 @@ async function testKeepEditingOverATopLevelFileFocusesTheComposer() {
 }
 
 async function main() {
-  await testFileOpenedFromAFileStaysInTheGroupWhenThatFileCloses(false);
-  await testFileOpenedFromAFileStaysInTheGroupWhenThatFileCloses(true);
+  testFileOpenedFromAFileStaysInTheGroupWhenThatFileCloses(false);
+  testFileOpenedFromAFileStaysInTheGroupWhenThatFileCloses(true);
   await testKeepEditingOverATopLevelFileFocusesTheComposer();
   console.log('tabGroupsContentOwnership.test.js: all tests passed');
 }

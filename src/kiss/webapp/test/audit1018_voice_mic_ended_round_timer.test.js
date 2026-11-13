@@ -18,25 +18,18 @@
 // test can end, recognizers, audio processors, recorded safety timers).
 
 const assert = require('assert');
-const {send} = require('./simplify2_harness');
+const {send, ofType} = require('./simplify2_harness');
 const {
   makeVoicePage,
   micBtn,
   settle,
   startPipeline,
-  wake,
-  speak,
+  speakRound,
   fireTimer,
 } = require('./voice_page_helpers');
 
 const liveTimers = (page, ms) =>
   page.timers.filter(t => !t.cleared && t.ms === ms);
-
-/** Wake, speak, fall silent: the round's audio is posted. */
-function speakRound(page) {
-  wake(page);
-  speak(page);
-}
 
 async function main() {
   const page = makeVoicePage({autoGrant: true});
@@ -50,7 +43,7 @@ async function main() {
   await startPipeline(page);
   speakRound(page); // round A: audio posted, transcript pending
   assert.strictEqual(
-    posted.filter(m => m.type === 'voiceTranscribe').length,
+    ofType(posted, 'voiceTranscribe').length,
     1,
   );
   assert.strictEqual(
@@ -90,7 +83,7 @@ async function main() {
   api.switchToTab(second);
   await startPipeline(page);
   speakRound(page); // round B
-  const audio = posted.filter(m => m.type === 'voiceTranscribe');
+  const audio = ofType(posted, 'voiceTranscribe');
   assert.strictEqual(audio.length, 2);
   posted.length = 0;
   // The daemon echoes round B's tag.
@@ -100,9 +93,10 @@ async function main() {
     round: audio[1].round,
   });
   assert.deepStrictEqual(
-    posted
-      .filter(m => m.type === 'submit')
-      .map(m => ({onB: m.tabId === second, prompt: m.prompt})),
+    ofType(posted, 'submit').map(m => ({
+      onB: m.tabId === second,
+      prompt: m.prompt,
+    })),
     [{onB: true, prompt: 'words spoken in chat B QB1'}],
     "round B's words must reach chat B, not the chat of the round the mic loss stranded: " +
       JSON.stringify(posted),

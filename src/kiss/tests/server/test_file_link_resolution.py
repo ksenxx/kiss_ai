@@ -150,6 +150,40 @@ class TestFileLinkResolution(_ServerHarness):
         self.assertEqual(own["results"], {"reports/analysis.html": True})
         self.assertEqual(other["results"], {"reports/analysis.html": False})
 
+    async def test_check_paths_looks_past_a_removed_worktree(self) -> None:
+        """A folder naming a merged, removed worktree stands for its repository.
+
+        Only for a path inside it: one that leaves the folder resolves as
+        written, and a worktree that exists is not looked past.  An
+        absolute path into the removed worktree (a file or a directory
+        the transcript printed in full) stands for the repository's
+        copy the same way.
+        """
+        (self.work_dir / "docs").mkdir()
+        (self.work_dir / "docs" / "a.txt").write_text("merged\n", encoding="utf-8")
+        worktree = self.work_dir / ".kiss-worktrees" / "kiss_wt-1-abc"
+        worktree.parent.mkdir()
+        inside = [str(worktree / "docs" / "a.txt"), str(worktree / "docs")]
+        leaving = str(worktree / ".." / ".." / "docs" / "a.txt")
+        reader, writer = await self._connect()
+        query: dict[str, Any] = {
+            "type": "checkPaths",
+            "paths": ["docs/a.txt", "../../docs/a.txt", *inside, leaving],
+            "workDir": str(worktree),
+        }
+
+        removed = await self._reply(reader, writer, query, "pathsExist")
+        worktree.mkdir()
+        present = await self._reply(reader, writer, query, "pathsExist")
+
+        escapes = {"../../docs/a.txt": True, leaving: True}
+        self.assertEqual(
+            removed["results"], {"docs/a.txt": True, **dict.fromkeys(inside, True), **escapes},
+        )
+        self.assertEqual(
+            present["results"], {"docs/a.txt": False, **dict.fromkeys(inside, False), **escapes},
+        )
+
     async def test_open_file_replies_with_the_file(self) -> None:
         """``openFile`` gets the resolved path, the text and the line."""
         target = self.work_dir / "src" / "main.py"

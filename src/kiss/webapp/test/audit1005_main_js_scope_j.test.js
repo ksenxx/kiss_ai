@@ -7,12 +7,12 @@
 //
 // 1. A `tabs_state` snapshot that drops a chat tab (another surface closed
 //    it) removes that tab and its sub-agent descendants, retires the
-//    pending question of a removed tab, and leaves every content tab (a file opened from that chat) untouched: content tabs
-//    are per-surface editors, never in the registry, and have no
-//    `parentTabId`, so reconcileTabs has no editor to dispose.
-// 2. `talk` playback: a muted event is dropped before it reaches the
-//    queue, an audible one plays unmuted, and the queue moves on when the
-//    clip ends.
+//    pending question of a removed tab, and leaves every content tab (a
+//    file opened from that chat) untouched: content tabs are per-surface
+//    editors, never in the registry, and have no `parentTabId`, so
+//    reconcileTabs has no editor to dispose.
+// 2. `talk` playback: a clip plays unmuted, one at a time, and the queue
+//    moves on when the clip ends.
 
 /* global require, console, process */
 
@@ -23,20 +23,13 @@ const harness = require('./simplify2_harness');
 const {installAudio} = require('./speech_helpers');
 
 function makePage() {
-  const {win, posted} = harness.makePage({beforeScripts: harness.stubRaf});
-  return {win, sent: posted};
+  return harness.makePage({beforeScripts: harness.stubRaf});
 }
 
-const {send, clickTab, sleep} = harness;
-
-// Every open tab, in tab order (copied into this realm's Array so
-// deepStrictEqual compares values, not realms' prototypes).
-function tabIds(win) {
-  return Array.from(win._testApi.openTabs(), t => t.id);
-}
+const {send, clickTab, sleep, tabIds} = harness;
 
 async function testRegistryRemovalKeepsContentTabs() {
-  const {win, sent} = makePage();
+  const {win, posted: sent} = makePage();
   const T1 = 'tab-one';
   const T2 = 'tab-two';
   send(win, {
@@ -116,11 +109,9 @@ async function testRegistryRemovalKeepsContentTabs() {
   win.close();
 }
 
-async function testTalkPlaysUnmutedAndSkipsMuted() {
+async function testTalkPlaysUnmutedOneAtATime() {
   const {win} = makePage();
   const players = installAudio(win);
-  send(win, {type: 'talk', text: 'quiet', audioB64: 'QUJD', muted: true});
-  assert.strictEqual(players.length, 0, 'a muted talk creates no player');
   send(win, {type: 'talk', text: 'one', audioB64: 'QUJD', talkId: 'a'});
   send(win, {type: 'talk', text: 'two', audioB64: 'QUJD', talkId: 'b'});
   await sleep(0);
@@ -138,7 +129,7 @@ async function testTalkPlaysUnmutedAndSkipsMuted() {
 
 async function main() {
   await testRegistryRemovalKeepsContentTabs();
-  await testTalkPlaysUnmutedAndSkipsMuted();
+  await testTalkPlaysUnmutedOneAtATime();
   console.log('audit1005_main_js_scope_j.test.js: all tests passed');
 }
 

@@ -48,7 +48,6 @@ function makePage(opts) {
     bodyClass: 'remote-chat',
     beforeScripts: opts.brokenMarked ? brokenMarked : undefined,
     extraScripts: opts.withMarked ? ['marked.min.js'] : [],
-    sourceUrl: 'report-main.js',
   });
 }
 
@@ -106,7 +105,7 @@ function testMdReportWaitsForTaskDone() {
   finishTask(win);
   const tab = assertReportTabActive(win, 'md report after task_done');
   assert.ok(
-    (tab.textContent || '').indexOf('summary.md') >= 0,
+    tab.textContent.indexOf('summary.md') >= 0,
     'report tab must be titled after the report file',
   );
   const srcdoc = activeSrcdoc(win);
@@ -618,7 +617,7 @@ function testReportsSegmentVariants() {
       ' tabs',
   );
   assert.ok(
-    (tabsFound[1].textContent || '').indexOf('win.md') >= 0 &&
+    tabsFound[1].textContent.indexOf('win.md') >= 0 &&
       tabsFound[1].classList.contains('active'),
     'reports must open in write order with the last one active',
   );
@@ -654,7 +653,7 @@ function testBackgroundTabReportOpensAtItsTaskDone() {
   finishTask(win, {tabId: firstTabId});
   const tab = assertReportTabActive(win, 'background-tab report');
   assert.ok(
-    (tab.textContent || '').indexOf('bg.md') >= 0,
+    tab.textContent.indexOf('bg.md') >= 0,
     'the background-generated report tab must be titled after the file',
   );
   win.close();
@@ -737,15 +736,14 @@ function testSwitchBackToChatRestoresOutput() {
   writeReport(win, 'reports/summary.md', '# hi');
   finishTask(win);
   assertReportTabActive(win, 'switch-back');
-  const chatTab = Array.from(
-    win.document.querySelectorAll('#tab-list .chat-tab'),
-  ).find(el => !el.classList.contains('content-tab'));
-  chatTab.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  // The file screen's strip lists the report alone: the chat comes
+  // back the way the Chats panel's pick brings it.
+  clickTab(win, win._testApi.openTabs().find(t => !t.isContentTab).id);
   const out = win.document.getElementById('output');
   assert.notStrictEqual(
     out.style.display,
     'none',
-    'clicking the chat tab must restore the chat surface',
+    'going back to the chat must restore the chat surface',
   );
   const area = win.document.getElementById('content-tab-area');
   assert.strictEqual(

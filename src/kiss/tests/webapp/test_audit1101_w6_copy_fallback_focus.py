@@ -186,6 +186,14 @@ def test_copy_fallback_restores_focus_and_selection() -> None:
                     }"""
                 )
                 assert result == {"ok": True, "focus": "other", "clipboard": "late"}
+
+                # The textarea copy itself, which the menu exports for the
+                # page's other copy controls (A/W1-F8).
+                result = page.evaluate(
+                    """async () => [ContentContextMenu.copyViaTextarea(document, 'direct'),
+                                    await navigator.clipboard.readText()]"""
+                )
+                assert result == [True, "direct"]
                 assert errors == []
             finally:
                 browser.close()

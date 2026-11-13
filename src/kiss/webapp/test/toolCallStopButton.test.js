@@ -9,8 +9,6 @@
 // `interruptTool` for the panel's tab and tool; the `tool_interrupt_ack`
 // receipt resets a rejected click; the arriving tool_result hides it.
 
-/* global require, console, process */
-
 'use strict';
 
 const assert = require('assert');
@@ -53,6 +51,26 @@ function makePage() {
 
 function display(win, el) {
   return win.getComputedStyle(el).getPropertyValue('display');
+}
+
+/**
+ * Run one Bash call in tab `tabId` to its result (`streamed` is the
+ * output it printed first, '' for none); the text its panel then shows.
+ */
+function bashPanelText(win, tabId, command, streamed, result) {
+  send(win, {type: 'tool_call', name: 'Bash', command, tabId, ts: Date.now()});
+  const tcs = win.document.querySelectorAll('#output .ev.tc');
+  const tc = tcs[tcs.length - 1];
+  if (streamed) send(win, {type: 'system_output', text: streamed, tabId});
+  send(win, {
+    type: 'tool_result',
+    tool_name: 'Bash',
+    tabId,
+    ts: Date.now(),
+    ...result,
+  });
+  return tc.querySelector(':scope > .bash-panel > .bash-panel-content')
+    .textContent;
 }
 
 function bootRunningTab(wv) {
@@ -225,73 +243,22 @@ async function pageTests() {
   });
 
   await test('Bash interrupt message: empty and newline-terminated streams', () => {
-    send(win, {
-      type: 'tool_call',
-      name: 'Bash',
-      command: 'true',
-      tabId: TAB,
-      ts: Date.now(),
-    });
-    let tcs = out.querySelectorAll('.ev.tc');
-    let tc = tcs[tcs.length - 1];
-    send(win, {
-      type: 'tool_result',
-      tool_name: 'Bash',
+    const interrupted = {
       content: 'User interrupted the tool call.',
       interrupted: true,
-      tabId: TAB,
-      ts: Date.now(),
-    });
+    };
     assert.strictEqual(
-      tc.querySelector(':scope > .bash-panel > .bash-panel-content')
-        .textContent,
+      bashPanelText(win, TAB, 'true', '', interrupted),
       'User interrupted the tool call.',
       'no separator when nothing was streamed',
     );
-    send(win, {
-      type: 'tool_call',
-      name: 'Bash',
-      command: 'echo a',
-      tabId: TAB,
-      ts: Date.now(),
-    });
-    tcs = out.querySelectorAll('.ev.tc');
-    tc = tcs[tcs.length - 1];
-    send(win, {type: 'system_output', text: 'a\n', tabId: TAB});
-    send(win, {
-      type: 'tool_result',
-      tool_name: 'Bash',
-      content: 'User interrupted the tool call.',
-      interrupted: true,
-      tabId: TAB,
-      ts: Date.now(),
-    });
     assert.strictEqual(
-      tc.querySelector(':scope > .bash-panel > .bash-panel-content')
-        .textContent,
+      bashPanelText(win, TAB, 'echo a', 'a\n', interrupted),
       'a\nUser interrupted the tool call.',
       'no double newline after a newline-terminated stream',
     );
-    send(win, {
-      type: 'tool_call',
-      name: 'Bash',
-      command: 'echo b',
-      tabId: TAB,
-      ts: Date.now(),
-    });
-    tcs = out.querySelectorAll('.ev.tc');
-    tc = tcs[tcs.length - 1];
-    send(win, {type: 'system_output', text: 'b\n', tabId: TAB});
-    send(win, {
-      type: 'tool_result',
-      tool_name: 'Bash',
-      content: '',
-      tabId: TAB,
-      ts: Date.now(),
-    });
     assert.strictEqual(
-      tc.querySelector(':scope > .bash-panel > .bash-panel-content')
-        .textContent,
+      bashPanelText(win, TAB, 'echo b', 'b\n', {content: ''}),
       'b\n',
       'an ordinary Bash result adds nothing',
     );
@@ -437,7 +404,7 @@ function retagBody() {
   assert.strictEqual(msg.callId, 7);
 }
 
-async function panelStopBody() {
+function panelStopBody() {
   const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
     runScripts: 'dangerously',
     pretendToBeVisual: true,

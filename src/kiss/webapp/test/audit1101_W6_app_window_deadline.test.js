@@ -36,7 +36,7 @@ const http = require('http');
 const path = require('path');
 const vm = require('vm');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {MEDIA, sleep} = require('./simplify2_harness');
+const {MEDIA, waitFor} = require('./simplify2_harness');
 
 const {test, report} = makeRunner();
 
@@ -98,6 +98,7 @@ function abortControl() {
 function runPage(base, name, bounds, control) {
   const actions = [];
   const context = {
+    URL,
     URLSearchParams,
     AbortSignal: control
       ? {
@@ -109,6 +110,8 @@ function runPage(base, name, bounds, control) {
       : AbortSignal,
     location: {
       search: '?url=%2Fapp',
+      href: base + '/media/appWindow.html?url=%2Fapp',
+      origin: base,
       replace: url => actions.push('replace:' + url),
     },
     document: {},
@@ -139,14 +142,9 @@ function runPage(base, name, bounds, control) {
   return actions;
 }
 
-/** Poll `actions` for its first entry within `ms`; null when none came. */
-async function firstAction(actions, ms) {
-  const deadline = Date.now() + ms;
-  for (;;) {
-    if (actions.length) return actions[0];
-    if (Date.now() >= deadline) return null;
-    await sleep(25);
-  }
+/** The first entry of `actions`, once the page has taken one. */
+function firstAction(actions) {
+  return waitFor(() => actions[0], 'the page takes an action', WATCHDOG_MS);
 }
 
 /** `promise`, or a failure once `WATCHDOG_MS` passed without it. */
@@ -182,7 +180,7 @@ async function main() {
           'nothing happens while the daemon holds the request',
         );
         control.abort();
-        const first = await firstAction(actions, WATCHDOG_MS);
+        const first = await firstAction(actions);
         assert.strictEqual(
           first,
           'replace:/app',
@@ -214,7 +212,7 @@ async function main() {
           'nothing happens while the daemon holds the body',
         );
         control.abort();
-        const first = await firstAction(actions, WATCHDOG_MS);
+        const first = await firstAction(actions);
         assert.strictEqual(
           first,
           'open:kiss-app-window:popup,left=0,top=0,width=800,height=600',
@@ -246,7 +244,7 @@ async function main() {
       async function answered(name, bounds) {
         const control = abortControl();
         const actions = runPage(daemon.base, name, bounds, control);
-        await firstAction(actions, WATCHDOG_MS);
+        await firstAction(actions);
         assert.deepStrictEqual(
           control.deadlines,
           [2000],

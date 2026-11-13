@@ -17,6 +17,8 @@
 //   that task ran on -- the daemon's binding (`tabMachine`), this
 //   machine for an unbound chat -- whatever the global pick, and
 //   switching to a new chat shows the global pick again;
+// * the daemon's answer to `ready` names every binding (`tabMachines`):
+//   one the page holds that is not among them ended while it was away;
 // * a pick made on a chat that shows a task is also where THAT chat's
 //   next task goes: kept (persisted across a reload) until the submit,
 //   the daemon's binding does not overwrite it; a closed tab forgets it;
@@ -775,8 +777,83 @@ function testASubAgentTabShowsItsParentsMachine() {
   console.log("  ok - a sub-agent tab shows its parent's machine");
 }
 
+// A page that was away when a tab came home (another surface ran a task
+// of this machine in it, its machine was lost) still holds the tab's
+// binding.  The daemon's answer to its `ready` names every binding
+// there is, and the page ends where a freshly loaded one starts.  Until
+// the answer is in, what the page held stands: a prompt kept in the
+// composer during the outage is sent the moment the banner goes, and
+// still runs where its chat lives.
+function testAReadyAnswerNamesEveryBinding() {
+  const {win, posted, state} = readyPage();
+  const api = win._testApi;
+  send(win, {type: 'daemonStatus', connected: true});
+  const home = api.getActiveTabId();
+  replay(win, home, 'chat-1', 'ran on the gpu', 'gpu-box');
+  api.createNewTab();
+  const stays = api.getActiveTabId();
+  replay(win, stays, 'chat-2', 'runs on the gpu', 'gpu-box');
+  pick(win, 'gpu-box');
+  // A new chat for this machine while the global pick is the gpu: its
+  // tab holds an unsent pick of this machine.
+  api.createNewTab('');
+  const fresh = api.getActiveTabId();
+  assert.deepStrictEqual(persistedPicks(state), {[fresh]: ''});
+
+  send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
+  send(win, {type: 'daemonStatus', connected: true});
+  api.switchToTab(stays);
+  assert.strictEqual(
+    runTask(win, posted, 'sent as the banner went').machine,
+    'gpu-box',
+    "the daemon's answer is not in yet: the binding held stands",
+  );
+
+  api.switchToTab(home);
+  assert.strictEqual(select(win).value, 'gpu-box');
+  send(win, {type: 'tabMachines', machines: {[stays]: 'gpu-box'}});
+  assert.strictEqual(
+    select(win).value,
+    '',
+    'the tab on screen came home while the page was away',
+  );
+  assert.strictEqual(runTask(win, posted, 'go on here').machine, '');
+  api.switchToTab(stays);
+  assert.strictEqual(select(win).value, 'gpu-box', 'named again: it stands');
+  api.switchToTab(fresh);
+  assert.strictEqual(select(win).value, '');
+  assert.deepStrictEqual(
+    persistedPicks(state),
+    {[fresh]: ''},
+    "a new chat's unsent pick of this machine is not the daemon's to drop",
+  );
+
+  // A binding made while the page was away is taken as any binding is:
+  // it confirms the pick that asked for it.
+  api.switchToTab(home);
+  pick(win, 'gpu-box');
+  assert.deepStrictEqual(persistedPicks(state), {
+    [fresh]: '',
+    [home]: 'gpu-box',
+  });
+  send(win, {
+    type: 'tabMachines',
+    machines: {[stays]: 'gpu-box', [home]: 'gpu-box'},
+  });
+  assert.deepStrictEqual(persistedPicks(state), {[fresh]: ''});
+  assert.strictEqual(select(win).value, 'gpu-box');
+  // A daemon with no binding at all (it restarted) names none.
+  send(win, {type: 'tabMachines', machines: {}});
+  assert.strictEqual(select(win).value, '');
+  api.switchToTab(stays);
+  assert.strictEqual(select(win).value, '');
+  win.close();
+  console.log("  ok - the daemon's answer to ready names every binding");
+}
+
 try {
   testListsThisMachineThenTheReachableOnes();
+  testAReadyAnswerNamesEveryBinding();
   testASubAgentTabShowsItsParentsMachine();
   testAChatThatComesToShowATaskLeavesTheGlobalPick();
   testARefusedRunKeepsTheChatsMachineAndThePick();

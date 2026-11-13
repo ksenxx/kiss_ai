@@ -55,9 +55,7 @@ class TestWorkDirFilterQueries:
         self.saved = redirect_persistence(self.tmpdir)
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -106,9 +104,7 @@ class TestGetHistoryCommand:
         self.cfg.enter(self.tmpdir)
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         self.cfg.exit()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)

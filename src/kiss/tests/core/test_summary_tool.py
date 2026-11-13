@@ -59,7 +59,6 @@ def test_blocked_tool_is_not_executed_and_prints_error() -> None:
     printer = _RecordingPrinter()
     executor: Any = KISSAgent("guard-dispatch-executor")
     executor.printer = printer
-    executor.verbose = False
     calls: list[str] = []
 
     def finish(result: str) -> str:

@@ -39,20 +39,17 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
 def _redirect_db(tmpdir: Path) -> tuple:
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = tmpdir / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    th._close_thread_db()
+    (th._DB_PATH, th._KISS_DIR) = saved
 
 
 def _run_interrupted_and_get_persisted_result(
@@ -113,10 +110,10 @@ def test_plain_exception_still_persists_task_failed(tmp_path: Path) -> None:
     """Regression guard: ordinary exceptions keep a 'Task failed' label.
 
     ``SorcarAgent.run`` wraps them into a ``success: false`` result
-    whose summary names the error, and that summary is what the row
-    keeps: never empty, never the orphan-sweep sentinel.
+    whose HTML summary names the error, and that summary is what the
+    row keeps: never empty, never the orphan-sweep sentinel.
     """
     persisted = _run_interrupted_and_get_persisted_result(
         tmp_path, RuntimeError("boom"),
     )
-    assert persisted == "Task failed with error: boom"
+    assert persisted == "<p>Task failed with error: boom</p>"
