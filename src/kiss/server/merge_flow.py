@@ -8,8 +8,7 @@ Owns:
 - Presentation of a worktree a task left pending (it was stopped, or
   the agent never called ``commit_and_merge``): the ``worktree_done``
   bar with Merge / Discard / Do nothing.
-- The worktree merge / discard / detach user actions and the conflict
-  probe behind the bar.
+- The worktree merge / discard / detach user actions.
 - The settings panel's manual "Git Commit" of the tab's working tree.
 
 Split out of ``server.py`` for organisation.
@@ -30,7 +29,9 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _git,
     _porcelain_entries,
+    _reclaim_process_lock,
     repo_lock,
+    repo_locks,
 )
 from kiss.agents.sorcar.merge_conflict_resolver import resolve_merge_conflict
 from kiss.agents.sorcar.sorcar_agent import (
@@ -69,9 +70,7 @@ def _git_paths(cwd: str, command: str, *args: str) -> list[str] | None:
     NUL-separated, as :meth:`GitWorktreeOps._diff_name_only` lists:
     git quotes no ``-z`` path, so a name with a double quote, a
     backslash, a control character or an edge space comes back
-    byte-exact, equal to the real on-disk path and to the names
-    ``_diff_name_only`` puts next to it in the changed-file lists and
-    the conflict file-overlap sets.
+    byte-exact, equal to the real on-disk path.
 
     Args:
         cwd: The directory to run git in.
@@ -85,18 +84,6 @@ def _git_paths(cwd: str, command: str, *args: str) -> list[str] | None:
     if result.returncode != 0:
         return None
     return [path for path in result.stdout.split("\0") if path]
-
-
-def _capture_untracked(work_dir: str) -> set[str]:
-    """Return the set of untracked files in the repo.
-
-    Args:
-        work_dir: Repository root directory.
-
-    Returns:
-        Set of untracked file paths relative to work_dir.
-    """
-    return set(_git_paths(work_dir, "ls-files", "--others", "--exclude-standard") or ())
 
 
 def _stage_all(work_path: Path) -> tuple[str, str]:
@@ -288,16 +275,23 @@ class _MergeFlowMixin:
                     message="Not a git repository.", work_dir=requested_dir, reply_to=reply_to,
                 )
                 return
-            # The repository lock serializes this with the other git
-            # users of the repo (a new task's worktree setup, Source
-            # Control actions, Merge / Discard).  The message generation
-            # may take minutes, so the lock is held only around the git
-            # steps: stage + read the diff, then stage again + commit
-            # once the staged tree and parent are still the ones the
-            # message describes.
-            with repo_lock(repo):
+            # The two locks a merge holds for its whole transaction (the
+            # repository's ``repo_lock``, then its cross-process flock,
+            # the same from any of its checkouts) serialize this with the
+            # other git users of the repository, in this daemon and in any
+            # other Sorcar process (a new task's worktree setup, Source
+            # Control actions, Merge / Discard, an orphan reclaim).  The
+            # message generation may take minutes, so they are held only
+            # around the git steps: stage + read the diff, then stage
+            # again + commit once the staged tree and parent are still
+            # the ones the message describes.
+            with repo_lock(repo), _reclaim_process_lock(repo):
                 snapshot, error = _stage_all(work_path)
-                diff_text = "" if error else GitWorktreeOps.staged_diff(work_path)
+                # Only the index says "clean": a patch git cannot print
+                # (a missing textconv program) is empty too, and is
+                # committed under the generator's fallback subject.
+                has_changes = not error and GitWorktreeOps.has_staged_changes(work_path)
+                diff_text = GitWorktreeOps.staged_diff(work_path) if has_changes else ""
             if error:
                 self._broadcast_autocommit_done(
                     tab_id, success=False, committed=False,
@@ -305,7 +299,7 @@ class _MergeFlowMixin:
                     work_dir=requested_dir, reply_to=reply_to,
                 )
                 return
-            if not diff_text:
+            if not has_changes:
                 self._broadcast_autocommit_done(
                     tab_id, success=True, committed=False,
                     message="Nothing to commit.", work_dir=requested_dir, reply_to=reply_to,
@@ -314,7 +308,7 @@ class _MergeFlowMixin:
             if not reply_to:
                 self._commit_toast(tab_id, "info", "Auto-generating commit message…")
             msg = generate_commit_message_from_diff(diff_text)
-            with repo_lock(repo):
+            with repo_lock(repo), _reclaim_process_lock(repo):
                 staged, error = _stage_all(work_path)
                 if error:
                     error = "Staging failed: " + error
@@ -329,8 +323,8 @@ class _MergeFlowMixin:
                         message=error, work_dir=requested_dir, reply_to=reply_to,
                     )
                     return
-                # Commit directly (the staged diff was verified
-                # non-empty above) so a failure's actual git output —
+                # Commit directly (staged changes were verified
+                # above) so a failure's actual git output —
                 # pre-commit hook rejection text, identity/config
                 # errors, … — can be reported to the user.
                 commit_result = _git("commit", "-m", msg, cwd=str(work_path))
@@ -498,10 +492,7 @@ class _MergeFlowMixin:
                     changed = _flatten_changed(listing, wt_agent._wt)
                     unreadable = _unreadable_worktrees(listing)
                 if not changed and not unreadable:
-                    # Automatic path: rescue git-ignored task output
-                    # the changed-files probe cannot see (see
-                    # SorcarAgent.discard).
-                    wt_agent.discard(rescue_ignored=True)
+                    wt_agent.discard()
             finally:
                 with self._state_lock:
                     state.is_merging = prev_merging
@@ -514,7 +505,7 @@ class _MergeFlowMixin:
             return False
         for wt in unreadable:
             logger.warning(
-                "Cannot list the changes of pending worktree %s (branch %s): git failed; "
+                "Cannot list the changes of pending worktree %s (branch %s); "
                 "the worktree is kept for the user to merge or discard",
                 wt.wt_dir, wt.branch,
             )
@@ -522,81 +513,17 @@ class _MergeFlowMixin:
         # is in (the clients' file-link fallback directory and SCM
         # view); ``worktrees`` lists every pending worktree, one per
         # repository, which Merge / Discard / Do nothing all act on.
-        # Each worktree's files were listed once above and the singular
-        # ``hasConflict`` is derived from the rows (``_conflict_of``
-        # spawns 7 git processes per worktree).
-        rows = [
-            {
-                "repoRoot": str(wt.repo_root),
-                "branch": wt.branch,
-                "worktreeDir": str(wt.wt_dir),
-                "originalBranch": wt.original_branch,
-                "changedFiles": files or [],
-                "hasConflict": self._conflict_of(wt),
-            }
-            for wt, files in listing
-        ]
         self.printer.broadcast({
             "type": "worktree_done",
             "branch": wt_agent._wt_branch,
             "worktreeDir": str(wt_agent._wt_dir),
             "worktreeWorkDir": str(wt_agent._wt_work_dir),
-            "originalBranch": wt_agent._original_branch,
-            "changedFiles": changed,
-            "hasConflict": any(row["hasConflict"] for row in rows),
-            "worktrees": rows,
+            "worktrees": [
+                {"branch": wt.branch, "worktreeDir": str(wt.wt_dir)} for wt, _files in listing
+            ],
             "tabId": tab_id,
         })
         return True
-
-    def _conflict_of(self, wt: GitWorktree) -> bool:
-        """Whether merging *wt*'s branch into its original branch would conflict.
-
-        Uses file-level overlap detection between:
-
-        1. Files changed on the original branch since the fork point.
-        2. Files changed in the worktree (committed + uncommitted)
-           since the fork point.
-
-        When both sides modify the same file, reports a potential
-        conflict.  Also checks for dirty main working-tree files that
-        overlap with the worktree changes (which would cause
-        ``git merge`` to refuse).
-
-        Args:
-            wt: A pending worktree.
-
-        Returns:
-            True if the merge would likely fail, False otherwise.
-        """
-        if wt.original_branch is None or not wt.wt_dir.exists():
-            return False
-        wt_dir = wt.wt_dir
-        wt_fork = self._resolve_base_ref(
-            str(wt_dir), wt.baseline_commit, wt.original_branch,
-        )
-        if wt_fork is None:
-            return False
-        # The baseline is the worktree's own first commit, so the
-        # original branch forked from its parent.
-        orig_fork = f"{wt_fork}^" if wt_fork == wt.baseline_commit else wt_fork
-
-        orig_files = set(GitWorktreeOps._diff_name_only(
-            wt.repo_root, "--no-renames", orig_fork, wt.original_branch,
-        ))
-        wt_files = set(GitWorktreeOps._diff_name_only(wt_dir, "--no-renames", wt_fork))
-        wt_files.update(_capture_untracked(str(wt_dir)))
-
-        if orig_files & wt_files:
-            return True
-
-        dirty: set[str] = set()
-        for extra_flags in ((), ("--cached",)):
-            dirty.update(
-                GitWorktreeOps._diff_name_only(wt.repo_root, "--no-renames", *extra_flags)
-            )
-        dirty.update(_capture_untracked(str(wt.repo_root)))
-        return bool(dirty & wt_files)
 
     @staticmethod
     def _resolve_base_ref(
@@ -646,10 +573,10 @@ class _MergeFlowMixin:
         worktree has already been removed.
 
         An empty list is a VERIFIED clean worktree: callers auto-discard
-        on it.  When git cannot make the comparison (a missing object,
-        an unreadable index, a base that no longer resolves and no
-        unique commits to fall back on), the answer is ``None`` — the
-        changes are unknown, not absent.
+        on it.  When the comparison cannot be made (no original branch
+        on record, a missing object, an unreadable index, a base that
+        no longer resolves and no unique commits to fall back on), the
+        answer is ``None`` — the changes are unknown, not absent.
 
         Args:
             wt: A pending worktree.
@@ -659,7 +586,7 @@ class _MergeFlowMixin:
             when the changes could not be enumerated.
         """
         if not wt.original_branch:
-            return []
+            return None
         if wt.wt_dir.exists():
             base_ref = self._resolve_base_ref(
                 str(wt.wt_dir), wt.baseline_commit, wt.original_branch,
@@ -750,7 +677,11 @@ class _MergeFlowMixin:
             verb: Human-readable action name (e.g. ``"merging"``).
 
         Returns:
-            Error dict with ``success: False`` when busy, otherwise ``None``.
+            Error dict with ``success: False`` when busy, otherwise
+            ``None``.  The refusal behind an in-flight merge or discard
+            is ``retryable``: it is broadcast to every page, a page
+            drops its bar on a result that is not, and the in-flight
+            action may still end with the worktree pending.
         """
         if state.running():
             return {
@@ -767,6 +698,7 @@ class _MergeFlowMixin:
                     "A merge or discard is already in progress "
                     f"on this tab. Wait for it to finish before {verb}."
                 ),
+                "retryable": True,
             }
         return None
 
@@ -819,14 +751,14 @@ class _MergeFlowMixin:
             # orphaned claim can be detected (``merge_in_progress``).
             state.merge_thread = threading.current_thread()
         try:
-            # One lock per isolated repository, taken in path order so
-            # two tabs acting on the same repositories cannot deadlock
-            # (the per-worktree merge/discard re-enters its own lock).
-            roots = {str(w.repo_root): w.repo_root for w in _pending_worktrees(wt)}
-            roots.setdefault(str(repo_root), repo_root)
+            # One lock per isolated repository, in the order every
+            # thread takes several in, so two tabs acting on the same
+            # repositories cannot deadlock (the per-worktree
+            # merge/discard re-enters its own lock).
+            roots = [repo_root, *(w.repo_root for w in _pending_worktrees(wt))]
             with contextlib.ExitStack() as locks:
-                for _name, root in sorted(roots.items()):
-                    locks.enter_context(repo_lock(root))
+                for lock in repo_locks(roots):
+                    locks.enter_context(lock)
                 if action == "nothing":
                     # ``kept: True`` tells the clients to KEEP their
                     # pending-worktree fallback directory — the
@@ -866,22 +798,15 @@ class _MergeFlowMixin:
                         "Worktree merge finished: tab=%s success=%s elapsed=%.1fs",
                         tab_id, success, time.monotonic() - started,
                     )
-                    return {"success": success, "message": msg}
-                # A user-explicit Discard throws the work away as
-                # asked (no ignored-file rescue).  A partial discard
-                # (branch deletion failed) or a deferred one (ignored
-                # output could not be rescued) must not report
-                # success; a deferred discard is retryable so the
-                # page keeps the bar's buttons.
+                    if success:
+                        return {"success": True, "message": msg}
+                    # A worktree is still pending: ``retryable`` keeps the
+                    # bar's buttons on the page for the retry.
+                    return {"success": False, "message": msg, "retryable": True}
+                # A partial discard (branch deletion failed) must not
+                # report success.
                 msg = wt.discard()
-                deferred = "Discard deferred" in msg
-                result: dict[str, Any] = {
-                    "success": "Partially discarded" not in msg and not deferred,
-                    "message": msg,
-                }
-                if deferred:
-                    result["retryable"] = True
-                return result
+                return {"success": "Partially discarded" not in msg, "message": msg}
         finally:
             with self._state_lock:
                 state.is_merging = False

@@ -14,6 +14,7 @@ photo silently.
 
 from __future__ import annotations
 
+import os
 import shutil
 import struct
 import subprocess
@@ -29,6 +30,7 @@ from kiss.core.models.model import (
     encode_binary_attachment,
     parse_binary_attachments,
 )
+from kiss.core.printer import truncate_result
 
 _JPEG_SOI = b"\xff\xd8\xff"
 
@@ -132,3 +134,27 @@ def test_read_tool_can_embed_a_heic_photo(heic_photo: Path) -> None:
     assert len(attachments) == 1
     assert attachments[0].mime_type == "image/jpeg"
     assert attachments[0].data.startswith(_JPEG_SOI)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the stand-in converter is a shell script")
+def test_printing_a_result_with_a_heic_photo_runs_no_converter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A printer keeps a result's text only; it converted every embedded photo again.
+
+    The converter is a stand-in ``sips`` first on ``PATH`` that logs each run: a
+    host's own converter leaves no count of its runs, and a host may have none.
+    Everything else is real, the process ``heif_to_jpeg`` starts included.
+    """
+    runs = tmp_path / "runs"
+    converter = tmp_path / "bin" / "sips"
+    converter.parent.mkdir()
+    converter.write_text(f'#!/bin/sh\necho run >> "{runs}"\nprintf JPEG > "$6"\n')
+    converter.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{converter.parent}{os.pathsep}{os.environ['PATH']}")
+    heic = b"\x00\x00\x00\x18ftypheic" + bytes(64)
+    result = "photo:\n" + encode_binary_attachment("image/heic", heic)
+    text, attachments = parse_binary_attachments(result)  # the adapter's one conversion
+    assert [(a.mime_type, a.data) for a in attachments] == [("image/jpeg", b"JPEG")]
+    assert truncate_result(result) == text == f"photo:\n[attached image/heic, {len(heic)} bytes]"
+    assert runs.read_text() == "run\n"

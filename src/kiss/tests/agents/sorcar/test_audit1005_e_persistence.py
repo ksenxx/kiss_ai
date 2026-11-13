@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.persistence_helpers import close_db
 
 _SNAPSHOT_TAIL = f".failed_events.jsonl.consumed-{1:020d}-{os.getpid()}-" + "b" * 32
 
@@ -39,14 +40,13 @@ def kiss_dir(monkeypatch: pytest.MonkeyPatch):
     home = Path(tmp) / ".kiss"
     home.mkdir()
     monkeypatch.setenv("KISS_HOME", str(home))
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    saved = (th._DB_PATH, th._KISS_DIR)
     th._KISS_DIR = home
-    th._db_conn = None
     try:
         yield home
     finally:
-        th._close_db()
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+        close_db()
+        (th._DB_PATH, th._KISS_DIR) = saved
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -63,7 +63,7 @@ def _committed_legacy_snapshot(kiss_dir: Path) -> str:
     th._get_db().execute(
         "INSERT INTO replayed_journals (snapshot, timestamp) VALUES (?, 2.0)", (committed,),
     )
-    th._close_db()
+    close_db()
     (kiss_dir / committed).write_text(json.dumps({
         "task_id": task_id, "event_json": json.dumps({"type": "result", "text": "twice"}),
         "timestamp": 2.0, "origin_db_path": str(th._DB_PATH),

@@ -62,6 +62,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import AgentServer, _subagent_is_done
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.conftest import init_repo, redirect_persistence, restore_persistence
 
 
@@ -426,7 +427,7 @@ class TestCleanupExceptionSafety(unittest.TestCase):
         # why the writer must be stopped first), then turn the DB path
         # into a directory so every subsequent persistence call raises
         # for real.
-        th._close_db()
+        close_db()
         bad = Path(self.tmpdir) / "db-as-directory"
         bad.mkdir()
         th._DB_PATH = bad

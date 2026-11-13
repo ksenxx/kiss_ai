@@ -54,6 +54,9 @@ from kiss.tests.core.models.anthropic_sse_harness import (
     ScriptedAnthropicServer,
     text_message_stream,
 )
+from kiss.tests.core.models.test_audit1005_anthropic_stop_mid_stream import (
+    ended_during_its_lookup,
+)
 
 _OPUS_ID = "us.anthropic.claude-opus-4-6-v1:0"
 _OPUS = "bedrock/" + _OPUS_ID
@@ -688,7 +691,7 @@ def test_blank_token_cleanup_cannot_delete_a_token_saved_meanwhile(tmp_path, mon
 
     def construct() -> None:
         try:
-            _bedrock_client("", httpx2.Timeout(5.0))
+            _bedrock_client("", ("", "", "", "us-east-1"), httpx2.Timeout(5.0))
         except BaseException as exc:  # noqa: BLE001 - reported below
             errors.append(exc)
 
@@ -843,6 +846,21 @@ def test_client_reused_until_credentials_change(monkeypatch) -> None:
     _set_aws(monkeypatch, AWS_ACCESS_KEY_ID="AKIA2", AWS_SECRET_ACCESS_KEY="s2")
     adapter.initialize("three")
     assert adapter.client is not first
+
+
+def test_stop_during_the_address_lookup_ends_a_bedrock_request(monkeypatch) -> None:
+    """The Bedrock client's pool is abortable too: a Stop does not wait for the resolver."""
+    _set_aws(monkeypatch)
+    with _bedrock_server() as server:
+        monkeypatch.setenv("ANTHROPIC_BEDROCK_BASE_URL", server.base_url)
+        adapter = AnthropicModel(_OPUS, api_key="bearer-token", bedrock=True)
+        adapter.initialize("Say ok.")
+        try:
+            error = ended_during_its_lookup(adapter, server.base_url, stopped=True)
+        finally:
+            adapter.client.close()
+        assert isinstance(error, KeyboardInterrupt), repr(error)
+        assert server.requests == [], "the request was sent after it was stopped"
 
 
 def test_keep_prompt_cache_warm_pings_bedrock(monkeypatch) -> None:

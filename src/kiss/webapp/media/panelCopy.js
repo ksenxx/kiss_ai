@@ -305,7 +305,7 @@
     try {
       ok = d.execCommand('copy');
     } catch (_err) {
-      ok = false;
+      // a refused copy command: ok stays false
     } finally {
       d.body.removeChild(ta);
       if (focused && focused !== d.body && focused.isConnected) {

@@ -19,28 +19,46 @@
 4. Two launcher writers at once (V9) are serialized: one that listed
    the processes before the other built the clone and a window started
    from it deleted that clone, executables and all, under the window.
+5. A clone is launched under the writers' lock, held shared: a writer
+   that listed the processes just before the launch deleted it too.
+   A launch waits for no launch, and starts nothing in a clone's place:
+   not the browser itself, nor another browser's clone left at its path.
+6. ``uninstall_launcher`` removes the macOS bundle as a writer replaces
+   it: under that lock, and never while a window runs from it.
+7. The watchdog's sweep counts its strikes anew once the popup has
+   connected again: the strikes from before quit a minimized popup's
+   browser at the first sweep after its connection dropped.
 
-The tools are stubs on ``PATH``; the files, threads and processes are
+The tools are stubs on ``PATH`` (none in 5. and 6.: the real ``ps``, a writer
+held with ``sys.setprofile``); the files, threads and processes are
 real.  The macOS paths run on Linux too: nothing in them is platform
-specific but the tools' names.
+specific but the tools' names.  The clones are macOS code exercised on
+Linux with copies of ``sleep`` for the browser: which executable a launch
+starts shows here, the Dock icon macOS gives its window does not.
 """
 
 from __future__ import annotations
 
+import functools
 import os
+import platform
 import plistlib
 import shutil
+import signal
 import stat
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import pytest
 
 from kiss.core.brand import BRAND
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.server import standalone_app
 from kiss.tests.conftest import posix_only
 
@@ -214,6 +232,27 @@ def test_stuck_desktop_database_refresh_times_out(bin_dir: Path, tmp_path: Path)
     assert entry.is_file()
 
 
+def test_desktop_database_refresh_that_cannot_start_keeps_the_install(
+    bin_dir: Path, tmp_path: Path
+) -> None:
+    """An ``update-desktop-database`` that is no program is skipped: the entry is written."""
+    refresh = bin_dir / "update-desktop-database"
+    refresh.write_bytes(b"\x00\x01 neither a binary nor a script")
+    refresh.chmod(0o755)
+    home = tmp_path / "home"
+    entry = standalone_app.install_launcher(
+        home=home,
+        exe=tmp_path / "kiss-app",
+        state_dir=tmp_path / "state",
+        browser=tmp_path / "chromium",
+        icon=tmp_path / "icon.png",
+        system="Linux",
+    )
+    launcher = standalone_app.linux_launcher_path(home)
+    assert entry == launcher
+    assert launcher.is_file()
+
+
 # ``sips -z H W <png> --out <out>``: waits for ``<png>.gate`` (so the
 # test schedules each conversion's steps), then writes the output;
 # ``iconutil -c icns <iconset> -o <icns>``: needs all 12 sizes present.
@@ -282,7 +321,7 @@ _SLOW_PS = (
 
 
 def _start_window(exe_copy: Path) -> tuple[subprocess.Popen[bytes], int]:
-    """Run the clone's executable (a copy of ``sleep``); it and the executable's inode."""
+    """Run the clone's executable (a copy of ``sleep``); it and its inode."""
     window = subprocess.Popen(
         [str(exe_copy), "60"],
         stdin=subprocess.DEVNULL,
@@ -292,13 +331,19 @@ def _start_window(exe_copy: Path) -> tuple[subprocess.Popen[bytes], int]:
     return window, exe_copy.stat().st_ino
 
 
-def _browser_bundle(root: Path, version: str) -> Path:
-    """A browser bundle of *version* under *root*: a copy of ``sleep`` and a versioned helper."""
-    browser = root / f"Chromium-{version}.app" / "Contents" / "MacOS" / "Chromium"
+def _copy_sleep(executable: Path) -> None:
+    """Write a runnable copy of ``sleep`` to *executable*."""
+    shutil.copy(shutil.which("sleep") or "/bin/sleep", executable)
+    if sys.platform == "darwin":
+        # macOS kills a relocated Apple-signed executable unless it is signed for its new path.
+        subprocess.run(["codesign", "--force", "--sign", "-", executable], check=True)
+
+
+def _browser_bundle(root: Path, version: str, name: str = "Chromium") -> Path:
+    """A browser bundle of *version* with a sleeping executable and versioned helper."""
+    browser = root / f"{name}-{version}.app" / "Contents" / "MacOS" / name
     browser.parent.mkdir(parents=True)
-    # copy, not copy2: macOS marks /bin/sleep "restricted", a file flag
-    # copystat may not set (EPERM).
-    shutil.copy(shutil.which("sleep") or "/bin/sleep", browser)
+    _copy_sleep(browser)
     (browser.parents[1] / "Frameworks").mkdir()
     (browser.parents[1] / "Frameworks" / f"helper-v{version}").write_text(f"helper {version}")
     with (browser.parents[1] / "Info.plist").open("wb") as f:
@@ -393,6 +438,339 @@ def test_a_stale_not_in_use_hint_cannot_delete_a_live_clone_of_another_browser(
         assert clone.stat().st_ino == inode, "the executable the window runs from was replaced"
         assert (bundle / "Contents" / "Frameworks" / "helper-v1").is_file()
         assert standalone_app.macos_bundle_browser(bundle, updated) is None
+    finally:
+        window.kill()
+        window.wait(10)
+
+
+# A child that launches a clone: in the foreground (``exec`` replaces it with the clone), or,
+# given a third argument, detached and stopped where it calls ``start_detached``, its lock
+# held.  Its command line names no bundle: the process listing takes it for no window.
+_LAUNCH = (
+    "import os, signal, sys; from kiss.server import standalone_app as a\n"
+    "home = a.Path(sys.argv[1]); browser, log = home / sys.argv[2], home / 'log'\n"
+    "clone = a.macos_bundle_path(home) / 'Contents' / 'MacOS' / browser.name\n"
+    "def stop(frame, event, arg):\n"
+    "    if event == 'call' and frame.f_code is a.start_detached.__code__:\n"
+    "        os.kill(os.getpid(), signal.SIGSTOP)\n"
+    "sys.setprofile(stop if sys.argv[3:] else None)\n"
+    "a.launch_app([str(clone), '300'], log, browser, foreground=not sys.argv[3:], home=home)\n"
+)
+
+# A child the kernel refuses flock(2), with ENOLCK as a file system without locks does (a
+# seccomp filter; its numbers are those of x86-64 Linux): what launching the clone returned,
+# and the descriptors it kept on the lock file.
+_LAUNCH_WITHOUT_FLOCK = (
+    "import ctypes, os, sys; from kiss.server import standalone_app as a\n"
+    "home = a.Path(sys.argv[1]); browser, bundle = home / sys.argv[2], a.macos_bundle_path(home)\n"
+    "class Rule(ctypes.Structure):\n"
+    "    _fields_ = [('code', ctypes.c_ushort), ('jt', ctypes.c_ubyte), ('jf', ctypes.c_ubyte),\n"
+    "                ('k', ctypes.c_uint)]\n"
+    "class Program(ctypes.Structure):\n"
+    "    _fields_ = [('len', ctypes.c_ushort), ('filter', ctypes.POINTER(Rule))]\n"
+    "rules = (Rule * 4)(Rule(0x20, 0, 0, 0), Rule(0x15, 0, 1, 73),  # the call is flock:\n"
+    "                   Rule(0x06, 0, 0, 0x00050000 | 37),  # fail with ENOLCK\n"
+    "                   Rule(0x06, 0, 0, 0x7fff0000))  # any other call: allowed\n"
+    "program, libc = Program(4, rules), ctypes.CDLL(None, use_errno=True)\n"
+    "assert libc.prctl(38, 1, 0, 0, 0) == 0  # no new privileges, which a filter requires\n"
+    "assert libc.prctl(22, 2, ctypes.byref(program), 0, 0) == 0\n"
+    "clone = bundle / 'Contents' / 'MacOS' / browser.name\n"
+    "started = a.launch_app(\n"
+    "    [str(clone), '0'], home / 'log', browser, foreground=False, home=home)\n"
+    "lock = str(bundle.parent / f'.{bundle.name}.lock')\n"
+    "fds = [f'/proc/self/fd/{fd}' for fd in os.listdir('/proc/self/fd')]\n"
+    "print(started, [fd for fd in fds if os.path.realpath(fd) == lock])\n"
+)
+
+# A child interrupted while it waits for a writer's lock: whether it kept no descriptor open.
+_INTERRUPTED_WAIT = (
+    "import os, signal, sys; from kiss.server import standalone_app as a\n"
+    "signal.signal(signal.SIGALRM, signal.default_int_handler)\n"
+    "kept = os.listdir('/dev/fd')\n"
+    "try:\n"
+    "    signal.setitimer(signal.ITIMER_REAL, 0.5)\n"
+    "    a._lock_shared(a.Path(sys.argv[1]))\n"
+    "except KeyboardInterrupt:\n"
+    "    print(os.listdir('/dev/fd') == kept)\n"
+)
+
+
+def _clone_state(executable: Path) -> tuple[int, list[str]]:
+    """The inode of a bundle's *executable* and the names of the helpers next to it."""
+    return executable.stat().st_ino, os.listdir(executable.parents[1] / "Frameworks")
+
+
+class _Steps:
+    """``sys.setprofile`` hooks: the real functions run, the hooks wait and take notes.
+
+    ``writer`` holds its thread where the process listing returns, under
+    the writer's lock, until ``resume``.  ``launcher`` sets ``reached``
+    once its thread asks for a file lock or has started its window, and
+    keeps in ``started`` the :func:`_clone_state` it started that from.
+    """
+
+    def __init__(self) -> None:
+        self.listed, self.resume, self.reached = (threading.Event() for _ in range(3))
+        self.started: tuple[int, list[str]] | None = None
+
+    def writer(self, frame: FrameType, event: str, arg: object) -> None:
+        if event == "return" and frame.f_code is standalone_app.macos_bundle_in_use.__code__:
+            self.listed.set()
+            self.resume.wait(60)
+
+    def launcher(self, frame: FrameType, event: str, arg: object) -> None:
+        if event == "c_call" and getattr(arg, "__name__", "") == "flock":
+            self.reached.set()
+        elif event == "call" and frame.f_code is standalone_app.start_detached.__code__:
+            self.started = _clone_state(Path(frame.f_locals["command"][0]))
+        elif event == "return" and frame.f_code is standalone_app.start_detached.__code__:
+            self.reached.set()
+
+
+@pytest.mark.parametrize(
+    "case", ["updated browser", "KISS_APP_BROWSER", "other browser", "read-only lock"]
+)
+def test_a_writers_process_listing_cannot_delete_the_clone_a_launch_starts(
+    case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A writer's list-then-delete and the launch of a clone exclude each other.
+
+    Writer B (another browser) has listed the processes, none, under
+    its lock when launch A starts the clone it chose earlier: B then
+    deleted the executables under A's new window.  Now A waits for B
+    and starts the clone of its own browser, which it rebuilds: what B
+    left is another browser's, also under the clone's name ("updated
+    browser": A started it there).  Where ``$KISS_APP_BROWSER`` names
+    the clone itself (also behind a lock file that became read-only
+    after B opened it), what B left in its place is A's to start.
+    """
+    apps = tmp_path / "Applications"
+    bundle = apps / f"{BRAND['product_name']}.app"
+    icon, exe, state = tmp_path / "icon.png", tmp_path / "kiss-app", tmp_path / "state"
+    first = _browser_bundle(tmp_path, "1")
+    other = _browser_bundle(tmp_path, "2", "Brave" if case == "other browser" else "Chromium")
+    clone = standalone_app.write_macos_launcher(apps, BRAND, icon, exe, state, first)
+    assert clone is not None
+    named = case in ("KISS_APP_BROWSER", "read-only lock")  # the clone is the browser to start
+    if named:
+        monkeypatch.setenv("KISS_APP_BROWSER", str(clone))
+    engine = standalone_app.find_browser() if named else first
+    assert engine is not None
+    assert standalone_app.macos_launch_browser(engine, home=tmp_path) == clone
+    steps = _Steps()
+    results: dict[str, object] = {}
+
+    def write() -> None:
+        sys.setprofile(steps.writer)
+        results["B"] = standalone_app.write_macos_launcher(apps, BRAND, icon, exe, state, other)
+
+    def launch() -> None:
+        sys.setprofile(steps.launcher)
+        results["A"] = standalone_app.launch_app(
+            [str(clone), "60"], tmp_path / "kiss-app.log", engine, foreground=False, home=tmp_path
+        )
+
+    writer, launcher = threading.Thread(target=write), threading.Thread(target=launch)
+    try:
+        writer.start()
+        assert steps.listed.wait(60), "writer B never listed the processes"
+        if case == "read-only lock":
+            (apps / f".{bundle.name}.lock").chmod(0o400)
+        launcher.start()
+        assert steps.reached.wait(60), "launch A neither waited for the lock nor started"
+        steps.resume.set()
+        writer.join(180)
+        launcher.join(180)
+        assert results == {"A": True, "B": clone.with_name(other.name)}
+        assert standalone_app.macos_bundle_pid(bundle), "the window is not the brand bundle's"
+        assert _clone_state(clone) == steps.started, "B replaced the clone under A's window"
+        helper = "helper-v2" if named else "helper-v1"
+        assert _clone_state(clone)[1] == [helper], "A started a browser it had not chosen"
+    finally:
+        steps.resume.set()
+        subprocess.run(["pkill", "-f", f"^{tmp_path}/"], check=False)
+
+
+# ``main()`` calls :func:`launch_app` on macOS only: its exit status for "nothing was
+# started" cannot be reached on another platform without a test double for the platform.
+def test_a_launch_that_chose_the_clone_starts_it_or_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A launch that chose the clone never starts the browser itself in its place.
+
+    A writer's lock still held at the deadline ends the launch with a
+    message (the browser itself, no file of the bundle, starts without
+    the lock).  The clone starts as chosen, refreshed first when the
+    browser was updated in place, and in the foreground ``exec`` releases
+    the lock.  A clone that is another browser's by now, gone or still at
+    its path, cannot be rebuilt while that is in use, or a stopped launch
+    holds the lock: the launch ends too, as does an uninstall then.
+    No launch waits for that lock, or for an unreadable or read-only file,
+    and one the system refuses the lock starts the clone as before, unlocked.
+    A wait for the lock that is interrupted keeps no descriptor of it.
+    """
+    apps = tmp_path / "Applications"
+    bundle = apps / f"{BRAND['product_name']}.app"
+    icon, exe, state = tmp_path / "icon.png", tmp_path / "kiss-app", tmp_path / "state"
+    first, other = _browser_bundle(tmp_path, "1"), _browser_bundle(tmp_path, "2", "Brave")
+    replaced = standalone_app.write_macos_launcher(apps, BRAND, icon, exe, state, other)
+    clone = standalone_app.write_macos_launcher(apps, BRAND, icon, exe, state, first)
+    assert replaced is not None and clone is not None
+    log, lock = tmp_path / "kiss-app.log", apps / f".{bundle.name}.lock"
+    launch = functools.partial(standalone_app.launch_app, foreground=False, home=tmp_path)
+    child = [sys.executable, "-c", _LAUNCH, str(tmp_path), str(first.relative_to(tmp_path))]
+    children: list[subprocess.Popen[bytes]] = []
+    monkeypatch.setattr(standalone_app, "SETUP_TIMEOUT_SECS", TIMEOUT)  # first and last step wait
+    try:
+        with exclusive_file_lock(lock):
+            assert launch([str(clone), "60"], log, first) is None
+            assert "still locked" in capsys.readouterr().err
+            assert launch([str(first), "0"], log, first) is True
+            interrupted = subprocess.run(
+                [sys.executable, "-c", _INTERRUPTED_WAIT, str(lock)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert interrupted.stdout == "True\n", interrupted.stderr
+        with (first.parents[1] / "Info.plist").open("wb") as plist:
+            plistlib.dump({"CFBundleVersion": "1.1", "CFBundleShortVersionString": "1.1"}, plist)
+        children.append(subprocess.Popen(child))
+        assert _wait_until(lambda: standalone_app.macos_bundle_pid(bundle) == children[0].pid, 60)
+        assert standalone_app.macos_bundle_browser(bundle, first) == clone, "a stale clone started"
+        running = _clone_state(clone)
+        with exclusive_file_lock(lock, blocking=False) as free:
+            assert free, "the browser inherited the lock of its launch"
+        for chosen, browser in ((replaced, other), (clone, _browser_bundle(tmp_path, "2"))):
+            assert launch([str(chosen), "60"], log, browser) is None
+            assert "no longer" in capsys.readouterr().err
+        children.append(subprocess.Popen([*child, "stopped"]))
+        assert os.WIFSTOPPED(os.waitpid(children[1].pid, os.WUNTRACED)[1])
+        with exclusive_file_lock(lock, blocking=False) as free:
+            assert not free, "a launch does not keep the writers out"
+        with pytest.raises(TimeoutError, match="still locked"):
+            standalone_app.uninstall_launcher(home=tmp_path, system="Darwin")
+        for mode in (0, 0o400, 0o600):  # unreadable: not locked; read-only: locked like any other
+            lock.chmod(mode)
+            assert launch([str(clone), "300"], log, first) is True, "waited for another launch"
+        (tmp_path / "link").symlink_to(clone)  # a browser path that only resolves into the bundle
+        assert launch([str(tmp_path / "link"), "0"], log, tmp_path / "link") is True
+        assert capsys.readouterr().err == "" and _clone_state(clone) == running
+        if sys.platform == "linux" and platform.machine() == "x86_64":  # the filter's numbers
+            refused = subprocess.run(
+                [sys.executable, "-c", _LAUNCH_WITHOUT_FLOCK, *child[3:]],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert refused.stdout == "True []\n", refused.stderr
+        assert launch([str(replaced), "60"], log, replaced) is None  # $KISS_APP_BROWSER named it
+        assert "no longer" in capsys.readouterr().err
+        ran = [standalone_app.macos_bundle_processes(b.parents[2]) for b in (clone, first, other)]
+        assert len(ran[0] or []) == 4 and ran[1:] == [[], []], "not four windows, all the clone's"
+    finally:
+        subprocess.run(["pkill", "-f", f"^{tmp_path}/"], check=False)
+        for started in children:
+            started.kill()
+            started.wait(10)
+
+
+def test_uninstall_removes_the_bundle_as_a_writer_replaces_it(tmp_path: Path) -> None:
+    """``uninstall_launcher`` leaves a bundle a window runs from and takes the writers' lock.
+
+    It deleted the clone under the window, and next to a launch (the
+    stopped one above) or another uninstall.  Of two at once, the second
+    waits while the first lists the processes, and finds nothing left.
+    """
+    apps = tmp_path / "Applications"
+    bundle = apps / f"{BRAND['product_name']}.app"
+    icon, exe, state = tmp_path / "icon.png", tmp_path / "kiss-app", tmp_path / "state"
+    clone = standalone_app.write_macos_launcher(
+        apps, BRAND, icon, exe, state, _browser_bundle(tmp_path, "1")
+    )
+    assert clone is not None
+    steps = _Steps()
+    results: dict[str, Path | None] = {}
+
+    def uninstall(name: str, hook: Callable[[FrameType, str, object], None]) -> None:
+        sys.setprofile(hook)
+        results[name] = standalone_app.uninstall_launcher(home=tmp_path, system="Darwin")
+
+    window, inode = _start_window(clone)
+    try:
+        assert _wait_until(lambda: standalone_app.macos_bundle_in_use(bundle) is True)
+        with pytest.raises(OSError, match="in use"):
+            standalone_app.uninstall_launcher(home=tmp_path, system="Darwin")
+        assert window.poll() is None and clone.stat().st_ino == inode
+    finally:
+        window.kill()
+        window.wait(10)
+    assert _wait_until(lambda: standalone_app.macos_bundle_in_use(bundle) is False)
+    first = threading.Thread(target=uninstall, args=("first", steps.writer))
+    second = threading.Thread(target=uninstall, args=("second", steps.launcher))
+    first.start()
+    try:
+        assert steps.listed.wait(60), "the first uninstall never listed the processes"
+        second.start()
+        assert steps.reached.wait(60), "the second uninstall did not wait for the lock"
+    finally:
+        steps.resume.set()
+    first.join(60)
+    second.join(60)
+    assert results == {"first": bundle, "second": None} and not bundle.exists()
+
+
+def test_a_popup_that_connected_again_gets_the_sweeps_whole_count(
+    bin_dir: Path, tmp_path: Path
+) -> None:
+    """Sweeps from before the popup last connected do not count against its browser.
+
+    The browser (a copy of ``sleep`` in a bundle; the ``osascript`` stub
+    counts no window on screen, as for a minimized popup) is quit by the
+    third sweep in a row.  Two strikes, then the popup connects and its
+    connection drops: the next sweep quit the browser.  Nor may a sweep
+    quit it whose look at the processes spanned such a connection (it
+    is held, by a profile hook, where ``windowless_app_pid`` returns).
+    """
+    _stub(bin_dir, "osascript", "echo 0\n")
+    exe = tmp_path / "Brand.app" / "Contents" / "MacOS" / "Chromium"
+    exe.parent.mkdir(parents=True)
+    _copy_sleep(exe)
+    sweep = functools.partial(standalone_app.sweep_windowless_app, exe.parents[2])
+    looked, reconnected = threading.Event(), threading.Event()
+    swept: list[bool] = []
+
+    def reconnect() -> None:
+        assert standalone_app.app_window_event("open")
+        assert standalone_app.app_window_event("dropped")
+
+    def held_sweep() -> None:
+        sys.setprofile(hold_after_the_look)
+        swept.append(sweep())
+
+    def hold_after_the_look(frame: FrameType, event: str, arg: object) -> None:
+        if event == "return" and frame.f_code is standalone_app.windowless_app_pid.__code__:
+            looked.set()
+            reconnected.wait(60)
+
+    window, _ = _start_window(exe)
+    try:
+        assert _wait_until(lambda: standalone_app.macos_bundle_pid(exe.parents[2]) == window.pid)
+        swept += [sweep(), sweep()]
+        reconnect()
+        swept += [sweep(), sweep()]
+        assert swept == [False] * 4 and window.poll() is None, "strikes from before counted"
+        sweeper = threading.Thread(target=held_sweep)
+        sweeper.start()
+        try:
+            assert looked.wait(60), "the third sweep never looked at the processes"
+            reconnect()
+        finally:
+            reconnected.set()
+            sweeper.join(60)
+        assert swept == [False] * 5 and window.poll() is None, "a sweep spanning a connection quit"
+        assert [sweep(), sweep(), sweep()] == [False, False, True]
+        assert window.wait(10) == -signal.SIGTERM and not sweep()
     finally:
         window.kill()
         window.wait(10)

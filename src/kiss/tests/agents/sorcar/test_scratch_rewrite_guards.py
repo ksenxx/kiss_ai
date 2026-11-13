@@ -34,11 +34,16 @@ from kiss.agents.sorcar.edit_guards import (
 )
 from kiss.agents.sorcar.shell_scan import SimpleCommand, resolve, simple_commands
 from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.processes import bash_version
 from kiss.tests.conftest import host_sed_is_gnu, posix_only
 
 pytestmark = posix_only("bash, GNU sed and python3 are the oracles")
 
 _BODY = "<<'EOF'\nbody\nEOF\n"
+_BASH_VERSION = bash_version()
+_BASH_4 = pytest.mark.skipif(
+    _BASH_VERSION < (4, 0), reason="this Bash feature was added after Bash 3.2",
+)
 
 
 def _created(tmp_path: Path, command: str) -> set[str]:
@@ -78,14 +83,31 @@ def _created(tmp_path: Path, command: str) -> set[str]:
     # an assigning expansion of another variable, and a quoted value under a set IFS
     ("T=tmp/x; : ${U:=y}; mkdir -p $T; cat > $T/f " + _BODY, "tmp/x/f"),
     ('IFS=/; T=tmp/x; mkdir -p "$T"; cat > "$T"/f ' + _BODY, "tmp/x/f"),
+    # audit 2026-11-10 S10-F3: the shell assigns the assignments of one command in order, so
+    # a later one (the commands in it too) sees the values of the earlier ones, before a
+    # command as well; the arguments of ``export`` are expanded before any is assigned
+    ("T=a; T=tmp/x V=$T; mkdir -p $V; cat > $V/f " + _BODY, "tmp/x/f"),
+    ("T=a; T=tmp/x V=$T bash -c 'mkdir -p $V; cat > $V/f <<EOF\nbody\nEOF\n'", "tmp/x/f"),
+    ("T=a; T=tmp/x V=$(mkdir -p $T; cat > $T/f " + _BODY + ")", "tmp/x/f"),
+    ("T=a; T=tmp/x V=($(mkdir -p $T; cat > $T/f " + _BODY + "))", "tmp/x/f"),
+    ("T=tmp/x; export T=a V=$T; mkdir -p $V; cat > $V/f " + _BODY, "tmp/x/f"),
 ])
 def test_assigned_variables_resolve_to_the_file_bash_writes(
     tmp_path: Path, command: str, expected: str,
 ) -> None:
-    assert heredoc_targets(command) == [expected]
-    assert _created(tmp_path, command) == {expected}
-    [target] = [c.outputs[0] for c in simple_commands(command, "/w") if c.outputs]
-    assert resolve(target_cwd(command), target) == f"/w/{expected}"
+    bash3_prefix = _BASH_VERSION < (4, 0) and command.startswith("T=a; T=tmp/x V=")
+    actual = "a/f" if bash3_prefix and " bash -c " in command else expected
+    assert _created(tmp_path, command) == {actual}
+    if bash3_prefix:
+        [target_text] = heredoc_targets(command)
+        assert target_text in ("$T/f", "$V/f")
+        assert heredoc_guard(command, "/w", lambda path: True) == (
+            HEREDOC_UNRESOLVED_VERDICT.format(path=target_text)
+        )
+    else:
+        assert heredoc_targets(command) == [expected]
+        [target] = [c.outputs[0] for c in simple_commands(command, "/w") if c.outputs]
+        assert resolve(target_cwd(command), target) == f"/w/{expected}"
 
 
 def target_cwd(command: str) -> str | None:
@@ -155,10 +177,99 @@ def target_cwd(command: str) -> str | None:
     # A13_astra-8: unquoted, a value is split on IFS once the command sets it
     "IFS=/; T=tmp/x; cat > $T/f " + _BODY,
     "T=tmp/x; IFS=$'/'; cat > $T/f " + _BODY,
+    # audit 2026-11-10 S10-F3: an expansion in a later assignment that assigns an earlier one
+    'T= V=${T:=notes.md}; cat > "$T"/f ' + _BODY,
 ])
 def test_values_only_the_shell_knows_stay_unresolved(command: str) -> None:
     assert heredoc_guard(command, "/w", lambda path: True) == (
         HEREDOC_UNRESOLVED_VERDICT.format(path=heredoc_targets(command)[0]))
+
+
+@pytest.mark.parametrize("command, written", [
+    # audit 2026-11-10 S10-F4: a builtin's target that is an array element, or a name the shell
+    # expands, which may be any variable's (``PWD`` and ``IFS`` too, which the scan otherwise
+    # takes as given; under that ``IFS`` the target is several words and bash writes nothing)
+    pytest.param(
+        "T=tmp/x; printf -v 'T[0]' notes.md; cat > $T/f " + _BODY, "notes.md/f",
+        marks=_BASH_4,
+    ),
+    ('T=tmp/x; printf -v "$(printf T)" notes.md; cat > $T/f ' + _BODY, "notes.md/f"),
+    ('T=tmp/x; printf -v"$(printf T)" notes.md; cat > $T/f ' + _BODY, "notes.md/f"),
+    ('T=tmp/x; read "$(printf T)" <<< notes.md; cat > $T/f ' + _BODY, "notes.md/f"),
+    ('TU=tmp/x; read "T$(printf U)" <<< notes.md; cat > $TU/f ' + _BODY, "notes.md/f"),
+    ('T=tmp/x; read -a"$(printf T)" <<< notes.md; cat > $T/f ' + _BODY, "notes.md/f"),
+    ('T=tmp/x; export "$(printf T)=notes.md"; cat > $T/f ' + _BODY, "notes.md/f"),
+    ('read "$(printf PWD)" <<< "$PWD/notes.md"; cat > $PWD/f ' + _BODY, "notes.md/f"),
+    ('read "$(printf IFS)" <<< /; T=tmp/x; cat > $T/f ' + _BODY, None),
+    # S10-F3, review round 1: an attribute transforms what is assigned, so the assignment
+    # after it sees another value than the one written (the review's three cases), whatever
+    # declares the attribute and wherever; a read-only variable keeps the value it has
+    ('declare -i T; T=scratch V=$T; cat > "$V" ' + _BODY, "0"),
+    pytest.param(
+        'declare -u T; T=victim V=$T; cat > "$V" ' + _BODY, "VICTIM", marks=_BASH_4,
+    ),
+    pytest.param(
+        'declare -l T; T=VICTIM V=$T; cat > "$V" ' + _BODY, "victim", marks=_BASH_4,
+    ),
+    pytest.param(
+        'T=tmp/x; typeset -c T; T=victim V=$T; cat > "$V" ' + _BODY, "Victim",
+        marks=_BASH_4,
+    ),
+    pytest.param(
+        'T=tmp/x; N=T; declare -u "$N"; T=victim V=$T; cat > "$V" ' + _BODY,
+        "VICTIM", marks=_BASH_4,
+    ),
+    pytest.param(
+        'T=tmp/x; f() { local -u T; T=victim V=$T; cat > "$V" ' + _BODY + "}; f",
+        "VICTIM", marks=_BASH_4,
+    ),
+    pytest.param(
+        "T=tmp/x; eval 'declare -u T'; T=victim V=$T; cat > \"$V\" " + _BODY,
+        "VICTIM", marks=_BASH_4,
+    ),
+    ("T=victim; readonly T; T=tmp/x V=$T bash -c 'cat > \"$V\"' " + _BODY, "victim"),
+    # the text ``eval`` runs sees the assignment before it, which the scan does not follow;
+    # nor does it follow one to ``PWD``, which it otherwise takes from the directory
+    ("T=tmp/x; T=victim eval 'cat > \"$T\"' " + _BODY, "victim"),
+    ('PWD=notes.md V=$PWD; cat > "$V"/f ' + _BODY, "notes.md/f"),
+])
+def test_the_bash_tool_refuses_a_write_only_the_shell_can_name(
+    tmp_path: Path, command: str, written: str | None,
+) -> None:
+    """Bash, run on its own, writes *written*, which the text of the command does not name;
+    the Bash tool refuses the command and leaves that file, existing and unread, as it is."""
+    oracle, work = tmp_path / "oracle", tmp_path / "work"
+    for root in (oracle, work):
+        (root / "tmp" / "x").mkdir(parents=True)
+        (root / "notes.md").mkdir()
+    assert _created(oracle, command) == ({written} if written else set())
+    protected = work / (written or "tmp/x/f")
+    protected.write_text("ORIGINAL\n")
+    out = UsefulTools(work_dir=str(work)).Bash(command, "a file only the shell can name")
+    assert out.startswith(HEREDOC_UNRESOLVED_VERDICT.format(path=heredoc_targets(command)[0]))
+    assert protected.read_text() == "ORIGINAL\n"
+
+
+@pytest.mark.parametrize("command, written", [
+    *[(f"mkdir -p tmp/a; {scoped}; cd tmp/a; cat > result.txt " + _BODY, "tmp/a/result.txt")
+      for scoped in ("(set -P)", "X=$(set -P)", "set -P | cat", "set -P & wait",
+                     "bash -c 'set -P'", "set -- -P")],
+    *[(f'mkdir -p tmp; {declared}; cat > "$T" ' + _BODY, "tmp/result.txt") for declared in (
+        "T=tmp/result.txt; readonly CONFIG=release", "declare -i count=1; T=tmp/result.txt")],
+    ("mkdir -p tmp/a tmp/b; cd tmp/a; cd ../b; cat > result.txt " + _BODY, "tmp/b/result.txt"),
+    ("mkdir -p tmp/a; cd tmp/./a; cat > result.txt " + _BODY, "tmp/a/result.txt"),
+    ("mkdir -p tmp/a; cd tmp/a/; cat > result.txt " + _BODY, "tmp/a/result.txt"),
+])
+def test_the_bash_tool_runs_a_scratch_write(tmp_path: Path, command: str, written: str) -> None:
+    """S10, review round 2: bash, on its own, creates *written* alone and the Bash tool runs
+    the command too.  A ``set -P`` that is not the shell's, an attribute of another variable
+    and a ``cd`` between real directories leave the file the text names known."""
+    oracle, work = tmp_path / "oracle", tmp_path / "work"
+    oracle.mkdir()
+    work.mkdir()
+    assert _created(oracle, command) == {written}
+    UsefulTools(work_dir=str(work)).Bash(command, "a scratch file the text names")
+    assert (work / written).read_text() == "body\n"
 
 
 def test_an_optimistic_scan_keeps_what_a_list_assigned() -> None:
@@ -351,6 +462,11 @@ def test_python_heredoc_rewrites_a_scratch_file_only(work: Path) -> None:
     assert (work / "tmp" / "notes.md").read_text() == "one\n"
 
 
+#: A read-replace-write of ``f`` whose replacements are one chain of 400 calls.
+_CHAINED_REWRITE = ("s = open('f').read()\ns = s" + ".replace('a', 'b')" * 400
+                    + "\nopen('f', 'w').write(s)\n")
+
+
 @pytest.mark.parametrize("program, expected", [
     ("p='a.py'\ns=open(p).read()\nopen(p,'w').write(s.replace('x','y'))", ["a.py"]),
     ("from pathlib import Path\np = Path('tmp/x.py')\np.write_text(p.read_text())", ["tmp/x.py"]),
@@ -382,9 +498,24 @@ def test_python_heredoc_rewrites_a_scratch_file_only(work: Path) -> None:
     ("p = 'tmp/out'\nmatch 'notes.md':\n    case p:\n        pass\nopen(p, 'w').write('x')", None),
     ("p = 'tmp/out'\nmatch ['notes.md']:\n    case [*p]:\n        pass\nopen(p, 'w')", None),
     ("p = 'tmp/out'\nmatch {}:\n    case {**p}:\n        pass\nopen(p, 'w')", None),
+    # a long chain of calls is read link by link (``ast.unparse`` recursed into it and
+    # raised RecursionError from 167 links on); a source the parser gives up on
+    # (MemoryError, RecursionError) is one python would not run: nothing known is written
+    pytest.param(_CHAINED_REWRITE, ["f"], id="long-call-chain"),
+    pytest.param("x = " + "lambda: " * 3000 + "1\n" + _CHAINED_REWRITE, None,
+                 id="parser-stack-overflow"),
+    pytest.param("x = s" + ".r()" * 50000 + "\n" + _CHAINED_REWRITE, None, id="ast-recursion"),
 ])
 def test_python_written_paths(program: str, expected: list[str] | None) -> None:
     assert python_written_paths(program) == expected
+
+
+def test_a_python_rewrite_too_deep_to_read_is_refused_not_raised() -> None:
+    """The guard refuses the rewrites of :func:`test_python_written_paths` it cannot read
+    to their end; it raised ``RecursionError`` (or ``MemoryError``) out of the tool call."""
+    for program in (_CHAINED_REWRITE, "x = " + "lambda: " * 3000 + "1\n" + _CHAINED_REWRITE):
+        refusal = rewrite_guard(f"python3 - <<'EOF'\n{program}EOF")
+        assert refusal is not None and refusal.startswith("REFUSED: the python heredoc did NOT run")
 
 
 def test_a_heredoc_copying_python_rewrite_text_is_data(work: Path) -> None:

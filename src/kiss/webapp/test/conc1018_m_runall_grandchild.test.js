@@ -185,11 +185,10 @@ function writeSuite(dir, pidFile, {detached, exits, startDelayMs = 0}) {
 }
 
 /** Run the scratch runner in `dir` under the subreaper helper; returns
- * `{out, status, fates, elapsed}`. */
+ * `{out, status, fates}`. */
 function runUnderSubreaper(dir, mode) {
   const pidFile = path.join(dir, 'pids');
   const resultFile = path.join(dir, 'result.json');
-  const started = Date.now();
   const res = spawnSync(
     'python3',
     [
@@ -207,7 +206,7 @@ function runUnderSubreaper(dir, mode) {
   assert.ok(!res.error, `the helper ran: ${res.error}\n${out}`);
   assert.strictEqual(res.status, 0, `the helper finished\n${out}`);
   const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
-  return {out, elapsed: Date.now() - started, ...result};
+  return {out, ...result};
 }
 
 function withScratchRunner(suiteOptions, mode, check) {
@@ -221,6 +220,8 @@ function withScratchRunner(suiteOptions, mode, check) {
 }
 
 function assertTimedOutRun(r, message) {
+  // A runner that waits for the stalled suite anyway is still running
+  // when the helper's 30 s are up: status "hung".
   assert.notStrictEqual(
     r.status,
     'hung',
@@ -230,14 +231,6 @@ function assertTimedOutRun(r, message) {
   assert.ok(r.out.includes(message), `the timed-out suite is named\n${r.out}`);
   assert.ok(r.out.includes(READY_MESSAGE), `output flushed\n${r.out}`);
   assert.ok(r.out.includes('0/1 suites passed'), r.out);
-  // `status === 1` and the reaped fate already prove the runner acted on
-  // the timeout; the elapsed bound only guards against a runner that
-  // waits for the stalled suite anyway, so it allows for three process
-  // start-ups under a loaded 32-way parallel run.
-  assert.ok(
-    r.elapsed < SHORT_TIMEOUT_MS + 30000,
-    `the runner reported soon after the timeout (${r.elapsed} ms)`,
-  );
   assert.strictEqual(r.fates.suite, 'not-ours', 'the runner reaped the suite');
 }
 

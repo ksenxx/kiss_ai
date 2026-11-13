@@ -6,10 +6,14 @@
 
 // Helpers shared by the remote meta-drawer suites (remoteMetaMobileDrawer,
 // remoteMetaPanelInfo, sidebarChatModeDrawerAndComposer): the drawer's
-// open state and the getTaskUpdate polls the page posts.
+// open state, the getTaskUpdate polls the page posts and the daemon's
+// reply to one.
 
 const assert = require('assert');
-const {ofType, lastMsg} = require('./simplify2_harness');
+const {send, ofType, lastMsg} = require('./simplify2_harness');
+
+// How often main.js polls for the open panel's task update.
+const POLL_MS = 5000;
 
 /** Whether the meta drawer is open. */
 function drawerOpen(win) {
@@ -38,4 +42,36 @@ function lastPoll(wv) {
   return poll;
 }
 
-module.exports = {drawerOpen, overlayOpen, polls, pollCount, lastPoll};
+/** A complete taskUpdate reply to *poll*; *fields* override the defaults. */
+function replyToPoll(win, poll, fields) {
+  send(
+    win,
+    Object.assign(
+      {
+        type: 'taskUpdate',
+        tabId: poll.tabId,
+        token: poll.token,
+        taskId: 'task-1',
+        exists: true,
+        sig: 'sig-1',
+        content: '',
+        error: '',
+        running: false,
+        cost: 0,
+        updatedAt: 0,
+        dueAt: 0,
+      },
+      fields,
+    ),
+  );
+}
+
+module.exports = {
+  POLL_MS,
+  drawerOpen,
+  overlayOpen,
+  polls,
+  pollCount,
+  lastPoll,
+  replyToPoll,
+};

@@ -21,14 +21,17 @@ import json
 import os
 import stat
 from collections.abc import Coroutine
+from types import CodeType
 from typing import Any
 
 from websockets.asyncio.client import connect
 
+from kiss.server import web_server
 from kiss.server.sorcar import API, validate_command
 from kiss.server.web_server import _file_version
 from kiss.tests.conftest import is_root, posix_only
 from kiss.tests.server.conftest import no_verify_ssl
+from kiss.tests.server.pause import Pause
 from kiss.tests.server.test_content_tab_file_links import (
     _PY_SOURCE,
     _ServerHarness,
@@ -80,6 +83,33 @@ def _open(harness: _ServerHarness, path: str) -> dict:
     return harness.run(
         _first_reply(harness, {"type": "openFile", "path": path}, "fileContent"),
     )
+
+
+def _reply_after_fifo_swap(
+    harness: _ServerHarness, held_at: CodeType, payload: dict, reply_type: str,
+) -> dict:
+    """Send *payload*; once its worker enters *held_at*, make the file a FIFO.
+
+    The worker has resolved ``payload["path"]`` as a regular file by
+    then and has not opened it yet.  Returns the reply, which must come
+    without a writer ever opening the FIFO.
+    """
+    target = payload["path"]
+    with Pause(held_at, lambda frame_locals: True) as pause:
+        pending = asyncio.run_coroutine_threadsafe(
+            _first_reply(harness, payload, reply_type), harness.loop,
+        )
+        try:
+            assert pause.paused.wait(10)
+            os.unlink(target)
+            os.mkfifo(target)
+            pause.release()
+            return pending.result(10)
+        finally:
+            # A worker a regression left blocked in the FIFO's open is
+            # let go: a writer's end opens and closes.
+            os.close(os.open(target, os.O_RDWR | os.O_NONBLOCK))
+            os.unlink(target)
 
 
 class TestCatalog:
@@ -427,3 +457,44 @@ class TestSaveFile:
         })
         assert reply["ok"] is False and reply["conflict"] is True
         assert target.read_text() == "g\n"
+
+    def test_save_sent_again_after_a_lost_reply_is_no_conflict(self, harness) -> None:
+        """A save's reply can be lost with the connection; the client then
+        sends the save again, still with the stamp of the text it opened.
+        The file already holds the text: saved, not "changed on disk"."""
+        target = harness.work_dir / "sent_again.txt"
+        target.write_text("old\n", newline="")
+        payload = {"path": str(target), "content": "new\n", "version": _file_version(b"old\n")}
+        first = _save(harness, payload)
+        again = _save(harness, payload)
+        assert first["ok"] is True and again["ok"] is True, again
+        assert again["version"] == first["version"] == _file_version(b"new\n")
+        assert target.read_text() == "new\n"
+
+    @posix_only("named pipes")
+    def test_file_swapped_for_a_fifo_is_refused_without_blocking(self, harness) -> None:
+        """A name that becomes a FIFO after it was resolved as a regular
+        file: the open and the save's version check answer with an
+        error at once.  A plain ``open`` of a FIFO waits for a writer,
+        and the save would keep every other save out meanwhile."""
+        target = harness.work_dir / "swapped.txt"
+        target.write_text("old\n")
+        opened = _reply_after_fifo_swap(
+            harness, web_server._inline_binary_mime.__code__,
+            {"type": "openFile", "path": str(target)}, "fileContent",
+        )
+        assert "Not a regular file" in opened["error"], opened
+        target.write_text("old\n")
+        saved = _reply_after_fifo_swap(
+            harness, web_server._open_regular_file.__code__,
+            {
+                "type": "saveFile", "path": str(target), "content": "new\n",
+                "version": _file_version(b"old\n"),
+            },
+            "fileSaved",
+        )
+        assert saved["ok"] is False and "Not a regular file" in saved["error"], saved
+        # The save lock is free again: another file still saves.
+        other = harness.work_dir / "after_fifo.txt"
+        other.write_text("a\n")
+        assert _save(harness, {"path": str(other), "content": "b\n"})["ok"] is True

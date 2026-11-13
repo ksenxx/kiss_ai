@@ -38,16 +38,20 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sqlite3
 import time
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from itertools import batched
+from pathlib import Path, PurePosixPath
 from typing import Any, TypeGuard
 
 from kiss.agents.sorcar.fanout_guard import is_review_task
+from kiss.core.brand import HOME_DIR
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
 from kiss.core.printer import event_cost, parse_cost
 from kiss.core.tool_verdict import REFUSED_PREFIX
@@ -149,6 +153,14 @@ class TaskRow:
     """Routine calls that ran at the lowered ``routine_turn_effort``."""
 
 
+def _count(value: Any) -> int:
+    """Return an event's count field as an int: 0 when it is missing or not a number."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _bucket(context_tokens: int) -> str:
     for name, upper in CONTEXT_BUCKETS:
         if context_tokens < upper:
@@ -157,23 +169,50 @@ def _bucket(context_tokens: int) -> str:
 
 
 def _is_agents_md_read(event: dict[str, Any]) -> bool:
-    """Whether *event* read the repository's ``AGENTS.md`` (``SORCAR.md`` before 2026.10.2)."""
-    path = str(event.get("path") or event.get("file_path") or "")
-    name = path.replace("\\", "/").rstrip("/")
-    return name.endswith(("AGENTS.md", "SORCAR.md")) and "/.kiss/" not in path
+    """Whether *event* read a repository's ``AGENTS.md`` (``SORCAR.md`` before 2026.10.2).
+
+    The file of that name directly in a Sorcar home is the user's standing
+    instructions, not a repository's.  A home is :func:`kiss_home` (a
+    leading ``~/`` is expanded as the Read tool does), or any directory
+    named as this brand's home or the stock ``.kiss`` (another user's, or
+    one from before a re-brand).  A repository below a home (the bootstrap
+    clone, a ``channel_work`` project) is counted.
+    """
+    raw = str(event.get("path") or event.get("file_path") or "")
+    if raw[:2] in ("~/", "~\\"):
+        raw = os.path.expanduser("~") + raw[1:]
+    path = PurePosixPath(raw.replace("\\", "/"))
+    directory = path.parent
+    return (
+        path.name in ("AGENTS.md", "SORCAR.md")
+        and directory.name not in (".kiss", HOME_DIR)
+        and directory != PurePosixPath(kiss_home().as_posix())
+    )
+
+
+BIND_BATCH = 500
+"""Task ids bound to one statement.  A stock SQLite takes 32,766 variables, fewer than a
+long window has tasks or than its tasks have parents that started before it."""
+
+
+def _marks(batch: tuple[str, ...]) -> str:
+    """Return one ``?`` per id of *batch*, comma-separated, for an ``IN (...)`` list."""
+    return ",".join("?" * len(batch))
+
+
+def _events_of(conn: sqlite3.Connection, task_ids: list[str]) -> Iterator[tuple[str, str]]:
+    """Yield ``(task_id, event_json)`` for every event of *task_ids*, each task's in order."""
+    for batch in batched(task_ids, BIND_BATCH):
+        yield from conn.execute(
+            f"SELECT task_id, event_json FROM events WHERE task_id IN ({_marks(batch)}) "
+            "ORDER BY task_id, seq",
+            batch,
+        )
 
 
 def _scan_events(conn: sqlite3.Connection, rows: dict[str, TaskRow]) -> None:
     """Fill the per-task event figures of every task in *rows*."""
-    if not rows:
-        return
-    placeholders = ",".join("?" * len(rows))
-    cur = conn.execute(
-        f"SELECT task_id, event_json FROM events WHERE task_id IN ({placeholders}) "
-        "ORDER BY task_id, seq",
-        list(rows),
-    )
-    seen_reads: dict[str, set[tuple[str, Any, Any]]] = defaultdict(set)
+    seen_reads: dict[str, set[tuple[str, str, str]]] = defaultdict(set)
     last_cost: dict[str, float] = {}
     last_steps: dict[str, int] = {}
     # Peak (context, window) of the current session of each task.  A
@@ -187,7 +226,7 @@ def _scan_events(conn: sqlite3.Connection, rows: dict[str, TaskRow]) -> None:
     last_tool: dict[str, str] = {}
     # Characters streamed as system_output since the last tool_call.
     streamed: dict[str, int] = defaultdict(int)
-    for task_id, event_json in cur:
+    for task_id, event_json in _events_of(conn, list(rows)):
         try:
             event = json.loads(event_json)
         except ValueError:
@@ -214,7 +253,7 @@ def _scan_events(conn: sqlite3.Connection, rows: dict[str, TaskRow]) -> None:
             if reason is not None:
                 row.refusals[reason] = row.refusals.get(reason, 0) + 1
         elif kind == "llm_call":
-            output_tokens = int(event.get("output_tokens") or 0)
+            output_tokens = _count(event.get("output_tokens"))
             row.llm_calls += 1
             row.llm_cost += parse_cost(event.get("cost")) or 0.0
             row.llm_output_tokens += output_tokens
@@ -227,7 +266,11 @@ def _scan_events(conn: sqlite3.Connection, rows: dict[str, TaskRow]) -> None:
             path = str(event.get("path") or event.get("file_path") or "")
             if _is_agents_md_read(event):
                 row.agents_md_reads += 1
-            key = (path, event.get("start_line"), event.get("max_lines"))
+            # The range is persisted as strings under ``extras``
+            # (JsonPrinter._format_tool_call); a bound not given is Read's default.
+            extras = event.get("extras")
+            bounds = extras if isinstance(extras, dict) else {}
+            key = (path, str(bounds.get("start_line", 1)), str(bounds.get("max_lines", 2000)))
             if key in seen_reads[task_id]:
                 row.repeat_reads += 1
             seen_reads[task_id].add(key)
@@ -249,7 +292,7 @@ def _scan_events(conn: sqlite3.Connection, rows: dict[str, TaskRow]) -> None:
             if row.first_context is None:
                 row.first_context = context
             cost = event_cost(event) or 0.0
-            steps = int(event.get("total_steps") or 0)
+            steps = _count(event.get("total_steps"))
             delta = max(0.0, cost - last_cost.get(task_id, 0.0))
             last_cost[task_id] = cost
             # Only a genuine model step (step counter advanced by one)
@@ -286,8 +329,11 @@ def load_tasks(db_path: str, since: float, until: float | None = None) -> dict[s
     Returns:
         Task rows keyed by task id.
     """
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"{Path(db_path).absolute().as_uri()}?mode=ro", uri=True)
     try:
+        # One read transaction: the rows and their events are those of one
+        # moment, whatever the daemon commits while they are read.
+        conn.execute("BEGIN")
         rows = _select_rows(
             conn, "timestamp >= ? AND timestamp < ?",
             (since, until if until is not None else 1e18),
@@ -298,9 +344,9 @@ def load_tasks(db_path: str, since: float, until: float | None = None) -> dict[s
         # root of its own (their own figures are not counted).
         missing = {r.parent_id for r in rows.values() if r.parent_id} - set(rows)
         while missing:
-            ancestors = _select_rows(
-                conn, f"id IN ({','.join('?' * len(missing))})", tuple(missing),
-            )
+            ancestors: dict[str, TaskRow] = {}
+            for batch in batched(missing, BIND_BATCH):
+                ancestors.update(_select_rows(conn, f"id IN ({_marks(batch)})", batch))
             for row in ancestors.values():
                 row.in_window = False
             rows.update(ancestors)
@@ -392,10 +438,11 @@ def compute_kpis(rows: dict[str, TaskRow]) -> dict[str, Any]:
     for r in counted:
         tree_cost[_root_of(r, rows)] += r.cost
     for r in window:
-        # Topmost reviewer rows only: their cost already includes the
-        # reviewers (and helpers) nested under them.
+        # Topmost in-window reviewer-owned rows only: their cost already
+        # includes the reviewers (and helpers) nested under them.  The
+        # helper of a reviewer that started before the window is one.
         parent = rows.get(r.parent_id)
-        if depths[r.id] > 0 and (parent is None or depths[parent.id] == 0):
+        if depths[r.id] > 0 and (parent is None or not parent.in_window or depths[parent.id] == 0):
             tree_review_cost[_root_of(r, rows)] += r.cost
     review_shares = {
         root: min(1.0, tree_review_cost[root] / tree_cost[root])
@@ -433,7 +480,7 @@ def compute_kpis(rows: dict[str, TaskRow]) -> dict[str, Any]:
         "tree_cost_median_usd": round(_percentile(tree_costs, 0.5), 4),
         "tree_cost_p90_usd": round(_percentile(tree_costs, 0.9), 4),
         "cost_per_llm_call_usd": round(llm_cost / llm_calls, 4) if llm_calls else 0.0,
-        "agents_md_reads": sum(r.agents_md_reads for r in rows.values()),
+        "agents_md_reads": sum(r.agents_md_reads for r in window),
         "reads": reads,
         "repeat_reads": repeat_reads,
         "repeat_read_ratio": round(repeat_reads / reads, 4) if reads else 0.0,

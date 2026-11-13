@@ -34,6 +34,7 @@ in that chat do not, so ``/discover`` is never sent after itself.
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -385,8 +386,9 @@ class _LabScript:
         lab = self.lab()
         step = len(self.requests) - 1
         # Paths in a Bash command are spelt for bash (Git Bash on
-        # Windows), where the backslashes of a native path are escapes.
-        lab_sh, caller_sh = lab.as_posix(), self.caller_tree.as_posix()
+        # Windows), where the backslashes of a native path are escapes,
+        # and quoted: a temporary directory may hold a space.
+        lab_sh, caller_sh = shlex.quote(lab.as_posix()), shlex.quote(self.caller_tree.as_posix())
         if step == 0:
             return tool_call_response("Bash", {
                 "description": "copy the caller's current files to the lab",
@@ -403,11 +405,13 @@ class _LabScript:
             )
         if step == 3:
             base = run_git(lab, "rev-parse", "HEAD").stdout.strip()
+            tree_sh = shlex.quote(self.lab_tree().as_posix())
+            patch_sh = shlex.quote((lab.parent / "best.patch").as_posix())
             return tool_call_response("Bash", {
                 "description": "commit the idea and write the patch",
                 "command": (
-                    f"cd {self.lab_tree().as_posix()} && git add -A && {_COMMIT} idea"
-                    f" && git diff --binary {base} HEAD > {(lab.parent / 'best.patch').as_posix()}"
+                    f"cd {tree_sh} && git add -A && {_COMMIT} idea"
+                    f" && git diff --binary {base} HEAD > {patch_sh}"
                 ),
             })
         return finish_response("The best point is in best.patch.")
@@ -481,16 +485,15 @@ def test_a_sub_agent_lab_leaves_the_callers_tree_alone_and_hands_back_a_patch() 
         })
 
         reqs = script.requests
-        assert len(reqs) == 6, [_last_message(r)[-300:] for r in reqs] or printer.captured
+        assert len(reqs) == 6, [_last_message(r)[-300:] for r in reqs] or [
+            str(event.get("summary")) for event in printer.events_of_type("result")
+        ]
         # The SEA ran, as a sub-agent, with the loop in its prompt.
         assert discover_sea.DISCOVERY_INSTRUCTIONS in request_text(reqs[0])
         assert "- Is subagent: yes\n" in request_text(reqs[0])
         assert "Created worktree" in _last_message(reqs[2])
         assert "Successfully wrote" in _last_message(reqs[3])
         assert "has not been merged" in _last_message(reqs[5])
-        assert "files were changed after the last shell command" not in "".join(
-            _last_message(r) for r in reqs
-        )
         lab, lab_tree = script.lab(), script.lab_tree()
         assert lab_tree.parent == lab / ".kiss-worktrees"
         assert (lab_tree / "model.py").read_text(encoding="utf-8") == "SCORE = 3\n"

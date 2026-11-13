@@ -357,6 +357,7 @@ class TestMyModelsAliasSync:
         assert raw["gpt-7-low"]["use_responses_api"] is True
 
 
+@pytest.mark.live_api
 @pytest.mark.skipif(
     not os.environ.get("OPENAI_API_KEY"),
     reason="OPENAI_API_KEY not set",

@@ -97,12 +97,13 @@ import logging
 import os
 import random
 import re
-import select
+import selectors
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import Future
 from importlib import import_module
 from types import ModuleType
 from typing import Any
@@ -110,6 +111,7 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlsplit
 
 from kiss.core.locked import locked
 from kiss.core.processes import terminate_process_group
+from kiss.core.tool_interrupt import result_interruptible
 
 logger = logging.getLogger(__name__)
 
@@ -411,7 +413,6 @@ _XVFB_WRAPPER = (
 )
 
 
-@locked(_XVFB_LOCK)
 def virtual_display() -> str | None:
     """Return the ``DISPLAY`` of a process-wide Xvfb, starting it on demand.
 
@@ -421,21 +422,72 @@ def virtual_display() -> str | None:
     launches and is torn down at interpreter exit (or, if the process is
     killed, by the wrapper shell loop within two seconds).
 
-    The lock is taken through :func:`locked`: the browser tools call
-    this on the task thread, where the runner's Stop injection would
-    leak a plain ``with`` (CPython gh-74174) and hang every later
-    browser launch of the daemon.
+    The browser tools call this on the task thread, where the runner's
+    Stop is an exception raised at any check point of the bytecode:
+    inside ``Popen`` once the wrapper is forked, or as a call returns
+    and before its result is bound, where nothing could reap the
+    wrapper or close its pipe (and a plain ``with`` leaks the lock,
+    CPython gh-74174).  The display is therefore started and published
+    by a thread of its own, which receives no injection
+    (:func:`_provide_display`); the caller only waits for it, and a
+    start-up whose caller was stopped ends published or terminated.
 
     Returns:
         A display name such as ``":1"``, or ``None`` when this is not
         Linux or the ``Xvfb`` binary is not installed (the caller then
         falls back to real headless mode).
+
+    Raises:
+        ToolCallInterrupted: When the calling thread's tool call was
+            interrupted while the display was starting.
+    """
+    abandoned = threading.Event()
+    provided: Future[str | None] = Future()
+    try:
+        threading.Thread(target=_provide_display, args=(provided, abandoned), daemon=True).start()
+        return result_interruptible(provided)
+    finally:
+        abandoned.set()
+
+
+def _provide_display(provided: Future[str | None], abandoned: threading.Event) -> None:
+    """Thread body of :func:`virtual_display`: resolve *provided* with the shared display.
+
+    *provided* is resolved with the lock released: a caller stopped
+    inside ``Future.result`` may have leaked the future's own lock, and
+    a thread parked on that one must not hold the display's.
+
+    Args:
+        provided: Receives the display, ``None``, or the error raised.
+        abandoned: Set once the caller stopped waiting.
+    """
+    try:
+        with _XVFB_LOCK:
+            display = _shared_display(abandoned)
+    except BaseException as error:  # the caller's to report
+        provided.set_exception(error)
+    else:
+        provided.set_result(display)
+
+
+def _shared_display(abandoned: threading.Event) -> str | None:
+    """Return the display of the running Xvfb, starting one when none runs.
+
+    Called with ``_XVFB_LOCK`` held, on the thread of :func:`_provide_display`.
+
+    Args:
+        abandoned: Set once the caller of :func:`virtual_display` stopped
+            waiting: no Xvfb is started for it, and one that has not
+            reported its display yet is given up.
+
+    Returns:
+        What :func:`virtual_display` returns.
     """
     global _XVFB_PROC, _XVFB_DISPLAY
     if _XVFB_PROC is not None and _XVFB_PROC.poll() is None:
         return _XVFB_DISPLAY
     _XVFB_PROC, _XVFB_DISPLAY = None, None
-    if not sys.platform.startswith("linux") or shutil.which("Xvfb") is None:
+    if abandoned.is_set() or not sys.platform.startswith("linux") or shutil.which("Xvfb") is None:
         return None
     read_fd = write_fd = -1
     proc: subprocess.Popen[bytes] | None = None
@@ -451,20 +503,17 @@ def virtual_display() -> str | None:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
+            # Forgotten before it is closed: after an error at the close, the
+            # ``finally`` must not close a number that may be another thread's by then.
+            fd, write_fd = write_fd, -1
+            os.close(fd)
+            display = _read_display_number(read_fd, proc, abandoned)
         except OSError:
-            # Descriptor or process exhaustion (the pipe or Popen's own
-            # pipe): browse headless rather than fail the whole tool.
+            # Descriptor or process exhaustion (the pipe, Popen's own pipe or
+            # the selector): browse headless rather than fail the whole tool.
             logger.warning("could not start Xvfb; falling back to headless", exc_info=True)
             return None
-        os.close(write_fd)
-        write_fd = -1
-        display = _read_display_number(read_fd, proc)
         if display is not None:
-            # Published inside the guarded region, the owner last: a Stop
-            # injected into the task thread between the read and the
-            # publication (or between the two stores) finds the owner
-            # unset below and terminates the wrapper, where it used to
-            # outlive the call with nothing able to reap it.
             _XVFB_DISPLAY = display
             _XVFB_PROC = proc
     finally:
@@ -474,43 +523,53 @@ def virtual_display() -> str | None:
         if read_fd >= 0:
             os.close(read_fd)
         if proc is not None and _XVFB_PROC is not proc and proc.poll() is None:
-            # Timed out, or a Stop injected into the task thread before
-            # the owner was published: the wrapper (and its Xvfb) must
-            # not outlive this call unowned, since ``_XVFB_PROC`` is
+            # Timed out, abandoned or failed: the wrapper (and its Xvfb)
+            # must not outlive this call unowned, since ``_XVFB_PROC`` is
             # still ``None`` and nothing could reap it.  A wrapper that
             # ``_read_display_number`` already saw exit is reaped and its
             # group gone (the wrapper kills Xvfb before it exits), so its
             # pgid may belong to someone else by now: no signal.
             terminate_process_group(proc)
-    if display is None:
+    if display is not None:
+        logger.info("virtual display %s started for headed Chromium", display)
+    elif not abandoned.is_set():  # else nobody is left to fall back
         logger.warning("Xvfb did not start; falling back to headless Chromium")
-        return None
-    logger.info("virtual display %s started for headed Chromium", display)
     return display
 
 
-def _read_display_number(read_fd: int, proc: subprocess.Popen[bytes]) -> str | None:
+def _read_display_number(
+    read_fd: int, proc: subprocess.Popen[bytes], abandoned: threading.Event
+) -> str | None:
     """Read the display number Xvfb writes once it accepts connections.
+
+    The wait uses the platform's readiness API, not ``select``, whose
+    ``FD_SETSIZE`` limit rejects a pipe numbered 1024 or higher (a
+    daemon with that many sockets and files open).
 
     Args:
         read_fd: Read end of the ``-displayfd`` pipe.
         proc: The wrapper process, polled so a crashed Xvfb is noticed.
+        abandoned: Set once the caller of :func:`virtual_display`
+            stopped waiting: the start-up is given up.
 
     Returns:
-        ``":N"`` or ``None`` on timeout / early exit.
+        ``":N"`` or ``None`` on timeout / early exit / *abandoned*.
     """
     deadline = time.monotonic() + _XVFB_START_TIMEOUT_SECS
     data = b""
-    while not data.endswith(b"\n"):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or proc.poll() is not None:  # pragma: no cover — timing
-            return None
-        ready, _, _ = select.select([read_fd], [], [], min(remaining, 0.5))
-        if ready:
-            chunk = os.read(read_fd, 16)
-            if not chunk:
+    with selectors.DefaultSelector() as ready:
+        ready.register(read_fd, selectors.EVENT_READ)
+        while not data.endswith(b"\n"):
+            if abandoned.is_set():
                 return None
-            data += chunk
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or proc.poll() is not None:  # pragma: no cover — timing
+                return None
+            if ready.select(min(remaining, 0.5)):
+                chunk = os.read(read_fd, 16)
+                if not chunk:
+                    return None
+                data += chunk
     return ":" + data.decode().strip()
 
 
@@ -976,18 +1035,18 @@ def hold_tremor(x: float, y: float) -> tuple[float, float]:
 # those sites also carry an empty ``#px-captcha`` placeholder, which is why
 # the page text decides that a check is showing and this only locates the
 # widget.
-PRESS_AND_HOLD_BOX_JS = """() => {
-  const el = document.querySelector('#px-captcha');
-  if (!el) return [];
-  const r = el.getBoundingClientRect();
-  if (r.width < 40 || r.height < 20) return [];
-  return [{x: r.x, y: r.y, width: r.width, height: r.height}];
-}"""
-
 # Smallest box taken for the bar: content pages' empty ``#px-captcha``
 # placeholders and collapsed frames are narrower or shorter.
 _MIN_BAR_WIDTH = 40.0
 _MIN_BAR_HEIGHT = 20.0
+PRESS_AND_HOLD_BOX_JS = f"""() => {{
+  const el = document.querySelector('#px-captcha');
+  if (!el) return [];
+  const r = el.getBoundingClientRect();
+  if (r.width < {_MIN_BAR_WIDTH:g} || r.height < {_MIN_BAR_HEIGHT:g}) return [];
+  return [{{x: r.x, y: r.y, width: r.width, height: r.height}}];
+}}"""
+
 # Buttons looked at in the widget's visible frame (the real one has one).
 _MAX_BAR_BUTTONS = 4
 
@@ -1042,7 +1101,11 @@ def press_and_hold_box(page: Any, widget: dict[str, float]) -> dict[str, float] 
         if frame.parent_frame is None:
             continue
         try:
-            box: dict[str, float] | None = frame.frame_element().bounding_box()
+            owner = frame.frame_element()
+            try:
+                box: dict[str, float] | None = owner.bounding_box()
+            finally:
+                owner.dispose()  # the widget is polled: a kept handle per frame adds up
             if box is None or not _usable_box(box, widget):
                 continue  # a hidden copy, a collapsed frame, or one elsewhere
             buttons = frame.get_by_role("button")

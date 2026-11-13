@@ -11,8 +11,7 @@ const {makeRow, sendHistory} = require('./history_helpers');
 
 const OLD_TASK = makeRow({task_id: '7', title: 'Old task', has_events: true});
 
-function makePage(opts) {
-  const {desktopMatches = true} = opts || {};
+function makePage({desktopMatches}) {
   // desktopMatches === null: no window.matchMedia at all.
   let fireChange = null;
   const {win, posted} = makeChatPage({

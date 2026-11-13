@@ -14,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 const {MEDIA, send, lastMsg, click: clickIn} = require('./simplify2_harness');
+const {trackWindow} = require('./workdir_helpers');
 
 const SHARE_JS = fs.readFileSync(path.join(MEDIA, 'share.js'), 'utf8');
 
@@ -48,7 +49,8 @@ function shareWithTasks(wv, tasks, replyExtra) {
 
 /**
  * Load share.js into a fresh page whose #app holds `bodyHtml`, the
- * exact document shape _build_share_page writes.
+ * exact document shape _build_share_page writes.  The window is
+ * tracked: workdir_helpers' closeWindows() closes it.
  */
 function makeSharePage(bodyHtml) {
   const dom = new JSDOM(
@@ -60,6 +62,7 @@ function makeSharePage(bodyHtml) {
   const win = dom.window;
   win.scrollTo = function () {};
   win.eval(SHARE_JS + '\n//# sourceURL=share.js');
+  trackWindow(win);
   return win;
 }
 

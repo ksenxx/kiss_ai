@@ -38,20 +38,17 @@ from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemo
 
 def _redirect_db(tmpdir: str) -> tuple:
     """Redirect persistence DB to a temp dir."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    th._close_thread_db()
+    (th._DB_PATH, th._KISS_DIR) = saved
 
 
 def _make_repo(path: Path) -> Path:
@@ -324,7 +321,7 @@ class TestChatSorcarAgent:
         agent.discard()
 
 
-_WT_PROPERTIES = ("_repo_root", "_wt_branch", "_original_branch", "_wt_dir", "_wt_work_dir")
+_WT_PROPERTIES = ("_repo_root", "_wt_branch", "_wt_dir", "_wt_work_dir")
 
 
 class _PausedPropertyReader(threading.Thread):
@@ -379,8 +376,7 @@ def test_worktree_properties_survive_a_merge_between_lookup_and_dereference() ->
         assert agent.create_worktree().startswith("Created worktree")
         wt = agent._wt
         assert wt is not None
-        expected = [wt.repo_root, wt.branch, wt.original_branch, wt.wt_dir,
-                    SorcarAgent._wt_work_dir_of(wt)]
+        expected = [wt.repo_root, wt.branch, wt.wt_dir, SorcarAgent._wt_work_dir_of(wt)]
         readers = [_PausedPropertyReader(agent, name) for name in _WT_PROPERTIES]
         for reader in readers:
             reader.start()

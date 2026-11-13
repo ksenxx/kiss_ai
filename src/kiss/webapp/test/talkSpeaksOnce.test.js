@@ -9,16 +9,9 @@ const assert = require('assert');
 const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {installAudio} = require('./speech_helpers');
-const runner = makeRunner();
-const report = runner.report;
+// Every page a test built: the runner closes them when it has ended.
 const openWindows = [];
-
-/** Run one test through the shared runner, then close its windows. */
-async function test(name, fn) {
-  const result = runner.test(name, fn);
-  if (result) await result;
-  while (openWindows.length) openWindows.pop().close();
-}
+const {test, report} = makeRunner({windows: openWindows});
 
 const B64 = 'SUQzBAAAAAAAAA==';
 

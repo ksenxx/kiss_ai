@@ -3,15 +3,15 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 //
-// Shared helpers for the composer-attachment suites (audit0902_fix_
-// attachment_latch_per_tab, audit0911_attachment_added_mid_send,
-// audit0911_remove_pending_attachment_unblocks_send): a chat page whose
-// image decoder parks every call until the test settles it, plus the
-// paste / Enter / settle primitives those suites drive it with.
+// Shared helpers for the suites that drive the composer and its
+// attachments: a chat page whose image decoder parks every call until
+// the test settles it, plus the paste / Enter / settle primitives those
+// suites drive it with.
 'use strict';
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {key} = require('./ui_antipattern_harness');
 
 /**
  * Build a chat page whose `createImageBitmap` parks every call until
@@ -90,6 +90,22 @@ function paste(win, file) {
 }
 
 /**
+ * Put `text` in the composer with the caret at its end, as typing it
+ * leaves it.  No input or keyboard event is dispatched: the caller
+ * sends the one it tests.
+ *
+ * @param {object} win The page window.
+ * @param {string} text The composer's new content.
+ * @returns {object} The composer textarea.
+ */
+function setInput(win, text) {
+  const inp = win.document.getElementById('task-input');
+  inp.value = text;
+  inp.setSelectionRange(text.length, text.length);
+  return inp;
+}
+
+/**
  * Type a prompt into the composer and press Enter.
  *
  * @param {object} win The page window.
@@ -98,9 +114,18 @@ function paste(win, file) {
 function typeAndEnter(win, text) {
   const inp = win.document.getElementById('task-input');
   inp.value = text;
-  inp.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
-  );
+  key(win, inp, 'Enter');
+}
+
+/**
+ * Type a prompt into the composer and click the send button.
+ *
+ * @param {object} win The page window.
+ * @param {string} text The prompt.
+ */
+function typeAndSend(win, text) {
+  win.document.getElementById('task-input').value = text;
+  win.document.getElementById('send-btn').click();
 }
 
 /**
@@ -148,6 +173,22 @@ async function failDecode(decodes, first, reason) {
 }
 
 /**
+ * The first composer chip whose label contains `name`.
+ *
+ * @param {object} win The page window.
+ * @param {string} name Text of the chip's label.
+ * @returns {object} The chip element.
+ * @throws {Error} When no chip carries `name`.
+ */
+function chipNamed(win, name) {
+  const chips = win.document.querySelectorAll('#file-chips .file-chip');
+  for (const chip of chips) {
+    if (chip.textContent.indexOf(name) >= 0) return chip;
+  }
+  throw new Error('no chip found for ' + name);
+}
+
+/**
  * Click the x on the composer chip whose label contains `name`.
  *
  * @param {object} win The page window.
@@ -155,14 +196,7 @@ async function failDecode(decodes, first, reason) {
  * @throws {Error} When no chip carries `name`.
  */
 function removeChip(win, name) {
-  const chips = win.document.querySelectorAll('#file-chips .file-chip');
-  for (const chip of chips) {
-    if (chip.textContent.indexOf(name) >= 0) {
-      chip.querySelector('.fc-rm').click();
-      return;
-    }
-  }
-  throw new Error('no chip found for ' + name);
+  chipNamed(win, name).querySelector('.fc-rm').click();
 }
 
 /**
@@ -175,13 +209,7 @@ function removeChip(win, name) {
  * @throws {Error} When no chip carries `name`.
  */
 function chipPending(win, name) {
-  const chips = win.document.querySelectorAll('#file-chips .file-chip');
-  for (const chip of chips) {
-    if (chip.textContent.indexOf(name) >= 0) {
-      return chip.classList.contains('pending');
-    }
-  }
-  throw new Error('no chip found for ' + name);
+  return chipNamed(win, name).classList.contains('pending');
 }
 
 /**
@@ -246,7 +274,9 @@ module.exports = {
   makePage,
   makeHeldDeadlinePage,
   paste,
+  setInput,
   typeAndEnter,
+  typeAndSend,
   submits,
   settle,
   failDecode,

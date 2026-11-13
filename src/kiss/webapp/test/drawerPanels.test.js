@@ -365,6 +365,10 @@ function testMobileRemoteIdleShowsComposer() {
     const {win, posted} = makePage({userAgent: ua});
     showTaskPanel(win, posted);
     const d = win.document;
+    assert.ok(
+      d.body.classList.contains('remote-mobile'),
+      `${name}: the body is marked as a phone's`,
+    );
     assertInputDrawer(win, false, `${name}: nothing is running, so type away`);
     const container = d.getElementById('input-container');
     assert.ok(
@@ -435,6 +439,15 @@ function testDesktopRemoteDefaults() {
     false,
     'a desktop screen fits both, so a running task keeps the composer',
   );
+  assert.ok(
+    !win.document.body.classList.contains('remote-mobile'),
+    "a desktop body is not marked as a phone's",
+  );
+  // "+" unfolds the textbox on a phone only: a desktop keeps the fold
+  // the user made.
+  click(win, 'input-drawer-btn');
+  click(win, 'new-chat-btn');
+  assertInputDrawer(win, true, 'desktop: + keeps the hand-folded composer');
   win.close();
 }
 
@@ -506,6 +519,12 @@ function testMobileUserChoicePersists() {
   const wv2 = makePage({userAgent: UA_IPHONE, initialState: wv1.getState()});
   showTaskPanel(wv2.win, wv2.posted);
   assertInputDrawer(wv2.win, true, 'a reload restores the user-folded drawer');
+  setRunning(wv2.win, wv2.posted, false);
+  assertInputDrawer(
+    wv2.win,
+    true,
+    'an idle phone must not undo the restored fold either',
+  );
   click(wv2.win, 'input-drawer-btn');
   setRunning(wv2.win, wv2.posted, true);
   assertInputDrawer(
@@ -554,17 +573,18 @@ function testLegacyStateDoesNotResurrectFoldedComposer() {
   wvNew.win.close();
 }
 
+// null is what the remote web app's transport returns on a first boot.
 function testMalformedStateGracefulBoot() {
-  for (const bad of ['garbage', 42, true]) {
+  for (const bad of ['garbage', 42, true, null]) {
     const {win, posted} = makePage({userAgent: UA_IPHONE, initialState: bad});
     assert.ok(
       posted.some(m => m.type === 'ready'),
-      `main.js must boot with a ${typeof bad} persisted state`,
+      `main.js must boot with ${JSON.stringify(bad)} as its persisted state`,
     );
     assertInputDrawer(
       win,
       false,
-      `a malformed (${typeof bad}) blob falls back to a reachable composer`,
+      `a ${JSON.stringify(bad)} blob falls back to a reachable composer`,
     );
     win.close();
   }
@@ -680,7 +700,7 @@ function testMobileRemoteNeverFocusesComposerByCode() {
 // whether a running task or the user's own tap on the handle folded it,
 // and later news of the task running elsewhere does not fold it again.
 function testMobileNewChatUnfoldsAndFocusesComposer() {
-  const {win, posted} = makePage({userAgent: UA_IPHONE});
+  const {win, posted, getState} = makePage({userAgent: UA_IPHONE});
   const d = win.document;
   const inp = d.getElementById('task-input');
   showTaskPanel(win, posted);
@@ -722,6 +742,14 @@ function testMobileNewChatUnfoldsAndFocusesComposer() {
   click(win, 'new-chat-btn');
   assertInputDrawer(win, false, '+ unfolds a hand-folded textbox');
   assert.strictEqual(d.activeElement, inp, '+ focuses the hand-folded one');
+  const reopened = makePage({userAgent: UA_IPHONE, initialState: getState()});
+  assertInputDrawer(reopened.win, false, 'a reload keeps what + unfolded');
+  reopened.win.close();
+  // "+" also ended the hold of that hand-made choice: back on the
+  // running chat the phone folds the composer once more.
+  win._testApi.switchToTab('tab-other');
+  send(win, {type: 'status', running: true, tabId: 'tab-other', startTs: 5});
+  assertInputDrawer(win, true, '+ handed the fold back to the running state');
   win.close();
 }
 

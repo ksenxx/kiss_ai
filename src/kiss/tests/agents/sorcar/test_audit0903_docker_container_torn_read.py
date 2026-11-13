@@ -19,17 +19,18 @@ thread, leaving the timed-out command running for the rest of the
 container's life (the exact outcome the reaper exists to prevent).
 
 Fix under test: every method takes ONE snapshot of ``self.container``
-and uses only the snapshot afterwards; ``_kill_exec`` treats a
-concurrently-closed container as "nothing left to kill" (the kill
-target died with the container) instead of asserting.
+and uses only the snapshot afterwards; ``_kill_exec`` is given the
+reaper's own snapshot and treats a container removed meanwhile as
+"nothing left to kill" (the kill target died with the container)
+instead of asserting.
 
 Reproduction notes:
 
 * ``test_kill_exec_after_concurrent_close_is_a_noop`` is the
   deterministic state-based reproduction of the reaper interleaving —
-  the reaper's loop observed a live container, ``close()`` completed,
-  then the reaper invoked the kill.  It fails with ``AssertionError``
-  on the unfixed code.
+  the reaper took its container snapshot, ``close()`` completed, then
+  the reaper invoked the kill on the snapshot.  It failed with
+  ``AssertionError`` on the unfixed code.
 * The ``Bash``/``get_host_port`` windows are a few instructions wide,
   so per the audit protocol they were confirmed on the unfixed code by
   temporarily inserting a ``time.sleep(0.08)`` between the check and
@@ -44,11 +45,10 @@ Reproduction notes:
 All tests run against the real Docker daemon (skipped when none is
 available) with real threads — no mocks of the code under test.
 
-Unreachable-without-doubles branches of the modified code, documented
-per the testing policy instead of being mocked: ``_kill_exec``'s
-``except Exception`` (the container vanishing between the snapshot and
-``exec_run``) and the reaper's ``exec_inspect`` failure branch require
-the daemon to drop the container mid-call.
+Unreachable-without-doubles branch of the modified code, documented
+per the testing policy instead of being mocked: the reaper's
+``exec_inspect`` failure branch requires the daemon to drop the
+container mid-call.
 """
 
 from __future__ import annotations
@@ -89,19 +89,20 @@ def cleanup() -> Iterator[None]:
 def test_kill_exec_after_concurrent_close_is_a_noop(cleanup: None) -> None:
     """The reaper's kill must survive a close() that won the race.
 
-    The timed-out-exec reaper checks ``self.container is None`` at the
-    top of each poll and calls ``_kill_exec`` afterwards; a ``close()``
-    completing in between handed ``_kill_exec`` a manager whose
-    container is gone.  On the unfixed code this asserted (killing the
-    reaper thread); it must simply do nothing.
+    The timed-out-exec reaper sweeps the container its run was started
+    in; a ``close()`` completing before the sweep hands ``_kill_exec``
+    a container that is gone.  On the unfixed code this asserted
+    (killing the reaper thread); it must simply do nothing.
     """
     mgr = DockerManager(IMAGE)
     mgr.open()
+    container = mgr.container
+    assert container is not None
     mgr.close()
     assert mgr.container is None
     # Unfixed code: AssertionError.  Fixed code: silent no-op — the
     # tagged process tree died with the container.
-    mgr._kill_exec("deadbeef" * 4)
+    mgr._kill_exec("deadbeef" * 4, container)
 
 
 def test_bash_racing_close_never_tears(cleanup: None) -> None:

@@ -46,10 +46,8 @@ same URL replaces the installed profile instead of adding a second one.
 from __future__ import annotations
 
 import argparse
-import datetime
 import hashlib
 import io
-import json
 import plistlib
 import re
 import socket
@@ -60,16 +58,15 @@ from urllib.parse import urlsplit
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import pkcs7
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from PIL import Image, ImageOps
 
 from kiss.core import tls_certs
 from kiss.core.brand import PRODUCT_NAME
-from kiss.core.config import kiss_home
+from kiss.core.config import kiss_home, read_remote_urls, remote_url_file
 from kiss.core.file_lock import exclusive_file_lock
-from kiss.core.utils import atomic_write_text
 
 SIGNER_CERT_FILE = "profile-signer.pem"
 SIGNER_KEY_FILE = "profile-signer-key.pem"
@@ -81,7 +78,6 @@ DEFAULT_ICON = Path(__file__).resolve().parents[1] / "webapp" / "media" / "kiss-
 """The brand icon the profile carries unless ``--icon`` names another."""
 DEFAULT_ICON_BACKGROUND = "#ffffff"
 """The colour flattened under the icon's transparent pixels (see :func:`icon_png`)."""
-_TLS_LOCK_TIMEOUT_S = 30.0
 
 
 def default_url() -> str:
@@ -89,14 +85,12 @@ def default_url() -> str:
 
     The tunnel URL when the daemon publishes one (it reaches the phone
     anywhere), else the first LAN URL (same Wi-Fi only), else ``''``
-    when the file is missing or names neither.
+    when the file is missing, names neither or is not the object the
+    daemon writes.
     """
-    try:
-        data = json.loads((kiss_home() / "remote-url.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""
-    lan = data.get("lan") or [""]
-    return str(data.get("tunnel") or lan[0] or "")
+    urls = read_remote_urls(remote_url_file())
+    lan = urls.get("lan")
+    return str(urls.get("tunnel") or (lan[0] if isinstance(lan, list) and lan else ""))
 
 
 def icon_png(path: Path, background: str) -> bytes:
@@ -170,85 +164,6 @@ def profile_plist(url: str, label: str, icon: bytes, organization: str) -> bytes
     return plistlib.dumps(profile, sort_keys=False)
 
 
-def _load_signer(
-    cert_path: Path, key_path: Path, ca_cert: x509.Certificate,
-) -> tuple[x509.Certificate, rsa.RSAPrivateKey] | None:
-    """Return the signing pair at the paths when it needs no re-issue, else ``None``.
-
-    Re-issue when either file is missing or unreadable, the key is not
-    RSA or does not match the certificate, the current CA did not issue
-    it, or it is not yet valid (issued under a clock set ahead) or
-    within :data:`tls_certs.RENEWAL_THRESHOLD_DAYS` of expiry.
-    """
-    try:
-        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
-        key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
-        cert.verify_directly_issued_by(ca_cert)
-    except Exception:
-        return None
-    if not isinstance(key, rsa.RSAPrivateKey) or cert.public_key() != key.public_key():
-        return None
-    now = datetime.datetime.now(datetime.UTC)
-    renewal = datetime.timedelta(days=tls_certs.RENEWAL_THRESHOLD_DAYS)
-    if cert.not_valid_before_utc > now or cert.not_valid_after_utc - now <= renewal:
-        return None
-    return cert, key
-
-
-def _issue_signer(
-    cert_path: Path, key_path: Path, ca_cert: x509.Certificate, ca_key: ec.EllipticCurvePrivateKey,
-) -> tuple[x509.Certificate, rsa.RSAPrivateKey]:
-    """Issue and write an RSA-2048 profile-signing certificate from the local CA (key file first).
-
-    ``digitalSignature``/``contentCommitment`` key usage and the
-    ``emailProtection`` extended key usage, which is what CMS signed
-    data (S/MIME) verifiers such as ``openssl smime -verify`` expect;
-    iOS checks the chain, not the purpose.  Validity follows the
-    server certificate's (:data:`tls_certs.SERVER_CERT_VALIDITY_DAYS`).
-    """
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    host = socket.gethostname().split(".")[0] or "localhost"
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, f"{PRODUCT_NAME} profile signing {host}"[:64]),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, PRODUCT_NAME),
-    ])
-    now = datetime.datetime.now(datetime.UTC)
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(ca_cert.subject)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - datetime.timedelta(minutes=5))
-        .not_valid_after(now + datetime.timedelta(days=tls_certs.SERVER_CERT_VALIDITY_DAYS))
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(
-            x509.KeyUsage(
-                digital_signature=True, content_commitment=True, key_encipherment=False,
-                data_encipherment=False, key_agreement=False, key_cert_sign=False,
-                crl_sign=False, encipher_only=False, decipher_only=False,
-            ),
-            critical=True,
-        )
-        .add_extension(
-            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.EMAIL_PROTECTION]), critical=False,
-        )
-        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
-        .add_extension(
-            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False,
-        )
-        .sign(ca_key, hashes.SHA256())
-    )
-    key_pem = key.private_bytes(
-        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption(),
-    )
-    atomic_write_text(key_path, key_pem.decode("ascii"), mode=0o600)
-    atomic_write_text(
-        cert_path, cert.public_bytes(serialization.Encoding.PEM).decode("ascii"), create_mode=0o644,
-    )
-    return cert, key
-
-
 def signer_identity(tls_dir: Path) -> tuple[x509.Certificate, rsa.RSAPrivateKey, x509.Certificate]:
     """Return ``(signing cert, its key, CA cert)`` for *tls_dir*, issuing what is missing.
 
@@ -257,17 +172,32 @@ def signer_identity(tls_dir: Path) -> tuple[x509.Certificate, rsa.RSAPrivateKey,
     issuance never interleave their check-then-write sequences.  The CA
     itself is generated when *tls_dir* has none (a throwaway directory).
 
+    The signing certificate carries the ``digitalSignature`` and
+    ``contentCommitment`` key usages and the ``emailProtection``
+    extended key usage, which is what CMS signed data (S/MIME)
+    verifiers such as ``openssl smime -verify`` expect; iOS checks the
+    chain, not the purpose.
+
     Args:
         tls_dir: The daemon's TLS directory (``$KISS_HOME/tls``).
     """
     tls_dir.mkdir(parents=True, exist_ok=True)
-    with exclusive_file_lock(tls_dir / tls_certs.TLS_LOCK_FILE, timeout=_TLS_LOCK_TIMEOUT_S):
+    with exclusive_file_lock(
+        tls_dir / tls_certs.TLS_LOCK_FILE, timeout=tls_certs.TLS_LOCK_TIMEOUT_S,
+    ):
         ca_cert, ca_key = tls_certs.ensure_local_ca(tls_dir)
         cert_path, key_path = tls_dir / SIGNER_CERT_FILE, tls_dir / SIGNER_KEY_FILE
-        pair = _load_signer(cert_path, key_path, ca_cert) or _issue_signer(
+        pair = tls_certs.current_cert_and_key(cert_path, key_path, ca_cert)
+        if pair is not None and isinstance(pair[1], rsa.RSAPrivateKey):
+            return pair[0], pair[1], ca_cert
+        host = socket.gethostname().split(".")[0] or "localhost"
+        cert, key = tls_certs.issue_leaf(
             cert_path, key_path, ca_cert, ca_key,
+            rsa.generate_private_key(public_exponent=65537, key_size=2048),
+            f"{PRODUCT_NAME} profile signing {host}"[:64],
+            ExtendedKeyUsageOID.EMAIL_PROTECTION, content_commitment=True,
         )
-    return pair[0], pair[1], ca_cert
+        return cert, key, ca_cert
 
 
 def sign_profile(
@@ -337,7 +267,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--url must be an http(s) URL, got {url!r}")
     if not args.icon.is_file():
         parser.error(f"--icon {args.icon} is not a file")
-    icon = icon_png(args.icon, args.icon_background)
+    try:
+        icon = icon_png(args.icon, args.icon_background)
+    except (OSError, ValueError) as exc:  # not an image Pillow reads, or not a colour
+        parser.error(f"--icon {args.icon} on --icon-background {args.icon_background!r}: {exc}")
     plist = profile_plist(url, args.label, icon, args.organization)
     stem = re.sub(r"[^a-z0-9._-]+", "-", args.label.lower()).strip("-.") or "webclip"
     out = args.out or Path(f"{stem}.mobileconfig")

@@ -5,24 +5,16 @@
 """Audit 2026-09-02 (sorcar-agents): preserve-outcome warnings must match the cause.
 
 ``ChatSorcarAgent._commit_and_clean_worktree`` reports WHY a
-worktree was preserved (``PRESERVED_SUBAGENT_ACTIVE``,
-``PRESERVED_RESCUE_FAILED``, ``PRESERVED_COMMIT_FAILED``).
-``_retire_previous_worktree`` turns each outcome into a
-matching user warning, but ``merge()`` collapsed the outcome to a bool
-and returned "auto-commit ... failed (a pre-commit hook may have
-rejected the commit)" for every preserved outcome.
+worktree was preserved (``PRESERVED_COMMIT_FAILED``: the commit did
+not go through), and ``_retire_previous_worktree`` and ``merge()``
+turn that outcome into a matching message: a rejecting pre-commit hook
+is the case that blames the hook.
 
-So a user whose worktree was kept because a git-ignored output file
-could not be rescued into the main repo was told to go fix a pre-commit
-hook.
-
-These tests use real git repos and a real symlinked directory in the
-main repo to make the ignored-file rescue fail closed.
+These tests use real git repos and a real rejecting pre-commit hook.
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -59,45 +51,6 @@ def _agent_with_worktree(env: IsolatedKissHome) -> ChatSorcarAgent:
     assert agent._wt is not None
     (agent._wt.wt_dir / "agent.txt").write_text("agent work\n", encoding="utf-8")
     return agent
-
-
-def _make_rescue_fail(env: IsolatedKissHome, agent: ChatSorcarAgent) -> None:
-    """Arrange a git-ignored task output that cannot be rescued.
-
-    The main repo carries ``out`` as a symlink pointing OUTSIDE the
-    repository, while the worktree creates a real ``out/`` directory
-    with an ignored file in it.  ``rescue_ignored_files`` refuses to
-    write through the escaping symlink and fails closed.
-    """
-    assert agent._wt is not None
-    (env.repo / ".gitignore").write_text("out/\n", encoding="utf-8")
-    _git(env.repo, "add", ".gitignore")
-    _git(env.repo, "commit", "-q", "-m", "ignore out")
-    outside = env.tmpdir / "outside"
-    outside.mkdir()
-    os.symlink(outside, env.repo / "out")
-    wt_out = agent._wt.wt_dir / "out"
-    wt_out.mkdir()
-    (wt_out / "data.txt").write_text("ignored output\n", encoding="utf-8")
-    # Make the worktree's .gitignore match the main repo's so the
-    # file really is ignored there too.
-    (agent._wt.wt_dir / ".gitignore").write_text("out/\n", encoding="utf-8")
-
-
-def test_preserve_warning_names_failed_rescue_not_hook(
-    env: IsolatedKissHome,
-) -> None:
-    """Preserve-for-review kept for an unrescuable ignored file must say so."""
-    agent = _agent_with_worktree(env)
-    wt = agent._wt
-    assert wt is not None
-    _make_rescue_fail(env, agent)
-    assert agent._retire_previous_worktree() is True
-    assert wt.wt_dir.exists(), "worktree deleted with the only copy of out/"
-    warning = agent._merge_conflict_warning or ""
-    assert "ignored" in warning, warning
-    assert "pre-commit" not in warning, warning
-    assert str(wt.wt_dir) in warning, warning
 
 
 def _install_rejecting_pre_commit_hook(repo: Path) -> Path:
@@ -142,26 +95,3 @@ def test_merge_still_blames_hook_when_commit_was_rejected(
         hook.unlink()
     assert agent._wt is wt
     assert "pre-commit hook" in message, message
-    assert "sub-agent" not in message and "ignored" not in message
-
-
-def test_merge_reports_failed_rescue_not_hook(
-    env: IsolatedKissHome,
-) -> None:
-    """``merge()`` must not blame a hook for a failed ignored-file rescue."""
-    agent = _agent_with_worktree(env)
-    wt = agent._wt
-    assert wt is not None
-    _make_rescue_fail(env, agent)
-    message = agent.merge()
-    assert agent._wt is wt, "merge dropped the pending worktree"
-    assert "ignored" in message, message
-    assert "pre-commit" not in message, message
-
-    # Once the cause is gone, the same merge succeeds.
-    os.unlink(env.repo / "out")
-    message = agent.merge()
-    assert message.startswith("Successfully merged"), message
-    assert agent._wt is None
-    assert (env.repo / "agent.txt").read_text(encoding="utf-8") == "agent work\n"
-    assert (env.repo / "out" / "data.txt").exists()

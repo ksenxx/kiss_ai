@@ -25,10 +25,10 @@ Orphan-sweep join guard
 -----------------------
 
 Many tests in this folder construct a ``AgentServer`` — which starts
-the ``orphan-task-sweep`` daemon thread — and then close
-``persistence._db_conn`` in their teardown, which used to crash the
+the ``orphan-task-sweep`` daemon thread — and then close their
+persistence connection in their teardown, which used to crash the
 interpreter with SIGSEGV whenever the sweep was still running SQL on
-that connection.  The guard against that race lives in the ROOT
+the connection closed.  The guard against that race lives in the ROOT
 ``tests/conftest.py`` (``join_orphan_sweeps``), so it protects every
 test directory rather than this one only; see its module docstring for
 the mechanism.
@@ -53,14 +53,14 @@ from collections.abc import Iterator
 
 import pytest
 
-from kiss.agents.sorcar import persistence
+from kiss.tests.persistence_helpers import close_db
 
 
 @pytest.fixture(autouse=True)
 def _reset_persistence_connection_cache() -> Iterator[None]:
     """Reset the persistence layer's cached sqlite connections before each test.
 
-    ``persistence._close_db()`` stops and drains the background event
+    ``close_db()`` stops and drains the background event
     writer, clears the sequence/HasEvents caches, bumps the global
     connection generation counter (lazily invalidating EVERY thread's
     cached connection, not just this thread's), and closes the current
@@ -69,5 +69,5 @@ def _reset_persistence_connection_cache() -> Iterator[None]:
     re-creates the schema, eliminating the test-order-dependent
     ``task_history`` failures described in the module docstring.
     """
-    persistence._close_db()
+    close_db()
     yield

@@ -15,10 +15,10 @@
 //         wake, was paired with that new round although the new round was
 //         still capturing (no reply can answer a round before its audio is
 //         posted), so tab X's words were submitted into tab Y.  The page
-//         now pairs an untagged reply only with a round whose audio was
-//         posted, and tags every posted round so that a daemon echoing the
-//         tag refuses the late reply even after the next round posted its
-//         own audio (the tagged case is voiceRoundFailsClosed_wave3's).
+//         tags every posted round and the daemon echoes the tag, so the
+//         late reply names its cancelled round and is refused, whether the
+//         next round is still capturing (here) or has posted its own audio
+//         (voiceRoundFailsClosed_wave3).
 //  SENS   The wake sensitivity of a sibling same-origin tab did not follow
 //         a change made in another one (only auto-submit did), so the
 //         slider showed a stale value and the wake detector kept using it.
@@ -39,6 +39,7 @@ const {
   fireWake,
   wake,
   speak,
+  speakRound,
   fireTimer,
 } = require('./voice_page_helpers');
 
@@ -71,33 +72,33 @@ function hearTrailingAlias(page) {
 /**
  * Speak round A on tab `first`, turn the mic off (cancelling it while
  * its transcript is on its way), move to tab `second` and turn the mic
- * back on.
+ * back on.  Returns round A's tag.
  */
 async function cancelRoundThenMoveTab(page, first, second) {
   clickTab(page.win, first);
   await startPipeline(page);
-  wake(page);
-  speak(page);
+  const roundA = speakRound(page);
   micBtn(page.win).click(); // mic off: round A is cancelled
   clickTab(page.win, second);
   await startPipeline(page);
+  return roundA;
 }
 
 async function main() {
   await test(
-    "ROUND: a cancelled round's untagged reply arriving after the next " +
-      'wake is refused, and the next round still answers on its tab',
+    "ROUND: a cancelled round's reply arriving after the next wake is " +
+      'refused, and the next round still answers on its tab',
     async () => {
       const page = makeVoicePage();
       const {win, posted} = page;
       const {first, second} = twoTabs(win);
-      await cancelRoundThenMoveTab(page, first, second);
+      const roundA = await cancelRoundThenMoveTab(page, first, second);
       wake(page); // round B begins on tab Y and is still capturing
 
-      // Round A's reply comes back (from a daemon that does not echo
-      // round tags).  Round B has posted nothing, so it cannot be B's.
+      // Round A's reply comes back.  Round A was cancelled, so its words
+      // are refused; round B has posted nothing yet.
       posted.length = 0;
-      send(win, {type: 'voiceSpeech', text: 'round A words QW1'});
+      send(win, {type: 'voiceSpeech', text: 'round A words QW1', round: roundA});
       assert.strictEqual(
         submits(posted).length,
         0,
@@ -114,8 +115,9 @@ async function main() {
       );
 
       speak(page); // round B posts its audio
+      const roundB = posted.find(m => m.type === 'voiceTranscribe').round;
       posted.length = 0;
-      send(win, {type: 'voiceSpeech', text: 'round B words QW2'});
+      send(win, {type: 'voiceSpeech', text: 'round B words QW2', round: roundB});
       const subs = submits(posted);
       assert.strictEqual(subs.length, 1, JSON.stringify(posted));
       assert.ok(subs[0].prompt.includes('round B words QW2'));

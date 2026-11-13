@@ -6,8 +6,11 @@ if the directory tree is swapped underneath a live ``MemoryDir``; it stays as
 defence in depth.
 """
 
+import sys
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from types import FrameType
 
 import pytest
 import yaml
@@ -81,6 +84,17 @@ def test_split_frontmatter_roundtrip_and_key_order() -> None:
     assert body == "Body\n\nMore\n"
 
 
+def test_memory_frontmatter_preserves_unicode_line_separators(tmp_path: Path) -> None:
+    """YAML's NEL folding must not silently turn a stored title into different text."""
+    memory = MemoryDir(tmp_path)
+    title = "café\u0085next\u2028line\u2029paragraph"
+    memory.write("unicode", "body", title=title, summary=title)
+    page = memory.read("unicode")
+    assert page.title == title
+    assert page.summary == title
+    assert page.body == "body\n"
+
+
 def test_render_page_without_frontmatter_and_empty_values() -> None:
     assert render_page({}, "just body") == "just body\n"
     assert (
@@ -150,7 +164,7 @@ def test_memory_dir_write_read_update_delete(tmp_path: Path) -> None:
     assert other.title == "finnish bureaucracy" and other.summary == ""
     assert memory.page_names() == ["finnish-bureaucracy", "imported", "woks"]
 
-    memory.delete("woks")
+    memory.delete("woks.md")
     assert memory.page_names() == ["finnish-bureaucracy", "imported"]
     with pytest.raises(FileNotFoundError):
         memory.read("woks")
@@ -158,14 +172,44 @@ def test_memory_dir_write_read_update_delete(tmp_path: Path) -> None:
         memory.delete("woks")
     # The deletion is recorded (for syncing with another machine) and undone by a new write.
     tombstone = tmp_path / "mem" / ".tombstones" / "woks"
-    assert tombstone == memory.tombstone_path("woks.md")
     deleted_at = tombstone.read_text().strip()
     assert datetime.strptime(deleted_at, "%Y-%m-%dT%H:%M:%SZ")
     assert memory.write("woks", "back again").frontmatter["updated"] >= deleted_at
     assert not tombstone.exists()
     assert memory.page_names() == ["finnish-bureaucracy", "imported", "woks"]
     with pytest.raises(ValueError, match="Invalid page name"):
-        memory.tombstone_path("Bad Name")
+        memory.delete("Bad Name")
+
+
+class _PagePathCalls:
+    """Profile hook: counts the calls of ``MemoryDir.page_path`` made while it is installed."""
+
+    count = 0
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        if event == "call" and frame.f_code is MemoryDir.page_path.__code__:
+            self.count += 1
+
+
+def _page_path_calls(operation: Callable[..., object], *args: str) -> int:
+    """Run ``operation(*args)`` and return how many times it validated a page path."""
+    calls = _PagePathCalls()
+    previous = sys.getprofile()
+    sys.setprofile(calls)
+    try:
+        operation(*args)
+    finally:
+        sys.setprofile(previous)
+    return calls.count
+
+
+def test_write_and_delete_validate_the_page_path_once(tmp_path: Path) -> None:
+    """The tombstone's place comes from the validated page path, not from a second validation."""
+    memory = MemoryDir(tmp_path)
+    tombstone = tmp_path / ".tombstones" / "a-page"
+    assert _page_path_calls(memory.write, "a-page", "body") == 1
+    assert _page_path_calls(memory.delete, "a-page") == 1 and tombstone.exists()
+    assert _page_path_calls(memory.write, "a-page", "back again") == 1 and not tombstone.exists()
 
 
 def test_memory_dir_rejects_bad_names_and_empty_bodies(tmp_path: Path) -> None:
@@ -220,6 +264,42 @@ def test_memory_dir_refuses_a_symlinked_tombstone_directory(tmp_path: Path) -> N
     assert memory.read("lesson").body == "a page\n"
     assert (elsewhere / "lesson").read_text() == "unrelated file\n"
     assert sorted(p.name for p in elsewhere.iterdir()) == ["lesson"]
+
+
+class _PlantsALink:
+    """Profile hook: makes *page* a link to *outside* as a write renders its validated page."""
+
+    def __init__(self, page: Path, outside: Path) -> None:
+        self.page = page
+        self.outside = outside
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        if event == "call" and frame.f_code is render_page.__code__:
+            self.page.symlink_to(self.outside)
+
+
+def test_memory_writes_replace_a_link_instead_of_following_it(tmp_path: Path) -> None:
+    """A symlinked tombstone, or a page made a link once its path was validated, is replaced:
+    written through, the memory's text would land in the file the link names."""
+    outside = tmp_path / "outside"
+    outside.write_text("unrelated file\n")
+    root = tmp_path / "mem"
+    memory = MemoryDir(root)
+    memory.write("lesson", "a page")
+    tombstone = root / ".tombstones" / "lesson"
+    tombstone.parent.mkdir(exist_ok=True)
+    tombstone.symlink_to(outside)
+    memory.delete("lesson")
+    assert not tombstone.is_symlink()
+    assert datetime.strptime(tombstone.read_text().strip(), "%Y-%m-%dT%H:%M:%SZ")
+    previous = sys.getprofile()
+    sys.setprofile(_PlantsALink(root / "raced.md", outside))
+    try:
+        memory.write("raced", "a raced page")
+    finally:
+        sys.setprofile(previous)
+    assert not (root / "raced.md").is_symlink() and memory.read("raced").body == "a raced page\n"
+    assert outside.read_text() == "unrelated file\n"
 
 
 def test_memory_dir_escape_guard_for_resolved_paths(tmp_path: Path) -> None:

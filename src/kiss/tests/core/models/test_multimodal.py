@@ -126,6 +126,7 @@ class TestAttachment(unittest.TestCase):
 class TestAnthropicModelAudioVideoAttachments(unittest.TestCase):
     """Unit tests: Anthropic model transcribes audio or skips with warning."""
 
+    @pytest.mark.live_api
     def test_audio_attachment_transcribed_when_api_key_set(self) -> None:
         """Audio is transcribed to text when OPENAI_API_KEY is available."""
         from kiss.core.models.anthropic_model import AnthropicModel

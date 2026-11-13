@@ -46,6 +46,7 @@ from kiss.core.models.openai_compatible_model import (
     _extract_deepseek_reasoning,
     _function_call_entry,
     _function_call_item,
+    _streamed_slot,
     _terminal_error,
 )
 
@@ -139,7 +140,9 @@ def _hoist(value: Any, nested_key: str) -> Any:
     return value
 
 
-def _terminal_response_error(status: str, reason: str, message: str) -> KISSError:
+def _terminal_response_error(
+    status: str, reason: str, message: str, code: str | None, text: str = ""
+) -> KISSError:
     """Return the error for a terminal ``failed`` / ``incomplete`` response.
 
     Args:
@@ -147,6 +150,12 @@ def _terminal_response_error(status: str, reason: str, message: str) -> KISSErro
         reason: The ``incomplete_details.reason`` of an incomplete
             response (``""`` when absent).
         message: The error message; it names *reason*.
+        code: The provider's error code (``None`` when it gave none),
+            attached to the error for ``getattr(error, "code", None)``: a
+            ``server_error`` is endpoint trouble, not a refused request,
+            and the message does not say which.
+        text: The text the response held when it ended; the typed errors
+            carry it.
 
     Returns:
         :class:`ContentFilterError` when the content filter stopped the
@@ -155,7 +164,11 @@ def _terminal_response_error(status: str, reason: str, message: str) -> KISSErro
         instead of retrying the same one), else a plain :class:`KISSError`.
         Only an ``incomplete`` response is typed by its reason.
     """
-    return _terminal_error(reason if status == "incomplete" else "", "max_output_tokens", message)
+    reason = reason if status == "incomplete" else ""
+    error = _terminal_error(reason, "max_output_tokens", message, text)
+    # ``KISSError`` declares no ``code``, hence ``setattr`` and the ``getattr`` of its readers.
+    setattr(error, "code", code)
+    return error
 
 
 def _pending_index(calls: list[dict[str, str]], func_name: str, call_id: str) -> int | None:
@@ -183,8 +196,13 @@ def _pending_index(calls: list[dict[str, str]], func_name: str, call_id: str) ->
 # The request parameters a Responses call accepts, taken from the SDK's own
 # signature (keyword-only, no **kwargs), and the sub-keys its
 # ``stream_options`` declares (the Chat Completions shape differs).
-_RESPONSES_REQUEST_PARAMS = accepted_request_params(Responses.create)
+# ``background`` is left out: such a request is answered with a queued job,
+# and this transport returns the answer of its one request, it polls for none.
+_RESPONSES_REQUEST_PARAMS = accepted_request_params(Responses.create) - {"background"}
 _RESPONSES_STREAM_OPTION_KEYS = frozenset(response_create_params.StreamOptions.__annotations__)
+
+# The statuses of a reply that carries no answer yet, or never will.
+_UNFINISHED_STATUSES = ("queued", "in_progress", "cancelled")
 
 
 _GPT_VERSION = re.compile(r"(?:^|/)gpt-(\d+)(?:\.(\d+))?")
@@ -326,6 +344,10 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         # _blocking_request records it in _rejected_response.
         response = self._blocking_request(self.client.responses.create, kwargs)
         self._raise_for_failed_response(response)
+        # A stream says so itself: it ends without ``response.completed``.
+        status = _get_attr_or_key(response, "status")
+        if status in _UNFINISHED_STATUSES:
+            raise KISSError(f"Responses API returned {status} response")
         content, tool_calls = self._parse_non_streaming(response)
         return content, tool_calls, response, _StreamOrder({}, None)
 
@@ -668,10 +690,10 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
     def _stream_output_index(event: Any, default: int) -> int:
         """Read ``event.output_index`` defensively.
 
-        Returns ``default`` (typically ``len(tool_calls)`` — i.e. allocate
-        a fresh slot) when ``output_index`` is missing, ``None``, or
-        non-integer.  Critically, this does NOT collapse ``output_index=0``
-        to the default the way ``int(... or 0)`` would have.
+        Returns ``default`` (``-1`` where the caller must know there is
+        none) when ``output_index`` is missing, ``None``, or non-integer.
+        Critically, this does NOT collapse ``output_index=0`` to the
+        default the way ``int(... or 0)`` would have.
         """
         raw = getattr(event, "output_index", None)
         if raw is None:
@@ -721,6 +743,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self,
         event: Any,
         item_id: str,
+        call_id: str,
         tool_calls: dict[int, dict[str, str]],
         item_to_idx: dict[str, int],
         args_from_delta: set[int],
@@ -735,31 +758,36 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         when the event carries a real ``output_index`` that differs from the
         provisional one (the model's real output ordering must win, or
         parallel tool calls return in the wrong order).  An unknown item
-        lands at the event's ``output_index`` (or the next position).
+        lands at the event's ``output_index``.  Without one, it joins the
+        slot holding its call id, else an argument event that names no
+        item continues the last entry (the call being streamed, see
+        :func:`_streamed_slot`) and any other event gets an unused index:
+        ``len(slots)`` is another call's slot as soon as the indexes are
+        not ``0..n-1`` (a reasoning item comes first).
 
         Args:
             event: The stream event (``output_index`` is read from it).
             item_id: The function-call item id the event belongs to; empty
                 when the event carries none.
+            call_id: The ``call_id`` of an item event's function call;
+                empty when it has none and for argument events.
             tool_calls: Accumulated slots keyed by output index.
             item_to_idx: Map from item id to its slot index.
             args_from_delta: Indices whose arguments came from deltas.
             args_from_added: Indices whose arguments came from ``added``.
-            make_room: For item events: when the target index holds a
-                different known item, move that occupant out of the way
-                (``_relocate_slot``) when the event has a real
-                ``output_index``, else take the index after the last slot.
+            make_room: ``True`` for item events: when the event's
+                ``output_index`` holds a different known item, that
+                occupant is moved out of the way (``_relocate_slot``).
                 Argument events pass ``False`` and join whatever is there.
 
         Returns:
-            The index to use; the caller creates the slot with
-            ``setdefault`` and fills it by its own rules.
+            The index to use; the caller takes the slot with
+            :func:`_streamed_slot` and fills it by its own rules.
         """
-        has_real_index = getattr(event, "output_index", None) is not None
-        event_idx = self._stream_output_index(event, len(tool_calls))
+        event_idx = self._stream_output_index(event, -1)
         old_idx = item_to_idx.get(item_id) if item_id else None
         if old_idx is not None:
-            if has_real_index and event_idx != old_idx:
+            if 0 <= event_idx != old_idx:
                 return self._move_tool_slot(
                     tool_calls,
                     item_to_idx,
@@ -770,18 +798,23 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     event_idx,
                 )
             return old_idx
+        if event_idx < 0:
+            if call_id:
+                for idx, slot in tool_calls.items():
+                    if slot["id"] == call_id:
+                        return idx
+            if tool_calls and not make_room and not item_id:
+                return next(reversed(tool_calls))
+            return max(tool_calls, default=-1) + 1
         if not make_room or not item_id:
             return event_idx
         occupant = tool_calls.get(event_idx)
         occupant_iid = str(occupant.get("item_id", "") or "") if occupant else ""
-        if not occupant_iid or occupant_iid == item_id:
-            return event_idx
-        if has_real_index:
+        if occupant_iid and occupant_iid != item_id:
             self._relocate_slot(
                 tool_calls, item_to_idx, args_from_delta, args_from_added, event_idx
             )
-            return event_idx
-        return max(tool_calls) + 1
+        return event_idx
 
     @staticmethod
     def _relocate_slot(
@@ -1162,18 +1195,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         return False
 
     @staticmethod
-    def _event_type(event: Any) -> str:
-        """Return the SSE event-type string for ``event``.
-
-        Args:
-            event: An event object returned by the streaming SDK.
-
-        Returns:
-            The event's ``type`` attribute as a string (empty if missing).
-        """
-        return str(getattr(event, "type", "") or "")
-
-    @staticmethod
     def _part_final_text(part: Any) -> str | None:
         """Return the text of a message content part the stream finalised.
 
@@ -1227,7 +1248,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             stream: The streaming iterator returned by the SDK.
 
         Returns:
-            ``(content, tool_calls, response)`` — see
+            ``(content, tool_calls, response, order)`` — see
             :meth:`_consume_stream_events`.
         """
         with self._watched_events(stream, "openai-responses-stream-abort-watchdog") as events:
@@ -1279,7 +1300,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         item_output_indexes: dict[str, int] = {}
 
         for event in events:
-            etype = self._event_type(event)
+            etype = str(getattr(event, "type", "") or "")
             ev_item_id = str(getattr(event, "item_id", "") or "")
             if not ev_item_id:
                 nested_item = getattr(event, "item", None)
@@ -1367,13 +1388,14 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     idx = self._tool_slot_index(
                         event,
                         item_id,
+                        call_id,
                         tool_calls,
                         item_to_idx,
                         args_from_delta,
                         args_from_added,
                         make_room=True,
                     )
-                    slot = tool_calls.setdefault(idx, _new_tool_slot())
+                    slot = _streamed_slot(tool_calls, idx, _new_tool_slot())
                     if call_id and not slot.get("id"):
                         slot["id"] = call_id
                     if name and not slot.get("name"):
@@ -1394,13 +1416,14 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 idx = self._tool_slot_index(
                     event,
                     item_id,
+                    "",
                     tool_calls,
                     item_to_idx,
                     args_from_delta,
                     args_from_added,
                     make_room=False,
                 )
-                slot = tool_calls.setdefault(idx, _new_tool_slot())
+                slot = _streamed_slot(tool_calls, idx, _new_tool_slot())
                 if item_id and not slot.get("item_id"):
                     slot["item_id"] = item_id
                     item_to_idx[item_id] = idx
@@ -1425,17 +1448,18 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 if item is not None and getattr(item, "type", "") == "function_call":
                     self._close_thinking_if_open()
                     item_id = str(getattr(item, "id", "") or "")
+                    call_id = str(getattr(item, "call_id", "") or "")
                     idx = self._tool_slot_index(
                         event,
                         item_id,
+                        call_id,
                         tool_calls,
                         item_to_idx,
                         args_from_delta,
                         args_from_added,
                         make_room=True,
                     )
-                    slot = tool_calls.setdefault(idx, _new_tool_slot())
-                    call_id = str(getattr(item, "call_id", "") or "")
+                    slot = _streamed_slot(tool_calls, idx, _new_tool_slot())
                     name = str(getattr(item, "name", "") or "")
                     if call_id:
                         slot["id"] = call_id
@@ -1476,6 +1500,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     status,
                     self._incomplete_reason(resp),
                     f"Responses API stream ended {ending}" + (f": {detail}" if detail else ""),
+                    self._failure_code(resp) or self._failure_code(event),
+                    content,
                 )
             elif etype == "response.completed":
                 saw_completed = True
@@ -1544,17 +1570,13 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             elif fcid and fcid in call_id_to_idx:
                 idx = call_id_to_idx[fcid]
             else:
-                try:
-                    candidate_idx = int(final_tc.get("output_index", "") or len(tool_calls))
-                except (ValueError, TypeError):
-                    candidate_idx = len(tool_calls)
                 if not iid and not fcid and not fname:
                     if tool_calls:
                         continue
                     raise KISSError(
                         "Responses API returned identityless function_call without id/call_id/name"
                     )
-                idx = candidate_idx
+                idx = int(final_tc["output_index"])
                 occupant = tool_calls.get(idx, {})
                 if (iid or fcid) and (occupant.get("item_id") or occupant.get("id")):
                     # A call the stream never carried, at a position a
@@ -1622,6 +1644,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             status,
             self._incomplete_reason(response),
             f"Responses API returned {status} response" + (f": {detail}" if detail else ""),
+            self._failure_code(response),
+            _get_attr_or_key(response, "output_text", "") or "",
         )
 
     @staticmethod
@@ -1656,6 +1680,19 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             or _get_attr_or_key(carrier, "message", "")
             or ""
         )
+
+    @staticmethod
+    def _failure_code(carrier: Any) -> str | None:
+        """Return the provider's error code *carrier* reports, if any.
+
+        Args:
+            carrier: As for :meth:`_failure_detail`: a failed response
+                carries ``error.code``, the stream's bare ``error`` event
+                its ``code`` directly.
+        """
+        err = _get_attr_or_key(carrier, "error")
+        code = _get_attr_or_key(err, "code") or _get_attr_or_key(carrier, "code")
+        return code if isinstance(code, str) else None
 
     @classmethod
     def _response_has_message_text(cls, response: Any) -> bool:
@@ -1701,7 +1738,9 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         Returns:
             ``(content, tool_calls)`` where ``content`` is the concatenated
             ``output_text`` from every assistant message and ``tool_calls``
-            is a list of ``{"id","name","arguments"}`` dicts.
+            is a list of ``{"id","name","arguments"}`` dicts; ``arguments``
+            is absent when the item has none (or null), so that the
+            streamed arguments of a sparse terminal item are kept.
         """
         text_chunks: list[str] = []
         tool_calls: list[dict[str, str]] = []
@@ -1715,15 +1754,16 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     elif ptype == "refusal":
                         text_chunks.append(_get_attr_or_key(part, "refusal", "") or "")
             elif itype == "function_call":
-                tool_calls.append(
-                    {
-                        "id": str(_get_attr_or_key(item, "call_id", "") or ""),
-                        "name": str(_get_attr_or_key(item, "name", "") or ""),
-                        "arguments": str(_get_attr_or_key(item, "arguments", "") or ""),
-                        "item_id": str(_get_attr_or_key(item, "id", "") or ""),
-                        "output_index": str(output_index),
-                    }
-                )
+                call = {
+                    "id": str(_get_attr_or_key(item, "call_id", "") or ""),
+                    "name": str(_get_attr_or_key(item, "name", "") or ""),
+                    "item_id": str(_get_attr_or_key(item, "id", "") or ""),
+                    "output_index": str(output_index),
+                }
+                arguments = _get_attr_or_key(item, "arguments")
+                if arguments is not None:
+                    call["arguments"] = str(arguments or "")
+                tool_calls.append(call)
         return "".join(text_chunks), tool_calls
 
     @classmethod
@@ -1885,8 +1925,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     item["call_id"] = patch["id"]
                 if patch.get("name"):
                     item["name"] = patch["name"]
-                if "arguments" in patch:
-                    item["arguments"] = patch["arguments"]
+                item["arguments"] = patch.get("arguments", "")
                 if patch.get("item_id") and not item.get("id"):
                     item["id"] = patch["item_id"]
                 if not item.get("call_id") or not item.get("name"):
@@ -1923,10 +1962,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 item_id = tc.get("item_id", "")
                 resolved_order = item_output_indexes.get(item_id)
                 if resolved_order is None:
-                    try:
-                        resolved_order = int(tc.get("output_index", "") or "")
-                    except (ValueError, TypeError):
-                        resolved_order = len(raw_items)
+                    resolved_order = int(tc["output_index"])
                 stream_only_orders_list.append((resolved_order, len(raw_items) + tc_i, fc_item))
                 used_orders.add(resolved_order)
             next_order = 0

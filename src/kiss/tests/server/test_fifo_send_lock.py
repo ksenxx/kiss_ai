@@ -28,9 +28,10 @@ class FifoSendLockTests(unittest.TestCase):
             order: list[int] = []
 
             async def contender(i: int) -> None:
-                async with lock:
-                    order.append(i)
-                    await asyncio.sleep(0)
+                await lock.acquire()
+                order.append(i)
+                await asyncio.sleep(0)
+                lock.release()
 
             await lock.acquire()
             self.assertTrue(lock._locked)
@@ -51,8 +52,9 @@ class FifoSendLockTests(unittest.TestCase):
             log: list[str] = []
 
             async def contender(name: str) -> None:
-                async with lock:
-                    log.append(name)
+                await lock.acquire()
+                log.append(name)
+                lock.release()
 
             await lock.acquire()
             queued = asyncio.create_task(contender("queued-cancelled"))
@@ -89,8 +91,9 @@ class FifoSendLockTests(unittest.TestCase):
 
             async def contender() -> None:
                 nonlocal done
-                async with lock:
-                    done += 1
+                await lock.acquire()
+                done += 1
+                lock.release()
 
             await lock.acquire()
             tasks = [asyncio.create_task(contender()) for _ in range(20_000)]
@@ -115,8 +118,9 @@ class FifoSendLockTests(unittest.TestCase):
             printer._pending_sends[endpoint] = set()
             lock = printer.send_lock(endpoint)
             self.assertIs(lock, printer.send_lock(endpoint))
-            async with lock:
-                self.assertTrue(lock._locked)
+            await lock.acquire()
+            self.assertTrue(lock._locked)
+            lock.release()
             self.assertFalse(lock._locked)
 
         asyncio.run(scenario())

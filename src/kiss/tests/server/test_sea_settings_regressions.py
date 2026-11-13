@@ -34,23 +34,34 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.persistence import _get_db, _rw_lock
-from kiss.agents.sorcar.sea_settings import SeaError, resolve_settings
+from kiss.agents.sorcar.sea_apply import apply_sea
+from kiss.agents.sorcar.sea_commands import sea_check
+from kiss.agents.sorcar.sea_settings import (
+    SeaError,
+    anchored_work_dir,
+    locked_conflicts,
+    resolve_settings,
+)
 from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import agent_state, sorcar
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 from kiss.tests.server.test_sea_command_dispatch import _seed_seas_md
 
 
 class _RaisingStr(str):
-    """A ``str`` whose ``strip`` raises, as untrusted script code may return."""
+    """A ``str`` whose ``strip`` and ``==`` raise, as untrusted script code may return."""
 
     __slots__ = ()
+    __hash__ = str.__hash__
 
     def strip(self, chars: str | None = None) -> str:  # type: ignore[override]
         raise RuntimeError("strip exploded")
+
+    def __eq__(self, other: object) -> bool:
+        raise RuntimeError("eq exploded")
 
 
 class _RaisingNumber(int):
@@ -112,6 +123,111 @@ def test_known_key_with_none_value_is_dropped() -> None:
     assert resolved["use_web_tools"] is True
 
 
+_STRING_KEYS = ["tool_profile", "work_dir", "model", "chat_id", "docker_image"]
+
+
+@pytest.mark.parametrize("key", _STRING_KEYS)
+def test_string_setting_of_an_untrusted_subclass_is_copied_not_called(key: str) -> None:
+    # No method of the script's own ``str`` subclass runs: the resolved value
+    # is an exact ``str``, so the launcher's later ``strip()`` cannot raise.
+    resolved = resolve_settings({key: _RaisingStr("bash"), "locked": [_RaisingStr(key)]})
+    assert type(resolved[key]) is str and resolved[key] == "bash"
+    assert [type(name) for name in resolved["locked"]] == [str] and resolved["locked"] == [key]
+
+
+@pytest.mark.parametrize("key", _STRING_KEYS)
+def test_blank_string_setting_is_no_override(key: str) -> None:
+    # Whitespace alone is the "none" a script computing the value may produce,
+    # as a blank ``run_agent`` option is not passed: the caller's value stands.
+    assert resolve_settings({key: " \t", "use_web_tools": True}) == {"use_web_tools": True}
+    assert resolve_settings({key: ""}) == {}
+
+
+def test_work_dir_in_the_home_of_an_unknown_user_is_kept_as_written(tmp_path: Path) -> None:
+    # ``~no_such_user`` names no home: the path stays as written (as a shell
+    # leaves it), under the caller's directory, instead of a RuntimeError
+    # that escaped ``/<name> check`` and ``sea lint``.
+    base = str(tmp_path)
+    written = "~no_such_user_s12/x"
+    assert anchored_work_dir(written, base) == str(tmp_path / written)
+    assert anchored_work_dir("~/x", base) == str(Path.home() / "x")
+    settings = {"work_dir": written, "locked": ["work_dir"]}
+    assert locked_conflicts(settings, {"work_dir": f" {written} "}, base) == ""
+    assert locked_conflicts(settings, {"work_dir": "elsewhere"}, base).startswith(
+        "the script locks work_dir="
+    )
+    script = tmp_path / "demo_sea.py"
+    script.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\n\n"
+        "class Demo(BaseSea):\n"
+        "    def description(self):\n        return 'd.'\n\n"
+        "    def settings(self, settings):\n"
+        f"        return settings | {{'work_dir': {written!r}}}\n",
+        encoding="utf-8",
+    )
+    report = sea_check("demo", script)
+    assert report.startswith("/demo: d.") and f'"work_dir": "{written}"' in report
+
+
+@pytest.mark.parametrize(
+    ("config", "why"),
+    [
+        ("{1: 2, 'a': 3}", "TypeError: '<' not supported between instances of 'str' and 'int'"),
+        ("{'a': Loud()}", "RuntimeError: no text"),
+    ],
+)
+def test_check_reports_settings_json_cannot_write(tmp_path: Path, config: str, why: str) -> None:
+    # A ``model_config`` json cannot write (keys of mixed types cannot be
+    # sorted, a value's ``__str__`` raises) left ``/<name> check`` as a raw
+    # exception; the settings line of the report says so instead.
+    script = tmp_path / "demo_sea.py"
+    script.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\n\n"
+        "class Loud:\n"
+        "    def __str__(self):\n        raise RuntimeError('no text')\n\n\n"
+        "class Demo(BaseSea):\n"
+        "    def description(self):\n        return 'd.'\n\n"
+        "    def settings(self, settings):\n"
+        f"        return settings | {{'model_config': {config}}}\n",
+        encoding="utf-8",
+    )
+    report = sea_check("demo", script).splitlines()
+    assert report[0] == "/demo: d." and report[2] == f"settings: not JSON ({why})"
+    assert report[3].startswith("model: ") and len(report) == 7
+
+
+def test_work_dir_with_a_nul_byte_is_a_lock_conflict_not_a_raw_error(tmp_path: Path) -> None:
+    # A NUL byte names no directory: resolving the path and looking ``~user``
+    # up raise ``ValueError`` on it, which left ``locked_conflicts``, and so
+    # ``apply_sea`` and the dispatcher's lock check, as a raw exception.
+    base = str(tmp_path)
+    settings = {"work_dir": ".", "locked": ["work_dir"]}
+    for asked in ("bad\0path", "~bad\0user/x"):
+        assert anchored_work_dir(asked, base) == str(tmp_path / asked)
+        assert locked_conflicts(settings, {"work_dir": asked}, base) == (
+            f"the script locks work_dir='.' (asked for {asked!r})"
+        )
+    # The one unresolvable directory on both sides is no clash.
+    same = {"work_dir": "bad\0path", "locked": ["work_dir"]}
+    assert locked_conflicts(same, {"work_dir": "bad\0path"}, base) == ""
+    script = tmp_path / "pinned_sea.py"
+    script.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\n\n"
+        "class Pinned(BaseSea):\n"
+        "    def settings(self, settings):\n"
+        "        return settings | {'work_dir': '.', 'locked': ['work_dir']}\n",
+        encoding="utf-8",
+    )
+    cmd = {
+        "seaPath": str(script),
+        "prompt": "review",
+        "workDir": "bad\0path",
+        "provenance": {"work_dir": "explicit"},
+    }
+    with pytest.raises(SeaError, match=r"pinned: the script locks work_dir='\.' \(asked for "):
+        apply_sea(cmd)
+
+
 @pytest.mark.parametrize(
     ("value", "message"),
     [(True, "must be int or float, got bool"), (-5, "must be a positive number of seconds")],
@@ -147,8 +263,8 @@ class SeaSettingsDaemonRegressionTest(DaemonRunApiHarness):
 
     def setUp(self) -> None:
         super().setUp()
-        sea_commands._reset_for_tests()
-        self.addCleanup(sea_commands._reset_for_tests)
+        reset_sea_registry()
+        self.addCleanup(reset_sea_registry)
         self.addCleanup((kiss_home() / "SEAS.md").unlink, missing_ok=True)
 
     def _record_runs(

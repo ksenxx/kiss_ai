@@ -58,14 +58,12 @@ class _Base(unittest.TestCase):
 
         self._saved_db = (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         )
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         _persistence._KISS_DIR = kiss_dir
         _persistence._DB_PATH = kiss_dir / "history.db"
-        _persistence._db_conn = None
 
         self.server = AgentServer()
         self.server.work_dir = self.repo
@@ -104,11 +102,9 @@ class _Base(unittest.TestCase):
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
 
-        if _persistence._db_conn is not None:
-            _persistence._db_conn.close()
+        _persistence._close_thread_db()
         (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved_db
 

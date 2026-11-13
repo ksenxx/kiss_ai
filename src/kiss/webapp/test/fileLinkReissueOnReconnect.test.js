@@ -24,15 +24,13 @@
 'use strict';
 
 const assert = require('assert');
-const harness = require('./simplify2_harness');
+const {send, clickTab} = require('./simplify2_harness');
 const {
   makeWorkDirPage,
   pendingCounts,
   checkPathCommands: postedChecks,
 } = require('./file_link_helpers');
-const {clickTab} = harness;
 
-const {send} = harness;
 const WORK_DIR = '/tmp/kiss-link-reissue';
 
 function sendToolResult(win, tabId, content) {

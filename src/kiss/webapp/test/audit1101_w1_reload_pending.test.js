@@ -30,6 +30,7 @@
 
 const assert = require('assert');
 const H = require('./ui_antipattern_harness');
+const {contentTabs} = require('./subagent_tab_helpers');
 
 const {makePage, send, sleep, click, toast, toastButton} = H;
 
@@ -61,10 +62,6 @@ function reply(win, fields) {
       fields,
     ),
   );
-}
-
-function contentTabs(win) {
-  return win._testApi.openTabs().filter(t => t.isContentTab);
 }
 
 function lastOpenFile(posted) {
@@ -324,6 +321,68 @@ async function testTheLateReplyOfAClosedPlainOpenIsDropped() {
   }
 }
 
+/** Open a file with a fileContent reply of *fields*, then close its tab. */
+async function openAndClose(win, fields) {
+  reply(win, fields);
+  await sleep(0);
+  assert.strictEqual(contentTabs(win).length, 1, 'the reply opens the file');
+  click(
+    win,
+    win.document.querySelector('.chat-tab.content-tab .chat-tab-close'),
+  );
+  assert.strictEqual(contentTabs(win).length, 0, 'the file is closed');
+}
+
+// W1 audit 2026-11-12: the page remembers every file it ever closed,
+// one record each, for its whole life, on purpose.  A reply may be
+// outstanding across any number of closes: forgetting the oldest closes
+// reopened a closed file, and declaring every older request late
+// instead dropped the reply of a file never closed (both tried and
+// reviewed).  This pins the two behaviours a bound would trade.
+async function testCloseRecordsOutliveAnyNumberOfCloses() {
+  const ctx = makePage();
+  const {win, posted} = ctx;
+  try {
+    setUp(ctx);
+    const link = win.document.createElement('span');
+    link.className = 'kiss-filelink';
+    link.dataset.path = FILE;
+    win.document.getElementById('output').appendChild(link);
+    click(win, link);
+    click(win, link);
+    const other = win.document.createElement('span');
+    other.className = 'kiss-filelink';
+    other.dataset.path = '/shared/never-closed.txt';
+    win.document.getElementById('output').appendChild(other);
+    click(win, other);
+    const opens = posted.filter(m => m.type === 'openFile');
+    await openAndClose(win, {token: opens[0].token});
+    for (let i = 0; i < 300; i++) {
+      await openAndClose(win, {path: '/shared/f' + i, name: 'f' + i});
+    }
+    reply(win, {token: opens[1].token});
+    await sleep(0);
+    assert.strictEqual(
+      contentTabs(win).length,
+      0,
+      'BUG - the late reply reopened a file closed 300 closes ago',
+    );
+    reply(win, {
+      token: opens[2].token,
+      path: '/shared/never-closed.txt',
+      name: 'never-closed.txt',
+    });
+    await sleep(0);
+    assert.strictEqual(
+      contentTabs(win).length,
+      1,
+      'BUG - the late reply of a file never closed was dropped',
+    );
+  } finally {
+    win.close();
+  }
+}
+
 (async () => {
   await testReloadIsATokenedOpenFile();
   console.log('  ok - a reload is a tokened openFile, each with its own token');
@@ -339,6 +398,8 @@ async function testTheLateReplyOfAClosedPlainOpenIsDropped() {
   );
   await testTheLateReplyOfAClosedPlainOpenIsDropped();
   console.log("  ok - a closed editor's late plain-open reply is dropped");
+  await testCloseRecordsOutliveAnyNumberOfCloses();
+  console.log('  ok - close records outlive any number of closes');
 })().catch(e => {
   console.error(e);
   process.exit(1);

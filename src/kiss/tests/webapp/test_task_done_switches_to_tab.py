@@ -14,7 +14,7 @@ parallel.  Before this fix, when a task finished in a background tab
 
   * marked the tab's ``isRunning`` flag false,
   * recorded the tab's done label / duration in the per-tab state
-    object (so a later manual click would re-render the "Done (Xm Ys)"
+    object (so a later manual click would re-render the "Xm Ys"
     status), and
   * updated the in-tab-bar status dot (red ●  / green ●).
 

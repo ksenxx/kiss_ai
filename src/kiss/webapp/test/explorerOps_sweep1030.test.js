@@ -10,6 +10,8 @@
 // * Rename... of a folder renames it in its parent, not into itself;
 // * Cut and Set as Working Directory act on the machine the menu was
 //   opened on, even when the tree turned to another machine meanwhile;
+// * a paste answered after the tree turned to another machine opens no
+//   folder there;
 // * the folder dialog refuses a typed path the daemon spells as a
 //   file-system root ("/tmp/.." is "/");
 // * repaints before a machine's directories arrive ask it only once.
@@ -40,18 +42,11 @@ const {
   explorerRow,
   showSection,
 } = require('./ui_antipattern_harness');
+const {MACHINES} = require('./picked_machine_helpers');
+const {answerListing} = require('./workdir_helpers');
 
 const {test, report} = makeRunner();
 
-const MACHINES = [
-  {
-    name: 'laptop',
-    local: true,
-    status: 'reachable',
-    address: 'https://10.0.0.5:8787',
-  },
-  {name: 'gpu-box', status: 'reachable', address: 'https://gpu:8787'},
-];
 // gpu-box's workspace has the same path as this machine's, so a path
 // cut here names an entry there too.
 const BOX_DIRS = {
@@ -61,23 +56,6 @@ const BOX_DIRS = {
   recentWorkDirs: [{path: WD, ts: 1}],
   error: '',
 };
-
-/** Answer the last listDir for *p* on *machine* ('' for this one). */
-function answerListing(win, posted, p, machine, entries) {
-  const req = ofType(posted, 'listDir')
-    .filter(m => m.path === p && (m.machine || '') === machine)
-    .pop();
-  assert.ok(req, 'a listDir for ' + p + ' was sent');
-  const reply = {
-    type: 'dirListing',
-    token: req.token,
-    path: p,
-    root: req.workDir,
-    entries,
-  };
-  if (machine) reply.machine = machine;
-  send(win, reply);
-}
 
 /**
  * A page on this machine's WD (with /extra added to the Explorer
@@ -177,6 +155,46 @@ async function main() {
       before,
       "this machine's file is not moved on gpu-box",
     );
+    win.close();
+  });
+
+  await test('a paste reply opens its folder only on the machine it ran on', () => {
+    const {win, posted} = machinePage();
+    const paste = () => {
+      runMenuItem(win, explorerRow(win, WD + '/foo.py'), 'Copy');
+      runMenuItem(win, explorerRow(win, WD + '/sub'), 'Paste');
+      return ofType(posted, 'fsAction').pop();
+    };
+    const reply = copy =>
+      send(win, {
+        type: 'fsResult',
+        token: copy.token,
+        ok: true,
+        path: WD + '/sub/foo.py',
+      });
+    const boxSubListings = () =>
+      ofType(posted, 'listDir').filter(
+        m => m.path === WD + '/sub' && m.machine === 'gpu-box',
+      ).length;
+    // The tree turns to gpu-box before this machine's paste is answered.
+    const local = paste();
+    bindToBox(win);
+    answerListing(win, posted, WD, 'gpu-box', [
+      {name: 'foo.py', path: WD + '/foo.py', isDir: false},
+      {name: 'sub', path: WD + '/sub', isDir: true},
+    ]);
+    reply(local);
+    const sub = explorerRow(win, WD + '/sub');
+    assert.strictEqual(
+      sub.getAttribute('aria-expanded'),
+      'false',
+      "BUG: this machine's paste opened gpu-box's folder",
+    );
+    assert.strictEqual(boxSubListings(), 0);
+    // A paste on the machine the tree shows still opens its folder.
+    reply(paste());
+    assert.strictEqual(sub.getAttribute('aria-expanded'), 'true');
+    assert.strictEqual(boxSubListings(), 1);
     win.close();
   });
 

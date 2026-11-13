@@ -10,7 +10,9 @@
 //
 //   * a chat bound to `box` opens its terminal there: terminalOpen
 //     carries machine 'box' and the chat's folder on that machine, and
-//     the tab is titled with the machine's label;
+//     the tab is titled with the machine's label; so does a terminal
+//     opened from that chat's terminal, whichever chat it was reached
+//     from;
 //   * its Browser button sends browserOpen {url:'', machine:'box'};
 //   * a page the daemon announces with `machine` is a browser tab
 //     labelled with the machine, whose "+" opens the next page on the
@@ -27,6 +29,8 @@ const {
   ofType,
   installXtermStub,
   settle,
+  plain,
+  openChat,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 
@@ -41,30 +45,6 @@ function makePage() {
 function withTabViews(win) {
   stubRaf(win);
   installXtermStub(win);
-}
-
-/** Structural equality across the jsdom realm (its arrays are not ours), key order aside. */
-function same(actual, expected) {
-  const sorted = (k, v) =>
-    v && typeof v === 'object' && !Array.isArray(v)
-      ? Object.fromEntries(
-          Object.keys(v)
-            .sort()
-            .map(key => [key, v[key]]),
-        )
-      : v;
-  assert.strictEqual(
-    JSON.stringify(actual, sorted),
-    JSON.stringify(expected, sorted),
-  );
-}
-
-function openChat(win) {
-  send(win, {
-    type: 'tabs_state',
-    tabs: [{tabId: 'a1', chatId: 'chat-1', title: 'a1', workDir: '/ws'}],
-  });
-  send(win, {type: 'task_events', tabId: 'a1', task: 'the task', events: []});
 }
 
 function bindToBox(win) {
@@ -102,6 +82,19 @@ async function main() {
     assert.strictEqual(opens[0].machine, 'box');
     assert.strictEqual(opens[0].workDir, '/remote/ws');
     assert.strictEqual(opens[0].tab_id, tab.id);
+    // That terminal on screen, reached from another chat (one of this
+    // machine): a terminal opened there is the bound chat's as well.
+    win._testApi.createNewTab();
+    win._testApi.switchToTab(tab.id);
+    click(win, win.document.getElementById('terminal-btn'));
+    await settle();
+    assert.deepStrictEqual(
+      ofType(posted, 'terminalOpen').map(m => [m.machine, m.workDir]),
+      [
+        ['box', '/remote/ws'],
+        ['box', '/remote/ws'],
+      ],
+    );
     win.close();
   });
 
@@ -110,7 +103,7 @@ async function main() {
     openChat(win);
     bindToBox(win);
     click(win, win.document.getElementById('browser-btn'));
-    same(ofType(posted, 'browserOpen'), [
+    assert.deepStrictEqual(plain(ofType(posted, 'browserOpen')), [
       {type: 'browserOpen', url: '', machine: 'box'},
     ]);
     win.close();
@@ -135,12 +128,18 @@ async function main() {
       title: 'Local',
       focus: false,
     });
+    // (copied out of the page's realm, so deepStrictEqual compares plain arrays)
     const titles = () =>
-      win._testApi
-        .openTabs()
-        .filter(t => t.isContentTab)
-        .map(t => t.id + '=' + t.title);
-    same(titles(), ['browser__1@box=Example (Box)', 'browser__1=Local']);
+      plain(
+        win._testApi
+          .openTabs()
+          .filter(t => t.isContentTab)
+          .map(t => t.id + '=' + t.title),
+      );
+    assert.deepStrictEqual(titles(), [
+      'browser__1@box=Example (Box)',
+      'browser__1=Local',
+    ]);
 
     // The page's title follows (browserState) and keeps the label.
     send(win, {
@@ -160,7 +159,7 @@ async function main() {
       holder.querySelector('.browser-nav-btn[title="New browser tab"]');
     click(win, plusOf(views[0]));
     click(win, plusOf(views[1]));
-    same(ofType(posted, 'browserOpen'), [
+    assert.deepStrictEqual(plain(ofType(posted, 'browserOpen')), [
       {type: 'browserOpen', url: '', machine: 'box'},
       {type: 'browserOpen', url: ''},
     ]);
@@ -169,7 +168,7 @@ async function main() {
     // tab closes, the local one stays; the daemon's own snapshot then
     // closes the local one.
     send(win, {type: 'browserTabs', remote: true, tabs: []});
-    same(titles(), ['browser__1=Local']);
+    assert.deepStrictEqual(titles(), ['browser__1=Local']);
     send(win, {
       type: 'browserTabs',
       remote: true,
@@ -183,16 +182,19 @@ async function main() {
         },
       ],
     });
-    same(titles(), ['browser__1=Local', 'browser__2@box=Two (Box)']);
+    assert.deepStrictEqual(titles(), [
+      'browser__1=Local',
+      'browser__2@box=Two (Box)',
+    ]);
     send(win, {type: 'browserTabs', tabs: []});
-    same(titles(), ['browser__2@box=Two (Box)']);
+    assert.deepStrictEqual(titles(), ['browser__2@box=Two (Box)']);
     // The daemon closing the page (the stream lost, the page gone) drops the tab.
     send(win, {
       type: 'closeBrowserTab',
       tab_id: 'browser__2@box',
       machine: 'box',
     });
-    same(titles(), []);
+    assert.deepStrictEqual(titles(), []);
     win.close();
   });
 
@@ -208,7 +210,9 @@ async function main() {
     assert.ok(!('machine' in open), 'no machine field on a local terminal');
     assert.strictEqual(open.workDir, '/ws');
     click(win, win.document.getElementById('browser-btn'));
-    same(ofType(posted, 'browserOpen'), [{type: 'browserOpen', url: ''}]);
+    assert.deepStrictEqual(plain(ofType(posted, 'browserOpen')), [
+      {type: 'browserOpen', url: ''},
+    ]);
     win.close();
   });
 

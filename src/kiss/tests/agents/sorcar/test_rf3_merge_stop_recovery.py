@@ -14,7 +14,8 @@ asynchronous ``KeyboardInterrupt`` (``PyThreadState_SetAsyncExc``):
 * a git child (a commit behind a slow hook) must not outlive the Stop
   and land later (:class:`TestStopKillsGitChild`);
 * a Stop right after ``git stash push`` must still pop the stash
-  (:class:`TestStopDuringStashCreation`);
+  (:class:`TestStopDuringStashCreation`), and the merge's own entry,
+  not one the user pushed meanwhile (:class:`TestUserStashDuringMerge`);
 * the no-baseline squash path must undo a half-applied merge
   (:class:`TestStopDuringSquashApply`);
 * retiring the worktree must keep the ``git stash pop`` instructions of
@@ -25,9 +26,13 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, _git
@@ -88,7 +93,7 @@ class _MergeStopHarness:
                 returns True.
             before_stop: Optional callable run just before the Stop.
         """
-        merger = _MergeThread(self.agent)
+        merger = _MergeThread(self.agent.merge)
         merger.start()
         deadline = time.monotonic() + 30
         while not moment():
@@ -187,6 +192,78 @@ class TestStopDuringStashCreation(_MergeStopHarness):
 
         self._assert_main_untouched()
         assert self.agent._merge_conflict_warning is None
+
+
+class _UserStashAt:
+    """Profile hook: as *function* first returns, the user stashes a new draft.
+
+    The user's ``git stash`` takes none of the merge's locks, so the
+    top of the stash is no longer the merge's entry.  With *stop* the
+    runner's Stop is raised right after, where an injected one is.
+    """
+
+    def __init__(self, function: Any, repo: Path, stop: bool) -> None:
+        self.code = function.__code__
+        self.repo = repo
+        self.stop = stop
+        self.fired = False
+
+    def __call__(self, frame: Any, event: str, arg: Any) -> None:
+        if event == "return" and frame.f_code is self.code and not self.fired:
+            self.fired = True
+            (self.repo / "draft-b.txt").write_text("draft B\n")
+            subprocess.run(
+                ["git", "-C", str(self.repo), "stash", "push", "-qum", "user B"], check=True,
+            )
+            if self.stop:
+                raise KeyboardInterrupt
+
+
+class TestUserStashDuringMerge(_MergeStopHarness):
+    """The merge gives back the entry it stashed, wherever the stash holds it (C10-F6)."""
+
+    @pytest.mark.parametrize(
+        ("function", "outcome", "notes"),
+        [
+            (GitWorktreeOps.squash_merge, "Successfully merged", True),
+            (GitWorktreeOps.checkout, "Cannot checkout", True),
+            (GitWorktreeOps.stash_if_dirty, "", True),
+            (GitWorktreeOps.stash_if_dirty, "", False),
+        ],
+        ids=["success", "checkout-failed", "stopped", "stopped-with-nothing-stashed"],
+    )
+    def test_a_stash_the_user_pushes_meanwhile_stays_theirs(
+        self, function: Any, outcome: str, notes: bool,
+    ) -> None:
+        """The three restore paths, each with a user's entry on top of the merge's.
+
+        The merge popped the top of the stash: the user's new draft came
+        back and the notes it had stashed itself stayed hidden.  A merge
+        stopped as its stash step returned took ``refs/stash`` having
+        moved for an entry of its own, also when it had stashed nothing.
+        """
+        if notes:
+            (self.repo / "notes.txt").write_text(USER_NOTES)
+        if function is GitWorktreeOps.checkout:  # the branch the task started from is gone
+            _git("checkout", "-qb", "other", cwd=self.repo)
+            _git("branch", "-m", "main", "renamed", cwd=self.repo)
+        hook = _UserStashAt(function, self.repo, stop=not outcome)
+        sys.setprofile(hook)
+        try:
+            if outcome:
+                message = self.agent.merge()
+                assert outcome in message and "git stash pop" not in message, message
+            else:
+                with pytest.raises(KeyboardInterrupt):
+                    self.agent.merge()
+        finally:
+            sys.setprofile(None)
+
+        assert hook.fired
+        assert self.agent._merge_conflict_warning is None
+        assert GitWorktreeOps.status_porcelain(self.repo) == ("?? notes.txt" if notes else "")
+        stashed = _git("stash", "list", cwd=self.repo).stdout.splitlines()
+        assert len(stashed) == 1 and stashed[0].endswith("user B"), stashed
 
 
 @_SH_HOOKS

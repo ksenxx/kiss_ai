@@ -32,6 +32,7 @@ class TestSynthesizeTalkAudioUsage:
         assert usage["budget_used"] == 0.0
         assert usage["total_tokens_used"] == 0
 
+    @pytest.mark.live_api
     @pytest.mark.skipif(
         not os.environ.get("OPENAI_API_KEY"),
         reason="requires OPENAI_API_KEY for a live gpt-audio-1.5 call",

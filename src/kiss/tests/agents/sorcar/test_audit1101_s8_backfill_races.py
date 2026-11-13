@@ -140,7 +140,7 @@ def test_sea_backfill_keeps_the_sea_a_live_writer_supplied() -> None:
     home = IsolatedKissHome("audit1101-s8-sea-")
     try:
         parent, _ = _add_task("parent task")
-        child, _ = _add_task("do exact work", extra={"subagent": {"parent_task_id": parent}})
+        # The call is stamped before the child it launches, as in a real run.
         _append_chat_event(
             {
                 "type": "tool_call",
@@ -149,6 +149,7 @@ def test_sea_backfill_keeps_the_sea_a_live_writer_supplied() -> None:
             },
             task_id=parent,
         )
+        child, _ = _add_task("do exact work", extra={"subagent": {"parent_task_id": parent}})
         _flush_chat_events()
         seen: list[str] = []
         with closing(sqlite3.connect(home.kiss_home / "history.db")) as db:

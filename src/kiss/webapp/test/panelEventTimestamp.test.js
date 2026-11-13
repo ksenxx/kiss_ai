@@ -13,6 +13,7 @@ const {
   loadRemoteCss,
   readyTabId,
   stubClipboard,
+  flushMicrotasks,
 } = require('./simplify2_harness');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
@@ -33,8 +34,21 @@ function makePage() {
   return {win, posted, getClipboard: () => clip.last()};
 }
 
-function flushMicrotasks() {
-  return new Promise(resolve => setImmediate(resolve));
+/** The badge text of an epoch-ms stamp, built in the process locale as
+ * formatEventTs builds it: the suite must pass under any LC_ALL. */
+function stampLabel(win, epochMs) {
+  const d = new win.Date(epochMs);
+  const day = d.toLocaleDateString([], {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+  const time = d.toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  return day + ' ' + time;
 }
 
 function assertBadge(panel, ts, what) {
@@ -72,16 +86,22 @@ function assertBadge(panel, ts, what) {
     0,
     `${what}: no .panel-ts badge may remain a direct child of the panel`,
   );
-  const elapsed = panel.querySelectorAll('.panel-elapsed');
-  for (let i = 0; i < elapsed.length; i++) {
-    if (elapsed[i].closest('.panel-time') !== bar) continue;
+  // Every elapsed label sits in a footer bar; this panel's own follow
+  // its badge as direct children of the bar.
+  assert.ok(
+    Array.from(panel.querySelectorAll('.panel-elapsed')).every(label =>
+      label.closest('.panel-time'),
+    ),
+    `${what}: an elapsed label must sit inside a footer bar`,
+  );
+  for (const label of bar.querySelectorAll('.panel-elapsed')) {
     assert.strictEqual(
-      elapsed[i].parentElement,
+      label.parentElement,
       bar,
       `${what}: the elapsed label must be a direct child of the bar`,
     );
     assert.ok(
-      badge.compareDocumentPosition(elapsed[i]) &
+      badge.compareDocumentPosition(label) &
         panel.ownerDocument.defaultView.Node.DOCUMENT_POSITION_FOLLOWING,
       `${what}: the elapsed label must follow the badge in the bar`,
     );
@@ -405,9 +425,10 @@ async function run() {
     const label = promptPanel.querySelector(
       ':scope > .panel-time > .panel-ts',
     ).textContent;
-    assert.ok(
-      label.includes('2021'),
-      `other-year label must include the year, got ${JSON.stringify(label)}`,
+    assert.strictEqual(
+      label,
+      stampLabel(win, oldTs),
+      'the label must be the original date, year included, and time',
     );
     win.close();
   });
@@ -523,7 +544,6 @@ async function run() {
     const label = tc.querySelector(
       ':scope > .panel-time > .panel-ts',
     ).textContent;
-    assert.ok(tc.classList.contains('collapsed'), 'panel collapsed');
     const prev = tc.querySelector('.collapse-preview');
     assert.ok(
       prev.textContent.includes('tweak file'),
@@ -570,12 +590,9 @@ async function run() {
     const sameDay = new Date(2026, 5, 15, 9, 5, 42).getTime();
     const sameYear = new Date(2026, 0, 2, 23, 59, 7).getTime();
     const otherYear = new Date(2024, 11, 31, 0, 30, 59).getTime();
-    assert.ok(/2026/.test(PanelCopy.formatEventTs(sameDay)));
-    assert.ok(/:05:42/.test(PanelCopy.formatEventTs(sameDay)));
-    assert.ok(/2026/.test(PanelCopy.formatEventTs(sameYear)));
-    assert.ok(/:59:07/.test(PanelCopy.formatEventTs(sameYear)));
-    assert.ok(/2024/.test(PanelCopy.formatEventTs(otherYear)));
-    assert.ok(/:30:59/.test(PanelCopy.formatEventTs(otherYear)));
+    for (const ts of [sameDay, sameYear, otherYear]) {
+      assert.strictEqual(PanelCopy.formatEventTs(ts), stampLabel(wv.win, ts));
+    }
     assert.strictEqual(PanelCopy.formatEventTs(undefined), '');
     assert.strictEqual(PanelCopy.formatEventTs(null), '');
     assert.strictEqual(PanelCopy.formatEventTs('junk'), '');
@@ -634,6 +651,15 @@ async function run() {
     const {PanelCopy} = win;
     assert.strictEqual(typeof PanelCopy.ensurePanelFoot, 'function');
     const doc = win.document;
+    // What the page starts observing: a panel is asked for its bar every
+    // second while it is active, and must be watched once.
+    const observed = [];
+    win.MutationObserver = class extends win.MutationObserver {
+      observe(target, options) {
+        observed.push(target);
+        super.observe(target, options);
+      }
+    };
     const panel = doc.createElement('div');
     doc.body.appendChild(panel);
     const bar = PanelCopy.ensurePanelFoot(panel);
@@ -656,6 +682,7 @@ async function run() {
     const nestedBar = PanelCopy.ensurePanelFoot(nested);
     assert.notStrictEqual(nestedBar, bar, 'nested panel gets its own bar');
     assert.strictEqual(PanelCopy.ensurePanelFoot(panel), bar);
+    assert.deepStrictEqual(observed, [panel, nested], 'one observer per panel');
     win.close();
   });
 
@@ -755,7 +782,6 @@ async function run() {
   });
 
   report('panelEventTimestamp');
-  process.exit(0);
 }
 
 run().catch(e => {

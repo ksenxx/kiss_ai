@@ -27,8 +27,11 @@ from __future__ import annotations
 
 import pytest
 
+from kiss.core import config as config_module
 from kiss.scripts import update_models as _update_models
 from kiss.scripts.update_models import _noop_token_callback, detect_thinking_level
+from kiss.tests.core.models import anthropic_sse_harness
+from kiss.tests.core.models import openai_sse_harness as sse
 from kiss.tests.core.models.test_update_models_stream_only import _stream_only_server
 
 _probe_generate = _update_models.test_generate
@@ -111,3 +114,50 @@ def test_update_models_probes_carry_token_callback_for_stream_only_servers(
     assert _probe_generate("unknown-vendor/does-not-exist") is False
     assert _probe_function_calling("unknown-vendor/does-not-exist") is False
     assert detect_thinking_level("unknown-vendor/does-not-exist") is None
+
+
+def _call_the_tool_the_model_is_named_for(request: sse.Request) -> sse.Reply:
+    """Answer a chat request with one streamed tool call, of the tool ``calls-<tool>`` names."""
+    function = {"name": request.body["model"].removeprefix("calls-"), "arguments": "{}"}
+    call = {"index": 0, "id": "call_1", "type": "function", "function": function}
+    choices = (
+        {"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": None},
+        {"index": 0, "delta": {}, "finish_reason": "tool_calls"},
+    )
+    return sse.Reply(sse_chunks=[sse.chat_chunk({"choices": [choice]}) for choice in choices])
+
+
+def test_function_calling_probe_requires_the_offered_tool() -> None:
+    """A model that answers with a tool it was not offered does not call tools."""
+    with sse.ScriptedOpenAIServer(_call_the_tool_the_model_is_named_for) as server:
+        endpoint = {"base_url": server.base_url, "api_key": "dummy"}
+        assert _probe_function_calling("calls-calculator", endpoint) is True
+        assert _probe_function_calling("calls-web_search", endpoint) is False
+
+
+@pytest.mark.parametrize(
+    ("error_type", "verdict"),
+    [
+        ("overloaded_error", None),
+        ("api_error", None),
+        ("rate_limit_error", None),
+        ("timeout_error", None),
+        ("invalid_request_error", False),
+    ],
+)
+def test_probes_read_an_error_inside_a_claude_stream_by_its_type(
+    error_type: str, verdict: bool | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Anthropic reports an overload inside a stream that had answered 200 as an ``error`` event.
+
+    The SDK raises it with the stream's status, which read as a verdict: a retest during an
+    overload wrote ``gen`` and ``fc`` away.  A request rejected inside the stream still is one.
+    """
+    error = {"type": "error", "error": {"type": error_type, "message": "Overloaded"}}
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "sk-ant-test")
+    reply = [anthropic_sse_harness.sse("error", error)]
+    with anthropic_sse_harness.ScriptedAnthropicServer(reply) as server:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", server.base_url)
+        assert _probe_generate("claude-opus-4-6") is verdict
+        assert _probe_function_calling("claude-opus-4-6") is verdict
+        assert len(server.requests) == 2  # each probe was answered: no verdict of a missing key

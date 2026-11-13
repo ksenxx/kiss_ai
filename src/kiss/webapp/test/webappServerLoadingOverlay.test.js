@@ -18,6 +18,7 @@ const {
   newAuthDom,
   bootShim,
   installFakeWebSocket,
+  overlayText,
   ok,
 } = require('./transport_page_helpers');
 const {captureTimers} = require('./simplify2_harness');
@@ -37,10 +38,6 @@ function boot(prepare) {
   bootShim(window);
   assert.strictEqual(sockets.length, 1, 'the shim opens one WebSocket on load');
   return {window, sockets, sock: sockets[0], seen};
-}
-
-function overlayText(window) {
-  return window.document.getElementById('kiss-server-loading-msg').textContent;
 }
 
 async function run() {
@@ -126,10 +123,11 @@ async function run() {
       },
     });
     window.document.dispatchEvent(new window.Event('visibilitychange'));
-    assert.ok(
-      sockets.length >= 2,
-      'visibilitychange must reconnect at once, or iOS Safari users wait ' +
-        'out the full backoff',
+    assert.strictEqual(
+      sockets.length,
+      2,
+      'visibilitychange must reconnect at once (one new socket), or iOS ' +
+        'Safari users wait out the full backoff',
     );
     ok('visibilitychange wakes the shim and reconnects immediately');
     window.close();

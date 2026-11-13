@@ -66,13 +66,19 @@ from kiss.agents.sorcar.sea_commands import (
     sea_layers,
     slash_command,
 )
-from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, canonical_tool_profile
+from kiss.agents.sorcar.sorcar_agent import (
+    _notify_subagent_done,
+    canonical_tool_profile,
+    classification_chooses_prompt,
+    resolve_tool_profile,
+)
 from kiss.agents.sorcar.task_classifier import classification_enabled
 from kiss.core import tool_interrupt
 from kiss.core.llm_reply import LLMReply
 from kiss.core.locked import _race_delay, locked_call
 from kiss.core.models.model import Attachment, framework_flags_over
 from kiss.core.models.model_info import (
+    _strip_thinking_alias,
     custom_model_config,
     get_available_models,
     get_default_model,
@@ -84,9 +90,19 @@ from kiss.core.user_config import build_model_config, load_config
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.browser_tab import BrowserTabService
-from kiss.server.json_printer import JsonPrinter, stamp_event_ts
+from kiss.server.json_printer import (
+    IdentifiedPrompt,
+    JsonPrinter,
+    name_prompts,
+    prompt_ids_of,
+    stamp_event_ts,
+)
 
 logger = logging.getLogger(__name__)
+
+#: The longest ``promptId`` taken from a command: the page mints a
+#: UUID (36 characters), and the daemon remembers the ids it took.
+_MAX_PROMPT_ID_CHARS = 64
 
 
 def inject_keyboard_interrupt(tid: int) -> int:
@@ -164,6 +180,11 @@ def wait_for_thread_start(
     cleanup clears ``state.task_thread`` — dropping ownership and
     ending this wait.
 
+    ``ident`` is read under ``STATE_LOCK``, which ``_cmd_run`` holds
+    across ``thread.start()``: CPython publishes a starting thread's
+    ``ident`` before its started flag, and ``join`` still raises on a
+    thread read in between.
+
     Args:
         thread: The worker thread captured at stop/shutdown time.
         still_owns: Ownership guard evaluated under
@@ -179,14 +200,15 @@ def wait_for_thread_start(
         ``True`` when the thread started; ``False`` when ownership
         dropped or *deadline* passed first.
     """
-    while thread.ident is None:
+    while True:
         with agent_state.STATE_LOCK:
+            if thread.ident is not None:
+                return True
             if not still_owns():
                 return False
         if time.monotonic() > deadline:  # pragma: no cover — only by stalling start()
             return False
         time.sleep(0.01)
-    return True
 
 
 def _state_owns_thread(
@@ -237,13 +259,11 @@ def _state_owns_thread(
         *thread*, has not yet acknowledged the stop and *thread* is
         not performing the state's merge; ``False`` otherwise.
     """
-    current = agent_state.agent_states.get(state.task_id)
     return (
-        current is not None
-        and current is state
-        and current.task_thread is thread
-        and not current.stop_acknowledged
-        and not (current.is_merging and current.merge_thread is thread)
+        agent_state.agent_states.get(state.task_id) is state
+        and state.task_thread is thread
+        and not state.stop_acknowledged
+        and not (state.is_merging and state.merge_thread is thread)
     )
 
 
@@ -325,7 +345,8 @@ def _pending_message_reruns(state: AgentState) -> list[tuple[str, list[Attachmen
     """Under ``STATE_LOCK``: *state*'s undrained steering messages as ``(prompt, files)`` re-runs.
 
     Consecutive plain messages make one prompt, joined by blank lines
-    in the order they were typed, with their files combined; a
+    in the order they were typed, with their files combined and under
+    the ids of them all (:class:`IdentifiedPrompt`); a
     ``<task>`` message is a re-run of its own with its own files —
     never joined with a plain one, which ``parse_task_tags`` would then
     drop, and never given another message's files.  The two lists are
@@ -339,7 +360,10 @@ def _pending_message_reruns(state: AgentState) -> list[tuple[str, list[Attachmen
         tagged = contains_task_tags(text)
         if joinable and not tagged:
             prompt, pooled = reruns[-1]
-            reruns[-1] = (f"{prompt}\n\n{text}", pooled + list(files))
+            joined = IdentifiedPrompt(
+                f"{prompt}\n\n{text}", (*prompt_ids_of(prompt), *prompt_ids_of(text)),
+            )
+            reruns[-1] = (joined, pooled + list(files))
         else:
             reruns.append((text, list(files)))
         joinable = not tagged
@@ -386,6 +410,29 @@ def _end_agent_loop(state: AgentState) -> None:
     _end_run_before_loop(state)
     state.queued_followup_tasks.clear()
     state.queued_followup_files.clear()
+
+
+def _end_run(state: AgentState, end: Callable[[AgentState], None]) -> None:
+    """Run *end* under ``STATE_LOCK``, again while a Stop's interrupt lands in the call.
+
+    *end* (:func:`_end_agent_loop` or :func:`_end_run_before_loop`)
+    acknowledges the stop, and the watchdog injects under this lock
+    while the stop is unacknowledged (:func:`inject_if_owned`): an
+    interrupt injected just before is raised on this thread as it
+    takes the lock, before *end* has run.  Raised out of the caller it
+    skipped what the acknowledgement precedes: the end-of-loop cleanup
+    of ``_run_task_inner`` (the row's result, the terminal event, a
+    sub-agent's ``subagentDone``) or the failure ``result`` of
+    ``_run_task``.  The run has ended either way, so the interrupt has
+    nothing left to stop; each repeat consumes one injection and none
+    follows once *end* has run.
+    """
+    while True:
+        try:
+            locked_call(agent_state.STATE_LOCK, end, state)
+            return
+        except KeyboardInterrupt:
+            continue
 
 
 def _stop_interrupt_wrapped(exc: BaseException, state: AgentState) -> bool:
@@ -525,6 +572,33 @@ def _client_task_id_of(cmd: dict[str, Any]) -> str:
     """
     raw = cmd.get("taskId", "")
     return raw if isinstance(raw, str) else ""
+
+
+def _prompt_of(cmd: dict[str, Any]) -> Any:
+    """Return the ``prompt`` of a ``run`` / ``appendUserMessage`` command with its ids.
+
+    The chat page stamps each prompt with a ``promptId``; the re-run of
+    the messages a finished run left undrained stands for all of theirs
+    (``promptIds``, set by ``_redispatch_leftover_prompts``).  A text
+    sent under ids comes back as an :class:`IdentifiedPrompt`, so every
+    answer about it can name them (``name_prompts``); anything else
+    comes back as it was sent.  An id is a UUID the page minted: a
+    value that is no short string is not one, and is not echoed.
+
+    Args:
+        cmd: The command dict.
+
+    Returns:
+        The command's ``prompt`` (``""`` when absent).
+    """
+    prompt = cmd.get("prompt", "")
+    raw = cmd.get("promptIds") or [cmd.get("promptId")]
+    ids = tuple(
+        i
+        for i in (raw if isinstance(raw, list) else [])
+        if isinstance(i, str) and 0 < len(i) <= _MAX_PROMPT_ID_CHARS
+    )
+    return IdentifiedPrompt(prompt, ids) if ids and isinstance(prompt, str) else prompt
 
 
 def _staged_hook(cmd: dict[str, Any], key: str) -> Any:
@@ -680,13 +754,18 @@ def decode_attachments(raw: object) -> list[Attachment] | None:
 
 
 def _attachment_entries(raw: object) -> list[Any] | None:
-    """Return *raw* when it is a list, else log and return ``None``."""
+    """Return *raw* when it is a list, else ``None``.
+
+    Any other value is logged as malformed, except ``None``: that is
+    the field of a ``submit`` that carried none.
+    """
     if isinstance(raw, list):
         return raw
-    logger.warning(
-        "Ignoring malformed attachments field of type %s",
-        type(raw).__name__,
-    )
+    if raw is not None:
+        logger.warning(
+            "Ignoring malformed attachments field of type %s",
+            type(raw).__name__,
+        )
     return None
 
 
@@ -830,6 +909,24 @@ def contains_task_tags(text: str) -> bool:
         blocks rather than falling back to the whole text.
     """
     return any(_task_tag_blocks(text))
+
+
+def _seed_tool_profile(raw_profile: object) -> str | None:
+    """Return a run's tool profile for the classification pre-seeded before it.
+
+    Args:
+        raw_profile: The run command's ``toolProfile`` field.
+
+    Returns:
+        The profile as :func:`canonical_tool_profile` names it, or
+        ``None`` for a name the run is about to reject: that run fails
+        with the diagnostic once it is set up to report it, and has no
+        prompt to classify for.
+    """
+    try:
+        return canonical_tool_profile(raw_profile if isinstance(raw_profile, str) else "")
+    except ValueError:
+        return None
 
 
 def _zero_usage_counters(agent: Any) -> None:
@@ -989,6 +1086,7 @@ class _TaskRunnerMixin:
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _cmd_run(self, cmd: dict[str, Any]) -> None: ...
         def _broadcast_run_notice(self, cmd: dict[str, Any], tab_id: str) -> None: ...
+        def _refuse_unanswered_prompts(self, tab_id: str, prompts: list[str]) -> None: ...
         def _present_pending_worktree(
             self,
             tab_id: str,
@@ -1284,19 +1382,18 @@ class _TaskRunnerMixin:
                     # follow-up submitted during this setup window was
                     # echoed since, so the run's own prompt is echoed
                     # again first.
+                    prompt = _prompt_of(cmd)
                     self.printer.broadcast(
-                        {
-                            "type": "setTaskText",
-                            "text": str(cmd.get("prompt", "") or ""),
-                            "tabId": tab_id,
-                        }
+                        name_prompts(
+                            {"type": "setTaskText", "text": str(prompt or ""), "tabId": tab_id},
+                            prompt,
+                        )
                     )
                     self.printer.broadcast(
-                        {
-                            "type": "clear",
-                            "chat_id": override_chat_id,
-                            "tabId": tab_id,
-                        }
+                        name_prompts(
+                            {"type": "clear", "chat_id": override_chat_id, "tabId": tab_id},
+                            prompt,
+                        )
                     )
                     # That ``clear`` wipes the transcript again, so the
                     # run's notice (dropped attachments) must follow it.
@@ -1312,7 +1409,7 @@ class _TaskRunnerMixin:
             if state is not None:
                 # Idempotent after a loop that ended on its own; for a
                 # setup failure it is the only end-of-loop call.
-                locked_call(self._state_lock, _end_run_before_loop, state)
+                _end_run(state, _end_run_before_loop)
             if state is not None and _is_cancellation(exc, state):
                 # A cancellation that landed before ``_run_task_inner``'s
                 # own handlers (setup, or the inner prologue) — as the
@@ -1355,6 +1452,10 @@ class _TaskRunnerMixin:
                 # this run never reached.
                 with suppress(BaseException):
                     state = self._resolve_run_state(cmd)
+            # The saved model is read here, before the lock: the event
+            # loop takes ``_state_lock`` for every opening connection
+            # and would wait out a file read made under it.
+            last_model = _load_last_model()
             # Prompts typed into the tab after the agent's last step
             # (during result broadcast, persistence and worktree
             # merge, while ``task_thread`` was still installed): no
@@ -1367,6 +1468,7 @@ class _TaskRunnerMixin:
                 cmd,
                 tab_id,
                 client_task_id,
+                last_model,
             )
             # A run_agent child's completion signal goes out only now,
             # with the thread slot released: a parent replay that read
@@ -1381,7 +1483,9 @@ class _TaskRunnerMixin:
             self._broadcast_status_end_to_viewers(
                 task_id_for_end,
                 tab_id,
+                last_model,
                 client_task_id=client_task_id,
+                end_event=cmd.pop("_end_event", None),
             )
             # End this thread's stop binding HERE too, not only in
             # ``_run_task_inner``'s cleanup: that cleanup belongs to
@@ -1397,6 +1501,11 @@ class _TaskRunnerMixin:
             self._dispose_if_closed(tab_id)
             if redispatch:
                 self._redispatch_leftover_prompts(submitted_cmd, reruns)
+            else:
+                # No run takes what this one left (it was stopped, or its
+                # tab is gone): a message that waited for that run is
+                # handed back.
+                self._refuse_unanswered_prompts(tab_id, [prompt for prompt, _files in reruns])
 
     def _redispatch_leftover_prompts(
         self,
@@ -1406,17 +1515,22 @@ class _TaskRunnerMixin:
         """Re-submit the prompts a finished run left undrained, in order.
 
         Called at the very end of :meth:`_run_task`'s cleanup, once the
-        tab's thread slot is free, so :meth:`_cmd_run` takes its
-        fresh-run branch for the first prompt — exactly what would have
-        happened had the user typed it one second later — and queues
-        every further one on that run as a ``<task>`` follow-up, each
-        with its own files.  The follow-ups inherit the finished run's
+        tab's thread slot is free, so :meth:`_cmd_run` routes each
+        prompt, with its own files, exactly as it would have had the
+        user typed it one second later: the first takes the fresh-run
+        branch, a ``<task>`` message after it queues on that run as a
+        follow-up, and a plain message after it steers that run — a
+        plain message is for the task its tab is running, also when it
+        was typed after a ``<task>`` message, which runs once that task
+        is over.  The follow-ups inherit the finished run's
         settings as the user submitted them (work dir, model, worktree
         and auto-commit choices) — not what its SEA pipeline made of
         them (a ``/xxx`` command's ``seaPath``, a script's pinned
-        fields) — and not its client stamp: the run token (``taskId``)
-        belongs to the submission that has just ended, and the routing
-        key (``_state_key``) to the state that has just been torn down.
+        fields) — and not its client stamps: the run token (``taskId``)
+        and the prompt's id (``promptId``) belong to the submission that
+        has just ended, and the routing key (``_state_key``) to the
+        state that has just been torn down.  Each re-run goes out under
+        the ids of the messages it stands for (``promptIds``).
 
         Args:
             cmd: The finished run's ``run`` command as submitted
@@ -1424,10 +1538,11 @@ class _TaskRunnerMixin:
             reruns: ``(prompt, attachments)`` pairs from
                 :meth:`_release_run_state`, oldest first.
         """
-        base = {k: v for k, v in cmd.items() if k not in ("taskId", "_state_key")}
+        base = {k: v for k, v in cmd.items() if k not in ("taskId", "_state_key", "promptId")}
         for prompt, files in reruns:
             followup = dict(base)
-            followup["prompt"] = prompt
+            followup["prompt"] = str(prompt)
+            followup["promptIds"] = prompt_ids_of(prompt)
             followup["attachments"] = [
                 {"mimeType": att.mime_type, "data": base64.b64encode(att.data).decode("ascii")}
                 for att in files
@@ -1443,6 +1558,7 @@ class _TaskRunnerMixin:
         cmd: dict[str, Any],
         tab_id: str,
         client_task_id: str,
+        last_model: str,
     ) -> tuple[list[tuple[str, list[Attachment]]], bool, str | None]:
         """Under ``_state_lock``: free *state*'s run slot and end the tab's status.
 
@@ -1460,6 +1576,8 @@ class _TaskRunnerMixin:
             tab_id: The launcher tab.
             client_task_id: The client's run token, stamped on the
                 status event when known.
+            last_model: The saved model (``_load_last_model()``), read
+                by the caller before it took the lock.
 
         Returns:
             ``(reruns, redispatch, task_id)``: the ``(prompt,
@@ -1512,18 +1630,30 @@ class _TaskRunnerMixin:
                 False,
             ):
                 state.agent = None
-        status_end: dict[str, Any] = {
-            "type": "status",
-            "running": False,
-            "tabId": tab_id,
-        }
+        self._broadcast_run_end(tab_id, client_task_id, last_model)
+        return reruns, redispatch, task_id_for_end
+
+    def _broadcast_run_end(self, tab_id: str, client_task_id: str, last_model: str) -> None:
+        """Under ``_state_lock``: send *tab_id* the ``running=False`` of its run's end.
+
+        For the launcher tab (:meth:`_release_run_state`) and for each
+        tab viewing the run (:meth:`_end_viewer_status`): a tab's
+        spinner reads nothing but this event.  The tab's model picker
+        goes back to the user with it.
+
+        Args:
+            tab_id: The tab whose run ended.
+            client_task_id: The client's run token, stamped on the
+                event when known.
+            last_model: See :meth:`_restore_user_model_pick`.
+        """
+        status_end: dict[str, Any] = {"type": "status", "running": False, "tabId": tab_id}
         if client_task_id:
             status_end["taskId"] = client_task_id
         self.printer.broadcast(status_end)
-        self._restore_user_model_pick(tab_id)
-        return reruns, redispatch, task_id_for_end
+        self._restore_user_model_pick(tab_id, last_model)
 
-    def _restore_user_model_pick(self, tab_id: str) -> None:
+    def _restore_user_model_pick(self, tab_id: str, last_model: str) -> None:
         """Under ``_state_lock``: put the user's own model back in *tab_id*'s picker.
 
         A finished agent's ``set_model`` override is display-only, so
@@ -1538,17 +1668,21 @@ class _TaskRunnerMixin:
 
         Args:
             tab_id: The tab whose picker should be restored.
+            last_model: The saved model (``_load_last_model()``), read
+                by the caller before it took the lock.
         """
         # The tab's own pick, else the last saved model, else the default.
-        model = self._tab_models.get(tab_id, "") or (_load_last_model() or self._default_model)
+        model = self._tab_models.get(tab_id, "") or last_model or self._default_model
         self.printer.restore_model_pick(model, tab_id)
 
     def _broadcast_status_end_to_viewers(
         self,
         task_id: str | None,
         launcher_tab_id: str,
+        last_model: str,
         *,
         client_task_id: str = "",
+        end_event: dict[str, Any] | None = None,
     ) -> None:
         """Broadcast ``status running=False`` to every viewer subscribed
         to *task_id*, excluding the launcher tab.
@@ -1573,6 +1707,15 @@ class _TaskRunnerMixin:
             launcher_tab_id: The tab the task was launched in — its
                 ``running=False`` broadcast is emitted directly by
                 the caller, so skip it here to avoid duplication.
+            last_model: The saved model (``_load_last_model()``), for
+                the viewers' pickers: read by the caller, never under
+                the lock each viewer's status end takes.
+            client_task_id: The client's run token, stamped on the
+                status events when known.
+            end_event: The run's terminal event as the launcher tab was
+                sent it, without its ``tabId``; ``None`` for a run
+                that ended before its agent loop, which has none.  See
+                :meth:`_end_viewer_status`.
         """
         if task_id is None:
             return
@@ -1586,6 +1729,8 @@ class _TaskRunnerMixin:
                 viewer_tab_id,
                 task_key,
                 client_task_id,
+                last_model,
+                end_event,
             )
 
     def _end_viewer_status(
@@ -1593,6 +1738,8 @@ class _TaskRunnerMixin:
         viewer_tab_id: str,
         task_key: str,
         client_task_id: str,
+        last_model: str,
+        end_event: dict[str, Any] | None,
     ) -> None:
         """Under ``_state_lock``: send *viewer_tab_id* its ``running=False`` for *task_key*.
 
@@ -1607,7 +1754,24 @@ class _TaskRunnerMixin:
         after its thread starts (S3-05), so a viewer whose OWN task is
         in that startup window would otherwise receive a spurious
         ``running=False`` and its composer would re-enable mid-run.
+
+        Nothing is sent to a tab that left the run since the caller
+        read its viewers, before this hold: a replay that bound the tab
+        to another chat dropped its subscription, and the tab shows
+        that chat now, which this run's end would label Stopped.
+
+        The run's end (*end_event*) goes first, as the launcher tab got
+        it: the terminal event names one tab, and a page ends a tab's
+        task on that event alone.  Without a copy of a failure end a
+        viewer read ``Done`` and sent the user's next message as an
+        answer nobody waits for; without one of a ``task_done`` it
+        never opened the reports the task wrote and left its last
+        panel's time running.  The copy is marked ``viewer``: a page
+        sounds its jingle for the launcher's event, which reaches every
+        page, and for no copy.
         """
+        if task_key not in self.printer.tasks_for_tab(viewer_tab_id):
+            return
         viewer_state = agent_state.find_by_tab(viewer_tab_id)
         if viewer_state is not None and viewer_state.busy() and viewer_state.task_id != task_key:
             return
@@ -1619,15 +1783,9 @@ class _TaskRunnerMixin:
             for other in self._find_viewer_task_states(viewer_tab_id)
         ):
             return
-        payload: dict[str, Any] = {
-            "type": "status",
-            "running": False,
-            "tabId": viewer_tab_id,
-        }
-        if client_task_id:
-            payload["taskId"] = client_task_id
-        self.printer.broadcast(payload)
-        self._restore_user_model_pick(viewer_tab_id)
+        if end_event is not None:
+            self.printer.broadcast({**end_event, "tabId": viewer_tab_id, "viewer": True})
+        self._broadcast_run_end(viewer_tab_id, client_task_id, last_model)
 
     def _broadcast_dispatch_subagent_done(
         self,
@@ -1866,6 +2024,7 @@ class _TaskRunnerMixin:
             self._state_lock,
             self._subscribe_launching_tab_locked,
             task_id,
+            chat_id,
             source_tab_id,
         )
         if is_subagent:
@@ -1879,7 +2038,29 @@ class _TaskRunnerMixin:
             previous_task_id=previous_task_id,
         )
 
-    def _subscribe_launching_tab_locked(self, task_id: str, tab_id: str) -> None:
+    def _take_opened_task_pin_locked(self, tab_id: str, chat_id: str) -> str:
+        """Under ``_state_lock``: take the task *tab_id* was opened at, for the run starting in it.
+
+        The run continues from that task (``resume_from_task_id``), so
+        the pin is consumed.  Not when a replay bound the tab to another
+        chat since the run was admitted: the pin is then a task of that
+        chat, which the tab shows now and keeps, and seeding the run
+        from it would feed the run the other conversation.  The rule of
+        :meth:`_subscribe_launching_tab_locked`; a run with no chat id
+        yet (a direct ``_run_task`` caller's) has none to compare.
+
+        Args:
+            tab_id: The UI tab the run was launched from.
+            chat_id: The chat the run is on; ``""`` when not known yet.
+
+        Returns:
+            The pinned task id, or ``""`` when the run takes none.
+        """
+        if chat_id and self._tab_chat_views.get(tab_id, chat_id) != chat_id:
+            return ""
+        return self._tab_opened_task_ids.pop(tab_id, "")
+
+    def _subscribe_launching_tab_locked(self, task_id: str, chat_id: str, tab_id: str) -> None:
         """Under ``_state_lock``: subscribe the launching *tab_id* to *task_id*'s stream.
 
         Headless when the tab is closed on every surface already (its
@@ -1893,10 +2074,22 @@ class _TaskRunnerMixin:
         publication under (``_commit_replay_publication``), so
         neither interleaves with this subscription.
 
+        Not at all when a replay bound the tab to another chat since
+        the run was admitted: that replay's commit dropped the tab's
+        subscription to this run (the tab shows the other chat's
+        transcript), and a row allocated afterwards (the run's first,
+        when the replay landed in its setup, or a later subtask's)
+        must not bring the run's stream back into it.  The rule of
+        :meth:`_subscribe_idle_viewer_locked`, except that a tab with
+        no chat view is this run's (a direct ``_run_task`` caller's).
+
         Args:
             task_id: The task's allocated ``task_history`` row id.
+            chat_id: The chat the task runs on.
             tab_id: The UI tab the task was launched from.
         """
+        if self._tab_chat_views.get(tab_id, chat_id) != chat_id:
+            return
         state = agent_state.find_by_tab(tab_id)
         self.printer.subscribe_tab(
             task_id,
@@ -2079,13 +2272,24 @@ class _TaskRunnerMixin:
             _effective_config and _effective_config.get("base_url") and is_known_model(model)
         )
         available = get_available_models()
-        if not _endpoint_run and (not available or (model and model not in available)):
+        # An effort alias the catalog does not list runs as its base model.
+        # Codex is the adapter that applies its level, so only a ``codex/``
+        # alias (``codex/gpt-6-astra-xhigh``) is admitted on its base.
+        runnable = model in available or (
+            model.startswith("codex/") and _strip_thinking_alias(model) in available
+        )
+        if not _endpoint_run and (not available or (model and not runnable)):
+            refusal = "No model available.  Set at least one API key in the environment."
+            if available:
+                # Other models are usable and only the run's own is not (a
+                # router's pick, a typo): name it instead of asking for an
+                # API key the user may already have.
+                refusal = (
+                    f'No model available under the name "{model}".  Pick another'
+                    " model or configure its provider (API key or CLI)."
+                )
             locked_call(self._state_lock, _end_run_before_loop, state)
-            self._broadcast_early_failure(
-                "No model available.  Set at least one API key in the environment.",
-                state,
-                tab_id,
-            )
+            self._broadcast_early_failure(refusal, state, tab_id)
             return
 
         activated, stop_event = locked_call(
@@ -2122,6 +2326,21 @@ class _TaskRunnerMixin:
         _raw_classify = cmd.get("classifyTasks")
         _classify_enabled = _raw_classify if isinstance(_raw_classify, bool) else None
         _classify_task_text = prompt + append_to_prompt
+        # Decided here, once, for the phase line and the model call
+        # alike: a run without the edit tools, or on the caller's base
+        # prompt, ignores the verdict, so classifying it would only
+        # cost and delay the launch.  The agent names the profile of a
+        # run that names none (``review`` for a reviewer's child), once
+        # it holds this run's name instead of its previous run's.
+        _seed_profile = _seed_tool_profile(cmd.get("toolProfile"))
+        if _seed_profile is not None:
+            agent._tool_profile_name = _seed_profile
+        if _seed_profile is None or not classification_chooses_prompt(
+            resolve_tool_profile(agent._tool_profile(_classify_task_text)),
+            _seed_profile != NO_TOOLS_PROFILE,
+            system_prompt_override,
+        ):
+            _classify_enabled = False
         if classification_enabled(_classify_enabled):
             # The classifier is a blocking model round trip (seconds);
             # tell the user what the wait is (cleared below, once the
@@ -2159,9 +2378,9 @@ class _TaskRunnerMixin:
 
         opened_task_id = locked_call(
             self._state_lock,
-            self._tab_opened_task_ids.pop,
+            self._take_opened_task_pin_locked,
             tab_id,
-            "",
+            state.chat_id,
         )
         if opened_task_id:
             agent.resume_from_task_id(opened_task_id)
@@ -2184,7 +2403,7 @@ class _TaskRunnerMixin:
         task_history_id: str | None = None
         try:
             subtasks = parse_task_tags(prompt)
-            if _sea_run and isinstance(prompt, str):
+            if _sea_run:
                 # An SEA run (a ``/xxx text`` command, a
                 # ``run_agent`` child) gets its text as ONE atomic
                 # task: ``<task>`` blocks in it are the SEA's to
@@ -2373,10 +2592,9 @@ class _TaskRunnerMixin:
                             previous_task_id=state.task_id if subtask_index else None,
                         ),
                         # Persist the raw ``/xxx text`` (not the SEA's
-                        # task text) in the task-history row,
-                        # frequent-tasks table and the chat's
-                        # last-user-prompt cache; every other run
-                        # persists as before.
+                        # task text) in the task-history row and the
+                        # chat's last-user-prompt cache; every other
+                        # run persists as before.
                         _history_prompt=display_prompt if _is_slash_run else None,
                         # This block's start, already carried by the
                         # ``status running:true`` broadcast and the
@@ -2407,12 +2625,14 @@ class _TaskRunnerMixin:
                         # a ``run_agent`` caller — local or on another
                         # machine: ``daemon_client`` reads the sub-task's
                         # text from this event — see a bare "Task failed"
-                        # with the reason lost.
+                        # with the reason lost.  The summary is HTML,
+                        # as in the event a ``finish`` prints.
                         self._broadcast_failure_result(
                             agent=agent,
                             result_summary=result_summary,
                             task_history_id=getattr(agent, "last_task_id", "") or None,
                             tab_id=tab_id,
+                            summary_is_html=True,
                         )
                     suggested_next_task = str(
                         (_run_parsed or {}).get("suggested_next_task") or "",
@@ -2592,7 +2812,7 @@ class _TaskRunnerMixin:
                 tab_id=tab_id,
             )
         finally:
-            locked_call(self._state_lock, _end_agent_loop, state)
+            _end_run(state, _end_agent_loop)
             end_event_broadcast = False
             # The LAST child row, kept past ``cleanup_task`` (which
             # nulls ``task_history_id``) for the ``subagentDone`` owed
@@ -2639,14 +2859,11 @@ class _TaskRunnerMixin:
                     # never merged behind their back, and the next run
                     # on this tab preserves it on its branch.  A
                     # worktree without tracked changes has nothing to
-                    # review: its branch is dropped, after git-ignored
-                    # output (reports, data files) is rescued into the
-                    # checkout; a failed rescue is reported and leaves
-                    # the worktree pending (the next run preserves it).
+                    # review: its branch is dropped.
                     try:
                         if not self._present_pending_worktree(tab_id, discard_if_empty=False):
                             branch = agent._wt_branch
-                            message = agent.discard(rescue_ignored=True)
+                            message = agent.discard()
                             self.printer.broadcast(
                                 {
                                     "type": "worktree_result",
@@ -2663,16 +2880,16 @@ class _TaskRunnerMixin:
                 # ``subagent`` tells the pages a dispatched child's end
                 # (its synthetic ``api-…`` tab reaches every remote
                 # page) from the user's own task finishing: only the
-                # latter plays the victory sound.
-                self.printer.broadcast(
-                    {
-                        **task_end_event,
-                        "tabId": tab_id,
-                        "startTs": start_ms,
-                        "endTs": end_ms,
-                        "subagent": state.is_subagent,
-                    }
-                )
+                # latter plays the victory sound.  Kept on the command
+                # for the tabs viewing the run, which ``_run_task``
+                # tells once the run's slot is free.
+                cmd["_end_event"] = {
+                    **task_end_event,
+                    "startTs": start_ms,
+                    "endTs": end_ms,
+                    "subagent": state.is_subagent,
+                }
+                self.printer.broadcast({**cmd["_end_event"], "tabId": tab_id})
                 end_event_broadcast = True
                 self._refresh_files_after_task(work_dir)
                 logger.info(
@@ -2713,15 +2930,13 @@ class _TaskRunnerMixin:
                 # the same terminal event twice.
                 if task_end_event and not end_event_broadcast:
                     try:
-                        self.printer.broadcast(
-                            {
-                                **task_end_event,
-                                "tabId": tab_id,
-                                "startTs": start_ms,
-                                "endTs": int(time.time() * 1000),
-                                "subagent": state.is_subagent,
-                            }
-                        )
+                        cmd["_end_event"] = {
+                            **task_end_event,
+                            "startTs": start_ms,
+                            "endTs": int(time.time() * 1000),
+                            "subagent": state.is_subagent,
+                        }
+                        self.printer.broadcast({**cmd["_end_event"], "tabId": tab_id})
                     except BaseException:
                         logger.debug(
                             "End-event broadcast failed",
@@ -2796,30 +3011,7 @@ class _TaskRunnerMixin:
         # ``_cmd_run``/``_resolve_run_state``.
         if state is not None and state.task_id:  # pragma: no branch
             setup_result["taskId"] = state.task_id
-            self.printer.ensure_recording_for_task(state.task_id)
-            try:
-                cleanup_timer = threading.Timer(
-                    300.0,
-                    self.printer.cleanup_task,
-                    args=(state.task_id,),
-                )
-                cleanup_timer.daemon = True
-                cleanup_timer.start()
-            except RuntimeError:
-                # Thread exhaustion ("can't start new thread") — the
-                # same regime ``_stop_task``'s inline fallback and
-                # ``_cmd_run``'s spawn-failure handler already
-                # survive.  The timer was this recording's ONLY
-                # releaser, so drop it now instead of leaking it
-                # forever, and fall through: the failure ``result``
-                # broadcast below must happen unconditionally.
-                logger.warning(
-                    "Early-failure cleanup timer for task %s could "
-                    "not be started; dropping the recording now",
-                    state.task_id,
-                    exc_info=True,
-                )
-                self.printer.cleanup_task(state.task_id)
+            self._record_early_end(state.task_id)
         # Recording the result (the launcher's copy) and choosing the
         # viewers that get live copies form one step under
         # ``delivery_lock``: a viewer's replay snapshot then either
@@ -2833,14 +3025,47 @@ class _TaskRunnerMixin:
             tab_id,
         )
 
+    def _record_early_end(self, task_id: str) -> None:
+        """Open a recording for the ``result`` of a run that ends before its agent loop.
+
+        Kept for the linger the task's subscriber map gets, then freed
+        with the task's other printer state: a viewer whose replay
+        attached to the run before it ended takes its snapshot, or its
+        corrective one (``AgentServer._finalize_viewer_attach``), from
+        this recording.
+
+        Args:
+            task_id: The run's key (provisional: such a run has no row
+                of its own to be re-keyed to).
+        """
+        self.printer.ensure_recording_for_task(task_id)
+        try:
+            cleanup_timer = threading.Timer(300.0, self.printer.cleanup_task, args=(task_id,))
+            cleanup_timer.daemon = True
+            cleanup_timer.start()
+        except RuntimeError:
+            # Thread exhaustion ("can't start new thread") — the same
+            # regime ``_stop_task``'s inline fallback and ``_cmd_run``'s
+            # spawn-failure handler already survive.  The timer was this
+            # recording's ONLY releaser, so drop it now instead of
+            # leaking it forever; the caller's ``result`` broadcast
+            # happens all the same.
+            logger.warning(
+                "Early-end cleanup timer for task %s could not be started; "
+                "dropping the recording now",
+                task_id,
+                exc_info=True,
+            )
+            self.printer.cleanup_task(task_id)
+
     def _broadcast_setup_result(
         self,
         setup_result: dict[str, Any],
         state: AgentState | None,
         tab_id: str,
     ) -> None:
-        """Under ``delivery_lock``: broadcast a setup failure's ``result`` to the launcher and
-        every viewer.
+        """Under ``delivery_lock``: broadcast the ``result`` of a run that ended before its agent
+        loop to the launcher and every viewer.
 
         ``broadcast`` takes ``delivery_lock`` again, which is why that
         lock is re-entrant.
@@ -2855,6 +3080,11 @@ class _TaskRunnerMixin:
         # drop ``taskId`` so they stay transient: the launcher's copy
         # above already recorded the result once for replay.
         viewer_result = {k: v for k, v in setup_result.items() if k not in ("tabId", "taskId")}
+        if setup_result.get("taskId") != state.task_id:
+            # A ``/xxx help`` answer, filed under the row it was given:
+            # the viewers' replays read the run's recording, under the
+            # key they attached to (``_record_early_end``).
+            self.printer._record_task_event({**viewer_result, "taskId": state.task_id})
         for viewer_tab_id in self.printer._fanout_targets(state.task_id):
             if viewer_tab_id != tab_id:
                 self.printer.broadcast({**viewer_result, "tabId": viewer_tab_id})
@@ -2984,7 +3214,10 @@ class _TaskRunnerMixin:
         A viewer that opened the chat while ``description()`` ran is
         subscribed to the run's provisional id, not to this row: it
         gets a transient copy, as after a setup failure
-        (:meth:`_broadcast_setup_result`).
+        (:meth:`_broadcast_setup_result`), and its replay, when that
+        takes its snapshot only now, finds the answer in the run's
+        recording (:meth:`_record_early_end`) instead of sending an
+        empty transcript over it.
 
         Args:
             state: The launching tab's agent state; its ``chat_id`` is
@@ -3028,6 +3261,7 @@ class _TaskRunnerMixin:
             "taskId": str(task_id),
             "tabId": tab_id,
         }
+        self._record_early_end(state.task_id)
         locked_call(
             self.printer.delivery_lock,
             self._broadcast_setup_result,
@@ -3040,6 +3274,9 @@ class _TaskRunnerMixin:
             task_id=task_id,
         )
         _save_task_result(result=text, task_id=task_id, success=success)
+        # The row is finished: its tags and its chat's summary are
+        # derived from the saved result, as for a task an agent ran.
+        _save_task_extra(extra, task_id)
         self.printer.cleanup_task(str(task_id))
 
     def _task_printed_a_result(self, agent: object) -> bool:
@@ -3070,6 +3307,7 @@ class _TaskRunnerMixin:
         result_summary: str,
         task_history_id: str | None,
         tab_id: str,
+        summary_is_html: bool = False,
     ) -> None:
         """Broadcast a failed run's terminal ``result`` event.
 
@@ -3091,8 +3329,14 @@ class _TaskRunnerMixin:
             task_history_id: The failed run's ``task_history`` row id,
                 or ``None``/empty when none was allocated.
             tab_id: The launcher tab, used when no task id exists.
+            summary_is_html: True for an agent's own result summary:
+                the event carries it as ``summary``, which a client
+                renders as HTML.  A runner's label is plain text and
+                goes out as ``text`` alone, which a client escapes.
         """
         failure_result = _result_event(result_summary, success=False, agent=agent)
+        if summary_is_html:
+            failure_result["summary"] = result_summary
         if task_history_id:
             failure_result["taskId"] = str(task_history_id)
             self.printer.flush_bash_output(task_history_id)
@@ -3170,8 +3414,8 @@ class _TaskRunnerMixin:
         :meth:`ChatSorcarAgent.run` as soon as the run's
         ``task_history`` row id exists, before any agent event is
         broadcast.  For each viewer tab (excluding the launcher,
-        which ``ChatSorcarAgent.run`` already subscribed via
-        ``_subscribe_tab_id``) it mirrors the launcher's start
+        which :meth:`_on_run_task_id_allocated` subscribed just
+        before) it mirrors the launcher's start
         sequence: ``clear`` (resets the viewer's replayed content and
         per-tab stream state) followed by ``status running=True``
         (flips the viewer's spinner / stop button), after which the
@@ -3371,11 +3615,22 @@ class _TaskRunnerMixin:
                 call_id,
             )
             if accepted and pending_ask and owner_state is not None:
-                # Cleared here, under the lock, rather than by the task
-                # thread's finally a moment later: a session replay in
-                # between would re-emit the question after the
-                # askUserDone broadcast below and leave a stale prompt.
+                # The interrupted tool is a pending ask_user_question:
+                # its answer wait is aborted, so the question closes on
+                # every tab showing it, as an answer closes it
+                # (``_deliver_user_answer``).  Cleared and closed in
+                # this hold, the one the task thread publishes its next
+                # question under: a close names no question, and one
+                # sent after the release could follow that question to
+                # the clients and dismiss it, leaving the task waiting
+                # on a prompt no surface shows.  A session replay cannot
+                # re-emit the question after its close either.
                 owner_state.clear_pending_ask()
+                self.printer.broadcast_transient(
+                    {"type": "askUserDone"},
+                    owner_task_id,
+                    tab_id,
+                )
         logger.info(
             "Tool interrupt for tab %s (task %s, tool %r, call %s): %s",
             tab_id,
@@ -3387,16 +3642,6 @@ class _TaskRunnerMixin:
         self.printer.broadcast(
             {"type": "tool_interrupt_ack", "accepted": accepted, "tabId": tab_id},
         )
-        if accepted and pending_ask:
-            # The interrupted tool is a pending ask_user_question: the
-            # answer wait is aborted, so the question prompt must close
-            # on every tab showing it (an answer would do this through
-            # _cmd_user_answer's askUserDone).
-            self.printer.broadcast_transient(
-                {"type": "askUserDone"},
-                owner_task_id,
-                tab_id,
-            )
 
     def _stop_task(self, tab_id: str = "", run_token: str = "") -> None:
         """Signal the agent to stop.
@@ -3437,17 +3682,19 @@ class _TaskRunnerMixin:
             stop_event = owner_state.stop_event if owner_state is not None else None
             task_thread = owner_state.task_thread if owner_state is not None else None
             owner_task_id = owner_state.task_id if owner_state is not None else ""
+            # Ident-aware liveness (S3-05 / C-R4): ``_cmd_run``
+            # installs and registers the worker thread, then writes
+            # the tab registry and broadcasts ``clear`` BEFORE
+            # ``thread.start()``.  A stop processed in that window
+            # (daemon_client's stop-on-timeout / abort-cascade frames)
+            # used to see ``is_alive() == False`` and arm no watchdog —
+            # leaving nothing to enforce the stop against the run's
+            # untrusted setup code (SEA getters, tools files), which
+            # never checks the cooperative event.  Read under the lock
+            # ``_cmd_run`` starts the thread under: a thread inside
+            # ``start()`` has an ident and is not alive yet.
+            thread_alive = agent_state.thread_alive(task_thread)
 
-        # Ident-aware liveness of the thread captured under the lock
-        # (S3-05 / C-R4): ``_cmd_run`` installs and registers the
-        # worker thread, then writes the tab registry and broadcasts
-        # ``clear`` BEFORE ``thread.start()``.  A stop processed in
-        # that window (daemon_client's stop-on-timeout / abort-cascade
-        # frames) used to see ``is_alive() == False`` and arm no
-        # watchdog — leaving nothing to enforce the stop against the
-        # run's untrusted setup code (SEA getters, tools
-        # files), which never checks the cooperative event.
-        thread_alive = agent_state.thread_alive(task_thread)
         if stop_event is None and not thread_alive:
             # A stop the server cannot route used to vanish behind a
             # disabled logger.debug, so a mis-targeted click looked
@@ -3580,14 +3827,16 @@ class _TaskRunnerMixin:
                 stopped has already finished, acknowledged the stop
                 and is inside its cleanup (:func:`_state_owns_thread`),
                 or is awaiting a merge — an interrupt there would abort
-                row persistence or a ``git merge``.  Every run (UI task
-                or dispatched sub-agent) has its own dedicated
-                ``threading.Thread``, so a finished *task_thread* is
-                dead, not recycled; the guard exists for the ident
-                reuse by the OS and for the acknowledged-stop window.
-                The printer bridge clears ``task_thread`` under the
-                same lock when a run finishes, making the check+inject
-                pair race-free.
+                row persistence or a ``git merge``.  A UI task has its
+                own ``threading.Thread``, dead once the run is over; a
+                run the printer bridge registered may be on a pooled
+                one (the merge-conflict resolver of an interactive
+                worktree action), which goes on to other work that
+                only this guard keeps the injection out of.  The
+                bridge drops such a state under the same lock when the
+                run finishes, whatever Stop lands in its wait for it
+                (``JsonPrinter.agent_task_finished``), making the
+                check+inject pair race-free.
         """
         # A stop can land between ``_cmd_run`` registering the worker
         # thread and ``thread.start()`` (the registry disk write and
@@ -3627,9 +3876,18 @@ class _TaskRunnerMixin:
         The broadcast names this ask with a fresh ``questionId`` (kept
         as ``pending_ask_id``), which an answer echoes so that it
         reaches only this ask (see ``_cmd_user_answer``).
+
+        Nothing is published for a tool call whose Stop was already
+        accepted (``_interrupt_tool_call``, under this lock): that Stop
+        found no question to close and the wait aborts at once, so the
+        question would stay open on every surface with nobody waiting
+        for its answer.
         """
         if q is not None:
             agent_state.drain_queue(q)
+        call = tool_interrupt.current_tool_call()
+        if call is not None and call.interrupted:
+            return
         question_id = uuid.uuid4().hex
         if state is not None:
             state.pending_ask_question = question

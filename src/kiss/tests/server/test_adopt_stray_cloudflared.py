@@ -272,6 +272,39 @@ class TestStrayCloudflared(unittest.TestCase):
             "the declined tunnel to the previous port must be terminated",
         )
 
+    def _recorded_tunnel(self, *tunnel_args: str) -> subprocess.Popen[bytes]:
+        """Spawn a healthy ``cloudflared tunnel ... *tunnel_args`` and record it in the pidfile."""
+        metrics = self._metrics_server(_HealthyHandler)
+        proc = self._spawn_raw("tunnel", "--metrics", f"127.0.0.1:{metrics}", *tunnel_args)
+        ws._cloudflared_pidfile().write_text(json.dumps({
+            "pid": proc.pid, "metrics_port": metrics, "url": "https://old.example.com",
+        }))
+        return proc
+
+    def test_recorded_tunnel_the_configuration_no_longer_asks_for_is_declined(self) -> None:
+        """A tunnel token was set, changed or removed since the recorded tunnel
+        was started: adopted, the old tunnel would stay up and the configured
+        one never start.  The configured one itself is adopted."""
+        quick = ("--url", f"https://localhost:{self.local_port}")
+        for tunnel_args, token in (
+            (quick, "the-token"),
+            (("run", "--token", "another-token"), "the-token"),
+            (("run", "--token", "the-token"), None),
+        ):
+            old = self._recorded_tunnel(*tunnel_args)
+            self.assertIsNone(
+                ws._try_adopt_existing_cloudflared(self.local_port, token), tunnel_args,
+            )
+            old.wait(timeout=5)  # the declined tunnel is terminated
+        # A quick tunnel nobody recorded is no candidate for a named one.
+        stray = self._spawn_fake(self._metrics_server(_HealthyHandler), self.local_port)
+        self.assertIsNone(ws._try_adopt_existing_cloudflared(self.local_port, "the-token"))
+        self.assertIsNone(stray.poll())
+        named = self._recorded_tunnel("run", "--token", "the-token")
+        adopted = ws._try_adopt_existing_cloudflared(self.local_port, "the-token")
+        assert adopted is not None
+        self.assertEqual(adopted[0], named.pid)
+
     def test_malformed_pidfile_falls_back_to_stray(self) -> None:
         """A pidfile without an integer ``metrics_port`` is skipped, not fatal."""
         ws._cloudflared_pidfile().write_text(json.dumps({"pid": os.getpid()}))

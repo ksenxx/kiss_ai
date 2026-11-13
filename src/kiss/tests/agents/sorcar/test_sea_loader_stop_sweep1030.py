@@ -20,6 +20,15 @@ per-tool Stop leaves that thread alive (the agent catches
 ``ToolCallInterrupted`` and carries on), so every other loader of the
 file waited for as long as the task ran.  A record whose thread no
 longer executes the file is now dropped while the thread lives.
+
+The same Stop in ``sea_settings._claim``, after the wait for a file was
+recorded but before its ``try``, left the wait behind: the thread
+carried on, and a later load that had to wait for it was refused as a
+circular import.  In ``execute_python_file``, after the new module was
+published but before its ``try``, it left the empty module in
+``sys.modules`` in place of the last one that ran.  A thread's wait is
+now read from its stack and the publication is inside the ``try``; the
+two sweeps below stop a load before every bytecode of those functions.
 """
 
 from __future__ import annotations
@@ -29,9 +38,10 @@ import dis
 import sys
 import threading
 import time
+import typing
 from collections.abc import Callable
 from pathlib import Path
-from types import FrameType
+from types import CodeType, FrameType
 from typing import Any
 
 import pytest
@@ -123,6 +133,49 @@ class Parked(BaseSea):
     pass
 """
 
+_KEPT_SEA = """
+from __future__ import annotations
+
+from kiss.agents.seas.base.base_sea import BaseSea
+
+Alias = int
+
+
+class Kept(BaseSea):
+    x: Alias
+"""
+
+_OUTER_SEA = """
+import builtins
+builtins._sweep1030_parked.set()
+builtins._sweep1030_gate.wait(10)
+
+from kiss.agents.sorcar.sea_settings import execute_python_file
+
+execute_python_file({inner!r})  # asked for by the thread that executes this file
+
+from kiss.agents.seas.base.base_sea import BaseSea
+
+
+class Outer(BaseSea):
+    pass
+"""
+
+_INNER_SEA = """
+import builtins
+
+gate = builtins.__dict__.pop("_sweep1030_inner_gate", None)  # the first execution parks
+if gate is not None:
+    builtins._sweep1030_inner_parked.set()
+    gate.wait(10)
+
+from kiss.agents.seas.base.base_sea import BaseSea
+
+
+class Inner(BaseSea):
+    pass
+"""
+
 _GATE_CODE = sea_settings._executing.__wrapped__.__code__  # type: ignore[attr-defined]
 
 
@@ -141,7 +194,7 @@ def _injected(outcome: dict[str, Any]) -> bool:
 
 def _waiting_for(loader: threading.Thread, module_name: str) -> bool:
     """Whether *loader* waits in ``_claim`` for the file *module_name*."""
-    return sea_settings._EXECUTING_WAIT.get(loader) == module_name
+    return sea_settings._waited_module(loader.ident) == module_name
 
 
 def _raised(stopping: bool, fn: Callable[..., Any], *args: Any) -> BaseException:
@@ -391,3 +444,149 @@ def test_thread_executing_the_file_keeps_its_claim(tmp_path: Path) -> None:
     finally:
         gate.set()
         del builtins._sweep1030_gate, builtins._sweep1030_parked  # type: ignore[attr-defined]
+
+
+class _StopBeforeBytecode:
+    """Trace function raising the per-tool Stop before the *target*-th bytecode of *code* runs.
+
+    ``injected`` says whether it did.  A call of *until* (the wait the
+    swept code parks in) ends the count: the code got there unstopped.
+    """
+
+    def __init__(self, code: CodeType, target: int, until: CodeType | None = None) -> None:
+        self.code, self.target, self.until = code, target, until
+        self.seen = 0
+        self.injected = self.over = False
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> Any:
+        if event == "call" and frame.f_code is self.until:
+            self.over = True
+        if self.over or frame.f_code is not self.code:
+            return None
+        frame.f_trace_opcodes = True
+        if event == "opcode":
+            self.seen += 1
+            if self.seen == self.target:
+                self.injected = self.over = True
+                sys.settrace(None)
+                raise ToolCallInterrupted(f"per-tool Stop before bytecode {self.target}")
+        return self
+
+
+def _stopped_execution(path: Path, target: int) -> bool:
+    """Execute *path*, stopped before the *target*-th bytecode of ``execute_python_file``.
+
+    Returns:
+        Whether the Stop was injected (the call has fewer bytecodes otherwise).
+    """
+    stop = _StopBeforeBytecode(execute_python_file.__code__, target)
+    tracer = sys.gettrace()
+    sys.settrace(stop)
+    try:
+        execute_python_file(str(path))
+    except ToolCallInterrupted:
+        pass
+    finally:
+        sys.settrace(tracer)
+    return stop.injected
+
+
+def test_stop_anywhere_in_a_re_execution_keeps_a_whole_module_published(tmp_path: Path) -> None:
+    """Wherever the per-tool Stop lands in a re-execution of a file, the class an earlier
+    execution made still resolves its annotations through ``sys.modules``."""
+    path = tmp_path / "kept_sea.py"
+    path.write_text(_KEPT_SEA, encoding="utf-8")
+    kept = execute_python_file(str(path))["Kept"]
+    hints = typing.get_type_hints(kept)
+    assert hints["x"] is int
+    target = 1
+    while _stopped_execution(path, target):
+        assert typing.get_type_hints(kept) == hints, f"stopped before bytecode {target}"
+        target += 1
+    assert target > 50, "the sweep never got into execute_python_file"
+
+
+def _load_through_claim_stop(
+    outer: Path, inner: Path, stop: _StopBeforeBytecode, outcome: dict[str, Any]
+) -> None:
+    """Thread body: ask for *outer*, which another thread executes; once stopped in
+    ``_claim``, carry on and execute *inner* instead (its first execution parks)."""
+    sys.settrace(stop)
+    try:
+        execute_python_file(str(outer))
+    except ToolCallInterrupted:
+        execute_python_file(str(inner))
+    finally:
+        sys.settrace(None)
+    outcome["loaded"] = True
+
+
+def _stopped_or_waiting(stop: _StopBeforeBytecode, parked: threading.Event) -> bool:
+    """Whether the traced thread got to its wait unstopped, or was stopped and parked since."""
+    return stop.over and (not stop.injected or parked.is_set())
+
+
+def _waiting_or_over(loader: threading.Thread, module_name: str) -> bool:
+    """Whether *loader* waits for the file *module_name* or has ended."""
+    return not loader.is_alive() or _waiting_for(loader, module_name)
+
+
+def _claim_stopped(tmp_path: Path, target: int) -> bool:
+    """Stop a thread waiting for a file before the *target*-th bytecode of ``_claim``.
+
+    The file (``outer``) is being executed by another thread.  The
+    stopped thread carries on and executes a second file (``inner``),
+    which the first thread then asks for: it has to wait for the
+    stopped thread, which waits for nothing.
+
+    Returns:
+        Whether the Stop was injected (``_claim`` got to its wait first otherwise).
+    """
+    outer, inner = tmp_path / "outer_sea.py", tmp_path / "inner_sea.py"
+    outer.write_text(_OUTER_SEA.format(inner=str(inner)), encoding="utf-8")
+    inner.write_text(_INNER_SEA, encoding="utf-8")
+    gate, parked = threading.Event(), threading.Event()
+    inner_gate, inner_parked = threading.Event(), threading.Event()
+    builtins._sweep1030_gate, builtins._sweep1030_parked = gate, parked  # type: ignore[attr-defined]
+    builtins._sweep1030_inner_gate = inner_gate  # type: ignore[attr-defined]
+    builtins._sweep1030_inner_parked = inner_parked  # type: ignore[attr-defined]
+    stop = _StopBeforeBytecode(
+        sea_settings._claim.__code__, target, until=threading.Condition.wait.__code__
+    )
+    owned: dict[str, Any] = {}
+    waited: dict[str, Any] = {}
+    owner = threading.Thread(target=_load, args=(outer, owned), daemon=True)
+    waiter = threading.Thread(
+        target=_load_through_claim_stop, args=(outer, inner, stop, waited), daemon=True
+    )
+    try:
+        owner.start()
+        assert parked.wait(10), "the first load never reached the import"
+        waiter.start()
+        _wait_until(_stopped_or_waiting, stop, inner_parked)
+        if stop.injected:
+            gate.set()  # the owner of ``outer`` now asks for ``inner``
+            _wait_until(_waiting_or_over, owner, sea_settings._module_name(inner))
+        inner_gate.set()
+        gate.set()
+        owner.join(timeout=10)
+        waiter.join(timeout=10)
+        assert owned == waited == {"loaded": True}, (
+            f"stopped before bytecode {target}: the load that waited for the stopped thread "
+            "was refused as a circular import"
+        )
+    finally:
+        inner_gate.set()
+        gate.set()
+        for name in ("gate", "parked", "inner_gate", "inner_parked"):
+            builtins.__dict__.pop(f"_sweep1030_{name}", None)
+    return stop.injected
+
+
+def test_stop_anywhere_before_a_wait_for_a_file_leaves_no_wait_behind(tmp_path: Path) -> None:
+    """Wherever the per-tool Stop lands in ``_claim`` on the way to its wait, the thread that
+    carries on waits for nothing: a load that has to wait for it is no circular import."""
+    target = 1
+    while _claim_stopped(tmp_path, target):
+        target += 1
+    assert target > 10, "the sweep never got into _claim"

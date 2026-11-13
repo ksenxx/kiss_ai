@@ -29,14 +29,18 @@ const {
   stubRaf,
   twoTabs,
   ofType,
+  tabRecord,
+  ghostText,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {setInput} = require('./attachment_helpers');
 const {
   makeVoicePage,
   micBtn,
   startMic,
   wake,
   speak,
+  speakRound,
   fireTimer,
 } = require('./voice_page_helpers');
 
@@ -60,28 +64,12 @@ function makePage(opts) {
   return {win, posted};
 }
 
-// The label a tab carries (what its Chats-panel row / strip entry shows).
-// Chat tabs have no row of their own any more, so the label is read from
-// the tab records rather than from a rendered element.
-function tabTitle(win, tabId) {
-  const rec = win._testApi.openTabs().find(t => t.id === tabId);
-  assert.ok(rec, `tab ${tabId} must be open`);
-  return rec.title;
-}
-
 function visibleText(win) {
   return win.document.getElementById('output').textContent;
 }
 
 function taskInput(win) {
   return win.document.getElementById('task-input');
-}
-
-function setInput(win, text) {
-  const inp = taskInput(win);
-  inp.value = text;
-  inp.setSelectionRange(text.length, text.length);
-  return inp;
 }
 
 function autocompleteEl(win) {
@@ -92,12 +80,6 @@ function acTexts(win) {
   return Array.from(autocompleteEl(win).querySelectorAll('.ac-item')).map(el =>
     el.getAttribute('data-text'),
   );
-}
-
-function ghostText(win) {
-  const overlay = win.document.getElementById('ghost-overlay');
-  const el = overlay && overlay.querySelector('.ghost-text');
-  return el ? el.textContent : '';
 }
 
 function toastText(win) {
@@ -262,12 +244,12 @@ test('an @-mention file list for one tab never opens over another tab', () => {
   // Both tabs happen to hold the same half-typed mention.
   setInput(win, 'look at @src');
 
-  send(win, {
+  const reply = {
     type: 'files',
     prefix: 'src',
-    tabId: first,
     files: [{type: 'file', text: 'src/leak2_files_QK43.py'}],
-  });
+  };
+  send(win, {...reply, tabId: first});
 
   assert.ok(
     !acTexts(win).includes('src/leak2_files_QK43.py'),
@@ -275,6 +257,10 @@ test('an @-mention file list for one tab never opens over another tab', () => {
       'dropdown of the tab on screen',
   );
   assert.strictEqual(second, win._testApi.getActiveTabId());
+  // The same list answered for the tab on screen opens: the tab id
+  // alone kept the first one out.
+  send(win, {...reply, tabId: second});
+  assert.deepStrictEqual(acTexts(win), ['src/leak2_files_QK43.py']);
 
   win.close();
 });
@@ -300,44 +286,50 @@ test('the @-mention request names the tab that typed it', () => {
 
 test('a ghost suggestion for one tab never paints over another tab input', () => {
   const {win} = makePage();
-  const {first} = twoTabs(win);
+  const {first, second} = twoTabs(win);
 
   setInput(win, 'run the');
 
-  send(win, {
+  const reply = {
     type: 'ghost',
     query: 'run the',
-    tabId: first,
     suggestion: ' leak2_ghost_QK44 suite',
-  });
+  };
+  send(win, {...reply, tabId: first});
 
   assert.ok(
     !ghostText(win).includes('leak2_ghost_QK44'),
     'a ghost completion computed for a background tab must never be ' +
       'painted into the visible input overlay',
   );
+  // The same suggestion computed for the tab on screen is painted.
+  send(win, {...reply, tabId: second});
+  assert.strictEqual(ghostText(win), ' leak2_ghost_QK44 suite');
 
   win.close();
 });
 
 test('an inline completion list for one tab never opens over another tab', () => {
   const {win} = makePage();
-  const {first} = twoTabs(win);
+  const {first, second} = twoTabs(win);
 
   setInput(win, 'deploy');
 
-  send(win, {
+  const reply = {
     type: 'completions',
     query: 'deploy',
-    tabId: first,
     completions: [{type: 'task', text: 'deploy leak2_comp_QK45 service'}],
-  });
+  };
+  send(win, {...reply, tabId: first});
 
   assert.ok(
     !acTexts(win).includes('deploy leak2_comp_QK45 service'),
     'a completion list computed for a background tab must never render ' +
       'in the dropdown of the tab on screen',
   );
+  // The same list computed for the tab on screen opens.
+  send(win, {...reply, tabId: second});
+  assert.deepStrictEqual(acTexts(win), ['deploy leak2_comp_QK45 service']);
 
   win.close();
 });
@@ -747,6 +739,40 @@ test('an untagged foreign transcript never enters an unowned visible tab', () =>
   win.close();
 });
 
+// worktree_progress is no streaming transcript type, so the stream guard
+// lets it through and the adoption guard alone decides.
+test('a bare task id binds only the tab that submitted for it', () => {
+  const {win} = makePage();
+  const {first, second} = twoTabs(win);
+  const progress = taskId => send(win, {type: 'worktree_progress', taskId});
+  const submit = text => {
+    setInput(win, text);
+    win.document.getElementById('send-btn').click();
+  };
+  send(win, {
+    type: 'system_output',
+    text: 'a_own_QK86',
+    tabId: first,
+    taskId: 'task-A-QK86',
+  });
+  clickTab(win, second);
+
+  progress('task-A-QK86');
+  assert.strictEqual(ownedTaskId(win), '', 'a tab that asked for nothing');
+
+  // The tab's own request makes it the owner of the id that comes back.
+  submit('run QK86');
+  progress('task-B-QK86');
+  assert.strictEqual(ownedTaskId(win), 'task-B-QK86');
+
+  // Bound, it sends a follow-up: a foreign id does not rebind it.
+  submit('and then QK86');
+  progress('task-A-QK86');
+  assert.strictEqual(ownedTaskId(win), 'task-B-QK86');
+
+  win.close();
+});
+
 test('an unowned visible tab shows only the header counters addressed to it', () => {
   const {win} = makePage();
   const {second} = twoTabs(win);
@@ -917,7 +943,7 @@ test('a taskId-only setTaskText never retitles an unowned visible tab', () => {
   });
 
   assert.ok(
-    !tabTitle(win, second).includes('foreign header QK89'),
+    !tabRecord(win, second).title.includes('foreign header QK89'),
     "another task's header must not rename a tab that owns no task",
   );
 
@@ -958,15 +984,16 @@ test('a taskId-only adjacent transcript never replays in an unowned tab', () => 
 // ---------------------------------------------------------------------------
 // Leak 7 -- a transcript submitted after the user switched tabs.
 //
-// The page records the conversation on screen when a capture begins
-// (beginCapture -> markSpeechStart), posts the audio as `voiceTranscribe`
-// and pairs the daemon's `voiceSpeech` reply with that owner. These tests
-// drive the real in-page pipeline: the mic is granted, the wake word fires
-// through the recognizer's own result handler, and audio blocks run the
-// real capture logic until the audio is posted. Only then does the tab
-// switch happen and the transcript come back.  The mic is remembered ON
+// The page records the conversation on screen when the wake word is heard
+// (heardWake -> beginCapture -> markSpeechStart), posts the audio as
+// `voiceTranscribe` and pairs the daemon's `voiceSpeech` reply, by the
+// round tag it echoes, with that owner. These tests drive the real
+// in-page pipeline: the mic is granted, the wake word fires through the
+// recognizer's own result handler, and audio blocks run the real capture
+// logic until the audio is posted. Only then does the tab switch happen
+// and the transcript come back.  The mic is remembered ON
 // (kissVoiceEnabled=1), so the pipeline starts on load and startMic only
-// grants the microphone; wake / speak drive one round
+// grants the microphone; speakRound drives one round and returns its tag
 // (voice_page_helpers).
 // ---------------------------------------------------------------------------
 
@@ -978,12 +1005,16 @@ test('speech started in one tab is never submitted as another tab task', async (
   clickTab(win, first);
   await startMic(page);
   // The user wakes the mic and speaks while tab `first` is on screen ...
-  wake(page);
-  speak(page);
+  const round = speakRound(page);
   // ... then switches to `second` while the audio is being transcribed.
   clickTab(win, second);
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'leak7_speech_QK62', speaker: 1});
+  send(win, {
+    type: 'voiceSpeech',
+    text: 'leak7_speech_QK62',
+    speaker: 1,
+    round,
+  });
 
   const submits = ofType(posted, 'submit');
   assert.strictEqual(
@@ -1007,10 +1038,14 @@ test('speech started and finished in the same tab still submits', async () => {
   twoTabs(win);
 
   await startMic(page);
-  wake(page);
-  speak(page);
+  const round = speakRound(page);
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'run the tests QK63', speaker: 1});
+  send(win, {
+    type: 'voiceSpeech',
+    text: 'run the tests QK63',
+    speaker: 1,
+    round,
+  });
 
   const submits = ofType(posted, 'submit');
   assert.strictEqual(
@@ -1024,16 +1059,15 @@ test('speech started and finished in the same tab still submits', async () => {
   win.close();
 });
 
-test('voice dictation while a content tab is in front submits under the owning chat', async () => {
+test('voice dictation while a content tab is in front submits under the chat behind it', async () => {
   const page = makePage({voice: true});
   const {win, posted} = page;
   const api = win._testApi;
   const chatId = api.getActiveTabId();
 
-  // A file view in front: voice still belongs to the conversation that
-  // produced it, so the submit must land on the OWNING chat tab — and
-  // the dictated text must survive the switch back to it (the switch
-  // restores the chat's own saved composer text).
+  // A file view in front: voice still belongs to a conversation, the
+  // chat the view was reached from, so the submit must land on that
+  // chat tab, which comes back on screen before the words are written.
   send(win, {
     type: 'fileContent',
     tabId: chatId,
@@ -1047,13 +1081,13 @@ test('voice dictation while a content tab is in front submits under the owning c
     'the file tab is in front',
   );
   await startMic(page);
-  wake(page);
-  speak(page);
+  const round = speakRound(page);
   posted.length = 0;
   send(win, {
     type: 'voiceSpeech',
     text: 'voice on file tab QK80',
     speaker: 1,
+    round,
   });
 
   const submits = ofType(posted, 'submit');
@@ -1065,13 +1099,165 @@ test('voice dictation while a content tab is in front submits under the owning c
   assert.strictEqual(
     submits[0].tabId,
     chatId,
-    'the submit lands on the owning chat, never on the file view id',
+    'the submit lands on the chat behind the view, never on its own id',
   );
   assert.ok(submits[0].prompt.includes('voice on file tab QK80'));
   assert.strictEqual(
     api.getActiveTabId(),
     chatId,
     'the conversation is back on screen',
+  );
+
+  win.close();
+});
+
+// The stacked layout has ONE composer, and a file tab on screen hides it.
+// The words belong to the chat the file screen stands for (kissVoiceOwner):
+// the chat it was reached from, which a swipe back returns to, whichever
+// chat owns the file. That chat comes back first (`kiss-voice-compose`),
+// so voice reads and writes ITS draft and ITS answer box.
+
+// Chat `owner` opens a file: on this stacked page its tab takes the screen.
+function openFileOf(win, owner) {
+  send(win, {
+    type: 'fileContent',
+    tabId: owner,
+    name: 'leak_voice_QK81.txt',
+    path: '/tmp/leak_voice_QK81.txt',
+    content: 'file body QK81',
+  });
+  const fileId = win._testApi.getActiveTabId();
+  assert.notStrictEqual(fileId, owner, 'the file tab is in front');
+  return fileId;
+}
+
+// The user turns "Auto submit spoken task" off in the settings panel.
+function draftSpokenTasks(win) {
+  const select = win.document.getElementById('cfg-voice-auto-submit');
+  select.value = 'off';
+  select.dispatchEvent(new win.Event('change', {bubbles: true}));
+}
+
+test("speech over another chat's file goes to the chat it was reached from", async () => {
+  const page = makePage({voice: true});
+  const {win, posted} = page;
+  const {first: chatA, second: chatB} = twoTabs(win);
+  setInput(win, 'draft of B QK81');
+  clickTab(win, chatA);
+  setInput(win, 'draft of A QK81');
+  const fileOfA = openFileOf(win, chatA);
+  // On to chat B, and from there to A's file: the file screen now
+  // stands for chat B.
+  clickTab(win, chatB);
+  clickTab(win, fileOfA);
+  await startMic(page);
+  const round = speakRound(page);
+  posted.length = 0;
+  send(win, {type: 'voiceSpeech', text: 'spoken QK81', round});
+
+  assert.deepStrictEqual(
+    deliveries(posted).map(m => [m.tabId, m.prompt]),
+    [[chatB, 'draft of B QK81 spoken QK81']],
+    "the words join chat B's own draft and go to chat B",
+  );
+  clickTab(win, chatA);
+  assert.strictEqual(
+    taskInput(win).value,
+    'draft of A QK81',
+    "chat A, the file's owner, keeps its draft",
+  );
+
+  win.close();
+});
+
+test("speech drafted over a chat's file lands in that chat's composer", async () => {
+  const page = makePage({voice: true});
+  const {win, posted} = page;
+  const chat = win._testApi.getActiveTabId();
+  draftSpokenTasks(win);
+  setInput(win, 'draft QK82');
+  openFileOf(win, chat);
+  await startMic(page);
+  const round = speakRound(page);
+  posted.length = 0;
+  send(win, {type: 'voiceSpeech', text: 'dictated QK82', round});
+
+  assert.strictEqual(
+    win._testApi.getActiveTabId(),
+    chat,
+    'the chat is back on screen, where its composer shows',
+  );
+  assert.strictEqual(taskInput(win).value, 'draft QK82 dictated QK82');
+  assert.deepStrictEqual(deliveries(posted), [], 'a draft is not sent');
+
+  win.close();
+});
+
+test("an answer spoken over a chat's file answers that chat's question", async () => {
+  const page = makePage({voice: true});
+  const {win, posted} = page;
+  const chat = win._testApi.getActiveTabId();
+  draftSpokenTasks(win);
+  send(win, {
+    type: 'askUser',
+    tabId: chat,
+    question: 'Which branch?',
+    questionId: 'q-QK83',
+  });
+  openFileOf(win, chat);
+  await startMic(page);
+  const round = speakRound(page);
+  posted.length = 0;
+  send(win, {type: 'voiceSpeech', text: 'main QK83', round});
+
+  assert.deepStrictEqual(
+    deliveries(posted).map(m => [m.type, m.tabId, m.answer, m.questionId]),
+    [['userAnswer', chat, 'main QK83', 'q-QK83']],
+    'the agent waiting on the question gets the spoken answer',
+  );
+
+  win.close();
+});
+
+test('speech over a file whose own chat has closed goes to the chat behind it, or to none', async () => {
+  const page = makePage({voice: true});
+  const {win, posted} = page;
+  const chatA = {tabId: 'reg-a-QK84', chatId: 'chat-a-QK84', title: 'a'};
+  const chatB = {tabId: 'reg-b-QK84', chatId: 'chat-b-QK84', title: 'b'};
+  send(win, {type: 'tabs_state', tabs: [chatA, chatB]});
+  clickTab(win, chatB.tabId);
+  setInput(win, 'draft of B QK84');
+  clickTab(win, chatA.tabId);
+  const fileOfA = openFileOf(win, chatA.tabId);
+  clickTab(win, chatB.tabId);
+  clickTab(win, fileOfA);
+  // Chat A closes on another surface; its file stays, reached from chat B.
+  send(win, {type: 'tabs_state', tabs: [chatB]});
+  assert.strictEqual(win._testApi.getActiveTabId(), fileOfA);
+  await startMic(page);
+  posted.length = 0;
+  send(win, {type: 'voiceSpeech', text: 'spoken QK84', round: speakRound(page)});
+  assert.deepStrictEqual(
+    deliveries(posted).map(m => [m.tabId, m.prompt]),
+    [[chatB.tabId, 'draft of B QK84 spoken QK84']],
+    'the words go to chat B, which a swipe back returns to',
+  );
+
+  // Chat B closes too; the file stays, with no chat behind it.
+  setInput(win, 'next draft of B QK84');
+  clickTab(win, fileOfA);
+  send(win, {type: 'tabs_state', tabs: []});
+  assert.strictEqual(win._testApi.getActiveTabId(), fileOfA);
+  posted.length = 0;
+  send(win, {type: 'voiceSpeech', text: 'unheard QK84', round: speakRound(page)});
+  // voice.js typed nothing, so it sends nothing; a submit all the same
+  // would post the hidden draft under the file.
+  win.dispatchEvent(new win.CustomEvent('kiss-voice-submit'));
+
+  assert.deepStrictEqual(deliveries(posted), [], 'nothing is sent');
+  assert.ok(
+    !taskInput(win).value.includes('unheard QK84'),
+    'nor typed into the composer the file hides, for "+" to carry along',
   );
 
   win.close();
@@ -1085,12 +1271,11 @@ test('a spoken answer started in one tab never answers another tab question', as
   clickTab(win, first);
   send(win, {type: 'askUser', question: 'Which color?', tabId: first});
   await startMic(page);
-  wake(page);
-  speak(page);
+  const round = speakRound(page);
   clickTab(win, second);
   send(win, {type: 'askUser', question: 'Which port?', tabId: second});
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'leak7_answer_QK64'});
+  send(win, {type: 'voiceSpeech', text: 'leak7_answer_QK64', round});
 
   const answers = posted.filter(m => m.type === 'userAnswer');
   assert.ok(
@@ -1111,10 +1296,9 @@ test('an answer spoken without leaving the tab still answers its question', asyn
   clickTab(win, first);
   send(win, {type: 'askUser', question: 'Which color?', tabId: first});
   await startMic(page);
-  wake(page);
-  speak(page);
+  const round = speakRound(page);
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'blue QK64b'});
+  send(win, {type: 'voiceSpeech', text: 'blue QK64b', round});
 
   const answers = posted.filter(m => m.type === 'userAnswer');
   assert.strictEqual(
@@ -1138,14 +1322,12 @@ test('the second of two overlapping utterances never leaks either', async () => 
   // Two rounds before either transcript comes back: the rounds overlap,
   // so a single owner slot would forget the second utterance's tab
   // entirely.
-  wake(page);
-  speak(page);
-  wake(page);
-  speak(page);
+  const roundA = speakRound(page);
+  const roundB = speakRound(page);
   clickTab(win, second);
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'FIRST_QK69'});
-  send(win, {type: 'voiceSpeech', text: 'SECOND_LEAK_QK70'});
+  send(win, {type: 'voiceSpeech', text: 'FIRST_QK69', round: roundA});
+  send(win, {type: 'voiceSpeech', text: 'SECOND_LEAK_QK70', round: roundB});
 
   assert.strictEqual(
     ofType(posted, 'submit').length,
@@ -1168,15 +1350,14 @@ test('a transcript arriving after the mic was turned off is never attributed', a
 
   clickTab(win, first);
   await startMic(page);
-  wake(page);
-  speak(page);
+  const round = speakRound(page);
   // The user turns the mic off while the audio is still being
   // transcribed: the round is cancelled and its owner with it.
   micBtn(win).click();
   assert.ok(micBtn(win).classList.contains('voice-off'));
   clickTab(win, second);
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'LATE_QK71'});
+  send(win, {type: 'voiceSpeech', text: 'LATE_QK71', round});
 
   assert.strictEqual(
     ofType(posted, 'submit').length,
@@ -1201,8 +1382,8 @@ test('a reply lost in the transcribe window never eats the next transcript', asy
   await startMic(page);
   // The daemon's reply to round A never comes (the socket dropped
   // mid-transcription), and 60 s later the transcribe-flash safety
-  // timer cancels the round. The credit it leaves must not be charged
-  // to the next words, whose reply names its round by the echoed tag.
+  // timer cancels the round. It must not take the reply to the next
+  // words, which names its round by the echoed tag.
   wake(page);
   speak(page); // round A: audio posted, the reply is lost
   fireTimer(page, 60000);
@@ -1236,11 +1417,10 @@ test('speech carries across tabs that are showing the same task', async () => {
 
   clickTab(win, first);
   await startMic(page);
-  wake(page);
-  speak(page);
+  const round = speakRound(page);
   clickTab(win, second);
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'same task QK72'});
+  send(win, {type: 'voiceSpeech', text: 'same task QK72', round});
 
   const submits = ofType(posted, 'submit');
   assert.strictEqual(
@@ -1261,8 +1441,7 @@ test('a live round still submits after an earlier round was cancelled', async ()
 
   clickTab(win, first);
   await startMic(page);
-  wake(page);
-  speak(page);
+  const roundA = speakRound(page);
   // Round A is cancelled (mic off) while its audio is being transcribed;
   // the user moves to tab `second` and turns the mic back on. Round A's
   // late transcript lands before the next wake, while tab `second` is
@@ -1273,7 +1452,7 @@ test('a live round still submits after an earlier round was cancelled', async ()
   micBtn(win).click();
   await startMic(page);
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'cancelled words QK91'});
+  send(win, {type: 'voiceSpeech', text: 'cancelled words QK91', round: roundA});
   assert.strictEqual(
     ofType(posted, 'submit').length,
     0,
@@ -1283,9 +1462,8 @@ test('a live round still submits after an earlier round was cancelled', async ()
   assert.ok(!taskInput(win).value.includes('cancelled words QK91'));
   // Round B, spoken on tab `second`. A cancelled predecessor must not
   // poison it.
-  wake(page);
-  speak(page);
-  send(win, {type: 'voiceSpeech', text: 'live round QK92'});
+  const roundB = speakRound(page);
+  send(win, {type: 'voiceSpeech', text: 'live round QK92', round: roundB});
 
   const submits = ofType(posted, 'submit');
   assert.strictEqual(
@@ -1307,15 +1485,13 @@ test('an empty transcript closes its own round and nothing else', async () => {
 
   clickTab(win, first);
   await startMic(page);
-  wake(page);
-  speak(page);
+  const roundA = speakRound(page);
   clickTab(win, second);
-  wake(page);
-  speak(page);
+  const roundB = speakRound(page);
 
   // Round A's audio was noise: the daemon reports an empty transcript.
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: ''});
+  send(win, {type: 'voiceSpeech', text: '', round: roundA});
   assert.strictEqual(
     ofType(posted, 'submit').length,
     0,
@@ -1324,7 +1500,7 @@ test('an empty transcript closes its own round and nothing else', async () => {
 
   // Round B must still be intact and still owned by the visible tab.
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'after silence QK94'});
+  send(win, {type: 'voiceSpeech', text: 'after silence QK94', round: roundB});
   const submits = ofType(posted, 'submit');
   assert.strictEqual(
     submits.length,
@@ -1338,23 +1514,26 @@ test('an empty transcript closes its own round and nothing else', async () => {
   win.close();
 });
 
-test('a transcript for a round this page never started still arrives', async () => {
+test('a transcript for a round this page never started is refused', async () => {
   const page = makePage({voice: true});
   const {win, posted} = page;
-  // A transcript can turn up without this page ever having begun a
-  // round for it. It was never tied to a moment in time, so there is no
-  // tab switch to detect and no reason to drop it.
+  // The daemon answers only audio a page posted and echoes that round's
+  // tag. A transcript naming no round of this page (no tag, or a tag it
+  // never posted) cannot be tied to a conversation.
   posted.length = 0;
   send(win, {type: 'voiceSpeech', text: 'HOST_SIDE_QK74'});
+  send(win, {type: 'voiceSpeech', text: 'HOST_SIDE_QK74', round: 7});
 
-  const submits = ofType(posted, 'submit');
   assert.strictEqual(
-    submits.length,
-    1,
-    'an unsolicited transcript must still be delivered: ' +
+    ofType(posted, 'submit').length,
+    0,
+    'a transcript without a round must not be submitted: ' +
       JSON.stringify(posted),
   );
-  assert.ok(submits[0].prompt.includes('HOST_SIDE_QK74'));
+  assert.ok(
+    !taskInput(win).value.includes('HOST_SIDE_QK74'),
+    'nor may it be typed into the visible tab input',
+  );
 
   win.close();
 });
@@ -1365,13 +1544,12 @@ test('voice fails closed when the page publishes no owner', async () => {
   twoTabs(win);
 
   await startMic(page);
-  wake(page);
-  speak(page);
+  const round = speakRound(page);
   // No accessor at all any more: ownership cannot be proved, so the
   // transcript must be refused rather than typed somewhere arbitrary.
   delete win.kissVoiceOwner;
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'NO_OWNER_QK73'});
+  send(win, {type: 'voiceSpeech', text: 'NO_OWNER_QK73', round});
 
   assert.strictEqual(
     ofType(posted, 'submit').length,
@@ -1382,6 +1560,154 @@ test('voice fails closed when the page publishes no owner', async () => {
     !taskInput(win).value.includes('NO_OWNER_QK73'),
     'nor may it be typed into whatever input happens to be mounted',
   );
+
+  win.close();
+});
+
+// ---------------------------------------------------------------------------
+// Leak 7b -- the tab stayed on screen, the conversation in it did not.
+//
+// A round belongs to the chat it was spoken in and to what that chat was
+// waiting on, not to the tab. While the transcript is on its way the
+// daemon can rebind the tab to another chat (a replay, a run from another
+// surface), and a question can be asked, answered elsewhere or replaced.
+// main.js publishes the chat id and the pending question with the owner
+// (kissVoiceOwner), and voice.js refuses a round whose owner changed.
+//
+// kissVoiceOwner also answers when its tab id names no tab, as tabTaskId
+// does.  No test reaches that side: main.js opens a chat tab while it
+// loads, and closing the last one opens another at once.
+// ---------------------------------------------------------------------------
+
+// The daemon replays task `task` of chat `chat` into the active tab.
+function replayChat(win, chat, task) {
+  send(win, {
+    type: 'task_events',
+    tabId: win._testApi.getActiveTabId(),
+    chat_id: chat,
+    task_id: task,
+    task,
+    extra: '{}',
+    events: [{type: 'text_delta', text: chat + ' output'}, {type: 'text_end'}],
+  });
+}
+
+// What a transcript made the page send to the daemon.
+function deliveries(posted) {
+  return posted.filter(m =>
+    ['userAnswer', 'submit', 'appendUserMessage'].includes(m.type),
+  );
+}
+
+test('speech is never submitted to another chat its tab was rebound to', async () => {
+  const page = makePage({voice: true});
+  const {win, posted} = page;
+  replayChat(win, 'chat-a', 'task-a');
+  await startMic(page);
+  const round = speakRound(page);
+  replayChat(win, 'chat-b', 'task-b'); // the tab shows chat B now
+  posted.length = 0;
+  send(win, {type: 'voiceSpeech', text: 'chat A words QK95', round});
+
+  assert.deepStrictEqual(
+    deliveries(posted),
+    [],
+    'words spoken in chat A must not reach chat B through the tab they share',
+  );
+  assert.ok(!taskInput(win).value.includes('QK95'), 'nor its composer');
+
+  win.close();
+});
+
+test('speech reaches its chat after a newer task of it, or its id, arrived', async () => {
+  // Spoken in chat C; another task of the same chat is shown meanwhile.
+  let page = makePage({voice: true});
+  let tabId = page.win._testApi.getActiveTabId();
+  replayChat(page.win, 'chat-c', 'task-1');
+  await startMic(page);
+  let round = speakRound(page);
+  replayChat(page.win, 'chat-c', 'task-2');
+  page.posted.length = 0;
+  send(page.win, {type: 'voiceSpeech', text: 'same chat QK96', round});
+  let submits = ofType(page.posted, 'submit');
+  assert.strictEqual(submits.length, 1, JSON.stringify(page.posted));
+  assert.strictEqual(submits[0].prompt, 'same chat QK96');
+  assert.strictEqual(submits[0].tabId, tabId);
+  page.win.close();
+
+  // Spoken into a new chat, which has no id until its first task starts
+  // (here: before the transcript is back).
+  page = makePage({voice: true});
+  tabId = page.win._testApi.getActiveTabId();
+  await startMic(page);
+  round = speakRound(page);
+  send(page.win, {type: 'clear', tabId, chat_id: 'chat-new'});
+  page.posted.length = 0;
+  send(page.win, {type: 'voiceSpeech', text: 'new chat QK97', round});
+  submits = ofType(page.posted, 'submit');
+  assert.strictEqual(submits.length, 1, JSON.stringify(page.posted));
+  assert.strictEqual(submits[0].prompt, 'new chat QK97');
+  assert.strictEqual(submits[0].tabId, tabId);
+  page.win.close();
+});
+
+const ask = (question, questionId) =>
+  Object.assign({type: 'askUser', question}, questionId && {questionId});
+const askDone = {type: 'askUserDone'};
+
+// Each row: the daemon's frames before the round is spoken, and those
+// arriving while its transcript is on the way.  The id tells two asks of
+// the same words apart; a daemon from before the ids sends none.
+const QUESTION_CHANGES = [
+  [
+    'another question',
+    [ask('Deploy staging?', 'q-a')],
+    [askDone, ask('Delete production?', 'q-b')],
+  ],
+  ['the same words asked again', [ask('Go?', 'q-1')], [askDone, ask('Go?', 'q-2')]],
+  ['a question, after words spoken as a task', [], [ask('Go?', 'q-1')]],
+  ['no question, after words spoken as an answer', [ask('Go?', 'q-1')], [askDone]],
+  ['another question without ids', [ask('Stage?')], [askDone, ask('Delete?')]],
+  ['a question without id, after words spoken as a task', [], [ask('Go?')]],
+  ['no question, after an answer to one without id', [ask('Go?')], [askDone]],
+];
+
+for (const [name, before, during] of QUESTION_CHANGES) {
+  test('speech from before the question changed is dropped: ' + name, async () => {
+    const page = makePage({voice: true});
+    const {win, posted} = page;
+    before.forEach(frame => send(win, frame));
+    await startMic(page);
+    const round = speakRound(page);
+    during.forEach(frame => send(win, frame));
+    posted.length = 0;
+    send(win, {type: 'voiceSpeech', text: 'yes QK98', round});
+
+    assert.deepStrictEqual(
+      deliveries(posted),
+      [],
+      'stale words reach neither a question nor the agent',
+    );
+    assert.ok(!taskInput(win).value.includes('QK98'), 'nor the composer');
+
+    win.close();
+  });
+}
+
+test('a question the daemon re-sends meanwhile is still answered by voice', async () => {
+  const page = makePage({voice: true});
+  const {win, posted} = page;
+  send(win, ask('Go?', 'q-1'));
+  await startMic(page);
+  const round = speakRound(page);
+  send(win, ask('Go?', 'q-1')); // a replay of the same pending ask
+  posted.length = 0;
+  send(win, {type: 'voiceSpeech', text: 'yes QK99', round});
+
+  const answers = ofType(posted, 'userAnswer');
+  assert.strictEqual(answers.length, 1, JSON.stringify(posted));
+  assert.strictEqual(answers[0].answer, 'yes QK99');
+  assert.strictEqual(answers[0].questionId, 'q-1');
 
   win.close();
 });
@@ -1719,11 +2045,11 @@ test('a task header for a background tab never retitles the visible one', () => 
   send(win, {type: 'setTaskText', tabId: first, text: 'bg header QK82'});
 
   assert.ok(
-    !tabTitle(win, second).includes('bg header QK82'),
+    !tabRecord(win, second).title.includes('bg header QK82'),
     "a background task's header must not rename the tab on screen",
   );
   assert.ok(
-    tabTitle(win, first).includes('bg header QK82'),
+    tabRecord(win, first).title.includes('bg header QK82'),
     'it must rename its OWN tab instead',
   );
 
@@ -1737,7 +2063,7 @@ test('a task header for the visible tab still retitles it', () => {
   send(win, {type: 'setTaskText', tabId: second, text: 'own header QK83'});
 
   assert.ok(
-    tabTitle(win, second).includes('own header QK83'),
+    tabRecord(win, second).title.includes('own header QK83'),
     'the visible tab must still be named after the task it is running',
   );
 
@@ -1768,7 +2094,7 @@ test('the visible tab id is published for voice', () => {
   const {second} = twoTabs(win);
 
   assert.strictEqual(
-    win._testApi.getActiveTabId(),
+    win.kissVoiceOwner().tabId,
     second,
     'voice.js reads the conversation on screen through this accessor',
   );
@@ -1986,6 +2312,4 @@ test("a stale ask answer is dropped in a background tab's pre-adoption window", 
   const runner = makeRunner();
   for (const t of tests) await runner.test(t.name, t.fn);
   runner.report('crossTabTextLeak');
-  // main.js starts timers in every page opened above; exit explicitly.
-  process.exit(0);
 })();

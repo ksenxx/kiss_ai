@@ -12,20 +12,16 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {tabEl} = require('./subagent_tab_helpers');
 
 function makePage() {
   return harness.makePage({beforeScripts: harness.stubRaf}).win;
 }
 
-const {send, clickTab} = harness;
+const {send, clickTab, answering} = harness;
 
 function tabRecord(win, tabId) {
   return win._testApi.openTabs().find(t => t.id === tabId) || null;
-}
-
-// The composer is in answer mode while the tab on screen has a question.
-function askModalVisible(win) {
-  return win.document.body.classList.contains('ask-answering');
 }
 
 // The '?' attention mark a chat shows while it waits for an answer
@@ -42,9 +38,7 @@ function attentionGlyph(win, tabId) {
 
 // The rendered attention mark of a tab on the strip (null without one).
 function stripBadge(win, tabId) {
-  const el = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id="${tabId}"]`,
-  );
+  const el = tabEl(win, tabId);
   assert.ok(el, `tab ${tabId} must be on the strip`);
   return el.querySelector('.chat-tab-attention');
 }
@@ -76,7 +70,7 @@ function testActiveTabAskClearedOnEachTerminalEvent() {
 
     send(win, {type: 'askUser', question: 'Which branch?', tabId: tabId});
     assert.ok(
-      askModalVisible(win),
+      answering(win),
       `${type}: the question must be showing before the task ends`,
     );
     assertNoToast(win, `${type}: while the question is pending`);
@@ -84,13 +78,13 @@ function testActiveTabAskClearedOnEachTerminalEvent() {
     send(win, {type: type, tabId: tabId, success: true});
 
     assert.strictEqual(
-      askModalVisible(win),
+      answering(win),
       false,
       `${type} must take the composer out of answer mode`,
     );
     assert.strictEqual(
-      attentionGlyph(win, tabId),
-      '',
+      tabRecord(win, tabId).askPending,
+      false,
       `${type} must clear the attention indicator`,
     );
     assertNoToast(win, `${type}: after the question is retired`);
@@ -126,19 +120,19 @@ function testBackgroundAskClearedOnEachTerminalEvent() {
     send(win, {type: type, tabId: askTab, success: true});
 
     assert.strictEqual(
-      attentionGlyph(win, askTab),
-      '',
+      tabRecord(win, askTab).askPending,
+      false,
       `${type} must clear the background tab's attention indicator`,
     );
     assert.strictEqual(
-      askModalVisible(win),
+      answering(win),
       false,
       `${type} must not put the composer of the tab the user is on into answer mode`,
     );
 
     clickTab(win, askTab);
     assert.strictEqual(
-      askModalVisible(win),
+      answering(win),
       false,
       `${type}: visiting the finished tab must not resurrect the question`,
     );
@@ -182,11 +176,11 @@ function testSubagentStripBadgeClearedOnEachTerminalEvent() {
       `${type} must take the badge off the sub-agent's strip entry`,
     );
     assert.strictEqual(
-      attentionGlyph(win, subTab),
-      '',
+      tabRecord(win, subTab).askPending,
+      false,
       `${type} must clear the sub-agent's record too`,
     );
-    assert.strictEqual(askModalVisible(win), false);
+    assert.strictEqual(answering(win), false);
 
     win.close();
   }
@@ -209,8 +203,8 @@ function testUnrelatedTabKeepsItsQuestion() {
   send(win, {type: 'task_done', tabId: askTab, success: true});
 
   assert.strictEqual(
-    attentionGlyph(win, askTab),
-    '',
+    tabRecord(win, askTab).askPending,
+    false,
     "the finished task's badge must clear",
   );
   assert.strictEqual(
@@ -227,10 +221,7 @@ function testUnrelatedTabKeepsItsQuestion() {
   );
 
   clickTab(win, otherTab);
-  assert.ok(
-    askModalVisible(win),
-    'the unrelated question must still be answerable',
-  );
+  assert.ok(answering(win), 'the unrelated question must still be answerable');
 
   win.close();
   console.log('  ok - ending one task leaves other questions alone');
@@ -266,8 +257,8 @@ function testSameChatIdSiblingKeepsItsQuestion() {
   send(win, {type: 'task_done', tabId: doneTab, success: true});
 
   assert.strictEqual(
-    attentionGlyph(win, doneTab),
-    '',
+    tabRecord(win, doneTab).askPending,
+    false,
     "the finished task's own question must be retired",
   );
   assert.strictEqual(
@@ -277,19 +268,11 @@ function testSameChatIdSiblingKeepsItsQuestion() {
   );
 
   clickTab(win, siblingTab);
-  assert.ok(
-    askModalVisible(win),
-    "the sibling's question must still be answerable",
-  );
-  assert.strictEqual(
-    attentionGlyph(win, siblingTab),
-    '',
-    'the sibling question is on screen, so its badge is gone',
-  );
+  assert.ok(answering(win), "the sibling's question must still be answerable");
 
   clickTab(win, doneTab);
   assert.strictEqual(
-    askModalVisible(win),
+    answering(win),
     false,
     'the finished tab must not resurrect its dead question',
   );
@@ -318,7 +301,7 @@ function testTerminalEventWithoutQuestionIsHarmless() {
     'a terminal event for another tab must not clear this badge',
   );
   assert.strictEqual(
-    askModalVisible(win),
+    answering(win),
     false,
     'the composer stays a prompt box for a tab with no question',
   );

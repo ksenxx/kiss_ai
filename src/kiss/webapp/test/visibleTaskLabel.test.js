@@ -19,6 +19,9 @@ const {
   send,
   clickTab,
   stackOutputLayout,
+  wheel,
+  readyTabId,
+  statusMetrics: metrics,
 } = require('./simplify2_harness');
 
 const VIEWPORT = 500;
@@ -48,12 +51,6 @@ function scrollToBottom(win, O) {
   scrollTo(win, O, O.scrollHeight);
 }
 
-function wheel(win, el, deltaY) {
-  return el.dispatchEvent(
-    new win.WheelEvent('wheel', {deltaY, bubbles: true, cancelable: true}),
-  );
-}
-
 /** The active tab's label: the task the reader is looking at. */
 function shownTask(win) {
   const active = win._testApi.getActiveTabId();
@@ -68,15 +65,6 @@ function taskPanelOf(O, name) {
   const panel = region.querySelector(':scope > .task-panel');
   assert.ok(panel, 'the region of ' + name + ' must open with a task panel');
   return panel;
-}
-
-function metrics(win) {
-  const d = win.document;
-  return {
-    tokens: d.getElementById('status-tokens').textContent,
-    budget: d.getElementById('status-budget').textContent,
-    steps: d.getElementById('status-steps').textContent,
-  };
 }
 
 function taskEvents(name) {
@@ -100,7 +88,7 @@ const LAST_METRICS = {tokens: 'Tokens: 777', budget: 'Cost: $7.00', steps: 'Step
 function setup(opts) {
   const options = opts || {};
   const {win, posted} = makePage();
-  const tabId = posted.find(m => m.type === 'ready').tabId;
+  const tabId = readyTabId(posted);
   win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
   stackOutputLayout(win, heightOf, VIEWPORT);
@@ -675,7 +663,7 @@ function testLoaderIsNotTranscript() {
 
   scrollToBottom(win, O);
   assert.strictEqual(shownTask(win), 'Last task');
-  for (let i = 0; i < 5; i++) wheel(win, O, 50);
+  wheel(win, O, 50, 5);
   assert.ok(
     posted.some(m => m.type === 'getAdjacentTask' && m.direction === 'next'),
     'the overscroll must ask the backend for the following task',
@@ -842,9 +830,9 @@ function testLiveStepCountDoesNotRepaintTheNeighboursRow() {
   );
 
   scrollTo(win, O, 0);
-  assert.notStrictEqual(
+  assert.strictEqual(
     metrics(win).steps,
-    'Steps: 7',
+    'Steps: 1',
     'the live task must show its own step count once it is back on screen',
   );
   win.close();
@@ -971,7 +959,7 @@ function testHiddenTabReplayLeavesTheVisibleRowAlone() {
 // finished transcript.
 function testSubagentDoneShowsTheParentsOwnNumbers() {
   const {win, posted} = makePage();
-  const parent = posted.find(m => m.type === 'ready').tabId;
+  const parent = readyTabId(posted);
   win._testApi.hideWelcome();
   send(win, {type: 'status', running: true, tabId: parent});
   send(win, {

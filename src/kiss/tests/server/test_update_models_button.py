@@ -22,17 +22,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
-from unittest import IsolatedAsyncioTestCase
+from unittest import IsolatedAsyncioTestCase, skipUnless
 
 import kiss.agents.sorcar.persistence as th
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-from kiss.tests.local_ws import open_local_connection
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import nproc_limit_lowered_to_one, thread_start_can_be_starved
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 from kiss.tests.server.conftest import find_free_port
 from kiss.tests.server.pause import Pause
 
@@ -69,12 +73,11 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
@@ -108,9 +111,8 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         proc = self.server._update_models_proc
         if proc is not None:
             await asyncio.to_thread(proc.wait, 10)
-        if th._db_conn is not None:
-            th._db_conn.close()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved  # type: ignore[assignment]
+        th._close_thread_db()
+        th._DB_PATH, th._KISS_DIR = self.saved  # type: ignore[assignment]
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _updater_stub(self, body: str) -> None:
@@ -219,6 +221,40 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         done = await self._drain_until(reader_a, _has_type("notice"))
         self.assertIn("complete", str(done.get("text", "")))
 
+    def _is_updater_delivery(self, loc: dict[str, Any]) -> bool:
+        """Pause matcher: an executor future receiving a started updater, kept in ``_delivered``."""
+        if isinstance(loc["result"], subprocess.Popen):
+            self._delivered = loc["result"]
+            return True
+        return False
+
+    async def test_click_during_the_spawn_hand_over_is_refused(self) -> None:
+        """A click landing before the loop took over a finished spawn is refused.
+
+        Window A's updater has exited by the time its worker thread
+        delivers it.  A click admitted then started a second updater,
+        and window A's handler put its own finished watcher over the
+        live one's handle, which ``stop_async`` then never cancelled.
+        """
+        self._updater_stub(SUCCEEDING_UPDATER)
+        reader_a, writer_a = await self._connect()
+        reader_b, writer_b = await self._connect()
+        # Holds window A's worker between the spawn's return and the
+        # hand-over of its result to the event loop.
+        with Pause(Future.set_result.__code__, self._is_updater_delivery) as pause:
+            await self._send(writer_a, {"type": "updateModels"})
+            self.assertTrue(await asyncio.to_thread(pause.paused.wait, 30))
+            await asyncio.to_thread(self._delivered.wait, 10)
+            self._updater_stub(HELD_UPDATER.format(release=str(self.release)))
+            await self._send(writer_b, {"type": "updateModels"})
+            second = await self._drain_until(reader_b, _has_type("notice"))
+            self.assertIn("already running", str(second.get("text", "")))
+        await self._drain_until(reader_a, _has_type("notice"))
+        done = await self._drain_until(reader_a, _has_type("notice"))
+        self.assertIn("complete", str(done.get("text", "")))
+        self.assertIs(self.server._update_models_proc, self._delivered)
+        self.assertFalse(self.server._update_models_starting)
+
     async def test_spawn_failure_is_reported_and_starts_no_watcher(self) -> None:
         self._updater_stub(SUCCEEDING_UPDATER)
         blocker = Path(self.tmpdir) / "not-a-dir"
@@ -232,14 +268,61 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         self.assertIn(
             "Failed to start the model catalog update", str(err.get("text", ""))
         )
-        # The spawn thread reports the failure before its ``finally``
-        # releases the single-flight guard, so the error can be read
-        # first.  Commands on one connection are dispatched
+        # The spawn thread reports the failure before the loop's
+        # done-callback releases the single-flight guard, so the error
+        # can be read first.  Commands on one connection are dispatched
         # sequentially: a probe round-trip proves _handle_update_models
         # has finished.
         self.assertEqual(await self._banners_before_probe(reader_a, writer_a), [])
         self.assertIsNone(self.server._update_models_watch_task)
         self.assertFalse(self.server._update_models_starting)
+
+    async def test_a_refused_spawn_submission_releases_the_guard(self) -> None:
+        """A click whose spawn the executor refused left every later one "already running"."""
+        self._updater_stub(SUCCEEDING_UPDATER)
+        reader_a, writer_a = await self._connect()
+        loop = asyncio.get_running_loop()
+        pool = ThreadPoolExecutor()
+        loop.set_default_executor(pool)
+        pool.shutdown()
+        await self._send(writer_a, {"type": "updateModels"})
+        # The handler sends this notice and submits its spawn in one loop step.
+        first = await self._drain_until(reader_a, _has_type("notice"))
+        self.assertIn("Updating the model catalog", str(first.get("text", "")))
+        loop.set_default_executor(ThreadPoolExecutor())
+        await self._send(writer_a, {"type": "updateModels"})
+        second = await self._drain_until(reader_a, _has_type("notice"))
+        self.assertIn("Updating the model catalog", str(second.get("text", "")))
+        done = await self._drain_until(reader_a, _has_type("notice"))
+        self.assertIn("complete", str(done.get("text", "")))
+
+    def _note_updater(self, loc: dict[str, Any]) -> bool:
+        """Pause matcher that holds nothing: every updater a future receives, in ``_updaters``."""
+        if isinstance(loc["result"], subprocess.Popen):
+            self._updaters.append(loc["result"])
+        return False
+
+    @skipUnless(thread_start_can_be_starved(), "RLIMIT_NPROC does not starve threads here")
+    async def test_a_spawn_queued_by_a_refused_submission_never_runs(self) -> None:
+        """A thread that could not start left the spawn queued: it ran beside the next click's."""
+        fifo = Path(self.tmpdir) / "hold"
+        os.mkfifo(fifo)
+        self._updater_stub(f"open({str(fifo)!r}, 'rb', 0).read(1)\n")
+        self._updaters: list[subprocess.Popen[bytes]] = []
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        with open(fifo, "r+b", buffering=0) as hold:
+            try:
+                with Pause(Future.set_result.__code__, self._note_updater):
+                    with nproc_limit_lowered_to_one(), self.assertRaises(RuntimeError):
+                        await self.server._handle_update_models("")
+                    # The same executor can start its one thread now: the queued job runs first.
+                    await self.server._handle_update_models("")
+                self.assertEqual(self._updaters, [self.server._update_models_proc])
+                self.assertFalse(self.server._update_models_starting)
+            finally:
+                hold.write(b"xx")  # a byte lets one stand-in go
+                for updater in self._updaters:
+                    await asyncio.to_thread(updater.wait, 10)
 
     async def test_stop_cancels_a_pending_watcher(self) -> None:
         self._updater_stub(HELD_UPDATER.format(release=str(self.release)))

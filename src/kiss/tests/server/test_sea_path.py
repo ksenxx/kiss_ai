@@ -32,6 +32,7 @@ from kiss.core import user_config
 from kiss.core.models.model_info import get_available_models
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.conftest import init_repo
 
 
@@ -60,12 +61,10 @@ class AgentPathApiTest(unittest.TestCase):
         kiss_dir.mkdir(parents=True, exist_ok=True)
         self._saved_persistence = (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         )
         _persistence._KISS_DIR = kiss_dir
         _persistence._DB_PATH = kiss_dir / "history.db"
-        _persistence._db_conn = None
         self._saved_config_override = (
             vars(user_config).get("CONFIG_DIR"),
             vars(user_config).get("CONFIG_PATH"),
@@ -127,10 +126,9 @@ class AgentPathApiTest(unittest.TestCase):
         self.loop_thread.join(timeout=5)
         self.loop.close()
 
-        _persistence._close_db()
+        close_db()
         (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved_persistence
         saved_dir, saved_path = self._saved_config_override

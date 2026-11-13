@@ -47,7 +47,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from kiss.core.default_browser import browser_commands_from_env
-from kiss.core.locked import locked, locked_call
+from kiss.core.locked import ACQUIRE_SLICE_SECONDS, locked, locked_call
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +169,8 @@ def _claim_locked(url: str, surface: str, once: bool, deadline: float) -> str | 
             return None
         if opening.settled or now >= deadline:
             return opening.surface
-        _lock.wait(deadline - now)
+        # In slices: a Stop injected into this thread is raised between two waits.
+        _lock.wait(min(ACQUIRE_SLICE_SECONDS, deadline - now))
         once = True  # joined the launch in flight: share its outcome, do not repeat it
 
 
@@ -184,9 +185,13 @@ def _settle(url: str) -> None:
 
 @locked(_lock)
 def _release(url: str) -> None:
-    """Forget this thread's claim whose launch failed, so the next attempt opens again."""
+    """Forget this thread's claim whose launch failed, so the next attempt opens again.
+
+    A settled claim stays: a Stop landing in :func:`_claim` while this
+    thread re-checks a page it has opened reaches here too.
+    """
     opening = _recent.get(url)
-    if opening is not None and opening.owner == threading.get_ident():
+    if opening is not None and opening.owner == threading.get_ident() and not opening.settled:
         del _recent[url]
     _lock.notify_all()
 
@@ -394,18 +399,20 @@ def _open_on(
         :func:`_claim`), or ``None`` when this launch failed: the claim
         is released and the caller may try another surface.
     """
-    recent = _claim(url, surface, once)
-    if recent is not None:
-        return recent
+    recent: str | None = None
     opened = False
     try:
+        recent = _claim(url, surface, once)
+        if recent is not None:
+            return recent
         opened = launch(url)
     finally:
-        # Settle or release even when interrupted, so no waiter hangs on
-        # a claim that will never be resolved.
+        # Settle or release even when interrupted (a Stop may land as the
+        # claim returns), so no waiter hangs on a claim that will never
+        # be resolved.
         if opened:
             _settle(url)
-        else:
+        elif recent is None:
             _release(url)
     return surface if opened else None
 

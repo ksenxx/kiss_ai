@@ -191,20 +191,20 @@ function testCopyReturnsRawMarkdown() {
   console.log('  ok - PanelCopy.getRawText returns the raw markdown');
 }
 
-function runTests() {
-  testMarkdownDescriptionRendersFormatted();
-  testDescriptionHtmlIsSanitized();
-  testPlainTextFallbackWithoutMarked();
-  testEmptyDescription();
-  testFencedCodeBlockRenders();
-  testPanelStillCollapsesWithMarkdown();
-  testReplayRendersFormattedMarkdown();
-  testCopyReturnsRawMarkdown();
-}
+const TESTS = [
+  testMarkdownDescriptionRendersFormatted,
+  testDescriptionHtmlIsSanitized,
+  testPlainTextFallbackWithoutMarked,
+  testEmptyDescription,
+  testFencedCodeBlockRenders,
+  testPanelStillCollapsesWithMarkdown,
+  testReplayRendersFormattedMarkdown,
+  testCopyReturnsRawMarkdown,
+];
 
 try {
-  runTests();
-  console.log('\n8 passed, 0 failed');
+  for (const t of TESTS) t();
+  console.log(`\n${TESTS.length} passed, 0 failed`);
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

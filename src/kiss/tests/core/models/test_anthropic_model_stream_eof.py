@@ -18,10 +18,17 @@ Responses transports already refuse a stream without its terminal event.
 Every case drives the real SDK against a real local SSE endpoint; the
 usage ``message_start`` reported before the cut stays billable through
 ``take_partial_usage_response``.
+
+Conversely the turn is finished as soon as ``message_stop`` arrived: the
+adapter used to read on to the end of the body, so a connection that
+stayed open after the terminal event tripped the stall watchdog and the
+finished (and billed) answer was thrown away and asked for again.
 """
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -82,6 +89,8 @@ def _tool_stream(name: str, partial_json: str) -> list[bytes]:
         ),
     ]
 
+
+_STALL = 1.5
 
 _TERMINAL_EVENTS = [
     sse("content_block_stop", {"type": "content_block_stop", "index": 0}),
@@ -149,3 +158,59 @@ def test_the_same_stream_with_its_terminal_events_is_a_finished_turn(
     ]
     assert [m["role"] for m in model.conversation] == ["user", "assistant"]
     assert model.take_partial_usage_response() is None
+
+
+def test_a_body_left_open_after_message_stop_is_a_finished_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``message_stop`` ends the turn: the silence after it is not a stall."""
+    release = threading.Event()
+    tokens: list[str] = []
+    with ScriptedAnthropicServer(text_message_stream("complete answer"), hold=release) as server:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", server.base_url)
+        model = AnthropicModel(
+            "claude-under-test",
+            api_key="local-only",
+            model_config={"stream_stall_timeout": _STALL},
+            token_callback=tokens.append,
+        )
+        model.initialize("question")
+        try:
+            started = time.monotonic()
+            text, response = model.generate()
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+            model.client.close()
+        request_count = len(server.requests)
+    assert text == "complete answer"
+    assert tokens == ["complete answer"]
+    assert elapsed < _STALL, f"waited {elapsed:.2f}s for a finished turn"
+    assert response.stop_reason == "end_turn"
+    assert request_count == 1
+    assert [m["role"] for m in model.conversation] == ["user", "assistant"]
+    assert model.take_partial_usage_response() is None
+
+
+def test_a_reply_that_starts_after_a_second_of_silence_is_a_normal_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Silence before the first byte, within the stall timeout, is not a stall.
+
+    Pinned because the adapter's pool is abortable: its backend reads in
+    half-second slices, and one that knew the timeouts of httpcore only,
+    not of httpcore2, which the Anthropic SDK sends through, let the first
+    silent slice escape, so such a reply failed as a stall and was
+    requested twice.
+    """
+    with ScriptedAnthropicServer(text_message_stream("late answer"), delay=1.0) as server:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", server.base_url)
+        model = AnthropicModel("claude-under-test", api_key="local-only")
+        model.initialize("question")
+        try:
+            text, _ = model.generate()
+        finally:
+            model.client.close()
+        request_count = len(server.requests)
+    assert text == "late answer"
+    assert request_count == 1

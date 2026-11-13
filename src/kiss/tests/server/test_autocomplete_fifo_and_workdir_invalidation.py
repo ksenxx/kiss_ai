@@ -109,6 +109,17 @@ class TestAutocompleteFifoAndWorkDirInvalidation(unittest.TestCase):
             "identifiers were harvested from a FIFO",
         )
 
+    def test_an_active_file_path_with_a_nul_byte_is_still_answered(self) -> None:
+        """``os.open`` refuses such a path with ``ValueError``, not ``OSError``."""
+        self.server._cmd_complete({
+            "type": "complete",
+            "query": "nulQue",
+            "activeFile": "bad\0name.py",
+            "connId": "win-a",
+        })
+        identifiers = [c for c in self._completions_for("nulQue") if c.get("type") == "identifier"]
+        self.assertEqual(identifiers, [])
+
     def test_non_regular_files_yield_empty_content(self) -> None:
         """``read_active_file_head`` rejects device nodes outright.
 

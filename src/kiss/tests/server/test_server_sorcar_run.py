@@ -37,6 +37,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import user_config
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.conftest import init_repo
 
 
@@ -80,12 +81,10 @@ class SorcarRunApiTest(unittest.TestCase):
         kiss_dir.mkdir(parents=True, exist_ok=True)
         self._saved_persistence = (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         )
         _persistence._KISS_DIR = kiss_dir
         _persistence._DB_PATH = kiss_dir / "history.db"
-        _persistence._db_conn = None
         self._saved_config_override = (
             vars(user_config).get("CONFIG_DIR"),
             vars(user_config).get("CONFIG_PATH"),
@@ -147,10 +146,9 @@ class SorcarRunApiTest(unittest.TestCase):
         self.loop_thread.join(timeout=5)
         self.loop.close()
 
-        _persistence._close_db()
+        close_db()
         (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved_persistence
         saved_dir, saved_path = self._saved_config_override
@@ -1503,14 +1501,14 @@ class SorcarRunApiTest(unittest.TestCase):
         assert api_views == [], "api tab chat view leaked after run()"
 
     def test_scope_work_dir_pins_tab_visibility_scope(self) -> None:
-        """``run(scope_work_dir=…)`` pins the tab's workspace scope.
+        """``run(scope_work_dir=…)`` records the calling workspace on the tab.
 
         A ``run_agent`` sub-task executes in a channel/cron scratch
-        directory (``work_dir``) but must appear in the CALLING
-        workspace's tab bar, so ``run()`` forwards ``scope_work_dir``
-        as the tab's ``scopeWorkDir`` registry field — distinct from
-        the execution ``workDir`` — and it is broadcast to every
-        client in the ``tabs_state`` snapshot.
+        directory (``work_dir``); ``run()`` forwards ``scope_work_dir``,
+        the workspace it was issued from, as the tab's ``scopeWorkDir``
+        registry field — distinct from the execution ``workDir``,
+        informational (every client shows every tab) — and it is
+        broadcast to every client in the ``tabs_state`` snapshot.
         """
         captured: dict[str, Any] = {}
 
@@ -1547,8 +1545,8 @@ class SorcarRunApiTest(unittest.TestCase):
         api_tabs = captured.get("tabs") or []
         assert len(api_tabs) == 1, f"expected one api tab, got {api_tabs!r}"
         entry = api_tabs[0]
-        # The execution dir stays the scratch dir; the visibility
-        # scope is pinned to the caller's workspace.
+        # The execution dir stays the scratch dir; the caller's
+        # workspace is recorded beside it.
         assert entry["workDir"] == scratch
         assert entry["scopeWorkDir"] == workspace
 
@@ -1558,10 +1556,9 @@ class SorcarRunApiTest(unittest.TestCase):
         The SEA overrides the execution directory via
         ``settings()['work_dir']``, and ``_run_task`` re-pins the
         registry tab's ``workDir`` to the overridden value.  The tab's
-        ``scopeWorkDir`` must survive that re-pin — it is what keeps a
-        ``run_agent``-dispatched cron tab visible in the CALLING
-        workspace — because a script must not disturb the client-sent
-        scope.
+        ``scopeWorkDir`` must survive that re-pin: it names the
+        workspace a ``run_agent``-dispatched cron tab was issued from,
+        and a script must not disturb the client-sent value.
         """
         captured: dict[str, Any] = {}
         override_dir = str(Path(self.tmpdir) / "script_work")

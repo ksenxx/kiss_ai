@@ -18,6 +18,7 @@ const {
   makePage: makeChatPage,
   send,
   fakeGeometry,
+  readyTabId,
 } = require('./simplify2_harness');
 
 function makePage() {
@@ -31,26 +32,25 @@ function makePage() {
 // bottom of the chat, which is the state a real finished conversation
 // leaves behind.  Returns the tab id.
 function runScrolledConversation(win, posted, geo) {
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
+  const tabId = readyTabId(posted);
   win._testApi.hideWelcome();
   send(win, {
     type: 'status',
     running: true,
-    tabId: ready.tabId,
+    tabId,
     startTs: Date.now() - 2000,
   });
   send(win, {type: 'tool_call', name: 'Bash', command: 'make -j'});
   send(win, {type: 'system_output', text: 'x'.repeat(200) + '\n'});
   send(win, {type: 'result', summary: 'all done', success: true});
-  send(win, {type: 'status', running: false, tabId: ready.tabId});
+  send(win, {type: 'status', running: false, tabId});
   const O = win.document.getElementById('output');
   assert.strictEqual(
     O.scrollTop,
     Math.max(0, geo.sh - geo.ch),
     'setup: the finished conversation must be parked at the chat bottom',
   );
-  return ready.tabId;
+  return tabId;
 }
 
 function assertWelcomeAtTop(win, why) {

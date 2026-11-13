@@ -10,19 +10,17 @@ embedded apostrophe by *doubling* it::
 
     - 'link "Bob''s: list"':
 
-``_number_interactive_elements`` unescapes only the double-quote-style
-escapes (``\\"`` and ``\\\\``), so the recorded accessible name keeps
-the doubled apostrophe (``Bob''s: list``).  ``_resolve_locator`` then
-calls ``get_by_role(..., name="Bob''s: list", exact=True)`` which can
-never match, so every click/type/hover on such an element fails with
-"Element not found" even though it is plainly on the page.
+The name was recorded with the doubled apostrophe (``Bob''s: list``) and
+looked up as such, which could never match: every click/type/hover on
+such an element failed with "Element not found" even though it is
+plainly on the page.
 """
 
 from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.web_use_tool import WebUseTool, _number_interactive_elements
+from kiss.agents.sorcar.web_use_tool import WebUseTool
 
 APOS_COLON_PAGE = """<!DOCTYPE html>
 <html><head><title>Apos Page</title></head>
@@ -30,31 +28,6 @@ APOS_COLON_PAGE = """<!DOCTYPE html>
   <button onclick="document.title='Clicked!'">Bob's: list</button>
   <a href="#">plain link</a>
 </body></html>"""
-
-
-def test_single_quoted_yaml_name_unescapes_doubled_apostrophe() -> None:
-    """Parse-level: the doubled ``''`` inside a single-quoted YAML key
-    must be collapsed back to a single apostrophe."""
-    snap = "- 'link \"Bob''s: list\"':\n  - /url: \"#\""
-
-    _, elements = _number_interactive_elements(snap)
-
-    assert elements == [{
-        "role": "link", "name": "Bob's: list",
-        "occurrence": "0", "role_occurrence": "0",
-    }]
-
-
-def test_plain_double_quoted_name_keeps_literal_apostrophes() -> None:
-    """Names NOT wrapped in single quotes must keep ``''`` verbatim."""
-    snap = '- button "a\'\'b"'
-
-    _, elements = _number_interactive_elements(snap)
-
-    assert elements == [{
-        "role": "button", "name": "a''b",
-        "occurrence": "0", "role_occurrence": "0",
-    }]
 
 
 def test_click_element_with_apostrophe_and_colon_in_name(tmp_path: Path) -> None:
@@ -65,16 +38,9 @@ def test_click_element_with_apostrophe_and_colon_in_name(tmp_path: Path) -> None
     tool = WebUseTool(user_data_dir=None, headless=True)
     try:
         tree = tool.go_to_url(page.as_uri())
-        assert "Bob" in tree, tree
+        assert "- [1] 'button \"Bob''s: list\"'\n" in tree, tree
 
-        element_id = None
-        for entry in tool._elements:
-            if entry["role"] == "button":
-                element_id = tool._elements.index(entry) + 1
-                break
-        assert element_id is not None, tool._elements
-
-        result = tool.click(element_id)
+        result = tool.click(1)
 
         assert not result.startswith("Error"), result
         assert "Clicked!" in result, result

@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import uuid
 from typing import TYPE_CHECKING
 
 from kiss.core.locked import locked_call
@@ -124,6 +125,7 @@ class AgentState:
         "use_parallel",
         "last_user_prompt",
         "client_run_token",
+        "run_id",
     )
 
     def __init__(
@@ -190,7 +192,9 @@ class AgentState:
         # message routes to the plain steering path instead of being
         # queued: a task queued after the last drain would be echoed
         # to the user and then silently discarded by the end-of-run
-        # cleanup.  Never reset: each run creates a fresh state.
+        # cleanup.  ``_cmd_run`` creates a fresh state per run; a
+        # direct ``_run_task`` caller's reused idle state is re-opened
+        # by ``_resolve_run_state_locked``.
         self.followup_queue_closed: bool = False
         self.is_task_active: bool = is_task_active
         self.is_merging: bool = False
@@ -221,6 +225,13 @@ class AgentState:
         # kill a NEWER run that reused the same synthetic ``api-…``
         # tab after the original run finished.
         self.client_run_token: str = ""
+        # Names this run on the wire: the running statuses the server
+        # builds from a state carry it as ``runId``, so that a client
+        # can say which run its ``stop`` is for (a UI stop names only
+        # its tab, and one a dead link held back reaches whatever run
+        # owns the tab by then).  Unlike ``task_id`` it survives
+        # :func:`rekey`.
+        self.run_id: str = uuid.uuid4().hex
 
     @property
     def is_subagent(self) -> bool:
@@ -386,11 +397,12 @@ def _find_by_tab_locked(tab_id: str) -> AgentState | None:
 
 
 def find_by_tab(tab_id: str) -> AgentState | None:
-    """Return the server-owned state launched from *tab_id*, or ``None``.
+    """Return the state launched from *tab_id*, or ``None``.
 
-    At most one server-owned state exists per tab (a new run on a tab
-    replaces the tab's previous state), so the first match is the
-    match.  Sub-agent states carry synthetic tab ids of their own.
+    The tab's server-owned state when it has one: at most one exists
+    per tab (a new run on a tab replaces the tab's previous state).
+    Otherwise the first state registered under that tab id, such as a
+    sub-agent's, which carries a synthetic tab id of its own.
 
     Args:
         tab_id: The frontend tab id to look up.

@@ -34,9 +34,8 @@ from kiss.server import agent_state
 from kiss.server.web_server import (
     _SHUTDOWN_SIGNALS,
     RemoteAccessServer,
-    _generate_self_signed_cert,
 )
-from kiss.tests.local_ws import open_local_connection
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 

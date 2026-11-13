@@ -17,6 +17,7 @@ const path = require('path');
 const {JSDOM} = require('jsdom');
 const {
   makePage,
+  send,
   settle,
   stubRaf,
   captureTimers,
@@ -72,7 +73,6 @@ function makeTrack(win, state, log) {
   track.kind = 'audio';
   track.label = 'Test mic';
   track.readyState = 'live';
-  track.onended = null;
   track.getSettings = () => ({});
   track.stop = () => {
     track.readyState = 'ended';
@@ -80,9 +80,7 @@ function makeTrack(win, state, log) {
   };
   track.end = () => {
     track.readyState = 'ended';
-    const ev = new win.Event('ended');
-    track.dispatchEvent(ev);
-    if (typeof track.onended === 'function') track.onended(ev);
+    track.dispatchEvent(new win.Event('ended'));
   };
   state.tracks.push(track);
   return track;
@@ -176,9 +174,6 @@ function stubVoiceSurface(win, page) {
       this.destination = {};
       log.push('ctx-open');
     }
-    resume() {
-      return Promise.resolve();
-    }
     close() {
       log.push('ctx-closed');
       return Promise.resolve();
@@ -207,12 +202,16 @@ function stubVoiceSurface(win, page) {
  * voice surface.
  *
  * @param {{enabled?: boolean, debug?: boolean, sourceUrl?: *,
- *   noVosk?: boolean, pendingModel?: boolean, autoGrant?: boolean}} [opts]
+ *   noVosk?: boolean, pendingModel?: boolean, autoGrant?: boolean,
+ *   beforeScripts?: Function}} [opts]
  *   `enabled` remembers the mic ON (`kissVoiceEnabled=1`, the pipeline
  *   starts on load; default off, so a test clicks the mic button);
  *   `debug` sets `kissVoiceDebug=1` (a free-text recognizer runs next to
  *   the wake one); `sourceUrl` is passed to simplify2_harness.makePage;
- *   `noVosk` / `pendingModel` / `autoGrant` as for voicePageState.
+ *   `noVosk` / `pendingModel` / `autoGrant` as for voicePageState;
+ *   `beforeScripts(win)` runs after the voice surface is installed and
+ *   before the page scripts, so a suite's own stubs and stored settings
+ *   win.
  * @returns {{win: object, posted: Array<object>, getState: Function,
  *   state: {recognizers: Array, processors: Array, tracks: Array},
  *   mic: {calls: Array<{constraints: *, grant: Function, refuse: Function}>},
@@ -235,6 +234,7 @@ function makeVoicePage(opts) {
     win.__VOICE__ = Object.assign({}, VOICE_CFG);
     win.localStorage.setItem('kissVoiceEnabled', options.enabled ? '1' : '0');
     if (options.debug) win.localStorage.setItem('kissVoiceDebug', '1');
+    if (options.beforeScripts) options.beforeScripts(win);
   }
   const {win, posted, getState} = makePage({
     beforeScripts,
@@ -354,6 +354,28 @@ function speak(page) {
   );
 }
 
+/**
+ * Say the wake word and speak: the round's audio is posted for
+ * transcription.  Returns the tag the page posted with it, which the
+ * daemon echoes on the round's transcript.
+ */
+function speakRound(page) {
+  wake(page);
+  speak(page);
+  const sent = page.posted.filter(m => m.type === 'voiceTranscribe');
+  return sent[sent.length - 1].round;
+}
+
+/**
+ * Dictate `text`: speak a round, then deliver the daemon's transcript of
+ * it, tagged as the daemon tags it.  `extra` adds its `speaker` /
+ * `language` fields.
+ */
+function dictate(page, text, extra) {
+  const round = speakRound(page);
+  send(page.win, Object.assign({type: 'voiceSpeech', text, round}, extra));
+}
+
 /** Fire the page's one pending safety timer of `ms` milliseconds. */
 function fireTimer(page, ms) {
   const live = page.timers.filter(
@@ -362,7 +384,7 @@ function fireTimer(page, ms) {
   assert.strictEqual(live.length, 1, `one live ${ms} ms timer is armed`);
   page.win.clearTimeout(live[0].id);
   live[0].fired = true;
-  live[0].cb();
+  live[0].cb(...live[0].args);
 }
 
 /**
@@ -386,6 +408,26 @@ function makeBareVoiceWindow(cfg, beforeScript) {
   script.textContent = fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf-8');
   win.document.body.appendChild(script);
   return win;
+}
+
+/**
+ * A bare voice window (see makeBareVoiceWindow) over the stubbed voice
+ * surface, as a page record for the helpers above.  No main.js forwards
+ * what voice.js posts to the daemon here, so `posted` collects its
+ * `kiss-voice-post` events.  `cfg` overrides VOICE_CFG; `beforeScript(win)`
+ * runs after the surface is installed, so a suite's own stubs win.
+ */
+function makeBareVoicePage(cfg, beforeScript) {
+  const page = voicePageState();
+  page.posted = [];
+  page.win = makeBareVoiceWindow(Object.assign({}, VOICE_CFG, cfg), win => {
+    stubVoiceSurface(win, page);
+    win.addEventListener('kiss-voice-post', event =>
+      page.posted.push(event.detail),
+    );
+    if (beforeScript) beforeScript(win);
+  });
+  return page;
 }
 
 /**
@@ -416,6 +458,7 @@ module.exports = {
   stubVoiceSurface,
   makeVoicePage,
   makeBareVoiceWindow,
+  makeBareVoicePage,
   makeVoskWindow,
   micBtn,
   settle,
@@ -428,5 +471,7 @@ module.exports = {
   fireWake,
   wake,
   speak,
+  speakRound,
+  dictate,
   fireTimer,
 };

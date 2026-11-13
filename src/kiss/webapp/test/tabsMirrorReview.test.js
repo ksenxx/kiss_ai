@@ -159,13 +159,13 @@ function testOpenTabRejectedDropsLocalPendingTab() {
   const opens = msgsOf(posted, 'openTab');
   assert.strictEqual(opens.length, 1);
   const newId = opens[0].tabId;
-  assert.ok(tabBarIds(win).includes(newId));
+  assert.ok(openTabIds(win).includes(newId));
   const closesBefore = msgsOf(posted, 'closeTab').length;
 
   send(win, {type: 'openTabRejected', tabId: newId});
 
   assert.ok(
-    !tabBarIds(win).includes(newId),
+    !openTabIds(win).includes(newId),
     'a rejected openTab left a permanently local tab no other ' +
       'client will ever see',
   );
@@ -174,7 +174,7 @@ function testOpenTabRejectedDropsLocalPendingTab() {
     closesBefore,
     'dropping a rejected tab must not echo closeTab to the daemon',
   );
-  assert.deepStrictEqual(tabBarIds(win), ['t1']);
+  assert.deepStrictEqual(openTabIds(win), ['t1']);
 }
 
 function testOpenTabRejectedForLastTabKeepsLocalPlaceholder() {
@@ -187,13 +187,13 @@ function testOpenTabRejectedForLastTabKeepsLocalPlaceholder() {
   // The registry tab disappears (another client closed it) leaving
   // only the pending local tab...
   send(win, {type: 'tabs_state', tabs: []});
-  assert.deepStrictEqual(tabBarIds(win), [newId]);
+  assert.deepStrictEqual(openTabIds(win), [newId]);
   const opensBefore = msgsOf(posted, 'openTab').length;
 
   send(win, {type: 'openTabRejected', tabId: newId});
 
   assert.strictEqual(
-    tabBarIds(win).length,
+    openTabIds(win).length,
     1,
     'rejecting the last tab must keep one local placeholder',
   );
@@ -217,18 +217,18 @@ function testUnconfirmedPendingOpenExpiresAfterSnapshots() {
 
   send(win, {type: 'tabs_state', tabs: [snapshotEntry('t1', 'one')]});
   assert.ok(
-    tabBarIds(win).includes(newId),
+    openTabIds(win).includes(newId),
     'an in-flight openTab must survive the first stale snapshot',
   );
   send(win, {type: 'tabs_state', tabs: [snapshotEntry('t1', 'one')]});
   send(win, {type: 'tabs_state', tabs: [snapshotEntry('t1', 'one')]});
 
   assert.ok(
-    !tabBarIds(win).includes(newId),
+    !openTabIds(win).includes(newId),
     'a pending openTab no snapshot ever confirmed must expire — the ' +
       'tab stayed snapshot-immune forever',
   );
-  assert.deepStrictEqual(tabBarIds(win), ['t1']);
+  assert.deepStrictEqual(openTabIds(win), ['t1']);
 }
 
 // Two stale snapshots then the echo adopting the tab (expiry only
@@ -387,7 +387,12 @@ function testUnacknowledgedOpenIsNotReannouncedAfterReconnect() {
   const open3 = msgsOf(a.posted, 'openTab').pop();
   a.win.document.getElementById('task-input').value = 'typed offline';
   a.posted.length = 0;
-  send(a.win, {type: 'daemonStatus', connected: true, unconfirmed: [open3]});
+  // (An entry that is no command is skipped.)
+  send(a.win, {
+    type: 'daemonStatus',
+    connected: true,
+    unconfirmed: [null, open3],
+  });
   assert.deepStrictEqual(
     msgsOf(a.posted, 'openTab'),
     [],
@@ -466,6 +471,58 @@ function testUnacknowledgedOpenIsNotReannouncedAfterReconnect() {
     ['t1', open2.tabId, open3.tabId],
     'REGRESSION: an open the transport delivered and the daemon never ' +
       'listed keeps shielding a tab no other surface has',
+  );
+}
+
+// Audit 2026-11-11 (W1): the same verdict from an EMPTY registry.  An
+// empty snapshot spares the local placeholder it never listed, but a
+// tab this page announced is the registry's to keep or drop: opens the
+// daemon answered without listing them (every tab was closed on another
+// surface during the outage) must not survive as tabs no other surface
+// has.  One unannounced placeholder takes their place, and a tab the
+// daemon REJECTED as the page's only chat is that placeholder again.
+function testAnsweredOpensDoNotSurviveAnEmptyRegistry() {
+  const {win, posted} = makePage();
+  send(win, {type: 'daemonStatus', connected: true});
+  send(win, {type: 'tabs_state', tabs: [snapshotEntry('t1', 'one')], acks: []});
+  win._testApi.createNewTab();
+  win._testApi.createNewTab();
+  const opens = msgsOf(posted, 'openTab');
+  assert.strictEqual(opens.length, 2, 'setup: two opens announced');
+  // Both opens were delivered; their snapshots were lost with the
+  // connection, and another surface closed every tab meanwhile.
+  send(win, {type: 'daemonStatus', connected: false});
+  send(win, {type: 'daemonStatus', connected: true, unconfirmed: []});
+  send(win, {type: 'tabs_state', tabs: [], acks: opens.map(o => o.ack)});
+  const ids = openTabIds(win);
+  assert.strictEqual(
+    ids.length,
+    1,
+    'BUG: tabs closed elsewhere survive an empty registry: ' + ids,
+  );
+  assert.ok(
+    !opens.some(o => o.tabId === ids[0]),
+    'the survivor is a fresh, unannounced placeholder',
+  );
+  assert.strictEqual(
+    msgsOf(posted, 'openTab').length,
+    2,
+    'the placeholder is not announced',
+  );
+
+  // A rejected sole tab stays as the local placeholder: later empty
+  // snapshots keep sparing it, as they spare any placeholder.
+  const b = makePage();
+  send(b.win, {type: 'tabs_state', tabs: [snapshotEntry('t1', 'one')]});
+  b.win._testApi.createNewTab();
+  const newId = msgsOf(b.posted, 'openTab')[0].tabId;
+  send(b.win, {type: 'tabs_state', tabs: []});
+  send(b.win, {type: 'openTabRejected', tabId: newId});
+  send(b.win, {type: 'tabs_state', tabs: []});
+  assert.deepStrictEqual(
+    openTabIds(b.win),
+    [newId],
+    'the rejected sole tab is the placeholder an empty registry spares',
   );
 }
 
@@ -591,6 +648,27 @@ function testReplayedOpenIsSettledByTheDaemonsAnswer() {
   assert.strictEqual(openTabFrames(sockets).length, 2, 'nothing more is sent');
 }
 
+// The `ready` of a reconnect whose `pong` is lost was never sent: the
+// shim holds it back behind the batch awaiting that `pong`, and sends
+// it on the connection that follows.  main.js announces no second one
+// there, which would have the daemon resync this page twice.
+function testReadyGoesOutOncePerConnectionAfterALostPong() {
+  const {win, connect, reconnect} = makeTransportPage();
+  const first = connect();
+  first.fireMessage({type: 'pong'});
+  first.fireClose();
+  // A command queued during the outage makes the reconnect's batch.
+  win.acquireTransport().postMessage({type: 'getSettings'});
+  reconnect().fireClose(); // died before its pong
+  const third = reconnect();
+  third.fireMessage({type: 'pong'});
+  assert.strictEqual(
+    frames(third).filter(f => f.type === 'ready').length,
+    1,
+    'BUG: `ready` went out twice on one connection',
+  );
+}
+
 const tests = [
   testCloseSubagentTabBroadcastRemovesTabWithoutEcho,
   testCloseSubagentTabForUnknownIdIsIgnored,
@@ -600,9 +678,11 @@ const tests = [
   testUnconfirmedPendingOpenExpiresAfterSnapshots,
   testPendingOpenWaitsForItsAcknowledgment,
   testUnacknowledgedOpenIsNotReannouncedAfterReconnect,
+  testAnsweredOpensDoNotSurviveAnEmptyRegistry,
   testHeldOpenMadeOnlineSurvivesReconnects,
   testHeldOpenMadeOfflineSurvivesReconnects,
   testReplayedOpenIsSettledByTheDaemonsAnswer,
+  testReadyGoesOutOncePerConnectionAfterALostPong,
 ];
 
 runTests(tests.map(fn => [fn.name, fn]));

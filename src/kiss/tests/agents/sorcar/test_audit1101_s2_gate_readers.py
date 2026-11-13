@@ -32,6 +32,8 @@ from kiss.agents.sorcar.coding_gate import (
     bash_exit_code,
     run_on_host,
 )
+from kiss.agents.sorcar.exec_bridge import ExecBridge
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.tests.agents.sorcar.local_model_server import MODEL, serve, text_body
@@ -53,13 +55,27 @@ def test_host_failure_prefix_wins_over_a_marker_in_the_output(
     gate.result("Bash", {"command": command}, result, False)
     assert gate.exit_codes[command] == "7"
     assert gate.evidence_report({"evidence": [command]}) == f"- exit 7: `{command}`"
-    # The container tool's marker still reads as before, a marker in a passing
-    # host result too (the host tool never opens a passing result with the prefix).
-    assert bash_exit_code("some output\n[exit code: 3]") == "3"
-    assert bash_exit_code("[exit code: 0]\n") == "0"
-    assert bash_exit_code("fixture says [exit code: 5]\n") == "5"
+    # Each tool's sign counts in its own results only: the marker line closes a
+    # container result, the prefix opens a host result, and the other's is the
+    # command's output (audit 2026-11-12: a passing host command that printed a
+    # marker was recorded as failed).  A marker inside a line is output in both.
+    assert bash_exit_code("some output\n[exit code: 3]", container=True) == "3"
+    assert bash_exit_code("[exit code: 0]\n", container=True) == "0"
+    assert bash_exit_code("fixture says [exit code: 5]\n", container=True) == "0"
+    assert bash_exit_code("Error (exit code 2):\n[exit code: 4]", container=True) == "4"
     assert bash_exit_code("Error (exit code 2):\nno marker") == "2"
     assert bash_exit_code("Error (exit code 2):\n[exit code: 4]") == "2"
+    assert bash_exit_code("[exit code: 9]\n") == "0"
+    assert bash_exit_code("3 passed\nError (exit code 2):\nfrom a log\n") == "0"
+    contained = CodingGate(gate.shell, str(tmp_path), "tmp", container=True)
+    contained.result("Bash", {"command": "pytest -q"}, "F\n[exit code: 2]", False)
+    gate.result("Bash", {"command": "pytest -q"}, "F\n[exit code: 2]", False)
+    assert (contained.exit_codes["pytest -q"], gate.exit_codes["pytest -q"]) == ("2", "0")
+    # The agent's gate is the one of the tools its run has.
+    agent = SorcarAgent("gate-readers")
+    assert not agent._new_coding_gate(with_reviewer=False).container
+    agent.docker_manager = ExecBridge("exec:http://127.0.0.1:9")  # bound, never called
+    assert agent._new_coding_gate(with_reviewer=False).container
 
 
 def test_a_review_without_a_verdict_or_whose_call_fails_refuses_nothing(

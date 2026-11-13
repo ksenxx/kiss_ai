@@ -52,10 +52,10 @@ from kiss.agents.sorcar.task_classifier import (
     _decisions_model_config,
     cached_classification,
     classify_task,
-    clear_classification_cache,
 )
 from kiss.core import config as config_module
 from kiss.core.models.model_info import calculate_cost
+from kiss.tests.conftest import clear_classification_cache
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     IsolatedKissHome,

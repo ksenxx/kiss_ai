@@ -31,10 +31,13 @@ LLM/coding-assistant indexing") and verified live:
   `claude-opus-5-5-medium` / `openrouter/anthropic/claude-opus-5.5-medium`
   and run every other task on `claude-fable-5-2-max` /
   `openrouter/anthropic/claude-fable-5.2-max`, as `bestrouter_sea.py` and
-  `orbestrouter_sea.py` do, "through a non-blocking run_agent" (the `/sync`
+  `orbestrouter_sea.py` do, "through a non-blocking run_agent", and name
+  the reviewer without its suffix too (`gpt-6-astra`,
+  `openrouter/openai/gpt-6-astra`, where the page says `gpt-6-astra-xhigh`
+  and `openrouter/openai/gpt-6-astra-xhigh`) (the `/sync`
   row, rewritten in the same window, is identical in both),
-  the `/discover`, `/devtools`, `/install` and
-  `/sync_history_and_memory` rows are missing (the `/write_patent` and
+  the `/discover`, `/devtools`, `/install`, `/sync_history_and_memory`,
+  `/ccxbestrouter`, `/brbestrouter` and `/gepa` rows are missing (the `/write_patent` and
   `/review_patent` rows are there), the `/rsi7d` row still says the SEA
   "applies and evaluates improvements to each SEA" where the page now
   says it "hands each SEA (its own included) to the /discover SEA" and the
@@ -66,8 +69,9 @@ LLM/coding-assistant indexing") and verified live:
   `assets/` holds only a PNG render of the first, `tb2-success-by-model.png`,
   which the root `README.md` embeds); `sea-commands.md`
   documents `src/kiss/agents/sorcar/sea_commands.py` and describes the
-  27 bundled commands `/ask`, `/autorouter`, `/bestrouter`, `/devtools`, `/discover`,
-  `/forget`, `/git_extract_knowledge`, `/good_morning`, `/install`, `/machine`, `/merge`,
+  30 bundled commands `/ask`, `/autorouter`, `/bestrouter`, `/brbestrouter`,
+  `/ccxbestrouter`, `/devtools`, `/discover`,
+  `/forget`, `/gepa`, `/git_extract_knowledge`, `/good_morning`, `/install`, `/machine`, `/merge`,
   `/orautorouter`, `/orbestrouter`, `/recommendations`, `/remember`,
   `/review_paper`, `/review_patent`, `/revise_and_review_paper`, `/rsi7d`, `/sh`,
   `/skillopt`, `/sync`, `/sync_history_and_memory`, `/task_update`, `/write`,

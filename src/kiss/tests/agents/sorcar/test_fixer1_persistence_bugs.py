@@ -46,6 +46,7 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.core.tool_interrupt import inject_async_exception
 from kiss.tests.agents.sorcar import rwlock_probe
+from kiss.tests.persistence_helpers import close_db
 
 
 class _DBSandbox:
@@ -53,17 +54,16 @@ class _DBSandbox:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
-        th._close_db()
+        close_db()
 
     def teardown_method(self) -> None:
-        th._close_db()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        close_db()
+        th._DB_PATH, th._KISS_DIR = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
@@ -209,7 +209,7 @@ class TestA3SeqCacheClearRace(_DBSandbox):
             tr.start()
             assert reader_in.wait(5)
             for i, tid in enumerate(tids):
-                _queue_chat_event({"type": "e", "r": rnd, "i": i}, tid, db1)
+                _queue_chat_event({"type": "e", "r": rnd, "i": i}, tid)
             expected += n_tasks
             time.sleep(0.08)
 

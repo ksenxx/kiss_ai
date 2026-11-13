@@ -9,16 +9,21 @@
   thinking alias stripped), but embeddings sent the catalog name, so an
   ``openrouter/<vendor>/<id>`` embedding model asked OpenRouter for an id
   it does not serve.
-* **Stop during the connect.**  The embeddings call runs inline on the
+* **Stop during the connect.**  The embeddings call ran inline on the
   task thread (the memory tools), where a Stop arrives only as the
   runner's forced ``KeyboardInterrupt``, and an interrupt cannot land
   while the thread sits in the C ``connect()``.  The request's plain
   60 s timeout covered the connect phase too, so against an endpoint
-  that drops SYNs a Stop waited up to a minute; the connect phase is now
-  capped at ``stream_abort.CONNECT_TIMEOUT``, as on the streamed path.
-  The endpoint is a real listening socket whose accept queue is full, so
-  the kernel drops further SYNs; the interrupt is the runner's own
-  mechanism (``tool_interrupt.inject_async_exception``).
+  that drops SYNs a Stop waited up to a minute; the connect phase is
+  capped at ``stream_abort.CONNECT_TIMEOUT``, as on the streamed path,
+  and the request now runs on a worker thread, so the interrupt lands
+  in the caller's poll.  The endpoint is a real listening socket whose
+  accept queue is full, so the kernel drops further SYNs; the interrupt
+  is the runner's own mechanism (``tool_interrupt.inject_async_exception``).
+* **The SDK's sleep before its retry.**  A 429's ``Retry-After`` (up to
+  a minute) is slept out inside the SDK, where no socket is pending for
+  an abort to cut: the Stop and the timeout now end the caller at once
+  and leave the sleeping request on its worker thread.
 * **One request's abort is its own.**  The abort watchdog shuts down
   every socket of the pool it watches, and that pool
   (``AbortableNetworkBackend``) then shuts down every later connection
@@ -49,7 +54,13 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.core.models.stream_abort import CONNECT_TIMEOUT
 from kiss.core.tool_interrupt import inject_async_exception
-from kiss.tests.core.models.openai_sse_harness import Reply, Request, ScriptedOpenAIServer
+from kiss.tests.core.models.openai_sse_harness import (
+    Reply,
+    Request,
+    ScriptedOpenAIServer,
+    assert_left_during_the_retry_sleep,
+    retry_later,
+)
 
 # Margin above CONNECT_TIMEOUT for the interrupt to unwind; far below the
 # 60 s request timeout that used to cover the connect phase.
@@ -223,6 +234,30 @@ def test_a_stopped_request_leaves_its_concurrent_peer_and_the_next_request_alone
         assert sorted(request.body["input"] for request in server.requests) == ["A", "B", "C"]
 
 
+@pytest.mark.parametrize("stop", [False, True], ids=["timeout", "stop"])
+def test_the_sdks_retry_sleep_does_not_hold_an_embeddings_request(stop: bool) -> None:
+    """The Stop and the timeout end a request whose SDK sleeps out a ``Retry-After``.
+
+    The caller (a memory search worker, joined at process exit) leaves
+    while the SDK still sleeps, and the request given up is not sent again.
+    """
+    with ScriptedOpenAIServer(retry_later) as server:
+        model = OpenAICompatibleModel(
+            "text-embedding-3-small",
+            base_url=server.base_url,
+            api_key="sk-test",
+            model_config={"timeout": 1.0},
+        )
+        stop_event = threading.Event()
+        outcome: dict[str, Any] = {}
+        caller = threading.Thread(
+            target=_embed_into, args=(model, outcome, "x", stop_event), daemon=True
+        )
+        assert_left_during_the_retry_sleep(caller, stop_event if stop else None)
+        assert isinstance(outcome.get("error"), KeyboardInterrupt if stop else KISSError), outcome
+        assert len(server.requests) == 1, "the request given up was sent again"
+
+
 @pytest.mark.parametrize("timeout", [httpx.Timeout(5.0, connect=2.0), None])
 def test_a_configured_timeout_object_is_sent_as_is(timeout: httpx.Timeout | None) -> None:
     """Only a plain number gets the connect cap; an ``httpx.Timeout`` or ``None`` goes as is."""
@@ -298,12 +333,12 @@ def _embed_into(
         stop_signal.set_thread_stop_event(None)
 
 
-def _wait_until_connecting(thread: threading.Thread) -> None:
-    """Wait (at most 10 s) until *thread* sits in ``socket.create_connection``."""
+def _wait_until_connecting() -> None:
+    """Wait (at most 10 s) until a thread (the request's) sits in ``socket.create_connection``."""
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
-        frame = sys._current_frames().get(thread.ident or -1)
-        if frame is not None and frame.f_code.co_name == "create_connection":
+        frames = sys._current_frames().values()
+        if any(frame.f_code.co_name == "create_connection" for frame in frames):
             return
         time.sleep(0.01)
     raise AssertionError("the embeddings request never started connecting")
@@ -319,7 +354,7 @@ def test_a_stop_during_the_embeddings_connect_lands_within_the_connect_timeout()
         outcome: dict[str, Any] = {}
         thread = threading.Thread(target=_embed_into, args=(model, outcome), daemon=True)
         thread.start()
-        _wait_until_connecting(thread)
+        _wait_until_connecting()
         stopped_at = time.monotonic()
         assert inject_async_exception(thread.ident or -1, KeyboardInterrupt) == 1
         thread.join(CONNECT_TIMEOUT + _UNWIND_MARGIN)

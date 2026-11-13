@@ -48,7 +48,6 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.useful_tools import UsefulTools
-from kiss.agents.sorcar.web_use_tool import _number_interactive_elements
 
 
 @pytest.fixture()
@@ -117,50 +116,13 @@ class TestVanishedWorktreeFallback:
 
 
 class TestAriaSnapshotNameExtraction:
-    """_number_interactive_elements must decode Playwright's YAML escaping."""
-
-    def test_name_with_escaped_double_quotes(self):
-        """``<button>Say "hi" now</button>`` snapshots as
-        ``- button "Say \\"hi\\" now"`` — the recorded name must be the
-        real accessible name so get_by_role(name=..., exact=True) matches.
-        """
-        snapshot = '- button "Say \\"hi\\" now"'
-        numbered, elements = _number_interactive_elements(snapshot)
-        assert len(elements) == 1, elements
-        assert elements[0]["role"] == "button"
-        assert elements[0]["name"] == 'Say "hi" now', elements[0]["name"]
-        assert numbered.startswith("- [1] button"), numbered
-
-    def test_name_with_escaped_backslash(self):
-        """``back\\slash x`` snapshots as ``- button "back\\\\slash x"``."""
-        snapshot = '- button "back\\\\slash x"'
-        _numbered, elements = _number_interactive_elements(snapshot)
-        assert len(elements) == 1, elements
-        assert elements[0]["name"] == "back\\slash x", elements[0]["name"]
-
-    def test_single_quote_wrapped_role_line_is_numbered(self):
-        """Names containing ``": "`` make Playwright single-quote-wrap the
-        whole YAML key: ``- 'link "colon: \\"q\\""':``.  The element must
-        still be numbered (visible to the model) with the decoded name.
-        """
-        snapshot = '- \'link "colon: \\"q\\""\':\n  - /url: "#"'
-        _numbered, elements = _number_interactive_elements(snapshot)
-        assert len(elements) == 1, elements
-        assert elements[0]["role"] == "link"
-        assert elements[0]["name"] == 'colon: "q"', elements[0]["name"]
-
-    def test_plain_names_unchanged(self):
-        """Regression: plain unescaped names keep working."""
-        snapshot = '- link "plain":\n  - /url: "#"\n- button "Submit"'
-        numbered, elements = _number_interactive_elements(snapshot)
-        assert [e["name"] for e in elements] == ["plain", "Submit"]
-        assert "- [1] link" in numbered
-        assert "- [2] button" in numbered
+    """An element whose name Playwright has to escape is numbered and clickable."""
 
     def test_end_to_end_click_element_with_quoted_name(self):
-        """Full-stack check: a real Chromium page with a quoted-name button
-        must be numbered and resolvable (clickable) via WebUseTool's own
-        locator logic."""
+        """Full-stack check: on a real Chromium page, elements whose names
+        hold double quotes, a backslash or ``": "`` (which makes Playwright
+        single-quote the whole line) must be numbered and resolvable
+        (clickable) via WebUseTool's own locator logic."""
         from playwright.sync_api import sync_playwright
 
         from kiss.agents.sorcar.web_use_tool import WebUseTool
@@ -172,17 +134,22 @@ class TestAriaSnapshotNameExtraction:
                 page = browser.new_page()
                 page.set_content(
                     '<button onclick="this.textContent=\'done\'">Say "hi" now</button>'
+                    '<button onclick="this.textContent=\'done\'">back\\slash x</button>'
+                    '<a href="#" onclick="this.textContent=\'done\'">colon: "q"</a>'
                 )
                 tool._playwright = p
                 tool._browser = browser
                 tool._context = page.context
                 tool._page = page
                 tree = tool._get_ax_tree()
-                assert "[1] button" in tree, tree
-                locator = tool._resolve_locator(1)
-                assert locator.count() == 1
-                locator.click()
-                assert page.locator("button").inner_text() == "done"
+                assert '- [1] button "Say \\"hi\\" now"\n' in tree, tree
+                assert '- [2] button "back\\\\slash x"\n' in tree, tree
+                assert "- [3] 'link \"colon: \\\"q\\\"\"':\n" in tree, tree
+                for element_id in (1, 2, 3):
+                    locator = tool._resolve_locator(element_id)
+                    assert locator.count() == 1
+                    locator.click()
+                assert page.locator("button, a").all_inner_texts() == ["done"] * 3
                 browser.close()
         finally:
             tool._playwright = None

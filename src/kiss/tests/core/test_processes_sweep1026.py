@@ -16,7 +16,7 @@ not reach.  Every child is a real subprocess.
 
 Not reproducible end to end: ``returncode == -1`` (a ``SIGKILL``ed
 child that is still not reaped 5 s later needs a process stuck in the
-kernel) and the Windows read path.
+kernel) and, anywhere but on Windows, the Windows poll of a pipe.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,7 @@ from kiss.core.processes import (
     PIPE_GIVE_UP_SECONDS,
     CappedOutput,
     _capped_timeout,
+    _read_some,
     pid_alive,
     popen_process_group,
     run_capped,
@@ -174,6 +176,7 @@ def test_a_timed_out_run_process_group_closes_the_pipes_it_opened() -> None:
     """
     with pytest.raises(subprocess.TimeoutExpired) as raised:
         run_process_group(_py("import time; time.sleep(60)"), timeout=0.2)
+    assert raised.value.timeout == 0.2, "the error names a slice of the wait, not the timeout"
     frame = raised.value.__traceback__
     while frame is not None and frame.tb_frame.f_code.co_name != "run_process_group":
         frame = frame.tb_next
@@ -364,6 +367,30 @@ with open(sys.argv[1], "w") as f:
 def _kill_pid_file(pid_file: Path) -> None:
     with contextlib.suppress(OSError, ValueError):
         os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+
+@pytest.mark.parametrize(("give_up_in", "stopped"), [(-1.0, False), (60.0, True)])
+def test_a_silent_open_pipe_is_not_read_past_the_deadline_or_a_stop(
+    give_up_in: float, stopped: bool
+) -> None:
+    """A pipe that stays open and silent is given up at once past the deadline or on a stop.
+
+    The Windows branch read it plainly, whatever the two said: behind
+    a writer that outlived the kill (a child the Job Object never held)
+    the caller, or the stderr drain, sat in that read until the writer
+    left.  Both platforms share the loop now; this is the regression on
+    Windows, whose own part (the poll of the pipe) only Windows runs.
+    """
+    read_fd, write_fd = os.pipe()
+    stop = threading.Event()
+    if stopped:
+        stop.set()
+    with open(read_fd, "rb") as stream, ThreadPoolExecutor(1) as pool:
+        read = pool.submit(_read_some, stream, 1, time.monotonic() + give_up_in, stop)
+        try:
+            assert read.result(timeout=10) == b""
+        finally:
+            os.close(write_fd)  # EOF releases a read that heeded neither
 
 
 @posix_only("a descendant in its own session survives the group kill")

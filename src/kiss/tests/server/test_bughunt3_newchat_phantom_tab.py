@@ -23,13 +23,14 @@ import kiss.agents.sorcar.persistence as _pm
 import kiss.core.user_config as _vc
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.persistence_helpers import close_db
 
 
 class TestEmptyTabIdPhantom(unittest.TestCase):
     """Empty tabId must not create undisposable per-tab or task state."""
 
     def setUp(self) -> None:
-        _pm._close_db()
+        close_db()
         self._tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt3-")
         self._saved_paths = (
             _pm._KISS_DIR, _pm._DB_PATH, _vc.CONFIG_DIR, _vc.CONFIG_PATH,
@@ -49,7 +50,7 @@ class TestEmptyTabIdPhantom(unittest.TestCase):
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
-        _pm._close_db()
+        close_db()
         (
             _pm._KISS_DIR, _pm._DB_PATH, _vc.CONFIG_DIR, _vc.CONFIG_PATH,
         ) = self._saved_paths

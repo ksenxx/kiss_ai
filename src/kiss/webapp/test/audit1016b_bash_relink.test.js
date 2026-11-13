@@ -20,12 +20,13 @@ const assert = require('assert');
 const {
   makePage: makeChatPage,
   send,
+  ofType,
   fakeMatchMedia,
   queueRaf,
 } = require('./simplify2_harness');
 
 function makePage() {
-  const {win, posted} = makeChatPage({
+  return makeChatPage({
     bodyClass: 'remote-chat',
     extraScripts: ['marked.min.js'],
     beforeScripts(win) {
@@ -34,11 +35,10 @@ function makePage() {
       fakeMatchMedia(win, true);
     },
   });
-  return {win, posted};
 }
 
 function checks(posted) {
-  return posted.filter(m => m && m.type === 'checkPaths');
+  return ofType(posted, 'checkPaths');
 }
 
 function links(win) {

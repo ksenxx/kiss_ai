@@ -52,6 +52,7 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.conftest import find_free_port
 
 _SENTINEL = "Agent Failed Abruptly"
@@ -98,12 +99,10 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
         kiss_dir.mkdir(parents=True, exist_ok=True)
         self._saved = (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         )
         _persistence._KISS_DIR = kiss_dir
         _persistence._DB_PATH = kiss_dir / "history.db"
-        _persistence._db_conn = None
         self.db_path = kiss_dir / "history.db"
         self.endpoint_file = tmp / "sorcar-local.json"
         self.url_file = tmp / "remote-url.json"
@@ -119,10 +118,9 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
             except sqlite3.Error:
                 pass
             self.locker.close()
-        _persistence._close_db()
+        close_db()
         (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved
 
@@ -147,7 +145,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
         )
         _disown(orphan_id)
         assert _row_result(self.db_path, orphan_id) == _SENTINEL
-        _persistence._close_db()
+        close_db()
 
         self.locker = sqlite3.connect(
             str(self.db_path), isolation_level=None,
@@ -208,7 +206,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
             chat_id="install-restart-chat-2",
         )
         _disown(orphan_id)
-        _persistence._close_db()
+        close_db()
 
         started = time.monotonic()
         self.server = RemoteAccessServer(

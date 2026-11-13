@@ -45,9 +45,10 @@ from pathlib import Path
 
 import yaml
 
+from kiss.agents.sorcar.sea_apply import NO_TOOLS_PROFILE
 from kiss.agents.sorcar.sea_commands import evaluate_sea, get_command, list_commands, sea_layers
-from kiss.agents.sorcar.sea_settings import SeaError
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.sea_settings import SeaError, anchored_work_dir
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, canonical_tool_profile
 from kiss.core.base import collecting_trajectories
 from kiss.core.printer import Printer
 from kiss.core.user_config import apply_config_to_env, load_api_keys_readonly, load_config
@@ -121,8 +122,9 @@ def run_sea(
         task: The task text; the SEA's ``prompt(task)`` shapes it.
         model: The model when the SEA's ``model`` setting names none
             (default: the configured default model).
-        work_dir: The working directory when the SEA's ``work_dir``
-            setting names none (default: the current directory).
+        work_dir: The caller's directory (default: the current one): the
+            working directory when the SEA's ``work_dir`` setting names
+            none, and the one a relative setting is resolved against.
         max_budget: USD budget when the SEA's ``max_budget`` setting
             names none (default: Sorcar's default budget).
         save_trajectories: Whether the run writes trajectory files; with
@@ -150,22 +152,30 @@ def run_sea(
     settings = run.settings
     model_name = settings.get("model") or model or None
     model_config = settings.get("model_config")
+    base_dir = work_dir or os.getcwd()
+    pinned_dir = settings.get("work_dir")
     with collecting_trajectories(save=save_trajectories) as scope:
         agent = SorcarAgent(sea_path.stem)
-        # The SEA's ``auto_classify`` setting, as the daemon honours it:
-        # the verdict is pre-seeded so the run neither classifies again
-        # nor falls back to the persisted setting when the SEA fixed it.
-        agent.classify_task_for_run(
-            model_name, run.prompt, model_config, enabled=settings.get("auto_classify")
-        )
         result, error = "", ""
         try:
+            tool_profile = canonical_tool_profile(settings.get("tool_profile", ""))
+            # As in the daemon, ``none`` strips the run to ``finish`` plus
+            # what the SEA's ``tools()`` returns.
+            append_basic_tools = tool_profile != NO_TOOLS_PROFILE
+            # The SEA's ``auto_classify`` setting, as the daemon honours it:
+            # the verdict is pre-seeded so the run neither classifies again
+            # nor falls back to the persisted setting when the SEA fixed it.
+            agent.classify_task_for_run(
+                model_name, run.prompt, model_config, enabled=settings.get("auto_classify"),
+                tool_profile=tool_profile, append_basic_tools=append_basic_tools,
+            )
             result = agent.run(
                 model_name=model_name,
                 prompt_template=run.prompt,
-                work_dir=settings.get("work_dir") or work_dir or os.getcwd(),
+                work_dir=anchored_work_dir(pinned_dir, base_dir) if pinned_dir else base_dir,
                 max_budget=settings.get("max_budget", max_budget),
-                tool_profile=settings.get("tool_profile", ""),
+                tool_profile=tool_profile,
+                append_basic_tools=append_basic_tools,
                 web_tools=bool(settings.get("use_web_tools", False)),
                 use_memory=settings.get("use_memory"),
                 compaction=settings.get("compaction", True),

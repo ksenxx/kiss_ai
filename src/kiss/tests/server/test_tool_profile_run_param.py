@@ -42,6 +42,7 @@ from kiss.agents.sorcar.agent_dispatch import _run_agent, make_run_agent_tool
 from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import sorcar
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 _SH_SEA_PATH = str(Path(sh_sea.__file__).resolve())
@@ -170,7 +171,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             )
         finally:
             seas_md.unlink()
-            sea_commands._reset_for_tests()
+            reset_sea_registry()
         assert result.success is False, result
         assert "Task failed: SeaError" in result.text, result
         assert "boom_sea.py' failed to import" in result.text, result

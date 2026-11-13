@@ -15,6 +15,7 @@ checkout and its worktrees, so every run feeds the next balance.
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -48,20 +49,30 @@ def durations_path(root: Path = PROJECT_ROOT) -> Path:
 
 
 def load_durations(path: Path) -> dict[str, float]:
-    """Return the recorded seconds by test path (relative, POSIX) in *path*; ``{}`` without."""
+    """Return the recorded seconds by test path (relative, POSIX) in *path*; ``{}`` without.
+
+    The file is shared by every checkout on the machine, so what is not a
+    duration there is left out rather than raised: a file that is no JSON
+    object, and a value that is no finite, non-negative number (every JSON
+    number is read as a float).
+    """
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"), parse_int=float)
     except (OSError, ValueError):
         return {}
     if not isinstance(data, dict):
         return {}
-    return {str(key): float(value) for key, value in data.items()}
+    return {
+        key: value
+        for key, value in data.items()
+        if isinstance(value, float) and 0 <= value < math.inf
+    }
 
 
 def record_durations(path: Path, durations: dict[str, float]) -> None:
     """Merge *durations* (seconds by test path relative to the repo root) into *path*.
 
-    Read, merged and rewritten under an exclusive lock on ``<path>.lock``
+    Read, merged and rewritten under an exclusive lock on its ``.lock`` sibling
     (:func:`~kiss.core.file_lock.exclusive_file_lock`, which works on
     every platform), since the splits of one ``run_commands_parallel``
     call finish together; the latest run of a file replaces its earlier

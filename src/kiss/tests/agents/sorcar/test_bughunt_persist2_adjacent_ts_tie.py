@@ -35,6 +35,7 @@ from kiss.agents.sorcar.persistence import (
     _add_task,
     _get_adjacent_task_by_chat_id,
 )
+from kiss.tests.persistence_helpers import close_db
 
 
 class _TempDbTestBase:
@@ -42,18 +43,17 @@ class _TempDbTestBase:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         th._invalidate_chat_context_cache("")
 
     def teardown_method(self) -> None:
-        th._close_db()
+        close_db()
         th._invalidate_chat_context_cache("")
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        th._DB_PATH, th._KISS_DIR = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _force_equal_timestamps(self, chat_id: str, ts: float) -> None:

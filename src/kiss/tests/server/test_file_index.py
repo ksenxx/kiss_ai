@@ -39,7 +39,25 @@ from kiss.server.file_index import (
 )
 from kiss.server.server import AgentServer
 from kiss.tests.conftest import IS_WINDOWS, is_root, posix_only
-from kiss.tests.server.conftest import local_view, touch
+from kiss.tests.server.conftest import EntryGate, local_view, touch
+
+#: Scans the tree named on the command line with at most 256 MiB more memory than the
+#: interpreter holds by then, and prints what a ``.gitignore`` reader raised, whether the
+#: scan stayed within 64 MiB and its paths.  The cap makes a read that never ends fail
+#: in this child instead of taking the machine's memory.
+_SCAN_UNDER_A_MEMORY_CAP = """\
+import os, resource, sys, threading
+from kiss.server.file_index import FileIndex
+raised = []
+threading.excepthook = lambda args: raised.append(args.exc_type.__name__)
+pages = int(open("/proc/self/statm").read().split()[0])
+cap = pages * os.sysconf("SC_PAGE_SIZE") + 256 * 1024 * 1024
+resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
+before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+index = FileIndex.scan(sys.argv[1])
+grown = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before
+print(raised, grown < 64 * 1024, sorted(index.paths))
+"""
 
 
 def _wait(pred: Callable[[], bool], timeout: float = 10.0) -> None:
@@ -82,6 +100,13 @@ def _persist(tmp_path: Path, root: Path) -> list[str]:
         reg.stop()
 
 
+def _settle(root: Path) -> None:
+    """Date the directories at and below *root* an hour back, past a scan's racy window."""
+    old = time.time_ns() - 3600 * 10**9
+    for folder, _, _ in os.walk(root):
+        os.utime(folder, ns=(old, old))
+
+
 class TestScan:
     def test_lists_files_and_directories_skipping_dot_and_junk_dirs(self, tmp_path: Path) -> None:
         touch(
@@ -97,11 +122,12 @@ class TestScan:
     ) -> None:
         touch(
             tmp_path, "b.py", "a.py", "run.log", ".hidden", "src/x.py", "src/y.json",
-            "src/deep/z.py",
+            "src/deep/z.py", "log", "src/bin",
         )
         index = FileIndex.scan(str(tmp_path))
+        # ``log`` and ``bin`` are names, not suffixes: no data files.
         assert index.paths == [
-            "a.py", "b.py", "src/", "src/x.py", "src/deep/", "src/deep/z.py",
+            "a.py", "b.py", "log", "src/", "src/bin", "src/x.py", "src/deep/", "src/deep/z.py",
             ".hidden", "run.log", "src/y.json",
         ]
         assert index.dirs == frozenset({"", "src", "src/deep"})
@@ -132,15 +158,20 @@ class TestScan:
         assert reg.root_for(str(tmp_path / "src")) == (str(tmp_path), "src/")
 
     def test_nested_gitignores_apply_to_dirs_and_files_below_them(self, tmp_path: Path) -> None:
+        # To git a bracket expression (closed or not) and a backslash escape are
+        # glob syntax: neither excludes the entry spelled like the pattern.
+        spelled = ["item[12].py", "neg[!a]/f.py", "anch[^b].c", "open[.md"]
+        spelled += [] if IS_WINDOWS else ["esc\\#.py"]  # no backslash in a Windows file name
         (tmp_path / ".gitignore").write_text(
             "build/\n/top-only\nsecret.txt\n!keep\n*.log\n/data/\n/cache/\n"
+            "item[12].py\nneg[!a]/\n/anch[^b].c\nopen[.md\nesc\\#.py\n"
         )
         touch(
             tmp_path, "build/a.o", "top-only/x", "nested/top-only/y", "secret.txt",
             "nested/secret.txt", "keep", "run.log", "repo/.gitignore", "repo/tmp/junk",
             "repo/src/tmp/also-junk", "repo/generated/out.py", "repo/deeper/generated/in.py",
             "other/tmp/kept.py", "nested/build", "data", "cache/c.o", "nested/cache/k",
-            "repo/gen", "repo/sub/gen/g.py",
+            "repo/gen", "repo/sub/gen/g.py", *spelled,
         )
         (tmp_path / "repo" / ".gitignore").write_text("tmp\n/generated\n/gen/\n/sub/gen/\n")
         paths = set(FileIndex.scan(str(tmp_path)).paths)
@@ -150,6 +181,7 @@ class TestScan:
         assert "nested/top-only/" in paths, "anchored entry only applies at the root"
         assert "secret.txt" not in paths and "nested/secret.txt" not in paths
         assert "keep" in paths and "run.log" in paths, "negations and globs are ignored"
+        assert set(spelled) <= paths
         assert "repo/tmp/" not in paths and "repo/src/tmp/" not in paths
         assert "other/tmp/" in paths, "a nested ignore does not leak to siblings"
         assert "repo/generated/" not in paths
@@ -166,6 +198,7 @@ class TestScan:
 
     def test_rescan_reuses_unchanged_listings_and_sees_changes(self, tmp_path: Path) -> None:
         touch(tmp_path, "a/one.py", "b/two.py")
+        _settle(tmp_path)
         first = FileIndex.scan(str(tmp_path))
         assert first.relisted
         same = FileIndex.scan(str(tmp_path), first.listings)
@@ -181,14 +214,85 @@ class TestScan:
         assert changed.listings["b"] == (first.listings["b"][0], [], []) or (
             changed.listings["b"][1] == []
         )
+        # A file created right behind a scan, in the clock tick its directory
+        # was listed in, leaves the mtime where that scan saw it: not lost ...
+        for n in range(10):
+            touch(tmp_path, f"a/late{n}.py")
+            changed = FileIndex.scan(str(tmp_path), {}, changed)
+            assert f"a/late{n}.py" in changed.paths
+        # ... nor with the mtime forced (a directory dated ahead of the clock
+        # stays racy); listing it again without finding a change persists nothing.
+        ahead = time.time_ns() + 3600 * 10**9
+        os.utime(tmp_path / "a", ns=(ahead, ahead))
+        os.utime(tmp_path / "b", ns=(ahead, ahead))
+        changed = FileIndex.scan(str(tmp_path), {}, changed)
+        touch(tmp_path, "a/late.py")
+        os.utime(tmp_path / "a", ns=(ahead, ahead))
+        changed = FileIndex.scan(str(tmp_path), {}, changed)
+        assert "a/late.py" in changed.paths
+        assert not FileIndex.scan(str(tmp_path), {}, changed).relisted
 
     def test_gitignore_edit_takes_effect_without_relisting(self, tmp_path: Path) -> None:
         touch(tmp_path, ".gitignore", "out/x.py", "src/y.py")
+        _settle(tmp_path)
         first = FileIndex.scan(str(tmp_path))
         assert "out/" in first.paths
         (tmp_path / ".gitignore").write_text("out\n")
         second = FileIndex.scan(str(tmp_path), first.listings)
         assert "out/" not in second.paths and "src/" in second.paths
+        # Nor is an edit lost that leaves the file's mtime where the last scan
+        # saw it: one made in the same clock tick, or (the last two) with
+        # the mtime forced, the file dated ahead of the clock.
+        ahead = time.time_ns() + 3600 * 10**9
+        for n, rule in enumerate(("src", "out") * 6):
+            (tmp_path / ".gitignore").write_text(rule)
+            if n >= 10:
+                os.utime(tmp_path / ".gitignore", ns=(ahead, ahead))
+            second = FileIndex.scan(str(tmp_path), {}, second)
+            assert rule + "/" not in second.paths
+        assert second.listings[""] is first.listings[""], "the directory was never listed again"
+
+    @posix_only("symbolic links and file modes")
+    @pytest.mark.skipif(is_root(), reason="root reads a mode-000 file")
+    def test_gitignore_that_could_not_be_read_is_read_once_it_can(self, tmp_path: Path) -> None:
+        # A link without its target, a file without the permission: when the
+        # reason passes no mtime the scan compares has moved, so the failed
+        # read must not count as a read.  (A ``stat`` that fails while the
+        # read after it succeeds needs a stall between the two: not staged.)
+        root = tmp_path / "root"
+        touch(root, "linked/out/x.py", "locked/out/x.py", "locked/.gitignore")
+        (root / "linked" / ".gitignore").symlink_to(tmp_path / "rules")
+        locked = root / "locked" / ".gitignore"
+        locked.write_text("out\n")
+        locked.chmod(0o000)
+        os.utime(locked, ns=(0, 0))
+        _settle(root)
+        first = FileIndex.scan(str(root))
+        assert {"linked/out/", "locked/out/"} <= set(first.paths)
+        (tmp_path / "rules").write_text("out\n")
+        locked.chmod(0o644)
+        second = FileIndex.scan(str(root), {}, first)
+        assert "linked/out/" not in second.paths and "locked/out/" not in second.paths
+
+    @posix_only("descriptor limits")
+    def test_directory_that_could_not_be_listed_is_listed_once_it_can(self, tmp_path: Path) -> None:
+        # With no descriptor left ``scandir`` fails (EMFILE), and that passes:
+        # an empty listing recorded for the directory would outlive it.
+        import resource
+
+        touch(tmp_path, "src/a.py")
+        _settle(tmp_path)
+        first = FileIndex.scan(str(tmp_path))
+        changed = first.listings["src"][0] + 60 * 10**9  # touched since, and quiet again
+        os.utime(tmp_path / "src", ns=(changed, changed))
+        limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (0, limits[1]))
+        try:
+            during = FileIndex.scan(str(tmp_path), {}, first)
+        finally:
+            resource.setrlimit(resource.RLIMIT_NOFILE, limits)
+        assert during.paths == ["src/"] and "src" not in during.listings
+        assert FileIndex.scan(str(tmp_path), {}, during).paths == ["src/", "src/a.py"]
 
     def test_directories_below_max_depth_are_listed_but_not_descended(
         self, tmp_path: Path,
@@ -249,7 +353,7 @@ class TestScan:
     def test_unreadable_root_yields_empty_index(self, tmp_path: Path) -> None:
         index = FileIndex.scan(str(tmp_path / "missing"))
         assert index.paths == [] and index.listings == {}
-        assert FileIndex.empty("/nowhere").dirs == frozenset({""})
+        assert FileIndex.empty().dirs == frozenset({""})
 
     def test_view_of_subdirectory_strips_prefix_and_excludes_itself(self, tmp_path: Path) -> None:
         touch(tmp_path, "top.py", "kiss/README.md", "kiss/src/a.py", "kissing/b.py")
@@ -277,6 +381,7 @@ class TestScan:
         after the permission is granted.
         """
         touch(tmp_path, "a.py", "locked/secret.py", "locked/sub/deep.py")
+        _settle(tmp_path)
         locked = tmp_path / "locked"
         locked.chmod(0o000)
         try:
@@ -314,6 +419,53 @@ class TestScan:
             file_index._refused.discard(str(locked))
 
     @posix_only("named pipes")
+    def test_gitignore_that_is_no_ignore_file_is_left_unread(self, tmp_path: Path) -> None:
+        """A ``.gitignore`` that is a pipe, or longer than any ignore file, is skipped at once.
+
+        The name may be anything, or a link to anything.  The open of a
+        pipe nobody writes waited out the read deadline, after which the
+        directory was refused for good; a file of any length was read
+        whole.  Now the file is opened without waiting and read only when
+        it is a regular file of at most ``_GITIGNORE_MAX_BYTES`` (``full``
+        is one, and its rule holds): its directory stays indexed, under
+        the rules above it, and no reader thread is left behind.
+        """
+        touch(tmp_path, "pipe/out/x.py", "huge/out/x.py", "full/out/x.py", "binary/out/x.py")
+        os.mkfifo(tmp_path / "pipe" / ".gitignore")
+        (tmp_path / "binary" / ".gitignore").write_bytes(b"out\n\xff\n")  # not UTF-8
+        for name, size in ("huge", file_index._GITIGNORE_MAX_BYTES + 1), (
+            "full", file_index._GITIGNORE_MAX_BYTES,
+        ):
+            with open(tmp_path / name / ".gitignore", "wb") as ignore:
+                ignore.write(b"out\n")
+                ignore.truncate(size)  # the rest is a hole: no disk is used
+        threads = threading.active_count()
+        started = time.monotonic()
+        paths = set(FileIndex.scan(str(tmp_path)).paths)
+        assert time.monotonic() - started < file_index._READ_DEADLINE, "the scan waited for a pipe"
+        assert {"pipe/out/x.py", "huge/out/x.py", "binary/out/x.py"} <= paths
+        assert "full/out/" not in paths, "an ignore file of the longest length is still read"
+        assert not {str(tmp_path / name) for name in ("pipe", "huge")} & file_index._refused
+        assert threading.active_count() == threads, "a reader thread was left behind"
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="the child's memory is capped via /proc")
+    def test_gitignore_linked_to_an_endless_device_costs_no_memory(self, tmp_path: Path) -> None:
+        """A ``.gitignore`` that is a link to ``/dev/zero`` is not read.
+
+        A clone can carry such a link.  Its read never ended: it took
+        100 MiB in 40 ms and went on after the read deadline, until the
+        daemon had no memory left.  The scan runs in a child whose
+        memory is capped, so that a read without end fails there.
+        """
+        touch(tmp_path, "proj/out/x.py")
+        (tmp_path / "proj" / ".gitignore").symlink_to("/dev/zero")
+        child = subprocess.run(
+            [sys.executable, "-c", _SCAN_UNDER_A_MEMORY_CAP, str(tmp_path)],
+            capture_output=True, text=True, timeout=120,
+        )
+        listed = ["proj/", "proj/.gitignore", "proj/out/", "proj/out/x.py"]
+        assert child.stdout.strip() == f"[] True {listed}", child.stdout + child.stderr
+
     def test_gitignore_read_that_never_returns_refuses_the_directory(
         self, tmp_path: Path,
     ) -> None:
@@ -325,14 +477,16 @@ class TestScan:
         its ``.gitignore``.  macOS holds that ``open`` as long as the
         permission prompt the daemon cannot show stays unanswered: the
         index worker never returned and the picker never opened again.
-        A FIFO nobody writes blocks the same way.  The read runs on a
+        No file holds an ``open`` that does not wait where these tests
+        run (a pipe is told apart without waiting, see above), so a
+        profile gate holds the reader thread at its entry instead; the
+        reader itself is not replaced.  The read runs on a
         helper thread with a deadline; when it passes the directory is
         refused: a bare ``dir/`` entry, nothing below it, no listing kept,
         and no further wait on the next scan.
         """
-        touch(tmp_path, "a.py", "proj/main.py", "proj/sub/x.py")
-        fifo = tmp_path / "proj" / ".gitignore"
-        os.mkfifo(fifo)
+        touch(tmp_path, "a.py", "proj/main.py", "proj/sub/x.py", "proj/.gitignore")
+        held = EntryGate(file_index._read_file_into.__code__)
         proj = str(tmp_path / "proj")
         # The listing the daemon reloaded, which lists ``.gitignore`` as a
         # plain file: the scan must read it to learn the rules below.
@@ -341,10 +495,12 @@ class TestScan:
             "proj": (os.stat(proj).st_mtime_ns, [".gitignore", "main.py"], ["sub"]),
             "proj/sub": (os.stat(tmp_path / "proj" / "sub").st_mtime_ns, ["x.py"], []),
         }
+        threading.setprofile(held)  # carried by the reader thread the scan starts
         try:
             started = time.monotonic()
             index = FileIndex.scan(str(tmp_path), listings)
             elapsed = time.monotonic() - started
+            assert held.reached.is_set(), "the scan read no .gitignore"
             assert file_index._READ_DEADLINE <= elapsed < file_index._READ_DEADLINE + 3.0
             assert index.paths == ["a.py", "proj/"]
             assert proj in file_index._refused
@@ -357,14 +513,9 @@ class TestScan:
             assert again.paths == ["a.py", "proj/"]
             assert not again.relisted
         finally:
+            threading.setprofile(None)
+            held.release.set()  # the reader thread reads the file and ends
             file_index._refused.discard(proj)
-            # Release the helper thread still blocked in ``open``: a
-            # writer end lets its open return and read to EOF (ENXIO if
-            # no reader is waiting, which only an earlier failure leaves).
-            try:
-                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
-            except OSError:
-                pass
 
 
 class TestSearch:
@@ -376,6 +527,11 @@ class TestSearch:
         assert _texts(view.search("ReAdMe.MD", {})) == ["docs/README.md", "README.md"]
         assert view.search("nomatch", {}) == []
         assert view.search("a\nb", {}) == []
+        # A lone surrogate (a client's JSON may carry one, as may an NTFS name) is text
+        # like any other: it matches the names that hold it and no others.
+        assert view.search("read\ud83d", {}) == []
+        odd = FileView(["a\ud83d.txt", "b.txt"])
+        assert "a\ud83d.txt" in odd and _texts(odd.search("\ud83d", {})) == ["a\ud83d.txt"]
 
     def test_empty_query_keeps_index_order_and_limit(self) -> None:
         view = FileView([f"f{i}.py" for i in range(30)])
@@ -424,6 +580,12 @@ class TestSearch:
         assert _texts(view.search("", {}, limit=2)) == top_two
         many = FileView([f"src/f{i}.py" for i in range(30)] + ["runs/r/f.py"], 30)
         assert _texts(many.search("f", {})) == [f"src/f{i}.py" for i in range(20)]
+        # Inside the wide region every hit still competes: the best one is
+        # not among the first *limit* in index order.
+        weak = [f"runs/{i:02d}/config_old.txt" for i in range(25)] + ["runs/25/config"]
+        assert _texts(FileView(weak, 0).search("config", {}))[0] == "runs/25/config"
+        mixed = FileView(["src/config.py", *weak], 1)
+        assert _texts(mixed.search("config", {}))[:2] == ["src/config.py", "runs/25/config"]
 
     def test_non_ascii_names_are_searchable(self, tmp_path: Path) -> None:
         touch(tmp_path, "docs/résumé.md", "plain.py")
@@ -506,6 +668,7 @@ class TestRegistry:
     def test_listings_persist_across_registries(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
         touch(root, "a.py", "sub/b.py")
+        _settle(root)
         first = _registry(tmp_path, tmp_path / "home")
         _build(first, str(root))
         first.stop()
@@ -647,6 +810,44 @@ class TestRegistry:
         assert done.wait(10.0)
         assert reg._indexes[str(root)] is not index
 
+    @posix_only("named pipes")
+    def test_refresh_absorbed_by_a_job_older_than_the_running_scan_is_not_lost(
+        self, tmp_path: Path,
+    ) -> None:
+        # A FIFO in place of the persisted listings holds the worker between
+        # taking the first job and starting its scan, where the second job is
+        # queued: older than that scan, it would be skipped as satisfied by
+        # it, but the refresh it absorbs comes after the scan.
+        root = tmp_path / "root"
+        touch(root, "a.py")
+        reg = _registry(tmp_path, tmp_path / "home")
+        fifo = reg._cache_path(str(root))
+        fifo.parent.mkdir()
+        os.mkfifo(fifo)
+
+        def change_behind_the_scan() -> None:
+            touch(root, "b.py")
+            reg.refresh(str(root))
+
+        try:
+            reg.ensure(str(root), change_behind_the_scan)
+            fd = None
+            deadline = time.monotonic() + 10.0
+            while fd is None:
+                assert time.monotonic() < deadline, "the worker never read the listings"
+                try:
+                    fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                except OSError:  # ENXIO until the worker's read has opened it
+                    time.sleep(0.01)
+            reg.ensure(str(root))
+            os.close(fd)  # end of file: no listings, so the scan starts
+            idle = threading.Event()
+            reg.ensure(str(tmp_path / "other"), idle.set)
+            assert idle.wait(10.0)
+            assert local_view(reg, str(root)).paths == ["a.py", "b.py"]  # type: ignore[union-attr]
+        finally:
+            reg.stop()
+
     def test_default_cache_dir_follows_kiss_home(self, tmp_path: Path) -> None:
         from kiss.core.config import kiss_home
 
@@ -757,9 +958,8 @@ class TestRegistry:
         """
         root = tmp_path / "root"
         touch(root, "a.py", "locked/secret.py")
-        # Spelled as the scanner spells a sub-directory (root + "/" + rel): on
-        # Windows ``str(root / "locked")`` would differ by its separator.
-        locked = f"{root}/locked"
+        # Spelled as the scanner spells a sub-directory, with the host's separator.
+        locked = str(root / "locked")
         assert "locked/secret.py" in _persist(tmp_path, root)
         file_index._refused.add(locked)  # what a scan of another root left behind
         reg = _registry(tmp_path, tmp_path / "home")

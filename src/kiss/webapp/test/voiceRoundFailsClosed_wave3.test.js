@@ -16,8 +16,8 @@
 //   language, round}`), A's reply names a cancelled round and is refused.
 // * A reply without a usable tag (`round: null`, or none at all) could be
 //   A's late reply or B's; voice.js used to give it to B, typing chat X's
-//   words into chat Y.  It must fail closed: the cancelled round is
-//   charged first, and B's own reply still answers on Y.
+//   words into chat Y.  It names no round, so it is refused whatever is
+//   outstanding, and B's own tagged reply still answers on Y.
 //
 // Real chat.html, main.js and voice.js on jsdom; voice_page_helpers
 // supplies the microphone, Vosk recognizer and audio graph.
@@ -112,52 +112,43 @@ async function main() {
 
   await test(
     'an untagged reply while a cancelled and a posted round are both ' +
-      'outstanding fails closed; the posted round still answers on its chat',
+      'outstanding is refused; the posted round still answers by its tag',
     async () => {
       const page = makeVoicePage();
       const {first, second} = twoTabs(page.win);
-      await cancelAThenPostBElsewhere(page, first, second);
+      const {roundB} = await cancelAThenPostBElsewhere(page, first, second);
       page.posted.length = 0;
       // The daemon's serialization of a reply it could not tag.
       send(page.win, daemonReply('chat X words QF3', null));
-      assertRefused(page, 'QF3');
       // A reply with no round field at all is untagged too.
-      send(page.win, {type: 'voiceSpeech', text: 'chat Y words QF4'});
-      assertSubmittedOn(page, second, 'QF4');
+      send(page.win, {type: 'voiceSpeech', text: 'chat X words QF4'});
+      assertRefused(page, 'QF3');
+      assertRefused(page, 'QF4');
+      // Neither took round B: its own reply answers on Y.
+      send(page.win, daemonReply('chat Y words QF10', roundB));
+      assertSubmittedOn(page, second, 'QF10');
       page.win.close();
     },
   );
 
   await test(
-    'every cancelled round is charged before a posted one: two late ' +
-      'untagged replies are refused, the third answers the live round',
+    'an untagged reply during a capture is refused and leaves its round open',
     async () => {
       const page = makeVoicePage();
       const {win, posted} = page;
-      const {first, second} = twoTabs(win);
+      const {first} = twoTabs(win);
       clickTab(win, first);
       await startPipeline(page);
-      wake(page);
-      speak(page); // round A1
-      wake(page);
-      speak(page); // round A2
-      micBtn(win).click(); // mic off: both are cancelled
-      clickTab(win, second);
-      await startPipeline(page);
-      wake(page);
-      speak(page); // round B
-      assert.strictEqual(audioRounds(posted).length, 3);
+      wake(page); // the capture's round has no tag yet
       posted.length = 0;
-      send(win, {type: 'voiceSpeech', text: 'late A1 words QF5'});
-      send(win, {type: 'voiceSpeech', text: 'late A2 words QF6'});
+      send(win, daemonReply('stray words QF5', null));
+      send(win, {type: 'voiceSpeech', text: 'stray words QF6'});
       assertRefused(page, 'QF5');
       assertRefused(page, 'QF6');
-      send(win, {type: 'voiceSpeech', text: 'chat Y words QF7'});
-      assertSubmittedOn(page, second, 'QF7');
-      assert.ok(
-        !micBtn(win).classList.contains('voice-transcribing'),
-        'no round is left awaiting a transcript',
-      );
+      speak(page); // the capture goes on and posts its audio
+      const [round] = audioRounds(posted);
+      send(win, daemonReply('own words QF7', round));
+      assertSubmittedOn(page, first, 'QF7');
       win.close();
     },
   );

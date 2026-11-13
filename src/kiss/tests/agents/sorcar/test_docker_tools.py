@@ -114,6 +114,20 @@ class TestDockerTools(unittest.TestCase):
         finally:
             DEFAULT_CONFIG.read_dedupe = enabled
 
+    def test_read_counts_the_lines_of_a_path_shaped_like_an_assignment(self) -> None:
+        """A relative ``name=value`` path is read like any other (sweep 2026-11-11).
+
+        ``awk`` takes an operand of that shape for a variable assignment
+        and reads its standard input instead, which is empty: the line
+        count was 0 and ``Read`` answered ``(file is empty)`` for a file
+        with lines (a partition directory such as ``date=2024-01-01/``).
+        """
+        tools = self._session()
+        tools.Write("date=2024-01-01/part.csv", "1\n2\n3\n")
+        head = tools.Read("date=2024-01-01/part.csv", max_lines=2)
+        self.assertEqual(head, "1\n2\n[truncated: 1 more lines]\n")
+        self.assertEqual(tools.Read("date=2024-01-01/part.csv", start_line=3), "3\n")
+
     def test_edit_tolerates_whitespace_and_keeps_the_file_indentation(self) -> None:
         """An old_string off only by blanks edits the original lines; an exact match stays exact."""
         tools = self._session()

@@ -27,6 +27,7 @@ from typing import Any
 
 from kiss.agents.sorcar import persistence as th
 from kiss.server.server import HISTORY_TITLE_CHARS, AgentServer
+from kiss.tests.persistence_helpers import close_db
 
 _LONG_TASK = (
     "This is a deliberately very long task description that comfortably "
@@ -42,7 +43,7 @@ class TestHistoryTitleFullText(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.mkdtemp()
         self._orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
-        th._close_db()
+        close_db()
         th._DB_PATH = Path(self._tmp) / "history.db"  # type: ignore[attr-defined]
 
         self.server = AgentServer()
@@ -59,7 +60,7 @@ class TestHistoryTitleFullText(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        th._close_db()
+        close_db()
         th._DB_PATH = self._orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(self._tmp, ignore_errors=True)
 

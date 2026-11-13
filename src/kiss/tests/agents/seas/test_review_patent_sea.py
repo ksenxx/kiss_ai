@@ -17,14 +17,8 @@ import pytest
 
 from kiss.agents.seas.review_patent import review_patent_sea
 from kiss.agents.seas.write_patent import write_patent_sea
-from kiss.agents.sorcar import sea_commands
-from kiss.tests.agents.seas.conftest import gate, run_sea
-from kiss.tests.agents.seas.sea_contract import (
-    assert_no_removed_getters,
-    system_message,
-    tool_names,
-    tool_results,
-)
+from kiss.tests.agents.seas.conftest import gate
+from kiss.tests.agents.seas.sea_contract import assert_appending_sea_run, assert_no_removed_getters
 from kiss.tests.agents.seas.test_write_patent_sea import _CLEAN_DRAFT, _write
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
@@ -239,28 +233,19 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_gate_report(tmp_path: P
     """With the SEA's configuration the model sees the three tools and the real review gates."""
     path = tmp_path / "review.txt"
     path.write_text(_SLOPPY_REVIEW, encoding="utf-8")
-    run = sea_commands.evaluate_sea(
-        [review_patent_sea.ReviewPatentSea()], f"Check the review at {path}; do not edit."
+    results = assert_appending_sea_run(
+        review_patent_sea.ReviewPatentSea(),
+        f"Check the review at {path}; do not edit.",
+        [
+            tool_call_body("check_patent_review", {"review_path": str(path)}, prompt_tokens=500),
+            finish_body("<pre>summary: 10 gate(s) failed</pre>", prompt_tokens=600),
+        ],
+        tmp_path,
+        tools={"read_patent", "check_patent", "check_patent_review", "go_to_url", "finish"},
+        system_prompt=review_patent_sea.SYSTEM_PROMPT,
+        anchors=("# Patent-reviewing agent",),
+        summary="10 gate(s) failed",
     )
-    script = [
-        tool_call_body("check_patent_review", {"review_path": str(path)}, prompt_tokens=500),
-        finish_body("<pre>summary: 11 gate(s) failed</pre>", prompt_tokens=600),
-    ]
-    parsed, agentic = run_sea(run, script, tmp_path, max_steps=4)
-    assert parsed["success"] is True
-    assert len(agentic) == 2
-    for request in agentic:
-        names = tool_names(request)
-        assert {
-            "read_patent",
-            "check_patent",
-            "check_patent_review",
-            "go_to_url",
-            "finish",
-        } <= names
-        system = system_message(request)
-        assert "# Patent-reviewing agent" in system and not system.startswith("# Patent")
-    results = tool_results(agentic[1])
-    assert len(results) == 1, agentic[1]["messages"]
+    assert len(results) == 1, results
+    assert "summary: 10 gate(s) failed" in results[0]
     assert "dimensions unscored: 9 (limit 0) FAIL" in results[0]
-    assert "summary: " in results[0] and "gate(s) failed" in results[0]

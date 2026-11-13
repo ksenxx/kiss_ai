@@ -9,25 +9,29 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kiss.core.utils import atomic_write_text
+
 KISS_SRC = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = KISS_SRC.parent.parent
 OUTPUT = PROJECT_ROOT / "API.md"
 
-INCLUDE_FILES: set[Path] = {
-    Path("core/kiss_agent.py"),
-    Path("agents/sorcar/relentless_agent.py"),
-    Path("agents/sorcar/sorcar_agent.py"),
-    Path("agents/sorcar/chat_sorcar_agent.py"),
+INCLUDE_FILES = (
+    "core/kiss_agent.py",
+    "agents/sorcar/relentless_agent.py",
+    "agents/sorcar/sorcar_agent.py",
+    "agents/sorcar/chat_sorcar_agent.py",
+    "server/sorcar.py",
     # The synchronous client API (``run`` / ``TaskResult``), defined in
     # the sorcar layer and re-exported by ``kiss.server.sorcar``.
-    Path("agents/sorcar/daemon_client.py"),
-    Path("server/sorcar.py"),
-}
-INCLUDE_DIRS: set[Path] = {Path("third_party_agents")}
+    "agents/sorcar/daemon_client.py",
+)
+"""The documented modules, as paths below the package, in the order of their sections."""
 
 
 @dataclass
 class ParsedDoc:
+    """A Google-style docstring: its text before the sections, its ``Args`` and ``Returns``."""
+
     summary: str
     args: list[tuple[str, str]] = field(default_factory=list)
     returns: str = ""
@@ -35,15 +39,20 @@ class ParsedDoc:
 
 @dataclass
 class FuncInfo:
+    """A public function or method: its rendered signature and parsed docstring."""
+
     name: str
     signature: str
     parsed_doc: ParsedDoc
     is_async: bool = False
     is_property: bool = False
+    is_settable: bool = False
 
 
 @dataclass
 class ClassInfo:
+    """A public class: its bases, summary line, constructor and public methods."""
+
     name: str
     bases: list[str]
     doc: str
@@ -54,24 +63,18 @@ class ClassInfo:
 
 @dataclass
 class ModuleDoc:
+    """A documented module: its dotted name, summary line, public classes and functions."""
+
     name: str
     doc: str
-    all_exports: list[str] | None
     classes: list[ClassInfo] = field(default_factory=list)
     functions: list[FuncInfo] = field(default_factory=list)
-    is_package: bool = False
-
-
-def _format_annotation(node: ast.expr | None) -> str:
-    if node is None:
-        return ""
-    return ast.unparse(node)
 
 
 def _format_arg(arg: ast.arg, default: ast.expr | None = None) -> str:
     s = arg.arg
     if arg.annotation:
-        s += f": {_format_annotation(arg.annotation)}"
+        s += f": {ast.unparse(arg.annotation)}"
     if default is not None:
         val = ast.unparse(default)
         if len(val) > 50:
@@ -83,13 +86,15 @@ def _format_arg(arg: ast.arg, default: ast.expr | None = None) -> str:
 def _format_func_sig(node: ast.FunctionDef | ast.AsyncFunctionDef, skip_self: bool = False) -> str:
     parts: list[str] = []
     args = node.args
-    n_defaults = len(args.defaults)
-    n_args = len(args.args)
-    for i, arg in enumerate(args.args):
+    positional = [*args.posonlyargs, *args.args]  # the defaults are of the last of them
+    first_default = len(positional) - len(args.defaults)
+    for i, arg in enumerate(positional):
         if skip_self and i == 0 and arg.arg in ("self", "cls"):
             continue
-        di = i - (n_args - n_defaults)
-        parts.append(_format_arg(arg, args.defaults[di] if di >= 0 else None))
+        default = args.defaults[i - first_default] if i >= first_default else None
+        parts.append(_format_arg(arg, default))
+        if i + 1 == len(args.posonlyargs):
+            parts.append("/")
     if args.vararg:
         parts.append(f"*{_format_arg(args.vararg)}")
     elif args.kwonlyargs:
@@ -98,7 +103,7 @@ def _format_func_sig(node: ast.FunctionDef | ast.AsyncFunctionDef, skip_self: bo
         parts.append(_format_arg(arg, args.kw_defaults[i]))
     if args.kwarg:
         parts.append(f"**{_format_arg(args.kwarg)}")
-    ret = f" -> {_format_annotation(node.returns)}" if node.returns else ""
+    ret = f" -> {ast.unparse(node.returns)}" if node.returns else ""
     return f"({', '.join(parts)}){ret}"
 
 
@@ -112,9 +117,6 @@ def _get_summary(
 
 
 def _parse_google_docstring(raw: str) -> ParsedDoc:
-    if not raw:
-        return ParsedDoc("")
-
     lines = raw.split("\n")
     summary_lines: list[str] = []
     args: list[tuple[str, str]] = []
@@ -164,16 +166,9 @@ def _parse_google_docstring(raw: str) -> ParsedDoc:
             if indent <= args_base_indent and ":" in stripped:
                 if current_arg_name:
                     args.append((current_arg_name, current_arg_desc.strip()))
-                parts = stripped.split(":", 1)
-                param_part = parts[0].strip()
-                paren_idx = param_part.find(" (")
-                if paren_idx > 0:
-                    current_arg_name = param_part[:paren_idx].strip()
-                elif "(" in param_part:  # pragma: no branch
-                    current_arg_name = param_part.split("(")[0].strip()
-                else:
-                    current_arg_name = param_part
-                current_arg_desc = parts[1].strip() if len(parts) > 1 else ""
+                name, _, desc = stripped.partition(":")
+                current_arg_name = name.split("(")[0].strip()  # "name (type)" -> "name"
+                current_arg_desc = desc.strip()
             elif current_arg_name:  # pragma: no branch
                 current_arg_desc += " " + stripped
         elif section == "returns":
@@ -207,6 +202,11 @@ def _extract_class(node: ast.ClassDef) -> ClassInfo:
         if item.name == "__init__":
             init_sig = _format_func_sig(item, skip_self=True)
             init_doc = _parse_google_docstring(ast.get_docstring(item) or "")
+        elif _has_decorator(item, "setter"):
+            # ``@name.setter`` is no second method: the property can be assigned.
+            for method in methods:
+                if method.name == item.name:
+                    method.is_settable = True
         elif not item.name.startswith("_"):
             methods.append(
                 FuncInfo(
@@ -236,72 +236,10 @@ def _extract_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> FuncInfo:
     )
 
 
-def _parse_all_list(tree: ast.Module) -> list[str] | None:
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "__all__":  # pragma: no branch
-                    if isinstance(node.value, ast.List):
-                        return [
-                            e.value
-                            for e in node.value.elts
-                            if isinstance(e, ast.Constant) and isinstance(e.value, str)
-                        ]
-    return None
-
-
-def _parse_imports(tree: ast.Module) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            for alias in node.names:
-                result[alias.asname or alias.name] = node.module
-    return result
-
-
-def _module_to_path(dotted: str) -> Path:
-    parts = dotted.split(".")
-    path = KISS_SRC.parent.joinpath(*parts)
-    if path.is_dir():  # pragma: no branch
-        return path / "__init__.py"
-    return path.with_suffix(".py")
-
-
-def _file_to_module(path: Path) -> str:
-    rel = path.relative_to(KISS_SRC.parent)
-    parts = list(rel.parts)
-    if parts[-1] == "__init__.py":
-        parts = parts[:-1]
-    else:
-        parts[-1] = parts[-1].removesuffix(".py")
-    return ".".join(parts)
-
-
-def _is_included(path: Path) -> bool:
-    """Return True if *path* is in the explicit allowlist."""
-    rel = path.relative_to(KISS_SRC)
-    if rel in INCLUDE_FILES:
-        return True
-    return any(rel.parts[: len(d.parts)] == d.parts for d in INCLUDE_DIRS)
-
-
-def _find_def_in_file(path: Path, name: str) -> ClassInfo | FuncInfo | None:
-    if not path.exists():
-        return None
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, ast.ClassDef) and node.name == name:
-            return _extract_class(node)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            return _extract_function(node)
-    return None
-
-
 SKIP_FUNCTIONS = {"main"}
 
 
-def _extract_public_from_file(path: Path) -> tuple[list[ClassInfo], list[FuncInfo]]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+def _extract_public(tree: ast.Module) -> tuple[list[ClassInfo], list[FuncInfo]]:
     classes: list[ClassInfo] = []
     functions: list[FuncInfo] = []
     for node in ast.iter_child_nodes(tree):
@@ -317,92 +255,25 @@ def _extract_public_from_file(path: Path) -> tuple[list[ClassInfo], list[FuncInf
 
 
 def discover_modules() -> list[ModuleDoc]:
-    """Walk the package tree and collect all public API modules."""
+    """Return the documentation of every module of :data:`INCLUDE_FILES` with a public API.
+
+    Returns:
+        One :class:`ModuleDoc` per listed file that defines a public class
+        or function, in the listed order.
+
+    Raises:
+        OSError: When a listed file is missing: the list is stale.
+    """
     modules: list[ModuleDoc] = []
-    documented_per_file: dict[Path, set[str]] = {}
-
-    for init_path in sorted(KISS_SRC.rglob("__init__.py")):
-        if not _is_included(init_path):
-            continue
-        module_name = _file_to_module(init_path)
-        source = init_path.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        all_list = _parse_all_list(tree)
-        doc = _get_summary(tree)
-        if "deprecated" in source[:500].lower():  # pragma: no branch
-            continue
-
-        imports = _parse_imports(tree)
-        classes: list[ClassInfo] = []
-        functions: list[FuncInfo] = []
-
-        for name in all_list or []:
-            defn: ClassInfo | FuncInfo | None = None
-            source_path: Path = init_path
-            if name in imports:
-                source_path = _module_to_path(imports[name])
-                defn = _find_def_in_file(source_path, name)
-            if defn is None:
-                source_path = init_path
-                defn = _find_def_in_file(init_path, name)
-            if defn is None:
-                continue
-            documented_per_file.setdefault(source_path, set()).add(name)
-            if isinstance(defn, ClassInfo):
-                classes.append(defn)
-            else:
-                functions.append(defn)
-
-        modules.append(
-            ModuleDoc(
-                name=module_name,
-                doc=doc,
-                all_exports=all_list,
-                classes=classes,
-                functions=functions,
-                is_package=True,
+    for rel in INCLUDE_FILES:
+        tree = ast.parse((KISS_SRC / rel).read_text(encoding="utf-8"))
+        classes, functions = _extract_public(tree)
+        if classes or functions:
+            name = ".".join((KISS_SRC.name, *Path(rel).with_suffix("").parts))
+            modules.append(
+                ModuleDoc(name=name, doc=_get_summary(tree), classes=classes, functions=functions)
             )
-        )
-
-    for py_file in sorted(KISS_SRC.rglob("*.py")):
-        if py_file.name == "__init__.py" or not _is_included(py_file):
-            continue
-        module_name = _file_to_module(py_file)
-        classes, functions = _extract_public_from_file(py_file)
-        already = documented_per_file.get(py_file, set())
-        classes = [c for c in classes if c.name not in already]
-        functions = [f for f in functions if f.name not in already]
-        if not classes and not functions:
-            continue
-        doc = _get_summary(ast.parse(py_file.read_text(encoding="utf-8")))
-        modules.append(
-            ModuleDoc(
-                name=module_name,
-                doc=doc,
-                all_exports=None,
-                classes=classes,
-                functions=functions,
-            )
-        )
-
-    return _sort_modules(modules)
-
-
-def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
-    order = [
-        "kiss.core.kiss_agent",
-        "kiss.agents.sorcar.relentless_agent",
-        "kiss.agents.sorcar.sorcar_agent",
-        "kiss.agents.sorcar.chat_sorcar_agent",
-        "kiss.server.sorcar",
-        "kiss.agents.sorcar.daemon_client",
-    ]
-    rank = {name: i for i, name in enumerate(order)}
-
-    def key(m: ModuleDoc) -> tuple[int, str]:
-        return (rank.get(m.name, 999), m.name)
-
-    return sorted(modules, key=key)
+    return modules
 
 
 def _slug(text: str) -> str:
@@ -415,6 +286,16 @@ def _heading_depth(module_name: str) -> int:
 
 
 def generate_markdown(modules: list[ModuleDoc]) -> str:
+    """Return the API reference of *modules* as Markdown.
+
+    Args:
+        modules: The modules to document (:func:`discover_modules`), in
+            the order of their sections.
+
+    Returns:
+        The document: a table of contents, then one section per module
+        with its classes (constructor and public methods) and functions.
+    """
     lines: list[str] = []
 
     lines.append("# KISS Framework API Reference\n")
@@ -422,19 +303,16 @@ def generate_markdown(modules: list[ModuleDoc]) -> str:
 
     lines.append("<details><summary><b>Table of Contents</b></summary>\n")
     for mod in modules:
-        indent = "  " * mod.name.count(".")
-        lines.append(f"{indent}- [`{mod.name}`](#{_slug(mod.name)})")
+        lines.append(f"- [`{mod.name}`](#{_slug(mod.name)})")
     lines.append("\n</details>\n")
     lines.append("---\n")
 
     for mod in modules:
         h = "#" * _heading_depth(mod.name)
         doc_part = f" — *{mod.doc}*" if mod.doc else ""
-        lines.append(f"{h} `{mod.name}`{doc_part}\n")
-
-        if mod.is_package and mod.all_exports:
-            exports = ", ".join(mod.all_exports)
-            lines.append(f"```python\nfrom {mod.name} import {exports}\n```\n")
+        # The anchor is the TOC link's target: a renderer's own heading id, where it makes
+        # one, is derived from the whole heading text, description included.
+        lines.append(f'{h} <a id="{_slug(mod.name)}"></a>`{mod.name}`{doc_part}\n')
 
         for cls in mod.classes:
             _render_class(lines, cls, _heading_depth(mod.name) + 1)
@@ -448,21 +326,22 @@ def generate_markdown(modules: list[ModuleDoc]) -> str:
 
 
 def _render_class(lines: list[str], cls: ClassInfo, depth: int) -> None:
-    h = "#" * min(depth, 6)
+    h = "#" * depth
     bases_str = f"({', '.join(cls.bases)})" if cls.bases else ""
     doc_part = f" — {cls.doc}" if cls.doc else ""
     lines.append(f"{h} `class {cls.name}{bases_str}`{doc_part}\n")
     if cls.init_sig:
         lines.append(f"**Constructor:** `{cls.name}{cls.init_sig}`\n")
         _render_args_returns(lines, cls.init_doc)
-    if cls.methods:
-        for m in cls.methods:
-            _render_method(lines, m)
+    for m in cls.methods:
+        _render_method(lines, m)
 
 
 def _render_method(lines: list[str], func: FuncInfo) -> None:
     prefix = "async " if func.is_async else ""
-    prop_tag = " *(property)*" if func.is_property else ""
+    prop_tag = ""
+    if func.is_property:
+        prop_tag = " *(property, settable)*" if func.is_settable else " *(property)*"
     sig = f"`{prefix}{func.name}{func.signature}`{prop_tag}"
     summary = f" — {func.parsed_doc.summary}" if func.parsed_doc.summary else ""
     lines.append(f"- **{func.name}**{summary}<br/>{sig}")
@@ -478,9 +357,8 @@ def _render_function(lines: list[str], func: FuncInfo) -> None:
 
 
 def _render_args_returns(lines: list[str], doc: ParsedDoc, indent: str = "") -> None:
-    if doc.args:
-        for name, desc in doc.args:
-            lines.append(f"{indent}- `{name}`: {desc}")
+    for name, desc in doc.args:
+        lines.append(f"{indent}- `{name}`: {desc}")
     if doc.returns:
         lines.append(f"{indent}- **Returns:** {doc.returns}")
     if doc.args or doc.returns:
@@ -488,9 +366,15 @@ def _render_args_returns(lines: list[str], doc: ParsedDoc, indent: str = "") -> 
 
 
 def main() -> int:
+    """Write ``API.md`` at the repository root; return the exit code 0.
+
+    The document is renamed into place whole: generators that run together
+    (two checks of one tree) would otherwise write through each other, and
+    a reader would find the file empty or partial meanwhile.
+    """
     modules = discover_modules()
     markdown = generate_markdown(modules)
-    OUTPUT.write_text(markdown, encoding="utf-8")
+    atomic_write_text(OUTPUT, markdown, create_mode=0o666)
     print(f"Generated {OUTPUT.relative_to(PROJECT_ROOT)} ({len(modules)} modules)")
     return 0
 

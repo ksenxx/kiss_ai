@@ -58,6 +58,7 @@ from kiss.core import user_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import is_root, posix_only
 from kiss.tests.local_ws import make_test_tls, open_local_connection
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.conftest import init_repo
 
 # ``resource`` is imported inside the child-process body: a module-level
@@ -163,7 +164,6 @@ def _child_main() -> None:
     kiss_dir.mkdir()
     _persistence._KISS_DIR = kiss_dir
     _persistence._DB_PATH = kiss_dir / "history.db"
-    _persistence._db_conn = None
     user_config.CONFIG_DIR = kiss_dir
     user_config.CONFIG_PATH = kiss_dir / "config.json"
     cast(Any, SorcarAgent.__mro__[1]).run = _blocking_model_boundary
@@ -236,7 +236,7 @@ def _child_main() -> None:
     _PARENT_RELEASE.set()
     _wait_for(lambda: _find(received, "result"), "the parent's result")
     _run_on(loop, server.stop_async())
-    _persistence._close_db()
+    close_db()
     print(_RESULT_PREFIX + json.dumps({
         "task_id": task_id,
         "echo_index": received.index(echo) if echo else -1,

@@ -2,33 +2,20 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Direct accessors for the merge-flow answers the ``worktree_done`` event carries."""
+"""Direct accessor for the changed-file listing that decides whether ``worktree_done`` is sent."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from kiss.server import agent_state
-from kiss.server.merge_flow import _flatten_changed, _pending_worktrees
-
-
-def merge_conflict(server: Any, tab_id: str = "") -> bool:
-    """Whether merging any pending worktree of *tab_id* into its original branch would conflict.
-
-    The same per-worktree ``_conflict_of`` probe ``worktree_done`` folds
-    into its ``hasConflict`` field, asked directly so a test can check
-    the answer without presenting the worktree.  Pure query: nothing
-    is committed or otherwise mutated.
-    """
-    state = agent_state.find_by_tab(tab_id)
-    wt_agent = state.agent if state is not None else None
-    return any(server._conflict_of(wt) for wt in _pending_worktrees(wt_agent))
+from kiss.server.merge_flow import _flatten_changed
 
 
 def worktree_changed_files(server: Any, tab_id: str) -> list[str]:
     """The files changed in the pending worktrees of *tab_id* against their original branches.
 
-    The list ``worktree_done`` carries as ``changedFiles``, asked
+    The list that decides whether ``worktree_done`` is sent, asked
     directly: files of the worktree the task's work dir is in are
     relative to it, files of any other repository's worktree are
     prefixed with that repository's root, and a worktree git cannot

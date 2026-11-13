@@ -170,6 +170,98 @@ _SPLIT_PAGE = (
     b"</body></html>"
 )
 
+# Text a stylesheet displays in another case than the page spells it.
+_CASED_PAGE = (
+    '<html><head><meta charset="utf-8"><title>cased</title><style>'
+    ".up{text-transform:uppercase} .cap{text-transform:capitalize}"
+    "</style></head><body>"
+    '<p class="up" id="note">saved fine</p>'
+    '<p>Changes <span class="up">stored</span> ok</p>'
+    "<p class=\"cap\"><b>he</b>llo wide it's e.g.the world</p>"
+    '<p style="text-transform:lowercase">SHOUT Text</p>'
+    '<input class="up" value="field value">'
+    '<div lang="tr"><p class="up">iptal</p></div>'
+    '<p class="up" lang="de">schlie\u00dfen</p>'
+    '<p class="up" lang="el">\u0391\u03c0\u03bf\u03b8\u03ae\u03ba\u03b5\u03c5\u03c3\u03b7</p>'
+    '<p class="up" lang="not a tag">odd tongue</p>'
+    # Letters whose other case is two letters, or another letter than the one mapped back.
+    '<p class="up" lang="el">\u1fb3\u03b4\u03c9</p>'
+    '<p style="text-transform:lowercase">STRA\u1e9eE</p>'
+    # What Chromium does not map as String.toUpperCase does: a word's first letter goes to
+    # title case, Georgian has no upper case, and a three-letter language tag is not Turkish.
+    '<p class="cap">\u01c6uro \u1fb3\u03b4\u03c9</p>'
+    '<p class="up">\u10d2\u10d0\u10db\u10d0</p>'
+    '<p class="up" lang="tur">bitir</p>'
+    "</body></html>"
+).encode()
+
+
+# Text a stylesheet draws before or after an element: the accessibility tree shows it,
+# and so does a screenshot.
+_DRAWN_PAGE = (
+    '<html><head><meta charset="utf-8"><title>drawn</title><style>'
+    '.st::after { content: " DONE"; }'
+    ".state::before { content: attr(data-state); }"
+    '.note:before { content: "Note"; display: block; }'  # as CSS 2 wrote it
+    '.up::after { content: "new"; text-transform: uppercase; }'
+    # An arrow behind a link whose address holds what reads like the end of the rule's
+    # selector, on a button that draws a zero-width space, as GitHub's do.
+    'a[href$="::after,"]::after { content: "\\2197"; } .zw::before { content: "\\200B"; }'
+    # Selectors with an escape and with no element of their own; a string with escapes.
+    '.sm\\:tw::after { content: "TwDrawn"; } #kids > ::after { content: "!"; }'
+    '.esc::after { content: "Say \\"hi\\"\\a now"; }'
+    '@media screen { .media::before { content: "MediaDrawn"; } }'
+    '.gone::before { content: "GoneDrawn"; display: none; }'
+    '.unseen::before { content: "UnseenDrawn"; visibility: hidden; }'
+    '.off { display: none; } .off::before { content: "OffDrawn"; }'
+    'body::before { content: "BannerDrawn"; display: block; }'
+    'html::after { content: "RootDrawn"; display: block; }'
+    # Of the elements that hold no boxes of their own, some draw: an image that failed,
+    # a date field, a restyled checkbox.
+    'img::after { content: attr(alt) "Drawn"; } svg::before { content: "SvgDrawn"; }'
+    'input::before, textarea::before { content: attr(name) "Drawn"; }'
+    '.alt::before { content: "Glyph" / "AltDrawn"; }'
+    '.count { counter-increment: n; } .count::before { content: counters(n, "+") ". "; }'
+    # An icon font's glyph is no text, alone or before some.
+    '.icon::before { content: "\\f007"; } .badge::after { content: "\\f00c  Done"; }'
+    "</style></head><body>"
+    '<p><span class="st">Status</span></p>'
+    '<p><span class="state" data-state="Synced"></span></p>'
+    '<div class="note">body text</div>'
+    '<p class="up">release</p>'
+    '<p>Open <a class="zw" href="#::after,">Docs</a> page</p>'
+    '<p class="sm:tw">t</p><p id="kids"><b>x</b><i>y</i></p><p class="esc"></p>'
+    '<p class="media">m</p><p class="gone">g</p><p class="unseen">u</p><p class="off">o</p>'
+    '<img alt="Loaded" src="data:image/gif;base64,'
+    'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">'
+    '<img alt="Failed" src="data:image/gif;base64,AAAA">'
+    '<input name="Field"><input name="When" type="date"><textarea name="Area"></textarea>'
+    '<svg width="8" height="8"></svg>'
+    '<input name="Box" type="checkbox"><input name="Tick" type="checkbox" style="appearance:none">'
+    '<p class="alt">a</p><ol><li class="count">first</li></ol>'
+    '<p>My <i class="icon"></i>Profile</p><p>All<span class="badge"></span></p>'
+    '<details><summary>More</summary><p class="st">Folded</p></details>'
+    '<div class="st" style="display:contents">Flat</div>'
+    '<div id="host"><span>lit</span></div><x-part id="part"></x-part><p class="card">c</p>'
+    '<p id="far">f<span id="none"></span></p><p class="adopt">d</p>'
+    "<script>"
+    'const shadow = document.getElementById("host").attachShadow({mode: "open"});'
+    "shadow.innerHTML ="
+    " '<style>:host::before { content: \"HostDrawn\"; } p::after { content: \"InnerDrawn\"; }"
+    " ::slotted(span)::after { content: \"SlotDrawn\"; }</style>'"
+    " + '<p>in</p><b class=\"adopt\">sh</b><slot></slot>';"
+    # One sheet for the document and for a shadow tree, as component libraries share theirs.
+    "const shared = new CSSStyleSheet();"
+    "shared.replaceSync('.adopt::after { content: \"AdoptedDrawn\"; }');"
+    "document.adoptedStyleSheets = [shared]; shadow.adoptedStyleSheets = [shared];"
+    'document.getElementById("part").attachShadow({mode: "open"}).innerHTML ='
+    " '<b part=\"label\">parted</b>';"
+    "</script></body></html>"
+)
+
+# What the page of another origin cannot read: the rules of this sheet.
+_FAR_SHEET = b'#far::after { content: "FarDrawn"; }'
+
 
 class _CountingServer(http.server.ThreadingHTTPServer):
     effect_count: int
@@ -203,6 +295,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._send(_SHADOW_PAGE, "text/html")
         elif self.path.startswith("/split"):
             self._send(_SPLIT_PAGE, "text/html")
+        elif self.path.startswith("/cased"):
+            self._send(_CASED_PAGE, "text/html")
+        elif self.path.startswith("/drawn"):
+            self._send(_DRAWN_PAGE.encode(), "text/html")
+        elif self.path.startswith("/far.css"):
+            self._send(_FAR_SHEET, "text/css")
         else:
             self._send(_PAGE, "text/html")
 
@@ -317,6 +415,25 @@ def _find_id(tree: str, label: str) -> int:
     match = re.search(rf"\[(\d+)\].*{label}", tree)
     assert match, f"Element {label!r} not found in tree:\n{tree}"
     return int(match.group(1))
+
+
+def _set_extra_style(web: WebUseTool, css: str) -> None:
+    """Make *css* the rules of the page's extra style sheet, which the first call adds."""
+    web.evaluate_script(
+        "() => { let style = document.getElementById('extra');"
+        " if (!style) { style = document.createElement('style'); style.id = 'extra';"
+        " document.head.appendChild(style); }"
+        f" style.textContent = {json.dumps(css)}; return 1; }}"
+    )
+
+
+def _pseudo_reads(web: WebUseTool) -> list[str]:
+    """Return, and forget, the ids (else tag names) of the elements whose
+    ``::before`` or ``::after`` style the page saw read."""
+    names = web.evaluate_script(
+        "() => { const names = [...window.pseudoReads]; window.pseudoReads.clear(); return names; }"
+    )
+    return list(json.loads(names))
 
 
 def _console_containing(web: WebUseTool, needle: str) -> str:
@@ -752,6 +869,191 @@ class TestWaitFor:
         web.evaluate_script("() => { document.body.style.display = 'contents'; return 1; }")
         assert web.wait_for("Nested", timeout=2).startswith("Page: split")
 
+    def test_text_matches_as_written_and_as_displayed(self, web: WebUseTool, server: str) -> None:
+        """Text under a CSS ``text-transform`` is found by either spelling.
+
+        The accessibility tree spells it as the page wrote it, a screenshot
+        and the text-only content as it is displayed: both are what the
+        agent has read, and a displayed copy keeps a disappearance waiting.
+        """
+        tree = web.go_to_url(f"{server}/cased")
+        assert "saved fine" in tree
+        assert "SAVED FINE" in web.get_page_content(text_only=True)
+        for seen in (
+            "saved fine",
+            "SAVED FINE",
+            "Changes stored ok",
+            "Changes STORED ok",
+            # A word split over markup is capitalized once; words as Chromium finds them.
+            "Hello Wide It's E.G.The World",
+            "shout text",
+            "FIELD VALUE",
+            # Each language's own mapping (Turkish from an ancestor, German and Greek
+            # from the element), and the common one under a tag that names no language.
+            "\u0130PTAL",
+            "SCHLIESSEN",
+            "\u0391\u03a0\u039f\u0398\u0397\u039a\u0395\u03a5\u03a3\u0397",
+            "ODD TONGUE",
+            "\u0391\u0399\u0394\u03a9",
+            "stra\u00dfe",
+            "\u01c5uro \u1fbc\u03b4\u03c9",
+            "BITIR",
+        ):
+            assert web.wait_for(seen, timeout=2).startswith("Page: cased"), seen
+        for unseen in (
+            "Saved Fine", "IPTAL", "HeLlo",
+            "\u01c4uro", "\u1c92\u1c90\u1c9b\u1c90", "B\u0130T\u0130R",
+        ):
+            assert web.wait_for(unseen, timeout=0.5).startswith("Timed out"), unseen
+        assert web.wait_for("SAVED FINE", timeout=0.5, disappear=True).startswith("Timed out")
+        web.evaluate_script("() => { document.getElementById('note').remove(); return 1; }")
+        assert web.wait_for("SAVED FINE", disappear=True).startswith("Page: cased")
+        # The language is the one the browser computed for the element (here the
+        # page's Content-Language): no lang attribute names it.
+        web.evaluate_script(
+            "() => { const meta = document.createElement('meta');"
+            " meta.httpEquiv = 'content-language'; meta.content = 'tr';"
+            " document.head.appendChild(meta); return 1; }"
+        )
+        assert web.wait_for("F\u0130ELD VALUE", timeout=2).startswith("Page: cased")
+        assert web.wait_for("FIELD VALUE", timeout=0.5).startswith("Timed out")
+
+    def test_text_a_stylesheet_draws(self, web: WebUseTool, server: str) -> None:
+        """The strings of a ``::before`` or ``::after`` are read where they are displayed.
+
+        The accessibility tree shows them, so the agent waits for them; a wait
+        for "DONE" timed out with the text on screen, and a wait for it to
+        disappear returned at once.  Text is matched with and without them.
+        """
+        tree = web.go_to_url(f"{server}/drawn")
+        assert "Status DONE" in tree
+        seen = (
+            "Status DONE",
+            "Synced",
+            "Note body text",
+            # As written and as displayed, like any text under a text-transform.
+            "releasenew",
+            "releaseNEW",
+            # With the arrow the sheet draws, and as the page's own text reads.
+            "Open Docs\u2197 page",
+            "Open Docs page",
+            "MediaDrawnm",
+            "Glypha",
+            # A counter's number is not read, like the marker of a list item.
+            ". first",
+            "My Profile",
+            "All Done",
+            "Flat DONE",
+            "BannerDrawn",
+            "RootDrawn",
+            "FailedDrawn",
+            "WhenDrawn",
+            "TickDrawn",
+            "tTwDrawn",
+            "x!y!",
+            'Say "hi" now',
+            # The rules of a shadow tree: for its host, its own elements and what it slots.
+            "HostDrawn",
+            "inInnerDrawn",
+            "litSlotDrawn",
+            "dAdoptedDrawn",
+            "shAdoptedDrawn",
+        )
+        unseen = (
+            "GoneDrawn", "UnseenDrawn", "OffDrawn", "AltDrawn", "Folded DONE",
+            "LoadedDrawn", "FieldDrawn", "BoxDrawn", "AreaDrawn", "SvgDrawn", "+. first",
+        )
+        for text in seen:
+            assert web.wait_for(text, timeout=2).startswith("Page: drawn"), text
+        for text in unseen:
+            assert web.wait_for(text, timeout=0.5).startswith("Timed out"), text
+        # A drawn copy keeps a disappearance waiting.
+        assert web.wait_for("DONE", timeout=0.5, disappear=True).startswith("Timed out")
+        web.evaluate_script(
+            "() => { for (const el of document.querySelectorAll('.st')) el.className = '';"
+            " return 1; }"
+        )
+        assert web.wait_for("DONE", disappear=True).startswith("Page: drawn")
+
+    def test_only_the_elements_a_rule_may_draw_by_are_read(
+        self, web: WebUseTool, server: str
+    ) -> None:
+        """The ``::before`` and ``::after`` of every element are read only where they must be.
+
+        Reading them costs more than the rest of a poll, so the rules of the
+        style sheets say which elements to read: the page counts whose are.
+        Every element is read where a rule's selector does not find its
+        elements, which the text of such a rule shows.
+        """
+        web.go_to_url(f"{server}/drawn")
+        web.evaluate_script(
+            "() => { const read = window.getComputedStyle; window.pseudoReads = new Set();"
+            " window.getComputedStyle = (el, pseudo) => {"
+            "   if (pseudo) window.pseudoReads.add(el.id || el.tagName);"
+            "   return read.call(window, el, pseudo); };"
+            " return 1; }"
+        )
+        assert web.wait_for("Status DONE", timeout=2).startswith("Page: drawn")
+        reads = _pseudo_reads(web)
+        assert "SPAN" in reads and "far" not in reads
+        # Rules that draw no text: without a `content` (those of a @position-try have no
+        # such property), with one of no text.
+        _set_extra_style(
+            web,
+            "@position-try --below { top: anchor(bottom); } #far::before { color: red; }"
+            ' #far::after { content: ""; } @font-face { font-family: f; src: local("f"); }',
+        )
+        assert web.wait_for("Status DONE", timeout=2).startswith("Page: drawn")
+        assert "far" not in _pseudo_reads(web)
+        # A selector finds its elements where the rule draws by them, hovered ones too.
+        _set_extra_style(web, 'p:hover > #none::after, #far::after { content: "FoundDrawn"; }')
+        assert web.wait_for("fFoundDrawn", timeout=2).startswith("Page: drawn")
+        assert "part" not in _pseudo_reads(web)
+        # ... also the selectors of an imported sheet, once it has loaded.
+        _set_extra_style(web, '@import url("/far.css");')
+        assert web.wait_for("fFarDrawn", timeout=2).startswith("Page: drawn")
+        _pseudo_reads(web)
+        assert web.wait_for("fFarDrawn", timeout=2).startswith("Page: drawn")
+        assert "part" not in _pseudo_reads(web)
+        rules = "".join(f'.rule{i}::before {{ content: "r"; }}' for i in range(501))
+        everywhere = (
+            # A nested rule, a scoped one, one for a part of a shadow tree, a keyframe,
+            # one with a namespace prefix, which a query cannot resolve.
+            ('.card { &::after { content: "NestedDrawn"; } }', "cNestedDrawn"),
+            (
+                "@namespace h url(http://www.w3.org/1999/xhtml);"
+                ' h|p#far::after { content: "SpaceDrawn"; }',
+                "fSpaceDrawn",
+            ),
+            ('@scope (.card) { :scope::before { content: "ScopeDrawn"; } }', "ScopeDrawnc"),
+            ('x-part::part(label)::before { content: "PartDrawn"; }', "PartDrawnparted"),
+            (
+                '#far::before { content: ""; animation: key 1000s; }'
+                ' @keyframes key { from, to { content: "KeyDrawn"; } }',
+                "KeyDrawnf",
+            ),
+            # More rules than are worth a query each.
+            (rules + '#far::after { content: "ManyDrawn"; }', "fManyDrawn"),
+        )
+        for css, text in everywhere:
+            _set_extra_style(web, css)
+            assert web.wait_for(text, timeout=2).startswith("Page: drawn"), text
+            assert "part" in _pseudo_reads(web), text
+        # The rules of another origin's sheet, which the page cannot read.
+        _set_extra_style(web, "")
+        far = server.replace("127.0.0.1", "localhost")
+        loaded = web.evaluate_script(
+            "() => new Promise((done) => {"
+            " const link = document.createElement('link'); link.rel = 'stylesheet';"
+            f" link.href = '{far}/far.css'; link.onload = () => done('loaded');"
+            " document.head.appendChild(link); })"
+        )
+        assert "loaded" in loaded
+        for text in ("fFarDrawn", "Status DONE", "Open Docs page"):
+            assert web.wait_for(text, timeout=2).startswith("Page: drawn"), text
+        assert "part" in _pseudo_reads(web)
+        assert web.wait_for("ManyDrawn", timeout=0.5).startswith("Timed out")
+
 
 class TestAttachToChrome:
     def test_attach_drive_detach_and_reconnect_guidance(
@@ -785,8 +1087,15 @@ class TestAttachToChrome:
             chrome.stop()
 
     def test_attach_to_dead_port_and_tab_less_browser(
-        self, web: WebUseTool, server: str
+        self, web: WebUseTool, server: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # A driver that cannot be spawned is an error string too (it used to raise).
+        with monkeypatch.context() as env:
+            env.setenv("PLAYWRIGHT_NODEJS_PATH", "/nonexistent/node")
+            result = web.attach_to_chrome(f"http://localhost:{_dead_port()}")
+        assert result.startswith("Error attaching to Chrome at ")
+        assert "/nonexistent/node" in result or "cannot find the file specified" in result
+
         result = web.attach_to_chrome(f"http://localhost:{_dead_port()}")
         assert result.startswith("Error attaching to Chrome at ")
 

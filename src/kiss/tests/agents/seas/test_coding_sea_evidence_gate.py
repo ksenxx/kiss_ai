@@ -24,19 +24,21 @@ import asyncio
 import contextlib
 import hashlib
 import html
+import http.client
 import itertools
 import json
 import os
+import shlex
 import signal
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -63,13 +65,13 @@ from kiss.tests.agents.sorcar.local_model_server import (
     text_body,
     tool_call_body,
 )
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import posix_only, wait_for
 
 #: The tests that run commands on :class:`LocalEnvironment` (``sh`` on this host).
 local_shell = posix_only("the bridged local environment runs sh commands")
 #: The tagged-tree kill (:func:`kiss.agents.sorcar.docker_manager.kill_tagged_tree_script`)
-#: finds the tree through ``/proc/<pid>/environ``, as does :func:`_dead`: the
-#: environments the bridge serves are Linux sandboxes.
+#: finds the tree through ``/proc/<pid>/environ`` and :func:`_dead` reads
+#: ``/proc/<pid>/stat``: the environments the bridge serves are Linux sandboxes.
 linux_only = pytest.mark.skipif(sys.platform != "linux", reason="the tagged-tree kill scans /proc")
 #: The file tools' store scripts use ``mv -T`` and ``stat -c`` of the GNU/busybox
 #: coreutils of the Linux environments they run in.
@@ -142,28 +144,6 @@ class _ExpiringHandler(ScriptedHandler):
         self.wfile.write(body)
 
 
-@contextlib.contextmanager
-def _serve_then_refuse(script: list[bytes], refuse_at: int,
-                       ) -> Iterator[tuple[str, list[dict[str, Any]]]]:
-    """Serve ``script[0]`` before the *refuse_at*-th request, then refuse the model with 401.
-
-    Yields ``(base_url, requests)`` like :func:`serve`.
-    """
-    requests: list[dict[str, Any]] = []
-    handler = type("Expiring", (_ExpiringHandler,), {
-        "script": list(script), "requests": requests, "lock": threading.Lock(),
-        "refuse_at": refuse_at})
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}/v1", requests
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=30)
-
-
 #: A scripted body :class:`_StallingHandler` never sends: the request hangs.
 STALL = b"stall"
 
@@ -173,16 +153,22 @@ class _StallingHandler(ScriptedHandler):
 
     The held request is answered by nothing: the handler returns once
     :attr:`release` is set (the test's cleanup), after the client gave up
-    (``server_close`` joins the handler's thread, so the wait is bounded).
+    (or after ten seconds: its daemon thread outlives ``server_close``).
+    A subclass's :attr:`stop` is set once the request is recorded, not at
+    its headers: the body is still on its way then, and a client that
+    gives the request up on the stop would leave nothing to record.
     """
 
     release = threading.Event()
+    stop: threading.Event | None = None
 
     def do_POST(self) -> None:  # noqa: N802
         cls = type(self)
         with cls.lock:
             cls.requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
             body = cls.script[min(len(cls.requests), len(cls.script)) - 1]
+        if cls.stop is not None:
+            cls.stop.set()
         if body == STALL:
             cls.release.wait(10)
             return
@@ -222,7 +208,7 @@ def test_gate_runs_the_agents_own_verifier_in_the_container(tmp_path: Path) -> N
         _write_in(live, VERIFIER, slow_script)
         slow = harness.on_tool_call("finish", done)
         assert not slow.allowed and "did not finish within 3 seconds" in slow.text
-        assert _wait_until(partial(_dead_in, live, "/tmp/slow.pid"))
+        assert wait_for(partial(_dead_in, live, "/tmp/slow.pid"), 10)
         assert live.exec_run(["test", "-e", "/tmp/late"]).exit_code != 0
         # the budget of refusals is spent: the run is let go even though the verifier
         # fails, but a finish let through that way is not a verified one (no checkpoint)
@@ -348,7 +334,7 @@ def test_checkpoints_and_the_best_snapshot_submitted(
         jobs = ContainerJobs(partial(_exec_in, live))
         job_id, started = jobs.start("while true; do printf broken > /app/out.txt; sleep 0.1; done")
         assert job_id is not None, started
-        assert _wait_until(partial(_holds, live, "/app/out.txt", b"broken"))
+        assert wait_for(partial(_holds, live, "/app/out.txt", b"broken"), 10)
         assert coding_sea.submit_best_checkpoint(config) == "restored"
         assert _events(tmp_path, "submit")[-1]["killed_jobs"] == [job_id]
         assert live.exec_run(["sh", "-c", "sleep 1; cat /app/out.txt"]).output == b"hello"
@@ -359,7 +345,7 @@ def test_checkpoints_and_the_best_snapshot_submitted(
                                         "done) & echo started")
         assert orphaning is not None, started
         assert "status: exited 0" in jobs.bash_job(orphaning, action="wait", timeout_seconds=10)
-        assert _wait_until(partial(_holds, live, "/app/out.txt", b"broken"))
+        assert wait_for(partial(_holds, live, "/app/out.txt", b"broken"), 10)
         assert coding_sea.submit_best_checkpoint(config) == "restored"
         assert orphaning in _events(tmp_path, "submit")[-1]["killed_jobs"]
         assert live.exec_run(["sh", "-c", "sleep 1; cat /app/out.txt"]).output == b"hello"
@@ -521,6 +507,9 @@ def test_the_independent_reading_gates_the_first_edit(
                                                       ledger=coding_sea.LEDGER_PATH))
             assert len(requests) == 1 and requests[0]["messages"][0]["content"] == (
                 coding_sea.READING_CHECK_PROMPT.format(task=noted.task_prompt, ledger=ledger))
+            # a benefit the statement claims is motivation, as in the final review's brief
+            assert "is the user's motivation, not a requirement" in " ".join(
+                requests[0]["messages"][0]["content"].split())
             assert noted.reading_items == [items] and noted.reading_ledger == ledger
             assert _events(tmp_path, "gate_stage", "noted.jsonl")[-1]["stage"] == "reading"
             _write_in(live, coding_sea.LEDGER_PATH, ledger)
@@ -1556,7 +1545,11 @@ def test_a_credential_failure_at_the_last_step_is_not_exhaustion(tmp_path: Path)
         steps = coding_sea.BLIND_VERIFIER_STEPS
         busy = tool_call_body("Bash", {"command": "true"}, 100)
         delivering = tool_call_body("finish", {"script": "exit 0"}, 100)
-        with _serve_then_refuse([busy, delivering], steps) as (url, requests):
+
+        class Expiring(_ExpiringHandler):
+            refuse_at = steps
+
+        with serve([busy, delivering], handler_base=Expiring) as (url, requests):
             harness = _harness(tmp_path, container=live.id, blind_verifier=SCRIPTED_MODEL,
                                model_config={"base_url": url, "api_key": "local"})
             harness.on_llm_call([])
@@ -1722,13 +1715,15 @@ def test_a_failed_reviewer_is_retried_once_at_low_effort_then_skipped(tmp_path: 
     a failed review, not as a refusal against the agent.  A model that
     takes no effort parameter is retried as it was.
     """
-    live = _live_container("python:3.11-slim", "mkdir -p /app && printf hello > /app/out.txt")
-    if live is None:
-        pytest.skip("Docker is not available")
+    # looked up before the container starts: a catalog without such a model ends the
+    # test here, where no container is left running
     thinking = next(name for name, info in MODEL_INFO.items()
                     if info.thinking and info.thinking != "low"
                     and not info.is_decisions_supported)
     efforts = [MODEL_INFO[thinking].thinking, "low"]
+    live = _live_container("python:3.11-slim", "mkdir -p /app && printf hello > /app/out.txt")
+    if live is None:
+        pytest.skip("Docker is not available")
     try:
         with serve([text_body(""), text_body("VERDICT: OK")]) as (url, requests):
             harness = _harness(tmp_path, container=live.id, verifier_timeout=10,
@@ -1959,11 +1954,42 @@ def test_a_review_without_a_verdict_or_past_its_deadline_refuses_nothing(
         live.remove(force=True)
 
 
+def test_the_stalling_handler_sets_its_stop_once_the_request_is_recorded() -> None:
+    """A request whose body is still on its way has not stopped the run.
+
+    A model client writes a request's headers and body separately and
+    gives the request up on a Stop: one set at the headers could make it
+    drop the body, leaving the handler nothing to record (audit of
+    2026-11-10: the Stop test below then waited for a record that never
+    came).  The upload here pauses one byte short of the body: no stop
+    and no record yet; the last byte brings both.
+    """
+    run_stop = threading.Event()
+
+    class Stopping(_StallingHandler):
+        stop = run_stop
+
+    body = json.dumps({"model": SCRIPTED_MODEL}).encode()
+    _StallingHandler.release.clear()
+    try:
+        with serve([STALL], handler_base=Stopping) as (url, requests):
+            upload = http.client.HTTPConnection(urlsplit(url).netloc, timeout=10)
+            with contextlib.closing(upload):
+                upload.putrequest("POST", "/v1/chat/completions")
+                upload.putheader("Content-Length", str(len(body)))
+                upload.endheaders(body[:-1])
+                assert not run_stop.wait(0.2) and not requests
+                upload.send(body[-1:])
+                assert run_stop.wait(30) and requests == [{"model": SCRIPTED_MODEL}]
+    finally:
+        _StallingHandler.release.set()
+
+
 def test_a_stop_during_the_review_propagates_and_logs_its_spend(tmp_path: Path) -> None:
     """The run's Stop ends a review in flight; what the call cost is still the trial's.
 
-    The scripted server sets the run's stop event when the review request
-    arrives and holds the connection: the model client gives the request
+    The scripted server sets the run's stop event once the review request
+    is recorded and holds the connection: the model client gives the request
     up on the stop, the stop propagates out of the review (no verdict,
     nothing counted as a review or a failed review), and the side call
     logs its spend as a failed ``review`` event before it does, so
@@ -1979,9 +2005,7 @@ def test_a_stop_during_the_review_propagates_and_logs_its_spend(tmp_path: Path) 
     run_stop = threading.Event()
 
     class Stopping(_StallingHandler):
-        def do_POST(self) -> None:  # noqa: N802
-            run_stop.set()
-            super().do_POST()
+        stop = run_stop
 
     outer = stop_signal.get_thread_stop_event()
     stop_signal.set_thread_stop_event(run_stop)
@@ -1995,9 +2019,7 @@ def test_a_stop_during_the_review_propagates_and_logs_its_spend(tmp_path: Path) 
             _write_in(live, VERIFIER, "exit 0")
             with pytest.raises(KeyboardInterrupt):
                 harness.review_verdict({"success": True, "summary_in_html": "<p>Done.</p>"})
-            # the handler publishes the stop before it records the request, so the
-            # review can return while the record is still on its way
-            assert run_stop.is_set() and _wait_until(lambda: len(requests) == 1)
+            assert run_stop.is_set() and len(requests) == 1
         assert stop_signal.get_thread_stop_event() is run_stop
     finally:
         _StallingHandler.release.set()
@@ -2036,7 +2058,7 @@ def test_inventory_is_appended_at_a_context_restart(tmp_path: Path) -> None:
         assert harness.on_tool_call("Bash", {"command": "ls /app"}) == ALLOW
         assert harness.on_tool_call("Bash", {"command": "false"}) == ALLOW
         assert harness.on_tool_call("Bash", {"command": "python3 train.py"}) == ALLOW
-        assert harness.on_tool_call("Bash", {"command": "make"}) == ALLOW
+        assert harness.on_tool_call("Bash", {"command": "make", "background": True}) == ALLOW
         assert harness.on_tool_call("Write", {"file_path": "/app/new.py", "content": "x"}) == ALLOW
         assert not harness.on_tool_call("finish", {"success": True, "summary_in_html": "x"}).allowed
         # the results come in the order of the calls (a Read's and the refused
@@ -2067,14 +2089,10 @@ def test_inventory_is_appended_at_a_context_restart(tmp_path: Path) -> None:
         # and one that exited, and the agent's own (failing) run of its verifier
         assert live.exec_run(["sh", "-c", "printf 'x\\ny\\nz\\n' > /app/new.py && "
                               "printf hello! > /app/out.txt && rm /app/gone.txt"]).exit_code == 0
-
-        def in_container(command: str, _description: str, _timeout: float, _chars: int) -> str:
-            return str(live.exec_run(["sh", "-c", command]).output.decode())
-
-        jobs = ContainerJobs(in_container)
+        jobs = ContainerJobs(partial(_exec_in, live))
         running, _ = jobs.start("sleep 300")
         exited, _ = jobs.start("true")
-        assert running and exited and _wait_until(lambda: "exited" in jobs.wait(exited, 5))
+        assert running and exited and wait_for(lambda: "exited" in jobs.wait(exited, 5), 10)
         _write_in(live, VERIFIER, "echo checking; test \"$(cat /app/out.txt)\" = hello")
         assert harness.on_tool_call("Bash", {"command": f"bash {VERIFIER}"}) == ALLOW
         harness.on_llm_call([{"role": "tool", "content": "checking\n[exit code: 1]" + footer}])
@@ -2240,16 +2258,6 @@ class _Loop:
             self.loop.close()
 
 
-def _wait_until(predicate: Callable[[], bool], timeout: float = 10.0) -> bool:
-    """Poll *predicate* every 20 ms until it holds (``True``) or *timeout* passes (``False``)."""
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.02)
-    return True
-
-
 def _stop_when(predicate: Callable[[], bool]) -> threading.Event:
     """Return a stop event a helper thread sets once *predicate* holds (or after 10 s).
 
@@ -2260,7 +2268,7 @@ def _stop_when(predicate: Callable[[], bool]) -> threading.Event:
     stop = threading.Event()
 
     def fire() -> None:
-        _wait_until(predicate)
+        wait_for(predicate, 10)
         stop.set()
 
     threading.Thread(target=fire, daemon=True).start()
@@ -2288,7 +2296,7 @@ def _dead(pidfile: Path) -> bool:
         return False
     try:
         state = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1]
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):  # gone; or reaped between open and read
         return True
     return state.startswith("Z")
 
@@ -2308,21 +2316,27 @@ def _holds(container: Any, path: str, content: bytes) -> bool:
     return bool(container.exec_run(["cat", path]).output == content)
 
 
+def _touch(path: Path) -> str:
+    """A shell command that creates *path*, quoted: a temporary directory may hold a space."""
+    return f"touch {shlex.quote(str(path))}"
+
+
 def _late_toucher(late: Path, pidfile: Path) -> str:
     """A command whose background subshell's pid is recorded, then touches *late* after 6 s.
 
     Killing the tree is proven without waiting the 6 s out: once the
     recorded subshell is dead (:func:`_dead`) and *late* is absent, the
     touch can never land; a surviving subshell would have touched *late*
-    before dying on its own, within :func:`_wait_until`'s 10 s.  The 6 s
+    before dying on its own, within the wait's 10 s.  The 6 s
     leave the bridge's tagged-tree sweep (a ``/proc`` scan in its own
     subprocess, after the 1 s command timeout) 5 s on a loaded CI box;
     at 2 s the touch landed first under a parallel full-suite run.  The
     pid lands in *pidfile* atomically, so the file's existence means
     the pid is readable.
     """
-    record = f"echo $! > {pidfile}.tmp && mv {pidfile}.tmp {pidfile}"
-    return f"(sleep 6; touch {late}) & {record}; wait"
+    pid = shlex.quote(str(pidfile))
+    record = f"echo $! > {pid}.tmp && mv {pid}.tmp {pid}"
+    return f"(sleep 6; {_touch(late)}) & {record}; wait"
 
 
 def _bridged_workdir(tmp_path: Path) -> tuple[Path, _Loop, ExecBridgeServer]:
@@ -2345,7 +2359,7 @@ def _close(server: ExecBridgeServer, loop: _Loop) -> None:
     """
     server.environment.kill_all()
     try:
-        assert _wait_until(_no_reaper_thread)
+        assert wait_for(_no_reaper_thread, 10)
     finally:
         server.close()
         loop.close()
@@ -2365,7 +2379,7 @@ def test_exec_bridge_runs_the_tools_on_a_remote_environment(tmp_path: Path) -> N
         marker = workdir / "started"
         stop = _stop_when(marker.exists)
         started = time.monotonic()
-        stopped = exec_bridge.bridge_exec(url, f"touch {marker}; sleep 20", 30, stop)
+        stopped = exec_bridge.bridge_exec(url, f"{_touch(marker)}; sleep 20", 30, stop)
         assert stopped == (-1, "Killed: the task was stopped.")
         assert time.monotonic() - started < 5
         with exec_bridge.ExecBridge(f"exec:{url}", workdir="/x", volumes={}) as bridge:
@@ -2378,14 +2392,14 @@ def test_exec_bridge_runs_the_tools_on_a_remote_environment(tmp_path: Path) -> N
             bridge.stop_event = _stop_when(bash_marker.exists)
             started = time.monotonic()
             assert bridge.Bash(
-                f"touch {bash_marker}; sleep 20", "stopped", timeout_seconds=60
+                f"{_touch(bash_marker)}; sleep 20", "stopped", timeout_seconds=60
             ) == "Killed: the task was stopped.\n[exit code: -1]"
             assert time.monotonic() - started < 5
             parallel_marker = workdir / "parallel-started"
             bridge.stop_event = _stop_when(parallel_marker.exists)
             started = time.monotonic()
             report = bridge.run_commands_parallel(
-                json.dumps([f"touch {parallel_marker}; sleep 20", "sleep 20"]), timeout_seconds=60
+                json.dumps([f"{_touch(parallel_marker)}; sleep 20", "sleep 20"]), timeout_seconds=60
             )
             assert time.monotonic() - started < 5 and "stopped" in report.lower()
             bridge.stop_event = None
@@ -2408,8 +2422,6 @@ def test_exec_bridge_runs_the_tools_on_a_remote_environment(tmp_path: Path) -> N
     assert not exec_bridge.bridge_alive(url)
     with pytest.raises(KISSError, match="unreachable"):
         exec_bridge.bridge_exec(url, "true", 5)
-    with pytest.raises(KISSError, match="not answering"):
-        exec_bridge.ExecBridge(f"exec:{url}").__enter__()
     with pytest.raises(KISSError, match="not answering"):
         with exec_bridge.ExecBridge(f"exec:{url}"):
             pass
@@ -2461,7 +2473,7 @@ def test_exec_bridge_runs_the_file_tools_and_the_harness(
         done = {"success": True, "summary_in_html": "done"}
         verifier_path = tmp_path / "kiss-verify.sh"
         assert not harness.on_tool_call("finish", done).allowed
-        verifier_path.write_text("test -f " + str(workdir / "new.py") + "\n")
+        verifier_path.write_text("test -f " + shlex.quote(str(workdir / "new.py")) + "\n")
         assert harness.on_tool_call("finish", done) == ALLOW
         # no daemon to read through: the checks run with the environment's
         # own bash, and the checkpoint's digest comes from its sha256sum
@@ -2469,6 +2481,10 @@ def test_exec_bridge_runs_the_file_tools_and_the_harness(
         archive = tmp_path / "kiss-checkpoints" / "verified.tar"
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         assert harness.checkpoint_digests["verified"] == digest
+        # a rollback brings the tree back as it was checkpointed
+        (workdir / "data.txt").write_text("v3\n")
+        assert harness.rollback("verified") == f"Restored {workdir} from checkpoint 'verified'."
+        assert (workdir / "data.txt").read_text() == "v2\n"
         archive.write_bytes(b"forged")
         assert harness.rollback("verified").endswith("archive altered since it was saved")
         archive.unlink()
@@ -2478,7 +2494,8 @@ def test_exec_bridge_runs_the_file_tools_and_the_harness(
         slow_verdict = harness.on_tool_call("finish", done)
         assert not slow_verdict.allowed and "did not finish" in slow_verdict.text
         # the process snapshot and the test-context grep go through the bridge too
-        assert harness.process_snapshot() is not None
+        # (the environment is this host, so the snapshot lists this very process)
+        assert os.getpid() in {pid for pid, _start in harness.process_snapshot()}
         from kiss.agents.seas.coding import coding_test_context
 
         (workdir / "test_data.py").write_text("def test_x():\n    helper\n")
@@ -2500,7 +2517,7 @@ def test_exec_bridge_kills_the_command_tree(tmp_path: Path) -> None:
     late, pidfile = tmp_path / "late", tmp_path / "pid"
     try:
         assert exec_bridge.bridge_exec(server.url, _late_toucher(late, pidfile), 1) == (None, "")
-        assert _wait_until(partial(_dead, pidfile)) and not late.exists()
+        assert wait_for(partial(_dead, pidfile), 10) and not late.exists()
         # a Stop while a command runs ends the wait at once and kills the command
         pidfile.unlink()
         stop = _stop_when(pidfile.exists)
@@ -2508,7 +2525,7 @@ def test_exec_bridge_kills_the_command_tree(tmp_path: Path) -> None:
         stopped = exec_bridge.bridge_exec(server.url, _late_toucher(late, pidfile), 30, stop)
         assert stopped == (-1, "Killed: the task was stopped.")
         assert time.monotonic() - started < 5
-        assert _wait_until(partial(_dead, pidfile)) and not late.exists()
+        assert wait_for(partial(_dead, pidfile), 10) and not late.exists()
     finally:
         _close(server, loop)
 
@@ -2560,22 +2577,22 @@ def test_bridge_kill_covers_a_launch_the_provider_delays(tmp_path: Path) -> None
         # ``/exec`` is read, which is the reordered case pinned at the end)
         stop = _stop_when(partial(_launch_pending, server))
         stopped = exec_bridge.bridge_exec(
-            server.url, f"sleep 6; touch {late} # DELAY-ME", 30, stop)
+            server.url, f"sleep 6; {_touch(late)} # DELAY-ME", 30, stop)
         assert stopped == (-1, "Killed: the task was stopped.")
         assert not late.exists() and server.pending  # the launch is still pending
         environment.gate.set()  # the provider launches the command now: the reaper gets it
         # the exec ends (the launch leaves ``pending``) only once its tree is dead: had the
         # reaper missed it, the shell would have touched ``late`` before ending on its own,
-        # within ``_wait_until``'s 10 s.  The 6 s (as in :func:`_late_toucher`) cover the
+        # within the wait's 10 s.  The 6 s (as in :func:`_late_toucher`) cover the
         # reaper's next sweep, a host-wide ``/proc`` scan in its own subprocess: about 1 s
         # idle, up to 4.2 s with 100 busy loops on an 80-core box, where a 2 s touch always
         # landed first (and once under a parallel full-suite run, 2026-10-29).
-        assert _wait_until(partial(_exec_cleaned_up, server))
+        assert wait_for(partial(_exec_cleaned_up, server), 10)
         assert not late.exists()
         # /kill before /exec (request threads reordered): the command never runs
         assert exec_bridge._request(server.url, "/kill", {"token": "t1"}, 10) == {"ok": True}
         reply = exec_bridge._request(
-            server.url, "/exec", {"command": f"touch {late}", "timeout": 5, "token": "t1"}, 10)
+            server.url, "/exec", {"command": _touch(late), "timeout": 5, "token": "t1"}, 10)
         assert reply == {"exit_code": -1, "output": ""} and not late.exists()
         assert not server.cancelled
     finally:
@@ -2684,5 +2701,5 @@ def test_harbor_agent_closes_the_bridge_when_the_setup_fails(tmp_path: Path) -> 
                                         home=str(tmp_path / "no-daemon"))
     with pytest.raises(ConnectionError, match="sandbox is gone"):
         asyncio.run(agent.run("do it", Unreachable(str(tmp_path)), AgentContext()))  # type: ignore[arg-type]
-    assert _wait_until(_no_server_thread, 5)  # the server thread ends right after shutdown()
+    assert wait_for(_no_server_thread, 5)  # the server thread ends right after shutdown()
     assert not (tmp_path / "config.json").exists()

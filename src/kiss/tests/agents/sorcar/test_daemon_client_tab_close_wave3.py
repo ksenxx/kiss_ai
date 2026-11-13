@@ -8,9 +8,12 @@
   including a plain timeout, an unconfirmed stop and a lost connection,
   where the task keeps running: the daemon then removed a running
   task's tab from every surface.  A top-level run now closes its tab
-  only once the task is known to be over (it returned, its ``result``
-  arrived, its stop was confirmed, or the run was refused); a sub-agent
-  run, whose tab no surface shows, still closes it on every exit.
+  only once the task is known to be over (its terminal status arrived,
+  which a return and a confirmed stop follow, or the run was refused);
+  a sub-agent run, whose tab no surface shows, still closes it on
+  every exit.  A ``result`` alone is no such proof (audit 2026-11-10,
+  S3-F2): the daemon broadcasts it before the task thread persists and
+  cleans up, and closing on it removed a running task's tab.
 * The daemon marks the terminal status of a run whose machine stream
   was lost with ``lost`` (``RemoteTabs.dropped``) and follows it with a
   ``prompt_refused`` error.  The client read that status as the task's
@@ -46,12 +49,16 @@ LOST_REFUSAL = {
     "type": "error", "code": "prompt_refused", "text": "lost the connection to gpu-box",
 }
 SPEND = {"type": "usage_info", "cost": "$0.0200", "total_tokens": 7, "step_count": 2}
+FAILED = {"type": "result", "taskId": "t-1", "success": False, "text": "failed"}
+#: ``taskId`` of a scripted event that echoes the run's own (its client-minted run token).
+RUN_TOKEN = "<the run's token>"
 
 
 class _ScriptedDaemon:
     """A daemon stand-in that answers the ``run`` with *script* and records commands.
 
-    Every scripted event gets the run's ``tabId``.  A ``stop`` command
+    Every scripted event gets the run's ``tabId``, and the run's
+    ``taskId`` in place of :data:`RUN_TOKEN`.  A ``stop`` command
     is answered with *on_stop* (a confirmation, when the test wants
     one).  :attr:`disconnected` is set once the client closed, when
     every command it sent is recorded.
@@ -85,8 +92,11 @@ class _ScriptedDaemon:
     async def _handle(self, ws: ServerConnection) -> None:
         """Serve one authenticated client connection."""
         try:
-            tab_id = json.loads(await ws.recv())["tabId"]
+            run = json.loads(await ws.recv())
+            tab_id = run["tabId"]
             for event in self.script:
+                if event.get("taskId") == RUN_TOKEN:
+                    event = {**event, "taskId": run["taskId"]}
                 await ws.send(json.dumps({**event, "tabId": tab_id}))
             async for message in ws:
                 cmd = json.loads(message)
@@ -146,23 +156,36 @@ def test_lost_machine_before_start_is_not_a_refusal() -> None:
         daemon.close()
 
 
-def test_timeout_after_the_result_closes_the_tab() -> None:
-    """A ``result`` proves the task is over even when its terminal status is late."""
+def test_timeout_after_the_result_keeps_the_tab() -> None:
+    """S3-F2: a ``result`` whose terminal status is late does not prove the task is over."""
     result = {"type": "result", "taskId": "t-1", "success": True, "text": "done"}
     daemon = _ScriptedDaemon([RUNNING, result])
     try:
         with pytest.raises(TimeoutError):
             daemon_client.run("quick task", endpoint_file=daemon.endpoint_file, timeout=0.5)
-        assert daemon.sent() == ["closeTab"]
+        assert daemon.sent() == []
+    finally:
+        daemon.close()
+
+
+def test_a_failed_task_closes_the_tab_once_its_terminal_status_arrived() -> None:
+    """The terminal status ends the task whatever its ``result``: the tab closes."""
+    daemon = _ScriptedDaemon([RUNNING, FAILED, {"type": "status", "running": False}])
+    try:
+        result = daemon_client.run("failing", endpoint_file=daemon.endpoint_file, timeout=30.0)
+        assert not result.success and daemon.sent() == ["closeTab"]
     finally:
         daemon.close()
 
 
 @pytest.mark.parametrize("confirmed", [True, False])
 def test_cancel_closes_the_tab_only_once_confirmed(confirmed: bool) -> None:
-    """A confirmed cancel ends the task, so its tab closes; an unconfirmed one keeps it."""
+    """A confirmed cancel ends the task, so its tab closes; an unconfirmed one keeps it.
+
+    The task's ``result`` arrived before the stop: unconfirmed, it closes nothing (S3-F2).
+    """
     on_stop = [{"type": "status", "running": False}] if confirmed else []
-    daemon = _ScriptedDaemon([RUNNING], on_stop=on_stop)
+    daemon = _ScriptedDaemon([RUNNING, FAILED], on_stop=on_stop)
     cancel = threading.Event()
     cancel.set()
     try:

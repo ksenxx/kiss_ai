@@ -42,7 +42,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {waitFor} = require('./simplify2_harness');
+const {settle, waitFor} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -68,12 +68,39 @@ function fakePage(renders) {
 }
 
 /**
+ * What a loaded document keeps in the page, as the pinned pdf.js does
+ * (pdfjs-dist 6.3.289, legacy/build/pdf.mjs): the fonts its FontLoader
+ * adds to document.fonts and the hidden <div><svg><defs> its
+ * DOMFilterFactory appends to the body.  The loading task holds both as
+ * `_transport.fontLoader` and `_transport.filterFactory`, and only frees
+ * them (WorkerTransport.destroy) once the worker answered "Terminate".
+ */
+function fakeTransport(win) {
+  const doc = win.document;
+  const font = {family: 'g_d' + doc.fonts.size + '_f1'};
+  doc.fonts.add(font);
+  const filters = doc.createElement('div');
+  filters.className = 'pdf-filters';
+  filters.innerHTML = '<svg width="0" height="0"><defs></defs></svg>';
+  doc.body.append(filters);
+  return {
+    font,
+    filters,
+    fontLoader: {clear: () => doc.fonts.delete(font)},
+    filterFactory: {destroy: () => filters.remove()},
+  };
+}
+
+/**
  * A jsdom page running the real pdfView.js over a stand-in pdf.js.
  * `workers` records every Worker the viewer starts (`terminated`, and
- * `emitError` plays a worker that fails to start); `resizes` the
- * ResizeObserver callbacks.  With `opts.deadWorker` the library's load
- * and destroy never settle, as pdf.js's do over a worker that answers
- * nothing.
+ * `emitError` plays a worker that fails to start or dies); `tasks` the
+ * library's loading tasks; `resizes` the ResizeObserver callbacks.  With
+ * `opts.deadWorker` the library's load and destroy never settle, as
+ * pdf.js's do over a worker that answers nothing; with `opts.hungFree`
+ * the document loads and only its destroy never settles (a worker that
+ * hung after delivering pages); with `opts.failedFree` its destroy
+ * rejects, as pdf.js's does when the worker answers with an error.
  */
 function makePage(renders, opts) {
   opts = opts || {};
@@ -84,6 +111,7 @@ function makePage(renders, opts) {
   });
   const win = dom.window;
   const ctx = dom.getInternalVMContext();
+  win.document.fonts = new Set(); // jsdom has no FontFaceSet
   win.fetch = () =>
     Promise.resolve({ok: true, blob: () => Promise.resolve(new win.Blob([]))});
   win.URL.createObjectURL = () => 'blob:fake-pdf-worker';
@@ -126,12 +154,27 @@ function makePage(renders, opts) {
   };
   const page = fakePage(renders);
   const doc = {numPages: 1, getPage: () => Promise.resolve(page)};
+  const tasks = [];
   const lib = {
     PDFWorker: {create: () => ({destroy() {}})},
-    getDocument: () =>
-      opts.deadWorker
+    getDocument() {
+      const task = opts.deadWorker
         ? {promise: new Promise(() => {}), destroy: () => new Promise(() => {})}
-        : {promise: Promise.resolve(doc), destroy: () => Promise.resolve()},
+        : {
+            promise: Promise.resolve(doc),
+            _transport: fakeTransport(win),
+            destroy() {
+              if (opts.hungFree) return new Promise(() => {});
+              if (opts.failedFree) return Promise.reject(new Error('no'));
+              task._transport.fontLoader.clear();
+              task._transport.filterFactory.destroy();
+              task._transport = null;
+              return Promise.resolve();
+            },
+          };
+      tasks.push(task);
+      return task;
+    },
   };
   const script = new vm.Script(
     fs.readFileSync(path.join(MEDIA, 'pdfView.js'), 'utf8'),
@@ -152,7 +195,15 @@ function makePage(renders, opts) {
     },
   );
   script.runInContext(ctx);
-  return {win, workers, resizes};
+  return {win, workers, tasks, resizes};
+}
+
+/** The fonts and filter SVGs pdf.js documents have left in *win*. */
+function pageResources(win) {
+  return {
+    fonts: [...win.document.fonts],
+    filters: [...win.document.body.querySelectorAll('.pdf-filters')],
+  };
 }
 
 /** Mount a viewer of an empty document into a fresh holder of *win*. */
@@ -212,13 +263,92 @@ async function testDeadWorker() {
     'the viewer starts a worker',
   );
   closed.viewer.dispose();
-  await new Promise(resolve => setTimeout(resolve, 20));
   assert.strictEqual(
     silent.workers[0].terminated,
     true,
     'dispose must not wait for a document free the worker never answers',
   );
   assert.strictEqual(closed.holder.childElementCount, 0);
+
+  // Closed over a worker that hung after its pages arrived (it spins
+  // on a malformed stream): the document free is never answered
+  // either, and the worker is stopped all the same.  pdf.js removes a
+  // document's fonts and filter SVG from the page only on that answer,
+  // so the viewer removes them itself -- its own, not those of the
+  // other PDF open beside it.
+  const hung = makePage([], {hungFree: true});
+  const shown = mount(hung.win);
+  const beside = mount(hung.win);
+  await waitFor(
+    () =>
+      shown.holder.querySelector('.pdf-page') &&
+      beside.holder.querySelector('.pdf-page'),
+    'both pages are laid out',
+  );
+  const [first, second] = hung.tasks.map(task => task._transport);
+  assert.deepStrictEqual(pageResources(hung.win), {
+    fonts: [first.font, second.font],
+    filters: [first.filters, second.filters],
+  });
+  shown.viewer.dispose();
+  await waitFor(
+    () => hung.workers[0].terminated,
+    'a worker that never answers the document free is stopped anyway',
+    8000,
+  );
+  assert.deepStrictEqual(
+    pageResources(hung.win),
+    {fonts: [second.font], filters: [second.filters]},
+    'the closed document leaves no font or filter SVG in the page',
+  );
+  assert.strictEqual(hung.workers[1].terminated, false);
+
+  // A worker that dies under a shown document never answers its free
+  // either: nothing of the document stays in the page, then or when the
+  // failed viewer is closed.
+  const dying = makePage([]);
+  const drawn = mount(dying.win);
+  await waitFor(
+    () => drawn.holder.querySelector('.pdf-page'),
+    'the page is laid out',
+  );
+  assert.strictEqual(pageResources(dying.win).fonts.length, 1);
+  dying.workers[0].emitError({message: 'out of memory'});
+  assert.ok(drawn.holder.querySelector('.content-binary-note'));
+  assert.deepStrictEqual(
+    pageResources(dying.win),
+    {fonts: [], filters: []},
+    'a dead worker leaves no font or filter SVG in the page',
+  );
+  drawn.viewer.dispose();
+  assert.deepStrictEqual(pageResources(dying.win), {fonts: [], filters: []});
+
+  // A free that fails leaves the document's resources to the viewer too.
+  const failing = makePage([], {failedFree: true});
+  const lost = mount(failing.win);
+  await waitFor(
+    () => lost.holder.querySelector('.pdf-page'),
+    'the page is laid out',
+  );
+  lost.viewer.dispose();
+  await waitFor(() => failing.workers[0].terminated, 'the worker is stopped');
+  assert.deepStrictEqual(
+    pageResources(failing.win),
+    {fonts: [], filters: []},
+    'a failed free leaves no font or filter SVG in the page',
+  );
+
+  // A document pdf.js freed itself is not touched again.
+  const freed = makePage([]);
+  const done = mount(freed.win);
+  await waitFor(
+    () => done.holder.querySelector('.pdf-page'),
+    'the page is laid out',
+  );
+  done.viewer.dispose();
+  await waitFor(() => freed.workers[0].terminated, 'the worker is stopped');
+  assert.strictEqual(freed.tasks[0]._transport, null);
+  assert.deepStrictEqual(pageResources(freed.win), {fonts: [], filters: []});
 }
 
 /**
@@ -283,11 +413,7 @@ async function testKeysStayWithTheirScroller() {
 async function main() {
   const renders = [];
   const {win} = makePage(renders);
-  const holder = win.document.createElement('div');
-  win.document.body.appendChild(holder);
-  const viewer = win.mountPdfViewer(holder, new win.Uint8Array(0), {
-    name: 'report.pdf',
-  });
+  const {holder, viewer} = mount(win);
   await waitFor(() => renders.length === 1, 'the first page is drawn');
   const box = holder.querySelector('.pdf-page');
   assert.ok(box, 'one page box');
@@ -297,7 +423,7 @@ async function main() {
   // A zoom cancels the draw in flight: nothing to show for it.
   holder.querySelector('.pdf-zoom-in').click();
   await waitFor(() => renders.length === 2, 'the zoom draws again');
-  await new Promise(resolve => setTimeout(resolve, 20));
+  await settle();
   assert.strictEqual(box.childElementCount, 0, 'a cancelled draw shows nothing');
 
   // The draw at the new scale fails for real: the page says so.
@@ -355,8 +481,13 @@ async function main() {
   holder.querySelector('.pdf-zoom-in').click();
   await waitFor(() => renders.length === 6, 'one more draw');
   viewer.dispose();
-  await new Promise(resolve => setTimeout(resolve, 20));
+  await settle();
   assert.strictEqual(holder.childElementCount, 0, 'the viewer is gone');
+  assert.strictEqual(
+    box.querySelector('.content-binary-note'),
+    null,
+    'a draw cancelled by dispose reports no failure',
+  );
   await testDeadWorker();
   await testKeysStayWithTheirScroller();
   console.log('pdfViewRenderFailure.test.js passed');

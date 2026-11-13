@@ -50,6 +50,16 @@ Branch-coverage notes:
   design (``pragma: no cover`` at the call sites).
 * The handshake's normal arm (no stop pending → ``thread.start()``)
   is exercised by every other run test in this suite.
+
+A third reader of that window is the stop watchdog itself.  CPython
+publishes a starting thread's ``ident`` before its started flag
+(``Thread._bootstrap_inner``), so a watchdog that read ``ident``
+outside ``STATE_LOCK`` could take a worker for started while
+``join()`` still raised ``RuntimeError``: the watchdog died and the
+accepted stop was never enforced.  ``_cmd_run`` starts the worker
+under ``STATE_LOCK``, so read under that lock the worker is either
+unstarted or fully started.  The last test holds the window open with
+a real thread whose bootstrap dwells between the two steps.
 """
 
 from __future__ import annotations
@@ -62,13 +72,16 @@ import tempfile
 import textwrap
 import threading
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any
 from unittest import TestCase
 
 from kiss.agents.sorcar import local_endpoint
 from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.tab_registry import TabRegistry
+from kiss.server.task_runner import _state_owns_thread, _TaskRunnerMixin
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import connect_local
 
@@ -417,3 +430,45 @@ class TestPrestartShutdownAndStopHandshake(TestCase):
             "injection INSIDE the untrusted setup; the run must never "
             "have started",
         )
+
+
+class _SlowStartThread(threading.Thread):
+    """Real thread that dwells between publishing its ident and its started flag."""
+
+    def _set_native_id(self) -> None:
+        """Stretch the step ``_bootstrap_inner`` runs between the two."""
+        time.sleep(0.3)
+        super()._set_native_id()  # type: ignore[misc]
+
+
+def _start_under_state_lock(thread: threading.Thread) -> None:
+    """Start *thread* as ``_cmd_run``'s handshake does: under ``STATE_LOCK``."""
+    with agent_state.STATE_LOCK:
+        thread.start()
+
+
+def test_stop_watchdog_waits_out_a_worker_that_is_still_starting() -> None:
+    """The watchdog joins a starting worker only once ``start()`` has returned."""
+    worker = _SlowStartThread(target=time.sleep, args=(0,), daemon=True)
+    state = AgentState(
+        "slow-start-task",
+        tab_id="slow-start-tab",
+        server_owned=True,
+        stop_event=threading.Event(),
+        task_thread=worker,
+    )
+    agent_state.register(state)
+    starter = threading.Thread(target=_start_under_state_lock, args=(worker,), daemon=True)
+    try:
+        starter.start()
+        deadline = time.monotonic() + 30
+        while worker.ident is None:
+            assert time.monotonic() < deadline, "worker never published its ident"
+            time.sleep(0.001)
+        # Raised "cannot join thread before it is started" before the fix.
+        _TaskRunnerMixin._force_stop_thread(worker, partial(_state_owns_thread, state, worker))
+        worker.join(timeout=30)
+        assert not worker.is_alive()
+    finally:
+        starter.join(timeout=30)
+        agent_state.unregister(state.task_id)

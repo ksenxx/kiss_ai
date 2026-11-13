@@ -49,17 +49,54 @@
   peer trickling one byte at a time held the request, its thread and
   its socket for good (audit 2026-11-08, S4 F2).  The socket is shut
   down at the deadline instead, wherever the request is.
+* The finish gate of a bridged task runs its commands through
+  ``ExecBridge.run``, the raw primitive ``DockerManager.run`` is for a
+  container: the bridge had none, so every gate command raised
+  ``AttributeError`` (audit 2026-11-10, S4 F1).
+* A bridge URL that names no endpoint (a port that is no number or out
+  of range, an unclosed IPv6 bracket) and a reply nested too deep for
+  the JSON decoder are an unreachable bridge like any other: the URL
+  was parsed outside the request's error handling and ``RecursionError``
+  was not among the reply errors, so ``bridge_alive`` raised a raw
+  ``ValueError``/``RecursionError`` and ``bridge_exec``, whose request
+  thread died of it, an ``IndexError`` (audit 2026-11-11, S9 F1).
+* A bridge URL with an IPv6 host and no port (``http://[::1]``) dials
+  that host on HTTP's default port: ``http.client`` was handed the
+  bracket-less host with no port and split it again at its last colon,
+  host ``:`` on port 1 (audit 2026-11-11, S9 re-fix).
+* A Stop raised at the back edge of ``bridge_exec``'s wait loop kills
+  the command like one raised anywhere else in the wait.  On CPython
+  3.13 the back edge of its ``while worker.is_alive():`` loop was
+  outside the exception table of the ``try`` around it, so the handler
+  that posts the kill was skipped there.  The interpreter raises a
+  pending Stop at that instruction only when the thread switch happens
+  to fall on it, so the test raises there from an opcode trace event
+  instead (audit 2026-11-11, S9 re-fix).
+* Out of threads, a bridge call fails as an unreachable bridge does.
+  The deadline timer's ``RuntimeError`` escaped ``_request``, so
+  ``bridge_alive`` raised it and ``bridge_exec``, whose request thread
+  died of it, an ``IndexError``; the kill it then could not post raised
+  in its place, as did a request thread that could not start (audit
+  2026-11-12, B4).
 """
 
 from __future__ import annotations
 
+import dis
 import inspect
 import json
+import os
+import select
+import socket
+import sys
 import threading
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from types import FrameType
 from typing import Any, cast
 
 import pytest
@@ -73,7 +110,15 @@ from kiss.agents.sorcar.exec_bridge import (
     bridge_exec,
 )
 from kiss.agents.sorcar.shell_guards import DESTRUCTIVE_VERDICT
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.benchmarks.terminal_bench.exec_bridge_server import ExecBridgeServer
 from kiss.core.kiss_error import KISSError
+from kiss.tests.agents.seas.test_coding_sea_evidence_gate import LocalEnvironment, _close, _Loop
+from kiss.tests.conftest import nproc_limit_lowered_to_one, thread_start_can_be_starved
+from kiss.tests.server.pause import Pause
+
+#: A JSON reply nested deeper than the decoder recurses.
+_DEEP_JSON = b"[" * 100_000 + b"]" * 100_000
 
 
 class _Bridge(ThreadingHTTPServer):
@@ -83,11 +128,12 @@ class _Bridge(ThreadingHTTPServer):
     body that never completes (a byte every 50 ms until the bridge is
     torn down, whatever ``/kill`` says), ``"drop"`` closes the
     connection without a reply, ``"bad-code"`` answers with an
-    ``exit_code`` that is no integer.  *ping_fault* makes ``/ping``
-    misbehave the same way: ``"trickle"``, ``"header-trickle"`` (the
-    status line, then a header that never completes), ``"chunk-trickle"``
-    (complete headers, then a chunk size line that never completes) or
-    ``"list"`` (a JSON list).  *peer_gone* is set by a trickling handler
+    ``exit_code`` that is no integer, ``"deep"`` with :data:`_DEEP_JSON`.
+    *ping_fault* makes ``/ping`` misbehave the same way: ``"trickle"``,
+    ``"header-trickle"`` (the status line, then a header that never
+    completes), ``"chunk-trickle"`` (complete headers, then a chunk size
+    line that never completes), ``"list"`` (a JSON list) or ``"deep"``
+    (:data:`_DEEP_JSON`).  *peer_gone* is set by a trickling handler
     whose client ended the connection.  *stop_on_exec* is set by the
     ``/exec`` handler just before it replies: the task's Stop landing as
     the reply completes.
@@ -141,8 +187,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._trickle(b"HTTP/1.1 200 OK\r\nX-Probe: ")
         elif self.bridge.ping_fault == "chunk-trickle":
             self._trickle(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;pad=")
-        elif self.bridge.ping_fault == "list":
-            data = b"[]"
+        elif self.bridge.ping_fault in ("list", "deep"):
+            data = b"[]" if self.bridge.ping_fault == "list" else _DEEP_JSON
             self.send_response(200)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
@@ -166,6 +212,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self.bridge.stop_on_exec.set()
             if self.bridge.exec_fault == "bad-code":
                 self._reply({"exit_code": "bad", "output": "accepted"})
+                return
+            if self.bridge.exec_fault == "deep":
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(_DEEP_JSON)))
+                self.end_headers()
+                self.wfile.write(_DEEP_JSON)
                 return
             self._reply({"exit_code": 0, "output": "RAN"})
         else:
@@ -238,6 +290,43 @@ def test_run_commands_parallel_applies_the_bash_shell_guards() -> None:
         assert server.commands == ["echo ok"], server.commands
     assert report.startswith("2 commands: 1 succeeded, 1 failed, 0 timed out.")
     assert DESTRUCTIVE_VERDICT in report
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the bridge's tagged-tree kill scans /proc")
+def test_the_gate_shell_of_a_bridged_task_runs_its_command_raw(tmp_path: Path) -> None:
+    """``SorcarAgent._gate_shell`` on a bridged task, over the real bridge server and a local
+    environment: the output whole (three times what ``Bash`` keeps), the deadline kept, a task
+    Stop ending the running command (its tree holds the pipe ``alive`` open) and, once set,
+    posting nothing."""
+    loop = _Loop()
+    server = ExecBridgeServer(LocalEnvironment(str(tmp_path)), loop.loop)
+    agent = SorcarAgent("bridged gate")
+    agent.docker_manager = bridge = ExecBridge(f"exec:{server.url}")
+    bridge.stop_event = stop = threading.Event()
+    alive, late = tmp_path / "alive", tmp_path / "late"
+    os.mkfifo(alive)
+    reader = os.open(alive, os.O_RDONLY | os.O_NONBLOCK)
+
+    def stop_once_started() -> None:
+        if select.select([reader], [], [], 30)[0] and os.read(reader, 8) == b"started\n":
+            stop.set()
+
+    stopper = threading.Thread(target=stop_once_started)
+    stopper.start()
+    try:
+        size = 3 * MAX_OUTPUT_CHARS
+        assert agent._gate_shell(f"head -c {size} /dev/zero | tr '\\0' x", 30) == (0, "x" * size)
+        assert agent._gate_shell("sleep 30", 1) == (None, "")
+        running = f"exec 3>{alive}; echo started >&3; sleep 30"
+        assert agent._gate_shell(running, 60) == (-1, STOPPED_MESSAGE)
+        # End of file: the last process of the stopped command closed the pipe.
+        assert select.select([reader], [], [], 10)[0] and os.read(reader, 8) == b""
+        assert agent._gate_shell(f"touch {late}", 7) == (-1, STOPPED_MESSAGE)
+    finally:
+        _close(server, loop)
+        stopper.join(35)
+        os.close(reader)
+    assert not late.exists(), "a stopped gate command was still posted"
 
 
 def test_run_commands_parallel_rejects_bad_arguments_like_the_other_tools() -> None:
@@ -388,6 +477,110 @@ def test_run_commands_parallel_reports_an_unreachable_bridge_as_not_run() -> Non
     report = ExecBridge("exec:http://127.0.0.1:9").run_commands_parallel('["true"]')
     assert report.startswith("1 commands: 0 succeeded, 1 failed, 0 timed out."), report
     assert "[1/1] exit -1 in" in report and "Error: " in report, report
+
+
+@pytest.mark.parametrize(
+    "url", ["http://127.0.0.1:notaport", "http://127.0.0.1:99999", "http://[::1"],
+)
+def test_a_bridge_url_that_names_no_endpoint_is_an_unreachable_bridge(url: str) -> None:
+    assert bridge_alive(url) is False
+    with pytest.raises(KISSError, match="unreachable"):
+        bridge_exec(url, "true", 5)
+    with pytest.raises(KISSError, match="is not answering"):
+        ExecBridge(f"exec:{url}").__enter__()
+    report = ExecBridge(f"exec:{url}").run_commands_parallel('["true"]')
+    assert report.startswith("1 commands: 0 succeeded, 1 failed, 0 timed out."), report
+    assert "[1/1] exit -1 in" in report and "Error: " in report, report
+
+
+@pytest.mark.parametrize(("url", "port"), [("http://[::1]", 80), ("http://[::1]:0", 0)])
+def test_an_ipv6_bridge_url_dials_its_host_on_the_default_port_unless_it_names_one(
+    url: str, port: int,
+) -> None:
+    """The address is read where the request makes its socket (a test cannot listen on port 80)."""
+    dialled: list[tuple[str, int]] = []
+
+    def record(frame: FrameType, event: str, arg: object) -> None:
+        if event == "call" and frame.f_code is socket.create_connection.__code__:
+            dialled.append(frame.f_locals["address"])
+
+    profiler = sys.getprofile()
+    sys.setprofile(record)
+    try:
+        bridge_alive(url)
+    finally:
+        sys.setprofile(profiler)
+    assert dialled == [("::1", port)]
+
+
+def test_a_stop_raised_at_the_back_edge_of_the_wait_loop_kills_the_command() -> None:
+    code = bridge_exec.__code__
+    raised: list[int] = []
+
+    def at_back_edge(frame: FrameType, event: str, arg: object) -> Any:
+        if frame.f_code is not code:
+            return None
+        frame.f_trace_opcodes = True
+        back_edge = code.co_code[frame.f_lasti] == dis.opmap["JUMP_BACKWARD"]
+        if event == "opcode" and back_edge and not raised:
+            raised.append(frame.f_lineno)
+            raise KeyboardInterrupt
+        return at_back_edge
+
+    with _bridge(exec_delay=30.0) as (server, bridge):
+        tracer = sys.gettrace()
+        sys.settrace(at_back_edge)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                bridge_exec(bridge.url, "sleep 30", 30)
+        finally:
+            sys.settrace(tracer)
+        assert raised, "the wait never went round its loop"
+        assert server.kills == server.tokens == [server.tokens[0]]
+
+
+def _is_the_deadline_timer(frame_locals: dict[str, Any]) -> bool:
+    """Whether the thread being built is a request's deadline timer."""
+    return isinstance(frame_locals["self"], threading.Timer)
+
+
+def _is_the_request_thread(frame_locals: dict[str, Any]) -> bool:
+    """Whether the thread being built is the one ``bridge_exec`` makes its request on."""
+    return str(frame_locals.get("name") or "").startswith("exec-bridge-")
+
+
+def _starve(
+    first: Callable[[dict[str, Any]], bool], starved: ExitStack, frame_locals: dict[str, Any],
+) -> bool:
+    """``Pause`` matcher at ``Thread.__init__``: from the thread *first* names on, none starts."""
+    if first(frame_locals):
+        starved.enter_context(nproc_limit_lowered_to_one())
+    return False
+
+
+@pytest.mark.skipif(not thread_start_can_be_starved(), reason="Thread.start cannot be starved")
+@pytest.mark.parametrize("first", [_is_the_deadline_timer, _is_the_request_thread])
+def test_a_bridge_call_out_of_threads_is_an_unreachable_bridge(
+    first: Callable[[dict[str, Any]], bool],
+) -> None:
+    with _bridge() as (server, bridge):
+        with ExitStack() as starved, Pause(
+            threading.Thread.__init__.__code__, partial(_starve, first, starved),
+        ):
+            with pytest.raises(KISSError, match="unreachable: can't start new thread"):
+                bridge_exec(bridge.url, "true", 5)
+            assert bridge_alive(bridge.url) is False
+        assert server.commands == []
+        assert bridge_alive(bridge.url) is True
+
+
+def test_a_reply_nested_too_deep_to_decode_is_an_unreachable_bridge() -> None:
+    with _bridge(ping_fault="deep", exec_fault="deep") as (server, bridge):
+        assert bridge_alive(bridge.url) is False
+        with pytest.raises(KISSError, match="unreachable"):
+            bridge_exec(bridge.url, "echo hi", 30)
+        # The command was accepted: it is killed before the error propagates.
+        assert server.kills == server.tokens == [server.tokens[0]]
 
 
 def test_a_reply_dropped_after_exec_was_accepted_kills_the_command() -> None:

@@ -209,6 +209,13 @@ class TestAgentBillsReportedCost:
             calculate_cost(_OPENROUTER_MODEL, _INPUT_TOKENS, _OUTPUT_TOKENS)
         )
 
+    def test_cost_that_is_no_amount_falls_back_to_the_catalog(self) -> None:
+        """A ``NaN`` cost added to ``budget_used`` would disable the budget cap for good."""
+        agent = _run_agent(_OPENROUTER_MODEL, {"cost": float("nan")})
+        assert agent.budget_used == pytest.approx(
+            calculate_cost(_OPENROUTER_MODEL, _INPUT_TOKENS, _OUTPUT_TOKENS)
+        )
+
     def test_non_openrouter_model_ignores_a_cost_field(self) -> None:
         """Only OpenRouter documents ``usage.cost``; a direct provider's
         extra field of the same name is not trusted over the catalog."""
@@ -320,6 +327,17 @@ class TestCostFieldShapes:
         assert model.extract_cost_from_response({"usage": {"cost": True}}) is None
         assert model.extract_cost_from_response({"usage": None}) is None
         assert model.extract_cost_from_response({}) is None
+
+    def test_cost_that_is_no_amount_is_ignored(self) -> None:
+        """Infinite, ``NaN``, negative and over-float figures are no charge, as either cost."""
+        model = self._model()
+        for cost in (float("inf"), float("nan"), -0.5, 10**400):
+            assert model.extract_cost_from_response({"usage": {"cost": cost}}) is None
+            byok = {"cost": 0.5, "is_byok": True, "cost_details": {"upstream_inference_cost": cost}}
+            assert model.extract_cost_from_response({"usage": byok}) == pytest.approx(0.5)
+        # Two amounts whose sum is none.
+        byok = {"cost": 1e308, "is_byok": True, "cost_details": {"upstream_inference_cost": 1e308}}
+        assert model.extract_cost_from_response({"usage": byok}) is None
 
     def test_non_numeric_upstream_cost_counts_as_zero(self) -> None:
         response = {

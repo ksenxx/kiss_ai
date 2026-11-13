@@ -32,18 +32,22 @@
 //          `recognizer` but never the free one, leaking one worker-side
 //          recognizer (a model.recognizers map entry) per pipeline start.
 //
-//  REV-1   The transcribe-flash safety timer FORGOT the outstanding rounds
-//          (no cancelled credit), so a reply arriving after it had fired,
-//          with no newer round to claim it, retired as "no round at all"
-//          and was typed into whatever chat was on screen: words spoken
-//          in chat A submitted into chat B.
+//  REV-1   The transcribe-flash safety timer FORGOT the outstanding rounds,
+//          so a reply arriving after it had fired was typed into whatever
+//          chat was on screen: words spoken in chat A submitted into chat
+//          B. The timer cancels them: a reply whose tag is no longer
+//          outstanding is refused, on any chat.
 //
 //  REV-2   A reply lost with its socket connection has no transcript on
-//          its way, so the credit a later mic-off turned it into must not
-//          eat the next valid dictation. The daemon echoes each round's
-//          tag, so the next round's reply names its round and never
-//          touches that credit. (An untagged reply cannot tell the two
-//          apart, so it is charged to the credit and fails closed.)
+//          its way, so the round a later mic-off cancels must not eat the
+//          next valid dictation. The daemon echoes each round's tag, so
+//          the next round's reply names its round.
+//
+//  A/W11-F1  The wake-flash safety timer firing mid-capture cancelled the
+//          capture's round but left the capture recording with no
+//          overlay; its audio was then uploaded and transcribed for a
+//          reply that was always refused. The timer ends the capture
+//          with its round.
 //
 // jsdom provides no speech engine, audio graph, or microphone, so the
 // harness supplies the minimal window.Vosk / AudioContext / mediaDevices
@@ -66,6 +70,7 @@ const {
   lastProcessor,
   wake,
   speak,
+  speakRound,
   fireTimer,
 } = require('./voice_page_helpers');
 
@@ -99,13 +104,12 @@ async function main() {
       // Mic back on, move to tab B, and speak a full round there.
       await startPipeline(page);
       clickTab(win, second); // tab B on screen
-      wake(page); // round B begins on tab B
-      speak(page); // its audio is posted
+      const roundB = speakRound(page); // round B: spoken and posted on tab B
 
       // The daemon answers round B. Its words belong to tab B, the tab on
       // screen — never to the abandoned round's tab A.
       posted.length = 0;
-      send(win, {type: 'voiceSpeech', text: 'round B words QC1'});
+      send(win, {type: 'voiceSpeech', text: 'round B words QC1', round: roundB});
       const subs = submits(posted);
       assert.strictEqual(
         subs.length,
@@ -132,8 +136,7 @@ async function main() {
 
       // Round A: wake, speech, 2 s silence -> audio posted, transcript
       // pending. Its owner (tab A) must stay queued until the reply.
-      wake(page);
-      speak(page);
+      const roundA = speakRound(page);
 
       // Round B begins on tab B while A transcribes, then the user says
       // nothing for 5 s: the no-audio branch must retire round B itself.
@@ -146,27 +149,24 @@ async function main() {
         'the silent round must not post audio',
       );
 
-      // Round A's transcript arrives. Its words were spoken on tab A; tab
-      // B is on screen, so they are dropped — never submitted into tab B.
+      // Back on tab A, round A's transcript arrives. Round A is still
+      // outstanding (the silent round took nothing of it), so its words
+      // are submitted where they were spoken.
+      clickTab(win, first);
       posted.length = 0;
-      send(win, {type: 'voiceSpeech', text: 'round A words QC3'});
-      assert.strictEqual(
-        submits(posted).length,
-        0,
-        "round A's words must not be typed into tab B's conversation: " +
-          JSON.stringify(posted),
-      );
-      assert.ok(
-        !win.document.getElementById('task-input').value.includes('QC3'),
-        "round A's words must not be drafted into tab B's input either",
+      send(win, {type: 'voiceSpeech', text: 'round A words QC3', round: roundA});
+      assert.deepStrictEqual(
+        submits(posted).map(m => ({onA: m.tabId === first, prompt: m.prompt})),
+        [{onA: true, prompt: 'round A words QC3'}],
+        "round A's words must still reach tab A: " + JSON.stringify(posted),
       );
       win.close();
     },
   );
 
   await test(
-    'CAND-2: a rounds reset mid-capture leaves the silent finish with ' +
-      'nothing to retire and the accounting sound',
+    'A/W11-F1: the wake-flash safety timer ends the capture with its round, ' +
+      'so nothing recorded after it is posted and the next wake answers',
     async () => {
       const page = makeVoicePage();
       const {win, posted} = page;
@@ -176,40 +176,33 @@ async function main() {
       await startPipeline(page);
       wake(page); // capture begins: one round
       // The 45 s wake-flash safety timer fires mid-capture (the audio clock
-      // stalled); voice.js cancels every outstanding round. The capture
-      // itself lives on and ends in the no-audio branch, which now has
-      // nothing of its own left to retire — and must not eat into
-      // anything else.
+      // fell behind the wall clock); voice.js cancels every outstanding
+      // round and takes the overlay down.
       fireTimer(page, 45000);
       assert.ok(
         !micBtn(win).classList.contains('voice-triggered'),
         'the safety timer clears the wake flash',
       );
-      feed(lastProcessor(page), false, 20); // 5.12 s: silent finish
-
-      // The cancellation moved the capture's round into the cancelled
-      // credit, so the next transcript fails CLOSED against it (by
-      // design: a cancelled round's words may not be typed anywhere).
-      // The silent finish must not have consumed that credit, nor pushed
-      // any counter negative.
-      posted.length = 0;
-      send(win, {type: 'voiceSpeech', text: 'cancelled words QC4'});
+      // The user speaks and falls silent: with the overlay gone this is
+      // not a dictation, so no audio leaves the page.
+      feed(lastProcessor(page), true, 4);
+      feed(lastProcessor(page), false, 10); // 2.56 s: past the end silence
       assert.strictEqual(
-        submits(posted).length,
+        posted.filter(m => m.type === 'voiceTranscribe').length,
         0,
-        "a cancelled round's transcript must fail closed: " +
-          JSON.stringify(posted),
+        'audio recorded after the timer cancelled the round must not be posted',
       );
 
-      // With the credit spent, an unsolicited transcript flows again: the
-      // accounting is exactly one round behind, never stale forever.
+      // The page is listening for the wake word again: a new wake opens
+      // a round (speakRound checks the overlay and the posted audio)
+      // whose reply is delivered.
+      const round = speakRound(page);
       posted.length = 0;
-      send(win, {type: 'voiceSpeech', text: 'after reset words QC5'});
-      assert.strictEqual(
-        submits(posted).length,
-        1,
-        'an unsolicited transcript must still be delivered: ' +
-          JSON.stringify(posted),
+      send(win, {type: 'voiceSpeech', text: 'after the timer QC5', round});
+      assert.deepStrictEqual(
+        submits(posted).map(m => ({onA: m.tabId === first, prompt: m.prompt})),
+        [{onA: true, prompt: 'after the timer QC5'}],
+        JSON.stringify(posted),
       );
       win.close();
     },
@@ -225,8 +218,7 @@ async function main() {
       clickTab(win, first); // chat A on screen
 
       await startPipeline(page);
-      wake(page); // round A begins on chat A
-      speak(page); // audio posted, transcript pending
+      const roundA = speakRound(page); // round A: posted on chat A, reply pending
 
       // The user moves to chat B; the daemon is slow and the 60 s
       // transcribing flash runs out before its reply lands.
@@ -237,20 +229,28 @@ async function main() {
         'the safety timer clears the transcribing flash',
       );
 
-      // Round A's delayed reply arrives with no newer round to claim it.
-      // Its words were spoken in chat A: they must not be submitted into
-      // (or drafted for) chat B.
+      // Round A's delayed reply arrives. Its words were spoken in chat A:
+      // they must not be submitted into (or drafted for) chat B.
+      const late = {
+        type: 'voiceSpeech',
+        text: 'words spoken in chat A QR1',
+        round: roundA,
+      };
       posted.length = 0;
-      send(win, {type: 'voiceSpeech', text: 'words spoken in chat A QR1'});
+      send(win, late);
+      // Nor on chat A itself: the timer cancelled the round, and a
+      // cancelled round's words are typed nowhere.
+      clickTab(win, first);
+      send(win, late);
       assert.deepStrictEqual(
-        submits(posted).map(m => ({onB: m.tabId === second, prompt: m.prompt})),
+        submits(posted).map(m => m.prompt),
         [],
         "a cancelled round's late words must not be submitted: " +
           JSON.stringify(posted),
       );
       assert.ok(
         !win.document.getElementById('task-input').value.includes('QR1'),
-        "nor drafted into chat B's input",
+        'nor drafted into either input',
       );
       win.close();
     },
@@ -283,8 +283,7 @@ async function main() {
       assert.strictEqual(audio.length, 2, 'only rounds A and B ever posted audio');
 
       // Only round B's reply ever arrives, with the tag the daemon echoes.
-      // It belongs to the live round, never to the credit the lost round
-      // left behind.
+      // It belongs to the live round, never to the cancelled round A.
       posted.length = 0;
       send(win, {
         type: 'voiceSpeech',

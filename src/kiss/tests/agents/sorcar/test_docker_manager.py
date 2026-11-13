@@ -219,8 +219,31 @@ def test_bash_until_re_runs_the_command_until_its_output_matches() -> None:
             "Error: until is not a valid regular expression: ")
         assert env.Bash("true", "bad poll", until="x", poll_seconds="soon").startswith(  # type: ignore[arg-type]
             "Error: poll_seconds must be a number of seconds, got 'soon'")
+        # An integer no float can hold raised OverflowError out of the tool.
+        assert env.Bash("true", "huge poll", until="x", poll_seconds=10**400).startswith(
+            "Error: poll_seconds must be a number of seconds, got 1000")
         assert env.Bash("rm -rf /", "guarded", until="x").startswith("REFUSED: ")
         assert env.Bash("echo plain", "plain") == "plain\n"
+        # A pattern the search child cannot be given as an argument (a NUL, a
+        # character with no bytes) is refused too: accepted, nothing was searched
+        # and the call ran to its deadline although its output matched.
+        for unsearchable in ("a\0b", "\ud800"):
+            t0 = time.monotonic()
+            result = env.Bash("printf 'a\\0b'", "unsearchable", timeout_seconds=8,
+                              until=unsearchable)
+            assert result.startswith("Error: until is not a valid regular expression: "), result
+            assert time.monotonic() - t0 < 4, result
+        # An output too long to keep whole is not searched (the match may be in the
+        # middle that was dropped): the poll ends on that run and says so, as on the host.
+        flood = ("head -c 1500000 /dev/zero | tr '\\0' a; echo; echo MIDDLE; "
+                 "head -c 1700000 /dev/zero | tr '\\0' b")
+        t0 = time.monotonic()
+        result = env.Bash(flood, "flood", timeout_seconds=20, until="MIDDLE", poll_seconds=1)
+        assert time.monotonic() - t0 < 12, result[-300:]
+        assert re.search(
+            r"\[until 'MIDDLE': not searched on run 1: the output is too long to keep whole "
+            r"\([\d,]+ characters dropped\); poll with a command that prints less "
+            r"\(grep, tail\)\]$", result), result[-300:]
         # A task Stop ends the wait after the current run.
         env.stop_event = threading.Event()
         threading.Timer(1.5, env.stop_event.set).start()

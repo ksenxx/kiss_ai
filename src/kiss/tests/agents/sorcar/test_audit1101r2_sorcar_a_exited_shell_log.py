@@ -50,9 +50,9 @@ EXIT_LEAVING_A_WRITER = (
 
 def _wait_exit(job: BackgroundJob) -> int | None:
     deadline = time.monotonic() + 10
-    while job.process.poll() is None and time.monotonic() < deadline:
+    while job.returncode() is None and time.monotonic() < deadline:
         time.sleep(0.05)
-    return job.process.poll()
+    return job.returncode()
 
 
 def _kill_writer(tmp_path: Path) -> None:

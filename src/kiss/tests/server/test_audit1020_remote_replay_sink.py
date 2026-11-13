@@ -36,9 +36,14 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 from kiss.agents.sorcar import machines as mach
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import find_free_port
-from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.tests.local_ws import (
+    LocalReader,
+    LocalWriter,
+    _generate_self_signed_cert,
+    open_local_connection,
+)
 
 TAB = "tab-shared"
 
@@ -53,8 +58,12 @@ class TestRemoteReplaySinkReleased(IsolatedAsyncioTestCase):
     """
 
     async def asyncSetUp(self) -> None:
+        # Cleanups, each registered as its resource starts, not asyncTearDown:
+        # unittest skips the tear-down when the set-up fails.
         self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         mach.save_machines([])
+        self.addCleanup(mach.save_machines, [])
         from kiss.tests.remote_daemon import start_remote_daemon
 
         remote_home = Path(self.tmpdir) / "remote-home"
@@ -77,6 +86,7 @@ class TestRemoteReplaySinkReleased(IsolatedAsyncioTestCase):
                 },
             ],
         )
+        self.addCleanup(self.remote.stop)
         with sqlite3.connect(remote_home / "history.db", timeout=10) as db:
             db.execute(
                 "UPDATE task_history SET parent_task_id = 'seeded-1', is_side_channel = 1"
@@ -93,9 +103,13 @@ class TestRemoteReplaySinkReleased(IsolatedAsyncioTestCase):
             url_file=Path(self.tmpdir) / "remote-url.json",
             local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
+        # Registered before the start: one that fails part-way is stopped too.
+        self.addAsyncCleanup(self.server.stop_async)
         await self.server.start_async()
         self.conn_a = await open_local_connection(self.server)
+        self.addCleanup(self.conn_a[1].close)
         self.conn_b = await open_local_connection(self.server)
+        self.addCleanup(self.conn_b[1].close)
         await self._send(
             self.conn_a,
             {
@@ -108,14 +122,6 @@ class TestRemoteReplaySinkReleased(IsolatedAsyncioTestCase):
         )
         added = await self._until(self.conn_a, "machines")
         self.assertEqual(added["error"], "")
-
-    async def asyncTearDown(self) -> None:
-        self.conn_a[1].close()
-        self.conn_b[1].close()
-        await self.server.stop_async()
-        self.remote.stop()
-        mach.save_machines([])
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _send(self, conn: tuple[LocalReader, LocalWriter], cmd: dict[str, Any]) -> None:
         conn[1].write(json.dumps(cmd).encode("utf-8") + b"\n")
@@ -202,3 +208,21 @@ class TestRemoteReplaySinkReleased(IsolatedAsyncioTestCase):
         await self._resume(self.conn_a, "chat-side", task_id="side-1")
         await self._until(self.conn_a, "subagentDone", tab_id=TAB)
         await self._seeded_transcript_reaches_b_only()
+        # The tab shows the seeded chat now.  A surface that connects is
+        # told of the tab's binding, not of the side channel's end kept
+        # for the tab, which would close it there.  The machines' browser
+        # pages end what a ``ready`` is answered with.
+        late = await open_local_connection(self.server)
+        try:
+            await self._send(late, {"type": "ready"})
+            told: list[dict[str, Any]] = []
+            while not (told and told[-1].get("type") == "browserTabs" and told[-1].get("remote")):
+                msg = await self._next(late)
+                assert msg is not None, "the answer to ready never ended"
+                told.append(msg)
+        finally:
+            late[1].close()
+        self.assertEqual(
+            [m["machines"].get(TAB) for m in told if m.get("type") == "tabMachines"], ["box"],
+        )
+        self.assertEqual([m for m in told if m.get("type") == "subagentDone"], [])

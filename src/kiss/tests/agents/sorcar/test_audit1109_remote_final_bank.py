@@ -10,22 +10,30 @@
 * Orphan recovery now writes the row's ``model_costs`` from its
   persisted ``llm_call`` events, as a final save does, so the Spend
   panel splits a recovered task's own spend by the models it ran on.
+* The final save's bank waits for the offsets' publish lock in slices
+  (``locked_call``), so a Stop reaches a save another publisher blocks.
 """
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import os
 import subprocess
 import sys
 import textwrap
+import threading
+from types import CodeType, FrameType
 from typing import cast
 from unittest import mock
 
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar import sorcar_agent
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.server import agent_state
+from kiss.agents.sorcar.relentless_agent import _OFFSET_PUBLISH_LOCK
+from kiss.core.locked import locked_call
+from kiss.server import agent_state, task_update
 from kiss.server.agent_state import AgentState
 from kiss.server.task_update import charge_remote_subtask_usage
 from kiss.tests.agents.sorcar import test_audit1103_remote_costs as base
@@ -37,6 +45,69 @@ from kiss.tests.agents.sorcar.test_audit1103_remote_costs import (
     _row,
     _task,
 )
+from kiss.tests.lock_injection import inject, lock_is_free
+from kiss.tests.server.pause import Pause
+
+
+def _hold(lock: threading.RLock, held: threading.Event, release: threading.Event) -> None:
+    """Own *lock* from *held* until *release*, as another publisher of the offsets."""
+    with lock:
+        held.set()
+        release.wait(60)
+
+
+def _save_on_thread(agent: ChatSorcarAgent, task_id: str, outcome: list[str]) -> None:
+    """Run *task_id*'s final save as its task thread does; record how it ended."""
+    try:
+        with th.TASK_USAGE_LOCK:
+            agent._save_final_usage({}, task_id, result_summary="Done")
+        outcome.append("saved")
+    except BaseException as exc:  # noqa: BLE001 — the injected Stop is the outcome
+        outcome.append(type(exc).__name__)
+    finally:
+        th._close_thread_db()
+
+
+def _report_on_thread(child: str, report: dict[str, object], outcome: list[str]) -> None:
+    """Charge *report* for *child* as the usage sync does; record how it ended."""
+    try:
+        charge_remote_subtask_usage(None, child, report)
+        outcome.append("charged")
+    except BaseException as exc:  # noqa: BLE001 — the injected Stop is the outcome
+        outcome.append(type(exc).__name__)
+    finally:
+        th._close_thread_db()
+
+
+def _flag_lock_wait(
+    thread: threading.Thread, bank: CodeType, at_lock: threading.Event,
+    frame: FrameType, what: str, arg: object,
+) -> None:
+    """Profile function (*thread*, *bank*, *at_lock* bound): set *at_lock* as *thread* asks
+    for the offsets' publish lock in the function with code *bank*."""
+    if what != "c_call" or getattr(arg, "__self__", None) is not _OFFSET_PUBLISH_LOCK:
+        return
+    caller = frame.f_back if frame.f_code is locked_call.__code__ else frame
+    if (getattr(arg, "__name__", "") == "acquire" and caller is not None
+            and caller.f_code is bank and threading.current_thread() is thread):
+        at_lock.set()
+
+
+def _wait_parked_in_bank(
+    thread: threading.Thread,
+    bank: CodeType = ChatSorcarAgent._bank_pending_remote_charges.__code__,
+) -> None:
+    """Wait until *thread* asks for the offsets' publish lock, which another thread holds,
+    in the function with code *bank*: its own next ``acquire`` call sets the event waited
+    on (a ``with`` on the lock, which no Stop interrupts, makes none)."""
+    at_lock = threading.Event()
+    profiler = threading.getprofile()
+    threading.setprofile_all_threads(functools.partial(_flag_lock_wait, thread, bank, at_lock))
+    try:
+        if not at_lock.wait(30):
+            raise AssertionError(f"{bank.co_name}: no acquire call on the offsets' publish lock")
+    finally:
+        threading.setprofile_all_threads(profiler)
 
 
 def _flags(parent: str) -> list[tuple[int, int]]:
@@ -192,6 +263,54 @@ class TestRemoteFinalBank(base.TestRemoteSubagentCosts):
         self.assertEqual(_flags(parent), [(1, 1)])
         self.assertEqual(self._last_usage(parent), (3.5, 350, 6))
 
+    def test_a_stop_at_the_held_offsets_lock_unwinds_and_the_retry_banks_once(self) -> None:
+        """Another publisher owns the offsets' publish lock while a pending charge is
+        banked, by the final save or by the report's own live path: an injected Stop
+        unwinds the bank while the lock is still held, and the final save (retried, in
+        the first case) banks the charge once."""
+        report = self._late_report()
+        for live in (False, True):
+            with self.subTest(live=live):
+                parent, agent, _state = self._parent_agent(register=live)
+                child = f"remote-held-child-{live}"
+                th._record_remote_subtask(child, parent, "box", ASTRA, 2.0, 200, 3)
+                outcome: list[str] = []
+                if live:
+                    banker = threading.Thread(
+                        target=_report_on_thread, args=(child, report, outcome), daemon=True)
+                    bank = task_update._bank_remote_charge.__code__
+                else:
+                    charge_remote_subtask_usage(None, child, report)
+                    banker = threading.Thread(
+                        target=_save_on_thread, args=(agent, parent, outcome), daemon=True)
+                    bank = ChatSorcarAgent._bank_pending_remote_charges.__code__
+                th._save_task_result("Done", parent)
+                held, release = threading.Event(), threading.Event()
+                holder = threading.Thread(
+                    target=_hold, args=(_OFFSET_PUBLISH_LOCK, held, release), daemon=True)
+                holder.start()
+                self.assertTrue(held.wait(10))
+                banker.start()
+                try:
+                    _wait_parked_in_bank(banker, bank)
+                    self.assertEqual(inject(banker), 1)
+                    banker.join(5)
+                    self.assertFalse(banker.is_alive(), "the Stop waited for the lock's holder")
+                    self.assertFalse(lock_is_free(_OFFSET_PUBLISH_LOCK))  # still the holder's
+                finally:
+                    release.set()
+                    holder.join(10)
+                    banker.join(10)
+                self.assertEqual(outcome, ["KeyboardInterrupt"])
+                self.assertEqual(
+                    (_flags(parent), agent.usage_snapshot()), ([(0, 0)], (3.0, 300, 5)))
+                with th.TASK_USAGE_LOCK:
+                    agent._save_final_usage(
+                        {}, parent, result_summary="Done", unless_finished=True)
+                self.assertEqual(agent.usage_snapshot(), (3.5, 350, 6))
+                self.assertEqual(_row(parent), (3.5, 350, 6))
+                self.assertEqual(_flags(parent), [(1, 1)])
+
     def test_a_charge_from_another_process_is_banked_by_the_final_save(self) -> None:
         parent, agent, _state = self._parent_agent(register=True)
         report = self._late_report()
@@ -218,6 +337,46 @@ class TestRemoteFinalBank(base.TestRemoteSubagentCosts):
         self.assertEqual(agent.usage_snapshot(), (3.5, 350, 6))
         self.assertEqual(_row(parent), (3.5, 350, 6))
         self.assertEqual(_flags(parent), [(1, 1)])
+
+    def test_charges_outnumbering_the_stack_frames_are_banked_by_one_save(self) -> None:
+        """A process without the parent's live agent charges the row between the final
+        save's bank and its write, round after round, more often than the interpreter has
+        stack frames left: a Stop in the second round unwinds the save, and the retried
+        save banks every charge and ends."""
+        parent, agent, _state = self._parent_agent(register=False)
+        th._record_remote_subtask("remote-many-child", parent, "box", ASTRA, 2.0, 200, 3)
+        th._save_task_result("Done", parent)
+        # Room for 100 more frames keeps the rounds few: each banks every charge before it.
+        self.addCleanup(sys.setrecursionlimit, sys.getrecursionlimit())
+        sys.setrecursionlimit(len(inspect.stack(0)) + 100)
+        rounds = 150
+        reports = iter(range(1, rounds + 1))
+
+        def charge_again(_locals: dict[str, object]) -> bool:
+            """Entering the save's snapshot step: report the child's next growth; the
+            second report comes with the runner's Stop.  Never holds the thread."""
+            n = next(reports, 0)
+            if n:
+                charge_remote_subtask_usage(
+                    None, "remote-many-child",
+                    {"cost": 2.0 + n / 2, "tokens": 200 + 50 * n, "steps": 3 + n})
+            if n == 2:
+                inject(threading.current_thread())
+            return False
+
+        outcome: list[str] = []
+        saver = threading.Thread(
+            target=_save_on_thread, args=(agent, parent, outcome), daemon=True)
+        with Pause(ChatSorcarAgent._persist_replay_events_if_missing.__code__, charge_again):
+            saver.start()
+            saver.join(120)
+            self.assertEqual(outcome, ["KeyboardInterrupt"])
+            with th.TASK_USAGE_LOCK:
+                agent._save_final_usage({}, parent, result_summary="Done", unless_finished=True)
+        totals = (3.0 + rounds / 2, 300 + 50 * rounds, 5 + rounds)
+        self.assertEqual(agent.usage_snapshot(), totals)
+        self.assertEqual(_row(parent), totals)
+        self.assertEqual(_flags(parent), [(1, 1)] * rounds)
 
     def test_orphan_recovery_writes_the_split_by_model(self) -> None:
         """A killed task that switched models: the recovered row's Spend split follows

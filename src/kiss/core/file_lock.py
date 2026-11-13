@@ -19,6 +19,7 @@ The lock is not reentrant across separate opens on either platform.
 from __future__ import annotations
 
 import errno
+import functools
 import os
 import time
 from collections.abc import Iterator
@@ -49,6 +50,10 @@ _WINDOWS_LOCK_BYTES = 1
 _WINDOWS_CONTENDED_ERRNOS = (errno.EACCES, errno.EDEADLK)
 # How often a polled wait re-probes the lock.
 _POLL_INTERVAL = 0.05
+# ``open()``'s opener for a lock file: created private to the user.  A C
+# callable, so no bytecode (no check point for a task's Stop) runs between
+# the descriptor's creation and the file object that owns and closes it.
+_open_private = functools.partial(os.open, mode=0o600)
 
 
 def _fileno(target: int | IO[str] | IO[bytes]) -> int:
@@ -174,17 +179,15 @@ def exclusive_file_lock(
             by another process.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    locked = False
-    try:
+    # An append mode: the only kind that creates the file without truncating it.
+    with open(lock_path, "a+b", opener=_open_private) as lock_file:
+        locked = False
         try:
-            locked = lock_exclusive(descriptor, blocking, timeout)
-        except TimeoutError as e:
-            raise TimeoutError(f"{lock_path} {e}") from None
-        yield locked
-    finally:
-        try:
-            if locked:
-                unlock(descriptor)
+            try:
+                locked = lock_exclusive(lock_file, blocking, timeout)
+            except TimeoutError as e:
+                raise TimeoutError(f"{lock_path} {e}") from None
+            yield locked
         finally:
-            os.close(descriptor)
+            if locked:
+                unlock(lock_file)

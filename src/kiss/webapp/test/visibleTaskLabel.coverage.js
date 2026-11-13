@@ -5,7 +5,8 @@
 
 // Coverage gate: requires 100% line coverage of the visible-task panel code
 // fenced by `// visibletask-coverage:start` / `:end` in media/*.js when
-// running test/visibleTaskLabel.test.js.
+// running test/visibleTaskLabel.test.js.  `minRegions` keeps a deleted
+// fence pair from silently shrinking the gate.
 
 'use strict';
 
@@ -16,6 +17,6 @@ gateRegions({
   mark: 'visibletask',
   label: 'visible-task panel',
   targets: [
-    {file: 'main.js', sourceUrl: 'visibletask-main.js'},
+    {file: 'main.js', sourceUrl: 'visibletask-main.js', minRegions: 16},
   ],
 });

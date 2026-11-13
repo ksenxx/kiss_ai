@@ -19,10 +19,9 @@ non-agentic call per attachment to the first configured model of
 tool message.  It never raises on its own: a missing vision model or a
 failed call becomes a line that tells the model why it has no picture
 (a Stop, and the caller's own limit check, do propagate).  What the
-calls cost is returned with the text (:class:`Described`) and, call by
-call, handed to the caller's ``credit`` callback: the calling model keeps
-it for its agent, which bills it against its own budget like every
-other spend made on its behalf.
+calls cost is handed, call by call, to the caller's ``credit`` callback:
+the calling model keeps it for its agent, which bills it against its own
+budget like every other spend made on its behalf.
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Callable, Sequence
-from typing import NamedTuple
 
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_families import _available
@@ -70,19 +68,6 @@ CONTEXT_LIMIT = 2000
 """Characters of the tool result's text shown to the vision model as context."""
 
 
-class Described(NamedTuple):
-    """The words that stand in for a tool result's attachments, and what they cost."""
-
-    text: str
-    """One block per attachment (a description or a :data:`FAILURE_LINE`), blank-line separated."""
-    cost: float
-    """USD the vision calls were billed, a failed call's partial usage included."""
-    tokens: int
-    """Tokens the vision calls used."""
-    calls: int
-    """How many vision calls were made (failed ones included)."""
-
-
 def vision_model() -> str | None:
     """Return the first model of :data:`VISION_MODELS` whose provider is configured.
 
@@ -114,9 +99,9 @@ def _describe_one(
     model_name: str | None,
     caller_model: str,
     what: str,
-    credit: Callable[[float, int, str, str], None] | None = None,
-    limit_check: Callable[[], None] | None = None,
-) -> Described:
+    credit: Callable[[float, int, str, str], None] | None,
+    limit_check: Callable[[], None] | None,
+) -> str:
     """Describe one attachment with *model_name*, or say why it could not be described.
 
     Args:
@@ -135,8 +120,7 @@ def _describe_one(
 
     Returns:
         The description under :data:`DESCRIPTION_HEADER`, or a
-        :data:`FAILURE_LINE`, with the spend of the call that produced it
-        (none when no call was made).
+        :data:`FAILURE_LINE`.
 
     Raises:
         KeyboardInterrupt: The user stopped the task during the call.
@@ -152,8 +136,7 @@ def _describe_one(
             index,
             caller_model,
         )
-        line = FAILURE_LINE.format(reason="no vision model is configured", **failure)
-        return Described(line, 0.0, 0, 0)
+        return FAILURE_LINE.format(reason="no vision model is configured", **failure)
     from kiss.core.kiss_agent import KISSAgent
 
     if limit_check is not None:
@@ -190,8 +173,7 @@ def _describe_one(
         logger.warning(
             "Vision bridge: %s could not describe attachment %d", model_name, index, exc_info=True
         )
-        line = FAILURE_LINE.format(reason=f"{model_name} failed: {failed!r:.200}", **failure)
-        return Described(line, agent.budget_used, agent.total_tokens_used, 1)
+        return FAILURE_LINE.format(reason=f"{model_name} failed: {failed!r:.200}", **failure)
     logger.info(
         "Vision bridge: %s described %s attachment %d (%d bytes) for %s; "
         "cost $%.4f, %d tokens, billed to the calling agent",
@@ -206,8 +188,7 @@ def _describe_one(
     header = DESCRIPTION_HEADER.format(
         mime=attachment.mime_type, index=index, model=model_name, caller=caller_model
     )
-    text = f"{header} {description.strip() or '(the vision model returned no text)'}"
-    return Described(text, agent.budget_used, agent.total_tokens_used, 1)
+    return f"{header} {description.strip() or '(the vision model returned no text)'}"
 
 
 def describe_attachments(
@@ -217,18 +198,17 @@ def describe_attachments(
     *,
     credit: Callable[[float, int, str, str], None] | None = None,
     limit_check: Callable[[], None] | None = None,
-) -> Described:
+) -> str:
     """Describe tool-result attachments in words for a model that cannot see them.
 
     One non-agentic call per image or PDF to :func:`vision_model`, with
     the attachment and :data:`DESCRIBE_PROMPT`; the cost of each call is
-    logged at INFO with the model's name and returned in the result for
-    the caller to bill.  A caller that bills through *credit* gets each
-    call's spend as the call ends, so a stop (which propagates) loses
-    none of it.  An attachment that cannot be described (no vision
-    model configured, an API error) becomes a :data:`FAILURE_LINE` that
-    tells the model why it has no picture and what to do instead; only a
-    Stop and *limit_check* raise.
+    logged at INFO with the model's name.  A caller that bills through
+    *credit* gets each call's spend as the call ends, so a stop (which
+    propagates) loses none of it.  An attachment that cannot be
+    described (no vision model configured, an API error) becomes a
+    :data:`FAILURE_LINE` that tells the model why it has no picture and
+    what to do instead; only a Stop and *limit_check* raise.
 
     Args:
         attachments: The images and PDFs lifted out of one tool result
@@ -243,8 +223,7 @@ def describe_attachments(
             that call ends, a stopped call's partial usage
             included, so the spend reaches the caller even when this
             function never returns (``Model._credit_helper_usage``);
-            possibly twice per key (it must add a key once).  The
-            returned totals are the same figures.
+            possibly twice per key (it must add a key once).
         limit_check: Called before each call is made; the calling
             agent's limit check, which raises once what ``credit``
             received has spent the budget, so a batch of descriptions
@@ -252,20 +231,14 @@ def describe_attachments(
 
     Returns:
         The descriptions, one block per attachment separated by blank
-        lines, with the summed cost, tokens and number of the calls made.
+        lines.
 
     Raises:
         KeyboardInterrupt: The user stopped the task during a call.
         KISSError: *limit_check* found the caller's budget spent.
     """
     model_name = vision_model()
-    parts = [
+    return "\n\n".join(
         _describe_one(attachment, index, model_name, caller_model, what, credit, limit_check)
         for index, attachment in enumerate(attachments, 1)
-    ]
-    return Described(
-        "\n\n".join(part.text for part in parts),
-        sum(part.cost for part in parts),
-        sum(part.tokens for part in parts),
-        sum(part.calls for part in parts),
     )

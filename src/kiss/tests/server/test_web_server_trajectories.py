@@ -64,24 +64,34 @@ class TestTrajectoryRoutes(IsolatedAsyncioTestCase):
         return status, body
 
     async def _fetch(
-        self, path: str, headers: dict[str, str] | None = None, port: int = 0,
+        self,
+        path: str,
+        headers: dict[str, str] | list[tuple[str, str]] | None = None,
+        port: int = 0,
     ) -> tuple[int, str, dict[str, str]]:
-        """GET *path* with *headers*; return the status, body and reply headers."""
-        import urllib.error
-        import urllib.request
+        """GET *path* with *headers*; return the status, body and reply headers.
 
-        url = f"https://127.0.0.1:{port or self.port}{path}"
-        ctx = no_verify_ssl()
+        *headers* given as pairs may repeat a name: each pair is a header line.
+        A ``Host`` among them replaces the one the client would send.
+        """
+        import http.client
+
+        pairs = list(headers.items()) if isinstance(headers, dict) else headers or []
+        own_host = any(name == "Host" for name, _ in pairs)
 
         def _get() -> tuple[int, str, dict[str, str]]:
+            conn = http.client.HTTPSConnection(
+                "127.0.0.1", port or self.port, timeout=5, context=no_verify_ssl(),
+            )
             try:
-                resp = urllib.request.urlopen(
-                    urllib.request.Request(url, headers=headers or {}),
-                    timeout=5, context=ctx,
-                )
+                conn.putrequest("GET", path, skip_host=own_host)
+                for name, value in pairs:
+                    conn.putheader(name, value)
+                conn.endheaders()
+                resp = conn.getresponse()
                 return resp.status, resp.read().decode(), dict(resp.headers)
-            except urllib.error.HTTPError as e:
-                return e.code, e.read().decode() if e.fp else "", dict(e.headers)
+            finally:
+                conn.close()
 
         return await asyncio.get_event_loop().run_in_executor(None, _get)
 
@@ -146,6 +156,19 @@ class TestTrajectoryRoutes(IsolatedAsyncioTestCase):
             self.assertEqual(status, 401, path)
             self.assertNotIn("job_2024", body)
             self.assertIn("Basic", headers.get("WWW-Authenticate", ""))
+        # A proxy appends the visitor's address to the header it is sent:
+        # an earlier hop is the visitor's own text and must not pass him
+        # for this machine.  Neither do two credentials make one.
+        right_pair = ("Authorization", "Basic " + _basic("traj-secret"))
+        for claim in (
+            [("X-Forwarded-For", "127.0.0.1, 203.0.113.41")],
+            [("X-Forwarded-For", ", 203.0.113.41")],
+            [("Cf-Connecting-Ip", "::1")],
+            [("X-Forwarded-For", "127.0.0.1"), ("X-Forwarded-For", "203.0.113.41")],
+            [*visitor.items(), right_pair, right_pair],
+        ):
+            status, body, _ = await self._fetch("/api/jobs", claim)
+            self.assertEqual((status, "job_2024" in body), (401, False), claim)
         wrong = {**visitor, "Authorization": "Basic " + _basic("wrong")}
         status, body, _ = await self._fetch(job_path, wrong)
         self.assertEqual(status, 401)
@@ -160,6 +183,43 @@ class TestTrajectoryRoutes(IsolatedAsyncioTestCase):
         save_config({"remote_password": ""})
         status, body, _ = await self._fetch(job_path, right)
         self.assertEqual((status, "Agent A" in body), (403, False))
+
+    async def test_api_asks_a_page_of_another_site_for_the_remote_password(self) -> None:
+        """What this machine's browser sends for another site's page is not a local request.
+
+        After a DNS rebinding (the site's name re-pointed at 127.0.0.1)
+        the page reaches the daemon over loopback as its own origin:
+        only the ``Host`` it names tells its request from the web app's.
+        A cross-site script's names the site as ``Origin``.  Both need
+        the password, and get nothing while none is set.
+        """
+        job_path = "/api/jobs/job_2024_01_01_00_00_00_1/trajectories"
+        foreign = (
+            [("Host", f"evil.example:{self.port}")],
+            [("Host", "evil.example")],
+            [("Host", "[")],
+            [("Host", f"127.0.0.1:{self.port}"), ("Host", "evil.example")],
+            [("Origin", "https://evil.example")],
+            [("Origin", "null")],
+        )
+        for password, refusal in (("", 403), ("traj-secret", 401)):
+            save_config({"remote_password": password})
+            for headers in foreign:
+                for path in ("/api/jobs", job_path):
+                    status, body, _ = await self._fetch(path, headers)
+                    leaked = "job_2024" in body or "Agent A" in body
+                    self.assertEqual((status, leaked), (refusal, False), (password, headers, path))
+        right = ("Authorization", "Basic " + _basic("traj-secret"))
+        status, body, _ = await self._fetch(job_path, [*foreign[0], right])
+        self.assertEqual((status, "Agent A" in body), (200, True), "the password opens it")
+        # The web app opened on this machine, under each of its names.
+        for headers in (
+            [("Host", f"localhost:{self.port}")],
+            [("Host", f"[::1]:{self.port}"), ("Origin", f"http://[::1]:{self.port}")],
+            [("Host", "LOCALHOST"), ("Origin", f"https://127.0.0.1:{self.port}")],
+        ):
+            status, body, _ = await self._fetch(job_path, headers)
+            self.assertEqual((status, "Agent A" in body), (200, True), headers)
 
     async def test_private_daemon_serves_no_trajectory_data(self) -> None:
         """The token-only private daemon hands its jobs to no HTTP requester.

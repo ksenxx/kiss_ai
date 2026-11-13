@@ -107,7 +107,6 @@ class _Harness:
         self.tools.redirect = True
         self.agent: Any = KISSAgent("redirect-harness")
         self.agent.printer = self.printer
-        self.agent.verbose = False
         self.agent.tool_call_hook = self.hook
         self.agent.tool_call_guard = guard
         self.agent.function_map = {
@@ -500,6 +499,48 @@ def test_a_per_line_sed_applies_the_edit_exact_for_the_file(tmp_path: Path) -> N
     out = h.call("Bash", command=sed, description="d")
     assert out == "new old\n" and notes.read_text() == "new old\n", out
     assert [name for name, _ in h.hook_calls][-2:] == ["Bash", "Bash"]
+
+
+def test_the_edit_of_a_rewrite_is_refused_once_the_file_no_longer_holds_what_it_was_read_from(
+    tmp_path: Path,
+) -> None:
+    """Audit 2026-11-12 B5/A7: the pairs exact for the text a rewrite was read against were
+    applied to whatever the file held when the Edit landed.  A writer in between (a line now
+    holding the sed's pattern twice, a text the python's second ``.replace`` now finds) made
+    the Edit a change the command would not make; it is refused and nothing is written.  (An
+    Edit whose strings are gone fails as any Edit does: the exact-conversions module.)
+    """
+    tools = UsefulTools(work_dir=str(tmp_path))
+    tools.redirect = True
+    notes = tmp_path / "notes.md"
+    for command, what, shown, pairs, landed in (
+        ("sed -i 's/old/new/' notes.md", "`sed -i` call", "old a\nold b\n",
+         {"old_string": "old", "new_string": "new", "replace_all": True}, "old old\nold b\n"),
+        (PYTHON_TWO_REPLACES, "python heredoc", "old\n",
+         {"old_string": "old", "new_string": "new", "replace_all": True}, "old text\n"),
+    ):
+        notes.write_text(shown)
+        tools.Read(str(notes))
+        with pytest.raises(ToolRedirect) as raised:
+            tools.Bash(command, "rewrite")
+        arguments = raised.value.arguments
+        assert arguments == {"file_path": str(notes), **pairs, "exact": True}
+        notes.write_text(landed)
+        assert tools.Edit(**arguments) == (
+            f"Error: {notes} changed since the {what} was read as this Edit, which the command "
+            "no longer stands for: nothing was written. Re-issue the command."
+        )
+        assert notes.read_text() == landed
+        # The same call is made while the file holds what the command was read against.
+        notes.write_text(shown)
+        with pytest.raises(ToolRedirect):
+            tools.Bash(command, "rewrite")
+        assert tools.Edit(**arguments).startswith("Successfully replaced")
+        assert notes.read_text() == shown.replace("old", "new")
+        # An Edit of the model's own (no rewrite stands behind it) is made as asked.
+        notes.write_text(landed)
+        assert tools.Edit(**arguments).startswith("Successfully replaced")
+        assert notes.read_text() == landed.replace("old", "new")
 
 
 def test_without_an_agent_the_tool_runs_the_rest_itself(tmp_path: Path) -> None:

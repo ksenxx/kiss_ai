@@ -40,7 +40,7 @@ def _deleted_page_with_remote_copy(tmp_path: Path) -> tuple[MemoryDir, Path]:
     shutil.copytree(local.root, tmp_path / "remote")
     time.sleep(1.1)  # the deletion must be strictly newer than the remote page
     local.delete("p")
-    assert local.tombstone_path("p").exists() and not local.page_path("p").exists()
+    assert (local.root / ".tombstones" / "p").exists() and not local.page_path("p").exists()
     return local, tmp_path / "remote"
 
 
@@ -58,7 +58,7 @@ def test_failed_publish_keeps_the_tombstone_so_the_sync_does_not_resurrect(tmp_p
     finally:
         os.chmod(local.root, stat.S_IRWXU)
     assert not local.page_path("p").exists()
-    assert local.tombstone_path("p").exists()
+    assert (local.root / ".tombstones" / "p").exists()
     counts, _ = merge(remote, local.root, tolerance=0)
     assert counts["added"] == 0
     assert not local.page_path("p").exists(), "the sync brought the deleted page back"
@@ -68,7 +68,7 @@ def test_failed_publish_keeps_the_tombstone_so_the_sync_does_not_resurrect(tmp_p
 @_permission_bits
 def test_unremovable_tombstone_leaves_the_page_beside_it_and_the_page_wins(tmp_path: Path) -> None:
     local, remote = _deleted_page_with_remote_copy(tmp_path)
-    tombstone = local.tombstone_path("p")
+    tombstone = local.root / ".tombstones" / "p"
     os.chmod(tombstone.parent, stat.S_IRUSR | stat.S_IXUSR)
     try:
         with pytest.raises(PermissionError):
@@ -92,7 +92,7 @@ def test_unremovable_tombstone_leaves_the_page_beside_it_and_the_page_wins(tmp_p
 def test_failed_delete_keeps_the_page_and_the_page_wins(tmp_path: Path) -> None:
     local = MemoryDir(tmp_path / "local")
     local.write("p", "body")
-    local.tombstone_path("p").parent.mkdir()
+    (local.root / ".tombstones").mkdir()
     # Read-only memory root with a writable tombstone directory: the
     # tombstone can be written, the page cannot be unlinked.
     os.chmod(local.root, stat.S_IRUSR | stat.S_IXUSR)
@@ -105,7 +105,7 @@ def test_failed_delete_keeps_the_page_and_the_page_wins(tmp_path: Path) -> None:
     (tmp_path / "empty").mkdir()
     counts, _ = merge(tmp_path / "empty", local.root, tolerance=0)
     assert counts["removed"] == 0 and local.read("p").body == "body\n"
-    assert not local.tombstone_path("p").exists()
+    assert not (local.root / ".tombstones" / "p").exists()
 
 
 def test_delete_of_a_missing_page_leaves_no_tombstone(tmp_path: Path) -> None:
@@ -113,13 +113,13 @@ def test_delete_of_a_missing_page_leaves_no_tombstone(tmp_path: Path) -> None:
     memory.write("other", "body")
     with pytest.raises(FileNotFoundError):
         memory.delete("p")
-    assert not memory.tombstone_path("p").exists()
+    assert not (memory.root / ".tombstones" / "p").exists()
 
 
 def test_write_and_delete_of_one_page_are_serialised_under_the_memory_lock(tmp_path: Path) -> None:
     memory = MemoryDir(tmp_path / "memory")
     memory.write("p", "seed")
-    page_path, tombstone = memory.page_path("p"), memory.tombstone_path("p")
+    page_path, tombstone = memory.page_path("p"), memory.root / ".tombstones" / "p"
     barrier = threading.Barrier(3)
     threads = [
         threading.Thread(target=_write_after, args=(barrier, memory)),
@@ -141,7 +141,7 @@ def test_write_and_delete_of_one_page_are_serialised_under_the_memory_lock(tmp_p
 
 def test_concurrent_write_and_delete_leave_page_xor_tombstone(tmp_path: Path) -> None:
     memory = MemoryDir(tmp_path / "memory")
-    page_path, tombstone = memory.page_path("p"), memory.tombstone_path("p")
+    page_path, tombstone = memory.page_path("p"), memory.root / ".tombstones" / "p"
     previous = sys.getswitchinterval()
     sys.setswitchinterval(1e-6)
     try:

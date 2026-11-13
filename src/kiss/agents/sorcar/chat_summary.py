@@ -53,6 +53,13 @@ NOT_SUBAGENT = "(parent_task_id IS NULL OR parent_task_id = '')"
 #: not the sub-agent runs they dispatched.
 LISTABLE = f"chat_id = ? AND {NOT_SUBAGENT}"
 
+#: The farthest instant from the epoch a JavaScript ``Date`` holds, in
+#: milliseconds.  The page dates a task with a ``Date`` and
+#: ``persistence._HISTORY_DONE_SQL`` applies the same bound: a time
+#: beyond it is corrupt data, and one beyond 2**63 is an integer SQLite
+#: cannot store.
+_MAX_EPOCH_MS = 8.64e15
+
 
 def _text(value: object) -> str:
     """Return a ``task_history`` TEXT column value as ``str``.
@@ -130,8 +137,9 @@ def launch_ms(start_ts: int | str | None, timestamp: float | str | None) -> int:
     ``start_ts`` (already ms) when the daemon recorded one, else the
     row's insertion ``timestamp`` (epoch seconds) -- the fallback the
     history panel applies too.  A column SQLite's dynamic typing let a
-    foreign tool fill with text or a non-finite number counts as unset,
-    so one corrupt row never takes a whole history read down.
+    foreign tool fill with text, a non-finite number or a time farther
+    from the epoch than :data:`_MAX_EPOCH_MS` counts as unset, so one
+    corrupt row never takes a whole history read or a finish save down.
 
     Args:
         start_ts: The row's ``start_ts`` column.
@@ -145,27 +153,30 @@ def launch_ms(start_ts: int | str | None, timestamp: float | str | None) -> int:
         start = int(start_ts or 0)
     except (TypeError, ValueError, OverflowError):
         start = 0
-    if start > 0:
+    if 0 < start <= _MAX_EPOCH_MS:
         return start
     try:
-        return int(float(timestamp or 0.0) * 1000)
+        seconds = float(timestamp or 0.0)
     except (TypeError, ValueError, OverflowError):
         return 0
+    return int(seconds * 1000) if abs(seconds) <= _MAX_EPOCH_MS / 1000 else 0
 
 
 def end_ms(end_ts: int | float | str | None) -> int:
     """Return a ``task_history`` row's completion instant in epoch milliseconds.
 
     0 while the task runs, and, with the same guard as :func:`launch_ms`,
-    for a column a foreign tool filled with text or a non-finite number.
+    for a column a foreign tool filled with text, a non-finite number or
+    a time farther from the epoch than :data:`_MAX_EPOCH_MS`.
 
     Args:
         end_ts: The row's ``end_ts`` column.
     """
     try:
-        return int(end_ts or 0)
+        end = int(end_ts or 0)
     except (TypeError, ValueError, OverflowError):
         return 0
+    return end if abs(end) <= _MAX_EPOCH_MS else 0
 
 
 def upsert_chat_summary(db: sqlite3.Connection, chat_id: str) -> None:

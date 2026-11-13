@@ -14,6 +14,10 @@
 // timer cancelled by an earlier callback of the same drain still ran
 // (audit 2026-11-08 WT7/F1: the drain emptied the ledger before running
 // anything, so the page's clearTimeout found no record to mark).
+// waitFor looks at its predicate before its deadline: a poll that resumes
+// late returns a condition met meanwhile (audit 2026-11-10 A/WT7-F1).
+// withTeardown runs its teardown once each test has settled, never under
+// an asynchronous test that is still running.
 
 'use strict';
 
@@ -25,7 +29,8 @@ const {
   recordTimers,
   fireTimers,
   queueRaf,
-  sleep,
+  waitFor,
+  withTeardown,
 } = require('./simplify2_harness');
 
 async function testNaturallyFiredTimerIsNotFiredAgain() {
@@ -33,7 +38,7 @@ async function testNaturallyFiredTimerIsNotFiredAgain() {
   const timers = captureTimers(win);
   const runs = [];
   win.setTimeout((a, b) => runs.push([a, b]), 1, 'x', 'y');
-  await sleep(30);
+  await waitFor(() => runs.length, 'the timer never fired on its own');
   assert.deepStrictEqual(runs, [['x', 'y']], 'the timer fired on its own');
   fireCapturedTimers(win, timers);
   assert.strictEqual(runs.length, 1, 'a timer that fired is not fired again');
@@ -130,11 +135,44 @@ function testFrameCancelledByAnEarlierFrameDoesNotRun() {
   console.log('  ok - queueRaf: a frame cancelled from its own batch stays quiet');
 }
 
+async function testConditionMetBeforeALatePollIsNotATimeout() {
+  let met = '';
+  // Runs right after waitFor's first look and stalls past its budget,
+  // which is wide enough that a busy machine does not use it up before
+  // the first look is over.
+  queueMicrotask(() => {
+    met = 'value';
+    const end = Date.now() + 120;
+    while (Date.now() < end);
+  });
+  assert.strictEqual(await waitFor(() => met, 'timed out', 100), 'value');
+  await assert.rejects(waitFor(() => false, 'never met', 5), /never met/);
+  await assert.rejects(waitFor(() => false, '', 0), /waitFor timed out/);
+  console.log('  ok - waitFor: a late poll returns a condition met in time');
+}
+
+async function testTeardownFollowsEachSettledTest() {
+  const order = [];
+  const test = withTeardown(
+    (name, fn) => fn(),
+    () => order.push('teardown'),
+  );
+  await test('sync', () => order.push('sync'));
+  await test('async', async () => {
+    await Promise.resolve();
+    order.push('async');
+  });
+  assert.deepStrictEqual(order, ['sync', 'teardown', 'async', 'teardown']);
+  console.log('  ok - withTeardown: the teardown follows each settled test');
+}
+
 async function main() {
   await testNaturallyFiredTimerIsNotFiredAgain();
   testTimerCancelledByAnEarlierCallbackOfTheDrainStaysQuiet();
   testDrainingTheRecordedTimersTwiceRunsEachOnce();
   testFrameCancelledByAnEarlierFrameDoesNotRun();
+  await testConditionMetBeforeALatePollIsNotATimeout();
+  await testTeardownFollowsEachSettledTest();
   console.log('simplify2_harness: all tests passed');
 }
 

@@ -33,6 +33,7 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
     _load_history,
 )
+from kiss.tests.persistence_helpers import close_db
 
 
 class _TempDbTestBase:
@@ -40,18 +41,17 @@ class _TempDbTestBase:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         th._invalidate_chat_context_cache("")
 
     def teardown_method(self) -> None:
-        th._close_db()
+        close_db()
         th._invalidate_chat_context_cache("")
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        th._DB_PATH, th._KISS_DIR = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _corrupt_column(self, task_id: str, column: str, value: object) -> None:
@@ -134,3 +134,16 @@ class TestBlobInTextColumns(_TempDbTestBase):
 
         tags = db.execute("SELECT tags FROM task_history WHERE id = ?", (tid,)).fetchone()[0]
         assert "failed" in tags.split(","), tags
+
+    def test_task_list_and_chat_header_decode_blob_texts(self) -> None:
+        """The recommendations task list and a chat's header show a BLOB text, not its repr."""
+        tid, chat = _add_task("placeholder")
+        for column in ("task", "work_dir", "model", "sea", "result"):
+            self._corrupt_column(tid, column, f"blob {column}".encode())
+
+        [row] = th.user_tasks_since(0.0)
+
+        assert [row[key] for key in ("task", "workDir", "model", "sea", "result")] == [
+            "blob task", "blob work_dir", "blob model", "blob sea", "blob result",
+        ]
+        assert th._chat_first_tasks([chat]) == {chat: "blob task"}

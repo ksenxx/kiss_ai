@@ -69,12 +69,11 @@ class TestDaemonLinkPeerFanout(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-link-fanout-")
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
@@ -89,9 +88,8 @@ class TestDaemonLinkPeerFanout(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        th._close_thread_db()
+        th._DB_PATH, th._KISS_DIR = self.saved
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

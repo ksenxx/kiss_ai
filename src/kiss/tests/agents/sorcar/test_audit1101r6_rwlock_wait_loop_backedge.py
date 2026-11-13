@@ -2,7 +2,7 @@
 
 CPython 3.13 leaves the back-edge ``JUMP_BACKWARD`` of a ``while`` loop
 outside the exception table of the handlers of its own frame (cpython
-#108214), so an injected ``KeyboardInterrupt`` raised on the back-edge of
+gh-130279), so an injected ``KeyboardInterrupt`` raised on the back-edge of
 a wait loop written inside the acquisition's ``try`` skipped the
 ``finally`` and left the condition's mutex held by the thread that then
 died: every later reader and writer of the daemon's database waited on

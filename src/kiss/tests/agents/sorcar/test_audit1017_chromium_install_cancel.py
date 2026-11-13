@@ -17,6 +17,8 @@ records its pid; no mocks, patches or fakes of the code under test.
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import os
 import signal
 import subprocess
@@ -24,13 +26,19 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from kiss.agents.sorcar.web_use_tool import _install_chromium
-from kiss.core.processes import pid_alive
-from kiss.core.tool_interrupt import inject_async_exception
+from kiss.core.processes import kill_process_group, pid_alive, waitid_exited
+from kiss.core.tool_interrupt import ToolCallInterrupted, inject_async_exception
+from kiss.tests.agents.sorcar.test_webuse_unresponsive_page_timeout import (
+    _stop_in,
+    _StopWhileTimerStarts,
+)
 from kiss.tests.conftest import posix_only
+from kiss.tests.server.pause import Pause, Pauses
 
 pytestmark = posix_only("process groups and PyThreadState_SetAsyncExc on a thread")
 
@@ -128,3 +136,36 @@ def test_installer_exit_status(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="exited with status 3"):
         _install_chromium(command, timeout=30.0)
     os.kill(_grandchild_pid(pid_file), signal.SIGKILL)
+
+
+def _note_reaped_leader(signalled: list[int], entry: dict[str, Any]) -> bool:
+    """Record a group signal whose leader is no longer this process's unreaped child."""
+    try:
+        waitid_exited(entry["pid"])
+    except ChildProcessError:
+        signalled.append(entry["pid"])
+    return False
+
+
+@pytest.mark.parametrize("stop_at", ["the wait returns", "the status is not kept yet"])
+def test_stop_once_the_installer_is_reaped_signals_no_group(stop_at: str) -> None:
+    """A Stop landing once the installer has been reaped signals no process group.
+
+    The reaped launcher's pid, and so its group's id, is free for a
+    stranger: as the wait that reaped it returns, and already between
+    the ``waitpid`` and the assignment of ``returncode``, where a check
+    of ``returncode`` still reads a running child.
+    """
+    signalled: list[int] = []
+    hooks = [Pause(kill_process_group.__code__, functools.partial(_note_reaped_leader, signalled))]
+    stop: Any = contextlib.nullcontext()
+    if stop_at == "the wait returns":
+        stop = _StopWhileTimerStarts(subprocess.Popen.wait.__code__)
+    else:
+        stopping = functools.partial(_stop_in, threading.get_ident())
+        # CPython's private POSIX method, which typeshed leaves out.
+        keeps_status = subprocess.Popen._handle_exitstatus.__code__  # type: ignore[attr-defined]
+        hooks.append(Pause(keeps_status, stopping))
+    with Pauses(*hooks), stop, pytest.raises(ToolCallInterrupted):
+        _install_chromium([sys.executable, "-c", "pass"], timeout=30.0)
+    assert not signalled, f"the group of the reaped installer {signalled} was signalled"

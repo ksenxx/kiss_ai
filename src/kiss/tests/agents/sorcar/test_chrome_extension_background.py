@@ -96,7 +96,7 @@ const sock = {
 };
 const context = vm.createContext({
   chrome, WebSocket: { OPEN: 1 }, fetch: () => Promise.reject(new Error('no bridge')),
-  setTimeout, clearTimeout, setInterval, clearInterval, console,
+  setTimeout, clearTimeout, setInterval, clearInterval, console, URL,
 });
 vm.runInContext(input.source, context, { filename: 'background.js' });
 const handleCommand = vm.runInContext('handleCommand', context);
@@ -143,7 +143,7 @@ const chrome = {
 const sock = { readyState: 1, send(text) { const r = JSON.parse(text); replies[r.id] = r; } };
 const context = vm.createContext({
   chrome, WebSocket: { OPEN: 1 }, fetch: () => Promise.reject(new Error('no bridge')), console,
-  Date: { now: () => now },
+  URL, Date: { now: () => now },
   setTimeout(fn, delay) { const t = { fn, delay, live: true }; timers.push(t); return t; },
   clearTimeout(t) { if (t) t.live = false; },
   setInterval() {}, clearInterval() {},
@@ -168,6 +168,11 @@ const settle = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(
   console.log(JSON.stringify({ answered, calls, replies }));
 })();
 """
+
+
+# Not covered: a closed socket's server proof completing after its replacement authenticated
+# (the ``sock !== ws`` guard in connect()'s hello_ok handler). That handler exists only on a
+# socket connect() opened, and the order only with a digest held open: both would be stand-ins.
 
 
 def test_a_queued_command_answered_by_an_early_timer_never_runs() -> None:
@@ -241,7 +246,7 @@ def test_type_text_with_an_empty_string_clears_the_field() -> None:
         "type_text", "", args={"tabId": 1, "uid": 4, "text": ""}, timeout_ms=1000,
     )
     assert out["replies"]["1"] == {"id": 1, "ok": True, "result": "ran"}
-    assert [c for c in out["calls"] if c.startswith("script:")][0].endswith('(4, "")')
+    assert [c for c in out["calls"] if c.startswith("script:")][0].endswith('(4, "", null)')
     # A missing text is still refused before the page is touched.
     out = _run_focus_race("type_text", "", args={"tabId": 1, "uid": 4}, timeout_ms=1000)
     assert out["replies"]["1"]["ok"] is False

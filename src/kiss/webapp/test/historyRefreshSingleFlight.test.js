@@ -21,18 +21,20 @@
 
 const assert = require('assert');
 const {makePage, send, ofType} = require('./simplify2_harness');
-const {machineSession: session, rowTitles} = require('./history_helpers');
+const {
+  machineSession: session,
+  rowTitles,
+  lastGetHistory: lastRequest,
+  freezeClock,
+} = require('./history_helpers');
+
+const FROZEN_NOW_MS = 1_700_500_000_000;
 
 const SESSIONS = [
   session(1, 'local one', ''),
   session(2, 'box task', 'box'),
   session(3, 'lab task', 'lab'),
 ];
-
-function lastRequest(posted) {
-  const reqs = ofType(posted, 'getHistory');
-  return reqs[reqs.length - 1];
-}
 
 function reply(generation, sessions, offset = 0) {
   return {
@@ -54,8 +56,14 @@ function chips(win) {
   return Array.from(new Set(names));
 }
 
+// The page's clock stands still: a flight is given up on after 30 s of
+// it, so on the host's clock a stalled run would end the flight under a
+// test that folds into it (testAStalledFlightIsGivenUpOn moves the
+// clock itself).
 function openPage() {
-  const {win, posted} = makePage();
+  const {win, posted} = makePage({
+    beforeScripts: w => freezeClock(w, FROZEN_NOW_MS),
+  });
   win.document.getElementById('sidebar').classList.add('open');
   send(win, {type: 'daemonStatus', connected: true});
   const first = lastRequest(posted);
@@ -70,7 +78,7 @@ function testBurstFoldsIntoTheFlightAndEveryReplyShows() {
   // The load burst: task news while page one is still in flight.
   const tabId = win._testApi.getActiveTabId();
   send(win, {type: 'tasks_updated'});
-  send(win, {type: 'status', running: true, attached: true, tabId, startTs: Date.now()});
+  send(win, {type: 'status', running: true, attached: true, tabId, startTs: FROZEN_NOW_MS});
   send(win, {type: 'status', running: false, tabId});
   send(win, {type: 'tasks_updated'});
   assert.strictEqual(
@@ -158,24 +166,28 @@ function testAReconnectDoesNotWaitOnALostReply() {
 function testAStalledFlightIsGivenUpOn() {
   const {win, posted} = openPage();
   posted.length = 0;
-  const realNow = win.Date.now;
-  win.Date.now = () => realNow() + 31_000;
-  try {
-    send(win, {type: 'tasks_updated'});
-    assert.strictEqual(
-      ofType(posted, 'getHistory').length,
-      1,
-      'a page-one request 30 s without a reply is not waited on',
-    );
-  } finally {
-    win.Date.now = realNow;
-  }
+  win.Date.now = () => FROZEN_NOW_MS + 29_000;
+  send(win, {type: 'tasks_updated'});
+  assert.strictEqual(
+    ofType(posted, 'getHistory').length,
+    0,
+    'a page-one request under 30 s old is still waited on',
+  );
+  win.Date.now = () => FROZEN_NOW_MS + 31_000;
+  send(win, {type: 'tasks_updated'});
+  assert.strictEqual(
+    ofType(posted, 'getHistory').length,
+    1,
+    'a page-one request 30 s without a reply is not waited on',
+  );
   win.close();
   console.log('  ok - a stalled flight is given up on');
 }
 
 function testAClosedPanelFoldsNothing() {
-  const {win, posted} = openPage();
+  const {win, posted, first} = openPage();
+  // Page one has landed: no flight is left for the news to fold into.
+  send(win, reply(first.generation, SESSIONS));
   posted.length = 0;
   win.document.getElementById('sidebar').classList.remove('open');
   send(win, {type: 'tasks_updated'});

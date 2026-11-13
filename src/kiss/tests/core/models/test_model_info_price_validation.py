@@ -34,6 +34,13 @@ _BAD_PRICES: list[tuple[str, Any]] = [
     ("infinite", json.loads("1e309")),
     ("nan", json.loads("NaN")),
     ("over-float-int", 10**400),
+    # Finite itself, but its 2.5x long-lifetime cache-write price is not:
+    # the entry loaded with an ``inf`` rate and every cost was ``NaN``
+    # (``0 tokens x inf``).
+    ("overflowing", 1e308),
+    # The other end: as an input price it makes the cached-audio rate
+    # ``audio x cache_read / input`` infinite.
+    ("vanishing", 1e-300),
 ]
 
 

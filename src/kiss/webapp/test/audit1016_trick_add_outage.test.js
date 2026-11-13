@@ -18,7 +18,13 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  byId,
+  typeInto,
+  ofType,
+} = require('./simplify2_harness');
 
 function addErrorText(doc) {
   const el = doc.getElementById('tricks-add-error');
@@ -26,10 +32,13 @@ function addErrorText(doc) {
 }
 
 function submitAdd(win, text) {
-  const addInput = win.document.getElementById('tricks-add-input');
-  addInput.value = text;
-  addInput.dispatchEvent(new win.Event('input', {bubbles: true}));
+  typeInto(win, byId(win, 'tricks-add-input'), text);
   win.document.getElementById('tricks-add-btn').click();
+}
+
+function dropAndReconnect(win) {
+  send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
+  send(win, {type: 'daemonStatus', connected: true});
 }
 
 function testOutageDropsThePendingAdd() {
@@ -40,14 +49,13 @@ function testOutageDropsThePendingAdd() {
 
   submitAdd(win, 'Delta promptlet');
   assert.strictEqual(
-    posted.filter(m => m.type === 'addTrick').length,
+    ofType(posted, 'addTrick').length,
     1,
     'the Add click posts addTrick',
   );
 
   // The reply never comes: the socket drops and comes back.
-  send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
-  send(win, {type: 'daemonStatus', connected: true});
+  dropAndReconnect(win);
   assert.strictEqual(
     doc.getElementById('tricks-add-input').value,
     'Delta promptlet',
@@ -74,6 +82,66 @@ function testOutageDropsThePendingAdd() {
 
   win.close();
   console.log('  ok - an outage drops the pending promptlet add');
+}
+
+function editFirstRow(win, text) {
+  const doc = win.document;
+  doc.querySelector('#tricks-list .sidebar-item-edit').click();
+  doc.querySelector('.tricks-edit-input').value = text;
+  doc.querySelector('.tricks-edit-save').click();
+}
+
+function openPromptlets(tricks) {
+  const page = makePage();
+  send(page.win, {type: 'daemonStatus', connected: true});
+  send(page.win, {type: 'tricksData', tricks, userCount: tricks.length});
+  page.win.document.getElementById('tricks-btn').click();
+  return page;
+}
+
+// Audit 2026-11-11 (W1): an edit's new text lives nowhere else once
+// its editor is closed.  The disconnect dropped the pending edits like
+// the add's wait, and their texts with them: a change queued behind an
+// unanswered edit was never sent, and an edit the daemon had not
+// applied was gone from the page.
+function testOutageKeepsThePendingEdits() {
+  // The first edit reached the disk: the one queued behind it goes out.
+  let {win, posted} = openPromptlets(['Original A']);
+  editFirstRow(win, 'First B');
+  editFirstRow(win, 'Latest C');
+  const edits = () => ofType(posted, 'editTrick');
+  assert.strictEqual(edits().length, 1, 'setup: the second edit waits for the first answer');
+  dropAndReconnect(win);
+  send(win, {type: 'tricksData', tricks: ['First B'], userCount: 1});
+  assert.deepStrictEqual(
+    edits()
+      .slice(1)
+      .map(m => m.text + ' -> ' + m.newText),
+    ['First B -> Latest C'],
+    'BUG - the edit queued behind the outage was never sent',
+  );
+  assert.strictEqual(
+    win.document.querySelector('#tricks-list .sidebar-item-text').textContent,
+    'Latest C',
+  );
+  win.close();
+
+  // The edit never reached the disk: its text comes back as a draft,
+  // and an unrelated error after the reconnect is not its rejection.
+  ({win, posted} = openPromptlets(['Original A']));
+  editFirstRow(win, 'First B');
+  dropAndReconnect(win);
+  send(win, {type: 'error', text: 'Update failed: no network'});
+  send(win, {type: 'tricksData', tricks: ['Original A'], userCount: 1});
+  const editor = win.document.querySelector('.tricks-edit-input');
+  assert.ok(editor, 'BUG - the unsaved edit was dropped with the connection');
+  assert.strictEqual(editor.value, 'First B', 'the draft is back to be saved again');
+  const shown = win.document.getElementById('tricks-list').textContent;
+  assert.ok(shown.includes('connection dropped'), 'with the reason: ' + shown);
+  assert.ok(!shown.includes('Update failed'), 'an unrelated error is not its rejection');
+  assert.strictEqual(edits().length, 1, 'nothing is sent again on its own');
+  win.close();
+  console.log('  ok - an outage keeps the pending promptlet edits');
 }
 
 function testRejectionStillShowsWithoutOutage() {
@@ -116,6 +184,7 @@ function testAnotherCommandsRefusalIsNotTheAdds() {
 
 try {
   testOutageDropsThePendingAdd();
+  testOutageKeepsThePendingEdits();
   testRejectionStillShowsWithoutOutage();
   testAnotherCommandsRefusalIsNotTheAdds();
 } catch (e) {

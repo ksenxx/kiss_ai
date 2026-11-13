@@ -4,8 +4,10 @@
 # add your name here
 """Running history sections through real SQLite, daemon tasks, WSS and Chromium.
 
-The live task uses a real model and Bash tool, waiting for a release file. No
-worker, transport, clock, model or browser API is replaced. Completed rows and
+The live task is a real daemon task that waits in the real Bash tool for a
+release file. Its model is the tests' local stand-in endpoint
+(``StandInModelServer``), so the run needs no API key and no network. No
+worker, transport, clock or browser API is replaced. Completed rows and
 historical dates are fixture data in the isolated test database.
 
 The daemon writes finite timestamps and chat IDs. Missing/invalid timestamp and
@@ -30,6 +32,12 @@ from playwright.sync_api import expect, sync_playwright
 
 from kiss.agents.sorcar import persistence
 from kiss.agents.sorcar.daemon_client import run
+from kiss.tests.server.parallel_agent_harness import (
+    STANDIN_MODEL,
+    StandInModelServer,
+    finish_response,
+    tool_call_response,
+)
 from kiss.tests.server.test_content_tab_file_links import _ServerHarness
 from kiss.tests.webapp.test_content_tab_file_links import _open_page
 
@@ -53,6 +61,26 @@ def _date(task_id: str, timestamp: float) -> None:
             "UPDATE task_history SET timestamp = ? WHERE id = ?",
             (timestamp, task_id),
         )
+
+
+def _respond(release: Path, _request: dict[str, Any]) -> dict[str, Any]:
+    """Answer the live task's model calls: wait in Bash for *release*, then finish.
+
+    The wait is asked for again until the test releases the task: one
+    wait cannot span the UI steps of a loaded run, because a foreground
+    Bash call longer than ``bash_detach_seconds`` (120 s) goes on as a
+    background job and returns.
+    """
+    if release.exists():
+        return finish_response("released")
+    return tool_call_response(
+        "Bash",
+        {
+            "command": f"while [ ! -f '{release}' ]; do sleep 0.2; done",
+            "description": "Wait for the release file",
+            "timeout_seconds": 60,
+        },
+    )
 
 
 def _assert_live(task: Future[Any]) -> None:
@@ -103,21 +131,15 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
     cancel = threading.Event()
     today = dt.datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
     yesterday = (today - dt.timedelta(days=1)).timestamp()
-    # Left to itself the model picks the Bash timeout (gpt-5.4-mini often
-    # chose 1 to 5 s), and the task finished seconds in, while a loaded
-    # parallel run was still clicking through the steps below.
-    prompt = (
-        "section-live: Use Bash to run this command once in the foreground with "
-        "timeout_seconds=900, then finish successfully: "
-        f"`while [ ! -f '{release}' ]; do sleep 0.2; done`. "
-        "Do not create the release file. Do not do any other work."
-    )
+    prompt = "section-live: wait for the release file"
+    model = StandInModelServer(partial(_respond, release))
     pool = ThreadPoolExecutor(max_workers=1)
     task = pool.submit(
         run,
         prompt,
         chat_id="running-section-chat",
-        model="gpt-5.4-mini",
+        model=STANDIN_MODEL,
+        model_config=model.model_config,
         work_dir=str(harness.work_dir),
         auto_classify=False,
         use_memory=False,
@@ -312,3 +334,4 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
         cancel.set()
         pool.shutdown(wait=True, cancel_futures=True)
         harness.stop()
+        model.stop()

@@ -12,10 +12,11 @@ Covers the scheduler behaviour added on top of the base cron agent:
 - a tick that overlaps runs from a previous tick is not skipped: it
   starts the due jobs that are idle and leaves the still-running one
   alone, which runs again on the first tick after it finishes;
-- a tick in another process over the same store (``kiss-cron --tick``
-  beside the daemon's scheduler) finds the run recorded on the job and
-  leaves it alone too; the record of a process that died mid-run is
-  dropped and the job runs;
+- a scheduler in another process over the same store (``kiss-cron
+  --tick`` beside the daemon's scheduler) finds the run by the lock it
+  holds and leaves the job alone too; nothing but the end of the run,
+  or of the process running it, frees the job, not even a Stop raised
+  as the run's thread starts;
 - the scheduler thread never blocks on a long job;
 - ``gateway_command`` turns a channel + chat into the channel CLI's
   tick command so an always-on gateway is scheduled as a command job.
@@ -24,6 +25,11 @@ Everything runs against the real JSON store under an isolated
 ``KISS_HOME`` (fixture reused from ``test_cron_agent``); only the
 daemon-client boundary of prompt jobs is captured, as in
 ``test_cron_agent.test_prompt_job_runs_as_generated_sea``.
+
+Not covered, and why: ``_launch`` refusing a job whose run lock or
+registry entry is taken.  Its callers rule both out under the store
+lock just before, so only a process that takes the run lock without
+the store lock in that instant gets there.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import pytest
@@ -231,13 +238,26 @@ def _tick_in_another_process(now: float) -> int:
     return int(completed.stdout.strip().splitlines()[-1])
 
 
+def _run_now_in_another_process(job_id: str, reply: Path) -> subprocess.Popen[bytes]:
+    """Start ``cron_job("run_now")`` of *job_id* in a second process; its reply goes to *reply*."""
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from kiss.agents.sorcar.cron_agent import cron_job\n"
+        "Path(sys.argv[2]).write_text(cron_job('run_now', job_id=sys.argv[1]))\n"
+    )
+    return subprocess.Popen([sys.executable, "-c", code, job_id, str(reply)])
+
+
 def test_a_tick_in_another_process_leaves_the_running_job_alone(tmp_path: Path) -> None:
-    """The store, not a process's own registry, says a job is running.
+    """The run's lock, not a process's own registry, says a job is running.
 
     A second scheduler over the same store cannot see this process's
-    threads: it must find the run recorded on the job (``running_pid``)
-    and skip it, and a record left by a process that died mid-run must
-    not block the job.
+    threads: it must find the run by the lock it holds and skip the job.
+    What an older version recorded on the job instead, the pid of the
+    process running it, claims nothing: such a record was trusted for as
+    long as some process had that pid, so after a reboot the job was
+    skipped by every tick and refused by every "run now".
     """
     release = tmp_path / "release"
     gate = shlex.quote(release.as_posix())
@@ -245,7 +265,6 @@ def test_a_tick_in_another_process_leaves_the_running_job_alone(tmp_path: Path) 
     assert tick(2.0, wait=False) == 1
     try:
         _wait_until(lambda: running_job_ids() == {slow["id"]})
-        assert _stored(slow["id"])["running_pid"] == os.getpid()
         # Due again for the other process: it leaves the job alone.
         _set_job_fields(slow["id"], next_run_at=1.0)
         assert _tick_in_another_process(3.0) == 0
@@ -255,15 +274,141 @@ def test_a_tick_in_another_process_leaves_the_running_job_alone(tmp_path: Path) 
         release.touch()
     _wait_until(lambda: running_job_ids() == set())
     assert _stored(slow["id"])["last_summary"] == "slow-done"
-    assert "running_pid" not in _stored(slow["id"])
 
-    # The record of a process that died mid-run is stale: the job runs.
-    dead = subprocess.Popen([sys.executable, "-c", "pass"])
-    assert dead.wait() == 0
-    _set_job_fields(slow["id"], next_run_at=1.0, running_pid=dead.pid)
+    # An older version's record of a live process (this one): the job runs.
+    _set_job_fields(slow["id"], next_run_at=1.0, running_pid=os.getpid())
     assert _tick_in_another_process(4.0) == 1
     assert _stored(slow["id"])["last_run_at"] == 4.0
-    assert "running_pid" not in _stored(slow["id"])
+
+
+def test_only_the_end_of_a_run_or_of_its_process_frees_the_job(tmp_path: Path) -> None:
+    """A run in another process is not overlapped, whatever the store says of it.
+
+    The claim was a record on the stored job, the runner's pid and the
+    time: older than the job's timeout plus ten minutes it was dropped
+    as stale, so a step of the wall clock let a second process start the
+    job beside a first one still inside its timeout, and the first one's
+    outcome then removed the second one's record for a third to start.
+    The stored job is rewritten here while the run is on, as that expiry
+    and that outcome left it: without a record.  A process killed
+    mid-run frees the job at once, not when its pid is nobody's.
+    """
+    started = tmp_path / "started"
+    release = tmp_path / "release"
+    job = _due_command_job(
+        "gated",
+        f"echo started >> {shlex.quote(started.as_posix())}; "
+        f"until [ -f {shlex.quote(release.as_posix())} ]; do sleep 0.1; done; echo done",
+    )
+    unclaimed = load_jobs()
+    refusal = tmp_path / "refusal"
+    runners = [_run_now_in_another_process(job["id"], tmp_path / "unfinished")]
+    try:
+        _wait_until(started.exists, timeout=60.0)
+        cron_agent.save_jobs(unclaimed)
+        second = _run_now_in_another_process(job["id"], refusal)
+        runners.append(second)
+        _wait_until(
+            lambda: second.poll() is not None or len(started.read_text().split()) > 1,
+            timeout=60.0,
+        )
+        assert started.read_text().split() == ["started"], "the job ran twice at once"
+        assert "already running" in refusal.read_text()
+        assert "already running" in cron_agent.apply_job_action("run_now", job["id"])
+        assert _tick_in_another_process(2.0) == 0
+        # The first process dies mid-run; its command, in its own
+        # session, runs on until released.
+        assert runners[0].poll() is None
+        runners[0].kill()
+        runners[0].wait()
+        release.touch()
+        assert _tick_in_another_process(3.0) == 1
+        assert _stored(job["id"])["last_summary"] == "done"
+    finally:
+        release.touch()
+        for runner in runners:
+            runner.kill()
+            runner.wait()
+
+
+@pytest.mark.parametrize("taker", ["thread", "launcher"])
+def test_a_stop_as_the_run_thread_starts_leaves_the_run_lock_one_owner(
+    tmp_path: Path, taker: str,
+) -> None:
+    """A Stop raised as ``Thread.start`` returns must not take the lock of a thread that runs.
+
+    The launcher gave the run lock and the registration back unless the
+    line after ``start()`` had run.  An interrupt raised as that call
+    returns (Ctrl-C on ``kiss-cron --tick``) skips the line with the
+    thread started: the job ran on, unlocked and unregistered, so a
+    second process started it too and the interrupted scheduler did not
+    stop its command.  The lock has one owner either way: the thread,
+    whose run stays locked and registered, or the launcher, when the
+    thread had not taken the lock yet (it is held back here until the
+    launcher is done) and then runs nothing.
+    """
+    started = tmp_path / "started"
+    release = tmp_path / "release"
+    job = _due_command_job(
+        "gated",
+        f"echo started >> {shlex.quote(started.as_posix())}; "
+        f"until [ -f {shlex.quote(release.as_posix())} ]; do sleep 0.1; done; echo done",
+    )
+    threads: list[threading.Thread] = []
+    launcher_done = threading.Event()
+
+    def stop_as_start_returns(frame: FrameType, event: str, arg: Any) -> Any:
+        if frame.f_code is not threading.Thread.start.__code__:
+            return None
+        if event == "return" and frame.f_locals["self"].name == f"kiss-cron-job-{job['id']}":
+            sys.settrace(None)
+            threads.append(frame.f_locals["self"])
+            if taker == "thread":
+                _wait_until(started.exists)
+            raise KeyboardInterrupt
+        return stop_as_start_returns
+
+    def hold_the_run_thread(frame: FrameType, event: str, arg: Any) -> Any:
+        if frame.f_code is cron_agent._run_locked.__code__:
+            launcher_done.wait(10)
+
+    traces = (sys.gettrace(), threading.gettrace())
+    if taker == "launcher":
+        threading.settrace(hold_the_run_thread)
+    sys.settrace(stop_as_start_returns)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            cron_agent.apply_job_action("run_now", job["id"])
+    finally:
+        sys.settrace(traces[0])
+        threading.settrace(traces[1])  # type: ignore[arg-type]
+        launcher_done.set()
+    try:
+        if taker == "thread":
+            second = _run_now_in_another_process(job["id"], tmp_path / "refusal")
+            try:
+                _wait_until(
+                    lambda: second.poll() is not None or len(started.read_text().split()) > 1,
+                    timeout=60.0,
+                )
+                assert started.read_text().split() == ["started"], "the job ran twice at once"
+                assert "already running" in (tmp_path / "refusal").read_text()
+            finally:
+                second.kill()
+                second.wait()
+            assert running_job_ids() == {job["id"]}
+            assert "already running" in cron_agent.apply_job_action("run_now", job["id"])
+        else:
+            threads[0].join(5)
+            assert not started.exists(), "the job ran without its run lock"
+            assert running_job_ids() == set()
+            assert cron_agent.apply_job_action("run_now", job["id"]) == ""
+    finally:
+        release.touch()
+        threads[0].join(30)
+    _wait_until(lambda: running_job_ids() == set())
+    assert started.read_text().split() == ["started"]
+    assert _stored(job["id"])["last_summary"] == "done"
 
 
 def test_scheduler_thread_does_not_block_on_long_job(tmp_path: Path) -> None:
@@ -413,6 +558,10 @@ def test_gateway_command_job_never_delivers_to_a_chat(
         '| sort -V | tail -n1)" --channel=C0AKYSNLB7W --quiet'
     )
     assert cron_agent._is_gateway_command('kiss-slack "--channel=C0AKYSNLB7W" --quiet')
+    # A lookup by name has no path in front of the launcher.
+    assert cron_agent._is_gateway_command('"$(command -v kiss-slack)" --channel=C0AKYSNLB7W')
+    assert cron_agent._is_gateway_command("$(which kiss-slack) --channel C0AKYSNLB7W --quiet")
+    assert not cron_agent._is_gateway_command('echo "$(date) kiss-slack" --channel=C0AKYSNLB7W')
     assert not cron_agent._is_gateway_command("kiss-slack --channels C0AKYSNLB7W")
     assert not cron_agent._is_gateway_command("echo 'unbalanced")
     other = _create(cron_job(

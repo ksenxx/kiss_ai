@@ -20,6 +20,9 @@
   charges, so a daemon that dies anywhere around the bank, a second final
   save, and a charge recorded by a process without the parent's agent all
   count the charge once.
+* A charge another process commits while the parent's final save runs
+  (after its read of the pending charges) is banked by that save too:
+  the ledger its caller folds holds what the row holds.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from types import SimpleNamespace
@@ -42,6 +46,7 @@ from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar import sorcar_agent
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.machines import LOCAL_MACHINE
+from kiss.agents.sorcar.relentless_agent import _OFFSET_PUBLISH_LOCK
 from kiss.server import agent_state, task_update
 from kiss.server import sorcar as server_api
 from kiss.server.agent_state import AgentState
@@ -58,6 +63,10 @@ from kiss.tests.agents.sorcar.test_audit1103_remote_costs import (
     _costs_by_model,
     _row,
     _task,
+)
+from kiss.tests.agents.sorcar.test_audit1109_remote_final_bank import (
+    _save_on_thread,
+    _wait_parked_in_bank,
 )
 from kiss.tests.agents.sorcar.test_history_date_range import _redirect, _restore
 from kiss.tests.server.test_history_date_range import _make_server
@@ -207,6 +216,7 @@ class TestRemoteFixes(base.TestRemoteSubagentCosts):
 
     def _die_after_a_usage_event(
         self, child: str, report: dict[str, Any], function: str, legacy: bool = False,
+        step: bool = True,
     ) -> str:
         """In another process: the running parent's real printer and agent take the charge
         for *child*; the charging thread stops as *function* returns, the parent's own
@@ -248,13 +258,16 @@ class TestRemoteFixes(base.TestRemoteSubagentCosts):
 
             def charge():
                 sys.setprofile(stop)
-                charge_remote_subtask_usage(None, {child!r}, {report!r})
+                # Without a step after it, the bank's own publication is the last event.
+                charge_remote_subtask_usage(
+                    None if {step!r} else printer, {child!r}, {report!r},
+                )
 
             threading.Thread(target=charge, daemon=True).start()
             assert stopped.wait(30), "the charge did not reach " + {function!r}
             # The parent's executor prints its next step: session-relative text and
             # counters, which the printer offsets to the task's totals.
-            printer.print(
+            if {step!r}: printer.print(
                 "Steps: 2/100, Context: 1,000/200,000 tokens, Total tokens: 40, "
                 "Budget: $3.5100/$10.00, ",
                 type="usage_info", total_tokens=40, cost="$0.0100", cost_usd=0.01,
@@ -324,6 +337,36 @@ class TestRemoteFixes(base.TestRemoteSubagentCosts):
                 self.assertEqual(_row(parent), (3.51, 390, 8))
                 self.assertEqual(_charges(parent), [(0.5, 50, 1)])
                 self.assertEqual(_settled(parent), [1])
+
+    def test_spend_banked_after_the_last_step_is_recovered_once(self) -> None:
+        """The process dies after the charge's whole publication and before the parent's
+        next step: its last usage event is the bank's own (no text, the task's totals, the
+        ledger stamp), and recovery adopts it, the delta once, not the step before it."""
+        self._on(self.remote_dir)
+        report = self._report(_task(ASTRA, 2.5, 250, 4))  # C's row, a late $0.5 included
+        self._on(self.local_dir)
+        th._get_db()
+        parent = self._die_after_a_usage_event(
+            "remote-bank-last-child", report,
+            "sys.modules['kiss.server.task_update']._publish_charge", step=False,
+        )
+        last = th._get_db().execute(
+            "SELECT event_json FROM events WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (parent,),
+        ).fetchone()
+        saved = json.loads(last[0])
+        self.assertEqual(saved["text"], "")
+        self.assertEqual(saved["banked"], [3.5, 350, 6])
+        self.assertEqual((saved["cost_usd"], saved["total_tokens"], saved["total_steps"]),
+                         (3.5, 350, 6))
+        self.assertEqual(_row(parent), (0.0, 0, 0))
+        self.assertEqual(th._recover_orphaned_tasks(set()), 1)
+        self.assertEqual(_row(parent), (3.5, 350, 6))
+        charge_remote_subtask_usage(None, "remote-bank-last-child", report)  # nothing new
+        self.assertEqual(th._recover_orphaned_tasks(set()), 0)
+        self.assertEqual(_row(parent), (3.5, 350, 6))
+        self.assertEqual(_charges(parent), [(0.5, 50, 1)])
+        self.assertEqual(_settled(parent), [1])
 
     def test_a_charge_of_cost_alone_is_recovered_once_around_the_bank(self) -> None:
         """A report grown in cost alone (an ``/ask`` answer billed without tokens or steps)
@@ -472,6 +515,42 @@ class TestRemoteFixes(base.TestRemoteSubagentCosts):
         self.assertEqual(_charges(parent), [(0.5, 50, 1), (0.25, 25, 1)])
         self.assertEqual(_settled(parent), [1, 1])
         self.assertEqual(_costs_by_model(), {OPUS: 1.0, ASTRA: 2.75})
+
+    def test_a_charge_another_process_commits_during_the_final_save_reaches_the_ledger(
+        self,
+    ) -> None:
+        """Another process charges the row after the final save read its pending charges
+        and before its row transaction: the save banks that charge too, so the ledger the
+        run's caller folds, the row and an ancestor's row agree; a retried save adds nothing."""
+        parent, _chat = th._add_task(f"task on {OPUS}")
+        agent = ChatSorcarAgent("remote-raced-parent")
+        sorcar_agent._attribute_sub_usage(agent, 3.0, 300, 5)
+        self._on(self.remote_dir)
+        report = self._report(_task(ASTRA, 2.5, 250, 4))
+        self._on(self.local_dir)
+        for child in ("raced-child-a", "raced-child-b"):
+            th._record_remote_subtask(child, parent, "box", ASTRA, 2.0, 200, 3)
+        charge_remote_subtask_usage(None, "raced-child-a", report)
+        th._save_task_result("Done", parent)
+        outcome: list[str] = []
+        saver = threading.Thread(
+            target=_save_on_thread, args=(agent, parent, outcome), daemon=True)
+        with _OFFSET_PUBLISH_LOCK:  # parks the save right after its read of the pending charges
+            saver.start()
+            _wait_parked_in_bank(saver)
+            self._charge_from_another_process("raced-child-b", report)
+        saver.join(60)
+        self.assertEqual(outcome, ["saved"])
+        self.assertEqual(agent.usage_snapshot(), (4.0, 400, 7))
+        self.assertEqual(_row(parent), (4.0, 400, 7))
+        top, _chat = th._add_task("ancestor of the raced parent")
+        ancestor = ChatSorcarAgent("remote-raced-ancestor")
+        sorcar_agent._attribute_sub_usage(ancestor, *agent.usage_snapshot())
+        with th.TASK_USAGE_LOCK:
+            ancestor._save_final_usage({}, top, result_summary="Done")
+            agent._save_final_usage({}, parent, result_summary="Done", unless_finished=True)
+        self.assertEqual((_row(top), _row(parent)), ((4.0, 400, 7), (4.0, 400, 7)))
+        self.assertEqual(_settled(parent), [1, 1])
 
     def test_spend_already_on_the_ledger_is_mirrored_to_the_finished_row_once(self) -> None:
         """Spend made after a row's final save that its agent's ledger already holds (the
@@ -648,6 +727,17 @@ class TestRemoteFixes(base.TestRemoteSubagentCosts):
         # The grown record (with the machine's split) replaces the stale copy.
         self.assertEqual(_costs_by_model(), {OPUS: 1.0, ASTRA: 1.75, FABLE: 0.5})
 
+    def test_a_mirrored_child_counts_by_a_record_that_grew_in_tokens_alone(self) -> None:
+        """Late spend on a free model moves the record's tokens and not its cost."""
+        parent, child = self._dispatch()
+        self._mirror(parent, child, with_grandchild=False)
+        charge_remote_subtask_usage(None, child, {"cost": 2.0, "tokens": 230, "steps": 4})
+        self.assertEqual(_row(parent), (3.0, 330, 6))
+        tokens = {entry["model"]: entry["tokens"] for entry in th._spend_by_day_and_model()}
+        self.assertEqual(tokens, {OPUS: 100, ASTRA: 230})
+        models = th._task_usage([parent])[parent]["models"]
+        self.assertEqual(models, {OPUS: [1.0, 100.0], ASTRA: [2.0, 230.0]})
+
     def test_a_mirrored_tree_is_not_counted_twice_by_the_grown_record(self) -> None:
         parent, child = self._dispatch()
         self._mirror(parent, child, with_grandchild=True)
@@ -698,9 +788,7 @@ class TestSyncTriggers:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

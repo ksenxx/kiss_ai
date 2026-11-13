@@ -33,6 +33,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar import sea_commands
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer, WebPrinter
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 from kiss.tests.local_ws import LocalReader, open_local_connection
 from kiss.tests.server.pause import Pause
 
@@ -52,9 +53,9 @@ class SeaWatcherLifecycleTest(IsolatedAsyncioTestCase):
     """The server subscribes once, broadcasts changes, and unsubscribes on stop."""
 
     async def asyncSetUp(self) -> None:
-        sea_commands._reset_for_tests()
+        reset_sea_registry()
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True)
         # A private KISS home: the test writes its own ``SEAS.md`` there
@@ -63,7 +64,6 @@ class SeaWatcherLifecycleTest(IsolatedAsyncioTestCase):
         os.environ["KISS_HOME"] = str(kiss_dir)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
@@ -74,14 +74,12 @@ class SeaWatcherLifecycleTest(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
-        sea_commands._reset_for_tests()
+        reset_sea_registry()
         if self.saved_home is None:
             os.environ.pop("KISS_HOME", None)
         else:
             os.environ["KISS_HOME"] = self.saved_home
-        if th._db_conn is not None:
-            th._db_conn.close()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        th._DB_PATH, th._KISS_DIR = self.saved
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

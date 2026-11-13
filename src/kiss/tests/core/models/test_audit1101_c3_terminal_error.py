@@ -199,5 +199,46 @@ def test_responses_classification(
         assert f"Responses API returned {status} response" in message
     # The transport's own detail is kept: the failure message, else the reason.
     assert (_DETAIL if status == "failed" else reason) in message
+    # So is the provider's code, which tells endpoint trouble from a refused request.
+    assert getattr(info.value, "code", None) == ("server_error" if status == "failed" else None)
+    rejected = model.take_partial_usage_response()
+    assert model.extract_input_output_token_counts_from_response(rejected)[:2] == (7, 3)
+
+
+def test_bare_error_event_carries_its_code() -> None:
+    """The stream's ``error`` event has no response: its code was kept nowhere."""
+
+    def respond(request: Request) -> Reply:
+        error = {"code": "rate_limit_exceeded", "message": _DETAIL}
+        return Reply(sse_chunks=[responses_event("error", error)])
+
+    with ScriptedOpenAIServer(respond) as server:
+        model = OpenAICompatibleModel2(
+            _MODEL, base_url=server.base_url, api_key="k", token_callback=lambda _t: None
+        )
+        model.initialize("hi")
+        with pytest.raises(KISSError) as info:
+            model.generate()
+    _assert_classified(info.value, KISSError, None)
+    assert str(info.value) == f"KISS Error: Responses API stream ended with error: {_DETAIL}"
+    assert getattr(info.value, "code", None) == "rate_limit_exceeded"
+
+
+@pytest.mark.parametrize("status", ["queued", "in_progress", "cancelled"])
+def test_unfinished_responses_reply_is_refused(status: str) -> None:
+    """A non-streamed reply that never completed was returned as an empty answer."""
+
+    def respond(request: Request) -> Reply:
+        return _responses_reply(request, status, "")
+
+    with ScriptedOpenAIServer(respond) as server:
+        model = OpenAICompatibleModel2(_MODEL, base_url=server.base_url, api_key="k")
+        model.initialize("hi")
+        turns = len(model.conversation)
+        with pytest.raises(KISSError) as info:
+            model.generate()
+    _assert_classified(info.value, KISSError, None)
+    assert f"Responses API returned {status} response" in str(info.value)
+    assert len(model.conversation) == turns
     rejected = model.take_partial_usage_response()
     assert model.extract_input_output_token_counts_from_response(rejected)[:2] == (7, 3)

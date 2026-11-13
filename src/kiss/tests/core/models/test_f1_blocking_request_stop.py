@@ -254,6 +254,11 @@ def _on_the_worker(_frame_locals: dict[str, Any]) -> bool:
     return threading.current_thread().name == _WORKER_THREAD
 
 
+def _first_entry(_frame_locals: dict[str, Any]) -> bool:
+    """A :class:`Pause` matcher: hold the first thread that enters the hooked function."""
+    return True
+
+
 class _WorkerEntry:
     """A :class:`Pause` matcher that never pauses: ``entered`` is set once the worker enters."""
 
@@ -334,17 +339,18 @@ def test_a_stop_while_the_connection_is_set_up_never_sends_the_request(
 ) -> None:
     """A Stop that lands before the request's connection is up: the request never goes out.
 
-    The worker is held on its way into httpcore's TCP connect (as a
-    starved thread or a slow handshake holds it) until the Stop has
-    unwound the turn and aborted the client.  The connection it then
-    opens was not in the pool the abort walked; the pool's abortable
-    backend shuts it down before httpcore writes on it, so the provider
-    never sees (nor bills) the stopped request and the worker ends at
-    once instead of waiting on the provider until the client timeout.
+    The request's TCP connect is held at its entry (as a slow address
+    lookup or handshake holds it; the pool's abortable backend runs it
+    on a thread of its own) until the Stop has unwound the turn and
+    aborted the client.  The connection it then opens was not in the
+    pool the abort walked; the backend closes it with nothing written
+    on it, so the provider never sees (nor bills) the stopped request
+    and the worker ends at once instead of waiting on the provider until
+    the client timeout.
     """
     model = OpenAICompatibleModel2(_MODEL, base_url=silent_server.base_url, api_key="k")
     model.initialize("Say something.")
-    with Pause(httpcore.SyncBackend.connect_tcp.__code__, _on_the_worker) as connecting:
+    with Pause(httpcore.SyncBackend.connect_tcp.__code__, _first_entry) as connecting:
         error, _elapsed = _run_with_stop(
             model.generate, _stop_when(connecting.paused.is_set), None
         )
@@ -615,6 +621,52 @@ def test_a_stopped_delegated_responses_turn_leaves_a_usable_client(silent_server
     assert len(silent_server.requests) == 2
 
 
+def test_a_delegated_reply_kept_at_the_deadline_leaves_a_usable_client() -> None:
+    """A delegated turn that keeps the reply its deadline's abort raced with leaves the next usable.
+
+    The deadline found the worker alive; the worker, which had the whole
+    reply in hand, stored it as the abort tore the shared client down, so
+    the turn returns that reply (it was billed) instead of raising.  The
+    delegate dropped its reference to the closed client on that normal
+    return too, and the parent must follow, or every later turn fails
+    with ``APIConnectionError``.
+    """
+    gateway = _TricklingGateway()
+    gateway.release.set()  # the first turn, which creates the delegate, is answered at once
+    with ScriptedOpenAIServer(gateway) as server:
+        model = OpenAICompatibleModel(
+            _MODEL,
+            base_url=server.base_url,
+            api_key="k",
+            model_config={"use_responses_api": True, "reasoning_effort": "high", "timeout": 0.3},
+        )
+        model.initialize("Use the finish tool.")
+        model.generate_and_process_with_tools({}, tools_schema=_TOOLS_SCHEMA)
+        delegate = model._responses_delegate
+        assert delegate is not None, "the turn was not delegated"
+        abort = delegate._abort_pending_request
+
+        def land_the_reply_then_abort() -> None:
+            gateway.release.set()
+            deadline = time.monotonic() + _UNWIND_WITHIN
+            while _worker_threads() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            abort()
+
+        delegate._abort_pending_request = land_the_reply_then_abort  # type: ignore[method-assign]
+        gateway.release.clear()
+        _calls, content, _response = model.generate_and_process_with_tools(
+            {}, tools_schema=_TOOLS_SCHEMA
+        )
+        assert content == "late but complete", "the reply that landed as the abort ran was dropped"
+        assert model.client is None, "the parent kept the shared client the abort closed"
+        _calls, content, _response = model.generate_and_process_with_tools(
+            {}, tools_schema=_TOOLS_SCHEMA
+        )
+        assert content == "late but complete"
+        assert len(server.requests) == 3
+
+
 def test_a_reply_stored_before_a_forced_interrupt_is_billed() -> None:
     """A ``KeyboardInterrupt`` raised into the waiting thread keeps the stored reply.
 
@@ -627,8 +679,8 @@ def test_a_reply_stored_before_a_forced_interrupt_is_billed() -> None:
     reply = object()
     waiting = threading.Event()
 
-    class _InterruptedWait(threading.Event):
-        def wait(self, timeout: float | None = None) -> bool:
+    class _InterruptedPoll(threading.Event):
+        def is_set(self) -> bool:
             # Let the worker finish (it stores the reply and exits), then
             # interrupt the waiter in its poll.
             waiting.set()
@@ -643,7 +695,7 @@ def test_a_reply_stored_before_a_forced_interrupt_is_billed() -> None:
         return reply
 
     model = OpenAICompatibleModel(_MODEL, base_url="http://127.0.0.1:9", api_key="k")
-    stop_signal.set_thread_stop_event(_InterruptedWait())
+    stop_signal.set_thread_stop_event(_InterruptedPoll())
     try:
         with pytest.raises(KeyboardInterrupt):
             model._blocking_request(create, {})

@@ -101,19 +101,16 @@ class TestSubagentRowsExcludedFromChatContext:
         self.tmpdir = tempfile.mkdtemp()
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved = (th._DB_PATH, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         self.srv, self.url = _start_server()
 
     def teardown_method(self) -> None:
         """Restore persistence globals and tear down the temp DB / server."""
         self.srv.shutdown()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
+        th._close_thread_db()
+        (th._DB_PATH, th._KISS_DIR) = self._saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _insert_subagent_row(

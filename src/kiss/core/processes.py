@@ -18,6 +18,7 @@ import contextlib
 import errno
 import logging
 import os
+import re
 import selectors
 import shutil
 import signal
@@ -25,6 +26,8 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
+from functools import cache, partial
 from typing import IO, Any
 
 from kiss.core.locked import locked_call
@@ -84,6 +87,37 @@ def find_bash() -> str | None:
         if os.path.exists(candidate):
             return candidate
     return None  # pragma: no cover — Windows without Git bash
+
+
+@cache
+def bash_version(executable: str | None = None) -> tuple[int, int]:
+    """Return the major and minor version of *executable*, or ``(0, 0)`` if unknown.
+
+    The probe uses the same Bash path :func:`find_bash` gives shell-tool
+    callers, including Git Bash outside Windows ``PATH``.  Its result is
+    cached because shell scanning asks for it on every command.  An absent,
+    unstartable or unparseable Bash is treated as the oldest version so
+    safety checks take their conservative branch.
+
+    Args:
+        executable: Bash to probe; ``None`` uses :func:`find_bash`.
+
+    Returns:
+        ``(major, minor)``, or ``(0, 0)`` when no reliable answer is available.
+    """
+    path = executable or find_bash()
+    if path is None:
+        return (0, 0)
+    try:
+        result = subprocess.run(
+            [path, "--noprofile", "--norc", "-c",
+             'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        major, minor = result.stdout.split(".", 1)
+        return int(major), int(minor)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return (0, 0)
 
 
 # ``signal.SIGKILL`` does not exist on Windows.  Callers that want an
@@ -271,6 +305,16 @@ def start_process_group(proc: subprocess.Popen[Any], *args: Any, **kwargs: Any) 
     across the call still has the child when the exception is raised as
     this call returns to it, so its own handler can act on it.
 
+    ``Popen.__init__`` has the same gap inside, where no handler
+    reaches: it stores the pid in the bytecode after the call that
+    forks, and that call blocks until the child execs.  An exception
+    set meanwhile was raised before the pid existed anywhere.  This
+    thread is therefore marked in ``_spawning`` for the length of
+    ``Popen.__init__``: the Stop's injector leaves the exception for a
+    marked thread with the mark (:func:`inject_outside_spawn`), and
+    this thread sets it itself once ``Popen.__init__`` has returned, so
+    it is raised here, where the child is killed.
+
     Args:
         proc: ``object.__new__(subprocess.Popen)``, not yet initialised.
         *args: Positional arguments for :class:`subprocess.Popen`.
@@ -280,8 +324,21 @@ def start_process_group(proc: subprocess.Popen[Any], *args: Any, **kwargs: Any) 
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
     else:
         kwargs["start_new_session"] = True
+    ident = threading.get_ident()
+    held: list[Callable[[], int] | None] = [None]
     try:
-        subprocess.Popen.__init__(proc, *args, **kwargs)
+        try:
+            locked_call(_spawning_lock, _spawning.__setitem__, ident, held)
+            subprocess.Popen.__init__(proc, *args, **kwargs)
+        finally:
+            # A C call, first in the block: no check point precedes it,
+            # so the mark never outlives the spawn.  An injector that
+            # found the mark fills ``held`` before it releases the
+            # lock, so the take under that lock misses nothing.
+            _spawning.pop(ident, None)
+            inject = locked_call(_spawning_lock, held.pop)
+            if inject is not None:
+                inject()  # raised as this call returns, the child in hand
         if IS_WINDOWS:  # pragma: no cover — Windows-only branch
             _windows_enrol_in_job(proc)
     except BaseException:
@@ -295,6 +352,44 @@ def start_process_group(proc: subprocess.Popen[Any], *args: Any, **kwargs: Any) 
                 if pipe is not None:
                     pipe.close()
         raise
+
+
+#: Ident of each thread inside ``Popen.__init__`` (:func:`start_process_group`) ->
+#: its one-item list: the injection held back for that spawn, or None.
+_spawning: dict[int, list[Callable[[], int] | None]] = {}
+_spawning_lock = threading.RLock()
+
+
+def inject_outside_spawn(tid: int, inject: Callable[[], int]) -> int:
+    """Call *inject*, which sets an asynchronous exception for thread *tid*, outside a spawn.
+
+    An exception set while *tid* is inside ``Popen.__init__`` is raised
+    there, possibly between the fork and the statement that stores the
+    child's pid, and then nobody can kill or reap that child (see
+    :func:`start_process_group`).  For a thread that is spawning,
+    *inject* is therefore not called here: it is left to that thread,
+    which calls it as its spawn ends, however long the spawn takes (a
+    blocked fork could not be interrupted anyway).  This call does not
+    wait for the spawn.  One left for a spawn replaces one left earlier,
+    as an exception set for a thread replaces one it has not raised yet.
+
+    Args:
+        tid: The target thread's ``ident``.
+        inject: Sets the exception and returns the number of threads it was set in.
+
+    Returns:
+        What *inject* returned, or ``1`` when it was left to the spawning thread.
+    """
+    return locked_call(_spawning_lock, _inject_or_hold, tid, inject)
+
+
+def _inject_or_hold(tid: int, inject: Callable[[], int]) -> int:
+    """Under ``_spawning_lock``: leave *inject* to the spawn thread *tid* is in, else call it."""
+    held = _spawning.get(tid)
+    if held is None:
+        return inject()
+    held[0] = inject
+    return 1
 
 
 def kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
@@ -473,6 +568,166 @@ def _other_group_members(pid: int) -> bool:
     return False
 
 
+#: Seconds :func:`kill_env_marked` keeps sweeping the process table.
+_SWEEP_SECONDS = 5.0
+
+
+def kill_env_marked(mark: str) -> None:
+    """``SIGKILL`` every process started with the environment entry *mark*, or ``mark/...``.
+
+    *mark* is ``NAME=folder``, an entry the caller put in the environment
+    of every command it started (a sub-agent's private folder; a folder
+    nested in it marks the commands of a daemon one of those commands
+    started).  A process keeps the entry through ``fork``, ``setsid`` and
+    ``nohup``, so the ones that left their process group are found too;
+    one started with a scrubbed environment (``env -i``) is not.  The
+    sweep is repeated until it finds nothing, at most
+    :data:`_SWEEP_SECONDS`, so a process forked while a sweep ran does
+    not survive.  On Linux a process is held by a pidfd from before its
+    environment is read and signalled through it: the signal reaches
+    that process or none, whatever becomes of its pid.  Where there is
+    no pidfd (an older kernel, a sandbox that refuses the call, macOS,
+    BSD) the pid is signalled right after its environment was read, which
+    shortens the time in which the number could pass to a stranger and
+    does not end it.  Windows has no such process table and is skipped.
+
+    Args:
+        mark: The environment entry, ``NAME=folder``.
+    """
+    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
+        return
+    killed: set[int] = set()
+    deadline = time.monotonic() + _SWEEP_SECONDS
+    while pids := _env_marked_pids(mark):
+        killed.update(pids)
+        if time.monotonic() >= deadline:  # pragma: no cover — processes that outlive SIGKILL
+            logger.warning("Processes carrying %s are still listed: %s", mark, pids)
+            break
+        time.sleep(0.05)
+    if killed:
+        logger.info("Killed %d processes carrying %s", len(killed), mark)
+
+
+def _env_marked_pids(mark: str) -> list[int]:
+    """``SIGKILL`` the processes, this one aside, whose environment holds *mark* or ``mark/...``.
+
+    The environment is read from ``/proc/<pid>/environ``, which holds the
+    one the process was started with (this user's processes only; a
+    zombie's is empty), or from ``ps eww`` where there is no ``/proc``
+    (macOS, BSD).  A process is signalled as soon as its environment was
+    read: through a pidfd opened before the reading, or by its pid where
+    none can be opened (no ``os.pidfd_open``, a kernel or seccomp profile
+    without the call, no descriptor left); on the ``ps`` path by its pid,
+    after its environment was read once more, alone (the listing of the
+    whole table took its time).
+
+    Returns:
+        The pids found, one whose process ended before the signal included.
+    """
+    own = os.getpid()
+    pids = []
+    if os.path.exists("/proc/self/environ"):
+        entry = os.fsencode(mark)
+        pidfd_open = getattr(os, "pidfd_open", None)
+        for name in os.listdir("/proc"):
+            if not name.isdigit() or int(name) == own:
+                continue
+            pid, pidfd = int(name), -1
+            if pidfd_open is not None:
+                try:
+                    pidfd = pidfd_open(pid)
+                except ProcessLookupError:  # it ended meanwhile
+                    continue
+                except OSError:  # no pidfd: the pid is signalled below
+                    pass
+            try:
+                with open(f"/proc/{name}/environ", "rb") as environ:
+                    entries = environ.read().split(b"\0")
+                if any(e == entry or e.startswith(entry + b"/") for e in entries):
+                    pids.append(pid)
+                    if pidfd >= 0 and sys.platform == "linux":
+                        signal.pidfd_send_signal(pidfd, SIGKILL)
+                    else:
+                        os.kill(pid, SIGKILL)
+            except OSError:  # another user's process, or one that ended meanwhile
+                continue
+            finally:
+                if pidfd >= 0:
+                    os.close(pidfd)
+        return pids
+    for pid in _env_marked_pids_ps(mark, own):  # pragma: no cover — no /proc: macOS, BSD
+        # Read once more, alone: the listing of the whole table took its time.
+        if _env_marked_pids_ps(mark, own, pid):
+            pids.append(pid)
+            with contextlib.suppress(OSError):  # it ended meanwhile
+                os.kill(pid, SIGKILL)
+    return pids
+
+
+#: Times :func:`_env_marked_pids_ps` reads the processes while one replaces its command.
+_PS_READINGS = 3
+
+
+def _env_marked_pids_ps(mark: str, own: int, only: int | None = None) -> list[int]:
+    """The pids, *own* aside, whose environment holds *mark* or ``mark/...``, from ``ps``.
+
+    ``ps eww`` prints the environment on the line of the command, after
+    it (FreeBSD's ``ps``: before it): of every process, or of the process
+    with the pid *only* alone.  The command as ``ps ww`` prints it is
+    taken off that line: a mark among the arguments of a command (``grep
+    NAME=folder``) is no entry of its environment.  The two listings are
+    not one instant.  A line its command cannot be taken off, of a
+    process that replaced the command between them, names no process:
+    the listings are read again, :data:`_PS_READINGS` times at most.
+    """
+    which = ["-A"] if only is None else ["-p", str(only)]
+    marked = re.compile(rf"(?:^|\s){re.escape(mark)}(?:[/\s]|$)")
+    environs: dict[int, str | None] = {}
+    for _ in range(_PS_READINGS):
+        lines = {
+            pid: line
+            for pid, line in _ps_commands(["eww", *which]).items()
+            if pid != own and marked.search(line)
+        }
+        commands = _ps_commands(["ww", *which]) if lines else {}
+        environs = {pid: _without_command(line, commands.get(pid)) for pid, line in lines.items()}
+        if None not in environs.values():
+            break
+    return [pid for pid, environ in environs.items() if environ and marked.search(environ)]
+
+
+def _without_command(line: str, command: str | None) -> str | None:
+    """The environment on a process's ``ps eww`` *line*: the line without its ``ps ww`` *command*.
+
+    Returns:
+        ``""`` for a process that ended between the two listings (no
+        *command*); ``None`` for one that replaced its command between them.
+    """
+    if not command:
+        return ""
+    if line.startswith(command):
+        return line[len(command):]
+    if line.endswith(command):
+        return line[: len(line) - len(command)]
+    return None
+
+
+def _ps_commands(options: list[str]) -> dict[int, str]:
+    """The command column of ``ps`` run with *options*, by pid."""
+    try:
+        listing = subprocess.run(
+            ["ps", *options, "-o", "pid=,command="], capture_output=True, timeout=15,
+        ).stdout.decode(errors="replace")
+    except (OSError, subprocess.TimeoutExpired):  # pragma: no cover — ps missing/unresponsive
+        return {}
+    commands = {}
+    for line in listing.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid.isdigit():
+            commands[int(pid)] = command
+    return commands
+
+
 # Seconds a killed child is given to exit before the caller stops waiting
 # for it.
 _REAP_GRACE_SECONDS = 2.0
@@ -488,7 +743,9 @@ def run_process_group(
     *timeout* is killed with its whole group (:func:`kill_process_tree`)
     rather than alone, and so is a child whose wait any other exception
     cuts short (a Stop landing as ``KeyboardInterrupt`` or an injected
-    exception), which ``subprocess.run`` would leave running.  The reap
+    exception), which ``subprocess.run`` would leave running.  The wait
+    is taken in slices of :data:`_STOP_POLL_SECONDS`, between which an
+    injected Stop is raised (never inside a blocking wait).  The reap
     after the kill waits for the child itself, at most
     :data:`_REAP_GRACE_SECONDS`, never for its pipes: a grandchild that
     outlived the kill in its own session (or on Windows without
@@ -512,7 +769,9 @@ def run_process_group(
     # ``try``: a Stop raised as the spawning call returns reaches the
     # handler with the child in hand (see :func:`start_process_group`).
     proc: subprocess.Popen[Any] = object.__new__(subprocess.Popen)
-    reading = False  # ``communicate`` entered: on Windows its reader threads own the pipes
+    # Pipe -> who closes it, whichever claims it first: the thread that
+    # reads it for ``communicate`` (Windows) or the handler below.
+    owners: dict[Any, str] = {}
     try:
         start_process_group(
             proc,
@@ -525,8 +784,19 @@ def run_process_group(
             errors="replace",
             env=env,
         )
-        reading = True
-        stdout, stderr = proc.communicate(timeout=timeout)
+        if IS_WINDOWS:  # pragma: no cover — Windows-only branch
+            proc._readerthread = partial(_read_claimed_pipe, owners)  # type: ignore[attr-defined]
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                stdout, stderr = proc.communicate(
+                    timeout=min(deadline - time.monotonic(), _STOP_POLL_SECONDS)
+                )
+                break
+            except subprocess.TimeoutExpired as exc:
+                if time.monotonic() >= deadline:
+                    exc.timeout = timeout  # the caller's, not the last slice's
+                    raise
     except BaseException:
         if getattr(proc, "pid", None) is None:
             raise  # never spawned; ``Popen.__init__`` closed what it had opened
@@ -540,15 +810,33 @@ def run_process_group(
         # The pipes go with the child: left open, they lived as long as
         # the Popen, which the raised error's traceback keeps alive for
         # as long as the caller keeps the error.  On Windows
-        # ``communicate``'s reader threads own them and close them at
-        # EOF; closing under their read would park this thread instead.
-        # A Stop raised as the spawn returned found no reader yet.
-        if not (IS_WINDOWS and reading):
-            for pipe in (proc.stdout, proc.stderr):
-                if pipe is not None:
-                    pipe.close()
+        # ``communicate`` reads each pipe on a thread of its own, which
+        # closes it at EOF; closing under its read would park this
+        # thread instead.  Only a pipe no reader has claimed is closed
+        # here: a reader never made or never started, and one starting
+        # only now, which finds the claim taken and leaves the pipe.
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None and owners.setdefault(pipe, "handler") == "handler":
+                pipe.close()
         raise
     return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
+
+
+def _read_claimed_pipe(  # pragma: no cover — Windows-only
+    owners: dict[Any, str], pipe: IO[str], buffer: list[str]
+) -> None:
+    """Read *pipe* to EOF into *buffer* and close it, unless its claim in *owners* is taken.
+
+    The body of a Windows ``communicate`` reader thread, in place of
+    ``Popen._readerthread``, which reads unasked.  ``dict.setdefault``
+    is atomic, so of the thread and the handler of
+    :func:`run_process_group` exactly one gets each pipe, in any order.
+    """
+    if owners.setdefault(pipe, "reader") == "reader":
+        try:
+            buffer.append(pipe.read())
+        finally:
+            pipe.close()
 
 
 #: How long :func:`run_capped` keeps reading a command's pipes after the
@@ -757,10 +1045,10 @@ def signal_unreaped_child(pid: int, sig: int) -> bool:
         except ProcessLookupError:
             return False
         except OSError as exc:
+            # Without pidfds the pid is signalled below.  Not logged: callers signal under a
+            # lock of their own (the browser watchdog's), which a blocked log sink would hold.
             if exc.errno not in (errno.ENOSYS, errno.EPERM):
                 raise
-            # pragma: no cover — a kernel or seccomp profile without pidfd_open
-            logger.debug("pidfd_open(%d): %s; signalling the pid instead", pid, exc.strerror)
     try:
         try:
             exited = waitid_exited(pid)
@@ -802,8 +1090,8 @@ def _drain_stderr(
     poll slice, so the thread neither keeps the pipe open nor rewrites
     ``out.stderr`` after the result was returned.  The pipe is closed
     here, by its only reader; found set before the first read, *stop*
-    says the caller closed the pipe itself, so it is not touched (see
-    :func:`run_capped`).
+    says the caller closed the pipe itself, so it is not read (see
+    :func:`run_capped`; closing it once more does nothing).
     """
     kept = b""
     try:
@@ -816,6 +1104,41 @@ def _drain_stderr(
                 out.stderr = kept.decode("utf-8", "replace")
     finally:
         stream.close()
+
+
+def _windows_pipe_readable(stream: IO[bytes], seconds: float) -> bool:  # pragma: no cover — Windows
+    """:func:`_pipe_readable` for Windows, where no readiness API works on a pipe.
+
+    ``PeekNamedPipe`` is polled instead, 1 ms apart at first and twice
+    as long after every miss: it reports the bytes waiting, and fails
+    (a broken pipe) once the pipe is empty and every writer is gone.
+    """
+    import _winapi
+    import msvcrt
+
+    handle = msvcrt.get_osfhandle(stream.fileno())  # type: ignore[attr-defined]
+    deadline = time.monotonic() + seconds
+    pause = 0.001
+    while True:
+        try:
+            if _winapi.PeekNamedPipe(handle)[0]:  # type: ignore[attr-defined]
+                return True
+        except OSError:
+            return True  # EOF or a dead handle: the read reports which (b"" or the error)
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return False
+        time.sleep(min(pause, left))
+        pause *= 2
+
+
+def _pipe_readable(stream: IO[bytes], seconds: float) -> bool:
+    """Whether *stream* has bytes to read or is at EOF, waiting at most *seconds* for either."""
+    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
+        return _windows_pipe_readable(stream, seconds)
+    with selectors.DefaultSelector() as ready:
+        ready.register(stream, selectors.EVENT_READ)
+        return bool(ready.select(seconds))
 
 
 def _read_some(
@@ -840,9 +1163,9 @@ def _read_some(
     injected into the task thread (see :func:`run_capped`), raised
     between bytecodes and never inside the blocking wait, so one wait
     for the whole remaining time would hold it, and the child, back
-    that long.  On Windows the watchdog's Job Object kills every
-    descendant, so a plain read cannot be held open there (and
-    readiness APIs do not work on pipes).
+    that long.  Windows polls the pipe for the same slices
+    (:func:`_windows_pipe_readable`): a plain read there was deaf to
+    the Stop, and held open by a descendant outside the Job Object.
 
     Args:
         stream: The child's stdout or stderr pipe.
@@ -857,18 +1180,13 @@ def _read_some(
         The bytes read, possibly fewer than *limit*; ``b""`` at EOF,
         once *give_up* has passed, or once *stop* is set.
     """
-    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        return stream.read(limit)
     remaining = give_up - time.monotonic()
-    if remaining > 0:
-        with selectors.DefaultSelector() as ready:
-            ready.register(stream, selectors.EVENT_READ)
-            while remaining > 0:
-                if stop is not None and stop.is_set():
-                    return b""
-                if ready.select(min(remaining, _STOP_POLL_SECONDS)):
-                    return os.read(stream.fileno(), limit)
-                remaining = give_up - time.monotonic()
+    while remaining > 0:
+        if stop is not None and stop.is_set():
+            return b""
+        if _pipe_readable(stream, min(remaining, _STOP_POLL_SECONDS)):
+            return os.read(stream.fileno(), limit)
+        remaining = give_up - time.monotonic()
     logger.warning(
         "child pipe still open %ss after the kill; giving up", PIPE_GIVE_UP_SECONDS,
     )

@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -122,6 +123,10 @@ the remaining headroom (20 % of the limit, ~70k tokens for a 350k limit)
 is 15-35 steps, fewer than a compaction needs to pay for itself."""
 CHARS_PER_TOKEN = 4
 """Rough characters-per-token ratio used to turn dropped text into tokens."""
+CLEAR_PRICE_RATIO = 50.0
+"""Cache reads that one cache write costs on the model the bulk clear's
+settings are stated for (Claude Fable 5.2: $10 against $0.20 per million
+tokens); :func:`clear_thresholds` scales them to another model's ratio."""
 STUB_PREVIEW_CHARS = 200
 PROTECTED_TOOLS = frozenset({"Edit", "Write", "finish"})
 STUB_PREFIX = "[compacted tool output"
@@ -168,10 +173,12 @@ def _is_assistant_turn(message: dict[str, Any]) -> bool:
     return message.get("role") == "assistant" or message.get("type") == "function_call"
 
 
-def _result_slots(conversation: list[Any]) -> list[tuple[dict[str, Any], str, str]]:
-    """Return ``(holder, key, call_id)`` for every tool-result text the model has seen.
+def _result_slots(conversation: list[Any]) -> list[list[tuple[dict[str, Any], str, str]]]:
+    """Return the ``(holder, key, call_id)`` of every text of each tool result the model has seen.
 
-    ``holder[key]`` is the ``str`` text of one tool result.  Results
+    One list per result that has a text, oldest first; ``holder[key]``
+    is a ``str`` text of it: its one text, or each text part of an
+    Anthropic result made of blocks (a result with a picture).  Results
     appended after the last assistant turn have not been sent to the
     model yet and are never candidates: compaction runs before a model
     call, and hiding fresh evidence before the model's first look at it
@@ -181,28 +188,32 @@ def _result_slots(conversation: list[Any]) -> list[tuple[dict[str, Any], str, st
         (i for i, m in enumerate(conversation) if isinstance(m, dict) and _is_assistant_turn(m)),
         default=-1,
     )
-    slots: list[tuple[dict[str, Any], str, str]] = []
+    results: list[list[tuple[dict[str, Any], str, str]]] = []
     for index, message in enumerate(conversation):
         if not isinstance(message, dict) or index > last_turn:
             continue
         if message.get("role") == "tool" and isinstance(message.get("content"), str):
-            slots.append((message, "content", str(message.get("tool_call_id"))))
+            results.append([(message, "content", str(message.get("tool_call_id")))])
         elif message.get("type") == "function_call_output" and isinstance(
             message.get("output"), str
         ):
-            slots.append((message, "output", str(message.get("call_id"))))
+            results.append([(message, "output", str(message.get("call_id")))])
         elif message.get("role") == "user" and isinstance(message.get("content"), list):
             for block in message["content"]:
                 if not isinstance(block, dict) or block.get("type") != "tool_result":
                     continue
                 call_id = str(block.get("tool_use_id"))
                 if isinstance(block.get("content"), str):
-                    slots.append((block, "content", call_id))
+                    results.append([(block, "content", call_id)])
                 elif isinstance(block.get("content"), list):
-                    for part in block["content"]:
-                        if isinstance(part, dict) and isinstance(part.get("text"), str):
-                            slots.append((part, "text", call_id))
-    return slots
+                    texts = [
+                        (part, "text", call_id)
+                        for part in block["content"]
+                        if isinstance(part, dict) and isinstance(part.get("text"), str)
+                    ]
+                    if texts:
+                        results.append(texts)
+    return results
 
 
 class CompactionTable:
@@ -232,27 +243,24 @@ class CompactionTable:
         return stub_id
 
 
-def make_stub(
-    text: str, preview_chars: int = STUB_PREVIEW_CHARS, table: CompactionTable | None = None,
-) -> str:
+def make_stub(text: str, table: CompactionTable | None = None) -> str:
     """Build the replacement for a compacted tool output.
 
     Args:
         text: The original tool output.
-        preview_chars: How many leading characters to keep.
         table: Where the original is kept under the stub's id (a table of
             the call's own when ``None``: the stub then has an id nothing
             expands).
 
     Returns:
         A stub naming its id, the original size, the way to get the
-        output back, and the first *preview_chars* characters.
+        output back, and the first :data:`STUB_PREVIEW_CHARS` characters.
     """
     stub_id = (table or CompactionTable()).add(text)
     return (
-        f"{STUB_PREFIX} #{stub_id}: {len(text):,} chars; the first {preview_chars} follow. "
+        f"{STUB_PREFIX} #{stub_id}: {len(text):,} chars; the first {STUB_PREVIEW_CHARS} follow. "
         f"To see it again, Read the file or re-run a read-only command; do not "
-        f"repeat a command that has side effects.]\n" + text[:preview_chars]
+        f"repeat a command that has side effects.]\n" + text[:STUB_PREVIEW_CHARS]
     )
 
 
@@ -393,11 +401,30 @@ def make_argument_stub(
             f"the first {ARGUMENT_PREVIEW_CHARS} follow]\n{text[:ARGUMENT_PREVIEW_CHARS]}")
 
 
+def _decoded_call(name: str, raw: Any) -> tuple[dict[str, Any], str] | None:
+    """Return a call's arguments and the file they went to, or ``None`` when they are opaque.
+
+    Opaque arguments are left as they are: text that is not a JSON
+    object, and arguments nested deeper than the interpreter follows,
+    where ``json.loads`` and ``str`` raise ``RecursionError``.  The file
+    is the ``file_path`` of an ``Edit`` or ``Write``
+    (:data:`FILE_ARGUMENT_TOOLS`), ``""`` for a call that names none.
+    """
+    try:
+        args = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(args, dict):
+            return None
+        file_path = str(args.get("file_path") or "") if name in FILE_ARGUMENT_TOOLS else ""
+    except (ValueError, RecursionError):
+        return None
+    return args, file_path
+
+
 def _stubbed_arguments(
-    name: str, args: dict[str, Any], superseded: bool, table: CompactionTable | None,
+    name: str, args: dict[str, Any], file_path: str, superseded: bool,
+    table: CompactionTable | None,
 ) -> tuple[dict[str, Any], int]:
     """Return *args* with its large string values stubbed, and the characters removed."""
-    file_path = str(args.get("file_path", "")) if name in FILE_ARGUMENT_TOOLS else ""
     new_args: dict[str, Any] = {}
     dropped = 0
     for key, value in args.items():
@@ -416,32 +443,31 @@ def _argument_plan(
 ) -> list[Replacement]:
     """Plan the argument stubs of the calls in *old_call_ids* (see :func:`plan_compaction`)."""
     slots = _call_slots(conversation)
+    calls = [_decoded_call(name, holder[key]) for _call_id, name, holder, key in slots]
     # The last call that touched each file: every earlier Edit/Write of it is superseded.
-    last_touch: dict[str, int] = {}
-    parsed: list[dict[str, Any] | None] = []
-    for index, (_call_id, name, holder, key) in enumerate(slots):
-        raw = holder[key]
-        args: Any = raw
-        if isinstance(raw, str):
-            try:
-                args = json.loads(raw)
-            except ValueError:
-                args = None
-        args = args if isinstance(args, dict) else None
-        parsed.append(args)
-        if args is not None and name in FILE_ARGUMENT_TOOLS and args.get("file_path"):
-            last_touch[str(args["file_path"])] = index
+    last_touch = {
+        call[1]: index for index, call in enumerate(calls) if call is not None and call[1]
+    }
     plan: list[Replacement] = []
     for index, (call_id, name, holder, key) in enumerate(slots):
-        args = parsed[index]
-        if args is None or call_id not in old_call_ids or name in PROTECTED_ARGUMENT_TOOLS:
+        call = calls[index]
+        if call is None or call_id not in old_call_ids or name in PROTECTED_ARGUMENT_TOOLS:
             continue
-        superseded = (name in FILE_ARGUMENT_TOOLS and bool(args.get("file_path"))
-                      and last_touch.get(str(args["file_path"])) != index)
-        new_args, dropped = _stubbed_arguments(name, args, superseded, table)
+        args, file_path = call
+        superseded = bool(file_path) and last_touch[file_path] != index
+        new_args, dropped = _stubbed_arguments(name, args, file_path, superseded, table)
         if dropped <= 0:
             continue
-        value: Any = new_args if key == "input" else json.dumps(new_args)
+        value: Any = new_args
+        if key != "input":
+            # Non-ASCII text stays unescaped, as the model wrote it; only a lone surrogate
+            # keeps its JSON escape, the one spelling of it a UTF-8 request body can carry.
+            try:
+                value = json.dumps(new_args, ensure_ascii=False).encode(
+                    "utf-8", "backslashreplace").decode("utf-8")
+            except RecursionError:
+                # Decoded, yet nested deeper than the encoder follows (Python 3.14): opaque too.
+                continue
         plan.append(Replacement(holder, key, value, dropped, "argument"))
     return plan
 
@@ -449,7 +475,6 @@ def _argument_plan(
 def plan_compaction(
     conversation: list[Any],
     keep_recent: int = KEEP_RECENT_TOOL_RESULTS,
-    arguments: bool = True,
     table: CompactionTable | None = None,
 ) -> list[Replacement]:
     """Select the old, large tool outputs and arguments a compaction would stub, without editing.
@@ -458,12 +483,12 @@ def plan_compaction(
         conversation: The model conversation (any of the three shapes in
             the module docstring; unknown messages are ignored).
         keep_recent: Number of newest tool results left untouched, with
-            the arguments of their calls.  Results of at most
+            the arguments of their calls (a result made of several text
+            parts counts once).  Results of at most
             :data:`MIN_COMPACT_CHARS` characters and those of the
             :data:`PROTECTED_TOOLS` are never compacted; arguments of at
             most :data:`MIN_COMPACT_CHARS` characters and those of the
             :data:`PROTECTED_ARGUMENT_TOOLS` neither.
-        arguments: Whether the arguments of the old calls are planned too.
         table: The session's :class:`CompactionTable`, which keeps the
             originals under the ids the stubs carry (``None``: the stubs
             get ids nothing expands).
@@ -471,8 +496,9 @@ def plan_compaction(
     Returns:
         The :class:`Replacement` list to pass to :func:`apply_compaction`.
     """
-    slots = _result_slots(conversation)
-    candidates = slots[: max(0, len(slots) - keep_recent)]
+    results = _result_slots(conversation)
+    old = results[: max(0, len(results) - keep_recent)]
+    candidates = [slot for result in old for slot in result]
     if not candidates:
         return []
     names = _names_by_call_id(conversation)
@@ -485,8 +511,7 @@ def plan_compaction(
             continue
         stub = make_stub(text, table=table)
         plan.append(Replacement(holder, key, stub, len(text) - len(stub), "result"))
-    if arguments:
-        plan.extend(_argument_plan(conversation, {call_id for _, _, call_id in candidates}, table))
+    plan.extend(_argument_plan(conversation, {call_id for _, _, call_id in candidates}, table))
     return plan
 
 
@@ -533,10 +558,16 @@ class TurnRemoval:
     note: str
 
 
-def plan_turn_removal(
-    conversation: list[Any], keep_recent: int = KEEP_RECENT_TURNS,
-) -> TurnRemoval | None:
-    """Plan the removal of every model turn but the newest *keep_recent*, without editing.
+def _json_chars(item: Any) -> int:
+    """Return the size of *item* as JSON; 0 when it nests deeper than the encoder follows."""
+    try:
+        return len(json.dumps(item, default=str))
+    except RecursionError:
+        return 0
+
+
+def plan_turn_removal(conversation: list[Any]) -> TurnRemoval | None:
+    """Plan removing every model turn but the newest :data:`KEEP_RECENT_TURNS`, without editing.
 
     For the providers that require the reasoning of every earlier turn
     to be passed back whenever tools are present (DeepSeek), where a
@@ -547,11 +578,11 @@ def plan_turn_removal(
 
     Args:
         conversation: The model conversation (any of the three shapes).
-        keep_recent: Newest model turns kept, with their results.
 
     Returns:
         The :class:`TurnRemoval` to pass to :func:`apply_turn_removal`,
-        or ``None`` when no more than *keep_recent* turns exist.
+        or ``None`` when no more than :data:`KEEP_RECENT_TURNS` turns
+        (the ones kept, with their results) exist.
     """
     starts: list[int] = []
     previous = False
@@ -560,11 +591,11 @@ def plan_turn_removal(
         if current and not previous:
             starts.append(index)
         previous = current
-    if len(starts) <= max(keep_recent, 0):
+    if len(starts) <= KEEP_RECENT_TURNS:
         return None
     start = starts[0]
-    stop = starts[len(starts) - keep_recent] if keep_recent > 0 else len(conversation)
-    turns = len(starts) - max(keep_recent, 0)
+    stop = starts[len(starts) - KEEP_RECENT_TURNS]
+    turns = len(starts) - KEEP_RECENT_TURNS
     # An earlier removal's note just before the first turn is absorbed, so
     # one note tells how many turns are gone in all.
     earlier = conversation[start - 1] if start > 0 else None
@@ -576,7 +607,7 @@ def plan_turn_removal(
         start -= 1
         turns += int(head.group(1))
     note = TURN_REMOVAL_NOTE.format(turns=turns)
-    removed = sum(len(json.dumps(item, default=str)) for item in conversation[start:stop])
+    removed = sum(_json_chars(item) for item in conversation[start:stop])
     return TurnRemoval(start, stop, turns, removed - len(note), note)
 
 
@@ -670,6 +701,66 @@ def should_compact(
     if handoff_tokens is not None and context_tokens >= HANDOFF_PROXIMITY_FRACTION * handoff_tokens:
         return False
     return True
+
+
+def clear_thresholds(
+    trigger_tokens: int,
+    clear_at_least: int,
+    write_reads: float | None,
+    handoff_tokens: float | None,
+) -> tuple[float, float]:
+    """Return the trigger and the minimum removal of a bulk clear at a model's cache prices.
+
+    A clear makes the provider write what it keeps once, at the cache-write
+    price; until the next clear every call reads what has piled up since,
+    at the cache-read price.  Clearing after every ``D`` tokens of growth
+    costs one write per ``D`` and reads that grow with ``D``, so the
+    cheapest ``D`` grows with the square root of the write price over the
+    read price, and the settings, stated for :data:`CLEAR_PRICE_RATIO`,
+    are scaled by it.  Replayed on the 19,174 Claude Fable 5.2 calls of
+    2026-11-11, 250k and 50k cost $2,638 at 50 reads a write, 177k and
+    35k $3,071 at 25, 125k and 25k $3,806 at 12.5, each within 1.1% of
+    the cheapest trigger at its ratio; 250k unscaled costs $3,206 and
+    $4,341 at the lower two.
+
+    Args:
+        trigger_tokens: ``Config.context_edit_trigger_tokens``.
+        clear_at_least: ``Config.context_edit_clear_at_least``.
+        write_reads: The model's cache-write price over its cache-read
+            price (:func:`~kiss.core.models.model_info.get_cache_write_ratio`);
+            ``None`` when unknown, which leaves the settings as they are.
+        handoff_tokens: Context size at which the session hands off, or
+            ``None`` when the model's window is unknown.
+
+    Returns:
+        ``(trigger, minimum)`` in tokens.  The trigger is at most
+        :data:`HANDOFF_PROXIMITY_FRACTION` of the hand-off limit, so a
+        model with a small window is cleared before it hands off.
+    """
+    scale = math.sqrt((write_reads or CLEAR_PRICE_RATIO) / CLEAR_PRICE_RATIO)
+    trigger = trigger_tokens * scale
+    if handoff_tokens is not None:
+        trigger = min(trigger, HANDOFF_PROXIMITY_FRACTION * handoff_tokens)
+    return trigger, clear_at_least * scale
+
+
+def reasoning_tokens(output_tokens: int, function_calls: list[dict[str, Any]], text: str) -> int:
+    """Return the tokens of a reply that are neither its text nor its tool calls: its reasoning.
+
+    A provider that keeps the model's reasoning across tool calls bills it
+    with the reply's output and reads it again on every later request, but
+    returns a summary of it or nothing (on 2026-11-11 the thinking text of
+    Claude Fable 5.2 had 0.94 characters per token of reasoning).  Its size
+    is therefore what the output tokens leave after the visible parts, at
+    :data:`CHARS_PER_TOKEN`.
+
+    Args:
+        output_tokens: The output tokens the reply was billed.
+        function_calls: The reply's tool calls.
+        text: The reply's text.
+    """
+    visible = len(text) + sum(len(json.dumps(call, default=str)) for call in function_calls)
+    return max(0, output_tokens - visible // CHARS_PER_TOKEN)
 
 
 def apply_compaction(plan: list[Replacement]) -> int:

@@ -271,17 +271,15 @@ body {
   margin-bottom: var(--space-1);
 }
 
-.kiss-notification-message { font-size: var(--fs-base); }
-
-.kiss-notification-message,
-.kiss-notification-progress-message {
+.kiss-notification-message {
+  font-size: var(--fs-base);
   line-height: 1.35;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
-/* "Do not show this" under a notice that offers it: a small checkbox
-   row, muted like the progress line, the whole label clickable. */
+/* "Do not show this" under a notice that offers it: a small muted
+   checkbox row, the whole label clickable. */
 .kiss-notification-opt-out {
   display: flex;
   align-items: center;
@@ -296,12 +294,6 @@ body {
 .kiss-notification-opt-out-box {
   margin: 0;
   cursor: pointer;
-}
-
-.kiss-notification-progress-message {
-  color: var(--dim);
-  font-size: var(--fs-sm);
-  margin-top: var(--space-1);
 }
 
 .kiss-notification-close {
@@ -378,13 +370,6 @@ body {
   flex-shrink: 0;
 }
 
-.kiss-notification-progress {
-  height: 2px;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent);
-  background-size: 200% 100%;
-  animation: kiss-notification-progress 1.1s linear infinite;
-}
-
 .kiss-sr-only {
   position: absolute;
   width: 1px;
@@ -402,16 +387,8 @@ body {
   to { opacity: 1; transform: translateX(0); }
 }
 
-@keyframes kiss-notification-progress {
-  from { background-position: 200% 0; }
-  to { background-position: -200% 0; }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .kiss-notification,
-  .kiss-notification-progress {
-    animation: none;
-  }
+  .kiss-notification { animation: none; }
 }
 
 /* The machine the chat's tasks run on: a drop-down centred at the
@@ -478,7 +455,6 @@ body {
    onto a second line instead of shrinking to its chevron. */
 @media (width < 900px) {
   #chat-header { flex-wrap: wrap; row-gap: 0; }
-  #chat-machine-wrap { max-width: 100%; }
   #chat-workdir-wrap { flex: 1 1 50%; }
 }
 
@@ -521,9 +497,10 @@ body.content-tab-open #chat-header { display: none; }
 
 /* The tab rows (renderTabBar).  There is no row of chat tabs: the
    chat on screen is the one picked in the Chats panel.  #tab-bar, the
-   group strip, lists the chat on screen with its sub-agents (and, on a
-   stacked surface, every open file, browser and terminal tab) and only
-   appears when it has more than one tab.  #content-tab-bar is the
+   group strip, lists the chat on screen with its sub-agents and only
+   appears when it has more than one tab; while a stacked surface
+   shows a content tab it lists the open file, browser and terminal
+   tabs instead, a single one included.  #content-tab-bar is the
    content pane's own row in the desktop remote webapp's split layout
    (remote-codex.css); hidden everywhere else.  #pane-resizer is the
    handle between the two panes of that layout. */
@@ -577,6 +554,10 @@ body.content-tab-open #chat-header { display: none; }
   margin-top: var(--space-1);
   padding: var(--space-1-5) var(--space-2);
   font-size: var(--fs-base);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  color: var(--fg);
 }
 
 .config-label textarea { resize: vertical; }
@@ -589,12 +570,16 @@ body.content-tab-open #chat-header { display: none; }
 .config-checkbox { display: flex; align-items: center; gap: var(--space-2); flex-direction: row; }
 .config-checkbox input[type="checkbox"] { margin: 0; width: auto; }
 
+/* A checkbox label's text that holds an element of its own (a folder
+   path): one flex item, so the text flows as one paragraph, and a path
+   too long for the sheet breaks instead of widening it. */
+.config-checkbox-text { min-width: 0; overflow-wrap: anywhere; }
+
 .config-sensitivity-row { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-1); }
 
 .config-sensitivity-row input[type="range"] {
   flex: 1;
   margin: 0;
-  accent-color: var(--accent);
 }
 
 .config-sensitivity-value {
@@ -1101,7 +1086,7 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
   font-size: var(--fs-sm); color: var(--dim); padding: 0 var(--space-2-5);
 }
 .remote-url-tls-hint code { font-size: inherit; user-select: all; }
-.remote-url-tls-hint a { color: var(--accent); text-decoration: none; }
+.remote-url-tls-hint a { text-decoration: none; }
 .remote-url-tls-hint a:hover { text-decoration: underline; }
 
 /* Every transcript panel (tool calls, results, Thinking, prompts, status
@@ -1138,7 +1123,7 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 
 .txt code {
   background: color-mix(in srgb, var(--fg) 8%, transparent); padding: var(--space-0-5) var(--space-1-5); border-radius: var(--radius-sm);
-  font-family: var(--font-mono); font-size: var(--fs-md);
+  font-size: var(--fs-md);
 }
 
 .txt pre {
@@ -1212,11 +1197,6 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
   font-size: var(--fs-lg); line-height: 1.5; padding: var(--space-1-5) var(--space-1);
   color: color-mix(in srgb, var(--fg) 88%, transparent);
   overflow-wrap: anywhere; word-break: break-word;
-}
-
-body.ask-answering #input-container {
-  border-color: color-mix(in srgb, var(--red) 60%, transparent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 30%, transparent);
 }
 
 .tc.collapsed > :not(.tc-h, .panel-copy-btn, .panel-stop-btn) { display: none; }
@@ -1553,11 +1533,6 @@ body.ask-answering #input-container {
   50% { opacity: 0; }
 }
 
-#input-container.drag-over {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
-}
-
 #input-area {
   flex-shrink: 0;
   position: relative;
@@ -1636,6 +1611,23 @@ body.content-tab-open #send-btn { display: none !important; }
 .file-chip.pending { opacity: 0.6; }
 
 #input-container { transition: border-color var(--dur-slow); }
+
+/* The composer's states: a file dragged over it, and (red, like the
+   question's panel) an ask_user question waiting for the answer typed
+   into it.  Each pair of selectors outranks the remote skin's composer
+   rules (remote-codex.css), at rest and focused. */
+body.remote-chat #input-container.drag-over,
+body.remote-chat #input-container.drag-over:focus-within {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+body.remote-chat.ask-answering #input-container,
+body.remote-chat.ask-answering #input-container:focus-within {
+  border-color: color-mix(in srgb, var(--red) 60%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 30%, transparent);
+}
+
 #input-wrap { display: flex; align-items: flex-start; gap: var(--space-1); }
 #input-text-wrap { flex: 1; min-width: 0; position: relative; }
 
@@ -1682,7 +1674,6 @@ body.content-tab-open #send-btn { display: none !important; }
   align-items: center; justify-content: center; flex-shrink: 0;
 }
 #stop-btn svg { width: 15px; height: 15px; }
-#stop-btn:hover { background: color-mix(in srgb, var(--red) 20%, transparent); }
 
 /* Stop requested, agent not there yet: pulse so a pending stop cannot be
    mistaken for a click the daemon never received. */
@@ -1717,37 +1708,27 @@ body.content-tab-open #send-btn { display: none !important; }
 #model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 #model-btn svg { flex-shrink: 0; opacity: 0.55; }
 
-#upload-btn svg { width: 16px; height: 16px; }
-
-/* The composer's icon buttons: quiet at rest, and on hover the same
-   soft square that every other icon button in the app shows (tab
-   close, panel close, password toggle, custom-model actions). */
+/* The composer's icon buttons.  remote-codex.css draws them, and
+   .more-menu-item below the two that sit in the "..." menu. */
 #menu-btn,
 #meta-drawer-btn,
 #new-chat-btn,
 #more-btn,
-.toggle-btn {
-  background: none; border: none; border-radius: var(--radius-sm);
-  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: var(--space-1); transition: color var(--dur-base), background var(--dur-base), opacity var(--dur-base);
-  display: flex; align-items: center; position: relative;
-}
-
-.toggle-btn:hover {
-  color: color-mix(in srgb, var(--fg) 80%, transparent);
-  background: color-mix(in srgb, var(--fg) 8%, transparent);
-}
-
-.toggle-btn.active { color: var(--accent); }
-.toggle-btn.active:hover { color: color-mix(in srgb, var(--accent) 80%, transparent); }
+.toggle-btn { cursor: pointer; position: relative; }
 
 #share-btn.share-ok { color: var(--green); }
 #share-btn.share-err { color: var(--red); }
 #voice-btn.voice-loading { opacity: 0.5; }
 #voice-btn.voice-listening { animation: voice-pulse 1.6s ease-in-out infinite; }
 #voice-btn.voice-error { color: var(--error); }
-#voice-btn.voice-triggered { color: var(--red); animation: blink-pending 0.8s ease-in-out infinite; }
-#voice-btn.voice-transcribing { color: var(--warning); animation: blink-pending 0.8s ease-in-out infinite; }
+
+/* A recording or transcribing round colours the button; the second
+   selector of each outranks the remote skin's listening colour. */
+#voice-btn.voice-triggered,
+body.remote-chat #voice-btn.active.voice-triggered { color: var(--red); animation: blink-pending 0.8s ease-in-out infinite; }
+
+#voice-btn.voice-transcribing,
+body.remote-chat #voice-btn.active.voice-transcribing { color: var(--warning); animation: blink-pending 0.8s ease-in-out infinite; }
 
 @keyframes voice-pulse {
   0%, 100% { opacity: 1; }
@@ -1943,7 +1924,13 @@ body.content-tab-open #send-btn { display: none !important; }
   bottom: 0;
   width: 90vw;
   transform: translateX(-100%);
-  transition: transform var(--dur-slow) var(--ease);
+
+  /* Hidden once the slide out ends, which takes the closed drawer's
+     controls out of the Tab order; opening shows it at once (.open). */
+  visibility: hidden;
+  transition:
+    transform var(--dur-slow) var(--ease),
+    visibility 0s linear var(--dur-slow);
   z-index: var(--z-drawer);
   padding: var(--space-4);
 
@@ -1956,7 +1943,7 @@ body.content-tab-open #send-btn { display: none !important; }
   flex-direction: column;
 }
 
-#sidebar.open { transform: translateX(0); }
+#sidebar.open { transform: translateX(0); visibility: visible; transition-delay: 0s; }
 
 /* The task-info panel is shown by remote-codex.css (docked on
    desktop, a right-hand drawer on mobile).  Its drawer affordances
@@ -2668,7 +2655,12 @@ button.app-row-main .app-state { color: var(--accent); }
   border-top-left-radius: var(--radius-lg);
   border-top-right-radius: var(--radius-lg);
   transform: translateY(100%);
-  transition: transform var(--dur-slow) var(--ease);
+
+  /* Hidden when closed, as #sidebar is. */
+  visibility: hidden;
+  transition:
+    transform var(--dur-slow) var(--ease),
+    visibility 0s linear var(--dur-slow);
   z-index: var(--z-drawer);
   padding: var(--space-4);
   overflow: hidden;
@@ -2676,7 +2668,7 @@ button.app-row-main .app-state { color: var(--accent); }
   flex-direction: column;
 }
 
-#tricks-panel.open { transform: translateY(0); }
+#tricks-panel.open { transform: translateY(0); visibility: visible; transition-delay: 0s; }
 
 /* The "x" of every side panel; the settings dialog's and the bottom
    sheet's buttons also stack above their own scrolling panes (the
@@ -2742,10 +2734,6 @@ button.app-row-main .app-state { color: var(--accent); }
   gap: var(--space-1-5);
 }
 
-.tricks-item:hover {
-  background: color-mix(in srgb, var(--fg) 8%, transparent);
-}
-
 /* The copy and (user-owned rows only) edit and delete buttons sit at
    the right edge of a promptlet row; they take the row's own gap, not
    the task panels' margin. */
@@ -2763,10 +2751,9 @@ button.app-row-main .app-state { color: var(--accent); }
   cursor: default;
 }
 
-.tricks-item.editing:hover {
-  background: none;
-  filter: none;
-}
+/* The row does not react to the pointer (the selector outranks both
+   sheets' .sidebar-item:hover). */
+body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
 
 .tricks-edit-input {
   flex: 1 1 100%;
@@ -2807,7 +2794,6 @@ button.app-row-main .app-state { color: var(--accent); }
    scrolled; the padding pays the section's usual top margin back. */
 #settings-panel > .sidebar-section {
   flex: 1 1 auto;
-  min-height: 0;
   overflow: auto;
   margin: calc(-1 * var(--space-4));
   padding: calc(var(--space-4) + var(--space-0-5)) var(--space-4) var(--space-4);
@@ -3670,6 +3656,7 @@ button.app-row-main .app-state { color: var(--accent); }
   flex: none; display: flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; padding: 0;
   border: 1px solid var(--border); color: color-mix(in srgb, var(--fg) 70%, transparent);
+  background: var(--surface2);
   font-size: var(--fs-lg); cursor: pointer; transition: color var(--dur-base), background var(--dur-base);
 }
 #history-view-toggle:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 10%, transparent); }
@@ -4177,10 +4164,6 @@ button.app-row-main .app-state { color: var(--accent); }
   padding-left: 19px;
 }
 
-.running-item:hover {
-  background-color: color-mix(in srgb, var(--fg) 5%, transparent);
-}
-
 /* The task panel of the task the user is looking at (the tab on
    screen): an accent wash and outline so the eye finds it in the
    list.  The :hover forms outrank both surfaces' generic
@@ -4284,12 +4267,10 @@ body.remote-chat .running-item.history-active-task:hover {
 .running-item.collapsed > .running-item-info { display: none; }
 
 /* "3 hours ago" — the task's age, right after the show-details chevron
-   of a history task panel — followed by its tags ("work · coding"), SEA
-   and machine in the same muted, small style, so they read as one line
-   of metadata; each may shrink (with an ellipsis) but never wraps. */
+   of a history task panel — followed by the machine of a remote task
+   in the same muted, small style, so they read as one line of
+   metadata; each may shrink (with an ellipsis) but never wraps. */
 .sidebar-item-launched,
-.sidebar-item-tags,
-.sidebar-item-sea,
 .sidebar-item-machine {
   flex-shrink: 1;
   min-width: 0;
@@ -4308,12 +4289,7 @@ body.remote-chat .running-item.history-active-task:hover {
   font-weight: 600;
 }
 
-.sidebar-item-launched + .sidebar-item-tags::before,
-.sidebar-item-launched + .sidebar-item-sea::before,
-.sidebar-item-tags + .sidebar-item-sea::before,
-.sidebar-item-launched + .sidebar-item-machine::before,
-.sidebar-item-tags + .sidebar-item-machine::before,
-.sidebar-item-sea + .sidebar-item-machine::before {
+.sidebar-item-launched + .sidebar-item-machine::before {
   content: '•';
   margin-right: var(--space-0-5);
 }
@@ -4349,13 +4325,13 @@ body.remote-chat .running-item.history-active-task:hover {
 }
 
 .sidebar-confirm-yes { color: var(--status-fail); }
-.sidebar-confirm-yes:hover:not(:disabled) { background: color-mix(in srgb, var(--status-fail) 12%, var(--surface2)); border-color: var(--status-fail); }
+.sidebar-confirm-yes:hover:not(:disabled) { border-color: var(--status-fail); }
 
 /* A spent Delete (its delete is posted and the row waits for the daemon's refetch). */
 .sidebar-confirm-yes:disabled { opacity: 0.4; cursor: default; }
 
 .sidebar-confirm-no { color: var(--status-ok); }
-.sidebar-confirm-no:hover { border-color: var(--status-ok); }
+.sidebar-confirm-no:hover:not(:disabled) { border-color: var(--status-ok); }
 
 .sidebar-item:hover {
   filter: brightness(0.9); border-color: color-mix(in srgb, var(--fg) 15%, transparent);
@@ -4459,14 +4435,14 @@ body.remote-chat .running-item.history-active-task:hover {
 
 .md-body code {
   background: color-mix(in srgb, var(--fg) 8%, transparent); padding: 1px var(--space-1); border-radius: var(--radius-sm);
-  font-family: var(--font-mono); font-size: var(--fs-md);
+  font-size: var(--fs-md);
 }
 
 .md-body pre {
   background: var(--theme-textCodeBlock-background, rgb(0 0 0 / 30%)); border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
   border-radius: var(--radius-md); padding: var(--space-2) var(--space-2-5); overflow-x: auto; margin: var(--space-1-5) 0;
 }
-.md-body pre code { background: none; padding: 0; font-size: var(--fs-md); }
+.md-body pre code { background: none; padding: 0; }
 
 .md-body blockquote {
   border-left: 3px solid var(--accent); padding: var(--space-1) var(--space-2-5); margin: var(--space-1-5) 0; color: var(--dim); font-style: italic;
@@ -4679,16 +4655,16 @@ code { font-family: var(--font-mono); }
 
 .copyable { position: relative; }
 
+.panel-stop-btn,
 .panel-copy-btn {
-  position: absolute; top: 5px; right: 6px; z-index: var(--z-float);
-  display: flex; align-items: center; justify-content: center;
+  position: absolute; top: 5px; z-index: var(--z-float);
+  align-items: center; justify-content: center;
   padding: var(--space-1) var(--space-1); cursor: pointer;
   background: color-mix(in srgb, var(--surface) 80%, transparent);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
-  color: var(--dim);
-  opacity: 0.45;
   transition: opacity var(--dur-base), color var(--dur-base), background var(--dur-base);
 }
+.panel-copy-btn { display: flex; right: 6px; color: var(--dim); opacity: 0.45; }
 
 .copyable:hover > .panel-copy-btn,
 .panel-copy-btn:focus-visible,
@@ -4708,17 +4684,7 @@ code { font-family: var(--font-mono); }
    panel's tool call is in progress -- a .tc stamped with data-start-ms
    (stampPanelStart) and not yet sealed by data-time-done
    (finalizePanelTime / sealPanelTimes). */
-.panel-stop-btn {
-  display: none;
-  position: absolute; top: 5px; right: 34px; z-index: var(--z-float);
-  align-items: center; justify-content: center;
-  padding: var(--space-1) var(--space-1); cursor: pointer;
-  background: color-mix(in srgb, var(--surface) 80%, transparent);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  color: var(--red);
-  opacity: 0.8;
-  transition: opacity var(--dur-base), color var(--dur-base), background var(--dur-base);
-}
+.panel-stop-btn { display: none; right: 34px; color: var(--red); opacity: 0.8; }
 .tc[data-start-ms]:not([data-time-done]) > .panel-stop-btn { display: flex; }
 
 .panel-stop-btn:hover,
@@ -4902,7 +4868,6 @@ code { font-family: var(--font-mono); }
 .content-tab-icon.terminal-tab-icon {
   font-family: var(--font-mono);
   font-weight: 700;
-  font-size: var(--fs-xs);
 }
 
 /* The daemon machine's browser streamed as a tab (browserTab.js): an

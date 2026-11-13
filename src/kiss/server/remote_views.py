@@ -63,7 +63,10 @@ from the connection that opened it only, as the local
 :class:`~kiss.server.terminal_tab.TerminalService` does.  A connection
 that drops stops watching its pages, and its shells are hung up after
 :data:`~kiss.server.terminal_tab.GRACE_SECONDS` unless a reconnecting
-page claims them with ``terminalOpen`` first.  A lost stream ends its
+page claims them with ``terminalOpen`` first.  A ``browserOpen`` is
+forwarded with an ``openId`` the machine echoes on its answer, so the
+answers to several opens in flight reach the connections that asked
+in whatever order the machine finishes them.  A lost stream ends its
 terminals with a ``terminalError`` naming the machine, answers the
 ``browserOpen`` requests it never replied to with a ``browserError``,
 and closes its browser tabs on every surface.
@@ -86,6 +89,7 @@ import contextlib
 import json
 import logging
 import threading
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -108,8 +112,8 @@ VIEW_COMMANDS = TERMINAL_COMMANDS | BROWSER_COMMANDS
 
 TERMINAL_EVENTS = frozenset({"terminalData", "terminalOpened", "terminalExit", "terminalError"})
 BROWSER_EVENTS = frozenset({
-    "openBrowserTab", "browserTabs", "browserFrame", "browserState", "closeBrowserTab",
-    "browserError",
+    "openBrowserTab", "browserTabs", "browserFrame", "browserTouch", "browserState",
+    "closeBrowserTab", "browserError",
 })
 
 _MACHINE_SEPARATOR = "@"
@@ -145,6 +149,25 @@ def registered_machine(name: str) -> Machine | None:
     return next((m for m in load_machines() if m.name == name), None)
 
 
+def _shows(cmd: dict[str, Any]) -> bool:
+    """Whether the ``browserViewport`` *cmd* shows its page, as the machine's daemon reads it.
+
+    That daemon reads it as this one reads a local page's
+    (``_cmd_browser_viewport``): ``visible`` defaults to true, and a
+    size that is no number counts as 0.  Read otherwise here, the
+    stream would count a viewer the machine sends no frames for, or
+    none for the frames it sends.
+    """
+    try:
+        return (
+            bool(cmd.get("visible", True))
+            and int(cmd.get("width") or 0) > 0
+            and int(cmd.get("height") or 0) > 0
+        )
+    except (TypeError, ValueError, OverflowError):  # text, a list, NaN, Infinity
+        return False
+
+
 class RemoteViewStream(MachineStream):
     """One machine's stream: its terminals and browser pages shown here.
 
@@ -160,9 +183,10 @@ class RemoteViewStream(MachineStream):
             round trip's window) is taken for the re-open's answer and
             lets the old exit through; the page then shows an exit
             note its fresh shell clears.
-        openers: The connections whose ``browserOpen`` awaits its
-            reply (the focused ``openBrowserTab`` or a ``browserError``
-            addressed to the stream), oldest first.
+        openers: By the ``openId`` its ``browserOpen`` was forwarded
+            with, the connection awaiting the reply (the focused
+            ``openBrowserTab`` or a ``browserError`` addressed to the
+            stream, which echoes the id), oldest first.
         browser_tabs: By the remote's own tab id, the last
             ``openBrowserTab`` of every page the machine's browser has
             open, already namespaced and stamped (unfocused): a
@@ -194,7 +218,7 @@ class RemoteViewStream(MachineStream):
         """
         self.terminals: dict[str, str] = {}
         self.opening: set[str] = set()
-        self.openers: list[str] = []
+        self.openers: dict[str, str] = {}
         self.browser_tabs: dict[str, dict[str, Any]] = {}
         self.viewers: dict[str, set[str]] = {}
         self.flows: dict[str, FrameFlow[str]] = {}
@@ -272,17 +296,18 @@ class RemoteViewStream(MachineStream):
     def _relay_browser(self, kind: str, msg: dict[str, Any]) -> None:
         """Relay a browser event with namespaced ids and the ``machine`` stamp.
 
-        A frame goes to the page's viewers.  The remote strips the
-        ``connId`` it addressed a frame with, so the reply to a
-        ``browserOpen`` is told by its shape: a focused, non-popup
-        ``openBrowserTab`` while an opener waits goes to the oldest
-        waiting opener (one while none waits is an agent's call for
-        attention: every client gets it, focused, as the remote's own
-        surfaces do), and a ``browserError`` without a tab (the browser
-        could not launch) likewise.  Everything else goes to every
-        client.  The event is delivered under the lock, in the order
-        the bookkeeping saw it (a ``ready`` snapshot copies the
-        bookkeeping under the same lock).
+        A frame goes to the page's viewers, and so does the machine's
+        word on a finger one of them put down (``browserTouch``).  The
+        reply to a ``browserOpen`` (a focused, non-popup
+        ``openBrowserTab``, or a ``browserError`` without a tab: the
+        browser could not launch)
+        goes to the opener it answers (:meth:`_take_opener`); a
+        focused ``openBrowserTab`` that answers none is an agent's call
+        for attention: every client gets it, focused, as the remote's
+        own surfaces do.  Everything else goes to every client.  The
+        event is delivered under the lock, in the order the
+        bookkeeping saw it (a ``ready`` snapshot copies the bookkeeping
+        under the same lock).
 
         A frame is acknowledged to the machine once it is here (after
         the lock: nothing is sent under it), whether or not anyone
@@ -310,10 +335,14 @@ class RemoteViewStream(MachineStream):
                 for conn_id in self.viewers.get(remote_id, ()):
                     flow.offer(conn_id, text)
                 to = []
+            elif kind == "browserTouch":
+                to = list(self.viewers.get(remote_id, ()))
             elif kind == "openBrowserTab":
                 self.browser_tabs[remote_id] = dict(event, focus=False)
-                if msg.get("focus") and not msg.get("popup") and self.openers:
-                    to = [self.openers.pop(0)]
+                if msg.get("focus") and not msg.get("popup"):
+                    opener = self._take_opener(msg)
+                    if opener is not None:
+                        to = [opener]
             elif kind == "browserState":
                 cached = self.browser_tabs.get(remote_id)
                 if cached is not None:
@@ -325,9 +354,10 @@ class RemoteViewStream(MachineStream):
                 if flow is not None:
                     flow.close()
             elif kind == "browserError" and not remote_id:
-                if not self.openers:
+                opener = self._take_opener(msg)
+                if opener is None:
                     return
-                to = [self.openers.pop(0)]
+                to = [opener]
                 answered = True
             if to is None:
                 self._owner.deliver(text)
@@ -339,6 +369,24 @@ class RemoteViewStream(MachineStream):
                 self.send({"type": "browserFrameAck", "tab_id": remote_id})
         elif kind == "closeBrowserTab" or answered:
             self._owner.close_if_idle(self)
+
+    def _take_opener(self, msg: dict[str, Any]) -> str | None:
+        """The connection whose ``browserOpen`` *msg* answers, no longer waiting (under ``lock``).
+
+        The machine echoes the open's ``openId``.  A daemon older than
+        the id echoes none: its reply goes to the oldest waiting
+        opener.  Such a reply was addressed to this stream, so it has
+        no ``tabId``; an announcement to all of the machine's clients
+        (an agent's page) is stamped with one and answers no open.
+
+        Returns:
+            The opener's connection id, or None when *msg* answers no
+            waiting open.
+        """
+        open_id = str(msg.get("openId") or "")
+        if not open_id and "tabId" not in msg:
+            open_id = next(iter(self.openers), "")
+        return self.openers.pop(open_id, None)
 
     def frame_acked(self, remote_id: str, conn_id: str) -> None:
         """The connection *conn_id* received a frame of the page *remote_id*.
@@ -364,7 +412,7 @@ class RemoteViewStream(MachineStream):
 
     def _stamped(self, msg: dict[str, Any]) -> dict[str, Any]:
         """A copy of *msg* without the remote's addressing, stamped with the machine."""
-        event = {k: v for k, v in msg.items() if k not in ("connId", "tabId")}
+        event = {k: v for k, v in msg.items() if k not in ("connId", "tabId", "openId")}
         event["machine"] = self.machine.name
         return event
 
@@ -490,7 +538,7 @@ class RemoteViews:
                 except MachineError as exc:
                     self._refuse(name, tab_id, conn_id, str(exc))
                     return True
-                if self._forward(stream, name, tab_id, conn_id, cmd, frame):
+                if self._forward(stream, name, tab_id, conn_id, frame):
                     break
             else:
                 self._refuse(name, tab_id, conn_id, f"lost the connection to {machine_name}")
@@ -500,7 +548,7 @@ class RemoteViews:
             if found is None:
                 return False
             stream = found
-            self._forward(stream, name, tab_id, conn_id, cmd, frame)
+            self._forward(stream, name, tab_id, conn_id, frame)
         else:
             remote_id, machine_name = split_tab_id(tab_id)
             if not machine_name:
@@ -516,23 +564,23 @@ class RemoteViews:
                 stream.frame_acked(remote_id, conn_id)
                 return True
             frame["tab_id"] = remote_id
-            self._forward(stream, name, remote_id, conn_id, cmd, frame)
+            self._forward(stream, name, remote_id, conn_id, frame)
         if name == "terminalClose":
             self.close_if_idle(stream)
         return True
 
     def _forward(
         self, stream: RemoteViewStream, name: str, tab_id: str, conn_id: str,
-        cmd: dict[str, Any], frame: dict[str, Any],
+        frame: dict[str, Any],
     ) -> bool:
-        """Book *cmd* on *stream* and send *frame*, as one step; False when not booked.
+        """Book *frame* on *stream* and send it, as one step; False when not booked.
 
         A send that fails ends the stream, whose relay thread then runs
         :meth:`dropped` as lost: that tells the booked terminal owner,
         opener or page viewers (the sender among them) once.
         """
         with stream.send_lock:
-            if not self._book(stream, name, tab_id, conn_id, cmd):
+            if not self._book(stream, name, tab_id, conn_id, frame):
                 return False
             try:
                 stream.send(frame)
@@ -548,9 +596,13 @@ class RemoteViews:
 
         A retired stream takes nothing.  A terminal's input, resize and
         close count only from the connection that opened it.  A
+        ``browserOpen`` is stamped (*cmd* is the frame to send) with
+        the ``openId`` its opener waits under.  A
         ``browserViewport`` hiding the page is sent only once nobody on
         this daemon watches it: the remote tracks one viewer, this
-        stream, whose last visible size it keeps.
+        stream, whose last visible size it keeps.  One for a page the
+        stream does not have (it closed meanwhile) is dropped: nothing
+        would ever remove its viewers.
         """
         with stream.lock:
             if stream.retired:
@@ -565,13 +617,13 @@ class RemoteViews:
                     del stream.terminals[tab_id]
                     stream.opening.discard(tab_id)
             elif name == "browserOpen":
-                stream.openers.append(conn_id)
+                cmd["openId"] = open_id = uuid.uuid4().hex
+                stream.openers[open_id] = conn_id
             elif name == "browserViewport":
-                visible = bool(cmd.get("visible")) and int(cmd.get("width") or 0) > 0 and int(
-                    cmd.get("height") or 0
-                ) > 0
+                if tab_id not in stream.browser_tabs:
+                    return False
                 watching = stream.viewers.setdefault(tab_id, set())
-                if visible:
+                if _shows(cmd):
                     watching.add(conn_id)
                 else:
                     watching.discard(conn_id)
@@ -689,16 +741,24 @@ class RemoteViews:
         waits for each stream's ``send_lock`` (a command's send to the
         machine may be stalled for up to its timeout) and sends over the
         socket itself, so it runs on a thread of its own, like the grace
-        timers it starts.
+        timers it starts.  When no thread can be started it is done
+        here, at the cost of that wait: left undone, the connection
+        would watch its pages and own its shells for good.
         """
         thread = threading.Thread(
             target=self._viewer_gone, args=(conn_id,),
             name=f"remote-views-gone-{conn_id}", daemon=True,
         )
-        thread.start()
+        try:
+            thread.start()
+        except RuntimeError:
+            self._viewer_gone(conn_id)
 
     def _viewer_gone(self, conn_id: str) -> None:
-        """Do :meth:`viewer_gone`'s bookkeeping and sends, off the server loop."""
+        """Do :meth:`viewer_gone`'s bookkeeping and sends.
+
+        Off the server loop, unless no thread could be started.
+        """
         with self._lock:
             streams = list(self._streams.values())
         for stream in streams:
@@ -723,7 +783,12 @@ class RemoteViews:
                     GRACE_SECONDS, self._hang_up_detached, (stream, tab_id, conn_id),
                 )
                 timer.daemon = True
-                timer.start()
+                try:
+                    timer.start()
+                except RuntimeError:
+                    # No thread is left for the grace period: hung up at
+                    # once, or nothing would ever end the shell.
+                    self._hang_up_detached(stream, tab_id, conn_id)
 
     def _hang_up_detached(self, stream: RemoteViewStream, tab_id: str, conn_id: str) -> None:
         """Hang the shell of *tab_id* up unless another connection claimed it meanwhile.
@@ -788,7 +853,7 @@ class RemoteViews:
                     self.deliver_to(conn_id, json.dumps({
                         "type": "terminalError", "tab_id": tab_id, "text": text, "machine": name,
                     }))
-                for conn_id in stream.openers:
+                for conn_id in stream.openers.values():
                     self.deliver_to(conn_id, json.dumps({
                         "type": "browserError", "tab_id": "", "text": text, "machine": name,
                     }))

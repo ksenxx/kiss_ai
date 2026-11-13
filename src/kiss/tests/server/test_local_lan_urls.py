@@ -23,22 +23,42 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import tempfile
+import urllib.request
 from pathlib import Path
 from typing import Any
-from unittest import IsolatedAsyncioTestCase, TestCase
+from unittest import IsolatedAsyncioTestCase, TestCase, skipUnless
 
 from websockets.asyncio.client import connect
 
+from kiss.core.config import remote_url_file
 from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _IP_CHANGE_DEBOUNCE_TICKS,
-    _URL_FILE,
     RemoteAccessServer,
     _save_url_file,
 )
 from kiss.tests.conftest import TRANSIENT_REPLACE_READ_ERRORS
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
+
+_URL_FILE = remote_url_file()  # under the session's KISS_HOME, which the test conftest sets
+
+
+def _has_ipv6_loopback() -> bool:
+    """Whether this host can bind ``::1``."""
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+def _http_status(url: str) -> int:
+    """GET *url* and return the response status."""
+    with urllib.request.urlopen(url, timeout=10) as response:
+        return int(response.status)
 
 
 class TestSaveUrlFileLocalLan(TestCase):
@@ -176,6 +196,18 @@ class TestLoopbackOnlyServer(_LiveServerCase):
         self.assertEqual(srv._lan_urls(), [])
 
 
+@skipUnless(_has_ipv6_loopback(), "this host has no IPv6 loopback")
+class TestIpv6LoopbackServer(_LiveServerCase):
+    """A listener on ``::1`` is IPv6-only: ``127.0.0.1`` does not reach it."""
+
+    host = "::1"
+
+    async def test_advertised_loopback_url_reaches_the_listener(self) -> None:
+        loopback = json.loads(_URL_FILE.read_text())["loopback"]
+        self.assertEqual(loopback, f"http://[::1]:{self.port}")
+        self.assertEqual(await asyncio.to_thread(_http_status, loopback), 200)
+
+
 class TestLanCapableServer(_LiveServerCase):
     """0.0.0.0 bind + password: LAN URLs are advertised everywhere."""
 
@@ -221,9 +253,22 @@ class TestLanCapableServer(_LiveServerCase):
         finally:
             save_config({"remote_password": self.password})
 
+    async def test_one_address_listener_advertises_that_address_alone(self) -> None:
+        """A listener on one address is reachable there only, whatever other
+        addresses the host has; an IPv6 wildcard one (IPv6-only) at none of
+        the IPv4 addresses the daemon knows."""
+        work_dir = tempfile.mkdtemp()
+        for host, expected in (
+            ("192.0.2.10", ["https://192.0.2.10:8787"]),
+            ("fd00::5", ["https://[fd00::5]:8787"]),
+            ("::", []),
+        ):
+            srv = RemoteAccessServer(host=host, port=8787, work_dir=work_dir)
+            srv._last_ips = frozenset({"192.0.2.10", "198.51.100.11"})
+            self.assertEqual(srv._lan_urls(), expected, host)
+
     async def test_lan_urls_uses_cached_ips(self) -> None:
         """_lan_urls prefers the probed IP snapshot (no live socket probe)."""
-        self.assertTrue(self.server._ips_probed)
         old = self.server._last_ips
         try:
             self.server._last_ips = frozenset({"10.9.8.7"})
@@ -239,7 +284,6 @@ class TestLanCapableServer(_LiveServerCase):
         ``/webclip.mobileconfig`` embeds that URL in the profile it
         serves (test_tls_local_ca checks the served profile itself).
         """
-        self.assertTrue(self.server._ips_probed)
         old = self.server._last_ips
         try:
             self.server._last_ips = frozenset({"10.9.8.8", "10.9.8.7"})
@@ -259,11 +303,9 @@ class TestLanCapableServer(_LiveServerCase):
         """
         old = self.server._last_ips
         try:
-            self.server._ips_probed = False
-            self.server._last_ips = frozenset({"192.168.3.3"})
+            self.server._last_ips = frozenset()  # as before the first probe
             self.assertEqual(self.server._lan_urls(), [])
         finally:
-            self.server._ips_probed = True
             self.server._last_ips = old
 
     async def test_ip_change_republishes_urls_in_tunnel_mode(self) -> None:

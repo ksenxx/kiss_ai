@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import shutil
 import socket
 import tempfile
@@ -37,17 +38,17 @@ from kiss.server import sidebar_panels
 from kiss.server.web_server import (
     MACHINES_REGISTRY_POLL_SECONDS,
     RemoteAccessServer,
-    _generate_self_signed_cert,
 )
 from kiss.tests.conftest import find_free_port
-from kiss.tests.local_ws import open_local_connection
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 from kiss.tests.remote_daemon import start_remote_daemon
+from kiss.tests.server.test_sidebar_panels import _step_wall_clock_back
 
 
 def _forget_machine_pings() -> None:
     """Drop the cached machine pings (and host names) so the next report pings anew."""
     with sidebar_panels._machines_lock:
-        sidebar_panels._machines_checked_at = 0.0
+        sidebar_panels._machines_pinged_at = -math.inf
         mach._hosts.clear()
 
 
@@ -55,14 +56,23 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
     """One local daemon, one remote daemon, one registry, one cron store."""
 
     async def asyncSetUp(self) -> None:
+        # Cleanups, each registered as its resource starts, not asyncTearDown:
+        # unittest skips the tear-down when the set-up fails.  They run
+        # last-registered first: the registry is emptied before the pings
+        # are forgotten, as the tear-down did.
         self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         self.saved_jobs = cron_agent.load_jobs()
+        self.addCleanup(cron_agent.save_jobs, self.saved_jobs)
         cron_agent.save_jobs([])
         mach.save_machines([])
         _forget_machine_pings()
+        self.addCleanup(_forget_machine_pings)
+        self.addCleanup(mach.save_machines, [])
         self.remote = await asyncio.to_thread(
             start_remote_daemon, Path(self.tmpdir) / "remote-home", password="pw-remote",
         )
+        self.addCleanup(self.remote.stop)
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
@@ -71,17 +81,11 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
             keyfile=str(keyfile), url_file=Path(self.tmpdir) / "remote-url.json",
             local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
+        # Registered before the start: one that fails part-way is stopped too.
+        self.addAsyncCleanup(self.server.stop_async)
         await self.server.start_async()
         self.reader, self.writer = await open_local_connection(self.server)
-
-    async def asyncTearDown(self) -> None:
-        self.writer.close()
-        await self.server.stop_async()
-        self.remote.stop()
-        mach.save_machines([])
-        _forget_machine_pings()
-        cron_agent.save_jobs(self.saved_jobs)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        self.addCleanup(self.writer.close)
 
     async def _ask(self, cmd: dict[str, Any], reply_type: str) -> dict[str, Any]:
         """Send *cmd* and return the first *reply_type* message."""
@@ -157,10 +161,12 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
         self.assertIn("sshbox", sshbox["error"])
         # The pings are cached: a second request serves the same probe,
         # and `refresh` pings again.
-        again = await self._machines()
-        self.assertEqual(again["checkedAt"], reply["checkedAt"])
+        pinged_at = sidebar_panels._machines_pinged_at
+        await self._machines()
+        self.assertEqual(sidebar_panels._machines_pinged_at, pinged_at)
         refreshed = await self._machines(refresh=True)
-        self.assertGreaterEqual(refreshed["checkedAt"], reply["checkedAt"])
+        refreshed_at = sidebar_panels._machines_pinged_at
+        self.assertGreater(refreshed_at, pinged_at)
         self.assertEqual(
             [row["status"] for row in refreshed["machines"]],
             ["reachable", "reachable", "unreachable", "unreachable"],
@@ -172,11 +178,11 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
         # next request ping again; the dead rows cost no dial (the links
         # are backed off), so it answers at once.
         with sidebar_panels._machines_lock:
-            sidebar_panels._machines_checked_at -= sidebar_panels.MACHINES_DOWN_TTL_SECONDS
+            sidebar_panels._machines_pinged_at -= sidebar_panels.MACHINES_DOWN_TTL_SECONDS
         started = time.monotonic()
         repinged = await self._machines()
         self.assertLess(time.monotonic() - started, mach.REQUEST_TIMEOUT)
-        self.assertGreater(repinged["checkedAt"], refreshed["checkedAt"])
+        self.assertGreater(sidebar_panels._machines_pinged_at, refreshed_at)
         self.assertEqual(
             [row["status"] for row in repinged["machines"]],
             ["reachable", "reachable", "unreachable", "unreachable"],
@@ -232,19 +238,22 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
             [(host, host), ("127.0.0.1", host), ("box", "box"), ("dead", "dead")],
         )
         # The host name of the last answered ping serves while the
-        # machine is down.
+        # machine is down.  Refresh pings although the wall clock stepped
+        # back since, which leaves the cached ping an hour in the future.
         self.remote.stop()
+        _step_wall_clock_back(3600.0)
         down = await self._machines(refresh=True)
         rows = {row["name"]: row for row in down["machines"]}
         self.assertEqual(rows["127.0.0.1"]["status"], "unreachable")
         self.assertEqual(rows["127.0.0.1"]["label"], host)
         self.assertEqual(rows["box"]["label"], "box")
+        down_at = sidebar_panels._machines_pinged_at
         # The label is as fresh as the daemon's knowledge, not as the
         # cached ping: a host name learnt meanwhile (a history fetch)
         # shows on the cached report.
         mach.note_host(mach.Machine(name="127.0.0.1"), "renamed-host")
         cached = await self._machines()
-        self.assertEqual(cached["checkedAt"], down["checkedAt"], "the same ping")
+        self.assertEqual(sidebar_panels._machines_pinged_at, down_at, "the same ping")
         rows = {row["name"]: row for row in cached["machines"]}
         self.assertEqual(rows["127.0.0.1"]["label"], "renamed-host")
 

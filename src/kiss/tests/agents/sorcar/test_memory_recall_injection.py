@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.memoryfield.index import hashed_embedding
 from kiss.core.memoryfield.tools import MEMORY_PROTOCOL, RECALL_HEADING, MemoryTools
 from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
@@ -89,3 +90,42 @@ def test_first_message_of_a_run_carries_the_recall_block(
     assert first.index("postgres pool exhaustion and the sessions timeout") < first.index(
         RECALL_HEADING
     )
+
+
+PLACEHOLDER_PAGE = """---
+title: Prompt templates fill the {task} placeholder
+summary: The task argument replaces {task} in the prompt template.
+updated: '2026-10-21T10:00:00+00:00'
+---
+A prompt template names its task argument as the {task} placeholder.
+"""
+
+
+def test_recalled_pages_are_not_filled_with_the_run_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page that quotes ``{task}`` reaches the model as written: only the template is filled."""
+    home = tmp_path / "home"
+    (home / "memories").mkdir(parents=True)
+    (home / "memories" / "prompt-template-placeholder.md").write_text(
+        PLACEHOLDER_PAGE, encoding="utf-8"
+    )
+    monkeypatch.setenv("KISS_HOME", str(home))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    work = tmp_path / "work"
+    work.mkdir()
+    task = "Explain how prompt templates fill the task placeholder with the task argument"
+    with serve([finish_body("<p>done</p>")]) as (url, requests):
+        SorcarAgent("recall-arguments").run(
+            prompt_template="Task: {task}",
+            arguments={"task": task},
+            model_name=MODEL,
+            work_dir=str(work),
+            model_config={"base_url": url, "api_key": "local"},
+            use_memory=True,
+            verbose=False,
+        )
+    first = str(next(m for m in requests[0]["messages"] if m["role"] == "user")["content"])
+    assert first.index(f"Task: {task}\n") < first.index(RECALL_HEADING)
+    assert "Prompt templates fill the {task} placeholder" in first
+    assert "The task argument replaces {task} in the prompt template." in first

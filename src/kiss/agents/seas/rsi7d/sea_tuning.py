@@ -45,7 +45,7 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar.sea_settings import settings_functions
+from kiss.agents.sorcar.sea_settings import sea_methods
 
 MIN_RUNS = 3
 """Finished runs needed before a limit is proposed (fewer is no evidence)."""
@@ -384,7 +384,7 @@ def settings_literal(tree: ast.Module) -> ast.Dict | None:
     as a literal; ``return build()`` does not) has no place to write a
     key.
     """
-    for node in settings_functions(tree):
+    for node in sea_methods(tree, "settings"):
         returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
         if len(returns) != 1:
             continue

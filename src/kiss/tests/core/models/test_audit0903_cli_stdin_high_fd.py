@@ -120,6 +120,27 @@ def _descriptors_above_fd_setsize() -> Iterator[None]:
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
 
+@contextlib.contextmanager
+def _cli_above_fd_setsize(cli: str) -> Iterator[_CLIProcess]:
+    """Run *cli* under :class:`_CLIProcess` with its stdin pipe above descriptor 1023.
+
+    The pipe takes the lowest free descriptors, and a thread an earlier
+    test left behind (a server closing its last connection) can free a
+    low one between the fill and the spawn: the turn would then run, and
+    pass, without the condition under test.  Such a spawn is repeated.
+    """
+    for _attempt in range(10):
+        with (
+            _descriptors_above_fd_setsize(),
+            _CLIProcess([cli], "Fake CLI", _TURN_TIMEOUT) as proc,
+        ):
+            assert proc._proc.stdin is not None
+            if proc._proc.stdin.fileno() >= 1024:
+                yield proc
+                return
+    pytest.fail("a descriptor below 1024 was freed at each of 10 spawns")
+
+
 def _install_script(tmp_path: Path, name: str, body: str) -> str:
     """Write an executable Python stand-in CLI and return its path.
 
@@ -153,12 +174,9 @@ class TestPromptSurvivesAboveFdSetsize:
     ) -> None:
         prompt = "hello from a busy daemon"
         cli = _echo_length_cli(tmp_path)
-        with _descriptors_above_fd_setsize():
-            with _CLIProcess([cli], "Fake CLI", _TURN_TIMEOUT) as proc:
-                assert proc._proc.stdin is not None
-                assert proc._proc.stdin.fileno() >= 1024
-                proc.send_prompt(prompt)
-                received = [line.strip() for line in proc.lines()]
+        with _cli_above_fd_setsize(cli) as proc:
+            proc.send_prompt(prompt)
+            received = [line.strip() for line in proc.lines()]
         assert received == [str(len(prompt.encode("utf-8")))]
 
     def test_slow_reader_gets_the_whole_big_prompt_above_fd_1024(
@@ -168,10 +186,9 @@ class TestPromptSurvivesAboveFdSetsize:
         # fills and the writer's readiness poller must time out and
         # retry (the "not yet writable" branch) many times.
         cli = _echo_length_cli(tmp_path, sleep_first=0.5)
-        with _descriptors_above_fd_setsize():
-            with _CLIProcess([cli], "Fake CLI", _TURN_TIMEOUT) as proc:
-                proc.send_prompt(_BIG_PROMPT)
-                received = [line.strip() for line in proc.lines()]
+        with _cli_above_fd_setsize(cli) as proc:
+            proc.send_prompt(_BIG_PROMPT)
+            received = [line.strip() for line in proc.lines()]
         assert received == [str(len(_BIG_PROMPT))]
 
     def test_child_that_closes_stdin_early_still_replies(
@@ -192,10 +209,9 @@ class TestPromptSurvivesAboveFdSetsize:
             print("done", flush=True)
             """,
         )
-        with _descriptors_above_fd_setsize():
-            with _CLIProcess([cli], "Fake CLI", _TURN_TIMEOUT) as proc:
-                proc.send_prompt(_BIG_PROMPT)
-                received = [line.strip() for line in proc.lines()]
+        with _cli_above_fd_setsize(cli) as proc:
+            proc.send_prompt(_BIG_PROMPT)
+            received = [line.strip() for line in proc.lines()]
         assert received == ["done"]
 
     def test_claude_code_turn_sees_its_prompt_above_fd_1024(

@@ -41,6 +41,7 @@ from kiss.agents.sorcar.sea_commands import (
 from kiss.agents.sorcar.sea_settings import anchored_work_dir
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.config import kiss_home
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 
 PICKER_SEA = """
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -70,13 +71,13 @@ def registry(tmp_path: Path) -> Iterator[Path]:
     seas_md = home / "SEAS.md"
     previous = seas_md.read_text(encoding="utf-8") if seas_md.is_file() else None
     seas_md.write_text(f"{folder}\n", encoding="utf-8")
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
     yield folder
     if previous is None:
         seas_md.unlink(missing_ok=True)
     else:
         seas_md.write_text(previous, encoding="utf-8")
-    sea_commands._reset_for_tests()
+    reset_sea_registry()
 
 
 def test_an_imported_class_and_its_file_loaded_copy_are_one_class(

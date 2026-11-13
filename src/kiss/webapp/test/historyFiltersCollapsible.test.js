@@ -6,14 +6,17 @@
 'use strict';
 
 const assert = require('assert');
-const harness = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  loadMainCss,
+  storageSnapshot,
+} = require('./simplify2_harness');
 const {visibleTitles, STATUS_CHIP_SESSIONS} = require('./history_helpers');
 
 function makePage(preSetup) {
-  return harness.makePage({beforeScripts: preSetup});
+  return makeChatPage({beforeScripts: preSetup});
 }
-
-const send = harness.send;
 
 function clickToggle(win) {
   const btn = win.document.getElementById('history-filters-toggle');
@@ -177,16 +180,6 @@ function testDefaultCollapsedThenControlsVisibleOnExpand() {
   console.log('  ok - collapsed by default; the header expands and re-collapses');
 }
 
-/** Every localStorage entry of the page as `{key: value}`. */
-function storageSnapshot(win) {
-  const items = {};
-  for (let i = 0; i < win.localStorage.length; i++) {
-    const k = win.localStorage.key(i);
-    items[k] = win.localStorage.getItem(k);
-  }
-  return items;
-}
-
 /** A fresh page whose localStorage starts with *items*. */
 function makePageWithStorage(items) {
   return makePage(win => {
@@ -252,7 +245,7 @@ function testFiltersStayAppliedWhileCollapsed() {
   chk.dispatchEvent(new win.Event('change', {bubbles: true}));
   clickToggle(win);
   assert.deepStrictEqual(
-    visibleTitles(win).sort(),
+    visibleTitles(win),
     ['errored task', 'running task'],
     'filters stay applied while the panel is collapsed',
   );
@@ -295,7 +288,7 @@ function testLocalStorageUnavailableFallsBackToCollapsed() {
 
 function testFiltersPanelCss() {
   const {win} = makePage();
-  harness.loadMainCss(win);
+  loadMainCss(win);
   const doc = win.document;
   const toggle = doc.getElementById('history-filters-toggle');
   const chevron = toggle.querySelector('.history-filters-chevron');

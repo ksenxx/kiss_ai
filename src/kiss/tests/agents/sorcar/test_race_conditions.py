@@ -30,7 +30,6 @@ def _worker_record_model_usage(db_dir: str, model: str, n: int) -> None:
     kiss_dir = Path(db_dir)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     for _ in range(n):
         th._record_model_usage(model)
 
@@ -42,6 +41,5 @@ def _worker_save_last_model(db_dir: str, model: str, n: int) -> None:
     kiss_dir = Path(db_dir)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     for _ in range(n):
         th._save_last_model(model)

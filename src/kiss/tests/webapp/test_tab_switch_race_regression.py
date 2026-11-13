@@ -748,11 +748,14 @@ class TestSetReadyResetsRunningTabId(unittest.TestCase):
         timestamps, without touching the active tab's UI state."""
         set_ready_src = _extract_function(self.js, "setReady")
         # setReady delegates the per-tab running flag to the real
-        # setTabRunning helper, so evaluate that too.  Its only UI
-        # side-effect (renderStopButton) fires for the ACTIVE tab
-        # alone, so routing it into uiCalls keeps the "background
-        # completion must not touch active-tab UI" check honest.
+        # setTabRunning helper, so evaluate that too.  Its UI
+        # side-effects fire for the ACTIVE tab (renderStopButton) and
+        # for the chat behind a file on screen (renderContentTabStop,
+        # which the real chatTargetTabId decides), so routing both into
+        # uiCalls keeps the "background completion must not touch
+        # active-tab UI" check honest.
         set_tab_running_src = _extract_function(self.js, "setTabRunning")
+        chat_target_src = _extract_function(self.js, "chatTargetTabId")
         result = _run_node(_make_test_script(
             r"""
             var tabs = [
@@ -771,16 +774,20 @@ class TestSetReadyResetsRunningTabId(unittest.TestCase):
             function removeSpinner() { uiCalls.push('removeSpinner'); }
             function renderTabBar() {}
             function renderStopButton() { uiCalls.push('renderStopButton'); }
+            function renderContentTabStop() {
+                uiCalls.push('renderContentTabStop');
+            }
             var statusText = { textContent: '' };
             var inp = { focus: function() {} };
             // setReady() only refocuses the composer on desktop clients
             // (main.js: `if (!isMobileRemote) inp.focus();`).
             var isMobileRemote = false;
             """
+            + chat_target_src
             + set_tab_running_src
             + set_ready_src
             + r"""
-            setReady('Done (4s)', 7, 1000, 5000);
+            setReady('4s', 7, 1000, 5000);
             var bg = getTab(7);
             if (bg.isRunning !== false) {
                 process.stdout.write('FAIL: background tab still running');
@@ -791,7 +798,7 @@ class TestSetReadyResetsRunningTabId(unittest.TestCase):
                     'FAIL: t0/endTs not anchored: ' + bg.t0 + '/' + bg.endTs);
                 process.exit(1);
             }
-            if (bg.statusTextContent !== 'Done (4s)') {
+            if (bg.statusTextContent !== '4s') {
                 process.stdout.write('FAIL: done label not persisted on tab');
                 process.exit(1);
             }
@@ -930,7 +937,7 @@ class TestPerTabT0(unittest.TestCase):
         """Behavior (real ``switchToTab`` evaluated in Node): switching
         to a non-running tab stops the live timer and flips the running
         state to false, while the restored ``t0``/``endTs`` anchors are
-        KEPT so the tab can render "Done (Xm Ys)" from agent
+        KEPT so the tab can render the time taken ("Xm Ys") from agent
         wall-clock."""
         switch_src = _extract_function(self.js, "switchToTab")
         # switchToTab delegates its activation tail (restore, running
@@ -1080,7 +1087,7 @@ class TestPerTabT0(unittest.TestCase):
             + content_focus_src
             + set_ready_src
             + r"""
-            setReady('Done (4s)', 1, 1000, 5000);
+            setReady('4s', 1, 1000, 5000);
             if (tabs[0].isRunning !== false || isRunning !== false) {
                 process.stdout.write('FAIL: running state not cleared');
                 process.exit(1);
@@ -1094,7 +1101,7 @@ class TestPerTabT0(unittest.TestCase):
                     'FAIL: anchors not re-anchored: ' + t0 + '/' + endTs);
                 process.exit(1);
             }
-            if (statusText.textContent !== 'Done (4s)') {
+            if (statusText.textContent !== '4s') {
                 process.stdout.write('FAIL: status label not rendered');
                 process.exit(1);
             }
@@ -1109,7 +1116,7 @@ class TestPerTabT0(unittest.TestCase):
             timerRunning = true;
             endTs = 0;
             document.activeElement = _makeEl('INPUT');
-            setReady('Done', 1);
+            setReady('2s', 1);
             if (focusCalls !== 1) {
                 process.stdout.write('FAIL: composer stole focus: ' + focusCalls);
                 process.exit(1);

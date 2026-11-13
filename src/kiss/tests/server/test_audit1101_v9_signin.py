@@ -22,7 +22,10 @@ And of the 2026-11-05 audit (A13):
 4. A cancel or retry that lands once the relay thread has reaped the
    hook (it exited on its own) signals nothing: the group's pid may
    already be a stranger's, and a helper the hook left behind (the
-   user's browser) is left alone as after any natural exit.
+   user's browser) is left alone as after any natural exit.  The
+   sign-in that hook had finished is still announced to every window,
+   after the window it was taken from by another one has heard so
+   (2026-11-10, A/V6-F1 and F2).
 5. A login whose relay thread cannot start (thread exhaustion) is
    ended and reported as a ``signinError``; it used to live on with
    its pipes open and nobody reading them.
@@ -285,20 +288,27 @@ def test_hook_output_that_is_not_utf8_ends_the_login_with_an_error(home: Path) -
 
 
 def test_an_end_after_the_hooks_exit_signals_its_group_nothing(home: Path) -> None:
-    """A cancel landing once the relay reaped the hook leaves its helper alone (item 4)."""
+    """A cancel landing once the relay reaped the hook leaves its helper alone (item 4).
+
+    Another window's cancel: the login's window hears of it, and the
+    sign-in the hook had finished by then is announced all the same,
+    with the ``status`` answer cached before it dropped.
+    """
     _install_hook(home, _EXITING_WITH_HELPER_HOOK)
     events: list[Event] = []
     url_seen = threading.Event()
 
     def reply(event: Event, broadcast: bool) -> None:
-        events.append(event)
+        events.append({**event, "everyone": broadcast})
         if event["type"] == "signinUrl":
             url_seen.set()
 
     login = SigninLogin()
     pid_file = home / "helper.pid"
     try:
-        login.start("test", reply)
+        send_signin(events.append)  # a page's ``ready``: "not logged in" is cached (no event)
+        assert signin._status_cache is not None
+        login.start("test", reply, "window-a")
         assert url_seen.wait(10), events
         assert _wait_until(lambda: pid_file.exists() and pid_file.read_text() != "")
         helper_pid = int(pid_file.read_text())
@@ -308,7 +318,7 @@ def test_an_end_after_the_hooks_exit_signals_its_group_nothing(home: Path) -> No
             (home / "finish").touch()
             assert _wait_until(lambda: exited_unreaped(proc)), "the hook did not exit"
             assert login._proc is proc
-            login._end_locked()  # what cancel() and a retry's start() do under the lock
+            login._end_locked("window-b")  # what cancel() and a start() do under the lock
             assert login._ending == [], "an end thread was started for a reaped hook"
         assert _wait_until(lambda: not _relay_threads() and not login._ending)
         assert proc.returncode == 0
@@ -319,7 +329,14 @@ def test_an_end_after_the_hooks_exit_signals_its_group_nothing(home: Path) -> No
         with contextlib.suppress(OSError, ValueError):
             os.kill(int(pid_file.read_text()), signal.SIGKILL)
         login.shutdown()
-    assert [e["type"] for e in events] == ["signinUrl"], events
+    assert [(e["type"], e["everyone"]) for e in events] == [
+        ("signinUrl", False),
+        ("signinError", False),
+        ("signinDone", True),
+    ], events
+    assert events[1]["error"] == signin.ENDED_ELSEWHERE and events[1]["provider"] == "test"
+    assert events[2]["email"] == "me@example.com"
+    assert signin._status_cache is None, "the answer cached before the sign-in outlived it"
     assert proc.stdin is not None and proc.stdin.closed
     assert proc.stdout is not None and proc.stdout.closed
 

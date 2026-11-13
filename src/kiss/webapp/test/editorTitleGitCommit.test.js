@@ -86,6 +86,41 @@ assert.strictEqual(actions.length, 2, 'a re-armed click commits again');
 assert.strictEqual(actions[1].tabId, ROOT);
 assert.strictEqual(autocommitBtn.disabled, true, 'and disables in flight');
 
+// --- another tab's commit ends nothing here --------------------------------
+// Audit 2026-11-11 (W1): the daemon broadcasts every commit's
+// autocommit_done to every surface, and commits run per tab.  One for
+// another tab (started on another surface) used to re-arm this
+// button while this tab's commit was still running: the next click
+// was sent, and refused by the daemon as a duplicate.
+send(win, {
+  type: 'autocommit_done',
+  tabId: 'a-tab-of-another-surface',
+  success: true,
+  manual: true,
+  message: 'Committed elsewhere.',
+});
+assert.strictEqual(
+  autocommitBtn.disabled,
+  true,
+  "BUG: another tab's autocommit_done re-armed the commit in flight",
+);
+click(win, autocommitBtn);
+assert.strictEqual(
+  ofType(posted, 'autocommitAction').length,
+  2,
+  'no duplicate request while this commit runs',
+);
+send(win, {
+  type: 'autocommit_done',
+  tabId: ROOT,
+  success: true,
+  manual: true,
+  message: 'Committed.',
+});
+assert.strictEqual(autocommitBtn.disabled, false, 'its own result re-arms');
+click(win, autocommitBtn);
+assert.strictEqual(ofType(posted, 'autocommitAction').length, 3);
+
 // The last commit is left in flight on purpose, which arms main.js's
 // 120 s autocommit re-arm timer: close the window so that timer does
 // not keep node alive for two minutes after the assertions are done.

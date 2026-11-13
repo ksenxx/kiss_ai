@@ -39,16 +39,9 @@ const {
   loadMainCss,
   readyTabId,
 } = require('./simplify2_harness');
-const runner = makeRunner();
-const report = runner.report;
+// Every page a test built: the runner closes them when it has ended.
 const openWindows = [];
-
-/** Run one test through the shared runner, then close its windows. */
-async function test(name, fn) {
-  const result = runner.test(name, fn);
-  if (result) await result;
-  while (openWindows.length) openWindows.pop().close();
-}
+const {test, report} = makeRunner({windows: openWindows});
 
 function makePage() {
   const wv = makeHarnessPage({
@@ -360,6 +353,26 @@ test('adjacent replay never repaints the live panel; scrolling does', () => {
     infoText(win).includes('old-model'),
     'parking on the neighbour shows ITS settings: ' + infoText(win),
   );
+
+  // Audit 2026-11-11 (W1): a neighbour's settings are its own.  Task
+  // ids number each daemon's own history, so a task of another tab (on
+  // another machine) may carry the neighbour's id: its settings must
+  // not replace the rows of the neighbour the reader is parked on.
+  send(win, {type: 'tabs_state', tabs: [{tabId: TAB}, {tabId: 'other-tab'}]});
+  send(win, {
+    type: 'task_settings',
+    tabId: 'other-tab',
+    taskId: 'task-1',
+    settings: Object.assign({}, SETTINGS, {model: 'other-tab-model'}),
+  });
+  win.document
+    .getElementById('output')
+    .dispatchEvent(new win.Event('scroll'));
+  assert.ok(
+    infoText(win).includes('old-model'),
+    "BUG - another tab's same-id task replaced the neighbour's rows: " +
+      infoText(win),
+  );
 });
 
 test('a neighbour without settings shows dashes', () => {
@@ -390,6 +403,61 @@ test('a neighbour without settings shows dashes', () => {
     infoText(win),
     '',
     'a legacy neighbour with no known settings shows dashes only',
+  );
+});
+
+test('a neighbour fetched by a same-task tab belongs to the tab on screen', () => {
+  const wv = makePage();
+  const win = wv.win;
+  const first = readyTabId(wv.posted);
+  win._testApi.hideWelcome();
+  const own = {
+    type: 'task_events',
+    chat_id: 'chat-abc',
+    task_id: 'task-2',
+    task: 'live task',
+    events: [
+      {
+        type: 'task_settings',
+        settings: Object.assign({}, SETTINGS, {
+          task_id: 'task-2',
+          model: 'live-model',
+        }),
+      },
+    ],
+  };
+  send(win, Object.assign({tabId: first}, own));
+  win._testApi.createNewTab();
+  send(win, Object.assign({tabId: win._testApi.getActiveTabId()}, own));
+  // The answer to a fetch the first tab made before the switch: both
+  // tabs show the task, so it is spliced into the one on screen.
+  send(win, {
+    type: 'adjacent_task_events',
+    tabId: first,
+    direction: 'prev',
+    task: 'older neighbour',
+    task_id: 'task-1',
+    events: [
+      {
+        type: 'task_settings',
+        settings: Object.assign({}, SETTINGS, {
+          task_id: 'task-1',
+          model: 'old-model',
+        }),
+      },
+    ],
+  });
+  assert.strictEqual(
+    win.document.querySelectorAll('#output .adjacent-task').length,
+    1,
+    'the neighbour is spliced into the transcript on screen',
+  );
+  clickTab(win, first);
+  const rows = infoRows(win);
+  assert.deepStrictEqual(
+    [rows.model, rows.taskId],
+    ['live-model', 'task-2'],
+    "the hidden tab keeps its own task, not the neighbour's",
   );
 });
 
@@ -427,6 +495,39 @@ test('a background tab keeps its settings and shows them on switch', () => {
   assert.ok(
     infoText(win).includes('bg-model'),
     'switching back shows the settings the tab received: ' + infoText(win),
+  );
+  // A replay REPLACES the hidden tab's transcript too.  One that
+  // throws half way hands the old transcript back, settings included;
+  // one carrying no settings must not keep the previous task's, as on
+  // the visible tab.
+  win._testApi.createNewTab();
+  const other = win._testApi.getActiveTabId();
+  const errors = [];
+  win.addEventListener('error', e => {
+    errors.push(e);
+    e.preventDefault();
+  });
+  const replay = {
+    type: 'task_events',
+    tabId: TAB,
+    chat_id: 'chat-abc',
+    task_id: 'task-9',
+    task: 'settings-less task',
+  };
+  send(win, {...replay, events: [null]});
+  assert.strictEqual(errors.length, 1, 'the malformed replay threw');
+  clickTab(win, TAB);
+  assert.ok(
+    infoText(win).includes('bg-model'),
+    'a failed replay hands the old settings back: ' + infoText(win),
+  );
+  clickTab(win, other);
+  send(win, {...replay, events: [{type: 'system_output', text: 'x\n'}]});
+  clickTab(win, TAB);
+  assert.strictEqual(
+    infoText(win),
+    '',
+    'a hidden replay without settings clears the rows',
   );
 });
 
@@ -653,7 +754,7 @@ test('a saved page lists every Task Info row for every task', () => {
   assert.strictEqual(done.Tokens, '1.23M');
   assert.strictEqual(done.Cost, '$1.50');
   assert.strictEqual(done.Steps, '12');
-  assert.strictEqual(done.Time, 'Done (2m 5s)');
+  assert.strictEqual(done.Time, '2m 5s');
   assert.strictEqual(done.Machine, 'box-a');
   assert.strictEqual(done.Workdir, '/repo');
   assert.strictEqual(done['Max budget'], '$5.00');

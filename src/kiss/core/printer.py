@@ -5,6 +5,7 @@
 """Abstract base class and shared utilities for KISS agent printers."""
 
 import logging
+import math
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -52,14 +53,22 @@ def parse_cost(value: Any) -> float | None:
 
     Returns:
         The figure; ``None`` for ``"N/A"``, a bool, or anything else
-        that is not one.
+        that is not one: a total can be kept of what is returned, so a
+        NaN, an infinity and a number beyond the float range (all of
+        which ``json.loads`` reads from a stored event) are none either.
     """
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    match = _COST_RE.fullmatch(value.strip()) if isinstance(value, str) else None
-    return float(match.group(1).replace(",", "")) if match else None
+    if isinstance(value, str):
+        match = _COST_RE.fullmatch(value.strip())
+        value = match.group(1).replace(",", "") if match else None
+    if not isinstance(value, (int, float, str)):
+        return None
+    try:
+        figure = float(value)
+    except OverflowError:
+        return None
+    return figure if math.isfinite(figure) else None
 
 
 def event_cost(event: dict[str, Any]) -> float | None:
@@ -76,9 +85,8 @@ def event_cost(event: dict[str, Any]) -> float | None:
         The cost; ``None`` when neither field is one.
     """
     exact = event.get("cost_usd")
-    if isinstance(exact, (int, float)) and not isinstance(exact, bool):
-        return float(exact)
-    return parse_cost(event.get("cost"))
+    figure = parse_cost(exact) if isinstance(exact, (int, float)) else None
+    return figure if figure is not None else parse_cost(event.get("cost"))
 
 
 def cost_fields(
@@ -169,7 +177,8 @@ def truncate_result(content: str) -> str:
         str: The original string if short enough, otherwise the first and last
             halves joined by a truncation marker.
     """
-    content, _ = parse_binary_attachments(content)
+    # Only the text is kept: no photo is converted for a printer.
+    content, _ = parse_binary_attachments(content, transcode=False)
     if len(content) <= MAX_RESULT_LEN:
         return content
     half = MAX_RESULT_LEN // 2

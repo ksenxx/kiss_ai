@@ -2,13 +2,13 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end test: a ``machineAction`` whose registration blows up still answers (F11).
+"""End-to-end test: a ``machineAction`` whose action blows up still answers (F11).
 
-``machines.add_machine`` can raise something other than ``MachineError``
-(a malformed IPv6 address makes ``urlsplit`` raise ``ValueError`` while
-deriving the default name); ``_reply_machine_action`` ran that in a
-background task without the ``try/except`` of its sibling replies, so
-the task died silently and the client never got its ``machines`` reply.
+A machine action can raise something other than ``MachineError`` (the
+``OSError`` of a registry whose lock file cannot be opened);
+``_reply_machine_action`` ran that in a background task without the
+``try/except`` of its sibling replies, so the task died silently and
+the client never got its ``machines`` reply.
 """
 
 from __future__ import annotations
@@ -22,9 +22,9 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 from kiss.agents.sorcar import machines as mach
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import find_free_port
-from kiss.tests.local_ws import open_local_connection
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 
 
 class TestMachineActionReplyOnUnexpectedError(IsolatedAsyncioTestCase):
@@ -72,5 +72,23 @@ class TestMachineActionReplyOnUnexpectedError(IsolatedAsyncioTestCase):
         # Nothing was registered: the report lists this daemon alone.
         self.assertEqual([m for m in reply["machines"] if not m["local"]], [])
         # The connection is still served: a plain poll answers too.
+        polled = await self._ask({"type": "getMachines"}, "machines")
+        self.assertEqual(polled["error"], "")
+
+    async def test_an_action_that_raises_is_answered_with_its_error(self) -> None:
+        # A directory where the registry's lock file belongs: opening it is an OSError.
+        lock = mach.machines_file().with_suffix(".lock")
+        lock.unlink(missing_ok=True)
+        lock.mkdir()
+        try:
+            with self.assertLogs("kiss.server.sorcar", "WARNING") as logged:
+                reply = await self._ask(
+                    {"type": "machineAction", "action": "remove", "name": "box"}, "machines",
+                )
+        finally:
+            lock.rmdir()
+        self.assertIn("machineAction remove failed", "\n".join(logged.output))
+        self.assertEqual(reply["action"], "remove")
+        self.assertIn(lock.name, reply["error"])
         polled = await self._ask({"type": "getMachines"}, "machines")
         self.assertEqual(polled["error"], "")

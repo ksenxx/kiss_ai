@@ -27,6 +27,7 @@
 #   KISS_REINSTALL_POLL_SECONDS      seconds between idle probes (default 5)
 #   KISS_REINSTALL_DEADLINE_SECONDS  give up after this long without an idle window (default 14400)
 #   KISS_REINSTALL_LABEL             job label / unit name (default kiss-reinstall-<epoch>-<pid>)
+#   KISS_HOME                        the daemon's state directory, handed on to the job
 #
 # The worker logs to <repo>/tmp/reinstall-kiss-web/<label>.log and keeps each
 # install.sh transcript next to it.  It exits 0 once install.sh reports
@@ -52,6 +53,10 @@ JOB_ENV=(
     "KISS_REINSTALL_POLL_SECONDS=$POLL_SECONDS"
     "KISS_REINSTALL_DEADLINE_SECONDS=$DEADLINE_SECONDS"
 )
+# The caller's state directory, when it names one: the job's idle probe and
+# its install.sh go by it, and a launchd or systemd job does not inherit the
+# caller's environment.
+[ -z "${KISS_HOME:-}" ] || JOB_ENV+=("KISS_HOME=$KISS_HOME")
 
 xml_escape() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 
@@ -121,16 +126,37 @@ unload_launchd_label() {
     fi
 }
 
-kiss_web_is_idle() {
-    local python="$HOME/.kiss/kiss/.venv/bin/python"
+# True when the daemon that published endpoint file $1 reports no task in
+# flight.  The probe runs under the python of the app in the daemon's state
+# directory (named after it: ~/.s10s/s10s; "kiss" in older installs and under
+# a $KISS_HOME without a leading dot), which has the probe's dependencies.
+daemon_is_idle() {
+    local home="${1%/*}" name python
+    name="${home##*/}"
+    python="$home/${name#.}/.venv/bin/python"
+    [ -x "$python" ] || python="$home/kiss/.venv/bin/python"
     [ -x "$python" ] || python=python3
-    KISS_ACTIVE_TASKS_STRICT=1 "$python" "$REPO/scripts/check-kiss-web-active-tasks.py" >/dev/null 2>&1
+    KISS_SORCAR_LOCAL="$1" KISS_ACTIVE_TASKS_STRICT=1 \
+        "$python" "$REPO/scripts/check-kiss-web-active-tasks.py" >/dev/null 2>&1
+}
+
+# True when no kiss-web daemon of this user reports a task in flight.  A daemon
+# publishes its endpoint in its state directory: ~/.kiss, a white-label
+# brand's own (~/.s10s) or $KISS_HOME, and install.sh restarts it whichever
+# that is.  So the daemon of each of them is asked, once.
+kiss_web_is_idle() {
+    local endpoint custom="${KISS_HOME:+$KISS_HOME/sorcar-local.json}"
+    for endpoint in "$HOME"/.[!.]*/sorcar-local.json; do
+        [ -f "$endpoint" ] || continue
+        [ "$endpoint" -ef "$custom" ] && custom=""
+        daemon_is_idle "$endpoint" || return 1
+    done
+    [ ! -f "$custom" ] || daemon_is_idle "$custom"
 }
 
 worker() {
     local deadline=$(( $(date +%s) + DEADLINE_SECONDS )) idle_streak=0 attempt=0 runlog rc
     export KISS_NONINTERACTIVE=1
-    unset KISS_FORCE_RESTART
     mkdir -p "$LOGDIR"
     exec >>"$LOG" 2>&1
     trap unload_launchd_label EXIT

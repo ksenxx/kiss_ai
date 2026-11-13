@@ -14,9 +14,11 @@ window must be widened.
   the pong budget: a peer that just answered the ping must not be
   aborted because a large replay is still draining ahead of the
   heartbeat.
-* V1-2 — the receive queue is unbounded: a client whose frames pile up
-  behind a slow command keeps answering pings (a paused transport
-  held back the pong too, and the watchdog aborted a live client).
+* V1-2 — the receive queue holds far more frames than a client sends
+  behind a slow command, so such a client keeps answering pings (a
+  paused transport held back the pong too, and the watchdog aborted a
+  live client).  It is not unbounded: past ``_RECEIVE_QUEUE_FRAMES``
+  the rest waits in the peer's socket.
 * V1-3 — a connection still sniffing its first byte, or in its TLS
   handshake, is closed with the listeners instead of lingering until
   its own timeout.
@@ -137,7 +139,7 @@ class TestHeartbeatBehindTheFifo(_LoopbackServerCase):
         self.assertEqual(await self._recv(client), {"type": "heartbeat"})
 
 
-class TestUnboundedReceiveQueue(_LoopbackServerCase):
+class TestReceiveQueue(_LoopbackServerCase):
     """V1-2: frames queued behind a slow command do not hold back the pong."""
 
     async def test_flood_behind_a_slow_command_keeps_the_pong(self) -> None:
@@ -167,6 +169,41 @@ class TestUnboundedReceiveQueue(_LoopbackServerCase):
         while types.count("pong") < 64:
             types.append((await self._recv(client))["type"])
         self.assertIn("heartbeat", types)
+
+    async def test_frames_past_the_queue_bound_stop_the_reading(self) -> None:
+        client, endpoint = await self._connect()
+        pause = Pause(
+            AgentServer._handle_command.__code__,
+            lambda frame_locals: frame_locals["cmd"].get("type") == "getConfig",
+        )
+        sent = ws._RECEIVE_QUEUE_FRAMES + 64
+        with pause:
+            await client.send(json.dumps({"type": "getConfig"}))
+            self.assertTrue(await asyncio.to_thread(pause.paused.wait, 10))
+            for _ in range(sent):
+                await client.send(json.dumps({"type": "ping"}))
+            # More than the queue holds: the daemon stops reading the
+            # connection instead of queueing whatever the client sends.
+            deadline = time.monotonic() + 10
+            while endpoint.transport.is_reading() and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+            self.assertFalse(
+                endpoint.transport.is_reading(), "the daemon reads on past its queue bound",
+            )
+            # The pong of a ping sent now waits in the socket the daemon
+            # itself is not reading: its absence is not the peer's doing.
+            ws._WS_PING_TIMEOUT = 0.4
+            await self.server._watchdog_ping_clients()
+            await asyncio.sleep(1.0)
+            self.assertFalse(
+                endpoint.transport.is_closing(),
+                "a live client was aborted for a pong the daemon did not read",
+            )
+        # Released: every frame is served, and the reading resumed.
+        pongs = 0
+        while pongs < sent:
+            pongs += (await self._recv(client))["type"] == "pong"
+        self.assertTrue(endpoint.transport.is_reading())
 
 
 class TestSniffingConnectionsCloseWithTheListeners(_LoopbackServerCase):
@@ -265,7 +302,9 @@ class TestStoredPasswordCache(_LoopbackServerCase):
                 event == "return" and frame.f_code is load_code
                 and frame.f_back is not None and frame.f_back.f_code is cache_code
             )
-            if threading.current_thread() is old and in_refresh:
+            # By ident: ``current_thread()`` in a thread that is past its
+            # own unregistering registers a dummy thread for it, for good.
+            if threading.get_ident() == old.ident and in_refresh:
                 old_loaded.set()
                 release_old.wait(10)
             elif threading.get_ident() == loop_tid:
@@ -297,10 +336,6 @@ class TestStoredPasswordCache(_LoopbackServerCase):
         client = await self._remote()
         await client.send(json.dumps({"type": "ping", "password": "Correct-Horse-Battery-1"}))
         self.assertEqual((await self._recv(client))["code"], "auth_failed")
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestPeerCertificateCheckOffTheLoop(_LoopbackServerCase):
@@ -342,3 +377,7 @@ class TestPeerCertificateCheckOffTheLoop(_LoopbackServerCase):
             self.assertLess(time.monotonic() - started, 2.0, "the browser waited for the check")
         reply = json.loads(await asyncio.wait_for(peer.recv(), 10))
         self.assertEqual(reply, AUTH_OK_LOCAL)
+
+
+if __name__ == "__main__":
+    unittest.main()

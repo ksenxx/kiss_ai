@@ -5,13 +5,8 @@
 """End-to-end regressions for area-E redundancy/race fixes in
 ``sorcar/git_worktree.py``.
 
-Covers audit findings:
+Covers audit finding:
 
-* **E-R4** — ``rescue_ignored_files`` re-inlined the ``git ls-files``
-  invocation because ``list_ignored_files`` conflated "git failed"
-  with "no ignored files".  ``list_ignored_files`` now returns
-  ``None`` on git failure; the rescue keeps failing closed and the
-  orphan-reclaim spare probe preserves a spare it cannot enumerate.
 * **E-RC2** — ``repo_lock`` is a ``threading.RLock`` (in-process
   only), so two PROCESSES reclaiming the same dead owner's worktree
   could interleave stage → cherry-pick → commit → cleanup and lose
@@ -21,15 +16,6 @@ Covers audit findings:
 
 Every test uses a REAL git repository and REAL child processes.  No
 mocks, patches or doubles, and no LLM calls.
-
-Unreachable branch note: the orphan-reclaim SPARE-content probe's
-``ignored is None`` arm (preserve a pool spare whose ignored files
-cannot be enumerated) requires ``git ls-files`` to fail inside a
-worktree that ``git worktree list`` just reported as registered —
-i.e. git breaking between two calls of one loop iteration.  That
-cannot be produced end-to-end without a git test double, so the
-``None`` contract is covered here via ``list_ignored_files`` /
-``rescue_ignored_files`` directly instead.
 """
 
 from __future__ import annotations
@@ -114,56 +100,6 @@ def _reclaim_worker(repo_str: str, barrier, out_queue) -> None:
         out_queue.put(f"error: {exc!r}")
     finally:
         os.environ.pop(_RACE_DELAY_ENV, None)
-
-
-class TestListIgnoredFiles(unittest.TestCase):
-    """E-R4 — git failure is distinguishable from no ignored files."""
-
-    def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="kiss_rr_e_ign_"))
-        self.repo = _make_repo(self.tmp / "repo")
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_returns_none_outside_a_repository(self) -> None:
-        bare_dir = self.tmp / "not_a_repo"
-        bare_dir.mkdir()
-        self.assertIsNone(GitWorktreeOps.list_ignored_files(bare_dir))
-
-    def test_returns_empty_list_for_clean_repository(self) -> None:
-        self.assertEqual(GitWorktreeOps.list_ignored_files(self.repo), [])
-
-    def test_returns_ignored_paths(self) -> None:
-        (self.repo / ".gitignore").write_text("*.log\n")
-        (self.repo / "debug.log").write_text("x\n")
-        self.assertEqual(
-            GitWorktreeOps.list_ignored_files(self.repo), ["debug.log"],
-        )
-
-    def test_rescue_fails_closed_when_enumeration_fails(self) -> None:
-        bare_dir = self.tmp / "fake_worktree"
-        bare_dir.mkdir()
-        (bare_dir / "precious.txt").write_text("do not lose\n")
-        rescued, ok = GitWorktreeOps.rescue_ignored_files(
-            bare_dir, self.repo,
-        )
-        self.assertEqual(rescued, 0)
-        self.assertFalse(ok)
-        # Nothing was copied into the repo.
-        self.assertFalse((self.repo / "precious.txt").exists())
-
-    def test_rescue_still_lands_ignored_files(self) -> None:
-        branch = "kiss/wt-100-rescue"
-        wt_dir = _plant_orphan_worktree(self.repo, branch)
-        (wt_dir / ".gitignore").write_text("*.secret\n")
-        (wt_dir / "keys.secret").write_text("hunter2\n")
-        rescued, ok = GitWorktreeOps.rescue_ignored_files(wt_dir, self.repo)
-        self.assertTrue(ok)
-        self.assertGreaterEqual(rescued, 1)
-        self.assertEqual(
-            (self.repo / "keys.secret").read_text(), "hunter2\n",
-        )
 
 
 class TestCrossProcessReclaim(unittest.TestCase):

@@ -8,7 +8,9 @@
 module under ``src/kiss/tests`` that imports, directly or through other
 ``kiss`` modules, a changed source file (``git diff --name-only HEAD``
 plus untracked files, or the paths given on the command line).  A
-changed test file is impacted by itself.  ``--splits N`` prints instead
+changed test file is impacted by itself, and a changed ``conftest.py``
+impacts every test below its directory, which pytest loads it for
+without an import.  ``--splits N`` prints instead
 the JSON list of ``N`` ``uv run pytest`` commands for
 ``run_commands_parallel``, each with a per-test timeout
 (:data:`DEFAULT_TEST_TIMEOUT_SECONDS`) and balanced by the durations
@@ -34,6 +36,7 @@ import argparse
 import ast
 import json
 import os
+import shlex
 import statistics
 import subprocess
 import sys
@@ -109,9 +112,12 @@ importers.  The full closure of a core module (``kiss_agent``,
 def impacted_tests(changed: list[Path], src: Path = SRC, depth: int = DEFAULT_DEPTH) -> list[Path]:
     """Return the test files within *depth* import hops of *changed* in the reverse import graph.
 
+    A changed ``conftest.py`` adds every test below its directory, whatever
+    the depth: pytest loads it for them without an import.
+
     Args:
         changed: Changed files (absolute, or relative to the repo root);
-            files outside *src* or not ``.py`` are ignored.
+            other files outside *src* or not ``.py`` are ignored.
         src: The source root to index (default: the repository's ``src/``).
         depth: Maximum import hops from a changed module to a test
             (:data:`DEFAULT_DEPTH`); ``0`` means no bound.
@@ -123,11 +129,19 @@ def impacted_tests(changed: list[Path], src: Path = SRC, depth: int = DEFAULT_DE
     # tests that break.
     importers: dict[str, set[str]] = defaultdict(set)
     for path in files:
+        importer = _module_name(path, src)
         for name in imported_modules(path, src):
-            importers[name].add(_module_name(path, src))
+            # Importing a.b.c runs a/__init__.py and a/b/__init__.py first:
+            # the importer depends on every package above the name too.
+            while name:
+                importers[name].add(importer)
+                name = name.rpartition(".")[0]
     roots = []
+    conftest_dirs = []
     for path in changed:
         resolved = path.resolve() if path.is_absolute() else (src.parent / path).resolve()
+        if resolved.name == "conftest.py":
+            conftest_dirs.append(resolved.parent)
         if resolved.suffix == ".py" and resolved.is_relative_to(src):
             roots.append(_module_name(resolved, src))
     seen = set(roots)
@@ -143,10 +157,10 @@ def impacted_tests(changed: list[Path], src: Path = SRC, depth: int = DEFAULT_DE
     tests_dir = src / "kiss" / "tests"
     return sorted(
         test
-        for m in seen
-        if (test := by_module.get(m)) is not None
-        and test.is_relative_to(tests_dir)
+        for module, test in by_module.items()
+        if test.is_relative_to(tests_dir)
         and test.name.startswith("test_")
+        and (module in seen or any(test.is_relative_to(d) for d in conftest_dirs))
     )
 
 
@@ -189,19 +203,39 @@ def owned_tests(changed: list[Path], src: Path = SRC) -> list[Path]:
 
 
 def changed_files() -> list[Path]:
-    """Return the files changed against ``HEAD`` plus the untracked ones (``[]`` outside git)."""
-    try:
-        diff = subprocess.run(
-            ["git", "diff", "--name-only", "HEAD"], cwd=PROJECT_ROOT, capture_output=True,
-            text=True, timeout=30, check=False,
-        ).stdout
-        untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard"], cwd=PROJECT_ROOT,
-            capture_output=True, text=True, timeout=30, check=False,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
+    """Return the files changed against ``HEAD`` plus the untracked ones.
+
+    ``[]`` outside git: no ``.git`` at the project root or above it.  Both
+    listings name their paths from the project root (``git diff`` would
+    name them from the top of the repository, which may be above it), as
+    they are on disk (``-z``: unquoted, so a name that is not ASCII is a
+    file too).  The listings are read as bytes and each name decoded as
+    Python reads file names: one that is not UTF-8 stays that file, and
+    so does one with a carriage return, which text mode would turn into
+    a line feed.  A rename is listed under both names: the tests that
+    still import the old one are the ones that break.
+
+    Raises:
+        OSError: When git cannot be started.
+        subprocess.SubprocessError: When git times out or fails in the
+            repository: no answer must not read as "nothing changed".
+    """
+    if not any((d / ".git").exists() for d in (PROJECT_ROOT, *PROJECT_ROOT.parents)):
         return []
-    return [PROJECT_ROOT / line for line in (diff + untracked).splitlines() if line.strip()]
+    names: list[bytes] = []
+    for command in (
+        ["git", "diff", "--name-only", "-z", "--relative", "--no-renames", "HEAD"],
+        ["git", "ls-files", "-z", "--others", "--exclude-standard"],
+    ):
+        done = subprocess.run(
+            command, cwd=PROJECT_ROOT, capture_output=True, timeout=30, check=False,
+        )
+        if done.returncode:
+            raise subprocess.SubprocessError(
+                f"{' '.join(command)} failed: {os.fsdecode(done.stderr).strip()}"
+            )
+        names += done.stdout.split(b"\0")
+    return [PROJECT_ROOT / os.fsdecode(name) for name in names if name]
 
 
 DEFAULT_TEST_TIMEOUT_SECONDS = 600
@@ -222,8 +256,9 @@ def split_commands(
     recorded files (its size alone when nothing is recorded, as the
     balance was before durations were kept).  The longest-weighing files
     are placed first, each into the lightest split so far.  Paths are in
-    POSIX form: the commands run through the Bash tool, which is bash on
-    Windows too, where a backslash would be eaten.
+    POSIX form and quoted as shell words: the commands run through the
+    Bash tool, which is bash on Windows too, where a backslash would be
+    eaten, and a space or a ``;`` in a path would end the argument.
 
     Args:
         tests: The test files to run.
@@ -247,7 +282,7 @@ def split_commands(
     flag = f"--timeout={timeout} " if timeout > 0 else ""
     return [
         f"uv run pytest -q -p no:cacheprovider {flag}"
-        + " ".join(t.relative_to(root).as_posix() for t in sorted(bucket))
+        + shlex.join(t.relative_to(root).as_posix() for t in sorted(bucket))
         for bucket in buckets
         if bucket
     ]
@@ -277,7 +312,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.owned and not args.paths:
         parser.error("--owned needs the files you changed: in a tree shared with siblings, "
                      "git diff holds their edits too")
-    changed = [Path(p) for p in args.paths] or changed_files()
+    try:
+        changed = [Path(p) for p in args.paths] or changed_files()
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"impacted-tests: cannot list the changed files: {error}", file=sys.stderr)
+        return 1
     tests = owned_tests(changed) if args.owned else impacted_tests(changed, depth=args.depth)
     if args.splits:
         commands = split_commands(
@@ -285,8 +324,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(commands))
     else:
-        for test in tests:
-            print(test.relative_to(PROJECT_ROOT))
+        # Written as bytes, each name as the file system has it: a name
+        # that is not UTF-8 is no text a strict stdout would encode.
+        listing = "".join(f"{test.relative_to(PROJECT_ROOT).as_posix()}\n" for test in tests)
+        sys.stdout.buffer.write(os.fsencode(listing))
     return 0
 
 

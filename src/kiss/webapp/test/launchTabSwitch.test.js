@@ -23,10 +23,19 @@ const assert = require('assert');
 const {
   makePage: makeChatPage,
   send,
-  snapshotEntry,
+  // The registry snapshot the daemon broadcasts after `ready` (and after
+  // every registry mutation): the canonical tab set every client
+  // reconciles against.
+  sendTabsState: tabsState,
   stubRaf,
   tabIds,
 } = require('./simplify2_harness');
+const {freezeClock} = require('./history_helpers');
+const {activeTabId} = require('./subagent_tab_helpers');
+
+// The pages' clock stays at this instant: a launch lasts 15 s of it, so a
+// slow run cannot end one, and only testLaunchWindowExpires moves it.
+const FROZEN_NOW_MS = 1_700_500_000_000;
 
 // A launched window whose backend is live. `daemonStatus connected` is how
 // the socket shim announces that: it synthesises it the moment the password
@@ -38,15 +47,14 @@ function makePage(opts) {
   const {win, posted} = makeChatPage({
     bodyClass: 'remote-chat',
     initialState: state,
-    beforeScripts: stubRaf,
+    beforeScripts(win) {
+      stubRaf(win);
+      freezeClock(win, FROZEN_NOW_MS);
+    },
     sourceUrl: 'launch-main.js',
   });
   if (connect) send(win, {type: 'daemonStatus', connected: true});
   return {win, posted};
-}
-
-function activeTabId(win) {
-  return win._testApi.getActiveTabId();
 }
 
 // A real pick by the user: a chat is picked in the Chats panel (the
@@ -59,16 +67,15 @@ function clickTab(win, tabId) {
   win._testApi.switchToTab(tabId);
 }
 
-// The registry snapshot the daemon broadcasts after `ready` (and after every
-// registry mutation): the canonical tab set every client reconciles against.
-function tabsState(win, entries) {
-  send(win, {
-    type: 'tabs_state',
-    tabs: entries.map(e =>
-      snapshotEntry(e.tabId, e.title, e.chatId, e.workDir),
-    ),
-  });
-}
+// The registry of the tests that must tell a launch still open from one
+// spent: the window restores `tab-a` (`state: {chatId: 'tab-a'}`) and
+// `tab-b` is the running task, so only a live launch shows `tab-b`.  A
+// snapshot of one tab cannot tell them apart: its only tab is on screen
+// either way.
+const TWO_CHATS = [
+  {tabId: 'tab-a', chatId: 'chat-a', title: 'alpha'},
+  {tabId: 'tab-b', chatId: 'chat-b', title: 'beta'},
+];
 
 // The replay's running-task news: the daemon broadcasts one of these for
 // every registry tab whose task is still going.
@@ -101,15 +108,14 @@ function testRemoteSingleRunningTaskTakesTheScreen() {
 
 // Several running tasks: the newest wins, whatever order the replays land in.
 function testRemoteNewestRunningTaskWins() {
-  for (const order of ['ascending', 'shuffled']) {
+  for (const order of ['ascending', 'descending', 'shuffled']) {
     const rows = [
       {tabId: 'tab-old', startTs: 100},
       {tabId: 'tab-new', startTs: 300},
       {tabId: 'tab-mid', startTs: 200},
     ];
-    rows.sort((a, b) =>
-      order === 'ascending' ? a.startTs - b.startTs : b.startTs - a.startTs,
-    );
+    if (order === 'ascending') rows.sort((a, b) => a.startTs - b.startTs);
+    if (order === 'descending') rows.sort((a, b) => b.startTs - a.startTs);
     const {win} = makePage();
     tabsState(win, [
       {tabId: 'tab-old', chatId: 'chat-old', title: 'old'},
@@ -266,7 +272,7 @@ function testNewestRestoredStatusWins() {
 // keystrokes lands before the backend is live -- and the chat is behind the
 // "server is starting" overlay the whole time.
 function testGestureBeforeTheBackendIsLiveKeepsTheLaunch() {
-  const {win} = makePage({connect: false});
+  const {win} = makePage({connect: false, state: {chatId: 'tab-a'}});
 
   win.document.dispatchEvent(
     new win.MouseEvent('pointerdown', {bubbles: true}),
@@ -276,16 +282,37 @@ function testGestureBeforeTheBackendIsLiveKeepsTheLaunch() {
   );
 
   send(win, {type: 'daemonStatus', connected: true});
-  tabsState(win, [{tabId: 'tab-1', chatId: 'chat-1', title: 'still going'}]);
-  statusRunning(win, 'tab-1', 5);
+  tabsState(win, TWO_CHATS);
+  statusRunning(win, 'tab-b', 5);
 
   assert.strictEqual(
     activeTabId(win),
-    'tab-1',
+    'tab-b',
     'a password keystroke must not spend the launch it precedes',
   );
   win.close();
   console.log('  ok - a gesture before the backend is live keeps the launch');
+}
+
+// The same holds for running-task news that reaches the page before the
+// backend is live: it moves nobody, and it is not the news that ends the
+// launch that has yet to begin.
+function testNewsBeforeTheBackendIsLiveKeepsTheLaunch() {
+  const {win} = makePage({connect: false, state: {chatId: 'tab-a'}});
+  tabsState(win, TWO_CHATS);
+  statusRunning(win, 'tab-b', 5);
+  assert.strictEqual(activeTabId(win), 'tab-a', 'no launch yet: nobody moves');
+
+  send(win, {type: 'daemonStatus', connected: true});
+  tabsState(win, TWO_CHATS);
+  statusRunning(win, 'tab-b', 5);
+  assert.strictEqual(
+    activeTabId(win),
+    'tab-b',
+    'news before the backend is live must not spend the launch it precedes',
+  );
+  win.close();
+  console.log('  ok - news before the backend is live keeps the launch');
 }
 
 // The real password-protected sequence. The socket shim reports a live backend
@@ -294,7 +321,7 @@ function testGestureBeforeTheBackendIsLiveKeepsTheLaunch() {
 // one lets `ready` through. Every keystroke of the password lands between the
 // two, so the launch has to survive them.
 function testPasswordPromptDoesNotSpendTheLaunch() {
-  const {win} = makePage({connect: false});
+  const {win} = makePage({connect: false, state: {chatId: 'tab-a'}});
 
   // auth_required: the app is revealed so the modal can be seen.
   send(win, {type: 'daemonStatus', connected: true});
@@ -310,12 +337,12 @@ function testPasswordPromptDoesNotSpendTheLaunch() {
   // auth_ok: the password was accepted, so the queued `ready` goes out and
   // the snapshot and replays come back.
   send(win, {type: 'daemonStatus', connected: true});
-  tabsState(win, [{tabId: 'tab-1', chatId: 'chat-1', title: 'still going'}]);
-  statusRunning(win, 'tab-1', 5);
+  tabsState(win, TWO_CHATS);
+  statusRunning(win, 'tab-b', 5);
 
   assert.strictEqual(
     activeTabId(win),
-    'tab-1',
+    'tab-b',
     'typing the remote password must not spend the launch it precedes',
   );
   win.close();
@@ -503,6 +530,14 @@ function testLaunchWindowExpires() {
     'tab-a',
     'a task starting a minute after launch must not switch tabs',
   );
+  // The window stays closed when the wall clock steps back (a time sync).
+  win.Date.now = () => realNow;
+  statusRunning(win, 'tab-b', realNow);
+  assert.strictEqual(
+    activeTabId(win),
+    'tab-a',
+    'an expired launch must not reopen when the clock steps back',
+  );
   win.close();
   console.log('  ok - the launch window expires');
 }
@@ -549,6 +584,7 @@ function runTests() {
     testFinishedTaskIsNoLongerACandidate,
     testTaskFinishingDoesNotMoveTheUser,
     testGestureBeforeTheBackendIsLiveKeepsTheLaunch,
+    testNewsBeforeTheBackendIsLiveKeepsTheLaunch,
     testPasswordPromptDoesNotSpendTheLaunch,
     testPointerDownEndsTheLaunch,
     testKeyDownEndsTheLaunch,
@@ -563,7 +599,6 @@ function runTests() {
 
 try {
   runTests();
-  process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.message ? err.message : err);
   process.exit(1);

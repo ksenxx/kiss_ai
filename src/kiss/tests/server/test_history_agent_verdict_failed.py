@@ -34,6 +34,7 @@ from kiss.agents.sorcar.persistence import _add_task
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.persistence_helpers import close_db
 
 _SUMMARY = "<p>Expected <code>add &lt;name&gt; &lt;address&gt; [password]</code>.</p>"
 
@@ -44,7 +45,7 @@ class TestHistoryAgentVerdictFailed(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-verdict-failed-")
         self._orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
-        th._close_db()
+        close_db()
         th._DB_PATH = Path(self.tmpdir) / "history.db"  # type: ignore[attr-defined]
         self.server = AgentServer()
         self.events: list[dict[str, Any]] = []
@@ -56,7 +57,7 @@ class TestHistoryAgentVerdictFailed(unittest.TestCase):
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
-        th._close_db()
+        close_db()
         th._DB_PATH = self._orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

@@ -22,18 +22,14 @@ const {
   stubRaf,
   clickTab,
   snapshotEntry,
+  // Chats are no longer rendered as a row of tabs (the chat on screen is
+  // the one picked in the Chats panel; the others stay open, hidden), so
+  // the open set is read from the page's test API.
+  tabIds,
 } = require('./simplify2_harness');
 
 function makePage() {
   return makeSharedPage({beforeScripts: stubRaf});
-}
-
-// Chats are no longer rendered as a row of tabs (the chat on screen is
-// the one picked in the Chats panel; the others stay open, hidden), so
-// the open set is read from the page's test API.  Copied into this realm
-// so deepStrictEqual does not trip over jsdom's Array prototype.
-function tabIds(win) {
-  return win._testApi.openTabs().map(t => String(t.id));
 }
 
 function tabTitle(win, tabId) {

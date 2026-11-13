@@ -19,19 +19,42 @@ The runs below drive a real ``JsonPrinter`` through the bridge calls
 ``start_recording``, the run's events, then ``agent_task_finished`` and
 ``stop_recording`` in its ``finally``), for a real ``ChatSorcarAgent``,
 with a real streaming ``Bash`` call that writes a fresh image.
+
+The last two tests interrupt the finish hook's wait for ``STATE_LOCK``:
+a real Ctrl-C on the main thread, then the Stop of the real
+merge-conflict resolver's tab on a pooled thread, with the server's
+own guarded injector and watchdog.
 """
 
 from __future__ import annotations
 
 import functools
 import shlex
+import signal
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any, cast
+
+import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.merge_conflict_resolver import run_merge_sea
 from kiss.agents.sorcar.shell_scan import bash_path
 from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.locked import ACQUIRE_SLICE_SECONDS
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
+from kiss.server.task_runner import _state_owns_thread, _TaskRunnerMixin, inject_if_owned
+from kiss.tests.conftest import posix_only
+from kiss.tests.server.parallel_agent_harness import (
+    STANDIN_MODEL,
+    IsolatedKissHome,
+    StandInModelServer,
+    finish_response,
+)
+from kiss.tests.server.pause import Pause
 
 _PER_TASK_STATE = (
     "_bash_states",
@@ -142,3 +165,117 @@ def test_server_owned_run_keeps_its_state_for_the_runner(tmp_path: Path) -> None
     finally:
         printer._thread_local.task_id = ""
         agent_state.unregister(key)
+
+
+def _hold_state_lock_across_ctrl_c(held: threading.Event, waiter: int) -> None:
+    """Hold ``STATE_LOCK`` while a Ctrl-C reaches thread *waiter*, which waits for it."""
+    with agent_state.STATE_LOCK:
+        held.set()
+        time.sleep(0.3)
+        signal.pthread_kill(waiter, signal.SIGINT)
+        time.sleep(0.3)
+
+
+@posix_only("the test injects SIGINT with pthread_kill")
+def test_ctrl_c_in_the_finish_hooks_lock_wait_still_drops_the_state() -> None:
+    """Ctrl-C ends the main thread's wait for ``STATE_LOCK`` itself; the state is dropped anyway."""
+    assert threading.current_thread() is threading.main_thread()
+    printer = JsonPrinter()
+    agent = ChatSorcarAgent("bridge-cleanup-ctrl-c")
+    key = "bridge-run-ctrl-c"
+    printer.agent_task_allocated(agent, key, "chat-ctrl-c")
+    held = threading.Event()
+    holder = threading.Thread(
+        target=_hold_state_lock_across_ctrl_c, args=(held, threading.get_ident()),
+    )
+    # A process started with SIGINT ignored (a shell's background job) has no Ctrl-C.
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        with pytest.raises(KeyboardInterrupt) as ctrl_c:
+            holder.start()
+            assert held.wait(10)
+            printer.agent_task_finished(agent, key)
+            time.sleep(10)  # only reached by a hook that did not wait for the lock
+        assert any(entry.name == "agent_task_finished" for entry in ctrl_c.traceback)
+        assert agent_state.get(key) is None
+        assert not cast(Any, agent_state.STATE_LOCK)._is_owned()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        holder.join(10)
+        agent_state.unregister(key)
+
+
+def _other_work(release: threading.Event) -> str:
+    """Unrelated work on a pooled thread: wait for *release*; say whether a Stop cut it short."""
+    try:
+        while not release.wait(0.05):
+            pass
+    except KeyboardInterrupt:
+        return "interrupted"
+    return "finished"
+
+
+def test_stops_in_the_finish_hooks_lock_wait_still_drop_the_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two Stops land while the merge resolver's finish hook waits for ``STATE_LOCK``.
+
+    The resolver runs on a pooled thread, and a Stop's watchdog injects
+    for as long as the bridge's state names that thread.  An injection
+    raised in the hook's wait for the lock skipped the unregister; a
+    second one in the hook's one repeat left the state registered for
+    good, and the watchdog then hit whatever the thread ran next.
+    """
+    monkeypatch.setenv("KISS_DISABLE_TASK_CLASSIFIER", "1")
+    home = IsolatedKissHome("kiss-bridge-retire-")
+    home.write_config()
+    standin = StandInModelServer(lambda _request: finish_response("conflict resolved"))
+    parent = ChatSorcarAgent("merge-parent")
+    parent.work_dir = str(home.repo)
+    parent.model_name = STANDIN_MODEL
+    parent.model_config = standin.model_config
+    parent.printer = printer = JsonPrinter()
+    finish_hook = Pause(JsonPrinter.agent_task_finished.__code__, lambda _locals: True)
+    state: agent_state.AgentState | None = None
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool, finish_hook:
+            resolver = pool.submit(run_merge_sea, parent, "resolve f.txt", home.repo)
+            assert finish_hook.paused.wait(60), "the resolver never reached its finish hook"
+            [state] = [s for s in agent_state.snapshot() if s.tab_id.endswith("__merge")]
+            worker = state.task_thread
+            assert worker is not None and not state.server_owned
+            # The guard a Stop on the resolver's tab arms its watchdog with.
+            still_owns = functools.partial(_state_owns_thread, state, worker)
+            with agent_state.STATE_LOCK:
+                finish_hook.release()
+                for _ in range(2):
+                    # The hook waits for the lock held here, as for a watchdog
+                    # that is injecting; a wait in slices raises within one.
+                    time.sleep(ACQUIRE_SLICE_SECONDS + 0.2)
+                    assert inject_if_owned(worker, still_owns) == 1
+                time.sleep(ACQUIRE_SLICE_SECONDS + 0.2)
+            # The resolver's work was done; its Stop is honoured all the same.
+            with pytest.raises(KeyboardInterrupt):
+                resolver.result(timeout=60)
+            # The thread goes on to other work with the Stop's watchdog still
+            # armed: one second of grace, then its guard.
+            assert pool.submit(threading.current_thread).result(timeout=10) is worker
+            release = threading.Event()
+            other = pool.submit(_other_work, release)
+            watchdog = threading.Thread(
+                target=_TaskRunnerMixin._force_stop_thread, args=(worker, still_owns), daemon=True,
+            )
+            watchdog.start()
+            watchdog.join(3)
+            release.set()
+            assert other.result(timeout=10) == "finished" and not watchdog.is_alive()
+            assert agent_state.get(state.task_id) is None
+            assert _held_state(printer, state.task_id) == []
+    finally:
+        standin.stop()
+        if state is not None:
+            # A state left registered must not hand a later injection the idle thread.
+            with agent_state.STATE_LOCK:
+                state.task_thread = None
+                agent_state.unregister(state.task_id, state)
+        home.cleanup()

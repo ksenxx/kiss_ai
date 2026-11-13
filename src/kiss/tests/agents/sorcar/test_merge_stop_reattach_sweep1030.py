@@ -22,6 +22,7 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
     tool_call_body,
 )
 from kiss.tests.conftest import posix_only
+from kiss.tests.server.parallel_agent_harness import OfflineFastModel
 
 # Sleeps (then rejects the commit) only in the main checkout: the squash
 # merge commit, not a commit inside the task's linked worktree.
@@ -42,7 +44,7 @@ case "$(git rev-parse --git-dir)" in
   *worktrees*) exit 0 ;;
 esac
 touch '{marker}'
-sleep 3
+sleep {sleep}
 exit 1
 """
 
@@ -54,8 +56,8 @@ def _git(repo: Path, *args: str) -> str:
     ).stdout
 
 
-def _repo_with_hook(path: Path, marker: Path) -> Path:
-    """A repository with one commit on ``main`` and the slow pre-commit hook."""
+def _repo_with_hook(path: Path, marker: Path, sleep: int = 3) -> Path:
+    """A repository with one commit on ``main`` and the pre-commit hook, *sleep* seconds slow."""
     path.mkdir()
     _git(path, "init", "-b", "main")
     _git(path, "config", "user.email", "t@t.com")
@@ -64,7 +66,7 @@ def _repo_with_hook(path: Path, marker: Path) -> Path:
     _git(path, "add", ".")
     _git(path, "commit", "-m", "initial")
     hook = path / ".git" / "hooks" / "pre-commit"
-    hook.write_text(_HOOK.format(marker=marker))
+    hook.write_text(_HOOK.format(marker=marker, sleep=sleep))
     hook.chmod(0o755)
     return path
 
@@ -74,9 +76,11 @@ def _call(tool: str, **arguments: Any) -> bytes:
     return tool_call_body(tool, arguments, prompt_tokens=500)
 
 
-def _run(repo: Path, script: list[bytes], url: str) -> None:
-    """Thread body: one top-level agent run in *repo*."""
-    SorcarAgent("merge-stop").run(
+def _run(repo: Path, script: list[bytes], url: str,
+         tools: list[Callable[..., Any]] | None = None) -> SorcarAgent:
+    """One top-level agent run in *repo* (also a thread's body); returns the agent."""
+    agent = SorcarAgent("merge-stop")
+    agent.run(
         prompt_template="Make the change, then merge it.",
         model_name=MODEL,
         max_steps=len(script) + 2,
@@ -86,7 +90,9 @@ def _run(repo: Path, script: list[bytes], url: str) -> None:
         use_memory=False,
         verbose=False,
         tool_profile="shell+edit",
+        tools=tools,
     )
+    return agent
 
 
 @posix_only("the pre-commit hook is a POSIX shell script")
@@ -125,3 +131,29 @@ def test_stopped_merge_gives_the_task_its_worktree_back(tmp_path: Path) -> None:
     assert len(worktrees) == 1, "the pending worktree lost its directory"
     assert worktrees[0].parent.resolve().as_posix() in _git(repo, "worktree", "list")
     assert _git(repo, "log", "--format=%s", "main").split() == ["initial"]
+
+
+def note(text: str) -> str:
+    """A tool of the caller's own, which the coding gate does not model."""
+    return f"noted {text}"
+
+
+@posix_only("the pre-commit hook is a POSIX shell script")
+def test_a_reattached_worktree_keeps_the_gate_base(tmp_path: Path) -> None:
+    """B/S11-F1 (audit 2026-11-10): what a failed merge committed stays in the gate's diff."""
+    repo = _repo_with_hook(tmp_path / "repo", tmp_path / "merge-commit-started", sleep=0)
+    seed = _git(repo, "rev-parse", "HEAD").strip()
+    script = [
+        _call("create_worktree"),
+        _call("Bash", command="echo task > task.txt", description="the task's change"),
+        _call("commit_and_merge"),  # commits it; the hook rejects the squash commit: reattached
+        _call("Bash", command="echo more > more.txt", description="more"),  # took a fresh base
+        _call("note", text="still here"),  # made the base follow HEAD to the task's commit
+        finish_body("<p>done</p>"), finish_body("<p>done</p>"),
+    ]
+    # Without a provider commit_and_merge commits under its fallback message.
+    with OfflineFastModel(), serve(script) as (url, requests):
+        gate = _run(repo, script, url, tools=[note])._coding_gate
+    assert "checked out again" in str(requests[-1]["messages"])  # the merge failed: reattached
+    assert gate.base_commit == seed
+    assert gate.changed_paths() == [("task.txt", False), ("more.txt", True)]

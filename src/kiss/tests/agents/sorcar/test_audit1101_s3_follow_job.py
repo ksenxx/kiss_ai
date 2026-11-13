@@ -20,6 +20,8 @@ nothing mocked; ``DEFAULT_CONFIG.bash_detach_seconds`` is set with
 
 from __future__ import annotations
 
+import os
+import signal
 import threading
 import time
 from pathlib import Path
@@ -28,6 +30,7 @@ import pytest
 
 from kiss.agents.sorcar.useful_tools import BackgroundJob, UsefulTools
 from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.processes import pid_alive
 from kiss.tests.conftest import posix_only
 
 pytestmark = posix_only("the host Bash tool runs bash loops and sleeps")
@@ -55,9 +58,9 @@ def _kill_jobs(tools: UsefulTools) -> None:
 
 def _wait_exit(job: BackgroundJob) -> int | None:
     deadline = time.monotonic() + 10
-    while job.process.poll() is None and time.monotonic() < deadline:
+    while job.returncode() is None and time.monotonic() < deadline:
         time.sleep(0.05)
-    return job.process.poll()
+    return job.returncode()
 
 
 # --- F3: a log growing faster than it is read ---------------------------------
@@ -137,9 +140,39 @@ def test_callback_failure_during_the_grace_kills_the_command_and_its_job(
     with pytest.raises(exception, match="callback exploded"):
         tools.Bash("echo ready; sleep 20", "long", timeout_seconds=10, on_timeout="background")
     (job,) = seen
-    assert job.process.poll() is None and list(tools._jobs) == [job.job_id]
+    assert job.returncode() is None and list(tools._jobs) == [job.job_id]
     tools.bash_job(job.job_id, action="kill")
     assert _wait_exit(job) is not None
+
+
+def test_a_foreground_result_leaves_its_detached_child_and_no_watcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command that finished within the grace is a foreground result: nothing watches it on.
+
+    Its job leaves the registry, but the job's watcher went on polling
+    for as long as a child the command detached (``nohup server &``)
+    lived, and killed that child when the task was stopped later; run
+    with a shorter timeout, as a foreground shell, the same command
+    leaves the child running (audit 2026-11-10, C/C13-F2).
+    """
+    monkeypatch.setattr(DEFAULT_CONFIG, "bash_detach_seconds", 120)
+    stop = threading.Event()
+    tools = UsefulTools(work_dir=str(tmp_path), stop_event=stop)
+    before = set(threading.enumerate())
+    out = tools.Bash("nohup tail -f /dev/null >/dev/null 2>&1 & echo pid=$!", "serve")
+    child = int(out.split("pid=")[1].split()[0])
+    try:
+        assert not tools._jobs
+        deadline = time.monotonic() + 10
+        while set(threading.enumerate()) - before and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not set(threading.enumerate()) - before, "the job's watcher is still polling"
+        stop.set()
+        time.sleep(1)  # twice the poll of a watcher, were one left
+        assert pid_alive(child), "the Stop killed the child the command detached"
+    finally:
+        os.kill(child, signal.SIGKILL)
 
 
 # --- F5: an exit between the last read and the end of the wait -----------------

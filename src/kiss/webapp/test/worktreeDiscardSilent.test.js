@@ -12,13 +12,11 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness.js');
+const {makePage, send, readyTabId} = require('./simplify2_harness.js');
 
 function main() {
   const {win, posted} = makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'the page must post ready with a tabId');
-  const activeTab = ready.tabId;
+  const activeTab = readyTabId(posted);
 
   send(win, {
     type: 'worktree_result',

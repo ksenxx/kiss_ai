@@ -137,7 +137,7 @@ class TestCancelBehindAFullPipe(SigninHookCase):
         every refusal produced so far, so the first non-empty batch
         holds exactly the refusal of the paste that did not fit.
         """
-        await self._send(reader, {"type": "signinLogin", "provider": "stubborn"})
+        await self._send(reader, {"type": "signinLogin", "provider": "stubborn", "attempt": "a1"})
         await self._wait_for_event(reader, "signinUrl")
         proc = self.server._server_api.signin._proc
         assert proc is not None and proc.stdin is not None
@@ -158,6 +158,12 @@ class TestCancelBehindAFullPipe(SigninHookCase):
         self.assertFalse(_writable(fd), "the pipe is not full")
         return proc
 
+    async def _hears_its_sign_in_was_ended_elsewhere(self, reader) -> None:
+        """The window that ran :meth:`_fill_the_hooks_pipe` is told another one ended its login."""
+        ended = await self._wait_for_event(reader, "signinError")
+        self.assertEqual((ended["provider"], ended["attempt"]), ("stubborn", "a1"))
+        self.assertEqual(ended["error"], signin.ENDED_ELSEWHERE)
+
     async def test_cancel_from_another_window_is_answered_and_the_hook_dies(self) -> None:
         self._install_hook()
         reader_a, _ = await self._ready("tab-a")
@@ -166,10 +172,12 @@ class TestCancelBehindAFullPipe(SigninHookCase):
         # The hook's pipe is full; B's cancel must not wait for the hook to drain it.
         started = time.monotonic()
         await self._send(reader_b, {"type": "signinCancel"})
-        await self._send(reader_b, {"type": "ping"})
-        await self._wait_for_event(reader_b, "pong", timeout=3.0)
+        heard_by_b = await self._landed_signin_events(reader_b)
         self.assertLess(time.monotonic() - started, 3.0)
         self.assertIsNone(self.server._server_api.signin._proc)
+        # A's sign-in was ended by B's "Not now": A is told, B hears nothing.
+        await self._hears_its_sign_in_was_ended_elsewhere(reader_a)
+        self.assertEqual(heard_by_b, [])
         # SIGTERM is ignored; the fallback kill ends the hook.
         self.assertEqual(await asyncio.to_thread(proc.wait, 5), -9)
         await self._send(reader_a, {"type": "signinPaste", "text": "late"})
@@ -190,6 +198,7 @@ class TestCancelBehindAFullPipe(SigninHookCase):
         await self._send(reader_b, {"type": "signinLogin", "provider": "google"})
         url = await self._wait_for_event(reader_b, "signinUrl", timeout=3.0)
         self.assertEqual(url["provider"], "google")
+        await self._hears_its_sign_in_was_ended_elsewhere(reader_a)
         self.assertEqual(await asyncio.to_thread(proc.wait, 5), -9)
         await self._send(reader_b, {"type": "signinPaste", "text": "ok"})
         done = await self._wait_for_event(reader_b, "signinDone")
@@ -261,10 +270,10 @@ kiss_dir = tmp / ".kiss"
 kiss_dir.mkdir(parents=True, exist_ok=True)
 th._KISS_DIR = kiss_dir
 th._DB_PATH = kiss_dir / "history.db"
-th._db_conn = None
 
 from kiss.server import signin
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.local_ws import _generate_self_signed_cert
 from kiss.tests.local_ws import open_local_connection
 
 signin.HOOK_END_TIMEOUT = float(sys.argv[2])

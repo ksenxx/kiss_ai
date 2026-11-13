@@ -2,15 +2,16 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Inside a task, a sub-agent of the caller's own model family is refused unless the
+"""Inside a task, a sub-agent on the caller's own model and effort is refused unless the
 work is parallel, and a review is sent to another family for a second opinion.
 
-The rule (:func:`~kiss.agents.sorcar.fanout_guard.same_family_conflict`, wired into
-:func:`~kiss.agents.sorcar.agent_dispatch.plan_run_agent`): a child of the caller's
-family is the same model with less context.  It starts only when the call is a
-``run_parallel`` over disjoint named pieces of work, the caller's own task asks for
-sub-agents, another family is pinned, or the child is a review -- which then runs on
-``other_family_model(parent)`` and says so on its ``ran:`` line.
+The rule (:func:`~kiss.agents.sorcar.fanout_guard.same_model_conflict`, wired into
+:func:`~kiss.agents.sorcar.agent_dispatch.plan_run_agent`): a child on the caller's
+model at the caller's effort is the same model with less context.  It starts only when
+the call is a ``run_parallel`` over disjoint named pieces of work, the caller's own task
+asks for sub-agents, another model or effort is named (whatever its vendor), or the
+child is a review -- which then runs on ``other_family_model(parent)`` and says so on
+its ``ran:`` line.
 
 The refusal, the fan-out over distinct files, the shared-file refusal, the parent
 task that asks for sub-agents, the named budget capped at the caller's remainder
@@ -47,9 +48,10 @@ from kiss.agents.sorcar.agent_dispatch import (
 )
 from kiss.agents.sorcar.cron_agent import CHAT_TASK_HEADING
 from kiss.agents.sorcar.daemon_client import TaskResult
-from kiss.agents.sorcar.fanout_guard import named_pieces, same_family_conflict, undivided_work
+from kiss.agents.sorcar.fanout_guard import named_pieces, same_model_conflict, undivided_work
 from kiss.core import config as config_module
 from kiss.core.models.model_families import family_of, other_family_model
+from kiss.core.models.model_info import delete_custom_model, save_custom_model
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.parallel_agent_harness import (
@@ -64,7 +66,7 @@ from kiss.tests.server.parallel_agent_harness import (
 
 WAYS_OUT = (
     "Ways out: do the work inline in this task; or name the disjoint files/commands in each "
-    "task of a run_parallel; or pass model="
+    "task of a run_parallel; or pass another model or effort (model="
 )
 PARENT_MARK = "PARENT-TASK"
 
@@ -184,8 +186,8 @@ def test_same_family_run_agent_without_named_pieces_is_refused(
     assert result.success is True, result
     text = script.tool_result()
     assert (
-        f"Error: sorcar: a sub-agent on {STANDIN_MODEL} is this task's own model family "
-        f"({family_of(STANDIN_MODEL)}), the same model with less context, and one sub-task "
+        f"Error: sorcar: a sub-agent on {STANDIN_MODEL} is this task's own model at its own "
+        "effort, the same model with less context, and one sub-task "
         "is no fan-out over disjoint work. " + WAYS_OUT
     ) in text, text[-1500:]
     assert "ran:" not in text
@@ -294,6 +296,7 @@ class _Caller:
 
     work_dir = ""
     model_name = STANDIN_MODEL
+    model_config: dict[str, Any] | None = None
 
     def __init__(self, task: str = "PARENT do the work") -> None:
         self.task_description = task
@@ -385,8 +388,13 @@ def test_sea_that_pins_its_model_is_a_pinned_reviewer(tmp_path: Path) -> None:
                               parent_agent=_Caller())
         assert isinstance(plan, dict), plan
         assert plan["model_name"] == "" and plan["model_note"] == ""
-        # The same SEA running a non-review child is the same model with less context.
-        refused = plan_run_agent(str(tmp_path), "probe the host", str(sea), parent_agent=_Caller())
+        # The same SEA running a non-review child: another model than the caller's may start,
+        # the caller's own model at its own effort is the same model with less context.
+        allowed = plan_run_agent(str(tmp_path), "probe the host", str(sea), parent_agent=_Caller())
+        assert isinstance(allowed, dict), allowed
+        caller = _Caller()
+        caller.model_name = "gpt-4o"
+        refused = plan_run_agent(str(tmp_path), "probe the host", str(sea), parent_agent=caller)
         assert isinstance(refused, str) and "a sub-agent on gpt-4o is this task's own" in refused
     finally:
         offline.__exit__(None, None, None)
@@ -460,24 +468,139 @@ def test_daemon_that_pins_its_model_refuses_a_sea_that_names_one(
     assert isinstance(plan, dict), plan
 
 
-def test_explicit_other_family_model_is_allowed_without_pieces() -> None:
-    """model= of another family is the third way out: a pieceless child runs on it."""
-    plan = _plan("probe the host", model="claude-opus-5-5")
-    assert isinstance(plan, dict), plan
-    assert plan["model_name"] == "claude-opus-5-5" and plan["model_note"] == ""
-    # The same model through another route is the same family: refused like the caller's own.
-    refused = _plan("probe the host", model="openrouter/openai/gpt-6-astra")
+def test_another_model_or_effort_is_allowed_without_pieces() -> None:
+    """The guard compares model and effort, not vendor: only the caller's own pair is refused."""
+    for other in ("claude-opus-5-5", "gpt-6-astra", "openrouter/openai/gpt-6-astra"):
+        plan = _plan("probe the host", model=other)  # another model, of any family
+        assert isinstance(plan, dict), plan
+        assert plan["model_name"] == other and plan["model_note"] == ""
+    # The caller's own model through another route is still the caller's own model.
+    refused = _plan("probe the host", model=f"openrouter/openai/{STANDIN_MODEL}")
     assert isinstance(refused, str), refused
-    assert "a sub-agent on openrouter/openai/gpt-6-astra is this task's own model family" in refused
+    assert (
+        f"a sub-agent on openrouter/openai/{STANDIN_MODEL} is this task's own model at its "
+        "own effort, the same model with less context"
+    ) in refused
+    # The launch the family rule refused 29 times on 2026-11-11: Opus medium -> Fable max.
+    caller = _Caller()
+    caller.model_name = "claude-opus-5-5-medium"
+    plan = _plan("probe the host", caller=caller, model="claude-fable-5-2-max")
+    assert isinstance(plan, dict), plan
+    # One model at two efforts is two workers; a bare name runs at its catalog effort (high).
+    caller.model_name = "claude-fable-5-2-max"
+    assert isinstance(_plan("probe the host", caller=caller, model="claude-fable-5-2-medium"), dict)
+    assert isinstance(_plan("probe the host", caller=caller, model="claude-fable-5-2"), dict)
+    for same in ("claude-fable-5-2-max", "openrouter/anthropic/claude-fable-5.2-max"):
+        assert isinstance(_plan("probe the host", caller=caller, model=same), str), same
+    caller.model_name = "claude-fable-5-2-high"
+    assert isinstance(_plan("probe the host", caller=caller, model="claude-fable-5-2"), str)
+    # A name outside the catalog carries its effort in its suffix only.
+    caller.model_name = "codex/gpt-6-astra-xhigh"
+    assert isinstance(_plan("probe the host", caller=caller, model="codex/gpt-6-astra"), dict)
+    assert isinstance(_plan("probe the host", caller=caller, model="codex/gpt-6-astra-xhigh"), str)
+
+
+def test_the_effort_a_model_configuration_asks_for_outranks_the_catalogs(tmp_path: Path) -> None:
+    """A ``reasoning_effort`` in the model configuration is the effort the guard compares.
+
+    The caller's configuration is its own; the child's is the call's ``model_config``
+    option, else the SEA's setting, else the caller's when the child inherits it.
+    """
+    probe = "probe the host"
+    at_high = '{"model_config": {"reasoning_effort": "high"}}'
+    at_max = '{"model_config": {"reasoning_effort": "max"}}'
+    caller = _Caller()
+    caller.model_name = "claude-fable-5-2"  # the catalog runs it at high
+    assert isinstance(_plan(probe, caller=caller), str)
+    # The same name at another effort is another worker; the max alias at high is the caller.
+    assert isinstance(_plan(probe, caller=caller, options=at_max), dict)
+    fable_max = "claude-fable-5-2-max"
+    assert isinstance(_plan(probe, caller=caller, model=fable_max, options=at_high), str)
+    # A caller its configuration runs at max: the max alias is its own model and effort, and so
+    # is the child that inherits the configuration; one the call configures itself is not.
+    caller.model_config = {"reasoning_effort": "max"}
+    assert isinstance(_plan(probe, caller=caller, model=fable_max), str)
+    assert isinstance(_plan(probe, caller=caller), str)
+    assert isinstance(_plan(probe, caller=caller, options='{"model_config": {}}'), dict)
+    tasks = [probe, "probe the guest"]
+    first = _plan(tasks[0], caller=caller, options=at_high, sibling_tasks=tasks)
+    assert isinstance(first, dict), first
+    assert isinstance(sibling_plan(first, tasks[1], "", caller, tasks), dict)
+    # A SEA's model_config outranks the inherited one, and the call's outranks the SEA's.
+    sea = tmp_path / "high_effort_sea.py"
+    sea.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\n"
+        "class Sea(BaseSea):\n"
+        "    def settings(self, settings):\n"
+        "        return settings | {'model_config': {'reasoning_effort': 'high'}}\n",
+        encoding="utf-8",
+    )
+    assert isinstance(plan_run_agent(str(tmp_path), probe, str(sea), parent_agent=caller), dict)
+    refused = plan_run_agent(str(tmp_path), probe, str(sea), parent_agent=caller, options=at_max)
+    assert isinstance(refused, str) and "is this task's own model at its own effort" in refused
+
+
+def test_a_bedrock_id_is_the_claude_model_behind_it() -> None:
+    """A Bedrock model or inference-profile id is one more route to its Claude model."""
+    probe = "probe the host"
+    us = "bedrock/us.anthropic.claude-opus-4-6-v1:0"
+    world = "bedrock/global.anthropic.claude-opus-4-6-v1:0"
+    caller = _Caller()
+    caller.model_name = "claude-opus-4-6"  # the catalog runs it at high
+    for same in (us, world, f"{us}-high"):
+        refused = _plan(probe, caller=caller, model=same)
+        assert isinstance(refused, str), same
+        assert f"a sub-agent on {same} is this task's own model at its own effort" in refused
+    for other in (f"{us}-medium", "bedrock/global.anthropic.claude-opus-4-7"):
+        assert isinstance(_plan(probe, caller=caller, model=other), dict), other
+    caller.model_name = us  # two profiles of one model
+    assert isinstance(_plan(probe, caller=caller, model=world), str)
+    # A Claude id the catalog does not describe is one model on every profile too; an id
+    # that is no Claude id stays a name of its own.
+    caller.model_name = "bedrock/us.anthropic.claude-zzz-9-v1:0"
+    other_profile = "bedrock/global.anthropic.claude-zzz-9-v1:0"
+    assert isinstance(_plan(probe, caller=caller, model=other_profile), str)
+    assert isinstance(_plan(probe, caller=caller, model="bedrock/us.meta.llama9-v1:0"), dict)
+    # A model the catalog lists under Bedrock alone is priced as that entry, and is the
+    # Claude model behind it all the same.
+    caller.model_name = "claude-sonnet-4-20250514"
+    sonnet = "bedrock/global.anthropic.claude-sonnet-4-20250514-v1:0"
+    assert isinstance(_plan(probe, caller=caller, model=sonnet), str)
+
+
+def test_a_provider_prefix_comes_off_before_the_effort_alias_is_read() -> None:
+    """``anthropic/claude-opus-5-5-max`` is ``claude-opus-5-5-max``, as the factory runs it."""
+    probe = "probe the host"
+    caller = _Caller()
+    caller.model_name = "claude-opus-5-5-max"
+    assert isinstance(_plan(probe, caller=caller, model="anthropic/claude-opus-5-5-max"), str)
+    assert isinstance(_plan(probe, caller=caller, model="anthropic/claude-opus-5-5-medium"), dict)
+    # A MY_MODELS.json model with an endpoint of its own is the name its gateway serves: the
+    # same name is the bundled model before it is registered, and only itself afterwards.
+    gateway = "anthropic/claude-opus-5-5"
+    caller.model_name = "claude-opus-5-5-high"
+    assert isinstance(_plan(probe, caller=caller, model=gateway), str)
+    assert save_custom_model(gateway, endpoint="http://127.0.0.1:9/v1") is None
+    try:
+        assert isinstance(_plan(probe, caller=caller, model=gateway), dict)
+        caller.model_name = gateway
+        assert isinstance(_plan(probe, caller=caller), str)
+    finally:
+        assert delete_custom_model(gateway) is None
 
 
 def test_refusal_covers_every_shortfall_and_names_the_pin_to_pass() -> None:
-    """One task, a pieceless task of a fan-out, a shared piece; the pin names the other family."""
+    """One task, a pieceless task of a fan-out, a shared piece; the pin is a name to pass.
+
+    The strongest model of another family, else the caller's own model at another effort,
+    else a strong model of its own family: the first the rule lets through as the
+    sub-task would run it.
+    """
     offline, chosen = _only_another_family_configured()
     try:
         refused = _plan("probe the host")
         assert isinstance(refused, str), refused
-        assert refused.endswith(f'{WAYS_OUT}"{chosen}".'), refused
+        assert refused.endswith(f'{WAYS_OUT}"{chosen}").'), refused
         assert "and one sub-task is no fan-out over disjoint work." in refused
         tasks = ["KID-1 edit src/a.py", "KID-2 say done"]
         refused = _plan(tasks[0], sibling_tasks=tasks)
@@ -493,12 +616,54 @@ def test_refusal_covers_every_shortfall_and_names_the_pin_to_pass() -> None:
         allowed = _plan(tasks[0], sibling_tasks=tasks[:2])
         assert isinstance(allowed, dict), allowed
         assert allowed["model_name"] == "" and allowed["model_note"] == ""
+        # The one credential is the caller's own vendor's: the pin is its model at the nearest
+        # effort below its own, else the nearest above, and it passes when passed.
+        caller = _Caller()
+        for model, config, pin in (
+            ("claude-fable-5-2", None, "claude-fable-5-2-medium"),
+            ("claude-fable-5-2-max", None, "claude-fable-5-2-xhigh"),
+            ("claude-fable-5-2-low", None, "claude-fable-5-2-medium"),
+            ("claude-fable-5-2", {"reasoning_effort": "turbo"}, "claude-fable-5-2-max"),
+            ("claude-fable-5-2-xhigh", {"reasoning_effort": "max"}, "claude-fable-5-2-high"),
+        ):
+            caller.model_name, caller.model_config = model, config
+            refused = _plan("probe the host", caller=caller)
+            assert isinstance(refused, str) and refused.endswith(f'{WAYS_OUT}"{pin}").'), refused
+            assert isinstance(_plan("probe the host", caller=caller, model=pin), dict), pin
+        # The sub-task's own configuration sets the effort, which outranks an alias's: no
+        # alias is a way out, another model of the family is, with that configuration.
+        caller.model_name, caller.model_config = "claude-fable-5-2", None
+        at_high = '{"model_config": {"reasoning_effort": "high"}}'
+        refused = _plan("probe the host", caller=caller, options=at_high)
+        assert isinstance(refused, str), refused
+        assert refused.endswith(f'{WAYS_OUT}"claude-opus-5-5").'), refused
+        alias = _plan("probe the host", caller=caller, model="claude-fable-5-2-medium",
+                      options=at_high)
+        assert isinstance(alias, str), alias
+        pinned = _plan("probe the host", caller=caller, model="claude-opus-5-5", options=at_high)
+        assert isinstance(pinned, dict), pinned
     finally:
         offline.__exit__(None, None, None)
-    with OfflineFastModel():  # no other family: the third way out has no name to give
-        refused = _plan("probe the host")
+    with OfflineFastModel():  # a model without effort aliases, its vendor's the one credential
+        config_module.DEFAULT_CONFIG.OPENAI_API_KEY = "kiss-test-key"
+        caller.model_name, caller.model_config = "gpt-4o", None
+        refused = _plan("probe the host", caller=caller)
+        assert isinstance(refused, str) and refused.endswith(f'{WAYS_OUT}"gpt-6-astra").'), refused
+        assert isinstance(_plan("probe the host", caller=caller, model="gpt-6-astra"), dict)
+    with OfflineFastModel():  # the caller's own name inherits its effort: no way out, not named
+        config_module.DEFAULT_CONFIG.GEMINI_API_KEY = "kiss-test-key"
+        caller.model_name = "gemini-3.1-pro-preview"
+        caller.model_config = {"reasoning_effort": "low"}
+        refused = _plan("probe the host", caller=caller)
         assert isinstance(refused, str), refused
-        assert refused.endswith(f'{WAYS_OUT}"<a model of another family>".'), refused
+        assert refused.endswith("or pass another model or effort."), refused
+        assert _plan("probe the host", caller=caller, model=caller.model_name) == refused
+    with OfflineFastModel():  # no credential at all: the third way out has no name to give
+        for model in (STANDIN_MODEL, "claude-fable-5-2"):
+            caller.model_name, caller.model_config = model, None
+            refused = _plan("probe the host", caller=caller)
+            assert isinstance(refused, str), refused
+            assert refused.endswith("or pass another model or effort."), refused
 
 
 def test_review_that_asks_for_changes_is_implementation_work_and_is_refused() -> None:
@@ -537,8 +702,8 @@ def test_children_that_inherit_nothing_are_left_alone(env: IsolatedKissHome) -> 
     # A caller without a model (standalone use) is not compared either.
     plan = plan_run_agent("", "say done", "")
     assert isinstance(plan, dict), plan
-    assert same_family_conflict("", STANDIN_MODEL, ["x"], "", False) == ""
-    assert same_family_conflict(STANDIN_MODEL, "", ["x"], "", False) == ""
+    assert same_model_conflict("", STANDIN_MODEL, ["x"], "", False) == ""
+    assert same_model_conflict(STANDIN_MODEL, "", ["x"], "", False) == ""
 
 
 def test_the_ran_line_carries_the_note_after_the_model() -> None:
@@ -574,11 +739,14 @@ def test_named_pieces_finds_paths_modules_urls_and_commands() -> None:
     }
     assert named_pieces("KID-1 say done") == set()
     assert named_pieces("i.e. a.m. `` ` `") == set()
+    # An abbreviation that opens a sentence is prose too.
+    assert named_pieces("E.g. do it. I.e. at 5 P.M. or 9 A.M.") == set()
 
 
 def test_undivided_work_wants_two_tasks_each_with_a_piece_and_no_shared_piece() -> None:
     assert undivided_work(["fix a.py"]) == "one sub-task is no fan-out over disjoint work"
     assert undivided_work(["fix a.py", "fix b.py"]) == ""
+    assert undivided_work(["Fix a.py. E.g. rename x.", "Fix b.py. E.g. rename y."]) == ""
     assert undivided_work(["fix a.py", "fix a.py and b.py"]) == (
         "tasks 1 and 2 of the fan-out both name a.py"
     )
@@ -607,6 +775,9 @@ def test_undivided_work_reports_every_overlap_and_ignores_shared_instructions() 
     # tmp/ paths never count, however many tasks name them
     assert undivided_work(["fix a.py, notes in tmp/x/notes.md", "fix b.py; log to ./tmp/x/log"
                            ", see /w/tmp/x/notes.md"]) == ""
+    # nor do paths in a sub-agent's private folder, wherever the temp directory is
+    plan = "/var/folders/T/kiss-sub-ab12cd34/plan.md"
+    assert undivided_work([f"fix a.py as {plan} says", f"fix b.py as {plan} says"]) == ""
     assert undivided_work(["work in tmp/x/", "work in tmp/y/"]) == (
         "task 1 of the fan-out names no file, directory, module, URL or `command` of its own "
         "(pieces every task names, and tmp/ paths, do not count)")

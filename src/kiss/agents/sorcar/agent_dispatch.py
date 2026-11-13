@@ -67,11 +67,11 @@ import yaml
 
 from kiss.agents.sorcar.daemon_client import TaskResult
 from kiss.agents.sorcar.fanout_guard import (
-    is_implementation_task,
+    is_read_only_review,
     is_review_task,
     parse_tasks_json,
     review_budget,
-    same_family_conflict,
+    same_model_conflict,
 )
 from kiss.agents.sorcar.machines import find_machine, is_local_machine, load_machines
 from kiss.agents.sorcar.run_config import (
@@ -145,10 +145,16 @@ _AGENT_JOBS_LOCK = threading.RLock()
 """Guards the job registry (:data:`_AGENT_JOBS`) and every job's budget reservation.
 
 A job's inherited share is resolved and recorded under it
-(:func:`_inherited_budget`), and a finishing job's spend lands on its
-caller's ledger in the same critical section that clears the job's
-reservation (:func:`_attribute_dispatch_usage`).
+(:func:`_inherited_budget`).  A finishing job's spend lands on its
+caller's ledger outside it, since the charge waits for the database,
+between one hold that marks the job :attr:`AgentJob.settling` and one
+that clears its reservation (:func:`_attribute_dispatch_usage`); a
+share resolved in between waits for the second
+(:func:`_live_jobs_of_other_calls`).
 """
+
+_JOB_SETTLED = threading.Condition(_AGENT_JOBS_LOCK)
+"""Notified when a job's spend has landed and its reservation is cleared."""
 
 
 @dataclass(frozen=True)
@@ -330,7 +336,10 @@ def parse_run_options(
         same name.
 
     Raises:
-        ValueError: When *options* is not a JSON object, names an
+        ValueError: When *options* is not a JSON object (the message
+            shows its first 80 characters, as
+            :func:`~kiss.agents.sorcar.fanout_guard.parse_tasks_json`
+            does for ``tasks``), names an
             unknown key or one of the four argument settings
             (:data:`ARGUMENT_OPTIONS`), has a value of the wrong type,
             a number is not positive and finite, or the tool profile is
@@ -340,12 +349,13 @@ def parse_run_options(
 
     parsed: dict[str, Any] = {}
     if options.strip():
+        shown = repr(options.strip()[:80])
         try:
             raw = json.loads(options)
-        except ValueError as e:
-            raise ValueError(f"options must be a JSON object, got {options!r}: {e}") from None
+        except (ValueError, RecursionError) as e:  # RecursionError: nested past the decoder's depth
+            raise ValueError(f"options must be a JSON object, got {shown}: {e}") from None
         if not isinstance(raw, dict):
-            raise ValueError(f"options must be a JSON object, got {options!r}.")
+            raise ValueError(f"options must be a JSON object, got {shown}.")
         for key, value in raw.items():
             parsed_value = _parse_option(key, value)
             if parsed_value is not None:
@@ -530,7 +540,6 @@ def _daemon_endpoint_file() -> str | None:
     return cron_agent._daemon_endpoint_file
 
 
-@locked(_AGENT_JOBS_LOCK)
 def _attribute_dispatch_usage(
     parent_agent: Any,
     result: Any,
@@ -538,14 +547,20 @@ def _attribute_dispatch_usage(
     parent_task_id: str = "",
     job: AgentJob | None = None,
     machine: str = "",
+    left_running: bool = False,
 ) -> None:
     """Fold a dispatched sub-task's spend into the calling task.
 
-    One :data:`_AGENT_JOBS_LOCK` critical section with the lapse of
-    *job*'s budget reservation: a job of another call resolves its
-    share under that lock (:func:`_inherited_budget`), so it counts this
-    sub-task once, by its reservation before the fold and by its spend
-    after it.
+    The charge flushes the caller's queued events and writes its row, so
+    it runs without :data:`_AGENT_JOBS_LOCK`: held across it, the lock
+    made every ``finish()``, ``agent_job`` call and job completion of
+    the process wait for the database.  *job* is marked
+    :attr:`AgentJob.settling` under the lock before the charge and its
+    budget reservation lapses under it after (:func:`_lapse_reservation`).
+    A job of another call resolves its share under that lock and waits
+    while this one is settling (:func:`_live_jobs_of_other_calls`), so
+    it counts this sub-task once, by its reservation before the fold and
+    by its spend after it.
 
     The daemon's terminal ``result`` event carries the sub-task's
     cost, tokens, and steps (parsed into the
@@ -602,16 +617,20 @@ def _attribute_dispatch_usage(
             reservation the fold replaces; ``None`` without one.
         machine: The registered machine the sub-task ran on, ``""``
             for this one.
+        left_running: Whether the dispatch ended with the sub-task
+            possibly still running (:func:`may_still_run`).  Nothing
+            charges what it spends from here on, so *job* keeps what
+            *result* had not spent of its budget reserved.
     """
     if job is not None:
         job.task_id = str(getattr(result, "task_id", "") or "") or job.task_id
     if parent_agent is None or result is None:
         return
-    if job is not None:
-        job.budget = None
     cost = float(getattr(result, "cost", 0.0) or 0.0)
     tokens = int(getattr(result, "tokens", 0) or 0)
     steps = int(getattr(result, "steps", 0) or 0)
+    if job is not None:
+        locked_call(_AGENT_JOBS_LOCK, setattr, job, "settling", True)
     try:
         charge = getattr(getattr(parent_agent, "printer", None), "charge_task_usage", None)
         persisted_charge = getattr(parent_agent, "_charge_persisted_usage", None)
@@ -635,6 +654,22 @@ def _attribute_dispatch_usage(
             )
     except Exception:  # pragma: no cover — attribution must never break dispatch
         logger.warning("dispatched sub-task usage attribution failed", exc_info=True)
+    finally:
+        if job is not None:
+            spent = cost if left_running else None
+            locked_call(_AGENT_JOBS_LOCK, _lapse_reservation, job, spent)
+
+
+def _lapse_reservation(job: AgentJob, spent: float | None) -> None:
+    """Clear *job*'s reservation once its spend is on the caller's ledger.
+
+    The caller holds :data:`_AGENT_JOBS_LOCK`; the shares that waited
+    for the spend are woken.  A sub-task left running, charged *spent*
+    so far (``None`` for one that ended), keeps the rest reserved.
+    """
+    job.budget = None if spent is None or job.budget is None else max(0.0, job.budget - spent)
+    job.settling = False
+    _JOB_SETTLED.notify_all()
 
 
 def dispatch_epoch(parent_agent: Any) -> Any:
@@ -876,21 +911,33 @@ def inherit_from_parent(
     return dataclasses.replace(got, fields=_filled_keys(asked, got))
 
 
-def _unreserved_share(
-    parent_agent: Any, share: float | None, siblings: int, reserved: float,
-) -> float | None:
-    """Return *share* less the part of *reserved* that falls on one sub-task.
+def _unreserved_share(parent_agent: Any, job: AgentJob | None, siblings: int) -> float | None:
+    """Return the share of one of *siblings* sub-tasks in what *parent_agent* has left unreserved.
 
     ``_subagent_budget_share(siblings)`` splits the caller's remainder
-    ``remaining / (siblings + 1)`` ways; splitting ``remaining -
-    reserved`` the same way is *share* minus ``reserved / (siblings +
-    1)``, so the caller still keeps its own share of what is really
-    left after the budgets its running sub-tasks already hold.
+    ``remaining / (siblings + 1)`` ways.  What the live jobs of its
+    calls other than *job*'s hold (:func:`reserved_budget`) comes off
+    first: splitting ``remaining - reserved`` the same way is the share
+    minus ``reserved / (siblings + 1)``, so the caller still keeps its
+    own share of what is really left after the budgets its running
+    sub-tasks already hold.  The caller holds :data:`_AGENT_JOBS_LOCK`;
+    the reservations are read before the ledger
+    (:func:`_live_jobs_of_other_calls` tells why).
+
+    Returns:
+        The share, or ``None`` when the caller has no budget context.
 
     Raises:
         BudgetExceededError: When those budgets hold all of the
             remainder.
     """
+    share_of: Callable[[int], float | None] | None = getattr(
+        parent_agent, "_subagent_budget_share", None,
+    )
+    if not callable(share_of):
+        return None
+    reserved = reserved_budget(_live_jobs_of_other_calls(job))
+    share = share_of(siblings)
     if share is None or reserved <= 0:
         return share
     left = share - reserved / (max(siblings, 0) + 1)
@@ -915,8 +962,8 @@ def _inherited_budget(
     under :data:`_AGENT_JOBS_LOCK`, so two sub-tasks of one caller
     resolving at the same time cannot both find the other unrecorded:
     the second one sees the first one's share.  A finishing sub-task's
-    spend lands on the ledger in the critical section that clears its
-    reservation (:func:`_attribute_dispatch_usage`), so each sub-task
+    spend lands on the ledger while it is settling, and a settling job
+    is waited for (:func:`_live_jobs_of_other_calls`), so each sub-task
     is counted exactly once: by its reservation or by its spend.
     A job whose SEA pins ``max_budget`` keeps the reservation
     :func:`new_agent_job` recorded: the daemon pins the share sent
@@ -926,13 +973,7 @@ def _inherited_budget(
     Returns:
         The budget, or ``None`` when the caller has no budget context.
     """
-    share: Callable[[int], float | None] | None = getattr(
-        parent_agent, "_subagent_budget_share", None,
-    )
-    if not callable(share):
-        return None
-    reserved = reserved_budget(_live_jobs_of_other_calls(job))
-    budget = _unreserved_share(parent_agent, share(siblings), siblings, reserved)
+    budget = _unreserved_share(parent_agent, job, siblings)
     if budget is not None and budget_cap is not None:
         budget = min(budget, budget_cap)
     if job is not None and job.budget is None:
@@ -941,10 +982,26 @@ def _inherited_budget(
 
 
 def _live_jobs_of_other_calls(job: AgentJob | None) -> list[AgentJob]:
-    """Return the owner's live jobs started by calls other than *job*'s (none without a job)."""
+    """Return the owner's live jobs started by calls other than *job*'s (none without a job).
+
+    The caller holds :data:`_AGENT_JOBS_LOCK`, which this gives up
+    while one of those jobs is settling: its spend is landing on the
+    owner's ledger with its reservation still up
+    (:func:`_attribute_dispatch_usage`), and a share read now could
+    count it twice.  The caller reads the ledger after this returns.
+    The wait is polled in slices like :func:`join_agent_job`, so a Stop
+    of the waiting call lands.
+    """
+    from kiss.core import tool_interrupt
+
     if job is None:
         return []
-    return [other for other in live_agent_jobs(job.owner) if other.call_id != job.call_id]
+    while True:
+        others = [other for other in live_agent_jobs(job.owner) if other.call_id != job.call_id]
+        if not any(other.settling for other in others):
+            return others
+        tool_interrupt.raise_if_interrupted()
+        _JOB_SETTLED.wait(_JOB_WAKE_SECONDS)
 
 
 @locked(_AGENT_JOBS_LOCK)
@@ -972,13 +1029,7 @@ def budget_cap_of(parent_agent: Any, job: AgentJob | None) -> float | None:
         BudgetExceededError: When the caller has nothing left, or its
             running sub-tasks hold all of it.
     """
-    share: Callable[[int], float | None] | None = getattr(
-        parent_agent, "_subagent_budget_share", None,
-    )
-    if not callable(share):
-        return None
-    reserved = reserved_budget(_live_jobs_of_other_calls(job))
-    cap = _unreserved_share(parent_agent, share(0), 0, reserved)
+    cap = _unreserved_share(parent_agent, job, 0)
     if job is not None and job.budget is not None and cap is not None:
         cap = job.budget = min(job.budget, cap)
     return cap
@@ -1191,13 +1242,13 @@ def dispatch_result(
 ) -> TaskResult | str:
     """Submit a SEA task to the kiss-web daemon and wait.
 
-    The tail of a ``run_agent`` job (:func:`start_agent_job`): calls
+    The tail of a ``run_agent`` job (:func:`launch_agent_job`): calls
     :func:`kiss.server.sorcar.run` with *sea_path* as its
     *sea_path* and returns the daemon's
     :class:`~kiss.agents.sorcar.daemon_client.TaskResult` (which
     carries the sub-task's persisted ``task_id``) — or a clean error
     string.  Every production dispatch runs this on a job thread
-    (:func:`start_agent_job`), which records anything it raises (the
+    (:func:`launch_agent_job`), which records anything it raises (the
     inherited-budget case described under *inherit*) as the job's
     error text.  Callers that need the sub-task's id
     (rsi7d's clone replays) use this; :func:`format_dispatch_result`
@@ -1263,7 +1314,7 @@ def dispatch_result(
         workspace: Workspace/account identifier a channel
             run holds for its lifetime (the daemon's task runner enters
             it); empty means ``"default"``.  Ignored by other scripts.
-        job: The job this dispatch runs as (:func:`start_agent_job`),
+        job: The job this dispatch runs as (:func:`new_agent_job`),
             when there is one.  Its ``cancel`` event stops the sub-task
             (:func:`kill_agent_job` sets it; the wait then sends the
             daemon a ``stop``, awaits its confirmation and returns an
@@ -1323,6 +1374,7 @@ def dispatch_result(
         # counts towards the caller.
         _attribute_dispatch_usage(
             parent_agent, e.result, epoch, parent_task_id, job, kwargs["machine"],
+            left_running=not e.confirmed,
         )
         if not e.confirmed:
             return unconfirmed_stop_error(name)
@@ -1334,13 +1386,14 @@ def dispatch_result(
             f"completed before the stop (side effects) is not reported here{spend}."
         )
     except Exception as e:
+        # The run was sent before the connection failed.
+        lost = isinstance(e, daemon_client.ConnectionLostError)
         _attribute_dispatch_usage(
             parent_agent, getattr(e, "task_result", None), epoch, parent_task_id, job,
-            kwargs["machine"],
+            kwargs["machine"], left_running=lost,
         )
         logger.warning("agent dispatch failed", exc_info=True)
-        if isinstance(e, daemon_client.ConnectionLostError):
-            # The run was sent before the connection failed.
+        if lost:
             return (
                 _CONNECTION_LOST_HEAD.format(name=name)
                 + f"{e}); it MAY STILL BE RUNNING (and spending) on the daemon."
@@ -1427,12 +1480,13 @@ def dispatch_command(
     # never raises the inherited share.  A task that reads as a review
     # but asks for changes ("review and fix ...") is an implementation
     # task and keeps the full share, as it keeps the full toolset
-    # (:meth:`SorcarAgent._tool_profile`).
-    review_task = is_review_task(prompt)
-    is_review = options.tool_profile == "review" or (
-        not options.tool_profile and review_task and not is_implementation_task(prompt)
+    # (:meth:`SorcarAgent._tool_profile`).  So does a review on another
+    # *machine*: *work_dir* is a path there, whose diff cannot be measured here.
+    sized_here = (
+        budget is None and inherit and not machine
+        and is_read_only_review(prompt, options.tool_profile)
     )
-    budget_cap = review_budget(work_dir) if budget is None and inherit and is_review else None
+    budget_cap = review_budget(work_dir) if sized_here else None
     inherited = inherit_from_parent(
         parent_agent if inherit else None, model_name, budget, options,
         # The script's model applies only when the call names none.
@@ -1468,7 +1522,7 @@ def dispatch_command(
         "scope_work_dir": scope_work_dir,
         "parent_task_id": parent_task_id,
         "parent_tab_id": parent_tab_id,
-        "parent_reviewer": parent_reviewer or review_task,
+        "parent_reviewer": parent_reviewer or is_review_task(prompt),
         # A cron run's sub-tasks are cron rows too (an in-chat job's
         # children carry no unattended text, so the flag travels).
         "cron_job": cron_agent.is_cron_run(parent_agent),
@@ -1805,7 +1859,7 @@ def plan_run_agent(
         sibling_tasks: Every task of a ``run_parallel`` call (*task* is
             its first); empty for a ``run_agent`` call.  A fan-out over
             disjoint named pieces of work may run on the caller's own
-            model family (:func:`~kiss.agents.sorcar.fanout_guard.same_family_conflict`).
+            model and effort (:func:`~kiss.agents.sorcar.fanout_guard.same_model_conflict`).
 
     Returns:
         The keyword arguments of :func:`dispatch_result` plus
@@ -1924,14 +1978,19 @@ def family_verdict(
     inherit: bool,
     machine_name: str,
 ) -> tuple[str, str, str]:
-    """Judge a sub-task that would run on the caller's own model family.
+    """Judge a sub-task by the model it would run on, against the caller's.
 
-    Inside a task, such a sub-agent is the same model with less context:
-    refused unless the call is a fan-out over disjoint named pieces, the
-    caller's task asks for sub-agents, or another family is pinned
-    (:func:`~kiss.agents.sorcar.fanout_guard.same_family_conflict`).  A
-    review that would be one runs on another family instead
-    (:func:`second_opinion_model`).  A channel or an ``inherit: false``
+    Inside a task, a sub-agent on the caller's own model and effort is
+    the same model with less context: refused unless the call is a
+    fan-out over disjoint named pieces or the caller's task asks for
+    sub-agents (:func:`~kiss.agents.sorcar.fanout_guard.same_model_conflict`).
+    The effort compared is the one each would run at: a
+    ``reasoning_effort`` in the model configuration outranks the model
+    name's, the caller's configuration being its own and the child's the
+    call's ``model_config`` option, else the SEA's setting, else the
+    caller's when the child inherits it (:func:`_parent_model_config`).
+    A review that would run on the caller's family runs on another
+    family instead (:func:`second_opinion_model`).  A channel or an ``inherit: false``
     call inherits no model, so neither applies to it; nor to a sub-task
     on another machine, which is work the caller cannot do inline here.
 
@@ -1951,15 +2010,28 @@ def family_verdict(
     """
     from kiss.agents.sorcar.cron_agent import _current_task_text
 
-    review = run_options.tool_profile == "review" or (
-        not run_options.tool_profile and is_review_task(task) and not is_implementation_task(task)
-    )
+    review = is_read_only_review(task, run_options.tool_profile)
     parent_model = (
         str(getattr(parent_agent, "model_name", "") or "") if inherit and not machine_name else ""
     )
     child_model = run_options.model or str(settings.get("model") or "") or parent_model
-    conflict = same_family_conflict(
+    own_config = run_options.model_config
+    if own_config is None:
+        own_config = settings.get("model_config")
+    child_config = own_config
+    if child_config is None:
+        # What ``inherit_from_parent`` passes on: the script's model
+        # applies only when the call names none.
+        child_config = _parent_model_config(
+            parent_agent, run_options.model or parent_model,
+            "model" in settings and not run_options.model,
+        )
+    # A pin the refusal names runs with the child's own configuration, or
+    # with the caller's when it is the model that one was supplied for.
+    conflict = same_model_conflict(
         parent_model, child_model, sibling_tasks, _current_task_text(parent_agent), review,
+        getattr(parent_agent, "model_config", None), child_config, own_config,
+        str(getattr(parent_agent, "_launch_model_name", "") or parent_model),
     )
     if conflict:
         return conflict, "", ""
@@ -2134,11 +2206,19 @@ def _abandon_job(job: AgentJob) -> None:
 
 
 def _collect_job(job: AgentJob) -> str:
-    """Return *job*'s result text, dropping it from the registry, or its notice if unfinished."""
-    if job.finished:
+    """Return *job*'s result text, dropping it from the registry, or its notice if unfinished.
+
+    A job whose sub-task may still be running
+    (:attr:`AgentJob.left_running`) stays its owner's until the run
+    ends, its result read (:func:`live_agent_jobs` tells what for).
+    """
+    if not job.finished:
+        return job_notice(job, job.timeout)
+    if job.left_running and job.owner is not None:
+        locked_call(_AGENT_JOBS_LOCK, setattr, job, "reported", True)
+    else:
         forget_agent_job(job)
-        return job.result
-    return job_notice(job, job.timeout)
+    return job.result
 
 
 def run_agents_parallel(
@@ -2222,7 +2302,8 @@ def run_agents_parallel(
     entries = [_collect_job(job) for job in started]
     report = str(yaml.safe_dump(entries, sort_keys=False))
     if len(report) > DEFAULT_CONFIG.tool_output_max_chars:
-        shown = spill_report(parent_work_dir, "agents", report)
+        shown = spill_report(
+            parent_work_dir, "agents", report, getattr(parent_agent, "_private_dir", None))
         if shown is not None:
             return digest_agent_results(entries, shown)
     return report
@@ -2313,9 +2394,10 @@ class AgentJob:
         running: Set once the sub-task's tab exists on every client
             (its initial ``status running=true``) or, after ``result``
             is recorded, when the dispatch ended without one.
-        thread: The thread running :func:`dispatch_result`, assigned
-            (already started) by :func:`start_agent_job` after the job
-            exists, since the thread's arguments name the job.
+        thread: The thread running :func:`dispatch_result`, assigned by
+            :func:`new_agent_job` after the job exists, since the
+            thread's arguments name the job; :func:`launch_agent_job`
+            starts it.
         started: ``time.monotonic()`` when the thread was started.
         timeout: The seconds the starting call blocks for the result
             (:func:`resolve_timeout`), shown on the ``ran`` line.
@@ -2340,8 +2422,14 @@ class AgentJob:
             ``None`` until then or when the daemon default applies.
             While the job is unfinished it is reserved against the
             owner's remainder (:func:`reserved_budget`); it is cleared
-            in the critical section that puts the sub-task's real spend
-            on the owner's ledger (:func:`_attribute_dispatch_usage`).
+            once the sub-task's real spend is on the owner's ledger
+            (:func:`_attribute_dispatch_usage`), down to what a
+            sub-task left running had not spent.
+        settling: Whether the sub-task's spend is landing on the
+            owner's ledger: set and cleared under
+            :data:`_AGENT_JOBS_LOCK`, around the charge that runs
+            without it.  A share of another call waits meanwhile
+            (:func:`_live_jobs_of_other_calls`).
         outcome: What :func:`dispatch_result` returned (the sub-task's
             :class:`TaskResult`, or an error string); ``None`` while
             running.
@@ -2357,7 +2445,9 @@ class AgentJob:
             *result* (any action): ``wait_any`` skips such a job, and a
             finished job that is not reported ends the owner's
             ``Bash(until=)`` polls and ``bash_job`` waits early once no
-            job is live (:func:`unread_results_note`).
+            job is live (:func:`unread_results_note`).  ``True``, or the
+            mark of the ``wait_any`` call returning it, which takes its
+            marks back when it ends without returning (:func:`_unclaim`).
         nudged: Whether such a wait was already ended over this job's
             unread result: the note names each job once, so a later wait
             the owner starts without reading it runs its course.
@@ -2375,10 +2465,11 @@ class AgentJob:
     call_id: str = ""
     inherit: bool = False
     budget: float | None = None
+    settling: bool = False
     outcome: TaskResult | str | None = None
     result: str = ""
     task_id: str = ""
-    reported: bool = False
+    reported: object = False
     nudged: bool = False
 
     @property
@@ -2393,6 +2484,17 @@ class AgentJob:
         """
         return bool(self.result)
 
+    @property
+    def left_running(self) -> bool:
+        """Whether the dispatch ended with its sub-task possibly still running.
+
+        After a stop the daemon did not confirm, or a daemon connection
+        lost once the run was sent (:func:`may_still_run`).  No thread
+        waits for such a sub-task and no kill reaches it, yet it may
+        still write in its owner's worktree and spend.
+        """
+        return may_still_run(self.outcome, self.name)
+
 
 _AGENT_JOBS: dict[str, AgentJob] = {}
 """Every unresolved sub-task dispatched in this process, by job id.
@@ -2403,20 +2505,12 @@ when its owner's run ends (:func:`kill_jobs_of`).  Guarded by
 """
 
 
-def start_agent_job(
+def new_agent_job(
     name: str, kwargs: dict[str, Any], owner: Any, call_id: str = "",
 ) -> AgentJob:
-    """Start :func:`dispatch_result` with *kwargs* in a thread and register the job.
+    """Build the job that runs :func:`dispatch_result` with *kwargs* on its own thread.
 
-    :func:`new_agent_job`, then :func:`launch_agent_job`.  A caller
-    that cancels its job when a Stop interrupts it (``run_agent``,
-    ``run_parallel``) holds the built job before launching it instead:
-    a Stop landing after the launch but before this function returns
-    would leave that caller nothing to cancel.  The function does
-    not wait for the sub-task to start: a blocking ``run_agent`` call
-    joins the thread under its one ``timeout`` (startup included) and
-    a ``wait="false"`` call waits for the tab with
-    :func:`wait_until_started`.
+    Neither registered nor started: :func:`launch_agent_job` does both.
 
     Args:
         name: The agent's display name.
@@ -2429,22 +2523,6 @@ def start_agent_job(
         call_id: The :attr:`AgentJob.call_id` of the call starting the
             job (``run_parallel`` gives its siblings one); empty for a
             call of its own.
-
-    Returns:
-        The registered job.
-    """
-    job = new_agent_job(name, kwargs, owner, call_id)
-    launch_agent_job(job)
-    return job
-
-
-def new_agent_job(
-    name: str, kwargs: dict[str, Any], owner: Any, call_id: str = "",
-) -> AgentJob:
-    """Build the job that runs :func:`dispatch_result` with *kwargs* on its own thread.
-
-    Neither registered nor started: :func:`launch_agent_job` does both.
-    The arguments are those of :func:`start_agent_job`.
 
     Returns:
         The unlaunched job.
@@ -2666,8 +2744,15 @@ def agent_jobs_of(owner: Any) -> dict[str, AgentJob]:
 
 
 def live_agent_jobs(owner: Any) -> list[AgentJob]:
-    """Return *owner*'s jobs whose sub-task is still running (:attr:`AgentJob.finished` unset)."""
-    return [job for job in agent_jobs_of(owner).values() if not job.finished]
+    """Return *owner*'s jobs whose sub-task is, or may be, still running.
+
+    The unfinished ones (:attr:`AgentJob.finished` unset) and those
+    whose dispatch left the sub-task running
+    (:attr:`AgentJob.left_running`): what the owner's finish gate names
+    before a merge removes the worktree under them, and what holds a
+    part of its budget (:func:`reserved_budget`).
+    """
+    return [job for job in agent_jobs_of(owner).values() if not job.finished or job.left_running]
 
 
 def unread_results_note(owner: Any) -> str:
@@ -2703,7 +2788,7 @@ def unread_results_note(owner: Any) -> str:
 
 
 def reserved_budget(jobs: Sequence[AgentJob]) -> float:
-    """Return the USD the unfinished ones of *jobs* were given (:attr:`AgentJob.budget`).
+    """Return the USD of their caller's remainder that *jobs* hold (:attr:`AgentJob.budget`).
 
     *jobs* are the caller's live jobs of other calls, read under
     :data:`_AGENT_JOBS_LOCK` when a job thread resolves its inherited
@@ -2713,9 +2798,11 @@ def reserved_budget(jobs: Sequence[AgentJob]) -> float:
     siblings of one ``run_parallel`` call (same :attr:`AgentJob.call_id`)
     are left out, as the split already divides the remainder among
     them.  A sub-task whose spend is on the caller's ledger (its budget
-    was cleared as the spend landed) or that finished holds nothing.
+    is cleared once the spend has landed) or that finished holds nothing;
+    one left running (:attr:`AgentJob.left_running`) holds what it had
+    not spent, which nothing charges any more.
     """
-    return sum(job.budget or 0.0 for job in jobs if not job.finished)
+    return sum(job.budget or 0.0 for job in jobs if not job.finished or job.left_running)
 
 
 def kill_jobs_of(owner: Any) -> list[str]:
@@ -2822,7 +2909,7 @@ def make_agent_job_tool(owner: Any = None) -> Callable[..., str]:
             return f"Error: action must be tail, wait, wait_any or kill, got {action!r}."
         if not job.finished:
             return f"Job {job_id} ({job.name} agent task) is still running."
-        job.reported = True
+        locked_call(_AGENT_JOBS_LOCK, setattr, job, "reported", True)
         return job.result
 
     return agent_job
@@ -2841,7 +2928,11 @@ def wait_any_agent_job(jobs: dict[str, AgentJob], ids: str, timeout_seconds: str
     so a Stop lands.  Every finished unreported job is returned at once
     (a lead line naming the finished and the running ids, then one
     section per job opened by a :data:`WAIT_ANY_SECTION` line) and
-    marked reported, so no result is returned twice.
+    marked reported, so no result is returned twice: each poll chooses
+    and marks them in one critical section (:func:`_claim_finished`),
+    as tools may run on helper threads and two waits overlap.  A Stop
+    raised after that, before the text is returned, takes the marks
+    back (:func:`_unclaim`): the results stay unread for the next call.
 
     Args:
         jobs: The caller's jobs, by id (:func:`agent_jobs_of`).
@@ -2858,7 +2949,7 @@ def wait_any_agent_job(jobs: dict[str, AgentJob], ids: str, timeout_seconds: str
     seconds = parse_wait_seconds(timeout_seconds)
     if isinstance(seconds, str):
         return seconds
-    names = [name for name in re.split(r"[\s,]+", ids.strip()) if name]
+    names = list(dict.fromkeys(name for name in re.split(r"[\s,]+", ids.strip()) if name))
     unknown = [name for name in names if name not in jobs]
     if unknown:
         known = ", ".join(sorted(jobs)) or "none"
@@ -2866,32 +2957,64 @@ def wait_any_agent_job(jobs: dict[str, AgentJob], ids: str, timeout_seconds: str
     chosen = [jobs[name] for name in names] if names else list(jobs.values())
     if not chosen:
         return "Error: this task has no agent jobs; run_agent(..., wait='false') starts one."
-    pending = [job for job in chosen if not job.reported]
-    listed = ", ".join(job.job_id for job in chosen)
-    if not pending:
-        return f"Every listed job has finished and its result was already returned: {listed}."
     deadline = None if seconds is None else time.monotonic() + seconds
-    while not any(job.finished for job in pending):
+    claim = object()  # this call's mark on the results it is returning
+    while True:
+        try:
+            claimed = locked_call(_AGENT_JOBS_LOCK, _claim_finished, chosen, claim)
+            if isinstance(claimed, str):
+                return claimed
+        except BaseException:
+            locked_call(_AGENT_JOBS_LOCK, _unclaim, chosen, claim)
+            raise
         tool_interrupt.raise_if_interrupted()
         left = None if deadline is None else deadline - time.monotonic()
         if left is not None and left <= 0:
-            break
+            running = ", ".join(job.job_id for job in claimed)
+            return (
+                f"None of {running} finished within {seconds:g}s; they are still running. "
+                f"agent_job('', 'wait_any') waits again."
+            )
         time.sleep(_JOB_WAKE_SECONDS if left is None else min(_JOB_WAKE_SECONDS, left))
+
+
+def _claim_finished(chosen: list[AgentJob], claim: object) -> str | list[AgentJob]:
+    """One poll of ``wait_any`` over *chosen*; the caller holds ``_AGENT_JOBS_LOCK``.
+
+    Returns:
+        The text ``wait_any`` returns (the results of the finished
+        unreported jobs, marked reported with *claim* here, or the
+        notice that every job was already returned), else the
+        unreported jobs, all still running, to wait on.
+    """
+    pending = [job for job in chosen if not job.reported]
+    if not pending:
+        listed = ", ".join(job.job_id for job in chosen)
+        return f"Every listed job has finished and its result was already returned: {listed}."
     done = [job for job in pending if job.finished]
-    running = ", ".join(job.job_id for job in pending if not job.finished)
     if not done:
-        return (
-            f"None of {running} finished within {seconds:g}s; they are still running. "
-            f"agent_job('', 'wait_any') waits again."
-        )
+        return pending
+    running = ", ".join(job.job_id for job in pending if not job.finished)
     lead = f"Finished: {', '.join(job.job_id for job in done)}; running: {running or 'none'}."
     sections = [f"Job {job.job_id} ({job.name} agent task) finished:\n{job.result}" for job in done]
     text = "\n\n".join([lead, *sections])
     # Marked last: a result is reported only once its text exists to be
     # returned (an interrupt before this point leaves it for the next call).
     for job in done:
-        job.reported = True
+        job.reported = claim
     return text
+
+
+def _unclaim(chosen: list[AgentJob], claim: object) -> None:
+    """Make the results marked with *claim* unread again; the caller holds ``_AGENT_JOBS_LOCK``.
+
+    For a ``wait_any`` that an exception ended before it returned their
+    text.  A result a single-job action returned since then is marked
+    ``True`` and stays reported.
+    """
+    for job in chosen:
+        if job.reported is claim:
+            job.reported = False
 
 
 def wait_any_results(text: str) -> dict[str, str]:
@@ -2909,18 +3032,22 @@ def wait_any_results(text: str) -> dict[str, str]:
     }
 
 
-def parse_wait_seconds(timeout_seconds: str) -> float | None | str:
+def parse_wait_seconds(timeout_seconds: object) -> float | None | str:
     """Parse ``agent_job``'s ``timeout_seconds``.
 
-    ``None`` when empty, else a finite non-negative float.
+    ``None`` when empty, else a finite non-negative float.  A JSON
+    number is read like its text: ``Bash`` and ``bash_job`` take the
+    argument of this name as a number, so models pass one here too,
+    and the call failed on it (``'int' object has no attribute 'strip'``).
 
     Returns:
         The seconds, ``None`` for an empty argument, or an error string.
     """
-    if not timeout_seconds.strip():
+    text = "" if timeout_seconds is None else str(timeout_seconds).strip()
+    if not text:
         return None
     try:
-        seconds = float(timeout_seconds)
+        seconds = float(text)
     except ValueError:
         return f"Error: timeout_seconds must be a number, got {timeout_seconds!r}."
     if not math.isfinite(seconds) or seconds < 0:

@@ -16,12 +16,9 @@
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
 const {plain} = require('./simplify2_harness');
+const {barButtons} = require('./worktree_bar_helpers');
 
 const {test, report} = h.makeRunner();
-
-function barButtons(win) {
-  return h.all(win, '.wt-bar .wt-btns .wt-btn');
-}
 
 function labels(btns) {
   return btns.map(b => b.textContent);

@@ -18,21 +18,19 @@
 
 const assert = require('assert');
 const {
-  makePage: makeChatPage,
+  makeRemoteChatPage: makePage,
   send,
   ofType,
+  plain,
 } = require('./simplify2_harness');
 const {
   historyRows,
+  rowByTitle,
   visibleTitles,
   lastGetHistory,
+  selectFilter,
   finishedSession,
 } = require('./history_helpers');
-
-function makePage() {
-  const {win, posted} = makeChatPage({bodyClass: 'remote-chat'});
-  return {win, posted};
-}
 
 /** A finished row, of the registered `machine` when one is given; `extra` on top. */
 function session(id, title, machine, extra) {
@@ -76,12 +74,6 @@ function options(win) {
   return Array.from(win.document.getElementById('hf-machine').options).map(
     o => [o.value, o.textContent],
   );
-}
-
-function selectMachine(win, value) {
-  const sel = win.document.getElementById('hf-machine');
-  sel.value = value;
-  sel.dispatchEvent(new win.Event('change', {bubbles: true}));
 }
 
 function testHiddenUntilAMachineIsRegistered() {
@@ -217,7 +209,7 @@ function testAMachinesReplyRelabelsTheChipsAndTheFilter() {
     ['box', 'box-host'],
     ['lab', 'lab'],
   ]);
-  selectMachine(win, 'box');
+  selectFilter(win, 'hf-machine', 'box');
   assert.strictEqual(lastGetHistory(posted).machine, 'box');
   // The same labels again: nothing to repaint.
   const again = posted.filter(m => m && m.type === 'getHistory').length;
@@ -272,7 +264,7 @@ function testTheHistoryReplysLabelsNameTheFilterAndTheChips() {
     if (chip) chips[r.dataset.machine] = chip.textContent;
   });
   assert.deepStrictEqual(chips, {box: 'box-host', lab: 'lab'});
-  selectMachine(win, 'box');
+  selectFilter(win, 'hf-machine', 'box');
   assert.strictEqual(
     lastGetHistory(posted).machine,
     'box',
@@ -300,7 +292,7 @@ function testSelectingAMachineFiltersRows() {
   send(win, historyReply(posted, SESSIONS, MACHINES));
   assert.strictEqual(visibleTitles(win).length, 5, 'All shows every row');
 
-  selectMachine(win, 'box');
+  selectFilter(win, 'hf-machine', 'box');
   assert.deepStrictEqual(visibleTitles(win), ['box task', 'box task two']);
   // The daemon applies the machine too (its rows may live beyond the
   // loaded page): the change refetches page one with the machine.
@@ -308,13 +300,13 @@ function testSelectingAMachineFiltersRows() {
   assert.strictEqual(request.machine, 'box');
   assert.strictEqual(request.offset, 0);
 
-  selectMachine(win, 'lab');
+  selectFilter(win, 'hf-machine', 'lab');
   assert.deepStrictEqual(visibleTitles(win), ['lab task']);
 
-  selectMachine(win, '__local__');
+  selectFilter(win, 'hf-machine', '__local__');
   assert.deepStrictEqual(visibleTitles(win), ['local one', 'local two']);
 
-  selectMachine(win, '');
+  selectFilter(win, 'hf-machine', '');
   assert.strictEqual(visibleTitles(win).length, 5, 'All restores every row');
 
   // The machine filter combines with the SEA filter.
@@ -324,7 +316,7 @@ function testSelectingAMachineFiltersRows() {
     session(3, 'box plain', 'box'),
   ];
   send(win, historyReply(posted, fixture, ['box']));
-  selectMachine(win, 'box');
+  selectFilter(win, 'hf-machine', 'box');
   const sea = win.document.getElementById('hf-sea');
   sea.value = 'write_paper_sea';
   sea.dispatchEvent(new win.Event('change', {bubbles: true}));
@@ -336,13 +328,13 @@ function testSelectingAMachineFiltersRows() {
 function testSelectionSurvivesRefreshesAndRemoval() {
   const {win, posted} = makePage();
   send(win, historyReply(posted, SESSIONS, MACHINES));
-  selectMachine(win, 'lab');
+  selectFilter(win, 'hf-machine', 'lab');
   // A refresh with the same registry keeps the selection and the filter.
   send(win, historyReply(posted, SESSIONS, MACHINES));
   assert.strictEqual(win.document.getElementById('hf-machine').value, 'lab');
   assert.deepStrictEqual(visibleTitles(win), ['lab task']);
   // The local option survives too.
-  selectMachine(win, '__local__');
+  selectFilter(win, 'hf-machine', '__local__');
   send(win, historyReply(posted, SESSIONS, MACHINES));
   assert.strictEqual(
     win.document.getElementById('hf-machine').value,
@@ -350,7 +342,7 @@ function testSelectionSurvivesRefreshesAndRemoval() {
   );
   assert.deepStrictEqual(visibleTitles(win), ['local one', 'local two']);
   // Removing the selected machine falls back to All and re-applies.
-  selectMachine(win, 'lab');
+  selectFilter(win, 'hf-machine', 'lab');
   const withoutLab = SESSIONS.filter(s => s.machine !== 'lab');
   send(win, historyReply(posted, withoutLab, ['box']));
   assert.strictEqual(win.document.getElementById('hf-machine').value, '');
@@ -367,7 +359,7 @@ function testSelectionSurvivesRefreshesAndRemoval() {
 function testStaleReplyLeavesTheSelectionAlone() {
   const {win, posted} = makePage();
   send(win, historyReply(posted, SESSIONS, MACHINES));
-  selectMachine(win, 'lab');
+  selectFilter(win, 'hf-machine', 'lab');
   const current = lastGetHistory(posted);
   assert.strictEqual(current.machine, 'lab');
   const requestsBefore = posted.filter(m => m.type === 'getHistory').length;
@@ -402,16 +394,6 @@ function testStaleReplyLeavesTheSelectionAlone() {
   console.log('  ok - a stale-generation reply leaves the selection alone');
 }
 
-function resumes(posted) {
-  return posted.filter(m => m && m.type === 'resumeSession');
-}
-
-// A posted message as a plain object of this realm (JSDOM objects
-// have another prototype, which deepStrictEqual minds).
-function plain(message) {
-  return JSON.parse(JSON.stringify(message));
-}
-
 // The daemon's replay of a chat into a tab, after its announcement of
 // the tab's binding to *machine* ('' for a local chat): it binds the
 // tab to the chat client-side.
@@ -428,17 +410,25 @@ function replay(win, tabId, chatId, taskId, task, machine) {
   });
 }
 
-function testClickingARemoteRowResumesTheChatHere() {
-  const {win, posted} = makePage();
-  send(win, historyReply(posted, SESSIONS, MACHINES));
+/** Record every URL the page opens (JSDOM navigates nowhere): a link it
+ *  clicks or a window it opens. */
+function recordOpened(win) {
   const opened = [];
-  // JSDOM does not navigate: record any anchor activation instead.
   win.HTMLAnchorElement.prototype.click = function () {
     opened.push(this.href);
   };
-  const remoteRow = historyRows(win).find(
-    r => r.querySelector('.sidebar-item-text').textContent === 'box task',
-  );
+  win.open = url => {
+    opened.push(String(url));
+    return null;
+  };
+  return opened;
+}
+
+function testClickingARemoteRowResumesTheChatHere() {
+  const {win, posted} = makePage();
+  send(win, historyReply(posted, SESSIONS, MACHINES));
+  const opened = recordOpened(win);
+  const remoteRow = rowByTitle(win, 'box task');
   posted.length = 0;
   remoteRow.click();
   assert.deepStrictEqual(opened, [], "nothing opens the machine's web UI");
@@ -446,13 +436,13 @@ function testClickingARemoteRowResumesTheChatHere() {
   // machine (the daemon binds the tab to it) and the task (the tab's
   // title until the replay arrives).  The row has no persisted events
   // and is not running: a remote row is resumed by chat id regardless.
-  const first = resumes(posted);
+  const first = ofType(posted, 'resumeSession');
   assert.strictEqual(first.length, 1, 'one resume per click');
   const tabId = first[0].tabId;
   assert.ok(tabId, 'the resume names the fresh tab');
   assert.deepStrictEqual(plain(first[0]), {
     type: 'resumeSession',
-    id: 'chat-2',
+    chatId: 'chat-2',
     taskId: 'task-2',
     tabId,
     machine: 'box',
@@ -473,11 +463,11 @@ function testClickingARemoteRowResumesTheChatHere() {
   remoteRow
     .querySelector('.sidebar-item-machine')
     .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  const again = resumes(posted);
+  const again = ofType(posted, 'resumeSession');
   assert.strictEqual(again.length, 1);
   assert.deepStrictEqual(plain(again[0]), {
     type: 'resumeSession',
-    id: 'chat-2',
+    chatId: 'chat-2',
     taskId: 'task-2',
     tabId,
     machine: 'box',
@@ -489,12 +479,10 @@ function testClickingARemoteRowResumesTheChatHere() {
     'the open tab is reused',
   );
   // The machine name is trimmed as the filter trims it.
-  const padded = historyRows(win).find(
-    r => r.querySelector('.sidebar-item-text').textContent === 'box task two',
-  );
+  const padded = rowByTitle(win, 'box task two');
   posted.length = 0;
   padded.click();
-  assert.strictEqual(resumes(posted)[0].machine, 'box');
+  assert.strictEqual(ofType(posted, 'resumeSession')[0].machine, 'box');
   // A local row's resume names no machine (nothing to bind).
   const localRow = historyRows(win).find(r => r.dataset.machine === '');
   posted.length = 0;
@@ -521,19 +509,9 @@ function testChatHeaderOfARemoteChatResumesItHere() {
     session(3, 'mixed chat, remote task', 'lab', {id: 'chat-m'}),
   ];
   send(win, historyReply(posted, fixture, MACHINES));
-  const opened = [];
-  win.HTMLAnchorElement.prototype.click = function () {
-    opened.push(this.href);
-  };
-  const groups = Array.from(
-    win.document.querySelectorAll('#history-list .history-chat-group'),
-  );
+  const opened = recordOpened(win);
   const groupWithTitle = title =>
-    groups.find(g =>
-      Array.from(g.querySelectorAll('.sidebar-item-text')).some(
-        t => t.textContent === title,
-      ),
-    );
+    rowByTitle(win, title).closest('.history-chat-group');
   const remoteGroup = groupWithTitle('remote chat task');
   const mixedGroup = groupWithTitle('mixed chat, local task');
   assert.ok(remoteGroup && mixedGroup, 'both chat groups are rendered');
@@ -553,18 +531,18 @@ function testChatHeaderOfARemoteChatResumesItHere() {
   posted.length = 0;
   remoteGroup.querySelector('.history-chat-header').click();
   assert.deepStrictEqual(opened, [], "the machine's web UI is not opened");
-  const remote = resumes(posted);
+  const remote = ofType(posted, 'resumeSession');
   assert.strictEqual(remote.length, 1, 'the remote-only chat is resumed here');
-  assert.strictEqual(remote[0].id, 'chat-r');
+  assert.strictEqual(remote[0].chatId, 'chat-r');
   assert.strictEqual(remote[0].machine, 'box');
   assert.strictEqual(remote[0].title, 'remote chat task');
 
   posted.length = 0;
   mixedGroup.querySelector('.history-chat-header').click();
   assert.deepStrictEqual(opened, []);
-  const local = resumes(posted);
+  const local = ofType(posted, 'resumeSession');
   assert.strictEqual(local.length, 1, 'the local copy of the chat is resumed');
-  assert.strictEqual(local[0].id, 'chat-m');
+  assert.strictEqual(local[0].chatId, 'chat-m');
   assert.ok(!('machine' in local[0]), 'a chat present here opens here');
   win.close();
   console.log(
@@ -585,7 +563,7 @@ function testACopyOfTheChatOnAnotherMachineGetsItsOwnTab() {
   const remoteRow = historyRows(win).find(r => r.dataset.machine === 'lab');
   posted.length = 0;
   localRow.click();
-  const local = resumes(posted);
+  const local = ofType(posted, 'resumeSession');
   assert.strictEqual(local.length, 1);
   const localTab = local[0].tabId;
   assert.ok(!('machine' in local[0]));
@@ -593,7 +571,7 @@ function testACopyOfTheChatOnAnotherMachineGetsItsOwnTab() {
   // The remote copy, same chat id: not the local tab.
   posted.length = 0;
   remoteRow.click();
-  const remote = resumes(posted);
+  const remote = ofType(posted, 'resumeSession');
   assert.strictEqual(remote.length, 1);
   const remoteTab = remote[0].tabId;
   assert.notStrictEqual(remoteTab, localTab, 'the copy gets its own tab');
@@ -611,7 +589,7 @@ function testACopyOfTheChatOnAnotherMachineGetsItsOwnTab() {
   // The remote row finds its own tab again.
   posted.length = 0;
   remoteRow.click();
-  const again = resumes(posted);
+  const again = ofType(posted, 'resumeSession');
   assert.strictEqual(again.length, 1);
   assert.strictEqual(again[0].tabId, remoteTab);
   assert.strictEqual(again[0].machine, 'lab');
@@ -620,12 +598,53 @@ function testACopyOfTheChatOnAnotherMachineGetsItsOwnTab() {
   // opens in a fresh tab of its own, bound to no machine.
   posted.length = 0;
   localRow.click();
-  const local2 = resumes(posted);
+  const local2 = ofType(posted, 'resumeSession');
   assert.strictEqual(local2.length, 1);
   assert.notStrictEqual(local2[0].tabId, remoteTab);
   assert.ok(!('machine' in local2[0]));
   win.close();
   console.log('  ok - a chat copied to another machine has one tab per copy');
+}
+
+function testACopyOfATaskOnAnotherMachineIsItsOwnRow() {
+  // The same chat and task here and, copied, on lab (W3 audit
+  // 2026-11-12): what the page keeps for a row, it keeps for that copy.
+  const {win, posted} = makePage();
+  const copy = {id: 'chat-m', has_events: true};
+  const fixture = (local, remote) => [
+    session(2, 'copied task', '', Object.assign({}, copy, local)),
+    session(2, 'copied task', 'lab', Object.assign({}, copy, remote)),
+  ];
+  const rowOf = machine =>
+    historyRows(win).find(r => r.dataset.machine === machine);
+  const machinesOf = selector =>
+    historyRows(win)
+      .filter(r => r.matches(selector) || r.querySelector(selector))
+      .map(r => r.dataset.machine);
+  send(win, historyReply(posted, fixture({is_running: true}), MACHINES));
+  // The remote copy's details are unfolded and its star has the
+  // keyboard; a refresh that rebuilds the rows leaves both with it.
+  rowOf('lab').querySelector('.sidebar-item-collapse').click();
+  rowOf('lab').querySelector('.sidebar-item-favorite').focus();
+  send(win, historyReply(posted, fixture({}, {steps: 9}), MACHINES));
+  assert.strictEqual(
+    win.document.activeElement,
+    rowOf('lab').querySelector('.sidebar-item-favorite'),
+    "the keyboard stays on the remote copy's star",
+  );
+  assert.deepStrictEqual(machinesOf('.sidebar-item.collapsed'), ['']);
+  // The local copy finished between the two replies: the tick is its own.
+  assert.deepStrictEqual(machinesOf('.sidebar-item-completed'), ['']);
+  // A tab marks the row of the copy it shows, whichever comes first.
+  for (const machine of ['lab', '']) {
+    rowOf(machine).click();
+    const tabId = ofType(posted, 'resumeSession').pop().tabId;
+    replay(win, tabId, 'chat-m', 'task-2', 'copied task', machine);
+    send(win, historyReply(posted, fixture({}, {steps: 9}), MACHINES));
+    assert.deepStrictEqual(machinesOf('.history-active-task'), [machine]);
+  }
+  win.close();
+  console.log('  ok - a task copied to another machine is a row of its own');
 }
 
 function testAnUnsentMachinePickDoesNotHideTheChatsTab() {
@@ -641,13 +660,11 @@ function testAnUnsentMachinePickDoesNotHideTheChatsTab() {
     ],
   });
   send(win, historyReply(posted, SESSIONS, MACHINES));
-  const remoteRow = historyRows(win).find(
-    r => r.querySelector('.sidebar-item-text').textContent === 'box task',
-  );
+  const remoteRow = rowByTitle(win, 'box task');
   // The remote chat shown, bound to box by the daemon.
   posted.length = 0;
   remoteRow.click();
-  const remoteTab = resumes(posted)[0].tabId;
+  const remoteTab = ofType(posted, 'resumeSession')[0].tabId;
   replay(win, remoteTab, 'chat-2', 'task-0', 'earlier box task', 'box');
   // The local chat shown in its own tab (resumable: it has events).
   send(
@@ -659,12 +676,8 @@ function testAnUnsentMachinePickDoesNotHideTheChatsTab() {
     ),
   );
   posted.length = 0;
-  historyRows(win)
-    .find(
-      r => r.querySelector('.sidebar-item-text').textContent === 'local one',
-    )
-    .click();
-  const localTab = resumes(posted)[0].tabId;
+  rowByTitle(win, 'local one').click();
+  const localTab = ofType(posted, 'resumeSession')[0].tabId;
   replay(win, localTab, 'chat-1', 'task-0', 'earlier local task', '');
   // The user picks box for the local tab's next task, submits nothing.
   const select = win.document.getElementById('chat-machine');
@@ -672,12 +685,8 @@ function testAnUnsentMachinePickDoesNotHideTheChatsTab() {
   select.dispatchEvent(new win.Event('change', {bubbles: true}));
   assert.strictEqual(select.value, 'box', 'the pick is shown');
   posted.length = 0;
-  historyRows(win)
-    .find(
-      r => r.querySelector('.sidebar-item-text').textContent === 'local one',
-    )
-    .click();
-  const again = resumes(posted);
+  rowByTitle(win, 'local one').click();
+  const again = ofType(posted, 'resumeSession');
   assert.strictEqual(again.length, 1);
   assert.strictEqual(again[0].tabId, localTab, 'the local chat keeps its tab');
   assert.ok(!('machine' in again[0]), 'a local chat: no machine');
@@ -697,13 +706,13 @@ function groups(win) {
 function testSelectingAMachineKeepsChatsCollapsed() {
   const {win, posted} = makePage();
   send(win, historyReply(posted, SESSIONS, MACHINES));
-  assert.ok(groups(win).length >= 5, 'one group per chat');
+  assert.strictEqual(groups(win).length, 5, 'one group per chat');
   assert.ok(
     groups(win).every(g => g.classList.contains('collapsed')),
     'every chat starts collapsed',
   );
   // A machine scopes the list; it is not a search: nothing unfolds.
-  selectMachine(win, 'box');
+  selectFilter(win, 'hf-machine', 'box');
   send(win, historyReply(posted, SESSIONS, MACHINES));
   assert.deepStrictEqual(visibleTitles(win), ['box task', 'box task two']);
   assert.ok(
@@ -716,7 +725,7 @@ function testSelectingAMachineKeepsChatsCollapsed() {
   );
   open.querySelector('.history-chat-collapse').click();
   assert.ok(!open.classList.contains('collapsed'));
-  selectMachine(win, '');
+  selectFilter(win, 'hf-machine', '');
   send(win, historyReply(posted, SESSIONS, MACHINES));
   const same = groups(win).find(g => g.dataset.chatId === open.dataset.chatId);
   assert.ok(
@@ -745,6 +754,7 @@ function runTests() {
   testClickingARemoteRowResumesTheChatHere();
   testChatHeaderOfARemoteChatResumesItHere();
   testACopyOfTheChatOnAnotherMachineGetsItsOwnTab();
+  testACopyOfATaskOnAnotherMachineIsItsOwnRow();
   testAnUnsentMachinePickDoesNotHideTheChatsTab();
 }
 

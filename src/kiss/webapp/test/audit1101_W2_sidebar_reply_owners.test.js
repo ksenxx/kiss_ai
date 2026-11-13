@@ -41,6 +41,7 @@ const {
   makePage: makeHarnessPage,
   makeRunner,
   send,
+  sleep,
   click,
   key,
   byId,
@@ -93,6 +94,11 @@ function cancel(win, form) {
 
 function rows(win, id) {
   return byId(win, id).querySelectorAll('.sidebar-panel-row');
+}
+
+/** The `tabs_state` entries of the chats *ids*, all in the workspace. */
+function tabsOf(...ids) {
+  return ids.map(id => ({tabId: id, chatId: 'chat-' + id, workDir: WD}));
 }
 
 function setupMachines(win) {
@@ -895,7 +901,9 @@ async function main() {
     // Stacked layout: a search asked in chat A whose reply lands once
     // chat B is on screen opens its tab in A's group without taking the
     // screen from B (as a file of a background task does); the same
-    // reply with A still on screen shows it.
+    // reply with A still on screen shows it, and so does one asked for
+    // on A's result while that is on screen, whichever chat it was
+    // reached from.
     const page = makeHarnessPage({narrow: true});
     pages.push(page.win);
     const {win, posted} = page;
@@ -903,10 +911,10 @@ async function main() {
     click(win, byId(win, 'meta-drawer-btn'));
     openExplorer(win, posted, [{name: 'src', path: WD + '/src', isDir: true}]);
     const owner = win._testApi.getActiveTabId();
-    const search = () => {
+    const search = (query = 'TODO') => {
       runMenuItem(win, explorerRow(win, WD + '/src'), 'Find in Folder...');
       const input = toastInput(toast(win, 'find-in-folder'));
-      input.value = 'TODO';
+      input.value = query;
       key(win, input, 'Enter');
       return ofType(posted, 'fsAction').pop();
     };
@@ -939,10 +947,164 @@ async function main() {
       result.id,
       'a result for the chat on screen shows',
     );
+    win._testApi.switchToTab(current);
+    win._testApi.switchToTab(result.id);
+    click(win, byId(win, 'meta-drawer-btn'));
+    reply(search('FIXME'));
+    const shown = win._testApi
+      .openTabs()
+      .find(t => t.id === win._testApi.getActiveTabId());
+    assert.strictEqual(
+      shown.title,
+      'Search: FIXME',
+      "a result asked for on A's result, reached from chat B, shows",
+    );
+  });
+
+  // Audit 2026-11-11 (W1): F4's rule for every result a sidebar reply
+  // opens.  A commit's patch or a file's diff asked for by a chat that
+  // closed (here: on another surface) before the reply came opens no
+  // tab: it used to open one owned by a tab that no longer exists.
+  await test('a result whose chat closed opens no tab', () => {
+    const replies = [
+      {text: 'patch content'},
+      {mode: 'diff', path: 'a.txt', original: 'old', modified: 'new'},
+    ];
+    for (const reply of replies) {
+      const {win, posted} = makePage();
+      send(win, {type: 'daemonStatus', connected: true});
+      win._testApi.endLaunch();
+      send(win, {type: 'tabs_state', tabs: tabsOf('a1', 'b1')});
+      win._testApi.switchToTab('a1');
+      runMenuItem(win, openScm(win, posted), 'Open Changes');
+      const req = ofType(posted, 'gitShow').pop();
+      assert.strictEqual(req.tabId, 'a1', 'setup: chat A asked');
+      send(win, {type: 'tabs_state', tabs: tabsOf('b1')});
+      assert.ok(
+        !win._testApi.openTabs().some(t => t.id === 'a1'),
+        'A is closed',
+      );
+      send(
+        win,
+        Object.assign(
+          {
+            type: 'gitShow',
+            token: req.token,
+            tabId: req.tabId,
+            repo: WD,
+            sha: req.sha,
+          },
+          reply,
+        ),
+      );
+      assert.strictEqual(
+        win._testApi.openTabs().filter(t => t.isContentTab).length,
+        0,
+        'BUG: a closed chat opened a result tab (' +
+          (reply.mode || 'patch') +
+          ')',
+      );
+    }
+  });
+
+  // Audit 2026-11-11 (W1): a file menu left open while another chat
+  // takes the screen (a tab activated or closed from another surface
+  // does not dismiss it) opens its file for the chat it was opened in,
+  // as the menu's New File and Compare items already did; an owner
+  // closed meanwhile opens nothing.  The three items used to open the
+  // file for whichever chat was on screen at the click.
+  await test('a file menu left open opens for the chat it was opened in', () => {
+    const twoChats = () => {
+      const page = makePage();
+      send(page.win, {type: 'daemonStatus', connected: true});
+      page.win._testApi.endLaunch();
+      send(page.win, {type: 'tabs_state', tabs: tabsOf('a1', 'b1')});
+      page.win._testApi.switchToTab('a1');
+      return page;
+    };
+    const change = {path: 'f1.py', status: 'M', group: 'changes'};
+    // Each opener leaves one menu item ready to be clicked on chat A.
+    const openers = {
+      'Explorer file': (win, posted) => {
+        openExplorer(win, posted, [{name: 'a.txt'}]);
+        rightClick(win, explorerRow(win, WD + '/a.txt'));
+        return menuItem(win, 'Open to the Side');
+      },
+      'Explorer selection': (win, posted) => {
+        openExplorer(win, posted, [{name: 'a.txt'}, {name: 'b.txt'}]);
+        for (const name of ['a.txt', 'b.txt'])
+          explorerRow(win, WD + '/' + name).dispatchEvent(
+            new win.MouseEvent('click', {bubbles: true, ctrlKey: true}),
+          );
+        rightClick(win, explorerRow(win, WD + '/a.txt'));
+        return menuItem(win, 'Open to the Side');
+      },
+      'Source Control file': (win, posted) => {
+        openScm(win, posted);
+        send(win, {
+          type: 'gitStatus',
+          token: ofType(posted, 'gitStatus').pop().token,
+          workDir: WD,
+          repo: WD,
+          branch: 'main',
+          changes: [change],
+          worktrees: [
+            {
+              path: WD,
+              name: 'repo',
+              head: SHA_A,
+              branch: 'main',
+              detached: false,
+              current: true,
+              changes: [change],
+            },
+          ],
+        });
+        rightClick(
+          win,
+          win.document.querySelector(
+            '.scm-row[data-scm-path="' + WD + '/f1.py"]',
+          ),
+        );
+        return menuItem(win, 'Open File');
+      },
+    };
+    const menuOpen = win => !byId(win, 'sidebar-context-menu').hidden;
+    for (const [name, open] of Object.entries(openers)) {
+      // Another chat takes the screen; the owner stays open.
+      let {win, posted} = twoChats();
+      let item = open(win, posted);
+      assert.ok(item, name + ': setup: the item is offered');
+      let before = ofType(posted, 'openFile').length;
+      win._testApi.switchToTab('b1');
+      assert.ok(menuOpen(win), name + ': setup: the menu stayed open');
+      click(win, item);
+      const owners = ofType(posted, 'openFile')
+        .slice(before)
+        .map(m => m.tabId);
+      assert.ok(owners.length > 0, name + ': the file is asked for');
+      assert.ok(
+        owners.every(id => id === 'a1'),
+        name + ': BUG: the file was opened for the chat on screen: ' + owners,
+      );
+
+      // The owner closed on another surface: nothing opens.
+      ({win, posted} = twoChats());
+      item = open(win, posted);
+      before = ofType(posted, 'openFile').length;
+      send(win, {type: 'tabs_state', tabs: tabsOf('b1')});
+      assert.ok(menuOpen(win), name + ': setup: the menu stayed open');
+      click(win, item);
+      assert.strictEqual(
+        ofType(posted, 'openFile').length,
+        before,
+        name + ': BUG: a closed chat opened a file',
+      );
+    }
   });
 
   report('audit1101_W2_sidebar_reply_owners');
-  await new Promise(r => setTimeout(r, 0));
+  await sleep(0);
   for (const win of pages) win.close();
 }
 

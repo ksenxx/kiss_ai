@@ -6,8 +6,7 @@
 
 A continuation's first message names the active worktree (unmerged)
 and the files written so far; a merge blocked by an unstashable main
-checkout names the blocking files; a successful merge copies the
-worktree's ``tmp/PROGRESS.md`` to the main checkout.
+checkout names the blocking files.
 """
 
 from __future__ import annotations
@@ -57,18 +56,6 @@ class TestHandoffHygiene(unittest.TestCase):
         state = self.agent._continuation_state()
         self.assertIn("new.txt", state)
         self.assertIn("other.txt", state)
-
-    def test_merge_copies_the_progress_log_to_the_main_checkout(self) -> None:
-        self.agent.create_worktree()
-        (wt,) = self.agent.worktrees
-        (wt.wt_dir / "a.txt").write_text("A\n")
-        (wt.wt_dir / "tmp").mkdir(exist_ok=True)
-        (wt.wt_dir / "tmp" / "PROGRESS.md").write_text("# Progress\n- did A\n")
-        msg = self.agent.merge()
-        self.assertIn(f"Successfully merged branch '{wt.branch}'", msg)
-        self.assertIn("Copied tmp/PROGRESS.md to", msg)
-        self.assertEqual((self.repo / "tmp" / "PROGRESS.md").read_text(), "# Progress\n- did A\n")
-        self.assertEqual((self.repo / "a.txt").read_text(), "A\n")
 
     @pytest.mark.skipif(IS_WINDOWS or os.geteuid() == 0, reason="needs an unreadable file")
     def test_unstashable_main_checkout_names_the_blocking_files(self) -> None:

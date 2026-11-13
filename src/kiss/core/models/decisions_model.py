@@ -38,6 +38,7 @@ follow the OpenRouter SDK reference
 import json
 import logging
 import time
+import weakref
 from collections.abc import Callable
 from http import HTTPStatus
 from typing import Any
@@ -183,6 +184,13 @@ class DecisionsModel(Model):
         # still setting up its connection too (see :meth:`decide`).
         self._client = httpx.Client(timeout=httpx.Timeout(self.timeout, connect=CONNECT_TIMEOUT))
         make_pool_abortable(self._client)
+        # A dropped adapter closes its connection at once: httpx binds a
+        # reply and its stream to each other, and that cycle holds the
+        # pool, whose socket would stay open until a cyclic collection.
+        # Not at exit, where the sockets go with the process.  The ignore:
+        # ``atexit`` is a writable property, which typeshed declares as a
+        # plain attribute of a class with empty ``__slots__``.
+        weakref.finalize(self, self._client.close).atexit = False  # type: ignore[misc]
 
     def decide(
         self,
@@ -211,9 +219,10 @@ class DecisionsModel(Model):
         of leaving it reading until the peer stops sending.
 
         Raises:
-            KISSError: On an unknown question type, a non-2xx response, an
-                unreachable endpoint, a request that outlived ``timeout``,
-                or a response without ``answers``.
+            KISSError: On an unknown question type, a closed adapter
+                (:meth:`close`), a non-2xx response, an unreachable
+                endpoint or a ``base_url`` that does not parse, a request
+                that outlived ``timeout``, or a response without ``answers``.
             KeyboardInterrupt: The user pressed Stop before the request
                 was sent or while it was in flight.  A reply landing at
                 the Stop itself is taken: the completed answer and its
@@ -222,6 +231,8 @@ class DecisionsModel(Model):
         """
         if stop_signal.stop_requested():
             raise stop_error()
+        if self._client.is_closed:
+            raise KISSError(f"Decisions adapter for {self.model_name} is closed")
         if not questions:
             raise KISSError("decide() needs at least one question")
         for name, question in questions.items():
@@ -240,7 +251,7 @@ class DecisionsModel(Model):
         try:
             with RequestAbortWatchdog(self._client, self.timeout, "decisions-abort-watchdog"):
                 response = self._client.post(self.endpoint_url, json=body, headers=headers)
-        except httpx.HTTPError as error:
+        except (httpx.HTTPError, httpx.InvalidURL) as error:
             raise self._cut_error(deadline) or KISSError(
                 f"Decisions request to {self.endpoint_url} failed: {error}"
             ) from error
@@ -262,6 +273,16 @@ class DecisionsModel(Model):
                 self._rejected_response = parsed
             raise KISSError(f"Decisions response has no 'answers' object: {parsed!r}"[:500])
         return parsed
+
+    def close(self) -> None:
+        """Close the pooled connection; :meth:`decide` raises ``KISSError`` from then on.
+
+        For an owner that keeps the adapter after its last request (an
+        agent's toolset outlives its run); a dropped adapter closes its
+        connection by itself.  No request may be in flight: like its
+        pool, the adapter serves one caller at a time.  Idempotent.
+        """
+        self._client.close()
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Start a conversation whose text :meth:`generate` will judge.
@@ -403,7 +424,8 @@ def _http_error_message(response: httpx.Response) -> str:
         response: The failed HTTP response.
 
     Returns:
-        ``"Decisions request failed (HTTP <code> <phrase>): <server message>"``.
+        ``"Decisions request failed (HTTP <code> <phrase>): <server message>"``,
+        the server message cut to 500 characters.
     """
     try:
         detail = response.json().get("error", {}).get("message") or response.text
@@ -413,4 +435,6 @@ def _http_error_message(response: httpx.Response) -> str:
         phrase = HTTPStatus(response.status_code).phrase
     except ValueError:
         phrase = ""
+    # The message becomes a tool result: a gateway's error page must not fill the context.
+    detail = str(detail)[:500]
     return f"Decisions request failed (HTTP {response.status_code} {phrase}): {detail}".strip()

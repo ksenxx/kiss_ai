@@ -57,9 +57,9 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 from kiss.agents.sorcar import machines as mach
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import find_free_port
-from kiss.tests.local_ws import open_local_connection
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 from kiss.tests.remote_daemon import start_remote_daemon
 
 
@@ -85,8 +85,12 @@ class TestRemoteFilePicker(IsolatedAsyncioTestCase):
     """One local daemon, one remote daemon, each with a file of its own."""
 
     async def asyncSetUp(self) -> None:
+        # Cleanups, each registered as its resource starts, not asyncTearDown:
+        # unittest skips the tear-down when the set-up fails.
         self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         mach.save_machines([])
+        self.addCleanup(mach.save_machines, [])
         root = Path(self.tmpdir)
         self.box_work = root / "box-work"
         self.box_work.mkdir()
@@ -108,6 +112,7 @@ class TestRemoteFilePicker(IsolatedAsyncioTestCase):
             config={"work_dir": str(self.box_work)},
             env={"HOME": str(box_user_home), "USERPROFILE": str(box_user_home)},
         )
+        self.addCleanup(self.remote.stop)
         self.certfile = root / "cert.pem"
         keyfile = root / "key.pem"
         _generate_self_signed_cert(self.certfile, keyfile)
@@ -116,21 +121,17 @@ class TestRemoteFilePicker(IsolatedAsyncioTestCase):
             keyfile=str(keyfile), url_file=root / "remote-url.json",
             local_endpoint_file=root / "sorcar-local.json",
         )
+        # Registered before the start: one that fails part-way is stopped too.
+        self.addAsyncCleanup(self.server.stop_async)
         await self.server.start_async()
         self.reader, self.writer = await open_local_connection(self.server)
+        self.addCleanup(self.writer.close)
         await self._ask({"type": "setWorkDir", "workDir": str(self.home_work)}, "workDirChanged")
         added = await self._ask({
             "type": "machineAction", "action": "add", "name": "box",
             "address": self.remote.url, "machinePassword": "pw-remote",
         }, "machines")
         self.assertEqual(added["error"], "")
-
-    async def asyncTearDown(self) -> None:
-        self.writer.close()
-        await self.server.stop_async()
-        self.remote.stop()
-        mach.save_machines([])
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _send(self, cmd: dict[str, Any]) -> None:
         """Send *cmd* on the local connection."""

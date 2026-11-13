@@ -47,7 +47,6 @@
     }
     @media (prefers-color-scheme: light) {
       html, body { background: #f6f6f7; color: #1d1d1f; }
-      .note { color: #6e6e73; }
     }
     body {
       display: flex;
@@ -77,6 +76,8 @@
       document.getElementById('name').textContent = title;
       if (!next || !probe) return;
       if (popup && window.name !== 'kiss-app-window') {
+        // Outer sizes on purpose: this is kiss-app's --app window, and Chromium
+        // sizes the popup of one by its window, not by its content area.
         var features = 'popup,left=' + screenX + ',top=' + screenY +
           ',width=' + outerWidth + ',height=' + outerHeight;
         if (window.open(location.href, 'kiss-app-window', features)) {

@@ -28,6 +28,7 @@ class TestTalkToolWiringE2E:
     slip through.  This drives the real tool end to end.
     """
 
+    @pytest.mark.live_api
     @pytest.mark.skipif(
         not os.environ.get("OPENAI_API_KEY"),
         reason="requires OPENAI_API_KEY for a live gpt-audio-1.5 call",

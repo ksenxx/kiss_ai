@@ -142,9 +142,7 @@ class TestNewTabStaleTaskId:
 
     def teardown_method(self) -> None:
         self.srv.shutdown()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         agent_state.agent_states.clear()

@@ -17,6 +17,7 @@ const assert = require('assert');
 const {
   makePage: buildPage,
   send,
+  settle,
   stubMonaco,
   waitFor,
 } = require('./simplify2_harness');
@@ -84,6 +85,8 @@ async function testPlainFileStillRendersHtml() {
     1,
     'a real .html FILE must still render in the sandboxed iframe',
   );
+  // An editor is created once ensureMonaco() has resolved, a turn later.
+  await settle();
   assert.strictEqual(created.length, 0, 'no text editor for an html file');
   win.close();
   console.log('  ok - a real .html file still renders as HTML');

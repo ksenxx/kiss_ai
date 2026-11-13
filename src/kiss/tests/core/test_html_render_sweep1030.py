@@ -90,3 +90,15 @@ def test_an_ordered_list_counts_from_its_start_attribute() -> None:
         '<li>seven</li></ol><ol start="x"><li>one</li></ol>'
     )
     assert html_to_rich(html).plain == "5. five\n6. six\n  3. three\n7. seven\n1. one"
+
+
+def test_a_block_that_opens_a_list_item_stays_on_the_markers_line() -> None:
+    """``<li><p>`` renders ``• text``: the bullet sat alone, its text unindented below."""
+    assert html_to_rich("<ul><li><p>one</p></li></ul>").plain == "• one"
+    html = "<ul><li><p>one</p><p>two</p></li><li><pre>l1\n  l2</pre></li></ul><p>after</p>"
+    assert html_to_rich(html).plain == "• one\n\ntwo\n\n• l1\n  l2\n\nafter"
+    html = "<ol><li><div>d</div>tail</li><li><h3>H</h3></li></ol>"
+    assert html_to_rich(html).plain == "1. d\ntail\n2. H"
+    # A nested list still starts below its item's marker; an empty item still ends its line.
+    html = "<ul><li><ul><li>b</li></ul></li><li></li></ul><p>x</p>"
+    assert html_to_rich(html).plain == "•\n  • b\n•\n\nx"

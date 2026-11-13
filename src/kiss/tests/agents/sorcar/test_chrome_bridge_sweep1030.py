@@ -25,16 +25,35 @@ thread has done its part:
 * An unwritable ``$KISS_HOME/chrome_extension`` made ``start()`` raise
   ``OSError`` (not ``ChromeBridgeError``): it escaped ``start_if_enabled``
   (daemon boot and settings saves) and ``use_my_chrome``, and leaked the
-  bound port.  It is a ``ChromeBridgeError`` now and the port is closed.
+  bound port.  It is a ``ChromeBridgeError`` now, raised before anything
+  is bound; a config file that cannot be written (the failure after the
+  bind) closes the port.
+* ``stop()`` called ``Server.shutdown()`` holding ``_conn_lock``, and for a
+  server whose loop never started.  websockets 17 waits in there for the
+  loop and for every handler to end, and a handler takes that lock before
+  it ends: ``stop()`` never returned.  At interpreter exit that shutdown
+  raised instead, before the config file was withdrawn.  The lock is
+  released first now, a loop that never ran is not waited for, and the
+  file is withdrawn before the server is released.
+
+The module passes with websockets 15 and 17; the last finding's hangs
+show only with 17 on the path (the lock test fails with either).  Two
+branches of ``_release_server`` exist for 17 alone and run only there:
+the close of its socket pair, and the ``RuntimeError`` its shutdown
+raises at interpreter exit (in the child process of the exit test).
 """
 
 from __future__ import annotations
 
+import gc
 import inspect
 import json
 import logging
+import os
 import queue
 import socket
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -43,6 +62,9 @@ from types import FrameType, ModuleType
 from typing import Any
 
 import pytest
+from websockets.exceptions import ConnectionClosed
+from websockets.sync.client import connect
+from websockets.sync.server import Server
 
 from kiss.agents.sorcar import chrome_bridge
 from kiss.agents.sorcar.chrome_bridge import (
@@ -54,7 +76,8 @@ from kiss.agents.sorcar.chrome_bridge import (
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.user_config import save_config
-from kiss.tests.agents.sorcar.test_chrome_bridge import ExtensionPeer
+from kiss.tests.agents.sorcar.test_chrome_bridge import ExtensionPeer, _hello
+from kiss.tests.conftest import IS_WINDOWS
 
 
 class LinePause:
@@ -116,6 +139,11 @@ def _config() -> dict[str, Any]:
     return dict(json.loads((extension_dir() / CONFIG_FILE_NAME).read_text()))
 
 
+def _open_fds() -> int:
+    """How many descriptors this process holds (0 on Windows, which has no ``/dev/fd``)."""
+    return 0 if IS_WINDOWS else len(os.listdir("/dev/fd"))
+
+
 @pytest.fixture
 def kiss_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """A private ``KISS_HOME`` (extension dir, config file, config.json); no singleton."""
@@ -140,7 +168,9 @@ def test_a_drop_racing_a_new_handshake_keeps_the_new_connection(bridge: ChromeBr
     with LinePause(ChromeBridge._drop_connection, "self._conn = None") as pause:
         first.close()
         assert pause.paused.wait(5), "the old connection was never dropped"
-        second = ExtensionPeer(bridge.port, bridge.token, responder=lambda cmd: "answered")
+        second = ExtensionPeer(  # its publish waits for the held drop: do not wait for it
+            bridge.port, bridge.token, responder=lambda cmd: "answered", wait_published=False
+        )
         # The second handler reads frames only after its swap, so a pong
         # proves the swap happened inside the window; with the swap
         # serialised behind the held drop none comes until it is let go.
@@ -182,6 +212,33 @@ def test_stop_racing_a_disconnect_withdraws_the_config(kiss_home: Path) -> None:
     assert not (extension_dir() / CONFIG_FILE_NAME).exists()
 
 
+def test_a_hello_landing_while_the_server_shuts_down_is_turned_away() -> None:
+    """``stop()`` is held inside ``Server.shutdown()``: the bridge's lock must be free there.
+
+    The hello's handler takes ``_conn_lock`` to learn that the bridge has
+    stopped.  With the lock held across the shutdown it parked there, and
+    websockets 17, whose shutdown waits for the handlers, never returned.
+    """
+    b = ChromeBridge(port=0, write_config=False)
+    b.start()
+    ws = connect(f"ws://127.0.0.1:{b.port}")
+    stopper = threading.Thread(target=b.stop, daemon=True)
+    try:
+        nonce = json.loads(ws.recv(timeout=5))["nonce"]
+        with LinePause(Server.shutdown, "self.socket.close()") as pause:
+            stopper.start()
+            assert pause.paused.wait(5), "stop() never shut the server down"
+            ws.send(json.dumps(_hello(b.token, nonce)))
+            with pytest.raises(ConnectionClosed):
+                while True:
+                    ws.recv(timeout=5)
+        stopper.join(10)
+        assert not stopper.is_alive(), "stop() waited for a handler it was blocking"
+        assert not b.extension_connected
+    finally:
+        ws.close()
+
+
 def test_a_predecessors_stop_never_unlinks_the_successors_config(kiss_home: Path) -> None:
     """A successor publishes while the predecessor's stop is between its check and unlink."""
     predecessor = ChromeBridge(write_config=True)
@@ -210,10 +267,12 @@ def _block_extension_dir(kiss_home: Path) -> None:
     (kiss_home / "chrome_extension").write_text("a file where the extension directory belongs")
 
 
-def test_an_unwritable_extension_dir_is_a_bridge_error_and_frees_the_port(
+def test_an_unwritable_config_file_is_a_bridge_error_and_frees_the_port(
     kiss_home: Path,
 ) -> None:
-    _block_extension_dir(kiss_home)
+    # A directory where the config file belongs: the write fails after the bind.
+    blocker = kiss_home / "chrome_extension" / CONFIG_FILE_NAME
+    blocker.mkdir(parents=True)
     b = ChromeBridge(write_config=True)
     with pytest.raises(ChromeBridgeError, match="cannot publish the bridge"):
         b.start()
@@ -224,6 +283,23 @@ def test_an_unwritable_extension_dir_is_a_bridge_error_and_frees_the_port(
     # accept at once either way.
     with pytest.raises((ConnectionRefusedError, TimeoutError)):
         socket.create_connection(("127.0.0.1", b.port), timeout=2).close()
+    # A stopped server is released whole (websockets 15 leaves its shutdown pipe
+    # open; a server of websockets 17 that never served, its socket pair), and
+    # one that was not published never served: a serving loop leaves its
+    # selector, a descriptor, to the garbage collector.  After a failed lazy
+    # start, one per use_my_chrome call...
+    gc.collect()  # what the tests before left to the collector
+    open_fds = _open_fds()
+    for _ in range(3):
+        with pytest.raises(ChromeBridgeError, match="cannot publish the bridge"):
+            ChromeBridge.instance()
+    assert _eventually(lambda: _open_fds() <= open_fds), (_open_fds(), open_fds)
+    # ...and after a bridge that served, once the selector of its loop is collected.
+    blocker.rmdir()
+    assert ChromeBridge.instance().port != 0
+    ChromeBridge.shutdown()
+    gc.collect()
+    assert _eventually(lambda: _open_fds() <= open_fds), (_open_fds(), open_fds)
 
 
 def test_start_if_enabled_survives_an_unwritable_extension_dir(kiss_home: Path) -> None:
@@ -251,3 +327,34 @@ def test_stop_logs_a_config_it_cannot_withdraw(
     with caplog.at_level(logging.WARNING, logger=chrome_bridge.__name__):
         b.stop()
     assert "could not withdraw" in caplog.text
+
+
+def leave_connected() -> list[object]:
+    """Child-process body: a published bridge, an extension connected and a hello still owed.
+
+    Returns:
+        The two connections, for the caller to keep open until the interpreter exits.
+    """
+    bridge = ChromeBridge.instance()
+    assert (extension_dir() / CONFIG_FILE_NAME).exists()
+    peer = ExtensionPeer(bridge.port, bridge.token)
+    owing = connect(f"ws://127.0.0.1:{bridge.port}")
+    assert json.loads(owing.recv(timeout=5))["type"] == "challenge"
+    return [peer, owing]
+
+
+def test_a_finished_run_withdraws_its_bridge_at_exit(tmp_path: Path) -> None:
+    """The exit hook stops a bridge that still has connections: no error, no config left.
+
+    websockets 17 closes a stopping server's open connections on a thread
+    pool, which the interpreter refuses at exit: ``stop()`` raised there
+    before it withdrew the config file, and the extension kept retrying a
+    dead port.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", f"import {__name__} as m; kept = m.leave_connected()"],
+        capture_output=True, text=True, timeout=120, check=False,
+        env={**os.environ, "KISS_HOME": str(tmp_path)},
+    )
+    assert proc.returncode == 0 and "Traceback" not in proc.stderr, proc.stderr[-3000:]
+    assert not (tmp_path / "chrome_extension" / CONFIG_FILE_NAME).exists()

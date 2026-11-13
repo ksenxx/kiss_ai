@@ -33,17 +33,16 @@ from kiss.agents.sorcar.persistence import _add_task, _save_task_extra
 
 def _redirect(tmpdir: str) -> tuple:
     """Redirect the persistence DB to a temp dir. Mirrors test_persistence.py."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    old = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
     return old
 
 
 def _restore(saved: tuple) -> None:
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    (th._DB_PATH, th._KISS_DIR) = saved
 
 
 class TestStripWorktreeSuffix(unittest.TestCase):
@@ -134,12 +133,7 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
         self.saved = _redirect(self.tmpdir)
 
     def tearDown(self) -> None:
-        if th._db_conn is not None:
-            try:
-                th._db_conn.close()
-            except Exception:
-                pass
-            th._db_conn = None
+        th._close_thread_db()
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

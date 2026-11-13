@@ -105,7 +105,7 @@ function testChipTogglingFiltersRows() {
   send(win, {type: 'history', sessions: STATUS_CHIP_SESSIONS, offset: 0});
 
   assert.deepStrictEqual(
-    visibleTitles(win).sort(),
+    visibleTitles(win),
     ['errored task', 'running task', 'succeeded task'],
     'all three rows visible with default chips',
   );
@@ -118,7 +118,7 @@ function testChipTogglingFiltersRows() {
 
   toggle('hf-errors', false);
   assert.deepStrictEqual(
-    visibleTitles(win).sort(),
+    visibleTitles(win),
     ['running task', 'succeeded task'],
     'unchecking the Errored chip hides the errored row',
   );

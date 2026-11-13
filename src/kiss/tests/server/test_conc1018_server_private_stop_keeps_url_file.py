@@ -12,7 +12,7 @@ unconditionally, so ``kiss-web --url`` and the machine probes lost the
 live daemon's URL until its watchdog rewrote it (findings I2-F2).
 
 A real :class:`RemoteAccessServer` is started on its private loopback
-endpoint and stopped; the pinned URL file (standing in for the
+endpoint and stopped; the URL file it is given (standing in for the
 canonical daemon's) must survive with its content.  A daemon that is
 not private still removes the file it owns on stop.
 """
@@ -29,7 +29,6 @@ import time
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
-import kiss.server.web_server as web_server
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
 from kiss.core.processes import pid_alive
 from kiss.server.web_server import RemoteAccessServer
@@ -64,10 +63,8 @@ class PrivateStopKeepsUrlFileTest(IsolatedAsyncioTestCase):
         self._saved = redirect_persistence(self.tmp)
         self.url_file = self.tmp / "remote-url.json"
         self.url_file.write_text(URL_CONTENT, encoding="utf-8")
-        web_server._URL_FILE = self.url_file
 
     async def asyncTearDown(self) -> None:
-        del web_server._URL_FILE
         restore_persistence(self._saved)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -75,6 +72,7 @@ class PrivateStopKeepsUrlFileTest(IsolatedAsyncioTestCase):
         server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
+            url_file=self.url_file,
             local_endpoint_file=self.tmp / "sorcar-local.json",
             work_dir=str(self.tmp),
         )

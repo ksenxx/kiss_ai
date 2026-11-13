@@ -10,7 +10,6 @@ const {makePage, send, readyTabId, click} = require('./simplify2_harness');
 const {
   subagentTabEls,
   togglePanel,
-  clickClose,
   openSubTabIds,
   tabEl,
   spawnSubagent,
@@ -942,33 +941,6 @@ function testLateSpawnUnderFinishedParentOpensUnderAncestor() {
   console.log('  ok - late spawn under finished parent opens under ancestor');
 }
 
-// A running sub-agent's tab stays open unless the USER closes it: a
-// hand close removes it and is echoed to the daemon (which mirrors it
-// to every other surface).  The mirror side, a close from another
-// surface applied without an echo, is pinned by tabsMirrorReview's
-// testCloseSubagentTabBroadcastRemovesTabWithoutEcho.
-function testUserCloseOfRunningSubagentTab() {
-  const {win, posted, rootId} = bootRunningRoot();
-  const [x, y] = runParallelCall(win, posted, rootId, ['x', 'y'], 'S ');
-  const closes = posted.filter(m => m.type === 'closeTab').length;
-  clickClose(win, x);
-  assert.deepStrictEqual(
-    openSubTabIds(win).sort(),
-    [y],
-    'running tab closes by hand',
-  );
-  assert.deepStrictEqual(
-    posted
-      .filter(m => m.type === 'closeTab')
-      .slice(closes)
-      .map(m => m.tabId),
-    [x],
-    'the hand close is echoed to the daemon',
-  );
-  win.close();
-  console.log('  ok - user close of a running sub-agent tab');
-}
-
 function main() {
   const tests = [
     testThreeSequentialRunParallelCallsOpenTabs,
@@ -985,7 +957,6 @@ function main() {
     testUnregisteredTabAdoptsIntoNewestPanelOnly,
     testFinishedAncestorKeepsLiveDescendants,
     testLateSpawnUnderFinishedParentOpensUnderAncestor,
-    testUserCloseOfRunningSubagentTab,
   ];
   for (const t of tests) t();
   console.log('runParallelMultiCallNested.test.js: all tests passed');

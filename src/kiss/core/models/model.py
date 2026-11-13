@@ -12,9 +12,11 @@ transports — the subprocess supervision those two share:
 :class:`_CLIProcess` and :class:`_ToolCallFilteredStream`.
 """
 
+import ast
 import base64
 import contextlib
 import dataclasses
+import hashlib
 import importlib
 import inspect
 import json
@@ -32,11 +34,13 @@ import types as types_module
 import typing
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin
 
 from kiss.core import stop_signal
+from kiss.core.context_compaction import ARGUMENT_STUB_PREFIX
 from kiss.core.kiss_error import KISSError
 from kiss.core.locked import locked_call
 from kiss.core.models.heif import (
@@ -60,13 +64,18 @@ from kiss.core.processes import (
     pid_handed_on,
     popen_process_group,
 )
-from kiss.core.tool_schema import declared_schema
+from kiss.core.tool_schema import declared_schema, is_unlisted
 
 logger = logging.getLogger(__name__)
 
 TokenCallback = Callable[[str], None]
 
 ThinkingCallback = Callable[[bool], None]
+
+# What ``json.loads`` raises for text it cannot decode: ``JSONDecodeError``,
+# a plain ``ValueError`` at the decoder's integer digit limit, and
+# ``RecursionError`` for nesting past its recursion limit.
+_UNDECODABLE_JSON = (ValueError, RecursionError)
 
 SUPPORTED_MIME_TYPES = {
     "image/jpeg",
@@ -344,7 +353,7 @@ def encode_binary_attachment(mime_type: str, data: bytes) -> str:
     return f"{opener}{Attachment(data, mime_type).to_base64()}{BINARY_ATTACHMENT_CLOSE}"
 
 
-def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
+def parse_binary_attachments(text: str, transcode: bool = True) -> tuple[str, list[Attachment]]:
     """Split a tool result string into plain text + binary attachments.
 
     Scans ``text`` for ``<<KISS_BINARY_ATTACHMENT ...>>...<<...>>`` blocks
@@ -357,6 +366,10 @@ def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
 
     Args:
         text: Raw tool result content possibly containing sentinel blocks.
+        transcode: Whether each attachment is built by
+            :meth:`Attachment.from_bytes`, which runs the HEIF converter
+            on a HEIC photo.  ``False`` for a caller that keeps the text
+            only: the payload is returned as it was embedded.
 
     Returns:
         ``(plain_text, attachments)``.  If the input has no sentinels,
@@ -390,7 +403,9 @@ def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
             out_parts.append(f"[undecodable {mime_type} attachment dropped]")
             continue
         out_parts.append(f"[attached {mime_type}, {len(data)} bytes]")
-        attachments.append(Attachment.from_bytes(data, mime_type))
+        attachments.append(
+            Attachment.from_bytes(data, mime_type) if transcode else Attachment(data, mime_type)
+        )
     out_parts.append(text[cursor:])
     return "".join(out_parts), attachments
 
@@ -431,7 +446,7 @@ def parse_tool_arguments(arguments: Any) -> dict[str, Any]:
         return {}
     try:
         parsed = json.loads(arguments)
-    except ValueError:  # JSONDecodeError, or the decoder's integer digit limit
+    except _UNDECODABLE_JSON:
         logger.debug("Exception caught", exc_info=True)
         return {}
     return parsed if isinstance(parsed, dict) else {}
@@ -570,6 +585,19 @@ def _audio_mime_to_format(mime_type: str) -> str:
     """
     fallback = mime_type.split("/", 1)[1] if "/" in mime_type else mime_type
     return _AUDIO_MIME_TO_FORMAT.get(mime_type, fallback)
+
+
+def _audio_format_to_mime(fmt: str) -> str:
+    """Map an OpenAI ``input_audio.format`` string to its audio MIME type.
+
+    Args:
+        fmt: The short format string (e.g. "mp3"); may be empty.
+
+    Returns:
+        The canonical MIME type (e.g. "audio/mpeg"); ``audio/<fmt>`` when no
+        explicit mapping exists, and ``audio/mpeg`` for an empty format.
+    """
+    return _AUDIO_FORMAT_TO_MIME.get(fmt, f"audio/{fmt}" if fmt else "audio/mpeg")
 
 
 #: Serializes the lazy imports of the provider modules and SDKs.  The
@@ -714,7 +742,7 @@ def _iter_jsonl(lines: Iterable[str]) -> Iterator[Any]:
             continue
         try:
             yield json.loads(line)
-        except ValueError:  # JSONDecodeError, or the decoder's integer digit limit
+        except _UNDECODABLE_JSON:
             continue
 
 
@@ -893,32 +921,161 @@ def flatten_content_to_text(content: Any) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def _unrecorded_tool_calls_text(message: dict[str, Any], content: str) -> str:
-    """Render the chat ``tool_calls`` of an assistant *message* its text does not record.
+_TEXT_CALL_ID = re.compile(r"call_[0-9a-f]{8}([0-9a-f]{12})")
+"""An id :func:`text_call_id` makes; the group is the digest of the call."""
+
+
+def _call_digest(name: str, arguments: Any) -> str:
+    """Return the digest of a call as a turn's text holds it: of its name and arguments."""
+    written = json.dumps([name, arguments], sort_keys=True)
+    return hashlib.sha256(written.encode()).hexdigest()[:12]
+
+
+def text_call_id(name: str, arguments: Any) -> str:
+    """Return a new id for a call that a turn's text holds, ending in the call's digest.
+
+    The record of such a call does not keep the arguments as the text
+    wrote them: the framework types them by the tool's signature, and a
+    compaction stubs them.  The digest still tells which call of the
+    text the record is (:func:`_assistant_turn_text`).
+
+    Args:
+        name: The tool's name.
+        arguments: The call's arguments as the text holds them, a JSON value.
+
+    Returns:
+        ``call_`` and twenty hex digits: eight random, twelve of the digest.
+    """
+    return f"call_{uuid.uuid4().hex[:8]}{_call_digest(name, arguments)}"
+
+
+def _id_digest(call_id: Any) -> str | None:
+    """Return the digest in the id of a text call, ``None`` for the id of any other call."""
+    match = _TEXT_CALL_ID.fullmatch(call_id) if isinstance(call_id, str) else None
+    return match.group(1) if match else None
+
+
+def _same_json(one: Any, other: Any) -> bool:
+    """Return whether *one* and *other* are one JSON value: ``1``, ``1.0`` and ``true`` are not."""
+    try:
+        return json.dumps(one, sort_keys=True) == json.dumps(other, sort_keys=True)
+    except RecursionError:  # nested past what the encoder follows
+        return False
+
+
+def _argument_stubs(written: Any, stored: Any) -> dict[str, str]:
+    """Return the stubs a compaction left in the *stored* arguments of a call, by argument name.
+
+    *written* is the arguments of the same call in its turn's text: a
+    stub the text wrote itself (the model copied one back) is no change.
+    """
+    if not (isinstance(written, dict) and isinstance(stored, dict)):
+        return {}
+    return {
+        key: value
+        for key, value in stored.items()
+        if isinstance(value, str)
+        and value.startswith(ARGUMENT_STUB_PREFIX)
+        and written.get(key) != value
+    }
+
+
+def _stub_text_call(content: str, call: dict[str, Any], stubs: dict[str, str]) -> str:
+    """Return *content* with the arguments of its text *call* replaced by their *stubs*.
+
+    A stub takes the place of the argument itself, never of the same
+    text elsewhere in the turn: the ``<parameter>`` of the ``<invoke>``
+    that is the call, or the ``arguments`` of each entry of a JSON
+    ``tool_calls`` block that is the call (a turn may write a block
+    again; the parser reads the repeats as one call).  Such a block is
+    written back as JSON, its text unescaped as a compaction writes it.
+
+    Args:
+        content: The turn's text.
+        call: One of the calls :func:`_parse_text_based_tool_calls` reads in *content*.
+        stubs: The stubs of the call's compacted arguments, by argument name.
+    """
+    invoke = _first_invoke(content)
+    if invoke is not None:
+        body = invoke.group(2)
+        parameters = _XML_PARAMETER_RE.finditer(body, 0, _end_of_last("</parameter>", body))
+        for parameter in reversed(list(parameters)):
+            key = parameter.group(1)
+            if key in stubs and parameter.group(2) == call["arguments"].get(key):
+                start, end = (invoke.start(2) + offset for offset in parameter.span(2))
+                content = content[:start] + stubs[key] + content[end:]
+        return content
+    for start, end, parsed in reversed(_iter_balanced_json_objects(content)):
+        entries = [
+            entry
+            for calls in _iter_tool_calls_lists(parsed)
+            for entry in calls
+            if entry["name"] == call["name"]
+            and _same_json(entry.get("arguments", {}), call["arguments"])
+        ]
+        for entry in entries:
+            entry["arguments"] = entry["arguments"] | stubs
+        if entries:
+            try:
+                block = json.dumps(parsed, ensure_ascii=False)
+            except RecursionError:  # nested past what the encoder follows: the block stays
+                continue
+            # A lone surrogate keeps its JSON escape: no UTF-8 prompt carries it raw.
+            block = block.encode("utf-8", "backslashreplace").decode("utf-8")
+            content = content[:start] + block + content[end:]
+    return content
+
+
+def _replayed_call_digest(content: str, name: str) -> str | None:
+    """Return the digest of the call of *name* that *content* is the rendering of, if it is one.
+
+    Codex's replay of a call it was served is the call's rendering
+    (:func:`render_tool_call`) and nothing else: the literals of the
+    rendering are the call's arguments as the turn's text holds them.
+    """
+    opener, closer = f"```python\n{name}(", "\n```"
+    if not (content.startswith(opener) and content.endswith(closer)):
+        return None
+    try:
+        # The tool's name need not be a Python name: the call is parsed as one of ``f``.
+        call = ast.parse("f(" + content[len(opener) : -len(closer)], mode="eval").body
+        keywords = call.keywords if isinstance(call, ast.Call) else []
+        arguments = {keyword.arg: ast.literal_eval(keyword.value) for keyword in keywords}
+        return _call_digest(name, arguments)
+    except (SyntaxError, ValueError, TypeError, RecursionError, MemoryError):
+        return None
+
+
+def _assistant_turn_text(message: dict[str, Any], content: str) -> str:
+    """Render an assistant *message* of the transcript: its text, then the calls the text lacks.
 
     The Chat-Completions and Gemini adapters (and converted Responses
     items) keep a call only in ``tool_calls``; it is rendered like an
     Anthropic ``tool_use`` block, ``[Tool Call] name(arguments)``.  The CLI
     adapters' own turns already carry their calls in the text (the raw
-    ``{"tool_calls": ...}`` block, or Codex's rendered invocation, see
-    :func:`render_tool_call`), so those are not rendered twice.  A call
-    is recorded only by its name *and* arguments: prose that mentions
+    ``{"tool_calls": ...}`` block or ``<invoke>``, or Codex's rendered
+    invocation, see :func:`render_tool_call`), so those are not rendered
+    twice.  A call is the text's when its id says so (:func:`text_call_id`:
+    one call of the text, no more, has the digest in the id), or when the
+    text holds a call of its name *and* arguments: prose that mentions
     the tool, or a same-name call with other arguments, records nothing.
+
+    The record of a text call does not keep the arguments as written:
+    they are typed by the tool's signature, and a compaction stubs them.
+    A stub is put into the text as well, in the place of the argument
+    itself (:func:`_stub_text_call`; Codex's rendering is rebuilt from
+    the record): the compaction then shrinks what the CLI model reads,
+    and the model can copy the stub back.
 
     Args:
         message: An assistant message in chat format.
         content: The message's flattened text.
 
     Returns:
-        One ``[Tool Call]`` line per unrecorded call, newline-joined.
+        The turn's text, then one ``[Tool Call]`` line per call it lacks.
     """
     calls = message.get("tool_calls") or []
-    if not calls:
-        return ""
-    recorded = {
-        (call["name"], json.dumps(call["arguments"], sort_keys=True))
-        for call in _parse_text_based_tool_calls(content)
-    }
+    written = _parse_text_based_tool_calls(content) if calls else []
     lines: list[str] = []
     for call in calls:
         function = call.get("function") or {}
@@ -927,16 +1084,38 @@ def _unrecorded_tool_calls_text(message: dict[str, Any], content: str) -> str:
         if not isinstance(arguments, str):
             arguments = json.dumps(arguments)
         try:
-            parsed = json.loads(arguments)
-        except ValueError:
-            parsed = None
-        if parsed is not None and (
-            (name, json.dumps(parsed, sort_keys=True)) in recorded
-            or (isinstance(parsed, dict) and render_tool_call(name, parsed) in content)
+            stored = json.loads(arguments)
+        except _UNDECODABLE_JSON:
+            lines.append(f"[Tool Call] {name}({arguments})")
+            continue
+        digest = _id_digest(call.get("id"))
+        # A digest that two calls of the text share tells neither of them.
+        text_calls = [other for other in written if digest and other["id"].endswith(digest)]
+        if len(text_calls) == 1:
+            stubs = _argument_stubs(text_calls[0]["arguments"], stored)
+            if stubs:
+                content = _stub_text_call(content, text_calls[0], stubs)
+            continue
+        if any(
+            other["name"] == name and _same_json(other["arguments"], stored) for other in written
         ):
             continue
+        if isinstance(stored, dict):
+            try:
+                rendering = render_tool_call(name, stored)
+            except RecursionError:
+                # Nesting the decoder accepted can still be too deep for
+                # ``repr`` (Linux's 8 MiB main-thread stack lets json.loads
+                # finish): no rendering of it can be in the text.
+                lines.append(f"[Tool Call] {name}({arguments})")
+                continue
+            if rendering in content:
+                continue
+            if digest is not None and _replayed_call_digest(content, name) == digest:
+                content = rendering  # Codex's replay of the call, from before a compaction
+                continue
         lines.append(f"[Tool Call] {name}({arguments})")
-    return "\n".join(lines)
+    return "\n".join(part for part in (content, *lines) if part)
 
 
 def _dialogue_transcript(messages: list[Any]) -> str:
@@ -946,7 +1125,7 @@ def _dialogue_transcript(messages: list[Any]) -> str:
     conversation is flattened into a single text block.  Tool-result
     messages (``role == "tool"``) are rendered as ``[Tool Result]: …`` and
     an assistant turn's calls as ``[Tool Call]`` lines (see
-    :func:`_unrecorded_tool_calls_text`).
+    :func:`_assistant_turn_text`).
 
     Args:
         messages: The conversation in chat format
@@ -962,11 +1141,58 @@ def _dialogue_transcript(messages: list[Any]) -> str:
         if role == "user":
             parts.append(f"[User]: {content}")
         elif role == "assistant":
-            calls = _unrecorded_tool_calls_text(msg, content)
-            parts.append("[Assistant]: " + "\n".join(p for p in (content, calls) if p))
+            parts.append("[Assistant]: " + _assistant_turn_text(msg, content))
         elif role == "tool":
             parts.append(f"[Tool Result]: {content}")
     return "\n\n".join(parts)
+
+
+def _name_attachments(
+    messages: list[Any], shown_types: tuple[str, ...]
+) -> tuple[list[Any], dict[str, Attachment]]:
+    """Name each message's attachments in the text of that message.
+
+    A CLI prompt is text.  An attachment whose type the CLI takes is handed
+    over beside the prompt and stands in the text as its label (``[Image
+    #1]``, the name both CLIs give an image); any other is declared not
+    shown, so a model told that files are attached knows which it received.
+
+    Args:
+        messages: The conversation in chat format
+            (:func:`responses_items_to_chat_messages` output).
+        shown_types: The MIME types the CLI takes: a full type, or a name
+            ending in ``/`` for every subtype of it.
+
+    Returns:
+        The messages, one with attachments replaced by a copy whose text
+        ends with their labels, and the attachments to hand over by label,
+        in label order.
+    """
+    shown: dict[str, Attachment] = {}
+    named: list[Any] = []
+    for message in messages:
+        attachments = message.get("attachments")
+        if not attachments:
+            named.append(message)
+            continue
+        lines = [flatten_content_to_text(message.get("content"))]
+        hidden: list[str] = []
+        for attachment in attachments:
+            mime = attachment.mime_type
+            if any(mime == t or (t.endswith("/") and mime.startswith(t)) for t in shown_types):
+                kind = "Image" if mime.startswith("image/") else "Document"
+                label = f"[{kind} #{len(shown) + 1}]"
+                shown[label] = attachment
+                lines.append(label)
+            else:
+                hidden.append(f"{mime} ({len(attachment.data)} bytes)")
+        if hidden:
+            lines.append(
+                f"[{len(hidden)} attachment(s) of this message could not be shown "
+                f"to this model: {', '.join(hidden)}]"
+            )
+        named.append({**message, "content": "\n".join(filter(None, lines))})
+    return named, shown
 
 
 def merge_system_texts(configured: str | None, messages: list[dict[str, Any]]) -> str | None:
@@ -1646,14 +1872,35 @@ class Model(ABC):
 
         return family_of(self.model_name) in REASONING_PASSBACK_FAMILIES
 
-    def server_side_context_editing(self) -> bool:
-        """Return whether the provider clears old tool inputs and results itself.
+    def clears_tool_uses_in_bulk(self) -> bool:
+        """Return whether the agent clears this model's old tool calls rarely and in bulk.
 
-        True when the requests carry a server-side clearing of old tool
-        calls (Anthropic's ``clear_tool_uses`` context edit): the agent then
-        does no client-side compaction of the conversation, which on the
-        Claude models that check the prefix of their thinking blocks would
-        invalidate every later block.  The base adapter sends none.
+        True for a model whose requests read the conversation from a prompt
+        cache that an edit of an earlier message makes the provider write
+        again (a Claude model on the Anthropic API): the agent then leaves
+        the conversation alone until the context passes
+        ``Config.context_edit_trigger_tokens`` and stubs every tool call but
+        the last ``Config.context_edit_keep_tool_uses`` at once
+        (:meth:`KISSAgent._maybe_clear_tool_uses`).  The base adapter is
+        compacted by the thresholds of the Compaction settings.
+        """
+        return False
+
+    def drop_stale_reasoning(self) -> int:
+        """Remove the old reasoning with the tool outputs an edit stubbed; return how many blocks.
+
+        The agent calls this after it stubbed old tool outputs and arguments
+        in the conversation.  The base adapter keeps no reasoning in its
+        conversation that the provider reads again, and removes nothing.
+        """
+        return 0
+
+    def keeps_newest_reasoning(self) -> bool:
+        """Whether :meth:`drop_stale_reasoning` leaves the newest reply's reasoning in place.
+
+        The agent then does not count that reply's reasoning among the
+        tokens a clear removes.  ``False`` for the base adapter, whose
+        reasoning the agent does not count at all.
         """
         return False
 
@@ -1718,7 +1965,7 @@ class Model(ABC):
                     credit=self._credit_helper_usage,
                     limit_check=self.limit_check,
                 )
-                text = f"{text}\n\n{described.text}"
+                text = f"{text}\n\n{described}"
                 attachments = [a for a in attachments if not describable(a)]
         if self.usage_info_for_messages:
             text = f"{text}\n\n{self.usage_info_for_messages}"
@@ -1790,17 +2037,22 @@ class Model(ABC):
         named by its ``tool_use_id`` or matched by position against the last
         assistant message.  Binary payloads are lifted out of the text and
         handed to :meth:`_deliver_tool_result_attachments`, so what a tool
-        returned actually reaches the model.
+        returned actually reaches the model.  The batch is added whole or
+        not at all: a result that raises (a picture is described for a
+        model that cannot see once the caller's limits allow it) leaves
+        the conversation as it was, so the caller can hand the batch over
+        again without answering a call twice.
 
         Args:
             function_results: List of tuples containing (function_name, result_dict).
         """
         tool_calls = self._find_tool_call_ids_from_last_assistant()
+        messages: list[dict[str, Any]] = []
         pending: list[Attachment] = []
 
         for i, (func_name, result_dict) in enumerate(function_results):
             result_content, attachments = self.tool_result_text_and_attachments(result_dict)
-            self.conversation.append(
+            messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": self.tool_result_call_id(result_dict, i, tool_calls, func_name),
@@ -1809,6 +2061,7 @@ class Model(ABC):
             )
             pending.extend(attachments)
 
+        self.conversation.extend(messages)
         if pending:
             self._deliver_tool_result_attachments(pending)
 
@@ -2061,9 +2314,14 @@ class Model(ABC):
             function_map: Dictionary mapping function names to callable functions.
 
         Returns:
-            list[dict[str, Any]]: A list of tool schemas in OpenAI format.
+            list[dict[str, Any]]: A list of tool schemas in OpenAI format, one per
+            tool not marked :func:`~kiss.core.tool_schema.unlisted`.
         """
-        return [self._function_to_openai_tool(func) for func in function_map.values()]
+        return [
+            self._function_to_openai_tool(func)
+            for func in function_map.values()
+            if not is_unlisted(func)
+        ]
 
     def _function_to_openai_tool(self, func: Callable[..., Any]) -> dict[str, Any]:
         """Converts a Python function to an OpenAI tool schema.
@@ -2256,15 +2514,20 @@ def _python_type_to_json_schema(python_type: Any) -> dict[str, Any]:
             return _python_type_to_json_schema(non_none_args[0])
         return {"anyOf": [_python_type_to_json_schema(a) for a in non_none_args]}
 
-    # The bare ``list``/``dict`` have no origin: they are the unparameterised
-    # collections, not the string fallback below.
-    if origin is list or python_type is list:
-        if args:
-            return {"type": "array", "items": _python_type_to_json_schema(args[0])}
-        return {"type": "array"}
-
-    if origin is dict or python_type is dict:
-        return {"type": "object"}
+    # A collection is an object or an array whatever its class (``dict``,
+    # ``Mapping[str, int]``; ``list``, ``Sequence[str]``, ``tuple[int, ...]``,
+    # ``set``, ``Iterable[int]``), bare (it has no origin then) or
+    # parameterised.  ``str`` and the bytes types are sequences too: they
+    # stay the string fallback below.
+    kind = origin or python_type
+    if isinstance(kind, type) and not issubclass(kind, (str, bytes, bytearray)):
+        if issubclass(kind, Mapping):
+            return {"type": "object"}
+        if issubclass(kind, (Sequence, AbstractSet)) or kind in (Iterable, Collection):
+            items = [arg for arg in args if arg is not Ellipsis]
+            if items and all(item == items[0] for item in items):
+                return {"type": "array", "items": _python_type_to_json_schema(items[0])}
+            return {"type": "array"}
 
     type_mapping: dict[type, dict[str, str]] = {
         str: {"type": "string"},
@@ -2306,8 +2569,13 @@ class CLITextModel(Model):
     # early at the first complete ``tool_calls`` block consult it.
     _tool_bearing_turn = False
 
-    def _build_prompt(self) -> str:
-        """Return the conversation as the prompt sent to the CLI.
+    # The MIME types of the user attachments the adapter's CLI takes (a name
+    # ending in ``/``: every subtype); any other attachment is named in the
+    # prompt as not shown.
+    _attachment_types: tuple[str, ...] = ()
+
+    def _prompt_and_attachments(self) -> tuple[str, dict[str, Attachment]]:
+        """Return the conversation as the prompt sent to the CLI, and the files beside it.
 
         A one-message conversation is the task text itself; a multi-turn
         conversation is flattened into a ``[User]/[Assistant]/[Tool
@@ -2317,47 +2585,59 @@ class CLITextModel(Model):
         :func:`responses_items_to_chat_messages`.  The system instruction
         never rides in the prompt: each adapter hands it to its CLI as the
         real system prompt (see :meth:`_build_cli_args` of the subclasses).
+        The files a user attached to a message are named in its text
+        (:func:`_name_attachments`); the adapter hands its CLI those of
+        :attr:`_attachment_types`.
 
         Returns:
-            The prompt text, without any system instruction.
+            The prompt text, without any system instruction, and the
+            attachments to hand over, by the label the text gives each.
         """
-        messages = responses_items_to_chat_messages(self.conversation)
+        messages, attachments = _name_attachments(
+            responses_items_to_chat_messages(self.conversation), self._attachment_types
+        )
         if len(messages) == 1:
-            return flatten_content_to_text(messages[0].get("content"))
-        return _dialogue_transcript(messages)
+            return flatten_content_to_text(messages[0].get("content")), attachments
+        return _dialogue_transcript(messages), attachments
+
+    def _build_prompt(self) -> str:
+        """Return the prompt text of :meth:`_prompt_and_attachments`."""
+        return self._prompt_and_attachments()[0]
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with an initial user prompt.
 
         Args:
             prompt: The initial user prompt.
-            attachments: Not supported — ignored with a warning if provided.
+            attachments: Files the user attached, kept on the message as
+                :meth:`add_message_to_conversation` keeps those of a later
+                one (see :meth:`_prompt_and_attachments`).
         """
-        if attachments:  # pragma: no cover – attachments not used in practice
-            self._cli_logger.warning(
-                f"{self._cli_model_name} does not support attachments; they will be ignored."
-            )
-        self.conversation = [{"role": "user", "content": prompt}]
+        message: dict[str, Any] = {"role": "user", "content": prompt}
+        if attachments:
+            message["attachments"] = list(attachments)
+        self.conversation = [message]
 
     def supports_images(self) -> bool:
-        """Return False: a single text prompt cannot carry the bytes a tool returned.
+        """Return False: the bytes a tool returned are not handed to the CLI.
 
-        The CLI's model may see images, but this transport has no
-        content-part shape to hand them over, so
-        :meth:`tool_result_text_and_attachments` has a vision model
-        describe them instead of leaving the note of
-        :meth:`_deliver_tool_result_attachments`.
+        Only what the user attached rides beside the prompt
+        (:meth:`_prompt_and_attachments`); a tool result is text of the
+        transcript, so :meth:`tool_result_text_and_attachments` has a
+        vision model describe its images and PDFs instead of leaving the
+        note of :meth:`_deliver_tool_result_attachments`.
         """
         return False
 
     def _deliver_tool_result_attachments(self, attachments: list[Attachment]) -> None:
-        """State that this transport cannot show the bytes a tool returned.
+        """State that the bytes a tool returned are not shown to the model.
 
-        The CLI is driven by a single text prompt and has no content-part
-        shape, so a screenshot or audio clip a tool produced cannot be
-        handed to the model.  Saying so — in the log and in the prompt
-        itself — is what keeps the model from reasoning about a picture it
-        never received, which is what silently dropping the bytes did.
+        A tool result is text of the transcript, so an audio clip or a
+        video a tool produced (its images and PDFs were described, see
+        :meth:`supports_images`) is not handed to the model.  Saying so —
+        in the log and in the prompt itself — is what keeps the model from
+        reasoning about a file it never received, which is what silently
+        dropping the bytes did.
 
         Args:
             attachments: The attachments lifted out of the tool results.
@@ -2479,7 +2759,7 @@ class CLITextModel(Model):
                     continue
                 try:
                     arguments[name] = json.loads(value)
-                except ValueError:
+                except _UNDECODABLE_JSON:
                     continue
 
     def _text_tools(
@@ -2520,8 +2800,9 @@ class CLITextModel(Model):
         (:class:`_CLIProcess`) and the two ways a turn is cut short:
 
         * output silence longer than ``model_config["timeout"]`` (300 s by
-          default) becomes the retryable :func:`_cli_stall_error`, never a
-          ``KISSError`` that would abort the whole task;
+          default), a spawn that takes as long included, becomes the
+          retryable :func:`_cli_stall_error`, never a ``KISSError`` that
+          would abort the whole task;
         * a user Stop propagates as ``KeyboardInterrupt``.
 
         However the block ends — those two, a parser or callback error
@@ -2556,10 +2837,10 @@ class CLITextModel(Model):
             ) as proc:
                 try:
                     yield proc
-                except _StreamReadTimeoutError:
-                    raise _cli_stall_error(label, timeout) from None
                 finally:
                     self._close_thinking_if_open()
+        except _StreamReadTimeoutError:  # from the block or from the spawn
+            raise _cli_stall_error(label, timeout) from None
         finally:
             for cli in started:
                 cli.close()
@@ -2765,10 +3046,18 @@ class _CLIProcess:
 
         Raises:
             KISSError: If the executable could not be started.
+            KeyboardInterrupt: The user pressed Stop during the spawn.
+            _StreamReadTimeoutError: The spawn outlasted *timeout*.
         """
+        # Closed until the spawn starts: a Stop landing before that leaves
+        # a registered supervisor with nothing for close() to end.
+        self._closed = True
+        # Whether the constructor completed, and whether it gave the start
+        # up instead (set under ``_handoff``, see :meth:`_spawn`).
+        self._started = False
+        self._gave_up = False
         if started is not None:
             started.append(self)
-        self._closed = False
         self._label = label
         self._timeout = timeout
         self._deadline = time.monotonic() + timeout
@@ -2794,48 +3083,66 @@ class _CLIProcess:
         # the spawn to the end of __init__ every statement is inside the
         # try that kills it: a Stop at any check point there must not
         # escape a constructor whose ``with`` block, and so close(),
-        # never starts.
-        readers: list[threading.Thread] = []
-        spawned: list[subprocess.Popen[str]] = []
-        spawn_error: list[OSError] = []
-        spawn_done = threading.Event()
-        handoff = threading.RLock()  # reentrant: locked_call needs its owner check
+        # never starts.  What ending a start that failed needs is kept on
+        # the supervisor, for close() to finish it (_end_failed_start).
+        self._readers: list[threading.Thread] = []
+        self._spawned: list[subprocess.Popen[str]] = []
+        spawn_error: list[OSError | ValueError] = []
+        self._spawn_done = threading.Event()
+        self._handoff = threading.RLock()  # reentrant: locked_call needs its owner check
         spawner = threading.Thread(
             target=self._spawn,
-            args=(args, cwd, env, spawned, spawn_error, spawn_done, handoff),
+            args=(args, cwd, env, self._spawned, spawn_error, self._spawn_done, self._handoff),
             daemon=True,
             name="cli-spawn",
         )
         try:
+            self._closed = False
             spawner.start()
-            spawn_done.wait()
+            # In slices: an untimed wait is deaf to a Stop and to the
+            # deadline for as long as the spawn itself blocks.
+            while not self._spawn_done.wait(_STOP_POLL_SECONDS):
+                if stop_signal.stop_requested():
+                    raise stop_error()
+                if time.monotonic() >= self._deadline:
+                    raise _StreamReadTimeoutError()
             if spawn_error:
                 raise KISSError(f"Failed to start {label}: {spawn_error[0]}") from spawn_error[0]
-            self._proc = spawned[0]
-            self._start_reader(readers, self._drain_stdout, "stdout")
-            self._start_reader(readers, self._drain_stderr, "stderr")
-            self._readers = (readers[0], readers[1])
+            self._proc = self._spawned[0]
+            self._start_reader(self._readers, self._drain_stdout, "stdout")
+            self._start_reader(self._readers, self._drain_stderr, "stderr")
+            self._started = True
         except BaseException:
-            # The Stop may have landed while the helper was still
-            # spawning.  The start is given up under the handoff lock: a
-            # child the helper returns from now on is the helper's own to
-            # end (see _spawn), one it returned before is aborted here,
-            # and the bounded wait keeps either ahead of the Stop.
-            locked_call(handoff, self._give_up_start)
-            spawn_done.wait(_REAP_GRACE_SECONDS)
-            if spawned:
-                self._proc = spawned[0]
-                self._abort_start(readers)
+            self._end_failed_start()
             raise
+
+    def _end_failed_start(self) -> None:
+        """End a start the constructor did not complete; :meth:`close` runs it again.
+
+        The Stop may have landed while the helper was still spawning.
+        The start is given up under the handoff lock: a child the helper
+        returns from now on is the helper's own to end (see
+        :meth:`_spawn`), one it returned before is aborted here, and the
+        bounded wait keeps either ahead of the Stop.  Another Stop can
+        cut this short at any check point, so every step can be repeated
+        and ``_closed`` is set by the last one only: the close
+        ``_cli_turn`` makes then finishes the job.
+        """
+        locked_call(self._handoff, self._give_up_start)
+        self._spawn_done.wait(_REAP_GRACE_SECONDS)
+        if self._spawned:
+            self._proc = self._spawned[0]
+            self._abort_start(self._readers)
+        self._closed = True
 
     def _give_up_start(self) -> None:
         """Mark the start given up; runs under the handoff lock of :meth:`_spawn`.
 
-        From here on no part of the child's lifetime is :meth:`close`'s
-        to end: a child the helper published before is aborted by the
-        constructor, one it returns later the helper ends itself.
+        A child the helper published before is aborted by
+        :meth:`_end_failed_start`, one it returns later the helper ends
+        itself.
         """
-        self._closed = True
+        self._gave_up = True
 
     def _spawn(
         self,
@@ -2843,11 +3150,14 @@ class _CLIProcess:
         cwd: str | None,
         env: dict[str, str] | None,
         spawned: list[subprocess.Popen[str]],
-        spawn_error: list[OSError],
+        spawn_error: list[OSError | ValueError],
         spawn_done: threading.Event,
         handoff: threading.RLock,
     ) -> None:
-        """Spawn the child into *spawned* (or its ``OSError`` into *spawn_error*), then signal.
+        """Spawn the child into *spawned* (or ``Popen``'s error into *spawn_error*), then signal.
+
+        ``Popen`` raises ``OSError`` for a command it cannot run and
+        ``ValueError`` for arguments it cannot pass on (a NUL byte).
 
         The child is published under *handoff*, and only while the
         constructor still waits for it: one returned after the
@@ -2878,11 +3188,11 @@ class _CLIProcess:
                 cwd=cwd,
                 env=env,
             )
-        except OSError as e:
+        except (OSError, ValueError) as e:
             spawn_error.append(e)
         else:
             with handoff:
-                published = not self._closed
+                published = not self._gave_up
                 if published:
                     spawned.append(proc)
             if not published:
@@ -2915,12 +3225,16 @@ class _CLIProcess:
         the last one may never have started: only an alive reader is
         joined, and a reader parked inside ``read(2)`` holding its
         pipe's buffer lock is always alive, so its pipe is left to it.
+        Run again after a Stop cut it short (:meth:`_end_failed_start`),
+        it signals nothing once the child is reaped: its pid, and so its
+        group's id, may belong to a stranger by then (:func:`pid_handed_on`).
 
         Args:
             readers: The reader threads recorded so far, stdout's first.
         """
-        self._signal_tree(SIGKILL)
-        self._reap(_REAP_GRACE_SECONDS)
+        if not pid_handed_on(self._proc):
+            self._signal_tree(SIGKILL)
+            self._reap(_REAP_GRACE_SECONDS)
         for thread in readers:
             if thread.is_alive():
                 thread.join(timeout=_REAP_GRACE_SECONDS)
@@ -2984,6 +3298,9 @@ class _CLIProcess:
         from breaking, and the reply the child already wrote must not
         wait on a prompt nobody will ever read.  A Stop or the deadline
         cancels the writer before raising, so no thread is left behind.
+        Only this loop ends a write at the deadline: a writer that gave
+        up by its own clock looked, a moment later, like one that had
+        sent everything, and the child answered a truncated prompt.
 
         Args:
             prompt: The complete prompt text.
@@ -3062,8 +3379,9 @@ class _CLIProcess:
         caller from the child's exit status.
 
         The pipe is written through its raw descriptor in non-blocking
-        mode, one ``os.write`` at a time, re-checking the cancel flag,
-        the child's exit and the turn deadline between writes.  A
+        mode, one ``os.write`` at a time, re-checking the cancel flag
+        and the child's exit between writes (the turn deadline is
+        :meth:`send_prompt`'s to enforce, through the flag).  A
         blocking buffered ``write()`` could be cancelled by nothing
         short of the reader going away — and a grandchild that inherited
         the pipe never reads it — which pinned this thread and the
@@ -3092,11 +3410,7 @@ class _CLIProcess:
                 fd = stdin.fileno()
                 os.set_blocking(fd, False)
                 while view:
-                    if (
-                        self._writer_cancel.is_set()
-                        or exited_unreaped(self._proc)
-                        or time.monotonic() >= self._deadline
-                    ):
+                    if self._writer_cancel.is_set() or exited_unreaped(self._proc):
                         break
                     try:
                         written = os.write(fd, view)
@@ -3128,7 +3442,9 @@ class _CLIProcess:
         detected within ``timeout`` seconds.  Silence while the child
         waits on the caller (``waiting_on_caller()`` is true) re-arms the
         deadline instead of ending the run; an error the caller reports
-        (``caller_error()``) ends the run at once.
+        (``caller_error()``) ends the run at once.  The deadline is
+        consulted only when no output is waiting: the time the caller
+        took over the line before is not the child's silence.
 
         Yields:
             One line of stdout at a time.
@@ -3146,9 +3462,13 @@ class _CLIProcess:
                 # tool returned, not whatever was left of a deadline
                 # re-armed while the tool ran.
                 self._deadline = time.monotonic() + self._timeout
-            remaining = self._remaining()
+            if self._stdout_lines.empty():
+                wait = min(self._remaining(), _STOP_POLL_SECONDS)
+            else:
+                self._raise_for_caller()
+                wait = 0.0
             try:
-                line = self._stdout_lines.get(timeout=min(remaining, _STOP_POLL_SECONDS))
+                line = self._stdout_lines.get(timeout=wait)
             except queue.Empty:
                 continue
             if line is None:
@@ -3305,10 +3625,14 @@ class _CLIProcess:
         the Windows job is terminated whatever the leader's status);
         and ``_closed`` is set only by a teardown
         that ran to its end, the one state in which a call has nothing
-        left to do (a start that never completed sets it too: its abort
-        path is that child's whole teardown).
+        left to do (a start that never completed is torn down by
+        :meth:`_end_failed_start`, here too when a Stop cut that short;
+        and it is set until the spawn starts, when there is no child yet).
         """
         if self._closed:
+            return
+        if not self._started:
+            self._end_failed_start()
             return
         proc = self._proc
         try:
@@ -3520,13 +3844,15 @@ class _ToolCallFilteredStream:
         self._token_callback = model.token_callback
         self._thinking_callback = model.thinking_callback
         self._in_thinking = False
-        self._pending = ""
+        # Held text is kept in chunks and joined once, when it is let go:
+        # appending each token to one string copies the whole block per token.
+        self._pending: list[str] = []
         self._json: _JsonPrefix | None = None
         self._held_prefix = ""
         self._fence_open = ""
         self._eat_close = False
         self._close_buf = ""
-        self._invoke: str | None = None
+        self._invoke: list[str] | None = None
         self._invoke_tail = ""
         self._line_blank = True
         self._invoke_done = False
@@ -3594,12 +3920,16 @@ class _ToolCallFilteredStream:
         """
         while text and not self._invoke_done:
             if self._invoke is not None:
-                self._invoke += text
-                end = self._invoke.find("</invoke>")
+                # The held chunks have no closer, so one ends in *text*:
+                # only it and the 8 characters before it are searched.
+                seam = "".join(self._invoke[-8:])[-8:]
+                self._invoke.append(text)
+                end = (seam + text).find("</invoke>")
                 if end < 0:
                     return
-                end += len("</invoke>")
-                block, text = self._invoke[:end], self._invoke[end:]
+                held = "".join(self._invoke)
+                end += len(held) - len(seam) - len(text) + len("</invoke>")
+                block, text = held[:end], held[end:]
                 self._invoke = None
                 self._invoke_done = bool(_parse_xml_tool_call(block))
                 if not self._invoke_done:
@@ -3621,7 +3951,7 @@ class _ToolCallFilteredStream:
                 return
             self._feed_text(text[:start])
             if self._line_blank:
-                self._invoke = ""
+                self._invoke = []
                 text = text[start:]
             else:
                 self._feed_text(text[start])
@@ -3663,7 +3993,7 @@ class _ToolCallFilteredStream:
                         self._json = _JsonPrefix()
                         self._json.feed(char)
                 elif not self._json.feed(char):
-                    self._pending += text[start:index]
+                    self._pending.append(text[start:index])
                     rescan = self._reject()
                     start = index
                     if rescan:
@@ -3674,7 +4004,7 @@ class _ToolCallFilteredStream:
                         start = index = 0
                     continue
                 elif not self._json.open:
-                    self._pending += text[start : index + 1]
+                    self._pending.append(text[start : index + 1])
                     self._release()
                     start = index + 1
                     if self._eat_close:
@@ -3685,7 +4015,7 @@ class _ToolCallFilteredStream:
             if self._json is None:
                 self._hold_tail(text[start:])
             else:
-                self._pending += text[start:]
+                self._pending.append(text[start:])
             if not resume:
                 return
             text, index = resume.pop()
@@ -3779,11 +4109,11 @@ class _ToolCallFilteredStream:
         if cut is None:
             self._release()
             return ""
-        rescan = self._pending[cut:]
-        self._pending = self._pending[:cut]
+        held = "".join(self._pending)
+        self._pending = [held[:cut]]
         self._release()
         self._eat_close = False
-        return rescan
+        return held[cut:]
 
     def _release(self) -> None:
         """Let go of the held candidate: drop a validated tool call, emit the rest.
@@ -3797,7 +4127,7 @@ class _ToolCallFilteredStream:
         with it and arms the closing-fence eater; anything else streams
         together with the opener that was held for it.
         """
-        block, self._pending = self._pending, ""
+        block, self._pending = "".join(self._pending), []
         fence, self._fence_open = self._fence_open, ""
         self._json = None
         if _parse_text_based_tool_calls(block):
@@ -3818,7 +4148,7 @@ class _ToolCallFilteredStream:
         invoke, self._invoke = self._invoke, None
         tail, self._invoke_tail = self._invoke_tail, ""
         if invoke is not None or tail:
-            self._feed(invoke or tail)
+            self._feed("".join(invoke or [tail]))
         held, self._held_prefix = self._held_prefix, ""
         self._emit(held)
         self._release()
@@ -3834,7 +4164,9 @@ def _tool_summary_and_params(
     The summary is the first docstring line, or ``Function <name>`` when
     *func* has no docstring; the docstring is ``""`` in that case.  This
     is the single reader of a tool's signature and docstring, shared by
-    the OpenAI schema builder and the text-based tools prompt.
+    the OpenAI schema builder and the text-based tools prompt.  The
+    parameters are the ones a call can name: ``*args`` and ``**kwargs``
+    take no argument under their own name.
 
     Args:
         func: The tool function.
@@ -3845,7 +4177,12 @@ def _tool_summary_and_params(
     """
     doc = inspect.getdoc(func) or ""
     summary = doc.split("\n")[0] if doc else f"Function {name}"
-    return summary, doc, inspect.signature(func).parameters
+    parameters = {
+        param_name: param
+        for param_name, param in inspect.signature(func).parameters.items()
+        if param.kind not in (param.VAR_POSITIONAL, param.VAR_KEYWORD)
+    }
+    return summary, doc, parameters
 
 
 def _annotation_name(annotation: Any) -> str:
@@ -3867,7 +4204,8 @@ def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) 
         function_map: Dictionary mapping function names to callable functions.
 
     Returns:
-        A formatted prompt string describing available tools and how to call them,
+        A formatted prompt string describing available tools and how to call them
+        (those marked :func:`~kiss.core.tool_schema.unlisted` are left out),
         or an empty string if no functions are provided.
     """
     if not function_map:
@@ -3875,6 +4213,8 @@ def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) 
 
     tools_desc = []
     for func_name, func in function_map.items():
+        if is_unlisted(func):
+            continue
         summary, _doc, parameters = _tool_summary_and_params(func, func_name)
         declared = declared_schema(func)
         if declared is not None:
@@ -4108,6 +4448,7 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
                 arguments = tc.get("arguments", {})
                 try:
                     key = (tc["name"], json.dumps(arguments, sort_keys=True))
+                    call_id = text_call_id(tc["name"], arguments)
                 except RecursionError:
                     # Arguments nested deeper than json.dumps can follow
                     # could not be recorded in the conversation either.
@@ -4115,13 +4456,7 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
                 if key in seen:
                     continue
                 seen.add(key)
-                function_calls.append(
-                    {
-                        "id": f"call_{uuid.uuid4().hex[:8]}",
-                        "name": tc["name"],
-                        "arguments": arguments,
-                    }
-                )
+                function_calls.append({"id": call_id, "name": tc["name"], "arguments": arguments})
 
     return function_calls
 
@@ -4135,6 +4470,18 @@ _XML_INVOKE_RE = re.compile(
     r'^[ \t]*<invoke name="([^"]+)">(.*?)</invoke>', re.MULTILINE | re.DOTALL
 )
 _XML_PARAMETER_RE = re.compile(r'<parameter name="([^"]+)">(.*?)</parameter>', re.DOTALL)
+
+
+def _end_of_last(closer: str, text: str) -> int:
+    """Return the offset just past the last *closer* in *text*, 0 when it has none.
+
+    The bound of a search for blocks that end in *closer*: none ends
+    past it, and without the bound every opener there scans the rest of
+    the text for a closer that is not there (a model looping on an
+    unclosed block: 18 s for 8,000 openers).
+    """
+    end = text.rfind(closer)
+    return end + len(closer) if end >= 0 else 0
 
 
 def _parse_xml_tool_call(content: str) -> list[dict[str, Any]]:
@@ -4154,13 +4501,10 @@ def _parse_xml_tool_call(content: str) -> list[dict[str, Any]]:
     match = _first_invoke(content)
     if match is None:
         return []
-    return [
-        {
-            "id": f"call_{uuid.uuid4().hex[:8]}",
-            "name": match.group(1),
-            "arguments": dict(_XML_PARAMETER_RE.findall(match.group(2))),
-        }
-    ]
+    body = match.group(2)
+    name = match.group(1)
+    arguments = dict(_XML_PARAMETER_RE.findall(body, 0, _end_of_last("</parameter>", body)))
+    return [{"id": text_call_id(name, arguments), "name": name, "arguments": arguments}]
 
 
 def _first_invoke(content: str) -> re.Match[str] | None:
@@ -4172,7 +4516,7 @@ def _first_invoke(content: str) -> re.Match[str] | None:
     Args:
         content: The text content to search.
     """
-    match = _XML_INVOKE_RE.search(content)
+    match = _XML_INVOKE_RE.search(content, 0, _end_of_last("</invoke>", content))
     if match is None or _has_json_call(content[: match.start()]):
         return None
     return match

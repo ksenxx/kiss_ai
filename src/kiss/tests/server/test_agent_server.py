@@ -24,6 +24,7 @@ import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
+from kiss.core.models.model_info import MODEL_INFO, get_model_provider
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.file_index import FileIndexRegistry
@@ -90,6 +91,38 @@ class TestModelVendorOrder(unittest.TestCase):
         assert sorted_names[2] == "gpt-4o"
         assert sorted_names[3] == "gemini-2.0-flash"
         assert sorted_names[-1] in ("unknown-model", "together/some-model")
+
+    def test_vendor_is_the_provider_that_serves_the_model(self) -> None:
+        """The picker groups every catalog model under the provider its requests go to.
+
+        ``openai/gpt-oss-*`` is OpenAI's open-weight family served by
+        Together AI (a ``TOGETHER_API_KEY`` runs it), so it belongs to
+        the "Together AI" group like the other maker-prefixed Together
+        models (``google/gemma-*``, ``moonshotai/*``), not to "OpenAI".
+        """
+        group = {
+            "Anthropic": "Anthropic",
+            "Claude Code CLI": "Anthropic",
+            "Bedrock": "Bedrock",
+            "OpenAI": "OpenAI",
+            "Codex CLI": "OpenAI",
+            "Gemini": "Gemini",
+            "Z.AI": "Z.AI",
+            "Moonshot": "Moonshot",
+            "OpenRouter": "OpenRouter",
+            "Together": "Together AI",
+        }
+        # A user's endpoint models route to no provider ("Unknown") and
+        # are listed from MY_MODELS.json, never through model_vendor.
+        served = {name: get_model_provider(name) for name in MODEL_INFO}
+        misfiled = {
+            name: (provider, _model_vendor_name(name))
+            for name, provider in served.items()
+            if provider in group and group[provider] != _model_vendor_name(name)
+        }
+        assert not misfiled, misfiled
+        assert model_vendor("openai/gpt-oss-120b") == ("Together AI", 7)
+        assert model_vendor("openai/gpt-4o") == ("OpenAI", 2)
 
 
 class TestGetFiles(unittest.TestCase):

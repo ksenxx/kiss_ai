@@ -6,7 +6,12 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, readyTabId} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  readyTabId,
+  pickerSections,
+} = require('./simplify2_harness');
 
 function typeInto(win, text) {
   const inp = win.document.getElementById('task-input');
@@ -65,11 +70,8 @@ async function runTests() {
   );
   const items = ac.querySelectorAll('.ac-item');
   assert.strictEqual(items.length, 3, 'autocomplete must list the returned files');
-  const labels = Array.from(ac.querySelectorAll('.ac-section')).map(
-    e => e.textContent,
-  );
   assert.deepStrictEqual(
-    labels,
+    pickerSections(win),
     ['Files', 'Home'],
     'work-dir items and home items get their own sections',
   );

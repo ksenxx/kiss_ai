@@ -87,8 +87,8 @@ def test_registry_change_during_tunnel_open_closes_the_orphan(
     thread.start()
     tunnel: mach.SshTunnel | None = None
     try:
-        assert _wait_for(lambda: login in mach._tunnels, 5.0)
-        tunnel = mach._tunnels[login]
+        assert _wait_for(lambda: (login, 8787) in mach._tunnels, 5.0)
+        tunnel = mach._tunnels[login, 8787]
         # Inside the opener's window: the tunnel is cached but its ssh
         # is not started yet, so this close finds nothing to kill.
         assert tunnel.process is None

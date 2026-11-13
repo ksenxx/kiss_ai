@@ -14,25 +14,17 @@
 
 const assert = require('assert');
 const {loadTipsPage: loadChatDom, tipsHost: panel} = require('./tips_helpers');
-const {makeRunner} = require('./ui_antipattern_harness');
+const {makeRunner, key} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
+
+// A keydown fired inside the dialog's shadow root reaches the page only
+// when it is composed (`extra` for `key`).
+const COMPOSED = {composed: true};
 
 function part(win, selector) {
   const host = panel(win);
   assert.ok(host, 'tips panel must be mounted');
   return host.shadowRoot.querySelector(selector);
-}
-
-function key(win, target, name, init) {
-  target.dispatchEvent(
-    new win.KeyboardEvent(
-      'keydown',
-      Object.assign(
-        {key: name, bubbles: true, cancelable: true, composed: true},
-        init,
-      ),
-    ),
-  );
 }
 
 const TIPS = {tips: ['# One\n\nfirst', '# Two\n\nsecond'], show: false};
@@ -71,7 +63,7 @@ test('Escape closes the dialog', () => {
   opener.focus();
   opener.click();
   assert.ok(panel(win));
-  key(win, part(win, '.tips-close'), 'Escape');
+  key(win, part(win, '.tips-close'), 'Escape', COMPOSED);
   assert.strictEqual(panel(win), null, 'Escape removes the dialog');
   assert.strictEqual(win.document.activeElement, opener);
   // The listener is gone with the dialog: a second Escape is harmless.
@@ -102,18 +94,28 @@ test('Tab wraps inside the dialog in both directions', () => {
   // close -> opt-out checkbox -> Next.
   assert.ok(part(win, '.tips-prev').disabled);
   next.focus();
-  key(win, next, 'Tab');
+  key(win, next, 'Tab', COMPOSED);
   assert.strictEqual(
     host.shadowRoot.activeElement,
     close,
     'Tab from the last item wraps to the first',
   );
-  key(win, close, 'Tab', {shiftKey: true});
+  key(win, close, 'Tab', {composed: true, shiftKey: true});
   assert.strictEqual(
     host.shadowRoot.activeElement,
     next,
     'Shift+Tab from the first item wraps to the last',
   );
+  // Paging to an end disables the button that got there.  With the
+  // focus on it, Tab would start from a disabled element, which is no
+  // item of the ring: the other paging button takes the focus.
+  const prev = part(win, '.tips-prev');
+  next.click();
+  assert.ok(next.disabled, 'the last tip');
+  assert.strictEqual(host.shadowRoot.activeElement, prev);
+  prev.click();
+  assert.ok(prev.disabled, 'the first tip');
+  assert.strictEqual(host.shadowRoot.activeElement, next);
 });
 
 test('opt-out checkbox persists locally and posts a tipsOptOut message for the host', () => {

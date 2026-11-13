@@ -8,8 +8,10 @@ Each experiment runs the same task twice against a real model: once with
 a lever switched off (the behaviour before
 ``projects/cost-levers-implementation-plan.md`` landed) and once with it
 on, and reports tokens, cost and steps from the agents' own usage
-counters.  Runs use an isolated ``KISS_HOME`` so nothing lands in the
-production ``history.db``; the tasks only read the repository.
+counters.  Runs use an isolated ``KISS_HOME``, deleted when the session
+ends, so nothing lands in the production ``history.db``; the tasks only
+read the repository.  A run that does not finish its task ends the
+session with its error: its usage is no measurement.
 
 Usage::
 
@@ -36,6 +38,7 @@ per-step overhead.  E1 and E4 change only what the tools return.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -43,6 +46,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -52,23 +56,40 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task, _save_task_result
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.config import DEFAULT_CONFIG
-from kiss.core.printer import Printer
+from kiss.core.printer import Printer, parse_result_yaml
 
 
-def isolate_kiss_home() -> Path:
-    """Point this process at a fresh ``KISS_HOME`` so runs never touch ``~/.kiss``.
+@contextlib.contextmanager
+def isolate_kiss_home() -> Iterator[Path]:
+    """Point this process at a fresh ``KISS_HOME`` for the block, then delete it.
 
-    Called from :func:`main` only; importing the module has no side effects.
+    Runs inside never touch the user's home.  On the way out the calling
+    thread's history connection is closed, the environment and the
+    persistence paths are what they were, and the temporary home is removed.
+    Entered by :func:`main` only; importing the module has no side effects.
 
-    Returns:
+    Yields:
         The temporary home directory.
     """
-    home = Path(tempfile.mkdtemp(prefix="kiss_cost_experiment_"))
-    os.environ["KISS_HOME"] = str(home)
-    os.environ["KISS_MUSE_AUTH"] = "0"
-    th._KISS_DIR = home
-    th._DB_PATH = home / "history.db"
-    return home
+    saved_env = {name: os.environ.get(name) for name in ("KISS_HOME", "KISS_MUSE_AUTH")}
+    saved_paths = (th._KISS_DIR, th._DB_PATH)
+    with tempfile.TemporaryDirectory(
+        prefix="kiss_cost_experiment_", ignore_cleanup_errors=True,
+    ) as tmp:
+        home = Path(tmp)
+        os.environ["KISS_HOME"] = str(home)
+        os.environ["KISS_MUSE_AUTH"] = "0"
+        th._KISS_DIR, th._DB_PATH = home, home / "history.db"
+        try:
+            yield home
+        finally:
+            th._close_thread_db()
+            th._KISS_DIR, th._DB_PATH = saved_paths
+            for name, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 REPO = Path(__file__).resolve().parents[3]
@@ -130,13 +151,34 @@ class _UsagePrinter(Printer):
     def token_callback(self, token: str) -> None:
         return None
 
-    def reset(self) -> None:
-        return None
+
+@contextlib.contextmanager
+def _levers(values: dict[str, Any]) -> Iterator[None]:
+    """Give the ``DEFAULT_CONFIG`` fields in *values* those values for the block.
+
+    The fields are what they were afterwards, also when a run fails, so the
+    experiments that follow in the session measure the same configuration
+    whichever ran before them.
+    """
+    saved = {key: getattr(DEFAULT_CONFIG, key) for key in values}
+    try:
+        for key, value in values.items():
+            setattr(DEFAULT_CONFIG, key, value)
+        yield
+    finally:
+        for key, value in saved.items():
+            setattr(DEFAULT_CONFIG, key, value)
 
 
-def _set_config(values: dict[str, Any]) -> None:
-    for key, value in values.items():
-        setattr(DEFAULT_CONFIG, key, value)
+def _require_success(result: str) -> None:
+    """Raise unless *result* is that of a run that finished its task.
+
+    A run that failed early has spent next to nothing: counted as a
+    measurement, the failure would read as the lever's savings.
+    """
+    parsed = parse_result_yaml(result) or {}
+    if parsed.get("success") is not True:
+        raise RuntimeError(f"the run failed: {parsed.get('summary') or result}")
 
 
 def _run_agent(
@@ -145,7 +187,7 @@ def _run_agent(
     agent = ChatSorcarAgent("cost-experiment")
     printer = _UsagePrinter()
     start = time.time()
-    agent.run(
+    _require_success(agent.run(
         prompt_template=prompt,
         model_name=model,
         work_dir=str(REPO),
@@ -156,7 +198,7 @@ def _run_agent(
         verbose=False,
         printer=printer,
         **kwargs,
-    )
+    ))
     return agent, time.time() - start, printer
 
 
@@ -164,26 +206,21 @@ def _first(contexts: list[int]) -> int:
     return contexts[0] if contexts else 0
 
 
-def _usage(agent: Any) -> tuple[int, float, int]:
-    return (
-        int(getattr(agent, "total_tokens_used", 0) or 0),
-        float(getattr(agent, "budget_used", 0.0) or 0.0),
-        int(getattr(agent, "total_steps", 0) or 0),
-    )
+def _usage(agent: ChatSorcarAgent) -> tuple[int, float, int]:
+    return agent.total_tokens_used, agent.budget_used, agent.total_steps
 
 
 def e1_read_hygiene(model: str, repeat: int) -> list[Run]:
     """Read-heavy task: outline + dedupe + compaction off vs on."""
     runs = []
     for variant, values in (("off", LEVERS_OFF), ("on", LEVERS_ON)):
-        _set_config(values)
-        agent, seconds, printer = _run_agent(READ_TASK, model)
+        with _levers(values):
+            agent, seconds, printer = _run_agent(READ_TASK, model)
         tokens, cost, steps = _usage(agent)
         runs.append(Run(
             "E1 read-hygiene", variant, repeat, tokens, cost, steps, seconds,
             _first(printer.contexts), note=f"max ctx {max(printer.contexts, default=0):,}",
         ))
-    _set_config(LEVERS_ON)
     return runs
 
 
@@ -203,7 +240,7 @@ def e2_review_profile(model: str, repeat: int) -> list[Run]:
 def _previous_system_prompt() -> str:
     text = subprocess.run(
         ["git", "show", f"{PREVIOUS_SYSTEM_MD_COMMIT}:src/kiss/SYSTEM.md"],
-        cwd=REPO, capture_output=True, text=True, check=True,
+        cwd=REPO, capture_output=True, text=True, check=True, timeout=30,
     ).stdout
     if "Mandatory First Actions" not in text:  # pragma: no cover — repo history
         raise RuntimeError("previous SYSTEM.md does not contain the mandate block")
@@ -247,24 +284,23 @@ def e4_chat_digest(model: str, repeat: int) -> list[Run]:
         arms.reverse()
     for variant, enabled in arms:
         chat_id = _seed_chat_with_long_results(8, 6000)
-        DEFAULT_CONFIG.chat_history_digest = enabled
-        agent = ChatSorcarAgent("cost-experiment")
-        agent.resume_chat_by_id(chat_id)
-        prefix_chars = len(agent.build_chat_prompt(TRIVIAL_TASK))
-        agent.resume_chat_by_id(chat_id)
         printer = _UsagePrinter()
-        start = time.time()
-        agent.run(
-            prompt_template=TRIVIAL_TASK, model_name=model, work_dir=str(REPO),
-            max_steps=5, max_budget=1.0, web_tools=False, use_memory=False, verbose=False,
-            printer=printer,
-        )
+        with _levers({"chat_history_digest": enabled}):
+            agent = ChatSorcarAgent("cost-experiment")
+            agent.resume_chat_by_id(chat_id)
+            prefix_chars = len(agent.build_chat_prompt(TRIVIAL_TASK))
+            start = time.time()
+            _require_success(agent.run(
+                prompt_template=TRIVIAL_TASK, model_name=model, work_dir=str(REPO),
+                max_steps=5, max_budget=1.0, web_tools=False, use_memory=False, verbose=False,
+                printer=printer,
+            ))
+            seconds = time.time() - start
         tokens, cost, steps = _usage(agent)
         runs.append(Run(
-            "E4 chat-digest", variant, repeat, tokens, cost, steps, time.time() - start,
+            "E4 chat-digest", variant, repeat, tokens, cost, steps, seconds,
             _first(printer.contexts), note=f"prompt {prefix_chars:,} chars",
         ))
-    DEFAULT_CONFIG.chat_history_digest = True
     return runs
 
 
@@ -323,20 +359,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--only", default="", help="comma-separated experiment ids")
     parser.add_argument("--out", default="tmp/experiments/results.json")
     args = parser.parse_args(argv)
-    isolate_kiss_home()
     selected = [e.strip() for e in args.only.split(",") if e.strip()] or list(EXPERIMENTS)
+    unknown = sorted(set(selected) - set(EXPERIMENTS))
+    if unknown:
+        parser.error(f"unknown experiment: {', '.join(unknown)} (known: {', '.join(EXPERIMENTS)})")
     runs: list[Run] = []
-    for repeat in range(args.repeats):
-        for key in selected:
-            batch = EXPERIMENTS[key](args.model, repeat)
-            runs.extend(batch)
-            for run in batch:
-                print(
-                    f"{run.experiment:<18} {run.variant:<9} r{run.repeat} "
-                    f"tokens={run.tokens:>9,} cost=${run.cost:.4f} steps={run.steps:>3} "
-                    f"step1-ctx={run.first_context:>6,} {run.seconds:6.1f}s {run.note}",
-                    flush=True,
-                )
+    with isolate_kiss_home():
+        for repeat in range(args.repeats):
+            for key in selected:
+                batch = EXPERIMENTS[key](args.model, repeat)
+                runs.extend(batch)
+                for run in batch:
+                    print(
+                        f"{run.experiment:<18} {run.variant:<9} r{run.repeat} "
+                        f"tokens={run.tokens:>9,} cost=${run.cost:.4f} steps={run.steps:>3} "
+                        f"step1-ctx={run.first_context:>6,} {run.seconds:6.1f}s {run.note}",
+                        flush=True,
+                    )
     rows = summarize(runs)
     print()
     for row in rows:

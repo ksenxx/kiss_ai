@@ -67,19 +67,19 @@ class TestMachineLinkLargeFrames(TestCase):
     """One real remote daemon with a seeded >1 MiB transcript, one ``MachineLink``."""
 
     def setUp(self) -> None:
+        # Cleanups, each registered as its resource starts, not tearDown:
+        # unittest skips the tear-down when the set-up fails.
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-link-frames-")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         mach.save_machines([])
+        self.addCleanup(mach.save_machines, [])
         self.remote = start_remote_daemon(
             Path(self.tmpdir) / "remote-home", password="pw-remote",
             seed=[{"chat_id": CHAT_ID, "task": BIG_TASK}],
         )
+        self.addCleanup(self.remote.stop)
+        self.addCleanup(mach.close_links)
         self.machine = mach.add_machine("box", self.remote.url, "pw-remote")
-
-    def tearDown(self) -> None:
-        mach.close_links()
-        self.remote.stop()
-        mach.save_machines([])
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_transcript_replay_on_the_machine_keeps_the_link_alive(self) -> None:
         """A UI on the machine replays a 1.5 MB transcript; the link still answers."""

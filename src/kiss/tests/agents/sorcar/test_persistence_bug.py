@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from kiss.agents.sorcar import persistence
+from kiss.tests.persistence_helpers import close_db
 
 
 class TestPersistence(unittest.TestCase):
@@ -27,12 +28,12 @@ class TestPersistence(unittest.TestCase):
         self._orig_db_path = persistence._DB_PATH
         self.addCleanup(self._restore_db_path)
         persistence._DB_PATH = self.tmpdir / "history.db"
-        persistence._close_db()
+        close_db()
 
     def _restore_db_path(self):
         """Restore the module's database path and drop the temp dir."""
         persistence._DB_PATH = self._orig_db_path
-        persistence._close_db()
+        close_db()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_append_chat_event_no_task(self):

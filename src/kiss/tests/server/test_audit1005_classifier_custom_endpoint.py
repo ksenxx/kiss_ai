@@ -38,12 +38,12 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.task_classifier import clear_classification_cache
 from kiss.core.models import model_info
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import clear_classification_cache
 from kiss.tests.server.conftest import clear_tab_states
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,

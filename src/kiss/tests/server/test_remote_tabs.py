@@ -47,6 +47,7 @@ import json
 import shutil
 import tempfile
 import threading
+from collections.abc import AsyncIterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -54,15 +55,38 @@ from unittest import IsolatedAsyncioTestCase
 
 from kiss.agents.sorcar import machines as mach
 from kiss.agents.sorcar import persistence
-from kiss.server.remote_tabs import RemoteTab
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.remote_tabs import RemoteTab, RemoteTabs
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import find_free_port
-from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.tests.local_ws import (
+    LocalReader,
+    LocalWriter,
+    _generate_self_signed_cert,
+    open_local_connection,
+)
 from kiss.tests.remote_daemon import start_remote_daemon
 from kiss.tests.server.pause import Pause
 from kiss.tests.server.remote_tabs_probe import machine_of
+from kiss.tests.server.two_client_harness import page_after
 
 SUMMARY = "<p>Hello from box</p>"
+
+# A SEA that needs no model: its run is held at the first model call until a
+# ``release`` file appears beside the script, and ends there (as failed).
+HELD_SEA = '''
+import pathlib
+import time
+
+from kiss.agents.seas.base.base_sea import BaseSea
+
+
+class Sea(BaseSea):
+    def llm_call_hook(self, new_messages):
+        release, deadline = pathlib.Path(__file__).with_name("release"), time.monotonic() + 60
+        while not release.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        raise RuntimeError("released")
+'''
 
 
 class _FinishingModel(BaseHTTPRequestHandler):
@@ -123,27 +147,72 @@ class _FinishingModel(BaseHTTPRequestHandler):
             pass  # the daemon was killed while its call was held
 
 
+async def _frames_to(reader: LocalReader, kind: str, tab_id: str = "") -> list[dict[str, Any]]:
+    """The frames *reader* yields up to the first *kind* one (of *tab_id* when given)."""
+    frames = [json.loads(await asyncio.wait_for(reader.readline(), 90))]
+    while frames[-1]["type"] != kind or tab_id not in ("", frames[-1].get("tabId")):
+        frames.append(json.loads(await asyncio.wait_for(reader.readline(), 90)))
+    return frames
+
+
+async def _late_frames(reader: LocalReader) -> AsyncIterator[dict[str, Any]]:
+    """The frames a connecting surface is sent, as a freshly loaded page takes them.
+
+    The ``tabMachines`` frame of its ``ready`` names every binding at
+    once: it is the ``tabMachine`` of each tab it names.
+    """
+    for _ in range(400):
+        msg = json.loads(await asyncio.wait_for(reader.readline(), 90))
+        if msg.get("type") != "tabMachines":
+            yield msg
+            continue
+        for tab, machine in msg["machines"].items():
+            yield {"type": "tabMachine", "tabId": tab, "machine": machine}
+
+
+def _closed_tabs(frames: list[dict[str, Any]]) -> list[str]:
+    """The sub-agent tabs *frames* tell a surface a user closed (``closeSubagentTab``)."""
+    return [str(f.get("tab_id")) for f in frames if f.get("type") == "closeSubagentTab"]
+
+
+def _ended_tabs(frames: list[dict[str, Any]]) -> list[str]:
+    """The sub-agent tabs *frames* tell a surface are over (``subagentDone``)."""
+    return [str(f.get("tab_id")) for f in frames if f.get("type") == "subagentDone"]
+
+
+def _release_model() -> None:
+    """Let a held model call answer: it blocks the single-threaded model server."""
+    _FinishingModel.released.set()
+
+
 class RemoteTabsHarness(IsolatedAsyncioTestCase):
     """One local daemon, one remote daemon ("box") with a fake model, one client."""
 
     async def asyncSetUp(self) -> None:
+        # Cleanups, each registered as its resource starts, not asyncTearDown:
+        # unittest skips the tear-down when the set-up fails, and the model
+        # server such a set-up left serving kept pytest from exiting.
         self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         mach.save_machines([])
+        self.addCleanup(mach.save_machines, [])
         _FinishingModel.parallel_on_first_call = False
         _FinishingModel.hold_sub_agent = 2.0
         _FinishingModel.released = threading.Event()
         _FinishingModel.calls = 0
         self.model_port = find_free_port()
         self.model_server = HTTPServer(("127.0.0.1", self.model_port), _FinishingModel)
-        self.model_thread = asyncio.get_running_loop().run_in_executor(
-            None, self.model_server.serve_forever,
-        )
+        self.addCleanup(self.model_server.server_close)
+        threading.Thread(target=self.model_server.serve_forever, daemon=True).start()
+        self.addCleanup(self.model_server.shutdown)
+        self.addCleanup(_release_model)
         endpoint = f"http://127.0.0.1:{self.model_port}/v1"
         self.model = "gpt-4o-mini"
         self.remote = await asyncio.to_thread(
             start_remote_daemon, Path(self.tmpdir) / "remote-home", password="pw-remote",
             config={"custom_endpoint": endpoint, "custom_api_key": "k", "max_budget": 100},
         )
+        self.addCleanup(self.remote.stop)
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
@@ -152,23 +221,16 @@ class RemoteTabsHarness(IsolatedAsyncioTestCase):
             keyfile=str(keyfile), url_file=Path(self.tmpdir) / "remote-url.json",
             local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
+        # Registered before the start: one that fails part-way is stopped too.
+        self.addAsyncCleanup(self.server.stop_async)
         await self.server.start_async()
         self.reader, self.writer = await open_local_connection(self.server)
+        self.addCleanup(self.writer.close)
         added = await self._ask({
             "type": "machineAction", "action": "add", "name": "box",
             "address": self.remote.url, "machinePassword": "pw-remote",
         }, "machines")
         self.assertEqual(added["error"], "")
-
-    async def asyncTearDown(self) -> None:
-        self.writer.close()
-        await self.server.stop_async()
-        self.remote.stop()
-        _FinishingModel.released.set()  # a held call blocks the single-threaded server
-        self.model_server.shutdown()
-        await self.model_thread
-        mach.save_machines([])
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _send(self, cmd: dict[str, Any]) -> None:
         self.writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
@@ -195,10 +257,11 @@ class RemoteTabsHarness(IsolatedAsyncioTestCase):
                 return msg
         raise AssertionError(f"no {reply_type} reply")
 
-    async def _submit(self, tab_id: str, prompt: str, machine: str) -> None:
+    async def _submit(self, tab_id: str, prompt: str, machine: str, prompt_id: str = "") -> None:
         await self._send({
             "type": "submit", "prompt": prompt, "tabId": tab_id,
             "machine": machine, "model": self.model, "workDir": self.tmpdir,
+            **({"promptId": prompt_id} if prompt_id else {}),
         })
 
     async def _run_until_idle(self, tab_id: str) -> list[dict[str, Any]]:
@@ -239,9 +302,7 @@ class RemoteTabsHarness(IsolatedAsyncioTestCase):
         seen: dict[str, dict[str, Any]] = {}
         replays = 0
         fenced = False
-        for _ in range(300):
-            line = await asyncio.wait_for(reader.readline(), timeout=90.0)
-            msg = json.loads(line.decode("utf-8"))
+        async for msg in _late_frames(reader):
             if msg.get("tabId") == tab_id:
                 seen.setdefault(str(msg["type"]), msg)
                 replays += msg["type"] == "task_events"
@@ -303,10 +364,14 @@ class TestRemoteTabs(RemoteTabsHarness):
 
     async def test_submit_runs_on_the_selected_machine(self) -> None:
         tab = "tab-remote"
-        await self._submit(tab, "Say hello", "box")
+        await self._submit(tab, "Say hello", "box", "p-box")
         frames = await self._run_until_idle(tab)
         types = [f["type"] for f in frames]
         self.assertIn("status", types)
+        # The machine answers the prompt under the id the page sent it by.
+        self.assertEqual(
+            [f.get("promptIds") for f in frames if f["type"] == "clear"], [["p-box"]],
+        )
         # The binding is announced to every surface before the run's frames.
         self.assertEqual(
             (types[0], frames[0]["machine"]), ("tabMachine", "box"),
@@ -425,18 +490,51 @@ class TestRemoteTabs(RemoteTabsHarness):
             "the unbinding is announced",
         )
 
+    async def test_a_sub_agent_tab_brought_home_is_unbound_on_every_surface(self) -> None:
+        """A prompt for this machine sent from a sub-agent tab on its parent's stream unbinds it.
+
+        The tab left the stream without a word: the surfaces online
+        kept it on the machine (its file links checked there, the
+        machine's files in the sidebar) while its task ran here, where
+        a freshly loaded page showed it.
+        """
+        root = "parent-sub-home"
+        spawned = await self._fan_out(root)
+        child = f"{root}__sub_{spawned['task_id']}"
+        tabs = self.server._server_api.remote_tabs
+        await self._send({"type": "resumeSession", "taskId": spawned["task_id"], "tabId": child})
+        await self._until("task_events", child)
+        self.assertEqual(machine_of(tabs, child), "box")
+        await self._submit(child, "Say hello here", "")
+        unbound = await asyncio.wait_for(self._until("tabMachine", child), 30)
+        self.assertEqual(unbound["machine"], "")
+        self.assertEqual((machine_of(tabs, child), machine_of(tabs, root)), ("", "box"))
+        _FinishingModel.released.set()
+        await self._run_until_idle(root)
+
     async def test_unknown_and_unreachable_machines_are_refused(self) -> None:
-        await self._submit("tab-x", "Say hello", "nowhere")
+        """A submit no stream can take is refused by name (``promptIds``).
+
+        ``RemoteTabs`` refuses a command with the same ``cmd=cmd`` at
+        two more places no test reaches: a stream that dies between its
+        connect and its registration (``_bind``), and a send that fails
+        for a sub-agent tab before the relay thread has dropped the
+        stream (``_forward``).  Each is a window of a few statements
+        that only a test double could hold open.
+        """
+        await self._submit("tab-x", "Say hello", "nowhere", "p-nowhere")
         error = await self._until("error", "tab-x")
         self.assertEqual(error["code"], "prompt_refused")
+        self.assertEqual(error["promptIds"], ["p-nowhere"], "the refusal names the prompt")
         self.assertIn("nowhere is not a registered machine", error["text"])
 
         dead = mach.Machine(name="dead", url=f"https://127.0.0.1:{find_free_port()}",
                             password="x")
         mach.save_machines([*mach.load_machines(), dead])
-        await self._submit("tab-y", "Say hello", "dead")
+        await self._submit("tab-y", "Say hello", "dead", "p-dead")
         error = await self._until("error", "tab-y")
         self.assertEqual(error["code"], "prompt_refused")
+        self.assertEqual(error["promptIds"], ["p-dead"])
         self.assertIn("dead (https://127.0.0.1:", error["text"])
         self.assertEqual(machine_of(self.server._server_api.remote_tabs, "tab-y"), "")
 
@@ -560,10 +658,11 @@ class TestRemoteTabs(RemoteTabsHarness):
 
         Returns the first ``tabMachine``, ``task_events`` of *tab*,
         ``openSubagentTab`` under it, the ``tabMachine`` of that
-        sub-agent tab (``sub_tabMachine``, announced before it) and its
-        ``task_events`` (``sub_task_events``), by key.  The surface
-        names *tab* as the one it shows: any other bound tab is only
-        offered (``replay_deferred``), not replayed.
+        sub-agent tab (``sub_tabMachine``, announced before it) and the
+        offer of its transcript (``sub_replay_deferred``), by key.  The
+        surface names *tab* as the one it shows: any other bound tab,
+        and every sub-agent tab, is only offered (``replay_deferred``),
+        not replayed.
         """
         reader, writer = await open_local_connection(self.server)
         try:
@@ -573,9 +672,7 @@ class TestRemoteTabs(RemoteTabsHarness):
             await writer.drain()
             seen: dict[str, dict[str, Any]] = {}
             bindings: dict[str, dict[str, Any]] = {}  # every tabMachine, by tab
-            for _ in range(400):
-                line = await asyncio.wait_for(reader.readline(), timeout=90.0)
-                msg = json.loads(line.decode("utf-8"))
+            async for msg in _late_frames(reader):
                 kind = str(msg.get("type"))
                 if kind == "tabMachine":
                     bindings.setdefault(str(msg["tabId"]), msg)
@@ -589,10 +686,10 @@ class TestRemoteTabs(RemoteTabsHarness):
                     )
                     seen["sub_tabMachine"] = bindings[msg["tab_id"]]
                 elif (
-                    kind == "task_events" and "openSubagentTab" in seen
+                    kind == "replay_deferred" and "openSubagentTab" in seen
                     and msg.get("tabId") == seen["openSubagentTab"]["tab_id"]
                 ):
-                    seen.setdefault("sub_task_events", msg)
+                    seen.setdefault("sub_replay_deferred", msg)
                 if len(seen) == 5:
                     return seen
             raise AssertionError(f"incomplete replay: {sorted(seen)}")
@@ -623,13 +720,14 @@ class TestRemoteTabs(RemoteTabsHarness):
                 # A surface joining while the sub-agent runs: its ready
                 # replays the parent AND announces the running sub-agent
                 # (openSubagentTab, the remote's own sub-tab id), then
-                # the sub-agent's transcript, all to that surface alone.
+                # offers the sub-agent's transcript, all to that surface
+                # alone.
                 late = await self._late_surface(tab)
                 self.assertEqual(late["tabMachine"]["machine"], "box")
                 self.assertEqual(late["task_events"]["task"], "Fan out to a sub-agent")
                 self.assertEqual(late["openSubagentTab"]["parent_tab_id"], tab)
                 sub_tab = late["openSubagentTab"]["tab_id"]
-                self.assertEqual(late["sub_task_events"]["tabId"], sub_tab)
+                self.assertEqual(late["sub_replay_deferred"]["tabId"], sub_tab)
                 self.assertEqual(
                     machine_of(self.server._server_api.remote_tabs, sub_tab), "box",
                     "the announced sub-agent tab joined the stream",
@@ -640,7 +738,7 @@ class TestRemoteTabs(RemoteTabsHarness):
                 )
                 # A second surface: the stream knows the sub-agent tab
                 # now (nothing to adopt), so its binding is replayed
-                # with the ready, still ahead of its transcript.
+                # with the ready, still ahead of its offer.
                 second = await self._late_surface(tab)
                 self.assertEqual(second["openSubagentTab"]["tab_id"], sub_tab)
                 self.assertEqual(second["sub_tabMachine"]["machine"], "box")
@@ -822,6 +920,180 @@ class TestRemoteTabs(RemoteTabsHarness):
             if msg.get("type") == "inputHistory":
                 break
 
+    async def _frames_until_idle(self, root: str) -> list[dict[str, Any]]:
+        """Every frame up to the end of *root*'s run (its own ``status running:false``)."""
+        seen: list[dict[str, Any]] = []
+        for _ in range(600):
+            msg = await self._next()
+            seen.append(msg)
+            if (msg.get("type") == "status" and msg.get("tabId") == root
+                    and not msg.get("running") and not msg.get("replayId")):
+                return seen
+        raise AssertionError(f"the run of {root} never ended here")
+
+    async def test_a_bind_of_a_joined_sub_agent_tab_leaves_its_parents_stream_running(
+        self,
+    ) -> None:
+        """A bind takes a sub-agent tab off its parent's stream; the stream itself stays.
+
+        The tab joins its parent's stream (a surface's resume of the
+        sub-agent) while a bind of it to another machine connects.  The
+        bind, registering, found the tab on a stream and retired that
+        stream as it retires a bind that won the race: the running
+        parent's, with every other tab on it.
+        """
+        root = "parent-child-rebound"
+        spawned = await self._fan_out(root)
+        child = f"{root}__sub_{spawned['task_id']}"
+        other = await asyncio.to_thread(
+            start_remote_daemon, Path(self.tmpdir) / "other-home", password="pw-other",
+            seed=[{"chat_id": "chat-other", "task": "Other's chat"}],
+        )
+        self.addCleanup(other.stop)
+        await asyncio.to_thread(mach.add_machine, "other", other.url, "pw-other")
+        tabs = self.server._server_api.remote_tabs
+        held = Pause(RemoteTab.__init__.__code__, lambda v: v["tab_id"] == child)
+        with held:
+            binding = asyncio.create_task(asyncio.to_thread(tabs.route, {
+                "type": "resumeSession", "id": "chat-other",
+                "taskId": other.task_ids["chat-other/Other's chat"],
+                "tabId": child, "machine": "other", "title": "Other's chat",
+            }))
+            self.assertTrue(await asyncio.to_thread(held.paused.wait, 30))
+            await self._send({
+                "type": "resumeSession", "taskId": spawned["task_id"], "tabId": child,
+            })
+            await self._until("task_events", child)
+            self.assertEqual(machine_of(tabs, child), "box")
+            held.release()
+            await binding
+        self.assertEqual(machine_of(tabs, child), "other")
+        self.assertEqual(
+            machine_of(tabs, root), "box", "the bind of the sub-agent tab retired its parent",
+        )
+        _FinishingModel.released.set()
+        seen = await self._frames_until_idle(root)
+        self.assertFalse(any(
+            m.get("type") == "subagentDone" and m.get("tab_id") == child for m in seen
+        ), "the sub-agent's end closed the tab that shows another machine's chat")
+
+    async def test_a_bind_of_an_announced_sub_agent_tab_is_not_ended_by_the_sub_agent(
+        self,
+    ) -> None:
+        """A sub-agent tab bound before any surface resumed it is no longer its announcer's.
+
+        The parent's stream had only announced the tab (``new_tab``)
+        when a machine's chat was opened in it: nothing mapped the tab,
+        so nothing took it off that stream, whose relay of the
+        sub-agent's ``subagentDone`` then closed the tab on every
+        surface while it showed the chat.
+        """
+        await self._submit("tab-a", "Say hello", "box")
+        await self._run_until_idle("tab-a")
+        await self._send({"type": "closeTab", "tabId": "tab-a"})
+        await self._until("tabs_state")
+        hello = await self._box_row("Say hello")
+        root = "parent-announced-rebound"
+        spawned = await self._fan_out(root)
+        child = f"{root}__sub_{spawned['task_id']}"
+        tabs = self.server._server_api.remote_tabs
+        self.assertEqual(machine_of(tabs, child), "", "no surface resumed the sub-agent tab")
+        await self._click_history_row(child, hello)
+        replay = await self._replay_of(child)
+        self.assertEqual(replay["task_events"]["chat_id"], hello["id"])
+        _FinishingModel.released.set()
+        seen = await self._frames_until_idle(root)
+        self.assertFalse(any(
+            m.get("type") == "subagentDone" and m.get("tab_id") == child for m in seen
+        ), "the sub-agent's end closed the tab that shows the machine's chat")
+        self.assertEqual(machine_of(tabs, child), "box")
+        late = await self._background_inventory(root)
+        self.assertFalse(any(
+            m["type"] == "subagentDone" and m.get("tab_id") == child for m in late
+        ), late)
+
+    async def _chat_opened_in_a_sub_agent_tab(self, joined: bool, resumed_meanwhile: bool) -> None:
+        """A chat of the machine opened in a sub-agent tab on its parent's stream is that tab's.
+
+        The tab is on its parent's stream (a surface's resume of the
+        sub-agent: before the bind when *joined*, during its connect
+        when *resumed_meanwhile*, as a page resumes on the ``new_tab``
+        it is told) when another surface opens a chat of the same
+        machine in it.  The bind kept the parent's stream for the tab,
+        so the chat and its pinned task were written there: a surface
+        connecting later was shown that chat in the parent's tab, and
+        the sub-agent's end closed the tab that showed it.  A tab taken
+        off that stream before the connect was no better: the resume
+        landing meanwhile stood the bind down, and the tab showed
+        neither the chat nor its sub-agent any more.
+        """
+        await self._submit("tab-a", "Say hello", "box")
+        await self._run_until_idle("tab-a")
+        await self._send({"type": "closeTab", "tabId": "tab-a"})
+        await self._until("tabs_state")
+        hello = await self._box_row("Say hello")
+        root = "parent-joined-rebound"
+        spawned = await self._fan_out(root)
+        child = f"{root}__sub_{spawned['task_id']}"
+        tabs = self.server._server_api.remote_tabs
+        join = {"type": "resumeSession", "taskId": spawned["task_id"], "tabId": child}
+        _, peer = await open_local_connection(self.server)
+        self.addCleanup(peer.close)
+        if joined:
+            await self._send(join)
+            await self._until("task_events", child)
+        if resumed_meanwhile:
+            with Pause(RemoteTab.__init__.__code__, lambda v: v["tab_id"] == child) as held:
+                await self._click_history_row(child, hello, writer=peer)
+                self.assertTrue(await asyncio.to_thread(held.paused.wait, 30))
+                await self._send(join)
+                await asyncio.wait_for(self._until("task_events", child), 30)
+        else:
+            await self._click_history_row(child, hello, writer=peer)
+        replay = await self._replay_of(child)
+        self.assertEqual(replay["task_events"]["chat_id"], hello["id"])
+        self.assertEqual(
+            (await self._late_replay(root))["task_events"]["task"], "Fan out to a sub-agent",
+            "the chat opened in the sub-agent tab is shown in its parent's tab",
+        )
+        self.assertEqual((await self._late_replay(child))["task_events"]["chat_id"], hello["id"])
+        _FinishingModel.released.set()
+        seen = await self._frames_until_idle(root)
+        self.assertFalse(any(
+            m.get("type") == "subagentDone" and m.get("tab_id") == child for m in seen
+        ), "the sub-agent's end closed the tab that shows the machine's chat")
+        self.assertEqual((machine_of(tabs, root), machine_of(tabs, child)), ("box", "box"))
+        # A page's own close of the sub-agent's tab, in only now, is not
+        # for the chat's: the tab keeps its stream, and this daemon
+        # answers the page with the snapshot that still lists the tab.
+        await self._send({"type": "closeTab", "tabId": child, "incarnation": 0, "ack": "kept"})
+        while "kept" not in (await self._until("tabs_state", timeout=30)).get("acks", []):
+            pass
+        self.assertEqual(machine_of(tabs, child), "box")
+        # Closed on a surface of the machine: every client of it is told
+        # (the tab is named like a sub-agent's), and the tab bound here
+        # keeps its stream, as any other bound tab closed there does.
+        box_reader, box = await open_local_connection(self.remote.home)
+        self.addCleanup(box.close)
+        box.write(json.dumps({"type": "closeTab", "tabId": child}).encode() + b"\n")
+        await box.drain()
+        await _frames_to(box_reader, "closeSubagentTab")
+        self.assertEqual((await self._late_replay(child))["task_events"]["chat_id"], hello["id"])
+
+    async def test_a_chat_opened_in_a_joined_sub_agent_tab_is_not_its_parents(self) -> None:
+        """The tab was on its parent's stream when the chat was opened in it."""
+        await self._chat_opened_in_a_sub_agent_tab(joined=True, resumed_meanwhile=False)
+
+    async def test_a_chat_opened_in_a_sub_agent_tab_joining_meanwhile_is_not_its_parents(
+        self,
+    ) -> None:
+        """The tab joined its parent's stream while the chat's bind was connecting."""
+        await self._chat_opened_in_a_sub_agent_tab(joined=False, resumed_meanwhile=True)
+
+    async def test_a_chat_opened_in_a_sub_agent_tab_resumed_meanwhile_still_shows(self) -> None:
+        """The tab was on its parent's stream, and another page resumed its sub-agent meanwhile."""
+        await self._chat_opened_in_a_sub_agent_tab(joined=True, resumed_meanwhile=True)
+
     async def _background_inventory(self, root: str) -> list[dict[str, Any]]:
         reader, writer = await open_local_connection(self.server)
         try:
@@ -829,11 +1101,10 @@ class TestRemoteTabs(RemoteTabsHarness):
             await writer.drain()
             seen = []
             fenced = False
-            for _ in range(400):
-                msg = json.loads(await asyncio.wait_for(reader.readline(), 90))
+            async for msg in _late_frames(reader):
                 if msg.get("type") in (
                     "tabMachine", "new_tab", "openSubagentTab", "status", "task_events",
-                    "subagentDone",
+                    "subagentDone", "closeSubagentTab",
                 ):
                     seen.append(msg)
                 if msg.get("type") == "replay_deferred" and msg.get("tabId") == root:
@@ -864,15 +1135,320 @@ class TestRemoteTabs(RemoteTabsHarness):
         ), seen)
         self.assertFalse(any(m.get("type") == "task_events" for m in seen), seen)
         self.assertFalse(any(m.get("replayId") for m in seen), seen)
-        await self._send({"type": "closeTab", "tabId": child})
-        await self._send({"type": "getInputHistory", "tabId": child})
-        await self._until("inputHistory")
+        await self._close_here(child)
+        # A surface that was away during the user's close still shows the
+        # tab, which no registry snapshot lists: only this closes it there.
         seen = await self._background_inventory(root)
         self.assertFalse(any(m.get("type") in ("new_tab", "openSubagentTab") for m in seen))
+        self.assertEqual(_closed_tabs(seen), [child], seen)
         _FinishingModel.released.set()
         await self._run_until_idle(root)
         seen = await self._background_inventory(root)
         self.assertFalse(any(m.get("type") in ("new_tab", "openSubagentTab") for m in seen))
+        self.assertEqual(_closed_tabs(seen), [child], seen)
+
+    async def _close_here(self, tab: str) -> None:
+        """Close *tab* as a page of this daemon does, and wait until the daemon has."""
+        await self._send({"type": "closeTab", "tabId": tab})
+        await self._send({"type": "getInputHistory", "tabId": tab})
+        await self._until("inputHistory")
+
+    async def _fetched_through(self, root: str) -> list[dict[str, Any]]:
+        """This client's frames up to the answer of a fetch of *root*'s transcript it sends now.
+
+        The fetch goes down *root*'s stream and its answer comes back on
+        it: whatever the machine sent on the stream before the fetch
+        reached it is relayed, or dropped, by then.
+        """
+        chat = self.server._server_api.remote_tabs._tabs[root].chat_id
+        await self._send({"type": "resumeSession", "id": chat, "tabId": root, "scoped": True})
+        return await _frames_to(self.reader, "task_events", root)
+
+    async def test_a_reopening_or_a_takeover_forgets_the_close_kept_for_the_surfaces_away(
+        self,
+    ) -> None:
+        """A user's close of a child is replayed only while its tab stays closed.
+
+        Reopened from its fan-out panel, the tab is open on every
+        surface again; a local chat resumed into it took it over.  The
+        close kept for the surfaces away would close either on the next
+        surface to connect.  The machine keeps its own record of the
+        close and repeats it in every replay of the parent: that must
+        not reach the chat the tab shows now either, and nor must a
+        page's own close of the sub-agent's tab that is in only now.
+        """
+        root = "parent-close-forgotten"
+        spawned = await self._fan_out(root)
+        child = f"{root}__sub_{spawned['task_id']}"
+        reopen = {
+            "type": "resumeSession", "taskId": spawned["task_id"], "tabId": child,
+            "parentTabId": root, "reopen": True,
+        }
+        # Closed before any page resumed it: the stream only announced it.
+        await self._close_here(child)
+        self.assertEqual(_closed_tabs(await self._background_inventory(root)), [child])
+        await self._send(reopen)
+        await self._until("task_events", child)
+        seen = await self._background_inventory(root)
+        self.assertEqual(_closed_tabs(seen), [], "a reopened tab closes on the next surface")
+        self.assertIn(child, [m.get("tab_id") for m in seen if m["type"] == "openSubagentTab"])
+        await self._close_here(child)
+        await self._reuse_child_locally(child)
+        await self._send({"type": "closeTab", "tabId": child, "incarnation": 0})
+        await self._send({"type": "getInputHistory", "tabId": child})
+        await self._until("inputHistory")
+        self.assertEqual(
+            _closed_tabs(await self._background_inventory(root)), [],
+            "a close of the sub-agent's tab closes the chat that took the tab over",
+        )
+        await self._fetched_through(root)  # the machine's replay repeats its record...
+        self.assertEqual(
+            _closed_tabs(await self._fetched_through(root)), [],  # ...all in by this answer
+            "the machine's record of the close reached the chat that took the tab over",
+        )
+
+    async def test_a_pages_own_close_of_a_sub_agent_tab_is_the_machines_to_judge(self) -> None:
+        """A page's own close of a machine's sub-agent tab closes only the tab the page closed.
+
+        A page closes a finished sub-agent's tab by itself and names
+        the incarnation it closed.  Taken for a user's close, one that
+        was in late (another page's, on a slow uplink) closed the tab a
+        user had reopened meanwhile, here and on the machine.  The
+        machine counts its tabs' incarnations: the close goes to it as
+        it is, and the tab closes here when the machine says the close
+        stood.  A close the stream could not carry needs no answer: the
+        stream is lost, and its end closes the tab.
+        """
+        root = "parent-own-close"
+        spawned = await self._fan_out(root)
+        child = f"{root}__sub_{spawned['task_id']}"
+        tabs = self.server._server_api.remote_tabs
+        join = {"type": "resumeSession", "taskId": spawned["task_id"], "tabId": child}
+        reopen = {**join, "parentTabId": root, "reopen": True}
+        own = {"type": "closeTab", "tabId": child, "incarnation": 0}
+        await self._send(join)
+        await self._until("task_events", child)
+        _FinishingModel.released.set()
+        await self._run_until_idle(root)
+        await self._send(own)
+        self.assertEqual((await self._until("closeSubagentTab"))["tab_id"], child)
+        self.assertEqual(machine_of(tabs, child), "")
+        await self._send(reopen)
+        reopened = await self._until("openSubagentTab")
+        await self._until("task_events", child)
+        self.assertGreater(reopened["incarnation"], 0)
+        await self._send(own)  # another page's, of the tab as it was before the reopening
+        self.assertEqual(
+            _closed_tabs(await self._fetched_through(root)), [],
+            "a page's late close of the tab closed the tab reopened since",
+        )
+        self.assertEqual(machine_of(tabs, child), "box")
+        self.assertEqual(_closed_tabs(await self._background_inventory(root)), [])
+        await self._send({**own, "incarnation": reopened["incarnation"]})
+        self.assertEqual((await self._until("closeSubagentTab"))["tab_id"], child)
+        self.assertEqual(_closed_tabs(await self._background_inventory(root)), [child])
+        await self._send(reopen)
+        await self._until("task_events", child)
+        stream = tabs._tabs[root]
+        with Pause(RemoteTabs.dropped.__code__, lambda v: v["tab"] is stream) as held:
+            await asyncio.to_thread(stream._ws.close)  # lost, and not yet known to be
+            self.assertTrue(await asyncio.to_thread(held.paused.wait, 30))
+            await self._send(own)
+            await self._send({"type": "getInputHistory", "tabId": child})
+            self.assertEqual(_closed_tabs(await _frames_to(self.reader, "inputHistory")), [])
+        self.assertEqual((await self._until("subagentDone"))["tab_id"], child)
+
+    async def test_a_child_closed_on_a_surface_of_the_machine_closes_here_too(self) -> None:
+        """A sub-agent tab a user closes on the machine's own surface closes on this daemon's.
+
+        The machine tells every client of a user's close
+        (``closeSubagentTab``) and stops sending the tab its sub-agent's
+        events.  The stream dropped that word: the tab stayed open here,
+        on the surfaces online and on those away, spinning for good.
+        The tab leaves the stream as on a close made here, and a surface
+        connecting later is told too.  A close still on its way when
+        the stream ends closes nothing: the stream's tabs are ended by
+        then, and may show something else.
+        """
+        root = "parent-closed-on-box"
+        spawned = await self._fan_out(root)
+        child = f"{root}__sub_{spawned['task_id']}"
+        tabs = self.server._server_api.remote_tabs
+        join = {"type": "resumeSession", "taskId": spawned["task_id"], "tabId": child}
+        await self._send(join)
+        await self._until("task_events", child)
+        _, box = await open_local_connection(self.remote.home)  # a surface of the machine
+        self.addCleanup(box.close)
+        close = json.dumps({"type": "closeTab", "tabId": child}).encode() + b"\n"
+        box.write(close)
+        await box.drain()
+        told = await asyncio.wait_for(self._until("closeSubagentTab"), 30)
+        self.assertEqual(told["tab_id"], child)
+        self.assertEqual(machine_of(tabs, child), "", "the closed tab is still on the stream")
+        self.assertEqual(_closed_tabs(await self._background_inventory(root)), [child])
+        await self._send({**join, "parentTabId": root, "reopen": True})
+        await self._until("task_events", child)
+        stream = tabs._tabs[root]
+        with Pause(
+            RemoteTabs.close_sub_tab.__code__, lambda v: v["sub_tab_id"] == child,
+        ) as held:
+            box.write(close)
+            await box.drain()
+            self.assertTrue(await asyncio.to_thread(held.paused.wait, 30))
+            await self._send({"type": "newChat", "tabId": root})
+            await self._until("tabMachine", root)
+        await asyncio.to_thread(stream._thread.join, 30)
+        await self._send({"type": "getInputHistory"})
+        self.assertEqual(
+            _closed_tabs(await _frames_to(self.reader, "inputHistory")), [],
+            "a close of the machine's reached a tab of a stream that had ended",
+        )
+
+    async def test_the_machines_echo_of_a_close_made_here_does_not_undo_a_reopening_since(
+        self,
+    ) -> None:
+        """The machine's word of a close this daemon forwarded closes nothing reopened since.
+
+        The machine tells every client of the close, the stream that
+        forwarded it included.  A fan-out panel expanded before that
+        word is in has put the tab back on the stream: taken for a close
+        made on the machine, the echo would close the tab on every
+        surface, and the reopening's announcement, next on the stream,
+        would be dropped for a tab that left it.
+
+        Not asserted: that the stream takes a close for one again from
+        the reopening's announcement on, not only from the end of its
+        replay.  A close lands between the two only while the machine's
+        daemon, another process, is still sending that replay.
+        """
+        root = "parent-close-echo"
+        spawned = await self._fan_out(root)
+        child = f"{root}__sub_{spawned['task_id']}"
+        join = {"type": "resumeSession", "taskId": spawned["task_id"], "tabId": child}
+        await self._send(join)
+        await self._until("task_events", child)
+        with Pause(
+            RemoteTab._relay_frame.__code__,
+            lambda v: v["msg"].get("type") == "closeSubagentTab",
+        ) as held:
+            await self._close_here(child)
+            self.assertTrue(await asyncio.to_thread(held.paused.wait, 30), "no echo of the close")
+            # Dispatched in order: the reopening is forwarded when the fence answers.
+            await self._send({**join, "parentTabId": root, "reopen": True})
+            await self._send({"type": "getInputHistory", "tabId": child})
+            await self._until("inputHistory")
+        frames = await asyncio.wait_for(_frames_to(self.reader, "task_events", child), 30)
+        self.assertEqual(_closed_tabs(frames), [], "the echo closed the reopened tab")
+        self.assertEqual(machine_of(self.server._server_api.remote_tabs, child), "box")
+        self.assertEqual(_closed_tabs(await self._background_inventory(root)), [])
+
+    async def _frames_on_connect(self) -> list[dict[str, Any]]:
+        """Every frame a surface connecting now gets on its ``ready``.
+
+        Its ``ready`` answers one ``inputHistory`` before the bound tabs are
+        replayed; the second, to its own request, comes after the replay.
+        """
+        reader, writer = await open_local_connection(self.server)
+        try:
+            for name in ("ready", "getInputHistory"):
+                writer.write(json.dumps({"type": name}).encode() + b"\n")
+            await writer.drain()
+            frames: list[dict[str, Any]] = []
+            while [f["type"] for f in frames].count("inputHistory") < 2:
+                frames.append(json.loads(await asyncio.wait_for(reader.readline(), 90)))
+            return frames
+        finally:
+            writer.close()
+
+    async def _announced_on_connect(self) -> list[dict[str, Any]]:
+        """The sub-agent tabs a surface connecting now is told to open."""
+        frames = await self._frames_on_connect()
+        return [f for f in frames if f["type"] in ("new_tab", "openSubagentTab")]
+
+    async def _closed_api_run_tab(self, resumed: bool) -> None:
+        """A local task's run on "box": its tab, once closed, is not announced on connect.
+
+        The run's stream (an ``api-…`` tab no surface shows) replays the
+        run's ``new_tab`` to a connecting surface.  A close of the tab it
+        opens, *resumed* by a page or only announced so far, ends that
+        while the run goes on; the fan-out panel's resume reopens the tab
+        on the stream, and the announcement is back.  A second surface,
+        connected throughout, is told to open the tab again by the
+        machine's ``reopened`` announcement (the parent is a task id, so
+        the machine keeps the run as a sub-agent's) and offered the
+        transcript: the page's fetch of it brings what the asker and the
+        machine's own surfaces got; a surface that never asks gets none.
+        """
+        script = Path(self.tmpdir) / "held_sea.py"
+        script.write_text(HELD_SEA, encoding="utf-8")
+        await self._send({
+            "type": "run", "prompt": "Run on box", "tabId": "api-run", "taskId": "token",
+            "machine": "box", "model": self.model, "workDir": self.tmpdir,
+            "parentTaskId": "c" * 32, "parentTabId": "caller", "seaPath": str(script),
+        })
+        spawn = await self._until("new_tab")
+        # The held run's last event: its transcript is settled from here on.
+        self.assertEqual((await self._until("prompt", "api-run"))["taskId"], spawn["task_id"])
+        child = f"caller__sub_{spawn['task_id']}"
+        reader, peer = await open_local_connection(self.server)
+        self.addCleanup(peer.close)
+        resume = {"type": "resumeSession", "taskId": spawn["task_id"], "tabId": child}
+        if resumed:
+            await self._send(resume)
+            await self._until("task_events", child)
+        self.assertEqual(await self._announced_on_connect(), [spawn])
+        await self._send({"type": "closeTab", "tabId": child})
+        await self._ask({"type": "getInputHistory", "tabId": child}, "inputHistory")
+        self.assertEqual(await self._announced_on_connect(), [])
+        await self._send(resume)  # a page's own, of the ``new_tab`` it got before the close
+        await self._send({"type": "getInputHistory", "tabId": child})
+        late = [await self._next()]
+        while late[-1]["type"] != "inputHistory":
+            late.append(await self._next())
+        self.assertFalse([f for f in late[:-1] if f.get("tabId") == child], "a closed tab answered")
+        self.assertEqual(await self._announced_on_connect(), [])
+        idle, idle_writer = await open_local_connection(self.server)  # never asks for the tab
+        self.addCleanup(idle_writer.close)
+        box, box_writer = await open_local_connection(self.remote.home)  # a surface of the machine
+        self.addCleanup(box_writer.close)
+        await self._send({**resume, "parentTabId": "caller", "reopen": True})
+        asked = await _frames_to(self.reader, "task_events", child)
+        self.assertNotIn("replay_deferred", [f["type"] for f in asked], "the asker is offered it")
+        shown = asked[-1]["events"]
+        peer.write(json.dumps({"type": "getInputHistory"}).encode() + b"\n")
+        await peer.drain()
+        told = await _frames_to(reader, "inputHistory")
+        self.assertEqual(
+            [{k: v for k, v in f.items() if k not in ("startTs", "ts")} for f in told
+             if f["type"] in ("new_tab", "openSubagentTab", "task_events", "replay_deferred")],
+            [{
+                "type": "openSubagentTab", "tab_id": child, "parent_tab_id": "caller",
+                "description": "Run on box", "task_id": spawn["task_id"],
+                "parent_task_id": "c" * 32,
+                "isSubagentTab": True, "isDone": False, "reopened": True,
+            }, {**resume, "type": "replay_deferred", "chatId": ""}],
+            "the reopening opens the tab on a surface connected through the close, and offers it",
+        )
+        # The page's answer to the offer when the user opens the tab (``requestDeferredReplay``)
+        # brings the asker's transcript, which is the one the machine's own surfaces got.
+        peer.write(json.dumps({**resume, "id": "", "scoped": True}).encode() + b"\n")
+        await peer.drain()
+        self.assertEqual((await _frames_to(reader, "task_events", child))[-1]["events"], shown)
+        self.assertEqual((await _frames_to(box, "task_events", child))[-1]["events"], shown)
+        idle_writer.write(json.dumps({"type": "getInputHistory"}).encode() + b"\n")
+        await idle_writer.drain()
+        self.assertNotIn("task_events", [f["type"] for f in await _frames_to(idle, "inputHistory")])
+        self.assertEqual(await self._announced_on_connect(), [spawn])
+        script.with_name("release").touch()
+        await self._run_until_idle("api-run")
+
+    async def test_an_api_run_tab_closed_after_its_resume_is_not_announced_on_connect(self) -> None:
+        """The closed tab had joined the run's stream (a page resumed it)."""
+        await self._closed_api_run_tab(resumed=True)
+
+    async def test_an_api_run_tab_closed_before_a_resume_is_not_announced_on_connect(self) -> None:
+        """The closed tab was only announced: no page had resumed it yet."""
+        await self._closed_api_run_tab(resumed=False)
 
     async def test_background_ready_ends_a_child_that_finished_while_the_surface_was_away(
         self,
@@ -883,8 +1459,8 @@ class TestRemoteTabs(RemoteTabsHarness):
         list, and the ``closeTab`` a page sends when it closes a finished
         child never came from one that was away: without the end
         replayed, the child would spin for good on it.  A child reopened
-        since (an expanded fan-out panel's resume) stays open, and one
-        closed since is nobody's business any more.
+        since (an expanded fan-out panel's resume) stays open, and one a
+        user closed since is closed on the surface connecting later too.
         """
         root = "parent-away"
         spawned = await self._fan_out(root)
@@ -914,12 +1490,19 @@ class TestRemoteTabs(RemoteTabsHarness):
         await self._until("task_events", child)
         seen = await self._background_inventory(root)
         self.assertFalse(any(m["type"] == "subagentDone" for m in seen), seen)
-        # Closed by a page: off the stream, so nothing of it is replayed.
-        await self._send({"type": "closeTab", "tabId": child})
-        await self._send({"type": "getInputHistory", "tabId": child})
-        await self._until("inputHistory")
+        # Closed by a user: off the stream, and the close is all a surface
+        # that was away (it still shows the reopened tab) is told of it.
+        await self._close_here(child)
         seen = await self._background_inventory(root)
-        self.assertFalse(any(m.get("tab_id") == child or m.get("tabId") == child for m in seen))
+        self.assertEqual(
+            [m["type"] for m in seen if child in (m.get("tab_id"), m.get("tabId"))],
+            ["closeSubagentTab"], seen,
+        )
+        # The parent's stream retires (a new chat in its tab): the surface
+        # that was away shows the child as before, so the close outlives it.
+        await self._send({"type": "newChat", "tabId": root})
+        await self._until("tabMachine", root)
+        self.assertEqual(_closed_tabs(await self._frames_on_connect()), [child])
 
     async def test_an_online_surfaces_auto_close_keeps_the_end_for_the_surfaces_away(
         self,
@@ -933,7 +1516,9 @@ class TestRemoteTabs(RemoteTabsHarness):
         replayed on its ``ready`` closes it, so that close must not
         erase it.  The child is off the stream (no binding, no state is
         replayed for it).  Reopened from the fan-out panel since, the
-        child stays open on every surface: nothing ends it any more.
+        child stays open on every surface: nothing ends it any more,
+        and a surface connecting later, which never had the tab, is
+        told to open it as the ones online were.
         """
         root = "parent-auto-closed"
         spawned = await self._fan_out(root)
@@ -954,6 +1539,7 @@ class TestRemoteTabs(RemoteTabsHarness):
         self.assertEqual(
             [m["tab_id"] for m in seen if m["type"] == "subagentDone"], [child], types,
         )
+        self.assertEqual(_closed_tabs(seen), [], "the end kept for the tab closes it already")
         self.assertNotIn(("tabMachine", child), types)
         self.assertFalse(any(
             m["type"] in ("new_tab", "openSubagentTab", "status")
@@ -966,12 +1552,19 @@ class TestRemoteTabs(RemoteTabsHarness):
             "type": "resumeSession", "taskId": spawned["task_id"], "tabId": child,
             "parentTabId": root, "reopen": True,
         })
+        reopened = await self._until("openSubagentTab")
         await self._until("task_events", child)
         seen = await self._background_inventory(root)
         self.assertFalse(any(m["type"] == "subagentDone" for m in seen), seen)
         self.assertIn(("tabMachine", child), [
             (m["type"], m.get("tabId")) for m in seen
         ])
+        # The machine's own announcement, with the incarnation a page's
+        # close of the reopened tab names: the real page opens the tab.
+        self.assertTrue(reopened["isDone"] and reopened["incarnation"] > 0, reopened)
+        self.assertEqual([m for m in seen if m["type"] == "openSubagentTab"], [reopened], seen)
+        page = await asyncio.to_thread(page_after, root, seen)
+        self.assertEqual(page["shown"], [child], "a surface connecting later lacks the tab")
 
     async def test_a_closed_childs_tab_reused_for_a_local_chat_is_not_ended_by_the_child(
         self,
@@ -985,7 +1578,9 @@ class TestRemoteTabs(RemoteTabsHarness):
         end must go with the reuse (the tab is no longer on the stream
         and its id does not name the stream, so only the detach itself
         can drop it), or a surface connecting later would close the
-        local chat's view.
+        local chat's view.  The parent's stream retires in between (a
+        new chat in its tab): the pages away show the child as before,
+        so the end outlives the stream, and the reuse still drops it.
         """
         root = "parent-alias-reused"
         spawned = await self._fan_out(root)
@@ -1003,12 +1598,108 @@ class TestRemoteTabs(RemoteTabsHarness):
         # Kept for the pages away (the machine ends the derived
         # ``{root}__sub_{task}`` tab of the pages that only saw the
         # child's ``new_tab`` as well; that end is not this tab's).
-        self.assertIn(child, [m["tab_id"] for m in seen if m["type"] == "subagentDone"], seen)
+        self.assertIn(child, _ended_tabs(seen), seen)
+        await self._send({"type": "newChat", "tabId": root})
+        await self._until("tabMachine", root)
+        self.assertIn(child, _ended_tabs(await self._frames_on_connect()))
         await self._reuse_child_locally(child)
+        self.assertNotIn(child, _ended_tabs(await self._frames_on_connect()))
+
+    async def test_a_tab_ended_with_its_stream_is_ended_for_the_surfaces_away_too(self) -> None:
+        """What a stream's end tells the surfaces online is kept for the ones away.
+
+        The stream is lost while its sub-agent runs: the sub-agent's tab
+        is ended on every surface online.  A page that was away shows it
+        as before, and its parent's stream, retired, replays nothing: the
+        end is kept past the stream.  Not past the tab's return: the chat
+        opened in the parent's tab again brings a stream on which the
+        machine announces the sub-agent, still running there, and the
+        end kept would close that tab on the next surface to connect.
+        """
+        root = "parent-lost-then-back"
+        spawned = await self._fan_out(root)
+        child = f"{root}__sub_{spawned['task_id']}"
+        await self._send({
+            "type": "resumeSession", "taskId": spawned["task_id"], "tabId": child,
+        })
+        opened = await self._until("openSubagentTab")
+        await self._until("task_events", child)
+        stream = self.server._server_api.remote_tabs._tabs[root]
+        await asyncio.to_thread(stream._ws.close)  # lost here; the machine runs on
+        self.assertEqual((await self._until("subagentDone"))["tab_id"], child)
+        await self._until("tabMachine", root)
+        away = await self._frames_on_connect()
+        self.assertEqual(_ended_tabs(away), [child], away)
+        page = await asyncio.to_thread(page_after, root, [spawned, opened, *away])
+        self.assertEqual(page["shown"], [], "the page that was away keeps the ended tab")
+        await self._click_history_row(root, await self._box_row("Fan out to a sub-agent"))
+        again = await self._until("openSubagentTab")
+        self.assertEqual((again["tab_id"], again["isDone"]), (child, False))
         seen = await self._background_inventory(root)
-        self.assertFalse(any(
-            m["type"] == "subagentDone" and m.get("tab_id") == child for m in seen
-        ), seen)
+        self.assertEqual(_ended_tabs(seen), [], seen)
+        page = await asyncio.to_thread(page_after, root, seen)
+        self.assertEqual(page["shown"], [child], "the tab its machine announced again is closed")
+
+    async def test_a_chat_opened_in_another_tab_takes_its_sub_agent_tab_along_on_every_page(
+        self,
+    ) -> None:
+        """A running chat opened in another tab shows its sub-agent there, on every page.
+
+        One chat, one tab: the daemon closes the tab the chat was in and
+        ends the sub-agent's tab under it, then the machine announces the
+        sub-agent, still running, under the new tab.  A page that had the
+        closed tab on screen falls back to the first chat left, another
+        one, so the sub-agent's tab opens in a group that is not on
+        screen.  The page that was online throughout and one that
+        connects afterwards both end with that one sub-agent tab.
+        """
+        first, other, second = "parent-first-tab", "another-chat", "parent-second-tab"
+        spawned = await self._fan_out(first)
+        old = f"{first}__sub_{spawned['task_id']}"
+        await self._send({"type": "openTab", "tabId": other, "title": "new chat", "ack": "other"})
+        while "other" not in (await self._until("tabs_state")).get("acks", []):
+            pass
+        await self._send({"type": "resumeSession", "taskId": spawned["task_id"], "tabId": old})
+        online = [spawned, await self._until("openSubagentTab")]
+        await self._until("task_events", old)
+        await self._click_history_row(second, await self._box_row("Fan out to a sub-agent"))
+        child = f"{second}__sub_{spawned['task_id']}"
+        while (online[-1]["type"], online[-1].get("tab_id")) != ("openSubagentTab", child):
+            online.append(await self._next())
+        self.assertEqual(_ended_tabs(online), [old], "the tab under the closed one is not ended")
+        for name, frames in (
+            ("online throughout", online),
+            ("connecting afterwards", await self._frames_on_connect()),
+        ):
+            page = await asyncio.to_thread(page_after, first, frames)
+            self.assertEqual(page["shown"], [child], name)
+
+    async def test_the_closes_kept_past_a_stream_are_a_thousand_at_most(self) -> None:
+        """A retired stream's closes are kept for the surfaces away, a thousand tabs at most.
+
+        Each one is told to every surface that connects for as long as
+        the daemon runs, and only a reuse of its tab id forgets it:
+        unbounded, every remote sub-agent of a long session would be
+        told to every page.  The oldest close goes first.
+        """
+        root = "parent-many-closed"
+        await self._submit(root, "Say hello", "box")
+        await self._run_until_idle(root)
+        gone = [f"{root}__sub_{n}" for n in range(1001)]
+        # Each close is told to every surface once it is noted: the first
+        # is noted before the others are sent, which land in any order.
+        await self._send({"type": "closeTab", "tabId": gone[0]})
+        self.assertEqual((await self._until("closeSubagentTab"))["tab_id"], gone[0])
+        for tab in gone[1:]:
+            await self._send({"type": "closeTab", "tabId": tab})
+        mirrored: set[str] = set()
+        while len(mirrored) < len(gone) - 1:
+            mirrored.update(_closed_tabs([await self._next()]))
+        await self._send({"type": "newChat", "tabId": root})
+        await self._until("tabMachine", root)
+        kept = _closed_tabs(await self._frames_on_connect())
+        self.assertEqual(len(kept), 1000)
+        self.assertEqual(set(kept), set(gone[1:]), "the oldest close is not the one forgotten")
 
     async def _box_row(self, title: str) -> dict[str, Any]:
         """The history row of box's task *title*, as the CHATS panel gets it."""
@@ -1108,6 +1799,17 @@ class TestRemoteTabs(RemoteTabsHarness):
         late = await self._late_replay(tab)
         self.assertEqual(late["task_events"]["task"], "Say hello")
 
+        # Scrolling past the end of that task asks for the chat's next
+        # one: box holds the chat, so box names it.
+        after = await self._ask(
+            {"type": "getAdjacentTask", "tabId": tab, "taskId": hello["task_id"],
+             "direction": "next"},
+            "adjacent_task_events",
+        )
+        self.assertEqual(
+            (after["task"], after["adjacent_to"]), ("Say hello again", hello["task_id"]),
+        )
+
         # Another of box's chats clicked into the same tab: the tab stays
         # bound (one stream), shows that chat, and a surface connecting
         # later gets that chat, not the first.
@@ -1164,9 +1866,7 @@ class TestRemoteTabs(RemoteTabsHarness):
             )
             await writer.drain()
             seen: dict[str, dict[str, Any]] = {}
-            for _ in range(400):
-                line = await asyncio.wait_for(reader.readline(), timeout=90.0)
-                msg = json.loads(line.decode("utf-8"))
+            async for msg in _late_frames(reader):
                 if msg.get("tabId") == tab and msg["type"] in ("tabMachine", "task_events"):
                     seen.setdefault(str(msg["type"]), msg)
                 if len(seen) == 2:
@@ -1180,7 +1880,11 @@ class TestRemoteTabs(RemoteTabsHarness):
 
         The stream never saw the sub-agent's ``new_tab`` (the run ended
         before the chat was opened here), so the fan-out panel's resume
-        names the parent tab, whose stream the sub-agent tab joins.
+        names the parent tab, whose stream the sub-agent tab joins.  A
+        prompt sent from that tab is the tab's own run: the bind kept
+        the parent's stream for it and cleared the parent's pin there.
+        One for a machine that is down is refused and leaves the tab on
+        the stream: it was taken off it before the connect, for good.
         """
         _FinishingModel.parallel_on_first_call = True
         remote_tabs = self.server._server_api.remote_tabs
@@ -1193,6 +1897,9 @@ class TestRemoteTabs(RemoteTabsHarness):
             if msg.get("type") == "status" and msg.get("tabId") == "tab-p" and not msg["running"]:
                 break
         self.assertTrue(child_task, "the run fanned out")
+        # A later task of the chat: the click below pins the tab to the first.
+        await self._submit("tab-p", "Say hello again", "box")
+        await self._run_until_idle("tab-p")
         await self._send({"type": "closeTab", "tabId": "tab-p"})
         await self._until("tabs_state")
 
@@ -1220,6 +1927,21 @@ class TestRemoteTabs(RemoteTabsHarness):
         # the sub-agent tab's binding along with the parent's.
         bindings = await self._late_bindings(tab, sub)
         self.assertEqual(bindings, {tab: "box", sub: "box"})
+        dead = mach.Machine(name="dead", url=f"https://127.0.0.1:{find_free_port()}",
+                            password="x")
+        mach.save_machines([*mach.load_machines(), dead])
+        await self._submit(sub, "Typed for a machine that is down", "dead")
+        error = await asyncio.wait_for(self._until("error", sub), 30)
+        self.assertEqual(error["code"], "prompt_refused")
+        self.assertEqual(machine_of(remote_tabs, sub), "box", "the failed bind unjoined the tab")
+        # A prompt sent from the sub-agent tab: a surface connecting later
+        # is shown the pinned task in the parent's tab, the new chat in this.
+        await self._submit(sub, "Typed into the sub-agent tab", "box")
+        await self._run_until_idle(sub)
+        late = await self._late_replay(tab)
+        self.assertEqual(late["task_events"]["task"], "Fan out to a sub-agent")
+        late = await self._late_replay(sub)
+        self.assertEqual(late["task_events"]["task"], "Typed into the sub-agent tab")
 
     async def _late_bindings(self, *tabs: str) -> dict[str, str]:
         """Connect a surface, send ``ready``, and return the machine its replay binds *tabs* to."""
@@ -1228,9 +1950,7 @@ class TestRemoteTabs(RemoteTabsHarness):
             writer.write(json.dumps({"type": "ready", "restoredTabs": []}).encode() + b"\n")
             await writer.drain()
             bindings: dict[str, str] = {}
-            for _ in range(400):
-                line = await asyncio.wait_for(reader.readline(), timeout=90.0)
-                msg = json.loads(line.decode("utf-8"))
+            async for msg in _late_frames(reader):
                 if msg.get("type") == "tabMachine" and msg.get("tabId") in tabs:
                     bindings.setdefault(str(msg["tabId"]), str(msg["machine"]))
                 if len(bindings) == len(tabs):

@@ -50,10 +50,9 @@ function checkPathsLikeHost(msg) {
 
 // The page's transport answers every `checkPaths` like the host does.
 function makePage() {
-  const {win, posted} = makeSharedPage({
+  return makeSharedPage({
     beforeScripts: win => answerCheckPaths(win, checkPathsLikeHost),
   });
-  return {win, posted};
 }
 
 function testWorktreeDoneRevivesDemotedLink() {

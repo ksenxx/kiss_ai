@@ -13,6 +13,7 @@ confirms the wire format against OpenRouter itself.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -20,9 +21,11 @@ import socket
 import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -38,6 +41,7 @@ from kiss.core.models.decisions_model import (
 )
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import MODEL_INFO, model
+from kiss.tests.server.pause import Pause
 
 JEV = "openrouter/~typesafe/jev-latest"
 
@@ -64,6 +68,8 @@ QUESTIONS = {
     "severity": score("How severe is the problem?", ["minor", "moderate", "severe"]),
 }
 
+_ERROR_PAGE = "<html>" + "<p>cloud edge error</p>" * 3000  # a gateway's 69 KB error page
+
 
 class _DecisionsHandler(BaseHTTPRequestHandler):
     """A ``/alpha/decisions`` endpoint whose behaviour is chosen per request.
@@ -71,7 +77,8 @@ class _DecisionsHandler(BaseHTTPRequestHandler):
     The ``state`` string selects the scenario so one server covers every
     response branch: ``"bad-request"`` → 400 with OpenRouter's error
     envelope, ``"unauthorized"`` → 401, ``"html-error"`` → 502 with a
-    non-JSON body, ``"weird-status"`` → 599 (no HTTP reason phrase),
+    non-JSON body, ``"huge-error"`` → 502 with :data:`_ERROR_PAGE`,
+    ``"weird-status"`` → 599 (no HTTP reason phrase),
     ``"not-json"`` → 200 with a non-JSON body, ``"no-answers"`` → 200
     without an ``answers`` object, ``"trickle"`` → 200 whose body is a
     space every 15 ms (legal JSON whitespace, each one resetting a read
@@ -104,6 +111,8 @@ class _DecisionsHandler(BaseHTTPRequestHandler):
             self._send(401, {"error": {"message": "Missing Authentication header", "code": 401}})
         elif state == "html-error":
             self._send_raw(502, b"<html>bad gateway</html>")
+        elif state == "huge-error":
+            self._send_raw(502, _ERROR_PAGE.encode())
         elif state == "weird-status":
             self._send_raw(599, b"upstream exploded")
         elif state == "not-json":
@@ -274,6 +283,8 @@ def test_decide_reports_http_errors_with_reason_phrase() -> None:
             m.decide("unauthorized", QUESTIONS)
         with pytest.raises(KISSError) as html:
             m.decide("html-error", QUESTIONS)
+        with pytest.raises(KISSError) as huge:
+            m.decide("huge-error", QUESTIONS)
         with pytest.raises(KISSError) as weird:
             m.decide("weird-status", QUESTIONS)
     assert str(bad.value).endswith(
@@ -285,6 +296,8 @@ def test_decide_reports_http_errors_with_reason_phrase() -> None:
     assert str(html.value).endswith(
         "Decisions request failed (HTTP 502 Bad Gateway): <html>bad gateway</html>"
     )
+    # The message is the decide tool's result, so the model's context: a page is cut short.
+    assert str(huge.value).endswith("(HTTP 502 Bad Gateway): " + _ERROR_PAGE[:500])
     assert str(weird.value).endswith("Decisions request failed (HTTP 599 ): upstream exploded")
 
 
@@ -308,6 +321,10 @@ def test_decide_wraps_connection_failures() -> None:
     root = f"http://127.0.0.1:{_free_closed_port()}"
     m = DecisionsModel(JEV, base_url=root, api_key="k", model_config={"timeout": 8})
     with pytest.raises(KISSError, match=f"Decisions request to {root}/alpha/decisions failed"):
+        m.decide("x", QUESTIONS)
+    # So does a URL httpx cannot parse (its InvalidURL is no HTTPError).
+    m = DecisionsModel(JEV, base_url="http://[::1", api_key="k")
+    with pytest.raises(KISSError, match=r"to http://\[::1/alpha/decisions failed: Invalid port"):
         m.decide("x", QUESTIONS)
 
 
@@ -385,6 +402,40 @@ def test_decide_gives_up_on_a_trickling_endpoint_at_its_timeout() -> None:
             "The package arrived crushed.",
             "The package arrived crushed.",
         ]
+
+
+def _looking_up(port: int | None, frame_locals: dict[str, Any]) -> bool:
+    """A :class:`Pause` matcher for ``socket.getaddrinfo``: the lookup of a connect to *port*."""
+    return frame_locals.get("port") == port
+
+
+@pytest.mark.parametrize("stopped", [False, True], ids=["deadline", "stop"])
+def test_decide_ends_while_its_endpoint_is_still_being_looked_up(stopped: bool) -> None:
+    """The deadline and a Stop end a request whose endpoint's address is not known yet.
+
+    Until the lookup returns the request has no socket for the watchdog
+    to shut down: ``decide`` waited for as long as the resolver did.  The
+    lookup is held at its entry, as a resolver that does not answer holds it.
+    """
+    stop = threading.Event()
+    with (
+        _decisions_server() as root,
+        ThreadPoolExecutor(
+            1, initializer=stop_signal.set_thread_stop_event, initargs=(stop,)
+        ) as task,  # bound to the Stop the way the runner binds a task thread
+    ):
+        timeout = 60 if stopped else 0.3
+        m = DecisionsModel(JEV, base_url=root, api_key="k", model_config={"timeout": timeout})
+        looking_up = functools.partial(_looking_up, urlsplit(root).port)
+        with Pause(socket.getaddrinfo.__code__, looking_up) as held:
+            call = task.submit(m.decide, "x", QUESTIONS)
+            assert held.paused.wait(10), "the request never reached its address lookup"
+            if stopped:
+                stop.set()
+            error = call.exception(5)
+        assert isinstance(error, KeyboardInterrupt if stopped else KISSError), error
+        assert stopped or "exceeded 0.3s" in str(error)
+        assert _DecisionsHandler.requests == [], "the request was sent after it was cut"
 
 
 def test_generate_answers_configured_questions(caplog: pytest.LogCaptureFixture) -> None:

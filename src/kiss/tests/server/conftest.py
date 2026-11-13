@@ -45,6 +45,7 @@ import yaml
 from kiss.agents.sorcar import persistence
 from kiss.server import agent_state
 from kiss.tests.conftest import find_free_port as find_free_port
+from kiss.tests.persistence_helpers import close_db
 
 if TYPE_CHECKING:
     import asyncio
@@ -53,7 +54,7 @@ if TYPE_CHECKING:
     from kiss.server.file_index import FileIndexRegistry, FileView
     from kiss.server.server import AgentServer
 
-PersistenceState = tuple[Path, Any, Path]
+PersistenceState = tuple[Path, Path]
 
 # Upgrade-request headers that make a test client on 127.0.0.1 look like a
 # visitor relayed by the local cloudflared tunnel: the daemon admits a DIRECT
@@ -94,21 +95,20 @@ def redirect_persistence(tmpdir: str | Path) -> PersistenceState:
     the supported test redirect.  Pass the result to
     :func:`restore_persistence` when the test is done.
     """
-    saved = (persistence._DB_PATH, persistence._db_conn, persistence._KISS_DIR)
+    saved = (persistence._DB_PATH, persistence._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     persistence._KISS_DIR = kiss_dir
     persistence._DB_PATH = kiss_dir / "history.db"
-    persistence._db_conn = None
     return saved
 
 
 def restore_persistence(saved: PersistenceState) -> None:
     """Undo :func:`redirect_persistence`.
 
-    ``_close_db`` drains and stops the event-writer thread before the
-    scratch connection goes away: closing ``persistence._db_conn``
-    directly while that thread is still flushing a finished task's
+    ``close_db`` drains and stops the event-writer thread before the
+    scratch connection goes away: closing that thread's connection
+    while it is still flushing a finished task's
     events is a use-after-close inside the sqlite3 C module (a SIGSEGV
     of the whole pytest process, not a Python exception).  The
     process-owner marker minted under the scratch ``_KISS_DIR``
@@ -118,8 +118,8 @@ def restore_persistence(saved: PersistenceState) -> None:
     owner-token request re-mints it under the restored directory.
     """
     persistence._release_owner_marker()
-    persistence._close_db()
-    persistence._DB_PATH, persistence._db_conn, persistence._KISS_DIR = saved
+    close_db()
+    persistence._DB_PATH, persistence._KISS_DIR = saved
 
 
 def run_git(cwd: str | Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -400,7 +400,7 @@ def write_fake_player(tmp_path: Path, marker_dir: Path) -> Path:
 def _reset_persistence_connection_cache() -> Iterator[None]:
     """Reset the persistence layer's cached sqlite connections before each test.
 
-    ``persistence._close_db()`` stops and drains the background event
+    ``close_db()`` stops and drains the background event
     writer, clears the sequence/HasEvents caches, bumps the global
     connection generation counter (lazily invalidating EVERY thread's
     cached connection, not just this thread's), and closes the current
@@ -409,5 +409,5 @@ def _reset_persistence_connection_cache() -> Iterator[None]:
     re-creates the schema, eliminating the test-order-dependent
     ``task_history`` failures described in the module docstring.
     """
-    persistence._close_db()
+    close_db()
     yield

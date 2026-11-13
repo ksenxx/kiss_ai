@@ -25,7 +25,12 @@ const {
   byId,
   ofType,
 } = require('./simplify2_harness');
-const {MACHINES} = require('./settings_helpers');
+const {
+  MACHINES,
+  openSettings,
+  closeSettings,
+  typeInto,
+} = require('./settings_helpers');
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
 const MODELS = [
@@ -75,13 +80,11 @@ function pick(win, model) {
  * @returns {object} The one saveConfig the close posted.
  */
 function saveSettings(win, posted, config) {
-  click(win, byId(win, 'settings-btn'));
+  openSettings(win);
   send(win, {apiKeys: {}, ...config});
-  const budget = byId(win, 'cfg-max-budget');
-  budget.value = '7';
-  budget.dispatchEvent(new win.Event('input', {bubbles: true}));
+  typeInto(win, 'cfg-max-budget', '7');
   const from = posted.length;
-  click(win, byId(win, 'settings-panel-close'));
+  closeSettings(win);
   const saves = ofType(posted.slice(from), 'saveConfig');
   assert.strictEqual(saves.length, 1, 'closing the edited sheet saves once');
   assert.strictEqual(saves[0].config.max_budget, 7);

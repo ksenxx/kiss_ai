@@ -18,6 +18,7 @@ import platform
 import re
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -34,12 +35,12 @@ from kiss.agents.sorcar.persistence import (
     _current_db_path,
     _load_chat_context,
     _load_task_chain_context,
-    _record_frequent_task,
     _save_task_extra,
     _save_task_result,
     _task_has_transcript_events,
     _write_event_batch,
     task_end_ms,
+    usage_totals_event,
 )
 from kiss.agents.sorcar.relentless_agent import DEFAULT_MAX_BUDGET
 from kiss.agents.sorcar.sea_commands import named_commands_help
@@ -177,27 +178,56 @@ def _retried_cleanup_step(
 def _retire_printer_task(agent: Any, run_printer: Any, task_key: str) -> None:
     """Tell *run_printer* that *agent*'s run under *task_key* is over, then stop its recording.
 
-    Both hooks are duck-typed and optional.  The finish hook
-    (``JsonPrinter.agent_task_finished``) waits for the server's
-    ``STATE_LOCK``; a Stop landing in that wait would leave the state
-    the printer bridge created registered as an active task for the
-    daemon's lifetime, so the idempotent hook is called once more
-    before the Stop goes on.  ``stop_recording`` runs whatever the
-    hook did: it reads the thread's task binding, which the caller
-    restores next, so it runs only while that binding is *task_key*'s.
-    A Stop that landed before the run bound the thread leaves the
-    binding the calling task's (a sub-agent runs on its caller's
-    thread), whose live recording an unkeyed stop would retire.
+    Both hooks are duck-typed, optional and idempotent.  Once entered,
+    the finish hook (``JsonPrinter.agent_task_finished``) drops the
+    state the printer bridge registered for the run whatever Stop
+    lands in it.  A Stop raised earlier, as a call on the way to the
+    hook is entered, would skip it: the state would stay registered,
+    an active task of a thread that has left the run, and the Stop's
+    watchdog would go on interrupting whatever the thread runs next.
+
+    CPython raises an injected Stop only at a function's entry, after
+    a call returns or at a loop's back-edge, and another thread
+    can inject one only while this thread has given up the GIL: in a
+    blocking call or at one of those points.  After a Stop is raised
+    none is pending, so the next point raises none unless the thread
+    blocked on the way there (one injected at that point is raised at
+    the one after).  The hook is therefore the first call made here
+    (its lookup is an attribute read, not a ``getattr`` call) and is
+    made again at once when a ``BaseException`` cuts it short: the
+    second call is past the hook's entry before a Stop can be raised
+    again.  The caller repeats this function the same way, for a Stop
+    raised at its entry.
+
+    ``stop_recording`` runs whatever the hook did: it reads the
+    thread's task binding, which the caller restores next, so it runs
+    only while that binding is *task_key*'s.  A Stop that landed
+    before the run bound the thread leaves the binding the calling
+    task's (a sub-agent runs on its caller's thread), whose live
+    recording an unkeyed stop would retire.
 
     Args:
         agent: The agent whose run is over.
         run_printer: The printer the run was given.
         task_key: The task id the run was registered under.
     """
-    finished = getattr(run_printer, "agent_task_finished", None)
     try:
+        try:
+            finished = run_printer.agent_task_finished
+        except AttributeError:
+            finished = None
         if finished is not None:
-            _finish_printer_task(finished, agent, task_key)
+            try:
+                finished(agent, task_key)
+            except Exception:
+                logger.warning("agent_task_finished(%r) raised", task_key, exc_info=True)
+            except BaseException:
+                # Inline, not through a helper: its entry would come first.
+                try:
+                    finished(agent, task_key)
+                except Exception:
+                    logger.warning("agent_task_finished(%r) raised", task_key, exc_info=True)
+                raise
     finally:
         stop_rec = getattr(run_printer, "stop_recording", None)
         tl = getattr(run_printer, "_thread_local", None)
@@ -211,26 +241,6 @@ def _retire_printer_task(agent: Any, run_printer: Any, task_key: str) -> None:
                 # (every later broadcast under the task's id appends to it):
                 # a failure worth a trace, like the finish hook's.
                 logger.warning("stop_recording(%r) raised", task_key, exc_info=True)
-
-
-def _finish_printer_task(finished: Callable[[Any, str], Any], agent: Any, task_key: str) -> None:
-    """Call the printer's finish hook *finished*; once more when a Stop interrupted it.
-
-    Args:
-        finished: The printer's ``agent_task_finished`` hook.
-        agent: The agent whose run is over.
-        task_key: The task id the run was registered under.
-    """
-    try:
-        finished(agent, task_key)
-    except Exception:
-        logger.warning("agent_task_finished(%r) raised", task_key, exc_info=True)
-    except BaseException:
-        try:
-            finished(agent, task_key)
-        except Exception:
-            logger.warning("agent_task_finished(%r) raised", task_key, exc_info=True)
-        raise
 
 
 def _parse_result(result: str) -> dict[str, Any] | None:
@@ -501,45 +511,42 @@ class ChatSorcarAgent(SorcarAgent):
                 the same lock, so no late add can fall between the check
                 and the write.
         """
-        if unless_finished and task_end_ms(task_id) > 0:
-            return
-        owed_remote = self._bank_pending_remote_charges(task_id)
-        # One coherent triple (see usage_snapshot): three property reads
-        # could tear across a concurrent abandoned-subagent reclaim.
-        final_cost, final_tokens, final_steps = self.usage_snapshot()
-        _race_delay()  # test hook: widens the snapshot-to-save window
-        extra_payload["tokens"] = final_tokens
-        # Unrounded, like the live ``cost_usd`` and the late adds to the
-        # row: a parent row sums its children's exact spend.
-        extra_payload["cost"] = final_cost
-        extra_payload["steps"] = final_steps
-        # The run is over: stamp its end so sub-agents (which no server
-        # runner finalises) get a duration too.
-        extra_payload["endTs"] = int(time.time() * 1000)
-        self._persist_replay_events_if_missing(
-            task_id, prompt, parsed, result_summary,
-            usage=(final_cost, final_tokens, final_steps),
-        )
-        if owed_remote:
-            # The bank above may have grown the totals past the run's
-            # last usage event: persist the final ones as the task's
-            # latest, as a late charge of a finished row does, so its
-            # replayed header shows what its row holds.  Before the row
-            # is finished, so a save a Stop cuts persists it on retry (a
-            # repeat of the same totals is harmless).
-            _append_chat_event({
-                "type": "usage_info",
-                "text": "",
-                "taskId": task_id,
-                "total_tokens": final_tokens,
-                "cost": f"${final_cost:.4f}",
-                "cost_usd": final_cost,
-                "total_steps": final_steps,
-                "ts": int(time.time() * 1000),
-            }, task_id=task_id)
-        _save_task_extra(extra_payload, task_id=task_id)
+        while not (unless_finished and task_end_ms(task_id) > 0):
+            owed_remote = self._bank_pending_remote_charges(task_id)
+            # One coherent triple (see usage_snapshot): three property reads
+            # could tear across a concurrent sub-task fold.
+            final_cost, final_tokens, final_steps = self.usage_snapshot()
+            _race_delay()  # test hook: widens the snapshot-to-save window
+            extra_payload["tokens"] = final_tokens
+            # Unrounded, like the live ``cost_usd`` and the late adds to the
+            # row: a parent row sums its children's exact spend.
+            extra_payload["cost"] = final_cost
+            extra_payload["steps"] = final_steps
+            # The run is over: stamp its end so sub-agents (which no server
+            # runner finalises) get a duration too.
+            extra_payload["endTs"] = int(time.time() * 1000)
+            self._persist_replay_events_if_missing(
+                task_id, prompt, parsed, result_summary,
+                usage=(final_cost, final_tokens, final_steps),
+            )
+            if owed_remote:
+                # The bank above may have grown the totals past the run's
+                # last usage event: persist the final ones as the task's
+                # latest, as a late charge of a finished row does, so its
+                # replayed header shows what its row holds.  Before the row
+                # is finished, so a save a Stop cuts persists it on retry (a
+                # repeat of the same totals is harmless).
+                totals = usage_totals_event(task_id, final_tokens, final_cost, final_steps)
+                _append_chat_event({**totals, "ts": int(time.time() * 1000)}, task_id=task_id)
+            if _save_task_extra(extra_payload, task_id=task_id, owed_through=owed_remote):
+                return
+            # Another process charged the row after the bank above read
+            # its pending charges, and nothing was written: bank that
+            # charge too, so that the ledger this run's caller folds
+            # holds what the row holds, and save again.  A loop, as such
+            # charges can outnumber the frames the stack has.
 
-    def _bank_pending_remote_charges(self, task_id: str) -> bool:
+    def _bank_pending_remote_charges(self, task_id: str) -> int | None:
         """Bank on this run's ledger the remote charges its row got while no live agent held it.
 
         A remote sub-agent's late spend reported while the row runs is
@@ -552,7 +559,8 @@ class ChatSorcarAgent(SorcarAgent):
         here exactly as the live path does, with ``TASK_USAGE_LOCK`` held
         (so no charge this process records falls between this and the
         snapshot after it): the mark first, with the ledger totals it is
-        banked over, then the record, under the offsets' publish lock.
+        banked over, then the record, under the offsets' publish lock
+        (taken in slices: a Stop reaches a save another publisher blocks).
         A charge already marked is not marked again and its record is
         appended again: the ledger counts its key once, so one the live
         agent banked adds nothing, and one whose bank a Stop cut after
@@ -563,29 +571,28 @@ class ChatSorcarAgent(SorcarAgent):
             task_id: The finishing run's row.
 
         Returns:
-            Whether the row is owed any charge its totals do not hold
-            yet (banked here or by the live agent).
+            The id of the newest charge the row is owed and its totals
+            do not hold yet (banked here or by the live agent), ``0``
+            when it is owed none, ``None`` when they could not be read.
         """
-        from kiss.agents.sorcar.persistence import (
-            _mark_remote_charge_banked,
-            _pending_remote_charges,
-        )
+        from kiss.agents.sorcar.persistence import _pending_remote_charges
         from kiss.agents.sorcar.relentless_agent import _OFFSET_PUBLISH_LOCK
-        from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
+        from kiss.agents.sorcar.sorcar_agent import _bank_remote_charge
 
-        owed = False
+        newest = None
         try:
-            for charge, cost, tokens, steps, marked in _pending_remote_charges(task_id):
-                owed = True
-                with _OFFSET_PUBLISH_LOCK:
-                    if not marked:
-                        _mark_remote_charge_banked(charge, *self.usage_snapshot())
-                    _attribute_sub_usage(self, cost, tokens, steps, key=f"remote:{charge}")
+            pending = _pending_remote_charges(task_id)
+            newest = pending[-1][0] if pending else 0
+            for charge, cost, tokens, steps, marked in pending:
+                locked_call(
+                    _OFFSET_PUBLISH_LOCK, _bank_remote_charge,
+                    self, charge, cost, tokens, steps, marked,
+                )
         except Exception:
             # Never fails the final save: an unbanked charge is still
             # settled into the row by its finalization.
             logger.warning("pending remote charges of %s not banked", task_id, exc_info=True)
-        return owed
+        return newest
 
     def _build_extra_payload(
         self,
@@ -647,7 +654,7 @@ class ChatSorcarAgent(SorcarAgent):
             settings["Parent task id"] = parent_id
         return settings
 
-    def _scratch_dir(self) -> str:
+    def _tree_scratch_dir(self) -> str:
         """One scratch directory per task, ``./tmp/<task-id>/``.
 
         Concurrent siblings in the same work dir then never share a file
@@ -853,14 +860,17 @@ class ChatSorcarAgent(SorcarAgent):
         Args:
             prompt_template: The task prompt.  First so the historical
                 ``run("task", ...)`` call keeps working; every other
-                parameter up to *tools_hook* is forwarded verbatim to
-                :meth:`SorcarAgent.run`, in that method's order and
-                with its defaults — see its docstring for what each
-                one does.  *model_name* is resolved here once
-                (:meth:`_resolve_model_name`) and the resolved name is
-                what the base run receives.
+                parameter up to *tools_hook* but *arguments* is
+                forwarded verbatim to :meth:`SorcarAgent.run`, in that
+                method's order and with its defaults — see its
+                docstring for what each one does.  *model_name* is
+                resolved here once (:meth:`_resolve_model_name`) and
+                the resolved name is what the base run receives, as
+                is the profile decided for *tool_profile*.
             model_name: LLM model to use.  Defaults to the config value.
-            arguments: Values filling the placeholders of *prompt_template*.
+            arguments: Values filling the placeholders of
+                *prompt_template*, and of nothing else: they are filled
+                in here, before the chat history is put in front.
             system_prompt: Suffix appended to the actual system prompt.
             tools: Tools added on top of the built-in toolset.
             max_steps: Maximum steps per sub-session.
@@ -890,10 +900,11 @@ class ChatSorcarAgent(SorcarAgent):
             tool_call_hook: Hook called before every tool call.
             llm_response_hook: Hook called after every model reply.
             use_memory: Per-run persistent-memory toggle.
-            tool_profile: Tool profile name the toolset is cut down to;
-                the EFFECTIVE profile (``review`` for a reviewer
-                sub-agent asked for none) is what the ``task_settings``
-                event reports.
+            tool_profile: Tool profile name the toolset is cut down to.
+                The EFFECTIVE profile (``review`` for a reviewer
+                sub-agent asked for none) is decided here, on the task
+                without the chat history: the ``task_settings`` event
+                reports it and the base run is given it.
             live_browser: The daemon's ``BrowserTabService``.
             prompt_suffix: Caller-supplied suffix already appended to
                 *prompt_template*, recorded so a ``run_agent`` sub-task
@@ -907,10 +918,11 @@ class ChatSorcarAgent(SorcarAgent):
                 soon as the history row exists, before any event of the
                 run is broadcast.
             _history_prompt: The raw user text to persist and display
-                (history row, frequent-tasks table, last-user-prompt
-                cache) in place of *prompt_template*, which may carry an
-                internal directive the LLM must see (a slash-command
-                run).  ``None`` or blank: *prompt_template* is used.
+                (history row, last-user-prompt cache) in place of
+                *prompt_template*, which may carry an internal directive
+                the LLM must see (a slash-command run).  ``None`` or
+                blank: *prompt_template* with its *arguments* filled in
+                is used.
             _open_bare_path: Whether a *prompt_template* that is only a
                 filesystem path gets the "open it" directive.  The task
                 runner passes False for a run it starts on behalf of a
@@ -926,17 +938,23 @@ class ChatSorcarAgent(SorcarAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
+        # The arguments are filled in here, once: every reader below
+        # (the history row, the profile and classifier verdicts, the
+        # prompt) gets the task as the model sees it, and what
+        # ``build_chat_prompt`` puts around it (an earlier task or
+        # result may quote ``{task}``) is not a template, so the base
+        # run is given no arguments.
+        task_text = substitute_prompt_args(prompt_template, arguments)
         # A caller (currently the slash-command dispatch in
         # ``TaskRunner._run_task_inner``) can supply the raw user text
-        # to use for every history / display / frequent-task write,
-        # while ``prompt_template`` carries an internal directive the
-        # LLM must actually see.  Absent, the two are the same and
-        # ``prompt_template`` is used everywhere — the original
-        # behaviour.
+        # to use for every history / display write, while
+        # ``prompt_template`` carries an internal directive the LLM
+        # must actually see.  Absent, the two are the same and the
+        # task is used everywhere.
         history_prompt = (
             _history_prompt
             if isinstance(_history_prompt, str) and _history_prompt
-            else prompt_template
+            else task_text
         )
         if self._chat_id == "":
             self._chat_id = _allocate_chat_id()
@@ -975,9 +993,9 @@ class ChatSorcarAgent(SorcarAgent):
             base_system_prompt or "",
         ).strip()
         agent_prompt = self.build_chat_prompt(
-            with_open_directive(prompt_template, work_dir or ".")
+            with_open_directive(task_text, work_dir or ".")
             if open_bare_path
-            else prompt_template,
+            else task_text,
             name_commands=open_bare_path,
         )
 
@@ -994,30 +1012,29 @@ class ChatSorcarAgent(SorcarAgent):
         # the user's config, which the picker may change between two
         # reads (see ``SorcarAgent._resolve_model_name``).
         resolved_model = self._resolve_model_name(model_name)
-        # The tool profile is the EFFECTIVE one (``SorcarAgent.run``
-        # resolves the same rule from the same name a moment later): a
-        # reviewer-marked sub-agent asked for no profile runs
-        # ``review``, not the full toolset.  It gates the classifier
-        # and is recorded in the task settings below.
+        # The tool profile is the EFFECTIVE one, decided HERE, once,
+        # and passed down like the model: a reviewer-marked sub-agent
+        # asked for no profile runs ``review`` unless its task asks for
+        # changes, and ``SorcarAgent.run`` could only judge
+        # ``agent_prompt``, where an earlier task of the chat ("Fix the
+        # parser bug") reads as such a request.  The verdict gates the
+        # classifier and is recorded in the task settings below.
         self._tool_profile_name = canonical_tool_profile(tool_profile)
-        effective_profile = self._tool_profile(prompt_template)
+        effective_profile = self._tool_profile(task_text)
         # The verdict is about the task as submitted, not about the
         # conversation ``agent_prompt`` prepends to it: classify the
         # raw task here, ahead of ``SorcarAgent.run`` (which reuses the
         # verdict) — but only when the verdict can choose the prompt;
-        # a run that cannot edit files gets SYSTEM_LITE.md regardless.
+        # a run that cannot edit files gets SYSTEM_LITE.md regardless,
+        # and one with its own base prompt that prompt.
         # The reset first drops a verdict a previous run of this agent
         # left behind by crashing before its own cleanup; a verdict the
         # task runner pre-seeded survives it.
         self._reset_task_classification()
         if classification_chooses_prompt(
-            resolve_tool_profile(effective_profile), append_basic_tools,
+            resolve_tool_profile(effective_profile), append_basic_tools, base_system_prompt,
         ):
-            self._classify_task_once(
-                resolved_model,
-                substitute_prompt_args(prompt_template, arguments),
-                model_config,
-            )
+            self._classify_task_once(resolved_model, task_text, model_config)
         resolved_budget = (
             run_max_budget if run_max_budget is not None else DEFAULT_MAX_BUDGET
         )
@@ -1045,7 +1062,8 @@ class ChatSorcarAgent(SorcarAgent):
         # capture the epoch and later bank its spend into it, so the
         # epoch must not be swapped again by ``_reset`` (see
         # ``_begin_run_usage_epoch``).  Classifier spend is held apart
-        # until the ``finally`` below folds it, so nothing is lost here.
+        # until ``_reset`` banks it (the ``finally`` below, for a run
+        # that ends earlier), so nothing is lost here.
         self.reset_usage()
         # ``super().run`` binds the printer from the *printer* argument
         # (``None`` gives a fresh console printer or none, never the one
@@ -1064,13 +1082,12 @@ class ChatSorcarAgent(SorcarAgent):
         # Whether the run returned normally (the cleanup re-raises a
         # Stop that landed in one of its own steps only then).
         completed = False
-        # Every remaining setup step (the id's publication, state
-        # registration, printer wiring, frequent-task recording, ...)
-        # must run inside the try below: an exception in any of them
-        # would otherwise bypass the cleanup and leave a permanently
-        # "running" task behind (F-14).  The locals the cleanup reads
-        # are bound BEFORE the row is allocated, so the try can begin
-        # the instant its id is assigned.
+        # Every remaining setup step (the row's allocation, the id's
+        # publication, state registration, printer wiring, ...) must run
+        # inside the try below: an exception in any of them would
+        # otherwise bypass the cleanup and leave a permanently "running"
+        # task behind (F-14).  The locals the cleanup reads are bound
+        # BEFORE the try.
         # The calling thread's previous task binding is restored on exit:
         # a side-channel task (``/update``, merge conflict resolution)
         # runs on a worker thread that then attributes the child's spend
@@ -1081,14 +1098,17 @@ class ChatSorcarAgent(SorcarAgent):
         # thread rewrote the offset.
         previous_task_id = ""
         broadcast = getattr(run_printer, "broadcast", None)
-        task_id, self._chat_id = _add_task(
-            history_prompt, chat_id=self._chat_id, extra=early_extra,
-        )
-        # No call between the assignment and the try: a Stop is delivered
-        # at a call's return, and one landing here would leave the row
-        # committed, unpublished and never finalised.
-        task_key = task_id
+        # The row's id is chosen here, not by the allocation: a Stop
+        # landing as the allocation returns is raised before its result
+        # is bound, and the cleanup would finish an id naming no row
+        # while the committed one stayed "running".  When the allocation
+        # fails, or a Stop lands in it before its commit, the id names
+        # no row and every cleanup step keyed by it writes nothing.
+        task_id = uuid.uuid4().hex
         try:
+            _add_task(
+                history_prompt, chat_id=self._chat_id, extra=early_extra, task_id=task_id,
+            )
             # The publication's lock wait is interruptible, so it lives
             # inside the protected region: a Stop landing in it used to
             # skip the whole cleanup, and the runner (which finds the
@@ -1098,7 +1118,7 @@ class ChatSorcarAgent(SorcarAgent):
                 tl = getattr(run_printer, "_thread_local", None)
                 if tl is not None:
                     previous_task_id = getattr(tl, "task_id", "") or ""
-                    tl.task_id = task_key
+                    tl.task_id = task_id
                 allocated = getattr(run_printer, "agent_task_allocated", None)
                 if allocated is not None:
                     allocated(self, task_id, self._chat_id)
@@ -1131,7 +1151,7 @@ class ChatSorcarAgent(SorcarAgent):
                 task_id=task_id,
                 tool_profile=effective_profile,
             )
-            if run_printer is None and task_id:
+            if run_printer is None:
                 # Headless (a fan-out child without a printer): persist
                 # the event ourselves, as :meth:`_persist_replay_events_if_missing`
                 # does for the prompt and result.
@@ -1149,14 +1169,11 @@ class ChatSorcarAgent(SorcarAgent):
             _safe_broadcast(
                 broadcast, {"type": "task_settings", "settings": task_settings},
             )
-            if self._subagent_info is None:
-                _record_frequent_task(history_prompt)
 
             run_started = True
             result = super().run(
                 model_name=resolved_model,
                 prompt_template=agent_prompt,
-                arguments=arguments,
                 system_prompt=system_prompt,
                 tools=tools,
                 max_steps=max_steps,
@@ -1179,7 +1196,7 @@ class ChatSorcarAgent(SorcarAgent):
                 tool_call_hook=tool_call_hook,
                 llm_response_hook=llm_response_hook,
                 use_memory=use_memory,
-                tool_profile=tool_profile,
+                tool_profile=effective_profile,
                 live_browser=live_browser,
                 prompt_suffix=prompt_suffix,
                 system_prompt_hook=system_prompt_hook,
@@ -1227,14 +1244,22 @@ class ChatSorcarAgent(SorcarAgent):
                 self._last_result_summary = result_summary
                 try:
                     if run_printer is not None:
-                        _retire_printer_task(self, run_printer, task_key)
+                        try:
+                            _retire_printer_task(self, run_printer, task_id)
+                        except BaseException:
+                            # A Stop raised as the call was entered kept
+                            # all of it from running.  The repeat, made at
+                            # once, is past that entry before a Stop can
+                            # be raised again (see _retire_printer_task).
+                            _retire_printer_task(self, run_printer, task_id)
+                            raise
                 except BaseException as exc:  # noqa: BLE001
                     first = _first_cleanup_error(first, "_retire_printer_task", exc)
                 finally:
                     try:
                         if run_printer is not None:
                             tl = getattr(run_printer, "_thread_local", None)
-                            if tl is not None and getattr(tl, "task_id", "") == task_key:
+                            if tl is not None and getattr(tl, "task_id", "") == task_id:
                                 tl.task_id = previous_task_id
                     except BaseException as exc:  # noqa: BLE001
                         first = _first_cleanup_error(first, "restore task binding", exc)
@@ -1298,7 +1323,7 @@ class ChatSorcarAgent(SorcarAgent):
                                 )
                                 # One coherent triple (see usage_snapshot):
                                 # three property reads could tear across a
-                                # concurrent abandoned-subagent reclaim.
+                                # concurrent sub-task fold.
                                 # Read and saved under TASK_USAGE_LOCK, so
                                 # a sub-task's late charge either lands on
                                 # the ledger before this read or finds the

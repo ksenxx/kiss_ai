@@ -93,7 +93,7 @@ def _tags(task_id: str) -> list[str]:
     return str(row[0] or "").split(",")
 
 
-def _traced(run: Callable[[], None]) -> list[str]:
+def _traced(run: Callable[[], object]) -> list[str]:
     """Run *run* on this thread with the lock probe on its connection; return what it saw."""
     seen: list[str] = []
     db = th._get_db()
@@ -135,7 +135,7 @@ def _commit_between_scan_and_txn(
         seen.append("committed before txn")
 
 
-def _run_with_late_event(task_id: str, finish: Callable[[], None]) -> list[str]:
+def _run_with_late_event(task_id: str, finish: Callable[[], object]) -> list[str]:
     """Run *finish* here while a peer commits a secret event between its scan and its write."""
     seen: list[str] = []
     db = th._get_db()
@@ -234,7 +234,7 @@ def _pause_after_each_scan(
 
 
 def _finalize_paused_after_each_scan(
-    finalize: Callable[[], None], scanned: threading.Event, resume: threading.Event,
+    finalize: Callable[[], object], scanned: threading.Event, resume: threading.Event,
     seen: list[str],
 ) -> None:
     """Finalizer thread: run *finalize* with the lock probe, pausing after each clean scan."""
@@ -246,7 +246,7 @@ def _finalize_paused_after_each_scan(
         th._close_thread_db()
 
 
-def _overtake_every_scan(task_id: str, finalize: Callable[[], None]) -> list[str]:
+def _overtake_every_scan(task_id: str, finalize: Callable[[], object]) -> list[str]:
     """Run *finalize* on a thread and replay a transcript after each of its clean scans.
 
     Three replays of one clean event each overtake the first scan and

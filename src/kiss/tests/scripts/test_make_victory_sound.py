@@ -62,15 +62,10 @@ def test_envelope_shapes_attack_sustain_and_release() -> None:
     assert jingle.envelope(0.18 + 0.02, 0.18) > 0.5
 
 
-def test_tone_has_the_fundamental_and_vibrato_only_on_held_notes() -> None:
-    """A tone starts at zero phase; a short note's pitch is fixed while a
-    held note's drifts with the vibrato."""
-    assert jingle.tone(440.0, 0.0, 0.1) == 0.0
-    period = 1 / 440.0
-    # Fixed pitch: one period later the short tone repeats exactly.
-    assert jingle.tone(440.0, period, 0.1) == pytest.approx(0.0, abs=1e-6)
-    # Vibrato on a held note: the same instant no longer lands on a cycle.
-    assert abs(jingle.tone(440.0, 50 * period, 0.8)) > 1e-3
+def test_tone_has_the_fundamental_at_a_fixed_pitch() -> None:
+    """A tone starts at zero phase and repeats one period later."""
+    assert jingle.tone(440.0, 0.0) == 0.0
+    assert jingle.tone(440.0, 1 / 440.0) == pytest.approx(0.0, abs=1e-6)
 
 
 @pytest.mark.skipif(

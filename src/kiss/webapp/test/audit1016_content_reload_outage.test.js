@@ -30,6 +30,7 @@ const {
   sleep,
   click,
   all,
+  ofType,
   openDirtyContentTab,
 } = require('./ui_antipattern_harness');
 
@@ -42,7 +43,7 @@ async function testReloadSwallowedByOutageKeepsEdits() {
 
   // Save -> the daemon refuses (changed on disk) -> the conflict toast.
   click(win, win.document.querySelector('.content-save-btn'));
-  const saves = posted.filter(m => m.type === 'saveFile');
+  const saves = ofType(posted, 'saveFile');
   assert.strictEqual(saves.length, 1, 'Save sends one saveFile');
   send(win, {
     type: 'fileSaved',
@@ -57,7 +58,7 @@ async function testReloadSwallowedByOutageKeepsEdits() {
   assert.ok(reload, "the conflict toast offers 'Reload from disk'");
   click(win, reload);
   assert.strictEqual(
-    posted.filter(m => m.type === 'openFile').length,
+    ofType(posted, 'openFile').length,
     1,
     'the reload asks the daemon for the file',
   );

@@ -20,22 +20,23 @@ import time
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.tests.persistence_helpers import close_db
 
 
 def _redirect(tmpdir: str) -> tuple:
     """Point persistence at a temp DB and force a fresh writer thread."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+    saved = (th._DB_PATH, th._KISS_DIR)
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "history.db"
-    th._close_db()
+    close_db()
     return saved
 
 
 def _restore(saved: tuple) -> None:
-    th._close_db()
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+    close_db()
+    (th._DB_PATH, th._KISS_DIR) = saved
 
 
 class TestParallelEventThroughput:

@@ -32,11 +32,10 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {makeRunner} = require('./ui_antipattern_harness');
+const {makeRunner, rightClick} = require('./ui_antipattern_harness');
+const {MEDIA, flushMicrotasks} = require('./simplify2_harness');
 
 const {test, report} = makeRunner();
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 /**
  * A page whose clipboard writeText is settled by hand per text, with
@@ -78,20 +77,13 @@ function makeWindow(html, script) {
     } else {
       p.reject(new Error('refused'));
     }
-    await new Promise(resolve => setImmediate(resolve));
+    await flushMicrotasks();
   }
   return {win, writes, settle};
 }
 
 function menuCopy(win, target) {
-  target.dispatchEvent(
-    new win.MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 10,
-    }),
-  );
+  rightClick(win, target);
   const item = win.document.querySelector(
     '#sorcar-content-context-menu .sorcar-ctx-item[data-action="copy"]',
   );

@@ -19,7 +19,7 @@
 // notification, and the daemon's workDirChanged broadcast re-scopes the
 // page to a pick made in another browser.
 
-/* global require, __dirname */
+/* global require */
 
 'use strict';
 
@@ -39,11 +39,14 @@ const {
   pick,
   errorNotifications,
 } = require('./workdir_helpers');
-const {click, loadMainCss} = require('./simplify2_harness');
+const {
+  click,
+  loadMainCss,
+  tabIds: openTabIds,
+  MEDIA,
+} = require('./simplify2_harness');
 const {showSection} = require('./ui_antipattern_harness');
 const {cssRule} = require('./designTokens');
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 const NOW = Date.now() / 1000;
 const RECENTS = [
@@ -126,7 +129,6 @@ function testRefusedAdoptionIsTakenBack() {
     },
   });
   assert.strictEqual(currentDir(win), '/home/u/newest');
-  win.close();
 }
 
 /** Submit *text* from the composer; the posted `submit` message. */
@@ -137,12 +139,6 @@ function submitPrompt(win, posted, text) {
   const sent = msgs(posted, 'submit');
   assert.strictEqual(sent.length, before + 1, 'one submit is posted');
   return sent[sent.length - 1];
-}
-
-/** The ids of every open tab (a background chat has no strip entry, so
- *  the registry, not the DOM, lists them). */
-function openTabIds(win) {
-  return Array.from(win._testApi.openTabs(), t => t.id);
 }
 
 /** Bring a background chat on screen the way the Chats panel's pick does. */

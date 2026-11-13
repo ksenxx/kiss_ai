@@ -24,7 +24,6 @@ both ends) are used; nothing is replaced.
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
 import socket
@@ -35,21 +34,18 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
-from websockets.frames import OP_TEXT, Frame
+from websockets.frames import Frame, Opcode
 
 from kiss.agents.sorcar.chrome_bridge import ChromeBridge, ChromeBridgeError
 from kiss.tests.agents.sorcar.test_chrome_bridge import (
     ExtensionPeer,
     _call_in_thread,
     _eventually,
+    _hello,
 )
 
 _BUFFER_BYTES = 4096
 _PAYLOAD = "x" * (8 * 1024 * 1024)
-
-
-def _proof(key: str, message: str) -> str:
-    return hashlib.sha256(f"{key}:{message}".encode()).hexdigest()
 
 
 class _StuckPeer:
@@ -71,7 +67,7 @@ class _StuckPeer:
             headers += self.sock.recv(1)
         assert b"101 Switching Protocols" in headers
         nonce = self._receive_json()["nonce"]
-        self._send_json({"type": "hello", "proof": _proof(bridge.token, nonce)})
+        self._send_json(_hello(bridge.token, nonce))
         assert self._receive_json()["type"] == "hello_ok"
 
     def _receive_exact(self, size: int) -> bytes:
@@ -84,7 +80,7 @@ class _StuckPeer:
 
     def _receive_json(self) -> dict[str, Any]:
         first, second = self._receive_exact(2)
-        assert first & 15 == OP_TEXT and not second & 128
+        assert first & 15 == Opcode.TEXT and not second & 128
         size = second & 127
         if size == 126:
             (size,) = struct.unpack("!H", self._receive_exact(2))
@@ -93,7 +89,7 @@ class _StuckPeer:
         return dict(json.loads(self._receive_exact(size)))
 
     def _send_json(self, message: dict[str, Any]) -> None:
-        self.sock.sendall(Frame(OP_TEXT, json.dumps(message).encode()).serialize(mask=True))
+        self.sock.sendall(Frame(Opcode.TEXT, json.dumps(message).encode()).serialize(mask=True))
 
     def close(self) -> None:
         self.sock.close()
@@ -194,7 +190,8 @@ def test_replacing_a_peer_that_ignores_the_close_handshake_does_not_stall_the_ne
     try:
         assert bridge.wait_for_extension(5)
         replaced = bridge._conn
-        fresh = ExtensionPeer(bridge.port, bridge.token, responder=_answer)
+        # No readiness ping: it would wait a stalled reader out before the clock starts.
+        fresh = ExtensionPeer(bridge.port, bridge.token, responder=_answer, wait_published=False)
         assert _eventually(lambda: bridge._conn is not None and bridge._conn is not replaced)
         started = time.monotonic()
         assert bridge.call("list_tabs", timeout=5) == "answered"

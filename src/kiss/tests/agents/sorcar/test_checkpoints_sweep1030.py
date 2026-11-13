@@ -18,13 +18,19 @@ patched constant, a test double).
 
 from __future__ import annotations
 
+import os
+import select
+import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
+from types import FrameType
 
 from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.processes import kill_process_tree, start_process_group
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
     end_tool_call,
@@ -155,6 +161,74 @@ def test_a_stop_injected_into_a_slow_checkpoint_ends_git(tmp_path: Path) -> None
     assert not thread.is_alive()
     assert isinstance(outcome.get("error"), KeyboardInterrupt), outcome
     assert _git_processes(repo) == ""
+
+
+class _GitAddLaunchStop:
+    """Profile hook parking its thread as ``start_process_group`` returns from starting ``git add``.
+
+    A Stop injected while the thread is parked is raised the moment the
+    hook returns: as the launch returns, before its caller holds git.
+    """
+
+    def __init__(self) -> None:
+        self.parked = threading.Event()
+        self.resume = threading.Event()
+        self.git: subprocess.Popen[bytes] | None = None
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        launch = event == "return" and frame.f_code is start_process_group.__code__
+        if launch and "add" in frame.f_locals["args"][0]:
+            sys.setprofile(None)
+            self.git = frame.f_locals["proc"]
+            self.parked.set()
+            self.resume.wait(30)
+
+    def checkpoint(self, tools: UsefulTools, outcome: dict) -> None:
+        """:func:`_checkpoint` on a thread this hook profiles."""
+        sys.setprofile(self)
+        _checkpoint(tools, outcome)
+
+
+@posix_only("a FIFO and a shell filter")
+def test_a_stop_as_git_starts_ends_it_and_its_descendants(tmp_path: Path) -> None:
+    """Audit 2026-11-10, S1-F1: a Stop raised as the launch of git returns ends git's group.
+
+    The launch stood before the ``try`` whose handler ends git, and its
+    result was not bound yet: ``git add`` and the clean filter it runs
+    outlived the checkpoint and the task.  The filter writes a line to
+    a FIFO once it runs and holds it open while it lives; ``cat``
+    passes the line on and exits once the filter is gone.
+    """
+    repo = _repo(tmp_path / "repo")
+    fifo = tmp_path / "filter"
+    os.mkfifo(fifo)
+    held = f"{{ echo >&3; exec sleep 60; }} 3>{shlex.quote(str(fifo))}"
+    _git(repo, "config", "filter.slow.clean", held)
+    (repo / ".gitattributes").write_text("*.bin filter=slow\n")
+    (repo / "slow.bin").write_text("x\n")
+    hook = _GitAddLaunchStop()
+    outcome: dict = {}
+    thread = threading.Thread(
+        target=hook.checkpoint, args=(UsefulTools(work_dir=str(repo)), outcome))
+    thread.start()
+    assert hook.parked.wait(30) and hook.git is not None and thread.ident is not None
+    relay = subprocess.Popen(["cat", fifo], stdout=subprocess.PIPE)
+    try:
+        assert relay.stdout and select.select([relay.stdout], [], [], 30)[0]  # the filter runs
+        inject_async_exception(thread.ident, KeyboardInterrupt)
+        hook.resume.set()
+        thread.join(30)
+        assert not thread.is_alive()
+        assert isinstance(outcome.get("error"), KeyboardInterrupt), outcome
+        assert relay.wait(10) == 0  # end of file: the filter, git's descendant, is gone
+        assert hook.git.wait(10) < 0  # and git itself, the group's leader, was ended
+    finally:
+        hook.resume.set()
+        relay.kill()
+        relay.communicate()
+        if hook.git.returncode is None:  # left running by the product: not the next test's
+            kill_process_tree(hook.git)
+            hook.git.wait(10)
 
 
 def _checkpoint_inside_tool_call(tools: UsefulTools, outcome: dict) -> None:

@@ -13,6 +13,10 @@ daemon tells the two apart by stamping the steering echo with
 the durable ``recordOnly`` copy the drain hook emits for a message
 queued before the task row existed — so the flag is persisted with the
 event and a replay renders the same panel.
+
+Both echoes also name the message they answer (``promptIds``, the
+``promptId`` the page sent it under), so the page does not take the
+echo of another message with the same text for its own.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ class TestSteerPromptEchoFlag:
         h.server._handle_command({
             "type": "appendUserMessage",
             "prompt": "FOCUS ON THE LOGIN BUG",
+            "promptId": "p-live",
             "tabId": "tab-parent",
         })
         rec = [
@@ -50,6 +55,7 @@ class TestSteerPromptEchoFlag:
         ]
         assert rec, "the steering echo was not recorded"
         assert rec[0].get("steer") is True
+        assert rec[0].get("promptIds") == ["p-live"]
         assert _steer_prompts(
             h.persisted_events(h.parent_task_id), "FOCUS ON THE LOGIN BUG",
         ), "the persisted echo lost its steer flag"
@@ -60,6 +66,7 @@ class TestSteerPromptEchoFlag:
         h.server._handle_command({
             "type": "appendUserMessage",
             "prompt": "QUEUED BEFORE THE ROW",
+            "promptId": "p-queued",
             "tabId": "tab-parent",
         })
         assert h.parent_state.unattributed_prompt_echoes == ["QUEUED BEFORE THE ROW"]
@@ -80,6 +87,7 @@ class TestSteerPromptEchoFlag:
         )
         assert persisted, "the durable copy lost its steer flag"
         assert "recordOnly" not in persisted[0]
+        assert persisted[0].get("promptIds") == ["p-queued"]
 
     def test_task_own_prompt_is_not_steer(self) -> None:
         """The task's own ``prompt`` event (the agent's print) has no flag."""
@@ -93,4 +101,4 @@ class TestSteerPromptEchoFlag:
             e for e in h.recording(h.parent_task_id)
             if e.get("type") == "prompt" and e.get("text") == "the task text"
         ]
-        assert rec and "steer" not in rec[0]
+        assert rec and "steer" not in rec[0] and "promptIds" not in rec[0]

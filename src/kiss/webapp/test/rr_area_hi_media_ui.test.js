@@ -12,12 +12,13 @@
 //   followupSuggestionClickCopies.test.js).
 // - I-RC2: replacing the input history cache resets a live ArrowUp/
 //   ArrowDown cycling position instead of resuming at a stale index
-//   into the new list.
+//   into the new list; so does switching tabs, which puts another
+//   chat's draft into the composer.
 
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, readyTabId} = require('./simplify2_harness');
 
 // Every open tab's title, rendered or not: chat tabs have no row of
 // their own any more, so a background chat's title is only in the
@@ -37,7 +38,7 @@ const CLIPPED = 'x'.repeat(30) + '\u2026';
 
 function testActiveTabTitleClipped() {
   const {win, posted} = makePage();
-  const tabId = posted.find(m => m.type === 'ready').tabId;
+  const tabId = readyTabId(posted);
   send(win, {type: 'setTaskText', tabId, text: LONG});
   assert.ok(
     allTabTitles(win).includes(CLIPPED),
@@ -48,7 +49,7 @@ function testActiveTabTitleClipped() {
 
 function testBackgroundTabTitleClipped() {
   const {win, posted} = makePage();
-  const tab1 = posted.find(m => m.type === 'ready').tabId;
+  const tab1 = readyTabId(posted);
   win._testApi.createNewTab(); // becomes the active tab
   send(win, {type: 'task_events', tabId: tab1, task: LONG, events: []});
   assert.ok(
@@ -60,7 +61,7 @@ function testBackgroundTabTitleClipped() {
 
 function testFollowupBarLabel() {
   const {win, posted} = makePage();
-  const tabId = posted.find(m => m.type === 'ready').tabId;
+  const tabId = readyTabId(posted);
   win._testApi.hideWelcome();
   send(win, {type: 'followup_suggestion', tabId, text: 'Do X next'});
   const bar = win.document.querySelector('#output .followup-bar');
@@ -104,11 +105,44 @@ function testInputHistoryReplaceResetsCycling() {
   console.log('  ok - inputHistory replace resets the cycling position');
 }
 
+function testTabSwitchResetsHistoryCycling() {
+  const {win} = makePage();
+  const inp = win.document.getElementById('task-input');
+  win._testApi.endLaunch();
+  send(win, {
+    type: 'tabs_state',
+    tabs: [
+      {tabId: 'a', chatId: 'chat-a', title: 'A'},
+      {tabId: 'b', chatId: 'chat-b', title: 'B'},
+    ],
+  });
+  win._testApi.switchToTab('b');
+  inp.value = 'draft of chat B';
+  inp.dispatchEvent(new win.Event('input', {bubbles: true}));
+
+  win._testApi.switchToTab('a');
+  send(win, {type: 'inputHistory', tasks: ['old-0', 'old-1']});
+  key(win, inp, 'ArrowUp');
+  assert.strictEqual(inp.value, 'old-0', 'ArrowUp recalls in chat A');
+
+  // Chat B's draft is no history entry: ArrowDown leaves it.
+  win._testApi.switchToTab('b');
+  assert.strictEqual(inp.value, 'draft of chat B');
+  key(win, inp, 'ArrowDown');
+  assert.strictEqual(
+    inp.value,
+    'draft of chat B',
+    'ArrowDown after a tab switch must not wipe the restored draft',
+  );
+  console.log('  ok - a tab switch resets the cycling position');
+}
+
 function main() {
   testActiveTabTitleClipped();
   testBackgroundTabTitleClipped();
   testFollowupBarLabel();
   testInputHistoryReplaceResetsCycling();
+  testTabSwitchResetsHistoryCycling();
   console.log('rr_area_hi_media_ui: all tests passed');
   process.exit(0);
 }

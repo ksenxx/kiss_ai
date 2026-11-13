@@ -251,22 +251,16 @@ def kiss_home() -> Iterator[Path]:
     """Point persistence at a throwaway KISS_HOME for this test."""
     home = Path(tempfile.mkdtemp(prefix="kiss-review0911-"))
     saved_env = os.environ.get("KISS_HOME")
-    saved = (persistence._DB_PATH, persistence._db_conn, persistence._KISS_DIR)
+    saved = (persistence._DB_PATH, persistence._KISS_DIR)
     os.environ["KISS_HOME"] = str(home)
     persistence._KISS_DIR = home
     persistence._DB_PATH = home / "history.db"
-    persistence._db_conn = None
     try:
         yield home
     finally:
-        if persistence._db_conn is not None:
-            try:
-                persistence._db_conn.close()
-            except Exception:  # pragma: no cover — cleanup best-effort
-                pass
+        persistence._close_thread_db()
         (
             persistence._DB_PATH,
-            persistence._db_conn,
             persistence._KISS_DIR,
         ) = saved
         if saved_env is None:

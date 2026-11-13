@@ -45,9 +45,7 @@ def history_db():
     tmpdir = tempfile.mkdtemp()
     saved = _redirect(tmpdir)
     yield
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
+    th._close_thread_db()
     _restore(saved)
     shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -189,6 +187,21 @@ class TestSpendFollowsTheModelThatRan:
             assert _by_model() == {"claude-opus-5-5": (3.0, 300)}
             db.execute("DELETE FROM task_history WHERE id = ?", (task,))
             db.commit()
+
+    def test_a_damaged_event_is_left_out_of_the_split(self) -> None:
+        """An events row that is not JSON neither fails the charge and the save nor counts."""
+        task, _ = th._add_task("task", "", {"model": "claude-opus-5-5"})
+        th._append_chat_event(_llm_call("claude-opus-5-5", 2.0, 200), task_id=task)
+        th._get_db().execute(
+            "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, 99, ?, 0)",
+            (task, '{"type": "llm_call", "stage": "gate_stage", "cost": 1.0'),
+        )
+        th._record_model_charge(task, "gpt-6-astra", 0.5, 50, "review-1")
+        th._save_task_extra({"cost": 3.0, "tokens": 300, "steps": 1}, task_id=task)
+        assert json.loads(_model_costs(task)) == {
+            "claude-opus-5-5": [2.0, 200],
+            "gpt-6-astra": [0.5, 50],
+        }
 
 
 _MODEL = "claude-opus-5-5"

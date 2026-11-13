@@ -42,6 +42,8 @@ import json
 import os
 import posixpath
 import re
+import shlex
+import sys
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -52,7 +54,9 @@ from kiss.agents.sorcar.shell_scan import (
     Group,
     SimpleCommand,
     Word,
+    _continued,
     bash_path,
+    cd_path,
     handed_text,
     host_path,
     receiver,
@@ -64,8 +68,9 @@ VIEW_COMMANDS = frozenset({"cat", "sed", "grep", "nl", "head", "tail"})
 """Commands whose single file operand is shown to the model."""
 # Commands that take a non-file first operand (sed's script, grep's pattern).
 _FIRST_OPERAND_IS_NOT_A_FILE = frozenset({"sed", "grep"})
-# An in-place option of sed: ``-i``, ``-i.bak``, ``-Ei``, ``--in-place[=.bak]``.
-_SED_INPLACE = re.compile(r"-[a-zA-Z]*i|--in-place(?:=|$)")
+# An in-place option of sed: ``-i``, ``-i.bak``, ``-Ei``, ``--in-place[=.bak]`` or a
+# prefix of it (``--in-pl``, ``--i=.bak``: GNU sed's only long option in ``i``).
+_SED_INPLACE = re.compile(r"-[a-zA-Z]*i|--i[a-z-]*(?:=|$)")
 _PYTHON_HEREDOC = re.compile(r"python3?\s+-\s*<<")
 _RE_SUB = re.compile(r"\bre\.sub\(")
 # Evidence that a python heredoc writes a file back: ``.write(``,
@@ -210,33 +215,43 @@ def _file_ends(path: Path) -> str:
 
 _VALUE_OPTIONS: dict[str, frozenset[str]] = {
     "sed": frozenset({"-e", "-f", "--expression", "--file"}),
-    "grep": frozenset({"-e", "-f", "-A", "-B", "-C", "-m", "--regexp", "--file"}),
-    "head": frozenset({"-n", "-c"}),
-    "tail": frozenset({"-n", "-c"}),
+    "grep": frozenset({
+        "-e", "-f", "-A", "-B", "-C", "-m", "--regexp", "--file",
+        "--after-context", "--before-context", "--context", "--max-count",
+    }),
+    "head": frozenset({"-n", "-c", "--lines", "--bytes"}),
+    "tail": frozenset({"-n", "-c", "--lines", "--bytes"}),
     "nl": frozenset({"-n", "-b", "-s", "-w"}),
     "cat": frozenset(),
 }
 """Per view command, the options whose value is the next token."""
-_SCRIPT_OPTIONS = frozenset({"--expression", "--regexp"})
-"""Long options carrying the script/pattern; ``-e`` (joined or separate) is matched by prefix."""
+_SCRIPT_OPTIONS = frozenset({"--expression", "--regexp", "--file"})
+"""Long options carrying the script/pattern or its file, the value attached with ``=`` or not.
+
+``-e`` and ``-f`` (joined or separate) are matched by prefix.
+"""
 
 
 def _operands(program: str, args: list[Word]) -> list[Word]:
     """Return the file operands among the *args* of the view command *program*.
 
     Those are its words that are no option or option value and do not
-    come before the script of ``sed`` / the pattern of ``grep``.
+    come before the script of ``sed`` / the pattern of ``grep``; every
+    word after ``--`` is an operand.
     """
     operands: list[Word] = []
     script_given = False
     skip_next = False
-    for word in args:
+    for index, word in enumerate(args):
         token = word.text
         if skip_next:
             skip_next = False
             continue
+        if token == "--":
+            operands += args[index + 1:]
+            break
         if token.startswith("-") and token != "-":
-            if token in _SCRIPT_OPTIONS or token.startswith("-e"):
+            if token.split("=", 1)[0] in _SCRIPT_OPTIONS or token.startswith(("-e", "-f")):
                 script_given = True
             skip_next = token in _VALUE_OPTIONS[program]
             continue
@@ -284,6 +299,7 @@ def _rewrites_unguarded(
 
 def rewrite_guard(
     command: str, cwd: str | None = None, guarded: Callable[[str], bool] | None = None,
+    isdir: Callable[[str], bool] | None = None,
 ) -> str | None:
     """Return the refusal of a shell command that rewrites a file the way ``Edit`` should.
 
@@ -310,12 +326,17 @@ def rewrite_guard(
         guarded: Whether a rewrite of the absolute bash path given is
             refused (an existing file outside the scratch directories);
             ``None`` refuses every rewrite, as before.
+        isdir: Whether an absolute bash path is a directory where the
+            command runs: a ``cd`` bash does not walk as written then
+            leaves a directory only the shell knows
+            (:func:`~kiss.agents.sorcar.shell_scan.simple_commands`),
+            where every file is guarded.
 
     Returns:
         The refusal text naming the ``Edit`` call to make (with the file
         and the strings when the command names them literally), or ``None``.
     """
-    commands = simple_commands(command, cwd)
+    commands = simple_commands(command, cwd, isdir=isdir)
     for simple in commands:
         if _is_multiline_sed_inplace(simple):
             if _unguarded(simple.cwd, _operands("sed", simple.argv()[1:]), guarded):
@@ -463,17 +484,6 @@ def _first_line(command: str) -> tuple[str, str]:
     """Return the first non-blank line of *command* and the text after it."""
     head, _, rest = command.lstrip(" \t\n").partition("\n")
     return head, rest
-
-
-def _continued(line: str) -> bool:
-    """Whether the unquoted here-document line *line* ends in a backslash the shell joins.
-
-    Bash removes a ``\\``-newline pair while reading the line, before it
-    looks for the delimiter; the backslash of a ``\\\\`` pair does not
-    count (the pairs are read from the left, so an odd run at the end
-    leaves one unpaired).
-    """
-    return (len(line) - len(line.rstrip("\\"))) % 2 == 1
 
 
 def _heredoc_body(line: str, rest: str) -> tuple[str, str] | None:
@@ -643,7 +653,8 @@ class _Rewrite:
         text: Its text on the command's first line.
         body: Its here-document's body as the shell hands it on; ``None``
             without one.
-        cwd: The absolute directory the ``cd`` before it moves to; ``""``
+        cwd: The absolute path of the ``cd`` before it, as written
+            (:func:`~kiss.agents.sorcar.shell_scan.cd_path`); ``""``
             without a ``cd``.
         remainder: The rest of the command after it; ``""`` without one.
     """
@@ -687,10 +698,13 @@ def _rewrite_segment(command: str, cwd: str | None) -> _Rewrite | None:
         cwd: The absolute POSIX directory it starts in; ``None`` when unknown.
 
     Returns:
-        The rewrite with its ``cd`` directory and the rest of the
-        command, or ``None`` when *command* is not of that shape.  A
-        caller applying the call should first check the directory
-        exists (bash runs nothing when the ``cd`` fails) and run the
+        The rewrite with the path of its ``cd`` as written (a ``..``
+        stays with the name before it) and the rest of the command, or
+        ``None`` when *command* is not of that shape.  A caller
+        applying the call should first check that bash walks that path
+        (:func:`~kiss.agents.sorcar.shell_scan.walks`: it runs nothing
+        when the ``cd`` fails, and enters another directory than the
+        rewrite's when it gets there through a link only) and run the
         rest only when the call went through.
     """
     commands = simple_commands(command, cwd)
@@ -720,9 +734,10 @@ def _rewrite_segment(command: str, cwd: str | None) -> _Rewrite | None:
     text, operator = segments[index]
     rewrite = commands[index]
     if index:
-        if rewrite.cwd is None:
+        entered = cd_path(commands[0].cwd, commands[0].argv()[1:])
+        if rewrite.cwd is None or entered is None:
             return None
-        directory = rewrite.cwd
+        directory = entered
     if (
         rewrite.group is not None
         or not rewrite.words
@@ -755,8 +770,9 @@ class HeredocCopy:
         path: Its absolute POSIX path; ``None`` when only the shell knows it.
         body: The here-document's text as the shell hands it to the command.
         append: Whether the copy appends (``>>``, ``tee -a``) rather than overwrites.
-        cwd: The absolute POSIX directory the ``cd`` before the copy moves
-            to, where the ``remainder`` runs; ``""`` when there is no ``cd``.
+        cwd: The absolute POSIX path of the ``cd`` before the copy, as
+            written (:attr:`_Rewrite.cwd`), where the ``remainder`` runs;
+            ``""`` when there is no ``cd``.
         remainder: The rest of the command, to run after the ``Write``:
             the first line's part after the ``&&`` / ``;`` and the lines
             after the here-document, joined with a newline; ``""`` when
@@ -774,14 +790,31 @@ class HeredocCopy:
 _TEE_OPTIONS = frozenset({"-a", "--append", "-i", "--ignore-interrupts"})
 
 
+def _names_a_directory(target: str) -> bool:
+    """Whether the path *target* can only name a directory.
+
+    Its last component is then empty (``f/``), ``.`` or ``..``.  The
+    system opens no file by such a name (``f/`` for a file ``f``: not a
+    directory), while :func:`resolve` drops the ending and names ``f``:
+    no ``Write`` or ``Edit`` stands for a command writing it.
+    """
+    return posixpath.basename(target) in ("", ".", "..")
+
+
 def _home_path(target: Word, home: str) -> str | None:
-    """Return the absolute POSIX path of a ``~`` / ``~/x`` *target* in the home directory *home*."""
+    """Return the absolute POSIX path of a ``~`` / ``~/x`` *target* in the home directory *home*.
+
+    ``None`` when more than the tilde may expand in it (a variable, a
+    pattern, braces: only the shell knows the file then).  A ``..``
+    stays in the path for the filesystem, as in any other
+    (:func:`~kiss.agents.sorcar.shell_scan.resolve`).
+    """
     rest = target.text[1:]
     if target.literal or target.text[:1] != "~" or rest[:1] not in ("", "/"):
         return None
-    if any(char in rest for char in "$`*?["):
+    if any(char in rest for char in "$`*?[{"):
         return None
-    return posixpath.normpath(home + rest)
+    return resolve(None, Word(home + rest, literal=True))
 
 
 def heredoc_copy(command: str, cwd: str | None, home: str | None = "~") -> HeredocCopy | None:
@@ -795,7 +828,8 @@ def heredoc_copy(command: str, cwd: str | None, home: str | None = "~") -> Hered
     command or as the rewrite step of ``[cd DIR &&] <copy> [&& | ; |
     newline] <rest>`` (:func:`_rewrite_segment`; the result then names
     the ``cd`` directory and the rest).  A ``~`` / ``~/x`` target is
-    resolved in *home*.
+    resolved in *home*; one that can only name a directory (``f/``) is
+    no copy, the shell opens no file by it (:func:`_names_a_directory`).
 
     Args:
         command: The shell command text.
@@ -826,7 +860,7 @@ def heredoc_copy(command: str, cwd: str | None, home: str | None = "~") -> Hered
         target = operands[0]
     else:
         return None
-    if ">>" in target.text:
+    if ">>" in target.text or _names_a_directory(target.text):
         return None
     if program == "tee":
         append = bool({"-a", "--append"} & set(options))
@@ -851,8 +885,9 @@ class MechanicalEdit:
             shell knows it.
         target: The file as the command names it.
         edits: ``(old, new, replace_all)`` per replacement, in order.
-        cwd: The absolute POSIX directory the ``cd`` before the rewrite
-            moves to, where the ``remainder`` runs; ``""`` when there is no ``cd``.
+        cwd: The absolute POSIX path of the ``cd`` before the rewrite, as
+            written (:attr:`_Rewrite.cwd`), where the ``remainder`` runs;
+            ``""`` when there is no ``cd``.
         remainder: The rest of the command, to run after the ``Edit``: the
             first line's part after the ``&&`` / ``;`` and the lines after
             the here-document (or the first line), joined with a newline;
@@ -956,10 +991,15 @@ _WRITE_MODES = frozenset({"w", "wt"})
 
 
 def _is_utf8(encoding: str) -> bool:
-    """Whether the codec name *encoding* (``utf8``, ``UTF-8``...) is UTF-8."""
+    """Whether the codec name *encoding* (``utf8``, ``UTF-8``...) is UTF-8.
+
+    A name python looks up no codec by is not: an unknown one
+    (``LookupError``), one holding a null character or a lone surrogate
+    (``ValueError``).
+    """
     try:
         return codecs.lookup(encoding).name == "utf-8"
-    except LookupError:
+    except (LookupError, ValueError):
         return False
 
 
@@ -1046,11 +1086,100 @@ def _open_call(node: ast.expr, modes: frozenset[str]) -> ast.expr | None:
     return None
 
 
+_INERT_MODULES = frozenset({
+    "collections", "datetime", "functools", "io", "itertools", "json", "math", "os", "os.path",
+    "pathlib", "re", "shutil", "string", "subprocess", "sys", "textwrap", "time", "typing",
+})
+"""Modules every python has whose import does nothing a rewrite could show.
+
+The ones a rewrite program plausibly imports: an ``import`` of any other
+module may fail or act before the file is written (:meth:`_PythonRewrite.imports`).
+The standard library's, that is: a file of that name where the program runs
+is another module (the ``shadowed`` oracle of :func:`mechanical_edit`).
+"""
+
+
+def _imported(program: str) -> set[str]:
+    """Return the top-level names of the modules the python *program* imports."""
+    modules: set[str] = set()
+    for node in ast.walk(ast.parse(program)):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name.partition(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module.partition(".")[0])
+    return modules
+
+
+# Run by a python started with ``-I -S`` (its own library: nothing of the directory, the
+# environment or ``site`` is on its path) with the module names: imports them and prints
+# ``name origin`` for every module that loaded, the ones they import and the submodules of
+# their packages included (``__main__`` has no spec).
+_LIBRARY_ORIGINS = (
+    "import sys\n"
+    "for name in sys.argv[1:]:\n"
+    "    __import__(name)\n"
+    "specs = [getattr(module, '__spec__', None) for module in list(sys.modules.values())]\n"
+    "lines = {'%s %s' % (spec.name, spec.origin) for spec in specs if spec is not None}\n"
+    "print('\\n'.join(sorted(lines)))\n"
+)
+# Run by the python a command runs, as the command runs it, with those lines: prints the
+# same lines for where it would load each module from, asking its finders as an import
+# does (a submodule with the search path of its package); no module runs.
+_ORIGINS_HERE = (
+    "import sys\n"
+    "def spec(name):\n"
+    "    if name in sys.modules:\n"
+    "        return sys.modules[name].__spec__\n"
+    "    package = name.rpartition('.')[0]\n"
+    "    path = spec(package).submodule_search_locations if package else None\n"
+    "    for finder in sys.meta_path:\n"
+    "        found = finder.find_spec(name, path)\n"
+    "        if found is not None:\n"
+    "            return found\n"
+    "for line in sys.argv[1].splitlines():\n"
+    "    name = line.split()[0]\n"
+    "    print(name, spec(name).origin)\n"
+)
+
+
+def shadow_command(program: str, path: str, modules: set[str]) -> str:
+    """Return the shell command telling whether python, run in *path*, shadows one of *modules*.
+
+    The interpreter is asked, since only it knows its path: the
+    directory a program read from stdin runs in, the ``PYTHONPATH``
+    entries as it normalises them, an archive among them, and whatever
+    its own startup puts first (an executable line of a ``.pth``, a
+    ``sitecustomize``).  *program* (a bare name or an absolute path, as
+    the command names it) says first, isolated from all of those
+    (:data:`_LIBRARY_ORIGINS`), where its library holds the modules and
+    every module they import in turn (``json`` imports ``enum`` through
+    ``re``, and its own ``json.decoder``: an ``enum.py`` in the directory,
+    or a finder that takes the submodule, is what that runs), then, run
+    in *path* as the command runs it (:data:`_ORIGINS_HERE`), where it
+    would load each of them from.  The status is 1 when the answers
+    are the same (nothing shadows), or *path* is no directory, which the
+    command's ``cd`` fails on; any other status stands for a shadow:
+    another origin, or a python that gave no answer.
+    """
+    python = shlex.quote(program)
+    names = " ".join(shlex.quote(module) for module in sorted(modules))
+    return (
+        f"cd -P -- {shlex.quote(path)} 2>/dev/null || exit 1; "
+        f"library=$({python} -I -S -c {shlex.quote(_LIBRARY_ORIGINS)} {names}) && "
+        f'here=$({python} -c {shlex.quote(_ORIGINS_HERE)} "$library") && '
+        '[ -n "$here" ] && [ "$here" = "$library" ] && exit 1; exit 0'
+    )
+
+
 class _PythonRewrite:
     """Reads a python program statement by statement for the read-replace-write pattern.
 
     Attributes:
         paths: Names assigned one string (or ``Path(<string>)``) so far.
+        objects: Those of them assigned a ``Path(...)``, which alone
+            have ``read_text`` / ``write_text``.
+        pathlib: Whether ``from pathlib import Path`` ran: a ``Path``
+            called before it raises ``NameError``.
         read: The literal path read; ``written``: the one written back.
         named: The first literal path a statement outside the pattern
             opens, for naming the file in a refusal.
@@ -1063,6 +1192,8 @@ class _PythonRewrite:
 
     def __init__(self) -> None:
         self.paths: dict[str, str] = {}
+        self.objects: set[str] = set()
+        self.pathlib = False
         self.read: str | None = None
         self.written: str | None = None
         self.named: str | None = None
@@ -1071,12 +1202,18 @@ class _PythonRewrite:
         self.exact = True
         self.universal_newlines = False
 
-    def path(self, node: ast.expr) -> str | None:
-        """Return the path *node* names: a string, ``Path(<string>)`` or a name assigned one."""
+    def path(self, node: ast.expr, text_io: bool = False) -> str | None:
+        """Return the path *node* names: a string, ``Path(<string>)`` or a name assigned one.
+
+        With *text_io* only one that has ``read_text`` / ``write_text``:
+        a ``Path(...)`` or a name assigned one (:attr:`objects`), not a
+        string.  A ``Path`` called before its import raises: the path is
+        named all the same, the exactness ends.
+        """
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
+            return None if text_io else node.value
         if isinstance(node, ast.Name):
-            return self.paths.get(node.id)
+            return None if text_io and node.id not in self.objects else self.paths.get(node.id)
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -1084,11 +1221,16 @@ class _PythonRewrite:
             and len(node.args) == 1
             and not node.keywords
         ):
+            self.exact = self.exact and self.pathlib
             return self.path(node.args[0])
         return None
 
     def statement(self, node: ast.stmt) -> None:
-        """Account for one top-level statement; a shape outside the pattern ends the exactness."""
+        """Account for one top-level statement; a shape outside the pattern ends the exactness.
+
+        So does one binding ``open`` or ``Path`` (``open = ...``, ``with
+        ... as Path:``): they are then not the calls the pattern reads.
+        """
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             self.imports(node)
             return
@@ -1103,27 +1245,43 @@ class _PythonRewrite:
             fits = self.write(node.value)
         elif isinstance(node, ast.With):
             fits = self.with_open(node)
-        if not fits:
+        if not fits or _bound_names(node).keys() & {"open", "Path"}:
             self.exact = False
             self.note_paths(node)
 
     def imports(self, node: ast.Import | ast.ImportFrom) -> None:
-        """Account for an import: one rebinding a name the pattern reads ends the exactness.
+        """Account for an import: one that may fail or act, or rebinds a name read, is not exact.
 
-        A path or text name bound to a module (``import os as p``) no
-        longer holds what it was read as; ``open`` from another module
-        (``from gzip import open``), a ``Path`` that is not
-        ``pathlib``'s, or a ``*`` import (which may bind either) are not
-        the calls the pattern reads.
+        Python runs an import before the rewrite, and one that fails
+        ends the program with the file as it was.  Part of the pattern
+        are only the import of a module every python has and that does
+        nothing when imported (:data:`_INERT_MODULES`) and ``from
+        pathlib import Path``: any other module may be missing or act,
+        any other ``from`` import may name what its module lacks (a
+        ``*`` binds anything), and a relative one fails in a program
+        read from stdin, which has no parent package.  A path or text
+        name bound to a module (``import os as p``) no longer holds
+        what it was read as, and an ``open`` or a ``Path`` bound to a
+        module is not the call the pattern reads.  ``pathlib``'s
+        ``Path`` is noted as imported (:attr:`pathlib`).
         """
-        pathlib = isinstance(node, ast.ImportFrom) and node.module == "pathlib"
+        if isinstance(node, ast.ImportFrom):
+            pathlib = not node.level and node.module == "pathlib"
+            inert = pathlib and all(alias.name == "Path" for alias in node.names)
+        else:
+            pathlib = False
+            inert = all(alias.name in _INERT_MODULES for alias in node.names)
+        if not inert:
+            self.exact = False
         for alias in node.names:
             name = (alias.asname or alias.name).partition(".")[0]
             if (
-                name in self.paths or name == self.text or name in ("open", "*")
-                or (name == "Path" and not (pathlib and alias.name == "Path"))
+                name in self.paths or name == self.text or name == "open"
+                or (name == "Path" and not pathlib)
             ):
                 self.exact = False
+            elif name == "Path":
+                self.pathlib = True
 
     def assignment(self, name: str, value: ast.expr) -> bool:
         """Account for ``name = value``: a path, the text read, or its replacements.
@@ -1137,6 +1295,8 @@ class _PythonRewrite:
             if name in self.paths or name == self.text:
                 return False
             self.paths[name] = literal
+            if self.path(value, True) is not None:
+                self.objects.add(name)
             return True
         if name in self.paths:
             return False
@@ -1159,6 +1319,7 @@ class _PythonRewrite:
 
         The call must read the bytes as ``Edit`` does (:func:`_exact_text_io`);
         :attr:`universal_newlines` records whether it translates line endings.
+        ``read_text`` (the call is then *node* itself) needs a ``Path``.
         """
         read = _method_call(node, "read", 0)
         if read is not None:
@@ -1169,7 +1330,7 @@ class _PythonRewrite:
         if path is None or not _exact_text_io(call):
             return None
         self.universal_newlines = _universal_newlines(call)
-        return self.path(path)
+        return self.path(path, call is node)
 
     def replacements(self, node: ast.expr) -> list[tuple[str, str, bool]] | None:
         """Return the pairs of a ``text.replace(old, new)...`` chain on the text read, in order.
@@ -1203,7 +1364,8 @@ class _PythonRewrite:
     def write(self, node: ast.expr) -> bool:
         """Account for ``open(p, "w").write(s)``, ``Path(p).write_text(s)``, ``p.write_text(s)``.
 
-        The call must write the bytes as ``Edit`` does (:func:`_exact_text_io`).
+        The call must write the bytes as ``Edit`` does (:func:`_exact_text_io`);
+        ``write_text`` (the call is then *node* itself) needs a ``Path``.
         """
         write = _method_call(node, "write", 1)
         if write is not None:
@@ -1213,7 +1375,7 @@ class _PythonRewrite:
             path, call = (None if write is None else write[0]), node
         if write is None or path is None or not _exact_text_io(call):
             return False
-        return self.written_to(self.path(path), write[1][0])
+        return self.written_to(self.path(path, call is node), write[1][0])
 
     def written_to(self, path: str | None, value: ast.expr) -> bool:
         """Record the write of *value* (the text read) to *path*; only one write fits."""
@@ -1295,12 +1457,21 @@ def python_edit(program: str) -> tuple[str | None, list[tuple[str, str, bool]], 
     (:func:`_universal_newlines`): the pairs are then exact only for a
     file holding no ``\\r`` (:meth:`MechanicalEdit.edits_for`).
 
+    A program python itself would not run as far as its write is
+    outside the pattern too: one the parser gives up on
+    (:data:`_UNREADABLE`), one that parses but does not compile (a
+    repeated keyword, a late ``__future__`` import), a relative import,
+    a string used as a ``Path``, a ``Path`` not imported yet, ``open``
+    or ``Path`` bound to something else, a path holding a null
+    character.
+
     Args:
         program: The python source.
     """
     try:
         tree = ast.parse(program)
-    except (SyntaxError, ValueError):
+        compile(tree, "<stdin>", "exec")
+    except _UNREADABLE:
         return None, [], False
     rewrite = _PythonRewrite()
     for statement in tree.body:
@@ -1311,6 +1482,7 @@ def python_edit(program: str) -> tuple[str | None, list[tuple[str, str, bool]], 
         and rewrite.edits
         and rewrite.read is not None
         and rewrite.read == rewrite.written
+        and "\0" not in rewrite.read
     ):
         return path, rewrite.edits, rewrite.universal_newlines
     return path, [], False
@@ -1338,7 +1510,7 @@ def python_written_paths(program: str) -> list[str] | None:
     """
     try:
         tree = ast.parse(program)
-    except (SyntaxError, ValueError):
+    except _UNREADABLE:
         return None
     stores = _bound_names(tree)
     names: dict[str, str] = {}
@@ -1356,7 +1528,7 @@ def python_written_paths(program: str) -> list[str] | None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        if ast.unparse(node.func).rpartition(".")[2] in _CHDIR:
+        if _called_name(node) in _CHDIR:
             return None
         target = _write_target(node)
         if target is None:
@@ -1368,11 +1540,28 @@ def python_written_paths(program: str) -> list[str] | None:
     return written or None
 
 
+#: What python raises for a source it cannot parse or compile: a syntax error, a null
+#: byte, or nesting past the parser's limits (a chain of tens of thousands of calls).
+_UNREADABLE = (SyntaxError, ValueError, RecursionError, MemoryError)
+
 #: A write whose target or mode is not a literal: it may name any file.
 _UNKNOWN = ast.Name("?")
 
 #: The calls that change the working directory (``os.chdir(d)``, a bare ``chdir(d)``).
 _CHDIR = frozenset({"chdir", "fchdir"})
+
+
+def _called_name(call: ast.Call) -> str:
+    """Return the name *call* calls by: the ``chdir`` of ``os.chdir(d)`` and of a bare ``chdir(d)``.
+
+    The last name alone, read off the node (``""`` when the target ends in none):
+    ``ast.unparse`` of the target recurses once per link of a chain of calls and
+    overflows the stack on a long one.
+    """
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return func.id if isinstance(func, ast.Name) else ""
 
 
 def _bound_names(tree: ast.AST) -> Counter[str]:
@@ -1446,13 +1635,14 @@ def _literal_path(node: ast.expr, names: dict[str, str]) -> str | None:
         return node.value
     if isinstance(node, ast.Name):
         return names.get(node.id)
-    if (
-        isinstance(node, ast.Call)
-        and ast.unparse(node.func) in ("Path", "pathlib.Path")
-        and len(node.args) == 1
-        and not node.keywords
-    ):
-        return _literal_path(node.args[0], names)
+    if isinstance(node, ast.Call) and len(node.args) == 1 and not node.keywords:
+        func = node.func
+        qualified = (
+            isinstance(func, ast.Attribute) and func.attr == "Path"
+            and isinstance(func.value, ast.Name) and func.value.id == "pathlib"
+        )
+        if qualified or (isinstance(func, ast.Name) and func.id == "Path"):
+            return _literal_path(node.args[0], names)
     return None
 
 
@@ -1485,6 +1675,10 @@ def _sed_text(raw: str, delimiter: str, pattern: bool) -> str | None:
     the pattern so are escaped BRE metacharacters, while a bare one
     makes it a regular expression; in the replacement ``\\&`` is ``&``,
     while a bare ``&`` or a ``\\N`` back-reference is no literal text.
+    Nor is the escaped delimiter of a pattern when it is a BRE
+    metacharacter: sed unescapes it to the metacharacter
+    (``s.a\\.b.c.`` replaces ``aXb``).  Nor is a newline no backslash
+    precedes: sed ends the command there, unterminated.
     """
     parts: list[str] = []
     position = 0
@@ -1496,6 +1690,8 @@ def _sed_text(raw: str, delimiter: str, pattern: bool) -> str | None:
                 parts.append("\n")
             elif escaped == "t":
                 parts.append("\t")
+            elif pattern and escaped == delimiter and escaped in _SED_PATTERN_METACHARACTERS:
+                return None
             elif escaped in (delimiter, "\\") and escaped:
                 parts.append(escaped)
             elif pattern and escaped and escaped in _SED_PATTERN_METACHARACTERS:
@@ -1505,7 +1701,7 @@ def _sed_text(raw: str, delimiter: str, pattern: bool) -> str | None:
             else:
                 return None
             position += 2
-        elif (pattern and char in _SED_PATTERN_METACHARACTERS) or (not pattern and char == "&"):
+        elif char == "\n" or (char in _SED_PATTERN_METACHARACTERS if pattern else char == "&"):
             return None
         else:
             parts.append(char)
@@ -1517,10 +1713,14 @@ def sed_edit(simple: SimpleCommand) -> tuple[Word | None, list[tuple[str, str, b
     """Return the file operand of the ``sed`` *simple* and the ``Edit`` pair its script stands for.
 
     The pair is empty unless the options are ``-i``/``--in-place`` and
-    at most ``-z``/``-e``, and the one script, a word the shell passes
+    at most ``-z``/``-e`` (an ``-e`` ending the command has no script:
+    sed runs nothing), and the one script, a word the shell passes
     on as written (no ``$``, backtick or glob in it), is
     ``s<d>old<d>new<d>`` or ``s<d>old<d>new<d>g`` (then ``replace_all``)
-    whose *old* and *new* are literal text (:func:`_sed_text`).  Without
+    whose *old* and *new* are literal text (:func:`_sed_text`) and whose
+    delimiter is one byte, as sed requires (``s§a§b§`` is an error).  On
+    macOS, the separate empty backup suffix of ``sed -i ''`` is consumed as
+    an option value, not mistaken for the script.  Without
     ``-z`` sed matches one line at a time, so *old* may not hold a
     newline (it would never match), and without ``g`` it replaces the
     first match of every line: the pair replaces one match, exact only
@@ -1536,8 +1736,13 @@ def sed_edit(simple: SimpleCommand) -> tuple[Word | None, list[tuple[str, str, b
     operands: list[Word] = []
     literal = True
     value_next = False
+    bsd_in_place_suffix = False
     for word in simple.argv()[1:]:
         text = word.text
+        if bsd_in_place_suffix:
+            bsd_in_place_suffix = False
+            if not text and word.literal:
+                continue
         if value_next:
             scripts.append(text)
             literal = literal and word.literal
@@ -1552,6 +1757,7 @@ def sed_edit(simple: SimpleCommand) -> tuple[Word | None, list[tuple[str, str, b
             literal = literal and word.literal
         elif text.startswith("-") and text != "-":
             options.append(text)
+            bsd_in_place_suffix = sys.platform == "darwin" and text == "-i"
         else:
             operands.append(word)
     if not scripts and operands:
@@ -1562,6 +1768,7 @@ def sed_edit(simple: SimpleCommand) -> tuple[Word | None, list[tuple[str, str, b
     in_place = {"-i", "--in-place"} & set(options)
     if (
         operand is None
+        or value_next
         or len(scripts) != 1
         or not literal
         or not in_place
@@ -1569,7 +1776,13 @@ def sed_edit(simple: SimpleCommand) -> tuple[Word | None, list[tuple[str, str, b
     ):
         return operand, []
     script = scripts[0]
-    if len(script) < 2 or script[0] != "s" or script[1] in "\\\n" or script[1].isalnum():
+    if (
+        len(script) < 2
+        or script[0] != "s"
+        or script[1] in "\\\n"
+        or script[1].isalnum()
+        or not script[1].isascii()
+    ):
         return operand, []
     parts = _sed_parts(script[2:], script[1])
     if len(parts) != 3 or parts[2] not in ("", "g"):
@@ -1583,7 +1796,24 @@ def sed_edit(simple: SimpleCommand) -> tuple[Word | None, list[tuple[str, str, b
     return operand, [(old, new, parts[2] == "g")]
 
 
-def mechanical_edit(command: str, cwd: str | None) -> MechanicalEdit | None:
+def _program(word: Word, cwd: str | None) -> str | None:
+    """The program *word* names in *cwd*, as the oracles of :func:`mechanical_edit` are asked.
+
+    A bare name as written (bash looks it up on ``PATH``) and a path
+    made absolute; ``None`` for a relative path in an unknown directory.
+    """
+    return word.text if "/" not in word.text else resolve(cwd, word)
+
+
+def _found(program: str | None, runs: Callable[[str], bool] | None) -> bool:
+    """Whether bash finds *program* (:func:`_program`), as *runs* tells; without it, always."""
+    return runs is None or (program is not None and runs(program))
+
+
+def mechanical_edit(
+    command: str, cwd: str | None, shadowed: Callable[[str, str, set[str]], bool] | None = None,
+    runs: Callable[[str], bool] | None = None,
+) -> MechanicalEdit | None:
     """Return the ``Edit`` a python heredoc rewrite or a ``sed -i`` *command* stands for.
 
     The rewrite is one simple command (no wrapper, no assignment, no
@@ -1591,12 +1821,27 @@ def mechanical_edit(command: str, cwd: str | None) -> MechanicalEdit | None:
     ``[cd DIR &&] <rewrite> [&& | ; | newline] <rest>``
     (:func:`_rewrite_segment`; the result then names the ``cd``
     directory and the rest).  ``None`` when *command* is not of that
-    shape or the rewrite is not mechanical (:func:`python_edit`,
-    :func:`sed_edit`).
+    shape, the rewrite is not mechanical (:func:`python_edit`,
+    :func:`sed_edit`) or its file can only name a directory
+    (:func:`_names_a_directory`).
 
     Args:
         command: The shell command text.
         cwd: The absolute POSIX directory it starts in; ``None`` when unknown.
+        shadowed: Whether the python given (a program as *runs* gets
+            it), run in the absolute bash directory given, loads one of
+            the modules named, or one they import, from elsewhere than
+            its own library (``json.py`` in the directory a program read
+            from stdin runs in is what ``import json`` runs, and it may
+            fail or act; :func:`shadow_command` asks the interpreter).
+            With it a python rewrite importing such a module, or run in
+            an unknown directory, is not mechanical; without it every
+            import is taken for the standard library's.
+        runs: Whether bash finds the program given: a bare name on the
+            ``PATH`` of the command's environment, or an absolute bash
+            path.  With it a rewrite whose program is not found is not
+            mechanical (bash fails with status 127 and leaves the file
+            alone); without it the program is taken to be there.
     """
     rewrite = _rewrite_segment(command, cwd)
     if rewrite is None:
@@ -1609,7 +1854,11 @@ def mechanical_edit(command: str, cwd: str | None) -> MechanicalEdit | None:
     words = [word.text for word in argv[1:]]
     if program in ("python", "python3") and rewrite.body is not None and words == ["-"]:
         path, edits, universal_newlines = python_edit(rewrite.body)
-        if path is None or not edits:
+        python = _program(argv[0], simple.cwd)
+        if path is None or not edits or _names_a_directory(path) or not _found(python, runs):
+            return None
+        if shadowed is not None and (modules := _imported(rewrite.body)) and (
+                python is None or simple.cwd is None or shadowed(python, simple.cwd, modules)):
             return None
         return MechanicalEdit(
             "python heredoc", resolve(simple.cwd, Word(path, True)), path, edits,
@@ -1617,7 +1866,8 @@ def mechanical_edit(command: str, cwd: str | None) -> MechanicalEdit | None:
         )
     if program == "sed" and rewrite.body is None:
         operand, edits = sed_edit(simple)
-        if operand is None or not edits:
+        if (operand is None or not edits or _names_a_directory(operand.text)
+                or not _found(_program(argv[0], simple.cwd), runs)):
             return None
         # -z makes NUL the record separator; without g the first match of
         # every record goes, whatever separates them.
@@ -1663,8 +1913,9 @@ def _output_files(
     The output goes to the files it is redirected to, else on to its
     :func:`~kiss.agents.sorcar.shell_scan.receiver` (the command it is
     piped to, or its group); ``tee`` also writes it to its operands.
-    Piped into a group, it reaches what the group's commands that read
-    the group's input write (*commands* holds them all).  With
+    Piped into a group, or into a command that runs literal text (its
+    ``script``: a shell's ``-c``, ``eval``), it reaches what the commands
+    in it that read its input write (*commands* holds them all).  With
     *copies_only*, it stops at the first command that is not ``cat`` or
     ``tee``: that one writes output of its own.
     """
@@ -1681,8 +1932,9 @@ def _output_files(
         if node.outputs:
             writes.extend((node.cwd, word) for word in node.outputs)
             break
-        if isinstance(node.reader, Group):
-            for member in _input_readers(node.reader, commands):
+        into = node.reader.script if isinstance(node.reader, SimpleCommand) else node.reader
+        if isinstance(into, Group):
+            for member in _input_readers(into, commands):
                 writes.extend(_output_files(member, copies_only, commands))
             break
         node = receiver(node)
@@ -1780,6 +2032,7 @@ def _input_readers(group: Group, commands: list[SimpleCommand]) -> list[SimpleCo
 
 def _heredoc_writes(
     command: str, cwd: str | None, copies_only: bool,
+    isdir: Callable[[str], bool] | None = None,
 ) -> list[tuple[str | None, Word]]:
     """Return ``(directory, file)`` for each file a here-document pipeline of *command* writes.
 
@@ -1793,9 +2046,11 @@ def _heredoc_writes(
         command: The shell command text.
         cwd: The directory it starts in (``None``: unknown).
         copies_only: Whether only ``cat``/``tee`` copies count.
+        isdir: Whether a path is a directory where the command runs
+            (:func:`heredoc_guard`).
     """
     writes: list[tuple[str | None, Word]] = []
-    commands = simple_commands(command, cwd)
+    commands = simple_commands(command, cwd, isdir=isdir)
     for reader in commands:
         if reader.reads_heredoc():
             writes.extend(_output_files(reader, copies_only, commands))
@@ -1814,7 +2069,10 @@ def heredoc_targets(command: str) -> list[str]:
     return [word.text for _, word in _heredoc_writes(command, None, copies_only=False)]
 
 
-def heredoc_guard(command: str, cwd: str | None, guarded: Callable[[str], bool]) -> str | None:
+def heredoc_guard(
+    command: str, cwd: str | None, guarded: Callable[[str], bool],
+    isdir: Callable[[str], bool] | None = None,
+) -> str | None:
     """Refuse a ``cat``/``tee`` here-document copy into a guarded file, or one that may be.
 
     A copy into a file that does not exist yet creates it and may run.
@@ -1835,12 +2093,18 @@ def heredoc_guard(command: str, cwd: str | None, guarded: Callable[[str], bool])
             refused where the command runs (the host, a container or an
             exec bridge's environment): the file exists, and is not a
             scratch file where the caller exempts those.
+        isdir: Whether an absolute bash path is a directory there, its
+            links followed.  With it a ``cd link/../deep`` that bash
+            cannot walk as written, and so takes through the link,
+            leaves a directory only the shell can resolve
+            (:func:`~kiss.agents.sorcar.shell_scan.simple_commands`);
+            without it the directory is the one the text names.
 
     Returns:
         :data:`HEREDOC_VERDICT` or :data:`HEREDOC_UNRESOLVED_VERDICT`, or
         ``None`` when the command may run.
     """
-    for directory, target in _heredoc_writes(command, cwd, copies_only=True):
+    for directory, target in _heredoc_writes(command, cwd, copies_only=True, isdir=isdir):
         path = resolve(directory, target)
         if path is None:
             return HEREDOC_UNRESOLVED_VERDICT.format(path=target.text)
@@ -1850,8 +2114,16 @@ def heredoc_guard(command: str, cwd: str | None, guarded: Callable[[str], bool])
 
 
 def numbered_region(content: str, start_line: int, end_line: int) -> str:
-    """Return lines *start_line*..*end_line* (1-based, clipped) of *content* with line numbers."""
-    lines = content.splitlines()
+    """Return lines *start_line*..*end_line* (1-based, clipped) of *content* with line numbers.
+
+    A line ends at ``\\n`` only, as :func:`line_of` counts them and as Read,
+    ``sed -n`` and ``grep -n`` number them (``str.splitlines`` would also end
+    one at a form feed, a lone ``\\r`` and the Unicode separators, and move
+    every number after it); a ``\\r\\n`` is shown as ``\\n``, as Read shows it.
+    """
+    lines = content.replace("\r\n", "\n").split("\n")
+    if not lines[-1]:  # no text after the last newline, or none at all: not a line
+        del lines[-1]
     start = max(1, start_line)
     end = min(len(lines), end_line)
     return "\n".join(f"{n:5d} | {lines[n - 1]}" for n in range(start, end + 1))
@@ -1867,19 +2139,21 @@ def region_around_string(content: str, needle: str, context: int = 10) -> str:
 
     When *needle* does not occur, the lines around its first line's
     best match (the first line containing the needle's first line
-    stripped) are shown; when nothing matches, the file's head.
+    stripped) are shown; when nothing matches, the file's head.  The
+    needle's lines end at ``\\n`` only, as the content's do
+    (:func:`numbered_region`).
 
     Args:
         content: The file text.
         needle: The ``old_string`` the model wanted to replace.
         context: Lines shown on each side.
     """
-    first_line = next((ln.strip() for ln in needle.splitlines() if ln.strip()), "")
+    first_line = next((ln.strip() for ln in needle.split("\n") if ln.strip()), "")
     position = content.find(needle)
     if position < 0 and first_line:
         position = content.find(first_line)
     if position < 0:
         return numbered_region(content, 1, 2 * context)
     anchor = line_of(content, position)
-    needle_lines = max(1, len(needle.rstrip("\n").splitlines()))
+    needle_lines = needle.rstrip("\n").count("\n") + 1
     return numbered_region(content, anchor - context, anchor + needle_lines - 1 + context)

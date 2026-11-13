@@ -111,7 +111,6 @@ def _agent(old: OpenAICompatibleModel2) -> KISSAgent:
     agent = KISSAgent("HandOffHook")
     agent.model = old
     agent.model_name = old.model_name
-    agent.verbose = False
     agent.printer = None
     agent.function_map = {"finish": agent.finish}
     agent.max_steps = 5
@@ -131,9 +130,12 @@ def test_the_next_call_hook_sees_the_switching_steps_tool_results() -> None:
         raise _HookReachedError
 
     agent.llm_call_hook = hook
+    agent._reasoning_tokens = agent._newest_reasoning_tokens = 4_000
     agent.switch_model(new, "gemini-2.5-flash")
 
     assert agent.model is new and agent.model_name == "gemini-2.5-flash"
+    # The conversion dropped the reasoning items, so none is counted as carried.
+    assert (agent._reasoning_tokens, agent._newest_reasoning_tokens) == (0, 0)
     assert agent._cached_tools_schema == new._build_openai_tools_schema(agent.function_map)
     with pytest.raises(_HookReachedError):
         agent._execute_step()
@@ -148,8 +150,11 @@ def test_a_gemini_to_gemini_switch_carries_the_thought_signatures() -> None:
     agent.model = old
     new = GeminiModel("gemini-3-flash-preview", api_key="k")
     new.initialize("")
+    agent._reasoning_tokens = agent._newest_reasoning_tokens = 4_000
 
     agent.switch_model(new, "gemini-3-flash-preview")
 
     assert new._thought_signatures == {"call_1": b"sig-1"}
     assert new.conversation == old.conversation
+    # Kept verbatim, the conversation still carries its reasoning.
+    assert (agent._reasoning_tokens, agent._newest_reasoning_tokens) == (4_000, 4_000)

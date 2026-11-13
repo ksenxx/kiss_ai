@@ -185,10 +185,12 @@ function openChatsPanel(win) {
  * A remote-chat page with the Chats panel open and an empty `configData`
  * delivered, the starting point of the chat-panel header suites.
  *
+ * @param {Function} [beforeScripts] Called with the window before
+ *   main.js runs (a `freezeClock`, say).
  * @returns {{win: object, posted: Array<object>}}
  */
-function openChatsPage() {
-  const {win, posted} = makePage({bodyClass: 'remote-chat'});
+function openChatsPage(beforeScripts) {
+  const {win, posted} = makePage({bodyClass: 'remote-chat', beforeScripts});
   win.document.getElementById('sidebar').classList.add('open');
   send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
   return {win, posted};
@@ -231,6 +233,20 @@ function todayNoonSec() {
   const d = new Date();
   d.setHours(12, 0, 0, 0);
   return Math.floor(d.getTime() / 1000);
+}
+
+/**
+ * The date-separator label of the day holding unix time `tsSec`, a day
+ * that is neither today nor yesterday: the year is shown only for a day
+ * outside the year of `todayNoon` (three days ago on January 2).
+ */
+function dayLabel(tsSec, todayNoon) {
+  const d = new Date(tsSec * 1000);
+  const opts = {weekday: 'short', month: 'short', day: 'numeric'};
+  if (d.getFullYear() !== new Date(todayNoon * 1000).getFullYear()) {
+    opts.year = 'numeric';
+  }
+  return d.toLocaleDateString(undefined, opts);
 }
 
 /** A row of chat `chat` for task `task` at unix time `ts`; `extra` on top. */
@@ -392,6 +408,7 @@ module.exports = {
   answerHistory,
   localIsoDate,
   todayNoonSec,
+  dayLabel,
   groupedSession,
   sendHistoryPage,
   listShape,

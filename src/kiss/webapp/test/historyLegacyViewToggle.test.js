@@ -26,6 +26,7 @@ const {
 } = require('./simplify2_harness');
 const {
   todayNoonSec,
+  dayLabel,
   freezeClock,
   groupedSession: session,
   sendHistoryPage: sendHistory,
@@ -88,18 +89,12 @@ const FLAT = [
 ];
 
 function dateSeparator(daysAgo) {
-  const date = new Date((todayNoon - daysAgo * DAY) * 1000);
-  const opts = {weekday: 'short', month: 'short', day: 'numeric'};
-  if (date.getFullYear() !== new Date(todayNoon * 1000).getFullYear()) {
-    opts.year = 'numeric';
-  }
-  return 'sep:' + date.toLocaleDateString(undefined, opts);
+  return 'sep:' + dayLabel(todayNoon - daysAgo * DAY, todayNoon);
 }
 
 test('the view toggle sits right of the search box and swaps grouped <-> flat without a refetch', () => {
   const {win, posted} = makePage();
   const toggle = byId(win, 'history-view-toggle');
-  assert.ok(toggle, '#history-view-toggle exists');
   const searchWrap = byId(win, 'history-search').closest('.search-wrap');
   assert.strictEqual(
     searchWrap.nextElementSibling,

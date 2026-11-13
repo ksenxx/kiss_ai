@@ -100,6 +100,8 @@ class GeminiScript:
         serving: Set once the server has written its scripted chunks, so
             a test can time a Stop against a stream that is genuinely
             quiet.
+        hung_up: Set once a keep-alive could not be written: the client
+            closed the connection of a ``"keepalive"`` response.
         delay: Seconds the endpoint "generates" before each chunk: a
             streamed response pauses that long before writing each chunk,
             a unary one pauses ``delay * len(chunks)`` before its single
@@ -112,6 +114,9 @@ class GeminiScript:
         refusals: How many of the next requests are answered with an
             HTTP 503 and no body before the scripted response, so a test
             can drive the SDK's own retry (``http_options.retry_options``).
+        refuse_thinking: The message of the HTTP 400 that answers a
+            request carrying a ``thinkingConfig``, as a model without
+            thinking refuses one; empty (the default) refuses none.
         release: Set by the fixture teardown to free a silent handler.
         requests: The decoded JSON bodies the endpoint received.
         paths: The request paths, in order, so a test can tell a
@@ -124,7 +129,9 @@ class GeminiScript:
         self.delay = 0.0
         self.headers = "complete"
         self.refusals = 0
+        self.refuse_thinking = ""
         self.serving = threading.Event()
+        self.hung_up = threading.Event()
         self.release = threading.Event()
         self.requests: list[dict[str, Any]] = []
         self.paths: list[str] = []
@@ -149,6 +156,7 @@ class GeminiScript:
         self.delay = delay
         self.headers = headers
         self.serving.clear()
+        self.hung_up.clear()
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -160,8 +168,19 @@ class _Handler(BaseHTTPRequestHandler):
         """Answer a ``streamGenerateContent`` (or ``generateContent``) call."""
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b"{}"
-        self.script.requests.append(json.loads(raw))
+        request = json.loads(raw)
+        self.script.requests.append(request)
         self.script.paths.append(self.path)
+        if self.script.refuse_thinking and "thinkingConfig" in request.get("generationConfig", {}):
+            message = self.script.refuse_thinking
+            error = {"code": 400, "message": message, "status": "INVALID_ARGUMENT"}
+            payload = json.dumps({"error": error}).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if self.script.refusals > 0:
             self.script.refusals -= 1
             self.send_response(503)
@@ -208,6 +227,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"\r\n")
                 self.wfile.flush()
             except OSError:
+                self.script.hung_up.set()
                 return
 
     def _send_unary(self) -> None:

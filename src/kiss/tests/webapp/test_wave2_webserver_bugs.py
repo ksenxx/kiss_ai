@@ -30,7 +30,7 @@ from websockets.http11 import Request
 import kiss.server.web_server as ws_mod
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.server.conftest import redirect_persistence, restore_persistence
+from kiss.tests.server.conftest import environ, redirect_persistence, restore_persistence
 
 # ``_process_request`` refuses non-loopback peers while the remote
 # password is empty, and it fails closed on a missing peer address, so
@@ -79,16 +79,12 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status_code, 404)
 
         payload = os.urandom(256 * 1024)
-        cache = Path(self.tmpdir) / "models" / "model.tar.gz"
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_bytes(payload)
-        saved_cache = ws_mod.VOICE_MODEL_CACHE
-        ws_mod.VOICE_MODEL_CACHE = cache
-        try:
+        with environ(KISS_HOME=self.tmpdir):  # the archive of a home of this test's own
+            cache = ws_mod._voice_model_cache_path()
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_bytes(payload)
             req = Request("/voice-model.tar.gz", Headers())
             resp = await self.server._process_request(cast(Any, _LOOPBACK_CONN), req)
-            assert resp is not None
-            self.assertEqual(resp.status_code, 200)
-            self.assertEqual(resp.body, payload)
-        finally:
-            ws_mod.VOICE_MODEL_CACHE = saved_cache
+        assert resp is not None
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.body, payload)

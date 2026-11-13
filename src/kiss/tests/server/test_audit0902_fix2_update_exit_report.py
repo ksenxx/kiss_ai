@@ -40,8 +40,13 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.core.brand import PRODUCT_NAME
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.local_ws import (
+    LocalReader,
+    LocalWriter,
+    _generate_self_signed_cert,
+    open_local_connection,
+)
 from kiss.tests.server.conftest import find_free_port
 
 REFUSAL = "another KISS update is already running (pid 123); exiting."
@@ -88,12 +93,11 @@ class TestRunUpdateExitReport(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
@@ -134,9 +138,8 @@ class TestRunUpdateExitReport(IsolatedAsyncioTestCase):
             except Exception:
                 pass
         await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved  # type: ignore[assignment]
+        th._close_thread_db()
+        th._DB_PATH, th._KISS_DIR = self.saved  # type: ignore[assignment]
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _install_stub(self, body: str) -> None:

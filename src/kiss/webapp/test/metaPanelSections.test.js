@@ -38,8 +38,10 @@ const {
   click,
   stubRaf,
   fakeMatchMedia,
+  flushMicrotasks,
 } = require('./simplify2_harness');
 const {makeRunner, key} = require('./ui_antipattern_harness');
+const {pointer} = require('./panel_resize_helpers');
 
 const {test, report} = makeRunner();
 
@@ -209,11 +211,10 @@ function startOnChat(win, tabId) {
 /**
  * Take the workspace (Explorer, Source Control) and global (Schedule,
  * Machines, Apps, Spend, Recommendations) sections out of the stack (the `hidden`
- * attribute, then the panel's resize observer re-applies the layout),
- * leaving only the two per-task sections.
+ * attribute, which the page watches to re-apply the layout), leaving
+ * only the two per-task sections.
  */
-function hideGlobalSections(wv) {
-  const win = wv.win;
+async function hideGlobalSections(win) {
   for (const id of [
     'meta-explorer',
     'meta-scm',
@@ -224,14 +225,7 @@ function hideGlobalSections(wv) {
     'meta-recommendations',
   ])
     el(win, id).hidden = true;
-  const panel = el(win, 'meta-panel');
-  wv.observers.find(o => o.target === panel).fn([]);
-}
-
-function pointer(win, target, type, fields) {
-  const ev = new win.Event(type, {bubbles: true, cancelable: true});
-  Object.assign(ev, {button: 0, clientY: 0, pointerId: 1}, fields);
-  target.dispatchEvent(ev);
+  await flushMicrotasks();
 }
 
 async function main() {
@@ -374,6 +368,14 @@ async function main() {
     assertExpanded(info, false);
     assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
     assertResizer(resizerAfter(info), 'static');
+    // A static separator ignores a double-click: the stored height stays.
+    resizerAfter(info).dispatchEvent(
+      new win.MouseEvent('dblclick', {bubbles: true}),
+    );
+    assert.strictEqual(
+      win.localStorage.getItem('kiss-meta-section-h:meta-section-info'),
+      '123',
+    );
   });
 
   await test('remote webapp: a task start expands Task Info and Task update and collapses the rest', () => {
@@ -389,11 +391,15 @@ async function main() {
     assertExpanded(info, false);
     assertExpanded(update, false);
     for (const section of others) assertExpanded(section, true);
+    const schedule = el(win, 'meta-schedule');
+    assertResizer(resizerAfter(schedule), 'handle');
     // The page arranges the panel when the daemon's running status
     // starts a task in the chat tab on screen.
     startOnChat(win, 'a1');
     assertExpanded(info, true);
     assertExpanded(update, true);
+    // The separators follow: nothing is expanded below Schedule now.
+    assertResizer(resizerAfter(schedule), 'static');
     for (const section of others) {
       assertExpanded(section, false);
       assert.strictEqual(
@@ -420,11 +426,11 @@ async function main() {
     assertExpanded(apps, true);
   });
 
-  await test('remote webapp: the Task update section joins the stack with content and leaves when emptied', () => {
+  await test('remote webapp: the Task update section joins the stack with content and leaves when emptied', async () => {
     const wv = makePage();
     const win = wv.win;
     const [info, update] = sections(win);
-    hideGlobalSections(wv);
+    await hideGlobalSections(win);
     showTaskUpdate(wv, '<p>progress</p>');
     assert.ok(update.classList.contains('visible'));
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
@@ -482,11 +488,11 @@ async function main() {
     assertResizer(resizerAfter(update), 'static');
   });
 
-  await test('remote webapp: arrow keys, double-click and pointer drag on the separator', () => {
+  await test('remote webapp: arrow keys, double-click and pointer drag on the separator', async () => {
     const wv = makePage();
     const win = wv.win;
     const [info] = sections(win);
-    hideGlobalSections(wv);
+    await hideGlobalSections(win);
     const r = resizerAfter(info);
     const list = el(win, 'meta-list');
     const HK = 'kiss-meta-section-h:meta-section-info';
@@ -504,16 +510,21 @@ async function main() {
 
     // Arrow keys fix the height (jsdom has no layout: every rect is 0,
     // so the clamp lands on 0) and persist it; other keys are ignored.
-    key(win, r, 'Tab');
+    // (key() returns false when the page consumed the key.)
+    assert.strictEqual(key(win, r, 'Tab'), true, 'Tab keeps its default');
     assert.strictEqual(win.localStorage.getItem(HK), null);
-    key(win, r, 'ArrowDown');
+    assert.strictEqual(
+      key(win, r, 'ArrowDown'),
+      false,
+      'the arrow is consumed',
+    );
     assert.strictEqual(win.localStorage.getItem(HK), '0');
     assert.strictEqual(bodyLayout(list), '0px');
     // The last expanded body below a dragged one still fills.
     assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
     assert.strictEqual(r.getAttribute('aria-valuenow'), '0');
     assert.strictEqual(r.getAttribute('aria-valuemax'), '0');
-    key(win, r, 'ArrowUp');
+    assert.strictEqual(key(win, r, 'ArrowUp'), false, 'the arrow is consumed');
     assert.strictEqual(bodyLayout(list), '0px');
 
     // Double-click restores the equal share.
@@ -530,7 +541,12 @@ async function main() {
       !win.document.body.classList.contains('meta-section-resizing'),
       'right button ignored',
     );
-    pointer(win, r, 'pointerdown');
+    // jsdom has no pointer capture: record what the page asks for.
+    const captured = [];
+    r.setPointerCapture = id => captured.push(id);
+    const press = pointer(win, r, 'pointerdown', {pointerId: 7});
+    assert.ok(press.defaultPrevented, 'the press is consumed');
+    assert.deepStrictEqual(captured, [7], 'the drag captures its pointer');
     assert.ok(win.document.body.classList.contains('meta-section-resizing'));
     pointer(win, r, 'pointermove', {clientY: 40});
     assert.strictEqual(bodyLayout(list), '0px');
@@ -542,12 +558,16 @@ async function main() {
     pointer(win, r, 'pointerdown');
     pointer(win, r, 'pointercancel');
     assert.ok(!win.document.body.classList.contains('meta-section-resizing'));
+    // A move after the drag ended resizes nothing.
+    r.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
+    pointer(win, r, 'pointermove', {clientY: 40});
+    assert.strictEqual(bodyLayout(list), 'equal');
   });
 
-  await test('a third section added per the chat.html recipe joins the stack; `hidden` removes it', () => {
+  await test('a third section added per the chat.html recipe joins the stack; `hidden` removes it', async () => {
     const wv = makePage({extraSection: true});
     const win = wv.win;
-    hideGlobalSections(wv);
+    await hideGlobalSections(win);
     const [info, update, , , , , , , , extra] = sections(win);
     assert.strictEqual(extra.id, 'meta-section-extra');
     assertExpanded(extra, true);
@@ -579,17 +599,14 @@ async function main() {
     assertExpanded(extra, true);
     assertExpanded(update, false);
 
-    // A section hidden with the `hidden` attribute is out of the stack
-    // (its owner re-applies the layout; the panel's resize observer
-    // does here).
-    const relayout = () =>
-      wv.observers.find(o => o.target === el(win, 'meta-panel')).fn([]);
+    // A section hidden with the `hidden` attribute is out of the stack:
+    // the page watches the attribute and lays the panel out again.
     extra.hidden = true;
-    relayout();
+    await flushMicrotasks();
     assertResizer(resizerAfter(update), 'hidden');
     assertResizer(resizerAfter(extra), 'hidden');
     extra.hidden = false;
-    relayout();
+    await flushMicrotasks();
     assert.strictEqual(bodyLayout(el(win, 'meta-extra-body')), 'equal');
     assertResizer(resizerAfter(update), 'static');
   });
@@ -674,7 +691,7 @@ async function main() {
     assertExpanded(info, true);
     click(win, toggleOf(update));
     assertExpanded(update, true);
-    assertExpanded(info, false, 'opening Task update folded Task Info');
+    assertExpanded(info, false);
     click(win, toggleOf(info));
     assertExpanded(info, true);
     assertExpanded(update, false);
@@ -685,10 +702,14 @@ async function main() {
   const VK = 'kiss-meta-sections-version';
   const RECS = 'meta-recommendations';
 
-  /** Only Recommendations is expanded; every other section is folded. */
+  /**
+   * Only Recommendations is expanded; every other section is folded, so
+   * no separator has an expanded section on both sides.
+   */
   function assertFreshLayout(win) {
     for (const section of sections(win))
       assertExpanded(section, section.id === RECS);
+    assertResizer(resizerAfter(el(win, 'meta-schedule')), 'static');
   }
 
   await test('remote webapp: the first load of a version expands only Recommendations, whatever was stored', () => {

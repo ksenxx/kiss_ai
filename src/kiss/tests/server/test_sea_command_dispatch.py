@@ -36,7 +36,7 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.server import agent_state, sorcar
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import AgentServer
-from kiss.tests.agents.sorcar.conftest import isolated_sea_registry
+from kiss.tests.agents.sorcar.conftest import isolated_sea_registry, reset_sea_registry
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 
@@ -209,8 +209,8 @@ class SlashCommandRunTest(DaemonRunApiHarness):
 
     def setUp(self) -> None:
         super().setUp()
-        sea_commands._reset_for_tests()
-        self.addCleanup(sea_commands._reset_for_tests)
+        reset_sea_registry()
+        self.addCleanup(reset_sea_registry)
         self.addCleanup((kiss_home() / "SEAS.md").unlink, missing_ok=True)
 
     def _record_runs(self, runs: list[dict[str, Any]]) -> None:

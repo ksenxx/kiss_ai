@@ -19,8 +19,6 @@
 //
 // Run with: node src/kiss/webapp/test/metaRowsNextTaskMachine.test.js
 
-/* global require, console, process */
-
 'use strict';
 
 const assert = require('assert');

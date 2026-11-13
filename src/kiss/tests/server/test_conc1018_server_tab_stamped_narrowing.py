@@ -13,10 +13,12 @@ connections: peer A (tab-a) and the silent peer C get tab-a's
 ``status``; peer B (tab-b) does not; an empty-stamped global event
 still reaches all three.
 
-The unscoped ``task_events`` replay slot (``_reserve_replay_send``)
-is still sent to every local peer: narrowing it needs
-``JsonPrinter.replay_snapshot`` to carry the target tab, a file this
-slice does not own.
+The unscoped ``task_events`` replay (a ``resumeSession`` with no
+connection scope, reserved by ``_reserve_replay_send``) follows the
+same narrowing: sending every sub-agent transcript of a big fan-out to
+every ``daemon_client`` run on the machine kept the koushik-sorcar
+daemon's event loop busy for 50 s (2026-11-12), long enough for every
+link and local connection to miss its keepalive.
 """
 
 from __future__ import annotations
@@ -41,12 +43,11 @@ class TestTabStampedNarrowing(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-conc1018-stamped-")
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
@@ -57,9 +58,8 @@ class TestTabStampedNarrowing(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        th._close_thread_db()
+        th._DB_PATH, th._KISS_DIR = self.saved
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -141,6 +141,38 @@ class TestTabStampedNarrowing(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([len(s) for s in statuses], [1, 0, 1])
         for got in (got_a, got_b, got_c):
             self.assertIn("tabs_state", [e["type"] for e in got])
+
+    async def test_unscoped_replay_skips_peers_that_addressed_only_other_tabs(self) -> None:
+        task_id, chat_id = th._add_task("replayed task")
+        reader_a, writer_a = await self._connect()
+        reader_b, writer_b = await self._connect()
+        reader_c, _writer_c = await self._connect()
+        await self._send(writer_b, {"type": "stop", "tabId": "tab-b"})
+        await self._wait_for_interest("tab-b")
+        await asyncio.gather(
+            self._collect(reader_a, 0.3),
+            self._collect(reader_b, 0.3),
+            self._collect(reader_c, 0.3),
+        )
+
+        # No ``scoped`` and no ``replayConnId``: a history click, whose
+        # transcript every surface showing tab-a must get.
+        await self._send(writer_a, {
+            "type": "resumeSession", "chatId": chat_id, "taskId": task_id,
+            "tabId": "tab-a",
+        })
+
+        got_a, got_b, got_c = await asyncio.gather(
+            self._collect(reader_a, 1.5),
+            self._collect(reader_b, 1.5),
+            self._collect(reader_c, 1.5),
+        )
+        replays = [
+            [e for e in got if e["type"] == "task_events" and e.get("task_id") == task_id]
+            for got in (got_a, got_b, got_c)
+        ]
+        self.assertEqual([len(r) for r in replays], [1, 0, 1])
+        self.assertEqual(replays[0][0]["tabId"], "tab-a")
 
 
 if __name__ == "__main__":

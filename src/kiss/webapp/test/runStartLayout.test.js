@@ -28,6 +28,7 @@ const {
   stubDesktop,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {trackWindow, closeWindows} = require('./workdir_helpers');
 
 const FOLD_KEY = 'kiss-content-pane-folded';
 
@@ -42,11 +43,9 @@ function makePage(opts) {
     beforeScripts: w => stubDesktop(w, desktop),
     sourceUrl: 'runstart-main.js',
   });
-  OPEN_WINDOWS.push(win);
+  trackWindow(win);
   return {win, posted};
 }
-
-const OPEN_WINDOWS = [];
 
 function hasClass(win, cls) {
   return win.document.body.classList.contains(cls);
@@ -167,6 +166,9 @@ async function main() {
     });
     win._testApi.switchToTab('sub1');
     assert.strictEqual(win._testApi.getActiveTabId(), 'sub1');
+    // An open sub-agent tab is born running: only after an end is its
+    // next running status a start.
+    end(win, 'sub1');
     start(win, 'sub1');
     assertPaneShown(win, 'sub-agent started');
 
@@ -218,7 +220,7 @@ async function main() {
   });
 
   // The pages' timers would keep the process alive.
-  for (const win of OPEN_WINDOWS.splice(0)) win.close();
+  closeWindows();
   report('runStartLayout');
 }
 

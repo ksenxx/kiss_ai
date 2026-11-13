@@ -175,7 +175,7 @@ class TestPendingWorktreeSurvivesNextRun(unittest.TestCase):
         assert [b.get("branch") for b in bars] == [branch], (
             "the Merge / Discard bar was not presented for the pending worktree"
         )
-        assert bars[0].get("changedFiles") == ["declined.txt"]
+        assert worktree_changed_files(self.server, tab_id) == ["declined.txt"]
 
     def test_next_run_parks_the_pending_worktree_on_its_branch(self) -> None:
         """The declined worktree is committed to its branch, not merged.

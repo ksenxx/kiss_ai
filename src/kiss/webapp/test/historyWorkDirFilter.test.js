@@ -199,18 +199,20 @@ function testSelectingADirectoryKeepsChatsCollapsed() {
         .getElementById('history-list')
         .querySelectorAll('.history-chat-group'),
     );
-  assert.ok(groups().length >= 2, 'chats are grouped');
-  const collapsedBefore = groups().map(g => g.classList.contains('collapsed'));
+  // Each chat on screen and whether it is folded (newest chat first).
+  const folds = () =>
+    groups()
+      .filter(g => g.style.display !== 'none')
+      .map(g => [g.dataset.chatId, g.classList.contains('collapsed')]);
+  assert.deepStrictEqual(folds(), [
+    ['chat-b', true],
+    ['chat-a', true],
+  ]);
   // A directory scopes the list like a machine: it is no search, so
   // every chat stays as folded as it was.
   selectWorkDir(win, KISS);
   sendReply(win, posted, fixture.slice(0, 2), WORK_DIRS);
-  assert.deepStrictEqual(
-    groups()
-      .filter(g => g.style.display !== 'none')
-      .map(g => g.classList.contains('collapsed')),
-    collapsedBefore.slice(0, 1),
-  );
+  assert.deepStrictEqual(folds(), [['chat-a', true]]);
   win.close();
   console.log('  ok - selecting a directory keeps the chats collapsed');
 }
@@ -407,7 +409,6 @@ const TESTS = [
 try {
   for (const t of TESTS) t();
   console.log(`\n${TESTS.length} passed, 0 failed`);
-  process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);
   process.exit(1);

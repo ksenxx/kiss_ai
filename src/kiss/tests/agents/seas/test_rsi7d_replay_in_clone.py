@@ -80,6 +80,8 @@ class ReplayInCloneTest(DaemonLocalHarness):
                 "custom_api_key": "kiss-test-key",
                 "use_web_browser": False,
                 "auto_classify": False,
+                # A run's memory recall asks OpenAI for an embedding when a key is exported.
+                "use_memory": False,
             }),
             encoding="utf-8",
         )

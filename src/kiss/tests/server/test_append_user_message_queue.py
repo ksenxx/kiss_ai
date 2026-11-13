@@ -304,6 +304,41 @@ class TestDrainPendingUserMessages:
         finally:
             server.printer._thread_local.task_id = None
 
+    def test_message_sent_under_an_id_reaches_the_agent_as_plain_text(self) -> None:
+        """The id (``promptId``) stays with the daemon's answers.
+
+        An agent serializes what it is handed, and YAML refuses a
+        ``str`` subclass: the drained message, the answer to a pending
+        question and every echoed text are exactly ``str``.
+        """
+        import queue
+
+        server, events = _make_server()
+        st = _register_active_state("task-id", "tab-id")
+        server._cmd_append_user_message(
+            {"tabId": "tab-id", "prompt": "steer it", "promptId": "p-1"},
+        )
+        server.printer._thread_local.task_id = "task-id"
+        try:
+            queued, _files = server.printer.drain_pending_user_messages()
+        finally:
+            server.printer._thread_local.task_id = None
+        assert [(type(message), message) for message in queued] == [(str, "steer it")]
+
+        st.user_answer_queue = queue.Queue(maxsize=1)
+        st.pending_ask_id = "ask-1"
+        server._cmd_append_user_message({"tabId": "tab-id", "prompt": "yes", "promptId": "p-2"})
+        answer = st.user_answer_queue.get_nowait()
+        assert (type(answer), answer) == (str, "yes")
+
+        echoes = [e for e in events if e.get("type") == "prompt"]
+        assert [(type(e["text"]), e["text"], e["promptIds"]) for e in echoes] == [
+            (str, "steer it", ["p-1"]),
+            (str, "steer it", ["p-1"]),
+            (str, "yes", ["p-2"]),
+        ]
+        assert server._prompts_taken_from("tab-id") == {"promptsTaken": ["p-1", "p-2"]}
+
 
 class _PreStepHookRecordingModel:
     """A model that records whether the pre-step hook was called first.
@@ -317,7 +352,7 @@ class _PreStepHookRecordingModel:
     serves_tools_natively = False  # no native tool set is built for it
     native_tools_exposed = Model.native_tools_exposed  # the base no-op
     # The context policies of the base model: none applies.
-    server_side_context_editing = Model.server_side_context_editing
+    clears_tool_uses_in_bulk = Model.clears_tool_uses_in_bulk
     keeps_reasoning_turns = Model.keeps_reasoning_turns
     compacts_whole_turns = Model.compacts_whole_turns
 
@@ -375,7 +410,6 @@ class TestPreStepHookIntegration:
         agent = KISSAgent("HookTest")
         agent.model = model_obj
         agent.model_name = model_obj.model_name
-        agent.verbose = False
         agent.printer = None
         agent.is_agentic = True
         agent.max_steps = 5

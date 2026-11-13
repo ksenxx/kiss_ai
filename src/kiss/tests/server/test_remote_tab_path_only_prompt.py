@@ -24,9 +24,20 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import CodeType
 
+from kiss.server.machine_stream import MachineStream
+from kiss.server.remote_tabs import RemoteTabs
+from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.pause import Pause, Pauses
 from kiss.tests.server.remote_tabs_probe import machine_of
 from kiss.tests.server.test_remote_tabs import RemoteTabsHarness
+
+# Where ``RemoteTabs._registry_title`` scans the registry snapshot it took:
+# a thread held at its entry has read the tab's title and not used it yet.
+_TITLE_SCAN = next(
+    c for c in RemoteTabs._registry_title.__code__.co_consts if isinstance(c, CodeType)
+)
 
 
 class TestRemoteTabPathOnlyPrompt(RemoteTabsHarness):
@@ -105,6 +116,46 @@ class TestRemoteTabPathOnlyPrompt(RemoteTabsHarness):
         await asyncio.to_thread(stream._relay_frame, late, json.dumps(late))
         self.assertEqual(await self._title_of(tab), "Renamed")
         self.assertNotIn(tab, stream.displaced_titles)
+
+    async def test_a_file_prompt_gives_back_the_title_it_replaced(self) -> None:
+        # Two surfaces submit to the tab at once: the file prompt of one
+        # has read the tab's title when the task prompt of the other is
+        # published, and is published after it.  The title its
+        # ``promptOpened`` gives back is the one it replaced, the
+        # task's, not the one it read before.  The task prompt reaches
+        # the machine after that answer: a tab running a task opens no
+        # file.
+        tab = "tab-two-surfaces"
+        await self._submit(tab, "Say hello", "box")
+        await self._run_until_idle(tab)
+        target = Path(self.remote.home) / "notes.md"
+        target.write_text("draft\n", encoding="utf-8", newline="")
+        _, other = await open_local_connection(self.server)
+        self.addCleanup(other.close)
+        registry = self.server._agent_server.tab_registry
+        title_read = Pause(_TITLE_SCAN, lambda local: True)
+        task_sent = Pause(
+            MachineStream.send.__code__,
+            lambda local: local["cmd"].get("prompt") == "Second task",
+        )
+        with Pauses(title_read, task_sent):
+            await self._submit(tab, str(target), "box")
+            self.assertTrue(await asyncio.to_thread(title_read.paused.wait, 30))
+            other.write(json.dumps({
+                "type": "submit", "prompt": "Second task", "tabId": tab, "machine": "box",
+                "model": self.model, "workDir": self.tmpdir,
+            }).encode("utf-8") + b"\n")
+            await other.drain()
+            # The task prompt is published in the window if anything lets it in.
+            for _ in range(40):
+                if any(e["title"] == "Second task" for e in registry.snapshot()):
+                    break
+                await asyncio.sleep(0.05)
+            title_read.release()
+            await self._until("promptOpened", tab)
+            task_sent.release()
+        await self._until("task_done", tab)
+        self.assertEqual(await self._title_of(tab), "Second task")
 
     async def _title_of(self, tab: str) -> str:
         tabs = await self._ask({"type": "ready", "tabId": tab}, "tabs_state")

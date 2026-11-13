@@ -76,16 +76,14 @@ class TestAgentServerBranches:
         self._tmpdir = tempfile.mkdtemp()
         kiss_dir = Path(self._tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved = (th._DB_PATH, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         th._invalidate_chat_context_cache()
 
     def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
+        th._close_thread_db()
+        (th._DB_PATH, th._KISS_DIR) = self._saved
         th._invalidate_chat_context_cache()
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
@@ -111,7 +109,8 @@ class TestAgentServerBranches:
             events.append(ev)
             orig(ev)
         server.printer.broadcast = cap  # type: ignore[assignment]
-        server._complete("a", seq=-1)
+        server._complete_seq_latest[""] = 1
+        server._complete("a", 1)
         ghost = [e for e in events if e.get("type") == "ghost"]
         assert len(ghost) == 1
         assert ghost[0]["suggestion"] == ""
@@ -228,7 +227,8 @@ class TestAgentServerBranches:
             events.append(ev)
         server.printer.broadcast = cap  # type: ignore[assignment]
         th._add_task("integrate all the modules together")
-        server._complete("integrate all the module")
+        server._complete_seq_latest[""] = 1
+        server._complete("integrate all the module", 1)
         ghost = [e for e in events if e.get("type") == "ghost"]
         assert len(ghost) == 1
         assert "s together" in ghost[0]["suggestion"]

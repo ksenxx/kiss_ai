@@ -49,6 +49,7 @@ from kiss.tests.agents.seas.conftest import (
     persist_task,
 )
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
+from kiss.tests.conftest import is_root
 
 DEMO_SEA = '''"""Demo SEA: a worker with a tool."""
 
@@ -493,9 +494,7 @@ def test_created_test_file_held_out_cap_and_an_interrupted_gate(
     _assert_untouched(root, test=None)
 
 
-@pytest.mark.skipif(
-    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes read-only files"
-)
+@pytest.mark.skipif(is_root(), reason="root writes read-only files")
 def test_a_failed_test_file_copy_puts_the_script_back(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

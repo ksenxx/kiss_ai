@@ -120,7 +120,7 @@ function runTests(tests) {
     }
   }
   console.log(`\n${tests.length - failed} passed, ${failed} failed`);
-  process.exit(failed ? 1 : 0);
+  if (failed) process.exit(1);
 }
 
 /** The Explorer's top-level folder rows, in DOM order. */

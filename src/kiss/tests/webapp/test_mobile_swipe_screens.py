@@ -17,6 +17,13 @@ A drag that scrolled something sideways, a two-finger drag, a vertical
 drag, a short, a slow, or a selecting drag, one in the composer, or one
 under an open sheet, is not a swipe.
 
+The file screen's tab bar lists the open files, terminals and browser
+pages and nothing else, also when there is only one.  A swipe right
+from it goes back to the chat that was on screen before it (its machine
+in the header, its task in the transcript), whichever chat the tab was
+opened from.  Stop and "Save chat", which stay on the file screen, act
+on that same chat.
+
 The swipes are real touch sequences dispatched through the Chrome
 DevTools protocol (``Input.dispatchTouchEvent``), so Chromium produces
 the same touch events and native scrolling a finger would.
@@ -24,13 +31,21 @@ the same touch events and native scrolling a finger would.
 
 from __future__ import annotations
 
+import http.server
+import os
+import threading
+from pathlib import Path
+
 import pytest
 
+from kiss.agents.sorcar import machines as mach
+from kiss.agents.sorcar import persistence, web_stealth
+from kiss.tests.remote_daemon import start_remote_daemon
 from kiss.tests.server.test_explorer_scm_commands import (
     harness,  # noqa: F401  (module fixture used by param name)
 )
+from kiss.tests.webapp.test_content_tab_editing import _dismiss_toasts
 from kiss.tests.webapp.test_workspace_sections import (
-    _dismiss_update_toast,
     _explorer_row,
     _open_page,
     _open_page_mobile,
@@ -196,7 +211,7 @@ def _open_file_from_drawer(page, name: str) -> None:
 
 def _open_mobile(browser, harness):
     context, page, _ = _open_page_mobile(browser, harness)
-    _dismiss_update_toast(page, harness)
+    _dismiss_toasts(page)
     return context, page, _touch_session(page)
 
 
@@ -604,5 +619,313 @@ def test_desktop_layout_ignores_swipes(browser, harness):
         assert not page.evaluate(
             "document.getElementById('sidebar-overlay').classList.contains('open')"
         )
+    finally:
+        context.close()
+
+
+# ---- The file screen's own tab bar, and the way back to the chat ------
+#
+# These tests leave chats open in the daemon's tab registry (a later
+# page adopts them), so they come last in the module.
+
+
+@pytest.fixture(scope="module")
+def box(harness):
+    """A second daemon, registered as the machine ``box``, with one chat."""
+    daemon = start_remote_daemon(
+        Path(harness.tmpdir) / "box-home", password="pw-box",
+        seed=[{"chat_id": "box-chat", "task": "Box task", "result": "done"}],
+    )
+    mach.save_machines([])
+    mach.add_machine("box", daemon.url, "pw-box")
+    yield daemon
+    daemon.stop()
+    mach.save_machines([])
+
+
+# A page 3000px wide: red up to x = 100, green beyond.  Its top third is
+# a strip that scrolls sideways on its own, over the same two colours.
+_BAND = "width:3000px;background:linear-gradient(90deg,#f00 100px,#0c0 100px)"
+_BAND_PAGE = (
+    "<!doctype html><html><head><title>Bands</title></head><body style='margin:0'>"
+    "<div style='position:absolute;left:0;top:0;width:100vw;height:33vh;overflow-x:auto'>"
+    f"<div style='height:100%;{_BAND}'></div></div>"
+    f"<div style='height:100vh;{_BAND}'></div></body></html>"
+).encode()
+# How far down the page the strip and the document under it are touched
+# and looked at, as fractions of the page's height.
+_STRIP_DOWN = 0.15
+_DOCUMENT_DOWN = 0.75
+
+# The colour the streamed picture shows near its left edge, the fraction
+# *down* of the way down: red while what is drawn there stands at its
+# left edge, green once it is scrolled 100px or more sideways ('' before
+# the first frame).
+_BAND_JS = """(down) => {
+  const img = document.querySelector('.browser-screen img.browser-frame');
+  if (!img || !img.naturalWidth) return '';
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const g = canvas.getContext('2d');
+  g.drawImage(img, 0, 0);
+  const y = Math.round(img.naturalHeight * down);
+  const [red, green] = g.getImageData(20, y, 1, 1).data;
+  return red > green ? 'red' : 'green';
+}"""
+
+
+def _wait_band(page, down: float, colour: str) -> None:
+    """Wait until the streamed picture shows *colour* at its left edge, *down* of the way down."""
+    page.wait_for_function(
+        f"([down, colour]) => ({_BAND_JS})(down) === colour", arg=[down, colour], timeout=60000,
+    )
+
+
+def _stays_on_the_page(page) -> bool:
+    """Whether the browser tab is still on screen after a drag, once
+    the swipe can no longer be waiting for the daemon's word on it (the
+    view waits TOUCH_ANSWER_MS, 600 ms, for a late answer)."""
+    page.wait_for_timeout(800)
+    return _settled_screen(page) == "file"
+
+
+class _BandPage(http.server.BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802 - http.server API
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(_BAND_PAGE)))
+        self.end_headers()
+        self.wfile.write(_BAND_PAGE)
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        pass
+
+
+@pytest.fixture
+def band_page(harness):
+    """The daemon's own browser, headless, opening on the band page."""
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _BandPage)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    saved = {k: os.environ.get(k) for k in ("KISS_HEADLESS", "KISS_BROWSER_HOME")}
+    os.environ["KISS_HEADLESS"] = "1"
+    os.environ["KISS_BROWSER_HOME"] = f"http://127.0.0.1:{httpd.server_address[1]}/"
+    yield
+    # The browser goes before the display it draws on.
+    harness.server._agent_server.browser_tabs.shutdown()
+    web_stealth.stop_virtual_display()
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def _bar(page) -> list[str] | None:
+    """The labels on the tab bar, or None while the bar is hidden."""
+    if not page.locator("#tab-bar").is_visible():
+        return None
+    labels: list[str] = page.locator("#tab-list .chat-tab .chat-tab-label").all_inner_texts()
+    return labels
+
+
+def _seed_chat(harness, chat_id: str, task: str) -> None:
+    """A finished one-task chat in the harness daemon's history."""
+    task_id, _ = persistence._add_task(
+        task, chat_id, {"work_dir": str(harness.work_dir)},
+    )
+    persistence._save_task_result("done", task_id=task_id)
+
+
+def _pick_chat(page, cdp, chat_id: str, task: str, machine: str = "") -> None:
+    """Swipe to the Chats screen and pick *chat_id*: its task is on the
+    chat screen, under a header that names *machine* ('' = this one)."""
+    _swipe_right(cdp)
+    _wait_screen(page, "chats")
+    page.locator(
+        f"#history-list .history-chat-group[data-chat-id='{chat_id}']"
+        " .history-chat-header"
+    ).click(timeout=30000)
+    _wait_screen(page, "chat")
+    page.wait_for_function(
+        "m => document.getElementById('chat-machine').value === m",
+        arg=machine, timeout=30000,
+    )
+    page.wait_for_selector("#remote-chat-loader", state="detached", timeout=30000)
+    assert _chat_on_screen(page)[1] == task
+
+
+def _chat_on_screen(page) -> tuple[str, str]:
+    """The chat screen as the user reads it: the machine the header
+    names and the task the transcript opens with."""
+    assert page.locator("#chat-machine").is_visible()
+    machine = page.locator("#chat-machine option:checked").inner_text()
+    task = page.locator("#output .task-panel .task-panel-text").first.inner_text()
+    return machine, task
+
+
+def test_a_lone_file_or_terminal_has_its_bar_and_swipes_back_to_the_chat_left(
+    browser, harness, box,
+):
+    """One file, then one terminal: the file screen's bar holds that one
+    tab.  A swipe right, or closing the tab, goes back to the chat the
+    file screen was swiped to from, on its machine, not to the chat the
+    tab was opened from."""
+    _seed_chat(harness, "local-chat", "Local task")
+    context, page, cdp = _open_mobile(browser, harness)
+    try:
+        _pick_chat(page, cdp, "local-chat", "Local task")
+        local = _chat_on_screen(page)[0]
+        _open_file_from_drawer(page, "feature.txt")
+        assert _bar(page) == ["feature.txt"]
+        page.click("#more-btn")
+        page.click("#terminal-btn")
+        page.wait_for_selector(_VIEW + ".terminal-view", timeout=30000)
+        assert _bar(page) == ["feature.txt", "Terminal"]
+        page.click("#tab-list .chat-tab:not(.active) .chat-tab-close")
+        assert _bar(page) == ["Terminal"]
+        # Back on the chat the terminal was opened from: no bar for a
+        # lone chat.  A draft keeps that chat open behind the next one.
+        _swipe_right(cdp)
+        _wait_screen(page, "chat")
+        assert _bar(page) is None
+        assert _chat_on_screen(page) == (local, "Local task")
+        page.fill("#task-input", "a draft keeps this chat open")
+        _pick_chat(page, cdp, "box-chat", "Box task", machine="box")
+        # The terminal of the local chat, looked at from the chat on box...
+        _swipe_left(cdp)
+        _wait_screen(page, "file")
+        assert _bar(page) == ["Terminal"]
+        # ...and the swipe back returns to that chat, on box.
+        _swipe_right(cdp)
+        _wait_screen(page, "chat")
+        assert _chat_on_screen(page) == ("box", "Box task")
+        # So does closing the terminal from its bar.
+        _swipe_left(cdp)
+        _wait_screen(page, "file")
+        page.click("#tab-list .chat-tab.active .chat-tab-close")
+        _wait_screen(page, "chat")
+        assert _bar(page) is None
+        assert _chat_on_screen(page) == ("box", "Box task")
+    finally:
+        context.close()
+
+
+def test_a_lone_browser_tab_has_its_bar_and_swipes_back_from_its_page(
+    browser, harness, band_page,
+):
+    """The daemon's browser streamed into a tab is alone on the file
+    screen and still has its bar.  A swipe right on the streamed page
+    goes back to the chat swiped from while what is under the finger
+    (the document, or a strip of it that scrolls on its own) stands at
+    its left edge; scrolled sideways, the finger scrolls it back."""
+    _seed_chat(harness, "alpha-chat", "Alpha task")
+    _seed_chat(harness, "beta-chat", "Beta task")
+    context, page, cdp = _open_mobile(browser, harness)
+    try:
+        _pick_chat(page, cdp, "alpha-chat", "Alpha task")
+        page.fill("#task-input", "a draft keeps this chat open")
+        _pick_chat(page, cdp, "beta-chat", "Beta task")
+        page.click("#more-btn")
+        page.click("#browser-btn")
+        _wait_screen(page, "file")
+        _wait_band(page, _DOCUMENT_DOWN, "red")
+        bar = _bar(page)
+        assert bar is not None and len(bar) == 1
+        box = page.locator(".browser-screen").bounding_box()
+        assert box is not None
+        for down in (_DOCUMENT_DOWN, _STRIP_DOWN):
+            y = box["y"] + box["height"] * down
+            # From its left edge a swipe right leaves for the chat.
+            _swipe_right(cdp, y=y)
+            _wait_screen(page, "chat")
+            assert _chat_on_screen(page)[1] == "Beta task"
+            _swipe_left(cdp)
+            _wait_screen(page, "file")
+            # Leftwards the finger scrolls what is under it and stays...
+            _drag(cdp, (_RIGHT_X, y), (_RIGHT_X - 200, y))
+            _wait_band(page, down, "green")
+            assert _stays_on_the_page(page)
+            # ...and rightwards it scrolls that back to its left edge.
+            _drag(cdp, (_LEFT_X, y), (_RIGHT_X, y))
+            _wait_band(page, down, "red")
+            assert _stays_on_the_page(page)
+        # From there the next swipe right leaves for the chat again.
+        _swipe_right(cdp, y=y)
+        _wait_screen(page, "chat")
+        assert _chat_on_screen(page)[1] == "Beta task"
+    finally:
+        context.close()
+
+
+def _active_tab(page) -> str:
+    return str(page.evaluate("window._testApi.getActiveTabId()"))
+
+
+def _announce_run(harness, page, tab_id: str) -> None:
+    """The daemon announces a task running in *tab_id*, and the page has
+    heard it.  (A task needs a model to run; the announcement is the
+    daemon's own ``status`` broadcast.)"""
+    harness.server._printer.broadcast(
+        {"type": "status", "running": True, "tabId": tab_id},
+    )
+    page.wait_for_function(
+        "id => window._testApi.openTabs().some(t => t.id === id && t.isRunning)",
+        arg=tab_id, timeout=15000,
+    )
+
+
+def test_stop_and_save_chat_on_the_file_screen_act_on_the_chat_swiped_from(
+    browser, harness,
+):
+    """A file opened from one chat and looked at from another: Stop and
+    "Save chat" on the file screen act on the chat the screen was swiped
+    to from, the one a swipe right returns to, and not on the chat the
+    file was opened from."""
+    _seed_chat(harness, "owner-chat", "Owner task")
+    _seed_chat(harness, "visitor-chat", "Visitor task")
+    context, page, sent = _open_page_mobile(browser, harness)
+    _dismiss_toasts(page)
+    cdp = _touch_session(page)
+    stop = page.locator("#stop-btn")
+    try:
+        _pick_chat(page, cdp, "owner-chat", "Owner task")
+        owner = _active_tab(page)
+        _open_file_from_drawer(page, "feature.txt")
+        _swipe_right(cdp)
+        _wait_screen(page, "chat")
+        page.fill("#task-input", "a draft keeps this chat open")
+        _pick_chat(page, cdp, "visitor-chat", "Visitor task")
+        visitor = _active_tab(page)
+        assert visitor != owner
+        # The owner's file, looked at from the visitor chat while only
+        # the owner's task runs: there is nothing here to stop.
+        _announce_run(harness, page, owner)
+        _swipe_left(cdp)
+        _wait_screen(page, "file")
+        assert _bar(page) == ["feature.txt"]
+        assert not stop.is_visible()
+        # The visitor's task starts: Stop shows, and stops that task.
+        _announce_run(harness, page, visitor)
+        stop.wait_for(state="visible", timeout=15000)
+        assert _screen(page) == "file"
+        stop.click()
+        # The daemon answers that nothing runs in the tab it was asked
+        # to stop, and the button goes with that tab's run.
+        stop.wait_for(state="hidden", timeout=15000)
+        assert [f["tabId"] for f in sent if f.get("type") == "stop"] == [visitor]
+        # "Save chat" brings the visitor chat back and saves its page.
+        assert _screen(page) == "file"
+        page.click("#more-btn")
+        page.click("#share-btn")
+        _wait_screen(page, "chat")
+        assert _chat_on_screen(page)[1] == "Visitor task"
+        page.locator("#output").get_by_text("Chat page saved to").wait_for(timeout=30000)
+        reports = Path(harness.work_dir) / "reports"
+        saved = sorted(p.name for p in reports.glob("chat-*.html"))
+        assert saved == ["chat-visitor-task-visitor-chat.html"]
+        assert "Visitor task" in (reports / saved[0]).read_text()
     finally:
         context.close()

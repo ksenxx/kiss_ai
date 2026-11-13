@@ -40,7 +40,7 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as th
 import kiss.core.user_config as vc
 from kiss.core.utils import is_root_dir
-from kiss.server.tab_registry import TabRegistry
+from kiss.server.tab_registry import OpenTabOutcome, TabRegistry
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 from kiss.tests.server.conftest import file_names, redirect_persistence, restore_persistence
@@ -158,7 +158,7 @@ class TestTabRegistryRootWorkDir(unittest.TestCase):
     def test_open_tab_refuses_root_work_dir(self) -> None:
         """A new tab opened with a root work dir stores ``""``."""
         registry = TabRegistry(self.path)
-        self.assertTrue(registry.open_tab("t1", "title", "C:\\"))
+        self.assertIs(registry.open_tab("t1", "title", "C:\\"), OpenTabOutcome.OPENED)
         self.assertEqual(registry.snapshot()[0]["workDir"], "")
 
     def test_update_tab_ignores_root_but_accepts_real_dir(self) -> None:
@@ -197,7 +197,7 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.server.web_server import _generate_self_signed_cert
+        from kiss.tests.local_ws import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
         self.server = RemoteAccessServer(
@@ -219,8 +219,7 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
             except Exception:
                 pass
         await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         vc.CONFIG_DIR = self._orig_cfg_dir
         vc.CONFIG_PATH = self._orig_cfg_path
@@ -390,7 +389,7 @@ class TestStartupRootFallback(IsolatedAsyncioTestCase):
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.server.web_server import _generate_self_signed_cert
+        from kiss.tests.local_ws import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -408,8 +407,7 @@ class TestStartupRootFallback(IsolatedAsyncioTestCase):
             os.environ.pop("KISS_WORKDIR", None)
         else:
             os.environ["KISS_WORKDIR"] = self._orig_env
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

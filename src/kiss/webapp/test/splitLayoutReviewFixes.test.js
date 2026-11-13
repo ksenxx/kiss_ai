@@ -19,8 +19,11 @@ const {
   stubDesktop,
   captureTimers,
   loadMainCss,
+  click,
+  byId,
 } = require('./simplify2_harness');
 const {installTokenisedCss} = require('./designTokens');
+const {activeTabId: activeId} = require('./subagent_tab_helpers');
 
 function makePage(opts) {
   const {desktopMatches = true} = opts || {};
@@ -45,14 +48,8 @@ function chatIds(win) {
     .map(t => t.id);
 }
 
-function activeId(win) {
-  return win._testApi.getActiveTabId();
-}
-
 function clickNewChat(win) {
-  win.document
-    .getElementById('new-chat-btn')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  click(win, byId(win, 'new-chat-btn'));
 }
 
 function shownContentTab(win) {

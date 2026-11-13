@@ -16,7 +16,8 @@ settings panel's "Update Models" button — instead of the repo's bundled
 * is left untouched by ``--dry-run``.
 
 Every test runs the real script as a subprocess (``--scrub-only``: the
-offline mode that needs no vendor API keys and no network).
+offline mode that needs no vendor API keys and no network; the registry
+test runs a whole update against a loopback listing).
 """
 
 from __future__ import annotations
@@ -108,6 +109,8 @@ def test_dry_run_leaves_the_target_untouched(tmp_path: Path) -> None:
     missing = tmp_path / "missing" / "MODEL_INFO.json"
     _run("--model-info", str(missing), "--dry-run")
     assert not missing.exists(), "--dry-run must not seed a new target"
+    # A dry run takes no catalog lock: no sidecar, no directory for one.
+    assert [path.name for path in tmp_path.iterdir()] == ["MODEL_INFO.json"]
 
 
 def test_default_target_is_the_bundled_repo_catalog() -> None:
@@ -136,3 +139,48 @@ def test_default_target_is_the_bundled_repo_catalog() -> None:
     help_text = " ".join(proc.stdout.split())
     assert "--model-info PATH" in help_text
     assert str(_BUNDLED) in help_text
+
+
+def test_user_registry_stays_out_of_the_catalog(tmp_path: Path) -> None:
+    """``MY_MODELS.json`` is neither diffed against the listings, nor probed, nor published.
+
+    The registry overrides both catalog models (one at the vendor's new price) and adds a
+    model of its own.  The catalog entry still takes the vendor's price, the overridden
+    ``gpt-7`` is not re-tested (its Chat probe would answer 404 and clear ``gen``), and the
+    user's own model is neither reported as deprecated nor written.
+    """
+    from kiss.tests.scripts.test_update_models_responses_api import (
+        _RETEST_CHILD,
+        _http_status_server,
+        _keyless_env,
+    )
+
+    entry = {
+        "context_length": 1000,
+        "input_price_per_1M": 1.0,
+        "output_price_per_1M": 4.0,
+        "fc": True,
+        "emb": False,
+        "gen": True,
+    }
+    repriced = {**entry, "input_price_per_1M": 2.0}
+    target = tmp_path / "MODEL_INFO.json"
+    target.write_text(json.dumps({"openrouter/acme/gpt-x": entry, "gpt-7": entry}))
+    home = tmp_path / "home"
+    home.mkdir()
+    registry = {"openrouter/acme/gpt-x": repriced, "gpt-7": entry, "openrouter/acme/mine": entry}
+    (home / "MY_MODELS.json").write_text(json.dumps(registry))
+    pricing = {"prompt": "0.000002", "completion": "0.000004"}
+    listing = {"data": [{"id": "acme/gpt-x", "context_length": 1000, "pricing": pricing}]}
+    command = [sys.executable, "-c", _RETEST_CHILD, "--model-info", str(target), "--test-existing"]
+    with _http_status_server(404, {"/listing": (200, json.dumps(listing).encode())}) as endpoint:
+        proc = subprocess.run(
+            [*command, endpoint],
+            env=_keyless_env(home, target),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    assert proc.returncode == 0, proc.stderr
+    assert "openrouter/acme/mine" not in proc.stdout
+    assert json.loads(target.read_text()) == {"openrouter/acme/gpt-x": repriced, "gpt-7": entry}

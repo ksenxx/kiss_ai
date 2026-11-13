@@ -47,6 +47,7 @@ from kiss.tests.conftest import (
     requires_anthropic_api_key,
     requires_gemini_api_key,
 )
+from kiss.tests.persistence_helpers import close_db
 
 MODEL_A = "claude-haiku-4-5"
 MODEL_B = "gemini-2.5-flash"
@@ -88,9 +89,9 @@ def _isolate_sorcar_db(tmp_path: Path) -> Any:
     test_dir.mkdir()
     sorcar_persistence._KISS_DIR = test_dir
     sorcar_persistence._DB_PATH = test_dir / "history.db"
-    sorcar_persistence._close_db()
+    close_db()
     yield
-    sorcar_persistence._close_db()
+    close_db()
     sorcar_persistence._KISS_DIR = orig_kiss_dir
     sorcar_persistence._DB_PATH = orig_db_path
 

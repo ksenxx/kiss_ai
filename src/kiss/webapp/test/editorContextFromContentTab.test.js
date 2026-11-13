@@ -18,9 +18,9 @@ const {
   clickTab,
   recordTimers,
   fireTimers,
+  pickMachine,
 } = require('./simplify2_harness');
 const {writeReport: writeReportAs} = require('./subagent_tab_helpers');
-const {pickMachine} = require('./simplify2_harness');
 const {MACHINES} = require('./picked_machine_helpers');
 
 const pages = [];

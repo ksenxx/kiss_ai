@@ -38,6 +38,9 @@ S3-11/S3-12  The synchronous daemon client capped a single event line at
 S3-13        A single corrupt persisted ``timestamp`` (TEXT or infinity in
              the dynamically typed SQLite column) aborted the whole
              history response.  ``_safe_start_ms`` now degrades it to 0.
+             An infinite one also reached the page as ``Infinity``, which
+             ``JSON.parse`` rejects: the row's ``timestamp`` and a replayed
+             event's ``_timestamp`` are finite on the wire now.
 
 All tests use real sockets, real filesystems, real threads, and real
 WSS/HTTPS connections — no mocks, patches, or fakes.
@@ -50,6 +53,7 @@ import json
 import os
 import random
 import shutil
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -58,10 +62,11 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 import yaml
-from websockets.asyncio.client import connect
+from websockets.asyncio.client import ClientConnection, connect
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
+import kiss.agents.sorcar.persistence as th
 from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server import web_server
 from kiss.server.server import _safe_start_ms
@@ -71,6 +76,7 @@ from kiss.server.task_runner import coerce_budget_override
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import fake_daemon
 from kiss.tests.server.conftest import FORWARDED_VISITOR, find_free_port, no_verify_ssl
+from kiss.tests.server.test_bughunt_web_server import _ServerTestBase
 
 _PASSWORD = "findings3-auth-test-password"
 
@@ -197,6 +203,70 @@ class TestSafeStartMs(unittest.TestCase):
         """A normal seconds timestamp converts to epoch milliseconds."""
         self.assertEqual(_safe_start_ms(1.5), 1500)
         self.assertEqual(_safe_start_ms(1000), 1_000_000)
+
+
+def _reject_json_constant(literal: str) -> None:
+    """``parse_constant`` hook: the chat page's ``JSON.parse`` knows no NaN or Infinity."""
+    raise ValueError(f"{literal} is not JSON")
+
+
+class TestCorruptTimestampOnTheWire(_ServerTestBase):
+    """S3-13 on the wire: an infinite ``timestamp`` column reaches no client as ``Infinity``.
+
+    The chat page reads a frame with ``JSON.parse``, which rejects the
+    ``Infinity`` that ``json.dumps`` writes for such a float, so the
+    whole transcript or History list of the frame would be dropped.
+    """
+
+    def _seed_task(self, corrupt_table: str, corrupt: object = 9e999) -> tuple[str, str]:
+        """Store a finished task with one event; set *corrupt_table*'s timestamps to *corrupt*."""
+        task_id, chat_id = th._add_task("corrupt clock", chat_id="chat-inf")
+        th._append_chat_event({"type": "text_delta", "text": "hello"}, task_id=task_id)
+        th._save_task_result("done", task_id, success=True)
+        db = sqlite3.connect(str(th._DB_PATH))
+        db.execute(f"UPDATE {corrupt_table} SET timestamp = ?", (corrupt,))
+        db.commit()
+        db.close()
+        return task_id, chat_id
+
+    async def _reply(self, cmd: dict[str, Any], kind: str) -> str:
+        """Send *cmd* as a signed-in page and return the text of the *kind* frame it gets."""
+        ws: ClientConnection = await self._connect_ok()
+        # A password-admitted session carries the password on every frame.
+        await ws.send(json.dumps({**cmd, "password": "s3cret"}))
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 30  # as a whole: heartbeats keep coming when the reply is aborted
+        while True:
+            raw = str(await asyncio.wait_for(ws.recv(), timeout=deadline - loop.time()))
+            if json.loads(raw).get("type") == kind:
+                return raw
+
+    async def test_transcript_with_an_infinite_event_time_is_json(self) -> None:
+        """A replayed event's ``_timestamp`` of +inf is dropped, not sent as ``Infinity``."""
+        task_id, chat_id = self._seed_task("events")
+        resume = {"type": "resumeSession", "chatId": chat_id, "taskId": task_id, "tabId": "t-inf"}
+        frame = json.loads(
+            await self._reply(resume, "task_events"), parse_constant=_reject_json_constant,
+        )
+        texts = [ev["text"] for ev in frame["events"] if ev.get("type") == "text_delta"]
+        self.assertEqual(texts, ["hello"])
+
+    async def test_history_frame_with_a_corrupt_task_time_is_strict_json(self) -> None:
+        """Infinite, text or BLOB: the row's times degrade to 0, the frame's date range to null.
+
+        The range (``_history_date_range``) went out as ``Infinity`` for the
+        first and aborted the reply for the other two, whatever the row said.
+        """
+        for corrupt in (9e999, "abc", b"\x00\x01"):
+            with self.subTest(corrupt=corrupt):
+                task_id, _ = self._seed_task("task_history", corrupt)
+                frame = json.loads(
+                    await self._reply({"type": "getHistory"}, "history"),
+                    parse_constant=_reject_json_constant,
+                )
+                row = next(s for s in frame["sessions"] if s["task_id"] == task_id)
+                self.assertEqual((row["timestamp"], row["startTs"]), (0, 0))
+                self.assertEqual(frame["dateRange"], {"min": None, "max": None})
 
 
 async def _replay_scripted_result(ws: ServerConnection, result_text: str) -> None:

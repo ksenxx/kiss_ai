@@ -21,13 +21,13 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, plain} = require('./simplify2_harness');
+const {makePage, send, click, plain} = require('./simplify2_harness');
 const {bar, barButtons} = require('./worktree_bar_helpers');
 
 function clickBarButton(win, text) {
   const btn = barButtons(win).find(b => b.textContent === text);
   assert.ok(btn, `the bar must have a "${text}" button`);
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  click(win, btn);
   return btn;
 }
 

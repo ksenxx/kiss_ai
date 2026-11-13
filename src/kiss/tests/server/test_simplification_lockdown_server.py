@@ -52,9 +52,7 @@ class _DbTestBase:
 
     def teardown_method(self) -> None:
         agent_state.agent_states.clear()
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -408,10 +406,11 @@ class TestPersistedSubagentIsDone(_DbTestBase):
         assert opens[0]["parent_tab_id"] == "tab-parent"
         assert opens[0]["description"] == "sub task"
         assert opens[0]["isDone"] is True
-        replays = [e for e in events if e.get("type") == "task_events"]
-        assert len(replays) == 1
-        assert replays[0]["task_id"] == sub_id
-        assert replays[0]["tabId"] == f"tab-parent__sub_{sub_id}"
+        assert not [e for e in events if e.get("type") == "task_events"]
+        offers = [e for e in events if e.get("type") == "replay_deferred"]
+        assert len(offers) == 1
+        assert offers[0]["taskId"] == sub_id
+        assert offers[0]["tabId"] == f"tab-parent__sub_{sub_id}"
 
     def test_no_subagent_rows_no_broadcast(self) -> None:
         parent_id, _ = th._add_task("childless parent")

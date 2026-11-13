@@ -12,17 +12,23 @@
 // hide / resubscribe, and dispose: a tab hidden again before the
 // layout tick reports nothing, and a hide already retracted the
 // viewport so a later dispose does not repeat it, and touch: a tap is
-// a click, a gesture a second finger joined or a cancelled touch is
-// not.  jsdom lays nothing out, so the screen's size is stubbed.
+// a click, a gesture a second finger joined, a cancelled touch or one
+// the view was hidden under is not; a finger that goes down asks the
+// daemon what a drag to the right would scroll, and only its answer
+// frees that drag for the phone layout's swipe back.  jsdom lays
+// nothing out, so the screen's size is stubbed.
 
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 
-const {captureTimers, fireCapturedTimers} = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  captureTimers,
+  fireCapturedTimers,
+  MEDIA,
+} = require('./simplify2_harness');
+const {IME_FORMS} = require('./ui_antipattern_harness');
 
 function makeView() {
   const dom = new JSDOM('<!DOCTYPE html><body></body>', {
@@ -94,7 +100,7 @@ async function testAddressBarAndState() {
   // with isComposing, or with keyCode 229 alone on some platforms.
   url.focus();
   url.value = '日本';
-  for (const init of [{isComposing: true}, {keyCode: 229}]) {
+  for (const init of IME_FORMS) {
     for (const key of ['Enter', 'Escape']) {
       const e = new win.KeyboardEvent(
         'keydown',
@@ -217,33 +223,159 @@ async function testTwoFingerTouchIsNoClick() {
   const screen = view.el.querySelector('.browser-screen');
   const one = {clientX: 50, clientY: 60};
   const two = {clientX: 150, clientY: 60};
+  // What the remote pointer was sent (a finger's question apart).
+  const pointer = () => sent.filter(m => m.event.kind === 'mouse');
   // A second finger joins a tap in progress (a pinch), both move, both lift.
   touch(win, screen, 'touchstart', [one]);
   touch(win, screen, 'touchstart', [one, two]);
   touch(win, screen, 'touchmove', [{clientX: 40, clientY: 60}, two]);
   touch(win, screen, 'touchend', [one], [two]);
   touch(win, screen, 'touchend', [], [one]);
-  assert.deepStrictEqual(sent, [], 'a two-finger gesture is not a click');
+  assert.deepStrictEqual(pointer(), [], 'a two-finger gesture is not a click');
+  assert.strictEqual(sent.length, 1, 'only the first finger asked');
   // A cancelled touch is forgotten.
   touch(win, screen, 'touchstart', [one]);
   touch(win, screen, 'touchcancel', [], [one]);
   touch(win, screen, 'touchend', [], [one]);
-  assert.deepStrictEqual(sent, [], 'a cancelled touch is not a click');
+  assert.deepStrictEqual(pointer(), [], 'a cancelled touch is not a click');
   // A one-finger tap is a click.
   touch(win, screen, 'touchstart', [one]);
   touch(win, screen, 'touchend', [], [one]);
   assert.deepStrictEqual(
-    sent.map(m => m.event.action),
+    pointer().map(m => m.event.action),
     ['mousePressed', 'mouseReleased'],
   );
+  // A one-finger drag scrolls, and lifting it is no click.  The remote
+  // pointer goes to the finger before each wheel.
+  sent.length = 0;
+  touch(win, screen, 'touchstart', [one]);
+  touch(win, screen, 'touchmove', [{clientX: 90, clientY: 60}]);
+  touch(win, screen, 'touchmove', [{clientX: 100, clientY: 70}]);
+  touch(win, screen, 'touchend', [], [{clientX: 100, clientY: 70}]);
+  assert.deepStrictEqual(
+    pointer().map(m => [
+      m.event.action,
+      m.event.x,
+      m.event.deltaX,
+      m.event.deltaY,
+    ]),
+    [
+      ['mouseMoved', 90, undefined, undefined],
+      ['mouseWheel', 90, -40, 0],
+      ['mouseMoved', 100, undefined, undefined],
+      ['mouseWheel', 100, -10, -10],
+    ],
+  );
+  // A finger down when the view hides has no box left to be mapped
+  // through: its lift is no click.
+  sent.length = 0;
+  touch(win, screen, 'touchstart', [one]);
+  view.setVisible(false);
+  touch(win, screen, 'touchend', [], [one]);
+  assert.deepStrictEqual(pointer(), [], 'a touch the view was hidden under');
+}
+
+// A finger that goes down on the screen asks the daemon what is under
+// it.  whenDragRightIsFree(callback) calls back when a drag to the
+// right from there scrolls nothing on the page (the phone layout then
+// turns back to the chat): at once when the daemon has said so, else
+// when it says so within 600 ms.  Without its word the drag stays the
+// page's.
+async function testAFingerAsksWhatADragToTheRightScrolls() {
+  const {win, view, sent, timers} = makeView();
+  const screen = view.el.querySelector('.browser-screen');
+  let free = 0;
+  const count = () => free++;
+  /** Put a finger down; the id its question carries. */
+  const finger = () => {
+    sent.length = 0;
+    touch(win, screen, 'touchstart', [{clientX: 50, clientY: 60}]);
+    assert.deepStrictEqual(
+      sent.map(m => [m.type, m.tab_id, m.event.kind, m.event.x, m.event.y]),
+      [['browserInput', 'tab-1', 'touch', 50, 60]],
+    );
+    return sent[0].event.id;
+  };
+  const answer = (id, scrollsLeft) => view.touched({id, scrollsLeft});
+
+  // No finger has asked: nothing was said about the page.
+  view.whenDragRightIsFree(count);
+  assert.strictEqual(free, 0);
+
+  // The daemon answered while the finger was down.
+  let id = finger();
+  answer(id, false);
+  view.whenDragRightIsFree(count);
+  assert.strictEqual(free, 1, 'nothing to scroll: free at once');
+  const next = finger();
+  assert.notStrictEqual(next, id, 'every finger asks under its own id');
+  answer(next, true);
+  view.whenDragRightIsFree(count);
+  fireCapturedTimers(win, timers);
+  assert.strictEqual(free, 1, 'the page scrolls: never free');
+
+  // The answer comes after the finger lifted.
+  id = finger();
+  view.whenDragRightIsFree(count);
+  assert.strictEqual(free, 1, 'not known yet');
+  answer('another-finger', false);
+  assert.strictEqual(free, 1, "another finger's answer");
+  answer(id, false);
+  assert.strictEqual(free, 2, 'the late answer frees the drag');
+  answer(id, false);
+  assert.strictEqual(free, 2, 'once');
+  id = finger();
+  view.whenDragRightIsFree(count);
+  answer(id, true);
+  fireCapturedTimers(win, timers);
+  assert.strictEqual(free, 2, 'the late answer: the page scrolls');
+
+  // No answer in time (an older daemon, a dead link): the drag stays
+  // the page's, whatever is said later.
+  id = finger();
+  const armed = timers.length;
+  view.whenDragRightIsFree(count);
+  assert.strictEqual(timers[armed].ms, 600);
+  fireCapturedTimers(win, timers, armed);
+  answer(id, false);
+  assert.strictEqual(free, 2, 'an answer after the wait turns nothing');
+
+  // The next finger ends the wait for the last one, and its own wait
+  // is not cut short by the last one's.
+  const last = finger();
+  const lastWait = timers.length;
+  view.whenDragRightIsFree(count);
+  const lastTimer = timers[lastWait];
+  id = finger();
+  view.whenDragRightIsFree(count);
+  fireCapturedTimers(win, [lastTimer]);
+  answer(last, false);
+  assert.strictEqual(free, 2, 'the last finger is forgotten');
+  answer(id, false);
+  assert.strictEqual(free, 3, 'the next finger still waits for its answer');
+
+  // The wait also ends when the view is hidden and when it is
+  // disposed: that drag turns no screen any more.
+  const hide = () => view.setVisible(false);
+  for (const leave of [hide, view.dispose]) {
+    id = finger();
+    view.whenDragRightIsFree(count);
+    leave();
+    answer(id, false);
+    fireCapturedTimers(win, timers);
+    assert.strictEqual(free, 3);
+  }
 }
 
 // A keyup goes to wherever the focus is then: one that leaves the
 // screen (the address field, another tab, another application) never
 // reaches it, and the remote page kept the key pressed.  Keys forwarded
 // down are released when the screen loses focus, when the view is
-// hidden and on dispose; a keyup the screen does get is forwarded as
-// before.
+// hidden and on dispose.  A keyup the screen gets is forwarded only for
+// a key it forwarded down and has not released: not a second time
+// after the blur, and not for Enter or Escape typed in the address
+// field (they hand the focus to the screen before they go up) nor for
+// the V of a paste whose Ctrl went up first.
 async function testHeldKeysReleasedWithFocus() {
   const {win, view, sent} = makeView();
   const screen = view.el.querySelector('.browser-screen');
@@ -264,18 +396,29 @@ async function testHeldKeysReleasedWithFocus() {
       .every(m => m.event.shift),
     'the releases carry the modifiers of the press',
   );
-  // Back on the screen, the key's own keyup is forwarded, once.
+  const keyup = key =>
+    screen.dispatchEvent(new win.KeyboardEvent('keyup', {key, bubbles: true}));
+  // Back on the screen, the key's own keyup: it was released already.
   screen.focus();
-  screen.dispatchEvent(
-    new win.KeyboardEvent('keyup', {key: 'a', bubbles: true}),
-  );
-  assert.deepStrictEqual(keys().slice(4), ['up:a']);
+  keyup('a');
+  const url = view.el.querySelector('.browser-url');
+  for (const key of ['Enter', 'Escape']) {
+    url.focus();
+    keydown(win, url, key);
+    assert.strictEqual(win.document.activeElement, screen);
+    keyup(key);
+  }
+  keydown(win, screen, 'Control', {ctrlKey: true});
+  keydown(win, screen, 'v', {ctrlKey: true});
+  keyup('Control');
+  keyup('v');
+  assert.deepStrictEqual(keys().slice(4), ['down:Control', 'up:Control']);
   // Hidden with a key down: released.  Disposed with one: released too.
   keydown(win, screen, 'b');
   view.setVisible(false);
   keydown(win, screen, 'c');
   view.dispose();
-  assert.deepStrictEqual(keys().slice(5), ['down:b', 'up:b', 'down:c', 'up:c']);
+  assert.deepStrictEqual(keys().slice(6), ['down:b', 'up:b', 'down:c', 'up:c']);
 }
 
 (async () => {
@@ -284,6 +427,7 @@ async function testHeldKeysReleasedWithFocus() {
   await testShowHideBeforeTick();
   await testHideThenDispose();
   await testTwoFingerTouchIsNoClick();
+  await testAFingerAsksWhatADragToTheRightScrolls();
   await testHeldKeysReleasedWithFocus();
   console.log('browserTabView.test.js passed');
 })().catch(err => {

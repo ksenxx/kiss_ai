@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 
-from kiss.core.base import Base
+from kiss.core.base import TRAJECTORY_NAME_BYTES, Base
 
 _WINDOWS_RESERVED = ':\\*?"<>|'
 
@@ -30,6 +30,32 @@ def test_hostile_agent_name_saves_a_trajectory_with_a_portable_file_name() -> No
     assert path.name.startswith("trajectory_Parallel-Read_the_file_C__Users_me_a_b__c__d__e_f_")
     assert re.fullmatch(r"trajectory_[\w.-]+\.yaml", path.name), path.name
     assert "hello" in path.read_text(encoding="utf-8")
+
+
+def test_long_agent_name_still_saves_a_trajectory() -> None:
+    """A name longer than a file name may be is cut, on a character boundary.
+
+    File systems cap a name at 255 bytes; ``_save`` raised ``OSError:
+    File name too long`` for a 300-character name, and ``KISSAgent.run``
+    saves from its ``finally``, so the run lost its result.  The byte
+    limit falls between two characters of the first two names and inside
+    a three-byte character of the third: what is kept is the longest
+    prefix of whole characters that fits.
+    """
+    for name in ("x" * 300, "日本語" * 60, "x" + "日" * 100):
+        first, second = Base(name), Base(name)
+        first._add_message("user", "hello")
+        first._save()
+
+        path = first.get_trajectory_path()
+        assert "hello" in path.read_text(encoding="utf-8")
+        # 34 bytes are left for atomic_write_text's staging name.
+        assert len(path.name.encode("utf-8")) <= 255 - 34, path.name
+        assert path.name.startswith(f"trajectory_{name[:30]}")
+        kept = path.name.removeprefix("trajectory_").rsplit("_", 2)[0]
+        assert name.startswith(kept), kept
+        assert len(kept.encode()) <= TRAJECTORY_NAME_BYTES < len(name[: len(kept) + 1].encode())
+        assert path != second.get_trajectory_path()
 
 
 def test_plain_names_keep_their_spelling() -> None:

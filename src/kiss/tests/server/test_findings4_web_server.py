@@ -29,9 +29,14 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import posix_only
-from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.tests.local_ws import (
+    LocalReader,
+    LocalWriter,
+    _generate_self_signed_cert,
+    open_local_connection,
+)
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
@@ -58,8 +63,7 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -125,13 +129,24 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
         writer.close()
 
     async def test_f406_submit_refused_after_shutdown_started(self) -> None:
-        """_handle_submit must not start tasks once shutdown began."""
+        """A submit after shutdown began starts no task, and its refusal names the prompt."""
         from kiss.server import agent_state
 
+        reader, writer = await self._connect()
+        self.addCleanup(writer.close)
         self.server._shutdown_initiated = True
         try:
-            await self.server._handle_submit(
-                {"tabId": "f406-tab", "prompt": "do work"},
+            await self._send(
+                writer,
+                {"type": "submit", "tabId": "f406-tab", "prompt": "do work", "promptId": "f406-p"},
+            )
+            while True:
+                frame = json.loads(await asyncio.wait_for(reader.readline(), timeout=10))
+                if frame.get("type") == "error":
+                    break
+            self.assertEqual(
+                (frame["code"], frame["tabId"], frame["promptIds"]),
+                ("prompt_refused", "f406-tab", ["f406-p"]),
             )
             state = agent_state.find_by_tab("f406-tab")
             self.assertTrue(

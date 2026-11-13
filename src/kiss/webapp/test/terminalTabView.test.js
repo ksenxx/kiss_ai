@@ -19,18 +19,17 @@ const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 const {
-  waitFor,
   settle,
   installXtermStub,
   newDom,
   loadPageScripts,
+  makePage: makeAppPage,
   plain,
 } = require('./simplify2_harness');
 const {
   readShimJs,
   installFakeWebSocket,
   frames,
-  waitForSocket,
 } = require('./transport_page_helpers');
 
 const MEDIA = path.join(__dirname, '..', 'media');
@@ -65,9 +64,13 @@ function runTimers(page) {
   due.forEach(t => t.fn());
 }
 
-/** Wait until the page's first terminal exists (xterm has loaded). */
-function xtermLoaded(page) {
-  return waitFor(() => page.terminals.length >= 1, 'xterm did not load');
+/**
+ * The page's first terminal exists one event-loop turn after the show:
+ * with the stub's Terminal in place ensureXterm() is already resolved.
+ */
+async function xtermLoaded(page) {
+  await settle();
+  assert.ok(page.terminals.length >= 1, 'xterm did not load');
 }
 
 /** Create a view, show it and let xterm load. */
@@ -344,14 +347,11 @@ function inputs(sock) {
     .map(f => f.data);
 }
 
-// Keystrokes typed while the socket is down used to join the
-// transport's reconnect batch, which goes out before main.js re-sends
-// terminalOpen: the daemon got them from a connection that did not own
-// the shell yet and dropped them.  The real chat page (transport.js,
-// api.js, main.js, terminalTab.js) over the fake WebSocket: the input
-// waits until the daemon's terminalOpened confirms the re-attach, then
-// goes out once, in order, after the terminalOpen.
-async function testInputTypedWhileDisconnectedWaitsForTheReattach() {
+/**
+ * The real chat page (transport.js, api.js, main.js, terminalTab.js)
+ * over a fake WebSocket, its first socket past the handshake.
+ */
+function makeTransportPage() {
   const win = newDom();
   const sockets = [];
   installFakeWebSocket(win, sockets);
@@ -360,6 +360,18 @@ async function testInputTypedWhileDisconnectedWaitsForTheReattach() {
   loadPageScripts(win);
   win.eval(fs.readFileSync(path.join(MEDIA, 'terminalTab.js'), 'utf8'));
   handshake(sockets[0]);
+  return {win, sockets, terminals};
+}
+
+// Keystrokes typed while the socket is down used to join the
+// transport's reconnect batch, which goes out before main.js re-sends
+// terminalOpen: the daemon got them from a connection that did not own
+// the shell yet and dropped them.  The real chat page (transport.js,
+// api.js, main.js, terminalTab.js) over the fake WebSocket: the input
+// waits until the daemon's terminalOpened confirms the re-attach, then
+// goes out once, in order, after the terminalOpen.
+async function testInputTypedWhileDisconnectedWaitsForTheReattach() {
+  const {win, sockets, terminals} = makeTransportPage();
   win.document.getElementById('terminal-btn').click();
   await xtermLoaded({terminals});
   const term = terminals[0];
@@ -376,9 +388,11 @@ async function testInputTypedWhileDisconnectedWaitsForTheReattach() {
   assert.deepStrictEqual(inputs(sockets[0]), ['echo live\r']);
 
   // The socket dies; the user keeps typing into the still-open terminal.
+  // The `online` event makes the shim reconnect at once, backoff or not.
   sockets[0].fireClose();
   term.dataCb('printf OFFLINE\r');
-  await waitForSocket(sockets, 2);
+  win.dispatchEvent(new win.Event('online'));
+  assert.strictEqual(sockets.length, 2);
   const sock = sockets[1];
   handshake(sock);
   await settle();
@@ -407,7 +421,8 @@ async function testInputTypedWhileDisconnectedWaitsForTheReattach() {
   // was typed for it is not run in the fresh shell.
   sock.fireClose();
   term.dataCb('rm -rf stale\r');
-  await waitForSocket(sockets, 3);
+  win.dispatchEvent(new win.Event('online'));
+  assert.strictEqual(sockets.length, 3);
   handshake(sockets[2]);
   await settle();
   sockets[2].fireMessage(opened(false));
@@ -425,20 +440,14 @@ async function testInputTypedWhileDisconnectedWaitsForTheReattach() {
 // run twice is not a settings save applied twice.  They wait in the
 // view until terminalOpened, then go out once.
 async function testTerminalOpenedDuringAnOutageHoldsInputUntilTheReattach() {
-  const win = newDom();
-  const sockets = [];
-  installFakeWebSocket(win, sockets);
-  const {terminals} = installXtermStub(win);
-  win.eval(readShimJs());
-  loadPageScripts(win);
-  win.eval(fs.readFileSync(path.join(MEDIA, 'terminalTab.js'), 'utf8'));
-  handshake(sockets[0]);
+  const {win, sockets, terminals} = makeTransportPage();
   sockets[0].fireClose();
   win.document.getElementById('terminal-btn').click();
   await xtermLoaded({terminals});
   const term = terminals[0];
   term.dataCb('echo example\r');
-  await waitForSocket(sockets, 2);
+  win.dispatchEvent(new win.Event('online'));
+  assert.strictEqual(sockets.length, 2);
   const sock = sockets[1];
   sock.onopen();
   sock.fireMessage({type: 'auth_ok'});
@@ -458,7 +467,8 @@ async function testTerminalOpenedDuringAnOutageHoldsInputUntilTheReattach() {
   // The connection dies before the pong: the next one re-sends the
   // batch; the input, posted after terminalOpened, goes out once.
   sock.fireClose();
-  await waitForSocket(sockets, 3);
+  win.dispatchEvent(new win.Event('online'));
+  assert.strictEqual(sockets.length, 3);
   handshake(sockets[2]);
   await settle();
   assert.deepStrictEqual(
@@ -469,7 +479,40 @@ async function testTerminalOpenedDuringAnOutageHoldsInputUntilTheReattach() {
   win.close();
 }
 
+async function testOpenTerminalsCarryDistinctTitles() {
+  // The "Terminal" menu item numbers a new tab one above the highest
+  // number among the terminals open: counting them would hand the
+  // number of a still-open terminal out again once an earlier one is
+  // closed.
+  const {win} = makeAppPage({
+    extraScripts: ['terminalTab.js'],
+    beforeScripts: installXtermStub,
+  });
+  const terminals = () =>
+    plain(win._testApi.openTabs().filter(t => /^Terminal/.test(t.title)));
+  const titles = () => terminals().map(t => t.title);
+  const open = () => win.document.getElementById('terminal-btn').click();
+  const close = id =>
+    win.document
+      .querySelector('.chat-tab[data-tab-id="' + id + '"] .chat-tab-close')
+      .click();
+  open();
+  open();
+  assert.deepStrictEqual(titles(), ['Terminal', 'Terminal 2']);
+  close(terminals()[0].id);
+  open();
+  assert.deepStrictEqual(titles(), ['Terminal 2', 'Terminal 3']);
+  // With none left the numbering starts over.
+  terminals().forEach(t => close(t.id));
+  open();
+  assert.deepStrictEqual(titles(), ['Terminal']);
+  // The views start their shells on a later tick.
+  await settle();
+  win.close();
+}
+
 (async () => {
+  await testOpenTerminalsCarryDistinctTitles();
   await testOpenFitAndResize();
   await testExitRestartAndReconnectNote();
   await testErrorOnFirstOpenCanBeRetried();

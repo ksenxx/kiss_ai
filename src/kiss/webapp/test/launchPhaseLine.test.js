@@ -202,7 +202,6 @@ function runTests() {
 try {
   runTests();
   console.log('\n4 passed, 0 failed');
-  process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.message ? err.message : err);
   process.exit(1);

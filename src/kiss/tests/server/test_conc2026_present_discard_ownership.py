@@ -68,14 +68,12 @@ class TestPresentDiscardOwnership(unittest.TestCase):
 
         self._saved_db = (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         )
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         _persistence._KISS_DIR = kiss_dir
         _persistence._DB_PATH = kiss_dir / "history.db"
-        _persistence._db_conn = None
 
         self.printer = MemoryPrinter()
         self.server = AgentServer(self.printer)
@@ -93,11 +91,9 @@ class TestPresentDiscardOwnership(unittest.TestCase):
                 except Exception:  # pragma: no cover — cleanup best-effort
                     pass
         agent_state.agent_states.clear()
-        if _persistence._db_conn is not None:
-            _persistence._db_conn.close()
+        _persistence._close_thread_db()
         (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved_db
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -478,7 +474,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
         finishes (clearing ``busy``, keeping the pending worktree);
         the presenter resumes — state, agent and pending all still
         match and the busy check passes.  Pre-fix it accepted the
-        stale empty answer and ``discard(rescue_ignored=True)`` deleted
+        stale empty answer and the automatic ``discard()`` deleted
         the completed output and its branch.  Post-fix the probe is
         repeated under the claim, so the presenter sees the output and
         presents the Merge/Discard buttons instead.
@@ -593,10 +589,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
                 and ev.get("tabId") == tab_id
             ]
             self.assertTrue(
-                any(
-                    "late-output.txt" in (ev.get("changedFiles") or [])
-                    for ev in done_events
-                ),
+                any(ev.get("branch") == branch for ev in done_events),
                 f"no worktree_done presenting the late output: "
                 f"{done_events!r}",
             )

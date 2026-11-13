@@ -16,9 +16,9 @@ const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {MEDIA, newDom} = require('./simplify2_harness');
 const runner = makeRunner();
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const BRAND = 'Seamless Loop';
 const LABEL_ATTRS = [
   'title',
@@ -47,12 +47,7 @@ function readableStrings(doc) {
 runner.test(
   'the rendered chat page names the brand, never the stock product',
   () => {
-    const html = fs
-      .readFileSync(path.join(MEDIA, 'chat.html'), 'utf8')
-      .replace(/\{\{([A-Z_]+)\}\}/g, (m, name) =>
-        name === 'PRODUCT_NAME' ? BRAND : '',
-      );
-    const {window: win} = new JSDOM(html);
+    const win = newDom({placeholders: {PRODUCT_NAME: BRAND}});
     const browserTip = win.document
       .getElementById('browser-btn')
       .getAttribute('data-tooltip');

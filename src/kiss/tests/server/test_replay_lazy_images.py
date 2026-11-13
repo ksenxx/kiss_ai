@@ -36,8 +36,10 @@ import kiss.agents.sorcar.persistence as th
 import kiss.core.user_config as vc
 from kiss.server import sidebar_panels
 from kiss.server.server import AgentServer, _coalesced_replay_events, _replay_image
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import find_free_port
+from kiss.tests.local_ws import _generate_self_signed_cert
+from kiss.tests.persistence_helpers import close_db
 
 _PNG_B64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 8).decode()
 _SVG_B64 = base64.b64encode(b'<svg xmlns="http://www.w3.org/2000/svg"/>').decode()
@@ -77,12 +79,11 @@ class _DatabaseCase(TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp(prefix="kiss-lazy-img-"))
-        self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved_persistence = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = self.tmpdir / ".kiss"
         kiss_dir.mkdir()
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         self.server = AgentServer()
         self.server.work_dir = str(self.tmpdir)
         self.events: list[dict[str, Any]] = []
@@ -99,8 +100,8 @@ class _DatabaseCase(TestCase):
         return capture
 
     def tearDown(self) -> None:
-        th._close_db()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
+        close_db()
+        th._DB_PATH, th._KISS_DIR = self._saved_persistence
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _persist(self, task: str, stream: list[dict[str, Any]]) -> tuple[str, str]:
@@ -208,12 +209,11 @@ class TestFetchOverTheDaemonAndTheLink(TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp(prefix="kiss-lazy-img-daemon-"))
-        self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self._saved_persistence = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = self.tmpdir / ".kiss"
         kiss_dir.mkdir()
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         self._saved_cfg = (vc.CONFIG_DIR, vc.CONFIG_PATH)
         vc.CONFIG_DIR = self.tmpdir / "config"
         vc.CONFIG_PATH = vc.CONFIG_DIR / "config.json"
@@ -246,8 +246,8 @@ class TestFetchOverTheDaemonAndTheLink(TestCase):
             self.loop.call_soon_threadsafe(self.loop.stop)
             self._thread.join(timeout=30)
             self.loop.close()
-            th._close_db()
-            th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
+            close_db()
+            th._DB_PATH, th._KISS_DIR = self._saved_persistence
             vc.CONFIG_DIR, vc.CONFIG_PATH = self._saved_cfg
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -275,6 +275,19 @@ class TestFetchOverTheDaemonAndTheLink(TestCase):
         )
         self.assertEqual(bad_index.get("index"), -1)
         self.assertIn("error", bad_index)
+        # The history database unreadable (a directory in its place):
+        # the picture still gets its answer, or the page would show it
+        # as loading for good.
+        close_db()
+        th._DB_PATH = self.tmpdir / "db-in-the-way"
+        th._DB_PATH.mkdir()
+        unreadable = link.request(
+            {"type": "getReplayImage", "taskId": self.task_id, "index": 0, "token": "rimg-10"},
+            "replayImage", timeout=10,
+        )
+        self.assertEqual(unreadable.get("token"), "rimg-10")
+        self.assertNotIn("b64", unreadable)
+        self.assertIn("Failed to load the picture", unreadable["error"])
 
     def test_forwarded_fetch_comes_back_stamped_with_the_machine(self) -> None:
         cmd = {

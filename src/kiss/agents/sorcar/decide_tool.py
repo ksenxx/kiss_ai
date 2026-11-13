@@ -31,11 +31,13 @@ every use of Jev.
 """
 
 import json
+import threading
 from collections.abc import Callable
 from typing import Any, TypeGuard
 
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
+from kiss.core.locked import locked_call
 from kiss.core.models.decisions_model import (
     QUESTION_TYPES,
     DecisionsModel,
@@ -86,6 +88,39 @@ def decisions_tool_available() -> bool:
     )
 
 
+#: The fields of a question; :func:`parse_questions` refuses any other.
+_QUESTION_FIELDS = ("type", "instructions", "criteria")
+
+
+def _decoding_stop(error: json.JSONDecodeError) -> str:
+    """Return the sentence of a ``questions`` refusal that shows where decoding stopped.
+
+    Three objects nest (the questions, a question, its criteria) and
+    models close two: each of the 33 calls the task history shows
+    refused (2026-11-11) lacked one closing brace at its end.  Such a
+    text is not completed for the model: a brace missing between two
+    questions leaves the text open at its end as well, and closing it
+    there nests the second question in the first.
+
+    Args:
+        error: The decoder's error for the ``questions`` text.
+
+    Returns:
+        ``""`` for a fault at the start of the text (the decoder's
+        message says it all), the text before a fault further on, or,
+        when the text ends before its JSON does, the brace rule.
+    """
+    text, pos = error.doc, error.pos
+    if not text[:pos].strip():
+        return ""
+    if text[pos:].strip():
+        return f". Decoding stopped after {text[max(0, pos - 40):pos]!r}."
+    return (
+        ". The text ends there, before its JSON does: a closing brace is probably missing "
+        "(every question, every criteria object and the questions object itself needs its own)."
+    )
+
+
 def parse_questions(questions_json: str) -> dict[str, dict[str, Any]]:
     """Parse and normalise the tool's ``questions`` JSON argument.
 
@@ -103,13 +138,18 @@ def parse_questions(questions_json: str) -> dict[str, dict[str, Any]]:
         :meth:`DecisionsModel.decide`.
 
     Raises:
-        KISSError: When the JSON does not parse, is not a non-empty object,
-            or an entry has a missing/unknown ``type``, a non-string
+        KISSError: When the JSON does not parse (the message shows where
+            decoding stopped, :func:`_decoding_stop`), is not a non-empty
+            object, or an entry has a field other than those three (a
+            question nested in another one, which would be dropped
+            unasked), a missing/unknown ``type``, a non-string
             ``instructions``, or criteria of the wrong shape for its type.
     """
     try:
         raw = json.loads(questions_json)
-    except (TypeError, ValueError) as e:
+    except json.JSONDecodeError as e:
+        raise KISSError(f"questions is not valid JSON: {e}{_decoding_stop(e)}") from e
+    except (TypeError, ValueError, RecursionError) as e:  # RecursionError: nested too deep
         raise KISSError(f"questions is not valid JSON: {e}") from e
     if not isinstance(raw, dict) or not raw:
         raise KISSError("questions must be a non-empty JSON object {name: question}")
@@ -119,6 +159,13 @@ def parse_questions(questions_json: str) -> dict[str, dict[str, Any]]:
             raise KISSError("Question names must be non-empty strings")
         if not isinstance(spec, dict):
             raise KISSError(f"Question {name!r} must be a JSON object, got {type(spec).__name__}")
+        unexpected = [repr(field) for field in spec if field not in _QUESTION_FIELDS]
+        if unexpected:
+            raise KISSError(
+                f"Question {name!r} takes only 'type', 'instructions' and 'criteria', not "
+                f"{', '.join(unexpected)} (another question nested in it? Then the closing "
+                f"brace of {name!r} is missing before it)"
+            )
         kind = spec.get("type")
         if kind not in QUESTION_TYPES:
             raise KISSError(
@@ -252,6 +299,9 @@ def make_decide_tool(
     decisions_model = model(model_name, model_config=model_config)
     if not isinstance(decisions_model, DecisionsModel):
         raise KISSError(f"{model_name} is not a decisions model (catalog flag 'dec' is not set)")
+    # The calls of one tool take turns with its model: it keeps a single charged-but-rejected
+    # reply, which a second call running at once would overwrite or take for its own.
+    lock = threading.RLock()
 
     def attribute(cost: float, tokens: int, binding: tuple[Any, str] | None) -> None:
         """Fold one call's spend into the accounting of the task it was made for (no step)."""
@@ -261,6 +311,22 @@ def make_decide_tool(
             from kiss.agents.sorcar.sorcar_agent import _attribute_side_call_usage
 
             _attribute_side_call_usage(agent, model_name, cost, tokens, binding)
+
+    def request(
+        state: str, parsed: dict[str, dict[str, Any]]
+    ) -> tuple[str, tuple[float, int] | None]:
+        """Make one request; return the tool's reply and the ``(cost, tokens)`` it was charged."""
+        try:
+            response = decisions_model.decide(state, parsed)
+        except KISSError as e:
+            # A 2xx reply without ``answers`` was still charged for.
+            charged = decisions_model.take_partial_usage_response()
+            if not isinstance(charged, dict):
+                return f"Error: {e.args[0]}", None
+            cost, input_tokens, output_tokens = decision_usage(decisions_model, charged)
+            return f"Error: {e.args[0]}", (cost, input_tokens + output_tokens)
+        text, cost, tokens = format_decision(decisions_model, response)
+        return text, (cost, tokens)
 
     def decide(state: str, questions: str) -> str:
         binding = None
@@ -272,16 +338,11 @@ def make_decide_tool(
             binding = side_call_binding(agent)
         try:
             parsed = parse_questions(questions)
-            response = decisions_model.decide(state, parsed)
         except KISSError as e:
-            # A 2xx reply without ``answers`` was still charged for.
-            charged = decisions_model.take_partial_usage_response()
-            if isinstance(charged, dict):
-                cost, input_tokens, output_tokens = decision_usage(decisions_model, charged)
-                attribute(cost, input_tokens + output_tokens, binding)
             return f"Error: {e.args[0]}"
-        text, cost, tokens = format_decision(decisions_model, response)
-        attribute(cost, tokens, binding)
+        text, usage = locked_call(lock, request, state, parsed)
+        if usage is not None:
+            attribute(*usage, binding)
         return text
 
     decide.__doc__ = (

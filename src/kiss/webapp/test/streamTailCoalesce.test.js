@@ -68,6 +68,17 @@ function openToolPanels(O) {
   return panels;
 }
 
+/** Count the animation frames the page requests from now on. */
+function countFrameRequests(win) {
+  const frames = {count: 0};
+  const request = win.requestAnimationFrame;
+  win.requestAnimationFrame = callback => {
+    frames.count += 1;
+    return request.call(win, callback);
+  };
+  return frames;
+}
+
 /** Run one finished Bash step (call and result) in tab `tabId`. */
 function sendBashStep(win, tabId, command) {
   send(win, {type: 'tool_call', name: 'Bash', command, tabId});
@@ -103,6 +114,9 @@ async function testBashChunkDefersTailSweepReplaysIt() {
   assert.ok(panel1, 'first tool_call panel missing');
   send(win, {type: 'tool_call', name: 'Bash', command: 'make one'});
   send(win, {type: 'system_output', text: 'one\n'});
+  // A tool panel is rendered folded: open the watched one by hand so
+  // that only the next tool_call's tail can fold it.
+  panel1.classList.remove('collapsed');
   send(win, {type: 'tool_call', name: 'Bash', command: 'make two'});
   const panels = O.querySelectorAll('.ev.tc');
   assert.strictEqual(panels.length, 3, 'expected three tool panels');
@@ -195,10 +209,19 @@ async function testTextDeltaStreamParity() {
     '',
     'chunk text must still be buffered before the flush frame',
   );
+  // The sweep is armed once per frame: a chunk that joins it (and the
+  // pending flush) requests no frame of its own.
+  const frames = countFrameRequests(win);
+  send(win, {type: 'text_delta', text: '!'});
+  assert.strictEqual(
+    frames.count,
+    0,
+    'BUG: a chunk joining the pending sweep requested another frame',
+  );
   await nextFrames(win);
   assert.strictEqual(
     txt.textContent,
-    'hello world',
+    'hello world!',
     'BUG: deferred text_delta chunks lost text across the flush frame',
   );
   assert.strictEqual(
@@ -306,25 +329,16 @@ async function testTabSwitchDropsPendingSweep() {
   assert.ok(!t1panel1.classList.contains('collapsed'), 'tail must be pending');
 
   // Switch tabs before the frame fires, and make tab 2 run a stream
-  // of its own whose chunks carry NO collapse debt.  Its panels are
-  // all open, three of them, so a debt carried over would fold one.
+  // of its own.
   win._testApi.createNewTab();
   const tab2 = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: true, tabId: tab2, startTs: Date.now()});
   sendBashStep(win, tab2, 'true');
   sendBashStep(win, tab2, 'false');
   send(win, {type: 'text_delta', text: 'hi ', tabId: tab2});
-  const t2panels = openToolPanels(O);
-  // This chunk re-arms the sweep for tab 2: the debt tab 1 left behind
-  // must have been dropped with tab 1's transcript.
   send(win, {type: 'text_delta', text: 'there', tabId: tab2});
 
   await nextFrames(win);
-  assert.ok(
-    !t2panels[0].classList.contains('collapsed'),
-    'BUG: the collapse debt of a transcript that left the screen was ' +
-      "applied to the NEW tab's transcript",
-  );
   assert.strictEqual(
     O.querySelector('.llm-panel .txt').textContent,
     'hi there',
@@ -493,6 +507,28 @@ async function testSweepScrollsSiblingSubpanels() {
     'BUG: the per-frame sweep did not scroll a sibling .tc-b ' +
       'subpanel of the latest event panel to its end',
   );
+  // A non-chunk event settles the pending sweep before it is handled:
+  // the deferred tail still scrolls the panel its chunk streamed into,
+  // not the panel the event appends.
+  body.scrollTop = 10;
+  send(win, {type: 'system_output', text: 'line three\n'});
+  send(win, {type: 'tool_call', name: 'Bash', command: 'make again'});
+  assert.strictEqual(
+    body.scrollTop,
+    700,
+    'BUG: a tool_call did not settle the pending sweep first',
+  );
+  // With no sweep pending the next event runs none: the reader's place
+  // in the panel that is about to stop being the latest stays put.
+  const again = O.querySelectorAll('.ev.tc > .tc-b')[1];
+  assert.ok(again, 'second tool-call body subpanel missing');
+  again.scrollTop = 10;
+  send(win, {type: 'tool_call', name: 'Bash', command: 'make thrice'});
+  assert.strictEqual(
+    again.scrollTop,
+    10,
+    'BUG: an event with no sweep pending ran one on the panel before it',
+  );
   win.close();
   console.log('  ok - sweep scrolls sibling subpanels of the latest panel');
 }
@@ -527,11 +563,23 @@ async function testReplayCancelsPendingSweep() {
   });
   const replayed = openToolPanels(O);
   assert.strictEqual(replayed.length, 3, 'replay must replace the transcript');
+  // The newest panel's argument body sits where a reader left it: the
+  // tail of a sweep that still ran would pin it to its end.
+  const body = replayed[2].querySelector(':scope > .tc-b');
+  assert.ok(body, 'tool-call body subpanel missing');
+  win._geoByClass['tc-b'] = {sh: 800, ch: 100};
+  body.scrollTop = 10;
   await nextFrames(win);
   assert.ok(
     !replayed[0].classList.contains('collapsed'),
     'BUG: a sweep deferred for the outgoing transcript ran against ' +
       'the replayed one',
+  );
+  assert.strictEqual(
+    body.scrollTop,
+    10,
+    'BUG: the cancelled sweep still ran its tail against the replayed ' +
+      'transcript',
   );
   assert.ok(
     replayed[0].textContent.includes('replayed'),

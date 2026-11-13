@@ -22,6 +22,7 @@ no separator a legal file name could collide with.
 
 from __future__ import annotations
 
+import heapq
 import os
 import re
 import stat
@@ -29,7 +30,14 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.git_worktree import _GIT_TIMEOUT_SECONDS, _git, _git_command, repo_lock
+from kiss.agents.sorcar.git_worktree import (
+    _GIT_TIMEOUT_SECONDS,
+    _git,
+    _git_command,
+    _reclaim_process_lock,
+    repo_lock,
+)
+from kiss.core.kiss_error import KISSError
 from kiss.core.processes import run_capped
 
 EXPLORER_EXCLUDED_NAMES: frozenset[str] = frozenset(
@@ -100,8 +108,7 @@ def list_directory(directory: Path) -> dict[str, Any]:
             except (OSError, RuntimeError):
                 pass
         (dirs if is_dir else files).append(item)
-    key = _entry_sort_key
-    entries = sorted(dirs, key=key) + sorted(files, key=key)
+    entries = sorted(dirs, key=_entry_sort_key) + sorted(files, key=_entry_sort_key)
     truncated = len(entries) > DIR_LISTING_MAX_ENTRIES
     return {
         "entries": entries[:DIR_LISTING_MAX_ENTRIES],
@@ -176,7 +183,7 @@ def git_worktrees(repo: str) -> list[dict[str, Any]]:
     if result.returncode == 0:
         for record in result.stdout.split("\0\0"):
             row = _parse_worktree_record(record)
-            if row is None or row.pop("bare", False) or row.pop("prunable"):
+            if row is None or row.pop("bare") or row.pop("prunable"):
                 continue
             if not row.pop("locked") and not os.path.isdir(row["path"]):
                 continue
@@ -448,7 +455,7 @@ def git_log(
             starts.append(wt["head"])
     if not starts:
         return {"repo": repo, "head": "", "commits": [], "worktrees": worktrees}
-    result = _log_from(repo, starts, limit)
+    result, modern = _log_from(repo, starts, limit)
     if result.returncode != 0:
         return {"error": result.stderr.strip() or "git log failed"}
     commits: list[dict[str, Any]] = []
@@ -461,35 +468,74 @@ def git_log(
     # ``--max-count`` is a global cap: a worktree head far behind the
     # others can be cut off although it was a start.  The graph promises
     # every worktree's head, so a missing one is fetched on its own and
-    # appended (older than everything shown, so the newest-first order
-    # holds).
+    # appended, in worktree order: a head may land above its child, which
+    # :func:`_children_first` puts right.
     for sha in starts:
         if sha in seen:
             continue
-        one = _log_from(repo, [sha], 1)
+        one = _log_from(repo, [sha], 1)[0]
         if one.returncode != 0:
             continue
         for commit in parse_git_log(one.stdout):
             if commit["sha"] not in seen:
                 seen.add(commit["sha"])
                 commits.append(commit)
+    merges = {commit["sha"]: commit for commit in commits if len(commit["parents"]) > 1}
+    if merges and not modern:
+        # An old git's ``-m`` lists a merge once per parent whose diff is
+        # not empty, so the row kept above need not be the first-parent
+        # one.  Without a walk ``--first-parent`` only restricts ``-m`` to
+        # that one diff (in the walk it would drop the side branches).
+        first = _log_from(repo, list(merges), len(merges), "--no-walk", "--first-parent")[0]
+        if first.returncode != 0:
+            return {"error": first.stderr.strip() or "git log failed"}
+        for row in parse_git_log(first.stdout):
+            merges[row["sha"]]["files"] = row["files"]
     return {
         "repo": repo,
         "head": head_sha,
-        "commits": commits,
+        "commits": _children_first(commits),
         "worktrees": worktrees,
     }
 
 
+def _children_first(commits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return *commits* ordered so that no commit precedes one of its listed children.
+
+    Otherwise the order is the given one: of the commits whose listed
+    children are all placed, the earliest in *commits* comes next, so a
+    list already in such an order (one ``--date-order`` walk) comes back
+    unchanged.
+    """
+    index = {commit["sha"]: i for i, commit in enumerate(commits)}
+    waiting = [0] * len(commits)  # listed children not placed yet
+    for commit in commits:
+        for parent in commit["parents"]:
+            if parent in index:
+                waiting[index[parent]] += 1
+    ready = [i for i, count in enumerate(waiting) if not count]  # ascending: a heap
+    ordered: list[dict[str, Any]] = []
+    while ready:
+        commit = commits[heapq.heappop(ready)]
+        ordered.append(commit)
+        for parent in commit["parents"]:
+            if parent in index:
+                waiting[index[parent]] -= 1
+                if not waiting[index[parent]]:
+                    heapq.heappush(ready, index[parent])
+    return ordered
+
+
 def _log_from(
-    repo: str, starts: list[str], limit: int,
-) -> subprocess.CompletedProcess[str]:
+    repo: str, starts: list[str], limit: int, *options: str,
+) -> tuple[subprocess.CompletedProcess[str], bool]:
     """Run the ``git log`` :func:`git_log` parses, walking from *starts*.
 
-    On an old git the merge rows come from ``-m``, which prints a merge
-    once per parent (the first-parent diff first); the sha
-    de-duplication in :func:`git_log` folds them back into one row
-    carrying the first-parent files.
+    Returns what :func:`_first_parent_merge` does.  On an old git the
+    merge rows come from ``-m``, which prints a merge once per parent
+    whose diff is not empty; the sha de-duplication in :func:`git_log`
+    folds them back into one row, whose files it then lists with the
+    *options* ``--no-walk --first-parent``.
     """
     fmt = "%x00".join(("%H", "%P", "%an", "%aI", "%D", "%s", "%B"))
     args = (
@@ -500,8 +546,9 @@ def _log_from(
         f"--max-count={limit}",
         "--name-status",
         f"--format={fmt}",
+        *options,
     )
-    return _first_parent_merge(repo, args, (*starts, "--"))[0]
+    return _first_parent_merge(repo, args, (*starts, "--"))
 
 
 def parse_git_log(text: str) -> list[dict[str, Any]]:
@@ -575,11 +622,11 @@ def parse_git_log(text: str) -> list[dict[str, Any]]:
 GIT_SHOW_MAX_BYTES = 4 * 1024 * 1024
 """Cap on the text one ``gitShow`` reply may carry (a huge diff is cut)."""
 
-_REF_NAME_RE = re.compile(r"^[^\s~^:?*\[\\]+$")
-"""A branch / tag name candidate: no whitespace or ref-forbidden chars."""
+_REF_NAME_RE = re.compile(r"[^\s~^:?*\[\\]+")
+"""A branch / tag name candidate (the whole string): no whitespace or ref-forbidden chars."""
 
-_REVISION_RE = re.compile(r"^[^\s\\]+$")
-"""A revision the user typed (``main``, ``v1``, ``HEAD~2``, ``abc123^``)."""
+_REVISION_RE = re.compile(r"[^\s\\]+")
+"""A revision the user typed (the whole string: ``main``, ``v1``, ``HEAD~2``, ``abc123^``)."""
 
 
 def _truncate(text: str) -> str:
@@ -636,7 +683,7 @@ def _git_head(
             env=full_env,
             keep_stderr=_GIT_STDERR_MAX_BYTES,
         )
-    except OSError as exc:
+    except (OSError, ValueError) as exc:  # ValueError: a NUL byte in an argument
         return "", False, f"git could not start: {exc}"
     if out.timed_out:
         return "", False, f"git timed out after {_GIT_TIMEOUT_SECONDS:g}s"
@@ -647,7 +694,7 @@ def _git_head(
 
 def _valid_sha(sha: str) -> bool:
     """Whether *sha* looks like an object name or a short prefix of one."""
-    return bool(re.match(r"^[0-9a-fA-F]{4,64}$", sha))
+    return bool(re.fullmatch(r"[0-9a-fA-F]{4,64}", sha))
 
 
 def _commit_of(repo: str, rev: str) -> str:
@@ -680,7 +727,7 @@ def _first_parent_merge(
     Returns the completed process and whether git knew
     ``--diff-merges=first-parent`` (git >= 2.31).  An older git rejects
     it and gets ``-m`` instead: a log walk then lists a merge once per
-    parent, which :func:`git_log` folds back into one row.  The option
+    parent it differs from, which :func:`git_log` puts right.  The option
     goes BEFORE *revs*, which end with ``--`` and any pathspec: after
     ``--`` git would read it as a path.
     """
@@ -694,8 +741,8 @@ def git_show(work_dir: str, sha: str, path: str = "") -> dict[str, Any]:
     """Describe one commit: its patch, or one file's content at that commit.
 
     Backs the commit graph's "Open Changes" (the whole commit, or a
-    single file's change when *path* is given together with
-    ``file_at_rev=False``) and "Open File" (see :func:`git_file_at`).
+    single file's change when *path* is given); "Open File" is
+    :func:`git_file_at`.
 
     Args:
         work_dir: A directory inside the repository.
@@ -820,9 +867,10 @@ def _text_side(text: str, truncated: bool, path: str) -> tuple[str | None, bool,
 def _worktree_file_text(repo: str, path: str) -> tuple[str | None, bool, str]:
     """Content of the working-tree file *path* under *repo* (see :func:`_blob_text`).
 
-    A symbolic link yields its target text, which is what git stores
-    for it (and what the other side of the diff holds); the link is
-    never followed, so the read stays inside the repository.
+    *path* is a :func:`_repo_relative` one.  A symbolic link yields its
+    target text, which is what git stores for it (and what the other
+    side of the diff holds); the link is never followed, so the read
+    stays inside the repository.
     """
     full = os.path.join(repo, path)
     parent_fd: int | None = None
@@ -834,8 +882,6 @@ def _worktree_file_text(repo: str, path: str) -> tuple[str | None, bool, str]:
             parent_fd = os.open(repo, os.O_RDONLY | os.O_DIRECTORY)
             parts = path.split("/")
             for part in parts[:-1]:
-                if part in ("", ".", ".."):
-                    return None, False, f"Invalid path: {path}"
                 next_fd = os.open(
                     part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd,
                 )
@@ -879,13 +925,13 @@ def _worktree_file_text(repo: str, path: str) -> tuple[str | None, bool, str]:
 def _repo_relative(path: str) -> bool:
     """Whether *path* is a plain repository-relative path.
 
-    Rejects an empty path, an absolute one and any ``.``/``..``
-    component (or an empty one), so that joining it under the repository
-    root can never reach outside it.  Git reports paths with ``/``; on
-    Windows a ``\\`` also separates components (elsewhere it is an
-    ordinary file-name character).
+    Rejects an empty path, an absolute one, one with a NUL byte (no file
+    has such a name) and any ``.``/``..`` component (or an empty one), so
+    that joining it under the repository root can never reach outside
+    it.  Git reports paths with ``/``; on Windows a ``\\`` also separates
+    components (elsewhere it is an ordinary file-name character).
     """
-    if not path or os.path.isabs(path):
+    if not path or "\0" in path or os.path.isabs(path):
         return False
     parts = re.split(r"[\\/]", path) if os.name == "nt" else path.split("/")
     return all(part not in ("", ".", "..") for part in parts)
@@ -960,7 +1006,7 @@ def git_file_diff(
 
 
 def git_compare(work_dir: str, base: str, sha: str) -> dict[str, Any]:
-    """Diff two revisions (``base...sha`` as VS Code's "Compare with..." does).
+    """Diff two revisions (``git diff base sha``, the graph's "Compare with...").
 
     Args:
         work_dir: A directory inside the repository.
@@ -975,16 +1021,17 @@ def git_compare(work_dir: str, base: str, sha: str) -> dict[str, Any]:
     repo, error = _repo_and_sha(work_dir, sha)
     if error:
         return error
-    if not base or base.startswith("-") or not _REVISION_RE.match(base):
+    if not base or base.startswith("-") or not _REVISION_RE.fullmatch(base):
         return {"error": f"Not a revision: {base}"}
     if not _commit_of(repo, base):
         return {"error": f"Unknown revision: {base}"}
     if not _commit_of(repo, sha):
         return {"error": f"Unknown commit: {sha}"}
     # Streamed: the diff costs the daemon the cap however far apart
-    # the two ends are.
+    # the two ends are.  ``git diff`` (unlike ``git show``) would run the
+    # user's ``diff.external`` tool in place of its own patch.
     text, truncated, err = _git_head(
-        "diff", "--no-color", "--stat", "--patch", base, sha, "--", cwd=repo,
+        "diff", "--no-color", "--no-ext-diff", "--stat", "--patch", base, sha, "--", cwd=repo,
     )
     if err:
         return {"error": err}
@@ -1037,7 +1084,7 @@ def git_action(
     if action not in GIT_ACTIONS:
         return {"error": f"Unknown git action: {action}"}
     if action in ("createBranch", "createTag"):
-        if not name or name.startswith("-") or not _REF_NAME_RE.match(name):
+        if not name or name.startswith("-") or not _REF_NAME_RE.fullmatch(name):
             return {"error": f"Not a valid name: {name!r}"}
         check = _git("check-ref-format", "--branch", name, cwd=repo)
         if check.returncode != 0:
@@ -1060,14 +1107,17 @@ def git_action(
         if is_merge:
             args += ["-m", "1"]
         args += [sha]
-    # The action moves HEAD / the index of a checkout; every other
-    # mutation of the repository (auto-commit, the worktree merge
-    # transaction, spare-worktree creation) is serialised by the lock
-    # of its MAIN worktree, also when *repo* is a linked worktree (a
-    # tab rooted at a task's ``.kiss-worktrees/…`` directory, whose
-    # merge transaction runs git in that very worktree).
-    with repo_lock(Path(git_worktrees(repo)[0]["path"])):
-        result = _git(*args, cwd=repo)
+    # The action moves HEAD / the index of a checkout, so it waits for the
+    # transactions of the repository (auto-commit, a worktree merge, a
+    # worktree's setup) by taking the pair of locks each of them takes: the
+    # repository's ``repo_lock`` (one lock, whichever checkout names it),
+    # then the lock file in the git dir its checkouts share, which a
+    # transaction in another process holds too.
+    try:
+        with repo_lock(Path(repo)), _reclaim_process_lock(Path(repo)):
+            result = _git(*args, cwd=repo)
+    except KISSError as exc:  # a transaction kept the repository's lock file past the wait for it
+        return {"error": str(exc)}
     # A hook can print anything; bound what goes on the wire.
     output = _truncate((result.stdout + result.stderr).strip())
     if result.returncode != 0:

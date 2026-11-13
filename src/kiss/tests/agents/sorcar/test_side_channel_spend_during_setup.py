@@ -25,9 +25,11 @@ from functools import partial
 from typing import Any
 
 import pytest
+import yaml
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _get_db
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server.task_update import charge_side_channel_usage
 from kiss.tests.agents.sorcar.test_task_settings_info import (
     _DBRedirect,
@@ -49,6 +51,11 @@ def _charge_side_channel(
     charge_side_channel_usage(None, agent, task_id, 0.5, 70, 1, epoch=epoch)
     if stop:
         raise KeyboardInterrupt("stopped during setup")
+
+
+def _broken_system_prompt(prompt: str) -> str:
+    """A SEA ``system_prompt`` method that fails: the run ends in its setup."""
+    raise RuntimeError("system prompt failed")
 
 
 class TestSideChannelSpendDuringSetup(_DBRedirect):
@@ -110,3 +117,46 @@ class TestSideChannelSpendDuringSetup(_DBRedirect):
         with pytest.raises(KeyboardInterrupt):
             self._run(agent, partial(_charge_side_channel, agent, True))
         assert self._row(agent.last_task_id) == (0.5, 70, 1)
+
+    def test_setup_failure_of_a_reused_plain_agent_reports_no_usage(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A plain ``SorcarAgent`` starts its epoch before its setup too.
+
+        The second run fails before ``_reset`` and makes no model call:
+        its counters are its own, zero, not the first run's.  The run has
+        no console (no printer, the default ``verbose``): its failure is
+        returned, not printed; a verbose run prints it.
+        """
+        agent = SorcarAgent("setup-failure")
+        srv, url = _start_server(_FinishHandler)
+        settings: dict[str, Any] = {
+            "model_name": "gpt-4o-mini",
+            "work_dir": self.tmpdir,
+            "web_tools": False,
+            "append_basic_tools": False,
+            "use_memory": False,
+            "model_config": {"base_url": url, "api_key": "test-key"},
+        }
+        try:
+            agent.run(prompt_template="say hi", **settings)
+            assert agent.usage_snapshot()[0] > 0
+            result = agent.run(
+                prompt_template="say hi again",
+                system_prompt_hook=_broken_system_prompt,
+                **settings,
+            )
+            quiet = capsys.readouterr().out
+            agent.run(
+                prompt_template="say hi again",
+                system_prompt_hook=_broken_system_prompt,
+                verbose=True,
+                **settings,
+            )
+        finally:
+            srv.shutdown()
+        assert yaml.safe_load(result)["success"] is False
+        assert "system prompt failed" in result
+        assert agent.usage_snapshot() == (0.0, 0, 0)
+        assert quiet == ""
+        assert "Status: FAILED" in capsys.readouterr().out

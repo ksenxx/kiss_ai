@@ -45,14 +45,13 @@ const {
   subagentTabEls,
   spawnSubagent,
   togglePanel,
+  toolPanel,
 } = require('./subagent_tab_helpers');
 
 /** A fresh chat page plus the id of the tab it booted on. */
 function makePage() {
   const {win, posted} = harness.makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  return {win, posted, parentId: ready.tabId};
+  return {win, posted, parentId: harness.readyTabId(posted)};
 }
 
 /** The registry snapshot: one chat tab, `parentId`, on PARENT_TASK. */
@@ -84,16 +83,6 @@ function announceSubagent(win, parentId, fields) {
       fields,
     ),
   );
-}
-
-/** The tool-call panel whose header names *toolName*. */
-function toolPanel(win, toolName) {
-  const headers = win.document.querySelectorAll('#output .ev.tc .tc-h');
-  for (const h of headers) {
-    const txt = (h.textContent || '').replace(/^[^A-Za-z]+/, '').trim();
-    if (txt.startsWith(toolName)) return h.closest('.ev.tc');
-  }
-  return null;
 }
 
 /** The tool_call event a parent emits for *toolName* spawning one child. */
@@ -259,9 +248,7 @@ function replayKeepsFinishedChildClosed(toolName) {
 
   // The transcript stays reachable: expanding the panel reopens the tab.
   const before = posted.length;
-  panel
-    .querySelector('.tc-h')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  togglePanel(win, panel);
   assert.ok(
     !panel.classList.contains('collapsed'),
     'header click expands the panel',
@@ -285,9 +272,7 @@ function replayKeepsFinishedChildClosed(toolName) {
   );
 
   // Collapsing closes it again.
-  panel
-    .querySelector('.tc-h')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  togglePanel(win, panel);
   assert.strictEqual(
     subagentTabEls(win).length,
     0,
@@ -362,13 +347,13 @@ function expandedChildren(win, posted, panel) {
 }
 
 /**
- * The task ids each fan-out panel of *panels* resumes when the user
- * unfolds it (a panel still unfolded is folded first); each is left
- * folded, the tabs it reopened closed again.
+ * The task ids each fan-out panel of *panels*, all folded, resumes when
+ * the user unfolds it; each is left folded, the tabs it reopened closed
+ * again.
  */
 function childrenOfPanels(win, posted, panels) {
   return panels.map(p => {
-    if (!p.classList.contains('collapsed')) togglePanel(win, p);
+    assert.ok(p.classList.contains('collapsed'), 'the panel starts folded');
     const ids = expandedChildren(win, posted, p);
     togglePanel(win, p);
     return ids;
@@ -668,9 +653,7 @@ function replayAttributesInterleavedCalls() {
   );
 
   // Expanding the first run_agent panel reopens exactly its two children.
-  panels[0]
-    .querySelector('.tc-h')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  togglePanel(win, panels[0]);
   assert.strictEqual(
     JSON.stringify(subagentTabEls(win).map(el => el.dataset.tabId)),
     JSON.stringify([parentId + '__sub_a1', parentId + '__sub_a2']),

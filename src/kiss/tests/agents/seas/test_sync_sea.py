@@ -120,6 +120,7 @@ def _race_once(repo: Path, other: Path, branch: str, marker: Path) -> None:
     )
 
 
+@pytest.mark.usefixtures("empty_machines")
 def test_sea_methods_follow_the_user_contract() -> None:
     """The SEA's methods pin the run: shell+edit tools, its own prompt, a default task."""
     sea = SyncSea()
@@ -181,6 +182,7 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert_no_removed_getters(sync_sea)
 
 
+@pytest.mark.usefixtures("empty_machines")
 def test_slash_sync_resolves_bare() -> None:
     """``/sync`` alone runs this file on the empty text; ``prompt()`` makes it the playbook."""
     assert sea_commands.slash_command_task("/sync") == ("", _SEA_PATH)
@@ -558,6 +560,7 @@ def test_sync_refuses_what_it_cannot_sync(tmp_path: Path) -> None:
         sync(str(mine))
 
 
+@pytest.mark.usefixtures("empty_machines")
 def test_agent_run_calls_git_sync_and_reports(tmp_path: Path) -> None:
     """With the SEA's configuration the model sees the shell, file and sync tools and syncs.
 

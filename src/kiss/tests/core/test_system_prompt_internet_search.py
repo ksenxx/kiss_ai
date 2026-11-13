@@ -97,6 +97,7 @@ LIVE_TEST_TIMEOUT_SECONDS = 600
 
 
 @pytest.mark.slow
+@pytest.mark.live_api
 @pytest.mark.timeout(LIVE_TEST_TIMEOUT_SECONDS)
 @pytest.mark.parametrize("model_name", TEST_MODELS)
 def test_current_info_task_triggers_internet_search(model_name: str) -> None:
@@ -125,6 +126,7 @@ def test_current_info_task_triggers_internet_search(model_name: str) -> None:
     )
 
 
+@pytest.mark.live_api
 @pytest.mark.timeout(LIVE_TEST_TIMEOUT_SECONDS)
 @pytest.mark.parametrize("model_name", TEST_MODELS)
 def test_confident_trivial_task_skips_internet_search(model_name: str) -> None:

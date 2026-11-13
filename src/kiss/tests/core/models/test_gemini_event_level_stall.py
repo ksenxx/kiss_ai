@@ -38,6 +38,7 @@ SDK over a real socket, and simply keeps writing blank lines.
 
 from __future__ import annotations
 
+import socket
 import threading
 import time
 from collections.abc import Generator
@@ -45,6 +46,7 @@ from collections.abc import Generator
 import pytest
 
 from kiss.core import stop_signal
+from kiss.core.kiss_error import ContentFilterError
 from kiss.core.models.gemini_model import GeminiModel
 from kiss.tests.core.models.gemini_sse_harness import (
     GeminiScript,
@@ -54,6 +56,9 @@ from kiss.tests.core.models.gemini_sse_harness import (
 )
 
 _MODEL = "gemini-keepalive-under-test"
+_USAGE = {"promptTokenCount": 5, "candidatesTokenCount": 3, "totalTokenCount": 8}
+# The count on a chunk sent while the answer is still being generated.
+_RUNNING_USAGE = {"promptTokenCount": 5, "candidatesTokenCount": 1, "totalTokenCount": 6}
 _STALL_TIMEOUT = 2.0
 # Comfortably above the stall timeout, and far below the time an
 # unbounded keep-alive stream would take (it never ends).
@@ -107,6 +112,17 @@ def _run_bounded(model: GeminiModel) -> tuple[BaseException | None, float]:
             f"not enforced at the event level, only at the byte level"
         )
     return outcome.get("error"), time.monotonic() - started
+
+
+def _generate_under(
+    stop: threading.Event, model: GeminiModel, outcome: dict[str, BaseException]
+) -> None:
+    """Thread body: run ``generate()`` with *stop* bound as the thread's Stop; record its error."""
+    stop_signal.set_thread_stop_event(stop)
+    try:
+        model.generate()
+    except BaseException as exc:  # noqa: BLE001 — reported to the test
+        outcome["error"] = exc
 
 
 class TestKeepAliveOnlyStreamStallsOut:
@@ -174,22 +190,44 @@ class TestKeepAliveOnlyStreamStallsOut:
         model = _make_model(monkeypatch, base_url)
         stop = threading.Event()
         outcome: dict[str, BaseException] = {}
-
-        def generate_under_stop() -> None:
-            stop_signal.set_thread_stop_event(stop)
-            try:
-                model.generate()
-            except BaseException as exc:  # noqa: BLE001 — reported to the test
-                outcome["error"] = exc
-            finally:
-                stop_signal.set_thread_stop_event(None)
-
-        worker = threading.Thread(target=generate_under_stop, daemon=True)
+        worker = threading.Thread(target=_generate_under, args=(stop, model, outcome), daemon=True)
         worker.start()
         assert script.serving.wait(10), "the endpoint never started its headers"
         stop.set()
         worker.join(5.0)
         assert not worker.is_alive(), "the Stop did not end the pre-header wait"
+        assert isinstance(outcome.get("error"), KeyboardInterrupt), f"got {outcome!r}"
+
+    def test_a_stop_during_the_tls_handshake_ends_the_turn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Stop pressed while the peer sits on the TLS ClientHello is honoured at once.
+
+        The pool lists a connection only once it is set up, so the abort found
+        nothing to cut and the turn waited out the 10 s connect timeout (audit
+        A/C4-F1, B/C4-F1).
+        """
+        stop = threading.Event()
+        outcome: dict[str, BaseException] = {}
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            listener.settimeout(10)
+            model = _make_model(monkeypatch, f"https://127.0.0.1:{listener.getsockname()[1]}")
+            worker = threading.Thread(
+                target=_generate_under, args=(stop, model, outcome), daemon=True
+            )
+            worker.start()
+            try:
+                peer, _ = listener.accept()
+                with peer:  # never answered: the client waits for a ServerHello
+                    peer.settimeout(10)
+                    assert peer.recv(1), "no ClientHello arrived"
+                    stop.set()
+                    worker.join(5.0)
+                    stopped = not worker.is_alive()
+            finally:
+                stop.set()
+                worker.join(_DEADLINE)  # the closed peer ends a handshake the Stop did not
+        assert stopped, "the Stop did not end the TLS handshake"
         assert isinstance(outcome.get("error"), KeyboardInterrupt), f"got {outcome!r}"
 
     def test_a_stall_during_an_sdk_retry_is_still_cut(
@@ -247,3 +285,83 @@ class TestKeepAliveOnlyStreamStallsOut:
         content, _ = model.generate()
 
         assert content == "All done."
+
+
+class TestBodyHeldOpenAfterTheTurnEnded:
+    """A turn the provider ended is used at once, however long its body stays open.
+
+    A gateway may hold a finished response open and feed it keep-alives.
+    The adapter read on to the end of the body, so the stall watchdog cut
+    a complete answer, which the agent then asked and paid for again, and
+    a refusal was retried as a stall instead of failing over.
+    """
+
+    @pytest.mark.parametrize(
+        "chunks",
+        [
+            [chunk([text_part("Done.")], usage=_USAGE, finish_reason="STOP")],
+            [chunk([text_part("Done.")], finish_reason="STOP"), {"usageMetadata": _USAGE}],
+            [
+                chunk([text_part("Do")], usage=_RUNNING_USAGE),
+                chunk([text_part("ne.")], finish_reason="STOP"),
+                {"usageMetadata": _USAGE},
+            ],
+        ],
+        ids=[
+            "usage-with-the-finish-reason",
+            "usage-after-the-finish-reason",
+            "running-usage-then-usage-after-the-finish-reason",
+        ],
+    )
+    def test_a_finished_answer_is_returned(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        gemini_endpoint: tuple[str, GeminiScript],
+        chunks: list[dict[str, object]],
+    ) -> None:
+        """The finish reason and the usage end the turn: one request, billed, the stream closed.
+
+        A finish reason alone does not, whatever usage came before it: that
+        was a running count, and the chunk that bills the turn may follow.
+        """
+        base_url, script = gemini_endpoint
+        script.play(chunks, after="keepalive")
+        model = _make_model(monkeypatch, base_url)
+
+        content, response = model.generate()
+
+        assert content == "Done."
+        assert [m["role"] for m in model.conversation] == ["user", "assistant"]
+        assert model.extract_input_output_token_counts_from_response(response) == (5, 3, 0, 0)
+        assert model.take_partial_usage_response() is None
+        assert len(script.requests) == 1
+        assert script.hung_up.wait(10), "the held-open connection was not closed"
+
+    @pytest.mark.parametrize(
+        "terminal",
+        [
+            chunk([], usage=_USAGE, finish_reason="SAFETY"),
+            {"promptFeedback": {"blockReason": "SAFETY"}, "usageMetadata": _USAGE},
+        ],
+        ids=["safety-stop", "prompt-blocked"],
+    )
+    def test_a_refusal_is_a_content_filter_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        gemini_endpoint: tuple[str, GeminiScript],
+        terminal: dict[str, object],
+    ) -> None:
+        """A filter stop and a blocked prompt fail over; their usage stays billable."""
+        base_url, script = gemini_endpoint
+        script.play([terminal], after="keepalive")
+        model = _make_model(monkeypatch, base_url)
+
+        with pytest.raises(ContentFilterError) as refusal:
+            model.generate()
+
+        assert refusal.value.stop_reason == "SAFETY"
+        assert [m["role"] for m in model.conversation] == ["user"]
+        partial = model.take_partial_usage_response()
+        assert model.extract_input_output_token_counts_from_response(partial) == (5, 3, 0, 0)
+        assert len(script.requests) == 1
+        assert script.hung_up.wait(10), "the held-open connection was not closed"

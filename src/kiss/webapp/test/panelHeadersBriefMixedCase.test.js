@@ -84,10 +84,6 @@ function assertThoughtsVisible(win, where) {
       where + ': a Thoughts panel is not collapsed',
     );
     assert.ok(
-      !p.classList.contains('chv-hidden'),
-      where + ': a Thoughts panel is not hidden',
-    );
-    assert.ok(
       !p.closest('.summary-sub'),
       where + ': a Thoughts panel is not adopted by a summary',
     );
@@ -97,7 +93,6 @@ function assertThoughtsVisible(win, where) {
       where + ': a Thoughts panel is displayed',
     );
   }
-  return panels.length;
 }
 
 // Thoughts panels staying open while the task streams (the sweep folds
@@ -144,10 +139,6 @@ function testSummaryFoldsThoughtsToo() {
     top.filter(p => p.classList.contains('llm-panel')).length,
     0,
     'no Thoughts panel of the recounted steps stays top-level',
-  );
-  assert.ok(
-    top.some(p => p.classList.contains('user-msg')),
-    'the steering Message panel stays top-level, after the summary',
   );
   win.close();
   console.log(

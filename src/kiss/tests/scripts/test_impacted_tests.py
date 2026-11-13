@@ -6,12 +6,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from kiss.core.processes import find_bash
 from kiss.scripts import impacted_tests as script
+from kiss.tests.conftest import posix_only
 
 
 def _tree(tmp_path: Path) -> Path:
@@ -68,6 +76,7 @@ def test_relative_imports_and_deleted_modules_reach_their_tests(tmp_path: Path) 
         "kiss/pkg/sub/deep.py": "from .. import H\nfrom .._helper import H as H2\n",
         "kiss/tests/test_pkg.py": "import kiss.pkg\n",
         "kiss/tests/test_deep.py": "import kiss.pkg.sub.deep\n",
+        "kiss/tests/test_rel.py": "from ..pkg.sub.deep import H2\n",
         "kiss/tests/test_gone.py": "from kiss.gone import thing\n",
     }.items():
         path = src / rel
@@ -80,7 +89,15 @@ def test_relative_imports_and_deleted_modules_reach_their_tests(tmp_path: Path) 
     names = lambda paths: [p.name for p in paths]  # noqa: E731
     # No test imports _helper directly; its importers (pkg, deep) are one hop away.
     assert script.impacted_tests([helper], src, depth=1) == []
-    assert names(script.impacted_tests([helper], src, depth=2)) == ["test_deep.py", "test_pkg.py"]
+    assert names(script.impacted_tests([helper], src, depth=2)) == [
+        "test_deep.py", "test_pkg.py", "test_rel.py",
+    ]
+    # Importing a submodule runs the __init__.py of every package above it first,
+    # whether the import names it absolutely (test_deep) or relatively (test_rel).
+    sub_init = src / "kiss" / "pkg" / "sub" / "__init__.py"
+    for depth in (1, script.DEFAULT_DEPTH, 0):
+        selected = script.impacted_tests([sub_init], src, depth)
+        assert names(selected) == ["test_deep.py", "test_rel.py"], depth
     # kiss/gone.py no longer exists; the test importing it is still selected.
     assert names(script.impacted_tests([src / "kiss" / "gone.py"], src)) == ["test_gone.py"]
 
@@ -128,6 +145,28 @@ def test_split_commands_balance_by_recorded_durations(tmp_path: Path) -> None:
     assert _paths(by_time[1]) == ["src/kiss/tests/test_mid.py", "src/kiss/tests/test_top.py"]
 
 
+def test_split_commands_quote_their_paths_for_the_shell(tmp_path: Path) -> None:
+    """A path with a space or a shell metacharacter stays one word of its command.
+
+    bash, which runs the commands, is asked for the words it reads; nothing is executed.
+    """
+    bash = find_bash()
+    if bash is None:
+        pytest.skip("no bash to read the command")
+    odd = tmp_path / "my tests; echo $HOME" / "test_it's.py"
+    odd.parent.mkdir()
+    for test in (odd, tmp_path / "test_plain.py"):
+        test.write_text("")
+    [command] = script.split_commands([odd, tmp_path / "test_plain.py"], 1, root=tmp_path)
+    read = subprocess.run(
+        [bash, "-c", f'words() {{ printf "%s\\0" "$@"; }}; words {command}'],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert read.stdout.split("\0")[:-1] == [
+        *PREFIX.split(), "my tests; echo $HOME/test_it's.py", "test_plain.py",
+    ], read.stderr
+
+
 def test_owned_tests_are_the_changed_tests_and_those_named_for_changed_modules(
     tmp_path: Path, capsys,
 ) -> None:
@@ -165,18 +204,138 @@ def test_owned_tests_are_the_changed_tests_and_those_named_for_changed_modules(
 def test_main_prints_paths_or_the_splits_json(capsys) -> None:
     """On the real repository the script's own test names itself."""
     me = Path(__file__)
+    mine = me.relative_to(script.PROJECT_ROOT).as_posix()
     assert script.main([str(me)]) == 0
-    assert capsys.readouterr().out.strip() == str(me.relative_to(script.PROJECT_ROOT))
+    assert capsys.readouterr().out.strip() == mine
     assert script.main([str(me), "--splits", "4"]) == 0
     commands = json.loads(capsys.readouterr().out)
-    mine = me.relative_to(script.PROJECT_ROOT).as_posix()
     assert commands == [f"{PREFIX}{mine}"]
     assert script.main([str(me), "--splits", "4", "--timeout", "0"]) == 0
     assert json.loads(capsys.readouterr().out) == [f"uv run pytest -q -p no:cacheprovider {mine}"]
     # --owned on the script itself: its own test, no hops; without paths it refuses.
     assert script.main(["--owned", "src/kiss/scripts/impacted_tests.py"]) == 0
-    assert capsys.readouterr().out.strip() == str(me.relative_to(script.PROJECT_ROOT))
+    assert capsys.readouterr().out.strip() == mine
     with pytest.raises(SystemExit) as refused:
         script.main(["--owned"])
     assert refused.value.code == 2
     assert "--owned needs the files you changed" in capsys.readouterr().err
+
+
+def test_a_changed_conftest_selects_every_test_below_it(tmp_path: Path) -> None:
+    """pytest loads a ``conftest.py`` for the tests under its directory without an import."""
+    src = _tree(tmp_path)
+    tests = src / "kiss" / "tests"
+    for rel in ("conftest.py", "sub/conftest.py", "sub/test_below.py", "sub/deep/test_deeper.py"):
+        (tests / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tests / rel).write_text("")
+    below = ["test_below.py", "test_deeper.py"]
+    hit = script.impacted_tests([tests / "sub" / "conftest.py"], src, depth=1)
+    assert sorted(p.name for p in hit) == below
+    # The suite's conftest and the repository's own (above src) reach every test.
+    everything = sorted([*below, "test_core.py", "test_mid.py", "test_other.py", "test_top.py"])
+    for conftest in (tests / "conftest.py", Path("conftest.py")):
+        assert sorted(p.name for p in script.impacted_tests([conftest], src)) == everything
+
+
+def _cli(env: dict[str, str], *command: str) -> subprocess.CompletedProcess[str]:
+    """Run ``python *command`` with *env* added to the environment, for at most 300 s.
+
+    Its output is decoded as file names are (``os.fsdecode``), so a listed path reads as the
+    file's name does here.
+    """
+    return subprocess.run(
+        [sys.executable, *command], env={**os.environ, **env}, capture_output=True, timeout=300,
+        check=False, encoding=sys.getfilesystemencoding(), errors=sys.getfilesystemencodeerrors(),
+    )
+
+
+def test_git_failing_in_the_repository_is_an_error_not_an_empty_selection(tmp_path: Path) -> None:
+    """No changed files could be listed: stderr says so, the exit is non-zero, no ``[]``."""
+    index = tmp_path / "index"
+    index.write_text("not an index")  # real git: "index file smaller than expected", exit 128
+    env = {"GIT_INDEX_FILE": str(index)}
+    done = _cli(env, "-m", "kiss.scripts.impacted_tests", "--splits", "2")
+    assert (done.returncode, done.stdout) == (1, ""), done.stderr
+    assert "cannot list the changed files: git diff --name-only" in done.stderr
+    assert "HEAD failed" in done.stderr
+
+
+@pytest.mark.slow
+@posix_only("stalls git on a FIFO")
+def test_git_stalling_is_an_error_too(tmp_path: Path) -> None:
+    """Real git blocks opening ``GIT_TRACE`` while the FIFO has no reader; the bound is 30 s."""
+    fifo = tmp_path / "trace"
+    os.mkfifo(fifo)
+    try:
+        done = _cli({"GIT_TRACE": str(fifo)}, "-m", "kiss.scripts.impacted_tests", "--splits", "2")
+    finally:
+        os.close(os.open(fifo, os.O_RDONLY | os.O_NONBLOCK))  # frees a git still blocked on it
+    assert (done.returncode, done.stdout) == (1, ""), done.stderr
+    assert "cannot list the changed files" in done.stderr and "timed out" in done.stderr
+
+
+def test_outside_a_repository_nothing_changed(tmp_path: Path) -> None:
+    """A copy of the script with no ``.git`` above it finds no changed files, as documented."""
+    copy = tmp_path / "src" / "kiss" / "scripts" / "impacted_tests.py"
+    copy.parent.mkdir(parents=True)
+    shutil.copy(script.__file__, copy)
+    done = _cli({}, str(copy), "--splits", "2")
+    assert (done.returncode, done.stdout) == (0, "[]\n"), done.stderr
+
+
+def _git(repo: Path, *command: str) -> None:
+    """Run ``git *command`` in *repo* under no configuration but an identity, for at most 60 s."""
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *command], cwd=repo,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull},
+        check=True, capture_output=True, timeout=60,
+    )
+
+
+def test_changes_of_a_project_below_the_repository_root_are_found_renames_included(
+    tmp_path: Path,
+) -> None:
+    """Audit SC1: ``git diff --name-only`` names its paths from the top of the repository, a
+    staged rename by its new name alone, and a name that is not ASCII in quotes.  The first lost
+    every tracked change of a project kept below the root (``.git`` above it), the second the
+    tests that still import the old name, the third the file so named.  Read as text, the
+    listing also lost a file with a carriage return in its name: the CR became a line feed.
+    And ``print`` could not write a test's name that is not UTF-8 to a UTF-8 terminal."""
+    repo = tmp_path / "repo"
+    kiss = repo / "project" / "src" / "kiss"
+    for rel, text in {
+        "scripts/impacted_tests.py": Path(script.__file__).read_text(encoding="utf-8"),
+        "mod.py": "X = 1\n",
+        "old.py": "Y = 1\n",
+        "tests/test_mod.py": "import kiss.mod\n",
+        "tests/test_old.py": "import kiss.old\n",
+        "tests/test_new.py": "import kiss.new\n",
+        "tests/test_untouched.py": "import json\n",
+    }.items():
+        (kiss / rel).parent.mkdir(parents=True, exist_ok=True)
+        (kiss / rel).write_text(text, encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "mv", "project/src/kiss/old.py", "project/src/kiss/new.py")
+    (kiss / "mod.py").write_text("X = 2\n")
+    (kiss / "tests" / "test_fresh.py").write_text("import json\n")  # untracked
+    (kiss / "tests" / "test_naïve.py").write_text("import json\n")
+    latin = b"test_caf\xe9.py"  # not UTF-8: read and listed all the same
+    with contextlib.suppress(OSError, UnicodeError):  # a system that refuses the names has none
+        (kiss / os.fsdecode(b"caf\xe9.py")).write_text("Z = 1\n")
+        (kiss / "tests" / os.fsdecode(latin)).write_text("import json\n")
+    # PYTHONIOENCODING=utf-8: the strict UTF-8 stdout of a terminal under LANG=en_US.UTF-8.
+    done = _cli({"PYTHONIOENCODING": "utf-8"}, str(kiss / "scripts" / "impacted_tests.py"))
+    assert done.returncode == 0, done.stderr
+    listed = [f"src/kiss/tests/test_{name}.py" for name in ("fresh", "mod", "naïve", "new", "old")]
+    if latin in os.listdir(os.fsencode(kiss / "tests")):
+        listed.insert(0, f"src/kiss/tests/{os.fsdecode(latin)}")
+    assert done.stdout.split() == listed
+    odd = kiss / "tests" / "test_carriage\rreturn.py"
+    with contextlib.suppress(OSError):  # as above: Windows has no such name
+        odd.write_text("import json\n")
+    done = _cli({}, str(kiss / "scripts" / "impacted_tests.py"), "--splits", "1")
+    assert done.returncode == 0, done.stderr
+    [command] = json.loads(done.stdout)
+    assert ("src/kiss/tests/test_carriage\rreturn.py" in shlex.split(command)) is odd.exists()

@@ -100,7 +100,7 @@ test('the picker shows the model the daemon reports the user last picked', () =>
   win.close();
 });
 
-test('a model list refresh leaves a tab that has its own pick alone', () => {
+test('a refresh re-sending the pick keeps each tab on its model', () => {
   const {win, posted} = makePage();
   sendModels(win, USER_MODEL);
   const {first, second} = twoTabs(win);
@@ -113,7 +113,7 @@ test('a model list refresh leaves a tab that has its own pick alone', () => {
   assert.strictEqual(
     label(win),
     OTHER_MODEL,
-    'a refresh must not take away the model this tab was given',
+    'the re-sent default is the model this tab was given',
   );
   const msg = submit(win, posted, 'go');
   assert.strictEqual(
@@ -161,6 +161,9 @@ test('a running agent model is shown in the tab running it', () => {
     tabId: tabId,
   });
 
+  assert.strictEqual(label(win), AGENT_MODEL);
+  // The daemon repeats the running status on a replay: the override stays.
+  send(win, {type: 'status', running: true, tabId: tabId});
   assert.strictEqual(label(win), AGENT_MODEL);
   win.close();
 });
@@ -297,6 +300,66 @@ test('a task that dies without a restore still hands the picker back', () => {
   win.close();
 });
 
+test('a background tab whose task dies gets the user model back too', () => {
+  const {win} = makePage();
+  sendModels(win, USER_MODEL);
+  const {first} = twoTabs(win);
+  send(win, {
+    type: 'modelPick',
+    model: AGENT_MODEL,
+    source: 'agent',
+    tabId: first,
+  });
+
+  send(win, {type: 'status', running: false, tabId: first});
+
+  clickTab(win, first);
+  assert.strictEqual(label(win), USER_MODEL);
+  win.close();
+});
+
+test('a task ending in a background tab leaves the override on screen', () => {
+  const {win} = makePage();
+  sendModels(win, USER_MODEL);
+  const {first, second} = twoTabs(win);
+  send(win, {
+    type: 'modelPick',
+    model: AGENT_MODEL,
+    source: 'agent',
+    tabId: second,
+  });
+
+  send(win, {type: 'status', running: false, tabId: first});
+
+  assert.strictEqual(label(win), AGENT_MODEL);
+  win.close();
+});
+
+// The model a restore names is the tab's pick as the daemon holds it:
+// it replaces this window's copy unless the user picked by hand here.
+test('a restore names the model the picker goes back to', () => {
+  const {win, posted} = makePage();
+  sendModels(win, USER_MODEL);
+  const tabId = win._testApi.getActiveTabId();
+  send(win, {
+    type: 'modelPick',
+    model: AGENT_MODEL,
+    source: 'agent',
+    tabId: tabId,
+  });
+
+  send(win, {
+    type: 'modelPick',
+    model: OTHER_MODEL,
+    source: 'restore',
+    tabId: tabId,
+  });
+
+  assert.strictEqual(label(win), OTHER_MODEL);
+  assert.strictEqual(submit(win, posted, 'next task').model, OTHER_MODEL);
+  win.close();
+});
+
 test('a background tab whose task ends is restored too', () => {
   const {win} = makePage();
   sendModels(win, USER_MODEL);
@@ -321,7 +384,61 @@ test('a background tab whose task ends is restored too', () => {
   win.close();
 });
 
-test('an open dropdown follows the model change under it', () => {
+test('a restore older than a hand pick hands back the pick', () => {
+  const {win, posted} = makePage();
+  sendModels(win, USER_MODEL);
+  const tabId = win._testApi.getActiveTabId();
+  send(win, {type: 'status', running: true, tabId: tabId});
+
+  // The user picks while the task runs; the agent then switches again
+  // and the task ends with a restore computed before the pick arrived.
+  pickFromDropdown(win, OTHER_MODEL);
+  send(win, {
+    type: 'modelPick',
+    model: AGENT_MODEL,
+    source: 'agent',
+    tabId: tabId,
+  });
+  assert.strictEqual(label(win), AGENT_MODEL);
+  send(win, {type: 'status', running: false, tabId: tabId});
+  send(win, {
+    type: 'modelPick',
+    model: USER_MODEL,
+    source: 'restore',
+    tabId: tabId,
+  });
+
+  assert.strictEqual(label(win), OTHER_MODEL, 'the pick is shown again');
+  assert.strictEqual(
+    submit(win, posted, 'next task').model,
+    OTHER_MODEL,
+    'the next task runs with the pick',
+  );
+  win.close();
+});
+
+test('a background tab keeps its hand pick over an older restore', () => {
+  const {win} = makePage();
+  sendModels(win, USER_MODEL);
+  const {first, second} = twoTabs(win);
+  clickTab(win, first);
+  pickFromDropdown(win, OTHER_MODEL);
+  clickTab(win, second);
+
+  send(win, {
+    type: 'modelPick',
+    model: USER_MODEL,
+    source: 'restore',
+    tabId: first,
+  });
+
+  assert.strictEqual(label(win), USER_MODEL, 'the other tab is untouched');
+  clickTab(win, first);
+  assert.strictEqual(label(win), OTHER_MODEL);
+  win.close();
+});
+
+test('an open dropdown keeps its filter and its tick when the agent switches', () => {
   const {win} = makePage();
   sendModels(win, USER_MODEL);
   const tabId = win._testApi.getActiveTabId();
@@ -330,8 +447,9 @@ test('an open dropdown follows the model change under it', () => {
   win.document
     .getElementById('model-btn')
     .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  // 'o' keeps the user's and the agent's model and hides OTHER_MODEL.
   const search = win.document.getElementById('model-search');
-  search.value = 'g';
+  search.value = 'o';
   search.dispatchEvent(new win.Event('input', {bubbles: true}));
   send(win, {
     type: 'modelPick',
@@ -341,18 +459,38 @@ test('an open dropdown follows the model change under it', () => {
   });
 
   assert.strictEqual(label(win), AGENT_MODEL);
-  const shown = Array.from(
+  const items = Array.from(
     win.document.querySelectorAll('#model-list .model-item'),
-  ).map(el => el.textContent.replace(/\u200e/g, ''));
-  assert.ok(
-    shown.length > 0 && shown.every(t => t.indexOf('g') >= 0),
+  );
+  const shown = items.map(el =>
+    el.firstChild.textContent.replace(/\u200e/g, ''),
+  );
+  assert.deepStrictEqual(
+    shown,
+    [USER_MODEL, AGENT_MODEL],
     `the typed filter must survive the repaint; got ${JSON.stringify(shown)}`,
   );
-  const active = win.document.querySelector('#model-list .model-item.active');
-  assert.ok(
-    !active ||
-      active.textContent.replace(/\u200e/g, '').indexOf(USER_MODEL) !== 0,
-    'the tick must not still claim the user model is in use',
+  // The tick marks the user's own pick (what a click sets and the next
+  // submit runs with); only the pill shows the agent's override.
+  assert.deepStrictEqual(
+    items.map(el => el.classList.contains('active')),
+    [true, false],
+    'the tick must stay on the model the user picked',
+  );
+  // A hand-back naming the other listed model moves the tick there: the
+  // open list is repainted, not left as it was drawn.
+  send(win, {
+    type: 'modelPick',
+    model: AGENT_MODEL,
+    source: 'restore',
+    tabId: tabId,
+  });
+  assert.deepStrictEqual(
+    Array.from(win.document.querySelectorAll('#model-list .model-item'), el =>
+      el.classList.contains('active'),
+    ),
+    [false, true],
+    'the tick must follow the model the restore names',
   );
   win.close();
 });
@@ -382,12 +520,19 @@ test('a modelPick with no model is ignored', () => {
   const {win} = makePage();
   sendModels(win, USER_MODEL);
   const tabId = win._testApi.getActiveTabId();
+  send(win, {
+    type: 'modelPick',
+    model: AGENT_MODEL,
+    source: 'agent',
+    tabId: tabId,
+  });
 
+  // Neither kind touches the live override it names no model for.
   send(win, {type: 'modelPick', model: '', source: 'agent', tabId: tabId});
-
-  assert.strictEqual(label(win), USER_MODEL);
+  assert.strictEqual(label(win), AGENT_MODEL);
+  send(win, {type: 'modelPick', model: '', source: 'restore', tabId: tabId});
+  assert.strictEqual(label(win), AGENT_MODEL);
   win.close();
 });
 
 report('modelPickerAgentOverride');
-process.exit(0);

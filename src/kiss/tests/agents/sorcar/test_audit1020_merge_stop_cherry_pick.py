@@ -95,7 +95,7 @@ class TestStopDuringCherryPick:
 
     def _merge_stopped_during_hook(self) -> None:
         """Run the merge on a thread and inject the Stop while the lingering hook runs."""
-        merger = _MergeThread(self.agent)
+        merger = _MergeThread(self.agent.merge)
         merger.start()
         deadline = time.monotonic() + 30
         while not self.ready.exists():
@@ -145,7 +145,10 @@ class TestStopDuringCherryPick:
     def test_stop_after_the_squash_commit_keeps_the_commit(self) -> None:
         """The undo must be a no-op once the pick has been committed."""
         _git("config", "--unset", "core.hooksPath", cwd=self.repo)
-        _install_lingering_pre_commit(self.repo, self.tmpdir / "commit-hooks", self.ready)
+        hooks = self.tmpdir / "commit-hooks"
+        _install_lingering_pre_commit(self.repo, hooks, self.ready)
+        # Lingering after the commit is made: a Stop during ``pre-commit`` ends git before it.
+        (hooks / "pre-commit").rename(hooks / "post-commit")
 
         self._merge_stopped_during_hook()
 

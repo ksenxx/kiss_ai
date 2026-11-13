@@ -614,10 +614,8 @@ def test_server_serves_codex_stylesheet_over_http(
     ``_process_request`` route rather than a look-alike test server.
     """
     from kiss.server.web_server import MEDIA_DIR as SRV_MEDIA
-    from kiss.server.web_server import (
-        RemoteAccessServer,
-        _generate_self_signed_cert,
-    )
+    from kiss.server.web_server import RemoteAccessServer
+    from kiss.tests.local_ws import _generate_self_signed_cert
 
     certfile = tmp_path / "cert.pem"
     keyfile = tmp_path / "key.pem"

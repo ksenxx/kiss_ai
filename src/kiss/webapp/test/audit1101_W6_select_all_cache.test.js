@@ -38,11 +38,10 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {makeRunner} = require('./ui_antipattern_harness');
+const {makeRunner, rightClick} = require('./ui_antipattern_harness');
+const {MEDIA, flushMicrotasks} = require('./simplify2_harness');
 
 const {test, report} = makeRunner();
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 function makeWindow(html, opts) {
   const win = new JSDOM('<body>' + html + '</body>', {
@@ -65,14 +64,7 @@ function makeWindow(html, opts) {
 }
 
 function menu(win, target, action) {
-  target.dispatchEvent(
-    new win.MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 10,
-    }),
-  );
+  rightClick(win, target);
   const item = win.document.querySelector(
     '#sorcar-content-context-menu .sorcar-ctx-item[data-action="' +
       action +
@@ -88,7 +80,7 @@ function menu(win, target, action) {
 async function copied(win, copies, target) {
   const before = copies.length;
   menu(win, target, 'copy');
-  await new Promise(resolve => setImmediate(resolve));
+  await flushMicrotasks();
   assert.strictEqual(copies.length, before + 1, 'one copy');
   return copies[before];
 }
@@ -363,7 +355,7 @@ async function main() {
           detail: 1,
         }),
       );
-      await new Promise(resolve => setImmediate(resolve));
+      await flushMicrotasks();
       assert.strictEqual(host.textContent, 'OXwo');
     },
   );

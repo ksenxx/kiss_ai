@@ -4,14 +4,18 @@
 # add your name here
 """Tests for ClaudeCodeModel — Claude Code CLI backend."""
 
+import json
 import os
 import shutil
+from pathlib import Path
 
 import pytest
 
 from kiss.core.models.claude_code_model import ClaudeCodeModel, _system_prompt_file
+from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import MODEL_INFO, model
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
+from kiss.tests.core.models.test_cli_subprocess_lifecycle import install_cli
 
 _has_claude = shutil.which("claude") is not None
 
@@ -154,7 +158,7 @@ class TestEffortFlag:
         env = m._cli_env()
         assert env is not None and env["CLAUDE_CODE_EFFORT_LEVEL"] == "low"
         monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
-        assert m._cli_env() is None  # inherits the daemon's environment, variable included
+        assert m._cli_env()["CLAUDE_CODE_EFFORT_LEVEL"] == "low"  # a copy of the daemon's env
 
     def test_catalog_level_of_the_base_and_of_an_alias(self) -> None:
         """A base entry runs at the level the catalog stores; a generated
@@ -201,6 +205,97 @@ class TestEffortFlag:
         assert env is not None and "CLAUDE_CODE_EFFORT_LEVEL" not in env
         assert m._use_subscription is False
         assert os.environ["CLAUDE_CODE_EFFORT_LEVEL"] == "max"
+
+
+_CLAUDE_RECORDS_ITS_INPUT = """
+    import json
+    import os
+    import sys
+
+    with open(os.environ["KISS_TEST_INPUT_LOG"], "a", encoding="utf-8") as log:
+        log.write(json.dumps({"argv": sys.argv[1:], "stdin": sys.stdin.read()}) + "\\n")
+    print(json.dumps({"type": "assistant",
+                      "message": {"id": "m1", "content": [{"type": "text", "text": "seen"}]}}),
+          flush=True)
+    print(json.dumps({"type": "result", "result": "seen",
+                      "usage": {"input_tokens": 10, "output_tokens": 5}}), flush=True)
+"""
+
+
+def _block(kind: str, attachment: Attachment) -> dict[str, object]:
+    """Return the Anthropic content block that carries *attachment*."""
+    source = {
+        "type": "base64",
+        "media_type": attachment.mime_type,
+        "data": attachment.to_base64(),
+    }
+    return {"type": kind, "source": source}
+
+
+def test_user_attachments_reach_the_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Images and PDFs the user attached are handed to ``claude`` as content blocks.
+
+    ``initialize`` dropped them with a log line and the transcript ignored
+    the ``attachments`` of later user messages, while Sorcar's prompt told
+    the model the files were "included in this message as inline content
+    that you can see directly".  The CLI takes them as one
+    ``--input-format stream-json`` user message (the shape claude 2.1.308
+    forwards to the API unchanged); a type it cannot take is named in the
+    prompt as not shown, and a turn without attachments is plain text as
+    before.  ``application/pdf; version=1.7`` is such a type: the block
+    builder reads only the bare ``application/pdf`` as a PDF, so a label
+    for it would name a file the model never gets.
+    """
+    install_cli(tmp_path, monkeypatch, "claude", _CLAUDE_RECORDS_ITS_INPUT)
+    log = tmp_path / "input.jsonl"
+    monkeypatch.setenv("KISS_TEST_INPUT_LOG", str(log))
+    png = Attachment(b"\x89PNG\r\n\x1a\npng-bytes", "image/png")
+    pdf = Attachment(b"%PDF-1.4 pdf-bytes", "application/pdf")
+    m = ClaudeCodeModel("cc/opus")
+    unread = [
+        Attachment(b"mp3-bytes", "audio/mpeg"),
+        Attachment(pdf.data, "application/pdf; version=1.7"),
+    ]
+    m.initialize("describe these", [png, unread[0], pdf, unread[1]])
+
+    assert m.generate()[0] == "seen"
+    m.add_message_to_conversation("user", "and this one", attachments=[png])
+    m.generate()
+    plain = ClaudeCodeModel("cc/opus")
+    plain.initialize("no files")
+    plain.generate()
+
+    first, second, third = (json.loads(line) for line in log.read_text().splitlines())
+    shown = [
+        {"type": "text", "text": "[Image #1]"},
+        _block("image", png),
+        {"type": "text", "text": "[Document #2]"},
+        _block("document", pdf),
+    ]
+    task = (
+        "describe these\n[Image #1]\n[Document #2]\n"
+        "[2 attachment(s) of this message could not be shown to this model: "
+        "audio/mpeg (9 bytes), application/pdf; version=1.7 (18 bytes)]"
+    )
+    assert _flag(first["argv"], "--input-format") == "stream-json"
+    # One line is one turn: a second line would be a second API request.
+    assert first["stdin"].endswith("\n") and first["stdin"].count("\n") == 1
+    assert json.loads(first["stdin"]) == {
+        "type": "user",
+        "message": {"role": "user", "content": [*shown, {"type": "text", "text": task}]},
+        "parent_tool_use_id": None,
+    }
+    assert json.loads(second["stdin"])["message"]["content"] == [
+        *shown,
+        {"type": "text", "text": "[Image #3]"},
+        _block("image", png),
+        {
+            "type": "text",
+            "text": f"[User]: {task}\n\n[Assistant]: seen\n\n[User]: and this one\n[Image #3]",
+        },
+    ]
+    assert "--input-format" not in third["argv"]
+    assert third["stdin"] == "no files"
 
 
 class TestModelInfoEntries:

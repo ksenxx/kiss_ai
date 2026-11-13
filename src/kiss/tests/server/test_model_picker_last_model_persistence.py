@@ -25,10 +25,11 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.persistence import _close_db
 from kiss.core import config as config_module
 from kiss.core.user_config import load_config, save_config
 from kiss.server.server import AgentServer
+from kiss.tests.persistence_helpers import close_db
+from kiss.tests.server.pause import Pause
 
 _API_KEY_NAMES = (
     "ANTHROPIC_API_KEY",
@@ -49,7 +50,7 @@ def _isolated_state(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
 
     saved_env = {name: os.environ.get(name) for name in _API_KEY_NAMES}
     saved_default_config = config_module.DEFAULT_CONFIG
-    _close_db()
+    close_db()
     tmpdir = tempfile.mkdtemp()
     monkeypatch.setattr(pm, "_KISS_DIR", type(pm._KISS_DIR)(tmpdir))
     monkeypatch.setattr(pm, "_DB_PATH", type(pm._DB_PATH)(os.path.join(tmpdir, "history.db")))
@@ -60,7 +61,7 @@ def _isolated_state(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     try:
         yield
     finally:
-        _close_db()
+        close_db()
         shutil.rmtree(tmpdir, ignore_errors=True)
         for name, value in saved_env.items():
             if value is None:
@@ -198,19 +199,9 @@ class TestModelPickerLastModelPersistence:
 
         server.printer.broadcast = capture  # type: ignore[method-assign]
 
-        save_started = threading.Event()
-        proceed_save = threading.Event()
-        real_save = pm._save_last_model
-
-        def slow_save(model: str) -> None:
-            save_started.set()
-            assert proceed_save.wait(timeout=30.0), (
-                "test bug: proceed_save not set within timeout"
-            )
-            real_save(model)
-
-        pm._save_last_model = slow_save  # type: ignore[assignment]
-        try:
+        held = Pause(pm._save_last_model.__code__, lambda frame_locals: True)
+        save_started = held.paused
+        with held:
             sel_thread = threading.Thread(
                 target=server._cmd_select_model,
                 args=({"tabId": "tabA", "model": "claude-opus-4-8"},),
@@ -230,7 +221,7 @@ class TestModelPickerLastModelPersistence:
             get_thread.start()
             time.sleep(0.05)
 
-            proceed_save.set()
+            held.release()
             sel_thread.join(timeout=30.0)
             get_thread.join(timeout=30.0)
             assert not sel_thread.is_alive(), (
@@ -239,8 +230,6 @@ class TestModelPickerLastModelPersistence:
             assert not get_thread.is_alive(), (
                 "test bug: get thread did not finish"
             )
-        finally:
-            pm._save_last_model = real_save  # type: ignore[assignment]
 
         with elock:
             model_events = [e for e in events if e.get("type") == "models"]
@@ -283,19 +272,9 @@ class TestModelPickerLastModelPersistence:
         save_config({"last_model": "gpt-5.5"})
         server = AgentServer()
 
-        save_started = threading.Event()
-        proceed_save = threading.Event()
-        real_save = pm._save_last_model
-
-        def slow_save(model: str) -> None:
-            save_started.set()
-            assert proceed_save.wait(timeout=30.0), (
-                "test bug: proceed_save not set within timeout"
-            )
-            real_save(model)
-
-        pm._save_last_model = slow_save  # type: ignore[assignment]
-        try:
+        held = Pause(pm._save_last_model.__code__, lambda frame_locals: True)
+        save_started = held.paused
+        with held:
             sel_thread = threading.Thread(
                 target=server._cmd_select_model,
                 args=({"tabId": "tabA", "model": "claude-opus-4-8"},),
@@ -315,7 +294,7 @@ class TestModelPickerLastModelPersistence:
             new_thread.start()
             time.sleep(0.05)
 
-            proceed_save.set()
+            held.release()
             sel_thread.join(timeout=30.0)
             new_thread.join(timeout=30.0)
             assert not sel_thread.is_alive(), (
@@ -324,8 +303,6 @@ class TestModelPickerLastModelPersistence:
             assert not new_thread.is_alive(), (
                 "test bug: new_chat thread did not finish"
             )
-        finally:
-            pm._save_last_model = real_save  # type: ignore[assignment]
 
         assert server._default_model == "claude-opus-4-8", (
             "_new_chat clobbered self._default_model with the stale "

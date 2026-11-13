@@ -32,18 +32,17 @@ import pytest
 from websockets.asyncio.client import connect
 
 from kiss.core.brand import PRODUCT_NAME
+from kiss.core.config import remote_url_file
 from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.sorcar import translate_client_command
 from kiss.server.web_server import (
     _MAX_LINE_BYTES,
     _TUNNEL_UNHEALTHY_LIMIT_QUICK,
-    _URL_FILE,
     TUNNEL_CHECK_INTERVAL,
     RemoteAccessServer,
     WebPrinter,
     _build_html,
     _create_ssl_context,
-    _generate_self_signed_cert,
     _get_local_ips,
     _pick_free_local_port,
     _print_url,
@@ -53,9 +52,13 @@ from kiss.server.web_server import (
     _save_url_file,
 )
 from kiss.tests.conftest import posix_only
+from kiss.tests.local_ws import _generate_self_signed_cert
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server._blocking_start import close_leaked_listeners
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
 from kiss.tests.server.conftest import FORWARDED_VISITOR, find_free_port, no_verify_ssl
+
+_URL_FILE = remote_url_file()  # under the session's KISS_HOME, which the test conftest sets
 
 
 class TestBuildHtml(unittest.TestCase):
@@ -293,26 +296,69 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
         status, _ = await self._http_get("/media/../server.py")
         self.assertEqual(status, 404)
 
+    async def test_unparseable_request_target_is_404(self) -> None:
+        """A target ``urlsplit`` or ``Path.resolve`` rejects is a 404, not a 500."""
+        for path in ("//[", "/media/%00"):
+            status, _ = await self._http_get(path)
+            self.assertEqual(status, 404, path)
+
     async def test_head_request_returns_200(self) -> None:
-        """HEAD / returns 200 OK (cloudflared health check)."""
+        """HEAD / returns 200 OK (cloudflared health check) and logs no error.
+
+        ``websockets`` never sees the HEAD request, and used to log
+        ``opening handshake failed`` with a traceback for every health
+        check once the answered connection closed.
+        """
         import http.client
 
-        def _head() -> int:
-            ctx = no_verify_ssl()
-            conn = http.client.HTTPSConnection(
-                "127.0.0.1",
-                self.port,
-                timeout=5,
-                context=ctx,
-            )
+        def _head(conn: http.client.HTTPConnection) -> int:
             conn.request("HEAD", "/")
-            resp = conn.getresponse()
-            status = resp.status
+            status = conn.getresponse().status
             conn.close()
             return status
 
-        status = await asyncio.get_event_loop().run_in_executor(None, _head)
-        self.assertEqual(status, 200)
+        loop = asyncio.get_event_loop()
+        assert self.server._ws_server is not None
+        with self.assertNoLogs("websockets.server", level="ERROR"):
+            for conn in (
+                http.client.HTTPSConnection(
+                    "127.0.0.1", self.port, timeout=5, context=no_verify_ssl(),
+                ),
+                http.client.HTTPConnection("127.0.0.1", self.port, timeout=5),
+            ):
+                self.assertEqual(await loop.run_in_executor(None, _head, conn), 200)
+            # The library logs when its handler ends, after the connection is lost.
+            async with asyncio.timeout(5):
+                while self.server._ws_server.handlers:
+                    await asyncio.sleep(0.01)
+
+    async def _send_and_leave(self, payload: bytes) -> None:
+        """Send *payload* over TLS, leave at once, and wait for the server to be done with it."""
+        _, writer = await asyncio.open_connection("127.0.0.1", self.port, ssl=no_verify_ssl())
+        writer.write(payload)
+        writer.close()
+        await writer.wait_closed()
+        assert self.server._ws_server is not None
+        async with asyncio.timeout(5):
+            while self.server._ws_server.handlers:
+                await asyncio.sleep(0.01)
+
+    async def test_handshake_error_log_is_for_failed_requests_only(self) -> None:
+        """A peer that leaves or is refused an upgrade logs no error; an unparseable request does.
+
+        A browser closes the preconnected sockets it did not use, and
+        ``websockets`` logged each as a failed handshake with a
+        traceback.  (The policy's last case, an answer this server
+        fails to prepare, is left to that log as well; no request is
+        known to fail, so nothing here can reach it.)
+        """
+        with self.assertNoLogs("websockets.server", level="ERROR"):
+            for payload in (b"", b"GET / HT", b"GET /ws HTTP/1.1\r\nHost: x\r\n\r\n"):
+                # Repeated: the EOF may arrive before or after the handshake task starts.
+                for _ in range(5):
+                    await self._send_and_leave(payload)
+        with self.assertLogs("websockets.server", level="ERROR"):
+            await self._send_and_leave(b"POST / HTTP/1.1\r\nHost: x\r\n\r\n")
 
     async def test_plain_http_loopback_served(self) -> None:
         """Plain HTTP on the same port serves the app to a loopback peer."""
@@ -334,15 +380,10 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         import kiss.agents.sorcar.persistence as _persistence
-        self._saved_persistence = (
-            _persistence._DB_PATH,
-            _persistence._db_conn,
-            _persistence._KISS_DIR,
-        )
+        self._saved_persistence = (_persistence._DB_PATH, _persistence._KISS_DIR)
         self._persistence_dir = Path(_scratch_dir(self))
         _persistence._KISS_DIR = self._persistence_dir
         _persistence._DB_PATH = self._persistence_dir / "history.db"
-        _persistence._db_conn = None
 
         self.port = find_free_port()
         self._orig_config = None
@@ -366,12 +407,8 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
         import kiss.agents.sorcar.persistence as _persistence
         _persistence._release_owner_marker()
-        _persistence._close_db()
-        (
-            _persistence._DB_PATH,
-            _persistence._db_conn,
-            _persistence._KISS_DIR,
-        ) = self._saved_persistence
+        close_db()
+        _persistence._DB_PATH, _persistence._KISS_DIR = self._saved_persistence
 
     async def test_ws_auth_no_password(self) -> None:
         """WebSocket connection with empty password succeeds immediately."""
@@ -3844,15 +3881,9 @@ class TestRemoveUrlFileOSError(unittest.TestCase):
 
     def test_remove_url_file_handles_oserror(self) -> None:
         """_remove_url_file does not raise when file path is problematic."""
-        import kiss.server.web_server as ws_mod
-
         with tempfile.TemporaryDirectory() as td:
-            ws_mod._URL_FILE = Path(td)
-            try:
-                _remove_url_file(ws_mod._URL_FILE)
-                self.assertTrue(ws_mod._URL_FILE.is_dir())
-            finally:
-                del ws_mod._URL_FILE
+            _remove_url_file(Path(td))
+            self.assertTrue(Path(td).is_dir())
 
 
 class TestReadyRestoredTabEmptyChatId(IsolatedAsyncioTestCase):
@@ -4605,64 +4636,6 @@ class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
         )
 
 
-class TestWatchdogExceptionPaths(IsolatedAsyncioTestCase):
-    """Test watchdog exception handling paths."""
-
-    async def asyncSetUp(self) -> None:
-        self.port = find_free_port()
-        save_config({"remote_password": ""})
-        self.server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            use_tunnel=False,
-        )
-        await self.server.start_async()
-
-    async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
-
-    async def test_watchdog_ping_close_exception(self) -> None:
-        """_ping_one_ws handles close() exception (lines 1616-1617)."""
-
-        class _FakeWS:
-            async def ping(self) -> asyncio.Future[None]:
-                raise ConnectionError("dead")
-
-            async def close(self) -> None:
-                raise RuntimeError("close failed too")
-
-        await self.server._ping_one_ws(_FakeWS())
-
-
-class TestHeadTransportNone(IsolatedAsyncioTestCase):
-    """Test _HeadAwareServerConnection when transport is None during HEAD."""
-
-    async def asyncSetUp(self) -> None:
-        self.port = find_free_port()
-        save_config({"remote_password": ""})
-        self.server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            use_tunnel=False,
-        )
-        await self.server.start_async()
-
-    async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
-
-    async def test_head_with_no_transport(self) -> None:
-        """HEAD request when transport already closed doesn't crash."""
-        ctx = no_verify_ssl()
-        reader, writer = await asyncio.open_connection(
-            "127.0.0.1", self.port, ssl=ctx, limit=16 * 1024 * 1024,
-        )
-        writer.write(b"HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        await writer.drain()
-        resp = await asyncio.wait_for(reader.read(4096), timeout=5)
-        self.assertIn(b"200 OK", resp)
-        writer.close()
-
-
 class TestWSHandlerGenericException(IsolatedAsyncioTestCase):
     """Test _ws_handler when a non-ConnectionClosed exception occurs."""
 
@@ -4949,22 +4922,17 @@ class TestRemoveUrlFileReadOnly(unittest.TestCase):
     @posix_only("chmod-based directory permission denial")
     def test_remove_oserror_from_readonly_dir(self) -> None:
         """_remove_url_file swallows OSError from read-only directory."""
-        import kiss.server.web_server as ws_mod
-
         tmpdir = tempfile.mkdtemp()
         try:
             fake_url_file = Path(tmpdir) / "subdir" / "remote-url.json"
             fake_url_file.parent.mkdir(parents=True, exist_ok=True)
             fake_url_file.write_text('{"local":"http://localhost:8787"}')
 
-            ws_mod._URL_FILE = fake_url_file  # type: ignore[misc]
-
             os.chmod(str(fake_url_file.parent), 0o444)
             try:
-                _remove_url_file(ws_mod._URL_FILE)
+                _remove_url_file(fake_url_file)
             finally:
                 os.chmod(str(fake_url_file.parent), 0o755)
-                del ws_mod._URL_FILE
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

@@ -14,10 +14,12 @@
 // showing a number the daemon no longer holds and re-saving it on
 // close.
 //
-// The marks are dropped in two places (``openSettingsPanel`` and
-// ``closeSettingsPanel``).
+// The marks are dropped in two places: ``closeSettingsPanel`` and
+// ``loadSettingsSheet`` (on open, and when the open sheet follows the
+// chat header to another machine).
 //
-// These tests pin the release valve rather than the guard.
+// These tests pin the release on close rather than the guard; the one
+// in ``loadSettingsSheet`` is pinned by machineScopedPicker.test.js.
 
 'use strict';
 

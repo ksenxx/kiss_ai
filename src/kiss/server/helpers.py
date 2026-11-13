@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kiss.core.models.model_info import _OPENAI_PREFIXES
+from kiss.core.models.model_info import _OPENAI_PREFIXES, _TOGETHER_PREFIXES
 
 # The web app's static files (``kiss/webapp/media``), served by the web
 # server and read by the standalone launcher for the app icon.
@@ -83,11 +83,15 @@ def model_vendor(name: str) -> tuple[str, int]:
         Tuple of (display name, numeric sort order).  Each vendor has its
         own order, so a sort on it keeps every vendor's models contiguous
         (the model picker draws a group header wherever the vendor changes).
+        The vendor is the provider that serves the model: Together AI's
+        open-weight models keep their maker's prefix (``openai/gpt-oss-*``).
     """
     if name.startswith(("claude-", "cc/")):
         return "Anthropic", 0
     if name.startswith("bedrock/"):
         return "Bedrock", 1
+    if name.startswith(_TOGETHER_PREFIXES):
+        return "Together AI", 7
     if name.startswith("openai/") or name.startswith(_OPENAI_PREFIXES):
         return "OpenAI", 2
     if name.startswith("gemini-"):

@@ -139,6 +139,7 @@ def test_library_is_byte_compiled_and_scripts_kept(installed_app: Path) -> None:
         "src/kiss/agents/sorcar/chat_summary.py",
         "src/kiss/agents/sorcar/history_columns.py",
         "src/kiss/scripts/sync_db.py",
+        "src/kiss/scripts/carry_over_tables.py",
         "src/kiss/scripts/merge_memory_pages.py",
         "src/kiss/core/_version.py",
     ):
@@ -155,6 +156,7 @@ def test_library_is_byte_compiled_and_scripts_kept(installed_app: Path) -> None:
                 "src/kiss/agents/sorcar/chat_summary.py",
                 "src/kiss/agents/sorcar/history_columns.py",
                 "src/kiss/scripts/sync_db.py",
+                "src/kiss/scripts/carry_over_tables.py",
                 "src/kiss/scripts/merge_memory_pages.py",
                 "src/kiss/core/_version.py",
             }
@@ -196,15 +198,31 @@ assert memory_delta.merge_module().TOMBSTONES_DIR == ".tombstones"
 commit = (Path(w.__file__).parent.parent / "core" / "_commit.txt").read_text().strip()
 assert w._read_commit() == commit != ""
 assert f"Configuration {w._read_version()} ({commit})<" in w._build_html()
-# Without the file (a tarball install, outside any git work tree) only the version shows.
+# A saved chat page records both in its last line.
+saved = f"version {w._read_version()}, commit {commit}</footer>"
+assert saved in w._build_share_page("t", "<p>x</p>")
+# Without the file (a tarball install, outside any git work tree) only the version shows,
+# and a saved page records the commit as unknown.
 # (git missing or hanging, the except branch of _read_commit, is not reproducible here.)
 commit_file = Path(w.__file__).parent.parent / "core" / "_commit.txt"
 commit_file.rename(commit_file.with_suffix(".bak"))
 try:
     assert w._read_commit() == ""
     assert f"Configuration {w._read_version()}<" in w._build_html()
+    saved = f"version {w._read_version()}, commit unknown</footer>"
+    assert saved in w._build_share_page("t", "<p>x</p>")
 finally:
     commit_file.with_suffix(".bak").rename(commit_file)
+# An install whose _version.py is gone records the version as unknown too.
+version = w._read_version()
+version_file = Path(w.__file__).parent.parent / "core" / "_version.py"
+version_file.rename(version_file.with_suffix(".bak"))
+try:
+    saved = f"version unknown, commit {commit}</footer>"
+    assert saved in w._build_share_page("t", "<p>x</p>")
+finally:
+    version_file.with_suffix(".bak").rename(version_file)
+assert w._read_version() == version != ""
 print("ok", len(commands), w._read_version())
 """
     env = dict(os.environ, PYTHONPATH=str(installed_app / "src"))

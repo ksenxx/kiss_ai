@@ -93,6 +93,13 @@ def test_failed_read_does_not_mark_file(repo: Path) -> None:
     assert tools.Read(str(repo / "missing.py")).startswith("Error: File not found")
     (repo / "missing.py").write_text("m = 1\n", encoding="utf-8")
     assert tools.Edit(str(repo / "missing.py"), "m = 1", "m = 2").startswith("Error:")
+    # A Read past the end shows nothing of the file either.
+    assert "past EOF (file has 2 lines)" in tools.Read(str(repo / "a.py"), start_line=99)
+    assert tools.Write(str(repo / "a.py"), "gone\n") == (
+        f"Error: {repo / 'a.py'} has not been read in this session. "
+        "Call Read on it before overwriting it."
+    )
+    assert (repo / "a.py").read_text(encoding="utf-8") == "x = 1\ny = 2\n"
 
 
 def test_unsupported_binary_read_does_not_mark_file(repo: Path) -> None:

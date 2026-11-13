@@ -31,6 +31,7 @@ const {
   activeFrameDoc,
   stubMonaco,
   persistedDrafts,
+  flushMicrotasks,
 } = require('./simplify2_harness.js');
 const {contentTabs} = require('./subagent_tab_helpers');
 
@@ -84,6 +85,8 @@ async function main() {
   assert.ok(contentTabs(win)[0].title.includes('notes.md'));
   assertMarkdownPreview(win, 'Notes', '.md');
   assert.ok(activeFrameDoc(win).includes('<em>text</em>'));
+  // An editor is only created once the Monaco loader's promise resolves.
+  await flushMicrotasks();
   assert.strictEqual(created.length, 0, 'no text editor for the preview');
   const toggle = Array.from(
     win.document.querySelectorAll('button'),

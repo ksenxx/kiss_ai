@@ -59,6 +59,19 @@ CASES: dict[str, tuple[str, bool]] = {
     "python_still_converts": (
         "python3 - <<'PY'\np = 'f'\ns = open(p).read()\nt = s.replace('old', 'new')\n"
         "open(p, 'w').write(t)\nPY", True),
+    # audit 2026-11-10 (B/S4-F1): programs python refuses before it runs their write
+    "python_keyword_repeated": (
+        "python3 - <<'PY'\ns = open('f', encoding='utf8', encoding='utf8').read()\n"
+        "s = s.replace('old', 'new')\nopen('f', 'w').write(s)\nPY", False),
+    "python_late_future_import": (
+        "python3 - <<'PY'\np = 'f'\nfrom __future__ import annotations\ns = open(p).read()\n"
+        "s = s.replace('old', 'new')\nopen(p, 'w').write(s)\nPY", False),
+    "python_relative_pathlib": (
+        "python3 - <<'PY'\nfrom .pathlib import Path\np = Path('f')\ns = p.read_text()\n"
+        "s = s.replace('old', 'new')\np.write_text(s)\nPY", False),
+    "python_relative_import": (
+        "python3 - <<'PY'\nfrom . import helpers\ns = open('f').read()\n"
+        "s = s.replace('old', 'new')\nopen('f', 'w').write(s)\nPY", False),
     "heredoc_comment_append": ("cat > f <<'EOF' # >> is mentioned here\nnew body\nEOF", True),
     "heredoc_delimiter_append": ("cat > f <<'>>'\nnew body\n>>", True),
     "heredoc_append": ("cat 1>> f <<'EOF'\nnew body\nEOF", True),
@@ -109,7 +122,7 @@ def test_conversions_leave_the_files_bash_leaves(
     tools = UsefulTools(work_dir=str(tools_dir))
     tools.Read(str(tools_dir / "f"))
     result = tools._rewrite_instead(command, str(tools_dir), name, 5, 2000)
-    if result is None or result.startswith("REFUSED"):
+    if result is None or result.text.startswith("REFUSED"):
         # Not converted: the shell would run it as written (or the model re-issues it).
         assert not converts, (name, result)
         assert _tree(tools_dir) == {"f": ORIGINAL.encode()}, name

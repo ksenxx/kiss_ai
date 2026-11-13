@@ -15,14 +15,7 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 
-const {send} = harness;
-
-function makePage() {
-  const page = harness.makePage();
-  page.win._testApi.endLaunch();
-  page.win._testApi.hideWelcome();
-  return page;
-}
+const {send, makeLaunchedPage: makePage} = harness;
 
 function budgetText(win) {
   return win.document.getElementById('status-budget').textContent;

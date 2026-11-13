@@ -19,11 +19,20 @@ subprocess (the same execution contract as ``DockerManager.Bash``), so
 they validate end-to-end behavior without any mocks.
 """
 
+import os
 import subprocess
 from pathlib import Path
 
 from kiss.agents.sorcar.docker_tools import DockerTools
 from kiss.agents.sorcar.useful_tools import _popen_kwargs
+
+
+def _bash_path(path: Path) -> str:
+    """Return *path* in the syntax understood by the host's POSIX shell."""
+    posix = path.resolve().as_posix()
+    if os.name == "nt" and len(posix) >= 3 and posix[1:3] == ":/":
+        return f"/{posix[0].lower()}{posix[2:]}"
+    return posix
 
 
 def _local_bash(command: str, description: str) -> str:
@@ -48,7 +57,7 @@ def test_read_last_line_without_trailing_newline(tmp_path: Path) -> None:
     f = tmp_path / "no_newline.txt"
     f.write_bytes(b"line1\nline2")
     tools = DockerTools(_local_bash)
-    result = tools.Read(str(f), start_line=2)
+    result = tools.Read(_bash_path(f), start_line=2)
     assert "past EOF" not in result, result
     assert "line2" in result
 
@@ -58,7 +67,7 @@ def test_read_truncation_marker_counts_unterminated_line(tmp_path: Path) -> None
     f = tmp_path / "no_newline.txt"
     f.write_bytes(b"line1\nline2")
     tools = DockerTools(_local_bash)
-    result = tools.Read(str(f), max_lines=1)
+    result = tools.Read(_bash_path(f), max_lines=1)
     assert "line1" in result
     assert "[truncated: 1 more lines]" in result, result
 
@@ -69,11 +78,11 @@ def test_read_with_trailing_newline_still_works(tmp_path: Path) -> None:
     f.write_text("a\nb\nc\n")
     tools = DockerTools(_local_bash)
 
-    assert tools.Read(str(f), start_line=2).splitlines()[0] == "b"
-    past_eof = tools.Read(str(f), start_line=4)
+    assert tools.Read(_bash_path(f), start_line=2).splitlines()[0] == "b"
+    past_eof = tools.Read(_bash_path(f), start_line=4)
     assert "past EOF" in past_eof
     assert "3 lines" in past_eof
 
-    windowed = tools.Read(str(f), max_lines=2)
+    windowed = tools.Read(_bash_path(f), max_lines=2)
     assert "a" in windowed and "b" in windowed
     assert "[truncated: 1 more lines]" in windowed

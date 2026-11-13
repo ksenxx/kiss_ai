@@ -55,6 +55,7 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _forwarded_client_ip,
 )
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
@@ -83,26 +84,28 @@ class TestForwardedIpHelpers(unittest.TestCase):
         self.assertFalse(is_loopback_ip(""))
         self.assertFalse(is_loopback_ip("not-an-ip"))
 
-    def test_forwarded_prefers_cf_connecting_ip(self) -> None:
-        ws = _conn(
-            request=SimpleNamespace(
-                headers=Headers(
-                    {
-                        "Cf-Connecting-Ip": "203.0.113.9",
-                        "X-Forwarded-For": "198.51.100.2, 10.0.0.1",
-                    }
-                )
-            )
-        )
-        self.assertEqual(_forwarded_client_ip(ws), "203.0.113.9")
+    def test_forwarded_reads_the_last_hop_a_relay_wrote(self) -> None:
+        """The visitor is the last ``X-Forwarded-For`` hop that is not this machine.
 
-    def test_forwarded_falls_back_to_xff_first_hop(self) -> None:
-        ws = _conn(
-            request=SimpleNamespace(
-                headers=Headers({"X-Forwarded-For": "198.51.100.2, 10.0.0.1"})
-            )
-        )
-        self.assertEqual(_forwarded_client_ip(ws), "198.51.100.2")
+        ``Cf-Connecting-Ip`` only speaks when that list names nobody.
+        """
+        xff, cf = "X-Forwarded-For", "Cf-Connecting-Ip"
+        for headers, expected in (
+            ([(xff, "198.51.100.2, 10.0.0.1")], "10.0.0.1"),
+            ([(cf, "203.0.113.9"), (xff, "198.51.100.2,10.0.0.1")], "10.0.0.1"),
+            ([(xff, "6.6.6.6"), (xff, "203.0.113.5")], "203.0.113.5"),
+            # cloudflared in front of a local proxy: the proxy's hop is loopback.
+            ([(xff, "6.6.6.6, 203.0.113.5, 127.0.0.1")], "203.0.113.5"),
+            ([(xff, "6.6.6.6, 203.0.113.5:4711")], "203.0.113.5"),
+            ([(xff, "6.6.6.6, [2001:db8::1]:4711")], "2001:db8::1"),
+            ([(xff, "6.6.6.6, 2001:db8::1")], "2001:db8::1"),
+            ([(cf, "203.0.113.9")], "203.0.113.9"),
+            ([(cf, "203.0.113.9"), (xff, "127.0.0.1")], "203.0.113.9"),
+            ([(xff, "127.0.0.1:4711, [::1]")], "?"),
+            ([(cf, "")], "?"),
+        ):
+            ws = _conn(request=SimpleNamespace(headers=Headers(headers)))
+            self.assertEqual(_forwarded_client_ip(ws), expected, headers)
 
     def test_forwarded_empty_when_no_headers(self) -> None:
         self.assertEqual(_forwarded_client_ip(_conn(request=None)), "")
@@ -150,14 +153,12 @@ class TestSharedIpLockoutRegression(IsolatedAsyncioTestCase):
 
         self._saved_persistence = (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         )
         self._persistence_dir = Path(tempfile.mkdtemp(prefix="kiss_lockout_"))
         self.addCleanup(shutil.rmtree, self._persistence_dir, True)
         _persistence._KISS_DIR = self._persistence_dir
         _persistence._DB_PATH = self._persistence_dir / "history.db"
-        _persistence._db_conn = None
 
         self.port = find_free_port()
         self._orig_config = (
@@ -181,19 +182,23 @@ class TestSharedIpLockoutRegression(IsolatedAsyncioTestCase):
 
         import kiss.agents.sorcar.persistence as _persistence
 
-        _persistence._close_db()
+        close_db()
         (
             _persistence._DB_PATH,
-            _persistence._db_conn,
             _persistence._KISS_DIR,
         ) = self._saved_persistence
 
     def _url(self) -> str:
         return f"wss://127.0.0.1:{self.port}/ws"
 
-    async def _first_handshake_frame(self, client_ip: str, password: str) -> str:
+    async def _first_handshake_frame(
+        self, client_ip: str, password: str, forwarded_for: str = "",
+    ) -> str:
         """Connect as *client_ip*, send one ``auth`` frame, return the
         server's first response ``type`` (or ``"closed"``).
+
+        With *forwarded_for* the request also carries that
+        ``X-Forwarded-For``, as one relayed by a local reverse proxy does.
 
         A locked-out IP is refused with an ``auth_locked`` frame followed
         immediately by a server close, so the ``auth`` ``send`` may race
@@ -201,6 +206,8 @@ class TestSharedIpLockoutRegression(IsolatedAsyncioTestCase):
         a connection that is already closing.
         """
         headers = {"Cf-Connecting-Ip": client_ip}
+        if forwarded_for:
+            headers["X-Forwarded-For"] = forwarded_for
         async with connect(
             self._url(), ssl=no_verify_ssl(), additional_headers=headers
         ) as ws:
@@ -254,6 +261,28 @@ class TestSharedIpLockoutRegression(IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await self._first_handshake_frame("198.51.100.7", ""),
+            "auth_required",
+        )
+
+    async def test_forged_forwarded_headers_do_not_evade_the_lockout(self) -> None:
+        """A visitor behind a local reverse proxy cannot choose his lockout bucket.
+
+        The proxy appends the address of the peer it accepted to the
+        ``X-Forwarded-For`` it is sent and passes a ``Cf-Connecting-Ip``
+        through, so both the earlier hops and that header are the
+        visitor's text: he changes them with every guess.
+        """
+        for guess in range(_AUTH_FAIL_MAX):
+            await self._first_handshake_frame(
+                f"192.0.2.{guess}", "nope", f"198.51.100.{guess}, 203.0.113.99",
+            )
+        self.assertEqual(
+            await self._first_handshake_frame("192.0.2.77", "", "198.51.100.77, 203.0.113.99"),
+            "auth_locked",
+        )
+        # Another visitor of the same proxy keeps his own bucket.
+        self.assertEqual(
+            await self._first_handshake_frame("192.0.2.77", "", "198.51.100.77, 203.0.113.5"),
             "auth_required",
         )
 

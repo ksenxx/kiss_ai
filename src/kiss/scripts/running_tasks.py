@@ -58,6 +58,7 @@ import sqlite3
 import stat
 import sys
 import time
+from pathlib import Path
 
 DEFAULT_WINDOW = 300.0
 TASK_TABLE = "task_history"
@@ -163,7 +164,7 @@ def _query(
         return []
     moment = time.time() if now is None else now
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30.0)
+        con = sqlite3.connect(f"{Path(path).absolute().as_uri()}?mode=ro", uri=True, timeout=30.0)
     except sqlite3.Error:
         return None
     try:
@@ -178,14 +179,22 @@ def _query(
             return []
         started = 't."timestamp"' if "timestamp" in columns else "NULL"
         ended = 'COALESCE(t."end_ts", 0) <= 0' if "end_ts" in columns else "1"
+        # Only these rows can be reported, so only their events are joined:
+        # joined with every event, the query read the trajectory of every
+        # task ever run and was not done after five minutes on a 15 GB
+        # history.
+        candidates = [ended]
         tests: list[str] = []
-        params: list[object] = []
+        params: dict[str, object] = {}
         if unfinished and "result" in columns:
-            tests.append('t."result" = ?')
-            params.append(UNFINISHED_RESULT)
+            candidates.append('t."result" = :placeholder')
+            tests.append('t."result" = :placeholder')
+            params["placeholder"] = UNFINISHED_RESULT
         if EVENT_TABLE in tables and window > 0:
-            tests.append(f'({ended} AND MAX(e."timestamp") > ?)')
-            params.append(moment - window)
+            # The maximum, not the last event stored: a journal replayed
+            # late stores older events behind fresher ones.
+            tests.append(f'({ended} AND MAX(e."timestamp") > :cutoff)')
+            params["cutoff"] = moment - window
             newest = f'COALESCE(MAX(e."timestamp"), {started})'
             source = f'{TASK_TABLE} t LEFT JOIN {EVENT_TABLE} e ON e."task_id" = t."id"'
         else:
@@ -194,7 +203,8 @@ def _query(
         if not tests:
             return []
         rows = con.execute(
-            f'SELECT t."id", {newest} FROM {source} GROUP BY t."id" HAVING {" OR ".join(tests)}',
+            f'SELECT t."id", {newest} FROM {source} WHERE {" OR ".join(candidates)}'
+            f' GROUP BY t."id" HAVING {" OR ".join(tests)}',
             params,
         ).fetchall()
     except sqlite3.Error:

@@ -24,9 +24,11 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.mcp_servers import (
+    _MAX_DECLARED_NODES,
     FileTokenStorage,
     MCPManager,
     MCPServerConfig,
+    _Connection,
     _refuse_login,
     _result_text,
     load_mcp_servers,
@@ -40,6 +42,7 @@ from kiss.tests.conftest import IS_WINDOWS
 
 _SERVER_SCRIPT = '''
 from mcp.server.fastmcp import FastMCP
+from mcp.types import EmbeddedResource, ResourceLink, TextContent, TextResourceContents
 
 mcp = FastMCP("testsrv")
 
@@ -56,18 +59,35 @@ def secret_word(prefix: str = "") -> str:
     return prefix + "XYLOPHONE-99"
 
 
+@mcp.tool()
+def read_file(path: str):
+    """Return a file as GitHub's server does: a note, the text as an embedded resource."""
+    contents = TextResourceContents(uri="repo://" + path, text="BODY-OF-" + path)
+    return [
+        TextContent(type="text", text="downloaded " + path),
+        EmbeddedResource(type="resource", resource=contents),
+        ResourceLink(type="resource_link", name="history", uri="repo://" + path + "/history"),
+    ]
+
+
 if __name__ == "__main__":
     mcp.run()
 '''
 
 
 @pytest.fixture
-def isolated_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect every user-level MCP location into *tmp_path*."""
+def isolated_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Redirect every user-level MCP location into *tmp_path*.
+
+    The servers the test connected through the process-wide manager
+    (``make_mcp_tools``) are stopped afterwards: the manager keeps its
+    children for the idle timeout, so they outlived the test session.
+    """
     monkeypatch.setenv("KISS_HOME", str(tmp_path / ".kisshome"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "project").mkdir()
-    return tmp_path
+    yield tmp_path
+    MCPManager.disconnect_existing()
 
 
 def _write_server_script(tmp_path: Path) -> Path:
@@ -227,6 +247,43 @@ def test_remove_from_all_scopes(isolated_homes: Path) -> None:
     assert remove_mcp_server("s", str(project)) == []
 
 
+def test_the_home_directory_is_no_project(
+    isolated_homes: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A task working in the user's home reads and writes the live user config.
+
+    ``~/.kiss`` is the stock brand's global home.  Under another brand
+    its ``mcp.json`` is a leftover, which was loaded over the live
+    ``$KISS_HOME/mcp.json`` as the home directory's project file (and
+    written to by a project-scope save).
+    """
+    home = isolated_homes / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
+    stale = home / ".kiss" / "mcp.json"
+    stale.parent.mkdir(parents=True)
+    leftover = json.dumps({"mcpServers": {"notes": {"url": "https://stale.example/mcp"}}})
+    stale.write_text(leftover, encoding="utf-8")
+    live = isolated_homes / ".kisshome" / "mcp.json"
+    notes = MCPServerConfig(name="notes", transport="http", url="https://live.example/mcp")
+    assert save_mcp_server(notes, "user", str(home)) == live
+    assert load_mcp_servers(str(home))["notes"].url == "https://live.example/mcp"
+    other = MCPServerConfig(name="other", transport="http", url="https://other.example/mcp")
+    assert save_mcp_server(other, "project", str(home)) == live
+    assert remove_mcp_server("notes", str(home)) == [live]
+    assert set(load_mcp_servers(str(home))) == {"other"}
+    assert stale.read_text(encoding="utf-8") == leftover
+    # The user file is read once, as the user's: its stdio server is not a
+    # project's (no working directory, the same connection as from any
+    # other task), and the home's Claude Code file still wins over it.
+    save_mcp_server(MCPServerConfig(name="local", command="serve"), "user", str(home))
+    claude = json.dumps({"mcpServers": {"other": {"url": "https://claude.example/mcp"}}})
+    (home / ".mcp.json").write_text(claude, encoding="utf-8")
+    servers = load_mcp_servers(str(home))
+    assert servers["local"] == load_mcp_servers(str(isolated_homes / "project"))["local"]
+    assert servers["local"].cwd == ""
+    assert servers["other"].url == "https://claude.example/mcp"
+
+
 def test_failed_config_write_leaves_no_temp_file(isolated_homes: Path) -> None:
     """A config write that cannot complete removes its ``.mcp.json-<hex>`` staging file.
 
@@ -286,7 +343,7 @@ def test_make_mcp_tools_live_call(
     save_mcp_server(_stdio_config(tmp_path), "user", str(project))
     tools = make_mcp_tools(str(project))
     names = {t.__name__ for t in tools}
-    assert names == {"testsrv_add", "testsrv_secret_word"}
+    assert names == {"testsrv_add", "testsrv_read_file", "testsrv_secret_word"}
 
     add = next(t for t in tools if t.__name__ == "testsrv_add")
     sig = inspect.signature(add)
@@ -300,6 +357,13 @@ def test_make_mcp_tools_live_call(
     assert secret() == "XYLOPHONE-99"
     assert secret(prefix="say-") == "say-XYLOPHONE-99"
 
+    # A file handed over as an embedded resource is text the model must get
+    # (it read "[resource content omitted]"); a link names what it points at.
+    read_file = next(t for t in tools if t.__name__ == "testsrv_read_file")
+    assert read_file(path="a.txt") == (
+        "downloaded a.txt\nBODY-OF-a.txt\n[resource_link content omitted: repo://a.txt/history]"
+    )
+
 
 def test_make_mcp_tools_permission_filter(
     isolated_homes: Path, tmp_path: Path, mcp_permission_rules,
@@ -309,7 +373,7 @@ def test_make_mcp_tools_permission_filter(
     project = isolated_homes / "project"
     save_mcp_server(_stdio_config(tmp_path), "user", str(project))
     names = {t.__name__ for t in make_mcp_tools(str(project))}
-    assert names == {"testsrv_add"}
+    assert names == {"testsrv_add", "testsrv_read_file"}
 
 
 def test_make_mcp_tools_no_servers_is_empty(isolated_homes: Path) -> None:
@@ -327,6 +391,75 @@ def test_make_mcp_tools_broken_server_skipped(isolated_homes: Path) -> None:
     assert make_mcp_tools(str(project)) == []
 
 
+_WHERE_SCRIPT = '''
+import os
+
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("where")
+
+
+@mcp.tool()
+def cwd() -> str:
+    """Return the server's working directory."""
+    return os.getcwd()
+
+
+if __name__ == "__main__":
+    mcp.run()
+'''
+
+
+def test_a_project_stdio_server_runs_in_its_project(isolated_homes: Path) -> None:
+    """A stdio server of a project's config file runs in that project.
+
+    Two projects check in the same ``.mcp.json`` naming a script by a
+    relative path, as Claude Code runs it.  The children inherited the
+    daemon's working directory, where the script is not found, and the
+    two identical entries shared one connection key, so with an
+    absolute path the second project was handed the first one's
+    server.  A user-level server stays shared by every project.
+    """
+    entry = {"command": sys.executable, "args": ["where.py"]}
+    tools = {}
+    for name in ("one", "two"):
+        project = isolated_homes / name
+        project.mkdir()
+        (project / "where.py").write_text(_WHERE_SCRIPT, encoding="utf-8")
+        (project / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"where": entry}}), encoding="utf-8",
+        )
+        (tools[name],) = make_mcp_tools(str(project))
+        # What a save writes back is the entry as checked in, not this checkout's path.
+        assert load_mcp_servers(str(project))["where"].to_json() == {"type": "stdio", **entry}
+    for name, tool in tools.items():
+        assert os.path.samefile(tool(), isolated_homes / name)
+
+    shared = MCPServerConfig(name="shared", command=sys.executable, args=("where.py",))
+    save_mcp_server(shared, "user", str(isolated_homes / "one"))
+    assert {
+        load_mcp_servers(str(isolated_homes / name))["shared"] for name in ("one", "two")
+    } == {shared}
+
+
+def test_a_sign_in_that_cannot_be_set_up_costs_no_other_server(
+    isolated_homes: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remote server whose OAuth provider cannot be built fails alone.
+
+    The SDK's provider refuses a ``$KISS_MCP_CLIENT_METADATA_URL`` that is
+    not HTTPS as it is built; that ``ValueError`` escaped ``connect_all``
+    and cost the run every MCP tool, the local servers' included.
+    """
+    monkeypatch.setenv("KISS_MCP_CLIENT_METADATA_URL", "http://plain.example/client.json")
+    project = isolated_homes / "project"
+    save_mcp_server(_stdio_config(tmp_path), "user", str(project))
+    remote = MCPServerConfig(name="remote", transport="http", url="https://127.0.0.1:9/mcp")
+    save_mcp_server(remote, "user", str(project))
+    assert len(make_mcp_tools(str(project))) == 3
+    assert "client_metadata_url" in MCPManager.instance().connect(remote).error
+
+
 def test_call_tool_unknown_server_errors() -> None:
     """Calling a tool on a never-connected server returns an error string."""
     out = MCPManager.instance().call_tool("no-such-server", "t", {})
@@ -335,7 +468,7 @@ def test_call_tool_unknown_server_errors() -> None:
 
 def test_result_text_flattening() -> None:
     """``CallToolResult`` content is flattened; errors are prefixed."""
-    from mcp.types import CallToolResult, TextContent
+    from mcp.types import CallToolResult, ImageContent, TextContent
 
     ok = CallToolResult(
         content=[
@@ -350,6 +483,8 @@ def test_result_text_flattening() -> None:
     assert _result_text(err) == "Error: boom"
     empty = CallToolResult(content=[])
     assert _result_text(empty) == "(empty result)"
+    image = CallToolResult(content=[ImageContent(type="image", data="aGk=", mimeType="image/png")])
+    assert _result_text(image) == "[image content omitted]"
 
 
 def test_wrapper_docstring_carries_schema_descriptions() -> None:
@@ -562,6 +697,141 @@ def test_wrapper_resolves_local_schema_references() -> None:
     assert inspect.signature(wrapper).parameters["billing"].annotation is dict
 
 
+def test_wrapper_merges_allof_and_resolves_the_root_schema() -> None:
+    """Arguments behind an ``allOf`` or behind a reference of the schema's root are declared.
+
+    A node is everything its ``allOf`` members are (pydantic wraps a
+    described model field in a one-member ``allOf``): the reducer
+    dropped the keyword and declared the object a string.  The root was
+    read for ``properties`` and ``required`` as written, so a tool whose
+    arguments its root names by reference or composition was declared
+    with none, and its required arguments could not be sent.
+    """
+    from mcp.types import Tool
+
+    from kiss.core.tool_schema import declared_schema
+
+    defs = {
+        "Address": {
+            "type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"],
+        },
+        "Args": {
+            "type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"],
+        },
+    }
+    extra = {
+        "properties": {"weight": {"type": "number"}, "city": {"type": "integer"}},
+        "required": ["weight", "city"],
+    }
+    ship = Tool(name="ship", inputSchema={
+        "$defs": defs,
+        "type": "object",
+        "properties": {
+            "address": {"allOf": [{"$ref": "#/$defs/Address"}], "description": "Where to"},
+            "parcel": {"allOf": [{"$ref": "#/$defs/Address"}, extra, "not a schema"]},
+        },
+        "required": ["address"],
+    })
+    declared = declared_schema(make_mcp_tool_wrapper(MCPManager.instance(), "srv", ship, "srv"))
+    assert declared is not None
+    address = {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+    assert declared["parameters"]["properties"] == {
+        "address": {**address, "description": "Where to"},
+        # Joined, the first to name a property declaring it.
+        "parcel": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}, "weight": {"type": "number"}},
+            "required": ["city", "weight"],
+        },
+    }
+    assert list(declared["parameters"]["properties"]["parcel"]["properties"]) == ["city", "weight"]
+    limit = {"limit": {"type": "integer"}}
+    for root, signature in (
+        ({"$defs": defs, "type": "object", "$ref": "#/$defs/Args"}, "(query: str) -> str"),
+        ({"$defs": defs, "allOf": [{"$ref": "#/$defs/Args"}]}, "(query: str) -> str"),
+        (
+            {"$defs": defs, "properties": limit, "allOf": [{"$ref": "#/$defs/Args"}]},
+            "(query: str, limit: int = None) -> str",
+        ),
+    ):
+        wrapper = make_mcp_tool_wrapper(
+            MCPManager.instance(), "srv", Tool(name="find", inputSchema=root), "srv",
+        )
+        assert str(inspect.signature(wrapper)) == signature, root
+        declared = declared_schema(wrapper)
+        assert declared is not None
+        assert declared["parameters"]["required"] == ["query"], root
+        assert declared["parameters"]["properties"]["query"] == {"type": "string"}, root
+    # A reference followed for one part is on the path of that part's
+    # children only: the same model named again beside it (an argument's
+    # second allOf member, a second argument of a composed root) is
+    # declared in full, not as a model that refers to itself.
+    billing = {"properties": {"billing": {"$ref": "#/$defs/Address"}}}
+    for schema in (
+        {"$defs": defs, "properties": {"order": {"allOf": [{"$ref": "#/$defs/Address"}, billing]}}},
+        {"$defs": defs, "properties": {"order": billing}, "allOf": [{"$ref": "#/$defs/Address"}]},
+    ):
+        declared = declared_schema(make_mcp_tool_wrapper(
+            MCPManager.instance(), "srv", Tool(name="bill", inputSchema=schema), "srv",
+        ))
+        assert declared is not None
+        assert declared["parameters"]["properties"]["order"]["properties"]["billing"] == address
+    # Keywords beside a reference apply with its target's, as the server's
+    # validator has them (it rejects an order without its city): joined too.
+    beside = {"$defs": defs, "properties": {"order": {"$ref": "#/$defs/Address", **billing}}}
+    declared = declared_schema(make_mcp_tool_wrapper(
+        MCPManager.instance(), "srv", Tool(name="bill", inputSchema=beside), "srv",
+    ))
+    assert declared is not None
+    assert declared["parameters"]["properties"]["order"] == {
+        "type": "object",
+        "properties": {"billing": address, "city": {"type": "string"}},
+        "required": ["city"],
+    }
+
+
+def test_a_large_declaration_stops_following_references() -> None:
+    """Definitions shared down a chain of models do not multiply without bound.
+
+    Each of 18 models names the next one twice: declared in full, the
+    last one is there 2**18 times, 17 MB from a 2 KB schema (and a hang
+    a few models further).  Once a declaration has
+    ``_MAX_DECLARED_NODES`` nodes, a reference declares its target's
+    type only.
+    """
+    from mcp.types import Tool
+
+    from kiss.core.tool_schema import declared_schema
+
+    depth = 18
+    twice = [{"a": {"$ref": f"#/$defs/D{i + 1}"}, "b": {"$ref": f"#/$defs/D{i + 1}"}}
+             for i in range(depth)]
+    defs = {f"D{i}": {"type": "object", "properties": twice[i]} for i in range(depth)}
+    tool = Tool(name="deep", inputSchema={
+        "$defs": {**defs, f"D{depth}": {"type": "string"}},
+        "type": "object",
+        "properties": {"x": {"$ref": "#/$defs/D0"}},
+    })
+    declared = declared_schema(make_mcp_tool_wrapper(MCPManager.instance(), "srv", tool, "srv"))
+    assert declared is not None
+    assert json.dumps(declared).count('"type"') <= _MAX_DECLARED_NODES
+    node = declared["parameters"]["properties"]["x"]
+    for _ in range(depth):  # the first path is declared to its end
+        node = node["properties"]["a"]
+    assert node == {"type": "string"}
+    # A chain of aliases is followed without the interpreter's stack: one
+    # longer than that is deep still ends at its target.
+    links = sys.getrecursionlimit() + 100
+    aliases = {f"A{i}": {"$ref": f"#/$defs/A{i + 1}"} for i in range(links)}
+    chained = Tool(name="chained", inputSchema={
+        "$defs": {**aliases, f"A{links}": {"type": "integer"}},
+        "properties": {"n": {"$ref": "#/$defs/A0"}},
+    })
+    declared = declared_schema(make_mcp_tool_wrapper(MCPManager.instance(), "srv", chained, "srv"))
+    assert declared is not None
+    assert declared["parameters"]["properties"] == {"n": {"type": "integer"}}
+
+
 
 def test_file_token_storage_roundtrip(isolated_homes: Path) -> None:
     """Tokens and client info persist to a 0600 file and clear()."""
@@ -598,9 +868,12 @@ def test_file_token_storage_roundtrip(isolated_homes: Path) -> None:
 
 
 def test_noninteractive_oauth_refuses_browser_flow() -> None:
-    """Agent runs never block on OAuth; they direct to the sign-in tool."""
+    """Agent runs never block on OAuth; they direct to the sign-in tool and end the connection."""
+    remote = MCPServerConfig(name="remote", transport="http", url="https://mcp.example/mcp")
+    conn = _Connection(config=remote)
     with pytest.raises(RuntimeError, match="requires an OAuth sign-in.*connect_mcp_server"):
-        asyncio.run(_refuse_login("https://auth.example/authorize"))
+        asyncio.run(_refuse_login(conn, "https://auth.example/authorize"))
+    assert conn.stop.is_set() and "requires an OAuth sign-in" in conn.error
 
 
 

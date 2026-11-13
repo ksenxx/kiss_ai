@@ -27,17 +27,17 @@ from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 
-import kiss.agents.sorcar.persistence as th
 from kiss.server.sorcar import ApiContext, translate_client_command
-from kiss.server.web_server import (
-    RemoteAccessServer,
-    _generate_self_signed_cert,
-)
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.local_ws import _generate_self_signed_cert
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class _RecordingEndpoint:
     """Minimal real WSS-like endpoint that records what is sent to it."""
+
+    # Watched by the printer only while a send is pending; none ever is.
+    transport = asyncio.WriteTransport()
 
     def __init__(self) -> None:
         self.sent: list[str] = []
@@ -84,9 +84,6 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
         sweep = self.server._agent_server._orphan_sweep_thread
         if sweep is not None and sweep.is_alive():
             await asyncio.to_thread(sweep.join, 30)
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
         restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

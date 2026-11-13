@@ -38,6 +38,7 @@ from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.persistence import _add_task, _prefix_match_tasks
 from kiss.agents.sorcar.skills import parse_frontmatter
 from kiss.tests.conftest import posix_only
+from kiss.tests.persistence_helpers import close_db
 
 
 def _run_git(*args: str, cwd: Path) -> None:
@@ -86,18 +87,17 @@ class _TempDbTestBase:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        self.saved = (th._DB_PATH, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
         th._invalidate_chat_context_cache("")
 
     def teardown_method(self) -> None:
-        th._close_db()
+        close_db()
         th._invalidate_chat_context_cache("")
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        th._DB_PATH, th._KISS_DIR = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
@@ -142,9 +142,9 @@ class TestCopyDirtySubmodule:
     def test_dirty_submodule_is_refused_not_flattened(self) -> None:
         """Mirroring the submodule's files (minus ``.git``) into the
         worktree's uninitialized gitlink directory hid them from git:
-        edits there were invisible to status, auto-commit and the
-        ignored-file rescue, and the finalizer removed the worktree with
-        their only copy (audit S4/F4).  The snapshot is refused with
+        edits there were invisible to status and auto-commit, and the
+        finalizer removed the worktree with their only copy (audit
+        S4/F4).  The snapshot is refused with
         ``OSError`` instead, which the caller turns into a fallback to
         the user's own checkout, left intact."""
         sub = _make_repo(self.tmp)  # creates self.tmp / "repo"

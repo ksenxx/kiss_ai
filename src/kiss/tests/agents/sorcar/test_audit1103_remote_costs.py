@@ -16,15 +16,22 @@ growth (``charge_remote_subtask_usage``):
 * a late charge to the sub-agent's row on the machine reaches the
   parent's row, its persisted ``usage_info`` and the Spend panel, once
   per report however often it is seen (A3-1); a running parent banks
-  it on its live agent.
+  it on its live agent;
+* the machine's report reads its two tables in one transaction and
+  takes no history lock: a stop anywhere in it ends the transaction;
+  the Spend panel reads them the same way.
 """
 
 from __future__ import annotations
 
 import shutil
+import sqlite3
+import sys
 import tempfile
 import time
 import unittest
+from functools import partial
+from types import FrameType
 from typing import Any
 
 import pytest
@@ -71,6 +78,37 @@ def _costs_by_model() -> dict[str, float]:
     return {model: round(cost, 9) for model, cost in costs.items()}
 
 
+def _charge_as_the_records_are_read(
+    db: sqlite3.Connection, peer: sqlite3.Connection, parent: str, child: str, statement: str,
+) -> None:
+    """Trace callback of *db*: as it reads the records, *peer* commits $0.25 more for *child*."""
+    if "FROM remote_subtasks" in statement:
+        db.set_trace_callback(None)
+        peer.execute("BEGIN IMMEDIATE")
+        peer.execute("UPDATE task_history SET cost = cost + 0.25 WHERE id = ?", (parent,))
+        peer.execute("UPDATE remote_subtasks SET cost = cost + 0.25 WHERE task_id = ?", (child,))
+        peer.execute("COMMIT")
+
+
+class _StopAt:
+    """Trace function that raises ``KeyboardInterrupt`` before the *at*-th bytecode it sees."""
+
+    def __init__(self, at: int) -> None:
+        self.at = at
+        self.seen = 0
+        self.where = ""
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> _StopAt:
+        frame.f_trace_opcodes = True
+        if event == "opcode":
+            if self.seen == self.at:
+                sys.settrace(None)
+                self.where = f"{frame.f_code.co_qualname}+{frame.f_lasti}"
+                raise KeyboardInterrupt
+            self.seen += 1
+        return self
+
+
 class TestRemoteSubagentCosts(unittest.TestCase):
     """P ($1 on claude-opus-5-5) dispatched C ($2) to the machine ``box``."""
 
@@ -86,9 +124,7 @@ class TestRemoteSubagentCosts(unittest.TestCase):
         shutil.rmtree(self.remote_dir, ignore_errors=True)
 
     def _close(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
+        th._close_thread_db()
 
     def _on(self, tmpdir: str) -> None:
         """Make *tmpdir*'s database the one the persistence functions use."""
@@ -135,6 +171,24 @@ class TestRemoteSubagentCosts(unittest.TestCase):
         self.assertEqual(_costs_by_model(), {OPUS: 1.0, ASTRA: 1.5, FABLE: 0.5})
         # Not mirrored: the local history has no row for the child.
         self.assertIsNone(th._load_chat_events_by_task_id(child))
+
+    def test_the_spend_panel_reads_its_two_tables_as_one_snapshot(self) -> None:
+        """A charge another process commits between the two reads shows whole or not at all.
+
+        Read apart, the parent's row predated the charge and the record
+        held it: the panel took the $0.25 out of the parent's own model.
+        """
+        parent, child = self._dispatch()
+        db = th._get_db()
+        peer = sqlite3.connect(th._DB_PATH, isolation_level=None)
+        self.addCleanup(peer.close)
+        db.set_trace_callback(partial(_charge_as_the_records_are_read, db, peer, parent, child))
+        try:
+            during = _costs_by_model()
+        finally:
+            db.set_trace_callback(None)
+        self.assertEqual(during, {OPUS: 1.0, ASTRA: 2.0})
+        self.assertEqual(_costs_by_model(), {OPUS: 1.0, ASTRA: 2.25})
 
     def test_a_late_charge_on_the_machine_reaches_the_finished_parent_once(self) -> None:
         parent, child = self._dispatch()
@@ -194,3 +248,34 @@ class TestRemoteSubagentCosts(unittest.TestCase):
         charge_remote_subtask_usage(None, "not-a-remote-child", {"cost": 5.0, "tokens": 9})
         self.assertEqual(_row(parent), (1.0, 100, 1))
         self.assertEqual(th._remote_subtask_ids("box", 0.0), [])
+
+    def test_a_stop_anywhere_in_the_report_leaves_no_transaction_open(self) -> None:
+        """One stop at each bytecode boundary of the report, in turn.
+
+        The server stops a thread at any boundary
+        (``PyThreadState_SetAsyncExc``).  While the stop is being
+        handled, and the frames its traceback holds are alive, the
+        thread's connection is in no transaction; the next report is
+        whole.
+        """
+        _, child = self._dispatch()
+        self._on(self.remote_dir)
+        th._record_remote_subtask("far", child, "box2", OPUS, 0.25, 25, 1)
+        expected = th._task_usage([child])
+        db = th._get_db()
+        tracer = sys.gettrace()
+        at = 0
+        while True:
+            stop = _StopAt(at)
+            sys.settrace(stop)
+            try:
+                th._task_usage([child])
+            except KeyboardInterrupt:
+                self.assertFalse(db.in_transaction, f"stop {at} at {stop.where}")
+            else:
+                break
+            finally:
+                sys.settrace(tracer)
+            self.assertEqual(th._task_usage([child]), expected, f"stop {at} at {stop.where}")
+            at += 1
+        self.assertGreater(at, 100)  # the sweep did visit the report's bytecodes

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 from pathlib import Path
 
 import kiss.scripts.update_models as update_models
@@ -52,14 +53,14 @@ def test_repo_readme_totals_are_in_sync(tmp_path: Path) -> None:
 def test_sync_catalog_docs_updates_both_files(tmp_path: Path, monkeypatch) -> None:
     """``sync_catalog_docs`` repairs README.md and MODELS.md and skips a missing file."""
     readme = tmp_path / "README.md"
-    models = tmp_path / "MODELS.md"
     shutil.copy(_README, readme)
-    shutil.copy(_MODELS, models)
+    # A copy of the catalog: the sync locks a sidecar next to the catalog it reads.
+    models, model_info = _copy_repo_files(tmp_path)
     pristine_readme = readme.read_text(encoding="utf-8")
     pristine_models = models.read_text(encoding="utf-8")
     monkeypatch.setattr(update_models, "README_PATH", readme)
     monkeypatch.setattr(update_models, "MODELS_PATH", models)
-    monkeypatch.setattr(update_models, "MODEL_INFO_PATH", _MODEL_INFO)
+    monkeypatch.setattr(update_models, "MODEL_INFO_PATH", model_info)
 
     assert sync_catalog_docs() is False
 
@@ -73,6 +74,27 @@ def test_sync_catalog_docs_updates_both_files(tmp_path: Path, monkeypatch) -> No
 
     models.unlink()
     assert sync_catalog_docs() is False
+
+
+def test_sync_catalog_docs_waits_for_the_catalog_writer(tmp_path: Path, monkeypatch) -> None:
+    """A sync that starts during a catalog update describes the catalog that update leaves."""
+    models, model_info = _copy_repo_files(tmp_path)
+    monkeypatch.setattr(update_models, "README_PATH", tmp_path / "README.md")
+    monkeypatch.setattr(update_models, "MODELS_PATH", models)
+    monkeypatch.setattr(update_models, "MODEL_INFO_PATH", model_info)
+    data = json.loads(model_info.read_text(encoding="utf-8"))
+    retired = next(iter(data))
+    assert f"- `{retired}`\n" in models.read_text(encoding="utf-8")
+    sync = threading.Thread(target=sync_catalog_docs, daemon=True)
+    with update_models.catalog_lock(model_info):
+        sync.start()
+        sync.join(timeout=1)
+        waited = sync.is_alive()
+        del data[retired]
+        update_models._write_model_info_json(model_info, data)
+    sync.join(timeout=60)
+    assert waited and not sync.is_alive()
+    assert f"- `{retired}`\n" not in models.read_text(encoding="utf-8")
 
 
 def test_repo_readme_lists_are_in_sync(tmp_path: Path) -> None:

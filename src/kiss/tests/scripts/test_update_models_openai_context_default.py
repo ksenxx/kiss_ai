@@ -18,6 +18,7 @@ synthetic vendor payloads, exactly like the live script does.
 """
 
 from kiss.scripts.update_models import (
+    _DEFAULT_CONTEXT_LENGTH_BY_SOURCE,
     _OPENAI_DEFAULT_CONTEXT_LENGTH,
     compute_changes,
 )
@@ -53,6 +54,32 @@ def test_new_openai_model_with_openrouter_listing_uses_its_context() -> None:
     assert entry["context_length"] == 262144
     assert entry["input_price_per_1M"] == 5.0
     assert entry["needs_pricing"] is False
+
+
+def test_new_gemini_model_without_a_reported_limit_never_lands_with_context_zero() -> None:
+    """Audit SC1: a new Gemini model listed without ``inputTokenLimit`` was written with context
+    0 until the next refresh repaired it; it gets the OpenRouter twin's window, else the vendor
+    default, at once.  A limit the listing does report still wins."""
+    gemini = {
+        "gemini-9-flash": {"context_length": 0, "source": "gemini"},
+        "gemini-9-pro": {"context_length": 0, "source": "gemini"},
+        "gemini-9-lite": {"context_length": 64000, "source": "gemini"},
+    }
+    openrouter = {
+        f"openrouter/google/gemini-9-{tier}": {
+            "context_length": 262144,
+            "input_price_per_1M": 2.0,
+            "output_price_per_1M": 12.0,
+            "source": "openrouter",
+        }
+        for tier in ("pro", "lite")
+    }
+    _, new_models = compute_changes({}, openrouter, {}, gemini, {}, {})
+    assert _new_model(new_models, "gemini-9-flash")["context_length"] == (
+        _DEFAULT_CONTEXT_LENGTH_BY_SOURCE["gemini"]
+    )
+    assert _new_model(new_models, "gemini-9-pro")["context_length"] == 262144
+    assert _new_model(new_models, "gemini-9-lite")["context_length"] == 64000
 
 
 def test_existing_zero_context_openai_entry_is_repaired_without_openrouter() -> None:

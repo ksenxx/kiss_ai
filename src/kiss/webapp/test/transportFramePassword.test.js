@@ -18,7 +18,8 @@ const {
   installFakeWebSocket,
   installFakeTimers,
   openNextSocket,
-  settle,
+  unlock,
+  overlayText,
   frames,
   ok,
   fail,
@@ -92,10 +93,7 @@ async function run() {
 
     // 4. The password typed into the dialog is the one later frames carry.
     sockets[1].fireMessage({type: 'auth_required'});
-    window.document.getElementById('auth-modal-input').value = 'NewPassword000000000';
-    window.document.getElementById('auth-modal-ok').click();
-    // The dialog resolves a promise before the auth frame goes out.
-    await settle();
+    await unlock(window.document, 'NewPassword000000000');
     assert.strictEqual(sockets[1].sent.length, 2, 'the typed password went out');
     // Posted while socket 2 waits for its auth_ok: queued for it.
     transport.postMessage({type: 'getConfig'});
@@ -214,16 +212,13 @@ async function run() {
       fail('remotePasswordChanged adoption', err);
     }
 
-    // 7. The same page clears the password (remote access off).  It is
-    //    signed out with everyone else: the old credential is forgotten
-    //    at once, the next frame goes bare and the server refuses it;
-    //    the reconnect probes bare and shows the handshake's refusal.
-    sock.fireMessage({type: 'remotePasswordChanged', password: ''});
-    transport.postMessage({type: 'ping'});
+    // 7. The password is cleared (remote access off), by this page or
+    //    any other.  A page admitted by password is told nothing but the
+    //    shut-out: the old credential is forgotten, the reconnect probes
+    //    bare and shows the handshake's refusal.
     try {
-      assert.deepStrictEqual(frames(sock).at(-1), {type: 'ping'});
-      assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null);
       sock.fireMessage({type: 'error', code: 'auth_failed', text: 'Wrong password.'});
+      assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null);
       sock.close();
       openNextSocket(sockets, timers, 0);
       sockets[1].fireOpen();
@@ -232,17 +227,51 @@ async function run() {
       ]);
       const refusal = 'Remote access is turned off: no remote password is set.';
       sockets[1].fireMessage({type: 'error', code: 'localhost_only', text: refusal});
-      const overlay = window.document.getElementById('kiss-server-loading-msg');
-      assert.ok(overlay, 'the connecting overlay message node exists');
-      assert.ok(overlay.textContent.indexOf(refusal) >= 0, overlay.textContent);
+      assert.ok(overlayText(window).includes(refusal), overlayText(window));
       ok('clearing the password signs the page out; the reconnect shows remote access is off');
+    } catch (err) {
+      fail('a cleared password on a password page', err);
+    }
+    window.close();
+  }
+
+  // 8. The empty password is told only to a page the daemon serves
+  //    without one: the browser on its own machine.  That page may
+  //    still hold a password in localStorage (typed before loopback
+  //    pages stopped being asked for one) and repeats it, unread, in
+  //    every frame.  Told the empty one, it forgets the stored copy
+  //    and sends bare frames.
+  {
+    const {window} = newAuthDom('http://127.0.0.1:8787/');
+    window.localStorage.setItem('sorcar-remote-pwd', 'Secret20Chars0000000');
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    bootShim(window);
+    const transport = window.acquireTransport();
+    const sock = sockets[0];
+    sock.fireOpen();
+    sock.fireMessage({type: 'auth_ok', local: false});
+    transport.postMessage({type: 'saveConfig', config: {remote_password: ''}});
+    sock.fireMessage({type: 'remotePasswordChanged', password: ''});
+    transport.postMessage({type: 'getConfig'});
+    try {
+      assert.deepStrictEqual(frames(sock), [
+        {type: 'auth', password: 'Secret20Chars0000000', parts: true},
+        {
+          password: 'Secret20Chars0000000', type: 'saveConfig',
+          config: {remote_password: ''},
+        },
+        {type: 'getConfig'},
+      ]);
+      assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null);
+      ok('a loopback page told the empty password forgets its stored one and sends bare frames');
     } catch (err) {
       fail('remotePasswordChanged with an empty password', err);
     }
     window.close();
   }
 
-  // 5. A big frame comes as numbered parts (the daemon's frame_parts):
+  // 9. A big frame comes as numbered parts (the daemon's frame_parts):
   //    the page sees it whole once the last part landed; a part out of
   //    sequence (the start was never seen) is dropped with what was
   //    gathered; a plain frame passes through as it is.
@@ -300,7 +329,6 @@ async function run() {
     }
     window.close();
   }
-  process.exit(0);
 }
 
 run().catch((err) => fail('unexpected error', err));

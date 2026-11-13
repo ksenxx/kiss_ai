@@ -42,12 +42,13 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar import machines as mach
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.agents.sorcar.test_audit1012_sorcar_core_machine_link_send import (
     _auth_ok_then_deaf_server,
 )
 from kiss.tests.conftest import find_free_port
-from kiss.tests.local_ws import open_local_connection
+from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
+from kiss.tests.persistence_helpers import close_db
 from kiss.tests.server.remote_tabs_probe import machine_of
 
 _TAB = "tab-deaf"
@@ -56,7 +57,7 @@ _TAB = "tab-deaf"
 def _restore_db(saved: tuple[Path, Path]) -> None:
     """Close the test's database and point persistence back at the shared one."""
     try:
-        th._close_db()
+        close_db()
     finally:
         th._KISS_DIR, th._DB_PATH = saved
 
@@ -72,7 +73,7 @@ class TestRemoteTabDeafDaemon(IsolatedAsyncioTestCase):
         # cleanup restores the shared one however setup or teardown end.
         self.addCleanup(_restore_db, (th._KISS_DIR, th._DB_PATH))
         th._KISS_DIR, th._DB_PATH = Path(self.tmpdir), Path(self.tmpdir) / "history.db"
-        th._close_db()
+        close_db()
         self.deaf_thread, port, ca_file, self.deaf_stop = _auth_ok_then_deaf_server(
             Path(self.tmpdir) / "deaf",
         )

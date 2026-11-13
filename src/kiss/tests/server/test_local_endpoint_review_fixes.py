@@ -36,6 +36,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import queue
 import shutil
 import socket
 import ssl
@@ -48,6 +49,9 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
+from websockets.protocol import State
+from websockets.sync.client import ClientConnection as SyncClientConnection
+from websockets.sync.client import connect as sync_connect
 
 import kiss.agents.sorcar.persistence as th
 import kiss.core.user_config as vc
@@ -59,15 +63,15 @@ from kiss.server.web_server import (
     _AUTH_FAIL_MAX,
     RemoteAccessServer,
     _bound_loopback,
-    _generate_self_signed_cert,
     _get_local_ips,
 )
-from kiss.tests.local_ws import connect_local, make_test_tls
+from kiss.tests.local_ws import _generate_self_signed_cert, connect_local, make_test_tls
 from kiss.tests.server.conftest import (
     FORWARDED_VISITOR,
     redirect_persistence,
     restore_persistence,
 )
+from kiss.tests.server.pause import Pause
 
 
 async def _ping(ws: ClientConnection) -> None:
@@ -118,8 +122,7 @@ class _ServerBase(IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         for server in self.servers:
             await server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         vc.CONFIG_DIR, vc.CONFIG_PATH = self._orig_cfg
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -395,8 +398,15 @@ class TestEndpointFileHelpers(TestCase):
             local_endpoint.connect(self.path, open_timeout=2.0)
 
 
-def _upgrade_only_server(tmp: Path) -> tuple[threading.Thread, int, Path, threading.Event]:
+def _upgrade_only_server(
+    tmp: Path,
+    drain: threading.Event | None = None,
+    drained: queue.SimpleQueue[int] | None = None,
+) -> tuple[threading.Thread, int, Path, threading.Event]:
     """A TLS server that completes the WebSocket upgrade and then never reads.
+
+    With *drain*, it reads again once that event is set, to the end of
+    the connection, and puts the number of bytes read on *drained*.
 
     Returns the serving thread, the port, the CA file and the stop event.
     """
@@ -438,13 +448,45 @@ def _upgrade_only_server(tmp: Path) -> tuple[threading.Thread, int, Path, thread
                         + accept.encode() + b"\r\n\r\n",
                     )
                     # Never read again: the client's writes pile up.
-                    stop.wait(30)
+                    (drain or stop).wait(30)
+                    if drained is not None:
+                        drained.put(_read_to_the_end(tls))
         finally:
             listener.close()
 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     return thread, port, ca_file, stop
+
+
+def _read_to_the_end(tls: ssl.SSLSocket) -> int:
+    """Read *tls* until the client ends the connection; return the number of bytes read."""
+    count = 0
+    tls.settimeout(20)
+    try:
+        while chunk := tls.recv(1 << 20):
+            count += len(chunk)
+    except OSError:  # a connection ended without a TLS close, or silent for 20 s
+        pass
+    return count
+
+
+def _is_the_send_writer(frame_locals: dict[str, object]) -> bool:
+    """Pause matcher at ``Thread._delete``: the thread ending is ``send``'s writer."""
+    return getattr(frame_locals.get("self"), "name", "") == "sorcar-local-send"
+
+
+def _the_first_call(_frame_locals: dict[str, object]) -> bool:
+    """Pause matcher: hold the first thread that enters the function."""
+    return True
+
+
+def _send(ws: SyncClientConnection, text: str, timeout: float, errors: list[BaseException]) -> None:
+    """Thread body: ``local_endpoint.send``, its error appended to *errors*."""
+    try:
+        local_endpoint.send(ws, text, timeout=timeout)
+    except BaseException as exc:  # noqa: BLE001 - reported by the test
+        errors.append(exc)
 
 
 class TestBoundedSend(TestCase):
@@ -458,7 +500,6 @@ class TestBoundedSend(TestCase):
         try:
             endpoint = local_endpoint.read_endpoint(path)
             assert endpoint is not None
-            from websockets.sync.client import connect as sync_connect
             ws = sync_connect(
                 endpoint.url, ssl=local_endpoint.client_ssl_context(endpoint),
                 open_timeout=5.0, compression=None,
@@ -481,25 +522,120 @@ class TestBoundedSend(TestCase):
         daemon does not read, so the caller's cleanup ``ws.close()``
         would otherwise wait behind it for good (audit A09).
         """
+        self._interrupt_send("call", threading.Thread.join.__code__, 30.0)
+
+    def test_a_send_interrupted_as_its_writer_starts_releases_it(self) -> None:
+        """The writer exists once ``Thread.start()`` returns: a Stop there is the same Stop."""
+        self._interrupt_send("return", threading.Thread.start.__code__, 30.0)
+
+    def test_a_send_interrupted_after_its_deadline_releases_its_writer(self) -> None:
+        """A Stop between the timed-out wait and the timeout's own close of the socket."""
+        self._interrupt_send("call", SyncClientConnection.close_socket.__code__, 0.5)
+
+    def _open(
+        self, drain: threading.Event, drained: queue.SimpleQueue[int],
+    ) -> SyncClientConnection:
+        """Connect to a server that reads nothing before *drain* and counts on *drained* then."""
+        tmp = Path(tempfile.mkdtemp(prefix="kiss-ep-send-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        thread, port, ca_file, stop = _upgrade_only_server(tmp, drain, drained)
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(stop.set)
+        self.addCleanup(drain.set)
+        ctx = ssl.create_default_context(cafile=str(ca_file))
+        ws = sync_connect(f"wss://127.0.0.1:{port}/ws", ssl=ctx, open_timeout=5.0, compression=None)
+        self.addCleanup(ws.close_socket)
+        return ws
+
+    def test_a_write_that_ended_is_no_timeout_while_its_thread_still_lives(self) -> None:
+        """The deadline passes with the frame written and the writer thread not yet gone.
+
+        Before: a writer thread still alive at the deadline was taken
+        for a write still blocked: ``send`` closed the socket and
+        reported a frame the daemon had as never sent, so a ``run``
+        the daemon had started was reported as not started.
+        """
+        drain = threading.Event()
+        drained: queue.SimpleQueue[int] = queue.SimpleQueue()
+        ws = self._open(drain, drained)
+        # ``Thread._delete`` is private and untyped: looked up, not named.
+        delete = getattr(threading.Thread, "_delete")  # noqa: B009
+        with Pause(delete.__code__, _is_the_send_writer) as held:
+            local_endpoint.send(ws, "late", timeout=0.3)
+            self.assertTrue(held.paused.is_set(), "the writer was not held at its exit")
+        self.assertIs(ws.protocol.state, State.OPEN)
+        drain.set()
+        ws.close_socket()
+        self.assertGreaterEqual(drained.get(timeout=30), len("late"))
+
+    def test_a_write_that_ends_as_the_deadline_closes_the_socket_is_no_timeout(self) -> None:
+        """The daemon reads the frame whole between the timed-out wait and the close.
+
+        ``send`` returns: the frame is with the daemon.  The socket is
+        closed by then, which the next read reports.  Before:
+        ``ConnectionError``, the frame reported as never sent.
+        """
+        frame = "x" * (64 * 1024 * 1024)
+        drain = threading.Event()
+        drained: queue.SimpleQueue[int] = queue.SimpleQueue()
+        ws = self._open(drain, drained)
+        errors: list[BaseException] = []
+        sender = threading.Thread(target=_send, args=(ws, frame, 0.5, errors), daemon=True)
+        with Pause(SyncClientConnection.close_socket.__code__, _the_first_call) as held:
+            sender.start()
+            self.assertTrue(held.paused.wait(30), "the deadline's close was not reached")
+            drain.set()  # the daemon reads again: the blocked write ends
+            self._join_the_writer()
+        sender.join(30)
+        self.assertFalse(sender.is_alive())
+        self.assertEqual(errors, [])
+        with self.assertRaises(ConnectionClosed):
+            ws.recv(timeout=5)
+        self.assertGreaterEqual(drained.get(timeout=30), len(frame))
+
+    def test_a_write_not_begun_when_the_last_wait_ends_is_a_timeout(self) -> None:
+        """The writer gets no core before the deadline, its close and the wait after it are over.
+
+        The frame was not written, and ``send`` says so.  The writer,
+        once it runs, finds the socket closed: the daemon reads nothing.
+        """
+        drain = threading.Event()
+        drained: queue.SimpleQueue[int] = queue.SimpleQueue()
+        ws = self._open(drain, drained)
+        with Pause(local_endpoint._write.__code__, _the_first_call) as held:
+            with self.assertRaisesRegex(ConnectionError, "did not accept a 5-byte command"):
+                local_endpoint.send(ws, "never", timeout=0.3)
+            self.assertTrue(held.paused.is_set(), "the writer was not held ahead of its write")
+        self._join_the_writer()
+        drain.set()
+        self.assertEqual(drained.get(timeout=30), 0)
+
+    def _join_the_writer(self) -> None:
+        """Wait for the end of ``send``'s writer thread."""
+        for writer in threading.enumerate():
+            if writer.name == "sorcar-local-send":
+                writer.join(30)
+                self.assertFalse(writer.is_alive(), "the write did not end")
+
+    def _interrupt_send(self, at_event: str, at_code: object, timeout: float) -> None:
+        """Raise a Stop in ``send`` at *at_event* of *at_code*; nothing may stay blocked."""
         tmp = Path(tempfile.mkdtemp(prefix="kiss-ep-send-"))
         thread, port, ca_file, stop = _upgrade_only_server(tmp)
         path = tmp / "sorcar-local.json"
         local_endpoint.write_endpoint(path, local_endpoint.LocalEndpoint(
             url=f"wss://127.0.0.1:{port}/ws", token="t" * 64, ca=str(ca_file), pid=1,
         ))
-        join = threading.Thread.join.__code__
 
         def interrupt_the_join(frame: object, event: str, arg: object) -> None:
             # The KeyboardInterrupt of a Stop, delivered the moment the
-            # caller's thread reaches the join (no sleeps, no patches).
-            if event == "call" and getattr(frame, "f_code", None) is join:
+            # caller's thread reaches that point (no sleeps, no patches).
+            if event == at_event and getattr(frame, "f_code", None) is at_code:
                 sys.setprofile(None)
                 raise KeyboardInterrupt
 
         try:
             endpoint = local_endpoint.read_endpoint(path)
             assert endpoint is not None
-            from websockets.sync.client import connect as sync_connect
             ws = sync_connect(
                 endpoint.url, ssl=local_endpoint.client_ssl_context(endpoint),
                 open_timeout=5.0, compression=None,
@@ -507,7 +643,7 @@ class TestBoundedSend(TestCase):
             sys.setprofile(interrupt_the_join)
             try:
                 with self.assertRaises(KeyboardInterrupt):
-                    local_endpoint.send(ws, "x" * (64 * 1024 * 1024), timeout=30.0)
+                    local_endpoint.send(ws, "x" * (64 * 1024 * 1024), timeout=timeout)
             finally:
                 sys.setprofile(None)
             closer = threading.Thread(target=ws.close, daemon=True)

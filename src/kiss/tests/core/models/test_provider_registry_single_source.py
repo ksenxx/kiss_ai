@@ -32,9 +32,11 @@ from __future__ import annotations
 
 import pytest
 
+from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.models.model_info import (
     MODEL_INFO,
     _openai_bare_name,
+    get_available_models,
     get_model_provider,
     model,
 )
@@ -72,6 +74,30 @@ class TestShippedCatalogRoutesCompletely:
         assert get_model_provider("openai/gpt-oss-20b") == "Together"
         assert get_model_provider("cc/opus") == "Claude Code CLI"
         assert get_model_provider("codex/gpt-5-codex") == "Codex CLI"
+
+    def test_embedding_and_speech_models_are_not_offered_for_generation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An embedding or speech endpoint never enters the model picker.
+
+        ``gemini-embedding-2`` (``embedContent`` only, per the Gemini models
+        API) and ``gemini-3.1-flash-tts-preview`` (which answers a text or
+        tool-bearing request with HTTP 400) shipped flagged for generation
+        and function calling.
+        """
+        monkeypatch.setattr(DEFAULT_CONFIG, "GEMINI_API_KEY", "local-only")
+        monkeypatch.setattr(DEFAULT_CONFIG, "OPENAI_API_KEY", "local-only")
+        offered = set(get_available_models())
+        embedders = [name for name in MODEL_INFO if "embedding" in name]
+        assert "gemini-embedding-2" in embedders
+        for name in embedders:
+            info = MODEL_INFO[name]
+            assert info.is_embedding_supported, name
+            assert not info.is_function_calling_supported, name
+            assert name not in offered, name
+        speech = "gemini-3.1-flash-tts-preview"
+        assert not MODEL_INFO[speech].is_function_calling_supported
+        assert speech not in offered
 
 
 class TestNoDeadExactNameSpecialCases:

@@ -26,12 +26,11 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM, VirtualConsole} = require('jsdom');
-const {makeRunner} = require('./ui_antipattern_harness');
-const {settle} = require('./simplify2_harness');
-const runner = makeRunner();
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makeRunner, rightClick} = require('./ui_antipattern_harness');
+const {MEDIA, settle} = require('./simplify2_harness');
+// The runner closes the pages a test built when it has ended.
 const windows = [];
+const runner = makeRunner({windows});
 
 // Rejections nobody handled and errors thrown out of event listeners
 // (jsdom reports those on its virtual console, like a browser's console).
@@ -68,21 +67,44 @@ function makeDom(clipboardText) {
   return win;
 }
 
-function activate(win, target, action) {
-  target.dispatchEvent(
-    new win.MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 10,
-    }),
-  );
+/**
+ * Make the clipboard read of *win* pend.  The returned function answers
+ * the pending read with its argument, and fails when the page asked for
+ * none since the last answer (a paste that never reached the clipboard
+ * would otherwise pass every "nothing was pasted" check).
+ */
+function deferClipboard(win) {
+  let answer = null;
+  Object.defineProperty(win.navigator, 'clipboard', {
+    value: {
+      readText: () =>
+        new Promise(resolve => {
+          answer = resolve;
+        }),
+    },
+    configurable: true,
+  });
+  return text => {
+    assert.ok(answer, 'the clipboard was asked');
+    answer(text);
+    answer = null;
+  };
+}
+
+/** Open the menu on *target* and return its row for *action*. */
+function menuRow(win, target, action) {
+  rightClick(win, target);
   const item = win.document.querySelector(
     '#sorcar-content-context-menu .sorcar-ctx-item[data-action="' +
       action +
       '"]',
   );
   assert.ok(item, action + ' item is offered');
+  return item;
+}
+
+function activate(win, target, action) {
+  const item = menuRow(win, target, action);
   assert.ok(!item.classList.contains('disabled'), action + ' item is enabled');
   item.dispatchEvent(
     new win.MouseEvent('click', {bubbles: true, cancelable: true, detail: 1}),
@@ -166,6 +188,33 @@ const run = (async () => {
     },
   );
 
+  // A number input has no selection offsets, so Copy reads the document
+  // Selection for it, which is the field's only while it holds the focus.
+  // (jsdom's focus() empties the Selection, the menu's own on opening
+  // included, so it is made again after each.)
+  await runner.test(
+    'Copy on a number input offers the document Selection only while ' +
+      'the field holds the focus',
+    () => {
+      const win = makeDom('');
+      const doc = win.document;
+      const num = doc.getElementById('num');
+      const other = doc.body.appendChild(doc.createElement('span'));
+      other.textContent = 'elsewhere';
+      win.getSelection().selectAllChildren(other);
+      assert.ok(
+        menuRow(win, num, 'copy').classList.contains('disabled'),
+        'text selected elsewhere is not the unfocused field\'s to copy',
+      );
+      num.focus();
+      win.getSelection().selectAllChildren(other);
+      assert.ok(
+        !menuRow(win, num, 'copy').classList.contains('disabled'),
+        'the focused field copies what the Selection reads',
+      );
+    },
+  );
+
   await runner.test(
     'Select All on a text input selects its whole value',
     () => {
@@ -177,6 +226,35 @@ const run = (async () => {
     },
   );
 
+  // An input that holds no text (a checkbox, a button) is not a field:
+  // Select All over it selects what it selects beside it.  It used to
+  // select the control's own (absent) text: nothing (A/W1-F1).  One of
+  // an unknown type is the text field the browser makes of it.
+  await runner.test(
+    'Select All over a non-text input selects the text around it',
+    () => {
+      const win = makeDom('');
+      const doc = win.document;
+      doc.body.insertAdjacentHTML(
+        'beforeend',
+        '<p id="para">before <input type="checkbox" id="cb">' +
+          '<input type="button" id="bt" value="Press"> after' +
+          '<input type="odd" id="odd" value="abc"></p>',
+      );
+      activate(win, doc.getElementById('para'), 'select-all');
+      const beside = win.getSelection().toString();
+      assert.ok(beside.includes('before') && beside.includes('after'), beside);
+      ['cb', 'bt'].forEach(id => {
+        win.getSelection().removeAllRanges();
+        activate(win, doc.getElementById(id), 'select-all');
+        assert.strictEqual(win.getSelection().toString(), beside, id);
+      });
+      const odd = doc.getElementById('odd');
+      activate(win, odd, 'select-all');
+      assert.deepStrictEqual([odd.selectionStart, odd.selectionEnd], [0, 3]);
+    },
+  );
+
   // The clipboard read is asynchronous (the browser may first ask the
   // user for permission): a field the page made read-only, disabled or
   // removed meanwhile is left alone, as the native paste would leave it.
@@ -185,22 +263,12 @@ const run = (async () => {
       'does not write into it',
     async () => {
       const win = makeDom('');
-      let deliver = null;
-      Object.defineProperty(win.navigator, 'clipboard', {
-        value: {
-          readText: () =>
-            new Promise(resolve => {
-              deliver = resolve;
-            }),
-        },
-        configurable: true,
-      });
+      const deliver = deferClipboard(win);
       const txt = win.document.getElementById('txt');
       txt.setSelectionRange(1, 1);
       const inputs = [];
       txt.addEventListener('input', () => inputs.push(txt.value));
       activate(win, txt, 'paste');
-      assert.ok(deliver, 'the clipboard was asked');
       txt.readOnly = true;
       deliver('X');
       await settle();
@@ -222,16 +290,7 @@ const run = (async () => {
     async () => {
       const win = makeDom('');
       const doc = win.document;
-      let deliver = null;
-      Object.defineProperty(win.navigator, 'clipboard', {
-        value: {
-          readText: () =>
-            new Promise(resolve => {
-              deliver = resolve;
-            }),
-        },
-        configurable: true,
-      });
+      const deliver = deferClipboard(win);
       const txt = doc.getElementById('txt');
       txt.value = 'abcdef';
       const inputs = [];
@@ -318,16 +377,7 @@ const run = (async () => {
     async () => {
       const win = makeDom('');
       const doc = win.document;
-      let deliver = null;
-      Object.defineProperty(win.navigator, 'clipboard', {
-        value: {
-          readText: () =>
-            new Promise(resolve => {
-              deliver = resolve;
-            }),
-        },
-        configurable: true,
-      });
+      const deliver = deferClipboard(win);
       doc.body.insertAdjacentHTML(
         'beforeend',
         '<div id="view"></div><textarea id="composer">DRAFT</textarea>',
@@ -427,6 +477,5 @@ const run = (async () => {
 })();
 
 run.then(() => {
-  while (windows.length) windows.pop().close();
   runner.report('contentContextMenuNumberInput_sweep1026');
 });

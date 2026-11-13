@@ -24,18 +24,25 @@ Docker ``Bash`` / ``run_commands_parallel`` tools alike:
 from __future__ import annotations
 
 import functools
+import os
+import posixpath
 import re
-from pathlib import Path
+from collections.abc import Callable
+from pathlib import Path, PurePosixPath
 
 #: ``_END`` closes a shell word: whitespace, end of command, a separator, a
 #: redirection, a comment or a closing backquote.  ``_WORD`` is one argument
 #: of a simple command: it stops at a separator, a redirection or a newline and cannot start a
 #: comment, so ``_ARGS`` (zero or more arguments) never crosses into the next
 #: command or a trailing ``# comment``.  ``_CMD`` is where a command name may
-#: start: the beginning or a separator (a backquote too), then optional
+#: start: the beginning or a separator (a backquote too; a ``)``, which
+#: closes a ``case`` pattern, a function's ``()`` or a substitution), then
+#: the reserved words a command follows (``{``, spelled ``\x7b`` in this
+#: format template, ``!``, ``if``, ``then``, ``do``...), optional
 #: environment assignments, one wrapper (``sudo``, ``env``, ``nohup``,
 #: ``timeout 5``...) with its own arguments (``sudo -n``, ``sudo -u root``,
-#: ``env DEBUG=1``), or one shell's ``-c`` with the quote opening its text
+#: ``env DEBUG=1``; the ``name {`` of a ``function`` or ``coproc``, read as
+#: wrappers too), or one shell's ``-c`` with the quote opening its text
 #: (``bash -c 'kill -1'``; the shell's options may go on after the ``-c``
 #: cluster, ``bash -c -e 'kill -1'``, ``bash -co posix 'kill -1'``, ``bash -c
 #: -- 'kill -1'``), and an optional directory prefix.  ``_CMD`` is
@@ -67,19 +74,22 @@ from pathlib import Path
 #: value and the directory prefix stop at a separator too
 #: (``_UNSEPARATED``), where the next command may start: as ``\S*`` they
 #: ran from every separator of ``:;:;:;...`` to the end of the text and
-#: backtracked through it, quadratic again.
+#: backtracked through it, quadratic again.  A backquote is such a
+#: separator, for them and for ``_WORD``: read across, every backquote of
+#: a run rescanned the rest of the text.
 _END = r"(?=\s|$|[;&|)\"'>#`])"
-_WORD = r"[^\s;&|<>()#][^\s;&|<>()]*"
+_WORD = r"[^\s;&|<>()#`][^\s;&|<>()`]*"
 _ARGS = r"(?:" + _WORD + r"[ \t]+)*"
 _ARGS_LAZY = r"(?:" + _WORD + r"[ \t]+)*?"
-_UNSEPARATED = r"[^\s;&|()]*"
-_WRAPPER = r"sudo|env|exec|nohup|nice|time|command|builtin|xargs|timeout"
+_UNSEPARATED = r"[^\s;&|()`]*"
+_WRAPPER = r"sudo|env|exec|nohup|nice|time|command|builtin|xargs|timeout|function|coproc"
 _COMMAND_NAME = r"(?:" + _UNSEPARATED + r"/)?(?:{commands})"
 _WRAPPER_ARGS = r"(?:[ \t]+(?!" + _COMMAND_NAME + _END + r")" + _WORD + r")*[ \t]+"
 _SHELL_C = r"-[abd-zA-Z]*c[a-zA-Z]*"
 _SHELL_ARGS = r"(?:[ \t]+(?!['\"]?" + _COMMAND_NAME + _END + r")" + _WORD + r")*[ \t]+['\"]?"
 _CMD = (
-    r"(?:^|[;&|(`\n])[^\S\n]*(?:\w+=" + _UNSEPARATED + r"[ \t]+)*"
+    r"(?:^|[;&|()`\n])[^\S\n]*(?:(?:\x7b|!|if|then|elif|else|while|until|do)[ \t]+)*"
+    r"(?:\w+=" + _UNSEPARATED + r"[ \t]+)*"
     r"(?:(?:" + _WRAPPER + r")" + _WRAPPER_ARGS
     + r"|(?:bash|sh|zsh|dash|ksh)(?:[ \t]+(?!" + _SHELL_C + r"[ \t])" + _WORD + r")*"
     r"[ \t]+" + _SHELL_C + _SHELL_ARGS + r")?"
@@ -96,7 +106,7 @@ _QUOTED_OR_BARE = r"(?:'{path}'|\"{path}\"|{path})"
 #:   ``kill -1 <pid>``: a following pid, ``$var``, ``%job`` or backquote
 #:   (optionally quoted) exempts ``-1`` only when it is the first argument
 #:   (after ``kill -9 -1 1234`` the signal is taken, so ``-1`` is the
-#:   all-processes target).
+#:   all-processes target).  The ``-1`` may be quoted (``kill -9 "-1"``).
 #: * ``pkill -f .`` may carry options before and after ``-f``, and ``-f`` may
 #:   be combined with other short flags (``pkill -ef .``).
 #: * The ``rm`` operand may follow options and other operands of the same
@@ -108,9 +118,10 @@ _QUOTED_OR_BARE = r"(?:'{path}'|\"{path}\"|{path})"
 #: The patterns are plain regexes on the command text: a quoted mention such as
 #: ``echo 'a; rm -rf /'`` is refused too, and the model rephrases it.
 _PKILL_FULL = r"(?:-[a-zA-Z0-9]*f[a-zA-Z0-9]*|--full)"
+_MINUS_ONE = _QUOTED_OR_BARE.format(path="-1") + _END
 _KILL_ALL = (
-    r"kill[ \t]+(?:-1" + _END + r"(?![ \t]+['\"]?[\d$%`])|" + _WORD + r"[ \t]+" + _ARGS + r"-1"
-    + _END + r")"
+    r"kill[ \t]+(?:" + _MINUS_ONE + r"(?![ \t]+['\"]?[\d$%`])|" + _WORD + r"[ \t]+" + _ARGS
+    + _MINUS_ONE + r")"
 )
 # The words before the first ``-f`` are matched greedily with a lookahead
 # that stops at it, so the split is unique and the match stays linear.
@@ -127,6 +138,35 @@ DESTRUCTIVE_COMMANDS = r"|".join(
     _CMD.format(commands=name) + body
     for name, body in (("kill", _KILL_ALL), ("pkill", _PKILL_ALL), ("rm", _RM_PROTECTED))
 )
+#: The working directory named from inside it, where every call starts:
+#: ``*`` and ``./*`` (its content), and ``$PWD``, ``$(pwd)`` or
+#: ``../{name}`` with the trailing ``/``, ``*`` or ``/*`` of the absolute
+#: spellings.  The delete runs elsewhere only when it is ``entered``: a
+#: plain ``rm`` right after ``cd DIR &&`` (or ``pushd``; or ``cd DIR; then``),
+#: so it runs only once the ``cd`` succeeded.  ``_ENTERS`` is that ``cd``:
+#: it starts a command of the shell that runs the ``rm`` (the text, or what
+#: follows a ``;``, ``&`` or ``(`` that no backslash escapes and that is no
+#: part of a redirection or a pipe, ``>&``, ``|&``; not a new line, which
+#: the line before, or a here-document's, may continue into, nor a ``!``,
+#: which inverts it, nor a wrapper, which runs it in a child) and DIR is
+#: one literal path, not an option, ``-``, ``~`` or an expansion.
+#: ``_CD`` is any mention of a ``cd``: one before the ``cd`` that enters
+#: (an earlier ``cd``, a function of that name) and nothing is proven.
+_ENTERS = (
+    r"(?:^|(?<![\\<>|])[;&(])[^\S\n]*(?:(?:\x7b|if|then|elif|else|while|until|do)[ \t]+)*"
+    r"(?:cd|pushd)[ \t]+(?P<quote>['\"]?)(?P<entered>(?![-+])/?[\w.+-]+(?:/[\w.+-]+)*/?)(?P=quote)"
+    r"[ \t]*(?:&&|;[ \t]*then[ \t])[ \t]*"
+)
+_RM_HERE = (
+    r"(?:" + _ENTERS + r"|" + _CMD.format(commands="rm") + r")rm[ \t]+" + _ARGS
+    + _QUOTED_OR_BARE.format(
+        path=r"(?:(?:\./)?\*|(?:\$PWD|\$\{{PWD\}}|\$\(pwd\)|`pwd`|\.\./{name})/?\*?)")
+    + _END
+)
+_CD = re.compile(r"\b(?:cd|pushd)\b")
+#: What every delete the guard refuses holds (``_RM_PROTECTED``, ``_RM_HERE``): only for a
+#: command with one does it matter what the work directory resolves to.
+_DELETES = re.compile(r"\brm[ \t]")
 
 #: Text the model sees instead of running a destructive command.
 DESTRUCTIVE_VERDICT = (
@@ -168,27 +208,128 @@ def destructive_pattern(workdir: str) -> re.Pattern[str]:
     return re.compile(DESTRUCTIVE_COMMANDS.format(workdir=escaped, name=name))
 
 
-def destructive_command_guard(command: str, work_dir: str | None) -> str | None:
+@functools.lru_cache(maxsize=64)
+def _rm_here(name: str) -> re.Pattern[str]:
+    """Return the compiled pattern of a delete of the directory *name* from inside it."""
+    return re.compile(_RM_HERE.format(name=re.escape(name)))
+
+
+def _slash_path(path: str) -> str:
+    """Return *path* with shell separators, preserving any Windows drive prefix.
+
+    Only Windows paths are rewritten: on POSIX a backslash is a legal
+    file-name character, not a separator.
+    """
+    return path.replace("\\", "/") if os.name == "nt" else path
+
+
+def _walk_realpath(path: str, realpath: Callable[[str], str]) -> str:
+    """Resolve *path* left to right so links before ``..`` keep Bash semantics.
+
+    Windows' :func:`os.path.realpath` removes ``..`` lexically before it
+    resolves a preceding directory link.  Git Bash instead follows that link
+    first when the normalized logical path does not exist, as POSIX realpath
+    does.  Resolving each prefix before walking up gives both hosts the same
+    answer and also works with the container callbacks used by the guard.
+    """
+    if re.match(r"^[A-Za-z]:/", path):
+        current, tail = path[:3], path[3:]
+    elif path.startswith("//"):
+        current, tail = "//", path[2:]
+    elif path.startswith("/"):
+        current, tail = "/", path[1:]
+    else:
+        current, tail = "", path
+    for part in tail.split("/"):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            current = posixpath.dirname(_slash_path(realpath(current)))
+        else:
+            current = posixpath.join(current, part)
+    return _slash_path(realpath(current))
+
+
+def _deleted_from_inside(
+    command: str, spelling: str, work: PurePosixPath,
+    isdir: Callable[[str], bool], realpath: Callable[[str], str],
+) -> bool:
+    """Return whether *command* deletes the work directory *spelling* by a name from inside it.
+
+    A delete that is not entered (``_RM_HERE``) runs where the call
+    starts, in the work directory.  An entered one runs in the directory
+    its ``cd`` names (a ``cd`` mentioned before it, ``_CD``, leaves
+    nothing proven).  It deletes the work directory when that directory
+    is the work directory, one above it, or one beside it, where
+    ``../<name>`` is the work directory.  The directory is taken from
+    the work directory by the text, and as the filesystem that holds
+    it names it (*isdir* and *realpath* ask it; *work* is the work
+    directory so named; a link back into the work directory is the
+    work directory): where bash's ``cd`` lands, which takes ``..`` by
+    the text, or the path as given when that one does not exist.
+    """
+    name = PurePosixPath(spelling).name
+    for delete in _rm_here(name).finditer(command):
+        entered = delete["entered"]
+        if entered is None or _CD.search(command, 0, delete.start()):
+            return True
+        given = posixpath.join(spelling, entered)
+        here = posixpath.normpath(given)
+        beside = posixpath.join(posixpath.dirname(here), name)
+        if any(map(PurePosixPath(spelling).is_relative_to, (here, beside))):
+            return True
+        landed = (
+            _slash_path(realpath(here)) if isdir(here) else _walk_realpath(given, realpath)
+        )
+        beside = _slash_path(realpath(posixpath.join(posixpath.dirname(landed), name)))
+        if any(map(work.is_relative_to, (landed, beside))):
+            return True
+    return False
+
+
+def destructive_command_guard(
+    command: str, work_dir: str | None,
+    isdir: Callable[[str], bool] = os.path.isdir,
+    realpath: Callable[[str], str] = os.path.realpath,
+) -> str | None:
     """Refuse a shell command that would end the task itself.
 
     Both the spelling of *work_dir* the agent was given and its resolved
     path are protected, so a symlinked work directory cannot be deleted
-    through either name.
+    through either name, nor from inside (``rm -rf *``): every call
+    starts in it, and only a ``cd`` proven to have left it moves the
+    delete elsewhere (:func:`_deleted_from_inside`).
 
     Args:
         command: The shell command line the model wants to run.
         work_dir: The agent's working directory (``None`` protects only the
             root and the process table).
+        isdir: Whether a path is a directory where the command runs.
+        realpath: The path the filesystem there gives a path, links
+            resolved as far as it exists (``os.path.realpath``).  Both
+            default to this host's; a container's tools pass its own:
+            its work directory is no path of this host.  Asked only
+            about a command that deletes (:data:`_DELETES`).
 
     Returns:
         :data:`DESTRUCTIVE_VERDICT` when the command is refused, else
         ``None``.
     """
-    spellings = {work_dir or "/"}
-    if work_dir:
-        spellings.add(str(Path(work_dir).resolve()))
-    for spelling in spellings:
-        if destructive_pattern(spelling).search(command):
+    if not work_dir or not _DELETES.search(command):
+        refused = destructive_pattern(work_dir or "/").search(command)
+        return DESTRUCTIVE_VERDICT if refused else None
+    spelling = _slash_path(work_dir)
+    resolved_native = realpath(work_dir)
+    resolved = _slash_path(resolved_native)
+    # Keep the native spelling too: callers and tests may put a Windows
+    # path with backslashes into the command even though Git Bash normally
+    # receives its slash spelling.
+    protected = {work_dir, spelling, resolved_native, resolved}
+    if any(destructive_pattern(path).search(command) for path in protected):
+        return DESTRUCTIVE_VERDICT
+    for path in {spelling, resolved}:
+        if _deleted_from_inside(
+                command, path, PurePosixPath(resolved), isdir, realpath):
             return DESTRUCTIVE_VERDICT
     return None
 
@@ -211,6 +352,8 @@ def lift_install_timeout(command: str, timeout_seconds: float) -> float:
 
 def refuse_or_lift(
     command: str, work_dir: str | None, timeout_seconds: float,
+    isdir: Callable[[str], bool] = os.path.isdir,
+    realpath: Callable[[str], str] = os.path.realpath,
 ) -> tuple[str | None, float]:
     """Apply :func:`destructive_command_guard` and :func:`lift_install_timeout` together.
 
@@ -222,10 +365,12 @@ def refuse_or_lift(
         command: The shell command the model wants to run.
         work_dir: The directory whose deletion is refused.
         timeout_seconds: The caller's deadline.
+        isdir: As for :func:`destructive_command_guard`.
+        realpath: As for :func:`destructive_command_guard`.
 
     Returns:
         ``(refusal, timeout_seconds)``: the guard's error message (``None``
         when the command may run) and the possibly lifted deadline.
     """
-    guard = destructive_command_guard(command, work_dir)
+    guard = destructive_command_guard(command, work_dir, isdir, realpath)
     return guard, lift_install_timeout(command, timeout_seconds)

@@ -360,6 +360,58 @@ function testStaleAnswerInPreAdoptionWindowIsDropped() {
   );
 }
 
+// Audit 2026-11-11 (W1): the task a tab left behind stops being stale
+// when a replay brings the tab back to it (a history click on a task
+// with no region on screen replays it into its chat's tab).  Its late
+// `/ask` answer used to be dropped although its own transcript was the
+// one on screen, and showed up only after another replay.
+function testAnswerForAReopenedTaskRenders() {
+  const {win} = makePage({beforeScripts: stubRaf});
+  const tab = win._testApi.getActiveTabId();
+  for (const id of ['100', '200']) {
+    if (id === '200') {
+      send(win, {type: 'setTaskText', text: 'task 200', tabId: tab});
+      send(win, {type: 'clear', tabId: tab, chat_id: 'chat-1'});
+    }
+    send(win, {
+      type: 'text_delta',
+      text: 'task ' + id + ' output',
+      tabId: tab,
+      taskId: id,
+    });
+    send(win, {type: 'text_end', tabId: tab, taskId: id});
+    send(win, {type: 'task_done', tabId: tab, taskId: id});
+  }
+  send(win, askAnswerEvent({tabId: tab, taskId: '100'}));
+  assert.strictEqual(
+    win.document.querySelector('#output .ev.ask-answer'),
+    null,
+    'setup: stale while the tab shows the newer task',
+  );
+  // The user reopens task 100: its replay takes the tab back to it.
+  send(win, {
+    type: 'task_events',
+    tabId: tab,
+    chat_id: 'chat-1',
+    task_id: '100',
+    task: 'task 100',
+    extra: '{}',
+    events: [{type: 'text_delta', text: 'task 100 output'}, {type: 'text_end'}],
+  });
+  assert.ok(
+    win.document.getElementById('output').textContent.includes('task 100 output'),
+    'setup: the replay put task 100 back on screen',
+  );
+  send(win, askAnswerEvent({tabId: tab, taskId: '100'}));
+  assert.strictEqual(
+    win.document.querySelectorAll('#output .ev.ask-answer').length,
+    1,
+    'BUG: the answer of the task on screen was dropped as stale',
+  );
+  win.close();
+  console.log('  ok - an answer for a task the tab was brought back to renders');
+}
+
 // The header-click fold/unfold of the answer panel is pinned for both
 // panel kinds by askPanelsNeverCollapsed.test.js (testUserStillFoldsByHand).
 const TESTS = [
@@ -372,6 +424,7 @@ const TESTS = [
   testStaleAnswerForReusedTabIsDropped,
   testStaleAnswerForReusedBackgroundTabIsDropped,
   testStaleAnswerInPreAdoptionWindowIsDropped,
+  testAnswerForAReopenedTaskRenders,
 ];
 
 try {

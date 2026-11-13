@@ -34,41 +34,15 @@ import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-from kiss.server.web_server import _compare_versions, _read_version
 from kiss.tests.conftest import (
     goto_retrying_network_change,
     mark_version_seen,
     reload_retrying_network_change,
 )
 from kiss.tests.server.test_explorer_scm_commands import (
-    ExplorerHarness,
     harness,  # noqa: F401  (module fixture used by param name)
 )
 from kiss.tests.webapp.test_content_tab_editing import _dismiss_toasts
-
-
-def _dismiss_update_toast(page, harness: ExplorerHarness) -> None:
-    """Close the sticky update toast the daemon raises when PyPI carries a
-    newer release than this checkout.
-
-    The ``update_available`` event is queued right behind the config
-    reply every page waits for, so when the daemon knows about a newer
-    release (same predicate as its ``_broadcast_update_available``) the
-    helper first waits for the event to land: dismissing before that
-    would leave the toast over the control the caller is about to click.
-    The marker is the persistent badge ``renderUpdateAvailable`` puts on
-    the settings panel's update button in the same call that raises the
-    toast, so repeated calls on one page (after the toast is gone) do not
-    wait again.  Without a pending release this only closes whatever
-    other notification is up.
-    """
-    latest = harness.server._latest_version
-    current = _read_version()
-    if latest and current and _compare_versions(latest, current) > 0:
-        page.wait_for_selector(
-            "#cfg-update-btn.has-update", state="attached", timeout=15000,
-        )
-    _dismiss_toasts(page)
 
 
 @pytest.fixture(scope="module")
@@ -797,11 +771,10 @@ def test_phone_drawer_holds_the_sections_and_closes_on_file_open(browser, harnes
     the tab shows."""
     context, page, frames = _open_page_mobile(browser, harness)
     try:
-        # At phone width the daemon's PyPI check may raise a sticky
-        # update toast at the top of the page; dismissing it once the
-        # drawer is open would land on the drawer's backdrop (which
-        # closes it), so it goes first.
-        _dismiss_update_toast(page, harness)
+        # At phone width a notification toast sits at the top of the
+        # page; dismissing it once the drawer is open would land on the
+        # drawer's backdrop (which closes it), so it goes first.
+        _dismiss_toasts(page)
         page.click("#meta-drawer-btn")
         page.wait_for_selector("#meta-panel.open", timeout=15000)
         # Let the drawer's slide-in transition finish before probing
@@ -887,7 +860,7 @@ def test_views_report_a_plain_folder_without_git(browser, harness):
     try:
         # Re-point the workspace through the "Working directory" panel,
         # the way a user does: opening a folder saves it and re-scopes.
-        _set_work_dir(page, harness, str(harness.plain_dir))
+        _set_work_dir(page, str(harness.plain_dir))
         _show_section(page, "meta-explorer")
         page.wait_for_selector(
             _explorer_row_sel("/plain/only.txt"), timeout=15000,
@@ -911,7 +884,7 @@ def test_views_report_a_plain_folder_without_git(browser, harness):
             timeout=15000,
         )
         # Back to the repository: both views follow the workspace.
-        _set_work_dir(page, harness, str(harness.work_dir))
+        _set_work_dir(page, str(harness.work_dir))
         page.wait_for_selector("#scm-graph .scm-commit", timeout=15000)
         assert page.locator("#scm-branch").inner_text() == "main"
         _show_section(page, "meta-explorer")
@@ -924,13 +897,13 @@ def test_views_report_a_plain_folder_without_git(browser, harness):
     finally:
         # Leave the shared server on the repository for the other tests.
         try:
-            _set_work_dir(page, harness, str(harness.work_dir))
+            _set_work_dir(page, str(harness.work_dir))
         except Exception:
             pass
         context.close()
 
 
-def _set_work_dir(page, harness: ExplorerHarness, work_dir: str) -> None:
+def _set_work_dir(page, work_dir: str) -> None:
     """Change the workspace through the chat header's working directory
     drop-down ("Choose ..." opens the folder picker, whose path box takes
     the directory) and wait for the docked task-info panel to show it."""
@@ -938,8 +911,8 @@ def _set_work_dir(page, harness: ExplorerHarness, work_dir: str) -> None:
     page.wait_for_selector("#folder-picker:not([hidden])", timeout=15000)
     page.fill("#folder-picker .folder-picker-input", work_dir)
     # The top-right notification container may cover the picker's
-    # controls when the daemon's PyPI check has raised an update toast.
-    _dismiss_update_toast(page, harness)
+    # controls while a toast is up.
+    _dismiss_toasts(page)
     page.click("#folder-picker .folder-picker-select")
     page.wait_for_selector("#folder-picker", state="hidden", timeout=15000)
     page.wait_for_function(

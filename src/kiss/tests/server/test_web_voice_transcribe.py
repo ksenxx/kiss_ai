@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
 from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
@@ -53,10 +54,8 @@ from kiss.server.speech import (
     update_voice_recording_info,
     voice_debug_dir,
 )
-from kiss.server.web_server import (
-    RemoteAccessServer,
-    _generate_self_signed_cert,
-)
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.local_ws import _generate_self_signed_cert
 from kiss.tests.server.conftest import (
     find_free_port,
     no_verify_ssl,
@@ -133,8 +132,7 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
             except Exception:
                 pass
         await self.server.stop_async()
-        if th._db_conn is not None:
-            th._db_conn.close()
+        th._close_thread_db()
         restore_persistence(self.saved)
         vc.CONFIG_DIR = self._orig_cfg_dir
         vc.CONFIG_PATH = self._orig_cfg_path
@@ -202,8 +200,9 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
         The clip is silence, so no gpt-audio call is made (offline):
         the saved WAV must hold the exact received samples (wake
         prefix included) and the note the wake flags and the outcome.
-        Older recordings beyond ``VOICE_DEBUG_KEEP`` are pruned, and an
-        unwritable folder does not stop the reply.
+        Older recordings beyond ``VOICE_DEBUG_KEEP`` are pruned (a
+        transcript arriving for one afterwards leaves no note behind),
+        and an unwritable folder does not stop the reply.
         """
         saved_home = os.environ.get("KISS_HOME")
         os.environ["KISS_HOME"] = str(Path(self.tmpdir) / "home")
@@ -227,6 +226,9 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
             self.assertEqual(len(wavs), VOICE_DEBUG_KEEP)
             self.assertFalse((folder / "00000000-000.wav").exists())
             self.assertFalse((folder / "00000000-000.json").exists())
+            # Its transcription ends only now: no note without a recording, which no sweep finds.
+            update_voice_recording_info(folder / "00000000-000.wav", {"text": "late"})
+            self.assertEqual(len(list(folder.glob("*.json"))), VOICE_DEBUG_KEEP)
             with wave.open(str(wavs[-1]), "rb") as wf:
                 self.assertEqual(wf.getframerate(), 16000)
                 self.assertEqual(wf.readframes(wf.getnframes()), pcm)
@@ -272,6 +274,7 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
         self.assertIsNone(msg["speaker"])
         self.assertIsNone(msg["language"])
 
+    @pytest.mark.live_api
     @unittest.skipUnless(
         HAVE_MAC_TTS, "requires macOS `say` and `afconvert`",
     )
@@ -301,6 +304,7 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
             f"speaker must be None or a positive int, got {speaker!r}",
         )
 
+    @pytest.mark.live_api
     @unittest.skipUnless(
         HAVE_MAC_TTS, "requires macOS `say` and `afconvert`",
     )

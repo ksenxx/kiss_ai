@@ -29,7 +29,7 @@ const {
   click,
   byId,
 } = require('./simplify2_harness');
-const {MACHINES} = require('./settings_helpers');
+const {openSettings, typeInto, MACHINES} = require('./settings_helpers');
 
 function label(win, id) {
   return byId(win, id).querySelector('.more-item-label').textContent;
@@ -89,7 +89,7 @@ function testBedrockSubpanel() {
     'the other keys stay in API Keys',
   );
 
-  click(win, byId(win, 'settings-btn'));
+  openSettings(win);
   const toggle = byId(win, 'bedrock-toggle');
   assert.strictEqual(toggle.textContent.trim(), 'Bedrock');
   assert.strictEqual(bedrockBody.hidden, true, 'Bedrock starts collapsed');
@@ -104,7 +104,7 @@ function testBedrockSubpanel() {
   // saved region still lands in its box.
   click(win, toggle);
   click(win, byId(win, 'settings-panel-close'));
-  click(win, byId(win, 'settings-btn'));
+  openSettings(win);
   assert.strictEqual(bedrockBody.hidden, true, 'reopen re-collapses Bedrock');
   send(win, {
     type: 'configData',
@@ -287,7 +287,7 @@ function testSettingsOpenForTheSelectedMachine() {
   pickMachine(win, 'gpu-box');
 
   const before = posted.length;
-  click(win, byId(win, 'settings-btn'));
+  openSettings(win);
   const getConfig = lastMsg(posted.slice(before), 'getConfig');
   const getModels = lastMsg(posted.slice(before), 'getMyModels');
   assert.strictEqual(
@@ -352,10 +352,7 @@ function testSettingsOpenForTheSelectedMachine() {
     win.document.querySelectorAll('#custom-models-list .custom-model-name'),
   ).map(el => el.textContent);
   assert.deepStrictEqual(rows, ['gpu-model']);
-  byId(win, 'cfg-custom-model-name').value = 'new-model';
-  byId(win, 'cfg-custom-model-name').dispatchEvent(
-    new win.Event('input', {bubbles: true}),
-  );
+  typeInto(win, 'cfg-custom-model-name', 'new-model');
   click(win, byId(win, 'custom-model-add-btn'));
   const save = lastMsg(posted, 'saveMyModel');
   assert.strictEqual(
@@ -381,10 +378,7 @@ function testSettingsOpenForTheSelectedMachine() {
 
   // Closing saves to gpu-box, then asks this daemon for its own
   // values back and drops the machine line.
-  byId(win, 'cfg-remote-password').value = 'gpu-pw-2';
-  byId(win, 'cfg-remote-password').dispatchEvent(
-    new win.Event('input', {bubbles: true}),
-  );
+  typeInto(win, 'cfg-remote-password', 'gpu-pw-2');
   const beforeClose = posted.length;
   click(win, byId(win, 'settings-panel-close'));
   const saved = lastMsg(posted.slice(beforeClose), 'saveConfig');
@@ -431,7 +425,7 @@ function testSettingsOpenForTheSelectedMachine() {
   // A tab on this daemon (still headed here since the pick above)
   // opens this daemon's settings: no machine.
   const beforeLocal = posted.length;
-  click(win, byId(win, 'settings-btn'));
+  openSettings(win);
   const local = lastMsg(posted.slice(beforeLocal), 'getConfig');
   assert.ok(local && !('machine' in local), 'a local tab asks this daemon');
   assert.strictEqual(line.hidden, true);
@@ -464,7 +458,7 @@ function testRemoteSheetKeepsThisDaemonsStateApart() {
 
   api.createNewTab();
   pickMachine(win, 'gpu-box');
-  click(win, byId(win, 'settings-btn'));
+  openSettings(win);
   assert.ok(
     panel.classList.contains('for-machine'),
     'the sheet is marked as a machine sheet',
@@ -580,7 +574,7 @@ function testAppearanceSurvivesRefusedStorage() {
 function testHistoryRowSettingsLine() {
   const {win, posted} = pageWithMachines();
   win.document.getElementById('sidebar').classList.add('open');
-  const req = posted.filter(m => m && m.type === 'getHistory').pop();
+  const req = lastMsg(posted, 'getHistory');
   const row = overrides =>
     Object.assign(
       {
@@ -624,6 +618,7 @@ function testHistoryRowSettingsLine() {
     const text = item.querySelector('.sidebar-item-text').textContent.trim();
     const settings = item.querySelector('.running-item-settings');
     lines[text] = settings ? settings.textContent : null;
+    if (settings) assert.strictEqual(settings.title, settings.textContent);
   });
   assert.strictEqual(
     lines['task 1'],

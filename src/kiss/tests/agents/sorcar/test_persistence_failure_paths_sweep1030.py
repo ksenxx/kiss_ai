@@ -14,6 +14,10 @@
    goes to a spill file and a replay or prune skips the round.  The lock
    is held for real, through a second open file description (``flock``
    locks conflict between those even inside one process).
+3. ``_spill_journal_lines`` stages a spill as ``<sidecar>.writing-*`` and
+   renames it into place.  A write the OS refused left the staging file
+   behind for good: nothing reads or deletes that name again.  Refused
+   for real, as in 1.
 """
 
 from __future__ import annotations
@@ -67,6 +71,35 @@ def test_failed_marker_write_leaves_no_marker_file(tmp_path: Path) -> None:
     assert "Exception ignored" not in proc.stderr, "a failed marker's handle was left open"
     assert report["token"]
     assert report["after_success"] == [f"{report['token']}.lock"]
+
+
+_FAILING_SPILL_CHILD = """
+import os, resource, signal, sys
+from kiss.agents.sorcar import persistence
+
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+resource.setrlimit(resource.RLIMIT_FSIZE, (0, resource.getrlimit(resource.RLIMIT_FSIZE)[1]))
+try:
+    persistence._spill_journal_lines(sys.argv[1], ["a record\\n"])
+except OSError:
+    print("refused", sorted(os.listdir(os.path.dirname(sys.argv[1]))))
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX RLIMIT_FSIZE")
+def test_failed_spill_write_leaves_no_staging_file(tmp_path: Path) -> None:
+    """A spill the OS refuses to write raises and leaves no ``.writing-*`` file."""
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir()
+    proc = subprocess.run(
+        [sys.executable, "-c", _FAILING_SPILL_CHILD, str(journal_dir / "events.journal")],
+        env={**os.environ, "KISS_HOME": str(tmp_path / "home")},
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert proc.stdout.strip() == "refused []", proc.stdout + proc.stderr
+    # A staging file that was never created has nothing to remove: the open's failure is raised.
+    with pytest.raises(FileNotFoundError):
+        persistence._spill_journal_lines(str(tmp_path / "gone" / "events.journal"), ["x\n"])
 
 
 def test_journal_lock_timeout_warning_names_the_fallback(
