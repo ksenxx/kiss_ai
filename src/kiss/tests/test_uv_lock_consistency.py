@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from kiss.scripts import check
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 UV_LOCK = REPO_ROOT / "uv.lock"
 
@@ -101,13 +103,22 @@ def test_every_locked_package_is_reachable_from_the_workspace() -> None:
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is not installed")
 def test_uv_accepts_the_lock_and_finds_it_up_to_date() -> None:
-    """``uv lock --check`` must parse the lock and agree with pyproject.toml."""
+    """``uv lock --check`` must parse the lock and agree with pyproject.toml.
+
+    A task's worktree shares the main checkout's environment, and its own
+    ``.venv`` is a file, there so that uv builds no second one
+    (``GitWorktreeOps.block_own_environment``): uv refuses to run in such
+    a tree unless it is told the environment, as the ``check`` script
+    tells its stages (``check.stage_env``, the inherited environment
+    outside a worktree).
+    """
     proc = subprocess.run(
         ["uv", "lock", "--check", "--offline"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         timeout=120,
+        env=check.stage_env(REPO_ROOT),
     )
     assert proc.returncode == 0, (
         f"uv lock --check failed (exit {proc.returncode}):\n{proc.stderr}"

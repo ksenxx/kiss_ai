@@ -270,14 +270,22 @@ class TestGlobalWorkDir(IsolatedAsyncioTestCase):
         live = backend.work_dir
         self.assertIn(live, dirs)
         self.assertEqual(vc.load_config().get("work_dir"), live)
-        # The last broadcast the client saw names the live directory.
+        # The last broadcast the client saw names the live directory.  The
+        # threads were joined on the event loop, so no broadcast has been
+        # sent yet: a silence ends the reading only once the last one read
+        # names the live directory.  It used to end at the first 0.3 s
+        # without a line, and a loop busy for longer than that before the
+        # first send (0.448 s in a full run on a loaded machine) left the
+        # client with no broadcast at all.
         last = ""
-        deadline = asyncio.get_running_loop().time() + 5
+        deadline = asyncio.get_running_loop().time() + 30
         while asyncio.get_running_loop().time() < deadline:
             try:
                 line = await asyncio.wait_for(reader.readline(), timeout=0.3)
             except TimeoutError:
-                break
+                if last == live:
+                    break
+                continue
             msg = json.loads(line.decode("utf-8"))
             if msg.get("type") == "workDirChanged":
                 last = msg["workDir"]

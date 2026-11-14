@@ -36,8 +36,9 @@ import pytest
 from kiss.agents.sorcar import sea_commands, sea_settings
 from kiss.core.config import kiss_home
 from kiss.core.tool_interrupt import inject_async_exception
-from kiss.tests.agents.sorcar.conftest import isolated_sea_registry
+from kiss.tests.agents.sorcar.conftest import isolated_sea_registry, reset_sea_registry
 from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.server.pause import Pause
 
 
 @pytest.fixture(autouse=True)
@@ -371,6 +372,45 @@ def _alive_watchers() -> list[threading.Thread]:
         t for t in threading.enumerate()
         if t.name == "kiss-sea-registry-watcher" and t.is_alive()
     ]
+
+
+def _on_the_poller(_locals: dict[str, object]) -> bool:
+    """Pause predicate: the entering thread is a registry poller."""
+    return threading.current_thread().name == "kiss-sea-registry-watcher"
+
+
+def test_the_watcher_starts_without_a_scan_and_drops_one_that_ends_after_its_stop(
+    tmp_path: Path,
+) -> None:
+    """The first rescan is the poller's, and a poller stopped during a rescan publishes nothing.
+
+    ``start_registry_watcher`` rescanned before it started the poller,
+    on the thread that called it: the daemon's event loop, which
+    answered no client for as long as the scan of every SEA folder
+    took.  The poller makes that rescan now, so one stopped at once is
+    still in it when the wait for it ends, and what it finds then
+    belongs to no one: the registry may be another test's by then, or
+    another server's.
+    """
+    folder = tmp_path / "one"
+    _touch_sea(folder, "alpha")
+    _write_seas_md([str(folder)])
+    seen: list[list[str]] = []
+    with Pause(sea_commands._scan_sources.__code__, _on_the_poller) as scan:
+        sea_commands.start_registry_watcher(poll_interval=0.1)
+        poller = sea_commands._watcher_thread
+        assert poller is not None and scan.paused.wait(30)
+        assert sea_commands._registered_names() == [], "the caller's thread scanned"
+        sea_commands.stop_registry_watcher(timeout=0.05)
+        assert poller.is_alive(), "the poller must still be inside its scan"
+        # What comes after a stop: a registry started over, for someone else.
+        reset_sea_registry()
+        sea_commands.subscribe(seen.append)
+    poller.join(timeout=10)
+    assert not poller.is_alive()
+    assert sea_commands._registered_names() == [] and seen == []
+    # A lookup still fills the registry by itself.
+    assert "alpha" in sea_commands.list_commands()
 
 
 @posix_only("FIFO-blocked read")

@@ -32,10 +32,12 @@ coverage run of the tests does not count its lines.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -65,7 +67,12 @@ from kiss.agents.sorcar.docker_manager import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import user_config
-from kiss.core.processes import _env_marked_pids_ps, kill_env_marked
+from kiss.core.processes import (
+    _SWEEP_SECONDS,
+    _env_marked_pids,
+    _env_marked_pids_ps,
+    kill_env_marked,
+)
 from kiss.core.tool_interrupt import inject_async_exception
 from kiss.tests.agents.sorcar.docker_test_containers import IMAGE, is_docker_available
 from kiss.tests.agents.sorcar.local_model_server import (
@@ -868,8 +875,55 @@ while True:
         assert lookalike.poll() is None and naming.poll() is None and renaming.poll() is None
     finally:
         for process in (exact, nested, victim, forking, lookalike, naming, renaming):
-            subprocess.run(["pkill", "-KILL", "-g", str(process.pid)], check=False, timeout=10)
+            # The group is signalled by the kernel, not through ``pkill -g``: on macOS that
+            # found nobody in the group of the script that replaces itself in 5 of 300 runs.
+            # A group already reaped is gone; macOS refuses one that holds only zombies.
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=10)
+
+
+class _OutlastsTheBudget:
+    """Profile hook: the first pass of the sweep returns with the budget spent, a marked
+    process started meanwhile."""
+
+    def __init__(self, start: Callable[[], subprocess.Popen]) -> None:
+        self.start = start
+        self.late: subprocess.Popen | None = None
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> None:
+        if event == "return" and frame.f_code is _env_marked_pids.__code__ and self.late is None:
+            self.late = self.start()
+            time.sleep(_SWEEP_SECONDS)
+
+
+def test_sweep_goes_on_after_a_pass_that_outlasted_its_budget(tmp_path: Path) -> None:
+    """What was started during the first pass dies, though that pass took the whole budget.
+
+    Where there is no ``/proc`` a pass runs ``ps`` twice for each process it signals: on a
+    loaded Mac the first pass, of 264 processes, took more than the sweep's five seconds.
+    The sweep ended there, and the 27 processes forked during that pass lived on.
+    """
+    folder = f"{tmp_path}/kiss-sub-a"
+
+    def start() -> subprocess.Popen:
+        return subprocess.Popen(shlex.split(HOST_FOREVER), start_new_session=True,
+                                env={**os.environ, "KISS_SUBAGENT_DIR": folder})
+
+    early = start()
+    slow_pass = _OutlastsTheBudget(start)
+    sys.setprofile(slow_pass)
+    try:
+        kill_env_marked(f"KISS_SUBAGENT_DIR={folder}")
+        sys.setprofile(None)
+        assert slow_pass.late is not None
+        assert [p.wait(timeout=10) for p in (early, slow_pass.late)] == [-9, -9]
+    finally:
+        sys.setprofile(None)
+        for process in (early, slow_pass.late):
+            if process is not None:
+                process.kill()
+                process.wait(timeout=10)
 
 
 @pytest.mark.parametrize("pidfd", [True, False])

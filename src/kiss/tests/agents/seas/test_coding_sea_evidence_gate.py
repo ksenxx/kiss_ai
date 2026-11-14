@@ -2577,17 +2577,19 @@ def test_bridge_kill_covers_a_launch_the_provider_delays(tmp_path: Path) -> None
         # ``/exec`` is read, which is the reordered case pinned at the end)
         stop = _stop_when(partial(_launch_pending, server))
         stopped = exec_bridge.bridge_exec(
-            server.url, f"sleep 6; {_touch(late)} # DELAY-ME", 30, stop)
+            server.url, f"sleep 20; {_touch(late)} # DELAY-ME", 30, stop)
         assert stopped == (-1, "Killed: the task was stopped.")
         assert not late.exists() and server.pending  # the launch is still pending
         environment.gate.set()  # the provider launches the command now: the reaper gets it
         # the exec ends (the launch leaves ``pending``) only once its tree is dead: had the
         # reaper missed it, the shell would have touched ``late`` before ending on its own,
-        # within the wait's 10 s.  The 6 s (as in :func:`_late_toucher`) cover the
-        # reaper's next sweep, a host-wide ``/proc`` scan in its own subprocess: about 1 s
-        # idle, up to 4.2 s with 100 busy loops on an 80-core box, where a 2 s touch always
-        # landed first (and once under a parallel full-suite run, 2026-10-29).
-        assert wait_for(partial(_exec_cleaned_up, server), 10)
+        # within the wait's 30 s.  The 20 s cover two of the reaper's sweeps and the pause
+        # between them: a sweep that is under way when the command starts does not see it
+        # (it lists ``/proc`` once, as it starts).  A sweep is a host-wide ``/proc`` scan in
+        # its own subprocess: 0.3 s on an idle 80-core box, 3.3 s with 240 busy loops on
+        # it, where a 6 s touch landed first in 11 runs of 12 (and once under a parallel
+        # full-suite run, 2026-11-12), as a 2 s one had with 100 (2026-10-29).
+        assert wait_for(partial(_exec_cleaned_up, server), 30)
         assert not late.exists()
         # /kill before /exec (request threads reordered): the command never runs
         assert exec_bridge._request(server.url, "/kill", {"token": "t1"}, 10) == {"ok": True}

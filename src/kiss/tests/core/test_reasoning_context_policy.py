@@ -22,16 +22,20 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar.sorcar_agent import summary
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.context_compaction import (
+    ARGUMENT_STUB_PREFIX,
     COMPACTION_MIN_STEP_GAP,
     COMPACTION_START_TOKENS,
     STUB_PREFIX,
     clear_thresholds,
+    payback_floor,
 )
 from kiss.core.kiss_agent import REASONING_TURN_NOTE, KISSAgent
 from kiss.core.models.anthropic_model import (
@@ -39,7 +43,7 @@ from kiss.core.models.anthropic_model import (
     AnthropicModel,
     context_edits,
 )
-from kiss.core.models.model_info import get_cache_write_ratio
+from kiss.core.models.model_info import get_cache_discount, get_cache_write_ratio
 from kiss.core.models.model_info import model as build_model
 from kiss.core.models.openai_compatible_model2 import (
     OpenAICompatibleModel2,
@@ -85,8 +89,15 @@ def note() -> str:
     return "ok"
 
 
-REASONED = {"name": "note", "thinking": "r" * 8_000, "output_tokens": 2_030}
+def long_output() -> str:
+    """Return a large tool output: 4,800 characters, which the stand-in counts as 1,920 tokens."""
+    return "word " * 960
+
+
+REASONED = {"name": "note", "thinking": "r" * 4_800, "output_tokens": 2_030}
 """A scripted reply that is 2,000 tokens of reasoning and a call with a short result."""
+RECAP = "- Read the parser and its tests, then fixed the off-by-one in the tokenizer.\n" * 20
+"""A ten-step recap as an agent writes it: 1,540 characters, the median of those recorded."""
 
 
 def _session(
@@ -112,7 +123,7 @@ def _session(
     monkeypatch.setattr(DEFAULT_CONFIG, "context_edit_trigger_tokens", trigger)
     monkeypatch.setattr(DEFAULT_CONFIG, "context_edit_keep_tool_uses", 5)
     monkeypatch.setattr(DEFAULT_CONFIG, "context_edit_clear_at_least", clear_at_least)
-    script = [{**anthropic_server.tool_use_message("big_output", {}, 0, f"toolu_{i}"),
+    script = [{**anthropic_server.tool_use_message("long_output", {}, 0, f"toolu_{i}"),
                **(reply or {}), **(replies or {}).get(i, {})} for i in range(steps)]
     script.append(anthropic_server.tool_use_message(
         "finish", {"result": "<p>done</p>"}, 0, "toolu_end"))
@@ -127,8 +138,8 @@ def _session(
         monkeypatch.setenv("ANTHROPIC_BASE_URL", url)
         monkeypatch.setattr(DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "local")
         agent.run(
-            model_name=model, prompt_template="Call big_output repeatedly.",
-            tools=[big_output, Write, note], max_steps=steps + 5, max_budget=500.0,
+            model_name=model, prompt_template="Call long_output repeatedly.",
+            tools=[long_output, Write, note, summary], max_steps=steps + 5, max_budget=500.0,
             printer=recorder, **run_options,
         )
     assert len(recorder.steps("llm_call")) == steps + 1
@@ -162,13 +173,20 @@ def _blocks(request: dict[str, Any], block_type: str) -> list[dict[str, Any]]:
 
 
 def _clears(recorder: _Recorder) -> list[dict[str, Any]]:
-    """Return the ``compaction`` events of a session, each with the context of the call after it."""
+    """Return the ``compaction`` events of a session, each with what the provider counted.
+
+    ``floor`` is the context of the call after the clear and ``freed`` the
+    tokens that left: what that call would have held, the context of the
+    call before it grown by a step like the last one, less ``floor``.
+    """
     context = {
         e["step"]: e["input_tokens"] + e["cache_read"] + e["cache_write"]
         for e in recorder.events if e["type"] == "llm_call"
     }
     return [
-        {**e, "floor": context[e["step"]]} for e in recorder.events if e["type"] == "compaction"
+        {**e, "floor": context[e["step"]],
+         "freed": 2 * context[e["step"] - 1] - context[e["step"] - 2] - context[e["step"]]}
+        for e in recorder.events if e["type"] == "compaction"
     ]
 
 
@@ -292,7 +310,7 @@ def test_reasoning_is_cleared_with_the_tool_calls_and_the_floor_does_not_rise(
     # call whose result is too short to stub, so nothing but the reasoning
     # can be cleared.  It counts toward the minimum and it goes at the clear,
     # so from one clear to the next the size the context falls back to grows
-    # by the calls and their results alone, under 150 tokens a step.
+    # by the calls and their results alone, under 200 tokens a step.
     _agent, requests, recorder = _session(monkeypatch, steps=70, model=model, reply=REASONED)
     clears = _clears(recorder)
     assert len(clears) >= 3
@@ -301,7 +319,7 @@ def test_reasoning_is_cleared_with_the_tool_calls_and_the_floor_does_not_rise(
         assert event["reasoning_blocks"] >= 9 and event["dropped_tokens"] >= 10_000
         assert len(_blocks(requests[event["step"] - 1], "thinking")) <= 1
     steps = clears[-1]["step"] - clears[0]["step"]
-    assert 0 < clears[-1]["floor"] - clears[0]["floor"] < 150 * steps
+    assert 0 < clears[-1]["floor"] - clears[0]["floor"] < 200 * steps
     assert _cache_rewrites(recorder) == ([e["step"] for e in clears], [])
 
 
@@ -313,7 +331,7 @@ def test_the_newest_reply_an_earlier_model_keeps_is_not_counted_as_cleared(
     # nothing else can go, so a clear would re-write the cache and leave the
     # context as large.  It is made one step later, when that reply is an old
     # one, and takes the reasoning with it.
-    big = {"thinking": "r" * 120_000, "output_tokens": 30_030}
+    big = {"thinking": "r" * 75_000, "output_tokens": 30_030}
     _agent, _requests, recorder = _session(
         monkeypatch, steps=16, model="claude-haiku-4-5", reply={"name": "note"},
         replies={11: big},
@@ -337,6 +355,81 @@ def test_a_clearing_without_a_minimum_waits_for_the_step_gap(
     assert len(clears) >= 3
     assert {b - a for a, b in zip(clears, clears[1:])} == {COMPACTION_MIN_STEP_GAP}
     assert _cache_rewrites(recorder)[0] == clears
+
+
+def test_a_clear_that_would_not_pay_for_its_cache_write_waits_until_it_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A session whose first 20 results cannot be stubbed (a Write's result is
+    # protected), long outputs after them, and a minimum of a fifth of the
+    # trigger, as in the default settings.  Past the trigger the old outputs
+    # soon hold that minimum, but they are a sixth of the context: the clear
+    # would write the other five sixths to the cache again, for more than
+    # the later calls save by reading less.  It is skipped, step after step,
+    # until the old outputs are the share that pays the write back.
+    writes = {i: {"name": "Write", "arguments": {"text": "t"}} for i in range(20)}
+    _agent, _requests, recorder = _session(
+        monkeypatch, steps=80, clear_at_least=8_000, replies=writes
+    )
+    share = payback_floor(get_cache_discount(anthropic_server.MODEL))
+    assert share == pytest.approx(0.438, abs=0.001)
+    clears = _clears(recorder)
+    # Two clears, where the minimum alone made five.
+    assert len(clears) == 2
+    for event in clears:
+        # Each was judged to free the share, and the provider saw it leave.
+        assert event["dropped_tokens"] >= share * event["context_tokens"]
+        assert event["freed"] >= share * event["context_tokens"]
+    # Until the first one the context grew to twice the trigger, and no call
+    # before it or between the two wrote the cache again.
+    assert clears[0]["context_tokens"] > 80_000
+    assert _cache_rewrites(recorder) == ([e["step"] for e in clears], [])
+
+
+def test_a_claude_models_text_is_sized_as_the_provider_counts_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The agent sizes a text from its length where the provider has not
+    # counted it yet: a step's tool output, shown in the footer of its
+    # result, and what a clear would remove.  The stand-in counts as Claude
+    # does, a token per 2.5 characters; at the 4 characters of the other
+    # model families both sizes came out 37% short.  Thinking is off, so a
+    # step is a call and its result and nothing else.
+    _agent, requests, recorder = _session(
+        monkeypatch, steps=30, replies={1: {"name": "note"}},
+        model_config={"thinking": {"type": "disabled"}},
+    )
+    context = [e["input_tokens"] + e["cache_read"] + e["cache_write"]
+               for e in recorder.events if e["type"] == "llm_call"]
+    # What the long output of the first step added beyond the short one of the second.
+    counted = (context[1] - context[0]) - (context[2] - context[1])
+    footer = re.search(
+        r"This step's tool output: ~([\d,]+) tokens",
+        _blocks(requests[1], "tool_result")[-1]["content"],
+    )
+    assert footer is not None
+    assert int(footer[1].replace(",", "")) == pytest.approx(counted, rel=0.05)
+    first = _clears(recorder)[0]
+    assert first["dropped_tokens"] == pytest.approx(first["freed"], rel=0.05)
+
+
+def test_a_recap_survives_the_clear_that_stubs_the_steps_it_covers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every ten steps a Sorcar agent recaps its work in a call of its
+    # ``summary`` tool.  Once a clear has stubbed the outputs of those steps
+    # the recap is what the model still knows of them, so it stays whole; a
+    # Write's content of the same length, which the file keeps, is stubbed.
+    replies = {
+        3: {"name": "summary", "arguments": {"description": RECAP}},
+        4: {"name": "Write", "arguments": {"text": RECAP}},
+    }
+    _agent, requests, recorder = _session(monkeypatch, steps=30, replies=replies)
+    first = _clears(recorder)[0]
+    sent = {b["name"]: b["input"] for b in _blocks(requests[first["step"] - 1], "tool_use")}
+    assert sent["summary"] == {"description": RECAP}
+    assert sent["Write"]["text"].startswith(ARGUMENT_STUB_PREFIX)
+    assert first["arguments"] == 1
 
 
 def test_anthropic_requests_carry_the_thinking_edit_and_the_turn_notes(

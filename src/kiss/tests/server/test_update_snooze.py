@@ -196,6 +196,22 @@ class TestSnoozeOutranksOlderPublications(_SnoozeTestBase):
         })
         return Pause(ws._compare_versions.__code__, lambda loc: loc["b"] == "2099.1.0")
 
+    async def _ready_is_handled(self, reader: LocalReader, writer: LocalWriter) -> None:
+        """Return once the daemon has handled the ``ready`` that *writer* sent.
+
+        A connection's commands are handled one after another, so the
+        ``pong`` arrives after the ``ready`` handler has returned, its own
+        ``update_available`` catch-up included.  The first
+        ``update_available`` a client reads can be a periodic publication
+        (every 0.2 s here) that overtook that catch-up: on a loaded
+        Windows machine the :class:`Pause` armed next held the catch-up,
+        and the ``snoozeUpdate`` of the same connection waited behind its
+        own ``ready`` until the wait for the snooze ran out.
+        """
+        writer.write(b'{"type": "ping"}\n')
+        await writer.drain()
+        await self._wait_for_event(reader, "pong", timeout=15.0)
+
     async def _assert_no_stale_false(self, reader: LocalReader) -> None:
         deadline = asyncio.get_event_loop().time() + 1.0
         while (remaining := deadline - asyncio.get_event_loop().time()) > 0:
@@ -210,6 +226,7 @@ class TestSnoozeOutranksOlderPublications(_SnoozeTestBase):
         try:
             await self._send_ready(writer, "tab-stale-global")
             await self._wait_for_snoozed(reader, False)
+            await self._ready_is_handled(reader, writer)
             with self._hold_cache_check() as pause:
                 old = asyncio.ensure_future(self.server._broadcast_update_available())
                 self.assertTrue(await asyncio.to_thread(pause.paused.wait, 10))
@@ -227,6 +244,7 @@ class TestSnoozeOutranksOlderPublications(_SnoozeTestBase):
         try:
             await self._send_ready(other_writer, "tab-other-window")
             await self._wait_for_snoozed(other_reader, False)
+            await self._ready_is_handled(other_reader, other_writer)
             with self._hold_cache_check() as pause:
                 # This window's ``ready`` catch-up is the older,
                 # connection-only publication held in flight.

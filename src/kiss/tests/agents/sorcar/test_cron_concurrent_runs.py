@@ -109,15 +109,27 @@ def _due_command_job(name: str, command: str) -> dict:
 _PWD = "pwd -W" if IS_WINDOWS else "pwd"
 
 
+def _meets(mine: Path, other: Path) -> str:
+    """A command that writes *mine* as it starts and ends well once *other* exists.
+
+    It waits 30 s at most, then fails.  Two jobs that run this command
+    with the two files swapped both end well only if their runs
+    overlapped, however long a shell takes to start on a loaded machine.
+    """
+    mine_file, other_file = shlex.quote(mine.as_posix()), shlex.quote(other.as_posix())
+    wait = f"for i in $(seq 300); do [ -f {other_file} ] && break; sleep 0.1; done"
+    return f"touch {mine_file}; {wait}; [ -f {other_file} ] && {_PWD}"
+
+
 def test_due_jobs_run_concurrently_in_private_work_dirs(tmp_path: Path) -> None:
     # Distinct commands: an identical command on the same schedule would be
     # rejected by cron_job("create") as a duplicate.
-    first = _due_command_job("first", f"sleep 1; {_PWD}")
-    second = _due_command_job("second", f"sleep 1 && {_PWD}")
-    started = time.monotonic()
+    up = [tmp_path / "first-up", tmp_path / "second-up"]
+    first = _due_command_job("first", _meets(up[0], up[1]))
+    second = _due_command_job("second", _meets(up[1], up[0]))
     assert tick(2.0) == 2
-    # Two 1 s jobs finishing in under 2 s can only have overlapped.
-    assert time.monotonic() - started < 1.8
+    # Each job ended well only because it saw the other one running.
+    assert [_stored(job["id"])["last_status"] for job in (first, second)] == ["ok", "ok"]
     cwds = [Path(_stored(job["id"])["last_summary"]) for job in (first, second)]
     assert cwds[0] != cwds[1]
     for job, cwd in zip((first, second), cwds, strict=True):

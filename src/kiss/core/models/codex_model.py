@@ -152,6 +152,14 @@ CODEX_MCP_TOOLS_NOTE = (
 # button, not this timeout, is the way to end such a call early.
 CODEX_MCP_TOOL_TIMEOUT_SECONDS = 24 * 60 * 60
 
+# How long Codex waits for the proxy that serves the KISS tools to start.
+# Its own 30 s end the turn for good (a ``KISSError``) on a machine that
+# is slower to start Python: 240 interpreters starting at once took 18 s
+# on an 80-core Windows machine, 480 took 33 s.  The bound on a silent
+# CLI (``model_config["timeout"]``) covers the wait instead, and the turn
+# it ends is retried.
+CODEX_MCP_STARTUP_TIMEOUT_SECONDS = 24 * 60 * 60
+
 # A reasoning summary line that is only a bold markdown title.  OpenAI's
 # backend sends Codex models' summaries as such titles alone
 # (``**Running baseline tests**``); the Thinking panel shows plain text.
@@ -1034,12 +1042,19 @@ class CodexModel(CLITextModel):
         args.extend(["-c", f"model_instructions_file={toml_value(instructions_file)}"])
         # Without a summary setting (``--ignore-user-config`` drops the
         # user's) the CLI emits no ``reasoning`` items, so no thinking shows.
-        args.extend(["-c", 'model_reasoning_summary="detailed"'])
+        # "concise", not "detailed": on an API key the backend sent a
+        # detailed summary in 4 turns of 24 and a concise one in 24 of 24
+        # (on a ChatGPT login 14 of 16 and 8 of 8), the same bold titles.
+        args.extend(["-c", 'model_reasoning_summary="concise"'])
         effort = self._effort_level()
         if effort:
             args.extend(["-c", f"model_reasoning_effort={toml_value(effort)}"])
         if self._tool_bridge is not None:
-            args.extend(self._tool_bridge.codex_args(CODEX_MCP_TOOL_TIMEOUT_SECONDS))
+            args.extend(
+                self._tool_bridge.codex_args(
+                    CODEX_MCP_STARTUP_TIMEOUT_SECONDS, CODEX_MCP_TOOL_TIMEOUT_SECONDS
+                )
+            )
         if self._cli_model and self._cli_model != "default":
             args.extend(["-m", self._cli_model])
         for image_file in image_files:

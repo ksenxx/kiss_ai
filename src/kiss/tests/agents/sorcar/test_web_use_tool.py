@@ -16,8 +16,10 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar import web_stealth
 from kiss.agents.sorcar.web_use_tool import (
     _ACCOUNTS_GOOGLE_URL_RE,
+    _SCROLL_AT_POINT_JS,
     _SINGLETON_FILES,
     WebUseTool,
     _abort_route,
@@ -215,6 +217,177 @@ FRAMED_PAGE = b"""<!DOCTYPE html>
   <iframe src="http://localhost:%s/spin"></iframe>
 </body></html>"""
 SPIN_PAGE = b"<!DOCTYPE html><html><body><script>while (true) {}</script></body></html>"
+# A page five screens long whose first screen is such an iframe: wherever the
+# pointer comes to rest in the middle of the window, it is over the iframe.
+COVERED_PAGE = b"""<!DOCTYPE html>
+<html><head><title>Covered</title></head>
+<body style="height: 500vh">
+  <iframe style="width: 90vw; height: 90vh" src="http://localhost:%s/spin"></iframe>
+</body></html>"""
+# The same iframe in a page that does not scroll: its content does, in a box
+# (``outer``), and the iframe sits in a box of that box which has more than it
+# shows and scrolls for no wheel (``clip``, ``overflow: hidden``).  Both boxes
+# are in a shadow tree, which shows the iframe through a slot: no parent of
+# the iframe in the document is one of them.
+BOXED_PAGE = b"""<!DOCTYPE html>
+<html><head><title>Boxed</title></head>
+<body style="margin: 0">
+  <div id="host">
+    <template shadowrootmode="open">
+      <div id="outer" style="height: 100vh; overflow: auto">
+        <div id="clip" style="height: 95vh; overflow: hidden">
+          <slot></slot>
+          <div style="height: 100vh"></div>
+        </div>
+        <div style="height: 400vh"></div>
+      </div>
+    </template>
+    <iframe style="display: block; width: 90vw; height: 90vh"
+            src="http://localhost:%s/spin"></iframe>
+  </div>
+</body></html>"""
+# Boxes that scroll, each where a wheel finds it through something else: one
+# on the page (``plain``), one in a shadow tree around slotted content that
+# has a shadow tree of its own (``shadowed``), one in the corner of a frame of
+# the page's own site that has a border and padding (``corner``), that frame's
+# document, and the page, three screens long.  Below them, what a wheel does
+# not scroll and does not look beyond (``overscroll-behavior``): a box at its
+# end (``held``), one with nothing to scroll (``idle``), one that hides what
+# it does not show (``shut``) and a frame whose document is at its end
+# (``sealed``); and a frame whose document hides what it does not show
+# (``blind``), which a wheel looks beyond.  Below those, boxes whose content
+# is in a wrapper that would keep the scrolling to itself and has no box that
+# scrolls (``through``: no box at all, ``lined``: an inline one, ``rowed``: a
+# table row), which a wheel does not stop at; and a frame drawn at twice its
+# size (``scaled``) with a box in its corner (``nook``).  ``sentinel`` stays
+# in its corner of the window wherever the page is.
+SCROLLERS_PAGE = b"""<!DOCTYPE html>
+<html><head><title>Scrollers</title>
+<style>
+  .below { position: absolute; top: 300px; width: 150px; height: 150px; border: 0 }
+  .last { top: 500px }
+  .kept { overscroll-behavior: contain }
+</style></head>
+<body style="margin: 0; height: 300vh">
+  <div id="plain" style="position: absolute; left: 0; top: 0; width: 200px; height: 200px;
+                         overflow: auto">
+    <div style="height: 1000px"></div>
+  </div>
+  <div id="host" style="position: absolute; left: 300px; top: 0; width: 200px; height: 200px">
+    <template shadowrootmode="open">
+      <div id="shadowed" style="height: 200px; overflow: auto">
+        <slot></slot>
+        <div style="height: 1000px"></div>
+      </div>
+    </template>
+    <div>
+      <template shadowrootmode="open"><div style="height: 150px"></div></template>
+    </div>
+  </div>
+  <iframe id="frame" style="position: absolute; left: 600px; top: 0; width: 300px; height: 200px;
+                            border: 10px solid; padding: 5px"
+          srcdoc='<body style="margin: 0; height: 1000px"><div id="corner" style="width: 100px;
+                  height: 100px; overflow: auto"><div style="height: 500px"></div></div></body>'>
+  </iframe>
+  <div id="held" class="below kept" style="left: 0; overflow: auto">
+    <div style="height: 1000px"></div>
+  </div>
+  <div id="idle" class="below kept" style="left: 200px; overflow: auto"></div>
+  <div id="shut" class="below kept" style="left: 400px; overflow: hidden">
+    <div style="height: 1000px"></div>
+  </div>
+  <iframe id="sealed" class="below" style="left: 600px"
+          srcdoc='<html style="overscroll-behavior: contain">
+                  <body style="margin: 0; height: 1000px"></body></html>'></iframe>
+  <iframe id="blind" class="below" style="left: 800px"
+          srcdoc='<html style="overflow: hidden">
+                  <body style="margin: 0; height: 1000px"></body></html>'></iframe>
+  <div id="through" class="below last" style="left: 0; overflow: auto">
+    <div class="kept" style="display: contents; overflow: auto">
+      <div style="height: 1000px"></div>
+    </div>
+  </div>
+  <div id="lined" class="below last" style="left: 200px; overflow: auto">
+    <span class="kept" style="overflow: auto">
+      <span style="display: inline-block; width: 100px; height: 1000px"></span>
+    </span>
+  </div>
+  <div id="rowed" class="below last" style="left: 400px; overflow: auto">
+    <div style="display: table">
+      <div class="kept" style="display: table-row; overflow: auto">
+        <div style="display: table-cell; width: 100px; height: 1000px"></div>
+      </div>
+    </div>
+  </div>
+  <iframe id="scaled" style="position: absolute; left: 600px; top: 500px; width: 150px;
+                             height: 60px; border: 5px solid; padding: 5px;
+                             transform: scale(2); transform-origin: 0 0"
+          srcdoc='<body style="margin: 0; height: 1000px"><div id="nook" style="width: 50px;
+                  height: 50px; overflow: auto"><div style="height: 500px"></div></div></body>'>
+  </iframe>
+  <div id="sentinel" style="position: fixed; right: 0; bottom: 0; width: 150px; height: 150px;
+                            overflow: auto">
+    <div style="height: 1000px"></div>
+  </div>
+</body></html>"""
+# How far each of them is scrolled, and all of them back to where they
+# start: ``held`` and the document of ``sealed`` at their ends, the others at
+# their beginnings (``plain`` at its end, and a page that hides what it does
+# not show, when told so).  A wheel is turned on what the compositor has of
+# the page, which it has two frames later.
+SCROLLERS_OFFSETS_JS = """() => ({
+  plain: plain.scrollTop,
+  shadowed: host.shadowRoot.getElementById("shadowed").scrollTop,
+  corner: frame.contentDocument.getElementById("corner").scrollTop,
+  frame: frame.contentWindow.scrollY,
+  held: held.scrollTop,
+  idle: idle.scrollTop,
+  shut: shut.scrollTop,
+  sealed: sealed.contentWindow.scrollY,
+  blind: blind.contentWindow.scrollY,
+  through: through.scrollTop,
+  lined: lined.scrollTop,
+  rowed: rowed.scrollTop,
+  nook: scaled.contentDocument.getElementById("nook").scrollTop,
+  scaled: scaled.contentWindow.scrollY,
+  sentinel: sentinel.scrollTop,
+  page: scrollY,
+})"""
+SCROLLERS_RESET_JS = """async ({plainAtItsEnd, pageShut}) => {
+  document.documentElement.style.overflow = pageShut ? "hidden" : "";
+  plain.scrollTop = plainAtItsEnd ? plain.scrollHeight : 0;
+  host.shadowRoot.getElementById("shadowed").scrollTop = 0;
+  frame.contentDocument.getElementById("corner").scrollTop = 0;
+  frame.contentWindow.scrollTo(0, 0);
+  held.scrollTop = held.scrollHeight;
+  shut.scrollTop = 0;
+  sealed.contentWindow.scrollTo(0, sealed.contentDocument.documentElement.scrollHeight);
+  blind.contentWindow.scrollTo(0, 0);
+  through.scrollTop = lined.scrollTop = rowed.scrollTop = 0;
+  scaled.contentDocument.getElementById("nook").scrollTop = 0;
+  scaled.contentWindow.scrollTo(0, 0);
+  sentinel.scrollTop = 0;
+  scrollTo(0, 0);
+  await new Promise((drawn) => requestAnimationFrame(() => requestAnimationFrame(drawn)));
+}"""
+# A page whose root element and body each say what they keep to themselves.
+# A body hands its scrolling over to the window unless one of the two is
+# contained; it then scrolls by itself.
+CONTAINED_PAGE = b"""<!DOCTYPE html>
+<html style="%s"><head><title>Contained</title></head>
+<body style="margin: 0; height: 100vh; overflow: auto; %s">
+  <div style="height: 300vh"></div>
+</body></html>"""
+# The pages under ``/contained/``: what the root says, what the body says,
+# and how far a wheel turned by 100 leaves the body and the window.  A
+# container that answers scroll-state queries only is not contained.
+CONTAINED = {
+    "painted": (b"", b"contain: paint", [100, 0]),
+    "anchored": (b"", b"container-type: anchored", [100, 0]),
+    "asked": (b"", b"container-type: scroll-state; overscroll-behavior: contain", [0, 100]),
+    "root-asked": (b"container-type: scroll-state", b"overscroll-behavior: contain", [0, 100]),
+}
+DRAWN_JS = "() => new Promise((drawn) => requestAnimationFrame(() => requestAnimationFrame(drawn)))"
 
 # A form whose submission the server answers only after SLOW_POST_SECS,
 # longer than the 5 s bound of the positioned click in ``_human_click``.
@@ -241,6 +414,7 @@ HOSTILE_TITLE_PAGE = (
 def http_server():
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
+            port = self.headers.get("Host", "").rsplit(":", 1)[-1].encode()
             pages = {
                 "/": FORM_PAGE,
                 "/second": SECOND_PAGE,
@@ -251,11 +425,16 @@ def http_server():
                 "/keytest": KEY_PAGE,
                 "/rows": ROWS_PAGE,
                 "/cards": CARDS_PAGE,
-                "/framed": FRAMED_PAGE % self.headers.get("Host", "").rsplit(":", 1)[-1].encode(),
+                "/framed": FRAMED_PAGE % port,
+                "/covered": COVERED_PAGE % port,
+                "/boxed": BOXED_PAGE % port,
+                "/scrollers": SCROLLERS_PAGE,
                 "/spin": SPIN_PAGE,
                 "/slowform": SLOW_FORM_PAGE,
                 "/hostile-title": HOSTILE_TITLE_PAGE,
             }
+            for name, says in CONTAINED.items():
+                pages[f"/contained/{name}"] = CONTAINED_PAGE % says[:2]
             content = pages.get(self.path, FORM_PAGE)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -522,6 +701,199 @@ class TestClick:
             assert match, tree
             assert web_tool.click(int(match.group(1))).startswith("Page: Pressed")
             assert time.monotonic() - started < 60
+        finally:
+            web_tool.go_to_url("about:blank")
+
+    def test_a_pointer_path_over_an_iframe_that_does_not_answer_ends_there(
+        self, web_tool, http_server, monkeypatch
+    ):
+        """The pointer's way to an element may cross an iframe that never answers.
+
+        A move is acknowledged by the renderer of the frame under the
+        pointer, and the wedged iframe has one of its own: a path over it
+        held the move until the input watchdog killed the browser (15 s),
+        under a page that was answering all along.  The hover, the click
+        or the scroll then failed with "Target page, context or browser
+        has been closed"; with the random point the tool starts the
+        pointer at, that was about one run in three of the test above.
+        Here every path goes over the iframe first.
+        """
+        try:
+            tree = web_tool.go_to_url(f"{http_server}/framed")
+            match = re.search(r'\[(\d+)\] button "Press"', tree)
+            assert match, tree
+            press = int(match.group(1))
+            page, browser = web_tool._page, web_tool._browser_pid
+            box = page.locator("iframe").bounding_box()
+            over_the_iframe = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            targets: list[tuple[float, float]] = []
+
+            def path_over_the_iframe(
+                start: tuple[float, float], end: tuple[float, float]
+            ) -> list[tuple[float, float]]:
+                targets.append(end)
+                return [over_the_iframe, end]
+
+            monkeypatch.setattr(web_stealth, "mouse_path", path_over_the_iframe)
+            assert web_tool.click(press, "hover").startswith("Page: Framed")
+            assert web_tool.click(press).startswith("Page: Pressed")
+            assert web_tool.scroll("down", 1).startswith("Page: Pressed")
+            assert len(targets) == 3 and web_tool._mouse_xy == targets[-1]
+            # The page is the one it was, in the browser it was in.
+            assert web_tool._page is page and not page.is_closed()
+            assert web_tool._browser_pid == browser
+        finally:
+            web_tool.go_to_url("about:blank")
+
+    def test_scroll_with_the_pointer_over_an_iframe_that_does_not_answer(
+        self, web_tool, http_server
+    ):
+        """The page scrolls although the wheel would be turned over a wedged iframe.
+
+        The wheel is turned where the pointer comes to rest, somewhere in
+        the middle of the window, and here that is over the iframe, which
+        holds a wheel as it holds the pointer: the scroll ended with the
+        browser killed ("Error scrolling down: Mouse.wheel: Target page,
+        context or browser has been closed").  The page is scrolled as far
+        as two notches of the wheel go, 240 to 360 pixels each, and again
+        from where that left the pointer.
+        """
+        try:
+            assert web_tool.go_to_url(f"{http_server}/covered").startswith("Page: Covered")
+            page, browser = web_tool._page, web_tool._browser_pid
+            assert web_tool.scroll("down", 2).startswith("Page: Covered")
+            scrolled = page.evaluate("scrollY")
+            assert 480 <= scrolled <= 720
+            assert web_tool.scroll("down", 1).startswith("Page: Covered")
+            assert page.evaluate("scrollY") > scrolled
+            assert web_tool._page is page and not page.is_closed()
+            assert web_tool._browser_pid == browser
+        finally:
+            web_tool.go_to_url("about:blank")
+
+    def test_scroll_over_an_iframe_that_does_not_answer_turns_the_box_around_it(
+        self, web_tool, http_server
+    ):
+        """What scrolls is what a wheel turned at that point scrolls.
+
+        Not the page, which has nothing to scroll here, nor the nearest
+        box with more than it shows, which no wheel scrolls
+        (``overflow: hidden``): the first box around the iframe that
+        scrolls for a wheel.  It is in a shadow tree, and it was not
+        looked for there: the scroll returned the page as if it had
+        scrolled, and nothing had.
+        """
+        try:
+            assert web_tool.go_to_url(f"{http_server}/boxed").startswith("Page: Boxed")
+            page, browser = web_tool._page, web_tool._browser_pid
+            assert web_tool.scroll("down", 2).startswith("Page: Boxed")
+            tops = page.evaluate(
+                "[...['outer', 'clip'].map((id) => host.shadowRoot.getElementById(id).scrollTop),"
+                " scrollY]"
+            )
+            assert 480 <= tops[0] <= 720 and tops[1:] == [0, 0]
+            assert web_tool._page is page and not page.is_closed()
+            assert web_tool._browser_pid == browser
+        finally:
+            web_tool.go_to_url("about:blank")
+
+    def test_the_scroll_for_a_held_wheel_turns_what_a_wheel_turns(self, web_tool, http_server):
+        """``_SCROLL_AT_POINT_JS`` scrolls what a wheel turned at the same point scrolls.
+
+        Each point is tried with the wheel and then with the script, on
+        frames that all answer: a box on the page, one in a shadow tree,
+        one in a frame of the page's own site (the point is 5 px inside
+        it, less than the frame's border and padding), that frame's
+        document, the page, and the page again for a box that is at its
+        end and for a frame whose document hides what it does not show.
+        Then the boxes around a wrapper that has no box to keep the
+        scrolling in, and a frame drawn at twice its size: the box in it
+        and its document, at points that are neither's in pixels of the
+        page, one of them at the frame's own scroll bar, where no
+        element is.  Then what a wheel scrolls nothing for: the boxes and the
+        frame that keep their scrolling to themselves, and a page that
+        hides what it does not show, which a script can scroll all the
+        same.
+        """
+        try:
+            assert web_tool.go_to_url(f"{http_server}/scrollers").startswith("Page: Scrollers")
+            page = web_tool._page
+            width, height = page.evaluate("[innerWidth, innerHeight]")
+
+            def wheel(x: float, y: float) -> None:
+                page.mouse.move(x, y)
+                page.mouse.wheel(0, 100)
+
+            def script(x: float, y: float) -> None:
+                page.evaluate(_SCROLL_AT_POINT_JS, [x, y, 0, 100])
+
+            for x, y, state, scrolled in (
+                (100, 100, {}, "plain"),
+                (400, 100, {}, "shadowed"),
+                (710, 110, {}, "corner"),
+                (815, 115, {}, "frame"),
+                (1000, 400, {}, "page"),
+                (100, 100, {"plainAtItsEnd": True}, "page"),
+                (875, 375, {}, "page"),  # over ``blind``
+                (75, 575, {}, "through"),
+                (250, 575, {}, "lined"),
+                (450, 575, {}, "rowed"),
+                (700, 600, {}, "nook"),
+                (820, 540, {}, "scaled"),
+                (900, 540, {}, "scaled"),  # where the frame shows a scroll bar, if it shows one
+                (75, 375, {}, None),  # over ``held``
+                (275, 375, {}, None),  # over ``idle``
+                (475, 375, {}, None),  # over ``shut``
+                (675, 375, {}, None),  # over ``sealed``
+                (1000, 400, {"pageShut": True}, None),
+                (100, 100, {"plainAtItsEnd": True, "pageShut": True}, None),
+            ):
+                for turn in (wheel, script):
+                    page.evaluate(SCROLLERS_RESET_JS, state)
+                    expected = page.evaluate(SCROLLERS_OFFSETS_JS)
+                    if scrolled:
+                        expected[scrolled] += 100
+                    turn(x, y)
+                    # That nothing else moved shows in what moves next.
+                    wheel(width - 75, height - 75)
+                    expected["sentinel"] += 100
+                    deadline = time.monotonic() + 10
+                    while (tops := page.evaluate(SCROLLERS_OFFSETS_JS)) != expected:
+                        assert time.monotonic() < deadline, (turn.__name__, x, y, tops, expected)
+                        time.sleep(0.05)
+        finally:
+            web_tool.go_to_url("about:blank")
+
+    @pytest.mark.parametrize("name", CONTAINED)
+    def test_the_scroll_for_a_held_wheel_turns_a_contained_body_and_no_other(
+        self, web_tool, http_server, name
+    ):
+        """A contained body scrolls as a box of the page does, for a wheel and for the script.
+
+        The window scrolls as the body says only when neither the body nor
+        the root element is contained.  The script took every body for the
+        window's, found nothing there for the window to scroll, and
+        scrolled nothing.  It then took every query container for a
+        contained one: where the body or the root answered scroll-state
+        queries, which contains nothing, it tried the body, which had
+        handed its scrolling over, and left the window where it was.
+        """
+        expected = CONTAINED[name][2]
+        try:
+            for turn in ("wheel", "script"):
+                url = f"{http_server}/contained/{name}"
+                assert web_tool.go_to_url(url).startswith("Page: Contained")
+                page = web_tool._page
+                page.evaluate(DRAWN_JS)
+                if turn == "wheel":
+                    page.mouse.move(200, 200)
+                    page.mouse.wheel(0, 100)
+                else:
+                    page.evaluate(_SCROLL_AT_POINT_JS, [200, 200, 0, 100])
+                deadline = time.monotonic() + 10
+                while (tops := page.evaluate("[document.body.scrollTop, scrollY]")) != expected:
+                    assert time.monotonic() < deadline, (turn, tops)
+                    time.sleep(0.05)
         finally:
             web_tool.go_to_url("about:blank")
 

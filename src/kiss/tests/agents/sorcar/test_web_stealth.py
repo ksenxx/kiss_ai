@@ -1724,7 +1724,10 @@ def test_reddit_block_page_is_reported_without_a_wait(tool, server, path, wordin
     assert "did not clear" not in first
     assert "log in to Reddit" in first and "old.reddit.com" in first and "show_browser()" in first
     assert wording in tree
-    assert elapsed < 4, elapsed
+    # The wait this page must not get is the 12 s of an interstitial that
+    # may clear.  The page itself is read in a second, and in five on a
+    # machine busy with other tests, where a bound of 4 s failed.
+    assert elapsed < 10, elapsed
     assert web_stealth.challenge_wait_secs(web_stealth.REDDIT_BLOCK) == 0
     assert web_stealth.widget_presses(web_stealth.REDDIT_BLOCK) == 0
 

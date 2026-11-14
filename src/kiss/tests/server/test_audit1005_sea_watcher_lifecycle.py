@@ -14,7 +14,9 @@ WebSocket client:
   runs again (a rebound listener);
 * ``stop_async`` removes the subscription and stops the poller, so a
   server torn down in-process leaves no subscriber bound to its dead
-  printer behind.
+  printer behind;
+* the watcher's first scan of the SEA folders, made while the server
+  starts, does not keep the clients that connect meanwhile waiting.
 """
 
 from __future__ import annotations
@@ -49,8 +51,21 @@ def _on_broadcast_thread(_locals: dict[str, Any]) -> bool:
     return threading.current_thread().name == "kiss-sea-commands-broadcast"
 
 
-class SeaWatcherLifecycleTest(IsolatedAsyncioTestCase):
-    """The server subscribes once, broadcasts changes, and unsubscribes on stop."""
+async def _serve(
+    server: RemoteAccessServer, started: threading.Event, stop: threading.Event,
+) -> None:
+    """Run *server* on this thread's loop from its start until *stop* is set."""
+    await server.start_async()
+    started.set()
+    try:
+        while not stop.is_set():
+            await asyncio.sleep(0.02)
+    finally:
+        await server.stop_async()
+
+
+class _PrivateHomeCase(IsolatedAsyncioTestCase):
+    """A server that is not started yet, in a KISS home of the test's own."""
 
     async def asyncSetUp(self) -> None:
         reset_sea_registry()
@@ -70,10 +85,8 @@ class SeaWatcherLifecycleTest(IsolatedAsyncioTestCase):
             url_file=Path(self.tmpdir) / "remote-url.json",
             local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
-        await self.server.start_async()
 
     async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
         reset_sea_registry()
         if self.saved_home is None:
             os.environ.pop("KISS_HOME", None)
@@ -82,6 +95,50 @@ class SeaWatcherLifecycleTest(IsolatedAsyncioTestCase):
         th._DB_PATH, th._KISS_DIR = self.saved
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+
+class SeaWatcherStartTest(_PrivateHomeCase):
+    """The watcher's first scan is not made on the server's event loop."""
+
+    async def test_clients_are_served_while_the_first_scan_runs(self) -> None:
+        """A client that connects during the start-up scan of the SEA folders is answered.
+
+        The listeners are bound and the endpoint is published before the
+        watcher starts, and its first scan parses every SEA script it
+        finds.  Made on the event loop, it left whoever connected
+        meanwhile (a window reopened right after a restart, another
+        daemon dialling this machine) without an answer for as long as
+        it took: seconds on a busy machine, more than a handshake waits.
+        """
+        started, stop = threading.Event(), threading.Event()
+        serving = threading.Thread(
+            target=asyncio.run, args=(_serve(self.server, started, stop),), daemon=True
+        )
+        with Pause(sea_commands._scan_sources.__code__, lambda _locals: True) as scan:
+            serving.start()
+            try:
+                self.assertTrue(await asyncio.to_thread(scan.paused.wait, 30), "no first scan")
+                _reader, writer = await open_local_connection(self.server)
+                writer.close()
+                await writer.wait_closed()
+            finally:
+                scan.release()
+                stop.set()
+                await asyncio.to_thread(serving.join, 60)
+        self.assertTrue(started.is_set(), "the server did not finish starting")
+        self.assertFalse(serving.is_alive(), "the server did not stop")
+
+
+class SeaWatcherLifecycleTest(_PrivateHomeCase):
+    """The server subscribes once, broadcasts changes, and unsubscribes on stop."""
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        await self.server.start_async()
+
+    async def asyncTearDown(self) -> None:
+        await self.server.stop_async()
+        await super().asyncTearDown()
 
     async def _recv_until(
         self,
@@ -165,9 +222,9 @@ class SeaWatcherLifecycleTest(IsolatedAsyncioTestCase):
         reader, writer = await open_local_connection(self.server)
         try:
             with Pause(WebPrinter.broadcast.__code__, _on_broadcast_thread) as pause:
-                # A notification on the loop (the startup rescan's path)
-                # starts the detached broadcaster; it is held at its send,
-                # after its last registry check.
+                # A notification on the loop (a rescan made there) starts
+                # the detached broadcaster; it is held at its send, after
+                # its last registry check.
                 self.server._on_sea_commands_changed(sea_commands.list_commands())
                 self.assertTrue(await asyncio.to_thread(pause.paused.wait, 30))
                 (folder / "stalecmdtwo" / "stalecmdtwo_sea.py").write_text(

@@ -23,7 +23,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, NamedTuple
 
 import docker
@@ -201,6 +201,49 @@ def _new_utf8_decoder() -> Any:
         ``decoder.decode(chunk)`` and flush with ``decoder.decode(b"", True)``.
     """
     return codecs.getincrementaldecoder("utf-8")("replace")
+
+
+def _exec_frames(stream: Any, api: Any) -> Iterator[tuple[bytes | None, bytes | None]]:
+    """Yield the ``(stdout, stderr)`` frames of the exec *stream*, the buffered ones first.
+
+    The SDK reads the frames from the raw socket underneath the HTTP
+    response's buffered reader (``APIClient._get_raw_response_socket``).
+    Output the daemon sent in the same read as the response header
+    stays in that reader and the SDK's stream ends without it: a
+    command that prints and exits at once came back empty with exit
+    code 0 (8 to 14 of 720 commands run on 24 threads).  Here the
+    frames are read through the reader, which hands out what it holds
+    before it reads the socket.  The socket's timeout is lifted first:
+    the SDK's reader waits for a silent command without one.  A dropped
+    connection ends the stream, as it ends the SDK's.
+
+    Only a reader on a plain socket (a unix socket or TCP, where the
+    loss was measured) is read this way; any other transport (a Windows
+    named pipe, ssh) keeps the SDK's stream.
+
+    Args:
+        stream: The demuxed ``CancellableStream`` from ``exec_start``.
+        api: The SDK's low-level client the stream came from.
+
+    Yields:
+        ``(data, None)`` for a stdout frame, ``(None, data)`` for a
+        stderr frame.  The HTTP response is closed when the generator
+        ends or is closed.
+    """
+    response = stream._response
+    try:
+        reader = response.raw._fp.fp
+        if not isinstance(getattr(reader, "raw", None), socket.SocketIO):
+            yield from stream
+            return
+        api._disable_socket_timeout(reader.raw)
+        while len(header := reader.read(8)) == 8:
+            data = reader.read(int.from_bytes(header[4:], "big"))
+            yield (None, data) if header[0] == 2 else (data, None)
+    except OSError:
+        logger.debug("docker exec stream dropped", exc_info=True)
+    finally:
+        response.close()
 
 
 def _drain_exec_stream(
@@ -994,7 +1037,7 @@ class _ExecRun:
                 with self.lock:
                     self.start_refused = True
                 raise
-            _drain_exec_stream(stream, self.put)
+            _drain_exec_stream(_exec_frames(stream, self.manager.client.api), self.put)
             self._wait_for_exit_code()
         except BaseException as exc:
             self.error = exc
