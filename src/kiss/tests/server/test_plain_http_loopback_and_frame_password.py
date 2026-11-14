@@ -134,10 +134,16 @@ class _ServerCase(IsolatedAsyncioTestCase):
                 return sock.recv(4096)
 
     async def _recv(self, ws: Any) -> dict[str, Any]:
-        """The next frame that is not the daemon's unsolicited ``update_available`` broadcast."""
+        """The next frame that is not one of the daemon's unsolicited broadcasts.
+
+        Those are ``update_available`` and ``seaCommands``, the SEA
+        command list sent when the registry's watcher ends a rescan
+        that changed it: its first one included, which on a loaded
+        machine is after the test's client connected.
+        """
         while True:
             reply = dict(json.loads(await asyncio.wait_for(ws.recv(), timeout=10)))
-            if reply["type"] != "update_available":
+            if reply["type"] not in ("update_available", "seaCommands"):
                 return reply
 
     def _token(self) -> str:

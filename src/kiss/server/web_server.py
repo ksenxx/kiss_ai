@@ -11386,7 +11386,9 @@ class RemoteAccessServer:
         instance: the ``_sea_command_subscribed`` guard prevents a
         second call from stacking duplicate subscribers, so a rebound
         listener or a test-time re-setup cannot fan a single rescan
-        out twice.
+        out twice.  Called on the event loop with the listeners up:
+        nothing here reads a SEA folder (the poller's first rescan
+        does).
         """
         if self._sea_command_subscribed:
             return
@@ -11400,12 +11402,11 @@ class RemoteAccessServer:
         """Broadcast the new SEA slash-command list to every client.
 
         Building the event reads the command usage from history.db,
-        which a write-locked database stalls for its busy timeout.  The
-        watcher's first rescan notifies on the event loop
-        (:meth:`_start_sea_command_watcher` runs during startup and
-        ``start_registry_watcher`` rescans synchronously), so that
-        notification is built on a worker thread, from the registry as
-        it is by then rather than an older snapshot.
+        which a write-locked database stalls for its busy timeout.  A
+        rescan made on the event loop notifies there (the watcher's
+        own, the first one included, are made on its poller thread),
+        so that notification is built on a worker thread, from the
+        registry as it is by then rather than an older snapshot.
 
         Args:
             commands: The sorted command names after a registry change.

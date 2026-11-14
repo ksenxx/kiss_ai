@@ -991,7 +991,13 @@ those keys with a message naming the argument.  Every value given is
 explicit: it wins over the SEA's settings, or is refused when the SEA
 locks the key.  Each option replaces the inherited value (and the
 SEA's, unless locked) of one key: `work_dir` (relative to
-the calling task's directory), `chat_id`, `workspace` (the account of
+the calling task's directory; a leading `~` or `~user` is expanded,
+`sea_settings.expand_user`, wherever a `work_dir` is written — a
+`~user` that names no user is kept as written, as a shell keeps it,
+and on Windows, which has no user database, a `~name` is kept as
+written unless `name` equals, case-insensitively, the last component
+of the current user's home directory, when it is expanded as
+`os.path.expanduser` expands it), `chat_id`, `workspace` (the account of
 a multi-account channel; refused for any SEA that is not a channel),
 `model_config`, `inherit`, `auto_classify`, `use_web_tools`,
 `use_memory`, `compaction` (`false`: the sub-task never compacts its
@@ -1235,7 +1241,18 @@ viewer's frames in flight on its account, and a viewer that never
 acknowledges, an older surface, has a frame counted as delivered after
 `ACK_GRACE` (5 s), so a slow link carries the latest picture at its
 own pace instead of a backlog that delayed the link's keepalive and
-lost the stream), and
+lost the stream), as does its `browserTouch` (the answer to a
+`browserInput` of `kind: "touch"`, the point where a viewer's finger
+went down: `{tab_id, id, scrollsLeft}`, whether a drag to the right
+from there would scroll something on the page — the element under
+the point, an ancestor through open shadow roots and slots, the
+window, or the page an iframe there embeds, cross-origin included;
+`true` as well on what a plugin draws, an `<embed>` or `<object>`,
+since nothing can look into it — so that the webapp's phone layout
+turns such a drag into its swipe back to the chat only when the
+page had nothing to scroll that way, within 600 ms of the swipe;
+`BrowserTabService._answer_touch`, `_scrolls_left`, every viewer
+told and the `id` naming whose finger it was), and
 its `openBrowserTab` goes to every client (the focused reply to a
 `browserOpen` to its requester alone; a focused one nobody asked for
 is the machine's agent calling for the user, `show_browser`, and
@@ -1811,8 +1828,9 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   `click` on a disabled control fails with `element [N] is disabled:
   nothing was clicked`, and on a link into another tab (`_blank` or a
   named target), which Chrome's pop-up blocker opens for a user's click
-  only, its reply adds `the link targets _blank, and Chrome blocks a
-  new tab for a scripted click: if none opened, open_tab <address>`;
+  only, its reply adds `the link targets <target>, and Chrome blocks a
+  new tab for a scripted click: if none opened, open_tab <address>`
+  (the link's `href` as the page resolves it);
   `type_text` replaces what an input, a text area or an editor holds
   and changes nothing else: a checkbox, a button or a list fails with
   `element [N] is a <input type=checkbox>, not a text field`, and a
@@ -2245,7 +2263,10 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   a time, `exec_bridge._shut_down`, the failure reading `the reply did
   not complete within the deadline`), and a
   request that failed after the bridge may have started the command
-  (the reply connection dropped, an invalid reply) posts the same
+  (the reply connection dropped, an invalid reply — one that is no
+  JSON object, reported as `Exec bridge <url> unreachable: returned an
+  invalid reply of type <type>`, the reply's Python type name and
+  never its text) posts the same
   kill before its error propagates; the run fails at its start when
   `/ping` does not answer; the file tools are the same `Bash`-backed
   `DockerTools` a container run uses), `""` runs the tools on the
@@ -2615,13 +2636,32 @@ Every MCP tool built this way is defined in every model request.  A
 user can have servers deferred instead (`"alwaysLoad": false` in a
 server's `mcp.json` entry, or an `mcp_upfront_tool_chars` budget in
 `$KISS_HOME/config.json`; neither is set by default, see
-`connectors/README.md`).  `make_mcp_tools` then leaves the deferred
+`connectors/README.md`).  The split is made after the permission
+rules dropped the denied tools (`mcp_tool_search.split_by_budget`):
+a server whose entry says `"alwaysLoad": false` is deferred and one
+whose entry says `true` loads upfront whatever the budget; the
+unmarked servers all load upfront without a budget
+(`upfront_tool_chars` reads the key as a non-negative integer and
+ignores any other value), and with one they load from the smallest
+up while their definitions together (characters of each tool's
+name, description and JSON argument schema, `definition_chars`) fit
+it, so the deferred servers are the largest and `0` defers every
+unmarked one.  `make_mcp_tools` then leaves the deferred
 servers' wrappers out and appends `mcp_tool_search` and
 `mcp_tool_call` (`mcp_tool_search.make_deferred_tools`; numbered like
 any synthesized name on a clash): the first lists the deferred tools'
-names in its description and returns the definitions a query asks
-for, the second runs a deferred tool whose definition the calling
-agent's model received in an earlier response.  `KISSAgent._execute_tool`
+names by server in its description and returns the definitions a
+`query` asks for (exact names, any number of them split on spaces
+and commas, in full; otherwise the tools sharing a stemmed word with
+the query, scored per word by where it occurs — 3 in the name, 2 in
+the description, 1 in an argument's name or description — times the
+word's rarity among the deferred tools, the best `limit` (5) of them
+with a `Showing N of M matches` line when more matched), the second
+runs a deferred tool whose definition the calling
+agent's model received in an earlier response (`arguments` a JSON
+object or its text; a name that is no deferred tool is answered
+with an `Error:` line naming up to the three closest, when any share a
+stemmed word with it).  `KISSAgent._execute_tool`
 stamps each call's `ToolCallToken.response` with the agent's id and
 the step of the response the call came in, which is how
 `DeferredTools` tells a definition returned by the same response (the
@@ -2971,7 +3011,10 @@ SEA's own `tool_call_hook` need not restate:
   exec, `DockerManager._shadows`, `ExecBridge._shadows`; an answer
   nobody got counts as a shadow, and a shadow makes the rewrite not
   mechanical); and a `sed -i` (`-i` or `--in-place` exactly: a backup
-  suffix, `-i.bak`, is an option the conversion does not take) with at
+  suffix, `-i.bak`, is an option the conversion does not take; on
+  macOS, whose sed takes the suffix as a separate word, the literal
+  empty word after `-i` in `sed -i '' s/a/b/ f` is read as that
+  option's value, not as the script) with at
   most `-e`/`--expression`/`-z`/`--null-data` whose one script
   is `s<d>old<d>new<d>` or `s<d>old<d>new<d>g` with literal text on
   both sides and a one-byte delimiter (`edit_guards.sed_edit`; an
@@ -3009,7 +3052,11 @@ SEA's own `tool_call_hook` need not restate:
   whose program bash does not find, which fails with status 127 and
   leaves the file alone (`useful_tools._host_runs`: a bare name on
   `PATH` — not when `PATH` holds a relative entry, which names another
-  directory after the command's `cd` — or an absolute path;
+  directory after the command's `cd` — or an absolute path; on
+  Windows with Git Bash the bare name is asked of that bash itself,
+  `command -v` on Git Bash's own `PATH` with the same refusal of a
+  relative entry, `_GIT_BASH_FINDS`, 5 s to answer, and an answer
+  nobody got counts the program as not found;
   `probe_command(path, "run")` in the container and over the bridge,
   where a probe that cannot answer counts the program as not
   found)).  The rewrite may be the whole
@@ -3114,10 +3161,20 @@ SEA's own `tool_call_hook` need not restate:
   verdicts, so no re-issue reminder follows): a command that would
   delete the work dir or `/` or kill every process
   (`shell_guards.destructive_command_guard`, `REFUSED: the Bash call did NOT run: ...`;
-  the `rm -rf` is matched on the work dir itself, by its path or from
+  the `rm -rf` is matched on the work dir itself, by its path — as
+  given and as the filesystem resolves it, each on Windows in its
+  native spelling and, backslashes turned to slashes, its slash
+  spelling, `shell_guards._slash_path` — or from
   inside it — `rm -rf *`, `./*`, `"$PWD"`, which only a `cd <dir> &&`
   right before it moves elsewhere, `<dir>` a literal path that neither
-  is the work dir nor holds it, `shell_guards._deleted_from_inside` —
+  is the work dir nor holds it by the text, nor once resolved is the
+  work dir, holds it, or is a directory beside it whose `../<name>`
+  is it: where bash's `cd` lands, `..` taken by
+  the text, or, when that path is not a directory, the path as given
+  resolved left to right so that a link before a `..` is followed
+  first on every host, `shell_guards._walk_realpath`, as Git Bash and
+  POSIX `realpath` do where Windows' `os.path.realpath` would drop
+  the `..` by the text; `shell_guards._deleted_from_inside` —
   on its parent
   through `<work dir>/..` or `/..`, and through a wrapper — `sudo`,
   `env`, `exec`, `nohup`, `nice`, `time`, `command`, `builtin`,
@@ -3319,7 +3376,21 @@ SEA's own `tool_call_hook` need not restate:
   not in a compound command that may not run, not `T+=`, not an
   assignment before a special builtin or before a wrapper with no
   command after it (`T=x export Y`, `T=x exec >f`: sh keeps the
-  variable, bash does not, so it is unknown; `_SPECIAL_BUILTINS`); a subshell's,
+  variable, bash does not, so it is unknown; `_SPECIAL_BUILTINS`); a
+  later assignment of one command's prefix sees what the earlier ones
+  assigned (`T=a V=$T` sets `V` to `a`; `_Scanner.assigning`) only
+  where the host's bash is 4 or newer (`processes.bash_version`: the
+  bash `find_bash` gives the shell tools, asked once per process for
+  its `BASH_VERSINFO` with 5 s to answer, `(0, 0)` — the oldest —
+  when none is found, starts, answers in 5 s or prints a version that
+  parses as integer major and minor), since Bash 3 expands a
+  command's whole prefix from the environment before it: there every
+  variable known so far, `PWD`, `IFS` and `CDPATH` included, is
+  unknown while such a word is read, so an assignment whose value
+  expands one (`V=$T`) is unknown, a literal one (`V=a`) is still
+  recorded as known, and a target spelled with an unknown is one only
+  the shell knows;
+  a subshell's,
   a pipeline stage's and a backgrounded list's assignments end with
   them (a brace group's included); after a brace group that may not
   have run, after `read` (`read T`, `read -aT`), `unset`, `declare`,
@@ -3443,7 +3514,10 @@ SEA's own `tool_call_hook` need not restate:
   foreground command; with background=True follow the job's log with
   bash_job(id, "wait", until=<regex>) instead.`), as is a pattern
   that does not compile (`Error: until is not a valid regular
-  expression: ...`), both before anything runs.  The container and
+  expression: ...`; the same refusal meets a pattern holding a NUL
+  byte or a character UTF-8 cannot encode, such as a lone surrogate,
+  `useful_tools._until_pattern`),
+  both before anything runs.  The container and
   bridged `Bash` take the same two arguments (`docker_manager._run_until`,
   `until_refusal`, which also refuses a `poll_seconds` that is no
   number; the pattern is searched with `^`/`$` matching at line ends,
@@ -3849,7 +3923,18 @@ the pool of every model adapter's client (the OpenAI-compatible,
 Anthropic, Gemini and decisions clients alike) gets an
 `AbortableNetworkBackend` when the client is built
 (`make_pool_abortable`), which keeps every socket it opens, the one a
-TLS upgrade yields included, and once aborted shuts them all down
+TLS upgrade yields included (an upgrade whose stream exposes a plain
+socket wraps it with the
+handshake deferred and runs it under the abort's watch — a stream
+without a socket, or one whose socket is already an `SSLSocket`
+(TLS in TLS), goes through the wrapped stream's `start_tls`
+unchanged; a
+`truststore.SSLContext`, which checks the peer's certificates against
+the OS trust store inside its own `wrap_socket` — before a deferred
+handshake has received any, so macOS and Windows would refuse the
+empty chain — is wrapped through its inner OpenSSL context instead,
+`stream_abort._wrap_before_handshake`, and its check is run after the
+handshake, `truststore._api._verify_peercerts`), and once aborted shuts them all down
 before httpcore writes the request on any of them, so the provider
 never sees the stopped request; a TCP connection not yet up at the
 abort — the wrapped backend connects on a thread of its own
@@ -4238,7 +4323,16 @@ SEA's hooks, so a hook author knows what the model reads:
   characters, and no further file started once the accumulated text
   has reached `REVIEW_FILE_BYTES` 120,000, so the last file shown may
   push the total past it; files the agent edited in another
-  repository's worktree included), runs no commands, answers one
+  repository's worktree included; the git commands the gate sends
+  through `CodingGate.git` run from the root of the work dir's
+  repository, `root=$(git rev-parse --show-toplevel) && cd "$root" &&
+  ( <command> )`, so the paths they print and take are root-relative
+  whatever the work dir, a task started in a subdirectory still has
+  its whole repository reviewed, and a `;`-separated tail of the
+  command cannot run in the task directory when the root is not found;
+  the diff of one edited file, `outside_diff`, is asked in that file's
+  own directory instead), runs no
+  commands, answers one
   `VERDICT:` line and numbered `NOT DONE` findings.  The review
   starts with one non-agentic model call (`CodingGate.side_call`) at
   the provider's default effort — the run's `model_config` without its
@@ -4455,7 +4549,8 @@ SEA's hooks, so a hook author knows what the model reads:
   steps apart would pay twice for one batch of stale text.  The
   newest six results (with their calls' arguments), results and
   arguments of 500 characters or fewer, results of `Edit` / `Write`
-  / `finish` and arguments of `finish` are never stubbed, and the
+  / `finish` and arguments of `finish` and of `summary` (an agent's
+  own recap of the steps a compaction stubs) are never stubbed, and the
   compaction is skipped (re-planned on a later step) unless it drops
   at least 25% of the context (10% once past the target), at least
   the share the model's cache discount needs to pay the miss back
@@ -4488,10 +4583,15 @@ SEA's hooks, so a hook author knows what the model reads:
   stay), and the old thinking blocks are removed
   (`Model.drop_stale_reasoning`) in one edit made only when the
   stubbed text and the removed reasoning together reach
-  `context_edit_clear_at_least` (50k) tokens and at least
+  `context_edit_clear_at_least` (50k) tokens and the share of the
+  context that pays the cache write back within `PAYBACK_STEPS`
+  (`payback_floor`: 44% on Claude Fable 5.1 and 5.2, 28% on Opus and
+  Sonnet 5.5, 15% on the other Claude models), and at least
   `COMPACTION_MIN_STEP_GAP` (10) steps have passed since the previous
   compaction, so the provider's prompt cache is re-written only
-  then.  The two settings hold for a
+  then.  A clear that would remove less is planned again on the
+  next step, and a session in which none removes that share grows
+  to its hand-off limit and restarts there.  The two settings hold for a
   model whose cache write costs fifty cache reads (Claude Fable 5.2
   and 5.1); `context_compaction.clear_thresholds` multiplies both by
   the square root of the model's own ratio over fifty
@@ -4502,7 +4602,12 @@ SEA's hooks, so a hook author knows what the model reads:
   reasoning with the stubbed text: a reply's reasoning is its output
   tokens less its visible text and tool calls
   (`context_compaction.reasoning_tokens`), since the provider returns
-  a summary of it.  Claude 5.1 and later, which drop a thinking
+  a summary of it.  A text's tokens are estimated from its length,
+  at 2.55 characters a token on a Claude model and 4 on the other
+  families (`model_families.chars_per_token`; measured on the steps
+  recorded from 2026-11-11 to 11-13: 2.52 on Claude Fable 5.2, 3.85
+  on GPT-6), in a compaction's estimate of what it removes and in the
+  usage footer's size of a step's tool output.  Claude 5.1 and later, which drop a thinking
   block sent back after an earlier message changed or (Fable 5.2)
   refuse the request, lose every thinking block at a clear; an
   earlier model keeps those of its newest reply, which the API
@@ -5948,7 +6053,12 @@ task count merge with the bare name the `llm_call` events carry.
   `ssh <login> did not answer in time` is reported);
   through it this daemon presents its client certificate,
   `$KISS_HOME/tls/client.pem`, and the machine's daemon, which sniffs
-  the first byte of every connection, serves the forwarded TLS like a
+  the first byte of every connection (`web_server._peek_first_byte`;
+  when the event loop has no reader callbacks — `add_reader` raises
+  `NotImplementedError`, as on Windows' proactor loop — a thread of a
+  pool of its own, `_SNIFF_EXECUTOR`, `_EXECUTOR_WORKERS` 64 workers
+  apart from the daemon's blocking work, peeks with
+  `_SNIFF_TIMEOUT_SECONDS`, 10 s, to wait), serves the forwarded TLS like a
   direct one and admits the link as it admits a browser on its own
   loopback, whatever its remote password; the daemon picks a new
   `trusted-clients` file up within two seconds (`ENROLL_TIMEOUT`, 30 s,
@@ -6025,7 +6135,11 @@ task count merge with the bare name the `llm_call` events carry.
   marker file `task-machines-backfilled` next to `history.db`) stamps
   the rows a sync copied in before the column existed from their
   first events, the `task_settings` event's `host` or the system
-  prompt's `Machine info:` line (`history_columns.task_origins`); the
+  prompt's `Machine info:` line (`history_columns.task_origins`; the
+  thread's own cached database connection, opened for the migration
+  that adds the column, is closed when the backfill ends, done or
+  failed, `_close_thread_db`, while a caller that already held one
+  keeps it); the
   favourite star and delete button of a remote machine's row, and the
   rename pencil and delete button of a chat whose rows are all that
   machine's, act on that machine's `history.db`: `setFavorite`,
@@ -6240,7 +6354,21 @@ task count merge with the bare name the `llm_call` events carry.
   is unknown or unreachable answers an empty reply carrying the
   `error`, and the page reports the share failed instead of exporting
   this daemon's history of the chat — it also refuses a reply whose
-  `machine` stamp is not the tab's binding); a
+  `machine` stamp is not the tab's binding; the page itself is
+  written by this daemon, `shareChat` is not forwarded, into
+  `<workDir>/reports/chat-<title-slug>-<chatId>.html`
+  (`chat-<chatId>.html` for a chat without a usable title;
+  `_share_page_filename`), `web_server._build_share_page`, and carries,
+  after the `#app` element and before the inlined share script, a
+  `<footer id="share-version">` line, `Saved by <product> version
+  <version>, commit <commit>`, the pair the Configuration header
+  shows (`_read_version`, `_read_commit`): the version is `unknown`
+  when `core/_version.py` cannot be read or holds no quoted
+  `__version__` assignment; the commit is the stripped text of a
+  readable `core/_commit.txt`, `unknown` when that text is empty, and
+  only without the file the output of a successful `git rev-parse
+  --short HEAD`, `unknown` when it fails, times out after 5 s or
+  prints nothing); a
   `submit` whose prompt is nothing but the path of an existing file,
   sent from a tab that is not running a task, starts no task on
   either daemon: the machine answers `promptOpened` and the file's

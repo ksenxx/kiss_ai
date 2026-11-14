@@ -1041,6 +1041,13 @@ class _HeldRelay:
 
     @staticmethod
     def _pump(src: socket.socket, dst: socket.socket) -> None:
+        """Copy *src* to *dst* until one of them ends, then end both.
+
+        Shut down, not only closed: closing a socket does not wake the
+        other pump, which is reading it, so an end that was gone (the
+        daemon, stopped) never reached the other end, which waited out
+        its own timeout for an answer.
+        """
         try:
             while data := src.recv(65536):
                 dst.sendall(data)
@@ -1048,10 +1055,11 @@ class _HeldRelay:
             pass
         finally:
             for sock in (src, dst):
-                try:
-                    sock.close()
-                except OSError:
-                    pass
+                for end in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
+                    try:
+                        end()
+                    except OSError:
+                        pass
 
     def stop(self) -> None:
         self._stop.set()
@@ -1076,7 +1084,10 @@ def test_merged_history_does_not_wait_long_for_a_slow_machine(tmp_path: Path) ->
     ]
     local = mach.HistoryPage([_local_row("b" * 32, "local newest", 1_800_000_000.0, False)])
     daemon = start_remote_daemon(tmp_path / "slow-home", seed=seed)
-    relay = _HeldRelay(("127.0.0.1", daemon.port), hold=mach.HISTORY_FANOUT_WAIT + 1.0)
+    # Held past the first reply's wait, and over early in the second's:
+    # what is left of that one is the time the machine has to answer,
+    # on a daemon that has just started and is still loading.
+    relay = _HeldRelay(("127.0.0.1", daemon.port), hold=mach.HISTORY_FANOUT_WAIT + 0.5)
     hole = socket.create_server(("127.0.0.1", 0))  # accepts in the kernel, never answers
     nudges: list[float] = []
     try:

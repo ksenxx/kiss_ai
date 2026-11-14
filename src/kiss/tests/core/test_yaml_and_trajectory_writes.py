@@ -21,8 +21,8 @@ mocks, patches, fakes or test doubles, and no LLM calls.
 
 from __future__ import annotations
 
+import contextlib
 import functools
-import gc
 import itertools
 import json
 import os
@@ -159,7 +159,28 @@ def _write_and_seed(folder: Path, seeds: Iterator[int]) -> None:
     seed_file_atomically(folder / f"seed{next(seeds)}", "x" * 100)
 
 
-@posix_only("open descriptors are counted through /dev/fd")
+def _open_files() -> set[tuple[int, int]]:
+    """The regular files this process holds a descriptor on, by device and inode.
+
+    What a write can lose is the descriptor on its staging file, a file
+    no earlier descriptor is on.  A count of ``/dev/fd`` before and
+    after is no measure of that: other threads go on closing what
+    earlier tests left (a model client's sockets, an event loop's pipe)
+    for a moment after the collector has run, and the count went down
+    during the test (``assert 37 == 46`` in a full run on a loaded Mac).
+    """
+    files = set()
+    for name in os.listdir("/dev/fd"):
+        try:
+            status = os.fstat(int(name))
+        except OSError:  # the listing's own descriptor, or one closed since
+            continue
+        if stat.S_ISREG(status.st_mode):
+            files.add((status.st_dev, status.st_ino))
+    return files
+
+
+@posix_only("open descriptors are listed through /dev/fd")
 def test_a_stop_during_a_write_leaks_no_descriptor_and_no_staging_file(tmp_path: Path) -> None:
     """A task's Stop landing as the staging file is created leaves nothing behind.
 
@@ -170,16 +191,109 @@ def test_a_stop_during_a_write_leaks_no_descriptor_and_no_staging_file(tmp_path:
     the ``.<name>-<hex>`` file next to the target: about one in seven of
     the Stops injected here.
     """
-    # An earlier test's model client that waits for the collector would close its
-    # sockets between the two counts (after ``test_model_config_forwarding_parity.py``,
-    # ``assert 14 == 17``); a descriptor this code loses is no object and stays lost.
-    gc.collect()
-    descriptors = len(os.listdir("/dev/fd"))
+    files = _open_files()
 
     hammer(functools.partial(_write_and_seed, tmp_path, itertools.count()), {})
 
     assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
-    assert len(os.listdir("/dev/fd")) == descriptors
+    assert _open_files() <= files
+
+
+class _StopsAtCheckPoints:
+    """``sys.monitoring`` callback raising a Stop at chosen check points of its thread.
+
+    The interpreter raises a task's Stop where it checks for one: at the
+    entry of a Python function and at the return of a call into C, the
+    check points of code without a loop, which ``sys.monitoring`` reports
+    as ``PY_START`` and ``C_RETURN``.  Raising from the callback puts the
+    Stop on an exact check point instead of wherever a timer finds the
+    thread.
+    """
+
+    def __init__(self) -> None:
+        self.thread = threading.get_ident()
+        self.first = 0  # the check point of the first Stop, counted from 1; 0 raises none
+        self.again = False  # whether every check point after that one raises too
+        self.seen = 0
+        self.raised = 0
+
+    def arm(self, first: int, again: bool) -> None:
+        """Raise at check point *first* of the code run next, and at each later one if *again*."""
+        self.first, self.again, self.seen, self.raised = first, again, 0, 0
+
+    def __call__(self, *call: object) -> None:
+        """Count one check point of the armed thread and raise the Stop due there.
+
+        The reported call is dropped first.  The traceback of the Stop
+        holds this frame, and the call's arguments with it: the staging
+        file object, for its ``__enter__``.  A real Stop holds no such
+        reference, the file is closed as its frame unwinds, and Windows
+        refuses to unlink a file that is still open.
+        """
+        del call
+        if not self.first or threading.get_ident() != self.thread:
+            return
+        self.seen += 1
+        if self.seen == self.first or (self.again and self.seen > self.first):
+            self.raised += 1
+            raise KeyboardInterrupt
+
+
+@contextlib.contextmanager
+def _stops_at_check_points() -> Iterator[_StopsAtCheckPoints]:
+    """Report the calling thread's check points to a :class:`_StopsAtCheckPoints`."""
+    monitoring, stops = sys.monitoring, _StopsAtCheckPoints()
+    check_points = (monitoring.events.PY_START, monitoring.events.C_RETURN)
+    tool = next(i for i in range(6) if monitoring.get_tool(i) is None)
+    monitoring.use_tool_id(tool, "kiss.tests stop at a check point")
+    for event in check_points:
+        monitoring.register_callback(tool, event, stops)
+    monitoring.set_events(tool, monitoring.events.PY_START | monitoring.events.CALL)
+    try:
+        yield stops
+    finally:
+        monitoring.set_events(tool, 0)
+        for event in check_points:
+            monitoring.register_callback(tool, event, None)
+        monitoring.free_tool_id(tool)
+
+
+@pytest.mark.parametrize("again", [False, True], ids=["one-stop", "stops-from-there-on"])
+def test_a_stop_at_any_check_point_of_a_write_leaves_no_staging_file(
+    tmp_path: Path, again: bool
+) -> None:
+    """A Stop raised at any check point of a write or a seed leaves no staging file.
+
+    The seed removed its staging file in a ``finally`` that began with
+    Python-level calls (``contextlib.suppress``, the waiting unlink,
+    ``Path.unlink``): a Stop landing on one of their nine check points
+    skipped the removal.  A second Stop landing in either cleanup did
+    the same, which the hammer above produces on a loaded machine, where
+    one write spans several of its interrupts: about 25 staging files per
+    million interrupts with five processes per core, and one failure of
+    that test in a full run of the suite.  Every check point is visited
+    here, with one Stop and with a Stop at each later check point too.
+    """
+    seeds = itertools.count()
+    atomic_write_text(tmp_path / "doc.txt", "old")
+    files = set() if IS_WINDOWS else _open_files()
+
+    with _stops_at_check_points() as stops:
+        first = 0
+        while first == 0 or stops.raised:
+            first += 1
+            stops.arm(first, again)
+            try:
+                _write_and_seed(tmp_path, seeds)
+            except KeyboardInterrupt:
+                pass
+            finally:  # whatever came out: armed, the Stops would go on into pytest itself
+                stops.first = 0
+            staged = [p.name for p in tmp_path.iterdir() if p.name.startswith(".")]
+            assert staged == [], f"a Stop at check point {first} left {staged}"
+
+    assert first > 50, "the Stops did not reach the write"
+    assert IS_WINDOWS or _open_files() <= files
 
 
 @posix_only("a 255-character name under a temp dir exceeds Windows' MAX_PATH")
@@ -193,8 +307,11 @@ def test_a_file_name_of_the_full_length_is_written_and_seeded(tmp_path: Path, na
     no length limit of its own).  The second name is cut inside a
     two-byte character.
     """
-    target = tmp_path / name
+    _assert_written_and_seeded(tmp_path / name)
 
+
+def _assert_written_and_seeded(target: Path) -> None:
+    """*target*, alone in its folder, takes two atomic writes and a seed that leave no debris."""
     atomic_write_text(target, "first")
     atomic_write_text(target, "second")
     assert target.read_text(encoding="utf-8") == "second"
@@ -202,7 +319,60 @@ def test_a_file_name_of_the_full_length_is_written_and_seeded(tmp_path: Path, na
     seed_file_atomically(target, "seed")
 
     assert target.read_text(encoding="utf-8") == "seed"
-    assert list(tmp_path.iterdir()) == [target]
+    assert list(target.parent.iterdir()) == [target]
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="the 259-character limit of a path is Windows'")
+@pytest.mark.parametrize("character", ["n", "\U0001f600"], ids=["one-unit", "two-units"])
+def test_a_path_of_the_full_length_is_written_and_seeded(tmp_path: Path, character: str) -> None:
+    """A target whose path is as long as Windows allows is staged like any other.
+
+    A Windows path holds 259 UTF-16 units unless the machine enables
+    long paths.  The staging file carried the target's whole name plus
+    34 characters, so a target whose own path is legal but longer than
+    225 units answered ``FileNotFoundError``: the trajectory of an agent
+    with a long name, which is saved from the ``finally`` of its run
+    (``test_long_agent_name_still_saves_a_trajectory`` in a full run of
+    the suite, once the agent's id had three digits).  The folder's path
+    has 160 units and the name 98, of which the staging name has room
+    for 64: the second name is cut inside a character of two units.
+    """
+    folder = tmp_path / ("d" * (159 - len(str(tmp_path))))
+    folder.mkdir()
+    width = len(character.encode("utf-16-le")) // 2
+    target = folder / ("n" + character * (97 // width) + "n" * (97 % width))
+    assert len(str(target).encode("utf-16-le")) // 2 == 259
+
+    _assert_written_and_seeded(target)
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="the 259-character limit of a path is Windows'")
+@pytest.mark.parametrize("form", ["drive", "share", "extended"])
+def test_a_file_in_a_folder_too_deep_for_a_staging_name_is_written_and_seeded(
+    tmp_path: Path, form: str
+) -> None:
+    r"""A target in a folder that leaves no staging name room is staged like any other.
+
+    A folder's path may hold 247 units, which leaves its files 11.  The
+    shortest staging name takes 34, so every write into a folder deeper
+    than 224 units answered ``FileNotFoundError``.  The folder is
+    reached through the drive, through the drive's administrative share
+    (``\\localhost\C$``, which needs an administrator: skipped without
+    it) and by a path already in the extended-length form (``\\?\``),
+    whose four units count for nothing.
+    """
+    root, units = tmp_path, 247
+    if form == "share":
+        root = Path(rf"\\localhost\{tmp_path.drive[0]}$") / tmp_path.relative_to(tmp_path.anchor)
+        if not root.is_dir():
+            pytest.skip("the administrative share of the drive is not reachable")
+    if form == "extended":
+        root, units = Path("\\\\?\\" + str(tmp_path)), 251
+    folder = root / ("d" * (units - 1 - len(str(root))))
+    folder.mkdir()
+    assert len(str(folder)) == units
+
+    _assert_written_and_seeded(folder / "f.txt")
 
 
 def test_publish_onto_a_directory_fails_at_once(tmp_path: Path) -> None:

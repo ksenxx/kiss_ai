@@ -2935,9 +2935,22 @@ def _spend_rows(cursor: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:
 
     A launch name such as "anthropic/claude-sonnet-4-6" is served (and
     its llm_call events named) as "claude-sonnet-4-6": both are filed
-    alike.
+    alike.  ``cost``, ``tokens`` and ``steps`` are numbers whatever the
+    columns hold: SQLite's dynamic typing lets a foreign tool store
+    text there, which counts as 0.  One such row, a sub-agent's or a
+    ``remote_subtasks`` record, raised out of the whole Spend report
+    and of its parent's usage, which the daemon then never answered.
     """
-    return [dict(row, m=_strip_provider_prefix(row["m"])) for row in cursor]
+    return [
+        dict(
+            row,
+            m=_strip_provider_prefix(row["m"]),
+            cost=_safe_float(row["cost"]),
+            tokens=_safe_int(row["tokens"]),
+            steps=_safe_int(row["steps"]),
+        )
+        for row in cursor
+    ]
 
 
 def _spend_children(

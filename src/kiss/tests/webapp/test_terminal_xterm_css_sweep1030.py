@@ -36,6 +36,7 @@ import certifi
 import pytest
 from playwright.sync_api import Page, sync_playwright
 
+from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.local_ws import _generate_self_signed_cert
 
 _TERMINAL_JS = (
@@ -140,7 +141,9 @@ def page(cdn: _Cdn) -> Iterator[Page]:
             f"--host-resolver-rules=MAP cdn.jsdelivr.net 127.0.0.1:{port}",
         ])
         page = browser.new_page(ignore_https_errors=True)
-        page.goto(f"https://localhost:{port}/")
+        # Other jobs' Docker containers change the host's interfaces, and Chromium
+        # aborts a navigation in flight then (``net::ERR_NETWORK_CHANGED``).
+        goto_retrying_network_change(page, f"https://localhost:{port}/")
         page.add_script_tag(content=_TERMINAL_JS)
         yield page
         browser.close()

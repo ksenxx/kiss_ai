@@ -170,23 +170,29 @@ def test_an_overrun_is_answered_and_the_connection_stays(chrome: _Chrome) -> Non
 
 
 def test_a_command_queued_past_its_deadline_is_answered_and_never_runs(chrome: _Chrome) -> None:
-    """Queued behind a 3 s script on its tab, a 1.5 s command is refused in time, unrun."""
+    """Queued behind a 12 s script on its tab, a 10 s command is refused in time, unrun.
+
+    ``timeout=10`` leaves the reply the full 1 s margin, as in the test
+    above (``timeout=1.5`` left 0.15 s: beside 24 busy loops the reply
+    came up to 0.55 s after the extension's deadline, and 36 of 72 rounds
+    ended with the bridge's own timeout and a dropped connection).
+    """
     chrome.page.evaluate("delete window.__slow_started; delete window.__queued_ran")
     box: dict[str, object] = {}
 
     def slow() -> None:
-        script = "window.__slow_started = true; new Promise(r => setTimeout(() => r(3), 3000))"
-        box["slow"] = _evaluate(chrome, script, 10)
+        script = "window.__slow_started = true; new Promise(r => setTimeout(() => r(3), 12000))"
+        box["slow"] = _evaluate(chrome, script, 30)
 
     worker = threading.Thread(target=slow)
     worker.start()
     try:
         chrome.page.wait_for_function("window.__slow_started === true", timeout=5000)
-        with pytest.raises(ChromeBridgeError, match=r"command exceeded its 1\.\d+s deadline"):
-            _evaluate(chrome, "window.__queued_ran = true", timeout=1.5)
+        with pytest.raises(ChromeBridgeError, match=r"command exceeded its (8\.\d+|9)s deadline"):
+            _evaluate(chrome, "window.__queued_ran = true", timeout=10)
         assert chrome.bridge.extension_connected
     finally:
-        worker.join(15)
+        worker.join(30)
     assert box["slow"] == 3
     assert _evaluate(chrome, "window.__queued_ran === undefined", timeout=10) is True
 

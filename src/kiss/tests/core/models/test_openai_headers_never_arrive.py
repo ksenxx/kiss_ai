@@ -226,6 +226,7 @@ class _TricklingHeaderServer:
                     while not self.release.wait(0.02):
                         connection.sendall(b"x")
                     return
+                _read_body(connection, head)
                 chunks = (
                     _responses_stream_chunks()
                     if path.endswith("/responses")
@@ -238,6 +239,28 @@ class _TricklingHeaderServer:
                 )
             except OSError:
                 return
+
+
+def _read_body(connection: socket.socket, head: bytes) -> None:
+    """Read the rest of the request whose header block, and maybe more, is *head*.
+
+    A connection closed with request bytes unread is reset, and Windows
+    drops with the reset the reply its peer has not read yet.  On a
+    loaded machine the SDK then met ``ConnectionResetError`` a
+    millisecond after its request was recorded and sent it again: a
+    third request, or a failed turn when the retry was reset too.
+    """
+    header, _, body = head.partition(b"\r\n\r\n")
+    length = next(
+        int(line.split(b":")[1])
+        for line in header.lower().split(b"\r\n")
+        if line.startswith(b"content-length:")
+    )
+    while len(body) < length:
+        chunk = connection.recv(65536)
+        if not chunk:
+            return
+        body += chunk
 
 
 def _assert_trickling_header_is_cut_then_the_instance_recovers(model: Any, stop: bool) -> None:

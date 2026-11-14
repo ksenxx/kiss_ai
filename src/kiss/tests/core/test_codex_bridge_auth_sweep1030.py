@@ -90,7 +90,7 @@ def test_two_bridges_have_different_secrets() -> None:
 def test_codex_args_forward_the_secret_by_name_only() -> None:
     """The overrides name the variable for Codex to forward; the secret is not on argv."""
     with ToolBridge(BASH_SCHEMA, _Executor()) as bridge:
-        args = bridge.codex_args(60)
+        args = bridge.codex_args(60, 60)
         token = bridge.codex_env()[BRIDGE_TOKEN_ENV]
     assert f'mcp_servers.kiss.env_vars=["{BRIDGE_TOKEN_ENV}"]' in args
     assert not any(token in arg for arg in args)

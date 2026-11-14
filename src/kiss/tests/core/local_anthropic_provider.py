@@ -20,6 +20,10 @@ the local stand-in (:mod:`kiss.tests.core.local_anthropic_server`):
   applied as the provider applied it on 2026-11-11: in bulk and with a
   boundary that holds between two clears, except that on some calls it
   stopped one result short (229 of the 311 moves recorded that day).
+
+The size of a prompt is counted at :data:`CHARS_PER_TOKEN`, the provider's
+measured rate, so a size the agent estimates from a text's length can be
+checked against what the provider bills for it.
 """
 
 from __future__ import annotations
@@ -29,7 +33,9 @@ import hashlib
 import json
 from typing import Any
 
-CHARS_PER_TOKEN = 4
+CHARS_PER_TOKEN = 2.5
+"""Characters of a block per token: on the 16,628 Claude Fable 5.2 steps of 2,000 characters or
+more recorded from 2026-11-11 to 11-13 the context grew by a token per 2.52 characters of output."""
 LOOKBACK_BLOCKS = 20
 """Blocks before a breakpoint among which the provider looks for a cached prefix."""
 THINKING_TYPES = ("thinking", "redacted_thinking")
@@ -65,7 +71,7 @@ def prompt_blocks(request: dict[str, Any]) -> list[dict[str, Any]]:
 
 def prompt_tokens(request: dict[str, Any]) -> int:
     """Return the size of *request*'s prompt, at :data:`CHARS_PER_TOKEN` characters a token."""
-    return sum(len(_text(block)) // CHARS_PER_TOKEN for block in prompt_blocks(request))
+    return sum(int(len(_text(block)) / CHARS_PER_TOKEN) for block in prompt_blocks(request))
 
 
 class PromptCache:
@@ -93,7 +99,7 @@ class PromptCache:
         for block in blocks:
             text = _text(block)
             digest.update(text.encode())
-            tokens += len(text) // CHARS_PER_TOKEN
+            tokens += int(len(text) / CHARS_PER_TOKEN)
             prefixes.append((digest.hexdigest(), tokens))
         points = [index for index, block in enumerate(blocks) if "cache_control" in block]
         if "cache_control" in request and blocks:
@@ -169,7 +175,7 @@ def _cleared_by_rule(request: dict[str, Any], edit: dict[str, Any]) -> int:
     sizes: list[int] = []
     context = cleared = 0
     for block in prompt_blocks(request):
-        size = len(_text(block)) // CHARS_PER_TOKEN
+        size = int(len(_text(block)) / CHARS_PER_TOKEN)
         context += size
         if block.get("type") != "tool_result":
             continue

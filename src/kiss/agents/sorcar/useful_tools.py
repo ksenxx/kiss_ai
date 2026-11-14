@@ -1832,14 +1832,23 @@ def _clean_env(work_dir: str | None = None, private_dir: str | None = None) -> d
             value untouched.
         private_dir: A sub-agent's private folder: the temp directory of
             the child processes, which :data:`SUBAGENT_DIR_ENV` marks
-            as the sub-agent's.
+            as the sub-agent's.  On Windows it is their ``TMPDIR`` only:
+            Git Bash keeps one mount table for all of its processes,
+            filled in by the first of them from its own ``TMP`` and
+            ``TEMP``, so a private folder there became ``/tmp`` of every
+            Git Bash shell of the user, and once the sub-agent had ended
+            and the folder was gone each of them started with "could
+            not find /tmp" and had no temp directory.
     """
     env = os.environ.copy()
     env.pop("VIRTUAL_ENV", None)
     if work_dir:
         env["KISS_WORKDIR"] = work_dir
     if private_dir:
-        env.update(dict.fromkeys(("TMPDIR", "TMP", "TEMP", SUBAGENT_DIR_ENV), private_dir))
+        names = ["TMPDIR", SUBAGENT_DIR_ENV]
+        if sys.platform != "win32":  # pragma: no branch
+            names += ["TMP", "TEMP"]
+        env.update(dict.fromkeys(names, private_dir))
     return env
 
 

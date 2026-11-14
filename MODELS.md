@@ -19,10 +19,10 @@ The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, s
 
 Current catalog capability totals:
 
-- **1044** generation-capable models
-- **887** function-calling-capable models
+- **1042** generation-capable models
+- **885** function-calling-capable models
 - **8** embedding models
-- **32** decision models
+- **34** decision models
 
 Full model list:
 
@@ -727,10 +727,10 @@ Full model list:
 - `openrouter/google/lyria-3-clip-preview`
 - `openrouter/google/lyria-3-pro-preview`
 - `openrouter/gryphe/mythomax-l2-13b`
+- `openrouter/heygen/heygen-decision-1`
+- `openrouter/heygen/heygen-decision-1-turbo`
 - `openrouter/ibm-granite/granite-4.2-8b`
 - `openrouter/inclusionai/ling-3.0-flash`
-- `openrouter/inclusionai/ling-3.0-flash-fin`
-- `openrouter/inclusionai/ling-3.0-flash-sante`
 - `openrouter/inclusionai/ling-3.0-flash-vl`
 - `openrouter/inclusionai/ling-3.0-tiny`
 - `openrouter/inclusionai/ling-3.1-flash`

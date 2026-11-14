@@ -35,6 +35,11 @@ from kiss.tests.conftest import find_free_port
 from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
 from kiss.tests.remote_daemon import start_remote_daemon
 
+# How long a test waits for a reply: twice the longest a machine's answer
+# is waited for by the daemon (its app probe, 53 s), far below the test
+# run's own timeout.
+REPLY_SECONDS = 120.0
+
 
 def _as_another_client(url: str, commands: list[dict[str, Any]], reply_type: str) -> None:
     """Send *commands* to the daemon at *url* as a password-authenticated client, each answered."""
@@ -110,16 +115,27 @@ class RemoteMachineCase(IsolatedAsyncioTestCase):
         return await self._next(reply_type)
 
     async def _next(self, reply_type: str, forwarded: bool | None = None) -> dict[str, Any]:
-        """The next *reply_type* message (with the given ``forwarded`` stamp, when asked)."""
-        for _ in range(300):
-            line = await asyncio.wait_for(self.reader.readline(), timeout=60.0)
-            assert line, "local connection closed"
-            msg: dict[str, Any] = json.loads(line.decode("utf-8"))
-            if msg.get("type") != reply_type:
-                continue
-            if forwarded is None or bool(msg.get("forwarded")) == forwarded:
-                return msg
-        raise AssertionError(f"no {reply_type} reply")
+        """The next *reply_type* message (with the given ``forwarded`` stamp, when asked).
+
+        It is waited for :data:`REPLY_SECONDS` in all, whatever else
+        arrives meanwhile.  The wait was a minute for each message, of
+        300: the daemon's heartbeats and registry pushes kept it going
+        for a reply that never came (a handler that raised), until the
+        test run's own timeout killed the process and the tests after
+        this one with it.
+        """
+        try:
+            async with asyncio.timeout(REPLY_SECONDS):
+                while True:
+                    line = await self.reader.readline()
+                    assert line, "local connection closed"
+                    msg: dict[str, Any] = json.loads(line.decode("utf-8"))
+                    if msg.get("type") != reply_type:
+                        continue
+                    if forwarded is None or bool(msg.get("forwarded")) == forwarded:
+                        return msg
+        except TimeoutError:
+            raise AssertionError(f"no {reply_type} reply within {REPLY_SECONDS:g} s") from None
 
     async def _ask_box(self, cmd: dict[str, Any], reply_type: str) -> dict[str, Any]:
         """Send *cmd* for ``box`` and return its forwarded *reply_type* reply."""

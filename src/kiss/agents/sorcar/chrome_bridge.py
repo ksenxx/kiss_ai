@@ -407,7 +407,9 @@ class ChromeBridge:
         """
         # Recorded before its start: a Stop landing in the start must not
         # leave a serving thread that stop() does not wait for.
-        self._server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        self._server_thread = threading.Thread(
+            target=_serve_until_closed, args=(server,), daemon=True
+        )
         try:
             self._server_thread.start()
         except RuntimeError as e:
@@ -844,6 +846,25 @@ def _config_lock(config: Path) -> AbstractContextManager[bool]:
     """The lock serialising the publication and the withdrawal of *config*."""
     lock = config.with_name(f".{config.name}.lock")
     return exclusive_file_lock(lock, timeout=_CONFIG_LOCK_TIMEOUT_SECS)
+
+
+def _serve_until_closed(server: Server) -> None:
+    """Run *server*'s serving loop until its listening socket is closed.
+
+    :meth:`ChromeBridge.stop` ends the loop by closing the socket, and may
+    do so while the loop is still starting.  websockets returns from the
+    loop for a socket closed before the loop looks its descriptor up; one
+    closed between that lookup and the selector's registration of it
+    made the registration fail (``EBADF``), and the thread died of it
+    with a traceback on stderr.  A loop that fails over a socket still
+    open has failed for another reason, which stays as loud as it was.
+    """
+    try:
+        server.serve_forever()
+    except OSError:
+        if server.socket.fileno() != -1:  # pragma: no cover - a loop that fails by itself
+            raise
+        logger.debug("Exception caught", exc_info=True)
 
 
 def _release_server(server: Server, thread: threading.Thread | None) -> None:

@@ -509,10 +509,18 @@ class ExtensionChromium:
         assert self.worker_eval(f"chrome.tabs.discard({tab_id}).then((tab) => tab.id)") == tab_id
 
     def close_pages(self) -> None:
-        """Record the coverage of every open page, then close them all."""
+        """Record the coverage of every open page, then close them all: none is left on return."""
         self.collect()
-        for target_id in self.pages().values():
+        closing = set(self.pages().values())
+        for target_id in closing:
             self.close_page(target_id)
+        # Chrome answers the request before it has closed the tab, and lists the page a
+        # moment longer than its tab: on a loaded machine the next test's click on the
+        # toolbar icon (:meth:`_web_tab`) found a page, opened none and had no tab to click in.
+        deadline = time.monotonic() + 15
+        while closing.intersection(self.pages().values()):
+            assert time.monotonic() < deadline, "Chrome did not close the pages"
+            time.sleep(0.01)
 
     def collect(self) -> None:
         """Add what ran since the last call to the coverage of ``background.js``.
@@ -745,11 +753,18 @@ _CODE = re.compile(r"[^\s{}()\[\];,]")  # V8 also reports the closing brace afte
 
 
 def _devtools_url(profile: Path) -> str:
-    """The browser's DevTools endpoint, from the file Chromium writes into its profile dir."""
+    """The browser's DevTools endpoint, from the file Chromium writes into its profile dir.
+
+    Until both lines are there the file is missing, empty or, on
+    Windows, refused to a reader (``PermissionError``) while Chromium
+    has it open for writing.
+    """
     port_file = profile / "DevToolsActivePort"
     deadline = time.monotonic() + 30
-    while not port_file.exists() or port_file.read_text().count("\n") < 1:
-        assert time.monotonic() < deadline, "Chromium never published its DevTools port"
-        time.sleep(0.05)
-    port, path = port_file.read_text().split("\n")[:2]
-    return f"ws://127.0.0.1:{port}{path}"
+    while True:
+        try:
+            port, path = port_file.read_text().split("\n")[:2]
+            return f"ws://127.0.0.1:{port}{path}"
+        except (OSError, ValueError):
+            assert time.monotonic() < deadline, "Chromium never published its DevTools port"
+            time.sleep(0.05)

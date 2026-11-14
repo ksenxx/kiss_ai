@@ -34,6 +34,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 import wave
@@ -359,8 +360,14 @@ class TestTranscribeAgentDegraded(unittest.TestCase):
         env = dict(os.environ)
         env["OPENAI_API_KEY"] = "sk-invalid-not-a-real-key"
         env["KISS_VOICE_AUDIO_TIMEOUT"] = "20"
+        # This run's interpreter on this run's sources.  ``uv run python``
+        # synced the environment first, and in a task's worktree, which
+        # shares the main checkout's, it built a second one on whatever
+        # Python uv found, until the worktree's ``.venv`` became a file
+        # uv refuses (``GitWorktreeOps.block_own_environment``).
+        env["PYTHONPATH"] = os.pathsep.join(sys.path)
         proc = subprocess.run(
-            ["uv", "run", "python", "-c", script],
+            [sys.executable, "-c", script],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,

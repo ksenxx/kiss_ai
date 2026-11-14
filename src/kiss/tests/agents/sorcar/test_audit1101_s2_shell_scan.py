@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import timeit
 from pathlib import Path
 
@@ -578,6 +579,16 @@ def test_an_attribute_is_its_own_variables(tmp_path: Path) -> None:
         assert _verdict(command, {"tmp/kept"}) == expected, command
 
 
+def _scan_cpu_seconds(command: str) -> float:
+    """The CPU time this thread takes to scan *command*, best of three.
+
+    That is the scan's own work.  Wall time also counts the wait for a core: in a full
+    run on a 10-core Mac that took the best of three scans over the bound below.
+    """
+    scan = functools.partial(simple_commands, command, "/w")
+    return min(timeit.repeat(scan, timer=time.thread_time, number=1, repeat=3))
+
+
 def test_the_assignments_of_a_command_are_read_in_one_pass() -> None:
     """Audit 2026-11-10 S10-F3, review round 1: what the earlier assignments of a command set
     is kept as the scan goes; replayed for every word, 8,000 of them took 18 seconds."""
@@ -587,8 +598,14 @@ def test_the_assignments_of_a_command_are_read_in_one_pass() -> None:
                     f"{known}; " + " ".join(f"T{i}=$T{i - 1}" for i in range(1, 4000)),
                     # arithmetic that assigns nothing: one long name is read once
                     "test 'a[" + "a" * 12000 + "]'", "(( " + "a" * 12000 + " ))"):
-        scan = functools.partial(simple_commands, command, "/w")
-        assert min(timeit.repeat(scan, number=1, repeat=3)) < 0.5, command[:40]
+        assert _scan_cpu_seconds(command) < 0.5, command[:40]
+    # An assignment costs the same whatever the shell knows by then: 40,000 of them after
+    # 4,000 statements take the time of the two parts.  With a copy of the shell's variables
+    # for each assignment, as Bash 3 was scanned, the whole took 14 times that.  The bound
+    # above did not show it: an idle Mac scanned its third command in 0.36 s that way.
+    assignments = " ".join(f"U{i}=$U{i - 1}" for i in range(1, 40001))
+    parts = _scan_cpu_seconds(known) + _scan_cpu_seconds(assignments)
+    assert _scan_cpu_seconds(f"{known}; {assignments}") < 4 * parts
 
 
 def test_the_text_env_splits_is_the_command_line_it_runs(tmp_path: Path) -> None:

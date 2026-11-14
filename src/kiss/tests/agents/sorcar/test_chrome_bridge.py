@@ -896,6 +896,47 @@ def test_second_process_defers_to_a_live_bridge_and_daemon_takes_over() -> None:
         daemon.stop()
 
 
+class _ClosedWhileRegistered(socket.socket):
+    """A listening socket closed just after the serving loop looked its descriptor up.
+
+    ``stop()`` closes the socket from another thread.  The moment that
+    close has to land in, between the selector's lookup of the descriptor
+    and its registration, is two calls wide: the close is made here
+    instead, by the lookup, which only the serving thread makes.
+    """
+
+    def fileno(self) -> int:
+        fd = super().fileno()
+        if fd != -1 and threading.current_thread() is not threading.main_thread():
+            self.close()
+        return fd
+
+
+@pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_stop_while_the_serving_loop_starts_ends_the_loop_quietly() -> None:
+    """``stop()`` may close the listening socket while the loop that serves it is starting.
+
+    websockets returns from the loop for a socket closed before the loop
+    looks its descriptor up, not for one closed between that lookup and
+    the selector's registration: the registration failed (``EBADF``) and
+    the serving thread died of it, its traceback on stderr.  Seen under
+    load in the test above, whose successor is stopped right after its
+    start.
+    """
+    bridge = ChromeBridge(write_config=False)
+    server = bridge._bind()
+    server.socket = _ClosedWhileRegistered(fileno=server.socket.detach())
+    try:
+        bridge._serve(server)
+        thread = bridge._server_thread
+        assert thread is not None
+        thread.join(10)
+        assert not thread.is_alive()
+        assert server.socket.fileno() == -1
+    finally:
+        bridge.stop()
+
+
 def test_two_lazy_starts_at_once_publish_exactly_one_bridge() -> None:
     """Two CLI runs start their bridge together: one publishes, the other defers to it.
 

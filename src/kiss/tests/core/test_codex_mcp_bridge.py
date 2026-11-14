@@ -48,6 +48,7 @@ from kiss.core.models.codex_mcp_bridge import (
 )
 from kiss.core.models.codex_model import (
     CODEX_INSTRUCTIONS_PREAMBLE,
+    CODEX_MCP_STARTUP_TIMEOUT_SECONDS,
     CODEX_MCP_TOOL_TIMEOUT_SECONDS,
     CODEX_MCP_TOOLS_NOTE,
 )
@@ -569,6 +570,12 @@ def test_agentic_codex_run_calls_kiss_tools_over_mcp(
         assert kiss["args"][:2] == ["-m", "kiss.core.models.codex_mcp_bridge"]
         assert kiss["tool_timeout_sec"] == CODEX_MCP_TOOL_TIMEOUT_SECONDS
         assert kiss["default_tools_approval_mode"] == "approve"
+        # Codex gives an optional server one second to start: on a slower
+        # start the model was asked without the tools and called them
+        # unavailable (6 live turns of 8 on a Windows machine).  It gives a
+        # required one 30 s and then fails the turn for good.
+        assert kiss["required"] is True
+        assert kiss["startup_timeout_sec"] == CODEX_MCP_STARTUP_TIMEOUT_SECONDS
         assert call["instructions"].startswith(
             CODEX_INSTRUCTIONS_PREAMBLE + CODEX_MCP_TOOLS_NOTE + SYSTEM_PROMPT
         )

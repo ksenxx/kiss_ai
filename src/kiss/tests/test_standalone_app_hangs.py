@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import os
 import signal
-import stat
 import subprocess
 import sys
 import time
@@ -31,7 +30,7 @@ import pytest
 from kiss.core.brand import BRAND
 from kiss.core.processes import pid_alive
 from kiss.server import standalone_app
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import posix_only, write_sh_stub
 
 pytestmark = posix_only("stub commands are sh scripts")
 
@@ -50,8 +49,7 @@ def _hanging_commands(bin_dir: Path, *names: str) -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
     for name in names:
         stub = bin_dir / name
-        stub.write_text(f'#!/bin/sh\necho $$ > "{stub}.pid"\n: > "{stub}.started"\nexec sleep 60\n')
-        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+        write_sh_stub(stub, f'echo $$ > "{stub}.pid"\n: > "{stub}.started"\nexec sleep 60\n')
 
 
 def _stuck_probe(

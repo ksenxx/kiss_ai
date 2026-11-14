@@ -23,7 +23,6 @@ from kiss.core.base import Base
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.context_compaction import (
     ARGUMENT_PREVIEW_CHARS,
-    CHARS_PER_TOKEN,
     COMPACTION_MIN_STEP_GAP,
     CompactionTable,
     Replacement,
@@ -33,6 +32,7 @@ from kiss.core.context_compaction import (
     compaction_target_tokens,
     dropped_chars,
     expand_stubs,
+    payback_floor,
     plan_compaction,
     plan_turn_removal,
     reasoning_tokens,
@@ -59,7 +59,11 @@ from kiss.core.models.model import (
     render_tool_call,
     strip_system_cache_break,
 )
-from kiss.core.models.model_families import fallback_of_another_family, same_family
+from kiss.core.models.model_families import (
+    chars_per_token,
+    fallback_of_another_family,
+    same_family,
+)
 from kiss.core.models.model_info import (
     MODEL_INFO,
     calculate_cost,
@@ -1424,7 +1428,8 @@ class KISSAgent(Base):
         if not turn.calls:
             self._llm_hook_conversation_index = len(self.model.conversation)
         self._newest_reasoning_tokens = reasoning_tokens(
-            (self.last_call_usage or {}).get("output_tokens", 0), function_calls, response_text
+            (self.last_call_usage or {}).get("output_tokens", 0), function_calls, response_text,
+            chars_per_token(self.model.model_name),
         )
         self._reasoning_tokens += self._newest_reasoning_tokens
         function_results: list[tuple[str, dict[str, Any]]] = []
@@ -1767,9 +1772,10 @@ class KISSAgent(Base):
         # Re-read after the tools ran: a tool may have spent (a sub-agent
         # whose cost was folded into the task), and the line appended to
         # these results is what the model reads next.
-        # What this step's tool results add to the context (about 4
-        # characters per token), shown in the footer so an oversized
-        # output is noticed by the model that asked for it.
+        # What this step's tool results add to the context (their
+        # characters over the model's characters per token), shown in the
+        # footer so an oversized output is noticed by the model that asked
+        # for it.
         self._last_results_chars = sum(len(str(r["result"])) for _, r in function_results)
         if not self._plain_io:
             self.model.set_usage_info_for_messages(self._get_usage_info_string())
@@ -2444,7 +2450,7 @@ class KISSAgent(Base):
         plan = [] if whole_turns else plan_compaction(
             self.model.conversation, table=self._compaction_table
         )
-        dropped_tokens = (removal.dropped if removal else dropped_chars(plan)) // CHARS_PER_TOKEN
+        dropped_tokens = self._tokens_of(removal.dropped if removal else dropped_chars(plan))
         if not should_compact(
             self.context_tokens_used,
             dropped_tokens,
@@ -2502,9 +2508,19 @@ class KISSAgent(Base):
         steps passed since the last edit.  The trigger and the minimum are
         ``Config.context_edit_trigger_tokens`` and
         ``Config.context_edit_clear_at_least`` at the model's cache prices
-        (:func:`~kiss.core.context_compaction.clear_thresholds`).  Between
-        two such edits a request is the one before it with new messages at
-        its end, which is what the provider's cache needs to be read.
+        (:func:`~kiss.core.context_compaction.clear_thresholds`), and the
+        minimum is never less than the share of the context that pays the
+        re-write back (:func:`~kiss.core.context_compaction.payback_floor`:
+        44% on Claude Fable 5.1 and 5.2).  A clear that removes less is
+        skipped and planned again on the next step; of the 620 clears
+        recorded on Claude Fable 5.2 on 2026-11-12 and 11-13, the 437
+        under that share cost $749 to re-write and saved $145 before the
+        next one.  When no clear reaches it, the session grows to its
+        hand-off limit and restarts there: replayed on those sessions
+        (20,582 calls), 326 clears and 62 hand-offs cost 13% less than
+        the 617 clears and 16 hand-offs of the minimum alone.  Between
+        two such edits a request is the one before it with new messages
+        at its end, which is what the provider's cache needs to be read.
         """
         config = DEFAULT_CONFIG
         trigger, at_least = clear_thresholds(
@@ -2523,13 +2539,26 @@ class KISSAgent(Base):
             table=self._compaction_table,
         )
         dropped_tokens = (
-            dropped_chars(plan) // CHARS_PER_TOKEN
+            self._tokens_of(dropped_chars(plan))
             + self._reasoning_tokens - self._kept_reasoning_tokens()
         )
-        if dropped_tokens < max(1, at_least):
+        floor = payback_floor(get_cache_discount(self.model.model_name))
+        if dropped_tokens < max(1, at_least, floor * self.context_tokens_used):
+            logger.debug(
+                "Skipped a clear dropping ~%d of %d context tokens: agent=%s step=%d",
+                dropped_tokens,
+                self.context_tokens_used,
+                self.name,
+                self.step_count,
+            )
             return
         self._last_compaction_step = self.step_count
         self._apply_stubs(plan, dropped_tokens, None)
+
+    def _tokens_of(self, chars: int) -> int:
+        """Return about how many tokens *chars* characters of tool text are for this agent's
+        model (:func:`~kiss.core.models.model_families.chars_per_token`)."""
+        return int(chars / chars_per_token(self.model.model_name))
 
     def _kept_reasoning_tokens(self) -> int:
         """Return the reasoning an edit leaves in the conversation: the newest reply's, on a
@@ -3538,7 +3567,7 @@ class KISSAgent(Base):
                 spent, cap = self.budget_status_hook()
             else:
                 spent, cap = self.budget_used, self.max_budget
-            result_tokens = self._last_results_chars // CHARS_PER_TOKEN
+            result_tokens = self._tokens_of(self._last_results_chars)
             added = (
                 f"This step's tool output: ~{result_tokens:,} tokens, "
                 if self._last_results_chars > 0

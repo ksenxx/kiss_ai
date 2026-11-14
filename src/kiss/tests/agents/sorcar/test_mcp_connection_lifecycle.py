@@ -56,7 +56,7 @@ from kiss.agents.sorcar.mcp_servers import (
 )
 from kiss.core import tool_interrupt
 from kiss.core.locked import locked_call
-from kiss.core.processes import pid_alive
+from kiss.core.processes import pid_alive, process_identity
 
 _SERVER_SCRIPT = '''
 import os, sys, time
@@ -150,20 +150,42 @@ def _config(script: Path, pid_file: Path, *extra: str) -> MCPServerConfig:
     )
 
 
-def _wait_for_pid_file(pid_file: Path, timeout: float = 30) -> int:
+class _ServerPid(int):
+    """A server's pid, with what the OS said that process was when its pid file was read.
+
+    Windows gives a freed pid to another process within seconds on a busy
+    machine, so there the number alone does not name a server that has
+    exited: its start time and executable tell the server from a stranger
+    that got its pid.
+    """
+
+    identity: str | None = None
+
+
+def _wait_for_pid_file(pid_file: Path, timeout: float = 30) -> _ServerPid:
     """Return the pid the freshly spawned server wrote, waiting for it."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            return int(pid_file.read_text())
+            pid = _ServerPid(pid_file.read_text())
         except (OSError, ValueError):
             time.sleep(0.05)
+            continue
+        if sys.platform == "win32":
+            pid.identity = process_identity(pid)
+        return pid
     raise AssertionError(f"server never wrote {pid_file}")
 
 
 def _alive(pid: int) -> bool:
-    """Return True while *pid* still exists."""
-    return pid_alive(pid)
+    """Return True while the server that wrote *pid* still runs."""
+    if not pid_alive(pid):
+        return False
+    if sys.platform != "win32":
+        return True
+    if not isinstance(pid, _ServerPid) or pid.identity is None:
+        return False
+    return process_identity(pid) == pid.identity
 
 
 def _wait_until_dead(pid: int, timeout: float = 20) -> bool:

@@ -599,7 +599,10 @@ def test_main_help(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixtur
         overleaf_mod.main()
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "kiss-overleaf" in out and "--channel" not in out
+    # Not the program's name: on Python 3.14 argparse takes it from how
+    # the interpreter was started ("python -m pytest" under that
+    # command), not from the patched argv.
+    assert "--workspace" in out and "--channel" not in out
 
 
 # ---------------------------------------------------------------- transport

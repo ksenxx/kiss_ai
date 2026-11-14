@@ -41,9 +41,9 @@ import pytest
 from kiss.core.brand import BRAND
 from kiss.server import standalone_app
 from kiss.tests.branded_package import BRAND_ICON_PNG, SEAMLESS_LOOP, make_branded_package
-from kiss.tests.conftest import find_free_port, posix_only
+from kiss.tests.conftest import find_free_port, posix_only, write_sh_stub
 
-pytestmark = posix_only("runs the kiss-app console script and stub browsers under bash")
+pytestmark = posix_only("runs the kiss-app console script and stub browsers under sh")
 
 _SRC = Path(__file__).resolve().parents[2]
 _KISS_APP = Path(sys.executable).parent / "kiss-app"
@@ -72,15 +72,19 @@ _PLATFORM_FLAGS = ["--disable-popup-blocking"] if _MACOS else []
 def _write_stub_browser(
     path: Path, log: Path, *, sleep: float = 0, exit_code: int = 0, stderr: str = ""
 ) -> Path:
-    """A fake browser: logs its arguments one per line, prints *stderr*, sleeps, exits."""
+    """A fake browser: logs its arguments one per line, prints *stderr*, sleeps, exits.
+
+    It has run once when this returns (``write_sh_stub``).  macOS holds
+    up the first run of a new script, for some 12 s while it checks a
+    browser bundle that another test has just cloned and launched: a
+    stub that had to start within the app's two seconds did not.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        f'#!/bin/bash\nprintf "%s\\n" "$@" >> "{log}"\n'
+    return write_sh_stub(
+        path,
+        f'printf "%s\\n" "$@" >> "{log}"\n'
         f"[ -z '{stderr}' ] || echo '{stderr}' >&2\nsleep {sleep}\nexit {exit_code}\n",
-        encoding="utf-8",
     )
-    path.chmod(0o755)
-    return path
 
 
 def _write_unrunnable(path: Path) -> Path:
@@ -92,8 +96,14 @@ def _write_unrunnable(path: Path) -> Path:
 
 
 def _stub_calls(log: Path) -> list[str]:
-    for _ in range(50):
-        if log.exists():
+    """The arguments a stub logged, one per line; ``[]`` when it logs none within a minute.
+
+    A stub the app has copied into its bundle is a new script again,
+    which no test can run beforehand: its first run may be held up as
+    ``_write_stub_browser`` describes.
+    """
+    for _ in range(600):
+        if log.exists() and log.stat().st_size:
             return log.read_text(encoding="utf-8").splitlines()
         time.sleep(0.1)
     return []

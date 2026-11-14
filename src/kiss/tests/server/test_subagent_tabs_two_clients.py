@@ -371,6 +371,14 @@ class SubagentTabsTwoClientsTest(TwoClientHarness):
                 what=f"c: running sub-agent tabs on replay, got "
                 f"{self._running_announced(c)}",
             )
+            # c's own replay is over once it has offered c each child's
+            # transcript.  The announcements counted above reach every
+            # client, those of a's and b's resumes in step 1 too, so c
+            # can hold all three while its replay is still on its way:
+            # that replay repeats to c a close made before it reaches
+            # the child, and c was then told twice in step 2b.
+            for tab in (plain_tab, nesting_tab, grand_tab):
+                self.wait_event(c, "replay_deferred", tabId=tab)
             # Every announcement of the grandchild -- the live spawn and
             # each replay -- names the NESTING child as its parent, never
             # the top-level chat tab.

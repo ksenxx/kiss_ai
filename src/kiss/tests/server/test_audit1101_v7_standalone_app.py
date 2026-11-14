@@ -45,7 +45,6 @@ import platform
 import plistlib
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import threading
@@ -60,7 +59,7 @@ import pytest
 from kiss.core.brand import BRAND
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.server import standalone_app
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import posix_only, write_sh_stub
 
 pytestmark = posix_only("stub commands are sh scripts")
 
@@ -71,10 +70,7 @@ TIMEOUT = 0.5
 def _stub(bin_dir: Path, name: str, body: str) -> Path:
     """Put an executable ``sh`` script *name* with *body* into *bin_dir*."""
     bin_dir.mkdir(parents=True, exist_ok=True)
-    stub = bin_dir / name
-    stub.write_text("#!/bin/sh\n" + body)
-    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
-    return stub
+    return write_sh_stub(bin_dir / name, body)
 
 
 def _hanging_stub(bin_dir: Path, name: str) -> Path:

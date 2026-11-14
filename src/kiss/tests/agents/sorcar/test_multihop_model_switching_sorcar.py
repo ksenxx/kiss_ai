@@ -260,6 +260,12 @@ class TestSorcarAgentRunMultiHopLive:
         for i, word in secrets.items():
             (work_dir / f"secret{i}.txt").write_text(f"The secret word is {word}\n")
 
+        # Step 6 asks for a response of its own.  Told only to keep the
+        # order, the last model at times put the read of the third file
+        # and ``finish`` in one response: it wrote the summary before it
+        # had the file's text and made the third word up (1 of 5 full
+        # runs, 1 of 16 repeats), though the read ran and both hand-offs
+        # had worked.
         prompt = (
             "Perform these steps EXACTLY in order. Do not skip, reorder, or "
             "add steps.\n"
@@ -268,8 +274,10 @@ class TestSorcarAgentRunMultiHopLive:
             f"3. Use the Read tool to read {work_dir}/secret2.txt.\n"
             "4. Call set_model with model_name 'gemini-2.5-flash'.\n"
             f"5. Use the Read tool to read {work_dir}/secret3.txt.\n"
-            "6. Call finish with success=True and a summary that lists all "
-            "three secret words exactly as written in the files.\n"
+            "6. Once you have received the text of secret3.txt, and in a "
+            "response of its own, call finish with success=True and a "
+            "summary that lists all three secret words exactly as written "
+            "in the files.\n"
         )
         agent = SorcarAgent("multihop-run-live")
         result = agent.run(

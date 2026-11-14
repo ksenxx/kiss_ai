@@ -290,6 +290,82 @@ _READ_AGAIN = "Call get_page_content() to read the page again and use the IDs it
 
 _SCROLL_DELTA = {"down": (0, 300), "up": (0, -300), "right": (300, 0), "left": (-300, 0)}
 
+# Scroll by (dx, dy) what a wheel turned at (x, y) scrolls: the nearest
+# box around the point that scrolls that way and has room left, else the
+# page.  For a point over an iframe whose renderer does not answer, where
+# the wheel itself is held as the pointer was (``WebUseTool.scroll``).
+# The boxes around the point are those of the innermost element there
+# that the page's script reaches, in open shadow trees and in frames of
+# the page's own site as well (drawn at whatever scale), where the
+# documents scroll too.  As for a wheel, a box or a document that hides
+# what it does not show (``overflow: hidden``) is passed over, and one
+# that keeps its scrolling to itself (``overscroll-behavior``) ends the
+# search, scrolled or not.  The boxes are taken from the element tree:
+# one that is laid out against a box further out (``position: fixed`` in
+# a box that scrolls) is still looked for in the boxes it is written in.
+# Each is scrolled by the delta in its own pixels, which is not what a
+# wheel turns a zoomed one by.
+_SCROLL_AT_POINT_JS = """([x, y, dx, dy]) => {
+  const [flow, chain] = dy
+    ? ["overflowY", "overscrollBehaviorY"] : ["overflowX", "overscrollBehaviorX"];
+  const inside = (el) => {
+    if (el.shadowRoot) return el.shadowRoot.elementFromPoint(x, y);
+    const doc = el.contentDocument;
+    if (!doc) return null;
+    const box = el.getBoundingClientRect();
+    const style = el.ownerDocument.defaultView.getComputedStyle(el);
+    // A frame's document is measured in the frame's own pixels, drawn at any scale.
+    x = (x - box.left) / (box.width / el.offsetWidth || 1);
+    y = (y - box.top) / (box.height / el.offsetHeight || 1);
+    x -= el.clientLeft + parseFloat(style.paddingLeft);
+    y -= el.clientTop + parseFloat(style.paddingTop);
+    // No element is at the frame's own scroll bar, where a wheel scrolls the frame's document.
+    const {innerWidth, innerHeight} = doc.defaultView;
+    const shown = x >= 0 && y >= 0 && x < innerWidth && y < innerHeight;
+    return doc.elementFromPoint(x, y) || (shown ? doc.documentElement : null);
+  };
+  const moved = (target, at) => {
+    const before = at();
+    target.scrollBy({left: dx, top: dy, behavior: "instant"});
+    return at().some((offset, axis) => offset !== before[axis]);
+  };
+  let el = document.elementFromPoint(x, y) || document.documentElement;
+  for (let inner; el && (inner = inside(el)) && inner !== el; el = inner);
+  while (el) {
+    const doc = el.ownerDocument, view = doc.defaultView, root = doc.documentElement;
+    const style = (of) => view.getComputedStyle(of);
+    const contained = (of) => {
+      const {contain, contentVisibility = "visible", containerType = "normal"} = style(of);
+      // A container that answers scroll-state queries only keeps nothing to itself.
+      return contain !== "none" || contentVisibility !== "visible"
+        || !/^(normal|scroll-state)$/.test(containerType);
+    };
+    // The window scrolls as the root element says, or as the body does for a root that says
+    // nothing either way, unless one of the two is contained: the body then scrolls itself.
+    const {overflowX, overflowY} = style(root);
+    const body = doc.body && doc.body.localName === "body" ? doc.body : null;
+    const shown = body && overflowX === "visible" && overflowY === "visible"
+      && !contained(root) && !contained(body) ? body : root;
+    if (el !== root && el !== shown) {
+      const {display, [flow]: overflow, [chain]: kept} = style(el);
+      if (/auto|scroll/.test(overflow) && moved(el, () => [el.scrollLeft, el.scrollTop])) break;
+      // Scrolling is kept by a box that scrolls, not by a wrapper that has no such box.
+      const boxed = !/^(contents|inline|table-(row|header|footer).*)$/.test(display);
+      if (boxed && !/visible|clip/.test(overflow) && kept !== "auto") break;
+    }
+    const outer = el.assignedSlot || el.parentElement || el.getRootNode().host;
+    if (outer) {
+      el = outer;
+      continue;
+    }
+    if (!/hidden|clip/.test(style(shown)[flow]) && moved(view, () => [view.scrollX, view.scrollY]))
+      break;
+    if (style(root)[chain] !== "auto") break;
+    el = view.frameElement;
+  }
+  return [true];
+}"""
+
 
 _CLOSE_WATCHDOG_SECS = 15.0
 # How long a new driver may take to answer its handshake before it is
@@ -2713,7 +2789,7 @@ class WebUseTool:
         goto = partial(self._page.goto, url, wait_until=wait_until, timeout=30000)
         return self._driver_call(goto, 30000, "Navigation")
 
-    def _move_mouse_to(self, x: float, y: float) -> None:
+    def _move_mouse_to(self, x: float, y: float) -> bool:
         """Move the pointer to (*x*, *y*) along a curved, decelerating path.
 
         Playwright's ``click()`` teleports the pointer onto the target,
@@ -2722,9 +2798,25 @@ class WebUseTool:
         point of the viewport right after a launch).  Callers hold
         :meth:`_input_hang_watchdog` because ``mouse.move`` has no timeout.
 
+        A move is acknowledged by the renderer of the frame under the
+        pointer, which for an iframe of another site is not the page's
+        own.  One that never answers (a script that does not return)
+        held the move of a path that merely crossed it until the
+        watchdog killed the browser, under a page that was answering
+        all along, and the click failed for it.  Each move therefore
+        gets a round trip (:meth:`_pointer_step`).  When such a frame
+        holds one, the path ends there and the pointer goes straight
+        to the target, the way Playwright's own click puts it; what is
+        under the target then decides, as it did.
+
         Args:
             x: Target x in viewport CSS pixels.
             y: Target y in viewport CSS pixels.
+
+        Returns:
+            Whether what is at the target took the pointer: ``False``
+            when that is a frame that does not answer, in a page that
+            does.  Raw input sent there next is held as the move was.
         """
         if self._mouse_xy is None:
             vw, vh = self._viewport_size()
@@ -2732,9 +2824,50 @@ class WebUseTool:
                 random.uniform(vw * 0.2, vw * 0.8),
                 random.uniform(vh * 0.2, vh * 0.8),
             )
+        taken = True
         for px, py in web_stealth.mouse_path(self._mouse_xy, (x, y)):
-            self._page.mouse.move(px, py, steps=2)
+            if not self._pointer_step(px, py, steps=2):
+                logger.debug("a frame under the pointer's path does not answer; path cut short")
+                taken = self._pointer_step(x, y, steps=1)
+                break
         self._mouse_xy = (x, y)
+        return taken
+
+    def _pointer_step(self, x: float, y: float, steps: int) -> bool:
+        """Move the pointer to (*x*, *y*) and tell whether what is there took the move.
+
+        The move gets a round trip to be acknowledged.  One that is not
+        is given up (:func:`_cdp_call`): the events of it the browser
+        has dispatched stay with the frame that does not take them.
+        Whose frame that is, the page tells.  One that does not answer
+        either was wedged by the move (a ``mousemove`` handler of its
+        own that never returns): the move is sent again without a
+        deadline, raw input that hangs, which the caller's watchdog
+        ends as it ends any other.
+
+        Args:
+            x: Target x in viewport CSS pixels.
+            y: Target y in viewport CSS pixels.
+            steps: How many events the move is made of (Playwright
+                spreads them evenly from where it last put the pointer).
+
+        Returns:
+            ``False`` when the move was not acknowledged within
+            :data:`_CDP_CALL_TIMEOUT_SECS` although the page answers:
+            the frame under the pointer has a renderer of its own,
+            which does not.
+        """
+        try:
+            _cdp_call(self._page, self._page.mouse._impl_obj.move(x, y, steps=steps))
+            return True
+        except TimeoutError:
+            pass
+        try:
+            self._require_responsive_renderer()
+        except (TimeoutError, web_stealth.playwright_api().TimeoutError):
+            self._page.mouse.move(x, y, steps=steps)
+            return True
+        return False
 
     def _human_click(self, locator: Any, hover_only: bool = False) -> None:
         """Click (or only hover) *locator* the way a person does.
@@ -3505,13 +3638,21 @@ class WebUseTool:
             def wheel() -> None:
                 # Wheel from wherever the pointer lands in the middle
                 # of the page, with uneven notches and pauses like a
-                # person's scroll wheel.
-                self._move_mouse_to(
-                    random.uniform(vw * 0.3, vw * 0.7), random.uniform(vh * 0.3, vh * 0.7)
-                )
+                # person's scroll wheel.  Over an iframe that does not
+                # answer the wheel would be held as the pointer was,
+                # until the watchdog killed the browser under a page
+                # that answers: the page scrolls what the wheel would
+                # have, itself.
+                x = random.uniform(vw * 0.3, vw * 0.7)
+                y = random.uniform(vh * 0.3, vh * 0.7)
+                taken = self._move_mouse_to(x, y)
                 for _ in range(amount):
                     notch = random.uniform(0.8, 1.2)
-                    self._page.mouse.wheel(dx * notch, dy * notch)
+                    if taken:
+                        self._page.mouse.wheel(dx * notch, dy * notch)
+                    else:
+                        turn = [x, y, dx * notch, dy * notch]
+                        self._read_page(self._page, _SCROLL_AT_POINT_JS, turn)
                     self._page.wait_for_timeout(random.randint(60, 180))
 
             self._input_hang_watchdog(wheel, deadline)

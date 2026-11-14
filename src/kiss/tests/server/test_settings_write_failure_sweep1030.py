@@ -35,8 +35,6 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
-from websockets.sync.server import Server
-
 from kiss.agents.sorcar import chrome_bridge
 from kiss.core import user_config
 from kiss.server.commands import _CommandsMixin
@@ -199,8 +197,7 @@ class SettingsWriteFailureTest(TwoClientHarness):
         lowered = threading.Event()
 
         def starve_the_bridge_thread(frame_locals: dict[str, Any]) -> bool:
-            serving = getattr(frame_locals.get("target"), "__self__", None)
-            if isinstance(serving, Server):
+            if frame_locals.get("target") is chrome_bridge._serve_until_closed:
                 starved.enter_context(nproc_limit_lowered_to_one())
                 lowered.set()
             return False

@@ -38,6 +38,7 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import ServerConnection
 
+from kiss.agents.sorcar import sea_commands
 from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import _WS_PING_TIMEOUT, RemoteAccessServer
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
@@ -87,6 +88,16 @@ class TestStalledPeerPing(IsolatedAsyncioTestCase):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        # So is the SEA registry watcher: it publishes its first rescan
+        # from its own thread a fraction of a second after the start,
+        # and the ``seaCommands`` frame broadcast then waits behind the
+        # flood until its bounded send drops the stalled peer, before
+        # the test has seen the stall or just as the ping begins.  Its
+        # thread gets up to 60 s to finish a notification in flight
+        # before the server unsubscribes; the server's own stop waits
+        # only 5 s for it.
+        await asyncio.to_thread(sea_commands.stop_registry_watcher, 60.0)
+        await asyncio.to_thread(self.server._stop_sea_command_watcher)
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
