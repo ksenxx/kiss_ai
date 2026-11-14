@@ -882,6 +882,10 @@ def test_a_watchdog_that_fired_as_its_call_ended_spares_the_next_call(tmp_path, 
             fired.append(threading.current_thread())  # the last one is the one held
             return bool(entry.get("operation", name) == name)
 
+        def the_recovery_is_logged(entry: dict[str, Any]) -> bool:
+            recovered.set()
+            return False  # never hold the logging thread, only mark the recovery as over
+
         def wait_until_over() -> None:
             if kind == "live":  # its thread is the daemon's loop: the recovery's future is done
                 recovered.wait(30)
@@ -889,7 +893,7 @@ def test_a_watchdog_that_fired_as_its_call_ended_spares_the_next_call(tmp_path, 
                 fired[-1].join(30)
 
         late = Pause(held.__code__, its_recovery_starts)
-        done = Pause(_log_future_error.__code__, lambda entry: bool(recovered.set()))
+        done = Pause(_log_future_error.__code__, the_recovery_is_logged)
         other = threading.Thread(
             target=_resume_then_let_go, args=(late, driver, wait_until_over), daemon=True
         )
