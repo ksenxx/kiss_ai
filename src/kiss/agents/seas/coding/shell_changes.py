@@ -3,14 +3,12 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""What a shell command changes: the file-change reader of the coding gate.
+"""What a shell command changes: the file-change reader of the coding SEA's finish gate.
 
-The coding gate (:mod:`kiss.agents.sorcar.coding_gate`) and the
-containerised coding SEA (:mod:`kiss.agents.seas.coding.coding_sea`) need
-to know when the agent's work changed: to arm the gate on a code file a
-shell command wrote, to count the changes between a passing run of the
-verifier and a finish (the SEA reuses the agent's own run when nothing
-changed, the gate its own last one), and to review only after a change.
+The containerised coding SEA (:mod:`kiss.agents.seas.coding.coding_sea`)
+needs to know when the agent's work changed: to count the changes between
+a passing run of the verifier and a finish (the gate reuses the agent's
+own run when nothing changed) and to review only after a change.
 What a shell command changes is read from its simple commands
 (:func:`~kiss.agents.sorcar.shell_scan.simple_commands`), the way the
 shell reads them: a program such as ``rm`` or ``cp`` counts in command
@@ -18,12 +16,6 @@ position only (``cat install.sh`` and ``git commit -m "rm stale"`` run
 nothing of the kind), a here-document is input to the program that
 reads it, and a file under a ``tmp`` directory is the run's scratch
 (a saved probe output, a copied log), not a change of the work.
-
-The module once also refused a ``finish`` whose summary hedged or that
-followed an edit no command checked.  Those refusals were answered by a
-rewording of the summary far more often than by a check, and the
-measurement of 2026-11-04 found no pass that depended on them, so the
-gate no longer refuses on the summary's wording.
 """
 
 from __future__ import annotations
@@ -117,11 +109,6 @@ _NESTED_TOOLS = {("uv", "pip"): "pip"}
 _LAUNCHERS = frozenset({("uv", "run")})
 _LAUNCH = "<launch>"
 _OUTER_TOOLS = frozenset(tool for tool, _ in _LAUNCHERS | frozenset(_NESTED_TOOLS))
-
-#: Tool names that change files outright.
-EDIT_TOOLS = frozenset({"Edit", "Write"})
-#: Tool names that run shell commands.
-SHELL_TOOLS = frozenset({"Bash", "run_commands_parallel"})
 
 
 def is_scratch_path(path: str) -> bool:

@@ -675,18 +675,10 @@ class KISSAgent(Base):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.pre_step_hook: Callable[..., None] | None = None
-        self.tool_call_guard: Callable[[str, dict[str, Any]], str | Verdict | None] | None = None
+        self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
         self.llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None
         self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
         self.llm_response_hook: Callable[[LLMReply], Verdict] | None = None
-        self.tool_result_hook: Callable[[str, dict[str, Any], str, bool], None] | None = None
-        """Called after every tool call the loop or a redirect made, with the
-        tool's name, its arguments, the result text the model reads and
-        whether the call was refused (the text is then the refusal).  A
-        call a hook refused and a call made inside another (a redirected
-        ``Edit`` and its follow-up) are reported too, each with its own
-        result, so a reader needs no pairing of a turn's calls with its
-        results.  ``SorcarAgent`` installs it for its coding gate."""
         self.helper_charge_hook: Callable[[str, float, int, str], None] | None = None
         """Called with the model, USD, tokens and unique key of each paid
         call the model's helpers made for this agent (a vision bridge
@@ -1875,9 +1867,8 @@ class KISSAgent(Base):
         sees.  Allowing means "no objection", not "must execute": the
         framework's :attr:`tool_call_guard` may still block the call.  A
         long-running call keeps the prompt cache warm meanwhile.  The
-        :attr:`tool_result_hook` then reads the result (a refusal
-        included, :meth:`_call_result_hook`) before it is settled
-        (:meth:`_settle_tool_result`): the note of an allowing verdict
+        result is then settled (:meth:`_settle_tool_result`): the note of
+        an allowing verdict
         (:func:`~kiss.core.tool_verdict.allow_with_note`) and a pending
         re-issue reminder are appended to it.  A call made inside a
         natively served call (*turn* given: the call a tool of the turn
@@ -1901,15 +1892,14 @@ class KISSAgent(Base):
             was not executed (its ``ends_run`` says whether the run ends
             on it), else ``None``.
         """
-        name, response, verdict, owed, call = self._execute_tool_through_hooks(function_call, turn)
-        self._call_result_hook(call, name, response, verdict, turn)
+        name, response, verdict, owed = self._execute_tool_through_hooks(function_call, turn)
         if turn is None:
             return self._settle_tool_result(name, response, verdict, owed)
         return locked_call(turn.lock, self._settle_native_call, turn, name, response, verdict, owed)
 
     def _execute_tool_through_hooks(
         self, function_call: dict[str, Any], turn: NativeTurn | None
-    ) -> tuple[str, str, Verdict, str | None, dict[str, Any]]:
+    ) -> tuple[str, str, Verdict, str | None]:
         """Run the hook, the guard, then the tool: :meth:`_guarded_execute_tool` unsettled.
 
         Args:
@@ -1920,15 +1910,10 @@ class KISSAgent(Base):
                 the agent loop.
 
         Returns:
-            tuple[str, str, Verdict, str | None, dict[str, Any]]: The
-            tool's name and result (a refusal included), the hook's or
-            guard's verdict on the call, :attr:`_refused_call` as it was
-            before the call -- what :meth:`_settle_tool_result` takes --
-            and the call as it was made: *function_call* with the
-            arguments the hook, the guard and the tool saw, which is
-            what the ``tool_result_hook`` must be given
-            (:meth:`_call_result_hook`) so that it books the result
-            under the arguments that ran.
+            tuple[str, str, Verdict, str | None]: The tool's name and
+            result (a refusal included), the hook's or guard's verdict
+            on the call and :attr:`_refused_call` as it was before the
+            call -- what :meth:`_settle_tool_result` takes.
         """
         name = function_call["name"]
         args = _call_args(function_call)
@@ -1949,7 +1934,7 @@ class KISSAgent(Base):
             else locked_call(turn.lock, self._admit_call, turn, name, verdict)
         )
         if not admitted:
-            return name, refusal_result(name, "The turn has ended."), verdict, None, function_call
+            return name, refusal_result(name, "The turn has ended."), verdict, None
         if not verdict.allowed:
             name, response = self._execute_tool(function_call, blocked=verdict.text, turn=turn)
         elif turn is None and is_long_running_call(name, args):
@@ -1958,7 +1943,7 @@ class KISSAgent(Base):
             name, response = self._execute_tool(function_call, turn=turn)
         if restored and verdict.allowed:
             response = f"{response}\n[{'; '.join(restored)}]"
-        return name, response, verdict, owed, function_call
+        return name, response, verdict, owed
 
     def _admit_call(
         self, turn: NativeTurn | None, name: str, verdict: Verdict
@@ -2028,48 +2013,6 @@ class KISSAgent(Base):
             return step(*args)
         return locked_call(turn.lock, _unless_closed, turn, step, *args)
 
-    def _call_result_hook(
-        self,
-        function_call: dict[str, Any],
-        name: str,
-        response: str,
-        verdict: Verdict,
-        turn: NativeTurn | None,
-    ) -> None:
-        """Give the :attr:`tool_result_hook` the result of a call before it is settled.
-
-        The hook reads the tool's result as it came back (a refusal
-        included), before the note of an allowing verdict and a pending
-        re-issue reminder are appended to it (:meth:`_settle_tool_result`),
-        and whether the call was refused: by the hook or guard, or by
-        one on a call it redirected to (:attr:`_redirect_ended`).  For a
-        natively served call the hook and the refusal are read in one
-        step of its *turn* (:meth:`_turn_step`), so a result the turn's
-        end abandoned never reaches the hook of the agent's next run,
-        and the hook is called outside ``turn.lock``: it may block
-        (Sorcar's gate runs git in it) and the Stop closes the turn
-        under that lock.
-
-        Args:
-            function_call: The call as it was made: ``name`` and the
-                ``arguments`` the hook, the guard and the tool saw (a
-                compaction stub expanded, :meth:`_execute_tool_through_hooks`).
-            name: The tool's name, as :meth:`_execute_tool` returned it.
-            response: The tool's result (a refusal included).
-            verdict: The hook's or guard's verdict on the call.
-            turn: The native turn the call belongs to; ``None`` for a
-                call of the agent loop.
-        """
-        hook, refused = self._turn_step(turn, self._result_hook_for, verdict) or (None, False)
-        if hook is not None:
-            hook(name, _call_args(function_call), response, refused)
-
-    def _result_hook_for(
-        self, verdict: Verdict
-    ) -> tuple[Callable[[str, dict[str, Any], str, bool], None] | None, bool]:
-        """Return the :attr:`tool_result_hook` and whether a call with *verdict* was refused."""
-        return self.tool_result_hook, not verdict.allowed or self._redirect_ended is not None
-
     def _settle_tool_result(
         self,
         name: str,
@@ -2078,9 +2021,6 @@ class KISSAgent(Base):
         owed: str | None,
     ) -> tuple[str, str, Verdict | None]:
         """Settle the result of a call :meth:`_guarded_execute_tool` ran.
-
-        The :attr:`tool_result_hook` has read the result already
-        (:meth:`_call_result_hook`).
 
         Args:
             name: The tool's name, as :meth:`_execute_tool` returned it.
@@ -2212,10 +2152,7 @@ class KISSAgent(Base):
             return name, refusal_result(name, f"The run has ended: {turn.ended.text}")
         previous_printer = bind_printer(turn.printer)
         try:
-            name, response, verdict, owed, call = self._execute_tool_through_hooks(
-                function_call, turn
-            )
-            self._call_result_hook(call, name, response, verdict, turn)
+            name, response, verdict, owed = self._execute_tool_through_hooks(function_call, turn)
             name, response, blocked = locked_call(
                 turn.lock,
                 self._publish_native_call,
@@ -2286,9 +2223,8 @@ class KISSAgent(Base):
         (:meth:`_settle_tool_result`: the refusal bookkeeping), the
         routine-turn note, the trajectory — are one step with respect
         to the closing of the turn, so a call the turn's end abandoned
-        never writes to the agent once the turn is closed (the
-        ``tool_result_hook`` ran before and the limit check comes
-        after, both outside the lock: :meth:`_turn_step`).
+        never writes to the agent once the turn is closed (the limit
+        check comes after, outside the lock: :meth:`_turn_step`).
 
         Args:
             turn: The record of the turn the call belongs to.
@@ -2619,8 +2555,8 @@ class KISSAgent(Base):
         every call); only when it allows does the framework's
         :attr:`tool_call_guard` get its say (Sorcar blocks ``finish``
         while a user follow-up is queued or a worktree is unmerged).
-        Both keep state of their run (Sorcar's guard its coding gate,
-        the root SEA's hook the summary it is owed) and must not be
+        Both keep state of their run (Sorcar's guard its one-shot
+        refusals, the root SEA's hook the summary it is owed) and must not be
         asked about a call that is not its run's.  So they are read in
         one step of *turn* (:meth:`_turn_step`): a call whose turn is
         closed asks neither.  And the hook may block past the Stop
@@ -2638,12 +2574,10 @@ class KISSAgent(Base):
         Returns:
             Verdict: The hook's refusing verdict (a
             :func:`~kiss.core.tool_verdict.end_run` one ends the run),
-            the guard's refusal text as a refusing verdict, the guard's
-            own verdict when it returns one (an allowing one with a note
-            the call's result ends with), or the hook's allowing verdict
-            when neither objects (its ``text``, if any, is such a note)
-            or the turn closed while the hook ran; ``ALLOW`` when the
-            turn was closed already.
+            the guard's refusal text as a refusing verdict, or the hook's
+            allowing verdict when neither objects (its ``text``, if any,
+            is a note the call's result ends with) or the turn closed
+            while the hook ran; ``ALLOW`` when the turn was closed already.
         """
         hook, guard = self._turn_step(turn, self._vetoes) or (None, None)
         verdict = ALLOW
@@ -2654,15 +2588,13 @@ class KISSAgent(Base):
         if guard is None or (turn is not None and turn.closed.is_set()):
             return verdict
         text = guard(name, args)
-        if isinstance(text, Verdict):
-            return text
         return verdict if text is None else Verdict(False, text)
 
     def _vetoes(
         self,
     ) -> tuple[
         Callable[[str, dict[str, Any]], Verdict] | None,
-        Callable[[str, dict[str, Any]], str | Verdict | None] | None,
+        Callable[[str, dict[str, Any]], str | None] | None,
     ]:
         """Return the :attr:`tool_call_hook` and the :attr:`tool_call_guard`."""
         return self.tool_call_hook, self.tool_call_guard

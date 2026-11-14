@@ -32,14 +32,16 @@ _SEA_PATH = Path(brbestrouter_sea.__file__).resolve()
 
 
 def test_models_are_the_bedrock_catalog_entries() -> None:
-    """Opus 5.5 (medium, max) and Fable 5.1 (max) on Bedrock, all in the catalog."""
+    """Opus 5.5 (medium; max works and writes) and Fable 5.1 (max) on Bedrock, in the catalog."""
     assert brbestrouter_sea.SIMPLE_MODEL == "bedrock/global.anthropic.claude-opus-5-5-medium"
     assert brbestrouter_sea.PRIMARY_MODEL == "bedrock/global.anthropic.claude-opus-5-5-max"
     assert brbestrouter_sea.REVIEW_MODEL == "bedrock/global.anthropic.claude-fable-5-1-max"
+    assert brbestrouter_sea.WRITER_MODEL == "bedrock/global.anthropic.claude-opus-5-5-max"
     for model in (
         brbestrouter_sea.SIMPLE_MODEL,
         brbestrouter_sea.PRIMARY_MODEL,
         brbestrouter_sea.REVIEW_MODEL,
+        brbestrouter_sea.WRITER_MODEL,
     ):
         assert model in MODEL_INFO, model
         assert MODEL_INFO[model].is_function_calling_supported, model
@@ -55,16 +57,28 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     protocol = brbestrouter_sea.SYSTEM_PROMPT
     assert sea.system_prompt("BASE") == "BASE\n\n" + protocol
     assert protocol.startswith("## Model routing protocol (brbestrouter)\n\n")
+    assert protocol == bestrouter_sea.routing_prompt(
+        "brbestrouter",
+        brbestrouter_sea.SIMPLE_MODEL,
+        brbestrouter_sea.PRIMARY_MODEL,
+        brbestrouter_sea.REVIEW_MODEL,
+        brbestrouter_sea.WRITER_MODEL,
+    )
     flat = " ".join(protocol.split())
     for phrase in (
         "Use 'bedrock/global.anthropic.claude-opus-5-5-medium' for simple questions and "
         "queries.",
+        "Use 'bedrock/global.anthropic.claude-opus-5-5-max' for writing any documents, papers, "
+        "reports, results which will be read by a human.",
         "Use 'bedrock/global.anthropic.claude-opus-5-5-max' model for all other tasks, "
-        "including software development and analysis and writing.",
+        "including software development and analysis.",
+        "Call `set_model(\"bedrock/global.anthropic.claude-opus-5-5-max\")` before you write "
+        "the final summary.",
         "Use bedrock/global.anthropic.claude-fable-5-1-max through "
         "`run_agent(model=\"bedrock/global.anthropic.claude-fable-5-1-max\", "
         "tool_profile=\"review\", wait=\"false\")` for a thorough read-only review and "
-        "debugging of the other model's work,",
+        "debugging of the work of 'bedrock/global.anthropic.claude-opus-5-5-max' and "
+        "'bedrock/global.anthropic.claude-opus-5-5-max',",
         "Use at most 75% of the task budget in bedrock/global.anthropic.claude-fable-5-1-max,",
         "Use the model names literally without hallucinating new model names.",
     ):
@@ -73,6 +87,7 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     assert "not codex" not in protocol
     assert f"'{bestrouter_sea.SIMPLE_MODEL}'" not in protocol
     assert f"'{bestrouter_sea.PRIMARY_MODEL}'" not in protocol
+    assert bestrouter_sea.WRITER_MODEL not in protocol
     # The reviewer is unquoted and wraps onto a new line: only the flat text shows a leak.
     assert f" {bestrouter_sea.REVIEW_MODEL} " in " ".join(bestrouter_sea.SYSTEM_PROMPT.split())
     assert f" {bestrouter_sea.REVIEW_MODEL} " not in flat
@@ -83,6 +98,7 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     assert brbestrouter_sea.SIMPLE_MODEL in description
     assert brbestrouter_sea.PRIMARY_MODEL in description
     assert brbestrouter_sea.REVIEW_MODEL in description
+    assert f", writes on {brbestrouter_sea.WRITER_MODEL}, " in description
     assert "/brbestrouter <task>" in description
     assert_no_removed_getters(brbestrouter_sea)
 

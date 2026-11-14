@@ -29,6 +29,7 @@ from types import FrameType
 from typing import Any
 
 import pytest
+import yaml
 from websockets.asyncio.server import ServerConnection
 
 from kiss.agents.sorcar import agent_dispatch, cron_agent
@@ -40,7 +41,6 @@ from kiss.agents.sorcar.agent_dispatch import (
     unread_results_note,
     wait_any_results,
 )
-from kiss.agents.sorcar.coding_gate import dispatch_successes
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.kiss_agent import is_routine_turn
 from kiss.core.locked import locked_call
@@ -135,7 +135,7 @@ def test_wait_any_returns_the_first_job_to_finish_and_never_twice(
         assert out.startswith(f"Finished: {fast.job_id}; running: {slow.job_id}.\n"), out
         results = wait_any_results(out)
         assert list(results) == [fast.job_id]
-        assert dispatch_successes(results[fast.job_id]) == [True]
+        assert yaml.safe_load(results[fast.job_id])["success"] is True
         assert "child 0 done" in results[fast.job_id]
         assert fast.reported and not slow.reported
         assert not is_routine_turn("agent_job", {"job_id": "", "action": "wait_any"}, out, False)

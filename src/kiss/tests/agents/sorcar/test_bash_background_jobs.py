@@ -350,8 +350,8 @@ class TestBashJob:
         narrow = tools.bash_job(job_id, tail_lines=100, max_output_chars=400)
         assert len(narrow) <= 400 and narrow.endswith("\n99\n100\n") and "\n1\n" not in narrow
         # A cap smaller than the header cuts what follows the status line, never the status:
-        # the coding gate reads the job's exit from it (the Bash result's defect of the cross
-        # finding of B2 and B4, 2026-11-12, in the job report).
+        # the coding SEA's gate reads the job's exit from it (the Bash result's defect of the
+        # cross finding of B2 and B4, 2026-11-12, in the job report).
         status = f"Job {job_id}: exited with code 0\n"
         tiny = tools.bash_job(job_id, tail_lines=100, max_output_chars=60)
         assert len(tiny) == 60 and tiny.startswith(status + "Command: seq 1 100\n"), tiny

@@ -182,19 +182,15 @@ def Write(text: str) -> str:  # noqa: N802
 
 
 class _ArgumentsSeen:
-    """A ``tool_call_hook`` (the instance) or ``tool_result_hook`` (:meth:`result`)
-    recording each ``text`` argument it is given."""
+    """A ``tool_call_hook`` recording each ``text`` argument it is given."""
 
     def __init__(self) -> None:
         self.texts: list[str] = []
 
     def __call__(self, name: str, args: dict[str, Any]) -> Verdict:
-        self.result(name, args, "", False)
-        return ALLOW
-
-    def result(self, name: str, args: dict[str, Any], response: str, refused: bool) -> None:
         if "text" in args:
             self.texts.append(str(args["text"]))
+        return ALLOW
 
 
 def _run_agent(
@@ -203,7 +199,6 @@ def _run_agent(
     hook_calls: list[int],
     compaction: bool = True,
     tool_call_hook: _ArgumentsSeen | None = None,
-    tool_result_hook: _ArgumentsSeen | None = None,
 ) -> KISSAgent:
     agent = KISSAgent("compaction-test")
 
@@ -211,8 +206,6 @@ def _run_agent(
         hook_calls.append(agent.step_count)
 
     agent.context_reset_hook = on_reset
-    if tool_result_hook is not None:
-        agent.tool_result_hook = tool_result_hook.result
     agent.run(
         model_name=MODEL,
         prompt_template="Call big_output repeatedly.",
@@ -633,12 +626,10 @@ def test_agent_expands_a_stub_the_model_passes_back_and_refuses_an_embedded_one(
     script.append(tool_call_body("Write", {"text": "# header\n" + stub}, 100_000))
     script.append(finish_body("<p>done</p>", prompt_tokens=60_000))
     hook_calls: list[int] = []
-    call_hook, result_hook = _ArgumentsSeen(), _ArgumentsSeen()
+    call_hook = _ArgumentsSeen()
     WRITTEN.clear()
     with serve(script) as (url, requests):
-        agent = _run_agent(
-            url, len(script), hook_calls, tool_call_hook=call_hook, tool_result_hook=result_hook
-        )
+        agent = _run_agent(url, len(script), hook_calls, tool_call_hook=call_hook)
     assert hook_calls == [32]
     assert agent._compaction_table.originals == {1: text}
     tool_msgs = [m for m in agent.model.conversation if m.get("role") == "tool"]
@@ -647,15 +638,17 @@ def test_agent_expands_a_stub_the_model_passes_back_and_refuses_an_embedded_one(
     assert "[argument 'text' (#1) restored from the compaction table]" in expanded
     assert "carries a compaction stub inside a longer text" in refused
     assert not refused.startswith("written ")
-    # The call hook, the tool and the result hook all see the restored
-    # original, so a result is booked under the arguments that ran; the
-    # refused call (no hook consulted, the tool not run) keeps what was sent.
+    # The call hook and the tool both see the restored original; the refused
+    # call reaches neither (no hook consulted, the tool not run).
     assert call_hook.texts == [text] * 32
     assert WRITTEN == [text] * 32
-    assert result_hook.texts == [text] * 32 + ["# header\n" + stub]
-    # The conversation's own record of the call keeps the stub as the model sent it.
+    # The conversation's own record of each call keeps what the model sent:
+    # the stub of the expanded call, the longer text of the refused one.
     sent = [m for m in requests[-1]["messages"] if m.get("role") == "assistant"]
     assert json.loads(sent[-2]["tool_calls"][0]["function"]["arguments"]) == {"text": stub}
+    assert json.loads(sent[-1]["tool_calls"][0]["function"]["arguments"]) == {
+        "text": "# header\n" + stub
+    }
 
 
 def test_agent_runs_tools_on_text_that_merely_names_the_stub_prefix() -> None:

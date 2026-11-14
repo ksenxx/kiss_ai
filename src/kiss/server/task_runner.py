@@ -2249,8 +2249,8 @@ class _TaskRunnerMixin:
         # else the global config's.  The classifier must call the same
         # endpoint as the run — a custom-endpoint model routed by name
         # to the default provider fails or stalls there.  A sent
-        # configuration of framework flags alone (a SEA's ``coding_gate:
-        # false``) keeps that endpoint (``framework_flags_over``).
+        # configuration of framework flags alone (a SEA's ``plain_io:
+        # true``) keeps that endpoint (``framework_flags_over``).
         _vcfg = load_config()
         _raw_model_config = cmd.get("modelConfig")
         _model_config = custom_model_config(model) or build_model_config(_vcfg)

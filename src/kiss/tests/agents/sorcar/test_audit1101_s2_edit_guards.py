@@ -122,7 +122,7 @@ def test_conversions_leave_the_files_bash_leaves(
     tools = UsefulTools(work_dir=str(tools_dir))
     tools.Read(str(tools_dir / "f"))
     result = tools._rewrite_instead(command, str(tools_dir), name, 5, 2000)
-    if result is None or result.text.startswith("REFUSED"):
+    if result is None or result.startswith("REFUSED"):
         # Not converted: the shell would run it as written (or the model re-issues it).
         assert not converts, (name, result)
         assert _tree(tools_dir) == {"f": ORIGINAL.encode()}, name

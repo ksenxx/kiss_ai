@@ -38,7 +38,12 @@ PRIMARY_MODEL = "openrouter/anthropic/claude-fable-5.2-max"
 REVIEW_MODEL = "openrouter/openai/gpt-6-astra-xhigh"
 """The model that reviews and debugs the primary model's work: GPT-6 Astra via OpenRouter."""
 
-SYSTEM_PROMPT = routing_prompt("orbestrouter", SIMPLE_MODEL, PRIMARY_MODEL, REVIEW_MODEL)
+WRITER_MODEL = "openrouter/google/gemini-4-carbon"
+"""The model that writes documents, papers, reports and results: Gemini 4 Carbon via OpenRouter."""
+
+SYSTEM_PROMPT = routing_prompt(
+    "orbestrouter", SIMPLE_MODEL, PRIMARY_MODEL, REVIEW_MODEL, WRITER_MODEL
+)
 """The routing protocol added to the system prompt of every run."""
 
 
@@ -48,7 +53,8 @@ class OrbestrouterSea(BaseSea):
     def description(self) -> str:
         """Return the one-sentence help text shown by ``/orbestrouter help``."""
         return (
-            f"Answers simple questions on {SIMPLE_MODEL}, runs every other task on "
+            f"Answers simple questions on {SIMPLE_MODEL}, writes on {WRITER_MODEL}, "
+            "runs every other task on "
             f"{PRIMARY_MODEL} and has {REVIEW_MODEL} review and debug the "
             "result read-only through a non-blocking run_agent on at most 75% of the task "
             "budget (the "

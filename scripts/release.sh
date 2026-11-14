@@ -26,7 +26,8 @@
 #    as the kiss_ai repo's main, and tag it with the version; every earlier
 #    release tag is re-pointed to its release commit when it is not one yet
 # 8. Create GitHub release
-# 9. Publish to PyPI
+# 9. Publish to PyPI, building the sdist and wheel from the public release
+#    commit (never the working checkout), so no excluded path is uploaded
 # 10. Run ./install.sh so this machine ends up running the version it just
 #     released (non-interactive, without opening the webapp); the
 #     nothing-to-release exit in step 3 runs it too before exiting
@@ -832,12 +833,30 @@ check_pypi_file_sizes() {
     done
 }
 
+# Build the sdist and wheel of <commit> minus the paths of $EXCLUDE_FILE into
+# <out-dir>. The build runs on an exported copy of the filtered tree, never on
+# the working checkout, so nothing the public repo leaves out (projects/,
+# excluded tests, untracked files) can reach PyPI.
+build_pypi_dists() {
+    local commit="$1" out_dir="$2"
+    local tree src_dir status=0
+    tree=$(filtered_tree "$commit") || return 1
+    src_dir=$(mktemp -d)
+    (set -o pipefail; git archive "$tree" | tar -x -C "$src_dir") || status=1
+    if (( status == 0 )); then
+        (cd "$src_dir" && uv build --out-dir "$out_dir") || status=1
+    fi
+    rm -rf "$src_dir"
+    return "$status"
+}
+
+# Build and upload release <version> from <commit> (the public release commit).
 publish_to_pypi() {
-    local version="$1"
+    local version="$1" commit="$2"
     
-    print_step "Building package for PyPI..."
+    print_step "Building package for PyPI from the public tree of $commit..."
     rm -rf dist/*.tar.gz dist/*.whl
-    uv build
+    build_pypi_dists "$commit" "$(pwd)/dist" || return 1
     
     if [[ -z "$(ls dist/*.tar.gz dist/*.whl 2>/dev/null)" ]]; then
         print_error "Build failed - no .tar.gz or .whl files in dist/"
@@ -999,7 +1018,7 @@ main() {
 
     # Step 9: Publish to PyPI
     print_step "Publishing to PyPI..."
-    publish_to_pypi "$VERSION"
+    publish_to_pypi "$VERSION" "$PUBLIC_COMMIT"
 
     # Step 10: Install the released version on this machine, before the stash
     # is restored so the install builds from the exact tree that was published.

@@ -93,8 +93,9 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
     assert harness.on_tool_call("run_agent", {"agent": "slack", "task": "x"}) != ALLOW
     settings = resolve_settings(harness.settings())
     assert settings["docker_image"] == f"container:{container_name}"
-    # The trial's toolset is the built-ins without ``decide`` (a text
-    # classifier, not an oracle for the task's domain) plus the checkpoint
+    # The trial's toolset is its own ``finish`` (with the ``evidence``
+    # argument the gate's review reads), the built-ins without ``decide`` (a
+    # text classifier, not an oracle for the task's domain) and the checkpoint
     # tools; neither the module nor the harness carries a removed name.
     assert_no_removed_getters(coding_sea)
     assert not hasattr(harness, "if_append_basic_tools")
@@ -109,9 +110,10 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
         return ""
 
     trial_tools = harness.tools([Bash, decide, checkpoint])
-    assert [t.__name__ for t in trial_tools] == ["Bash", "checkpoint", "rollback"]
+    assert [t.__name__ for t in trial_tools] == ["finish", "Bash", "checkpoint", "rollback"]
+    assert trial_tools[0] is coding_sea.finish
     # the trial's container checkpoint replaces the host one
-    assert trial_tools[1] == harness.checkpoint
+    assert trial_tools[2] == harness.checkpoint
     # The bundled ``coding`` SEA itself is a hidden worker: it is a factory
     # of trial SEAs, never a slash command of its own.
     assert coding_sea.CodingSea().settings({"model": "m"}) == {"model": "m", "hidden": True}
@@ -554,9 +556,10 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     run = sea_commands.evaluate_sea([loaded], "label", "task-1")
     assert run.prompt == "p"
     assert run.settings == resolved
-    # ``tools`` adds the harness's checkpoint tools to the built-ins and drops
-    # ``summary`` and ``decide``; with no ``summary`` tool the root layer's
-    # ten-step summary cadence never marks a summary due.
+    # ``tools`` puts the trial's own ``finish`` first, adds the harness's
+    # checkpoint tools to the built-ins and drops ``summary`` and ``decide``;
+    # with no ``summary`` tool the root layer's ten-step summary cadence never
+    # marks a summary due.
     def summary(description: str) -> str:
         return description
 
@@ -564,7 +567,7 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
         return state
 
     assert [t.__name__ for t in run.tools_hook([print, summary, decide])] == [
-        "print", "checkpoint", "rollback",
+        "finish", "print", "checkpoint", "rollback",
     ]
     assert loaded.has_summary_tool is False
     for step in range(1, 11):

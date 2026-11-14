@@ -49,10 +49,6 @@
   peer trickling one byte at a time held the request, its thread and
   its socket for good (audit 2026-11-08, S4 F2).  The socket is shut
   down at the deadline instead, wherever the request is.
-* The finish gate of a bridged task runs its commands through
-  ``ExecBridge.run``, the raw primitive ``DockerManager.run`` is for a
-  container: the bridge had none, so every gate command raised
-  ``AttributeError`` (audit 2026-11-10, S4 F1).
 * A bridge URL that names no endpoint (a port that is no number or out
   of range, an unclosed IPv6 bracket) and a reply nested too deep for
   the JSON decoder are an unreachable bridge like any other: the URL
@@ -85,8 +81,6 @@ from __future__ import annotations
 import dis
 import inspect
 import json
-import os
-import select
 import socket
 import sys
 import threading
@@ -95,7 +89,6 @@ from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from types import FrameType
 from typing import Any, cast
 
@@ -110,10 +103,7 @@ from kiss.agents.sorcar.exec_bridge import (
     bridge_exec,
 )
 from kiss.agents.sorcar.shell_guards import DESTRUCTIVE_VERDICT
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.benchmarks.terminal_bench.exec_bridge_server import ExecBridgeServer
 from kiss.core.kiss_error import KISSError
-from kiss.tests.agents.seas.test_coding_sea_evidence_gate import LocalEnvironment, _close, _Loop
 from kiss.tests.conftest import nproc_limit_lowered_to_one, thread_start_can_be_starved
 from kiss.tests.server.pause import Pause
 
@@ -290,43 +280,6 @@ def test_run_commands_parallel_applies_the_bash_shell_guards() -> None:
         assert server.commands == ["echo ok"], server.commands
     assert report.startswith("2 commands: 1 succeeded, 1 failed, 0 timed out.")
     assert DESTRUCTIVE_VERDICT in report
-
-
-@pytest.mark.skipif(sys.platform != "linux", reason="the bridge's tagged-tree kill scans /proc")
-def test_the_gate_shell_of_a_bridged_task_runs_its_command_raw(tmp_path: Path) -> None:
-    """``SorcarAgent._gate_shell`` on a bridged task, over the real bridge server and a local
-    environment: the output whole (three times what ``Bash`` keeps), the deadline kept, a task
-    Stop ending the running command (its tree holds the pipe ``alive`` open) and, once set,
-    posting nothing."""
-    loop = _Loop()
-    server = ExecBridgeServer(LocalEnvironment(str(tmp_path)), loop.loop)
-    agent = SorcarAgent("bridged gate")
-    agent.docker_manager = bridge = ExecBridge(f"exec:{server.url}")
-    bridge.stop_event = stop = threading.Event()
-    alive, late = tmp_path / "alive", tmp_path / "late"
-    os.mkfifo(alive)
-    reader = os.open(alive, os.O_RDONLY | os.O_NONBLOCK)
-
-    def stop_once_started() -> None:
-        if select.select([reader], [], [], 30)[0] and os.read(reader, 8) == b"started\n":
-            stop.set()
-
-    stopper = threading.Thread(target=stop_once_started)
-    stopper.start()
-    try:
-        size = 3 * MAX_OUTPUT_CHARS
-        assert agent._gate_shell(f"head -c {size} /dev/zero | tr '\\0' x", 30) == (0, "x" * size)
-        assert agent._gate_shell("sleep 30", 1) == (None, "")
-        running = f"exec 3>{alive}; echo started >&3; sleep 30"
-        assert agent._gate_shell(running, 60) == (-1, STOPPED_MESSAGE)
-        # End of file: the last process of the stopped command closed the pipe.
-        assert select.select([reader], [], [], 10)[0] and os.read(reader, 8) == b""
-        assert agent._gate_shell(f"touch {late}", 7) == (-1, STOPPED_MESSAGE)
-    finally:
-        _close(server, loop)
-        stopper.join(35)
-        os.close(reader)
-    assert not late.exists(), "a stopped gate command was still posted"
 
 
 def test_run_commands_parallel_rejects_bad_arguments_like_the_other_tools() -> None:

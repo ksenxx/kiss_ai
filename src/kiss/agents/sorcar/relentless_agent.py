@@ -807,8 +807,7 @@ class RelentlessAgent(Base):
         # Hooks installed on every per-session executor (see
         # :class:`~kiss.core.kiss_agent.KISSAgent`).
         self.pre_step_hook: Callable[..., None] | None = None
-        self.tool_call_guard: Callable[[str, dict[str, Any]], str | Verdict | None] | None = None
-        self.tool_result_hook: Callable[[str, dict[str, Any], str, bool], None] | None = None
+        self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
         self.helper_charge_hook: Callable[[str, float, int, str], None] | None = None
         self.context_reset_hook: Callable[[], None] | None = None
         self.llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None
@@ -855,7 +854,6 @@ class RelentlessAgent(Base):
         self.model_config = None
         self.pre_step_hook = None
         self.tool_call_guard = None
-        self.tool_result_hook = None
         self.helper_charge_hook = None
         self.context_reset_hook = None
         self.llm_call_hook = None
@@ -1144,7 +1142,7 @@ class RelentlessAgent(Base):
             tokens: Token count to add.
             steps: Step count to add.
             key: Stable transaction source for a RETRYABLE adjustment
-                (a classifier fold, a keyed side-channel or gate
+                (a classifier fold, a keyed side-channel or side-call
                 charge): a retry re-appends the same *key* and readers
                 count it once.  ``None`` marks a one-shot adjustment
                 (fan-out totals, TTS, property-setter deltas), which
@@ -1389,7 +1387,10 @@ class RelentlessAgent(Base):
             os.getpid(),
             self.task_description[:200],
         )
-        all_tools: list[Callable[..., Any]] = [finish, *tools]
+        # A ``finish`` among *tools* (a SEA's, taking more arguments)
+        # replaces the built-in one, in its first slot.
+        own_finish = [tool for tool in tools if tool.__name__ == "finish"]
+        all_tools = (own_finish or [finish]) + [tool for tool in tools if tool not in own_finish]
 
         progress_section = ""
         summaries: list[str] = []
@@ -1429,7 +1430,6 @@ class RelentlessAgent(Base):
             executor = KISSAgent(f"{self.name} Session-{session}")
             executor.pre_step_hook = self.pre_step_hook
             executor.tool_call_guard = self.tool_call_guard
-            executor.tool_result_hook = self.tool_result_hook
             executor.helper_charge_hook = self.helper_charge_hook
             executor.context_reset_hook = self.context_reset_hook
             if session > 0 and self.context_reset_hook is not None:

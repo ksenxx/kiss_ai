@@ -41,7 +41,6 @@ from kiss.agents.sorcar.edit_guards import (
     shadow_command,
 )
 from kiss.agents.sorcar.fanout_guard import SUBAGENT_DIR_PREFIX
-from kiss.agents.sorcar.shell_exit import Ran, exit_word, unrun
 from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.useful_tools import (
     _MAX_BINARY_READ_BYTES,
@@ -1407,37 +1406,6 @@ class DockerManager:
 
         Returns:
             The output of the command, including stdout, stderr, and exit code
-        """
-        return self.run_bash(
-            command, description, timeout_seconds, max_output_chars, until, poll_seconds).text
-
-    def run_bash(
-        self,
-        command: str,
-        description: str,
-        timeout_seconds: int = 30,
-        max_output_chars: int = MAX_OUTPUT_CHARS,
-        until: str = "",
-        poll_seconds: float = 5.0,
-    ) -> Ran:
-        """Make a :meth:`Bash` call: its result and how the command ended.
-
-        The exit is data for the agent's ``Bash`` tool to hand to the
-        coding gate (:mod:`~kiss.agents.sorcar.shell_exit`): in the
-        result's text the ``[exit code: N]`` line of the tool cannot be
-        told from one the command printed.
-
-        Args:
-            command: As for :meth:`Bash`, like every argument.
-            description: The call's description.
-            timeout_seconds: The call's deadline.
-            max_output_chars: The result's output budget.
-            until: The regular expression of a poll.
-            poll_seconds: Seconds between two runs of a poll.
-
-        Returns:
-            The result with the command's exit status, ``"timeout"``, or
-            ``"refused"`` / ``"error"`` for a command that did not run.
 
         Raises:
             KISSError: If no container is open.
@@ -1464,16 +1432,16 @@ class DockerManager:
             functools.partial(probe, test="run"),
         )
         if guard == STOPPED_MESSAGE:  # reported as a stopped exec reports it
-            return Ran(_with_exit_code(guard, -1), exit_word(-1))
+            return _with_exit_code(guard, -1)
         if guard is not None:
-            return unrun(guard)
+            return guard
         run = functools.partial(self._exec, container, command, cancel=self.stop_event,
                                 on_text=self.stream_callback)
         verdict = ""
         if until:
             refusal = until_refusal(until, poll_seconds)
             if refusal is not None:
-                return unrun(refusal)
+                return refusal
             (exit_code, output, dropped), verdict = _run_until(
                 run, until, poll_seconds, deadline, self.stop_event)
             verdict = "\n" + verdict
@@ -1487,7 +1455,7 @@ class DockerManager:
         output = _truncate_output(_collapse_progress(output), max_output_chars, dropped=dropped)
         text = (_timeout_message(deadline, output) if exit_code is None
                 else _with_exit_code(output, exit_code))
-        return Ran(text + verdict, exit_word(exit_code))
+        return text + verdict
 
     def run_commands_parallel(
         self,
@@ -1700,33 +1668,6 @@ class DockerManager:
         tool_interrupt.raise_if_interrupted()
         return fetched_bytes(path, max_bytes, exit_code, output)
 
-    def run(self, command: str, timeout_seconds: float) -> tuple[int | None, str]:
-        """Run *command* in the container: its exit code and output, uncut.
-
-        The finish gate's primitive (the host side is
-        :func:`~kiss.agents.sorcar.coding_gate.run_on_host`): no guard,
-        no echo of a description and none of :meth:`Bash`'s output cap,
-        since the gate parses ``-z`` file lists and hashes whole diffs
-        from the output and bounds its own reads.
-
-        Args:
-            command: The bash command to execute.
-            timeout_seconds: Seconds it may run; past them the code is ``None``.
-
-        Returns:
-            ``(exit code, output)``; the code is ``None`` at the deadline
-            and ``-1`` when the task was stopped meanwhile.
-
-        Raises:
-            KISSError: If no container is open.
-        """
-        container = self._open_container()
-        exit_code, output, _ = self._exec(
-            container, command, timeout_seconds, self.stop_event, whole=True,
-        )
-        tool_interrupt.raise_if_interrupted()
-        return exit_code, output
-
     def _exec(
         self,
         container: Container,
@@ -1921,7 +1862,11 @@ class DockerManager:
             not be made (the sub-agent then scratches in the work tree).
         """
         folder = f"/tmp/{SUBAGENT_DIR_PREFIX}{uuid.uuid4().hex[:8]}"
-        if self.run(f"mkdir -m 700 {folder}", 30)[0] != 0:
+        exit_code, _, _ = self._exec(
+            self._open_container(), f"mkdir -m 700 {folder}", 30, self.stop_event,
+        )
+        tool_interrupt.raise_if_interrupted()
+        if exit_code != 0:
             return None
         self.exec_env = dict.fromkeys(("TMPDIR", "TMP", "TEMP", SUBAGENT_DIR_ENV), folder)
         return folder

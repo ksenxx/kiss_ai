@@ -37,12 +37,14 @@ def test_both_models_are_openrouter_twins_of_the_bestrouter_models() -> None:
     assert orbestrouter_sea.SIMPLE_MODEL == "openrouter/anthropic/claude-opus-5.5-medium"
     assert orbestrouter_sea.PRIMARY_MODEL == "openrouter/anthropic/claude-fable-5.2-max"
     assert orbestrouter_sea.REVIEW_MODEL == "openrouter/openai/gpt-6-astra-xhigh"
+    assert orbestrouter_sea.WRITER_MODEL == "openrouter/google/gemini-4-carbon"
     assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-2-max"
     assert bestrouter_sea.REVIEW_MODEL == "gpt-6-astra-xhigh"
     for model in (
         orbestrouter_sea.SIMPLE_MODEL,
         orbestrouter_sea.PRIMARY_MODEL,
         orbestrouter_sea.REVIEW_MODEL,
+        orbestrouter_sea.WRITER_MODEL,
     ):
         assert model in MODEL_INFO, model
         assert MODEL_INFO[model].input_price_per_1M > 0, model
@@ -63,16 +65,21 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
         orbestrouter_sea.SIMPLE_MODEL,
         orbestrouter_sea.PRIMARY_MODEL,
         orbestrouter_sea.REVIEW_MODEL,
+        orbestrouter_sea.WRITER_MODEL,
     )
     flat = " ".join(protocol.split())
     for phrase in (
         "Use 'openrouter/anthropic/claude-opus-5.5-medium' for simple questions and queries.",
+        "Use 'openrouter/google/gemini-4-carbon' for writing any documents, papers, reports, "
+        "results which will be read by a human.",
         "Use 'openrouter/anthropic/claude-fable-5.2-max' model for all other tasks, including "
-        "software development and analysis and writing.",
-        "Use openrouter/openai/gpt-6-astra-xhigh (not codex) through "
+        "software development and analysis.",
+        "Call `set_model(\"openrouter/google/gemini-4-carbon\")` before you write the final "
+        "summary.",
+        "Use openrouter/openai/gpt-6-astra-xhigh through "
         "`run_agent(model=\"openrouter/openai/gpt-6-astra-xhigh\", tool_profile=\"review\", "
-        "wait=\"false\")` for a thorough read-only review and debugging of the other model's "
-        "work,",
+        "wait=\"false\")` for a thorough read-only review and debugging of the work of "
+        "'openrouter/anthropic/claude-fable-5.2-max' and 'openrouter/google/gemini-4-carbon',",
         "Use at most 75% of the task budget in openrouter/openai/gpt-6-astra-xhigh,",
         "Use the model names literally without hallucinating new model names.",
     ):
@@ -89,6 +96,7 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     description = sea.description()
     assert orbestrouter_sea.PRIMARY_MODEL in description
     assert orbestrouter_sea.REVIEW_MODEL in description
+    assert f", writes on {orbestrouter_sea.WRITER_MODEL}, " in description
     assert "/orbestrouter <task>" in description
     assert_no_removed_getters(orbestrouter_sea)
 

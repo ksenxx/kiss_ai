@@ -232,8 +232,10 @@ async function connect() {
 
 // ---------------------------------------------------------------- commands
 
+// A tab whose first navigation has not committed yet (a new tab on a busy
+// machine) has an empty url and its target in pendingUrl.
 function tabInfo(t) {
-  return { id: t.id, windowId: t.windowId, title: t.title, url: t.url, active: t.active, status: t.status };
+  return { id: t.id, windowId: t.windowId, title: t.title, url: t.url || t.pendingUrl, active: t.active, status: t.status };
 }
 
 // A command's deadline (handleCommand's limit) travels into every stage

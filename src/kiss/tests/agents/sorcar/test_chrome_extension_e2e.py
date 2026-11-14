@@ -814,6 +814,13 @@ def test_a_page_load_is_waited_for_fifteen_seconds_at_most(chrome: _Chrome) -> N
     pending = bridge.call("open_tab", {"url": chrome.site + "/pending"}, 25)
     assert 14 < time.monotonic() - began < 20
     assert (pending["title"], pending["status"]) == ("Pending", "loading")
+    # A new tab whose first page has not answered yet is listed with the URL it
+    # is opening (Chrome's pendingUrl), not with an empty one.
+    late = chrome.site + "/blank?ms=3000"
+    opening = _in_thread(bridge.call, "open_tab", {"url": late, "active": False}, 20)
+    time.sleep(1)
+    assert late in [listed["url"] for listed in bridge.call("list_tabs", timeout=10)]
+    assert opening.result(20)["url"] == late
     tab, url = chrome.open("/blank?closing")
     target = {"tabId": tab, "url": chrome.site + "/blank?ms=3000"}
     slow = _in_thread(bridge.call, "navigate", target, 20)

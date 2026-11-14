@@ -52,8 +52,6 @@ import docker
 import pytest
 import yaml
 
-from kiss.agents.sorcar import coding_gate as cg
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.chrome_bridge import CONFIG_FILE_NAME, ChromeBridge, extension_dir
 from kiss.agents.sorcar.container_jobs import GONE_STATUS, JOBS_DIR, ContainerJobs
 from kiss.agents.sorcar.docker_manager import (
@@ -66,7 +64,6 @@ from kiss.agents.sorcar.docker_manager import (
     remove_private_dir_script,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.core import user_config
 from kiss.core.processes import (
     _SWEEP_SECONDS,
     _env_marked_pids,
@@ -224,9 +221,9 @@ def _run_recording(agent: SorcarAgent, work_dir: Path, script: list[bytes],
         raised.append(exc)
 
 
-def _sub_agent(name: str, kind: type[SorcarAgent] = SorcarAgent) -> SorcarAgent:
+def _sub_agent(name: str) -> SorcarAgent:
     """An agent marked as the daemon marks a ``run_agent`` child."""
-    agent = kind(name)
+    agent = SorcarAgent(name)
     agent._subagent_info = dict(SUB_AGENT)
     return agent
 
@@ -260,13 +257,6 @@ def _gone(pid: int, within: float = 5.0) -> bool:
     while _running(pid) and time.monotonic() < deadline:
         time.sleep(0.05)
     return not _running(pid)
-
-
-def _pin_reviewer_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point the user config at a file that turns the finish gate's review stage off."""
-    config = tmp_path / "config.json"
-    config.write_text(json.dumps({cg.REVIEWER_CONFIG_KEY: "off"}))
-    monkeypatch.setattr(user_config, "CONFIG_PATH", config)
 
 
 def _start_container(**options: Any) -> Any:
@@ -389,39 +379,6 @@ def test_top_level_task_keeps_its_tmp_dir_and_its_jobs(tmp_path: Path) -> None:
         for job in agent._background_jobs.values():
             job.kill.set()
             job.ended.result(timeout=10)
-
-
-def test_finish_gate_runs_the_verifier_of_the_private_folder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The gate finds ``verify.sh`` in the sub-agent's folder and runs it in its environment.
-
-    Writing the verifier there is no change of the work; the refusal names
-    the script by its absolute path.
-    """
-    _pin_reviewer_off(tmp_path, monkeypatch)
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    hello = str(work_dir / "hello.py")
-    verifier = 'echo "$TMPDIR|$KISS_SUBAGENT_DIR" > gate_env.txt\ngrep -q hello hello.py\n'
-    script = [
-        tool_call_body("Write", {"file_path": "@SCRATCH@verify.sh", "content": verifier}, 1000),
-        tool_call_body("Write", {"file_path": hello, "content": "print('bye')\n"}, 1000),
-        finish_body("<p>done</p>", prompt_tokens=1000),  # refused: the verifier fails
-        tool_call_body("Write", {"file_path": hello, "content": "print('hello')\n"}, 1000),
-        finish_body("<p>done</p>", prompt_tokens=1000),
-    ]
-    requests: list[dict] = []
-    agent = _sub_agent("sub-gate", ChatSorcarAgent)  # the class the daemon runs a child as
-    result = _run(agent, work_dir, script, requests)
-    assert result["success"] is True and len(requests) == len(script)
-    folder = _scratch_dir(requests[0]).rstrip("/")
-    refusal = _tool_results(requests[3])[-1]
-    assert "Finish refused" in refusal and f"{folder}/verify.sh" in refusal
-    assert f"./{folder}" not in refusal
-    assert (work_dir / "gate_env.txt").read_text().strip() == f"{folder}|{folder}"
-    assert agent._coding_gate.written_files == [hello]
-    assert not Path(folder).exists() and not (work_dir / "tmp").exists()
 
 
 def test_a_stopped_sub_agent_is_cleaned_up_too(tmp_path: Path) -> None:

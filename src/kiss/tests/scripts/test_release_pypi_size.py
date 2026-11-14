@@ -5,10 +5,12 @@
 """End-to-end check that the PyPI upload of release.sh stays under 100 MiB.
 
 Runs ``scripts/test_release_pypi_size.sh``, which builds the real sdist and
-wheel with ``uv build`` and checks their size and contents (only the wheel's
-packages, never benchmark results, papers, reports or node_modules), then
-sources ``scripts/release.sh`` and drives ``publish_to_pypi`` against a stub
-``uv`` to prove an oversize sdist aborts before anything is uploaded.
+wheel of HEAD minus ``scripts/exclude.json`` (as the release does) and checks
+their size and contents (only the wheel's packages, never benchmark results,
+papers, reports, node_modules or an excluded path), then sources
+``scripts/release.sh`` and drives ``publish_to_pypi`` against a stub ``uv`` to
+prove an oversize sdist aborts before anything is uploaded and that the build
+runs on the committed tree minus the excluded paths.
 """
 
 import subprocess

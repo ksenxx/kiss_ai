@@ -3785,7 +3785,7 @@ def _recovered_progress_from_events(
         steps_m = _USAGE_STEPS_RE.search(text)
         if steps_m is None and not text.strip():
             # A ledger publication with no text: spend banked on the
-            # running task (a side channel, a gate charge, a sub-agent's
+            # running task (a side channel, a side call's charge, a sub-agent's
             # fold; task_update._publish_charge), the run's closing event,
             # or a late charge's.  Its structured fields are this task's
             # totals after the bank, so it rests on them (no session part)
@@ -4597,8 +4597,8 @@ def _add_keyed_task_usage(
     """Charge the spend keyed *key* to *task_id* and its finished ancestors, once.
 
     :func:`_add_late_task_usage` for a charge its caller may make again
-    under the same key (a finish-gate review that a stop ended is
-    charged twice, ``SorcarAgent._charge_gate_usage``).  The finished
+    under the same key (a side call that a stop ended is charged
+    twice, ``SorcarAgent._charge_side_call_usage``).  The finished
     rows' retained charges carry *key* in place of the task id, and
     *task_id*'s own is the charge's receipt: a transaction that finds it
     changes nothing, so a stop landing anywhere after the first commit
@@ -4611,7 +4611,7 @@ def _add_keyed_task_usage(
     and the row's final save writes that ledger's totals.  A row that
     finished since holds the key without a receipt, so the caller asks
     the ledger first (``task_update._key_on_ledger``; without the
-    bridge, ``SorcarAgent._charge_gate_usage``).
+    bridge, ``SorcarAgent._charge_side_call_usage``).
 
     Args:
         task_id: Primary key of the ``task_history`` row the spend is for.
@@ -5117,8 +5117,8 @@ def _own_model_costs(db: sqlite3.Connection, task_id: str) -> str:
     counts.  The Spend panel splits a task's own spend by this record, so
     a task that switched models with ``set_model`` is not filed entirely
     under the model it was launched with.  A model call made for the task
-    outside its agent loop (a finish-gate review, the commit message, a
-    ``talk`` synthesis, a ``decide`` call) emits no ``llm_call``; the
+    outside its agent loop (the commit message, a ``talk`` synthesis,
+    a ``decide`` call) emits no ``llm_call``; the
     ``gate_stage`` record each such charge leaves (``stage`` ``charge``,
     with ``model``, ``cost_usd`` and ``tokens``, see
     :func:`_record_model_charge`) is counted under its model the same way.
@@ -5170,12 +5170,12 @@ def _own_model_costs(db: sqlite3.Connection, task_id: str) -> str:
 def _record_model_charge(task_id: str, model: str, cost: float, tokens: int, key: str) -> None:
     """Record under *task_id* that a model call on *model* outside its agent loop was charged to it.
 
-    A finish-gate review attempt, the commit message, a ``talk``
-    synthesis or a ``decide`` call emits no ``llm_call``: this
+    The commit message, a ``talk`` synthesis or a ``decide`` call
+    emits no ``llm_call``: this
     ``gate_stage`` record (``stage`` ``charge``) is what files its *cost*
     and *tokens* under *model* in the row's split by model
     (:func:`_own_model_costs`).  Written as the spend is charged, so a
-    review a Stop ended is recorded too.  A row already finished (the
+    call a Stop ended is recorded too.  A row already finished (the
     charge landed after its final save) has its split refreshed now;
     an unfinished row's final save computes it.
 
@@ -6928,7 +6928,7 @@ def _task_has_transcript_events(task_id: str) -> bool:
                 return True
             # Metadata, not transcript: the run's settings, and the charge
             # records of its model calls outside the agent loop
-            # (_record_model_charge: finish-gate reviews, commit message, ...).
+            # (_record_model_charge: commit message, talk, decide).
             if event.get("type") == "task_settings" or (
                 event.get("type") == "gate_stage" and event.get("stage") == "charge"
             ):

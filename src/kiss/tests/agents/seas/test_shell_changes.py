@@ -3,16 +3,16 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Tests of the file-change readers of :mod:`kiss.agents.sorcar.evidence_gate`.
+"""Tests of the file-change readers of :mod:`kiss.agents.seas.coding.shell_changes`.
 
-The coding gate and the coding SEA read what a shell command changes
-(:func:`~kiss.agents.sorcar.evidence_gate.writes_files`,
-:func:`~kiss.agents.sorcar.evidence_gate.file_changes`) to arm the gate on a
-code file a command wrote, to count the changes since the agent's own passing
-verifier run, and to re-review only after a change: a program counts in
-command position only, a package or build tool writes through its mutating
-subcommands only (``uv run pytest`` is a check, ``uv sync`` a write), and a
-file under a ``tmp`` directory is the run's scratch, not a change of the work.
+The coding SEA's finish gate reads what a shell command changes
+(:func:`~kiss.agents.seas.coding.shell_changes.writes_files`,
+:func:`~kiss.agents.seas.coding.shell_changes.file_changes`) to count the
+changes since the agent's own passing verifier run and to review only after a
+change: a program counts in command position only, a package or build tool
+writes through its mutating subcommands only (``uv run pytest`` is a check,
+``uv sync`` a write), and a file under a ``tmp`` directory is the run's
+scratch, not a change of the work.
 """
 
 from __future__ import annotations
@@ -26,17 +26,17 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar import evidence_gate as eg
+from kiss.agents.seas.coding import shell_changes as sc
 from kiss.tests.conftest import posix_only
 
 
 def test_writing_commands_and_scratch_paths_are_recognised() -> None:
     for path in ("tmp/x", "./tmp/a.log", "/u/repo/tmp/probe/out", "sub/tmp/notes", "tmp",
                  "/var/folders/T/kiss-sub-ab12cd34/probe.py"):  # a sub-agent's private folder
-        assert eg.is_scratch_path(path), path
+        assert sc.is_scratch_path(path), path
     for path in ("tmpfile", "mytmp/x", "tmp/../a.py", "a.tmp", "src/a.py", "src/kiss-sub-x.py",
                  "/var/folders/T/kiss-sub-ab12cd34/../a.py"):
-        assert not eg.is_scratch_path(path), path
+        assert not sc.is_scratch_path(path), path
     for command in ("echo x > f.txt", "cat a >> log", "tee out.txt", "cp a b", "mv a b",
                     "sed -i s/a/b/ f", "sed --in-place s/a/b/ f", "git apply p.diff",
                     "pip install x", "make -j8", "touch f", "cat <<EOF > f\nx\nEOF", "mkdir d",
@@ -106,7 +106,7 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
                     "uv run --no-sync --with x pip install y", "uv run --with=x pip install y",
                     "uv run --no-sync -p 3.12 --with x pip install y",
                     "uv --no-cache pip install x"):
-        assert eg.writes_files({"command": command}), command
+        assert sc.writes_files({"command": command}), command
     for command in ("pytest -q", "ls -la", "cmd 2>&1 | head", "cmd > /dev/null", "cmd &> /dev/null",
                     "grep -n x f", "git status", "git diff", "docker run --rm img pytest",
                     "perform -x",
@@ -184,7 +184,7 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
                     "cd /w/tmp/x && find . -type f -execdir sh -c 'echo x > b.py' \\;",
                     "cd /w/tmp/x && find . -name '*.pyc' -delete",
                     "find tmp/x -name '*.pyc' -exec rm {} +"):
-        assert not eg.writes_files({"command": command}), command
+        assert not sc.writes_files({"command": command}), command
     # ...while a cd out of the scratch dir, one only the shell knows (a pushd that
     # rotates the stack, a ``cd "$D"``), a target the shell still expands, or find's
     # matches outside it keep the write (review round 6)
@@ -199,106 +199,106 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
                     "cd /w/tmp/x && find /w/src -type f -exec rm {} +",
                     "cd /w/tmp/x && find /w/src -type f -execdir sh -c 'echo x > b.py' \\;",
                     "cd /w/tmp/x && find /w/src -name x -delete"):
-        assert eg.writes_files({"command": command}), command
+        assert sc.writes_files({"command": command}), command
     # ...but not one into a file whose name only starts with tmp, or one tmp file among others
     for command in ("cmd > tmpfile", "cmd > mytmp/x", "cmd > tmp/a > out.txt",
                     "cmd > tmp/a; cmd > b"):
-        assert eg.writes_files({"command": command}), command
-    assert eg.writes_files({"commands": '["ls", "echo 1 > f"]'})
-    assert not eg.writes_files({"commands": '["ls", "pwd"]'})
-    assert eg.writes_files({"commands": "echo 1 > f"})  # not JSON: one command
+        assert sc.writes_files({"command": command}), command
+    assert sc.writes_files({"commands": '["ls", "echo 1 > f"]'})
+    assert not sc.writes_files({"commands": '["ls", "pwd"]'})
+    assert sc.writes_files({"commands": "echo 1 > f"})  # not JSON: one command
     # not a list: the text itself, where a quoted word is text, not a command
-    assert not eg.writes_files({"commands": '{"a": "rm f"}'})
-    assert not eg.writes_files({"commands": '{"a": "echo 1 > f"}'})
+    assert not sc.writes_files({"commands": '{"a": "rm f"}'})
+    assert not sc.writes_files({"commands": '{"a": "echo 1 > f"}'})
     # the commands are the ones the tool runs, decoded as it decodes them (audit 2026-11-11,
     # N1 and N4): a lone backslash (grep's ``\|``) and a raw newline in a string are no
     # error, and text nested past the decoder's depth is one command like any other text
     lone = r'''["grep -c 'a\|b' notes.txt > src/app.py", "git checkout main"]'''
-    assert eg.file_changes({"commands": lone}) == ["src/app.py", "git", "checkout", "main"]
-    assert eg.file_changes({"commands": '["cat <<EOF > a.py\nx = 1\nEOF", "ls"]'}) == ["a.py"]
-    assert eg.shell_commands({"commands": "[" * 100_000}) == ["[" * 100_000]
+    assert sc.file_changes({"commands": lone}) == ["src/app.py", "git", "checkout", "main"]
+    assert sc.file_changes({"commands": '["cat <<EOF > a.py\nx = 1\nEOF", "ls"]'}) == ["a.py"]
+    assert sc.shell_commands({"commands": "[" * 100_000}) == ["[" * 100_000]
     # the files a call changes, as its commands name them (the program first)
-    assert eg.file_changes({"command": "cp a.py tmp/x/; cp tmp/x/a.py b.py > log 2>&1"}) == [
+    assert sc.file_changes({"command": "cp a.py tmp/x/; cp tmp/x/a.py b.py > log 2>&1"}) == [
         "log", "cp", "b.py"]
-    assert eg.file_changes({"command": "make test; make"}) == ["make"]
-    assert eg.file_changes({"command": "bash -c 'rm -rf build; mkdir out'"}) == [
+    assert sc.file_changes({"command": "make test; make"}) == ["make"]
+    assert sc.file_changes({"command": "bash -c 'rm -rf build; mkdir out'"}) == [
         "rm", "build", "mkdir", "out"]
     # a nested shell's text that runs no command leaves the redirection this command's
     # (S3/F5); a reference option keeps every file operand (S3/F6)
-    assert eg.file_changes({"command": "bash -c '# no command' > src/main.py"}) == [
+    assert sc.file_changes({"command": "bash -c '# no command' > src/main.py"}) == [
         "src/main.py"]
     # ...while one that runs commands hands them its redirection, as a subshell's
-    assert eg.file_changes({"command": "bash -c 'echo 1 > a; echo 2' > b"}) == ["a", "b", "b"]
-    assert eg.file_changes({"command": "(echo 1 > a; echo 2) > b"}) == ["a", "b", "b"]
-    assert eg.file_changes({"command": "chmod --reference=tmp/ref src/main.py tmp/log"}) == [
+    assert sc.file_changes({"command": "bash -c 'echo 1 > a; echo 2' > b"}) == ["a", "b", "b"]
+    assert sc.file_changes({"command": "(echo 1 > a; echo 2) > b"}) == ["a", "b", "b"]
+    assert sc.file_changes({"command": "chmod --reference=tmp/ref src/main.py tmp/log"}) == [
         "chmod", "src/main.py", "tmp/log"]
-    assert eg.file_changes({"command": "chown --reference tmp/ref a.py"}) == ["chown", "a.py"]
-    assert eg.file_changes({"command": "chmod 755 bin/run"}) == ["chmod", "bin/run"]
+    assert sc.file_changes({"command": "chown --reference tmp/ref a.py"}) == ["chown", "a.py"]
+    assert sc.file_changes({"command": "chmod 755 bin/run"}) == ["chmod", "bin/run"]
     # a mode that starts with a dash was dropped as an option and the file with it
-    assert eg.file_changes({"command": "chmod -x bin/run"}) == ["chmod", "bin/run"]
-    assert eg.file_changes({"command": "chmod -fR -w src"}) == ["chmod", "src"]
+    assert sc.file_changes({"command": "chmod -x bin/run"}) == ["chmod", "bin/run"]
+    assert sc.file_changes({"command": "chmod -fR -w src"}) == ["chmod", "src"]
     # ``--`` ends a writing program's options: a file after it may start with a dash
     # (audit 2026-11-12: ``-dest.py`` was dropped, or its ``t`` read as ``-t``)
-    assert eg.file_changes({"command": "cp -- tmp/source.py -dest.py"}) == ["cp", "-dest.py"]
-    assert eg.file_changes({"command": "rm -f -- -dest.py"}) == ["rm", "-dest.py"]
-    assert eg.file_changes({"command": "chmod -- -x -run.py"}) == ["chmod", "-run.py"]
+    assert sc.file_changes({"command": "cp -- tmp/source.py -dest.py"}) == ["cp", "-dest.py"]
+    assert sc.file_changes({"command": "rm -f -- -dest.py"}) == ["rm", "-dest.py"]
+    assert sc.file_changes({"command": "chmod -- -x -run.py"}) == ["chmod", "-run.py"]
     # a copy into a directory writes a file of each source's name there, which was not
     # listed: a directory by the words (``-t``, several sources, a trailing ``/``) or,
     # the words not telling, a destination without a suffix
-    assert eg.file_changes({"command": "cp tmp/source.py src/"}) == [
+    assert sc.file_changes({"command": "cp tmp/source.py src/"}) == [
         "cp", "src/", "src/source.py"]
-    assert eg.file_changes({"command": "cp -t pkg.d tmp/a.py tmp/b.py"}) == [
+    assert sc.file_changes({"command": "cp -t pkg.d tmp/a.py tmp/b.py"}) == [
         "cp", "pkg.d", "pkg.d/a.py", "pkg.d/b.py"]
-    assert eg.file_changes({"command": "install tmp/a.py tmp/b.py pkg.d"}) == [
+    assert sc.file_changes({"command": "install tmp/a.py tmp/b.py pkg.d"}) == [
         "install", "pkg.d", "pkg.d/a.py", "pkg.d/b.py"]
-    assert eg.file_changes({"command": "cp tmp/source.py src"}) == ["cp", "src", "src/source.py"]
-    assert eg.file_changes({"command": "cp src/a.py src/a.py.orig"}) == ["cp", "src/a.py.orig"]
+    assert sc.file_changes({"command": "cp tmp/source.py src"}) == ["cp", "src", "src/source.py"]
+    assert sc.file_changes({"command": "cp src/a.py src/a.py.orig"}) == ["cp", "src/a.py.orig"]
     # find's ``{}`` are its matches, under its start paths
-    assert eg.file_changes({"command": "find . -name '*.pyc' -exec rm {} +"}) == ["rm", "."]
-    assert eg.file_changes({"command": "find src lib -delete"}) == ["find", "src", "lib"]
+    assert sc.file_changes({"command": "find . -name '*.pyc' -exec rm {} +"}) == ["rm", "."]
+    assert sc.file_changes({"command": "find src lib -delete"}) == ["find", "src", "lib"]
     # every -exec clause counts, each read up to its own ``;`` / ``+`` (audit A06-11: the
     # first clause once swallowed the rest), and -execdir's directory is that clause's alone
-    assert eg.file_changes({
+    assert sc.file_changes({
         "command": "find data -type f -exec true {} \\; -exec touch changed.py \\;",
     }) == ["touch", "changed.py"]
-    assert eg.file_changes({
+    assert sc.file_changes({
         "command": "cd /w/tmp/x && find . -type f -execdir cat {} + -exec touch /w/src/x.py \\;",
     }) == ["touch", "/w/src/x.py"]
     # -delete does not hide a writing clause of the same find (audit 2026-11-07, A08
     # astra-10 / fable-6), and an -execdir command that may leave the scratch tree (an
     # operand with ``..``; a start whose own parent is not scratch, since the start itself
     # is a match and its command runs in that parent) is judged as written (astra-11)
-    assert eg.file_changes({"command": "find tmp/x -delete -exec touch src/x.py \\;"}) == [
+    assert sc.file_changes({"command": "find tmp/x -delete -exec touch src/x.py \\;"}) == [
         "touch", "src/x.py"]
-    assert eg.file_changes({"command": "find src -delete -exec touch tmp/x.py \\;"}) == [
+    assert sc.file_changes({"command": "find src -delete -exec touch tmp/x.py \\;"}) == [
         "find", "src"]
-    assert eg.file_changes({
+    assert sc.file_changes({
         "command": "cd /w && find tmp/a -execdir cp {} ../src/x.py \\;",
     }) == ["cp", "../src/x.py"]
-    assert eg.file_changes({
+    assert sc.file_changes({
         "command": "cd /w && find tmp -maxdepth 0 -execdir touch out.py \\;",
     }) == ["touch", "out.py"]
-    assert eg.file_changes({"command": "cd /w && find tmp/a -execdir touch done.txt \\;"}) == []
-    assert eg.file_changes({"command": "uv run check --full --fix"}) == ["uv", "run", "check"]
+    assert sc.file_changes({"command": "cd /w && find tmp/a -execdir touch done.txt \\;"}) == []
+    assert sc.file_changes({"command": "uv run check --full --fix"}) == ["uv", "run", "check"]
     # the command ``uv run`` launches is read as itself (A08 fable-7: only package
     # subcommands were), after uv's and run's options (valued or not)
-    assert eg.file_changes({
+    assert sc.file_changes({
         "command": "uv run --no-project --no-sync sed -i s/old/new/ source.py",
     }) == ["sed", "s/old/new/", "source.py"]
     # a script option after the files, and a file ``--`` protects, keep the files (B/S4-F4)
-    assert eg.file_changes({"command": "sed -i source.py tmp/log -e s/old/new/g"}) == [
+    assert sc.file_changes({"command": "sed -i source.py tmp/log -e s/old/new/g"}) == [
         "sed", "source.py", "tmp/log", "s/old/new/g"]
-    assert eg.file_changes({"command": "sed -i -e s/a/b/ tmp/log -- -source.py"}) == [
+    assert sc.file_changes({"command": "sed -i -e s/a/b/ tmp/log -- -source.py"}) == [
         "sed", "s/a/b/", "tmp/log", "-source.py"]
-    assert eg.file_changes({"command": "uv -q --directory /w run -p 3.12 cp a.py b.py"}) == [
+    assert sc.file_changes({"command": "uv -q --directory /w run -p 3.12 cp a.py b.py"}) == [
         "cp", "b.py"]
-    assert eg.file_changes({"command": "uv run bash -c 'echo 1 > f'"}) == ["f"]
+    assert sc.file_changes({"command": "uv run bash -c 'echo 1 > f'"}) == ["f"]
     for command in ("uv run --with x cp a.py tmp/b.py", "uv run -q pytest -q", "uv run",
                     "uv --directory /w run --with"):
-        assert eg.file_changes({"command": command}) == [], command
-    assert eg.file_changes({"command": "(" * 20000 + "rm x"}) == []  # nested too deep to read
-    assert not eg.writes_files({"commands": 7})
-    assert not eg.writes_files({})
+        assert sc.file_changes({"command": command}) == [], command
+    assert sc.file_changes({"command": "(" * 20000 + "rm x"}) == []  # nested too deep to read
+    assert not sc.writes_files({"commands": 7})
+    assert not sc.writes_files({})
 
 
 @posix_only("bash and chmod are the oracles")
@@ -310,7 +310,7 @@ def test_a_commandless_nested_shell_and_a_reference_mode_change_the_files_named(
 
     The reader once dropped the redirection of a nested shell whose
     text yields no command, and the first file operand of a ``chmod``
-    with a reference option as if it were the mode, so the coding gate
+    with a reference option as if it were the mode, so the finish gate
     kept its cached verifier run current after the source was emptied or
     made non-executable (audit 2026-11-08, S3/F5 and F6).
     """
@@ -322,7 +322,7 @@ def test_a_commandless_nested_shell_and_a_reference_mode_change_the_files_named(
         source.write_text("print(42)\n")
         subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True)
         assert source.read_text() == "", command
-        assert eg.file_changes({"command": command}) == ["src/main.py"], command
+        assert sc.file_changes({"command": command}) == ["src/main.py"], command
     source.write_text("#!/usr/bin/env python3\nprint(42)\n")
     source.chmod(0o755)
     (tmp_path / "tmp" / "ref").write_text("ref")
@@ -332,7 +332,7 @@ def test_a_commandless_nested_shell_and_a_reference_mode_change_the_files_named(
     done = subprocess.run(["bash", "-c", command], cwd=tmp_path, capture_output=True, text=True)
     if done.returncode == 0:  # GNU chmod; the BSD one has no reference option
         assert stat.S_IMODE(source.stat().st_mode) == 0o644
-    assert eg.file_changes({"command": command}) == ["chmod", "src/main.py", "tmp/log"]
+    assert sc.file_changes({"command": command}) == ["chmod", "src/main.py", "tmp/log"]
 
 
 #: Running the tests or a lint through a package or build tool is a check, not a
@@ -377,12 +377,12 @@ WRITES = (
 
 @pytest.mark.parametrize("command", CHECKS)
 def test_a_package_or_build_tools_check_is_no_write(command: str) -> None:
-    assert not eg.writes_files({"command": command})
+    assert not sc.writes_files({"command": command})
 
 
 @pytest.mark.parametrize("command", WRITES)
 def test_a_package_or_build_tools_mutating_subcommand_is_a_write(command: str) -> None:
-    assert eg.writes_files({"command": command})
+    assert sc.writes_files({"command": command})
 
 
 # Runs writes_files on the commands read from stdin (JSON) while a thread ticks
@@ -390,7 +390,7 @@ def test_a_package_or_build_tools_mutating_subcommand_is_a_write(command: str) -
 # the ticking thread (a regex that runs for seconds holds the GIL that long).
 _PROBE = r"""
 import json, sys, threading, time
-from kiss.agents.sorcar.evidence_gate import writes_files
+from kiss.agents.seas.coding.shell_changes import writes_files
 
 beats = []
 done = threading.Event()
@@ -444,7 +444,7 @@ ADVERSARIAL = {
 
 
 def test_repeated_options_are_read_in_linear_time_without_holding_the_gil() -> None:
-    src = str(Path(eg.__file__).resolve().parents[3])
+    src = str(Path(sc.__file__).resolve().parents[4])
     env = {**os.environ, "PYTHONPATH": src + os.pathsep + os.environ.get("PYTHONPATH", "")}
     commands = list(ADVERSARIAL)
     done = subprocess.run(
@@ -456,7 +456,7 @@ def test_repeated_options_are_read_in_linear_time_without_holding_the_gil() -> N
     assert report["elapsed"] < 30, report
     assert report["max_gap"] < 2, report
     # short runs of the same shape still find the subcommand
-    assert not eg.writes_files({"command": "npm " + "--prefix +a " * 25 + "test"})
-    assert eg.writes_files({"command": "npm " + "--prefix +a " * 25 + "ci"})
-    assert eg.writes_files({"command": "npm --prefix +a ci"})
-    assert not eg.writes_files({"command": "npm --prefix +a test"})
+    assert not sc.writes_files({"command": "npm " + "--prefix +a " * 25 + "test"})
+    assert sc.writes_files({"command": "npm " + "--prefix +a " * 25 + "ci"})
+    assert sc.writes_files({"command": "npm --prefix +a ci"})
+    assert not sc.writes_files({"command": "npm --prefix +a test"})

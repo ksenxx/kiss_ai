@@ -364,10 +364,6 @@ when the task caps the reviewer's share, sum the costs the reviewers' results re
   it inherit the parent's remaining budget.
 - In a batched `Edit`, drop every entry whose `new_string` equals its `old_string`: one
   no-op entry ("new_string must be different from old_string") rejects the whole batch.
-- In the final summary, describe a review point the task rules out as "ruled out by the
-  task: <its words>"; never "declined", "skipped", "left as is" or "not done": the finish
-  gate reads those as an unmet requirement and refuses the finish, and the retry can push
-  the session over the context limit.
 - In a worktree, run project commands as the shared environment's binary:
   `PYTHONPATH=<worktree>/src:<worktree>/projects /home/ksen/kiss/.venv/bin/<cmd>`, never
   `uv run <cmd>` (it times out after 600 s)."""

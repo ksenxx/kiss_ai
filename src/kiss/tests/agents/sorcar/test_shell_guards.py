@@ -556,17 +556,18 @@ def test_docker_bash_applies_the_guards(cleanup: set[str]) -> None:
         mgr.Bash("touch /work/sub/kept", "seed")
         mgr.stop_event = threading.Event()
         mgr.stop_event.set()
-        unanswered = mgr.run_bash("cd sub && rm -rf *", "stopped")
+        unanswered = mgr.Bash("cd sub && rm -rf *", "stopped")
         mgr.stop_event = None
-        assert unanswered.code == "-1" and unanswered.text.startswith(STOPPED_MESSAGE)
+        assert unanswered == f"{STOPPED_MESSAGE}\n[exit code: -1]"
         assert mgr.Bash("ls /work/sub", "check").split() == ["kept"]
         # An oracle that timed out in a directory whose name reads like that message
         # is no Stop.
         mgr.Bash(f"mkdir -p '/work/{STOPPED_MESSAGE}/sub'", "seed")
         mgr.workdir = f"/work/{STOPPED_MESSAGE}"
-        timed_out = mgr.run_bash("cd sub && rm -f kept", "timeout", timeout_seconds=0)
+        timed_out = mgr.Bash("cd sub && rm -f kept", "timeout", timeout_seconds=0)
         mgr.workdir = "/work"
-        assert timed_out.code == "error" and "timed out" in timed_out.text, timed_out
+        assert timed_out.startswith("Error: the command did not run:"), timed_out
+        assert "timed out" in timed_out and "[exit code:" not in timed_out, timed_out
     finally:
         mgr.close()
     assert not os.path.exists(mgr.host_shared_path or "/nonexistent-kiss-shared")

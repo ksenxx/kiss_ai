@@ -32,16 +32,18 @@ _SEA_PATH = Path(ccxbestrouter_sea.__file__).resolve()
 
 
 def test_models_are_the_claude_code_and_codex_catalog_entries() -> None:
-    """Opus 5.5 and Fable 5.2 through Claude Code, Astra at xhigh effort through Codex."""
+    """Opus 5.5 (medium; max writes) and Fable 5.2 through Claude Code, Astra (xhigh) via Codex."""
     assert ccxbestrouter_sea.SIMPLE_MODEL == "cc/claude-opus-5-5-medium"
     assert ccxbestrouter_sea.PRIMARY_MODEL == "cc/claude-fable-5-2-max"
     assert ccxbestrouter_sea.REVIEW_MODEL == "codex/gpt-6-astra-xhigh"
+    assert ccxbestrouter_sea.WRITER_MODEL == "cc/claude-opus-5-5-max"
     # The reviewer is an effort alias the catalog does not list: it is known to the
     # catalog lookup as the entry it runs as, ``codex/gpt-6-astra``.
     assert is_known_model(ccxbestrouter_sea.REVIEW_MODEL)
     for model in (
         ccxbestrouter_sea.SIMPLE_MODEL,
         ccxbestrouter_sea.PRIMARY_MODEL,
+        ccxbestrouter_sea.WRITER_MODEL,
         _strip_thinking_alias(ccxbestrouter_sea.REVIEW_MODEL),
     ):
         assert model in MODEL_INFO, model
@@ -58,15 +60,25 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     protocol = ccxbestrouter_sea.SYSTEM_PROMPT
     assert sea.system_prompt("BASE") == "BASE\n\n" + protocol
     assert protocol.startswith("## Model routing protocol (ccxbestrouter)\n\n")
+    assert protocol == bestrouter_sea.routing_prompt(
+        "ccxbestrouter",
+        ccxbestrouter_sea.SIMPLE_MODEL,
+        ccxbestrouter_sea.PRIMARY_MODEL,
+        ccxbestrouter_sea.REVIEW_MODEL,
+        ccxbestrouter_sea.WRITER_MODEL,
+    )
     flat = " ".join(protocol.split())
     for phrase in (
         "Use 'cc/claude-opus-5-5-medium' for simple questions and queries.",
+        "Use 'cc/claude-opus-5-5-max' for writing any documents, papers, reports, results "
+        "which will be read by a human.",
         "Use 'cc/claude-fable-5-2-max' model for all other tasks, including "
-        "software development and analysis and writing.",
+        "software development and analysis.",
+        "Call `set_model(\"cc/claude-opus-5-5-max\")` before you write the final summary.",
         "Use codex/gpt-6-astra-xhigh through "
         "`run_agent(model=\"codex/gpt-6-astra-xhigh\", tool_profile=\"review\", "
-        "wait=\"false\")` for a thorough read-only review and debugging of the other model's "
-        "work,",
+        "wait=\"false\")` for a thorough read-only review and debugging of the work of "
+        "'cc/claude-fable-5-2-max' and 'cc/claude-opus-5-5-max',",
         "Use at most 75% of the task budget in codex/gpt-6-astra-xhigh,",
         "Use the model names literally without hallucinating new model names.",
     ):
@@ -75,6 +87,7 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     assert "not codex" not in protocol
     assert f"'{bestrouter_sea.SIMPLE_MODEL}'" not in protocol
     assert f"'{bestrouter_sea.PRIMARY_MODEL}'" not in protocol
+    assert bestrouter_sea.WRITER_MODEL not in protocol
     # The reviewer is unquoted and wraps onto a new line: only the flat text shows a leak.
     assert f" {bestrouter_sea.REVIEW_MODEL} " in " ".join(bestrouter_sea.SYSTEM_PROMPT.split())
     assert f" {bestrouter_sea.REVIEW_MODEL} " not in flat
@@ -85,6 +98,7 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     assert ccxbestrouter_sea.SIMPLE_MODEL in description
     assert ccxbestrouter_sea.PRIMARY_MODEL in description
     assert ccxbestrouter_sea.REVIEW_MODEL in description
+    assert f", writes on {ccxbestrouter_sea.WRITER_MODEL}, " in description
     assert "/ccxbestrouter <task>" in description
     assert_no_removed_getters(ccxbestrouter_sea)
 

@@ -53,10 +53,13 @@ from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import (
     IS_WINDOWS,
     SIGKILL,
+    end_pinned_descendants,
     exited_unreaped,
     kill_process_tree,
+    pin_process,
     popen_process_group,
     signal_unreaped_child,
+    unpin_process,
 )
 from kiss.core.processes import pid_alive as _pid_alive
 from kiss.core.processes import process_identity as _process_identity
@@ -402,12 +405,22 @@ def _unwatched(send: Callable[..., Any], *args: Any) -> Any:
     return send(*args)
 
 
-def _send_signal(pidfd: int, pid: int, sig: int) -> bool:
-    """Send *sig* through *pidfd*, or to the bare *pid* where there is none; True once sent."""
-    if pidfd >= 0 and sys.platform == "linux":
-        signal.pidfd_send_signal(pidfd, sig)
-    else:
-        os.kill(pid, sig)
+def _send_signal(pidfd: int, pinned: int | None, pid: int, sig: int) -> bool:
+    """Send *sig* through *pidfd*, or to the bare *pid* where there is none; True once sent.
+
+    With a :func:`pin_process` handle *pinned* (Windows) the process's
+    descendants are ended in the same step, even when the signal finds
+    it already gone: the kill ends the operation the watchdog guards,
+    so a later step would no longer be allowed to run.
+    """
+    try:
+        if pidfd >= 0 and sys.platform == "linux":
+            signal.pidfd_send_signal(pidfd, sig)
+        else:
+            os.kill(pid, sig)
+    finally:
+        if pinned is not None:  # pragma: no cover — Windows-only
+            end_pinned_descendants(pinned)
     return True
 
 
@@ -426,8 +439,12 @@ def _terminate_pid_escalating(
     the process that was verified and no later holder of its pid, which
     closes the window between a check and its signal (the browser is
     the driver's child, reaped by it the moment it exits, and the
-    identity read runs ``ps`` in between).  Elsewhere the bare pid is
-    signalled.
+    identity read runs ``ps`` in between).  On Windows a handle opened
+    the same way (:func:`pin_process`) keeps the pid from being reused,
+    and once the browser is verified and killed its descendants are
+    ended too: Windows ends no child with its parent, and a killed
+    Chromium left its renderer, GPU and utility processes running.
+    Elsewhere the bare pid is signalled.
 
     Args:
         pid: Process id to terminate.
@@ -444,6 +461,7 @@ def _terminate_pid_escalating(
             return
         except OSError:  # pragma: no cover — a kernel or seccomp profile without pidfd_open
             logger.debug("pidfd_open(%d) failed; signalling the pid instead", pid, exc_info=True)
+    pinned = pin_process(pid)
     try:
         for sig in (signal.SIGTERM, SIGKILL):
             if not _pid_alive(pid):
@@ -462,7 +480,7 @@ def _terminate_pid_escalating(
                 return
             logger.warning("Killing leaked Chromium (pid %d) with signal %d", pid, sig)
             try:
-                if not act(_send_signal, pidfd, pid, sig):
+                if not act(_send_signal, pidfd, pinned, pid, sig):
                     return  # the watchdog's operation has ended: the browser is the next call's
             except OSError:  # died between the check and the signal
                 return
@@ -475,6 +493,8 @@ def _terminate_pid_escalating(
     finally:
         if pidfd >= 0:
             os.close(pidfd)
+        if pinned is not None:  # pragma: no cover — Windows-only
+            unpin_process(pinned)
 
 
 def _killable_live_pid(pid: int | None) -> TypeGuard[int]:

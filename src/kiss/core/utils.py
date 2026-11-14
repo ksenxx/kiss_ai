@@ -806,7 +806,6 @@ def finish(
     is_continue: bool = False,
     summary_in_html: str = "",
     suggested_next_task: str = "",
-    evidence: str = "",
 ) -> str:
     """Finish execution with status and summary.
 
@@ -822,10 +821,6 @@ def finish(
         suggested_next_task: ONE concrete follow-up task for the user, as one plain-text sentence.
             Shown to the user as "Suggested next"; leave empty when nothing
             sensible follows.
-        evidence: With ``success=True``, a JSON list of the shell commands you ran in
-            this run (exactly as you ran them) whose exit code 0 backs the claim:
-            the verifier run, the test run.  A gated run checks that each one ran
-            and passed; leave empty when the task ran no check.
 
     Returns:
         A YAML string with 'success', 'is_continue' and 'summary' keys, where

@@ -200,8 +200,8 @@ def charge_side_channel_usage(
         tab_id: A tab that gets *task_id*'s new totals besides the tabs
             watching the task (whose subscriptions lapse a few minutes
             after it ends), or ``""``.
-        key: The key of a charge its caller may make again (a gate
-            review attempt a stop ended), or ``None``.
+        key: The key of a charge its caller may make again (a side
+            call a stop ended), or ``None``.
     """
     if not task_id or (budget <= 0 and tokens <= 0 and steps <= 0):
         return
