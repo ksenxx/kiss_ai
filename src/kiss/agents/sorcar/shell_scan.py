@@ -880,9 +880,12 @@ class _Assigned(dict[str, "str | None"]):
     """The variables as the later assignments of a command see them (:meth:`_Scanner.assign`).
 
     ``changed`` once one is set, as the scan of a word does to make it unknown (``${T:=x}``).
+    ``unknown`` holds the shell's variables with no value known, as Bash 3 expands those
+    assignments (:meth:`_Scanner.assigning`), once the first of them is scanned that way.
     """
 
     changed = False
+    unknown: _Assigned | None = None
 
     def __setitem__(self, name: str, value: str | None) -> None:
         self.changed = True
@@ -1159,7 +1162,13 @@ class _Scanner:
             # both readings; in particular, substitutions cannot be approved
             # against the wrong target.  Track an expansion that assigns one
             # (``${T:=x}``) so the command's later words stay unknown too.
-            unknown = _Assigned(dict.fromkeys([*shell, "PWD", "IFS", "CDPATH"]))
+            # One mapping serves the command's whole prefix: the scan of a word
+            # only makes variables unknown in it, which they all are, and a copy
+            # for each assignment took time quadratic in their number.
+            unknown = assigned.unknown
+            if unknown is None:
+                unknown = _Assigned(dict.fromkeys([*shell, "PWD", "IFS", "CDPATH"]))
+                assigned.unknown = unknown
             unknown.changed = False
             self.variables = unknown
         yield

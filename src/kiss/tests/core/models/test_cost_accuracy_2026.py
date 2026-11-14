@@ -41,6 +41,7 @@ from kiss.core.models.model_info import (
     ModelInfo,
     _apply_cache_pricing,
     _long_context_uplift,
+    _provider_cache_defaults,
     calculate_cost,
 )
 
@@ -377,6 +378,11 @@ class TestDirectCatalogPricesMatchProviderPages:
         )
         assert calculate_cost("gemini-embedding-2", 1_000_000, 0) == pytest.approx(0.20)
 
+    def test_gemini_embedding_2_preview_is_not_free(self):
+        """The preview id is still served and billed like the GA model (OpenRouter's
+        Google passthrough lists both at $0.20 per 1M input tokens); it was at $0."""
+        assert calculate_cost("gemini-embedding-2-preview", 1_000_000, 0) == pytest.approx(0.20)
+
     def test_gemini_4_argon_cache_read_is_five_percent_of_input(self):
         """ai.google.dev pricing 2026-10-13: Gemini 4 Argon is $2 / $10 with implicit
         caching discounting cached input by 95% to $0.10 (0.05x), unlike the 0.1x the
@@ -396,6 +402,38 @@ class TestDirectCatalogPricesMatchProviderPages:
         assert calculate_cost("openrouter/google/gemini-4-argon", 0, 0, 0, 1_000_000) == (
             pytest.approx(0.1875)
         )
+
+    @pytest.mark.parametrize(
+        ("name", "inp", "read"),
+        [
+            ("gemini-4-carbon", 2.0, 0.10),
+            ("gemini-4-carbon-high", 2.0, 0.10),
+            ("gemini-4-hydrogen", 1.5, 0.075),
+            ("gemini-4-hydrogen-low", 1.5, 0.075),
+            ("openrouter/google/gemini-4-hydrogen", 1.5, 0.075),
+        ],
+    )
+    def test_every_gemini_4_cache_read_is_five_percent_of_input(self, name, inp, read):
+        """ai.google.dev pricing 2026-11-13: Carbon $2 / $0.10 cached, Hydrogen $1.50 / $0.075.
+
+        Both direct entries carry no cache price (the updater adds Gemini models
+        without one), and the generic 0.1x Gemini rule billed every cached token
+        of them at twice Google's rate.
+        """
+        info = MODEL_INFO[name]
+        assert info.input_price_per_1M == pytest.approx(inp)
+        assert info.cache_read_price_per_1M == pytest.approx(read)
+        assert calculate_cost(name, 0, 0, 1_000_000, 0) == pytest.approx(read)
+
+    def test_a_new_gemini_4_entry_derives_the_five_percent_cache_read(self):
+        """The rule, not only the catalog: an entry with no cache price gets 0.05x."""
+        assert _provider_cache_defaults("gemini-4-neon", 3.0) == (0.15, 0.0, None)
+        assert _provider_cache_defaults("openrouter/google/gemini-4-neon", 3.0) == (
+            0.15, 0.0, None,
+        )
+        # Earlier Gemini generations keep Google's 0.1x read.
+        assert _provider_cache_defaults("gemini-3.6-flash", 0.75) == (0.075, 0.0, None)
+        assert MODEL_INFO["gemini-3.6-flash"].cache_read_price_per_1M == pytest.approx(0.075)
 
     def test_gpt_audio_mini_audio_tokens_priced_separately(self):
         """developers.openai.com pricing 2026-09: audio $10 / $20, text $0.60 / $2.40."""

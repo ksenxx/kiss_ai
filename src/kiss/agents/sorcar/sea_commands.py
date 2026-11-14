@@ -519,13 +519,16 @@ def refresh_registry() -> list[str]:
     return _publish(scan, _scan_sources(_read_seas_md_folders()))
 
 
-def _publish(scan: int, merged: dict[str, Path]) -> list[str]:
+def _publish(
+    scan: int, merged: dict[str, Path], unless: threading.Event | None = None
+) -> list[str]:
     """Install rescan number *scan*'s *merged* as the registry; notify the subscribers of a change.
 
     Compare-and-swap under ``_lock`` (:func:`_swap_registry`) so two
     concurrent rescans can never both observe the old
     ``_last_broadcast`` and fire the same notification twice, and a
-    rescan older than the one last published is dropped.  A changed
+    rescan older than the one last published is dropped, as is one
+    whose poller was stopped meanwhile (*unless*).  A changed
     snapshot is delivered under ``_notify_lock`` (order:
     ``_notify_lock`` -> ``_lock``), one delivery at a time, each
     ended as soon as a later snapshot is published
@@ -545,7 +548,7 @@ def _publish(scan: int, merged: dict[str, Path]) -> list[str]:
     good.
     """
     try:
-        snapshot, callbacks = locked_call(_lock, _swap_registry, scan, merged)
+        snapshot, callbacks = locked_call(_lock, _swap_registry, scan, merged, unless)
         if callbacks:
             locked_call(_notify_lock, _notify, snapshot, callbacks)
     except BaseException:
@@ -581,15 +584,20 @@ def _forget_broadcast() -> None:
 
 
 def _swap_registry(
-    scan: int, merged: dict[str, Path]
+    scan: int, merged: dict[str, Path], unless: threading.Event | None = None
 ) -> tuple[list[str], list[Callable[[list[str]], None]]]:
     """Replace the registry with rescan *scan*'s *merged*; return the snapshot and the callbacks.
 
     A rescan that started before the last published one is stale: the
-    registry is kept and nobody is notified.
+    registry is kept and nobody is notified.  Nor does a poller's
+    rescan count once the poller is stopped (*unless*, its stop event,
+    which :func:`stop_registry_watcher` sets under ``_lock`` too):
+    whoever stopped it waited a few seconds for it at most, and may
+    have gone on to another registry since (a test's, read from
+    another ``SEAS.md``).
     """
     global _last_broadcast, _published_scan
-    if scan < _published_scan:
+    if scan < _published_scan or (unless is not None and unless.is_set()):
         return sorted(_registry), []
     _published_scan = scan
     _registry.clear()
@@ -2258,6 +2266,15 @@ def start_registry_watcher(
     no-op — and safe to call from any thread.  The watcher runs as
     a daemon thread so it never blocks interpreter shutdown.
 
+    Nothing is scanned here: the first rescan is the poller's first
+    step.  The daemon calls this on its event loop once its listeners
+    are up, and a rescan parses every SEA script it finds.  Made
+    here, it kept every client that had connected by then without an
+    answer for as long as it took, seconds on a busy machine and more
+    than a handshake waits.  A lookup that comes before the first
+    rescan is published fills the registry itself
+    (:func:`list_commands`).
+
     Args:
         poll_interval: Seconds between rescans.  Bounded below at
             0.1 s to keep tests fast and above at 60 s to keep it
@@ -2265,13 +2282,6 @@ def start_registry_watcher(
     """
     global _watcher_thread, _watcher_stop
     interval = max(0.1, min(60.0, float(poll_interval)))
-    # Always emit the first refresh synchronously so the very first
-    # ``list_commands`` from a client cannot race the watcher's first
-    # tick, then hand ongoing rescans to the poller.
-    try:
-        refresh_registry()
-    except Exception:  # pragma: no cover - registry rescan is best-effort
-        logger.debug("initial SEA registry refresh failed", exc_info=True)
     # Create, start and publish the thread in one critical section so
     # ``stop_registry_watcher`` can never join an unstarted thread and a
     # concurrent second start cannot spawn a second poller.
@@ -2309,13 +2319,16 @@ def stop_registry_watcher(timeout: float = 5.0) -> None:
 def _watcher_loop(interval: float, stop: threading.Event) -> None:
     """Body of the background poller thread.
 
-    Rebuilds the registry every *interval* seconds until *stop* (this
-    poller's own event) is signalled.  Every rescan is wrapped in
-    ``try/except`` so a transient filesystem error (e.g. a folder
-    that appears mid-edit) cannot kill the watcher.
+    Rebuilds the registry at once and then every *interval* seconds,
+    until *stop* (this poller's own event) is signalled.  Every rescan
+    is wrapped in ``try/except`` so a transient filesystem error (e.g.
+    a folder that appears mid-edit) cannot kill the watcher.  A rescan
+    that ends after the stop is not published (:func:`_swap_registry`).
     """
-    while not stop.wait(interval):
+    while not stop.is_set():
         try:
-            refresh_registry()
+            scan = next(_scan_numbers)
+            _publish(scan, _scan_sources(_read_seas_md_folders()), unless=stop)
         except Exception:  # pragma: no cover - watcher must never die
             logger.debug("SEA registry rescan failed", exc_info=True)
+        stop.wait(interval)

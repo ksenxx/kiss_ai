@@ -373,6 +373,30 @@ def is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
+def write_sh_stub(stub: Path, body: str) -> Path:
+    """Write the executable ``sh`` script *body* to *stub* and run it once, up to its guard.
+
+    macOS assesses a new executable on its first run, one at a time for
+    the whole machine: 0.2 s on an idle Mac and a second or more while
+    other tests run new stubs of their own, against 10 ms for every
+    later run.  A test that gives its stub a short time to start (the
+    0.5 s of a "stuck command" probe) saw the stub killed before it had
+    marked its start.  The first run is made here instead: the script
+    begins with a guard that ends it at once.
+
+    Args:
+        stub: The script's path; its folder exists.
+        body: The script's lines after ``#!/bin/sh`` and the guard.
+
+    Returns:
+        *stub*.
+    """
+    stub.write_text('#!/bin/sh\n[ -n "$KISS_STUB_FIRST_RUN" ] && exit 0\n' + body)
+    stub.chmod(0o755)
+    subprocess.run([str(stub)], env={**os.environ, "KISS_STUB_FIRST_RUN": "1"}, check=True)
+    return stub
+
+
 @functools.cache
 def host_sed_is_gnu() -> bool:
     """Return whether the ``sed`` on PATH is GNU sed, asked once with ``sed --version``.

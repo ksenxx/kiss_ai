@@ -2053,8 +2053,13 @@ def _provider_cache_defaults(name: str, inp: float) -> tuple[float, float, float
         # OpenRouter passes Google's 0.1x cache-read rate through unchanged
         # (e.g. google/gemini-3.1-pro-preview: $2.00 input, $0.20 cache read).
         # Only Gemini: Google's open-weight Gemma models on OpenRouter are
-        # served by third parties that publish no cache discount.
-        return _derived_price(inp, 0.1), 0.0, None
+        # served by third parties that publish no cache discount.  Gemini 4
+        # discounts cached input by 95% instead (ai.google.dev/gemini-api/
+        # docs/pricing, 2026-11-13: Carbon and Argon $2.00 -> $0.10, Hydrogen
+        # $1.50 -> $0.075); the updater adds new Gemini models without a
+        # cache price, so the rule has to know it.
+        read_mult = 0.05 if name.rsplit("/", 1)[-1].startswith("gemini-4-") else 0.1
+        return _derived_price(inp, read_mult), 0.0, None
     if name.startswith(("kimi-", "moonshot-")):
         # Moonshot bills a 5-minute cache write at the uncached input rate
         # (kimi-k3: $3.00 input, $3.00 write, $0.30 read); it is reported in

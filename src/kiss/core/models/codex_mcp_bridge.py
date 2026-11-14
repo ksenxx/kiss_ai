@@ -361,10 +361,13 @@ class ToolBridge:
         """Return the calls answered so far, in order, and forget them."""
         return locked_call(self._server.state_lock, self._server.take_served)
 
-    def codex_args(self, tool_timeout_seconds: int) -> list[str]:
+    def codex_args(self, startup_timeout_seconds: int, tool_timeout_seconds: int) -> list[str]:
         """Return the ``codex exec`` overrides that register the proxy as an MCP server.
 
         Args:
+            startup_timeout_seconds: How long Codex waits for the proxy
+                to start (after its default of 30 s it fails the turn:
+                "required MCP servers failed to initialize").
             tool_timeout_seconds: How long Codex waits for one tool call
                 (its default of 60 s is far too short for KISS tools
                 such as ``Bash`` or ``run_parallel``).
@@ -378,6 +381,11 @@ class ToolBridge:
             ``env_vars`` forwards :data:`BRIDGE_TOKEN_ENV` from Codex's
             environment (:meth:`codex_env`) to the proxy, whose
             environment Codex otherwise clears.
+            ``required=true`` makes Codex wait for the proxy before it
+            asks the model: an optional server gets one second
+            (``mcp_optional_startup_grace_ms``), and when the proxy took
+            longer to start the model was asked without the tools and
+            answered that they are unavailable.
         """
         prefix = f"mcp_servers.{KISS_MCP_SERVER_NAME}"
         return [
@@ -388,9 +396,13 @@ class ToolBridge:
             "-c",
             f"{prefix}.env_vars={toml_value([BRIDGE_TOKEN_ENV])}",
             "-c",
+            f"{prefix}.startup_timeout_sec={int(startup_timeout_seconds)}",
+            "-c",
             f"{prefix}.tool_timeout_sec={int(tool_timeout_seconds)}",
             "-c",
             f"{prefix}.default_tools_approval_mode={toml_value('approve')}",
+            "-c",
+            f"{prefix}.required=true",
         ]
 
     def codex_env(self) -> dict[str, str]:

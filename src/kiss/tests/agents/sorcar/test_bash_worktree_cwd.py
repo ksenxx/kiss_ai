@@ -17,6 +17,7 @@ branch.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -54,6 +55,39 @@ def test_clean_env_without_work_dir_leaves_kiss_workdir(monkeypatch):
     monkeypatch.setenv("KISS_WORKDIR", "/inherited/main/repo")
     env = _clean_env(None)
     assert env["KISS_WORKDIR"] == "/inherited/main/repo"
+
+
+def _same_dir(path: str, folder: Path) -> bool:
+    return os.path.normcase(os.path.realpath(path)) == os.path.normcase(os.path.realpath(folder))
+
+
+def test_a_sub_agents_command_has_its_private_folder_as_temp_dir(tmp_path: Path) -> None:
+    """A sub-agent's private folder is the temp directory of its commands.
+
+    They find it in ``TMPDIR``, and in ``TMP`` and ``TEMP`` too except on
+    Windows.  Git Bash keeps one mount table for all of its processes, filled in by
+    the first of them from that process's own ``TMP``/``TEMP``.  A
+    sub-agent's shell that carried its private folder there made the
+    folder ``/tmp`` of every Git Bash shell of the user, and once the
+    folder was deleted at the sub-agent's end each of them started with
+    "bash.exe: warning: could not find /tmp, please create!" in front of
+    its output, and ``mktemp`` failed in it.
+    """
+    private = tmp_path / "private"
+    private.mkdir()
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import os\n"
+        "for name in ('TMPDIR', 'KISS_SUBAGENT_DIR', 'TMP', 'TEMP'):\n"
+        "    print(os.environ.get(name, ''))\n"
+    )
+    tools = UsefulTools(work_dir=str(tmp_path), private_dir=str(private))
+    output = tools.Bash(f"{shlex.quote(sys.executable)} probe.py", "print the temp variables")
+    tmpdir, marker, tmp, temp = output.strip().splitlines()
+    assert _same_dir(tmpdir, private) and _same_dir(marker, private), output
+    in_tmp_and_temp = sys.platform != "win32"
+    assert _same_dir(tmp, private) is in_tmp_and_temp, output
+    assert _same_dir(temp, private) is in_tmp_and_temp, output
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix shell semantics")

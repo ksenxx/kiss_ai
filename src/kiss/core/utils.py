@@ -106,14 +106,22 @@ def seed_file_atomically(path: Path, content: str) -> None:
     except FileExistsError:
         logger.debug("Exception caught", exc_info=True)
     finally:
-        # Windows sharing modes belong to the file, not the name: a
-        # reader that opened *path* the instant the link published it
-        # (the autocomplete worker) makes unlinking the staging name a
-        # PermissionError until it closes.  Wait that out; the seed is
-        # already in place, so a staging name that outlives the budget
-        # is left behind rather than reported as a failed seed.
-        with contextlib.suppress(PermissionError):
-            unlink_waiting_for_holders(staged)
+        # The removal is this block's first call and a C function on a
+        # ``str`` (see :func:`_staging_path`): a Stop landing anywhere
+        # in this function still finds the staging file gone.
+        try:
+            os.unlink(staged)
+        except FileNotFoundError:
+            pass
+        except PermissionError:
+            # Windows sharing modes belong to the file, not the name: a
+            # reader that opened *path* the instant the link published it
+            # (the autocomplete worker) makes unlinking the staging name a
+            # PermissionError until it closes.  Wait that out; the seed is
+            # already in place, so a staging name that outlives the budget
+            # is left behind rather than reported as a failed seed.
+            with contextlib.suppress(PermissionError):
+                unlink_waiting_for_holders(Path(staged))
 
 
 def atomic_write_text(
@@ -200,7 +208,12 @@ def atomic_write_text(
             _try_chmod(tmp, preserved)
         replace_waiting_for_readers(tmp, target)
     except BaseException:
-        tmp.unlink(missing_ok=True)
+        # The handler's first call, a C function on a ``str``: see
+        # :func:`_staging_path`.
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
         raise
 
 
@@ -432,23 +445,71 @@ def _staging_prefix(target: Path) -> str:
     digits :func:`_staging_path` appends fit the 255 bytes a file name
     may have: the whole name plus 34 characters refused a target whose
     own name is legal but longer than 221 bytes.
+
+    On Windows the name is cut again, to what the staging path leaves
+    it of the 259 UTF-16 units a path may have (``MAX_PATH`` less its
+    NUL, on a machine that does not enable long paths): the separator,
+    the dot, the dash and the digits take 35.  The whole name refused,
+    with ``FileNotFoundError``, a target whose own path is legal but
+    longer than 225 units.  A folder deeper than 224 units leaves the
+    name nothing: see :func:`_staging_path`.
     """
     name = os.fsencode(target.name)[:221].decode("utf-8", "ignore")
+    if os.name == "nt":
+        folder = os.path.abspath(target.parent).encode("utf-16-le", "surrogatepass")
+        room = max(259 - len(folder) // 2 - 35, 0)
+        name = name.encode("utf-16-le")[: 2 * room].decode("utf-16-le", "ignore")
     return f".{name}-"
 
 
-def _staging_path(target: Path) -> Path:
+def _staging_path(target: Path) -> str:
     """Return a unique sibling name under which *target*'s new content is staged.
 
     :func:`_staging_prefix` and 128 random bits.  Only the name is
     chosen here.  The caller creates the file with :func:`_write_staged`
     inside the ``try`` that removes it, so an exception raised as the
     file is created still finds its name.
+
+    The name is a ``str`` and the caller's cleanup begins with
+    ``os.unlink`` of it.  A task's Stop is raised only at a check point
+    of the bytecode (after a call returns, at the entry of a Python
+    function), and there is none between the start of an ``except`` or
+    ``finally`` block and its first call into C.  A cleanup that began
+    with a Python-level call (``Path.unlink``, ``contextlib.suppress``,
+    the ``__fspath__`` of a ``Path`` argument) had one: a Stop landing
+    there, a second one in a handler or the only one in a ``finally``
+    reached without an exception, skipped the removal and left the
+    staging file behind.
+
+    On Windows a folder deeper than 224 UTF-16 units has no room for
+    the 35 of the shortest staging name (:func:`_staging_prefix`),
+    though it may hold files of its own: every write into it answered
+    ``FileNotFoundError``.  The name is spelled in the extended-length
+    form there, which the limit of a path does not apply to.
     """
-    return target.parent / (_staging_prefix(target) + uuid.uuid4().hex)
+    staged = str(target.parent / (_staging_prefix(target) + uuid.uuid4().hex))
+    if os.name == "nt":
+        staged = _past_max_path(staged)
+    return staged
 
 
-def _write_staged(staged: Path, data: bytes, create_mode: int) -> None:
+def _past_max_path(path: str) -> str:
+    r"""Return *path* as Windows takes it whatever its length.
+
+    A path of at most 259 UTF-16 units, or one already in the
+    extended-length form, is returned as it is.  A longer one is
+    returned absolute and in that form: ``\\?\C:\...``, for a share
+    ``\\?\UNC\server\share\...``.
+    """
+    full = os.path.abspath(path)
+    if len(full.encode("utf-16-le", "surrogatepass")) <= 2 * 259 or full.startswith("\\\\?\\"):
+        return path
+    if full.startswith("\\\\"):
+        return "\\\\?\\UNC" + full[1:]
+    return "\\\\?\\" + full
+
+
+def _write_staged(staged: str, data: bytes, create_mode: int) -> None:
     """Create the staging file *staged* holding *data*.
 
     The one staging primitive of this module: every atomic write and

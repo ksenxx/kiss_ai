@@ -106,6 +106,20 @@ _WHEELWEDGE_PAGE = (
     b'addEventListener("mousemove", function () { while (true) {} });'
     b"</script></body></html>"
 )
+# A button whose own ``mousemove`` handler never returns, and an iframe of
+# another site (``localhost``, so a renderer of its own) whose script never
+# returns: a move over the iframe is held by the iframe, one onto the button
+# by the page.
+_JUMPWEDGE_PAGE = (
+    b"<html><head><title>jumpwedge</title></head><body>"
+    b'<button style="position: fixed; left: 10px; top: 400px; width: 200px; height: 100px"'
+    b' onmousemove="while (true) {}">Press</button>'
+    b'<iframe style="position: fixed; left: 500px; top: 0; width: 300px; height: 300px"'
+    b' src="http://localhost:%s/spin"></iframe>'
+    b"</body></html>"
+)
+_SPIN_PAGE = b"<html><body><script>while (true) {}</script></body></html>"
+_SILENT_IFRAME_CENTRE = (650.0, 150.0)
 
 # Each bounded read gives up after 10 s (``_PAGE_READ_TIMEOUT_MS``); the
 # join deadline leaves generous slack for browser start-up on slow CI.
@@ -136,6 +150,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             body, ctype = _INPUTWEDGE_PAGE, "text/html"
         elif self.path.startswith("/wheelwedge"):
             body, ctype = _WHEELWEDGE_PAGE, "text/html"
+        elif self.path.startswith("/jumpwedge"):
+            port = self.headers.get("Host", "").rsplit(":", 1)[-1].encode()
+            body, ctype = _JUMPWEDGE_PAGE % port, "text/html"
+        elif self.path.startswith("/spin"):
+            body, ctype = _SPIN_PAGE, "text/html"
         else:
             body, ctype = _OK_PAGE, "text/html"
         self.send_response(200)
@@ -359,6 +378,53 @@ def test_input_wedging_handlers_are_unblocked_by_watchdog(tmp_path):
         assert str(out["wheel_tree"]).startswith("Page: wheelwedge\n")
         assert str(out["scroll"]).startswith("Error scrolling down: ")
         assert float(out["scroll_s"]) < 60  # type: ignore[arg-type]
+        assert str(out["recovered"]).startswith("Page: fine page\n")
+    finally:
+        if worker.is_alive():
+            tool.close()
+        srv.shutdown()
+        srv.server_close()
+
+
+def _drive_jump_wedge(tool: WebUseTool, base: str, out: dict[str, object]) -> None:
+    """Click a button that wedges the page, along a path over an iframe that does not answer."""
+    out["tree"] = tool.go_to_url(f"{base}/jumpwedge")
+    browser = tool._browser_pid
+    assert browser is not None
+    t0 = time.monotonic()
+    out["click"] = tool.click(1)
+    out["click_s"] = time.monotonic() - t0
+    out["browser_gone"] = _wait_pid_exit(browser, 10.0)
+    out["recovered"] = tool.go_to_url(f"{base}/ok")
+    out["done"] = True
+
+
+def test_a_jump_onto_a_wedging_handler_is_unblocked_by_watchdog(tmp_path, monkeypatch):
+    """The pointer's jump past an iframe that does not answer is raw input like any other.
+
+    A path over such an iframe ends there and the pointer goes straight
+    to its target (the iframe holds the move, the page answers).  A
+    target whose own handler wedges the page on that jump holds it too,
+    and nothing told the two apart: the glide returned as if a frame had
+    held the pointer, its watchdog went with it, and the page stayed
+    wedged in a browser nothing relaunched.  The watchdog must end the
+    call, as it does for a path that meets the handler on its way.
+    """
+    monkeypatch.setattr(web_stealth, "mouse_path", lambda start, end: [_SILENT_IFRAME_CENTRE, end])
+    srv, base = _serve()
+    tool = WebUseTool(user_data_dir=str(tmp_path / "prof"), headless=True)
+    out: dict[str, object] = {}
+    worker = threading.Thread(
+        target=_drive, args=(tool, base, out), kwargs={"calls": _drive_jump_wedge}, daemon=True
+    )
+    worker.start()
+    worker.join(_JOIN_TIMEOUT_S + 60)
+    try:
+        assert out.get("done") is True, f"tool call hung; progress so far: {sorted(out)}"
+        assert '[1] button "Press"' in str(out["tree"])
+        assert str(out["click"]).startswith("Error clicking element 1: ")
+        assert float(out["click_s"]) < 60  # type: ignore[arg-type]
+        assert out["browser_gone"] is True, "the watchdog left the wedged page's browser running"
         assert str(out["recovered"]).startswith("Page: fine page\n")
     finally:
         if worker.is_alive():

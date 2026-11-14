@@ -47,6 +47,40 @@ class TestDockerManagerStreaming(unittest.TestCase):
         assert "stderr_msg" in joined
 
 
+def _run_fast_commands(env: DockerManager, count: int, lost: list[str]) -> None:
+    """Run *count* commands that print and exit at once; collect the results without the print."""
+    for _ in range(count):
+        result = env.Bash("echo printed-at-once", "fast command")
+        if "printed-at-once" not in result:
+            lost.append(result)
+
+
+@pytest.mark.skipif(not is_docker_available(), reason="Docker daemon is not running")
+def test_a_fast_command_keeps_the_output_that_arrives_with_the_header() -> None:
+    """No command loses its output, however early the daemon sends it.
+
+    The SDK reads an exec's frames from the raw socket underneath the
+    HTTP response's buffered reader.  Output the daemon sent in the
+    same read as the response header stayed in that reader: the command
+    came back empty with exit code 0, about one run in fifty of a
+    command that prints and exits at once on a loaded machine (the
+    attach test in a full run of the suite, a tool's whole output).
+    Twenty-four threads lost 8 to 14 of these 720 commands in each of
+    three runs.
+    """
+    lost: list[str] = []
+    with DockerManager(IMAGE) as env:
+        workers = [
+            threading.Thread(target=_run_fast_commands, args=(env, 30, lost)) for _ in range(24)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+
+    assert lost == []
+
+
 @pytest.fixture
 def registry_repository() -> Iterator[str]:
     """A repository of :data:`IMAGE` in a private registry on a random host port.

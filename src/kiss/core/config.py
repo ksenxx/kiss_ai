@@ -676,11 +676,16 @@ class Config(BaseModel):
         default_factory=lambda: _env_int("KISS_CONTEXT_EDIT_CLEAR_AT_LEAST", 50_000),
         description=(
             "Tokens that clearing must remove to be applied, so each one pays for the "
-            "prompt-cache write it causes: the stubbed inputs and results (four "
-            "characters a token) and the reasoning that goes with them (the output "
-            "tokens of the replies less their visible text).  Scaled to the model's cache "
-            "prices like context_edit_trigger_tokens.  0 sets no minimum; clearings are "
-            "then ten steps apart (KISS_CONTEXT_EDIT_CLEAR_AT_LEAST)."
+            "prompt-cache write it causes: the stubbed inputs and results (2.55 "
+            "characters a token on a Claude model) and the reasoning that goes with "
+            "them (the output tokens of the replies less their visible text).  Scaled "
+            "to the model's cache prices like context_edit_trigger_tokens.  Whatever "
+            "the value, a clearing must also remove the share of the context that pays "
+            "its cache write back within 50 steps (payback_floor: 44% on Claude Fable "
+            "5.1 and 5.2, 28% on Opus and Sonnet 5.5, 15% on the other Claude models), "
+            "which at the default is the larger of the two on those four models; with "
+            "0 that share is the only minimum, and clearings are at least ten steps "
+            "apart (KISS_CONTEXT_EDIT_CLEAR_AT_LEAST)."
         ),
     )
     routine_turn_effort: str = Field(

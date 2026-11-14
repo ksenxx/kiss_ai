@@ -188,6 +188,64 @@ class TestSpendFollowsTheModelThatRan:
             db.execute("DELETE FROM task_history WHERE id = ?", (task,))
             db.commit()
 
+    def test_a_row_with_text_in_its_number_columns_counts_as_nothing(self) -> None:
+        """Text for a row's cost, tokens or steps is 0 spend, not the end of the report.
+
+        SQLite's dynamic typing lets a foreign tool store text there.
+        One sub-agent row holding it raised ``float("n/a")`` out of the
+        whole Spend report and of its parent's usage, and a top-level
+        one out of its own usage: the daemon answered neither
+        ``getSpendReport`` nor ``getTaskUsage``, for good.
+        """
+        parent = _run_task("claude-opus-5-5", 3.0, 300, [])
+        child = _run_task("claude-fable-5-1", 1.0, 100, [], parent=parent)
+        alone = _run_task("gpt-6-astra", 2.0, 200, [])
+        db = th._get_db()
+        db.execute(
+            "UPDATE task_history SET cost = 'n/a', tokens = 'many', steps = 'few' "
+            "WHERE id IN (?, ?)",
+            (child, alone),
+        )
+        db.commit()
+
+        assert _by_model() == {
+            "claude-opus-5-5": (3.0, 300),
+            "claude-fable-5-1": (0.0, 0),
+            "gpt-6-astra": (0.0, 0),
+        }
+        usage = th._task_usage([parent, child, alone])
+        assert usage[parent] == {
+            "cost": 3.0, "tokens": 300, "steps": 1,
+            "models": {"claude-opus-5-5": [3.0, 300.0], "claude-fable-5-1": [0.0, 0.0]},
+        }
+        nothing = {"cost": 0.0, "tokens": 0, "steps": 0}
+        assert usage[child] == {**nothing, "models": {"claude-fable-5-1": [0.0, 0.0]}}
+        assert usage[alone] == {**nothing, "models": {"gpt-6-astra": [0.0, 0.0]}}
+
+    def test_a_remote_record_with_text_in_its_number_columns_counts_as_nothing(self) -> None:
+        """So does the record of a sub-agent run on another machine.
+
+        Read as the stand-in of a task with no row here, and next to the
+        row of one that has (the record replaces the row it has grown
+        past): the comparison raised as the sum did.
+        """
+        parent = _run_task("claude-opus-5-5", 3.0, 300, [])
+        child = _run_task("claude-fable-5-1", 1.0, 100, [], parent=parent)
+        db = th._get_db()
+        db.executemany(
+            "INSERT INTO remote_subtasks (task_id, parent_task_id, machine, model, cost, tokens, "
+            "steps, model_costs, timestamp) VALUES (?, ?, 'box', 'gpt-6-astra', 'n/a', 'many', "
+            "'few', '', 0)",
+            [("ran-on-box", parent), (child, parent)],
+        )
+        db.commit()
+
+        assert _by_model() == {
+            "claude-opus-5-5": (2.0, 200),
+            "claude-fable-5-1": (1.0, 100),
+            "gpt-6-astra": (0.0, 0),
+        }
+
     def test_a_damaged_event_is_left_out_of_the_split(self) -> None:
         """An events row that is not JSON neither fails the charge and the save nor counts."""
         task, _ = th._add_task("task", "", {"model": "claude-opus-5-5"})

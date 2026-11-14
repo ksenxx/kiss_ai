@@ -121,8 +121,16 @@ HANDOFF_PROXIMITY_FRACTION = 0.8
 """No compaction once the context reaches this share of the hand-off limit:
 the remaining headroom (20 % of the limit, ~70k tokens for a 350k limit)
 is 15-35 steps, fewer than a compaction needs to pay for itself."""
-CHARS_PER_TOKEN = 4
-"""Rough characters-per-token ratio used to turn dropped text into tokens."""
+CHARS_PER_TOKEN = 2.55
+"""Characters of tool text per token of a Claude model, used to turn dropped
+text into tokens.  Measured on the steps recorded from 2026-11-11 to 11-13
+whose tool results had 2,000 characters or more, as those characters over the
+growth of the context: 2.52 on Claude Fable 5.2 (16,628 steps), 2.56 on Fable
+5.1, 2.2 to 2.4 on Opus and Sonnet 5.5.  At the 4 used before, a size came out
+37% too small."""
+OTHER_CHARS_PER_TOKEN = 4
+"""The ratio for the other model families: 3.85 on GPT-6 (3,835 such steps)
+and 3.5 to 3.7 on GPT-5.6, where 2.55 would be 51% too large."""
 CLEAR_PRICE_RATIO = 50.0
 """Cache reads that one cache write costs on the model the bulk clear's
 settings are stated for (Claude Fable 5.2: $10 against $0.20 per million
@@ -137,8 +145,11 @@ STUB_HEAD = re.compile(r"\[compacted (?:tool output|argument)(?: #(\d+))?:[^\n]*
 original (none in the oldest format), and metadata up to the ``]`` that ends
 the line (a file path in the metadata may itself carry brackets).  Only such a
 whole line is a stub; the opening words alone are ordinary text."""
-PROTECTED_ARGUMENT_TOOLS = frozenset({"finish"})
-"""Tools whose arguments are never compacted (a ``finish`` ends the run)."""
+PROTECTED_ARGUMENT_TOOLS = frozenset({"finish", "summary"})
+"""Tools whose arguments are never compacted: a ``finish`` ends the run, and
+a ``summary`` is the agent's own recap of the steps a compaction stubs (of
+the 5,014 recaps recorded from 2026-11-11 to 11-13, 1,539 characters at the
+median, a stub kept the first 120)."""
 FILE_ARGUMENT_TOOLS = frozenset({"Edit", "Write"})
 """Tools whose ``file_path`` argument names the file their other arguments
 went to; the stub of such an argument points the model at the file."""
@@ -676,7 +687,7 @@ def should_compact(
     Args:
         context_tokens: Size of the last request, in tokens.
         dropped_tokens: Tokens the plan would remove (see :func:`dropped_chars`
-            and :data:`CHARS_PER_TOKEN`).
+            and :func:`~kiss.core.models.model_families.chars_per_token`).
         handoff_tokens: Context size at which the session hands off, or
             ``None`` when the model's window is unknown.
         target_tokens: The steady-state target (:func:`compaction_target_tokens`);
@@ -744,23 +755,26 @@ def clear_thresholds(
     return trigger, clear_at_least * scale
 
 
-def reasoning_tokens(output_tokens: int, function_calls: list[dict[str, Any]], text: str) -> int:
+def reasoning_tokens(
+    output_tokens: int, function_calls: list[dict[str, Any]], text: str, chars_per_token: float
+) -> int:
     """Return the tokens of a reply that are neither its text nor its tool calls: its reasoning.
 
     A provider that keeps the model's reasoning across tool calls bills it
     with the reply's output and reads it again on every later request, but
     returns a summary of it or nothing (on 2026-11-11 the thinking text of
     Claude Fable 5.2 had 0.94 characters per token of reasoning).  Its size
-    is therefore what the output tokens leave after the visible parts, at
-    :data:`CHARS_PER_TOKEN`.
+    is therefore what the output tokens leave after the visible parts.
 
     Args:
         output_tokens: The output tokens the reply was billed.
         function_calls: The reply's tool calls.
         text: The reply's text.
+        chars_per_token: Characters per token of the model's visible text
+            (:func:`~kiss.core.models.model_families.chars_per_token`).
     """
     visible = len(text) + sum(len(json.dumps(call, default=str)) for call in function_calls)
-    return max(0, output_tokens - visible // CHARS_PER_TOKEN)
+    return max(0, output_tokens - int(visible / chars_per_token))
 
 
 def apply_compaction(plan: list[Replacement]) -> int:

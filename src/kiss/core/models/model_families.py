@@ -25,6 +25,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
+from kiss.core.context_compaction import CHARS_PER_TOKEN, OTHER_CHARS_PER_TOKEN
 from kiss.core.models.model_info import (
     BEDROCK_PREFIX,
     MODEL_INFO,
@@ -118,6 +119,24 @@ def family_of(model_name: str) -> str:
     if "/" in name:
         return name.split("/", 1)[0]
     return name.split("-", 1)[0]
+
+
+def chars_per_token(model_name: str) -> float:
+    """Return how many characters of tool text one token of *model_name* holds.
+
+    The harness sizes text from its length where no provider has counted it
+    yet: a step's tool results, what a compaction would remove.  A Claude
+    model counts a token per
+    :data:`~kiss.core.context_compaction.CHARS_PER_TOKEN` characters on every
+    route to it, the other families per
+    :data:`~kiss.core.context_compaction.OTHER_CHARS_PER_TOKEN`.
+
+    Args:
+        model_name: A model name, with or without a route prefix.
+    """
+    if family_of(model_name) == "anthropic":
+        return CHARS_PER_TOKEN
+    return OTHER_CHARS_PER_TOKEN
 
 
 def same_family(model_a: str, model_b: str) -> bool:

@@ -211,13 +211,21 @@ def test_overview_lists_a_child_row_with_text_in_its_number_columns() -> None:
     task_id = _persist("Run the benchmark", [])
     child = _persist("Run the tests", [], extra={"subagent": {"parent_task_id": task_id}})
     db = persistence._get_db()
+    before = db.execute("SELECT cost, end_ts FROM task_history WHERE id = ?", (child,)).fetchone()
     db.execute("UPDATE task_history SET cost = 'n/a', end_ts = 'soon' WHERE id = ?", (child,))
     db.commit()
-
-    (line,) = [ln for ln in task_digest.overview(task_id).splitlines() if child in ln]
-    assert line.startswith(f"[{child}] steps=0, cost=$0.00, started "), line
-    assert line.endswith(", running"), line
-    assert "Status: running" in task_digest.overview(child)
+    try:
+        (line,) = [ln for ln in task_digest.overview(task_id).splitlines() if child in ln]
+        assert line.startswith(f"[{child}] steps=0, cost=$0.00, started "), line
+        assert line.endswith(", running"), line
+        assert "Status: running" in task_digest.overview(child)
+    finally:
+        # The history is the test session's, read by the tests that run
+        # after this one in its process: the row leaves as it came.
+        db.execute(
+            "UPDATE task_history SET cost = ?, end_ts = ? WHERE id = ?", (*before, child),
+        )
+        db.commit()
 
 
 def test_overview_of_a_finished_task_without_children_or_summaries() -> None:

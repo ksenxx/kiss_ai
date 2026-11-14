@@ -216,7 +216,7 @@ class TestBuildCliArgs:
         assert "project_doc_max_bytes=0" in args
         # Codex emits ``reasoning`` items (shown as thinking) only when a
         # reasoning summary is configured, and the user config is ignored.
-        assert args[args.index('model_reasoning_summary="detailed"') - 1] == "-c"
+        assert args[args.index('model_reasoning_summary="concise"') - 1] == "-c"
 
     def test_instructions_file_is_passed_as_a_toml_string(self) -> None:
         m = CodexModel("codex/default")

@@ -554,10 +554,17 @@ _SET_CLASS_JS = "([sel, name, on]) => document.querySelector(sel).classList.togg
 
 
 def _themed(page: Page, theme: str) -> None:
-    """Switch the page to `theme`, state colours settling at once."""
+    """Switch the page to `theme`, state colours settling at once.
+
+    Motion is turned off first: the stylesheet's durations are 0 under
+    ``prefers-reduced-motion`` only.  A frame drawn after the switch and
+    before that started the switch's own colour transitions at their
+    full length, and a colour read right then was still the light
+    theme's.
+    """
+    page.emulate_media(reduced_motion="reduce")
     if theme == "dark":
         page.evaluate("() => document.body.classList.remove('light-theme')")
-    page.emulate_media(reduced_motion="reduce")
 
 
 def _colour(page: Page, value: str) -> str:

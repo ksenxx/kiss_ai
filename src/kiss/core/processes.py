@@ -568,7 +568,7 @@ def _other_group_members(pid: int) -> bool:
     return False
 
 
-#: Seconds :func:`kill_env_marked` keeps sweeping the process table.
+#: Seconds :func:`kill_env_marked` waits for the processes it signalled to leave the table.
 _SWEEP_SECONDS = 5.0
 
 
@@ -581,11 +581,13 @@ def kill_env_marked(mark: str) -> None:
     started).  A process keeps the entry through ``fork``, ``setsid`` and
     ``nohup``, so the ones that left their process group are found too;
     one started with a scrubbed environment (``env -i``) is not.  The
-    sweep is repeated until it finds nothing, at most
-    :data:`_SWEEP_SECONDS`, so a process forked while a sweep ran does
-    not survive.  On Linux a process is held by a pidfd from before its
-    environment is read and signalled through it: the signal reaches
-    that process or none, whatever becomes of its pid.  Where there is
+    sweep is repeated until it finds nothing, so a process forked while
+    a sweep ran does not survive, and given up after
+    :data:`_SWEEP_SECONDS`.  A sweep that signalled a process for the
+    first time is not charged to those seconds: however long it took,
+    another follows it.  On Linux a process is held by a pidfd from
+    before its environment is read and signalled through it: the signal
+    reaches that process or none, whatever becomes of its pid.  Where there is
     no pidfd (an older kernel, a sandbox that refuses the call, macOS,
     BSD) the pid is signalled right after its environment was read, which
     shortens the time in which the number could pass to a stranger and
@@ -598,8 +600,18 @@ def kill_env_marked(mark: str) -> None:
         return
     killed: set[int] = set()
     deadline = time.monotonic() + _SWEEP_SECONDS
-    while pids := _env_marked_pids(mark):
-        killed.update(pids)
+    while True:
+        began = time.monotonic()
+        pids = _env_marked_pids(mark)
+        if not pids:
+            break
+        if not killed.issuperset(pids):
+            # The seconds are for the wait on processes that outlive their SIGKILL.
+            # Charged for its own work, the first sweep of a loaded Mac (``ps`` twice
+            # for each of 264 processes) used them up and was not repeated: what was
+            # forked during it lived on.
+            killed.update(pids)
+            deadline += time.monotonic() - began
         if time.monotonic() >= deadline:  # pragma: no cover — processes that outlive SIGKILL
             logger.warning("Processes carrying %s are still listed: %s", mark, pids)
             break

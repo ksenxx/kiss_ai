@@ -296,6 +296,9 @@ def test_agent_compaction_replaces_old_outputs_but_not_writes() -> None:
     sent = [m for m in last_request["messages"] if m.get("role") == "tool"]
     assert sent[0]["content"].startswith(STUB_PREFIX)
     assert sent[5]["content"].startswith("written ")
+    # A result's footer sizes its 8,000 characters at the 4 a token of a GPT model
+    # (a Claude model's 2.55: test_a_claude_models_text_is_sized_as_the_provider_counts_it).
+    assert "This step's tool output: ~2,000 tokens" in sent[-1]["content"]
     # The agent's own trajectory keeps the full text.
     assert any("line\nline\n" in str(m.get("content", "")) for m in agent.messages)
 
@@ -848,8 +851,9 @@ def test_agent_emits_a_compaction_event_with_the_tokens_removed(
     assert event["results"] == 23
     assert event["arguments"] == 1
     assert event["target_tokens"] == 150_000
-    # 23 outputs of 8,000 chars and a 4,000-char argument, less their stubs.
-    assert 40_000 < event["dropped_tokens"] < 48_000
+    # 23 outputs of 8,000 chars and a 4,000-char argument, less their stubs,
+    # at the 2.55 characters a token of a Claude model.
+    assert 68_000 < event["dropped_tokens"] < 74_000
     write_turn = agent.model.conversation[11]
     assert write_turn["content"][0]["name"] == "Write"
     assert write_turn["content"][0]["input"]["content"].startswith(ARGUMENT_STUB_PREFIX)
