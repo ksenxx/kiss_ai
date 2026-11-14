@@ -65,7 +65,6 @@ class TestFinishParameterRenamedToSummaryInHtml:
             "is_continue",
             "summary_in_html",
             "suggested_next_task",
-            "evidence",
         ]
 
     def test_keyword_call_uses_new_name(self) -> None:

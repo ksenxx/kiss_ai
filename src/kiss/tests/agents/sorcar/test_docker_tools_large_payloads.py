@@ -16,10 +16,9 @@ and its pooled socket to the daemon open for the life of the process;
 it now closes the client, which this module checks on the SDK's own
 connection pool.
 
-``DockerManager.run``, the finish gate's shell, promises the whole
-output (the gate parses ``-z`` file lists and hashes diffs from it) but
-used to keep only the head and tail of a flood past twice
-``_CAPTURE_CHARS``; a 6.9 MB listing is now returned uncut.
+``DockerManager.read_bytes`` fetches a file in one exec whose output is
+kept whole, where ``Bash`` keeps only the head and tail of a flood past
+twice ``_CAPTURE_CHARS``; a 6.9 MB listing comes back uncut.
 """
 
 import hashlib
@@ -73,18 +72,17 @@ class TestLargePayloads(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.env.close()
 
-    def test_run_returns_the_gate_output_uncut(self) -> None:
-        """``run`` keeps every line of an output past the capture cap; ``Bash`` cuts it.
+    def test_read_bytes_returns_a_file_past_the_capture_cap_uncut(self) -> None:
+        """``read_bytes`` keeps every byte of a fetch past the capture cap; ``Bash`` cuts it.
 
         The cap drops output only once the kept tail outgrows its first
-        piece, so the flood is well past three times ``_CAPTURE_CHARS``.
+        piece, so the listing is well past three times ``_CAPTURE_CHARS``.
         """
         count = 1_000_000
         expected = "".join(f"{n}\n" for n in range(1, count + 1))
         self.assertGreater(len(expected), 4 * _CAPTURE_CHARS)
-        exit_code, output = self.env.run(f"seq 1 {count}", 120)
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(output, expected)
+        self.assertEqual(self.env.Bash(f"seq 1 {count} > /tmp/listing.txt", "seed"), "")
+        self.assertEqual(self.env.read_bytes("/tmp/listing.txt"), expected.encode())
         self.assertLess(len(self.env.Bash(f"seq 1 {count}", "flood")), len(expected))
 
     def test_write_one_mib_and_read_back(self) -> None:

@@ -42,14 +42,14 @@ An effort alias the catalog does not list: it runs, and is sized and priced, as
 ``codex/gpt-6-astra``, and the Codex adapter passes the effort to the CLI.
 """
 
-SYSTEM_PROMPT = routing_prompt(
-    "ccxbestrouter", SIMPLE_MODEL, PRIMARY_MODEL, REVIEW_MODEL
-).replace(" (not codex)", "", 1)
-"""The routing protocol added to the system prompt of every run.
+WRITER_MODEL = "cc/claude-opus-5-5-max"
+"""The model that writes documents, papers, reports and results: Claude Opus 5.5 at max
+effort via Claude Code."""
 
-The bestrouter's "(not codex)" warning is dropped: the reviewer here is the
-Codex model on purpose.
-"""
+SYSTEM_PROMPT = routing_prompt(
+    "ccxbestrouter", SIMPLE_MODEL, PRIMARY_MODEL, REVIEW_MODEL, WRITER_MODEL
+)
+"""The routing protocol added to the system prompt of every run."""
 
 
 class CcxbestrouterSea(BaseSea):
@@ -58,7 +58,8 @@ class CcxbestrouterSea(BaseSea):
     def description(self) -> str:
         """Return the one-sentence help text shown by ``/ccxbestrouter help``."""
         return (
-            f"Answers simple questions on {SIMPLE_MODEL}, runs every other task on "
+            f"Answers simple questions on {SIMPLE_MODEL}, writes on {WRITER_MODEL}, "
+            "runs every other task on "
             f"{PRIMARY_MODEL} and has {REVIEW_MODEL} review and debug the "
             "result read-only through a non-blocking run_agent on at most 75% of the task "
             "budget (the bestrouter on Claude Code and Codex models); pick `ccxbestrouter` "

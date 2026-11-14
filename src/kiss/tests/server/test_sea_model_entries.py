@@ -109,10 +109,11 @@ def test_bundled_routers_are_the_model_picker_seas() -> None:
 
 
 def test_bestrouter_protocol_names_its_models_literally() -> None:
-    """The protocol fixes the simple, primary and review models by name and the 75% cap.
+    """The protocol fixes the simple, primary, writer and review models by name and the 75% cap.
 
-    The tab runs on the simple model, which the protocol sends to the
-    primary model for everything but simple questions.
+    The tab runs on the simple model, which the protocol sends to the writer
+    model for prose a human reads (the final summary included) and to the
+    primary model for everything else.
     """
     sea = bestrouter_sea.BestrouterSea()
     assert sea.register_as_model() is True
@@ -121,17 +122,24 @@ def test_bestrouter_protocol_names_its_models_literally() -> None:
     }
     assert bestrouter_sea.SIMPLE_MODEL == "claude-opus-5-5-medium"
     assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-2-max"
+    assert bestrouter_sea.WRITER_MODEL == "openrouter/google/gemini-4-carbon"
     protocol = bestrouter_sea.SYSTEM_PROMPT
     assert sea.system_prompt("BASE") == "BASE\n\n" + protocol
     assert protocol.startswith(BESTROUTER_MARKER)
     flat = " ".join(protocol.split())
     for phrase in (
         "Use 'claude-opus-5-5-medium' for simple questions and queries.",
+        "Use 'openrouter/google/gemini-4-carbon' for writing any documents, papers, reports, "
+        "results which will be read by a human.",
         "Use 'claude-fable-5-2-max' model for all other tasks, including software development "
-        "and analysis and writing.",
-        "Use gpt-6-astra-xhigh (not codex) through `run_agent(model=\"gpt-6-astra-xhigh\", "
+        "and analysis.",
+        "Call `set_model(\"openrouter/google/gemini-4-carbon\")` before you write the final "
+        "summary.",
+        "Use gpt-6-astra-xhigh through `run_agent(model=\"gpt-6-astra-xhigh\", "
         "tool_profile=\"review\", wait=\"false\")` for a thorough read-only review and "
-        "debugging of the other model's work,",
+        "debugging of the work of 'claude-fable-5-2-max' and "
+        "'openrouter/google/gemini-4-carbon',",
+        'on one line: {"file": "src/x.py", "line": 12,',
         "Use at most 75% of the task budget in gpt-6-astra-xhigh,",
         "ask the model not to invent new problems",
         "Use the model names literally without hallucinating new model names.",
@@ -139,10 +147,12 @@ def test_bestrouter_protocol_names_its_models_literally() -> None:
         assert phrase in flat, phrase
     for name in (
         bestrouter_sea.SIMPLE_MODEL, bestrouter_sea.PRIMARY_MODEL, bestrouter_sea.REVIEW_MODEL,
+        bestrouter_sea.WRITER_MODEL,
     ):
         assert name in MODEL_INFO, name
     assert "codex" not in bestrouter_sea.REVIEW_MODEL
     assert "bestrouter" in sea.description()
+    assert ", writes on openrouter/google/gemini-4-carbon, " in sea.description()
     # The protocol relies on run_parallel, so the SEA must not withhold it:
     # it appends to the system prompt, pins no tool profile, keeps every
     # tool and leaves the prompt untouched.

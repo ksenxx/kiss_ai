@@ -659,7 +659,7 @@ class ChatSorcarAgent(SorcarAgent):
 
         Concurrent siblings in the same work dir then never share a file
         name (P12 of the 2026-10-24 trajectory audit: two reviews read
-        each other's tmp/paper.pdf), and each task's verifier is its own.
+        each other's tmp/paper.pdf).
         """
         return f"./tmp/{self.last_task_id}/"
 

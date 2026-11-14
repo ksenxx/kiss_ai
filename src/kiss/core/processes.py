@@ -1430,3 +1430,183 @@ def process_identity(pid: int) -> str | None:
     except (OSError, subprocess.TimeoutExpired):  # pragma: no cover — ps missing/unresponsive
         return None
     return result.stdout.strip() or None
+
+
+_PROCESS_TERMINATE = 0x0001
+_SYNCHRONIZE = 0x00100000
+_TH32CS_SNAPPROCESS = 0x00000002
+
+
+def pin_process(pid: int) -> int | None:
+    """Open a handle on *pid* that keeps its number from being reused (Windows only).
+
+    Windows hands a process number to a new process only once every
+    handle on the old one is closed, so while the handle is open the
+    number keeps naming the same process, alive or exited: a check of
+    *pid* and a signal sent after it reach the same process, and a
+    process whose parent number is *pid* and that started after it is
+    its child (see :func:`end_pinned_descendants`).  Close it with
+    :func:`unpin_process`.
+
+    Args:
+        pid: Process id to pin.
+
+    Returns:
+        The handle, or ``None`` off Windows or when the process is gone
+        or cannot be opened.
+    """
+    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
+        return _windows_pin_process(pid)
+    return None
+
+
+def _windows_pin_process(pid: int) -> int | None:  # pragma: no cover — Windows-only
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    handle: int | None = kernel32.OpenProcess(
+        _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+    )
+    return handle or None
+
+
+def unpin_process(handle: int) -> None:  # pragma: no cover — Windows-only
+    """Close a handle :func:`pin_process` returned.
+
+    Args:
+        handle: The handle to close.
+    """
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
+def _windows_created(kernel32: Any, handle: int) -> int:  # pragma: no cover — Windows-only
+    """Return the creation time of the process behind *handle* (FILETIME ticks; 0 if unknown)."""
+    import ctypes
+
+    times = [ctypes.c_uint64() for _ in range(4)]
+    if not kernel32.GetProcessTimes(ctypes.c_void_p(handle), *(ctypes.byref(t) for t in times)):
+        return 0
+    return times[0].value
+
+
+def _windows_parent_pid(ntdll: Any, handle: int) -> int | None:  # pragma: no cover — Windows-only
+    """Return the parent process number recorded in the process behind *handle*."""
+    import ctypes
+
+    class _BasicInformation(ctypes.Structure):
+        _fields_ = [
+            ("ExitStatus", ctypes.c_int32),
+            ("PebBaseAddress", ctypes.c_void_p),
+            ("AffinityMask", ctypes.c_size_t),
+            ("BasePriority", ctypes.c_int32),
+            ("UniqueProcessId", ctypes.c_size_t),
+            ("InheritedFromUniqueProcessId", ctypes.c_size_t),
+        ]
+
+    info = _BasicInformation()
+    status = ntdll.NtQueryInformationProcess(
+        ctypes.c_void_p(handle), 0, ctypes.byref(info), ctypes.sizeof(info), None
+    )
+    return None if status != 0 else int(info.InheritedFromUniqueProcessId)
+
+
+def _windows_children_by_parent() -> dict[int, list[int]]:  # pragma: no cover — Windows-only
+    """Return a snapshot of every process number, grouped by the parent number it records."""
+    import ctypes
+
+    class _Entry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_uint32),
+            ("cntUsage", ctypes.c_uint32),
+            ("th32ProcessID", ctypes.c_uint32),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", ctypes.c_uint32),
+            ("cntThreads", ctypes.c_uint32),
+            ("th32ParentProcessID", ctypes.c_uint32),
+            ("pcPriClassBase", ctypes.c_int32),
+            ("dwFlags", ctypes.c_uint32),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    children: dict[int, list[int]] = {}
+    if snapshot is None or snapshot == ctypes.c_void_p(-1).value:
+        return children
+    try:
+        entry = _Entry()
+        entry.dwSize = ctypes.sizeof(_Entry)
+        found = kernel32.Process32FirstW(ctypes.c_void_p(snapshot), ctypes.byref(entry))
+        while found:
+            children.setdefault(entry.th32ParentProcessID, []).append(entry.th32ProcessID)
+            found = kernel32.Process32NextW(ctypes.c_void_p(snapshot), ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(snapshot))
+    return children
+
+
+def end_pinned_descendants(handle: int) -> int:  # pragma: no cover — Windows-only
+    """Terminate every descendant of the process behind a :func:`pin_process` handle.
+
+    Ending a process on Windows does not end its children (a killed
+    Chromium leaves its renderer, GPU and utility processes running),
+    and Windows keeps only each process's parent *number*, which may be
+    left over from an earlier process that had the number.  A process
+    counts as a child here only when, read through a handle opened on
+    it (so its own number cannot change hands meanwhile), it records the
+    parent's number and started no earlier than the parent: the pinned
+    parent's number belongs to no other process now, and any earlier
+    holder of it ended before the parent started.  Every child found is
+    held open the same way while its own children are looked up, then
+    all of them are terminated.
+
+    Args:
+        handle: A :func:`pin_process` handle on the parent, which may
+            already have exited.
+
+    Returns:
+        How many descendants were terminated.
+    """
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    ntdll = ctypes.WinDLL("ntdll")  # type: ignore[attr-defined]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    by_parent = _windows_children_by_parent()
+    root = kernel32.GetProcessId(ctypes.c_void_p(handle))
+    pending = [(root, _windows_created(kernel32, handle))]
+    found: list[int] = []
+    seen = {root}
+    try:
+        while pending:
+            parent, parent_created = pending.pop()
+            for pid in by_parent.get(parent, []):
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                child = kernel32.OpenProcess(
+                    _PROCESS_TERMINATE | _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION,
+                    False,
+                    pid,
+                )
+                if not child:
+                    continue
+                created = _windows_created(kernel32, child)
+                if (
+                    parent_created
+                    and created >= parent_created
+                    and _windows_parent_pid(ntdll, child) == parent
+                ):
+                    found.append(child)
+                    pending.append((pid, created))
+                else:
+                    kernel32.CloseHandle(ctypes.c_void_p(child))
+        return sum(bool(kernel32.TerminateProcess(ctypes.c_void_p(h), 1)) for h in found)
+    finally:
+        for child in found:
+            kernel32.CloseHandle(ctypes.c_void_p(child))

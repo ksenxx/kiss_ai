@@ -57,7 +57,6 @@ from kiss.agents.sorcar.docker_manager import (
     until_refusal,
 )
 from kiss.agents.sorcar.edit_guards import shadow_command
-from kiss.agents.sorcar.shell_exit import Ran, exit_word, unrun
 from kiss.agents.sorcar.useful_tools import (
     _MAX_BINARY_READ_BYTES,
     _output_budget,
@@ -327,7 +326,7 @@ class ExecBridge:
 
     Mirrors the parts of :class:`kiss.agents.sorcar.docker_manager.DockerManager`
     the agent uses: ``Bash``, ``run_commands_parallel`` (both with the
-    Docker tools' shell guards), ``run``, ``stop_event``, ``stream_callback``
+    Docker tools' shell guards), ``stop_event``, ``stream_callback``
     (output is not streamed: the bridge returns it whole), ``volumes``
     (none), ``workdir`` (the environment's working directory, asked for
     on entry) and the context-manager protocol (nothing to open or close:
@@ -396,36 +395,6 @@ class ExecBridge:
         Returns:
             The output of the command, with ``[exit code: N]`` appended when
             it failed, or the timeout error with the output seen so far.
-        """
-        return self.run_bash(
-            command, description, timeout_seconds, max_output_chars, until, poll_seconds).text
-
-    def run_bash(
-        self,
-        command: str,
-        description: str,
-        timeout_seconds: int = 30,
-        max_output_chars: int = MAX_OUTPUT_CHARS,
-        until: str = "",
-        poll_seconds: float = 5.0,
-    ) -> Ran:
-        """Make a :meth:`Bash` call: its result and how the command ended.
-
-        As ``DockerManager.run_bash``: the exit is data for the agent's
-        ``Bash`` tool to hand to the coding gate, which cannot tell the
-        tool's ``[exit code: N]`` line from one the command printed.
-
-        Args:
-            command: As for :meth:`Bash`, like every argument.
-            description: The call's description.
-            timeout_seconds: The call's deadline.
-            max_output_chars: The result's output budget.
-            until: The regular expression of a poll.
-            poll_seconds: Seconds between two runs of a poll.
-
-        Returns:
-            The result with the command's exit status, ``"timeout"``, or
-            ``"refused"`` / ``"error"`` for a command that did not run.
 
         Raises:
             ToolRedirect: The ``Write``/``Edit`` to make instead of *command*.
@@ -443,13 +412,13 @@ class ExecBridge:
             functools.partial(probe, test="run"),
         )
         if guard is not None:
-            return unrun(guard)
+            return guard
         run = functools.partial(bridge_exec, self.url, command, cancel=self.stop_event)
         verdict = ""
         if until:
             refusal = until_refusal(until, poll_seconds)
             if refusal is not None:
-                return unrun(refusal)
+                return refusal
             (exit_code, output), verdict = _run_until(
                 run, until, poll_seconds, deadline, self.stop_event)
             verdict = "\n" + verdict
@@ -463,7 +432,7 @@ class ExecBridge:
         output = _truncate_output(_collapse_progress(output), _output_budget(max_output_chars))
         text = (_timeout_message(deadline, output) if exit_code is None
                 else _with_exit_code(output, exit_code))
-        return Ran(text + verdict, exit_word(exit_code))
+        return text + verdict
 
     def run_commands_parallel(
         self,
@@ -594,25 +563,3 @@ class ExecBridge:
         exit_code, output = bridge_exec(self.url, script, timeout_seconds, self.stop_event)
         tool_interrupt.raise_if_interrupted()
         return fetched_bytes(path, max_bytes, exit_code, output)
-
-    def run(self, command: str, timeout_seconds: float) -> tuple[int | None, str]:
-        """Run *command* on the environment: its exit code and output, uncut.
-
-        The finish gate's primitive, as ``DockerManager.run`` is for a
-        container: no guard, no echo of a description and none of
-        :meth:`Bash`'s output cap.
-
-        Args:
-            command: The shell command to execute.
-            timeout_seconds: Seconds it may run; past them the code is ``None``.
-
-        Returns:
-            ``(exit code, output)``; the code is ``None`` at the deadline
-            and ``-1`` when the task was stopped meanwhile.
-
-        Raises:
-            KISSError: When the bridge cannot be reached or answers garbage.
-        """
-        exit_code, output = bridge_exec(self.url, command, timeout_seconds, self.stop_event)
-        tool_interrupt.raise_if_interrupted()
-        return exit_code, output

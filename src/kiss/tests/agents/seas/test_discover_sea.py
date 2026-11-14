@@ -356,10 +356,7 @@ class _LabScript:
     commits them (the baseline), step 1 isolates the lab with
     ``create_worktree``, step 2 writes an idea into the lab's worktree,
     step 3 commits it and writes ``best.patch``, and every later step is
-    ``finish`` (the first one is refused once: the lab's worktree is unmerged;
-    the coding gate lets the second through, since the patch was written by a
-    shell redirect into the scratch dir, which is a note, not a change of the
-    work).
+    ``finish`` (the first one is refused once: the lab's worktree is unmerged).
     """
 
     def __init__(self, caller_tree: Path) -> None:

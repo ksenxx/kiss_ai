@@ -24,9 +24,7 @@ Three findings of the 2026-10 core audit, each reproduced end to end:
   lives on the turn's own record (``NativeTurn``), which the next turn
   replaces, so a stale handler has nothing shared left to write to;
 * the limit check after a served call ran its hooks under ``turn.lock``,
-  so a hook that blocked kept the Stop from ever closing the turn;
-* a handler held between its check of ``turn.closed`` and its read of the
-  ``tool_result_hook`` gave the old run's result to the next run's hook.
+  so a hook that blocked kept the Stop from ever closing the turn.
 """
 
 from __future__ import annotations
@@ -49,7 +47,7 @@ from kiss.core.locked import ACQUIRE_SLICE_SECONDS, locked_call
 from kiss.core.models.codex_mcp_bridge import STOP_WAIT_SECONDS, ToolBridge
 from kiss.core.models.codex_model import CodexModel
 from kiss.core.tool_interrupt import ToolCallInterrupted, inject_async_exception
-from kiss.core.tool_verdict import ALLOW, ToolRedirect, Verdict, refusal_result, refuse
+from kiss.core.tool_verdict import ALLOW, Verdict, refusal_result, refuse
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.task_runner import _TaskRunnerMixin
 from kiss.tests.core.test_audit1018_codex_bridge_stop import (
@@ -57,7 +55,6 @@ from kiss.tests.core.test_audit1018_codex_bridge_stop import (
     RELEASE_HOLD,
     _call,
     _reply,
-    _ResultHook,
     _schema,
     hold_until_released,
 )
@@ -336,8 +333,9 @@ HOOK_CALLS: list[Any] = []
 
 
 def _hold_hook(*args: Any) -> None:
-    """A hook that blocks until released (a gate waiting on git, a busy row of the task
-    database), in each call whose last argument (a helper call's key) is the first call's."""
+    """A hook that blocks until released (a busy row of the task database, a parent's
+    budget check), in each call whose last argument (a helper call's key) is the first
+    call's."""
     call = args[-1] if args else None
     HOOK_CALLS.append(call)
     if call == HOOK_CALLS[0]:
@@ -350,20 +348,16 @@ def _next_run_hook(*args: Any) -> None:
     HOOK_CALLS.append("next run")
 
 
-@pytest.mark.parametrize(
-    ("hook", "published"),
-    [("tool_result_hook", 0), ("helper_charge_hook", 1), ("budget_check_hook", 1)],
-)
-def test_a_stop_closes_the_turn_while_a_hook_is_still_running(hook: str, published: int) -> None:
-    """The handler called the ``tool_result_hook`` under ``turn.lock``, the lock the
-    Stop closes the turn under: a hook that blocks (Sorcar's gate runs git in it)
-    is outside the tool's registered lifetime, so the bridge's interrupt never reaches
-    it, the bridge abandons the handler after ``STOP_WAIT_SECONDS`` and the owner then
-    waited for the lock with no bound at all, retrying even the forced Stop's
-    ``KeyboardInterrupt``.  So did the two hooks of the limit check that follows the
+@pytest.mark.parametrize("hook", ["helper_charge_hook", "budget_check_hook"])
+def test_a_stop_closes_the_turn_while_a_hook_is_still_running(hook: str) -> None:
+    """The handler called the two hooks of the limit check that follows a served call's
     publication (``helper_charge_hook`` writes the task's row, ``budget_check_hook`` is
-    the parent's).  Every hook now runs outside the lock, so closing the turn waits only
-    for in-memory work; an abandoned call whose hook returns after the close publishes
+    the parent's) under ``turn.lock``, the lock the Stop closes the turn under: a hook
+    that blocks is outside the tool's registered lifetime, so the bridge's interrupt never
+    reaches it, the bridge abandons the handler after ``STOP_WAIT_SECONDS`` and the owner
+    then waited for the lock with no bound at all, retrying even the forced Stop's
+    ``KeyboardInterrupt``.  Both hooks now run outside the lock, so closing the turn waits
+    only for in-memory work; an abandoned call whose hook returns after the close publishes
     nothing more and calls no further hook, so what is left of its limit check leaves the
     agent's next run alone.  The public ``run`` (its turn opened from the ``pre_step_hook``:
     the model's own needs a Codex process) returns while the hook is still running: its
@@ -416,7 +410,7 @@ def test_a_stop_closes_the_turn_while_a_hook_is_still_running(hook: str, publish
         assert agent.budget_used == 0.5, "the helpers' spend was not folded exactly once"
         # The run has returned: the agent is reused for its next run.
         agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
-        agent.tool_result_hook = agent.helper_charge_hook = agent.budget_check_hook = _next_run_hook
+        agent.helper_charge_hook = agent.budget_check_hook = _next_run_hook
         agent._add_message("user", "NEW RUN")
         RELEASE_HOOK.set()
         assert _reply(client) == {"text": "noop ran"}
@@ -425,7 +419,7 @@ def test_a_stop_closes_the_turn_while_a_hook_is_still_running(hook: str, publish
         leave.set()
         owner.join(STOP_WAIT_SECONDS + 10)
     flushed = ["another-helper-call"] if hook == "helper_charge_hook" else []
-    assert turns[0].calls == published, "the call was recorded on the wrong side of its hook"
+    assert turns[0].calls == 1, "the call was not recorded before its hook"
     assert HOOK_CALLS[1:] == flushed, "a hook ran again for the held call, or after the close"
     assert agent._helper_calls_filed == set(flushed), "the abandoned call wrote to the next run"
     assert [m["content"] for m in agent.messages] == ["NEW RUN"]
@@ -481,11 +475,11 @@ def test_a_served_calls_picture_is_described_under_the_limits_of_its_turn(
     """Codex has the picture a served call returned described on the bridge's thread, after
     the executor returned, and the description asks the agent's limit check first.  While
     the turn is open that is the run's check: its budget hook is asked and the description
-    bought.  A call whose ``tool_result_hook`` outlasted a forced Stop gets there once its
-    turn is closed and the agent reset for its next run: the check was the bare
-    ``_check_limits``, which asked the next run's budget hook, and a description nobody
-    reads was bought.  The check is the call's turn's: closed, it asks no hook and refuses
-    the description."""
+    bought.  A call whose own limit check outlasted a forced Stop (its ``budget_check_hook``
+    blocked) gets there once its turn is closed and the agent reset for its next run: the
+    check was the bare ``_check_limits``, which asked the next run's budget hook, and a
+    description nobody reads was bought.  The check is the call's turn's: closed, it asks
+    no hook and refuses the description."""
     HOOK_STARTED.clear()
     RELEASE_HOOK.clear()
     HOOK_CALLS.clear()
@@ -503,7 +497,7 @@ def test_a_served_calls_picture_is_described_under_the_limits_of_its_turn(
                 assert "A picture." in _reply(_call(bridge, "snapshot"))["text"]
                 # Asked after the call, then before its description.
                 assert hooks.calls == [("budget",), ("budget",)]
-                agent.tool_result_hook = _hold_hook
+                agent.budget_check_hook = _hold_hook  # asked after the second call
                 held.append(_call(bridge, "snapshot"))
                 assert HOOK_STARTED.wait(5), "the hook never ran"
                 raise KeyboardInterrupt  # a forced Stop: the bridge abandons the held handler
@@ -515,7 +509,7 @@ def test_a_served_calls_picture_is_described_under_the_limits_of_its_turn(
             reply = _reply(held[0])
         finally:
             RELEASE_HOOK.set()
-    assert HOOK_CALLS == [False], "the abandoned call's description asked the next run's hook"
+    assert HOOK_CALLS == [None], "the abandoned call's description asked the next run's hook"
     assert len(endpoint.requests) == 1, "a description was bought for a call nobody waits for"
     assert reply == {"error": "KISSError: KISS Error: The turn has ended."}
 
@@ -561,84 +555,6 @@ def test_one_filing_reads_the_helper_charge_hook_and_the_helper_calls_once(serve
     agent._check_limits()
     assert hooks.calls[2:] == [("successor", "after-first"), ("successor", "after-second")]
     assert agent.budget_used == 1.0 and len(agent._helper_calls_filed) == 4
-
-
-class _HeldBeforeTheResultHook:
-    """A ``threading.settrace`` hook holding a bridge handler as it enters ``_call_result_hook``.
-
-    The handler has run its tool and is about to give the result to the
-    run's ``tool_result_hook``; it is held, bounded, until the test lets
-    go.  A served call that redirected is still inside its own tool
-    then, so the bridge's Stop injects ``ToolCallInterrupted`` into the
-    held thread: it is raised as the wait returns and absorbed here, as
-    by a tool that swallows it, so the handler goes on from where it
-    was held.
-    """
-
-    def __init__(self) -> None:
-        self.paused = threading.Event()
-        self.release = threading.Event()
-
-    def __call__(self, frame: Any, event: str, arg: Any) -> None:
-        if (
-            event != "call"
-            or frame.f_code is not KISSAgent._call_result_hook.__code__
-            or self.paused.is_set()
-        ):
-            return None
-        self.paused.set()
-        try:
-            self.release.wait(30)
-        except ToolCallInterrupted:
-            pass
-        return None
-
-
-def redirect_to_noop() -> str:
-    """A tool that redirects to ``noop``: the result hook is reached first for the nested call.
-
-    Raises:
-        ToolRedirect: Always.
-    """
-    raise ToolRedirect("noop", {}, "redirected:")
-
-
-@pytest.mark.parametrize("tool", [noop, redirect_to_noop])
-def test_a_result_abandoned_before_its_hook_never_reaches_the_next_runs_hook(tool: Any) -> None:
-    """The handler checked ``turn.closed`` and then read the agent's current
-    ``tool_result_hook``: two steps, so a handler held between them while the Stop closed
-    the turn and the agent was reset gave the old run's result to the next run's hook.  So
-    did the call a served call redirected to.  The hook is now read under ``turn.lock``
-    together with the check, and none is called once the turn is closed."""
-    stop = threading.Event()
-    agent = KISSAgent("result hook read after the turn closed")
-    agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
-    agent.function_map = {"noop": noop, tool.__name__: tool}
-    agent._cached_tools_schema = _schema(tool.__name__)
-    old_run, new_run = _ResultHook(), _ResultHook()
-    agent.tool_result_hook = old_run
-    held = _HeldBeforeTheResultHook()
-    previous_trace = threading.gettrace()  # a coverage or debugger tracer, put back below
-    threading.settrace(held)
-    stop_signal.set_thread_stop_event(stop)
-    try:
-        with agent._native_tools_exposed():
-            abandoned = agent._native_turn
-            client = _call(_bridge_of(agent), tool.__name__)
-            assert held.paused.wait(5), "the handler never reached the result hook"
-            stop.set()  # the bridge waits STOP_WAIT_SECONDS for the handler, abandons it, closes
-        assert abandoned.closed.is_set()
-        # The run has returned: the agent is reused for its next run.
-        agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
-        agent.tool_result_hook = new_run
-        held.release.set()
-        assert "text" in _reply(client)
-    finally:
-        held.release.set()
-        threading.settrace(previous_trace)
-        stop_signal.set_thread_stop_event(None)
-    assert new_run.results == [], "the abandoned call's result reached the next run's hook"
-    assert old_run.results == [] and abandoned.calls == 0
 
 
 def _hold_then_allow(name: str, args: dict[str, Any]) -> Verdict:

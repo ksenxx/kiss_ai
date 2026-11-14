@@ -34,6 +34,7 @@ import pytest
 from playwright.sync_api import Browser, Page, sync_playwright
 
 from kiss.agents.sorcar import machines as mach
+from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.remote_daemon import RemoteDaemon, start_remote_daemon
 from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
@@ -108,7 +109,9 @@ def _open(browser: Browser, harness: ExplorerHarness, width: int = 1280) -> Page
     )
     context.add_init_script("localStorage.setItem('kissTipsOptOut', '1');")
     page = context.new_page()
-    page.goto(harness.base_url + "/")
+    # A host network change aborts the load with net::ERR_NETWORK_CHANGED (seen
+    # 2026-11-14); the shared helper retries only that.
+    goto_retrying_network_change(page, harness.base_url + "/")
     page.wait_for_selector("#task-input", state="visible", timeout=30000)
     page.wait_for_function(
         "() => [...document.querySelectorAll('#chat-machine option')]"

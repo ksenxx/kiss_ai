@@ -2,14 +2,17 @@
 # End-to-end test for the PyPI file-size guard in scripts/release.sh.
 # Run: bash scripts/test_release_pypi_size.sh
 #
-# Part 1 builds the real sdist and wheel of this repository with `uv build`
-# and checks that both stay under PyPI's 100 MiB per-file limit, that the
-# sdist carries only the wheel's packages (no benchmark results, papers,
-# reports or node_modules), and that the wheel can still be built from it.
+# Part 1 builds the real sdist and wheel of this repository's HEAD the way the
+# release does (build_pypi_dists: the tree minus scripts/exclude.json) and
+# checks that both stay under PyPI's 100 MiB per-file limit, that the sdist
+# carries only the wheel's packages (no benchmark results, papers, reports or
+# node_modules), that neither carries a path of scripts/exclude.json, and that
+# the wheel can still be built from the sdist.
 #
 # Part 2 sources release.sh and runs publish_to_pypi against a stub `uv` on
-# PATH: an oversize sdist must abort before `uv publish` runs, and a small
-# build must reach `uv publish`.
+# PATH: an oversize sdist must abort before `uv publish` runs, a small build
+# must reach `uv publish`, and the build must run on the committed tree minus
+# the excluded paths, not on the working checkout.
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,7 +27,8 @@ LIMIT=$((100 * 1024 * 1024))
 
 # --- Part 1: the real build fits PyPI ---------------------------------------
 cd "$REPO_ROOT"
-uv build --out-dir "$WORK/dist" > "$WORK/build.log" 2>&1 || { cat "$WORK/build.log"; fail "uv build failed"; }
+bash -c 'source "$1"; build_pypi_dists HEAD "$2"' _ "$RELEASE_SH" "$WORK/dist" \
+    > "$WORK/build.log" 2>&1 || { cat "$WORK/build.log"; fail "build_pypi_dists failed"; }
 SDIST=$(ls "$WORK"/dist/*.tar.gz)
 WHEEL=$(ls "$WORK"/dist/*.whl)
 for f in "$SDIST" "$WHEEL"; do
@@ -48,25 +52,45 @@ if grep -q "/node_modules/" "$WORK/sdist-files.txt"; then
 fi
 pass "sdist carries no benchmarkings/, papers/, assets/, reports/, node_modules/ or worktrees"
 
-for required in src/kiss/core/_version.py src/kiss/agents/sorcar/sorcar_agent.py projects/swedefend/ pyproject.toml README.md LICENSE; do
+for required in src/kiss/core/_version.py src/kiss/agents/sorcar/sorcar_agent.py pyproject.toml README.md LICENSE; do
     grep -q "^[^/]*/$required" "$WORK/sdist-files.txt" || fail "sdist lacks $required"
 done
-pass "sdist carries src/kiss, projects/swedefend, pyproject.toml, README.md and LICENSE"
+pass "sdist carries src/kiss, pyproject.toml, README.md and LICENSE"
+
+# No path of scripts/exclude.json may reach PyPI. Sdist members are matched
+# literally after the "<name>-<version>/" prefix. Wheel members drop the
+# src/ prefix, and the wheel may hold no top-level package but kiss: every
+# other package (projects/swedefend) is excluded.
+# Python's zipfile lists the wheel: unzip is not installed on every host.
+python3 -c 'import sys, zipfile; print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' \
+    "$WHEEL" > "$WORK/wheel-files.txt"
+while IFS= read -r excluded; do
+    leaks=$(sed 's|^[^/]*/||' "$WORK/sdist-files.txt" | awk -v p="$excluded" '$0 == p || index($0, p "/") == 1')
+    [[ -z "$leaks" ]] || fail "sdist contains excluded path $excluded:"$'\n'"$(head -3 <<< "$leaks")"
+    leaks=$(awk -v p="${excluded#src/}" '$0 == p || index($0, p "/") == 1' "$WORK/wheel-files.txt")
+    [[ -z "$leaks" ]] || fail "wheel contains excluded path $excluded:"$'\n'"$(head -3 <<< "$leaks")"
+done < <(bash -c 'source "$1"; read_exclude_paths' _ "$RELEASE_SH")
+other=$(cut -d/ -f1 "$WORK/wheel-files.txt" | sort -u | grep -v -e '^kiss$' -e '\.dist-info$' || true)
+[[ -z "$other" ]] || fail "wheel ships top-level entries other than kiss: $other"
+pass "neither the sdist nor the wheel carries a path of scripts/exclude.json"
 
 # The build log proves the wheel came out of the sdist, not the source tree.
 grep -q "Building wheel from source distribution" "$WORK/build.log" || fail "uv build did not build the wheel from the sdist"
 pass "wheel builds from the sdist"
 
 # --- Part 2: publish_to_pypi refuses oversize files before uploading --------
-# Stub uv: `uv build` copies a prepared dist/ into place, `uv publish` records
-# the call. $1: directory holding the prepared dist files.
+# Stub uv: `uv build --out-dir <dir>` lists the files of the tree it builds in
+# $WORK/build-tree.txt and copies the prepared dist files to <dir>, `uv publish`
+# records the call. $1: directory holding the prepared dist files.
 make_stub_uv() {
     local prepared="$1" bindir="$WORK/bin"
     mkdir -p "$bindir"
     cat > "$bindir/uv" <<EOF
 #!/bin/bash
 case "\$1" in
-    build) mkdir -p dist && cp "$prepared"/* dist/ ;;
+    build) [[ "\$2" == --out-dir ]] || exit 2
+           find . -type f | sort > "$WORK/build-tree.txt"
+           mkdir -p "\$3" && cp "$prepared"/* "\$3"/ ;;
     publish) echo "publish \$*" >> "$WORK/uv-calls.log" ;;
     *) echo "unexpected uv \$*" >&2; exit 2 ;;
 esac
@@ -74,9 +98,11 @@ EOF
     chmod +x "$bindir/uv"
 }
 
-# $1: label, $2: byte size of the prepared sdist. Runs publish_to_pypi in a
-# scratch project with the stub uv first on PATH and prints its output; the
-# exit status is that of publish_to_pypi.
+# $1: label, $2: byte size of the prepared sdist. Runs publish_to_pypi on the
+# HEAD of a scratch git project (a committed pkg/a.py, a committed private/
+# that its scripts/exclude.json excludes, an untracked notes.txt) with the stub
+# uv first on PATH and prints its output; the exit status is that of
+# publish_to_pypi.
 run_publish() {
     local label="$1" sdist_bytes="$2" prepared="$WORK/prepared-$label" project="$WORK/project-$label"
     rm -rf "$prepared" "$project" "$WORK/uv-calls.log" "$WORK/bin"
@@ -87,7 +113,14 @@ run_publish() {
     make_stub_uv "$prepared"
     (
         cd "$project"
-        PATH="$WORK/bin:$PATH" UV_PUBLISH_TOKEN=dummy bash -c 'source "$1"; publish_to_pypi 1.0' _ "$RELEASE_SH"
+        mkdir -p pkg private scripts
+        echo 'x = 1' > pkg/a.py
+        echo secret > private/secret.txt
+        echo '["private"]' > scripts/exclude.json
+        git init -q && git add -A
+        git -c user.name=t -c user.email=t@t commit -q -m init
+        echo draft > notes.txt
+        PATH="$WORK/bin:$PATH" UV_PUBLISH_TOKEN=dummy bash -c 'source "$1"; publish_to_pypi 1.0 HEAD' _ "$RELEASE_SH"
     )
 }
 
@@ -103,5 +136,9 @@ OUT=$(run_publish exact "$LIMIT" 2>&1) || fail "publish_to_pypi rejected a sdist
 grep -q "^publish" "$WORK/uv-calls.log" || fail "uv publish did not run for a sdist at the limit"
 echo "$OUT" | grep -q "Successfully published version 1.0" || fail "success not reported: $OUT"
 pass "sdist of exactly 100 MiB is uploaded"
+
+[[ "$(cat "$WORK/build-tree.txt")" == $'./pkg/a.py\n./scripts/exclude.json' ]] \
+    || fail "uv build did not run on the committed tree minus excluded paths: $(cat "$WORK/build-tree.txt")"
+pass "publish_to_pypi builds the committed tree without excluded or untracked files"
 
 echo "ALL TESTS PASSED"

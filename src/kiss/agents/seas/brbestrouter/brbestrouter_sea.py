@@ -40,14 +40,14 @@ REVIEW_MODEL = "bedrock/global.anthropic.claude-fable-5-1-max"
 """The model that reviews and debugs the primary model's work: Claude Fable 5.1 at max
 effort via Bedrock."""
 
-SYSTEM_PROMPT = routing_prompt(
-    "brbestrouter", SIMPLE_MODEL, PRIMARY_MODEL, REVIEW_MODEL
-).replace(" (not codex)", "", 1)
-"""The routing protocol added to the system prompt of every run.
+WRITER_MODEL = "bedrock/global.anthropic.claude-opus-5-5-max"
+"""The model that writes documents, papers, reports and results: Claude Opus 5.5 at max
+effort via Bedrock."""
 
-The bestrouter's "(not codex)" warning is dropped: it tells GPT-6 Astra from its
-Codex variant and means nothing for a Claude reviewer.
-"""
+SYSTEM_PROMPT = routing_prompt(
+    "brbestrouter", SIMPLE_MODEL, PRIMARY_MODEL, REVIEW_MODEL, WRITER_MODEL
+)
+"""The routing protocol added to the system prompt of every run."""
 
 
 class BrbestrouterSea(BaseSea):
@@ -56,7 +56,8 @@ class BrbestrouterSea(BaseSea):
     def description(self) -> str:
         """Return the one-sentence help text shown by ``/brbestrouter help``."""
         return (
-            f"Answers simple questions on {SIMPLE_MODEL}, runs every other task on "
+            f"Answers simple questions on {SIMPLE_MODEL}, writes on {WRITER_MODEL}, "
+            "runs every other task on "
             f"{PRIMARY_MODEL} and has {REVIEW_MODEL} review and debug the "
             "result read-only through a non-blocking run_agent on at most 75% of the task "
             "budget (the bestrouter on Amazon Bedrock models only); pick `brbestrouter` "

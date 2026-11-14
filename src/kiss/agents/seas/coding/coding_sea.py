@@ -79,8 +79,7 @@ from typing import Any
 
 from kiss.agents.seas.base.base_sea import ALLOW, Verdict, WorkerSea, allow_with_note, refuse
 from kiss.agents.seas.coding import coding_test_context as test_context
-from kiss.agents.sorcar.checkpoints import CHECKPOINT_NAME
-from kiss.agents.sorcar.coding_gate import (
+from kiss.agents.seas.coding.gate_readers import (
     EXIT_CODE_MARKER,
     REVIEW_VERDICT_LINE,
     STOP_POLL_SECONDS,
@@ -97,16 +96,18 @@ from kiss.agents.sorcar.coding_gate import (
     tool_result_texts,
     verifier_decides,
 )
+from kiss.agents.seas.coding.shell_changes import shell_commands, writes_files
+from kiss.agents.sorcar.checkpoints import CHECKPOINT_NAME
 from kiss.agents.sorcar.container_jobs import JOBS_DIR, KILL_ALL_SCRIPT, ContainerJobs
 from kiss.agents.sorcar.docker_manager import _EXEC_TOKEN_VAR, kill_tagged_tree_script
 from kiss.agents.sorcar.edit_guards import heredoc_targets
-from kiss.agents.sorcar.evidence_gate import shell_commands, writes_files
 from kiss.agents.sorcar.exec_bridge import BRIDGE_PREFIX, bridge_alive, bridge_exec
 from kiss.agents.sorcar.shell_guards import (
     INSTALL_COMMANDS,
     INSTALL_TIMEOUT_SECONDS,
     destructive_pattern,
 )
+from kiss.core import utils
 from kiss.core.event_sink import adopt_thread_context, thread_context
 from kiss.core.kiss_error import BudgetExceededError, KISSError, StepLimitExceededError
 
@@ -993,6 +994,9 @@ class ContainerHarness:
     def tools(self, tools: list[Callable[..., Any]]) -> list[Callable[..., Any]]:
         """The trial's toolset: the built-ins without ``decide`` and ``summary``, plus checkpoints.
 
+        The trial's :func:`finish` comes first and replaces the built-in
+        one: it takes the ``evidence`` argument the gate's review reads.
+
         ``decide`` is a text classifier; used as an oracle for the task's
         domain it picks a wrong answer with confidence, so an unattended
         trial does without it.  ``summary`` has no reader in an unattended
@@ -1014,7 +1018,7 @@ class ContainerHarness:
             owner = getattr(tool, "__self__", None)
             if isinstance(owner, ContainerJobs):
                 self.jobs = owner
-        return kept + [self.checkpoint, self.rollback]
+        return [finish, *kept, self.checkpoint, self.rollback]
 
     def settings(self) -> dict[str, Any]:
         """The trial's run settings (the trial SEA's ``settings``).
@@ -1954,7 +1958,7 @@ class ContainerHarness:
         """One non-agentic call of *model* at the provider's default effort, with a deadline.
 
         The call runs on the calling thread under a stop event of its own
-        (:func:`~kiss.agents.sorcar.coding_gate.call_stop_event`) that fires
+        (:func:`~kiss.agents.seas.coding.gate_readers.call_stop_event`) that fires
         after :data:`REVIEW_DEADLINE` seconds or when the run is stopped;
         the model clients watch the thread's stop event and end the
         streaming call on it, so the call cannot outlive the gate's budget
@@ -1962,9 +1966,9 @@ class ContainerHarness:
         Stop ends logs its spend itself as a failed *event* before the Stop
         propagates (the caller never gets to log it).  The trial's model
         overrides apply without their effort
-        (:func:`~kiss.agents.sorcar.coding_gate.default_effort`), or at
+        (:func:`~kiss.agents.seas.coding.gate_readers.default_effort`), or at
         low effort for the retry of a failed attempt (*lowered*,
-        :func:`~kiss.agents.sorcar.coding_gate.low_effort`).
+        :func:`~kiss.agents.seas.coding.gate_readers.low_effort`).
 
         Args:
             label: The agent's name in the logs.
@@ -2028,7 +2032,7 @@ class ContainerHarness:
         life, and its verdicts were no better) with :data:`REVIEW_DEADLINE`
         seconds to answer (:meth:`review_call`).  An attempt that answered
         nothing, was cut short by the output cap, was refused or missed the
-        deadline (:func:`~kiss.agents.sorcar.coding_gate.retryable_review_failure`)
+        deadline (:func:`~kiss.agents.seas.coding.gate_readers.retryable_review_failure`)
         is retried once at low effort.  A review that still failed, or
         answered without a ``VERDICT:`` line, is logged as failed (with the
         first attempt's failure under ``retried``) and refuses nothing: it
@@ -2360,7 +2364,7 @@ class ContainerHarness:
         """Count a tool call that changes the work, for the verifier reuse of the gate.
 
         An ``Edit`` / ``Write`` under the workdir and a shell command that
-        writes files (:func:`~kiss.agents.sorcar.evidence_gate.writes_files`;
+        writes files (:func:`~kiss.agents.seas.coding.shell_changes.writes_files`;
         a write under ``/tmp``, the verifier or the ledger, is not one)
         advance :attr:`changes`.  A call that may rewrite the verifier
         itself (an edit of it, a shell command naming it) makes the
@@ -2911,7 +2915,7 @@ class ContainerHarness:
         """Block commands that would end the trial; lift the timeout of installs and builds.
 
         The commands are read as the tool decodes them
-        (:func:`~kiss.agents.sorcar.evidence_gate.shell_commands`), so an
+        (:func:`~kiss.agents.seas.coding.shell_changes.shell_commands`), so an
         array only its lenient JSON decoder accepts is guarded command by
         command too.  A here-document creating a file under the workdir is
         an edit and meets the ledger gate (:meth:`ledger_verdict`).  The timeout is
@@ -3082,6 +3086,39 @@ def claim_text(args: dict[str, Any]) -> str:
         args: Arguments of the ``finish`` call.
     """
     return f"{args.get('summary_in_html', '')}\n{args.get('evidence', '')}"
+
+
+def finish(
+    success: bool,
+    is_continue: bool = False,
+    summary_in_html: str = "",
+    suggested_next_task: str = "",
+    evidence: str = "",
+) -> str:
+    """Finish execution with status and summary.
+
+    The trial's ``finish`` tool: the built-in one
+    (:func:`kiss.core.utils.finish`) plus ``evidence``, which the gate reads
+    from the call's arguments (:meth:`ContainerHarness.evidence_report`).
+
+    Args:
+        success: True if the agent has successfully completed the task, False otherwise.
+        is_continue: True if the task is incomplete and should continue, False otherwise.
+        summary_in_html: The agent's final result, formatted as HTML (never Markdown).
+            Use e.g. ``<h3>``, ``<p>``, ``<ul>``, ``<pre><code>``; Markdown or
+            plain-text input is converted to HTML.
+        suggested_next_task: ONE concrete follow-up task for the user, as one plain-text sentence.
+            Shown to the user as "Suggested next"; leave empty when nothing
+            sensible follows.
+        evidence: With ``success=True``, a JSON list of the shell commands you ran in
+            this run (exactly as you ran them) whose exit code 0 backs the claim:
+            the verifier run, the test run.  A gated run checks that each one ran
+            and passed; leave empty when the task ran no check.
+
+    Returns:
+        The built-in tool's result for the same call without ``evidence``.
+    """
+    return utils.finish(success, is_continue, summary_in_html, suggested_next_task)
 
 
 class RestartBudgetError(KISSError):

@@ -798,7 +798,7 @@ class TestBashUntil:
         before = time.monotonic()
         out = ut._poll_until(
             "echo nope", re.compile("never"), 30, before + 1.2, 8000, str(temp_test_dir),
-        ).text
+        )
         assert 1.1 <= time.monotonic() - before < 5
         assert re.search(
             rf"did not match after 1 run\(s\) and {self.SECONDS}: the call's deadline "

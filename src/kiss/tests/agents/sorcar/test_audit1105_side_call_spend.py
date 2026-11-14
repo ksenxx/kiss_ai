@@ -7,11 +7,11 @@ under the task's own model.  Each now leaves a ``gate_stage`` ``charge``
 record (``sorcar_agent._attribute_side_call_usage`` ->
 ``persistence._record_model_charge``) that ``_own_model_costs`` counts.
 Such a call is bound to its task as it starts (``side_call_binding``) and
-charged by the finish gate's row-or-ledger policy, so one returning after
-the task ended still charges that task.  The finish gate's own ``decide``
-call (``coding_gate.answered_findings``) was not charged to the task at
-all; it now is, under the decisions model, and the coding SEA's trial
-cost counts its findings check too.
+charged by the row-or-ledger policy of
+``SorcarAgent._charge_side_call_usage``, so one returning after the task
+ended still charges that task.  The ``decide`` call of the coding SEA's
+finish gate (``gate_readers.answered_findings``) reports its spend to
+its caller, and the SEA's trial cost counts that findings check.
 """
 
 from __future__ import annotations
@@ -23,9 +23,9 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.seas.coding.gate_readers import answered_findings
 from kiss.agents.sorcar import commit_message, decide_tool
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.coding_gate import CodingGate, answered_findings, run_on_host
 from kiss.agents.sorcar.decide_tool import DEFAULT_DECISIONS_MODEL, make_decide_tool
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
@@ -179,25 +179,6 @@ class TestGateDecideCharge:
                                          lambda c, t: spent.append((c, t)))
         assert answered is not None
         assert spent == [(pytest.approx(1.722e-05), 481)]
-
-    def test_the_gate_charges_its_decide_call_to_the_run_under_the_decisions_model(
-        self, monkeypatch: Any, tmp_path: Any,
-    ) -> None:
-        task = _row(finished=True)
-        agent = _agent(task)
-        charge = functools.partial(  # what _new_coding_gate binds
-            agent._charge_gate_usage, epoch=None, task_id=task, model="gpt-6-astra")
-        gate = CodingGate(lambda c, t: run_on_host(c, str(tmp_path), t), str(tmp_path),
-                          str(tmp_path), "gpt-6-astra", charge)
-        gate.open_findings = ["1. a finding"]
-        with _decisions_server() as base_url:
-            self._serve_decide(monkeypatch, base_url)
-            gate.unanswered_verdict({"summary_in_html": "done"})
-        row = th._get_db().execute("SELECT cost FROM task_history WHERE id = ?",
-                                   (task,)).fetchone()
-        assert float(row[0]) == pytest.approx(1.0 + 1.722e-05)
-        assert _split(task) == {FABLE: [1.0, 1_000],
-                                DEFAULT_DECISIONS_MODEL: [pytest.approx(1.722e-05), 481]}
 
 
 class TestCodingSeaFindingsCheck:

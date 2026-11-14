@@ -271,8 +271,8 @@ def test_a_python_rewrite_importing_a_module_of_the_environment_is_no_edit(
     # Nor is a rewrite an Edit when the environment's shell does not find its program: as
     # written it fails with status 127 and leaves the file alone.  The bridge asked nobody
     # and made the Edit (audit 2026-11-12 round 2, B4 #5); the Docker manager asks its container.
-    sed = bridge.run_bash(f"/nowhere/sed -i 's/v1/v2/' {workdir / 'data.txt'}", "sed")
-    assert sed.code == "127" and (workdir / "data.txt").read_text() == "v1\n", sed
+    sed = bridge.Bash(f"/nowhere/sed -i 's/v1/v2/' {workdir / 'data.txt'}", "sed")
+    assert sed.endswith("\n[exit code: 127]") and (workdir / "data.txt").read_text() == "v1\n", sed
 
 
 def test_an_environment_without_a_usable_working_directory_refuses_relative_targets() -> None:

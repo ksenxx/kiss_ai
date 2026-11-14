@@ -34,7 +34,6 @@ from kiss.agents.sorcar.agent_dispatch import (
     task_model_pinned,
     unread_results_note,
 )
-from kiss.agents.sorcar.coding_gate import CodingGate, gate_reviewer, run_on_host
 from kiss.agents.sorcar.commit_message import fallback_commit_message
 from kiss.agents.sorcar.container_jobs import ContainerJobs
 from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide_tool
@@ -76,7 +75,6 @@ from kiss.agents.sorcar.sea_settings import (
     SeaError,
     alias_free_profile,
 )
-from kiss.agents.sorcar.shell_exit import Ran, hand_over
 from kiss.agents.sorcar.skills import make_skill_tool
 from kiss.agents.sorcar.task_classifier import (
     TaskClassification,
@@ -88,11 +86,9 @@ from kiss.agents.sorcar.useful_tools import (
     BackgroundJob,
     UsefulTools,
     _absolutize,
-    _clean_env,
     wait_instead_of_sleep,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.core import stop_signal
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
@@ -112,7 +108,7 @@ from kiss.core.models.model_info import model as _model_factory
 from kiss.core.models.openai_compatible_model import _model_thinking_level
 from kiss.core.printer import Printer
 from kiss.core.processes import kill_env_marked
-from kiss.core.tool_verdict import Verdict, allow_with_note
+from kiss.core.tool_verdict import Verdict
 from kiss.core.utils import finish, rmtree_force, substitute_prompt_args
 
 logger = logging.getLogger(__name__)
@@ -1050,8 +1046,8 @@ def _attribute_side_call_usage(agent: Any, model: str, budget: float, tokens: in
 
     Such a call (the commit message, a ``talk`` synthesis, a ``decide``
     call) is not an agent step and emits no ``llm_call``.  A Sorcar
-    agent with a persisted row charges it as a finish-gate review is
-    charged (``SorcarAgent._charge_gate_usage``): bound to the task's
+    agent with a persisted row charges it through
+    ``SorcarAgent._charge_side_call_usage``: bound to the task's
     ledger epoch while the row is unfinished, added to the row (and its
     finished ancestors) once it is, and recorded under the row
     (:func:`~kiss.agents.sorcar.persistence._record_model_charge`) so the
@@ -1071,7 +1067,7 @@ def _attribute_side_call_usage(agent: Any, model: str, budget: float, tokens: in
         return
     epoch, task_id = binding if binding is not None else side_call_binding(agent)
     if task_id:
-        agent._charge_gate_usage(
+        agent._charge_side_call_usage(
             budget, tokens, 0, f"side:{uuid.uuid4().hex}",
             epoch=epoch, task_id=task_id, model=model,
         )
@@ -1276,11 +1272,6 @@ class SorcarAgent(RelentlessAgent):
         # One-shot ``finish`` gate: the first ``finish`` with a worktree
         # still pending is refused once with "call commit_and_merge".
         self._worktree_finish_gate_used: bool = False
-        # The finish gate of the run: the hedge check on every run with
-        # the edit tools, the coding SEA's whole gate once code changed.
-        # A placeholder until ``perform_task`` builds the run's own (a
-        # subclass's scratch directory needs its own state, set after this).
-        self._coding_gate = CodingGate(self._gate_shell, os.getcwd(), "tmp")
         # Per-run settings taken from :meth:`run`'s arguments; the
         # defaults are what a run that never reached ``run`` reports.
         self._launch_model_name: str = ""
@@ -1501,19 +1492,6 @@ class SorcarAgent(RelentlessAgent):
         until: str = "",
         poll_seconds: float = 5.0,
     ) -> str:
-        """Return the result text of :meth:`_docker_run`: the bash of the file tools and jobs."""
-        return self._docker_run(
-            command, description, timeout_seconds, max_output_chars, until, poll_seconds).text
-
-    def _docker_run(
-        self,
-        command: str,
-        description: str,
-        timeout_seconds: int = 30,
-        max_output_chars: int = DEFAULT_CONFIG.tool_output_default_chars,
-        until: str = "",
-        poll_seconds: float = 5.0,
-    ) -> Ran:
         """Run *command* in the task's container, honouring both limits.
 
         ``DockerManager.Bash`` honours a timeout and truncates its
@@ -1533,19 +1511,18 @@ class SorcarAgent(RelentlessAgent):
             poll_seconds: Seconds between two runs with ``until``.
 
         Returns:
-            The output of the command, and how the command ended: the
-            exit the ``Bash`` tool hands to the coding gate.
+            The output of the command.
 
         Raises:
             KISSError: If no docker manager is attached to this agent.
         """
         if self.docker_manager is None:
             raise KISSError("Docker manager not initialized")
-        ran: Ran = self.docker_manager.run_bash(
+        text: str = self.docker_manager.Bash(
             command, description, timeout_seconds, max_output_chars,
             until=until, poll_seconds=poll_seconds,
         )
-        return ran
+        return text
 
     def _tool_profile(self, task: str) -> str:
         """Return the tool profile this agent runs with.
@@ -1787,13 +1764,9 @@ class SorcarAgent(RelentlessAgent):
                     return jobs.bash_job(
                         job_id, "wait", timeout_seconds, 50, max_output_chars,
                     ) + note
-                ran = self._docker_run(
+                return self._docker_bash(
                     rest, description, timeout_seconds, max_output_chars, until, poll_seconds,
-                )
-                # The exit goes to the coding gate as data: the result's text is
-                # the command's own output, which may hold an ``[exit code: N]`` line.
-                hand_over(command, ran.code)
-                return ran.text + note
+                ) + note
 
             tools: list = [
                 Bash, jobs.bash_job, self.docker_manager.run_commands_parallel,
@@ -2169,7 +2142,6 @@ class SorcarAgent(RelentlessAgent):
         # the server UI's printer bridge must be drained when present.
         self.pre_step_hook = self._drain_pending_user_messages
         self.tool_call_guard = self._guard_tool_call
-        self.tool_result_hook = self._gate_tool_result
         self.helper_charge_hook = self._file_helper_charge
         self._live_jobs_finish_gate_used = False
         self._live_jobs_merge_gate_used = False
@@ -2179,11 +2151,6 @@ class SorcarAgent(RelentlessAgent):
                 # A sub-agent's private folder is made where its commands
                 # run: in the container.
                 self.docker_manager.make_private_dir()
-            # The gate is rebuilt now that the run's work dir, task id,
-            # scratch dir and model are final; the guard shows it every
-            # call and the result hook every result.
-            self._coding_gate = self._new_coding_gate(
-                with_reviewer="Edit" in self._run_tool_names)
             return super().perform_task(all_tools, attachments=attachments)
         finally:
             if in_container:
@@ -2278,8 +2245,7 @@ class SorcarAgent(RelentlessAgent):
         (absolute; the container's when its commands run in one, never
         the host's then), any other task's is in the work tree
         (:meth:`_tree_scratch_dir`), and so is that of a sub-agent whose
-        container could not hold a folder.  The finish gate looks for the
-        agent's verifier there.
+        container could not hold a folder.
         """
         if self.docker_image:
             folder = getattr(self.docker_manager, "private_dir", None)
@@ -2554,7 +2520,7 @@ class SorcarAgent(RelentlessAgent):
         without this record :func:`~kiss.agents.sorcar.persistence._split_own_share`
         files its spend under the row's model.  One
         :func:`~kiss.agents.sorcar.persistence._record_model_charge` per
-        model, as a gate review or a ``decide`` call gets, only when the
+        model, as a ``decide`` call gets, only when the
         run has a persisted row.  Each charge has a key derived from the
         record's, and the recording is idempotent by key, so a fold
         retried after a stop records each exactly once; a failure is
@@ -2829,7 +2795,7 @@ class SorcarAgent(RelentlessAgent):
         try:
             try:
                 if self._subagent_info is not None:
-                    # Resolved, so that the tools and the gate compare one path
+                    # Resolved, so that the tools compare one path
                     # (macOS keeps its temp directory behind a symlink).  With
                     # a container it is the folder of the tools that run on
                     # the host; the commands get one of their own in there.
@@ -3254,19 +3220,14 @@ class SorcarAgent(RelentlessAgent):
     # Tools
     # ------------------------------------------------------------------
 
-    def _enter_work_dir(self, work_dir: str, into_worktree: bool = False) -> None:
+    def _enter_work_dir(self, work_dir: str) -> None:
         """Point this agent and its live tools at *work_dir*.
 
         Args:
             work_dir: The directory Bash commands run in and relative
                 paths resolve against from now on.
-            into_worktree: Whether *work_dir* is in a worktree just
-                created: the coding gate then takes its base commit
-                there (the worktree's HEAD holds the checkout's dirty
-                state), so the diff it reviews is the task's own work.
         """
         self.work_dir = work_dir
-        self._coding_gate.move(work_dir, fresh_base=into_worktree)
         for tools in (self._useful_tools, self.web_use_tool):
             if tools is not None:
                 tools.work_dir = work_dir
@@ -3392,7 +3353,7 @@ class SorcarAgent(RelentlessAgent):
         wt = self._wt_for_repo(repo)
         assert wt is not None
         if moves_work_dir:
-            self._enter_work_dir(str(wt_work_dir), into_worktree=True)
+            self._enter_work_dir(str(wt_work_dir))
         self._worktree_finish_gate_used = False
         event: dict[str, object] = {
             "type": "worktree_created",
@@ -3477,8 +3438,6 @@ class SorcarAgent(RelentlessAgent):
                 reattached = self._reattach_after_failed_merge(wt) if stranded else ""
             message += reattached
             merged = self._wt_for_repo(wt.repo_root) is None
-            if merged:
-                message += self._coding_gate.merged()
             self._broadcast_to_watchers({
                 "type": "worktree_result",
                 "action": "merge",
@@ -3518,8 +3477,6 @@ class SorcarAgent(RelentlessAgent):
         wt_work_dir.mkdir(parents=True, exist_ok=True)
         self._share_main_checkout(wt.repo_root, wt.wt_dir)
         if self._work_dir_in_checkout_of(wt.repo_root):
-            # No fresh gate base: HEAD here is the commit of the task's own
-            # work, which must stay in the diff the gate reviews.
             self._enter_work_dir(str(wt_work_dir))
             return (
                 f"\n\nThe worktree is checked out again at {wt.wt_dir}; the work "
@@ -3990,10 +3947,6 @@ class SorcarAgent(RelentlessAgent):
             preserved outcome leaves it in place so no work is lost.
         """
         if wt.wt_dir.exists():
-            # The commits made here are the run's own work: when the merge
-            # does not go through and the task works on in this worktree,
-            # the gate's base stays behind them (``CodingGate.follow_head``).
-            self._coding_gate.moved_head = True
             self._commit_worktree(wt)
             if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
                 GitWorktreeOps.commit_all(wt.wt_dir, "kiss: commit late-arriving changes")
@@ -4795,7 +4748,6 @@ class SorcarAgent(RelentlessAgent):
         self._ask_user_question_callback = None
         self.pre_step_hook = None
         self.tool_call_guard = None
-        self.tool_result_hook = None
         self.helper_charge_hook = None
         self.context_reset_hook = None
         self.llm_call_hook = None
@@ -4822,73 +4774,13 @@ class SorcarAgent(RelentlessAgent):
                     "process may merge it", wt.branch,
                 )
 
-    def _new_coding_gate(self, with_reviewer: bool) -> CodingGate:
-        """Build the run's finish gate (:class:`CodingGate`).
+    def _charge_side_call_usage(self, budget: float, tokens: int, steps: int, key: str, *,
+                                epoch: Any = None, task_id: str = "", model: str = "") -> None:
+        """Attribute the spend of a model call made for the run outside its agent loop.
 
-        The verifier is ``verify.sh`` in the scratch directory the system
-        prompt names (``./tmp/`` without a chat, ``./tmp/<task-id>/`` with
-        one), under the work dir of the moment (:meth:`_enter_work_dir`
-        moves the gate with the agent); the gate runs commands with
-        :meth:`_gate_shell` and charges a review's spend to the run.  A
-        sub-agent gets no reviewer: its caller's gate reviews the whole
-        diff once, with the caller's own reviewer dispatch respected.
-
-        Args:
-            with_reviewer: Whether to resolve a reviewer model
-                (:func:`~kiss.agents.sorcar.coding_gate.gate_reviewer`).
-        """
-        reviewer = None
-        if with_reviewer and self._subagent_info is None:
-            reviewer = gate_reviewer(self.model_name)
-        # The charge is bound to THIS run's ledger epoch and persisted row
-        # now, as a dispatch binds its fold (``dispatch_epoch``): the
-        # review runs on its own thread, and a Stop lets the run end
-        # without waiting for it (``CodingGate.run_stages``), so its
-        # charge can land after the row's final save, or after this
-        # reusable agent began its next task.
-        charge = functools.partial(
-            self._charge_gate_usage, epoch=self._usage_epoch(), task_id=_persisted_task_id(self),
-            model=reviewer or "",
-        )
-        return CodingGate(self._gate_shell, self.work_dir or os.getcwd(), self._scratch_dir(),
-                          reviewer, charge, model_config=self.model_config,
-                          custom_tools=frozenset(tool.__name__ for tool in self._extra_tools),
-                          container=bool(self.docker_manager))
-
-    def _gate_shell(self, command: str, timeout: int) -> tuple[int | None, str]:
-        """Run *command* for the gate where the run's tools run: ``(exit code, output)``.
-
-        A stopped thread launches nothing: a gate stage that a Stop left
-        running (``CodingGate.run_stages`` cancels it and unwinds without
-        it) reaches its next command when this agent may already be on
-        its next task.  The place is read before the stop is tested, so a
-        stage not stopped at that test read the place of its own run.
-
-        Args:
-            command: The shell command (the verifier, a ``git diff``).
-            timeout: Seconds it may run; past them, or on a stopped
-                thread, the code is ``None``.
-        """
-        docker_manager, work_dir = self.docker_manager, self.work_dir or os.getcwd()
-        private_dir = self._private_dir
-        if stop_signal.stop_requested():
-            return None, ""
-        if docker_manager is not None:
-            # The raw exec, not the Bash tool: the tool's output cap would cut
-            # the gate's file lists and diffs.
-            in_container: tuple[int | None, str] = docker_manager.run(command, timeout)
-            return in_container
-        # A sub-agent's gate commands get the environment its tools' commands get.
-        env = _clean_env(work_dir, private_dir) if private_dir else None
-        return run_on_host(command, work_dir, timeout, env)
-
-    def _charge_gate_usage(self, budget: float, tokens: int, steps: int, key: str, *,
-                           epoch: Any = None, task_id: str = "", model: str = "") -> None:
-        """Attribute a gate review attempt's model spend to the run that asked for it.
-
-        A model call made for the run outside its agent loop (a ``decide``
-        call, a ``talk`` synthesis, the commit message) is charged here too
-        (:func:`_attribute_side_call_usage`), under a key of its own.
+        Such a call (a ``decide`` call, a ``talk`` synthesis, the commit
+        message) is charged through :func:`_attribute_side_call_usage`,
+        under a key of its own.
 
         A run with a persisted row and a server printer is charged
         through the printer's ``charge_task_usage`` bridge
@@ -4896,44 +4788,37 @@ class SorcarAgent(RelentlessAgent):
         as a dispatched sub-task's spend is: while the row is unfinished
         the spend is banked on the live ledger epoch *epoch* and the
         task's new totals go out as a ``usage_info``; once the row is
-        finished (a review a Stop left running, charged after the final
-        save) it is added to the row and its finished ancestors with a
-        persisted ``usage_info``, so the history and the Spend panel
-        show it.  A run with a row but no such printer (a CLI run)
-        gets the same row-or-ledger policy from
-        :meth:`_charge_persisted_usage`.  Without a row the spend goes
-        to the ledger epoch directly.
+        finished (a call that returned after the final save) it is added
+        to the row and its finished ancestors with a persisted
+        ``usage_info``, so the history and the Spend panel show it.  A
+        run with a row but no such printer (a CLI run) gets the same
+        row-or-ledger policy from :meth:`_charge_persisted_usage`.
+        Without a row the spend goes to the ledger epoch directly.
 
-        The gate charges an attempt again, with the same *key*, when a
-        stop ends it (``CodingGate.review_verdict``: the attempt's
-        ``finally`` and then the ``except BaseException`` that lets the
-        stop propagate), so a key counts once, where the spend is
-        committed: the ledger counts its records by key, and a finished
-        row takes a key in the transaction that leaves it as a receipt
+        A key counts once, where the spend is committed: the ledger
+        counts its records by key, and a finished row takes a key in the
+        transaction that leaves it as a receipt
         (:func:`~kiss.agents.sorcar.persistence._add_keyed_task_usage`).
-        A stop that cuts the first charge anywhere therefore neither
-        loses the spend (nothing committed: the second charge makes it)
-        nor doubles it.  A key the ledger epoch holds is not charged
-        again at all: its row may have finished since, from a snapshot
-        of that ledger.  The bridge decides that itself, under the lock
-        the final save holds (:func:`~kiss.server.task_update._key_on_ledger`);
+        A key the ledger epoch holds is not charged again at all: its
+        row may have finished since, from a snapshot of that ledger.
+        The bridge decides that itself, under the lock the final save
+        holds (:func:`~kiss.server.task_update._key_on_ledger`);
         :meth:`_charge_persisted_usage` does not, so for a run without
-        the bridge it is decided here.  The reviewer emits no
+        the bridge it is decided here.  A side call emits no
         ``llm_call``, so a row charge also records its *model*, spend
         and tokens under the row
         (:func:`~kiss.agents.sorcar.persistence._record_model_charge`,
-        once per key) for the Spend panel's split by model, however the
-        review ends.
+        once per key) for the Spend panel's split by model.
 
         Args:
-            budget: The attempt's spend in USD.
+            budget: The call's spend in USD.
             tokens: Its tokens.
             steps: Its model calls.
-            key: The attempt's key: a retried charge counts once.
-            epoch: The run's ledger epoch, captured when the gate was
-                built (:meth:`_new_coding_gate`); ``None`` for the current one.
-            task_id: The run's persisted row id captured then, or ``""``.
-            model: The reviewer model the attempt ran on, or ``""``.
+            key: The call's key: a repeated charge counts once.
+            epoch: The run's ledger epoch, taken when the call started
+                (:func:`side_call_binding`); ``None`` for the current one.
+            task_id: The run's persisted row id taken then, or ``""``.
+            model: The model the call ran on, or ``""``.
         """
         if task_id:
             charge = getattr(self.printer, "charge_task_usage", None)
@@ -4947,7 +4832,7 @@ class SorcarAgent(RelentlessAgent):
                 try:
                     _record_model_charge(task_id, model, budget, tokens, key)
                 except Exception:
-                    logger.warning("gate review spend of %s not filed under %s", task_id,
+                    logger.warning("side call spend of %s not filed under %s", task_id,
                                    model, exc_info=True)
             return
         _attribute_sub_usage(self, budget, tokens, steps, epoch=epoch, key=key)
@@ -4978,7 +4863,7 @@ class SorcarAgent(RelentlessAgent):
             tokens: Tokens spent.
             steps: Model calls made.
             epoch: The run's ledger epoch, or ``None`` for the current one.
-            key: The attempt's ledger key (see :meth:`_charge_gate_usage`).
+            key: The call's ledger key (see :meth:`_charge_side_call_usage`).
         """
         from kiss.agents.sorcar.persistence import TASK_USAGE_LOCK
 
@@ -5019,82 +4904,13 @@ class SorcarAgent(RelentlessAgent):
             # The history lists show the rows' new totals.
             printer.broadcast({"type": "tasks_updated"})
 
-    def _gate_tool_result(self, name: str, args: dict[str, Any], result: str,
-                          refused: bool) -> None:
-        """The run's ``tool_result_hook``: the gate reads every tool result.
-
-        A failure of the reader is logged and the result stands: the gate
-        must not break a run.
-
-        Args:
-            name: The tool called.
-            args: Its arguments.
-            result: The result text the model reads.
-            refused: Whether the call was refused (*result* is the refusal).
-        """
-        try:
-            self._coding_gate.result(name, args, result, refused)
-        except Exception:
-            logger.exception("coding gate: could not read the result of %s", name)
-
-    def _guard_evidence(self, name: str, args: dict[str, Any]) -> str | None:
-        """Evidence guardrail: a ``finish`` must be backed by checks, not claims.
-
-        Once the run changed code, the :class:`CodingGate` refuses a
-        success that fails the agent's own verifier or the review (one
-        refused round; then only a failing verifier refuses again); a
-        give-up whose verifier passes is questioned once.  A
-        ``commit_and_merge`` of a run that changed code is gated the same
-        way on the verifier and the review, while the worktree is still
-        there to fix the work in.  A run without the edit tools (a
-        read-only reviewer) reports rather than claims work, so its
-        ``finish`` is not gated.
-
-        Args:
-            name: The tool being called.
-            args: Its arguments.
-
-        Returns:
-            The refusal text, or ``None`` to let the call through.
-        """
-        if "Edit" not in self._run_tool_names or name not in ("finish", "commit_and_merge"):
-            return None
-        try:
-            if name == "commit_and_merge":
-                return self._coding_gate.merge_verdict(self.task_description)
-            return self._coding_gate.finish_verdict(args, self.task_description)
-        except Exception:
-            # A gate that cannot run its checks (a shell that fails, a
-            # container that died) lets the finish through unchecked
-            # rather than ending the run on the gate's own error.
-            logger.exception("coding gate: the finish check failed; the finish goes through")
-            return None
-
-    def _guard_tool_call(self, name: str, args: dict[str, Any]) -> str | Verdict | None:
-        """The run's tool-call guard: every reason a call is rejected, first one wins.
-
-        The gate observes every call first, a refused one included: the
-        turn's results are paired with its calls by position, and a
-        refused edit is redone after the refusal anyway.  A call nothing
-        rejects may still get a note on its result: the gate's
-        independent reading of the task when the agent writes its ledger
-        (:meth:`~kiss.agents.sorcar.coding_gate.CodingGate.reading_note`).
-        """
-        self._coding_gate.observe(name, args)
-        refusal = (
+    def _guard_tool_call(self, name: str, args: dict[str, Any]) -> str | None:
+        """The run's tool-call guard: every reason a call is rejected, first one wins."""
+        return (
             self._block_finish_when_user_message_pending(name, args)
             or self._block_finish_with_live_jobs(name, args)
             or self._guard_worktree(name, args)
-            or self._guard_evidence(name, args)
         )
-        if refusal is not None or "Edit" not in self._run_tool_names:
-            return refusal
-        try:
-            note = self._coding_gate.reading_note(name, args, self.task_description)
-        except Exception:
-            logger.exception("coding gate: the reading check failed; the call goes through")
-            return None
-        return allow_with_note(note) if note else None
 
 
 def _budget_arg(text: str) -> float:

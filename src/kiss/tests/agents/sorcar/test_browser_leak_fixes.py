@@ -15,7 +15,7 @@ Long-horizon tasks accumulated open Chromium windows because:
    escalated ``browser_profile_N`` directory that was never cleaned.
 
 These tests use a REAL headless Chromium (no mocks) and assert on the
-actual OS process state via ``os.kill(pid, 0)``.
+actual OS process state via :func:`kiss.core.processes.pid_alive`.
 """
 
 import json
@@ -35,8 +35,11 @@ from kiss.agents.sorcar.web_use_tool import (
     WebUseTool,
     _stop_playwright,
     _terminate_pid_escalating,
+    _under_timer,
+    _Watchdog,
+    _watchdog_kill,
 )
-from kiss.core.processes import process_identity
+from kiss.core.processes import pid_alive, process_identity
 from kiss.tests.conftest import posix_only
 from kiss.tests.server.pause import Pause
 
@@ -46,14 +49,8 @@ _posix_only = pytest.mark.skipif(
 
 
 def _pid_alive(pid: int) -> bool:
-    """Return True iff the OS process *pid* exists."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except PermissionError:  # pragma: no cover — foreign-owned process
-        return True
-    except OSError:
-        return False
+    """Return True iff the OS process *pid* exists (``os.kill(pid, 0)`` is Ctrl+C on Windows)."""
+    return pid_alive(pid)
 
 
 def _wait_dead(pid: int, timeout: float = 10.0) -> bool:
@@ -290,6 +287,107 @@ def _signal_after_pid_reuse() -> None:
     stranger.kill()
     stranger.wait()
     print(json.dumps(report), flush=True)
+
+
+_windows_only = pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows ends no child process with its parent"
+)
+# The base interpreter, not a venv launcher that would sit between a
+# script and the processes it starts.
+_PYTHON = getattr(sys, "_base_executable", sys.executable)
+_TREE_SCRIPT = """\
+import os, subprocess, sys, time
+if int(sys.argv[1]):
+    subprocess.Popen([sys.executable, __file__, str(int(sys.argv[1]) - 1)])
+print(os.getpid(), flush=True)
+time.sleep(300)
+"""
+
+
+def _windows_descendants(pid: int) -> set[int]:
+    """Return the live descendants of *pid*, as PowerShell's process list records them.
+
+    A process counts only if it started after its recorded parent: the
+    number may have belonged to an earlier process whose orphans still
+    name it (seen here when a leak left by one test outlived its root and
+    Chromium was given the root's number).
+    """
+    listing = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process | ForEach-Object "
+            '{ "$($_.ProcessId) $($_.ParentProcessId) $([long]$_.CreationDate.Ticks)" }',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    ).stdout.split()
+    started: dict[int, int] = {}
+    children: dict[int, list[int]] = {}
+    for child_id, parent_id, ticks in zip(listing[::3], listing[1::3], listing[2::3], strict=True):
+        started[int(child_id)] = int(ticks)
+        children.setdefault(int(parent_id), []).append(int(child_id))
+    found: set[int] = set()
+    pending = [pid]
+    while pending:
+        parent = pending.pop()
+        for child in children.get(parent, []):
+            if child not in found and child != pid and started[child] >= started[parent]:
+                found.add(child)
+                pending.append(child)
+    return found
+
+
+@_windows_only
+class TestWindowsKillEndsBrowserChildren:
+    """A killed Chromium's children must go with it, and nothing else may.
+
+    Not staged here: an orphan whose dead parent's number was later given
+    to the browser (refused by the creation-time check).  Windows hands a
+    chosen number out again only after cycling through its free ones: on
+    the test box, even freshly booted, no reuse came within 120 s of
+    spawning, and the spawning itself grew the process table past 500k.
+    """
+
+    def test_kill_ends_the_whole_tree_and_spares_a_stranger(self, tmp_path):
+        """Through a real watchdog: the root's death ends the guarded wait,
+        which ends the watchdog, and the children must be gone by then."""
+        script = tmp_path / "tree.py"
+        script.write_text(_TREE_SCRIPT)
+        root = subprocess.Popen([_PYTHON, str(script), "2"], stdout=subprocess.PIPE, text=True)
+        stranger = subprocess.Popen(["ping", "-n", "300", "127.0.0.1"], stdout=subprocess.DEVNULL)
+        try:
+            assert root.stdout is not None
+            tree = {int(root.stdout.readline()) for _ in range(3)}
+            assert root.pid in tree and len(tree) == 3, tree
+            watchdog = _Watchdog(0.2, _watchdog_kill, (root.pid, process_identity(root.pid)))
+            _under_timer(watchdog, root.wait)
+            assert watchdog.acted, "the watchdog never fired"
+            leaked = {pid for pid in tree if not _wait_dead(pid, 5.0)}
+            assert not leaked, f"child processes {sorted(leaked)} outlived the killed root"
+            assert stranger.poll() is None, "a process outside the tree was killed"
+        finally:
+            stranger.kill()
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(root.pid)], capture_output=True)
+            root.kill()
+
+    def test_watchdog_kill_ends_chromiums_child_processes(self, tmp_path):
+        tool = WebUseTool(user_data_dir=str(tmp_path / "prof"), headless=True)
+        try:
+            pid = _launch(tool)
+            children = _windows_descendants(pid)
+            assert children, "Chromium started no child processes"
+            _watchdog_kill(pid, tool._browser_identity)
+            assert _wait_dead(pid), f"Chromium (pid {pid}) survived the watchdog"
+            # TerminateProcess only starts a process's exit; a much longer
+            # wait would let children that notice the lost browser exit
+            # on their own and hide the leak.
+            leaked = {child for child in children if not _wait_dead(child, 1.0)}
+            assert not leaked, f"Chromium's child processes {sorted(leaked)} leaked"
+        finally:
+            tool.close()
 
 
 @_posix_only

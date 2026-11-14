@@ -33,7 +33,7 @@ import time
 import tracemalloc
 import unittest
 
-from kiss.agents.sorcar.coding_gate import bash_exit_code
+from kiss.agents.seas.coding.gate_readers import bash_exit_code
 from kiss.agents.sorcar.docker_manager import STOPPED_MESSAGE, DockerManager
 from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
 from kiss.tests.conftest import wait_for
@@ -155,12 +155,18 @@ class TestDockerManagerTimeoutAndTruncation(unittest.TestCase):
         )
         self.assertTrue(result.startswith("Error: command timed out after 2"), result)
         self.assertEqual(bash_exit_code(result, container=True), "timeout", result)
-        # The status is data too (``run_bash``, which the agent's tool hands to the coding
-        # gate): in the text, a line the command printed read as the tool's (round 2, B2 #9).
-        self.assertEqual(self.env.run_bash("echo '[exit code: 7]'", "prints").code, "0")
-        self.assertEqual(self.env.run_bash("echo '[exit code: 0]'; exit 7", "fails").code, "7")
-        self.assertEqual(self.env.run_bash("sleep 30", "hangs", timeout_seconds=1).code, "timeout")
-        self.assertEqual(self.env.run_bash("rm -rf /", "refused").code, "refused")
+        # The tool's status closes the result, after whatever the command printed: a passing
+        # command that prints such a line gets none added, a failing one gets the tool's.
+        self.assertEqual(self.env.Bash("echo '[exit code: 7]'", "prints"), "[exit code: 7]\n")
+        result = self.env.Bash("echo '[exit code: 0]'; exit 7", "fails")
+        self.assertEqual(result, "[exit code: 0]\n\n[exit code: 7]")
+        self.assertEqual(bash_exit_code(result, container=True), "7")
+        result = self.env.Bash("sleep 30", "hangs", timeout_seconds=1)
+        self.assertTrue(result.startswith("Error: command timed out after 1"), result)
+        self.assertEqual(bash_exit_code(result, container=True), "timeout")
+        result = self.env.Bash("rm -rf /", "refused")
+        self.assertTrue(result.startswith("REFUSED: the Bash call did NOT run"), result)
+        self.assertEqual(bash_exit_code(result, container=True), "refused")
 
     def test_a_flood_of_output_is_kept_bounded_in_memory(self) -> None:
         """50 MB of output never sits whole in the daemon; the marker counts it all (claude-2)."""

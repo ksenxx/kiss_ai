@@ -2,53 +2,51 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Cost audit of 2026-11-02: gate-review charges bound to their run; cleanup steps retried.
+"""Cost audit of 2026-11-02: side-call charges bound to their run; cleanup steps retried.
 
 Three findings of the review of the 2026-11-02 cost audit:
 
-1. The finish gate's review runs on a thread of its own, and a Stop (an
-   injected ``KeyboardInterrupt`` in ``CodingGate.run_stages``) lets the
-   run end without waiting for it.  The review's charge
-   (``SorcarAgent._charge_gate_usage``) then landed on the agent's
+1. A model call made for a run outside its agent loop (a side call: a
+   ``decide`` call, a ``talk`` synthesis, the commit message) can
+   return after a Stop ended the run (found on a review call the
+   harness no longer makes).  Its charge
+   (``SorcarAgent._charge_side_call_usage``) then landed on the agent's
    *current* ledger epoch — the next task's after a ``reset_usage`` —
    or in a ledger nothing reads again once the row's final save ran.
-   The gate's charge is now bound to the run's epoch and persisted row
-   when the gate is built, and a run with a row goes through the
-   printer's late-charge bridge (``charge_task_usage``) like a
-   dispatched sub-task's spend: a finished row gets the spend added,
-   with a persisted ``usage_info`` carrying its new totals.
+   The charge is now bound to the run's epoch and persisted row when
+   the call starts (``side_call_binding``), and a run with a row goes
+   through the printer's late-charge bridge (``charge_task_usage``)
+   like a dispatched sub-task's spend: a finished row gets the spend
+   added, with a persisted ``usage_info`` carrying its new totals.
 2. and 3. ``ChatSorcarAgent.run``'s cleanup caught a second Stop
    injection landing in the keyed classifier fold or in the row's final
    save and went on without them: the row kept cost 0 (a run that
    persists its own row) or the classifier's spend stayed unbanked.
    Both idempotent steps are retried once (``_retried_cleanup_step``).
 
-The review of the fixes (round 2) added two cases: the gate charges a
-stopped attempt twice with one key (its ``finally`` and the ``except
-BaseException`` that lets the stop propagate), which the bridge must
-count once; and the retry of a final save that did commit must not
-replace the row's totals, since a late charge may have been added to the
-finished row in between.
+The review of the fixes (round 2) added two cases: a call that a stop
+ended is charged twice with one key, which the bridge must count once;
+and the retry of a final save that did commit must not replace the
+row's totals, since a late charge may have been added to the finished
+row in between.
 
 The audit of 2026-11-09 (S11 F1) found the first case's guard losing a
 charge: the key was claimed before the bridge ran, so a Stop landing in
-between made the gate's second charge a no-op.  The key now travels
-through the bridge and counts once where the spend is committed (the
-ledger record, the finished row's retained charge), wherever a Stop
-cuts the first charge.  The review of that fix (R4) found the bridge
-adding a key to a row whose final save had already written it from the
-ledger; only the gate's own look at the ledger hid it.  The bridge asks
-the ledger itself now.
+between made the second charge a no-op.  The key now travels through
+the bridge and counts once where the spend is committed (the ledger
+record, the finished row's retained charge), wherever a Stop cuts the
+first charge.  The review of that fix (R4) found the bridge adding a
+key to a row whose final save had already written it from the ledger;
+only the charge's own look at the ledger hid it.  The bridge asks the
+ledger itself now.
 """
 
 from __future__ import annotations
 
 import functools
-import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -56,30 +54,22 @@ import pytest
 from kiss.agents.sorcar import chat_sorcar_agent as chat_module
 from kiss.agents.sorcar import persistence, sorcar_agent
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent, _retried_cleanup_step
-from kiss.agents.sorcar.coding_gate import CodingGate, run_on_host
 from kiss.agents.sorcar.relentless_agent import _ledger_totals
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _ClassifierSpend
 from kiss.agents.sorcar.task_classifier import TaskClassification
 from kiss.core.locked import locked_call
 from kiss.server import agent_state, task_update
 from kiss.server.agent_state import AgentState
-from kiss.tests.agents.sorcar.local_model_server import (
-    MODEL,
-    finish_body,
-    serve,
-    text_body,
-    tool_call_body,
-)
 from kiss.tests.lock_injection import inject
 from kiss.tests.server.parallel_agent_harness import CapturePrinter, IsolatedKissHome
 
 SEEDED = _ClassifierSpend("classifier:seeded", 0.25, 123, 2)
 
 
-def _charge_of(gate: Any) -> Callable[[float, int, int, str], None]:
-    """The gate's charge callback (built with one by ``SorcarAgent._new_coding_gate``)."""
-    assert gate.charge is not None
-    return gate.charge  # type: ignore[no-any-return]
+def _bound_charge(agent: SorcarAgent) -> Callable[[float, int, int, str], None]:
+    """A side call's charge, bound to *agent*'s task as the call starts (``side_call_binding``)."""
+    epoch, task_id = sorcar_agent.side_call_binding(agent)
+    return functools.partial(agent._charge_side_call_usage, epoch=epoch, task_id=task_id)
 
 
 @pytest.fixture
@@ -152,22 +142,22 @@ def _zero_session_run(
     return agent
 
 
-# --- finding 1: the gate's charge is the run's -------------------------------------------
+# --- finding 1: a side call's charge is its run's ----------------------------------------
 
 
-def test_gate_charge_lands_in_the_epoch_of_the_run_that_built_the_gate() -> None:
-    """A review charged after the agent moved on to its next task charges the run it reviewed."""
-    run = SorcarAgent("audit1102-gate-epoch")
+def test_a_side_call_charge_lands_in_the_epoch_of_the_run_it_was_made_for() -> None:
+    """A call charged after the agent moved on to its next task charges the run it was made for."""
+    run = SorcarAgent("audit1102-bound-epoch")
     epoch = run._usage_epoch()
-    gate = run._new_coding_gate(with_reviewer=False)
+    charge = _bound_charge(run)
     run.reset_usage()  # the reusable agent began its next task
-    _charge_of(gate)(0.5, 500, 1, "finish-review:late")
-    _charge_of(gate)(0.5, 500, 1, "finish-review:late")  # a retried charge counts once
+    charge(0.5, 500, 1, "side:late")
+    charge(0.5, 500, 1, "side:late")  # a retried charge counts once
     assert _ledger_totals(epoch) == (0.5, 500, 1)
     assert run.usage_snapshot() == (0.0, 0, 0)
 
 
-def test_gate_charge_of_a_run_with_a_row_goes_through_the_printers_bridge() -> None:
+def test_a_side_call_charge_of_a_run_with_a_row_goes_through_the_printers_bridge() -> None:
     """With a persisted row and a server printer the charge takes the late-charge bridge."""
     charges: list[tuple[Any, ...]] = []
 
@@ -184,38 +174,38 @@ def test_gate_charge_of_a_run_with_a_row_goes_through_the_printers_bridge() -> N
         ) -> None:
             charges.append((task_agent, task_id, budget, tokens, steps, epoch, key))
 
-    run = SorcarAgent("audit1102-gate-bridge")
+    run = SorcarAgent("audit1102-bridge")
     run.printer = _Printer()  # type: ignore[assignment]
     epoch = run._usage_epoch()
-    without_row = run._new_coding_gate(with_reviewer=False)
+    without_row = _bound_charge(run)
     run.last_task_id = "row-1"  # type: ignore[attr-defined]
-    with_row = run._new_coding_gate(with_reviewer=False)
-    _charge_of(with_row)(0.25, 250, 1, "finish-review:a")
-    assert charges == [(run, "row-1", 0.25, 250, 1, epoch, "finish-review:a")]
+    with_row = _bound_charge(run)
+    with_row(0.25, 250, 1, "side:a")
+    assert charges == [(run, "row-1", 0.25, 250, 1, epoch, "side:a")]
     assert run.usage_snapshot() == (0.0, 0, 0)  # the bridge owns the bank
-    _charge_of(without_row)(0.75, 750, 1, "finish-review:b")  # no row: the ledger, keyed
+    without_row(0.75, 750, 1, "side:b")  # no row: the ledger, keyed
     assert len(charges) == 1
     assert run.usage_snapshot() == (0.75, 750, 1)
 
 
-def test_a_review_charged_after_the_rows_final_save_reaches_the_row(
+def test_a_side_call_charged_after_the_rows_final_save_reaches_the_row(
     env: IsolatedKissHome,
 ) -> None:
-    """End to end: a late gate charge adds to the finished row and persists a ``usage_info``.
+    """End to end: a late side-call charge adds to the finished row and persists a ``usage_info``.
 
-    The run's gate is charged after the row was saved and the agent's
-    ledger reset for its next task (the Stop-abandoned review thread's
-    timing): the row and its replayed transcript carry the review's
-    spend, the next task's ledger does not.
+    The call, bound to the run, is charged after the row was saved and
+    the agent's ledger reset for its next task (the timing of a call
+    that a Stop left behind): the row and its replayed transcript carry
+    the call's spend, the next task's ledger does not.
     """
     printer = CapturePrinter()
     agent = _zero_session_run(env, printer)
     task_id = agent.last_task_id
     before = _row(task_id)
     assert before["end_ts"] > 0
-    gate = agent._coding_gate
+    charge = _bound_charge(agent)
     agent.reset_usage()
-    _charge_of(gate)(0.5, 500, 1, "finish-review:late")
+    charge(0.5, 500, 1, "side:late")
     after = _row(task_id)
     assert after["cost"] == pytest.approx(before["cost"] + 0.5)
     assert after["tokens"] == before["tokens"] + 500
@@ -224,74 +214,30 @@ def test_a_review_charged_after_the_rows_final_save_reaches_the_row(
     assert agent.usage_snapshot() == (0.0, 0, 0)
 
 
-def test_a_review_charged_after_the_rows_final_save_reaches_the_row_headless(
+def test_a_side_call_charged_after_the_rows_final_save_reaches_the_row_headless(
     env: IsolatedKissHome,
 ) -> None:
     """A CLI run (a persisted row, no server printer) gets the daemon's late-charge policy.
 
-    The ledger-only fallback left a stopped headless task's late review
-    spend out of its finished row (audit 2026-11-04, S2 F2): the row and
-    its transcript now get it, the stop's second charge of the attempt
-    counts once, and the next task's ledger stays clean.
+    The ledger-only fallback left a stopped headless task's late
+    side-call spend out of its finished row (audit 2026-11-04, S2 F2):
+    the row and its transcript now get it, the stop's second charge of
+    the call counts once, and the next task's ledger stays clean.
     """
     agent = _zero_session_run(env, None)
     task_id = agent.last_task_id
     before = _row(task_id)
     assert before["end_ts"] > 0
-    gate = agent._coding_gate
+    charge = _bound_charge(agent)
     agent.reset_usage()
-    _charge_of(gate)(0.5, 500, 1, "finish-review:late")
-    _charge_of(gate)(0.5, 500, 1, "finish-review:late")
+    charge(0.5, 500, 1, "side:late")
+    charge(0.5, 500, 1, "side:late")
     after = _row(task_id)
     assert after["cost"] == pytest.approx(before["cost"] + 0.5)
     assert after["tokens"] == before["tokens"] + 500
     assert after["steps"] == before["steps"] + 1
     assert _persisted_usage(task_id)[-1] == ("usage_info", pytest.approx(after["cost"]))
     assert agent.usage_snapshot() == (0.0, 0, 0)
-
-
-def test_a_headless_review_charged_while_the_row_is_unfinished_is_in_its_final_save(
-    env: IsolatedKissHome,
-) -> None:
-    """End to end, no printer: a real review charged mid-run lands in the row's final totals.
-
-    The row is unfinished when the review's charge arrives, so the spend
-    is banked on the run's ledger, which the final save reads: the row
-    carries every call the scripted endpoint answered, the review's
-    among them (the gate refuses the unchecked finish; every later call,
-    the review's included, gets the repeated 5000-token answer).  The
-    charge's failure branch (a database error under the lock) is not
-    reachable with a real database and is left untested.
-    """
-    env.write_config(coding_gate_reviewer=MODEL, classify_tasks=False, use_memory=False)
-    script = [
-        tool_call_body(
-            "Write", {"file_path": str(env.repo / "hello.py"), "content": "print(42)\n"}, 500
-        ),
-        finish_body("<p>Implemented hello.py.</p>"),
-        text_body("No findings.\nVERDICT: OK", 4000, 1000),
-    ]
-    agent = ChatSorcarAgent("audit1102-headless-review")
-    with serve(script) as (url, requests):
-        agent.run(
-            model_name=MODEL,
-            model_config={"base_url": url, "api_key": "local"},
-            prompt_template="Create hello.py then finish.",
-            max_sub_sessions=1,
-            max_budget=1,
-            max_steps=5,
-            tool_profile="shell+edit",
-            web_tools=False,
-            use_memory=False,
-            work_dir=str(env.repo),
-            verbose=False,
-        )
-    reviews = [b for b in requests if "You are reviewing" in str(b["messages"][-1]["content"])]
-    assert len(reviews) == 1 and len(requests) > 2
-    row = _row(agent.last_task_id)
-    assert row["end_ts"] > 0
-    assert (row["tokens"], row["steps"]) == (5700 + 5000 * (len(requests) - 2), len(requests))
-    assert row["cost"] == pytest.approx(agent.usage_snapshot()[0]) and row["cost"] > 0
 
 
 # --- findings 2 and 3: the cleanup's fold and final save complete under a second Stop ----
@@ -405,12 +351,12 @@ def _finish(agent: ChatSorcarAgent, task_id: str) -> None:
 @pytest.mark.parametrize("after_commit", [False, True])
 @pytest.mark.parametrize("with_printer", [True, False])
 @pytest.mark.parametrize("finished", [False, True])
-def test_a_stop_in_a_gate_charge_and_its_retry_charge_the_run_once(
+def test_a_stop_in_a_side_call_charge_and_its_retry_charge_the_run_once(
     env: IsolatedKissHome, finished: bool, with_printer: bool, after_commit: bool
 ) -> None:
-    """A Stop cuts a gate charge before its accounting or right after that committed, and
-    the gate charges the attempt again with its key: the run is charged exactly once, on
-    the ledger of a running row (which its final save writes) or in a finished row, through
+    """A Stop cuts a side call's charge before its accounting or right after that committed,
+    and the call is charged again with its key: the run is charged exactly once, on the
+    ledger of a running row (which its final save writes) or in a finished row, through
     the printer's bridge and without one (audit 2026-11-09, S11 F1)."""
     if not after_commit:
         code, event = locked_call.__code__, "call"  # at the usage lock: nothing charged yet
@@ -420,23 +366,23 @@ def test_a_stop_in_a_gate_charge_and_its_retry_charge_the_run_once(
         code, event = task_update._publish_charge.__code__, "call"  # in the row
     else:
         code, event = sorcar_agent._append_late_usage_events.__code__, "call"  # in the row
-    task_id, _chat = persistence._add_task("audit1102 stopped gate charge")
+    task_id, _chat = persistence._add_task("audit1102 stopped side-call charge")
     agent = ChatSorcarAgent("audit1102-stopped-charge")
     agent.printer = CapturePrinter() if with_printer else None
     with agent._task_id_lock:
         agent._last_task_id = task_id
     sorcar_agent._attribute_sub_usage(agent, 1.0, 100, 2)
-    charge = _charge_of(agent._new_coding_gate(with_reviewer=False))
+    charge = _bound_charge(agent)
     if finished:
         _finish(agent, task_id)
     tracer = sys.gettrace()
     sys.settrace(functools.partial(_stop_at, code, event))
     try:
         with pytest.raises(KeyboardInterrupt):
-            charge(0.5, 500, 1, "finish-review:stopped")
+            charge(0.5, 500, 1, "side:stopped")
     finally:
         sys.settrace(tracer)
-    charge(0.5, 500, 1, "finish-review:stopped")
+    charge(0.5, 500, 1, "side:stopped")
     if not finished:
         _finish(agent, task_id)
     row = _row(task_id)
@@ -457,14 +403,14 @@ def test_a_retried_keyed_charge_publishes_nothing_when_its_first_charge_was_publ
     with agent._task_id_lock:
         agent._last_task_id = task_id
     sorcar_agent._attribute_sub_usage(agent, 1.0, 100, 2)
-    charge = _charge_of(agent._new_coding_gate(with_reviewer=False))
+    charge = _bound_charge(agent)
     _finish(agent, task_id)
-    charge(0.5, 500, 1, "finish-review:once")
+    charge(0.5, 500, 1, "side:once")
     before = _persisted_usage(task_id)
-    charge(0.5, 500, 1, "finish-review:once")
+    charge(0.5, 500, 1, "side:once")
     assert _persisted_usage(task_id) == before
     assert before[-1][1] == 1.5
-    assert persistence._unpublished_keyed_charge(task_id, "finish-review:once") == ([], "", False)
+    assert persistence._unpublished_keyed_charge(task_id, "side:once") == ([], "", False)
 
 
 def _park_at(
@@ -492,7 +438,7 @@ def _charge_traced(charge: Callable[[], None], trace: Any, stops: list[BaseExcep
 
 
 @pytest.mark.parametrize("banked", [False, True])
-@pytest.mark.parametrize("route", ["bridge", "gate", "gate-cli"])
+@pytest.mark.parametrize("route", ["bridge", "side-call", "side-call-cli"])
 def test_a_keyed_charge_stopped_before_the_final_save_and_made_again_after_it_counts_once(
     env: IsolatedKissHome, route: str, banked: bool
 ) -> None:
@@ -500,19 +446,20 @@ def test_a_keyed_charge_stopped_before_the_final_save_and_made_again_after_it_co
     or has just returned; the row's final save follows, and only then does the caller make
     the charge again.  The finished row holds it once: in the ledger snapshot the save
     wrote, or as the second charge's late add, never both.  The bridge itself sees to that
-    (review of the S11 F1 fix, R4), for its own callers and for the gate, which keeps its
-    look at the ledger only for a run without the bridge (``gate-cli``)."""
+    (review of the S11 F1 fix, R4), for its own callers and for a side call's charge, which
+    keeps its look at the ledger only for a run without the bridge (``side-call-cli``)."""
     task_id, _chat = persistence._add_task("audit1102 keyed charge across the final save")
     agent = ChatSorcarAgent("audit1102-transition")
-    agent.printer = CapturePrinter() if route == "gate" else None
+    agent.printer = CapturePrinter() if route == "side-call" else None
     sorcar_agent._attribute_sub_usage(agent, 1.0, 100, 2)
-    key = "finish-review:transition"
+    key = "side:transition"
     if route == "bridge":
         charge = functools.partial(
             task_update.charge_side_channel_usage, None, agent, task_id, 0.5, 500, 1, key=key)
     else:
-        charge = functools.partial(agent._charge_gate_usage, 0.5, 500, 1, key, task_id=task_id)
-    bound = functools.partial(charge, epoch=agent._usage_epoch())  # as the gate charges
+        charge = functools.partial(
+            agent._charge_side_call_usage, 0.5, 500, 1, key, task_id=task_id)
+    bound = functools.partial(charge, epoch=agent._usage_epoch())  # as a side call charges
     reached, gate = threading.Event(), threading.Lock()
     stops: list[BaseException] = []
     park = functools.partial(
@@ -537,12 +484,12 @@ def test_a_keyed_charge_stopped_before_the_final_save_and_made_again_after_it_co
 
 
 @pytest.mark.parametrize("stopped", [False, True])
-def test_a_gate_charge_of_a_finished_child_reaches_its_running_parent_once(
+def test_a_side_call_charge_of_a_finished_child_reaches_its_running_parent_once(
     env: IsolatedKissHome, stopped: bool
 ) -> None:
     """The finished child's row takes the charge and its running parent owes it: banked on
     the parent's live agent at once, or, when a Stop cut the charge before that bank, by
-    the parent's final save; the gate's second charge of the key adds nothing."""
+    the parent's final save; a second charge of the key adds nothing."""
     parent_id, _chat = persistence._add_task("audit1102 running parent")
     parent = ChatSorcarAgent("audit1102-running-parent")
     with parent._task_id_lock:
@@ -558,19 +505,19 @@ def test_a_gate_charge_of_a_finished_child_reaches_its_running_parent_once(
         with child._task_id_lock:
             child._last_task_id = child_id
         sorcar_agent._attribute_sub_usage(child, 1.0, 100, 2)
-        charge = _charge_of(child._new_coding_gate(with_reviewer=False))
+        charge = _bound_charge(child)
         _finish(child, child_id)
         if stopped:
             tracer = sys.gettrace()
             sys.settrace(functools.partial(_stop_at, task_update._publish_charge.__code__, "call"))
             try:
                 with pytest.raises(KeyboardInterrupt):
-                    charge(0.5, 500, 1, "finish-review:parent")
+                    charge(0.5, 500, 1, "side:parent")
             finally:
                 sys.settrace(tracer)
         else:
-            charge(0.5, 500, 1, "finish-review:parent")
-        charge(0.5, 500, 1, "finish-review:parent")
+            charge(0.5, 500, 1, "side:parent")
+        charge(0.5, 500, 1, "side:parent")
         row = _row(child_id)
         assert (row["cost"], row["tokens"], row["steps"]) == (1.5, 600, 3)
         assert parent.usage_snapshot() == ((2.0, 200, 4) if stopped else (2.5, 700, 5))
@@ -619,7 +566,7 @@ def test_a_retried_keyed_charge_of_a_child_is_netted_once_by_its_waiting_parent(
         with child._task_id_lock:
             child._last_task_id = child_id
         sorcar_agent._attribute_sub_usage(child, 1.0, 100, 2)
-        charge = _charge_of(child._new_coding_gate(with_reviewer=False))
+        charge = _bound_charge(child)
         _finish(child, child_id)
         original = printer.broadcast_transient
         stop_once = [cut == "after_live_event"]
@@ -638,13 +585,13 @@ def test_a_retried_keyed_charge_of_a_child_is_netted_once_by_its_waiting_parent(
             sys.settrace(functools.partial(_stop_at, task_update._publish_charge.__code__, "call"))
         try:
             with pytest.raises(KeyboardInterrupt):
-                charge(0.5, 500, 1, "finish-review:a")
+                charge(0.5, 500, 1, "side:a")
         finally:
             sys.settrace(tracer)
         if cut != "after_live_event":
-            charge(0.25, 250, 1, "finish-review:b")  # publishes the row's totals first
-        charge(0.5, 500, 1, "finish-review:a")
-        charge(0.5, 500, 1, "finish-review:a")  # a third charge publishes nothing more
+            charge(0.25, 250, 1, "side:b")  # publishes the row's totals first
+        charge(0.5, 500, 1, "side:a")
+        charge(0.5, 500, 1, "side:a")  # a third charge publishes nothing more
         _finish(parent, parent_id)
     finally:
         agent_state.unregister(parent_id, state)
@@ -656,8 +603,7 @@ def test_a_retried_keyed_charge_of_a_child_is_netted_once_by_its_waiting_parent(
     persisted = [e for e in cast("list[dict[str, Any]]", loaded["events"])
                  if e.get("type") in ("usage_info", "result")]
     assert sorted(e["charge_key"] for e in persisted if "charge_key" in e) == (
-        ["finish-review:a"] if cut == "after_live_event"
-        else ["finish-review:a", "finish-review:b"]
+        ["side:a"] if cut == "after_live_event" else ["side:a", "side:b"]
     )
     for events in (live, persisted):
         charged: dict[str, Any] = {"cost": 0.0, "tokens": 0, "steps": 0}
@@ -668,65 +614,13 @@ def test_a_retried_keyed_charge_of_a_child_is_netted_once_by_its_waiting_parent(
         assert totals["total_tokens"] == 100
 
 
-def test_a_stopped_review_charged_twice_with_one_key_charges_the_run_once(
-    env: IsolatedKissHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``review_verdict`` charges a stopped attempt in its ``finally`` and again before the
-    stop propagates; through the printer's bridge the key still counts once."""
-    from kiss.core.kiss_agent import KISSAgent
-
-    real_run = KISSAgent.run
-
-    def run(self: KISSAgent, *args: Any, **kwargs: Any) -> str:
-        result: str = real_run(self, *args, **kwargs)
-        if self.name == "Finish reviewer":
-            raise KeyboardInterrupt("stop")  # the stop event, seen as the call ended
-        return result
-
-    monkeypatch.setattr(KISSAgent, "run", run)
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    (tmp_path / "hello.py").write_text("print('hello')\n")
-    task_id, _chat = persistence._add_task("audit1102 stopped review")
-    agent = ChatSorcarAgent("audit1102-bridge-once")
-    agent.printer = CapturePrinter()
-    with agent._task_id_lock:
-        agent._last_task_id = task_id
-    charge = functools.partial(  # what _new_coding_gate binds
-        agent._charge_gate_usage, epoch=agent._usage_epoch(), task_id=task_id
-    )
-    keys: list[str] = []
-
-    def counted(budget: float, tokens: int, steps: int, key: str) -> None:
-        keys.append(key)
-        charge(budget, tokens, steps, key)
-
-    def shell(command: str, timeout: int) -> tuple[int | None, str]:
-        return run_on_host(command, str(tmp_path), timeout)
-
-    with serve([text_body("Looking.\nVERDICT: OK")]) as (url, requests):
-        gate = CodingGate(
-            shell,
-            str(tmp_path),
-            "./tmp/",
-            MODEL,
-            counted,
-            model_config={"base_url": url, "api_key": "local"},
-        )
-        with pytest.raises(KeyboardInterrupt):
-            gate.review_verdict({"success": True, "summary_in_html": "<p>done</p>"}, "hello")
-        assert len(requests) == 1
-    assert len(keys) == 2 and keys[0] == keys[1], keys  # the gate's two charges, one key
-    cost, tokens, steps = agent.usage_snapshot()  # the running row's ledger took it once
-    assert cost > 0 and tokens > 0 and steps == 1
-
-
 def test_the_retry_of_a_committed_final_save_keeps_a_late_charge_on_the_row(
     env: IsolatedKissHome, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A Stop right after the first save's write: the retry leaves the finished row alone.
 
-    Between the two attempts a late gate charge finds the finished row
-    and adds to it; a retry that replaced the totals from the ledger
+    Between the two attempts a late side-call charge finds the finished
+    row and adds to it; a retry that replaced the totals from the ledger
     would erase it (review of the fixes, finding 2).
     """
     agent = ChatSorcarAgent("audit1102-committed-save")
@@ -743,7 +637,7 @@ def test_the_retry_of_a_committed_final_save_keeps_a_late_charge_on_the_row(
 
     def late_charge_then_log(first: Any, step: str, exc: BaseException) -> BaseException:
         if step == "final save":  # between the attempts, the lock released
-            _charge_of(agent._coding_gate)(0.5, 500, 1, "finish-review:late")
+            _bound_charge(agent)(0.5, 500, 1, "side:late")
         return real_first(first, step, exc)
 
     monkeypatch.setattr(ChatSorcarAgent, "_save_final_usage", save)

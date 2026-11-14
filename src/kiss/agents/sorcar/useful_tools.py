@@ -69,7 +69,6 @@ from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SLUG_PREFIX,
     _WORKTREE_SUBDIR,
 )
-from kiss.agents.sorcar.shell_exit import Ran, exit_word, hand_over, unrun
 from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.shell_scan import (
     UV_VALUED_OPTIONS,
@@ -497,7 +496,8 @@ def _after_uv_options(argv: list[str], index: int) -> int:
 
 #: Appended to the result of a ``uv run`` rewritten by :func:`uv_in_worktree`:
 #: after it, so the result still opens with the status its readers look for
-#: (``Error (exit code N):``, ``Error: Command timed out``).
+#: (``Error (exit code N):``, ``Error: Command timed out``; the coding SEA's
+#: gate reads them, :mod:`kiss.agents.seas.coding.gate_readers`).
 UV_REWRITTEN_NOTE = (
     "\nNote: the worktree has no environment of its own (it shares the main checkout's), "
     "so `uv run` ran as the environment's binary on the worktree's sources; run it so "
@@ -2179,21 +2179,17 @@ def run_commands_pool(
         wall time and (truncated) output (see
         :func:`_format_parallel_report`), or its digest when it is over
         the ceiling and *spill* kept the whole of it.  A string starting
-        with ``Error:`` when the arguments were invalid.  How each
-        command ended is handed over as data
-        (:func:`~kiss.agents.sorcar.shell_exit.hand_over`): a command's
-        output may hold a section of the report.
+        with ``Error:`` when the arguments were invalid.
 
     Raises:
         ToolCallInterrupted: When the tool panel's Stop was pressed.
     """
     try:
         command_list = parse_tasks_json(commands, name="commands")
-        if max_workers < 0:
-            raise ValueError(f"max_workers must be 0 or a positive integer, got {max_workers}.")
     except ValueError as e:
-        hand_over(commands)  # no command ran
         return f"Error: {e.args[0]}"
+    if max_workers < 0:
+        return f"Error: max_workers must be 0 or a positive integer, got {max_workers}."
     cancel = threading.Event()
     pool = ThreadPoolExecutor(max_workers=max_workers or len(command_list))
     try:
@@ -2218,7 +2214,6 @@ def run_commands_pool(
     pool.shutdown(wait=True)
     tool_interrupt.raise_if_interrupted()
     results = [(-1, NOT_STARTED, 0.0) if f.cancelled() else f.result() for f in futures]
-    hand_over(commands, *(_command_exit(code) for code, _, _ in results))
     report = _format_parallel_report(command_list, results, max_output_chars)
     if spill is not None and len(report) > DEFAULT_CONFIG.tool_output_max_chars:
         shown = spill(report)
@@ -2230,11 +2225,6 @@ def run_commands_pool(
 #: Characters of a failed command's output a digest keeps (its tail: the
 #: test runner's summary, the compiler's last errors).
 DIGEST_TAIL_CHARS = 1200
-
-
-def _command_exit(code: int | None) -> str:
-    """One command's outcome in the gate ledger's words (:mod:`~kiss.agents.sorcar.shell_exit`)."""
-    return f"killed by signal {-code}" if code is not None and code < -1 else exit_word(code)
 
 
 def _command_status(code: int | None, seconds: float) -> str:
@@ -2433,9 +2423,10 @@ def _tail_lines(path: Path, lines: int, max_chars: int) -> str:
 def _format_job_report(job: BackgroundJob, tail_lines: int, max_output_chars: int) -> str:
     """Return the ``bash_job`` result: status, command, log path and log tail.
 
-    The status line is whole under any budget (the coding gate reads
-    the job's exit from it); what follows is cut to the rest of
-    *max_output_chars*.
+    The status line is whole under any budget (the coding SEA's gate
+    reads the job's exit from it,
+    :data:`kiss.agents.seas.coding.gate_readers.JOB_EXITED`); what
+    follows is cut to the rest of *max_output_chars*.
     """
     status = f"Job {job.job_id}: {job.status()}\n"
     budget = max(max_output_chars - len(status), 0)
@@ -3627,7 +3618,7 @@ class UsefulTools:
         max_output_chars: int,
         until: str = "",
         **options: Any,
-    ) -> Ran | None:
+    ) -> str | None:
         """Apply the ``Write``/``Edit`` a shell rewrite of a file stands for, or refuse the rewrite.
 
         A ``cat``/``tee`` here-document copy into an existing file
@@ -3656,9 +3647,8 @@ class UsefulTools:
                 the follow-up (:func:`followup_call`).
 
         Returns:
-            The result of the applied call (with how the command ended,
-            :meth:`_apply`), a refusal, or ``None`` when *command* is no
-            such rewrite and may run.
+            The result of the applied call, a refusal, or ``None`` when
+            *command* is no such rewrite and may run.
         """
         bash_cwd = bash_path(os.path.abspath(cwd))
         copy = heredoc_copy(command, bash_cwd)
@@ -3667,7 +3657,7 @@ class UsefulTools:
                 return None
             refusal = cd_refusal(copy.cwd, _host_isdir)
             if refusal is not None:
-                return unrun(refusal)
+                return refusal
             if not _host_lexists(copy.path):
                 return None  # the here-document creates the file: the shell may
             followup = followup_call(
@@ -3679,7 +3669,7 @@ class UsefulTools:
         if edit is not None and edit.path is not None:
             refusal = cd_refusal(edit.cwd, _host_isdir)
             if refusal is not None:
-                return unrun(refusal)
+                return refusal
             followup = followup_call(
                 edit.cwd, edit.remainder, description, timeout_seconds, max_output_chars,
                 **options,
@@ -3688,9 +3678,8 @@ class UsefulTools:
             if applied is not None:
                 return applied
         guarded = functools.partial(_host_guarded, self.work_dir)
-        refusal = rewrite_guard(command, bash_cwd, guarded, _host_isdir) or heredoc_guard(
+        return rewrite_guard(command, bash_cwd, guarded, _host_isdir) or heredoc_guard(
             command, bash_cwd, guarded, _host_isdir)
-        return None if refusal is None else unrun(refusal)
 
     def _write_instead(
         self,
@@ -3698,7 +3687,7 @@ class UsefulTools:
         path: str,
         followup: tuple[str, dict[str, Any]] | None,
         until: str = "",
-    ) -> Ran:
+    ) -> str:
         """Write the here-document *copy* into the existing file *path* through :meth:`Write`.
 
         The file must have been shown (or be a scratch file, which
@@ -3720,7 +3709,7 @@ class UsefulTools:
                 f"<the current content followed by {preview(copy.body)}>" if copy.append
                 else preview(copy.body)
             )
-            return unrun(
+            return (
                 HEREDOC_VERDICT.format(path=copy.path)
                 + f"\nThe file was not shown in this session: call Read(file_path={shown}) and "
                 "then the same command again (it is then applied as that Write), or "
@@ -3732,10 +3721,10 @@ class UsefulTools:
             try:
                 text = _read_regular(resolved)
             except (OSError, UnicodeDecodeError) as e:
-                return unrun(f"Error: cannot append to {path}: {e}")
+                return f"Error: cannot append to {path}: {e}"
             if text is None:
                 # Seen on the descriptor, not read: reading a FIFO blocks.
-                return unrun(
+                return (
                     f"Error: {path} exists and is not a regular file "
                     f"(directory/FIFO/device/socket); refusing to append to it."
                 )
@@ -3756,7 +3745,7 @@ class UsefulTools:
         path: str,
         followup: tuple[str, dict[str, Any]] | None,
         until: str = "",
-    ) -> Ran | None:
+    ) -> str | None:
         """Apply the *edit* a python heredoc or ``sed -i`` stands for to *path* via :meth:`Edit`.
 
         The pairs are the ones exact for the file's text
@@ -3790,7 +3779,7 @@ class UsefulTools:
                 content = _read_regular(resolved)
             if content is None and not self._is_read(resolved):
                 call = edit_call(path, edit.edits)
-                return unrun(
+                return (
                     f"REFUSED: the {edit.what} did NOT run: it rewrites {path}, which was "
                     f"not shown in this session. Read(file_path={json.dumps(path)}) first, "
                     f"then {call}."
@@ -3805,7 +3794,7 @@ class UsefulTools:
             # A scratch file counts as shown, as Write overwrites one unread.
             self._mark_read(resolved)
             if not _is_scratch_path(resolved, self.work_dir):
-                return unrun(
+                return (
                     f"REFUSED: the {edit.what} did NOT run: it rewrites {path}, which was not "
                     f"shown in this session, with no reviewable change. Make the same change with "
                     f"{call} — the region around its first old_string follows and the file now "
@@ -3822,7 +3811,7 @@ class UsefulTools:
         appended: bool = False,
         followup: tuple[str, dict[str, Any]] | None = None,
         until: str = "",
-    ) -> Ran:
+    ) -> str:
         """Make the ``Write``/``Edit`` *call* (*name* with *args*) a shell rewrite stands for.
 
         Under an agent (:attr:`redirect`) the call is raised as a
@@ -3846,8 +3835,6 @@ class UsefulTools:
             The call's result, prefixed with what it was applied as, then
             the follow-up's (:func:`followup_result`); or the refusal of
             a polled rewrite, naming the call to make and the rest to poll.
-            The command ended as its follow-up did; with none, as the
-            call did (``"0"``, or ``"error"`` when it failed).
 
         Raises:
             ToolRedirect: Under an agent, naming the calls to make.
@@ -3857,21 +3844,20 @@ class UsefulTools:
                 f", then poll {json.dumps(followup[1]['command'])} with until= in a Bash call "
                 "of its own"
             )
-            return unrun(
+            return (
                 f"Error: until= re-runs a command as written, but this one is applied as {call} "
                 f"instead of running: make that call{rest}."
             )
         if self.redirect:
             raise rewrite_redirect(name, args, call, appended, followup)
         result = self.Write(**args) if name == "Write" else self.Edit(**args)
-        ran = Ran(_applied(call, result, appended), "error" if result.startswith("Error") else "0")
-        if followup is None:
-            return ran
-        tool, arguments = followup
-        # The rest runs only once the call went through; its exit is then the command's.
-        after = self._bash(**arguments) if ran.code == "0" else None
-        made = followup_result(tool, arguments, None if after is None else after.text, name)
-        return (after or ran)._replace(text=f"{ran.text}\n{made}")
+        text = _applied(call, result, appended)
+        if followup is not None:
+            tool, arguments = followup
+            # The rest runs only once the call went through: a failed one says ``Error``.
+            after = None if result.startswith("Error") else self.Bash(**arguments)
+            text += "\n" + followup_result(tool, arguments, after, name)
+        return text
 
     def _last_running_job(self) -> BackgroundJob | None:
         """Return the background job of this instance started last that is still running."""
@@ -3905,7 +3891,7 @@ class UsefulTools:
             command, timeout_seconds, self._last_running_job_id, self._wait_on_job,
         )
 
-    def _not_started(self, max_output_chars: int) -> Ran | None:
+    def _not_started(self, max_output_chars: int) -> str | None:
         """Return the result of a ``Bash`` call a Stop precedes, ``None`` when no Stop is set.
 
         Nothing is started then, as in the fan-out (:func:`_run_one_command`):
@@ -3917,7 +3903,7 @@ class UsefulTools:
         if not _stop_requested(self.stop_event):
             return None
         tool_interrupt.raise_if_interrupted()
-        return Ran(_format_bash_result(-1, NOT_STARTED, max_output_chars), "-1")
+        return _format_bash_result(-1, NOT_STARTED, max_output_chars)
 
     # Bash calls made and the call number at which the next batching hint may go out.
     _bash_calls = 0
@@ -4018,34 +4004,6 @@ class UsefulTools:
             The output of the command, or for a background job its job
             id, pid and log file path.
         """
-        ran = self._bash(
-            command, description, timeout_seconds, max_output_chars, background, machine,
-            on_timeout, until, poll_seconds,
-        )
-        hand_over(command, ran.code, job_id=ran.job_id)
-        return ran.text
-
-    def _bash(
-        self,
-        command: str,
-        description: str,
-        timeout_seconds: float = 300,
-        max_output_chars: int = DEFAULT_CONFIG.tool_output_default_chars,
-        background: bool = False,
-        machine: str = "",
-        on_timeout: str = "kill",
-        until: str = "",
-        poll_seconds: float = 5.0,
-    ) -> Ran:
-        """Make a :meth:`Bash` call: its result and how the command ended.
-
-        The command's exit is data here, which :meth:`Bash` hands over
-        to the coding gate (:mod:`~kiss.agents.sorcar.shell_exit`): the
-        result's text holds the command's own output, where no reader
-        can tell a status the command printed from the tool's.  The rest
-        of a rewrite made here (:meth:`_apply`) is run through this, so
-        only the call the model made hands anything over.
-        """
         max_output_chars = _output_budget(max_output_chars)
         started = time.monotonic()
         self._pending_append = self._pending_edit = None
@@ -4055,18 +4013,17 @@ class UsefulTools:
         # The arguments are checked before anything runs: a shell rewrite
         # below is applied as the Edit it stands for.
         if until and background:
-            return unrun(
+            return (
                 "Error: until= polls a foreground command; with background=True follow the "
                 "job's log with bash_job(id, \"wait\", until=<regex>) instead."
             )
         if machine and not background:
-            return unrun("Error: machine= applies to background=True only.")
+            return "Error: machine= applies to background=True only."
         if not background and on_timeout not in ("kill", "background"):
-            return unrun(
-                f"Error: on_timeout must be \"kill\" or \"background\", got {on_timeout!r}.")
+            return f"Error: on_timeout must be \"kill\" or \"background\", got {on_timeout!r}."
         regex = _until_pattern(until) if until else None
         if isinstance(regex, str):
-            return unrun(regex)
+            return regex
 
         cwd = self._resolve_cwd()
         guard, note, command, timeout_seconds = _common_guards(
@@ -4074,7 +4031,7 @@ class UsefulTools:
         if guard is None and machine:
             guard = rewrite_guard(command)  # a machine's files this host cannot see
         if guard is not None:
-            return unrun(guard)
+            return guard
         if not machine:
             # A shell rewrite of a file is applied as the Write/Edit it stands
             # for, or refused naming it.
@@ -4085,37 +4042,36 @@ class UsefulTools:
             if applied is not None:
                 return applied
         if background:
-            job, text = self._start_background_job(command, cwd, machine)
-            return unrun(text + note) if job is None else Ran(text + note, "background", job.job_id)
+            return self._start_background_job(command, cwd, machine)[1] + note
         refused, waited, command = self._wait_instead_of_sleep(command, timeout_seconds)
         if refused is not None:
-            return unrun(refused)
+            return refused
         # The wait a long sleep was spent on ends on a Stop: the rest is not started either.
         stopped = self._not_started(max_output_chars)
         if stopped is not None:
             return stopped
         note += waited
         grace = DEFAULT_CONFIG.bash_detach_seconds
-        ran = None
+        result = None
         if regex is not None:
             # The wait a long sleep was spent on counts against the call's deadline.
-            ran = self._poll_until(
+            result = self._poll_until(
                 command, regex, poll_seconds, started + timeout_seconds, max_output_chars, cwd,
             )
         elif on_timeout == "background":
-            ran = self._run_then_detach(command, timeout_seconds, max_output_chars, cwd)
+            result = self._run_then_detach(command, timeout_seconds, max_output_chars, cwd)
         elif 0 < grace < timeout_seconds:
-            ran = self._run_then_detach(command, timeout_seconds, max_output_chars, cwd, grace)
-        if ran is None:
-            ran = self._run_once(command, timeout_seconds, max_output_chars, cwd)[0]
+            result = self._run_then_detach(command, timeout_seconds, max_output_chars, cwd, grace)
+        if result is None:
+            result = self._run_once(command, timeout_seconds, max_output_chars, cwd)[0]
         hint = self.batching_hint(
-            "Bash", {"command": command}, ran.text, time.monotonic() - started,
+            "Bash", {"command": command}, result, time.monotonic() - started,
         )
-        return ran._replace(text=ran.text + hint + note)
+        return result + hint + note
 
     def _run_once(
         self, command: str, timeout_seconds: float, max_output_chars: int, cwd: str | None,
-    ) -> tuple[Ran, str | None, int]:
+    ) -> tuple[str, str | None, int]:
         """Run *command* once in the foreground: its formatted result, its output, what was dropped.
 
         The output (stdout and stderr combined, as captured) is ``None``
@@ -4140,17 +4096,17 @@ class UsefulTools:
             raise failed.error from failed.error.__cause__
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
-            return unrun(f"Error: {e}"), None, 0
+            return f"Error: {e}", None, 0
         finally:
             capture.close()
         if returncode is None:
-            return Ran(_format_bash_timeout(
+            return _format_bash_timeout(
                 output, timeout_seconds, max_output_chars, capture.spilled_to, capture.dropped,
-            ), "timeout"), None, capture.dropped
+            ), None, capture.dropped
         self._note_shell_view(command, returncode, output)
-        return Ran(_format_bash_result(
+        return _format_bash_result(
             returncode, output, max_output_chars, capture.spilled_to, capture.dropped,
-        ), str(returncode)), output, capture.dropped
+        ), output, capture.dropped
 
     def _poll_until(
         self,
@@ -4160,7 +4116,7 @@ class UsefulTools:
         deadline: float,
         max_output_chars: int,
         cwd: str | None,
-    ) -> Ran:
+    ) -> str:
         """Re-run *command* every *poll_seconds* until *regex* matches its output or *deadline*.
 
         One tool call however long the wait: the run that matches ends
@@ -4183,9 +4139,8 @@ class UsefulTools:
             cwd: The directory the command runs in.
 
         Returns:
-            The last run's result (the command ended as that run did) and
-            a line saying whether the regex matched, after how many runs
-            and seconds.
+            The last run's result and a line saying whether the regex
+            matched, after how many runs and seconds.
         """
         pause = max(poll_seconds, 1.0)
         stop = self.stop_event or threading.Event()
@@ -4195,7 +4150,7 @@ class UsefulTools:
         while True:
             runs += 1
             # The time left, to the hundredth: the timeout a killed run reports.
-            ran, output, dropped = self._run_once(
+            result, output, dropped = self._run_once(
                 command, round(max(deadline - time.monotonic(), 0.0), 2), max_output_chars, cwd,
             )
             matched = output is not None and not dropped and _searched(
@@ -4225,10 +4180,10 @@ class UsefulTools:
             why = f"; the poll ended early: {idle}"
         elif time.monotonic() >= deadline:
             why = ": the call's deadline (timeout_seconds) passed"
-        return ran._replace(text=(
-            f"{ran.text}\n[until {regex.pattern!r} {verdict} after {runs} run(s) and "
+        return (
+            f"{result}\n[until {regex.pattern!r} {verdict} after {runs} run(s) and "
             f"{time.monotonic() - started:.1f} s{why}]"
-        ))
+        )
 
     def _note_shell_view(self, command: str, returncode: int | None, output: str) -> None:
         """Count a ``cat`` / ``sed -n`` / ``grep -n`` of one file as a read of it for Edit/Write.
@@ -4282,7 +4237,7 @@ class UsefulTools:
         max_output_chars: int,
         cwd: str | None,
         grace_seconds: float = 0,
-    ) -> Ran | None:
+    ) -> str | None:
         """Run *command* as a background job in *cwd*; wait for it, then report or leave it running.
 
         The ``on_timeout="background"`` path of :meth:`Bash` waits
@@ -4307,7 +4262,7 @@ class UsefulTools:
         """
         job, started = self._start_background_job(command, cwd)
         if job is None:
-            return None if grace_seconds else unrun(started)
+            return None if grace_seconds else started
         wait_seconds = grace_seconds or timeout_seconds
         capture = _Capture(max_output_chars, self._new_spill)
         try:
@@ -4335,13 +4290,12 @@ class UsefulTools:
         returncode = job.returncode() if finished else None
         if returncode is None:
             remaining = timeout_seconds - grace_seconds if grace_seconds else timeout_seconds
-            return Ran(
+            return (
                 f"Still running after {wait_seconds:g}s; left running as background job "
                 f"{job.job_id} (pid {job.process.pid}). Log: {job.log_path}\n"
                 f'Follow it with bash_job({job.job_id!r}, action="wait", until=<regex>, '
                 f"timeout_seconds={remaining:g}).\nOutput so far:\n"
-                + _truncate_output(output, max_output_chars, capture.spilled_to, capture.dropped),
-                "background", job.job_id,
+                + _truncate_output(output, max_output_chars, capture.spilled_to, capture.dropped)
             )
         # Finished in time, this is a foreground result: the model never saw
         # the job id, so neither the registry entry nor the log lingers, and
@@ -4351,9 +4305,9 @@ class UsefulTools:
         job.released.set()
         unlink_waiting_for_holders(job.log_path)
         self._note_shell_view(command, returncode, output)
-        return Ran(_format_bash_result(
+        return _format_bash_result(
             returncode, output, max_output_chars, capture.spilled_to, capture.dropped,
-        ), str(returncode))
+        )
 
     def _follow_job(self, job: BackgroundJob, seconds: float, capture: _Capture) -> bool:
         """Wait up to *seconds* for *job* as :meth:`_wait_for_job` does, reading its growing log.

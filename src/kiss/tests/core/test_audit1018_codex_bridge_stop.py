@@ -573,16 +573,6 @@ def test_a_call_queued_behind_a_tool_when_the_stop_ends_the_block_is_refused(
         stop_signal.set_thread_stop_event(None)
 
 
-class _ResultHook:
-    """A run's ``tool_result_hook``: records every result it is given."""
-
-    def __init__(self) -> None:
-        self.results: list[tuple[str, dict[str, Any], str, bool]] = []
-
-    def __call__(self, name: str, args: dict[str, Any], result: str, refused: bool) -> None:
-        self.results.append((name, args, result, refused))
-
-
 def redirect_to_hold() -> str:
     """Redirect to :func:`hold_until_released`: the deaf tool runs nested in this call.
 
@@ -595,11 +585,11 @@ def redirect_to_hold() -> str:
 @pytest.mark.parametrize("tool", [hold_until_released, redirect_to_hold])
 def test_a_tool_the_stop_abandoned_settles_nothing_once_its_turn_is_closed(tool: Any) -> None:
     """A deaf tool the Stop abandoned returns after the agent was reset for the
-    next run, which installed its own ``tool_result_hook`` and owes a re-issue:
-    the abandoned call's result reaches neither (the turn it belongs to is
-    closed), exactly as it stays out of the conversation.  The same holds when
-    the deaf tool is the one a served call redirected to (a nested call of the
-    same turn): neither its result nor the count it restores is the next run's.
+    next run, which owes a re-issue: the abandoned call's result does not settle
+    it (the turn it belongs to is closed), exactly as it stays out of the
+    conversation.  The same holds when the deaf tool is the one a served call
+    redirected to (a nested call of the same turn): neither its result nor the
+    count it restores is the next run's.
     The call's late ``tool_result`` event goes to the printer of the run the
     call belongs to, never to the printer the reset installed for the next run."""
     HOLD_STARTED.clear()
@@ -610,8 +600,6 @@ def test_a_tool_the_stop_abandoned_settles_nothing_once_its_turn_is_closed(tool:
     agent._reset("codex/gpt-5.5", True, 10, 10.0, None, printer=old_printer, verbose=False)
     agent.function_map = {"hold_until_released": hold_until_released, tool.__name__: tool}
     agent._cached_tools_schema = _schema(tool.__name__)
-    old_run = _ResultHook()
-    agent.tool_result_hook = old_run
     stop_signal.set_thread_stop_event(stop)
     try:
         with agent._native_tools_exposed():
@@ -624,13 +612,9 @@ def test_a_tool_the_stop_abandoned_settles_nothing_once_its_turn_is_closed(tool:
         assert agent._native_turn.closed.is_set()
         new_printer = _RecordingPrinter()
         agent._reset("codex/gpt-5.5", True, 10, 10.0, None, printer=new_printer, verbose=False)
-        new_run = _ResultHook()
-        agent.tool_result_hook = new_run
         agent._refused_call = "Bash"
         RELEASE_HOLD.set()
         _reply(first)
-        assert old_run.results == []
-        assert new_run.results == [], "the abandoned call reached the next run's hook"
         assert agent._refused_call == "Bash", "the abandoned call settled the next run's refusal"
         assert agent.messages == [] and agent.tool_calls_made == 0
         assert new_printer.events == [], "the abandoned call's event reached the next run's printer"
@@ -678,8 +662,9 @@ class _Guard:
 def test_a_hook_the_stop_abandoned_consults_no_guard_once_its_turn_is_closed() -> None:
     """A served call blocked in its ``tool_call_hook`` is abandoned by the Stop;
     the agent is reset for the next run, which installs its own ``tool_call_guard``.
-    When the old hook finally allows, neither that guard (Sorcar's mutates the
-    coding gate) nor the tool is called: the call is refused as the turn's."""
+    When the old hook finally allows, neither that guard (Sorcar's keeps the
+    one-shot refusals of its run) nor the tool is called: the call is refused as
+    the turn's."""
     HOOK_STARTED.clear()
     RELEASE_HOOK.clear()
     PROBE_RAN.clear()
