@@ -1368,13 +1368,17 @@ class RemoteTabs:
         own fetch of the transcript :meth:`replay_to` deferred (the
         client answering the ``replay_deferred`` offer when the user
         opens the tab): forwarded to the machine, the answer to that
-        connection alone.  Any other resume into a bound tab, or one
-        whose bind is still connecting, shows a local chat there: the
-        tab is unbound (the bind stands down) and the resume handled
-        here.  A sub-agent tab on a stream leaves it for a chat
-        (``chatId``) the same way, but keeps it on a resume of a task
-        the stream never saw: that is the tab's own fetch, answered
-        here with nothing running, while the sub-agent runs on.
+        connection alone.  So is a ``scoped`` resume of the task a
+        sub-agent tab on a stream is named after: the machine's replay
+        of the parent offers that transcript too, with the sub-agent's
+        chat, to a stream that never saw the sub-agent's ``new_tab``
+        when the chat was opened here while it ran.  Any other resume
+        into a bound tab, or one whose bind is still connecting, shows
+        a local chat there: the tab is unbound (the bind stands down)
+        and the resume handled here.  A sub-agent tab on a stream
+        leaves it for a chat (``chatId``) the same way, but keeps it on
+        a resume of another task the stream never saw: answered here
+        with nothing running, while the sub-agent runs on.
         """
         machine_name = str(cmd.get("machine", "") or "")
         if machine_name:
@@ -1416,15 +1420,20 @@ class RemoteTabs:
                         return True  # the tab's leaving stands: see the docstring
             previous = self._tabs.get(tab_id)
             own_fetch = False
-            if tab is None and previous is not None and previous.tab_id == tab_id:
-                # The bound tab's own fetch of the chat it shows (the
-                # answer to a deferred replay's offer): nothing to bind
-                # or unbind, the machine replays it to this connection.
+            if tab is None and previous is not None:
+                # The tab's own fetch of what it shows (the answer to a
+                # deferred replay's offer): nothing to bind or unbind,
+                # the machine replays it to this connection.  A bound
+                # tab shows its chat; a sub-agent tab on the stream
+                # shows the task its id names, whatever chat the
+                # machine's offer, and so the fetch, names with it.
                 with previous.lock:
-                    own_fetch = bool(
-                        cmd.get("scoped") and conn_id and previous.chat_id
-                        and str(cmd.get("chatId") or cmd.get("id") or "") == previous.chat_id
-                    )
+                    if previous.tab_id == tab_id:
+                        shown = bool(previous.chat_id) and previous.chat_id == str(
+                            cmd.get("chatId") or cmd.get("id") or "")
+                    else:
+                        shown = bool(task_id) and task_id == _sub_task_id(tab_id)
+                    own_fetch = bool(shown and cmd.get("scoped") and conn_id)
                     if own_fetch:
                         previous.stamp_replay(cmd, conn_id)
             if own_fetch:

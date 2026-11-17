@@ -488,6 +488,26 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
   git_extract_knowledge 0a2b1cb8 [134]) is in no git repository: `replay_in_clone` and
   `improve_sea_with_discover` refuse it (sweep 1027f9dc); use `replay_in_place` when the
   task changes nothing on disk, else patch the prompt unverified.
+- `write_autorouter_evidence` counts its 66-character stamp line against the 2,500 cap:
+  write the block to `tmp/rsi7d/evidence.md`, `wc -c` it, and call the tool only when the
+  file is at most 2,430 bytes (8a8aacf9 [56] sent 2,529 and b4c5f863 [49] 2,560 characters,
+  both refused and re-sent).
+- For the baseline, run `_sea_runs(7)` from `rsi7d_sea` in one `uv run python` script
+  that writes `tmp/rsi7d/baseline.md` (per-SEA stats table) and
+  `tmp/rsi7d/runs-detail.md` (failed, unsuccessful and costliest runs) and prints only
+  the table: the raw `sea_runs()` JSON is about 220k characters (02fd7869, 8a8aacf9 and
+  b4c5f863 each pulled it into context for a 3-run SEA).
+- A SEA whose `prompt_constant` is empty in `indexed_seas()` (gepa: `system_prompt`
+  returns `... + GEPA_INSTRUCTIONS + "\\n"`) takes no `patch_sea_prompt`; do not splice
+  prompt text with `patch_sea_code` either (test_gepa_sea asserts the text ends with the
+  pseudocode fence): put the evidence-backed bullets in the report's recommendations.
+- Signature attribution uses the checkout's current prompts: when `git log --since=<window
+  start> --format=%h -- src/kiss/agents/seas/<name>/<name>_sea.py` shows a prompt change in
+  the window, that SEA's earlier runs land under `sorcar` (sweep d9b7dc4d counted 1
+  bestrouter run; a clone at the 11-14 morning commit counted 77 and 33 orbestrouter).
+  Mine them from a replay clone at the pre-change commit (`cd <clone> &&
+  PYTHONPATH=<clone>/src <checkout>/.venv/bin/python <script>` running `_sea_runs(7)`,
+  which then reads the clone's prompts) and say so in the report.
 """
 
 

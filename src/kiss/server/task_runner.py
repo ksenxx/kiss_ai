@@ -2880,7 +2880,8 @@ class _TaskRunnerMixin:
                 # ``subagent`` tells the pages a dispatched child's end
                 # (its synthetic ``api-…`` tab reaches every remote
                 # page) from the user's own task finishing: only the
-                # latter plays the victory sound.  Kept on the command
+                # latter plays the victory sound, and ``cron`` keeps a
+                # scheduled run's end silent too.  Kept on the command
                 # for the tabs viewing the run, which ``_run_task``
                 # tells once the run's slot is free.
                 cmd["_end_event"] = {
@@ -2888,6 +2889,7 @@ class _TaskRunnerMixin:
                     "startTs": start_ms,
                     "endTs": end_ms,
                     "subagent": state.is_subagent,
+                    "cron": bool(cmd.get("cronJob")),
                 }
                 self.printer.broadcast({**cmd["_end_event"], "tabId": tab_id})
                 end_event_broadcast = True
@@ -2935,6 +2937,7 @@ class _TaskRunnerMixin:
                             "startTs": start_ms,
                             "endTs": int(time.time() * 1000),
                             "subagent": state.is_subagent,
+                            "cron": bool(cmd.get("cronJob")),
                         }
                         self.printer.broadcast({**cmd["_end_event"], "tabId": tab_id})
                     except BaseException:

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Discover agent: AI discovery, auto research and optimization on the bestrouter.
+"""Discover agent: AI discovery, auto research and optimization.
 
 The agent is the plain Sorcar agent with :data:`DISCOVERY_INSTRUCTIONS`,
 the AI discovery loop written as pseudocode (``DISCOVER``, ``ROUND``,
@@ -72,11 +72,7 @@ here now, so an ordinary Sorcar run no longer carries it and a
 prompt that still holds a copy of the section (a custom base prompt) has
 that copy cut out first, so the loop is stated once.
 
-The run's model is ``bestrouter``: the daemon resolves the name to the
-bestrouter's primary model
-(:data:`kiss.agents.seas.bestrouter.bestrouter_sea.PRIMARY_MODEL`); the bestrouter's own
-review protocol is added only when ``bestrouter`` is also the tab's
-picked model.  The toolset is the full one, so the discovery loop can
+The run is on the caller's model.  The toolset is the full one, so the discovery loop can
 edit, run, browse and remember.
 
 Three ways to run it::
@@ -241,9 +237,6 @@ HELDOUT_CHECK(f) := f's metrics on the held-out part, run once per point
 ```"""
 """The AI discovery loop appended to the system prompt of every ``/discover`` run."""
 
-MODEL = "bestrouter"
-"""The run's model: the ``bestrouter`` model-picker SEA, resolved to its primary model."""
-
 TOOL_PROFILE = "full"
 """The run's toolset: every built-in tool."""
 
@@ -278,7 +271,7 @@ class DiscoverSea(BaseSea):
     def description(self) -> str:
         """Return the one-sentence help text shown by ``/discover help``."""
         return (
-            "Runs an AI discovery loop on the bestrouter with the full toolset: it fixes a "
+            "Runs an AI discovery loop with the full toolset: it fixes a "
             "dev / held-out split, searches the state of the art, implements and evaluates one "
             "idea per round as a git commit, keeps a Pareto frontier of the winners, and stops "
             "when a frontier point meets the task's goal and passes the held-out check, or at "
@@ -301,5 +294,5 @@ class DiscoverSea(BaseSea):
         return rest.rstrip("\n") + "\n\n" + DISCOVERY_INSTRUCTIONS + "\n"
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Run on :data:`MODEL` with the :data:`TOOL_PROFILE` toolset."""
-        return settings | {"model": MODEL, "tool_profile": TOOL_PROFILE}
+        """Run with the :data:`TOOL_PROFILE` toolset on the caller's model."""
+        return settings | {"tool_profile": TOOL_PROFILE}

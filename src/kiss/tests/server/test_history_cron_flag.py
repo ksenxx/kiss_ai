@@ -6,7 +6,8 @@
 
 The CHATS panel's Cron chip (off by default) hides those rows, so the
 daemon must tell them apart: a persisted ``is_cron`` column, stamped
-from the ``cronJob`` wire flag an in-chat job sends, or from the
+from the ``cronJob`` wire flag an in-chat job sends (and the client
+of a command job's script sets from ``KISS_CRON_JOB``), or from the
 unattended task text every prompt job (and every sub-task of one)
 carries, backfilled once for the rows older releases wrote, and
 reported as ``is_cron`` on every ``history`` session.
@@ -15,9 +16,13 @@ reported as ``is_cron`` on every ``history`` session.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shlex
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -159,8 +164,8 @@ class TestHistoryCronFlag(unittest.TestCase):
 class DaemonStampsCronRuns(DaemonRunApiHarness):
     """A real daemon stamps ``is_cron`` on the rows of cron launches."""
 
-    def _run_raw(self, extra_cmd: dict[str, Any]) -> None:
-        """Send one raw ``run`` command and wait for its end."""
+    def _run_raw(self, extra_cmd: dict[str, Any]) -> dict[str, Any]:
+        """Send one raw ``run`` command, wait for its end and return its end event."""
         tab_id = f"raw-{uuid.uuid4().hex}"
         ws = local_endpoint.connect(Path(self.endpoint_file), open_timeout=60)
         try:
@@ -176,14 +181,19 @@ class DaemonStampsCronRuns(DaemonRunApiHarness):
                 **extra_cmd,
             }))
             started = False
+            end_event: dict[str, Any] = {}
             while True:
                 event = json.loads(ws.recv(timeout=60))
-                if event.get("tabId") != tab_id or event.get("type") != "status":
+                if event.get("tabId") != tab_id:
+                    continue
+                if event.get("type") == "task_done":
+                    end_event = event
+                if event.get("type") != "status":
                     continue
                 if event.get("running"):
                     started = True
                 elif started:
-                    return
+                    return end_event
         finally:
             ws.close()
 
@@ -203,13 +213,22 @@ class DaemonStampsCronRuns(DaemonRunApiHarness):
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls)
         assert KISSAgent.run is not self._original_executor_run
-        self._run_raw({"prompt": "in-chat job", "cronJob": True})
-        self._run_raw({"prompt": cron_agent.PROMPT_PREAMBLE + "prompt job"})
+        # The end event says ``cron`` so the pages play no finish jingle.
+        self.assertIs(
+            self._run_raw({"prompt": "in-chat job", "cronJob": True})["cron"], True,
+        )
+        self.assertIs(
+            self._run_raw({"prompt": cron_agent.PROMPT_PREAMBLE + "prompt job"})["cron"],
+            True,
+        )
         self._run_raw({
             "prompt": "child of a prompt job",
             "appendToPrompt": cron_agent.unattended_child_suffix(""),
         })
-        self._run_raw({"prompt": "a user's own task", "cronJob": False})
+        self.assertIs(
+            self._run_raw({"prompt": "a user's own task", "cronJob": False})["cron"],
+            False,
+        )
         self._run_raw({"prompt": "a task without the field"})
         flags = self._is_cron_by_task()
         self.assertEqual(
@@ -255,6 +274,50 @@ class DaemonStampsCronRuns(DaemonRunApiHarness):
         self.assertEqual(
             {k: v for k, v in flags.items() if k.startswith("fresh text")},
             {"fresh text, no preamble: scheduled": 1, "fresh text, no preamble: typed": 0},
+        )
+
+    def test_a_task_a_command_job_starts_is_a_cron_row(self) -> None:
+        """A command job runs a shell command, and the command may start
+        a task itself (a script calling ``sorcar.run``).  The scheduler
+        tells the command it is a cron run (``KISS_CRON_JOB=1``) and the
+        client passes that on, so the row is a cron row unless the script
+        says otherwise; the same script run by hand gets plain rows."""
+        calls: list[dict[str, Any]] = []
+        self._install_executor_stub(calls)
+        script = self._write_py(
+            "starts_tasks.py",
+            '''
+            """Start two tasks on the daemon: one says nothing, one says it is no cron run."""
+
+            import sys
+
+            from kiss.server import sorcar
+
+            endpoint_file, work_dir, who = sys.argv[1:]
+            common = {
+                "work_dir": work_dir, "use_web_tools": False,
+                "endpoint_file": endpoint_file, "timeout": 120,
+            }
+            sorcar.run(who + ": says nothing", **common)
+            sorcar.run(who + ": says cron_job=False", cron_job=False, **common)
+            ''',
+        )
+        argv = [sys.executable, script, self.endpoint_file, self.repo]
+        outcome = cron_agent._run_command_job(
+            {"id": "starts-tasks", "command": shlex.join([*argv, "command job"])},
+            Path(self.tmpdir), 300.0,
+        )
+        self.assertEqual(outcome, ("silent", None))
+        by_hand = {k: v for k, v in os.environ.items() if k != "KISS_CRON_JOB"}
+        subprocess.run([*argv, "by hand"], env=by_hand, check=True, timeout=300)
+        self.assertEqual(
+            self._is_cron_by_task(),
+            {
+                "command job: says nothing": 1,
+                "command job: says cron_job=False": 0,
+                "by hand: says nothing": 0,
+                "by hand: says cron_job=False": 0,
+            },
         )
 
 

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -49,6 +50,16 @@ from kiss.core import tool_interrupt
 from kiss.core.printer import event_cost
 
 logger = logging.getLogger(__name__)
+
+CRON_JOB_ENV = "KISS_CRON_JOB"
+"""Environment variable that marks the processes of a cron command job.
+
+The scheduler sets it to ``1`` in the environment of the command it
+starts (:func:`kiss.agents.sorcar.cron_agent._run_command_job`), so
+every process of that command inherits it.  :func:`run` reads it when
+its *cron_job* argument is left out: a task that a scheduled script
+starts is then a cron row without the script saying so.
+"""
 
 _MAX_LINE_BYTES = 64 * 1024 * 1024
 """Largest daemon event frame the client accepts.
@@ -1128,6 +1139,8 @@ def run_command(
         prompt: The task text.
         tab_id: The tab the run is shown under.
         run_token: The client-minted per-submission run token.
+        cron_job: Whether the run is a cron run, settled: :func:`run`
+            has read the environment for its ``None``.
         sea_path: The resolved SEA file (``""`` for none).
         timeout: The seconds recorded as the run's ``timeout`` setting
             (``None`` for the daemon default).
@@ -1205,7 +1218,7 @@ def run(
     parent_tab_id: str = "",
     parent_reviewer: bool = False,
     side_channel: bool = False,
-    cron_job: bool = False,
+    cron_job: bool | None = None,
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -1290,10 +1303,14 @@ def run(
             never re-opened by a replay.  Persisted on the child's
             history row; only meaningful with *parent_task_id*; no
             SEA setting.
-        cron_job: Whether the cron scheduler launched the run (an
-            in-chat job; prompt jobs are recognised by their preamble).
-            Persisted as the history row's ``is_cron`` flag, which the
-            CHATS list hides unless its Cron chip is on; no SEA setting.
+        cron_job: Whether the run is a cron run: one the scheduler
+            launched (an in-chat job; prompt jobs are recognised by
+            their preamble) or one that a cron command job's script
+            starts.  ``None`` (default) takes it from the environment:
+            true when :data:`CRON_JOB_ENV` is ``1``, which the scheduler
+            sets for every command job.  Persisted as the history row's
+            ``is_cron`` flag, which the CHATS list hides unless its Cron
+            chip is on; no SEA setting.
         model: Model name; the daemon's selected default when empty.
         chat_id: Optional existing chat session id to continue.  Pass
             the ``chat_id`` of a previous :class:`TaskResult` to run
@@ -1731,6 +1748,8 @@ def run(
     """
     if not prompt or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
+    if cron_job is None:
+        cron_job = os.environ.get(CRON_JOB_ENV) == "1"
     sea_file = resolve_sea_path(sea_path)
     tab_id = f"api-{uuid.uuid4().hex}"
     # Client-minted per-submission run token.  Echoed on the run's

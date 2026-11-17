@@ -1111,6 +1111,20 @@
   // Row elements in allHistSessions order, for the fast path's in-place
   // refresh of time-derived metrics text.
   let historyRenderedRows = [];
+  // The newest totals a running task has published (`usage_info`), by
+  // machine and task id (historyLiveUsageKey): {tokens, cost, steps}.
+  // The daemon puts a running task's live totals on its row whenever
+  // the history is fetched, but the list is refetched on task news
+  // only (`tasks_updated`), and between two refetches the row kept
+  // the totals of its last fetch while the task's own chat header
+  // moved on with every step.  In publishing order, the task that has
+  // been silent the longest first, and at most HISTORY_LIVE_USAGE_MAX
+  // tasks besides the running rows of the list, whose totals are
+  // never dropped (historyRunningLiveKeys, their keys, is rebuilt by
+  // every history render).  See noteHistoryLiveUsage.
+  const historyLiveUsage = new Map();
+  const historyRunningLiveKeys = new Set();
+  const HISTORY_LIVE_USAGE_MAX = 256;
   // The history panel's view: collapsible per-chat panels (the
   // default), or the legacy flat list — every task newest first, each
   // row with a color bar naming its chat.  Persisted across reloads.
@@ -1148,8 +1162,17 @@
   // no acknowledgement): merged over every incoming history page until
   // the daemon's data agrees, so a refetch that predates the write (or
   // a page deferred across the very click that toggled the star)
-  // cannot flip the star back.
+  // cannot flip the star back.  A task's star is kept under its row's
+  // key (historySessionKey), a chat's under historyChatFavoriteKey.
   const historyPendingFavorites = new Map();
+  // What a toggle overlays on a history row, as [the toggle's key for
+  // the row, the row's field, where the row stashes the daemon's own
+  // value]: a task's star on its own row, a chat's on every row of
+  // the chat.
+  const HISTORY_FAVORITE_OVERLAYS = [
+    [historySessionKey, 'is_favorite', '_kissFavDaemon'],
+    [historyChatFavoriteKey, 'chat_is_favorite', '_kissChatFavDaemon'],
+  ];
   let historyFavExpiryTimer = null;
   let historyFavExpiryDeadline = Infinity;
 
@@ -21893,6 +21916,9 @@
 
   function handleEvent(ev) {
     const t = ev.type;
+    // Whichever tab it is for (and whether or not that tab is on
+    // screen), a task's totals also belong on its History row.
+    if (t === 'usage_info') noteHistoryLiveUsage(ev);
     // The daemon echoes every prompt it takes — setTaskText for a run,
     // prompt for a follow-up — to the tab it came from (an unaddressed
     // echo is for the tab on screen, as in the handlers below):
@@ -23230,6 +23256,8 @@
       case 'task_events': {
         const teTabId = ev.tabId || activeTabId;
         const teTab = getTab(teTabId);
+        // The replayed totals also belong on the task's History row.
+        noteReplayedHistoryUsage(teTabId, ev.events);
         // faildot-coverage:start
         // The replay REPLACES the tab's transcript, so the status icon
         // must describe the replayed task: its own failed `result`
@@ -23629,7 +23657,8 @@
         // tab that launched it, which reaches every page, and a copy,
         // marked `viewer`, to each tab showing the task under another
         // id.  A copy ends that tab's task like any end, in silence.
-        if (!ev.subagent && !ev.viewer && isUsersTaskTab(ev.tabId))
+        // A cron-launched run (`cron`) ends in silence as well.
+        if (!ev.subagent && !ev.viewer && !ev.cron && isUsersTaskTab(ev.tabId))
           playVictorySound();
         // victory-coverage:end
         // The task may have registered a machine (`/machine add`, on
@@ -29289,6 +29318,7 @@
       }
     }
     syncHistoryGroupMachine(group);
+    syncHistoryGroupFavorite(group);
   }
 
   /**
@@ -29327,6 +29357,58 @@
   function historyGroupMachine(group) {
     if (group._kissLastLocalSession || !group._kissLastSession) return '';
     return sessionMachine(group._kissLastSession);
+  }
+
+  /**
+   * Light *group*'s favourite star when its chat is starred.  The
+   * daemon stamps every row with its chat's star (`chat_is_favorite`,
+   * from `chat_summaries`); the header shows that of the row it opens,
+   * whose machine's history.db holds the star (historyGroupMachine).
+   */
+  function syncHistoryGroupFavorite(group) {
+    const btn = group.querySelector(
+      ':scope > .history-chat-header .history-chat-favorite',
+    );
+    // A row without a chat id has a header with no star.
+    if (!btn) return;
+    const session = group._kissLastLocalSession || group._kissLastSession;
+    const starred = !!session.chat_is_favorite;
+    if (btn.classList.contains('favorited') === starred) return;
+    const label = starred ? 'Unfavourite chat' : 'Favourite chat';
+    btn.classList.toggle('favorited', starred);
+    btn.innerHTML = starred ? FAV_FILLED_SVG : FAV_OUTLINE_SVG;
+    btn.dataset.tooltip = label;
+    btn.setAttribute('aria-label', label);
+  }
+
+  /**
+   * Flip the favourite star of *group*'s chat, as a task row's star
+   * flips the task's: shown at once on the header and on the chat's
+   * rows (the Favorites filter reads them), sent through
+   * `setChatFavorite`, and shielded from the refetches that predate
+   * the write (mergePendingFavorites).  A chat with no task on this
+   * daemon is starred on its machine, whose history.db holds its rows.
+   */
+  function toggleHistoryGroupFavorite(group, chatId) {
+    const session = group._kissLastLocalSession || group._kissLastSession;
+    const next = !session.chat_is_favorite;
+    const key = historyChatFavoriteKey(session);
+    allHistSessions.forEach((s, i) => {
+      if (historyChatFavoriteKey(s) !== key) return;
+      s.chat_is_favorite = next;
+      historyRenderedRows[i].dataset.chatFavorite = next ? '1' : '0';
+    });
+    const ts = Date.now();
+    historyPendingFavorites.set(key, {value: next, ts});
+    scheduleHistoryFavExpiry(ts + 10000 + 100, ts);
+    syncHistoryGroupFavorite(group);
+    applyHistoryFilterVisibility();
+    api.setChatFavorite(
+      historyWrite(
+        {chatId: chatId, isFavorite: next},
+        historyGroupMachine(group),
+      ),
+    );
   }
 
   /**
@@ -29480,10 +29562,11 @@
    * Build the chat panel's header, laid out like a task panel: the
    * chat's title (behind its last task's status icon) on the first
    * line, then the action strip with the "Show details" chevron, the
-   * pencil that lets the user retype the summary, and the "last
-   * launched ... ago" label.  Clicking the header brings the chat on
-   * screen (its last task, as a task row click does); it never folds
-   * the panel.  Double-clicking the title edits it, as the pencil does.
+   * chat's favourite star, the pencil that lets the user retype the
+   * summary, and the "last launched ... ago" label.  Clicking the
+   * header brings the chat on screen (its last task, as a task row
+   * click does); it never folds the panel.  Double-clicking the title
+   * edits it, as the pencil does.
    */
   function historyGroupHeader(group, chatId) {
     const header = document.createElement('div');
@@ -29514,6 +29597,16 @@
     actions.className = 'sidebar-item-actions history-chat-actions';
     actions.appendChild(historyGroupDetailsToggle(group, chatId));
     if (chatId) {
+      // Unlit until the chat's rows say it is starred
+      // (syncHistoryGroupFavorite).
+      actions.appendChild(
+        sidebarRowButton(
+          'sidebar-item-favorite history-chat-favorite',
+          FAV_OUTLINE_SVG,
+          'Favourite chat',
+          () => toggleHistoryGroupFavorite(group, chatId),
+        ),
+      );
       actions.appendChild(
         sidebarRowButton(
           'sidebar-item-edit history-chat-rename',
@@ -29859,6 +29952,207 @@
   }
 
   /**
+   * The key a task's live totals are kept under (historyLiveUsage).  A
+   * task id is unique on its own machine only (a history copied to
+   * another machine brings its ids along), so the machine is part of
+   * it, as in historySessionKey.
+   *
+   * @param {string} machine The registered machine's name, '' for this machine.
+   * @param {string} taskId The task's id (taskIdStr).
+   */
+  function historyLiveUsageKey(machine, taskId) {
+    return machine + '\n' + taskId;
+  }
+
+  /** The live-totals key of a history row; '' for a row naming no task. */
+  function historyRowLiveKey(s) {
+    const id = taskIdStr(s.task_id);
+    return id ? historyLiveUsageKey(sessionMachine(s), id) : '';
+  }
+
+  /**
+   * The machine the task of a usage event runs on: the one the daemon
+   * bound the event's tab to ('' for this machine), never the
+   * drop-down's unsent pick.  An event naming no tab is this daemon's
+   * own; null for a tab this page does not have (machine unknown).
+   */
+  function usageEventMachine(ev) {
+    if (ev.tabId === undefined || ev.tabId === null || ev.tabId === '') {
+      return '';
+    }
+    return getTab(ev.tabId) ? tabBoundMachine(ev.tabId) : null;
+  }
+
+  /**
+   * The totals a history row shows: the fetched ones, or for a running
+   * task the larger of those and the ones the task has published
+   * (historyLiveUsage).  A task's totals only grow while it runs, so
+   * the larger figure is the newer one: neither a replayed (older)
+   * event nor a history reply that was snapshotted before the newest
+   * event (it can arrive after it) lowers a row.
+   */
+  function historyRowUsage(s) {
+    const usage = {
+      tokens: Number(s.tokens || 0),
+      cost: Number(s.cost || 0),
+      steps: Number(s.steps || 0),
+    };
+    const key = s.is_running ? historyRowLiveKey(s) : '';
+    const live = key ? historyLiveUsage.get(key) : undefined;
+    if (live) {
+      usage.tokens = Math.max(usage.tokens, live.tokens);
+      usage.cost = Math.max(usage.cost, live.cost);
+      usage.steps = Math.max(usage.steps, live.steps);
+    }
+    return usage;
+  }
+
+  /**
+   * Keep historyLiveUsage within its bound: drop the totals of the
+   * tasks that have been silent the longest (sub-agents, tasks of an
+   * unloaded page: their row never comes) until at most
+   * HISTORY_LIVE_USAGE_MAX are kept.  Never those of a running row of
+   * the list (historyRunningLiveKeys): the row would fall back to the
+   * older totals it was fetched with.  More running rows than the
+   * bound keep all of theirs, until the rows leave the list.
+   */
+  function trimHistoryLiveUsage() {
+    if (historyLiveUsage.size <= HISTORY_LIVE_USAGE_MAX) return;
+    for (const silent of historyLiveUsage.keys()) {
+      if (historyRunningLiveKeys.has(silent)) continue;
+      historyLiveUsage.delete(silent);
+      if (historyLiveUsage.size <= HISTORY_LIVE_USAGE_MAX) return;
+    }
+  }
+
+  /**
+   * Raise the totals kept under *key* (historyLiveUsage) to at least
+   * the given ones.  A task's totals only grow while it runs, so
+   * whichever source reports them — the task's own `usage_info`, a
+   * replayed transcript, the row a history reply brought — the larger
+   * figure is the newer one.
+   *
+   * @param {string} key The task's live-totals key (historyLiveUsageKey).
+   * @param {number} tokens The task's tokens so far.
+   * @param {number} cost The task's cost so far, in USD.
+   * @param {number} steps The task's steps so far.
+   * @param {boolean} published Whether the task published them just
+   *     now: it then moves to the end of the publishing order
+   *     (trimHistoryLiveUsage drops from its start).  The totals of a
+   *     fetched row leave a task that is kept already where it is.
+   */
+  function raiseHistoryLiveUsage(key, tokens, cost, steps, published) {
+    const kept = historyLiveUsage.get(key);
+    const next = {
+      tokens: Math.max(kept ? kept.tokens : 0, tokens),
+      cost: Math.max(kept ? kept.cost : 0, cost),
+      steps: Math.max(kept ? kept.steps : 0, steps),
+    };
+    if (published) historyLiveUsage.delete(key);
+    historyLiveUsage.set(key, next);
+  }
+
+  /**
+   * A history reply listed the running row *s*: bank the totals it
+   * brought (the daemon's overlay of the task's live totals at fetch
+   * time).  A reply that was snapshotted earlier and arrives later
+   * (two requests of one generation can overlap, renderHistory) then
+   * cannot take the row back below what it has shown.
+   */
+  function bankHistoryRowUsage(s) {
+    const key = historyRowLiveKey(s);
+    if (!key) return;
+    const finite = v => {
+      const n = Number(v || 0);
+      return Number.isFinite(n) ? n : 0;
+    };
+    raiseHistoryLiveUsage(
+      key,
+      finite(s.tokens),
+      finite(s.cost),
+      finite(s.steps),
+      false,
+    );
+  }
+
+  /**
+   * A replayed transcript (`task_events`: a tab opened on a task, a
+   * reconnect) brings the task's `usage_info` events too, and paints
+   * the chat header from them; they never pass handleEvent on their
+   * own.  Hand the newest totals of each task in it to its History
+   * row (noteHistoryLiveUsage), or the row of a running task would
+   * stay behind the header until the task's next step.  The events
+   * are the task's persisted ones and name their task themselves
+   * (`taskId`); the tab the replay is for names the machine.
+   *
+   * @param {string} tabId The tab the replay is for.
+   * @param {Array<Object>} events The replayed events.
+   */
+  function noteReplayedHistoryUsage(tabId, events) {
+    const newest = new Map();
+    (events || []).forEach(inner => {
+      if (
+        !inner ||
+        inner.type !== 'usage_info' ||
+        inner.total_tokens == null ||
+        eventCost(inner) === null
+      ) {
+        return;
+      }
+      const id = taskIdStr(inner.taskId);
+      if (id) newest.set(id, inner);
+    });
+    newest.forEach(inner => {
+      noteHistoryLiveUsage(Object.assign({}, inner, {tabId: tabId}));
+    });
+  }
+
+  /**
+   * A task published its totals (`usage_info`): keep them, and repaint
+   * the metrics line of the task's running History row, so the row
+   * reads what the task's chat header reads.  Costs the daemon
+   * nothing: the event is on the wire anyway, for every tab this page
+   * has on the task.  The totals are kept for a task with no row here
+   * too: its first row can be a snapshot taken BEFORE this event that
+   * arrives after it (the daemon reads the live totals, then waits for
+   * the other machines' rows).  Not kept: the totals of a finished row
+   * (a late charge, which the daemon follows with `tasks_updated` and
+   * so with a refetch).
+   */
+  function noteHistoryLiveUsage(ev) {
+    const id = taskIdStr(ev.taskId);
+    const cost = eventCost(ev);
+    // An older daemon's text-only event carries no totals (and
+    // Number(null) is 0, which is not "no tokens yet").
+    const tokens = ev.total_tokens == null ? NaN : Number(ev.total_tokens);
+    const machine = usageEventMachine(ev);
+    if (!id || machine === null || cost === null || !Number.isFinite(tokens)) {
+      return;
+    }
+    const key = historyLiveUsageKey(machine, id);
+    const idx = allHistSessions.findIndex(s => historyRowLiveKey(s) === key);
+    if (idx >= 0 && !allHistSessions[idx].is_running) {
+      historyLiveUsage.delete(key);
+      return;
+    }
+    const steps = Number(ev.total_steps);
+    raiseHistoryLiveUsage(
+      key,
+      tokens,
+      cost,
+      Number.isFinite(steps) ? steps : 0,
+      true,
+    );
+    trimHistoryLiveUsage();
+    if (idx < 0) return;
+    const row = historyRenderedRows[idx];
+    const el = row && row.querySelector('.running-item-metrics');
+    if (!el) return;
+    const text = historyMetricsText(allHistSessions[idx]);
+    if (el.textContent !== text) el.textContent = text;
+  }
+
+  /**
    * The metrics line of a history row: steps, tokens, cost, a duration
    * (ticking while the task runs; none for a finished task with no
    * recorded end, which would otherwise grow forever), and the
@@ -29867,9 +30161,7 @@
    * kept rows never show a stale duration.
    */
   function historyMetricsText(s) {
-    const tokens = Number(s.tokens || 0);
-    const cost = Number(s.cost || 0);
-    const steps = Number(s.steps || 0);
+    const {tokens, cost, steps} = historyRowUsage(s);
     const ts = Number(s.timestamp || 0);
     let when = '';
     if (ts > 0) {
@@ -29947,14 +30239,14 @@
    * Field-by-field equality of one history session (no serialization:
    * huge prompt strings are compared directly, and a difference —
    * typically in the newest row — is found without copying them).
-   * The favourite overlay's stash of the daemon's value
-   * (`_kissFavDaemon`, mergePendingFavorites) is bookkeeping, not a
-   * shown field: a row rendered from the click and the overlaid page
-   * that confirms it are the same row.
+   * The favourite overlays' stashes of the daemon's values
+   * (HISTORY_FAVORITE_OVERLAYS, mergePendingFavorites) are bookkeeping,
+   * not shown fields: a row rendered from the click and the overlaid
+   * page that confirms it are the same row.
    */
   function historySessionRowEqual(a, b) {
-    const ka = Object.keys(a).filter(k => k !== '_kissFavDaemon');
-    const kb = Object.keys(b).filter(k => k !== '_kissFavDaemon');
+    const ka = Object.keys(a).filter(historyRowFieldShown);
+    const kb = Object.keys(b).filter(historyRowFieldShown);
     if (ka.length !== kb.length) return false;
     for (const k of ka) {
       const va = a[k];
@@ -30010,47 +30302,65 @@
   }
 
   /**
-   * Overlay optimistic favourite toggles on an incoming page.  An entry
-   * is retired once the daemon's own data agrees with it.
+   * What the favourite toggle of history row *s*'s chat is kept under
+   * (historyPendingFavorites): the chat on the row's machine, whose
+   * database the chat's star is written to.
+   */
+  function historyChatFavoriteKey(s) {
+    return sessionMachine(s) + '\nchat-favorite:' + String(s.id || '');
+  }
+
+  /** Whether key *k* of a history row is data, not a favourite overlay's stash. */
+  function historyRowFieldShown(k) {
+    return !HISTORY_FAVORITE_OVERLAYS.some(overlay => overlay[2] === k);
+  }
+
+  /**
+   * Overlay optimistic favourite toggles on an incoming page: a task's
+   * on its row, a chat's on every row of the chat.  An entry is retired
+   * once the daemon's own data agrees with it.
    */
   function mergePendingFavorites(sessions) {
     if (historyPendingFavorites.size === 0) return;
     const now = Date.now();
+    // Dropped after the walk: every row of a chat is judged by the
+    // chat's one entry.
+    const retired = new Set();
     sessions.forEach(s => {
-      // A favourite is a write to the row's own machine's database: a
-      // row of another machine with the same task id does not
-      // acknowledge it.
-      const key = historySessionKey(s);
-      const pending = historyPendingFavorites.get(key);
-      if (!pending) return;
-      // A parked page is merged AGAIN when it finally lands: judge
-      // agreement by the DAEMON's value, stashed before the first
-      // overlay, so the overlay can never acknowledge itself and retire
-      // the entry (cancelling the reconciliation refetch) for a write
-      // that may have failed.
-      const daemonValue = Object.prototype.hasOwnProperty.call(
-        s,
-        '_kissFavDaemon',
-      )
-        ? s._kissFavDaemon
-        : !!s.is_favorite;
-      // The overlay only shields against refetches that predate the
-      // write; setFavorite has no acknowledgement, so after this bound
-      // the daemon's data is authoritative again (it may legitimately
-      // disagree: another client toggled, or the write failed).
-      if (now - pending.ts > 10000 || daemonValue === pending.value) {
-        historyPendingFavorites.delete(key);
-        s.is_favorite = daemonValue;
-        delete s._kissFavDaemon;
-        // The last overlay retired: its reconciliation refetch has
-        // nothing left to show.
-        if (historyPendingFavorites.size === 0) clearHistoryFavExpiry();
-        return;
-      }
-      s._kissFavDaemon = daemonValue;
-      s.is_favorite = pending.value;
-      scheduleHistoryFavExpiry(pending.ts + 10000 + 100, now);
+      HISTORY_FAVORITE_OVERLAYS.forEach(([keyOf, field, stash]) => {
+        // A favourite is a write to the row's own machine's database: a
+        // row of another machine with the same task or chat id does not
+        // acknowledge it.
+        const key = keyOf(s);
+        const pending = historyPendingFavorites.get(key);
+        if (!pending) return;
+        // A parked page is merged AGAIN when it finally lands: judge
+        // agreement by the DAEMON's value, stashed before the first
+        // overlay, so the overlay can never acknowledge itself and
+        // retire the entry (cancelling the reconciliation refetch) for
+        // a write that may have failed.
+        const daemonValue = Object.prototype.hasOwnProperty.call(s, stash)
+          ? s[stash]
+          : !!s[field];
+        // The overlay only shields against refetches that predate the
+        // write; setFavorite has no acknowledgement, so after this bound
+        // the daemon's data is authoritative again (it may legitimately
+        // disagree: another client toggled, or the write failed).
+        if (now - pending.ts > 10000 || daemonValue === pending.value) {
+          retired.add(key);
+          s[field] = daemonValue;
+          delete s[stash];
+          return;
+        }
+        s[stash] = daemonValue;
+        s[field] = pending.value;
+        scheduleHistoryFavExpiry(pending.ts + 10000 + 100, now);
+      });
     });
+    retired.forEach(key => historyPendingFavorites.delete(key));
+    // The last overlay retired: its reconciliation refetch has
+    // nothing left to show.
+    if (historyPendingFavorites.size === 0) clearHistoryFavExpiry();
   }
 
   /**
@@ -30089,7 +30399,7 @@
     let focusCtrlClass = '';
     let focusCtrlNth = -1;
     let focusHeaderChatId = '';
-    let focusHeaderChevron = false;
+    let focusHeaderCtrl = '';
     if (offset === 0) {
       // A refresh that returns exactly what is already on screen keeps
       // the existing DOM.  `tasks_updated` broadcasts arrive whenever
@@ -30167,9 +30477,9 @@
       // action stays under Space/Enter after the rebuild (the control
       // is identified by its first class among same-class siblings).
       const active = document.activeElement;
-      // A focused chat-panel header (or its Show details chevron)
-      // survives the rebuild too: its group is found again by chat id
-      // after the fresh render.
+      // A focused chat-panel header (or its Show details chevron, or
+      // its favourite star) survives the rebuild too: its group is
+      // found again by chat id after the fresh render.
       const activeHeader =
         active && active.closest
           ? active.closest('#history-list .history-chat-header')
@@ -30177,7 +30487,10 @@
       if (activeHeader) {
         const headerGroup = activeHeader.closest('.history-chat-group');
         focusHeaderChatId = (headerGroup && headerGroup.dataset.chatId) || '';
-        focusHeaderChevron = active.classList.contains('history-chat-collapse');
+        focusHeaderCtrl =
+          ['.history-chat-collapse', '.history-chat-favorite'].find(sel =>
+            active.matches(sel),
+          ) || '';
       }
       const activeRow =
         active && active.closest
@@ -30207,6 +30520,7 @@
       historyRenderedLegacy = historyLegacyView;
       historyRenderedRows = [];
       allHistSessions = [];
+      historyRunningLiveKeys.clear();
       historyChatGroups.clear();
       scheduleHistoryMidnightRelabel(false);
       // Emptying the list drops its scroll offset: the rebuilt list
@@ -30217,6 +30531,8 @@
         historyList.innerHTML =
           '<div class="sidebar-empty">No conversations yet</div>';
         historyHasMore = false;
+        // No row is left to keep live totals for beyond the bound.
+        trimHistoryLiveUsage();
         refreshHistorySeaOptions();
         return;
       }
@@ -30228,8 +30544,18 @@
     allHistSessions.forEach(s => {
       if (s.is_running && s.task_id) {
         newRunningTaskIds.add(historySessionKey(s));
+        historyRunningLiveKeys.add(historyRowLiveKey(s));
+        bankHistoryRowUsage(s);
+      } else if (!s.is_running && historyLiveUsage.size) {
+        // A task that ended shows what its row stores: its live totals
+        // are done with.  (Those of a running row, and of a task whose
+        // row is not listed, stay.)
+        historyLiveUsage.delete(historyRowLiveKey(s));
       }
     });
+    // The running rows the last list kept totals for beyond the bound
+    // may be gone from this one.
+    trimHistoryLiveUsage();
     historyLastRunningTaskIds.forEach(id => {
       if (!newRunningTaskIds.has(id)) historyJustCompletedTaskIds.add(id);
     });
@@ -30253,6 +30579,9 @@
       div.dataset.timestamp = String(ts || 0);
       div.dataset.ts = String(ts);
       div.dataset.favorite = s.is_favorite ? '1' : '0';
+      // '1' for a task of a chat the user starred: the Favorites filter
+      // keeps the chat's tasks as it keeps a starred task.
+      div.dataset.chatFavorite = s.chat_is_favorite ? '1' : '0';
       // '1' for a task the cron scheduler launched (hidden unless the
       // Cron chip is on).
       div.dataset.cron = s.is_cron ? '1' : '0';
@@ -30477,15 +30806,15 @@
         target.focus({preventScroll: true});
       }
     } else if (focusHeaderChatId) {
-      // Likewise for a focused chat-panel header or its chevron: focus
-      // the same control of the same chat's fresh header so Space/Enter
-      // keeps doing what it did.
+      // Likewise for a focused chat-panel header, its chevron or its
+      // star: focus the same control of the same chat's fresh header
+      // so Space/Enter keeps doing what it did.
       const headerGroup = historyChatGroups.get(focusHeaderChatId);
       const headerBtn =
         headerGroup &&
         headerGroup.querySelector(
-          focusHeaderChevron
-            ? ':scope > .history-chat-header .history-chat-collapse'
+          focusHeaderCtrl
+            ? ':scope > .history-chat-header ' + focusHeaderCtrl
             : ':scope > .history-chat-header',
         );
       if (headerBtn) headerBtn.focus({preventScroll: true});
@@ -30808,7 +31137,10 @@
       else if (cat === 'errors') catOk = showErrors;
       else if (cat === 'completed') catOk = showCompleted;
       const dateOk = ts >= fromTs && ts <= toTs;
-      const favOk = !onlyFavorite || row.dataset.favorite === '1';
+      const favOk =
+        !onlyFavorite ||
+        row.dataset.favorite === '1' ||
+        row.dataset.chatFavorite === '1';
       const cronOk = showCron || row.dataset.cron !== '1';
       const tagOk =
         !onlyTag || (row.dataset.tags || '').split(',').includes(onlyTag);
@@ -33315,6 +33647,15 @@
     // by rememberClosedSubagentTab().
     closedSubagentTabCount: function () {
       return _rpClosedSubagentTabs.size;
+    },
+    // How many tasks' live totals the History list keeps, and for how
+    // many running rows it keeps them whatever the bound; see
+    // trimHistoryLiveUsage().
+    historyLiveUsageCounts: function () {
+      return {
+        kept: historyLiveUsage.size,
+        running: historyRunningLiveKeys.size,
+      };
     },
     // Every open tab, in tab order, with what the webapp tests compare
     // (test/*.test.js, the Playwright suites under tests/webapp).  The

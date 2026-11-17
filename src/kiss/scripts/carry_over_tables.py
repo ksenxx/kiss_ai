@@ -29,14 +29,15 @@ to lose nothing.  This script puts them back from the file the
 replacement kept: rows only the old database had are inserted, and
 where both have the same row every numeric column is raised to the
 larger of the two values.  The titles the user typed over chats there
-(``chat_summaries.user_summary``, which no sync moves either) go back
-over the same chats, in place of a title that came with the
-replacement.  The deletions carried over are then carried
-out on the new database, as a sync would: a task the old database had
-deleted does not come back in the new one, nor does what the web app
-deletes with it -- the tasks of a deleted chat, the sub-tasks of a
-deleted task.  Nothing else is ever lowered or deleted, so running it
-twice changes nothing the second time.
+and the stars given to them (``chat_summaries.user_summary`` and
+``is_favorite``, which no sync moves either) go back over the same
+chats, in place of what came with the replacement.  The deletions
+carried over are then carried out on the new database, as a sync
+would: a task the old database had deleted does not come back in the
+new one, nor does what the web app deletes with it -- the tasks of a
+deleted chat, the sub-tasks of a deleted task.  Nothing else is ever
+lowered or deleted, so running it twice changes nothing the second
+time.
 
 Usage:
     python3 carry_over_tables.py OLD_DATABASE NEW_DATABASE
@@ -67,6 +68,9 @@ CARRIED_TABLES = {
     "deleted_tasks": "id",
     "deleted_chats": "chat_id",
 }
+# The columns of ``chat_summaries`` that hold what the user set on a chat
+# (its title, its favourite star), each with the SQL literal of "not set".
+CARRIED_CHAT_COLUMNS = {"user_summary": "''", "is_favorite": "0"}
 # The deletion records, created in a new database from before they existed
 # (``persistence._init_tables`` declares them the same way).
 DELETED_DDL = (
@@ -186,46 +190,50 @@ def carry_over_table(con: sqlite3.Connection, table: str, key: str) -> tuple[int
     return max(inserted, 0), max(raised, 0)
 
 
-def carry_over_titles(con: sqlite3.Connection) -> int:
-    """Put the titles the user typed over the old database's chats back.
+def carry_over_chat_column(con: sqlite3.Connection, column: str, unset: str) -> int:
+    """Put what the user set on the old database's chats back: a title, a star.
 
-    ``chat_summaries.user_summary`` is the one column of that table
-    nothing can recompute.  A title the old database holds replaces the
-    one in the new database's row for the chat, whose generated columns
+    ``chat_summaries.user_summary`` (the title typed over a chat) and
+    ``is_favorite`` (the star given to it) are the columns of that table
+    nothing can recompute.  A value the old database holds replaces the
+    one in the new database's row for the chat, whose other columns
     stay as they are; a chat the new database has a task of but no row
     for yet (a row is written when a task finishes) gets a row holding
-    the title alone, as typing it there would have made.  A chat the new
+    the value alone, as setting it there would have made.  A chat the new
     database has neither a row nor a task of gets nothing, so a deleted
     chat does not come back.
 
     Args:
         con: Connection to the new database with the old one attached as
             ``old``.
+        column: The column to carry, a key of :data:`CARRIED_CHAT_COLUMNS`.
+        unset: The SQL literal the column holds while the user set nothing.
 
     Returns:
-        The number of rows that got a title.
+        The number of rows that got the value.
     """
-    # A database from before these columns has no titles to give, or no
+    # A database from before the column has no values to give, or no
     # chats to put them on.
-    titled = {"chat_id", "user_summary"}
+    needed = {"chat_id", column}
     if not (
-        titled <= {c[0] for c in _columns(con, "old", "chat_summaries")}
-        and titled <= {c[0] for c in _columns(con, "main", "chat_summaries")}
+        needed <= {c[0] for c in _columns(con, "old", "chat_summaries")}
+        and needed <= {c[0] for c in _columns(con, "main", "chat_summaries")}
         and "chat_id" in {c[0] for c in _columns(con, "main", "task_history")}
     ):
         return 0
-    title = (
-        '(SELECT o."user_summary" FROM old."chat_summaries" o'
-        ' WHERE o."chat_id" = main."chat_summaries"."chat_id" AND o."user_summary" != \'\')'
+    name = quote(column)
+    value = (
+        f'(SELECT o.{name} FROM old."chat_summaries" o'
+        f' WHERE o."chat_id" = main."chat_summaries"."chat_id" AND o.{name} != {unset})'
     )
     replaced = con.execute(
-        f'UPDATE main."chat_summaries" SET "user_summary" = {title}'
-        f" WHERE {title} != COALESCE(\"user_summary\", '')"
+        f'UPDATE main."chat_summaries" SET {name} = {value}'
+        f" WHERE {value} != COALESCE({name}, {unset})"
     ).rowcount
     added = con.execute(
-        'INSERT INTO main."chat_summaries" ("chat_id", "user_summary")'
-        ' SELECT o."chat_id", o."user_summary" FROM old."chat_summaries" o'
-        " WHERE o.\"user_summary\" != ''"
+        f'INSERT INTO main."chat_summaries" ("chat_id", {name})'
+        f' SELECT o."chat_id", o.{name} FROM old."chat_summaries" o'
+        f" WHERE o.{name} != {unset}"
         ' AND NOT EXISTS (SELECT 1 FROM main."chat_summaries" m'
         ' WHERE m."chat_id" = o."chat_id")'
         ' AND EXISTS (SELECT 1 FROM main."task_history" t WHERE t."chat_id" = o."chat_id")'
@@ -450,8 +458,8 @@ def carry_over(old_database: str, new_database: str) -> tuple[int, int, int]:
         new_database: Database that replaced it; updated in place.
 
     Returns:
-        The total number of rows inserted (or given their title back)
-        and raised, and the number of task rows the carried-over
+        The total number of rows inserted (or given their title or star
+        back) and raised, and the number of task rows the carried-over
         deletions removed.  ``(0, 0, 0)`` when there is no old database,
         or none that can be opened -- which is usually why it was
         replaced.
@@ -491,7 +499,8 @@ def carry_over(old_database: str, new_database: str) -> tuple[int, int, int]:
                     added, lifted = carry_over_table(con, table, key)
                     inserted += added
                     raised += lifted
-                inserted += carry_over_titles(con)
+                for column, unset in CARRIED_CHAT_COLUMNS.items():
+                    inserted += carry_over_chat_column(con, column, unset)
                 deleted = apply_deletions(con)
         finally:
             con.execute("DETACH DATABASE old")

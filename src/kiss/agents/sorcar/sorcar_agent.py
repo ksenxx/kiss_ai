@@ -2245,13 +2245,23 @@ class SorcarAgent(RelentlessAgent):
         (absolute; the container's when its commands run in one, never
         the host's then), any other task's is in the work tree
         (:meth:`_tree_scratch_dir`), and so is that of a sub-agent whose
-        container could not hold a folder.
+        container could not hold a folder (its ``/tmp`` is not writable).
+        A top-level task in a container that does not mount the work dir
+        (an attached ``container:<id>``) would scratch in the caller's own
+        directory, so its folder goes under the container's
+        ``/tmp/kiss-scratch/`` instead of ``./tmp/``.
         """
         if self.docker_image:
             folder = getattr(self.docker_manager, "private_dir", None)
         else:
             folder = self._private_dir
-        return f"{Path(folder).as_posix()}/" if folder else self._tree_scratch_dir()
+        if folder:
+            return f"{Path(folder).as_posix()}/"
+        manager = self.docker_manager
+        top_level = self._subagent_info is None
+        if top_level and manager is not None and self.work_dir not in manager.volumes:
+            return "/tmp/kiss-scratch/" + self._tree_scratch_dir().removeprefix("./tmp/")
+        return self._tree_scratch_dir()
 
     def _tree_scratch_dir(self) -> str:
         """The scratch directory in the work tree, relative to the work dir.

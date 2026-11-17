@@ -22,6 +22,7 @@ import docker.models.containers
 import pytest
 
 from kiss.agents.sorcar.docker_manager import ATTACH_PREFIX, DockerManager
+from kiss.agents.sorcar.relentless_agent import container_limits_line
 from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
 
 IMAGE = "python:3.11-slim"
@@ -75,6 +76,35 @@ def test_attach_by_name_uses_the_containers_workdir(containers) -> None:
         assert mgr.Bash("pwd", "cwd").splitlines()[0] == "/opt"
     with_workdir.reload()
     assert with_workdir.status == "running"
+
+
+def test_resource_limits_report_the_containers_cpu_and_memory_caps(containers) -> None:
+    """``nproc`` in a capped container shows the host; the limits come from its config."""
+    plain, _ = containers
+    client = docker.from_env()
+    nano = client.containers.run(
+        IMAGE, command="sleep infinity", detach=True, nano_cpus=10**9, mem_limit="2g",
+    )
+    quota = client.containers.run(
+        IMAGE, command="sleep infinity", detach=True, cpu_quota=150000,  # default period
+    )
+    try:
+        with DockerManager(f"{ATTACH_PREFIX}{nano.id}") as mgr:
+            assert mgr.resource_limits() == (1.0, 2 * 2**30)
+            line = container_limits_line(*mgr.resource_limits())
+        assert line.startswith("- Container limits: 1 CPU and 2 GiB of memory. `nproc`")
+        with DockerManager(f"{ATTACH_PREFIX}{quota.id}") as mgr:
+            assert mgr.resource_limits() == (1.5, None)
+            assert container_limits_line(*mgr.resource_limits()).startswith(
+                "- Container limits: 1.5 CPUs. "
+            )
+        with DockerManager(ATTACH_PREFIX + plain.id) as mgr:
+            assert mgr.resource_limits() == (None, None)
+            assert container_limits_line(*mgr.resource_limits()) == ""
+        assert DockerManager(ATTACH_PREFIX + plain.id).resource_limits() == (None, None)
+    finally:
+        nano.remove(force=True)
+        quota.remove(force=True)
 
 
 def test_attach_to_unknown_container_fails_loudly() -> None:

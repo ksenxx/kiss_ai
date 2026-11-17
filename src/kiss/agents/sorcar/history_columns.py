@@ -62,13 +62,14 @@ only with a default.  Keep it in step with the ``CREATE TABLE`` in
 ADDED_SUMMARY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("user_summary", "TEXT DEFAULT ''"),
     ("last_finished", "INTEGER DEFAULT 0"),
+    ("is_favorite", "INTEGER DEFAULT 0"),
 )
 """Columns of ``chat_summaries`` added after the first release, oldest first.
 
 Same shape and rules as :data:`ADDED_TASK_COLUMNS`.  The rows a column
 extends read its default until their chat's next recompute
 (``last_finished`` 0: unknown) or until the user types one
-(``user_summary``).
+(``user_summary``) or stars the chat (``is_favorite``).
 """
 
 CRON_TASK_MARKER = "You are running as an unattended scheduled automation (cron job)."

@@ -1664,6 +1664,7 @@ def test_ssh_enrollment_failures_are_reported_and_store_nothing(
     nothing = tmp_path / "nothing"
     nothing.mkdir()
     idle = start_sshd(sshd.config.parent, nothing)
+    enroll_timeout = mach.ENROLL_TIMEOUT
     monkeypatch.setattr(mach, "ENROLL_TIMEOUT", 2.0)
     try:
         with pytest.raises(mach.MachineError, match=r"no Sorcar daemon is running on .*: no .*"):
@@ -1729,6 +1730,9 @@ def test_ssh_enrollment_failures_are_reported_and_store_nothing(
     assert time.monotonic() - started < 0.5
 
     # The TLS directory locked by another writer: no client certificate.
+    # A real enrollment: the daemon polls its trusted CAs every 2 s, so the
+    # 2 s deadline of the failures above would lose to it under load.
+    monkeypatch.setattr(mach, "ENROLL_TIMEOUT", enroll_timeout)
     box = mach.add_machine("box", sshd.login)
     mach.close_links()
     monkeypatch.setattr(mach, "TLS_LOCK_TIMEOUT", 0.2)

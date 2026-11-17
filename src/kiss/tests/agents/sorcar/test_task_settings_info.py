@@ -32,6 +32,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, cast
 
+import docker
 import pytest
 
 import kiss.agents.sorcar.persistence as th
@@ -59,6 +60,7 @@ from kiss.server.json_printer import (
     _usage_info_event_from_session,
     with_synthesized_events,
 )
+from kiss.tests.agents.sorcar.docker_test_containers import IMAGE, is_docker_available
 from kiss.tests.conftest import IS_WINDOWS
 from kiss.tests.core.test_budget_enforcement_e2e import (
     _CHEAP,
@@ -202,6 +204,42 @@ class TestSystemPromptTaskSettings(_DBRedirect):
         interpreter = project_interpreter(self.tmpdir)
         assert interpreter.startswith(f"{on_path} (Python ") and interpreter.endswith(")")
         assert f"- Interpreter: {interpreter}" in system_text
+
+    @pytest.mark.slow
+    @pytest.mark.skipif(not is_docker_available(), reason="Docker daemon is not running")
+    def test_attached_container_scratch_dir_is_outside_its_work_dir(self) -> None:
+        """A run attached to a container that lacks the work dir keeps scratch out of it.
+
+        ``./tmp/<task id>/`` would land in the container's working
+        directory, which belongs to the caller, so the prompt names a
+        folder under the container's ``/tmp`` and the container's own
+        working directory, not the host's.
+        """
+        container = docker.from_env().containers.run(
+            IMAGE, command="sleep infinity", detach=True, working_dir="/srv/job",
+        )
+        _FinishHandler.bodies = []
+        srv, url = _start_server(_FinishHandler)
+        try:
+            agent = ChatSorcarAgent("attached-container-settings")
+            agent.run(
+                prompt_template="say hi",
+                model_name="gpt-4o-mini",
+                work_dir=self.tmpdir,
+                max_steps=3,
+                web_tools=False,
+                is_parallel=False,
+                verbose=False,
+                docker_image=f"container:{container.id}",
+                model_config={"base_url": url, "api_key": "test-key"},
+            )
+        finally:
+            srv.shutdown()
+            container.remove(force=True)
+        system_text = json.loads(_FinishHandler.bodies[0])["messages"][0]["content"]
+        assert f"- Scratch dir: /tmp/kiss-scratch/{agent.last_task_id}/" in system_text
+        assert "- Work dir: /srv/job, inside the container that your shell" in system_text
+        assert f"- Work dir: {self.tmpdir}" not in system_text
 
     @pytest.mark.skipif(IS_WINDOWS, reason="symlinks need privileges on Windows")
     def test_interpreter_is_the_projects_environment_also_from_a_worktree(

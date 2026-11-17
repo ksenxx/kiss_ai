@@ -6,12 +6,11 @@
 
 The SEA appends the AI discovery loop (once the ``## AI discovery, auto
 research, and optimization`` section of ``SYSTEM.md``, now the SEA's
-``DISCOVERY_INSTRUCTIONS``) to the system prompt and pins ``model:
-bestrouter`` and ``tool_profile: full``, so the tests check: the default
+``DISCOVERY_INSTRUCTIONS``) to the system prompt and pins ``tool_profile:
+full`` (the model is the caller's), so the tests check: the default
 prompts no longer carry the loop, a leftover copy in a prompt is cut out
 cleanly and the loop appended once, the slash command resolves to this
-file, the settings name the bestrouter picker (which the daemon resolves
-to its primary model) and the full toolset, the daemon-side loader stages
+file, the settings name only the full toolset, the daemon-side loader stages
 the rewrite as a system-prompt hook, and a real :class:`ChatSorcarAgent`
 run configured that way (against the scripted local chat-completions
 server) sends the default prompt with the loop at the end and offers the
@@ -40,7 +39,6 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.seas.bestrouter import bestrouter_sea
 from kiss.agents.seas.discover import discover_sea
 from kiss.agents.seas.discover.discover_sea import DiscoverSea, split_discovery_section
 from kiss.agents.sorcar import sea_commands
@@ -264,18 +262,13 @@ def test_description_is_one_sentence_naming_the_command() -> None:
     assert resolve_agent("discover", "") == (str(_SEA_PATH), "discover")
 
 
-def test_settings_name_the_bestrouter_and_the_full_toolset() -> None:
-    """The run's model is the ``bestrouter`` picker entry and its toolset is the full one."""
-    assert DiscoverSea().settings({}) == {"model": "bestrouter", "tool_profile": "full"}
-    assert DiscoverSea().settings({"max_budget": 2.0}) == {
-        "max_budget": 2.0, "model": "bestrouter", "tool_profile": "full",
+def test_settings_name_the_full_toolset_and_keep_the_callers_model() -> None:
+    """The toolset is the full one and the run stays on the caller's model."""
+    assert DiscoverSea().settings({}) == {"tool_profile": "full"}
+    assert DiscoverSea().settings({"max_budget": 2.0, "model": "m"}) == {
+        "max_budget": 2.0, "model": "m", "tool_profile": "full",
     }
-    assert sea_commands.sea_settings(_SEA_PATH) == {"model": "bestrouter", "tool_profile": "full"}
-    # ``bestrouter`` is a model-picker SEA, so the daemon resolves the
-    # model to the picker's own model instead of forwarding the name.
-    picker = Path(bestrouter_sea.__file__).resolve()
-    assert sea_commands.model_sea("bestrouter") == picker
-    assert sea_commands.sea_settings(picker)["model"] == bestrouter_sea.SIMPLE_MODEL
+    assert sea_commands.sea_settings(_SEA_PATH) == {"tool_profile": "full"}
     assert DiscoverSea().register_as_model() is False
     assert DiscoverSea().tools([print]) == [print]
     assert DiscoverSea().prompt("the task") == "the task"
@@ -283,10 +276,12 @@ def test_settings_name_the_bestrouter_and_the_full_toolset() -> None:
 
 
 def test_loader_stages_the_rewrite_as_a_system_prompt_hook() -> None:
-    """The daemon-side loader pins the model and profile and stages the prompt hook."""
-    cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH), "appendToSystemPrompt": "CALLER"}
-    assert apply_sea(cmd) == {"model", "toolProfile"}
-    assert cmd["model"] == "bestrouter"
+    """The daemon-side loader pins the profile, keeps the model and stages the prompt hook."""
+    cmd: dict[str, Any] = {
+        "seaPath": str(_SEA_PATH), "appendToSystemPrompt": "CALLER", "model": "m",
+    }
+    assert apply_sea(cmd) == {"toolProfile"}
+    assert cmd["model"] == "m"
     assert cmd["toolProfile"] == "full"
     assert cmd["appendToSystemPrompt"] == "CALLER"
     hook = cmd["systemPromptHook"]
@@ -313,7 +308,7 @@ def test_agent_run_ends_the_default_prompt_with_the_section(tmp_path: Path) -> N
     Settings``) come after it, and the full toolset is offered.
     """
     run = sea_commands.evaluate_sea([DiscoverSea()], "Make the parser twice as fast.")
-    assert run.settings == {"model": "bestrouter", "tool_profile": "full"}
+    assert run.settings == {"tool_profile": "full"}
     parsed, agentic = run_sea(
         run,
         [finish_body("<p>done</p>", prompt_tokens=500)],

@@ -760,12 +760,14 @@ def machine_file_usage(name: str, cmd: dict[str, Any]) -> None:
         logger.info("mention usage not counted on %s: %s", name, reply["error"])
 
 
-MACHINE_HISTORY_WRITES = ("setFavorite", "setChatSummary", "deleteTask", "deleteChat")
+MACHINE_HISTORY_WRITES = (
+    "setFavorite", "setChatSummary", "setChatFavorite", "deleteTask", "deleteChat",
+)
 """The CHATS-panel writes a registered machine applies to its own history.db.
 
 A history row of a remote machine lives in that machine's database:
-its favourite star, its chat's retyped title and its delete button
-send the command stamped ``machine`` (:func:`machine_history_write`)."""
+its favourite star, its chat's retyped title and star and its delete
+button send the command stamped ``machine`` (:func:`machine_history_write`)."""
 
 
 def machine_history_write(name: str, cmd: dict[str, Any]) -> dict[str, Any] | None:

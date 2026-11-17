@@ -139,6 +139,7 @@ const REPLAYABLE = [
   'getAdjacentTask',
   'setFavorite',
   'setChatSummary',
+  'setChatFavorite',
   'deleteTask',
   'deleteChat',
   'getInputHistory',

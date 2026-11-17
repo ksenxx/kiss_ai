@@ -502,13 +502,15 @@ def test_sub_agent_in_a_container_is_cleaned_up_in_the_container(
     assert _alive_in(container, pids) == []
     assert _sh(container, f"ls -d {folder} 2>/dev/null") == ""
     assert _sh(container, "grep -l KISS_SUBAGENT_DIR /proc/[0-9]*/environ 2>/dev/null") == ""
-    # a top-level task in the same container: the work tree's scratch dir, no mark, and
-    # the shared directory for its job's files, which stay
+    # a top-level task in the same container: a scratch dir under the container's /tmp (the
+    # work tree is the caller's directory), no mark, and the shared directory for its job's
+    # files, which stay
     top: list[dict] = []
     _run(SorcarAgent("docker-top"), tmp_path, [
         _bash('echo "${KISS_SUBAGENT_DIR-unset}|${TMPDIR-unset}" > top.txt'), job, done,
     ], top, docker_image=attached)
-    assert _scratch_dir(top[0]) == "./tmp/" and _sh(container, "cat top.txt") == "unset|unset"
+    assert _scratch_dir(top[0]) == "/tmp/kiss-scratch/"
+    assert _sh(container, "cat top.txt") == "unset|unset"
     assert f"; log: {JOBS_DIR}/" in _tool_results(top[2])[-1]
     assert _sh(container, f"ls {JOBS_DIR}/*.log") != ""
     assert _alive_in(container, _sh(container, "cat job.pid").split()) != []

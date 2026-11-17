@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 import ssl
 import threading
+import time
 import urllib.request
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34,7 +35,7 @@ from urllib.parse import urlsplit
 
 import certifi
 import pytest
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Page, Request, sync_playwright
 
 from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.local_ws import _generate_self_signed_cert
@@ -167,24 +168,78 @@ _SHOW_AGAIN_JS = """() => {
 
 _HEAD_STYLES_JS = "[...document.head.querySelectorAll('style')].map(s => s.textContent)"
 
+# The load note of the latest show: ``_SHOW_AGAIN_JS`` marks the note it answers as seen.
+_NOTE = ".terminal-load-error:not([data-seen])"
+_TERMINAL = ".terminal-view .xterm"
+
+
+def _show(page: Page, cdn: _Cdn, show_js: str, shown: str) -> list[str]:
+    """Run *show_js*, wait for *shown*, and return the CDN paths that show of the tab asked for.
+
+    Other jobs' Docker containers change the host's interfaces, and
+    Chromium then fails the downloads it is still connecting for
+    (``net::ERR_NETWORK_CHANGED``): ``fetch`` rejects and the tab shows
+    its load note, whatever the CDN would have answered and after fewer
+    than three requests reached it (one, in the full-suite run of
+    2026-11-15).  Such a show is a failed load too, so it must leave no
+    stylesheet behind; the tab is then shown again, three times at
+    most.  A download that fails for any other reason fails the test,
+    naming it.
+
+    Args:
+        page: The page under test.
+        cdn: The local CDN.
+        show_js: ``_OPEN_TERMINAL_JS`` or ``_SHOW_AGAIN_JS``.
+        shown: What the show must end on: ``_NOTE`` or ``_TERMINAL``.
+    """
+    started: list[Request] = []
+    cut: list[str] = []
+
+    def note_started(request: Request) -> None:
+        started.append(request)
+
+    def note_cut(request: Request) -> None:
+        # This show's downloads only: a late report on an earlier show's is not its failure.
+        if request in started:
+            cut.append(f"{request.url}: {request.failure}")
+
+    page.on("request", note_started)
+    page.on("requestfailed", note_cut)
+    try:
+        for _ in range(3):
+            started.clear()
+            cut.clear()
+            before = len(cdn.requested)
+            page.evaluate(show_js)
+            page.wait_for_selector(f"{shown}, {_NOTE}", timeout=30000)
+            if not cut:
+                assert page.query_selector(shown), page.inner_text(_NOTE)
+                return cdn.requested[before:]
+            assert all(c.endswith(": net::ERR_NETWORK_CHANGED") for c in cut), cut
+            assert page.query_selector(_NOTE), cut
+            assert page.evaluate(_HEAD_STYLES_JS) == []
+            show_js = _SHOW_AGAIN_JS
+            # As goto_retrying_network_change waits: the requests the cut show did get
+            # through have reached the CDN by then, and are not counted as the next show's.
+            time.sleep(1.0)
+    finally:
+        page.remove_listener("request", note_started)
+        page.remove_listener("requestfailed", note_cut)
+    raise AssertionError(f"the host's network changed during three shows in a row: {cut}")
+
 
 def test_failed_xterm_loads_leave_no_stylesheet_and_the_retry_adds_one(
     cdn: _Cdn, page: Page,
 ) -> None:
-    page.evaluate(_OPEN_TERMINAL_JS)
-    page.wait_for_selector(".terminal-load-error")
-    assert len(cdn.requested) == 3
+    files = sorted(cdn.files)
+    assert sorted(_show(page, cdn, _OPEN_TERMINAL_JS, _NOTE)) == files
     assert page.evaluate(_HEAD_STYLES_JS) == []
 
-    page.evaluate(_SHOW_AGAIN_JS)
-    page.wait_for_selector(".terminal-load-error:not([data-seen])")
-    assert len(cdn.requested) == 6
+    assert sorted(_show(page, cdn, _SHOW_AGAIN_JS, _NOTE)) == files
     assert page.evaluate(_HEAD_STYLES_JS) == []
 
     cdn.broken = False
-    page.evaluate(_SHOW_AGAIN_JS)
-    page.wait_for_selector(".terminal-view .xterm", timeout=30000)
-    assert sorted(cdn.requested[6:]) == sorted(cdn.files)
+    assert sorted(_show(page, cdn, _SHOW_AGAIN_JS, _TERMINAL)) == files
     css = cdn.files[urlsplit(_cdn_urls()[0]).path].decode("utf-8")
     assert page.evaluate(_HEAD_STYLES_JS) == [css]
     assert page.evaluate(

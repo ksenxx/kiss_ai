@@ -464,11 +464,35 @@ as HTML (e.g. <ol>, <p>, <pre><code>), never Markdown")**
 
 #: The ``IMPORTANT_INSTRUCTIONS`` work-dir line.  A container run from an
 #: image bind-mounts ``work_dir`` at the same path and starts the
-#: container there, so the line holds inside the container too.  It is
-#: omitted only when the tools run in a container that does not mount
-#: ``work_dir`` (an attached ``container:<id>`` owned by the caller):
-#: naming the host path would then point the model at files it cannot reach.
+#: container there, so the line holds inside the container too.
 WORK_DIR_LINE = "- Work dir: {work_dir}\n"
+
+#: The work-dir line when the tools run in a container that does not mount
+#: ``work_dir`` (an attached ``container:<id>`` owned by the caller): naming
+#: the host path would point the model at files it cannot reach, so the line
+#: names the container's own working directory and says which facts of the
+#: prompt describe this machine instead.  An exec bridge that could not
+#: determine its working directory has none to name; the line then says so.
+CONTAINER_WORK_DIR_LINE = (
+    "- Work dir: {work_dir}, inside the container that your shell and file tools "
+    "run in (every Bash call is a fresh shell started there). This machine's "
+    "files, git repository and ./tmp are not visible in the container, so the "
+    "rules above about git worktrees and ./tmp/PROGRESS.md do not apply, and the "
+    "user, IP address, OS and machine lines of Task Settings describe this "
+    "machine, not the container.\n"
+)
+
+#: The line naming the container's CPU and memory limits, when it has any:
+#: inside it ``nproc`` and ``/proc`` report the host's cores and memory, so
+#: without the line the model sizes builds and thread pools for the host
+#: (``make -j80`` in a 1-CPU, 2 GB container thrashes and runs out of memory).
+CONTAINER_LIMITS_LINE = (
+    "- Container limits: {limits}. `nproc` and /proc show the host's cores and "
+    "memory, not these limits: size `make -j`, worker pools and library thread "
+    "counts (OMP_NUM_THREADS, torch.set_num_threads) to the limits, because "
+    "oversubscribing them makes builds and numeric code many times slower and can "
+    "run out of memory.\n"
+)
 
 TASK_SETTINGS_HEADER = "\n# Task Settings\n"
 
@@ -492,6 +516,24 @@ def resolve_work_dir(work_dir: str | None) -> str:
     default_work_dir = str(Path(config_module.get_artifact_dir()).resolve() / "kiss_workdir")
     resolved = Path(work_dir or default_work_dir).resolve()
     return str(remap_vanished_worktree(resolved))
+
+
+def container_limits_line(cpus: float | None, memory_bytes: int | None) -> str:
+    """The :data:`CONTAINER_LIMITS_LINE` for these limits, ``""`` when neither is set.
+
+    Args:
+        cpus: The container's CPU limit, or ``None``.
+        memory_bytes: The container's memory limit in bytes, or ``None``.
+
+    Returns:
+        The prompt line, or ``""``.
+    """
+    parts = []
+    if cpus:
+        parts.append(f"{cpus:g} CPU{'' if cpus == 1 else 's'}")
+    if memory_bytes:
+        parts.append(f"{memory_bytes / 2**30:.3g} GiB of memory")
+    return CONTAINER_LIMITS_LINE.format(limits=" and ".join(parts)) if parts else ""
 
 
 #: Consecutive continuation sessions that made no progress — no tool
@@ -1296,14 +1338,17 @@ class RelentlessAgent(Base):
         Returns:
             The text to append after the caller's system prompt.
         """
-        work_dir_visible = (
-            self.docker_manager is None or self.work_dir in self.docker_manager.volumes
-        )
+        manager = self.docker_manager
+        if manager is None or self.work_dir in manager.volumes:
+            work_dir_line = WORK_DIR_LINE.format(work_dir=self.work_dir)
+        else:
+            work_dir_line = CONTAINER_WORK_DIR_LINE.format(
+                work_dir=manager.workdir or "the directory every command starts in",
+            )
+        if manager is not None:
+            work_dir_line += container_limits_line(*manager.resource_limits())
         instructions = IMPORTANT_INSTRUCTIONS.format(
-            work_dir_line=(
-                WORK_DIR_LINE.format(work_dir=self.work_dir) if work_dir_visible else ""
-            ),
-            current_pid=str(os.getpid()),
+            work_dir_line=work_dir_line, current_pid=str(os.getpid()),
         )
         instructions += self._task_settings_section()
         agents_md = config_module.agents_md_path()

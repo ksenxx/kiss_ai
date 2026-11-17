@@ -479,6 +479,30 @@ def test_content_filter_with_no_fallback_at_all_ends_the_run(
     assert [c["stop_reason"] for c in printer.llm_calls()] == ["content_filter"] * 2
 
 
+def test_a_daemon_that_pins_its_tasks_model_never_fails_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A benchmark daemon scores one model: with the pin set, a filtered request stays
+    on that model although a fallback of another family is declared, gets the one
+    context-stating retry of a refusal, and the typed error then ends the run."""
+    monkeypatch.setenv(model_families.PIN_TASK_MODEL_ENV, "1")
+    _register(monkeypatch, _OPENAI_PRIMARY, _ANTHROPIC_OTHER, thinking="high")
+    _register(monkeypatch, _ANTHROPIC_OTHER, None)
+
+    def respond(request: Request) -> Reply:
+        return _responses_incomplete("content_filter", str(request.body.get("model")))
+
+    printer = CapturePrinter()
+    with ScriptedOpenAIServer(respond) as server:
+        with pytest.raises(ContentFilterError, match="content_filter"):
+            _run_openai(server, printer, _OPENAI_PRIMARY, responses_api=True)
+        seen = _models_seen(server)
+
+    assert seen == [_OPENAI_PRIMARY, _OPENAI_PRIMARY]
+    assert printer.notices() == []
+    assert [c["model"] for c in printer.llm_calls()] == [_OPENAI_PRIMARY] * 2
+
+
 # --- A content policy refusal reported as an HTTP error -----------------------
 
 _CYBER_FLAG = (

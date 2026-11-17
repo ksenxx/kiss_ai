@@ -784,7 +784,12 @@ empty stdin (nobody answers an unattended command) and a marker variable
 `KISS_CRON_RUN_<hex>=1` in its environment that no other process has: when the run
 is killed, the descendants that left the process group and the parent chain (a
 `setsid` child of a shell that has exited) are found by that mark in `/proc` and
-killed too (`cron_agent._kill_marked`, Linux only). Ctrl-C in a `kiss-cron --tick`
+killed too (`cron_agent._kill_marked`, Linux only). Its environment also carries
+`KISS_CRON_JOB=1`: a task the command starts through `sorcar.run()` (a scheduled
+script) is recorded as a cron run, which the CHATS list hides unless its Cron chip
+is on, while the same script run by hand gets an ordinary row. The tasks of a
+gateway tick are the exception: they answer a person's message and stay listed.
+Ctrl-C in a `kiss-cron --tick`
 or `--daemon` stops the runs in progress rather than abandoning them
 (`cron_agent._stop_runs`): each run thread gets a `KeyboardInterrupt`, on which a
 command job's process tree (in its own process group, out of the terminal's SIGINT)

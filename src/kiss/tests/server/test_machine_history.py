@@ -304,6 +304,10 @@ class TestMachineHistory(IsolatedAsyncioTestCase):
         """Send the CHATS-panel write *cmd* and return the first *reply_type* message."""
         self.writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
         await self.writer.drain()
+        return await self._next(reply_type)
+
+    async def _next(self, reply_type: str) -> dict[str, Any]:
+        """Return the next *reply_type* message of the page's connection."""
         for _ in range(100):
             line = await asyncio.wait_for(self.reader.readline(), timeout=20.0)
             assert line, "local connection closed"
@@ -314,7 +318,7 @@ class TestMachineHistory(IsolatedAsyncioTestCase):
         raise AssertionError(f"no {reply_type}")
 
     async def test_writes_to_a_remote_row_reach_its_machine(self) -> None:
-        """Favourite, rename and delete stamped ``machine`` change that machine's history only."""
+        """Favourite, rename, chat star and delete stamped ``machine`` change that machine only."""
         rows = {s["title"]: s for s in (await self._history(machine="box"))["sessions"]}
         alpha = rows["remote alpha"]["task_id"]
         await self._write(
@@ -329,6 +333,13 @@ class TestMachineHistory(IsolatedAsyncioTestCase):
         )
         rows = {s["title"]: s for s in (await self._history())["sessions"]}
         self.assertEqual(rows["remote alpha"]["chat_summary"], "Renamed")
+
+        await self._write(
+            {"type": "setChatFavorite", "chatId": "chat-r", "isFavorite": True, "machine": "box"},
+        )
+        rows = {s["title"]: s for s in (await self._history())["sessions"]}
+        self.assertTrue(rows["remote alpha"]["chat_is_favorite"])
+        self.assertFalse(rows["local only"]["chat_is_favorite"])
 
         # The shared chat goes from the machine; this daemon's copy stays.
         await self._write(
@@ -369,6 +380,12 @@ class TestMachineHistory(IsolatedAsyncioTestCase):
         notice = await self._write(delete, "notice")
         self.assertEqual(notice["tabId"], "tab-9")
         self.assertIn("box: Cannot delete the task: unable to open database file", notice["text"])
+        # The daemon nudges the pages after every write it forwards, a refused
+        # one too, once the notice is out.  Read here: the delete below would
+        # take this nudge for its own, and its history be asked before the
+        # machine has deleted the task (the fetch then overtook the delete on
+        # the machine's link in the full-suite run of 2026-11-15).
+        await self._next("tasks_updated")
 
         await self._redirect_remote_database(None)
         blocked.rmdir()

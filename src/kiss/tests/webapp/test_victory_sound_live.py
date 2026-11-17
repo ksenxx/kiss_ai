@@ -308,10 +308,21 @@ class TestVictorySoundLive(RemoteTabsHarness):
                 for route in held:
                     with contextlib.suppress(PlaywrightError):
                         await route.abort()
+                cut_short: list[str] = []
+
+                def note_cut_short(request: Any) -> None:
+                    if CLIP in request.url and "net::ERR_NETWORK_CHANGED" in str(request.failure):
+                        cut_short.append(request.url)
+
+                page.on("requestfailed", note_cut_short)
                 await self._type_task_for_box(page, tab, "Say hello again")
                 await log.wait_played(1)
                 self._assert_sounded(log, 1, url)
-                self.assertEqual(await page.evaluate("window.__audioElements.length"), 2)
+                # One player for this finish, and the one the page fetched
+                # the clip again on when the host's network cut its first
+                # download short (see the module docstring).
+                made = await page.evaluate("window.__audioElements.length") - 1
+                self.assertIn(made, (1, 2) if cut_short else (1,), cut_short)
             finally:
                 await browser.close()
 

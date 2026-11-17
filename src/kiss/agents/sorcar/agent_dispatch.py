@@ -53,7 +53,6 @@ import difflib
 import json
 import logging
 import math
-import os
 import re
 import threading
 import time
@@ -102,7 +101,8 @@ from kiss.agents.sorcar.useful_tools import (
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
 from kiss.core.kiss_error import BudgetExceededError
 from kiss.core.locked import locked, locked_call
-from kiss.core.models.model_families import other_family_model, same_family
+from kiss.core.models.model_families import PIN_TASK_MODEL_ENV as PIN_TASK_MODEL_ENV
+from kiss.core.models.model_families import other_family_model, same_family, task_model_pinned
 
 logger = logging.getLogger(__name__)
 
@@ -1570,23 +1570,6 @@ def _without_cross_machine_inheritance(inherited: Inherited, asked: RunOptions) 
         docker_image=asked.docker_image,
         fields=tuple(f for f in inherited.fields if f not in ("chat_id", "docker_image")),
     )
-
-
-PIN_TASK_MODEL_ENV = "KISS_PIN_TASK_MODEL"
-"""Environment switch of a daemon that measures one model per task tree (a
-benchmark daemon, :mod:`kiss.benchmarks.terminal_bench.daemon`): set to a
-value other than ``""``/``"0"``, every sub-task keeps its caller's model and
-model configuration and ``set_model`` is refused (:func:`task_model_pinned`)."""
-
-
-def task_model_pinned() -> bool:
-    """Whether this daemon pins every task tree to the model it was launched with.
-
-    Benchmark daemons set :data:`PIN_TASK_MODEL_ENV` so the score of a run
-    reflects the one model it names: an agent can neither hand a sub-task to
-    another model nor switch its own.
-    """
-    return os.environ.get(PIN_TASK_MODEL_ENV, "") not in ("", "0")
 
 
 def sandbox_of(parent_agent: Any) -> str:

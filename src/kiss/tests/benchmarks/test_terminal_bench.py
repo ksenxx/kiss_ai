@@ -28,9 +28,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from websockets.asyncio.server import ServerConnection
 
 from kiss.agents.seas.coding import coding_sea
+from kiss.agents.sorcar.sea_apply import SETTING_FIELDS
 from kiss.benchmarks.terminal_bench import daemon, run, summarize, trial
+from kiss.tests.agents.sorcar.test_dispatch_stop_cascade import _RecordingDaemon
 from kiss.tests.conftest import IS_WINDOWS, posix_only
 
 
@@ -348,6 +351,59 @@ def test_harbor_agent_declares_name_version_and_options() -> None:
     assert gated_off.options.finish_gate is False
     assert gated_off.options.reviewer == "none" and gated_off.options.reasoning_effort == "max"
     assert gated_off.options.blind_verifier == "none" and gated_off.options.reading_check == "none"
+
+
+def test_vanilla_agent_options_and_daemon_failure(tmp_path: Path) -> None:
+    """The vanilla agent's defaults, and a trial without a daemon records the error."""
+    vanilla = pytest.importorskip("kiss.benchmarks.terminal_bench.vanilla_agent")
+    agent = vanilla.VanillaSorcarAgent(logs_dir=tmp_path, model_name="m", budget_usd="3")
+    assert vanilla.VanillaSorcarAgent.name() == "kiss-sorcar-vanilla"
+    assert agent.version() == vanilla.AGENT_VERSION
+    assert agent.options.budget_usd == 3.0 and agent.options.home == str(daemon.DEFAULT_HOME)
+    metrics = vanilla.run_vanilla_trial("do it", "c0ffee", "m", 1.0,
+                                        tmp_path / "missing.json", threading.Event())
+    assert metrics["agent_success"] is False and metrics["cost_usd"] == 0.0
+    assert metrics["container"] == "c0ffee" and metrics["error"]
+    from harbor.models.agent.context import AgentContext  # type: ignore[import-untyped]
+
+    context = AgentContext()
+    agent.record(context, metrics)
+    assert context.cost_usd == 0.0 and context.metadata == metrics
+    assert json.loads((tmp_path / "result.json").read_text())["error"] == metrics["error"]
+
+
+class _SpendThenDropDaemon(_RecordingDaemon):
+    """A local-WSS daemon stand-in that reports spend for the run, then drops the connection."""
+
+    async def _handle(self, ws: ServerConnection) -> None:
+        run_cmd = json.loads(await ws.recv())
+        self.run_cmd = run_cmd
+        tab_id = run_cmd.get("tabId", "")
+        await ws.send(json.dumps({"type": "status", "running": True, "tabId": tab_id}))
+        await ws.send(json.dumps({"type": "usage_info", "tabId": tab_id, "cost": "$1.2500",
+                                  "total_tokens": 1234, "step_count": 7}))
+
+
+def test_vanilla_trial_sends_its_restrictions_and_keeps_the_spend_of_a_lost_run() -> None:
+    """The run command carries the model, the container and the tool restrictions; a
+    connection the daemon drops mid-run is recorded with the spend reported so far."""
+    vanilla = pytest.importorskip("kiss.benchmarks.terminal_bench.vanilla_agent")
+    stand_in = _SpendThenDropDaemon(mode="drop")
+    try:
+        metrics = vanilla.run_vanilla_trial("do it", "c0ffee", "m", 2.0,
+                                            stand_in.endpoint_file, threading.Event())
+    finally:
+        stand_in.close()
+    assert stand_in.run_cmd is not None
+    assert stand_in.run_cmd["prompt"] == "do it" and not stand_in.run_cmd["seaPath"]
+    sent = {key: stand_in.run_cmd[field] for key, field in SETTING_FIELDS.items()}
+    assert sent["model"] == "m" and sent["max_budget"] == 2.0
+    assert sent["docker_image"] == "container:c0ffee"
+    assert sent["tool_profile"] == vanilla.TOOL_PROFILE == "shell+edit+agents+control"
+    assert sent["use_web_tools"] is False and sent["use_memory"] is False
+    assert sent["auto_classify"] is False
+    assert metrics["error"].startswith("ConnectionLostError") and metrics["agent_success"] is False
+    assert metrics["cost_usd"] == 1.25 and metrics["tokens"] == 1234 and metrics["steps"] == 7
 
 
 def test_daemon_module_help_runs() -> None:

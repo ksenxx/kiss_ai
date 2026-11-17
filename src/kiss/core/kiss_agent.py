@@ -63,6 +63,7 @@ from kiss.core.models.model_families import (
     chars_per_token,
     fallback_of_another_family,
     same_family,
+    task_model_pinned,
 )
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -1124,9 +1125,12 @@ class KISSAgent(Base):
         Returns:
             The new model name on a successful swap, or ``None`` when no
             fallback is available, the fallback equals the current
-            model, or the one-shot guard has already been consumed.
+            model, the one-shot guard has already been consumed, or the
+            daemon pins every task to its model (a benchmark daemon,
+            :func:`~kiss.core.models.model_families.task_model_pinned`:
+            the run must not be finished by another model).
         """
-        if self._fallback_used:
+        if self._fallback_used or task_model_pinned():
             return None
         if other_family and is_known_model(self.model_name):
             new_name = fallback_of_another_family(self.model_name)

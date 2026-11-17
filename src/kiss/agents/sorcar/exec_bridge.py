@@ -366,6 +366,14 @@ class ExecBridge:
     def __exit__(self, *exc: object) -> None:
         return None
 
+    def resource_limits(self) -> tuple[float | None, int | None]:
+        """The environment's CPU and memory limits: unknown through a bridge.
+
+        Returns:
+            ``(None, None)``.
+        """
+        return None, None
+
     def Bash(  # noqa: N802
         self,
         command: str,

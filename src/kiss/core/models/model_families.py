@@ -22,6 +22,7 @@ effort (:func:`same_model_and_effort`), whatever the family.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from typing import Any
 
@@ -415,6 +416,25 @@ def fallback_of_another_family(model_name: str) -> str | None:
     if declared and not same_family(declared, model_name):
         return declared
     return other_family_model(model_name) or declared
+
+
+PIN_TASK_MODEL_ENV = "KISS_PIN_TASK_MODEL"
+"""Environment switch of a daemon that measures one model per task tree (a
+benchmark daemon, :mod:`kiss.benchmarks.terminal_bench.daemon`): set to a
+value other than ``""``/``"0"``, every sub-task keeps its caller's model and
+model configuration, ``set_model`` is refused and no agent fails over to
+another model (:func:`task_model_pinned`)."""
+
+
+def task_model_pinned() -> bool:
+    """Whether this daemon pins every task tree to the model it was launched with.
+
+    Benchmark daemons set :data:`PIN_TASK_MODEL_ENV` so the score of a run
+    reflects the one model it names: an agent can neither hand a sub-task to
+    another model nor switch its own, and a refusal or a provider error of
+    that model is not handed to a fallback model either.
+    """
+    return os.environ.get(PIN_TASK_MODEL_ENV, "") not in ("", "0")
 
 
 VISION_FAMILIES: frozenset[str] = frozenset({"anthropic", "openai", "google", "xai"})

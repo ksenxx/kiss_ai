@@ -237,6 +237,7 @@ API: dict[str, ApiCommand] = {c.name: c for c in (
     ApiCommand("getAdjacentTask", required=("direction",)),
     ApiCommand("setFavorite", required=("taskId", "isFavorite")),
     ApiCommand("setChatSummary", required=("chatId", "summary")),
+    ApiCommand("setChatFavorite", required=("chatId", "isFavorite")),
     ApiCommand("deleteTask", required=("taskId",)),
     ApiCommand("deleteChat", required=("chatId",)),
     ApiCommand("openExternal", required=("url",)),

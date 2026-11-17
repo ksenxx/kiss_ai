@@ -153,9 +153,9 @@ function testChatLastLaunchedLine() {
     byChat[g.dataset.chatId] = g;
   });
   // The label closes the header's action strip, after the "Show
-  // details" chevron, the rename pencil and the delete control (the
-  // trash button and its hidden Delete / Cancel strip), where a task
-  // panel shows its age label.
+  // details" chevron, the chat's favourite star, the rename pencil and
+  // the delete control (the trash button and its hidden Delete /
+  // Cancel strip), where a task panel shows its age label.
   const lineA = byChat['chat-a'].querySelector(
     ':scope > .history-chat-header > .history-chat-actions > .history-chat-launched',
   );
@@ -170,12 +170,13 @@ function testChatLastLaunchedLine() {
     strip,
     [
       'sidebar-item-collapse history-chat-collapse',
+      'sidebar-item-favorite history-chat-favorite',
       'sidebar-item-edit history-chat-rename',
       'sidebar-item-delete',
       'sidebar-item-confirm',
       'history-chat-launched',
     ],
-    'chevron, rename pencil, delete control, then the label',
+    'chevron, star, rename pencil, delete control, then the label',
   );
   assert.strictEqual(
     byChat['chat-a'].querySelector(':scope > .history-chat-header')

@@ -146,7 +146,9 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert sea.system_prompt("ASSEMBLED") == "ASSEMBLED\n\n" + review_paper_sea.SYSTEM_PROMPT
     prompt = review_paper_sea.SYSTEM_PROMPT
     assert "William Strunk Jr. and E. B. White" in prompt
-    assert review_paper_sea.SECOND_OPINION_MODEL in prompt
+    # The second-opinion pass runs only on a model the task names: no default model.
+    assert "When the task names a second model, have it check" in prompt
+    assert "gpt-" not in prompt and "With no second model, check on your own model" in prompt
     assert "Run the `check_review` tool with the word limit" in prompt
     assert "`read_paper`" in prompt and "`check_review`" in prompt
     assert "Judge the novelty" in prompt and "at least 20 distinct sources" in prompt
@@ -170,16 +172,15 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert all(f"       {d}: N/10." in prompt for d in review_paper_sea._DIMENSIONS)
     assert review_paper_sea._HEADINGS[-1] == "Scores"
     assert [t.__name__ for t in sea.tools([print])] == ["print", "read_paper", "check_review"]
-    # Browse, skip the classifier, route through the bestrouter; a
-    # ``run_agent`` dispatch waits two hours.
+    # Browse, skip the classifier; a ``run_agent`` dispatch waits two hours.
     assert sea.settings({}) == {
         "use_web_tools": True,
         "auto_classify": False,
         "timeout": 2 * 3600,
-        "model": "bestrouter",
     }
-    # The SEA's model wins over the base's; other base keys pass through.
+    # The caller's model and other base keys pass through.
     assert sea.settings({"model": "m", "use_memory": True}) == {
+        "model": "m",
         "use_memory": True,
         **sea.settings({}),
     }

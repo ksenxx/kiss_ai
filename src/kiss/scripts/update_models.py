@@ -16,7 +16,10 @@ support: every tested model is live-probed through ``/v1/responses`` (see
 ``?output_modalities=decisions`` listing, probed through
 ``POST /api/alpha/decisions`` with one ``noul``/``choice``/``score``
 question each, and written with ``"dec": true`` (``gen``/``fc``/``emb``
-false).
+false).  An ``openrouter/*`` entry takes the prices of its listing record,
+except a closed-weight model listed at a regional endpoint's surcharge,
+which takes those of its cheapest serving standard-tier endpoint (see
+``prefer_standard_endpoint_prices``).
 
 Amazon Bedrock is onboarded from the configured region's listing (see
 ``fetch_bedrock``): every Claude id Bedrock serves there — the
@@ -483,41 +486,202 @@ def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
     ``"dec": true``.  Merging both into one mapping also keeps
     :func:`find_deprecated_models` from flagging a catalogued decisions
     model as "not in OpenRouter API".
+
+    A model the listing reports as closed-weight (a ``hugging_face_id`` that
+    is null or empty) carries ``"endpoints_of"``: the id whose endpoint list
+    prices it, which is its own id, or for a ``~`` alias the id of its
+    ``alias_target`` (an alias lists no endpoints, and the listing reports
+    no Hugging Face id for one whatever its target is).
+    :func:`prefer_standard_endpoint_prices` reads it.
     """
     if verbose:  # pragma: no branch
         print("  Fetching OpenRouter models...")
     today = datetime.date.today().isoformat()
     models: dict[str, dict] = {}
     skipped_deprecated = 0
+    closed_weight: set[str] = set()
+    alias_targets: dict[str, str] = {}
     for url, decisions in ((OPENROUTER_MODELS_URL, False), (OPENROUTER_DECISIONS_MODELS_URL, True)):
         data = api_get(url)
         for m in data.get("data", []):  # pragma: no branch
             model_id = m.get("id", "")
             if not model_id:  # pragma: no branch
                 continue
+            target = m.get("alias_target")
+            if isinstance(target, dict) and isinstance(target.get("slug"), str):
+                alias_targets[model_id] = target["slug"]
+            elif "hugging_face_id" in m and not m["hugging_face_id"]:
+                closed_weight.add(model_id)
             expiration = m.get("expiration_date")
             if expiration and expiration <= today:  # pragma: no branch
                 skipped_deprecated += 1
                 continue
-            pricing = m.get("pricing", {})
-            prompt_per_tok = float(pricing.get("prompt") or "0")
-            completion_per_tok = float(pricing.get("completion") or "0")
             ctx = _cap_context_length(m.get("context_length", 0) or 0)
             name = f"openrouter/{model_id}"
             if _is_excluded_model(name):  # pragma: no branch
                 continue
             models[name] = {
                 "context_length": ctx,
-                "input_price_per_1M": round(prompt_per_tok * 1_000_000, 6),
-                "output_price_per_1M": round(completion_per_tok * 1_000_000, 6),
                 "source": "openrouter",
                 "decisions": decisions,
-                **openrouter_cache_prices(pricing),
-                **openrouter_prompt_tiers(pricing),
+                **_openrouter_price_fields(m.get("pricing", {})),
             }
+    for name, record in models.items():
+        model_id = name.removeprefix("openrouter/")
+        priced_by = alias_targets.get(model_id, model_id)
+        if priced_by in closed_weight:
+            record["endpoints_of"] = priced_by
     if verbose:  # pragma: no branch
         print(f"    Found {len(models)} models ({skipped_deprecated} deprecated filtered out)")
     return models
+
+
+def _openrouter_price_fields(pricing: dict[str, Any]) -> dict[str, Any]:
+    """Convert one OpenRouter ``pricing`` object to the catalog's price fields.
+
+    A model's listing headline and each of its endpoints
+    (``/api/v1/models/<id>/endpoints``) carry a ``pricing`` object of the
+    same shape, so one conversion serves both.
+
+    Args:
+        pricing: A ``pricing`` object (USD per token, as strings).
+
+    Returns:
+        ``input_price_per_1M`` and ``output_price_per_1M`` (6 decimals),
+        plus the cache/image/audio prices and ``prompt_tiers`` it publishes.
+    """
+    return {
+        "input_price_per_1M": round(float(pricing.get("prompt") or "0") * 1_000_000, 6),
+        "output_price_per_1M": round(float(pricing.get("completion") or "0") * 1_000_000, 6),
+        **openrouter_cache_prices(pricing),
+        **openrouter_prompt_tiers(pricing),
+    }
+
+
+# Every catalog field :func:`_openrouter_price_fields` may set.
+_OPENROUTER_PRICE_FIELDS = ("input_price_per_1M", "output_price_per_1M", *_REMOVABLE_PRICE_FIELDS)
+
+
+# A regional surcharge is a modest multiple of a model's list price (1.1 to
+# 1.36 across OpenRouter's closed-weight models on 2026-11-16).  A headline
+# further than this above the cheapest standard endpoint is something else
+# (that endpoint is at a service tier's price, say: flex is half of standard)
+# and is left alone.
+_MAX_REGIONAL_SURCHARGE = 1.5
+
+
+def _openrouter_standard_endpoint_pricing(model_id: str) -> dict[str, Any] | None:
+    """Return the ``pricing`` of *model_id*'s cheapest serving standard-tier endpoint.
+
+    ``/api/v1/models/<id>/endpoints`` lists every provider endpoint of a
+    model with its own price sheet.  An endpoint counts when it reports
+    ``status`` 0 (it is serving), a null ``service_tier`` (``flex`` and
+    ``priority`` are opt-in tiers at other prices; an endpoint that does not
+    say is not assumed to be standard) and a prompt price above zero.
+
+    Args:
+        model_id: The OpenRouter model id, e.g. ``openai/gpt-5.6-sol``.
+
+    Returns:
+        The ``pricing`` object with the lowest prompt price (then the lowest
+        completion price, then the first listed), or ``None`` when the model
+        lists no such endpoint.
+
+    Raises:
+        Exception: When the listing cannot be fetched (:func:`api_get`) or a
+            price in it is not a number.
+    """
+    document = api_get(f"{OPENROUTER_MODELS_URL}/{model_id}/endpoints")
+    data = document.get("data") if isinstance(document, dict) else None
+    endpoints = data.get("endpoints") if isinstance(data, dict) else None
+    sheets: list[dict[str, Any]] = [
+        endpoint["pricing"]
+        for endpoint in (endpoints if isinstance(endpoints, list) else ())
+        if isinstance(endpoint, dict)
+        and endpoint.get("status") == 0
+        and "service_tier" in endpoint
+        and not endpoint["service_tier"]
+        and isinstance(endpoint.get("pricing"), dict)
+    ]
+    priced = [
+        (float(sheet.get("prompt") or "0"), float(sheet.get("completion") or "0"), index)
+        for index, sheet in enumerate(sheets)
+    ]
+    paid = [entry for entry in priced if entry[0] > 0]
+    return sheets[min(paid)[2]] if paid else None
+
+
+def prefer_standard_endpoint_prices(openrouter: dict[str, dict]) -> list[str]:
+    """Price a closed-weight model listed at a regional surcharge by its standard endpoint.
+
+    The price ``/api/v1/models`` shows for a model is that of one of its
+    endpoints, and for a closed-weight model it can be a regional one's.
+    Regional endpoints (``azure/us``, ``amazon-bedrock/us-east-1``,
+    ``google-vertex/us``) bill a premium over the model's list price, and
+    requests to ``https://openrouter.ai``, the ones KISS sends, are not
+    routed to them while a standard-priced endpoint exists (OpenRouter's
+    In-Region Routing guide, "Regional Endpoints on the Global Domain").
+    ``openai/gpt-5.6-sol`` was listed at $4.40/$22 on some days and at
+    OpenAI's $4/$20 on others (2026-11-12 to 11-15) while every request was
+    billed $4/$20, and each flip rewrote the catalog entry and its aliases;
+    ``google/gemini-3.8-flash`` stayed listed, and catalogued, at
+    ``google-vertex/us``'s $0.825/$4.125 while Google served it at
+    $0.75/$3.75.
+
+    So for every model :func:`fetch_openrouter` marked closed-weight
+    (``endpoints_of``) the headline is compared with the model's cheapest
+    serving standard-tier endpoint.  When the headline is that endpoint's
+    price plus a premium (at least as high on input and on output,
+    materially higher on one, and at most :data:`_MAX_REGIONAL_SURCHARGE`
+    times it), the endpoint's whole price sheet (base, cache, image, audio
+    and long-prompt tiers) replaces the headline's in *openrouter*, before
+    anything reads a price from it.  The headline stands in every other
+    case: an open-weight model (its hosts compete on price, regional ones
+    included), a free or per-request-priced one, a ``:variant``, a model
+    with no serving standard-tier endpoint, a headline that is already the
+    cheapest, and an endpoint listing that cannot be read (after the first
+    such failure no further model is looked up in this run, so an outage
+    costs one request's retries).
+
+    Args:
+        openrouter: :func:`fetch_openrouter`'s listing; updated in place.
+
+    Returns:
+        The names whose fetched prices were replaced, in listing order.
+    """
+    replaced: list[str] = []
+    standard: dict[str, dict[str, Any] | None] = {}  # endpoints_of -> its price fields
+    for name, fetched in openrouter.items():
+        model_id = fetched.get("endpoints_of")
+        if not model_id or ":" in name.split("/")[-1]:
+            continue
+        head_in, head_out = fetched["input_price_per_1M"], fetched["output_price_per_1M"]
+        if head_in <= 0:
+            continue
+        if model_id not in standard:
+            try:
+                pricing = _openrouter_standard_endpoint_pricing(model_id)
+                standard[model_id] = None if pricing is None else _openrouter_price_fields(pricing)
+            except Exception as exc:
+                print(
+                    f"  WARNING: OpenRouter endpoint listing failed for {model_id} ({exc}); "
+                    "keeping the listing's prices from there on"
+                )
+                break
+        own = standard[model_id]
+        if own is None:
+            continue
+        own_in, own_out = own["input_price_per_1M"], own["output_price_per_1M"]
+        if (
+            own_in <= head_in <= _MAX_REGIONAL_SURCHARGE * own_in
+            and own_out <= head_out <= _MAX_REGIONAL_SURCHARGE * own_out
+            and (_price_changed(head_in, own_in) or _price_changed(head_out, own_out))
+        ):
+            for field in _OPENROUTER_PRICE_FIELDS:
+                fetched.pop(field, None)
+            fetched.update(json.loads(json.dumps(own)))  # an alias and its target share ``own``
+            replaced.append(name)
+    return replaced
 
 
 def fetch_together(verbose: bool = False) -> dict[str, dict]:
@@ -3696,6 +3860,8 @@ def main() -> None:
 
     print("\n[2/6] Fetching from vendor APIs...")
     openrouter_models = fetch_openrouter(verbose=args.verbose)
+    for name in prefer_standard_endpoint_prices(openrouter_models):
+        print(f"  {name}: listed at a regional surcharge, priced by its standard endpoint")
     together_models = fetch_together(verbose=args.verbose)
     gemini_models = fetch_gemini(verbose=args.verbose)
     anthropic_models = fetch_anthropic(verbose=args.verbose)

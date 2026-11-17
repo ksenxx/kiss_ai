@@ -24,6 +24,7 @@
     'getAdjacentTask',
     'setFavorite',
     'setChatSummary',
+    'setChatFavorite',
     'deleteTask',
     'deleteChat',
     'openExternal',
